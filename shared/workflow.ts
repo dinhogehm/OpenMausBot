@@ -70,6 +70,14 @@ export interface WorkflowRun {
   workflowId: string;
   status: WorkflowRunStatus;
   currentNodeId?: string;
+  /** Task thread where the current node is executing (engine bookkeeping). */
+  currentThreadId?: string;
+  /** When the current node's turn was dispatched (engine bookkeeping). */
+  dispatchedAt?: number;
+  /** Set once the engine has re-prompted the current node for a missing or
+   * invalid outcome envelope; a second miss fails the run. Cleared on every
+   * fresh node dispatch, so each node gets exactly one re-prompt. */
+  repromptedAt?: number;
   /** Attempt counter for the current node only; resets when the run advances. */
   attempt: number;
   input: string;
