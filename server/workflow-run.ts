@@ -5,18 +5,22 @@
  * agent nodes, one envelope re-prompt per node, the cycle-execution cap,
  * per-workflow FIFO queueing, retry/backoff with the reserved "failed" edge,
  * node timeouts, per-bot FIFO waiting, and the reconciler tick that keeps all
- * of it alive across crashes ("no state may wait without a timer"). Approval/
- * notify execution (Task 5) and the real harness wiring (Task 6) build on the
- * DI surface declared here. */
+ * of it alive across crashes ("no state may wait without a timer"). Task 5
+ * adds the human approval gate (deadline, default decision, one reminder)
+ * and the notify node; the real harness wiring (Task 6) plugs into the DI
+ * surface declared here. */
 import {
   parseWorkflowOutcome,
   validateWorkflow,
+  WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H,
+  WORKFLOW_APPROVAL_OUTCOMES,
   WORKFLOW_CONTROL_CLOSE,
   WORKFLOW_CONTROL_OPEN,
   WORKFLOW_FAIL_OUTCOME,
   WORKFLOW_MAX_NODE_EXECUTIONS,
   WORKFLOW_NODE_RETRIES_DEFAULT,
   WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN,
+  WORKFLOW_NOTIFY_OUTCOME,
   type Workflow,
   type WorkflowNode,
   type WorkflowNodeResult,
@@ -54,14 +58,18 @@ export interface WorkflowEngineOptions {
     onDispatchError: (message: string) => void,
   ) => Promise<void>;
   interruptTurn?: (botId: string, threadId: string) => Promise<void>;
-  /** Used by notify nodes (Task 5); declared now so wiring lands once. */
+  /** Where notify nodes post. Absent, a notify node fails terminally — a
+   * notification the graph promised is never skipped silently. */
   postGroupMessage?: (groupId: string, text: string) => void;
-  /** Called on every terminal failure so a human learns a run paused; Task 5
-   * reuses it for approval surfacing. */
+  /** Called on every terminal failure (a paused 24/7 workflow must never be
+   * silent), when an approval gate opens, and for the gate's one reminder. */
   notifyUser?: (run: WorkflowRun, message: string) => void;
 }
 
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
+type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
+type NotifyNode = Extract<WorkflowNode, { kind: "notify" }>;
+export type ApprovalDecision = (typeof WORKFLOW_APPROVAL_OUTCOMES)[number];
 
 const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
 
@@ -106,6 +114,19 @@ function buildRepromptMessage(node: AgentNode): string {
   ].join("\n");
 }
 
+/** Literal substitution of the three supported tokens in one pass, so a
+ * token inside an inserted value is data and is never re-expanded; anything
+ * else in the template stays exactly as written. */
+function renderNotifyTemplate(template: string, workflow: Workflow, run: WorkflowRun): string {
+  const last = run.nodeResults[run.nodeResults.length - 1];
+  const values: Record<string, string> = {
+    input: run.input,
+    summary: last?.summary ?? "",
+    workflow: workflow.name,
+  };
+  return template.replace(/\{\{(input|summary|workflow)\}\}/g, (_match, token: string) => values[token] ?? "");
+}
+
 export class WorkflowEngine {
   private readonly options: WorkflowEngineOptions;
   private readonly store: WorkflowStore;
@@ -146,20 +167,59 @@ export class WorkflowEngine {
   }
 
   /** The reconciler: everything callbacks may have missed gets fixed here, so
-   * no run can wait on a state without a timer. Order matters — a timed-out
-   * dispatch becomes a due retry, a due retry becomes a live dispatch, and
-   * only what is left counts as an orphan or a stranded queue. */
+   * no run can wait on a state without a timer. Order matters — an approval
+   * gate past its deadline resolves first (it depends on no thread, and the
+   * node it advances to is dispatched, or parked as due, within this same
+   * tick), a timed-out dispatch becomes a due retry, a due retry becomes a
+   * live dispatch, and only what is left counts as an orphan or a stranded
+   * queue. */
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
       const now = this.now();
+      this.sweepApprovals(now);
       await this.sweepTimeouts(now);
       this.dispatchDue(now);
       this.redispatchOrphans();
       this.drainStrandedQueues();
     } finally {
       this.ticking = false;
+    }
+  }
+
+  /** A human gate never holds the queue forever: past its deadline the node's
+   * default decision is taken, and at half the window the user is reminded
+   * exactly once. Both clocks run from the persisted approvalRequestedAt, so
+   * a restart changes nothing. Expiry is not a failure and is not announced:
+   * the run's new state is visible in the UI, and a terminal failure further
+   * down still notifies through failNode. */
+  private sweepApprovals(now: number): void {
+    for (const run of this.store.listRuns()) {
+      if (run.status !== "waiting-approval") continue;
+      const gate = this.openGateOf(run);
+      if (!gate) {
+        this.failNode(run.id, "the workflow was deleted or edited under this run and its approval node is gone");
+        continue;
+      }
+      if (run.approvalRequestedAt === undefined) {
+        // A waiting receipt with no clock (never written by this engine, but
+        // a hand-edited file could): start the window now rather than take a
+        // decision the user never had a chance to make.
+        this.store.patchRun(run.id, { approvalRequestedAt: now });
+        continue;
+      }
+      const { node } = gate;
+      const windowMs = (node.expiresHours ?? WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H) * 3_600_000;
+      const deadline = run.approvalRequestedAt + windowMs;
+      if (now > deadline) {
+        this.settleApproval(run, gate, node.onExpire ?? "rejected", "expired without a decision");
+        continue;
+      }
+      if (run.approvalRemindedAt === undefined && now >= run.approvalRequestedAt + windowMs / 2) {
+        const patched = this.store.patchRun(run.id, { approvalRemindedAt: now });
+        if (patched) this.options.notifyUser?.(patched, `Reminder: ${node.prompt}`);
+      }
     }
   }
 
@@ -329,12 +389,20 @@ export class WorkflowEngine {
     // fresh thread; aim the cleanup at whatever is current NOW.
     const fresh = this.store.getRun(runId) ?? run;
     if (TERMINAL_RUN_STATUSES.has(fresh.status)) return fresh;
-    if (fresh.currentThreadId !== run.currentThreadId) await this.interruptLiveDispatch(fresh);
+    if (fresh.currentThreadId !== run.currentThreadId) {
+      await this.interruptLiveDispatch(fresh);
+      // Same race, second await: never stamp `cancelled` over a run that
+      // went terminal while the re-aimed interrupt was in flight.
+      const latest = this.store.getRun(runId);
+      if (!latest || TERMINAL_RUN_STATUSES.has(latest.status)) return latest ?? fresh;
+    }
     if (fresh.currentThreadId !== undefined) this.forgetThread(fresh.currentThreadId);
     const patched = this.store.patchRun(runId, {
       status: "cancelled",
       endedAt: this.now(),
       nextAttemptAt: undefined,
+      approvalRequestedAt: undefined,
+      approvalRemindedAt: undefined,
     });
     if (!patched) return fresh;
     this.drainQueue(patched.workflowId);
@@ -352,6 +420,49 @@ export class WorkflowEngine {
     } catch {
       // Best-effort: cancellation must not depend on the provider.
     }
+  }
+
+  /** A human's decision on an open gate. Task 6 exposes this over HTTP; the
+   * canvas renders approve/reject from the waiting-approval run frame. */
+  resolveApproval(runId: string, decision: ApprovalDecision): WorkflowRun {
+    if (!(WORKFLOW_APPROVAL_OUTCOMES as readonly string[]).includes(decision)) {
+      throw new Error(`invalid approval decision: ${decision}`);
+    }
+    const run = this.store.getRun(runId);
+    if (!run) throw new Error(`unknown run: ${runId}`);
+    if (run.status !== "waiting-approval") {
+      throw new Error(`run is not waiting for approval (run is ${run.status})`);
+    }
+    const gate = this.openGateOf(run);
+    if (gate) this.settleApproval(run, gate, decision, `${decision} by user`);
+    else this.failNode(runId, "the workflow was deleted or edited under this run and its approval node is gone");
+    return this.store.getRun(runId) ?? run;
+  }
+
+  /** The approval node a waiting run sits on, or null when the workflow was
+   * deleted or edited so that the node is gone. */
+  private openGateOf(run: WorkflowRun): { workflow: Workflow; node: ApprovalNode } | null {
+    const workflow = this.store.get(run.workflowId);
+    const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
+    return workflow && node?.kind === "approval" ? { workflow, node } : null;
+  }
+
+  /** Records the gate's decision and advances — one path for a user's click
+   * and for expiry, so both take the identical edge. */
+  private settleApproval(
+    run: WorkflowRun,
+    gate: { workflow: Workflow; node: ApprovalNode },
+    decision: ApprovalDecision,
+    summary: string,
+  ): void {
+    const at = this.now();
+    this.advance(
+      run,
+      gate.workflow,
+      gate.node,
+      { nodeId: gate.node.id, outcome: decision, summary, startedAt: run.approvalRequestedAt ?? at, endedAt: at },
+      { status: "running", approvalRequestedAt: undefined, approvalRemindedAt: undefined },
+    );
   }
 
   handleRuntimeEvent(event: RuntimeEvent): void {
@@ -419,20 +530,36 @@ export class WorkflowEngine {
       endedAt: this.now(),
     };
     this.forgetThread(event.threadId);
-    const nodeResults = [...run.nodeResults, result];
+    this.advance(run, workflow, node, result);
+  }
 
+  /** The one advance path: record the node's result, reset the per-node
+   * counters, then follow the single edge wired for the outcome or complete
+   * the run on a pure sink. Agent envelopes, approval decisions, expiries and
+   * notify posts all funnel here, so edge-following exists exactly once.
+   * `patch` carries the caller's own state cleanup (a closing approval gate)
+   * and lands in the same write as the result. */
+  private advance(
+    run: WorkflowRun,
+    workflow: Workflow,
+    node: WorkflowNode,
+    result: WorkflowNodeResult,
+    patch: Partial<WorkflowRun> = {},
+  ): void {
+    const nodeResults = [...run.nodeResults, result];
     const edge = workflow.edges.find(
-      (candidate) => candidate.from === node.id && candidate.outcome === parsed.outcome,
+      (candidate) => candidate.from === node.id && candidate.outcome === result.outcome,
     );
     if (edge) {
-      const patched = this.store.patchRun(runId, { nodeResults, attempt: 0, repromptedAt: undefined });
+      const patched = this.store.patchRun(run.id, { ...patch, nodeResults, attempt: 0, repromptedAt: undefined });
       if (!patched) return;
-      this.dispatchNode(runId, edge.to);
+      this.dispatchNode(run.id, edge.to);
       return;
     }
     if (!workflow.edges.some((candidate) => candidate.from === node.id)) {
       // Pure sink: the graph deliberately ends here.
-      const patched = this.store.patchRun(runId, {
+      const patched = this.store.patchRun(run.id, {
+        ...patch,
         nodeResults,
         attempt: 0,
         repromptedAt: undefined,
@@ -444,8 +571,8 @@ export class WorkflowEngine {
     }
     // A validated workflow forbids partial wiring, so this cannot happen —
     // still record the result and fail deterministically rather than hang.
-    this.store.patchRun(runId, { nodeResults });
-    this.failNode(runId, `no edge is wired for outcome "${parsed.outcome}" of node "${node.id}"`);
+    this.store.patchRun(run.id, { ...patch, nodeResults });
+    this.failNode(run.id, `no edge is wired for outcome "${result.outcome}" of node "${node.id}"`);
   }
 
   /** Dispatch `nodeId` as the run's current node. Bookkeeping is persisted
@@ -469,9 +596,12 @@ export class WorkflowEngine {
       this.failNode(runId, `node "${nodeId}" no longer exists in the workflow`);
       return;
     }
-    if (node.kind !== "agent") {
-      // Approval/notify execution lands in Task 5; failing beats hanging.
-      this.failNode(runId, `node "${nodeId}" is a "${node.kind}" node, which this engine cannot execute yet`);
+    if (node.kind === "approval") {
+      this.openApproval(runId, node);
+      return;
+    }
+    if (node.kind === "notify") {
+      this.executeNotify(run, workflow, node);
       return;
     }
     const botState = this.options.botState(node.botId);
@@ -507,6 +637,58 @@ export class WorkflowEngine {
     this.runByThread.set(task.threadId, runId);
     this.lastAssistantText.delete(task.threadId);
     this.startTurnSafely(node.botId, task.threadId, _buildNodePrompt(workflow, node, patched), runId);
+  }
+
+  /** Park the run on a human gate: no task, no turn, one notification. From
+   * here the sweep in tick() owns the deadline and the reminder. */
+  private openApproval(runId: string, node: ApprovalNode): void {
+    const patched = this.store.patchRun(runId, {
+      status: "waiting-approval",
+      currentNodeId: node.id,
+      approvalRequestedAt: this.now(),
+      approvalRemindedAt: undefined,
+      dispatchedAt: undefined,
+      nextAttemptAt: undefined,
+      currentThreadId: undefined,
+    });
+    if (!patched) return;
+    this.options.notifyUser?.(patched, node.prompt);
+  }
+
+  /** Post the rendered template to its group and advance in the same step —
+   * no task, no thread, nothing for the reconciler to wait on. A missing or
+   * throwing transport is terminal, never a silent skip. */
+  private executeNotify(run: WorkflowRun, workflow: Workflow, node: NotifyNode): void {
+    // The receipt names this node before anything can fail on its behalf.
+    const parked = this.store.patchRun(run.id, {
+      currentNodeId: node.id,
+      dispatchedAt: undefined,
+      nextAttemptAt: undefined,
+      currentThreadId: undefined,
+    });
+    if (!parked) return;
+    const post = this.options.postGroupMessage;
+    if (!post) {
+      this.failNode(run.id, "notification channel unavailable");
+      return;
+    }
+    // Scrubbed before it leaves the process and before it is persisted.
+    const text = redactSecretsInText(renderNotifyTemplate(node.template, workflow, parked));
+    try {
+      post(node.targetGroupId, text);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.failNode(run.id, `could not post to group "${node.targetGroupId}": ${reason}`);
+      return;
+    }
+    const at = this.now();
+    this.advance(parked, workflow, node, {
+      nodeId: node.id,
+      outcome: WORKFLOW_NOTIFY_OUTCOME,
+      summary: text.slice(0, 500),
+      startedAt: at,
+      endedAt: at,
+    });
   }
 
   private startTurnSafely(botId: string, threadId: string, prompt: string, runId: string): void {
@@ -590,6 +772,8 @@ export class WorkflowEngine {
       error: redactSecretsInText(reason).slice(0, 500),
       endedAt: this.now(),
       nextAttemptAt: undefined,
+      approvalRequestedAt: undefined,
+      approvalRemindedAt: undefined,
     });
     if (!patched) return;
     const workflow = this.store.get(patched.workflowId);

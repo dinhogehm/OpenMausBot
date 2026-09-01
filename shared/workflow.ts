@@ -88,6 +88,11 @@ export interface WorkflowRun {
   /** When the reconciler should next try dispatching the current node — set
    * both for retry backoff and while waiting for a busy bot to free up. */
   nextAttemptAt?: number;
+  /** When the current approval gate opened; the expiry and reminder clocks
+   * run from it, so it must survive a restart (engine bookkeeping). */
+  approvalRequestedAt?: number;
+  /** Set once the gate's single mid-window reminder went out (engine bookkeeping). */
+  approvalRemindedAt?: number;
   input: string;
   nodeResults: WorkflowNodeResult[];
   error?: string;
