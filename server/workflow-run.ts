@@ -17,11 +17,12 @@ import {
   type WorkflowNodeResult,
   type WorkflowRun,
   type WorkflowRunStatus,
+  type WorkflowRunTrigger,
 } from "../shared/workflow.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 import type { WorkflowStore } from "./workflow-store.ts";
 
-export type WorkflowRunTrigger = "manual" | "schedule" | "webhook";
+export type { WorkflowRunTrigger } from "../shared/workflow.ts";
 
 export interface WorkflowEngineOptions {
   store: WorkflowStore;
@@ -109,10 +110,8 @@ export class WorkflowEngine {
   }
 
   /** Start (or queue) a run. Creation validates even though the store's
-   * `update` already gates persistence, because `create` accepts drafts.
-   * `_trigger` is accepted now so schedule/webhook callers (Task 7) bind the
-   * final signature; the receipt does not record it yet. */
-  startRun(workflowId: string, input: string, _trigger: WorkflowRunTrigger): WorkflowRun {
+   * `update` already gates persistence, because `create` accepts drafts. */
+  startRun(workflowId: string, input: string, trigger: WorkflowRunTrigger): WorkflowRun {
     const workflow = this.store.get(workflowId);
     if (!workflow) throw new Error(`unknown workflow: ${workflowId}`);
     const firstError = validateWorkflow(workflow).find((issue) => issue.severity === "error");
@@ -124,6 +123,7 @@ export class WorkflowEngine {
     const run = this.store.createRun({
       workflowId,
       status: hasActive ? "queued" : "running",
+      trigger,
       attempt: 0,
       input,
       nodeResults: [],
@@ -286,12 +286,9 @@ export class WorkflowEngine {
     if (!oldest) return;
     const workflow = this.store.get(workflowId);
     if (!workflow) {
-      const patched = this.store.patchRun(oldest.id, {
-        status: "failed",
-        error: "the workflow definition was deleted",
-        endedAt: this.now(),
-      });
-      if (patched) this.drainQueue(workflowId);
+      // failNode drains again once this run is failed, so one dead promotion
+      // never strands the runs queued behind it.
+      this.failNode(oldest.id, "the workflow definition was deleted");
       return;
     }
     const promoted = this.store.patchRun(oldest.id, { status: "running" });

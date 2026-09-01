@@ -35,11 +35,9 @@ interface CapturedDispatch {
 function harness() {
   const dir = tempDir();
   let now = 1_000;
-  const store = new WorkflowStore({
-    file: join(dir, "workflows.json"),
-    runsFile: join(dir, "workflow-runs.json"),
-    now: () => now,
-  });
+  const file = join(dir, "workflows.json");
+  const runsFile = join(dir, "workflow-runs.json");
+  const store = new WorkflowStore({ file, runsFile, now: () => now });
   const tasks: Array<{ botId: string; title: string }> = [];
   const dispatches: CapturedDispatch[] = [];
   let taskSeq = 0;
@@ -81,6 +79,8 @@ function harness() {
     tasks,
     dispatches,
     completeTurn,
+    /** Fresh store over the same files: proves the bytes on disk, not the cache. */
+    reload: () => new WorkflowStore({ file, runsFile, now: () => now }),
     setNow: (value: number) => (now = value),
     failCreateTask: () => (createTaskFails = true),
     rejectStartTurn: (message: string) => (startTurnRejects = message),
@@ -190,6 +190,19 @@ describe("WorkflowEngine startRun", () => {
     expect(beginAt).toBeGreaterThanOrEqual(0);
     expect(inputAt).toBeGreaterThan(beginAt);
     expect(endAt).toBeGreaterThan(inputAt);
+  });
+
+  it("persists the trigger on both running and queued runs, surviving a restart", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const first = h.engine.startRun(workflow.id, "first", "webhook");
+    const second = h.engine.startRun(workflow.id, "second", "schedule");
+    expect(first.trigger).toBe("webhook");
+    expect(second.trigger).toBe("schedule");
+    // The UI timeline needs the trigger after a restart, so prove the disk.
+    const reloaded = h.reload();
+    expect(reloaded.getRun(first.id)?.trigger).toBe("webhook");
+    expect(reloaded.getRun(second.id)?.trigger).toBe("schedule");
   });
 
   it("throws on an unknown workflow and on validation errors, creating no run", () => {
@@ -393,6 +406,26 @@ describe("WorkflowEngine queueing", () => {
     expect(h.store.getRun(first.id)!.error).toBe("provider exploded");
     expect(h.store.getRun(second.id)!.status).toBe("running");
     expect(h.dispatches).toHaveLength(2);
+  });
+
+  it("fails every queued run through the funnel when the workflow was deleted, draining the whole queue", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const first = h.engine.startRun(workflow.id, "first", "manual");
+    const second = h.engine.startRun(workflow.id, "second", "manual");
+    const third = h.engine.startRun(workflow.id, "third", "manual");
+    h.store.remove(workflow.id);
+
+    h.dispatches[0]!.onDispatchError("provider exploded");
+    expect(h.store.getRun(first.id)!.status).toBe("failed");
+    expect(h.store.getRun(first.id)!.error).toBe("provider exploded");
+    // Draining hits the deleted-workflow branch for each queued run in turn;
+    // one failed promotion must not strand the runs behind it.
+    expect(h.store.getRun(second.id)!.status).toBe("failed");
+    expect(h.store.getRun(second.id)!.error).toBe("the workflow definition was deleted");
+    expect(h.store.getRun(third.id)!.status).toBe("failed");
+    expect(h.store.getRun(third.id)!.error).toBe("the workflow definition was deleted");
+    expect(h.dispatches).toHaveLength(1); // nothing new was dispatched
   });
 
   it("fails the run when startTurn rejects", async () => {

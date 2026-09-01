@@ -56,6 +56,8 @@ export interface Workflow {
 
 export type WorkflowRunStatus = "queued" | "running" | "waiting-approval" | "completed" | "failed" | "cancelled";
 
+export type WorkflowRunTrigger = "manual" | "schedule" | "webhook";
+
 export interface WorkflowNodeResult {
   nodeId: string;
   outcome: string;
@@ -69,6 +71,9 @@ export interface WorkflowRun {
   id: string;
   workflowId: string;
   status: WorkflowRunStatus;
+  /** What started this run; the UI timeline shows it, so it must survive a
+   * restart. Optional so pre-existing receipts load unchanged. */
+  trigger?: WorkflowRunTrigger;
   currentNodeId?: string;
   /** Task thread where the current node is executing (engine bookkeeping). */
   currentThreadId?: string;
