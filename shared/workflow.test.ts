@@ -174,4 +174,124 @@ describe("validateWorkflow", () => {
       expect.objectContaining({ severity: "error", code: "reserved-outcome", nodeId: "code" }),
     );
   });
+
+  it("flags two edges competing for the same outcome of one node", () => {
+    const issues = validateWorkflow(
+      wf({ edges: [...wf().edges, { from: "code", outcome: "done", to: "code" }] }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "duplicate-edge", nodeId: "code" }),
+    );
+  });
+
+  it("flags an edge whose outcome the source node can never produce", () => {
+    const issues = validateWorkflow(
+      wf({ edges: [...wf().edges, { from: "code", outcome: "deployed", to: "review" }] }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "unknown-outcome", nodeId: "code" }),
+    );
+  });
+
+  it("does not count a node reached only through a dead edge as reachable", () => {
+    const issues = validateWorkflow(wf({ edges: [{ from: "code", outcome: "typo", to: "review" }] }));
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "unknown-outcome", nodeId: "code" }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "unreachable", nodeId: "review" }),
+    );
+  });
+
+  it("rejects a failed edge on an approval node", () => {
+    const issues = validateWorkflow(
+      wf({
+        nodes: [wf().nodes[0]!, { kind: "approval", id: "review", prompt: "ship it?" }],
+        edges: [...wf().edges, { from: "review", outcome: WORKFLOW_FAIL_OUTCOME, to: "code" }],
+      }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "unknown-outcome", nodeId: "review" }),
+    );
+  });
+
+  it("flags an agent node declaring no outcomes", () => {
+    const issues = validateWorkflow(
+      wf({
+        nodes: [
+          { kind: "agent", id: "code", botId: "b1", instructions: "codifique", outcomes: [] },
+          ...wf().nodes.slice(1),
+        ],
+      }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "bad-outcomes", nodeId: "code" }),
+    );
+  });
+
+  it("flags an agent node declaring the same outcome twice", () => {
+    const issues = validateWorkflow(
+      wf({
+        nodes: [
+          { kind: "agent", id: "code", botId: "b1", instructions: "codifique", outcomes: ["done", "done"] },
+          ...wf().nodes.slice(1),
+        ],
+      }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "bad-outcomes", nodeId: "code" }),
+    );
+  });
+
+  it("flags an outcome name the parser could never emit", () => {
+    const issues = validateWorkflow(
+      wf({
+        nodes: [
+          { kind: "agent", id: "code", botId: "b1", instructions: "codifique", outcomes: ["done", "x".repeat(101)] },
+          ...wf().nodes.slice(1),
+        ],
+      }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "bad-outcomes", nodeId: "code" }),
+    );
+  });
+
+  it("flags an approval node with only approved wired", () => {
+    const issues = validateWorkflow(
+      wf({
+        nodes: [wf().nodes[0]!, { kind: "approval", id: "review", prompt: "ship it?" }],
+        edges: [
+          { from: "code", outcome: "done", to: "review" },
+          { from: "review", outcome: "approved", to: "code" },
+        ],
+      }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "unwired-outcome", nodeId: "review" }),
+    );
+  });
+
+  it("treats a notify node as a valid pure sink", () => {
+    const errors = validateWorkflow(
+      wf({
+        nodes: [wf().nodes[0]!, { kind: "notify", id: "review", targetGroupId: "g1", template: "shipped" }],
+        edges: [{ from: "code", outcome: "done", to: "review" }],
+      }),
+    ).filter((issue) => issue.severity === "error");
+    expect(errors).toEqual([]);
+  });
+
+  it("anchors a dangling edge to whichever endpoint exists", () => {
+    const fromMissing = validateWorkflow(
+      wf({ edges: [...wf().edges, { from: "ghost", outcome: "done", to: "code" }] }),
+    );
+    expect(fromMissing).toContainEqual(expect.objectContaining({ code: "dangling-edge", nodeId: "code" }));
+
+    const bothMissing = validateWorkflow(
+      wf({ edges: [...wf().edges, { from: "ghost", outcome: "done", to: "phantom" }] }),
+    ).find((issue) => issue.code === "dangling-edge");
+    expect(bothMissing).toBeDefined();
+    expect(bothMissing?.nodeId).toBeUndefined();
+  });
 });

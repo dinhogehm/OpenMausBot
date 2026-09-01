@@ -127,7 +127,10 @@ export interface WorkflowIssue {
   code:
     | "bad-entry"
     | "duplicate-node-id"
+    | "duplicate-edge"
     | "dangling-edge"
+    | "unknown-outcome"
+    | "bad-outcomes"
     | "unwired-outcome"
     | "unwired-failure"
     | "unreachable"
@@ -138,25 +141,29 @@ export interface WorkflowIssue {
 
 /** Structural validation only — the server refuses to persist on any error,
  * the canvas shows every issue inline. A node with zero wired outcomes is a
- * deliberate terminal sink; wiring some outcomes but not all is a mistake. */
+ * deliberate terminal sink; wiring some outcomes but not all is a mistake.
+ * Determinism is the invariant: every routable outcome has at most one
+ * successor, and only edges the engine can actually take count as reachable. */
 export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
   const issues: WorkflowIssue[] = [];
 
-  const seenIds = new Set<string>();
+  const nodeById = new Map<string, WorkflowNode>();
   for (const node of workflow.nodes) {
-    if (seenIds.has(node.id)) {
+    if (nodeById.has(node.id)) {
       issues.push({
         severity: "error",
         code: "duplicate-node-id",
         nodeId: node.id,
         message: `Duplicate node id "${node.id}".`,
       });
+      continue;
     }
-    seenIds.add(node.id);
+    nodeById.set(node.id, node);
   }
 
   for (const node of workflow.nodes) {
-    if (node.kind === "agent" && node.outcomes.includes(WORKFLOW_FAIL_OUTCOME)) {
+    if (node.kind !== "agent") continue;
+    if (node.outcomes.includes(WORKFLOW_FAIL_OUTCOME)) {
       issues.push({
         severity: "error",
         code: "reserved-outcome",
@@ -164,9 +171,46 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
         message: `Outcome "${WORKFLOW_FAIL_OUTCOME}" is reserved; every agent node already has it implicitly.`,
       });
     }
+    if (node.outcomes.length === 0) {
+      issues.push({
+        severity: "error",
+        code: "bad-outcomes",
+        nodeId: node.id,
+        message: `Node "${node.id}" declares no outcomes; an agent node needs at least one.`,
+      });
+    }
+    const declared = new Set<string>();
+    for (const outcome of node.outcomes) {
+      if (!outcome.trim()) {
+        issues.push({
+          severity: "error",
+          code: "bad-outcomes",
+          nodeId: node.id,
+          message: `Node "${node.id}" declares a blank outcome name.`,
+        });
+      } else if (outcome.length > 100) {
+        // The outcome parser bounds names at 100 chars, so a longer
+        // declaration is a route the model could never take.
+        issues.push({
+          severity: "error",
+          code: "bad-outcomes",
+          nodeId: node.id,
+          message: `Node "${node.id}" outcome "${outcome.slice(0, 24)}…" is longer than 100 chars and can never be parsed.`,
+        });
+      }
+      if (declared.has(outcome)) {
+        issues.push({
+          severity: "error",
+          code: "bad-outcomes",
+          nodeId: node.id,
+          message: `Node "${node.id}" declares outcome "${outcome}" more than once.`,
+        });
+      }
+      declared.add(outcome);
+    }
   }
 
-  const entryExists = seenIds.has(workflow.entryNodeId);
+  const entryExists = nodeById.has(workflow.entryNodeId);
   if (!entryExists) {
     issues.push({
       severity: "error",
@@ -176,21 +220,49 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
   }
 
   for (const edge of workflow.edges) {
-    if (!seenIds.has(edge.from) || !seenIds.has(edge.to)) {
-      issues.push({
-        severity: "error",
-        code: "dangling-edge",
-        nodeId: edge.from,
-        message: `Edge "${edge.from}" --${edge.outcome}--> "${edge.to}" references a missing node.`,
-      });
-    }
+    const fromExists = nodeById.has(edge.from);
+    const toExists = nodeById.has(edge.to);
+    if (fromExists && toExists) continue;
+    const anchor = fromExists ? edge.from : toExists ? edge.to : undefined;
+    issues.push({
+      severity: "error",
+      code: "dangling-edge",
+      ...(anchor === undefined ? {} : { nodeId: anchor }),
+      message: `Edge "${edge.from}" --${edge.outcome}--> "${edge.to}" references a missing node.`,
+    });
   }
 
   const wiredByNode = new Map<string, Set<string>>();
   for (const edge of workflow.edges) {
     const wired = wiredByNode.get(edge.from) ?? new Set<string>();
+    if (wired.has(edge.outcome)) {
+      issues.push({
+        severity: "error",
+        code: "duplicate-edge",
+        nodeId: edge.from,
+        message: `Node "${edge.from}" has more than one edge for outcome "${edge.outcome}"; the engine needs exactly one successor.`,
+      });
+    }
     wired.add(edge.outcome);
     wiredByNode.set(edge.from, wired);
+  }
+
+  const routableByNode = new Map<string, Set<string>>();
+  for (const [id, node] of nodeById) {
+    routableByNode.set(id, new Set(nodeOutcomes(node)));
+  }
+
+  for (const edge of workflow.edges) {
+    const routable = routableByNode.get(edge.from);
+    if (!routable) continue; // missing source already reported as dangling
+    if (!routable.has(edge.outcome)) {
+      issues.push({
+        severity: "error",
+        code: "unknown-outcome",
+        nodeId: edge.from,
+        message: `Edge "${edge.from}" --${edge.outcome}--> "${edge.to}" uses an outcome node "${edge.from}" can never produce.`,
+      });
+    }
   }
 
   for (const node of workflow.nodes) {
@@ -226,7 +298,10 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
   if (entryExists) {
     const adjacency = new Map<string, string[]>();
     for (const edge of workflow.edges) {
-      if (!seenIds.has(edge.from) || !seenIds.has(edge.to)) continue;
+      if (!nodeById.has(edge.from) || !nodeById.has(edge.to)) continue;
+      // A dead edge (unknown outcome) can never carry a run, so it must not
+      // make its target look reachable.
+      if (!routableByNode.get(edge.from)?.has(edge.outcome)) continue;
       const targets = adjacency.get(edge.from);
       if (targets) targets.push(edge.to);
       else adjacency.set(edge.from, [edge.to]);
