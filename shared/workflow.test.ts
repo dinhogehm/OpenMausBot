@@ -257,6 +257,24 @@ describe("validateWorkflow", () => {
     );
   });
 
+  it("flags a whitespace-padded outcome name the parser would trim past", () => {
+    const issues = validateWorkflow(
+      wf({
+        nodes: [
+          { kind: "agent", id: "code", botId: "b1", instructions: "codifique", outcomes: [" done "] },
+          ...wf().nodes.slice(1),
+        ],
+        edges: [
+          { from: "code", outcome: " done ", to: "review" },
+          ...wf().edges.slice(1),
+        ],
+      }),
+    );
+    expect(issues).toContainEqual(
+      expect.objectContaining({ severity: "error", code: "bad-outcomes", nodeId: "code" }),
+    );
+  });
+
   it("flags an approval node with only approved wired", () => {
     const issues = validateWorkflow(
       wf({

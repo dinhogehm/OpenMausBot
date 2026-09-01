@@ -188,6 +188,15 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
           nodeId: node.id,
           message: `Node "${node.id}" declares a blank outcome name.`,
         });
+      } else if (outcome !== outcome.trim()) {
+        // The outcome parser trims names before matching, so a padded
+        // declaration is a route the model could never take.
+        issues.push({
+          severity: "error",
+          code: "bad-outcomes",
+          nodeId: node.id,
+          message: `Node "${node.id}" outcome "${outcome}" has surrounding whitespace the parser strips; it can never be routed.`,
+        });
       } else if (outcome.length > 100) {
         // The outcome parser bounds names at 100 chars, so a longer
         // declaration is a route the model could never take.
