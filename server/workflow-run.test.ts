@@ -40,14 +40,17 @@ function harness() {
   const store = new WorkflowStore({ file, runsFile, now: () => now });
   const tasks: Array<{ botId: string; title: string }> = [];
   const dispatches: CapturedDispatch[] = [];
+  const interrupts: Array<{ botId: string; threadId: string }> = [];
+  const notifications: Array<{ runId: string; message: string }> = [];
   let taskSeq = 0;
   let eventSeq = 0;
   let createTaskFails = false;
   let startTurnRejects: string | null = null;
+  let botStateFn: (botId: string) => "ready" | "busy" | "missing" = () => "ready";
   const engine = new WorkflowEngine({
     store,
     now: () => now,
-    botState: () => "ready",
+    botState: (botId) => botStateFn(botId),
     createTask: (botId, title) => {
       if (createTaskFails) return null;
       tasks.push({ botId, title });
@@ -56,6 +59,13 @@ function harness() {
     startTurn: (botId, threadId, prompt, onDispatchError) => {
       dispatches.push({ botId, threadId, prompt, onDispatchError });
       return startTurnRejects === null ? Promise.resolve() : Promise.reject(new Error(startTurnRejects));
+    },
+    interruptTurn: (botId, threadId) => {
+      interrupts.push({ botId, threadId });
+      return Promise.resolve();
+    },
+    notifyUser: (run, message) => {
+      notifications.push({ runId: run.id, message });
     },
   });
   const base = (threadId: string) => ({
@@ -79,19 +89,63 @@ function harness() {
   const runtimeError = (threadId: string, message: string) => {
     engine.handleRuntimeEvent({ ...base(threadId), type: "runtime.error", message } satisfies RuntimeEvent);
   };
+  /** Fresh engine + fresh store over the same files with empty in-memory
+   * maps — a process restart. Its own capture arrays and a distinct thread
+   * prefix, so the two engines' dispatches can never be confused. */
+  const reloadEngine = () => {
+    const restartedStore = new WorkflowStore({ file, runsFile, now: () => now });
+    const restartedTasks: Array<{ botId: string; title: string }> = [];
+    const restartedDispatches: CapturedDispatch[] = [];
+    const restartedInterrupts: Array<{ botId: string; threadId: string }> = [];
+    let restartedSeq = 0;
+    const restartedEngine = new WorkflowEngine({
+      store: restartedStore,
+      now: () => now,
+      botState: (botId) => botStateFn(botId),
+      createTask: (botId, title) => {
+        restartedTasks.push({ botId, title });
+        return { threadId: `re-thread-${++restartedSeq}` };
+      },
+      startTurn: (botId, threadId, prompt, onDispatchError) => {
+        restartedDispatches.push({ botId, threadId, prompt, onDispatchError });
+        return Promise.resolve();
+      },
+      interruptTurn: (botId, threadId) => {
+        restartedInterrupts.push({ botId, threadId });
+        return Promise.resolve();
+      },
+    });
+    return {
+      engine: restartedEngine,
+      store: restartedStore,
+      tasks: restartedTasks,
+      dispatches: restartedDispatches,
+      interrupts: restartedInterrupts,
+    };
+  };
   return {
     store,
     engine,
     tasks,
     dispatches,
+    interrupts,
+    notifications,
     completeTurn,
     endTurn,
     runtimeError,
     /** Fresh store over the same files: proves the bytes on disk, not the cache. */
     reload: () => new WorkflowStore({ file, runsFile, now: () => now }),
+    reloadEngine,
     setNow: (value: number) => (now = value),
     failCreateTask: () => (createTaskFails = true),
     rejectStartTurn: (message: string) => (startTurnRejects = message),
+    setBotState: (fn: (botId: string) => "ready" | "busy" | "missing") => (botStateFn = fn),
+    /** Simulates the run-receipt cap pruning a live run: the entry vanishes,
+     * so every later patchRun/getRun for it misses (returns null). */
+    removeRun: (id: string) => {
+      const internals = store as unknown as { runs: Array<{ id: string }> };
+      internals.runs = internals.runs.filter((run) => run.id !== id);
+    },
   };
 }
 
@@ -109,6 +163,24 @@ const pipeline = (overrides: Partial<WorkflowInput> = {}): WorkflowInput => ({
   edges: [{ from: "plan", outcome: "done", to: "ship" }],
   layout: {},
   ...overrides,
+});
+
+/** pipeline() with zero retries on every agent node: failures that Task 4
+ * made retryable go terminal immediately, pinning the Task 3 assertions. */
+const noRetryPipeline = (): WorkflowInput => {
+  const input = pipeline();
+  for (const node of input.nodes) if (node.kind === "agent") node.retries = 0;
+  return input;
+};
+
+/** Single agent node (a pure sink) on the given bot — the smallest workflow
+ * that can contend for a bot in the per-bot FIFO tests. */
+const soloOn = (name: string, botId: string): WorkflowInput => ({
+  name,
+  entryNodeId: "only",
+  nodes: [{ kind: "agent", id: "only", botId, instructions: "Do it.", outcomes: ["done"] }],
+  edges: [],
+  layout: {},
 });
 
 /** review branches: approved --> merge, rejected --> rework (both sinks). */
@@ -331,9 +403,11 @@ describe("WorkflowEngine graph advance", () => {
     expect(h.dispatches).toHaveLength(4); // the fifth dispatch never happened
   });
 
-  it("fails the run when the turn itself does not complete ok", () => {
+  it("fails the run when the turn does not complete ok and the node has no retries", () => {
     const h = harness();
-    const workflow = h.store.create(pipeline());
+    // A not-ok turn became retryable in Task 4; zero retries pins the
+    // original terminal behavior this test always asserted.
+    const workflow = h.store.create(noRetryPipeline());
     const run = h.engine.startRun(workflow.id, "go", "manual");
     h.completeTurn("thread-1", "half-written answer", false);
     const persisted = h.store.getRun(run.id)!;
@@ -343,9 +417,11 @@ describe("WorkflowEngine graph advance", () => {
 });
 
 describe("WorkflowEngine envelope re-prompt", () => {
-  it("re-prompts exactly once on the same thread, then fails on a second miss", () => {
+  it("re-prompts exactly once on the same thread, then fails a no-retry node on a second miss", () => {
     const h = harness();
-    const workflow = h.store.create(pipeline());
+    // A double envelope miss became retryable in Task 4; zero retries pins
+    // the original terminal behavior (no third chance on the same thread).
+    const workflow = h.store.create(noRetryPipeline());
     const run = h.engine.startRun(workflow.id, "go", "manual");
 
     h.completeTurn("thread-1", "I did the work but forgot the envelope.");
@@ -364,9 +440,10 @@ describe("WorkflowEngine envelope re-prompt", () => {
     expect(h.dispatches).toHaveLength(2); // no third chance
   });
 
-  it("fails after the re-prompt when turns complete with no assistant text at all", () => {
+  it("fails a no-retry node after the re-prompt when turns complete with no assistant text at all", () => {
     const h = harness();
-    const workflow = h.store.create(pipeline());
+    // Same Task 4 adjustment as above: zero retries keeps this terminal.
+    const workflow = h.store.create(noRetryPipeline());
     const run = h.engine.startRun(workflow.id, "go", "manual");
     h.endTurn("thread-1"); // no assistant_text event ever arrived
     expect(h.dispatches).toHaveLength(2);
@@ -427,7 +504,9 @@ describe("WorkflowEngine event hygiene", () => {
 
   it("uses the last runtime.error as the reason when a turn ends not-ok without a stop reason", () => {
     const h = harness();
-    const workflow = h.store.create(pipeline());
+    // Zero retries: the not-ok path is retryable since Task 4, and this test
+    // pins the terminal reason, not the retry policy.
+    const workflow = h.store.create(noRetryPipeline());
     const run = h.engine.startRun(workflow.id, "go", "manual");
     h.runtimeError("thread-1", "the provider crashed hard");
     h.endTurn("thread-1", false);
@@ -454,7 +533,9 @@ describe("WorkflowEngine redaction", () => {
 
   it("redacts secrets from persisted run errors", () => {
     const h = harness();
-    const workflow = h.store.create(pipeline());
+    // Zero retries: a dispatch error is retryable since Task 4, and only the
+    // terminal path persists `error` — the redaction under test.
+    const workflow = h.store.create(noRetryPipeline());
     const run = h.engine.startRun(workflow.id, "go", "manual");
     h.dispatches[0]!.onDispatchError(`provider rejected ${SECRET}`);
     const persisted = h.store.getRun(run.id)!;
@@ -495,7 +576,9 @@ describe("WorkflowEngine queueing", () => {
 
   it("drains the queue when the active run fails via a dispatch error", () => {
     const h = harness();
-    const workflow = h.store.create(pipeline());
+    // Zero retries: a dispatch error only reaches the terminal drain-the-
+    // queue path (under test here) once retries are exhausted.
+    const workflow = h.store.create(noRetryPipeline());
     const first = h.engine.startRun(workflow.id, "first", "manual");
     const second = h.engine.startRun(workflow.id, "second", "manual");
 
@@ -526,14 +609,353 @@ describe("WorkflowEngine queueing", () => {
     expect(h.dispatches).toHaveLength(1); // nothing new was dispatched
   });
 
-  it("fails the run when startTurn rejects", async () => {
+  it("fails the run when startTurn rejects and the node has no retries", async () => {
     const h = harness();
-    const workflow = h.store.create(pipeline());
+    // Zero retries: a startTurn rejection is retryable since Task 4.
+    const workflow = h.store.create(noRetryPipeline());
     h.rejectStartTurn("spawn failed");
     const run = h.engine.startRun(workflow.id, "go", "manual");
     await new Promise((resolve) => setTimeout(resolve, 0));
     const persisted = h.store.getRun(run.id)!;
     expect(persisted.status).toBe("failed");
     expect(persisted.error).toBe("spawn failed");
+  });
+});
+
+describe("WorkflowEngine retries and backoff", () => {
+  it("schedules a backed-off retry on a dispatch error and re-dispatches fresh when due", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError("provider exploded");
+
+    let persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("running");
+    expect(persisted.attempt).toBe(1);
+    expect(persisted.nextAttemptAt).toBe(1_000 + 60_000);
+    expect(persisted.dispatchedAt).toBeUndefined();
+    expect(h.dispatches).toHaveLength(1); // no immediate re-dispatch
+
+    h.setNow(30_000);
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(1); // not due yet
+
+    h.setNow(61_000);
+    await h.engine.tick();
+    expect(h.tasks).toHaveLength(2); // a FRESH task/thread, never the dead one
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.dispatches[1]!.botId).toBe("planner");
+    expect(h.dispatches[1]!.threadId).toBe("thread-2");
+    persisted = h.store.getRun(run.id)!;
+    expect(persisted.attempt).toBe(1); // preserved across the re-dispatch
+    expect(persisted.nextAttemptAt).toBeUndefined();
+    expect(persisted.currentThreadId).toBe("thread-2");
+    expect(persisted.dispatchedAt).toBe(61_000);
+  });
+
+  it("schedules a retry when the envelope is missed twice and retries remain", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.completeTurn("thread-1", "no envelope");
+    h.completeTurn("thread-1", "still no envelope");
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("running");
+    expect(persisted.attempt).toBe(1);
+    expect(persisted.nextAttemptAt).toBe(1_000 + 60_000);
+    expect(h.dispatches).toHaveLength(2); // dispatch + one re-prompt, nothing more yet
+  });
+
+  it("backs off +120s on the second failure and advances along a drawn failed edge when exhausted", async () => {
+    const h = harness();
+    const workflow = h.store.create(
+      pipeline({
+        edges: [
+          { from: "plan", outcome: "done", to: "ship" },
+          { from: "plan", outcome: "failed", to: "ship" },
+        ],
+      }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+
+    h.dispatches[0]!.onDispatchError("boom 1");
+    h.setNow(61_000);
+    await h.engine.tick(); // retry #1 dispatches
+    h.dispatches[1]!.onDispatchError("boom 2");
+    let persisted = h.store.getRun(run.id)!;
+    expect(persisted.attempt).toBe(2);
+    expect(persisted.nextAttemptAt).toBe(61_000 + 120_000);
+
+    h.setNow(181_000);
+    await h.engine.tick(); // retry #2 dispatches
+    h.dispatches[2]!.onDispatchError("boom 3"); // default retries (2) exhausted
+
+    persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("running");
+    expect(persisted.currentNodeId).toBe("ship"); // advanced along the failed edge
+    expect(persisted.attempt).toBe(0);
+    expect(persisted.nodeResults).toEqual([
+      {
+        nodeId: "plan",
+        outcome: "failed",
+        summary: "boom 3",
+        threadId: "thread-3",
+        startedAt: 181_000,
+        endedAt: 181_000,
+      },
+    ]);
+    expect(h.dispatches[3]!.botId).toBe("shipper");
+    // The failed step flows into the next node's context like any outcome.
+    expect(h.dispatches[3]!.prompt).toContain("- plan: failed — boom 3");
+  });
+
+  it("fails terminally and notifies the user when retries are exhausted with no failed edge", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError("boom 1");
+    h.setNow(61_000);
+    await h.engine.tick();
+    h.dispatches[1]!.onDispatchError("boom 2");
+    h.setNow(181_000);
+    await h.engine.tick();
+    h.dispatches[2]!.onDispatchError("boom 3");
+
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("failed");
+    expect(persisted.error).toBe("boom 3");
+    expect(persisted.endedAt).toBe(181_000);
+    expect(h.notifications).toHaveLength(1);
+    expect(h.notifications[0]!.runId).toBe(run.id);
+    expect(h.notifications[0]!.message).toContain("boom 3");
+  });
+});
+
+describe("WorkflowEngine timeouts", () => {
+  it("interrupts and schedules a retry when a dispatched node exceeds its timeout", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+
+    h.setNow(1_000 + 30 * 60_000); // exactly the default budget: not over yet
+    await h.engine.tick();
+    expect(h.interrupts).toEqual([]);
+    expect(h.store.getRun(run.id)!.attempt).toBe(0);
+
+    h.setNow(1_001 + 30 * 60_000);
+    await h.engine.tick();
+    expect(h.interrupts).toEqual([{ botId: "planner", threadId: "thread-1" }]);
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("running");
+    expect(persisted.attempt).toBe(1);
+    expect(persisted.nextAttemptAt).toBe(1_001 + 30 * 60_000 + 60_000);
+    expect(persisted.dispatchedAt).toBeUndefined();
+    // The dead thread no longer routes events into the run.
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)!.nodeResults).toEqual([]);
+  });
+
+  it("honors a node-level timeoutMinutes override", async () => {
+    const h = harness();
+    const workflow = h.store.create(
+      pipeline({
+        nodes: [
+          { kind: "agent", id: "plan", botId: "planner", instructions: "Draft.", outcomes: ["done"], timeoutMinutes: 1 },
+          { kind: "agent", id: "ship", botId: "shipper", instructions: "Ship it.", outcomes: ["shipped"] },
+        ],
+      }),
+    );
+    h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(1_000 + 60_001);
+    await h.engine.tick();
+    expect(h.interrupts).toEqual([{ botId: "planner", threadId: "thread-1" }]);
+  });
+});
+
+describe("WorkflowEngine per-bot FIFO", () => {
+  it("defers dispatch while the bot is busy and serves waiting runs oldest-first as it frees", async () => {
+    const h = harness();
+    const wfA = h.store.create(soloOn("A", "shared"));
+    const wfB = h.store.create(soloOn("B", "shared"));
+    // The bot has `capacity` slots; each dispatched task consumes one, so a
+    // dispatch makes the bot busy again — exactly how a real turn behaves.
+    let capacity = 0;
+    const sharedTasks = () => h.tasks.filter((task) => task.botId === "shared").length;
+    h.setBotState(() => (sharedTasks() < capacity ? "ready" : "busy"));
+
+    const older = h.engine.startRun(wfA.id, "older", "manual");
+    h.setNow(1_500);
+    const younger = h.engine.startRun(wfB.id, "younger", "manual");
+
+    expect(h.tasks).toHaveLength(0); // no task created while the bot is busy
+    expect(h.store.getRun(older.id)!.status).toBe("running");
+    expect(h.store.getRun(older.id)!.nextAttemptAt).toBe(1_000);
+    expect(h.store.getRun(younger.id)!.status).toBe("running");
+    expect(h.store.getRun(younger.id)!.nextAttemptAt).toBe(1_500);
+
+    h.setNow(2_000);
+    await h.engine.tick();
+    expect(h.tasks).toHaveLength(0); // still busy: skipped, nextAttemptAt kept
+    expect(h.store.getRun(older.id)!.nextAttemptAt).toBe(1_000);
+
+    capacity = 1; // the bot frees; the tick must serve the OLDER run first
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect(h.dispatches[0]!.prompt).toContain("older");
+    expect(h.store.getRun(older.id)!.nextAttemptAt).toBeUndefined();
+    expect(h.store.getRun(younger.id)!.nextAttemptAt).toBe(1_500); // still waiting
+
+    await h.engine.tick(); // bot busy again with the older run: younger waits
+    expect(h.dispatches).toHaveLength(1);
+
+    capacity = 2; // frees again
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.dispatches[1]!.prompt).toContain("younger");
+  });
+
+  it("fails terminally when the node's bot is missing", () => {
+    const h = harness();
+    const workflow = h.store.create(soloOn("Gone", "ghost"));
+    h.setBotState(() => "missing");
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/bot/);
+    expect(h.tasks).toHaveLength(0);
+    expect(h.notifications).toHaveLength(1);
+  });
+});
+
+describe("WorkflowEngine restart recovery", () => {
+  it("re-dispatches a running run's current node when a fresh engine finds its thread orphaned", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(h.store.getRun(run.id)!.currentThreadId).toBe("thread-1");
+
+    // Process restart: fresh engine over the same files, empty in-memory maps.
+    const restarted = h.reloadEngine();
+    await restarted.engine.tick();
+
+    expect(restarted.tasks).toEqual([{ botId: "planner", title: "Workflow Release — plan" }]);
+    expect(restarted.dispatches).toHaveLength(1);
+    expect(restarted.dispatches[0]!.prompt).toContain("Draft the release plan.");
+    const persisted = restarted.store.getRun(run.id)!;
+    expect(persisted.status).toBe("running");
+    expect(persisted.attempt).toBe(0); // an orphan is not a failure
+    expect(persisted.currentNodeId).toBe("plan");
+    expect(persisted.currentThreadId).toBe("re-thread-1");
+  });
+
+  it("drains a stranded queue when the active run's terminal patch was lost", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const first = h.engine.startRun(workflow.id, "first", "manual");
+    const second = h.engine.startRun(workflow.id, "second", "manual");
+    expect(h.store.getRun(second.id)!.status).toBe("queued");
+
+    h.completeTurn("thread-1", envelope("done")); // plan -> ship (thread-2)
+    // The receipt vanishes before the terminal patch lands: patchRun misses,
+    // handleRuntimeEvent stops silently, and the queued run is stranded.
+    h.removeRun(first.id);
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(second.id)!.status).toBe("queued"); // stranded
+    expect(h.dispatches).toHaveLength(2);
+
+    await h.engine.tick();
+    expect(h.store.getRun(second.id)!.status).toBe("running");
+    expect(h.dispatches).toHaveLength(3);
+    expect(h.dispatches[2]!.prompt).toContain("second");
+  });
+});
+
+describe("WorkflowEngine run control", () => {
+  it("resumes a failed run in place when no other run is active", () => {
+    const h = harness();
+    const workflow = h.store.create(noRetryPipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError("boom");
+    expect(h.store.getRun(run.id)!.status).toBe("failed");
+
+    h.setNow(5_000);
+    const resumed = h.engine.resumeRun(run.id);
+    expect(resumed.status).toBe("running");
+    expect(resumed.attempt).toBe(0);
+    expect(resumed.error).toBeUndefined();
+    expect(resumed.endedAt).toBeUndefined();
+    expect(h.dispatches).toHaveLength(2); // current node re-dispatched immediately
+    expect(h.dispatches[1]!.botId).toBe("planner");
+    expect(resumed.currentThreadId).toBe("thread-2");
+  });
+
+  it("re-queues a resumed run when the workflow already has an active run, keeping its FIFO slot", () => {
+    const h = harness();
+    const workflow = h.store.create(noRetryPipeline());
+    const failed = h.engine.startRun(workflow.id, "first", "manual");
+    h.dispatches[0]!.onDispatchError("boom");
+    h.setNow(2_000);
+    const active = h.engine.startRun(workflow.id, "second", "manual");
+    expect(h.store.getRun(active.id)!.status).toBe("running");
+
+    const resumed = h.engine.resumeRun(failed.id);
+    expect(resumed.status).toBe("queued");
+    expect(resumed.error).toBeUndefined();
+    expect(resumed.attempt).toBe(0);
+    expect(h.dispatches).toHaveLength(2); // no dispatch while waiting its turn
+
+    // Its old startedAt makes it next in FIFO when the active run finishes.
+    h.completeTurn("thread-2", envelope("done"));
+    h.completeTurn("thread-3", envelope("shipped"));
+    expect(h.store.getRun(active.id)!.status).toBe("completed");
+    expect(h.store.getRun(failed.id)!.status).toBe("running");
+  });
+
+  it("throws when resuming a run that is not failed", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(() => h.engine.resumeRun(run.id)).toThrow(/failed/);
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(run.id)!.status).toBe("completed");
+    expect(() => h.engine.resumeRun(run.id)).toThrow(/failed/);
+    expect(() => h.engine.resumeRun("nope")).toThrow(/unknown run/);
+  });
+
+  it("cancels a running run: interrupts the live turn and drains the queue", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const first = h.engine.startRun(workflow.id, "first", "manual");
+    const second = h.engine.startRun(workflow.id, "second", "manual");
+
+    h.setNow(4_000);
+    await h.engine.cancelRun(first.id);
+    expect(h.interrupts).toEqual([{ botId: "planner", threadId: "thread-1" }]);
+    const persisted = h.store.getRun(first.id)!;
+    expect(persisted.status).toBe("cancelled");
+    expect(persisted.endedAt).toBe(4_000);
+    expect(h.store.getRun(second.id)!.status).toBe("running"); // queue drained
+    // The dead thread no longer routes events into the cancelled run.
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(first.id)!.status).toBe("cancelled");
+    expect(h.store.getRun(first.id)!.nodeResults).toEqual([]);
+  });
+
+  it("cancels a queued run without interrupting anything and is a no-op on terminal runs", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const first = h.engine.startRun(workflow.id, "first", "manual");
+    const second = h.engine.startRun(workflow.id, "second", "manual");
+
+    await h.engine.cancelRun(second.id);
+    expect(h.interrupts).toEqual([]);
+    expect(h.store.getRun(second.id)!.status).toBe("cancelled");
+
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(first.id)!.status).toBe("completed");
+    await h.engine.cancelRun(first.id); // idempotent no-op on terminal runs
+    expect(h.store.getRun(first.id)!.status).toBe("completed");
+    expect(h.interrupts).toEqual([]);
   });
 });

@@ -85,6 +85,9 @@ export interface WorkflowRun {
   repromptedAt?: number;
   /** Attempt counter for the current node only; resets when the run advances. */
   attempt: number;
+  /** When the reconciler should next try dispatching the current node — set
+   * both for retry backoff and while waiting for a busy bot to free up. */
+  nextAttemptAt?: number;
   input: string;
   nodeResults: WorkflowNodeResult[];
   error?: string;
