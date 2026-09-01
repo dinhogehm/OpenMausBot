@@ -20,6 +20,7 @@ import {
   type WorkflowRunTrigger,
 } from "../shared/workflow.ts";
 import type { RuntimeEvent } from "./contracts.ts";
+import { redactSecretsInText } from "./redact.ts";
 import type { WorkflowStore } from "./workflow-store.ts";
 
 export type { WorkflowRunTrigger } from "../shared/workflow.ts";
@@ -31,6 +32,7 @@ export interface WorkflowEngineOptions {
    * already emits run frames on every patch; this is for engine-level frames
    * later tasks add. */
   emit?: (payload: Record<string, unknown>) => void;
+  /** Declared now; the Task 4 reconciler consumes it. */
   botState: (botId: string) => "ready" | "busy" | "missing";
   /** Creates the isolated TaskRecord where a node runs (auditable transcript
    * in the bot's chat). */
@@ -102,6 +104,14 @@ export class WorkflowEngine {
   /** Latest full assistant text per dispatched thread — same accumulation as
    * RoutineManager: the turn's final assistant_text item wins. */
   private readonly lastAssistantText = new Map<string, string>();
+  /** Latest runtime.error per dispatched thread — the fallback reason for a
+   * turn that ends not-ok without a stop reason (mirrors RoutineManager). */
+  private readonly lastRuntimeError = new Map<string, string>();
+  /** Re-entrancy guard for drainQueue: while a drain loop runs, nested drain
+   * requests (failNode during a promotion, deleted-workflow chains) only
+   * enqueue the workflow id, so stack depth never scales with queue length. */
+  private draining = false;
+  private readonly drainPending: string[] = [];
 
   constructor(options: WorkflowEngineOptions) {
     this.options = options;
@@ -141,9 +151,19 @@ export class WorkflowEngine {
       this.lastAssistantText.set(event.threadId, event.text);
       return;
     }
+    if (event.type === "runtime.error") {
+      this.lastRuntimeError.set(event.threadId, event.message);
+      return;
+    }
     if (event.type !== "turn.completed") return;
     const run = this.store.getRun(runId);
-    if (!run || run.status !== "running" || run.currentThreadId !== event.threadId) return;
+    if (!run || run.status !== "running" || run.currentThreadId !== event.threadId) {
+      // The run is gone or this thread is no longer its current node: drop
+      // the stale registration so per-thread buffers cannot grow forever —
+      // the engine sees every app event, not just workflow ones.
+      this.forgetThread(event.threadId);
+      return;
+    }
     const workflow = this.store.get(run.workflowId);
     const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
     if (!workflow || !node || node.kind !== "agent") {
@@ -151,7 +171,10 @@ export class WorkflowEngine {
       return;
     }
     if (!event.ok) {
-      this.failNode(runId, event.stopReason ?? "the bot did not complete this node");
+      this.failNode(
+        runId,
+        event.stopReason ?? this.lastRuntimeError.get(event.threadId) ?? "the bot did not complete this node",
+      );
       return;
     }
     // The envelope stays verbatim in the node's task transcript — accepted
@@ -162,7 +185,10 @@ export class WorkflowEngine {
       if (run.repromptedAt === undefined) {
         // First miss: one re-prompt on the SAME thread restating the contract.
         const patched = this.store.patchRun(runId, { repromptedAt: this.now() });
-        if (!patched) return;
+        if (!patched) {
+          this.forgetThread(event.threadId);
+          return;
+        }
         this.lastAssistantText.delete(event.threadId);
         this.startTurnSafely(node.botId, event.threadId, buildRepromptMessage(node), runId);
         return;
@@ -174,7 +200,9 @@ export class WorkflowEngine {
     const result: WorkflowNodeResult = {
       nodeId: node.id,
       outcome: parsed.outcome,
-      summary: parsed.summary,
+      // Scrubbed before it is persisted, broadcast over SSE, and fed into
+      // the next node's prompt.
+      summary: redactSecretsInText(parsed.summary),
       threadId: event.threadId,
       startedAt: run.dispatchedAt ?? run.startedAt,
       endedAt: this.now(),
@@ -232,7 +260,7 @@ export class WorkflowEngine {
     }
     if (node.kind !== "agent") {
       // Approval/notify execution lands in Task 5; failing beats hanging.
-      this.failNode(runId, `node "${nodeId}" is an ${node.kind} node, which this engine cannot execute yet`);
+      this.failNode(runId, `node "${nodeId}" is a "${node.kind}" node, which this engine cannot execute yet`);
       return;
     }
     const task = this.options.createTask(node.botId, `Workflow ${workflow.name} — ${node.id}`);
@@ -268,7 +296,7 @@ export class WorkflowEngine {
     if (run.currentThreadId !== undefined) this.forgetThread(run.currentThreadId);
     const patched = this.store.patchRun(runId, {
       status: "failed",
-      error: reason.slice(0, 500),
+      error: redactSecretsInText(reason).slice(0, 500),
       endedAt: this.now(),
     });
     if (!patched) return;
@@ -276,8 +304,25 @@ export class WorkflowEngine {
   }
 
   /** One active run per workflow: when a run goes terminal, promote the
-   * oldest queued run of the same workflow and dispatch its entry node. */
+   * oldest queued run of the same workflow and dispatch its entry node.
+   * Failures during a promotion re-enter through failNode → drainQueue; the
+   * pending list plus the `draining` guard turn that mutual recursion into
+   * iteration, so a chain of dead promotions (deleted workflow, missing bot)
+   * unwinds in constant stack depth. */
   private drainQueue(workflowId: string): void {
+    if (!this.drainPending.includes(workflowId)) this.drainPending.push(workflowId);
+    if (this.draining) return; // the active loop below picks it up
+    this.draining = true;
+    try {
+      while (this.drainPending.length > 0) this.promoteOldestQueued(this.drainPending.shift()!);
+    } finally {
+      this.draining = false;
+    }
+  }
+
+  /** One promotion attempt. A failure inside re-enqueues the workflow id via
+   * failNode, so one dead promotion never strands the runs queued behind it. */
+  private promoteOldestQueued(workflowId: string): void {
     const runs = this.store.listRuns(workflowId);
     if (runs.some((run) => run.status === "running" || run.status === "waiting-approval")) return;
     const oldest = runs
@@ -286,8 +331,6 @@ export class WorkflowEngine {
     if (!oldest) return;
     const workflow = this.store.get(workflowId);
     if (!workflow) {
-      // failNode drains again once this run is failed, so one dead promotion
-      // never strands the runs queued behind it.
       this.failNode(oldest.id, "the workflow definition was deleted");
       return;
     }
@@ -299,5 +342,6 @@ export class WorkflowEngine {
   private forgetThread(threadId: string): void {
     this.runByThread.delete(threadId);
     this.lastAssistantText.delete(threadId);
+    this.lastRuntimeError.delete(threadId);
   }
 }

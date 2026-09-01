@@ -64,6 +64,9 @@ function harness() {
     threadId,
     createdAt: "1970-01-01T00:00:00.000Z",
   });
+  const endTurn = (threadId: string, ok = true) => {
+    engine.handleRuntimeEvent({ ...base(threadId), type: "turn.completed", ok } satisfies RuntimeEvent);
+  };
   const completeTurn = (threadId: string, text: string, ok = true) => {
     engine.handleRuntimeEvent({
       ...base(threadId),
@@ -71,7 +74,10 @@ function harness() {
       itemType: "assistant_text",
       text,
     } satisfies RuntimeEvent);
-    engine.handleRuntimeEvent({ ...base(threadId), type: "turn.completed", ok } satisfies RuntimeEvent);
+    endTurn(threadId, ok);
+  };
+  const runtimeError = (threadId: string, message: string) => {
+    engine.handleRuntimeEvent({ ...base(threadId), type: "runtime.error", message } satisfies RuntimeEvent);
   };
   return {
     store,
@@ -79,6 +85,8 @@ function harness() {
     tasks,
     dispatches,
     completeTurn,
+    endTurn,
+    runtimeError,
     /** Fresh store over the same files: proves the bytes on disk, not the cache. */
     reload: () => new WorkflowStore({ file, runsFile, now: () => now }),
     setNow: (value: number) => (now = value),
@@ -167,6 +175,15 @@ describe("WorkflowEngine startRun", () => {
     expect(dispatch.prompt).toContain("exactly one");
     expect(dispatch.prompt).toContain('"done"');
     expect(dispatch.prompt).not.toContain('"failed"');
+    // The example must be real JSON between the envelope tags, offering a
+    // declared outcome — not lorem the model would have to reverse-engineer.
+    const exampleLine = dispatch.prompt.split("\n").find((line) => line.startsWith(WORKFLOW_CONTROL_OPEN))!;
+    expect(exampleLine.endsWith(WORKFLOW_CONTROL_CLOSE)).toBe(true);
+    const example = JSON.parse(
+      exampleLine.slice(WORKFLOW_CONTROL_OPEN.length, exampleLine.length - WORKFLOW_CONTROL_CLOSE.length),
+    ) as { outcome?: unknown; summary?: unknown };
+    expect(example.outcome).toBe("done");
+    expect(typeof example.summary).toBe("string");
 
     const persisted = h.store.getRun(run.id)!;
     expect(persisted.currentNodeId).toBe("plan");
@@ -347,6 +364,19 @@ describe("WorkflowEngine envelope re-prompt", () => {
     expect(h.dispatches).toHaveLength(2); // no third chance
   });
 
+  it("fails after the re-prompt when turns complete with no assistant text at all", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.endTurn("thread-1"); // no assistant_text event ever arrived
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.dispatches[1]!.threadId).toBe("thread-1");
+    h.endTurn("thread-1"); // still silent after the re-prompt
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("failed");
+    expect(persisted.error).toBe("node did not produce a valid outcome envelope");
+  });
+
   it("a valid envelope after the re-prompt advances normally and clears the marker", () => {
     const h = harness();
     const workflow = h.store.create(pipeline());
@@ -363,6 +393,74 @@ describe("WorkflowEngine envelope re-prompt", () => {
     h.completeTurn("thread-2", "no envelope again");
     expect(h.store.getRun(run.id)!.status).toBe("running");
     expect(h.dispatches).toHaveLength(4);
+  });
+});
+
+describe("WorkflowEngine event hygiene", () => {
+  it("ignores events for threads that belong to no workflow run", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    // index.ts feeds the engine EVERY app event; foreign threads must be inert.
+    h.runtimeError("ghost-thread", "unrelated chat error");
+    h.completeTurn("ghost-thread", envelope("done"));
+    expect(h.dispatches).toHaveLength(1);
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("running");
+    expect(persisted.nodeResults).toEqual([]);
+  });
+
+  it("stops driving silently when the store loses the run mid-flight", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    // Simulate the receipt being pruned between events: every patch misses.
+    h.store.patchRun = () => null;
+    expect(() => h.completeTurn("thread-1", envelope("done"))).not.toThrow();
+    expect(h.dispatches).toHaveLength(1);
+    expect(h.tasks).toHaveLength(1);
+    expect(h.store.getRun(run.id)!.status).toBe("running"); // untouched receipt
+    // The thread registration is gone too: later events are ignored.
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("uses the last runtime.error as the reason when a turn ends not-ok without a stop reason", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.runtimeError("thread-1", "the provider crashed hard");
+    h.endTurn("thread-1", false);
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("failed");
+    expect(persisted.error).toBe("the provider crashed hard");
+  });
+});
+
+describe("WorkflowEngine redaction", () => {
+  const SECRET = "sk-ant-abcdefghijklmnop1234";
+
+  it("redacts secrets from the persisted summary and the next node's prompt", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.completeTurn("thread-1", envelope("done", `configured ${SECRET} as the key`));
+    const summary = h.store.getRun(run.id)!.nodeResults[0]!.summary;
+    expect(summary).not.toContain(SECRET);
+    expect(summary).toContain("«redacted");
+    // The summary flows into the next node's prompt; the secret must not.
+    expect(h.dispatches[1]!.prompt).not.toContain(SECRET);
+  });
+
+  it("redacts secrets from persisted run errors", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError(`provider rejected ${SECRET}`);
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("failed");
+    expect(persisted.error).not.toContain(SECRET);
+    expect(persisted.error).toContain("«redacted");
   });
 });
 
