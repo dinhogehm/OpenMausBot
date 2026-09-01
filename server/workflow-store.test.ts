@@ -2,7 +2,7 @@
 // runs against real files in a throwaway temp dir (no fs mocks): round-trips
 // construct a NEW store over the same paths so a passing assertion proves the
 // bytes on disk, not the in-memory cache.
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -74,9 +74,13 @@ describe("WorkflowStore definitions", () => {
     expect(reloaded.get(created.id)).toEqual(created);
     expect(reloaded.list()).toEqual([created]);
 
-    const disk = JSON.parse(readFileSync(h.file, "utf8")) as { version: number; workflows: unknown[] };
+    const raw = readFileSync(h.file, "utf8");
+    const disk = JSON.parse(raw) as { version: number; workflows: unknown[] };
     expect(disk.version).toBe(1);
     expect(disk.workflows).toHaveLength(1);
+    // Definitions are pretty-printed like routines/bots (hand-inspectable);
+    // the runs file stays compact for size.
+    expect(raw).toContain("\n");
     expect(statSync(h.file).mode & 0o777).toBe(0o600);
   });
 
@@ -115,6 +119,7 @@ describe("WorkflowStore definitions", () => {
   it("update rejects a patch with error-severity issues and keeps disk untouched", () => {
     const h = harness();
     const created = h.store.create(input());
+    const emittedBefore = h.emitted.length;
     // Dropping the rejected edge leaves review's outcomes partially unwired.
     expect(() =>
       h.store.update(created.id, {
@@ -126,6 +131,27 @@ describe("WorkflowStore definitions", () => {
     ).toThrow(/^invalid workflow: Node "review" declares outcome "rejected"/);
     expect(h.store.get(created.id)?.edges).toHaveLength(3);
     expect(h.open().get(created.id)?.edges).toHaveLength(3);
+    expect(h.emitted).toHaveLength(emittedBefore);
+  });
+
+  it("a failed disk write leaves in-memory state untouched and emits nothing", () => {
+    const h = harness();
+    const created = h.store.create(input());
+    const emittedBefore = h.emitted.length;
+    // Turn the target path into a directory so the atomic rename must fail.
+    rmSync(h.file);
+    mkdirSync(h.file);
+    expect(() => h.store.update(created.id, { name: "Phantom" })).toThrow();
+    expect(h.store.get(created.id)?.name).toBe("Pipeline");
+    expect(() => h.store.remove(created.id)).toThrow();
+    expect(h.store.list()).toHaveLength(1);
+    expect(() => h.store.create(input())).toThrow();
+    expect(h.store.list()).toHaveLength(1);
+
+    mkdirSync(h.runsFile);
+    expect(() => h.store.createRun(runInput())).toThrow();
+    expect(h.store.listRuns()).toEqual([]);
+    expect(h.emitted).toHaveLength(emittedBefore);
   });
 
   it("remove deletes, persists, and is idempotent", () => {
@@ -151,6 +177,11 @@ describe("WorkflowStore runs", () => {
     const reloaded = h.open();
     expect(reloaded.getRun(run.id)).toEqual(patched);
     expect(h.store.patchRun("nope", { status: "failed" })).toBeNull();
+    // A patch cannot clobber the receipt's identity.
+    expect(h.store.patchRun(run.id, { id: "evil" })?.id).toBe(run.id);
+    expect(h.store.getRun(run.id)).not.toBeNull();
+    // Runs are the high-churn file; it stays compact.
+    expect(readFileSync(h.runsFile, "utf8")).not.toContain("\n");
   });
 
   it("listRuns orders by startedAt desc and filters by workflowId", () => {
@@ -163,7 +194,28 @@ describe("WorkflowStore runs", () => {
     expect(h.store.listRuns("ghost")).toEqual([]);
   });
 
-  it("createRun prunes the oldest runs beyond the 2000 cap", () => {
+  it("createRun prunes the oldest terminal runs first, keeping live receipts", () => {
+    const h = harness();
+    // Oldest three are still queued: their receipts are the engine's
+    // crash-recovery state and must survive the cap.
+    const seeded = Array.from({ length: 2_000 }, (_, i) => ({
+      ...runInput({ startedAt: i, status: i < 3 ? ("queued" as const) : ("completed" as const) }),
+      id: `run-${i}`,
+    }));
+    writeFileSync(h.runsFile, JSON.stringify({ version: 1, runs: seeded }));
+
+    const store = h.open();
+    const created = store.createRun(runInput({ startedAt: 9_999 }));
+    expect(store.listRuns()).toHaveLength(2_000);
+    expect(store.getRun("run-0")).not.toBeNull();
+    expect(store.getRun("run-1")).not.toBeNull();
+    expect(store.getRun("run-2")).not.toBeNull();
+    expect(store.getRun("run-3")).toBeNull(); // oldest terminal evicted
+    expect(store.getRun(created.id)).not.toBeNull();
+    expect(h.open().listRuns()).toHaveLength(2_000);
+  });
+
+  it("createRun falls back to evicting the oldest run when none are terminal", () => {
     const h = harness();
     const seeded = Array.from({ length: 2_000 }, (_, i) => ({ ...runInput({ startedAt: i }), id: `run-${i}` }));
     writeFileSync(h.runsFile, JSON.stringify({ version: 1, runs: seeded }));
@@ -174,7 +226,6 @@ describe("WorkflowStore runs", () => {
     expect(store.getRun("run-0")).toBeNull();
     expect(store.getRun("run-1")).not.toBeNull();
     expect(store.getRun(created.id)).not.toBeNull();
-    expect(h.open().listRuns()).toHaveLength(2_000);
   });
 });
 
@@ -200,6 +251,18 @@ describe("WorkflowStore corruption tolerance", () => {
     expect(store.list()).toEqual([]);
     expect(store.listRuns()).toEqual([]);
   });
+
+  it("drops element-level garbage on load but keeps valid entries", () => {
+    const dir = tempDir();
+    const file = join(dir, "workflows.json");
+    const runsFile = join(dir, "workflow-runs.json");
+    const good = { ...input(), id: "wf-ok", createdAt: 1, updatedAt: 1 };
+    writeFileSync(file, JSON.stringify({ version: 1, workflows: [null, 42, { name: "no id" }, good] }));
+    writeFileSync(runsFile, JSON.stringify({ version: 1, runs: [null, "x", { id: 123 }] }));
+    const store = new WorkflowStore({ file, runsFile, now: () => 1 });
+    expect(store.list().map((workflow) => workflow.id)).toEqual(["wf-ok"]);
+    expect(store.listRuns()).toEqual([]);
+  });
 });
 
 describe("WorkflowStore emit", () => {
@@ -214,7 +277,7 @@ describe("WorkflowStore emit", () => {
     expect(h.emitted.map((payload) => payload.kind)).toEqual([
       "workflow",
       "workflow",
-      "workflow-removed",
+      "workflow.deleted",
       "workflow-run",
       "workflow-run",
     ]);
@@ -223,7 +286,7 @@ describe("WorkflowStore emit", () => {
       kind: "workflow",
       workflow: expect.objectContaining({ id: created.id, name: "Renamed" }),
     });
-    expect(h.emitted[2]).toEqual({ kind: "workflow-removed", id: created.id });
+    expect(h.emitted[2]).toEqual({ kind: "workflow.deleted", id: created.id });
     expect(h.emitted[3]).toEqual({ kind: "workflow-run", run });
     expect(h.emitted[4]).toEqual({
       kind: "workflow-run",

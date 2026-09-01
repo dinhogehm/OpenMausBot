@@ -2,13 +2,15 @@
  * runs live in separate files so the engine patching a receipt on every state
  * transition never rewrites the user-edited definitions file. `update` refuses
  * any patch with error-severity issues — persisting an invalid flow must be
- * impossible — while `create` accepts half-drawn canvas drafts. Every write
- * lands atomically and emits a keyed frame for the SSE bus. */
+ * impossible — while `create` accepts half-drawn canvas drafts. Every mutation
+ * writes to disk BEFORE it lands in memory (save-then-swap), so a failed write
+ * can never leave phantom state a later save would persist; every successful
+ * write emits a keyed frame for the SSE bus. */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { validateWorkflow, type Workflow, type WorkflowRun } from "../shared/workflow.ts";
+import { validateWorkflow, type Workflow, type WorkflowRun, type WorkflowRunStatus } from "../shared/workflow.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
 
@@ -36,16 +38,45 @@ interface WorkflowRunFile {
 /** Same retention as routine runs: enough history for the UI, bounded disk. */
 const MAX_RUNS = 2_000;
 
-function loadArray<T>(path: string, key: string): T[] {
+/** A run in one of these states can never transition again; only such
+ * receipts are safe to evict — a pruned live run would make every later
+ * patchRun from the engine silently miss. */
+const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
+
+function loadArray<T extends { id: string }>(path: string, key: string): T[] {
   try {
     const disk = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
     const value = disk?.[key];
-    return Array.isArray(value) ? (value as T[]) : [];
+    if (!Array.isArray(value)) return [];
+    // Element-level garbage (a stray null, a truncated object) must not
+    // detonate get/update later; entries without a string id are dropped.
+    return value.filter(
+      (entry): entry is T =>
+        typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string",
+    );
   } catch {
     // A missing or corrupted file must never keep the server from booting;
     // atomic writes make truncation a crash-only artifact anyway.
     return [];
   }
+}
+
+/** Oldest terminal receipts go first; live runs (queued/running/waiting)
+ * survive the cap because they are the engine's crash-recovery state. The
+ * hard cap still stands: with too few terminal runs, oldest go regardless. */
+function pruneRuns(runs: WorkflowRun[]): WorkflowRun[] {
+  let excess = runs.length - MAX_RUNS;
+  if (excess <= 0) return runs;
+  const kept: WorkflowRun[] = [];
+  for (const run of runs) {
+    if (excess > 0 && TERMINAL_RUN_STATUSES.has(run.status)) {
+      excess--;
+      continue;
+    }
+    kept.push(run);
+  }
+  if (excess > 0) kept.splice(0, excess);
+  return kept;
 }
 
 export class WorkflowStore {
@@ -70,8 +101,9 @@ export class WorkflowStore {
   create(input: WorkflowInput): Workflow {
     const at = this.now();
     const workflow: Workflow = { ...structuredClone(input), id: randomUUID(), createdAt: at, updatedAt: at };
-    this.workflows.push(workflow);
-    this.saveWorkflows();
+    const next = [...this.workflows, workflow];
+    this.writeWorkflows(next);
+    this.workflows = next;
     this.emitWorkflow(workflow);
     return structuredClone(workflow);
   }
@@ -80,27 +112,29 @@ export class WorkflowStore {
     const at = this.workflows.findIndex((workflow) => workflow.id === id);
     if (at === -1) throw new Error(`unknown workflow: ${id}`);
     const current = this.workflows[at]!;
-    const next: Workflow = {
+    const patched: Workflow = {
       ...current,
       ...structuredClone(patch),
       id: current.id,
       createdAt: current.createdAt,
       updatedAt: this.now(),
     };
-    const firstError = validateWorkflow(next).find((issue) => issue.severity === "error");
+    const firstError = validateWorkflow(patched).find((issue) => issue.severity === "error");
     if (firstError) throw new Error(`invalid workflow: ${firstError.message}`);
-    this.workflows[at] = next;
-    this.saveWorkflows();
-    this.emitWorkflow(next);
-    return structuredClone(next);
+    const next = this.workflows.slice();
+    next[at] = patched;
+    this.writeWorkflows(next);
+    this.workflows = next;
+    this.emitWorkflow(patched);
+    return structuredClone(patched);
   }
 
   remove(id: string): void {
-    const at = this.workflows.findIndex((workflow) => workflow.id === id);
-    if (at === -1) return;
-    this.workflows.splice(at, 1);
-    this.saveWorkflows();
-    this.emit?.({ kind: "workflow-removed", id });
+    const next = this.workflows.filter((workflow) => workflow.id !== id);
+    if (next.length === this.workflows.length) return;
+    this.writeWorkflows(next);
+    this.workflows = next;
+    this.emit?.({ kind: "workflow.deleted", id });
   }
 
   get(id: string): Workflow | null {
@@ -114,23 +148,26 @@ export class WorkflowStore {
 
   createRun(input: Omit<WorkflowRun, "id">): WorkflowRun {
     const run: WorkflowRun = { ...structuredClone(input), id: randomUUID() };
-    this.runs.push(run);
-    // The engine appends runs as they start, so insertion order is age order
-    // (same retention policy as routine runs).
-    if (this.runs.length > MAX_RUNS) this.runs.splice(0, this.runs.length - MAX_RUNS);
-    this.saveRuns();
+    const next = pruneRuns([...this.runs, run]);
+    this.writeRuns(next);
+    this.runs = next;
     this.emitRun(run);
     return structuredClone(run);
   }
 
+  /** Returns null (rather than throwing, as `update` does) on an unknown id:
+   * the engine may legitimately patch a receipt the cap already pruned,
+   * whereas updating an unknown workflow is a caller error. */
   patchRun(id: string, patch: Partial<WorkflowRun>): WorkflowRun | null {
     const at = this.runs.findIndex((run) => run.id === id);
     if (at === -1) return null;
-    const next: WorkflowRun = { ...this.runs[at]!, ...structuredClone(patch), id };
-    this.runs[at] = next;
-    this.saveRuns();
-    this.emitRun(next);
-    return structuredClone(next);
+    const patched: WorkflowRun = { ...this.runs[at]!, ...structuredClone(patch), id };
+    const next = this.runs.slice();
+    next[at] = patched;
+    this.writeRuns(next);
+    this.runs = next;
+    this.emitRun(patched);
+    return structuredClone(patched);
   }
 
   getRun(id: string): WorkflowRun | null {
@@ -143,15 +180,16 @@ export class WorkflowStore {
     return structuredClone(selected).sort((a, b) => b.startedAt - a.startedAt);
   }
 
-  private saveWorkflows() {
+  private writeWorkflows(workflows: Workflow[]) {
     mkdirSync(dirname(this.file), { recursive: true });
-    const disk: WorkflowFile = { version: 1, workflows: this.workflows };
-    writeFileAtomic(this.file, JSON.stringify(disk), { mode: 0o600 });
+    const disk: WorkflowFile = { version: 1, workflows };
+    // Definitions are hand-inspectable like routines/bots; runs stay compact.
+    writeFileAtomic(this.file, JSON.stringify(disk, null, 2), { mode: 0o600 });
   }
 
-  private saveRuns() {
+  private writeRuns(runs: WorkflowRun[]) {
     mkdirSync(dirname(this.runsFile), { recursive: true });
-    const disk: WorkflowRunFile = { version: 1, runs: this.runs };
+    const disk: WorkflowRunFile = { version: 1, runs };
     writeFileAtomic(this.runsFile, JSON.stringify(disk), { mode: 0o600 });
   }
 
