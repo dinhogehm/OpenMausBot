@@ -43,6 +43,10 @@ export interface WorkflowEngineOptions {
   /** Creates the isolated TaskRecord where a node runs (auditable transcript
    * in the bot's chat). */
   createTask: (botId: string, title: string) => { threadId: string } | null;
+  /** MUST flip `botState(botId)` to "busy" synchronously — before its first
+   * await — as index.ts's dispatch does: the reconciler's one-dispatch-per-bot
+   * -per-tick FIFO fairness rests on that invariant, so a Task 6 wrapper that
+   * defers the busy flip would let one tick double-book a bot. */
   startTurn: (
     botId: string,
     threadId: string,
@@ -178,6 +182,18 @@ export class WorkflowEngine {
           // Best-effort: a dead provider must not keep the run stuck.
         }
       }
+      // The turn may have completed naturally during the await and moved the
+      // run on; the timeout belongs to the DISPATCH we measured, so act only
+      // if that exact dispatch is still the current one.
+      const fresh = this.store.getRun(run.id);
+      if (
+        !fresh ||
+        fresh.status !== "running" ||
+        fresh.currentThreadId !== run.currentThreadId ||
+        fresh.dispatchedAt !== run.dispatchedAt
+      ) {
+        continue;
+      }
       if (run.currentThreadId !== undefined) this.forgetThread(run.currentThreadId);
       this.attemptFailure(run.id, "node timed out");
     }
@@ -206,9 +222,14 @@ export class WorkflowEngine {
       const workflow = this.store.get(run.workflowId);
       const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
       if (node?.kind === "agent" && this.options.botState(node.botId) === "busy") continue;
+      const nodeId = run.currentNodeId ?? workflow?.entryNodeId;
+      if (nodeId === undefined) {
+        this.failNode(run.id, "run has no current node recorded and its workflow is gone");
+        continue;
+      }
       const patched = this.store.patchRun(run.id, { nextAttemptAt: undefined });
       if (!patched) continue;
-      this.dispatchNode(run.id, run.currentNodeId ?? workflow?.entryNodeId ?? "");
+      this.dispatchNode(run.id, nodeId);
     }
   }
 
@@ -288,7 +309,12 @@ export class WorkflowEngine {
     });
     if (!patched) throw new Error(`unknown run: ${runId}`);
     if (hasActive) return patched;
-    this.dispatchNode(runId, patched.currentNodeId ?? this.store.get(run.workflowId)?.entryNodeId ?? "");
+    const nodeId = patched.currentNodeId ?? this.store.get(run.workflowId)?.entryNodeId;
+    if (nodeId === undefined) {
+      this.failNode(runId, "run has no current node recorded and its workflow is gone");
+      return this.store.getRun(runId) ?? patched;
+    }
+    this.dispatchNode(runId, nodeId);
     return this.store.getRun(runId) ?? patched;
   }
 
@@ -298,26 +324,34 @@ export class WorkflowEngine {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`unknown run: ${runId}`);
     if (TERMINAL_RUN_STATUSES.has(run.status)) return run;
-    if (this.hasLiveDispatch(run) && run.currentThreadId !== undefined) {
-      const workflow = this.store.get(run.workflowId);
-      const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
-      if (node?.kind === "agent") {
-        try {
-          await this.options.interruptTurn?.(node.botId, run.currentThreadId);
-        } catch {
-          // Best-effort: cancellation must not depend on the provider.
-        }
-      }
-    }
-    if (run.currentThreadId !== undefined) this.forgetThread(run.currentThreadId);
+    await this.interruptLiveDispatch(run);
+    // The turn may have completed during the await and moved the run to a
+    // fresh thread; aim the cleanup at whatever is current NOW.
+    const fresh = this.store.getRun(runId) ?? run;
+    if (TERMINAL_RUN_STATUSES.has(fresh.status)) return fresh;
+    if (fresh.currentThreadId !== run.currentThreadId) await this.interruptLiveDispatch(fresh);
+    if (fresh.currentThreadId !== undefined) this.forgetThread(fresh.currentThreadId);
     const patched = this.store.patchRun(runId, {
       status: "cancelled",
       endedAt: this.now(),
       nextAttemptAt: undefined,
     });
-    if (!patched) return run;
+    if (!patched) return fresh;
     this.drainQueue(patched.workflowId);
     return patched;
+  }
+
+  /** Best-effort interrupt of the run's live dispatch, if it has one. */
+  private async interruptLiveDispatch(run: WorkflowRun): Promise<void> {
+    if (!this.hasLiveDispatch(run) || run.currentThreadId === undefined) return;
+    const workflow = this.store.get(run.workflowId);
+    const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
+    if (node?.kind !== "agent") return;
+    try {
+      await this.options.interruptTurn?.(node.botId, run.currentThreadId);
+    } catch {
+      // Best-effort: cancellation must not depend on the provider.
+    }
   }
 
   handleRuntimeEvent(event: RuntimeEvent): void {
@@ -350,6 +384,7 @@ export class WorkflowEngine {
       this.attemptFailure(
         runId,
         event.stopReason ?? this.lastRuntimeError.get(event.threadId) ?? "the bot did not complete this node",
+        event.threadId,
       );
       return;
     }
@@ -369,7 +404,7 @@ export class WorkflowEngine {
         this.startTurnSafely(node.botId, event.threadId, buildRepromptMessage(node), runId);
         return;
       }
-      this.attemptFailure(runId, "node did not produce a valid outcome envelope");
+      this.attemptFailure(runId, "node did not produce a valid outcome envelope", event.threadId);
       return;
     }
 
@@ -446,11 +481,13 @@ export class WorkflowEngine {
     }
     if (botState === "busy") {
       // Per-bot FIFO: park the run for the reconciler, which serves waiting
-      // runs oldest-first as the bot frees up. No task is created yet.
+      // runs oldest-first as the bot frees up. No task is created yet, and a
+      // parked receipt must not keep pointing at a dead thread.
       this.store.patchRun(runId, {
         currentNodeId: node.id,
         nextAttemptAt: this.now(),
         dispatchedAt: undefined,
+        currentThreadId: undefined,
       });
       return;
     }
@@ -474,8 +511,10 @@ export class WorkflowEngine {
 
   private startTurnSafely(botId: string, threadId: string, prompt: string, runId: string): void {
     void this.options
-      .startTurn(botId, threadId, prompt, (message) => this.attemptFailure(runId, message))
-      .catch((error: unknown) => this.attemptFailure(runId, error instanceof Error ? error.message : String(error)));
+      .startTurn(botId, threadId, prompt, (message) => this.attemptFailure(runId, message, threadId))
+      .catch((error: unknown) =>
+        this.attemptFailure(runId, error instanceof Error ? error.message : String(error), threadId),
+      );
   }
 
   /** The RETRYABLE failure funnel — dispatch errors, envelope double-misses,
@@ -483,8 +522,17 @@ export class WorkflowEngine {
    * linearly backed-off re-dispatch (+60s, +120s, …) for the reconciler; a
    * vanished workflow/node can never dispatch again, so it gets no retries.
    * Exhausted retries take the workflow's drawn "failed" edge like any other
-   * outcome; only a run with nowhere left to go falls through to failNode. */
-  private attemptFailure(runId: string, reason: string): void {
+   * outcome; only a run with nowhere left to go falls through to failNode.
+   *
+   * `threadId` attributes the failure to a DISPATCH, not just the run: a
+   * callback can fire long after its dispatch was superseded (a late box-
+   * provisioning error, a turn that completed during an interrupt await), and
+   * acting on it would forget the LIVE thread and re-schedule the wrong node.
+   * Registration in runByThread drops the instant a dispatch stops being
+   * current, so it is a precise staleness test. Callers with no thread yet
+   * (timeout sweep after its own freshness check) omit it. */
+  private attemptFailure(runId: string, reason: string, threadId?: string): void {
+    if (threadId !== undefined && this.runByThread.get(threadId) !== runId) return;
     const run = this.store.getRun(runId);
     if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return;
     if (run.currentThreadId !== undefined) this.forgetThread(run.currentThreadId);
@@ -497,6 +545,7 @@ export class WorkflowEngine {
         attempt,
         nextAttemptAt: this.now() + attempt * 60_000,
         dispatchedAt: undefined,
+        currentThreadId: undefined,
         repromptedAt: undefined,
       });
       return;

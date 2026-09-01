@@ -47,6 +47,10 @@ function harness() {
   let createTaskFails = false;
   let startTurnRejects: string | null = null;
   let botStateFn: (botId: string) => "ready" | "busy" | "missing" = () => "ready";
+  /** While set, interruptTurn stays pending until releaseInterrupts() — lets
+   * tests land events in the middle of an engine `await interruptTurn`. */
+  let interruptGate: Promise<void> | null = null;
+  let releaseInterrupt: (() => void) | null = null;
   const engine = new WorkflowEngine({
     store,
     now: () => now,
@@ -62,7 +66,7 @@ function harness() {
     },
     interruptTurn: (botId, threadId) => {
       interrupts.push({ botId, threadId });
-      return Promise.resolve();
+      return interruptGate ?? Promise.resolve();
     },
     notifyUser: (run, message) => {
       notifications.push({ runId: run.id, message });
@@ -140,6 +144,14 @@ function harness() {
     failCreateTask: () => (createTaskFails = true),
     rejectStartTurn: (message: string) => (startTurnRejects = message),
     setBotState: (fn: (botId: string) => "ready" | "busy" | "missing") => (botStateFn = fn),
+    holdInterrupts: () => {
+      interruptGate = new Promise<void>((resolve) => (releaseInterrupt = resolve));
+    },
+    releaseInterrupts: () => {
+      releaseInterrupt?.();
+      releaseInterrupt = null;
+      interruptGate = null;
+    },
     /** Simulates the run-receipt cap pruning a live run: the entry vanishes,
      * so every later patchRun/getRun for it misses (returns null). */
     removeRun: (id: string) => {
@@ -653,6 +665,25 @@ describe("WorkflowEngine retries and backoff", () => {
     expect(persisted.dispatchedAt).toBe(61_000);
   });
 
+  it("ignores a late dispatch-error callback from a superseded dispatch", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    const stale = h.dispatches[0]!;
+    h.completeTurn("thread-1", envelope("done")); // advance to ship on thread-2
+    // Box provisioning can fail ~90s after dispatch; by then this callback
+    // describes a dispatch that is no longer current and must change nothing.
+    stale.onDispatchError("late provisioning failure");
+
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.currentNodeId).toBe("ship");
+    expect(persisted.attempt).toBe(0);
+    expect(persisted.nextAttemptAt).toBeUndefined();
+    // The live thread still routes: the run completes normally.
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(run.id)!.status).toBe("completed");
+  });
+
   it("schedules a retry when the envelope is missed twice and retries remain", () => {
     const h = harness();
     const workflow = h.store.create(pipeline());
@@ -753,6 +784,31 @@ describe("WorkflowEngine timeouts", () => {
     // The dead thread no longer routes events into the run.
     h.completeTurn("thread-1", envelope("done"));
     expect(h.store.getRun(run.id)!.nodeResults).toEqual([]);
+  });
+
+  it("does not misattribute the timeout when the turn completes during the interrupt await", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual"); // plan on thread-1
+    h.setNow(1_001 + 30 * 60_000); // past the default budget
+    h.holdInterrupts();
+    const ticking = h.engine.tick(); // the sweep is now parked on interruptTurn
+    // The turn lands naturally while the interrupt is in flight: the run
+    // advances to ship on a fresh thread.
+    h.completeTurn("thread-1", envelope("done", "made it just in time"));
+    h.releaseInterrupts();
+    await ticking;
+
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("running");
+    expect(persisted.currentNodeId).toBe("ship");
+    expect(persisted.currentThreadId).toBe("thread-2");
+    expect(persisted.attempt).toBe(0); // no retry got scheduled against ship
+    expect(persisted.nextAttemptAt).toBeUndefined();
+    expect(h.dispatches).toHaveLength(2); // plan + ship, no double dispatch
+    // ship's thread stayed registered: its completion still routes.
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(run.id)!.status).toBe("completed");
   });
 
   it("honors a node-level timeoutMinutes override", async () => {
@@ -939,6 +995,29 @@ describe("WorkflowEngine run control", () => {
     h.completeTurn("thread-1", envelope("done"));
     expect(h.store.getRun(first.id)!.status).toBe("cancelled");
     expect(h.store.getRun(first.id)!.nodeResults).toEqual([]);
+  });
+
+  it("re-aims the interrupt at the current thread when the turn completes during cancellation", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.holdInterrupts();
+    const cancelling = h.engine.cancelRun(run.id);
+    // The turn lands while the interrupt is in flight: the run moves to ship
+    // on thread-2, so that is the dispatch cancellation must now kill.
+    h.completeTurn("thread-1", envelope("done"));
+    h.releaseInterrupts();
+    await cancelling;
+
+    expect(h.interrupts).toEqual([
+      { botId: "planner", threadId: "thread-1" },
+      { botId: "shipper", threadId: "thread-2" },
+    ]);
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("cancelled");
+    // The superseded thread routes nothing anymore.
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(run.id)!.status).toBe("cancelled");
   });
 
   it("cancels a queued run without interrupting anything and is a no-op on terminal runs", async () => {
