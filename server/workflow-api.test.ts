@@ -264,14 +264,45 @@ describe("workflow definitions", () => {
     expect("nextRunAt" in created).toBe(false);
   });
 
-  it("refuses an invalid PATCH with the merged draft's issues and leaves the store alone", async () => {
-    const { call, store } = harness();
+  it("saves a PATCH that breaks the graph, reporting its issues — running it is what is refused", async () => {
+    const { call, store, dispatches } = harness();
     const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
     const response = await call("PATCH", `/api/workflows/${id}`, { entryNodeId: "ghost" });
-    expect(response?.status).toBe(400);
-    expect(bodyOf(response).error).toMatch(/^invalid workflow:/);
-    expect(bodyOf(response).issues.map((issue: WorkflowIssue) => issue.code)).toContain("bad-entry");
-    expect(store.get(id)?.entryNodeId).toBe("triage");
+    expect(response?.status).toBe(200);
+    const workflow = bodyOf(response).workflow as Workflow & { issues: WorkflowIssue[] };
+    expect(workflow.entryNodeId).toBe("ghost");
+    expect(workflow.issues.map((issue) => issue.code)).toContain("bad-entry");
+    expect(store.get(id)?.entryNodeId).toBe("ghost");
+
+    // The gate is execution, not persistence.
+    const run = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(run?.status).toBe(400);
+    expect(bodyOf(run).error).toMatch(/^invalid workflow:/);
+    expect(bodyOf(run).issues.map((issue: WorkflowIssue) => issue.code)).toContain("bad-entry");
+    expect(store.listRuns(id)).toEqual([]);
+    expect(dispatches).toHaveLength(0);
+  });
+
+  it("keeps a work-in-progress draft editable at every stage", async () => {
+    const { call, store } = harness();
+    // A fresh canvas: no entry, no nodes — exactly what the designer saves
+    // seconds after opening it.
+    const id = bodyOf(await call("POST", "/api/workflows", draftGraph())).workflow.id;
+    const renamed = await call("PATCH", `/api/workflows/${id}`, { name: "Half drawn" });
+    expect(renamed?.status).toBe(200);
+    expect(bodyOf(renamed).workflow.name).toBe("Half drawn");
+    expect(bodyOf(renamed).workflow.issues.map((issue: WorkflowIssue) => issue.code)).toContain("bad-entry");
+
+    // A node dropped on the canvas before any edge is wired: an unreachable
+    // node and a dangling edge are still saved, still reported.
+    const halfWired = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: agentGraph().nodes,
+      entryNodeId: "triage",
+      edges: [{ from: "triage", outcome: "done", to: "not-drawn-yet" }],
+    });
+    expect(halfWired?.status).toBe(200);
+    expect(bodyOf(halfWired).workflow.issues.map((issue: WorkflowIssue) => issue.code)).toContain("dangling-edge");
+    expect(store.get(id)?.edges).toHaveLength(1);
   });
 
   it("applies a valid PATCH and reports the warnings that remain", async () => {

@@ -228,9 +228,11 @@ export function createWorkflow({ store }: WorkflowApiDeps, body: unknown): Workf
   return { status: 201, body: { workflow: withIssues(store.create(input)) } };
 }
 
+/** A draft is saveable at every stage, so a graph the validator flags is a
+ * 200 carrying its issues — never a 400. Only running one is refused
+ * (POST /runs), which is the moment the issues actually matter. */
 export function patchWorkflow({ store }: WorkflowApiDeps, workflowId: string, body: unknown): WorkflowApiResponse {
-  const current = store.get(workflowId);
-  if (!current) return notFound("workflow");
+  if (!store.get(workflowId)) return notFound("workflow");
   const nulled = nullRequiredField(body);
   if (nulled !== undefined) return nullField(nulled);
   const parsed = workflowPatchSchema.safeParse(body);
@@ -240,15 +242,7 @@ export function patchWorkflow({ store }: WorkflowApiDeps, workflowId: string, bo
   for (const field of CLEARABLE_FIELDS) {
     if (raw?.[field] === null) patch[field] = undefined;
   }
-  try {
-    return { status: 200, body: { workflow: withIssues(store.update(workflowId, patch)) } };
-  } catch (error) {
-    if (!isInvalidWorkflow(error)) throw error;
-    // The store refused to persist; show the caller every issue the merged
-    // draft carries, not just the first one the store tripped on.
-    const draft: Workflow = { ...current, ...patch };
-    return { status: 400, body: { error: errorMessage(error), issues: validateWorkflow(draft) } };
-  }
+  return { status: 200, body: { workflow: withIssues(store.update(workflowId, patch)) } };
 }
 
 const liveRuns = (store: WorkflowStore, workflowId: string) =>

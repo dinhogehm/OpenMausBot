@@ -1,22 +1,23 @@
 /** Durable CRUD for workflow definitions and run receipts. Definitions and
  * runs live in separate files so the engine patching a receipt on every state
- * transition never rewrites the user-edited definitions file. `update` refuses
- * any patch with error-severity issues — persisting an invalid flow must be
- * impossible — while `create` accepts half-drawn canvas drafts. Every mutation
- * writes to disk BEFORE it lands in memory (save-then-swap), so a failed write
- * can never leave phantom state a later save would persist; every successful
- * write emits a keyed frame for the SSE bus. */
+ * transition never rewrites the user-edited definitions file.
+ *
+ * Persistence does not validate the graph: a half-drawn canvas must be
+ * saveable — and editable — or the designer could not save work in progress
+ * and a draft could not even be renamed. Validation gates EXECUTION instead
+ * (`WorkflowEngine.startRun` refuses a workflow with error-severity issues),
+ * while `GET /api/workflows` carries every issue so the canvas can paint the
+ * badges. Shape validation still happens at the API's zod layer, so what
+ * lands here is always a well-formed Workflow — just not necessarily a
+ * runnable one. Every mutation writes to disk BEFORE it lands in memory
+ * (save-then-swap), so a failed write can never leave phantom state a later
+ * save would persist; every successful write emits a keyed frame for the
+ * SSE bus. */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import {
-  validateWorkflow,
-  type Workflow,
-  type WorkflowRun,
-  type WorkflowRunStatus,
-  type WorkflowSchedule,
-} from "../shared/workflow.ts";
+import type { Workflow, WorkflowRun, WorkflowRunStatus, WorkflowSchedule } from "../shared/workflow.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
 
@@ -111,7 +112,7 @@ export class WorkflowStore {
   }
 
   /** Drafts are saveable by design — a half-drawn canvas must survive a
-   * restart — so creation does not validate. `update` is the gate. */
+   * restart — so neither creation nor update validates the graph. */
   create(input: WorkflowInput): Workflow {
     const at = this.now();
     const workflow: Workflow = { ...structuredClone(input), id: randomUUID(), createdAt: at, updatedAt: at };
@@ -141,8 +142,6 @@ export class WorkflowStore {
     if (scheduleKey(current.triggers?.schedule) !== scheduleKey(patched.triggers?.schedule)) {
       patched.nextRunAt = null;
     }
-    const firstError = validateWorkflow(patched).find((issue) => issue.severity === "error");
-    if (firstError) throw new Error(`invalid workflow: ${firstError.message}`);
     const next = this.workflows.slice();
     next[at] = patched;
     this.writeWorkflows(next);

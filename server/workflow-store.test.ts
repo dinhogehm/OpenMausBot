@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { WorkflowRun } from "../shared/workflow.ts";
+import { validateWorkflow, type WorkflowRun } from "../shared/workflow.ts";
 import { WorkflowStore, type WorkflowInput } from "./workflow-store.ts";
 
 const dirs: string[] = [];
@@ -116,22 +116,28 @@ describe("WorkflowStore definitions", () => {
     expect(() => h.store.update("nope", { name: "x" })).toThrow(/unknown workflow/);
   });
 
-  it("update rejects a patch with error-severity issues and keeps disk untouched", () => {
+  it("update persists a draft the validator flags — saving is not running", () => {
     const h = harness();
     const created = h.store.create(input());
-    const emittedBefore = h.emitted.length;
-    // Dropping the rejected edge leaves review's outcomes partially unwired.
-    expect(() =>
-      h.store.update(created.id, {
-        edges: [
-          { from: "code", outcome: "done", to: "review" },
-          { from: "review", outcome: "approved", to: "code" },
-        ],
-      }),
-    ).toThrow(/^invalid workflow: Node "review" declares outcome "rejected"/);
-    expect(h.store.get(created.id)?.edges).toHaveLength(3);
-    expect(h.open().get(created.id)?.edges).toHaveLength(3);
-    expect(h.emitted).toHaveLength(emittedBefore);
+    // Dropping the rejected edge leaves review's outcomes partially unwired:
+    // an error-severity issue, and still a legitimate work-in-progress save.
+    const partial = h.store.update(created.id, {
+      edges: [
+        { from: "code", outcome: "done", to: "review" },
+        { from: "review", outcome: "approved", to: "code" },
+      ],
+    });
+    expect(partial.edges).toHaveLength(2);
+    expect(validateWorkflow(partial).filter((issue) => issue.severity === "error")).toEqual([
+      expect.objectContaining({ code: "unwired-outcome", nodeId: "review" }),
+    ]);
+    expect(h.open().get(created.id)?.edges).toHaveLength(2);
+
+    // Even a workflow with no entry at all stays editable.
+    const emptied = h.store.update(created.id, { entryNodeId: "", nodes: [], edges: [] });
+    expect(emptied.entryNodeId).toBe("");
+    expect(h.store.update(created.id, { name: "Still a draft" }).name).toBe("Still a draft");
+    expect(h.open().get(created.id)?.name).toBe("Still a draft");
   });
 
   it("a failed disk write leaves in-memory state untouched and emits nothing", () => {
@@ -219,13 +225,15 @@ describe("WorkflowStore nextRunAt", () => {
     expect(h.store.update(created.id, { triggers: daily }).nextRunAt).toBeNull();
   });
 
-  it("update refuses a schedule the scheduler could not arm", () => {
+  it("keeps a schedule the scheduler could not arm, flagged rather than refused", () => {
+    // The API's zod layer is what refuses "9:00" at the door; the store is
+    // not a second gate, and the engine simply never arms an unusable one.
     const h = harness();
     const created = h.store.create(input());
-    expect(() =>
-      h.store.update(created.id, { triggers: { schedule: { type: "daily", time: "9:00", weekdays: [1] } } }),
-    ).toThrow(/^invalid workflow: Schedule time/);
-    expect(h.open().get(created.id)?.triggers).toBeUndefined();
+    const patched = h.store.update(created.id, { triggers: { schedule: { type: "daily", time: "9:00", weekdays: [1] } } });
+    expect(patched.triggers?.schedule).toEqual({ type: "daily", time: "9:00", weekdays: [1] });
+    expect(validateWorkflow(patched)).toContainEqual(expect.objectContaining({ code: "bad-schedule", severity: "error" }));
+    expect(h.open().get(created.id)?.nextRunAt).toBeNull();
   });
 });
 
