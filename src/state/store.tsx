@@ -20,6 +20,15 @@ import type { MascotBodyId } from "../../shared/mascot-bodies";
 import type { RoutineRequestCardData } from "../../shared/routine-request";
 import type { RoutineRunCardData } from "../../shared/routine-run";
 import type { GroupGoalRunCardData } from "../../shared/group-goal-run";
+import type { WorkflowRun } from "../../shared/workflow";
+import {
+  mergeWorkflowSnapshot,
+  removeWorkflow,
+  upsertWorkflow,
+  upsertWorkflowRun,
+  type WorkflowFrame,
+  type WorkflowListItem,
+} from "@/lib/workflow-state";
 import {
   reviewedSkillSha256,
   skillRequestBehavior,
@@ -425,12 +434,16 @@ export interface AppState {
   config: ConfigStatus | null;
   /** selected chat — a bot id OR a group id */
   selectedId: string;
-  activeView: "chat" | "team-map" | "routines" | "skill-recorder";
+  activeView: "chat" | "team-map" | "routines" | "skill-recorder" | "workflows";
   routines: Routine[];
   routineRuns: RoutineRun[];
   webhooks: WebhookTrigger[];
   webhookAttempts: WebhookAttempt[];
   webhookIngress: WebhookIngressStatus | null;
+  /** GET /api/workflows rows: definitions with their validator output */
+  workflows: WorkflowListItem[];
+  /** every workflow's runs, newest first (boot snapshot capped at 200) */
+  workflowRuns: WorkflowRun[];
   settingsOpen: boolean;
   pluginsOpen: boolean;
   computerOpen: boolean;
@@ -526,6 +539,11 @@ export type Action =
   | { type: "showRoutines" }
   | { type: "showTeamMap" }
   | { type: "showSkillRecorder" }
+  | { type: "showWorkflows" }
+  | { type: "workflowsHydrated"; workflows: WorkflowFrame[]; runs: WorkflowRun[] }
+  | { type: "workflowPatched"; workflow: WorkflowFrame }
+  | { type: "workflowRunPatched"; run: WorkflowRun }
+  | { type: "workflowDeleted"; workflowId: string }
   | { type: "routinesHydrated"; routines: Routine[]; runs: RoutineRun[] }
   | { type: "routinePatched"; routine: Routine }
   | { type: "routineDeleted"; routineId: string }
@@ -776,6 +794,28 @@ export function reducer(state: AppState, action: Action): AppState {
         appSettingsOpen: false,
         pluginsOpen: false,
       };
+    case "showWorkflows":
+      return {
+        ...state,
+        activeView: "workflows",
+        settingsOpen: false,
+        computerOpen: false,
+        inspectorOpen: false,
+        appSettingsOpen: false,
+        pluginsOpen: false,
+      };
+    case "workflowsHydrated": {
+      const merged = mergeWorkflowSnapshot(action.workflows, action.runs);
+      return { ...state, workflows: merged.workflows, workflowRuns: merged.runs };
+    }
+    case "workflowPatched":
+      return { ...state, workflows: upsertWorkflow(state.workflows, action.workflow) };
+    case "workflowRunPatched":
+      return { ...state, workflowRuns: upsertWorkflowRun(state.workflowRuns, action.run) };
+    // runs are kept on purpose: a deleted workflow's history stays readable
+    // until the next snapshot drops it
+    case "workflowDeleted":
+      return { ...state, workflows: removeWorkflow(state.workflows, action.workflowId) };
     case "routinesHydrated":
       return { ...state, routines: action.routines, routineRuns: action.runs };
     case "routinePatched": {
@@ -1284,6 +1324,8 @@ export const initialState: AppState = {
   webhooks: [],
   webhookAttempts: [],
   webhookIngress: null,
+  workflows: [],
+  workflowRuns: [],
   settingsOpen: false,
   pluginsOpen: false,
   computerOpen: false,
@@ -1307,7 +1349,9 @@ export async function api(path: string, init?: RequestInit): Promise<any> {
     headers: { "content-type": "application/json" },
     ...init,
   });
-  const body = await res.json().catch(() => ({}));
+  // 204 carries no body by contract (DELETE /api/workflows/:id); parsing it
+  // is not an error worth surfacing, and neither is any other empty reply
+  const body = res.status === 204 ? {} : await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? `${res.status} ${res.statusText}`);
   return body;
 }
@@ -1808,7 +1852,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // ── initial load + SSE fold ──────────────────────────────────────────
   useEffect(() => {
     let alive = true;
-    type PeripheralKey = "instances" | "config" | "routines" | "webhooks";
+    type PeripheralKey = "instances" | "config" | "routines" | "webhooks" | "workflows";
     type PeripheralPart = {
       key: PeripheralKey;
       request: () => Promise<() => void>;
@@ -1856,6 +1900,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const { webhooks, attempts, ingress } = await api("/api/webhooks");
           return () =>
             rawDispatch({ type: "webhooksHydrated", webhooks, attempts: attempts ?? [], ingress });
+        },
+      },
+      {
+        key: "workflows",
+        request: async () => {
+          // two routes, one boundary: a run frame must not land between a
+          // definitions snapshot and a runs snapshot that disagree on it
+          const [{ workflows }, { runs }] = await Promise.all([
+            api("/api/workflows"),
+            api("/api/workflow-runs?limit=200"),
+          ]);
+          return () => rawDispatch({ type: "workflowsHydrated", workflows: workflows ?? [], runs: runs ?? [] });
         },
       },
     ];
@@ -1977,6 +2033,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         frame.kind === "webhook.deleted"
       ) {
         bumpPeripheralVersion("webhooks");
+      } else if (frame.kind === "workflow" || frame.kind === "workflow-run" || frame.kind === "workflow.deleted") {
+        bumpPeripheralVersion("workflows");
       }
       switch (frame.kind) {
         case "message": {
@@ -2081,6 +2139,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "webhook.deleted":
           rawDispatch({ type: "webhookDeleted", webhookId: frame.webhookId });
+          break;
+        case "workflow":
+          rawDispatch({ type: "workflowPatched", workflow: frame.workflow });
+          break;
+        case "workflow-run":
+          rawDispatch({ type: "workflowRunPatched", run: frame.run });
+          break;
+        case "workflow.deleted":
+          rawDispatch({ type: "workflowDeleted", workflowId: frame.id });
           break;
         case "runtime": {
           const event = frame.event;
