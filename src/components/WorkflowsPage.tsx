@@ -114,8 +114,9 @@ export function ValidationBadge({ issues }: { issues: WorkflowListItem["issues"]
   );
 }
 
-/** The pill is decorative on its own — the accessible name carries the
- * status, the time and the failure reason, which are otherwise mouse-only. */
+/** The status and time stay real text: `aria-label` on a role-less span is
+ * dropped by every browser, so a named wrapper would be silent. The failure
+ * reason rides along in an `sr-only` span rather than a mouse-only tooltip. */
 export function RunPill({ run }: { run: WorkflowRun | null }) {
   if (!run) return <span className="text-[11px] text-ink-secondary">No runs yet</span>;
   const missed = isMissedWorkflowRun(run);
@@ -123,17 +124,16 @@ export function RunPill({ run }: { run: WorkflowRun | null }) {
   const when = formatWhen(run.startedAt);
   return (
     <span
-      aria-label={`Last run: ${label}, ${when}${run.error ? `. ${run.error}` : ""}`}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10.5px] font-medium",
         missed ? "bg-warning/15 text-warning" : RUN_TONE[run.status],
       )}
     >
       {run.status === "running" && <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />}
-      <span aria-hidden>{label}</span>
-      <span aria-hidden className="font-normal tabular-nums opacity-80">
-        {when}
-      </span>
+      <span className="sr-only">Last run: </span>
+      <span>{label}</span>
+      <span className="font-normal tabular-nums opacity-80">{when}</span>
+      {run.error && <span className="sr-only">. {run.error}</span>}
     </span>
   );
 }
@@ -173,6 +173,7 @@ export function WorkflowRow({
   // gate, so a rename can never PATCH twice and a blur the browser defers
   // cannot leave the row stuck in edit mode.
   const settledRef = useRef(false);
+  const restoreFocusRef = useRef(false);
   const { errors } = validationSummary(workflow.issues);
   // Never a bare `disabled`: that drops the button out of the tab order AND
   // suppresses its tooltip, so nobody ever learns why running is refused.
@@ -189,6 +190,14 @@ export function WorkflowRow({
     inputRef.current?.select();
   }, [editing]);
 
+  // A rename leaves the button disabled while its PATCH is in flight, so the
+  // focus can only land once editing is over AND the row is idle again.
+  useEffect(() => {
+    if (editing || busy !== null || !restoreFocusRef.current) return;
+    restoreFocusRef.current = false;
+    renameButtonRef.current?.focus();
+  }, [editing, busy]);
+
   const startEditing = () => {
     settledRef.current = false;
     setDraftName(workflow.name);
@@ -199,9 +208,9 @@ export function WorkflowRow({
     if (settledRef.current) return;
     settledRef.current = true;
     setEditing(false);
-    // the input is gone after this render; put focus back where the edit
-    // started instead of dropping it on the document
-    renameButtonRef.current?.focus();
+    // focus is restored in an effect: this button is still disabled during
+    // this render, and a disabled button cannot take focus
+    restoreFocusRef.current = true;
     if (!commit) return;
     const name = nextRename(workflow.name, draftName);
     if (name) onRename(name);
@@ -251,7 +260,11 @@ export function WorkflowRow({
               </button>
             )}
             <ValidationBadge issues={workflow.issues} />
-            {errors > 0 && <span className="text-[11px] text-danger">{runBlockedReason}</span>}
+            {runBlockedReason && (
+              <span id={`${workflow.id}-run-blocked`} className={cn("text-[11px]", errors > 0 ? "text-danger" : "text-ink-secondary")}>
+                {runBlockedReason}
+              </span>
+            )}
           </div>
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-ink-secondary">
             <RunPill run={latestRun} />
@@ -279,6 +292,7 @@ export function WorkflowRow({
               if (!runBlockedReason) onRun();
             }}
             aria-disabled={runBlockedReason ? true : undefined}
+            aria-describedby={runBlockedReason ? `${workflow.id}-run-blocked` : undefined}
             aria-label={`Run ${workflow.name}`}
             title={runBlockedReason ?? "Run now"}
             className={cn(

@@ -26,6 +26,7 @@ import {
   removeWorkflow,
   upsertWorkflow,
   upsertWorkflowRun,
+  WORKFLOW_RUNS_KEPT,
   type WorkflowFrame,
   type WorkflowListItem,
 } from "@/lib/workflow-state";
@@ -1929,7 +1930,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           // definitions snapshot and a runs snapshot that disagree on it
           const [{ workflows }, { runs }] = await Promise.all([
             api("/api/workflows"),
-            api("/api/workflow-runs?limit=200"),
+            api(`/api/workflow-runs?limit=${WORKFLOW_RUNS_KEPT}`),
           ]);
           return () => rawDispatch({ type: "workflowsHydrated", workflows: workflows ?? [], runs: runs ?? [] });
         },

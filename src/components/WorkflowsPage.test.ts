@@ -73,13 +73,17 @@ describe("ValidationBadge", () => {
 });
 
 describe("RunPill", () => {
-  it("carries status, time and failure reason in its accessible name", () => {
+  it("keeps status, time and failure reason as readable text", () => {
     const markup = renderToStaticMarkup(
       createElement(RunPill, { run: run({ status: "failed", error: "the bot for node \"triage\" no longer exists" }) }),
     );
 
-    expect(markup).toContain("aria-label=");
-    expect(markup).toContain("no longer exists");
+    // aria-label on a role-less span is dropped by browsers, so the words
+    // themselves have to be in the markup, not hidden behind an attribute.
+    const text = markup.replace(/<[^>]*>/g, "");
+    expect(text).toContain("Failed");
+    expect(text).toContain("no longer exists");
+    expect(markup).not.toContain("aria-label=");
   });
 
   it("names a missed scheduled slot as missed rather than failed", () => {
@@ -123,6 +127,13 @@ describe("WorkflowRow", () => {
     });
 
     expect(markup).not.toContain('aria-disabled="true"');
+  });
+
+  it("explains a busy row in visible text, not only in a tooltip", () => {
+    const markup = row({ busy: "delete" });
+
+    expect(markup.replace(/<[^>]*>/g, "")).toContain("Another action is still running");
+    expect(markup).toContain("aria-describedby=");
   });
 
   it("offers a dismissable alert for a row error", () => {
