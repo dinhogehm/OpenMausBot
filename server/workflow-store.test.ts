@@ -213,16 +213,18 @@ describe("WorkflowStore nextRunAt", () => {
     expect(h.emitted).toHaveLength(emittedBefore + 1);
     expect(h.open().get(created.id)?.nextRunAt).toBe(9_000);
 
-    // A real edit, and clearing the triggers, both disarm.
+    // A real edit, and clearing the triggers, both put the clock back to
+    // "not armed yet" (undefined) — never to "disarmed" (null), which is how
+    // a spent `once` stays spent.
     expect(h.store.update(created.id, { triggers: { schedule: { type: "daily", time: "10:00", weekdays: [1] } } }).nextRunAt)
-      .toBeNull();
+      .toBeUndefined();
     h.store.setNextRunAt(created.id, 9_000);
-    expect(h.store.update(created.id, { triggers: undefined }).nextRunAt).toBeNull();
+    expect(h.store.update(created.id, { triggers: undefined }).nextRunAt).toBeUndefined();
     expect(h.open().get(created.id)?.triggers).toBeUndefined();
-    expect(h.open().get(created.id)?.nextRunAt).toBeNull();
+    expect(h.open().get(created.id)?.nextRunAt).toBeUndefined();
     // Arming a workflow that never had a schedule is a change too.
     h.store.setNextRunAt(created.id, 9_000);
-    expect(h.store.update(created.id, { triggers: daily }).nextRunAt).toBeNull();
+    expect(h.store.update(created.id, { triggers: daily }).nextRunAt).toBeUndefined();
   });
 
   it("keeps a schedule the scheduler could not arm, flagged rather than refused", () => {
@@ -233,7 +235,7 @@ describe("WorkflowStore nextRunAt", () => {
     const patched = h.store.update(created.id, { triggers: { schedule: { type: "daily", time: "9:00", weekdays: [1] } } });
     expect(patched.triggers?.schedule).toEqual({ type: "daily", time: "9:00", weekdays: [1] });
     expect(validateWorkflow(patched)).toContainEqual(expect.objectContaining({ code: "bad-schedule", severity: "error" }));
-    expect(h.open().get(created.id)?.nextRunAt).toBeNull();
+    expect(h.open().get(created.id)?.nextRunAt).toBeUndefined();
   });
 });
 

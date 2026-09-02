@@ -220,11 +220,14 @@ export class WorkflowEngine {
    * next tick rather than inside an API handler — and ADVANCED BEFORE the
    * run starts, so a crash between the two skips a slot rather than firing
    * it twice (the same double-fire guard as routines). A `once` schedule is
-   * disarmed (null) when it fires; one already in the past when armed
-   * computes to null and never fires — the user chose a time that is gone,
-   * and there is no earlier tick to have missed. A slot late by more than
-   * the catch-up window is recorded as a missed run and announced like any
-   * failure, never executed hours late. */
+   * disarmed (null) when it fires and is never re-armed. A slot late by more
+   * than the catch-up window is recorded as a missed run and announced like
+   * any failure, never executed hours late.
+   *
+   * Arming and firing are separate steps, so a schedule saved just before
+   * its slot starts up to TWO tick periods late (~20s: one pass to arm it,
+   * the next to fire it). Late, never lost — which is the trade for keeping
+   * every write on the tick instead of in an API handler. */
   private sweepSchedules(now: number): void {
     if (!this.options.nextOccurrence) return;
     for (const workflow of this.store.list()) {
@@ -234,7 +237,10 @@ export class WorkflowEngine {
         if (typeof workflow.nextRunAt === "number") this.store.setNextRunAt(workflow.id, null);
         continue;
       }
-      if (workflow.nextRunAt === undefined || workflow.nextRunAt === null) {
+      // Deliberately disarmed (a spent `once`): only an edit to the schedule
+      // re-arms it, by putting the field back to undefined.
+      if (workflow.nextRunAt === null) continue;
+      if (workflow.nextRunAt === undefined) {
         this.store.setNextRunAt(workflow.id, this.initialOccurrence(workflow, schedule, now));
         continue;
       }
@@ -262,16 +268,21 @@ export class WorkflowEngine {
 
   /** The first slot a newly armed schedule fires. Arming happens on a tick,
    * which can land AFTER the slot the definition was saved for (a schedule
-   * edited seconds before it), so a `daily` schedule is anchored at the
-   * definition's own updatedAt instead of at `now`: the slot in between is
-   * then found and fired — late, but inside the catch-up window — rather
-   * than silently skipped. The anchor never reaches further back than that
-   * window, so a schedule left unarmed for days (a file from a build with no
-   * scheduler, a hand edit) catches up at most one slot. A `once` schedule
-   * keeps "strictly after now": its instant is absolute, and a time the user
-   * chose that has already passed is simply gone. */
+   * edited seconds before it), so nothing here is measured from `now`: a
+   * slot in that gap must still be found, and then either fired late or
+   * recorded as missed — never silently skipped.
+   *
+   * A `once` schedule arms at its own instant, whenever that is; the sweep's
+   * catch-up branch then decides between a late run and a visible missed
+   * receipt (the same reasoning as RoutineManager.initialOccurrence, and why
+   * a stale one must not be clamped to `now`). Re-arming is not a risk: a
+   * fired `once` is disarmed with null, which the sweep skips. A `daily`
+   * schedule is anchored at the definition's own updatedAt, never further
+   * back than the catch-up window — so one left unarmed for days (a file
+   * from a build with no scheduler, a hand edit) catches up at most one
+   * slot. */
   private initialOccurrence(workflow: Workflow, schedule: WorkflowSchedule, now: number): number | null {
-    if (schedule.type === "once") return this.occurrenceAfter(schedule, now);
+    if (schedule.type === "once") return Number.isFinite(schedule.at) ? schedule.at : null;
     return this.occurrenceAfter(schedule, Math.max(workflow.updatedAt, now - WORKFLOW_SCHEDULE_CATCH_UP_MS));
   }
 
@@ -476,8 +487,9 @@ export class WorkflowEngine {
     return run.currentThreadId !== undefined && this.runByThread.has(run.currentThreadId);
   }
 
-  /** Start (or queue) a run. Creation validates even though the store's
-   * `update` already gates persistence, because `create` accepts drafts.
+  /** Start (or queue) a run. Definitions persist as drafts — the store never
+   * refuses one — so validation gates EXECUTION, and this is where it
+   * happens: a workflow carrying any error-severity issue never starts.
    * `source` names the webhook (and delivery) behind a "webhook" run; it is
    * persisted on the receipt so the webhook's pending cap and its
    * pause/delete cancellation can find the runs it owns. */
@@ -499,6 +511,7 @@ export class WorkflowEngine {
       workflowId,
       status: hasActive ? "queued" : "running",
       trigger,
+      definitionUpdatedAt: workflow.updatedAt,
       ...(source === undefined ? {} : { webhookId: source.webhookId }),
       ...(source?.deliveryId === undefined ? {} : { deliveryId: source.deliveryId }),
       attempt: 0,
@@ -541,6 +554,15 @@ export class WorkflowEngine {
     const run = this.store.getRun(runId);
     if (!run) throw new Error(`unknown run: ${runId}`);
     if (run.status !== "failed") throw new Error(`only failed runs can be resumed (run is ${run.status})`);
+    // Same execution gate as startRun: a graph edited into an invalid state
+    // must not burn a task thread and a bot dispatch just to fail again. A
+    // workflow that is GONE stays the dispatch path's business (it fails the
+    // run with an honest reason rather than a validation message).
+    const workflow = this.store.get(run.workflowId);
+    if (workflow) {
+      const firstError = validateWorkflow(workflow).find((issue) => issue.severity === "error");
+      if (firstError) throw new Error(`invalid workflow: ${firstError.message}`);
+    }
     const hasActive = this.store
       .listRuns(run.workflowId)
       .some((candidate) => candidate.status === "running" || candidate.status === "waiting-approval");
@@ -550,6 +572,8 @@ export class WorkflowEngine {
       error: undefined,
       endedAt: undefined,
       nextAttemptAt: undefined,
+      // It resumes against the graph as it is NOW.
+      ...(workflow === undefined || workflow === null ? {} : { definitionUpdatedAt: workflow.updatedAt }),
     });
     if (!patched) throw new Error(`unknown run: ${runId}`);
     if (hasActive) return patched;
@@ -757,6 +781,21 @@ export class WorkflowEngine {
       return;
     }
     if (!workflow.edges.some((candidate) => candidate.from === node.id)) {
+      // A node with no outgoing edges is a deliberate sink — but only in the
+      // definition this run was planned against. Drafts persist, so the edge
+      // that carried this outcome may simply have been DELETED mid-run, and
+      // reporting that as success would claim a workflow finished while
+      // silently skipping the rest of it. Any change to the definition since
+      // the run started fails it closed instead: a plain rename is a false
+      // positive, which resuming the run (it re-stamps) clears. Receipts
+      // written before this guard carry no stamp and keep completing.
+      if (run.definitionUpdatedAt !== undefined && run.definitionUpdatedAt !== workflow.updatedAt) {
+        this.failNode(
+          run.id,
+          `the workflow changed while this run was in flight, so the outcome "${outcome}" of node "${node.id}" has nowhere to go`,
+        );
+        return;
+      }
       // Pure sink: the graph deliberately ends here.
       const patched = this.store.patchRun(run.id, { status: "completed", endedAt: this.now() });
       if (patched) this.drainQueue(patched.workflowId);
@@ -1026,7 +1065,9 @@ export class WorkflowEngine {
       this.failNode(oldest.id, "the workflow definition was deleted");
       return;
     }
-    const promoted = this.store.patchRun(oldest.id, { status: "running" });
+    // A queued run traverses the graph as it is at PROMOTION, so that is the
+    // definition it is judged against — not the one it was queued under.
+    const promoted = this.store.patchRun(oldest.id, { status: "running", definitionUpdatedAt: workflow.updatedAt });
     if (!promoted) return;
     // A freshly queued run starts at the entry; a resumed one re-queued
     // behind an active run picks up at the node where it failed.

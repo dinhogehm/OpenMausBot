@@ -247,8 +247,10 @@ describe("workflow definitions", () => {
       nextRunAt: 123,
     });
     expect(armed?.status).toBe(200);
-    expect(bodyOf(armed).workflow.nextRunAt).toBeNull();
-    expect(store.get(id)?.nextRunAt).toBeNull();
+    // Back to "not armed yet": the engine computes the first slot on its
+    // next tick, and the client's own value never lands.
+    expect(bodyOf(armed).workflow.nextRunAt).toBeUndefined();
+    expect(store.get(id)?.nextRunAt).toBeUndefined();
   });
 
   it("shows the engine's nextRunAt on the workflow as a read-only field", async () => {

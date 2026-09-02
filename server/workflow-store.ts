@@ -139,8 +139,11 @@ export class WorkflowStore {
     // triggers patch would let a canvas that saves the whole document (an
     // identical triggers object on each layout nudge) push the next slot
     // away on every save — and rewrite the file and emit a frame for nothing.
+    // Back to "not armed yet" (undefined), never to "disarmed" (null): a
+    // changed schedule is exactly what asks the engine's sweep for a fresh
+    // arm, while null is how a spent `once` stays spent.
     if (scheduleKey(current.triggers?.schedule) !== scheduleKey(patched.triggers?.schedule)) {
-      patched.nextRunAt = null;
+      patched.nextRunAt = undefined;
     }
     const next = this.workflows.slice();
     next[at] = patched;

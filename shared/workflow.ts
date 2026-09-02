@@ -63,10 +63,13 @@ export interface Workflow {
   layout: Record<string, { x: number; y: number }>;
   triggers?: WorkflowTriggers;
   maxNodeExecutions?: number;
-  /** Engine-owned timing state for `triggers.schedule`: the next instant the
-   * schedule fires; `null` once a `once` schedule has fired or until the
-   * engine (re)computes it. Never settable by a client — the API strips
-   * it — and reset whenever `triggers` change. */
+  /** Engine-owned timing state for `triggers.schedule`, in three states:
+   * `undefined` — not armed yet, so the engine computes the first slot;
+   * a number — the instant the schedule next fires;
+   * `null` — deliberately DISARMED (a `once` that already fired, or a clock
+   * left behind by a deleted schedule), which the engine never re-arms.
+   * Editing the schedule puts the field back to `undefined`, which is what
+   * asks for a fresh arm. Never settable by a client — the API strips it. */
   nextRunAt?: number | null;
   createdAt: number;
   updatedAt: number;
@@ -96,6 +99,13 @@ export interface WorkflowRun {
   /** What started this run; the UI timeline shows it, so it must survive a
    * restart. Optional so pre-existing receipts load unchanged. */
   trigger?: WorkflowRunTrigger;
+  /** `updatedAt` of the definition this run was planned against, stamped
+   * when the run starts (and re-stamped when a queued run is promoted or a
+   * failed one resumed). Definitions persist as drafts, so the graph can
+   * change under a live run; this is what lets the engine tell "this node
+   * is a deliberate sink" from "the rest of the workflow was deleted while
+   * I was running". Optional so pre-existing receipts load unchanged. */
+  definitionUpdatedAt?: number;
   /** The webhook (and its delivery) that started a "webhook" run, so the
    * webhook's pending cap and its pause/delete cancellation can find the
    * runs it owns. */
@@ -189,8 +199,10 @@ export interface WorkflowIssue {
   message: string;
 }
 
-/** Structural validation only — the server refuses to persist on any error,
- * the canvas shows every issue inline. A node with zero wired outcomes is a
+/** Structural validation only. Errors gate EXECUTION, not persistence: a
+ * half-drawn draft always saves (so work in progress survives a restart) and
+ * the canvas shows every issue inline, while the engine refuses to start a
+ * run of a workflow carrying any error. A node with zero wired outcomes is a
  * deliberate terminal sink; wiring some outcomes but not all is a mistake.
  * Determinism is the invariant: every routable outcome has at most one
  * successor, and only edges the engine can actually take count as reachable. */

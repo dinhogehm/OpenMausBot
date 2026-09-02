@@ -234,11 +234,14 @@ function newSecret(): string {
 /** Every valid record of `values`, one at a time: a single malformed entry
  * must not drop the rest — the next save would persist that loss, and a
  * webhook's secret digest with it. */
-function keepValid<Schema extends z.ZodType>(schema: Schema, values: unknown[] | undefined): z.output<Schema>[] {
+function keepValid<Schema extends z.ZodType>(schema: Schema, kind: string, values: unknown[] | undefined): z.output<Schema>[] {
   const kept: z.output<Schema>[] = [];
   for (const value of values ?? []) {
     const parsed = schema.safeParse(value);
     if (parsed.success) kept.push(parsed.data);
+    // A dropped record is lost state — a webhook's secret digest, at worst —
+    // so it is never dropped silently.
+    else console.warn(`webhooks: ignoring malformed ${kind} record on disk: ${schemaIssue(parsed.error, "invalid record")}`);
   }
   return kept;
 }
@@ -380,9 +383,9 @@ export class WebhookManager {
     try {
       const parsed = webhookFileEnvelopeSchema.safeParse(parseJson(readFileSync(this.file, "utf8")));
       if (!parsed.success) throw parsed.error;
-      this.webhooks = keepValid(storedWebhookSchema, parsed.data.webhooks);
-      this.deliveries = keepValid(deliveryReceiptSchema, parsed.data.deliveries).slice(-MAX_DELIVERIES);
-      this.attempts = keepValid(webhookAttemptSchema, parsed.data.attempts).slice(-MAX_ATTEMPTS);
+      this.webhooks = keepValid(storedWebhookSchema, "webhook", parsed.data.webhooks);
+      this.deliveries = keepValid(deliveryReceiptSchema, "delivery", parsed.data.deliveries).slice(-MAX_DELIVERIES);
+      this.attempts = keepValid(webhookAttemptSchema, "attempt", parsed.data.attempts).slice(-MAX_ATTEMPTS);
     } catch {
       this.webhooks = [];
       this.deliveries = [];
@@ -424,8 +427,10 @@ export class WebhookManager {
     const patch = parseTriggerPatch(value);
     // The target is replaced as a unit: naming either side of it drops the
     // other, so one field moves a webhook between a MAUS and a workflow and
-    // a record never carries both.
-    const retarget = patch.botId !== undefined || patch.workflowId !== undefined;
+    // a record never carries both. A BLANK botId names nothing (the same
+    // rule the input schema applies), so it leaves the target alone rather
+    // than clearing it.
+    const retarget = Boolean(patch.botId?.trim()) || patch.workflowId !== undefined;
     const clean = cleanInput({
       name: patch.name ?? trigger.name,
       prompt: patch.prompt ?? trigger.prompt,
@@ -437,8 +442,10 @@ export class WebhookManager {
       eventTypes: patch.eventTypes ?? trigger.eventTypes,
     });
     // Only a patch that names a target re-checks it: pausing or renaming a
-    // webhook whose MAUS or workflow was deleted must stay possible.
-    if (retarget) this.assertTargetExists(clean);
+    // webhook whose MAUS or workflow was deleted must stay possible. Turning
+    // one back ON is not in that set — a re-enabled webhook must still have
+    // somewhere to deliver.
+    if (retarget || patch.enabled === true) this.assertTargetExists(clean);
     Object.assign(trigger, clean, { updatedAt: this.now() });
     if (clean.botId === undefined) delete trigger.botId;
     if (clean.workflowId === undefined) delete trigger.workflowId;

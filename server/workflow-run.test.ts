@@ -1687,6 +1687,100 @@ describe("WorkflowEngine notification safety", () => {
   });
 });
 
+describe("WorkflowEngine definition changes under a live run", () => {
+  /** a --done--> b --done--> c, with c the only sink. */
+  const chain = (): WorkflowInput => ({
+    name: "Chain",
+    entryNodeId: "a",
+    nodes: [
+      { kind: "agent", id: "a", botId: "one", instructions: "First.", outcomes: ["done"] },
+      { kind: "agent", id: "b", botId: "two", instructions: "Second.", outcomes: ["done"] },
+      { kind: "agent", id: "c", botId: "three", instructions: "Third.", outcomes: ["done"] },
+    ],
+    edges: [
+      { from: "a", outcome: "done", to: "b" },
+      { from: "b", outcome: "done", to: "c" },
+    ],
+    layout: {},
+  });
+
+  it("never reports success when the rest of the graph was deleted mid-run", () => {
+    const h = harness();
+    const workflow = h.store.create(chain());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(h.store.getRun(run.id)?.definitionUpdatedAt).toBe(workflow.updatedAt);
+
+    // While "a" is running, the tail of the workflow is deleted. Saving that
+    // is legal (drafts persist), so the run must notice rather than treat
+    // "b has no outgoing edges" as a deliberate ending.
+    h.setNow(2_000);
+    h.store.update(workflow.id, { edges: [{ from: "a", outcome: "done", to: "b" }] });
+    h.completeTurn("thread-1", envelope("done", "a finished"));
+    h.completeTurn("thread-2", envelope("done", "b finished"));
+
+    const finished = h.store.getRun(run.id)!;
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/changed while this run was in flight/);
+    expect(finished.nodeResults.map((result) => result.nodeId)).toEqual(["a", "b"]);
+    // "c" never ran, and the user is told rather than left with a green run.
+    expect(h.tasks.map((task) => task.botId)).toEqual(["one", "two"]);
+    expect(h.notifications.at(-1)).toMatchObject({ runId: run.id, kind: "failed" });
+  });
+
+  it("completes on a real sink when the definition is untouched, and re-stamps a promoted run", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const first = h.engine.startRun(workflow.id, "one", "manual");
+    const second = h.engine.startRun(workflow.id, "two", "manual");
+    expect(second.status).toBe("queued");
+
+    // An edit while both runs are alive. The RUNNING one was planned against
+    // the old definition, so it fails closed at its sink (a rename is a false
+    // positive of that guard — resuming it re-stamps and completes).
+    h.setNow(2_000);
+    h.store.update(workflow.id, { name: "Renamed" });
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(first.id)?.status).toBe("failed");
+
+    // The queued run was promoted against the CURRENT definition, so its own
+    // sink is a genuine ending.
+    const promoted = h.store.getRun(second.id)!;
+    expect(promoted).toMatchObject({ status: "running", definitionUpdatedAt: 2_000 });
+    h.completeTurn("thread-3", envelope("done"));
+    h.completeTurn("thread-4", envelope("shipped"));
+    expect(h.store.getRun(second.id)?.status).toBe("completed");
+    expect(h.store.getRun(second.id)?.error).toBeUndefined();
+
+    // Resuming the false positive re-stamps it and it completes.
+    h.engine.resumeRun(first.id);
+    h.completeTurn("thread-5", envelope("shipped"));
+    expect(h.store.getRun(first.id)).toMatchObject({ status: "completed", definitionUpdatedAt: 2_000 });
+  });
+
+  it("refuses to resume a run whose graph is no longer valid, dispatching nothing", () => {
+    const h = harness();
+    const workflow = h.store.create(noRetryPipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.completeTurn("thread-1", envelope("done"));
+    h.endTurn("thread-2", false); // ship fails terminally (no retries)
+    const dispatchesBefore = h.dispatches.length;
+    const failed = h.store.getRun(run.id)!;
+    expect(failed.status).toBe("failed");
+
+    // The graph is edited into an invalid state before the retry.
+    h.store.update(workflow.id, { entryNodeId: "ghost" });
+    expect(() => h.engine.resumeRun(run.id)).toThrow(/^invalid workflow:/);
+    // No task thread, no bot dispatch, and the run is still failed.
+    expect(h.dispatches).toHaveLength(dispatchesBefore);
+    expect(h.store.getRun(run.id)?.status).toBe("failed");
+
+    // Repaired: the resume goes through.
+    h.store.update(workflow.id, { entryNodeId: "plan" });
+    expect(h.engine.resumeRun(run.id).status).toBe("running");
+  });
+});
+
 describe("WorkflowEngine webhook runs", () => {
   it("persists the webhook source on a run and counts the webhook's live runs", () => {
     const h = harness();
@@ -1855,11 +1949,12 @@ describe("WorkflowEngine schedules", () => {
     h.setNow(SLOT - 3_000);
     expect(
       h.store.update(workflow.id, { triggers: { schedule: { type: "daily", time: "10:00", weekdays: [1] } } }).nextRunAt,
-    ).toBeNull();
+    ).toBeUndefined();
     // …and the next tick lands after the slot. Anchoring the re-arm at
     // updatedAt finds it (late, inside the catch-up window) instead of
     // skipping to tomorrow; arming and firing are separate tick steps, so
-    // the run starts one pass later — late by a tick, never lost.
+    // the run starts on the pass after that — up to two tick periods (~20s)
+    // late in production, never lost.
     h.setNow(SLOT + 5_000);
     await h.engine.tick();
     expect(h.store.get(workflow.id)?.nextRunAt).toBe(SLOT);
@@ -1906,14 +2001,47 @@ describe("WorkflowEngine schedules", () => {
     expect(h.store.get(workflow.id)?.nextRunAt).toBeNull();
   });
 
-  it("never fires a once schedule that was already in the past when armed", async () => {
+  it("fires a once slot that passed inside the arm gap, then stays disarmed", async () => {
     const h = harness({ nextOccurrence: stub });
+    // Saved at 1_000 for 5_000; the first tick lands at 11_000, after it.
     const workflow = h.store.create(pipeline({ triggers: { schedule: { type: "once", at: 5_000 } } }));
-    h.setNow(10_000);
+    h.setNow(11_000);
+    await h.engine.tick();
+    // A `once` arms at its own instant whatever the clock says — the sweep,
+    // not the arm, decides between a late run and a missed receipt.
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(5_000);
+    await h.engine.tick();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      trigger: "schedule",
+      status: "running",
+      input: `Scheduled run for ${new Date(5_000).toISOString()}`,
+    });
+    // Spent: null is never re-armed, so it cannot fire again on later ticks.
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeNull();
+    h.setNow(20_000);
     await h.engine.tick();
     await h.engine.tick();
-    expect(h.store.get(workflow.id)?.nextRunAt ?? null).toBeNull();
-    expect(h.store.listRuns()).toEqual([]);
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+  });
+
+  it("records a once slot more than 12 hours gone as a missed receipt rather than losing it", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const at = 5_000;
+    const workflow = h.store.create(pipeline({ triggers: { schedule: { type: "once", at } } }));
+    const late = at + WORKFLOW_SCHEDULE_CATCH_UP_MS + 1;
+    h.setNow(late);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(at);
+    await h.engine.tick();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed", trigger: "schedule", startedAt: at, endedAt: late });
+    expect(runs[0]!.error).toMatch(/^missed: /);
+    expect(h.notifications).toEqual([{ runId: runs[0]!.id, message: expect.stringMatching(/missed/), kind: "failed" }]);
+    expect(h.dispatches).toHaveLength(0);
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeNull();
   });
 
   it("records a missed run instead of executing a slot more than 12 hours late", async () => {
@@ -1985,7 +2113,7 @@ describe("WorkflowEngine schedules", () => {
     const edited = h.store.update(workflow.id, {
       triggers: { schedule: { type: "daily", time: "10:00", weekdays: [1] } },
     });
-    expect(edited.nextRunAt).toBeNull();
+    expect(edited.nextRunAt).toBeUndefined();
     await h.engine.tick();
     expect(h.store.get(workflow.id)?.nextRunAt).toBe(20_000 + HOUR);
     expect(h.store.listRuns()).toEqual([]);

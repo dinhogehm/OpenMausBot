@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WebhookManager, type WebhookManagerOptions } from "./webhooks.ts";
 
@@ -226,9 +226,13 @@ describe("WebhookManager", () => {
     expect(() => h.manager.create({ name: "x", botId: "", workflowId: "wf-1" })).not.toThrow();
     expect(() => h.manager.create({ name: "x", botId: "maus-1", workflowId: "wf-1" })).toThrow("not both");
     expect(() => h.manager.create({ name: "x", workflowId: " wf-1" })).toThrow("whitespace");
-    // A patch carries no refine of its own; the merged record is re-checked.
+    // A blank botId names nothing wherever it appears, so on a patch it
+    // leaves the target alone instead of clearing it.
     const created = h.manager.list()[0]!;
-    expect(() => h.manager.update(created.id, { botId: "   " })).toThrow("Choose a MAUS or a workflow");
+    expect(h.manager.update(created.id, { botId: "   ", name: "Kept" })).toMatchObject({
+      name: "Kept",
+      workflowId: "wf-1",
+    });
     h.setWorkflowKnown(false);
     expect(() => h.manager.create({ name: "x", workflowId: "wf-1" })).toThrow("That workflow no longer exists");
     expect(h.manager.list()).toHaveLength(1);
@@ -258,27 +262,40 @@ describe("WebhookManager", () => {
     // target never re-checks one.
     expect(h.manager.update(forWorkflow.webhook.id, { name: "Renamed" })).toMatchObject({ name: "Renamed" });
     expect(h.manager.update(forWorkflow.webhook.id, { enabled: false })).toMatchObject({ enabled: false });
+    // Turning it back on IS checked: a live webhook must have a target.
+    expect(() => h.manager.update(forWorkflow.webhook.id, { enabled: true })).toThrow("That workflow no longer exists");
+    expect(h.manager.list().find((webhook) => webhook.id === forWorkflow.webhook.id)?.enabled).toBe(false);
+    h.setWorkflowKnown(true);
+    expect(h.manager.update(forWorkflow.webhook.id, { enabled: true })).toMatchObject({ enabled: true });
+    h.setWorkflowKnown(false);
     expect(h.manager.remove(forWorkflow.webhook.id)).toBe(true);
     // Naming a target still checks it.
     expect(() => h.manager.update(other.webhook.id, { workflowId: "wf-2" })).toThrow("no longer exists");
   });
 
-  it("keeps every valid record when one on disk is malformed", () => {
-    const h = harness();
-    const kept = create(h.manager);
-    const disk = JSON.parse(readFileSync(h.file, "utf8")) as { webhooks: Array<Record<string, unknown>> };
-    const good = disk.webhooks[0]!;
-    // A truncated record, and one naming both targets, are each dropped
-    // alone — the rest of the file (and its secret digests) survives.
-    disk.webhooks = [{ id: "truncated" }, good, { ...good, id: "both", endpointId: "wh_both", workflowId: "wf-1" }];
-    writeFileSync(h.file, JSON.stringify(disk));
+  it("keeps every valid record when one on disk is malformed, and says what it dropped", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness();
+      const kept = create(h.manager);
+      const disk = JSON.parse(readFileSync(h.file, "utf8")) as { webhooks: Array<Record<string, unknown>> };
+      const good = disk.webhooks[0]!;
+      // A truncated record, and one naming both targets, are each dropped
+      // alone — the rest of the file (and its secret digests) survives.
+      disk.webhooks = [{ id: "truncated" }, good, { ...good, id: "both", endpointId: "wh_both", workflowId: "wf-1" }];
+      writeFileSync(h.file, JSON.stringify(disk));
 
-    const reloaded = new WebhookManager(h.options);
-    expect(reloaded.list().map((webhook) => webhook.id)).toEqual([kept.webhook.id]);
-    // The next save must not persist a loss that never happened.
-    reloaded.update(kept.webhook.id, { name: "Still here" });
-    expect(new WebhookManager(h.options).list()).toEqual([expect.objectContaining({ id: kept.webhook.id, name: "Still here" })]);
-    expect(reloaded.authorize(kept.webhook.endpointId, kept.secret)).toBe(true);
+      const reloaded = new WebhookManager(h.options);
+      expect(reloaded.list().map((webhook) => webhook.id)).toEqual([kept.webhook.id]);
+      // A lost secret digest must be diagnosable, never silent.
+      expect(warn.mock.calls.filter(([line]) => String(line).includes("malformed webhook record"))).toHaveLength(2);
+      // The next save must not persist a loss that never happened.
+      reloaded.update(kept.webhook.id, { name: "Still here" });
+      expect(new WebhookManager(h.options).list()).toEqual([expect.objectContaining({ id: kept.webhook.id, name: "Still here" })]);
+      expect(reloaded.authorize(kept.webhook.endpointId, kept.secret)).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("retargets as a unit on update: naming a workflow drops the MAUS and vice versa", () => {
