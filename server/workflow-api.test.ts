@@ -311,7 +311,7 @@ describe("workflow definitions", () => {
     expect(store.get(id)?.edges).toHaveLength(1);
   });
 
-  it("applies a valid PATCH and reports the warnings that remain", async () => {
+  it("applies a valid PATCH; a graph that is one terminal node carries no issues at all", async () => {
     const { call } = harness();
     const id = bodyOf(await call("POST", "/api/workflows", draftGraph())).workflow.id;
     const response = await call("PATCH", `/api/workflows/${id}`, agentGraph());
@@ -319,7 +319,9 @@ describe("workflow definitions", () => {
     const workflow = bodyOf(response).workflow as Workflow & { issues: WorkflowIssue[] };
     expect(workflow.name).toBe("Triage");
     expect(errors(workflow.issues)).toEqual([]);
-    expect(workflow.issues.map((issue) => issue.code)).toEqual(["unwired-failure"]);
+    // A single node that wires nothing is a deliberate end of the run: no
+    // "failed edge missing" warning, because there is nowhere it could go.
+    expect(workflow.issues).toEqual([]);
   });
 
   it("404s a PATCH on an unknown workflow and 400s a malformed one before touching the store", async () => {
@@ -623,6 +625,9 @@ describe("workflow capabilities", () => {
     nodes: [
       { kind: "agent", id: "merge", botId: "bot-a", instructions: "Merge the PR.", outcomes: ["done"], requires: ["merge"] },
     ],
+    // wired to itself so a structural warning (no `failed` edge) rides along
+    // with the capability error — the tests below check the two lists merge
+    edges: [{ from: "merge", outcome: "done", to: "merge" }],
     layout: {},
   });
   const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);

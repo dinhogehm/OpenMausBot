@@ -136,9 +136,20 @@ export function autoVerdict(
     // for. A webhook turn begins with nobody watching, on a payload someone
     // else wrote, so it does not inherit that decision — the guard above is a
     // pattern list its own comment calls "not a security boundary", and it
-    // must not stand in for a human at 3am. A guard that would have carded
+    // must not stand in for a human at 3am. An explicit always-allow is the
+    // opposite kind of decision: a person named that exact program and said
+    // "this one, always" — and a bot that may not run it while nobody is
+    // watching can never finish a workflow node, only time out three times.
+    // So the named grant stands; only the blanket mode is withheld. Two
+    // shapes of "named" are not narrow enough to stand with nobody watching:
+    // a grant on the user's live desktop (this branch runs before the
+    // local-computer one, and unattended must never be MORE permissive than
+    // attended), and a command-tool key with no program segment — "approve
+    // the command I could not even name". A guard that would have carded
     // anyway keeps its own name; the block is only the story when it is the
     // thing that changed the outcome.
+    const namedNarrowly = context?.scope !== "local-computer" && key !== tool;
+    if (grant?.source === "always-allow" && namedNarrowly) return grant;
     if (grant) return { approve: null, source: "unattended-block", rule: grant.rule };
     if (destructive) return { approve: null, source: "destructive-guard", rule: destructive };
     if (sensitive) return { approve: null, source: "sensitive-guard", rule: sensitive };

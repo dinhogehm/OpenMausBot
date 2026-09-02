@@ -785,12 +785,18 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
     setSelectedNodeId(id);
   };
 
+  // One click, one run: the engine would queue a second manual run behind
+  // the active one, and five nervous clicks became five runs before this
+  // guard existed. Schedules and webhooks still queue — they are not clicks.
+  const activeRun = workflowRuns.some(isActiveWorkflowRun);
   const runBlockedReason =
     errors > 0
       ? `Fix ${errors} ${errors === 1 ? "error" : "errors"} before running`
       : running
         ? "A run is already starting"
-        : null;
+        : activeRun
+          ? "A run is already active — it finishes before another can start"
+          : null;
 
   // An agent node needs a bot and a notify node a room — both are foreign
   // keys the API refuses empty. Like the Run button, the reason is visible

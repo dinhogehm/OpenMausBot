@@ -484,7 +484,12 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
 
   for (const node of workflow.nodes) {
     if (node.kind !== "agent") continue;
-    if (!wiredByNode.get(node.id)?.has(WORKFLOW_FAIL_OUTCOME)) {
+    const wired = wiredByNode.get(node.id);
+    // A node that wires nothing is a deliberate end of the run: its declared
+    // outcomes end it and so does a failure. There is nowhere else a failure
+    // could go, so warning about it only teaches people to ignore warnings.
+    if (!wired || wired.size === 0) continue;
+    if (!wired.has(WORKFLOW_FAIL_OUTCOME)) {
       issues.push({
         severity: "warning",
         code: "unwired-failure",

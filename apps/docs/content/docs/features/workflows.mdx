@@ -113,16 +113,16 @@ Send the event to the webhook's `/hooks/…` endpoint on the local receiver with
 - **Notify nodes are at-least-once across a crash.** The engine records that it reached a notify node before it posts, so a crash in that instant re-posts the message on recovery rather than dropping it. A duplicate alert is the better failure.
 - **Editing the routing of a live workflow fails that run.** Moving nodes, renaming the workflow, editing instructions, changing a schedule — all safe while a run is in flight. Deleting an edge, deleting a node, or renaming an outcome is not: the run in flight is failed closed the moment it reaches a step whose path you removed, rather than reporting success for a pipeline it only half walked. Resume it (or start a fresh one) once you are done editing.
 
-## Permissions: a workflow turn never auto-approves
+## Permissions: what a workflow turn may approve on its own
 
-Every workflow node runs unattended — started by a schedule, a webhook, or an edge, with nobody at the keyboard. So **tool-permission requests are never auto-approved inside a workflow**, not even for a bot with auto-approve switched on or an "always allow" grant remembered for that exact command. Auto mode is a decision you made for turns you are present for; it does not transfer to 3am.
+Every workflow node runs unattended — started by a schedule, a webhook, or an edge, with nobody at the keyboard. Two kinds of permission exist on a bot, and a workflow treats them differently:
 
-Practically: a node that needs to `git push` will card. The request waits in that node's task like any approval, and:
+- An **always-allow** grant names one exact program (`Bash:gh`, `Bash:git`, …). You made that decision once, deliberately, for that program. It **holds inside a workflow**: a node whose bot may always run `gh` runs `gh` without asking. Without this, a bot that needs a tool could never finish a node — it would only time out, three times, and take the failure edge.
+- **Auto mode** (approve everything not caught by the guards) is a decision you made for turns you are present for. It does **not** transfer to 3am: inside a workflow, anything covered only by auto mode still cards for a person.
 
-- If you answer it, the node continues from there.
-- If nobody answers, the node hits its timeout, retries, and finally takes its `failed` edge.
+The destructive and sensitive guards outrank both, attended or not — an always-allow on `rm` never widens into `rm -rf /`.
 
-So design around it. Give unattended pipelines bots whose tools do not card for the routine path, keep the operations that genuinely need a human behind an **Approval** node where the waiting is explicit and has a deadline, and set node timeouts long enough to cover how quickly you actually answer.
+So design around it. Give the bots in an unattended pipeline always-allow grants for the exact tools the routine path needs, keep the operations that genuinely need a human behind an **Approval** node where the waiting is explicit and has a deadline, and set node timeouts long enough to cover how quickly you actually answer a card that does appear.
 
 ### Merging and deploying need a flag on the bot
 

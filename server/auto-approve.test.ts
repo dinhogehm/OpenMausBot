@@ -4,7 +4,7 @@
 // question is never answered by the machine.
 import { describe, expect, it } from "vitest";
 
-import { approvalKey, autoDecision, looksDestructive, looksSensitive } from "./auto-approve.ts";
+import { approvalKey, autoDecision, autoVerdict, looksDestructive, looksSensitive } from "./auto-approve.ts";
 
 describe("looksDestructive", () => {
   const dangerous = [
@@ -136,15 +136,53 @@ describe("unattended turns", () => {
   const bot = { autoApprove: true, alwaysAllow: ["Bash:git"] };
 
   it("does not inherit auto mode when nobody started the turn", () => {
-    expect(autoDecision(bot, "Bash", "git status", { unattended: true })).toBeNull();
+    // `ls` is covered only by the blanket auto mode, not by a named grant
+    expect(autoDecision(bot, "Bash", "ls -la", { unattended: true })).toBeNull();
+    expect(autoVerdict(bot, "Bash", "ls -la", { unattended: true }).source).toBe("unattended-block");
   });
 
-  it("does not inherit an always-allow grant either", () => {
-    expect(autoDecision(bot, "Bash", "git log", { unattended: true })).toBeNull();
+  it("keeps an explicit always-allow grant: the person named that exact program", () => {
+    expect(autoDecision(bot, "Bash", "git log", { unattended: true })).toBeTruthy();
+    expect(autoVerdict(bot, "Bash", "git log", { unattended: true }).source).toBe("always-allow");
+  });
+
+  it("never lets a named grant widen into the destructive guard, unattended or not", () => {
+    const trusting = { autoApprove: true, alwaysAllow: ["Bash:rm"] };
+    expect(autoDecision(trusting, "Bash", "rm -rf /", { unattended: true })).toBeNull();
+    expect(autoDecision(trusting, "Bash", "rm -rf /")).toBeNull();
   });
 
   it("still auto-approves the same action when a person started the turn", () => {
-    expect(autoDecision(bot, "Bash", "git status")).toBeTruthy();
-    expect(autoDecision(bot, "Bash", "git status", { unattended: false })).toBeTruthy();
+    expect(autoDecision(bot, "Bash", "ls -la")).toBeTruthy();
+    expect(autoDecision(bot, "Bash", "ls -la", { unattended: false })).toBeTruthy();
+  });
+
+  it("never lets a grant on the live desktop fire unattended — unattended must not out-permit attended", () => {
+    const desktop = { alwaysAllow: ["local-computer:mcp__computer__click"] };
+    const unattended = autoVerdict(desktop, "mcp__computer__click", "Click Submit", {
+      unattended: true,
+      scope: "local-computer",
+    });
+    expect(unattended.approve).toBeNull();
+    expect(unattended.source).toBe("unattended-block");
+    // attended, the same grant is refused too (host control is not a remembered thing)
+    expect(autoDecision(desktop, "mcp__computer__click", "Click Submit", { scope: "local-computer" })).toBeNull();
+  });
+
+  it("withholds a command-tool grant that names no program: nobody can approve a command they could not name", () => {
+    const bare = { alwaysAllow: ["Bash"] };
+    const verdict = autoVerdict(bare, "Bash", "", { unattended: true });
+    expect(verdict.approve).toBeNull();
+    expect(verdict.source).toBe("unattended-block");
+  });
+
+  it("lets the sensitive guard beat a named grant unattended, just as it does attended", () => {
+    const reader = { alwaysAllow: ["Bash:cat"] };
+    const unattended = autoVerdict(reader, "Bash", "cat ~/.ssh/id_rsa", { unattended: true });
+    expect(unattended.approve).toBeNull();
+    expect(unattended.source).toBe("sensitive-guard");
+    expect(autoVerdict(reader, "Bash", "cat ~/.ssh/id_rsa").source).toBe("sensitive-guard");
+    // the same grant still works on an innocent file, unattended
+    expect(autoDecision(reader, "Bash", "cat README.md", { unattended: true })).toBeTruthy();
   });
 });

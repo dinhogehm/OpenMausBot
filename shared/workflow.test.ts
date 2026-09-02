@@ -227,6 +227,17 @@ describe("validateWorkflow", () => {
     expect(wired).toEqual([expect.objectContaining({ severity: "warning", nodeId: "review" })]);
   });
 
+  it("um nó terminal (sem nenhuma aresta) não recebe o aviso de falha sem destino", () => {
+    const w = wf();
+    w.nodes.push({ kind: "agent", id: "fim", botId: "b3", instructions: "encerre", outcomes: ["ok"] });
+    w.edges.push({ from: "review", outcome: "approved", to: "fim" });
+    w.edges = w.edges.filter((e) => !(e.from === "review" && e.outcome === "approved" && e.to === "code"));
+    const issues = validateWorkflow(w);
+    expect(issues.some((i) => i.code === "unwired-failure" && i.nodeId === "fim")).toBe(false);
+    // um nó que liga algumas saídas mas não a falha continua avisando
+    expect(issues.some((i) => i.code === "unwired-failure" && i.nodeId === "code")).toBe(true);
+  });
+
   it("rejects declaring the reserved failed outcome manually", () => {
     const issues = validateWorkflow(
       wf({
