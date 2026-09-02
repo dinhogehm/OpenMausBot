@@ -107,6 +107,44 @@ type WorkflowRun = {
 **Dependência conhecida**: o server é filho do Electron — app fechado, nada roda. Para
 24/7 real: app aberto (com bloqueio de sleep) ou `server/` headless via launchd. Fase 2.
 
+### Desvios da implementação (servidor, decididos durante a execução)
+
+Registrados aqui porque mudam o contrato, não só o código. Datados de 2026-09-02.
+
+1. **Rascunhos são salváveis; a validação barra só a execução.** O desenho original
+   dizia "você não consegue salvar um fluxo ambíguo". Na prática isso impedia até
+   renomear um rascunho e tornaria impossível salvar um canvas pela metade. Agora
+   `PATCH /api/workflows/:id` persiste qualquer grafo (a validação de forma via zod
+   continua) e devolve 200 com `issues`; quem recusa um grafo inválido é `startRun`
+   (400 com `issues`) e `resumeRun`. O canvas continua mostrando os erros inline e
+   desabilitando o botão de rodar — a rigidez virou visual e de execução, não de escrita.
+
+2. **Impressão digital de roteamento em vez de "definição mudou".** Como o canvas salva
+   o documento inteiro a cada arraste, comparar `updatedAt` faria um run em voo falhar
+   ao mover um nó. `workflowRoutingFingerprint()` digere só o que decide o caminho:
+   `entryNodeId`, as arestas e o `id`/`kind`/outcomes de cada nó, tudo ordenado. Um run
+   é carimbado ao começar (e ao ser promovido da fila ou retomado) e só falha ao chegar
+   num nó-sumidouro se o roteamento mudou embaixo dele. Sem isso, apagar uma aresta
+   durante um run fazia o run terminar como **sucesso** pulando o resto do workflow.
+
+3. **`nextRunAt` tem três estados, não dois.** `undefined` = ainda não armado (a próxima
+   varredura arma), número = armado, `null` = desarmado de propósito (um `once` já
+   disparado ou impossível — a varredura ignora para sempre). Um cálculo de data que
+   falha devolve ao estado "não armado", nunca ao desarmado: uma agenda recorrente não
+   pode se aposentar sozinha por causa de um erro transitório.
+
+4. **O webhook é dono do vínculo, não o workflow.** `WorkflowTriggers.webhookId` foi
+   removido; um webhook aponta para `botId` **ou** `workflowId` (exatamente um). Deletar
+   o workflow pausa seus webhooks em vez de deixá-los respondendo 410 para sempre.
+
+5. **Tick de 10s** (não ~30s), alinhado ao `RoutineManager`. Consequência honesta: entre
+   armar e disparar há dois ticks, então uma agenda editada segundos antes do horário
+   dispara com até ~20s de atraso — nunca é pulada.
+
+6. **`postGroupMessage` é síncrono por contrato** (lançar reprova o nó; devolver uma
+   promessa reprova o nó), e `notifyUser` recebe um `kind` (`failed`/`approval`/
+   `reminder`) e pode lançar sem derrubar o tick.
+
 ## Canvas (página "Workflows")
 
 - Evolução da `src/components/TeamMapPage.tsx`; **única dependência nova:
