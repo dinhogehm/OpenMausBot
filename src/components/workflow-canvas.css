@@ -1,0 +1,103 @@
+/* xyflow's own theming is a block of `--xy-*` custom properties, and the app
+ * skins are the same idea under different names — so the bridge is one block
+ * of aliases rather than a fork of the library's stylesheet.
+ *
+ * Only `base.css` is imported (see WorkflowCanvas.tsx): it is structure plus
+ * variable plumbing. `style.css` would additionally paint white nodes, dark
+ * handles and white control buttons, which three of the four skins would
+ * then have to fight. Everything below is scoped to `.workflow-canvas` so it
+ * cannot leak into the rest of the app. */
+
+.workflow-canvas .react-flow {
+  --xy-background-color: var(--color-app);
+  --xy-background-pattern-color: color-mix(in srgb, var(--color-ink) 16%, transparent);
+
+  --xy-edge-stroke: color-mix(in srgb, var(--color-ink) 34%, transparent);
+  --xy-edge-stroke-width: 1.5;
+  --xy-edge-stroke-selected: var(--color-accent);
+
+  --xy-connectionline-stroke: var(--color-accent);
+  --xy-connectionline-stroke-width: 2;
+
+  --xy-selection-background-color: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  --xy-selection-border: 1px dotted var(--color-accent);
+
+  --xy-attribution-background-color: transparent;
+}
+
+/* The edge's outcome label. Without this the text renders in the browser's
+ * default black, which disappears on the dark skins. */
+.workflow-canvas .react-flow__edge-text {
+  fill: var(--color-ink-secondary);
+  font-size: 10px;
+}
+
+.workflow-canvas .react-flow__edge-textbg {
+  fill: var(--color-app);
+}
+
+/* Keyboard users tab through the nodes; the ring has to be visible on every
+ * skin, so it uses the shared focus token rather than the UA default. */
+.workflow-canvas .react-flow__node:focus-visible,
+.workflow-canvas .react-flow__edge:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 3px;
+  border-radius: 14px;
+}
+
+/* Handles: a token-coloured dot per outcome. The implicit `failed` path is
+ * drawn apart — dashed and in the danger colour — because it is the one
+ * outcome the author never declared and can never rename. */
+.workflow-canvas .react-flow__handle {
+  width: 11px;
+  height: 11px;
+  border-radius: 9999px;
+  background-color: var(--color-panel);
+  border: 1.5px solid color-mix(in srgb, var(--color-ink) 45%, transparent);
+}
+
+.workflow-canvas .react-flow__handle.wf-handle-source {
+  border-color: var(--color-accent);
+}
+
+.workflow-canvas .react-flow__handle.wf-handle-implicit {
+  border-color: var(--color-danger);
+  border-style: dashed;
+}
+
+.workflow-canvas .react-flow__handle.connectingfrom,
+.workflow-canvas .react-flow__handle:hover {
+  background-color: var(--color-accent);
+}
+
+.workflow-canvas .react-flow__handle.wf-handle-implicit.connectingfrom,
+.workflow-canvas .react-flow__handle.wf-handle-implicit:hover {
+  background-color: var(--color-danger);
+}
+
+/* Zoom / fit controls. base.css only lays them out, so the chrome is ours. */
+.workflow-canvas .react-flow__controls {
+  gap: 3px;
+  box-shadow: none;
+}
+
+.workflow-canvas .react-flow__controls-button {
+  background-color: var(--color-panel);
+  border: 1px solid color-mix(in srgb, var(--color-hairline) 70%, transparent);
+  border-radius: 8px;
+  color: var(--color-ink-secondary);
+}
+
+.workflow-canvas .react-flow__controls-button:hover {
+  background-color: var(--color-raised);
+  color: var(--color-ink);
+}
+
+.workflow-canvas .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.workflow-canvas .react-flow__attribution a {
+  color: var(--color-ink-secondary);
+  opacity: 0.55;
+}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CalendarClock,
@@ -22,6 +22,11 @@ import {
 import { nextRename } from "@/lib/rename";
 import type { WorkflowRun, WorkflowRunStatus } from "../../shared/workflow";
 import { cn } from "@/lib/cn";
+
+/** The editor drags in a graph library; a list nobody has opened a workflow
+ * from must not pay for it, and the static component suite must not import
+ * it either. */
+const WorkflowCanvas = lazy(async () => ({ default: (await import("./WorkflowCanvas")).WorkflowCanvas }));
 
 /** "New workflow" posts an empty canvas. The server saves it as a draft and
  * reports the missing entry node as an issue until the canvas adds one. */
@@ -397,6 +402,26 @@ export function WorkflowsPage() {
       dispatch({ type: "workflowDeleted", workflowId: workflow.id });
     });
   };
+
+  // Selecting a workflow opens its canvas in place of the list; the store
+  // owns the selection, so Back is just clearing it.
+  const opened = state.workflows.find((workflow) => workflow.id === state.selectedWorkflowId) ?? null;
+  if (opened) {
+    return (
+      <Suspense
+        fallback={
+          <main className="flex min-w-0 flex-1 items-center justify-center bg-app text-[12.5px] text-ink-secondary">
+            Loading canvas…
+          </main>
+        }
+      >
+        <WorkflowCanvas
+          workflow={opened}
+          onBack={() => dispatch({ type: "selectWorkflow", workflowId: null })}
+        />
+      </Suspense>
+    );
+  }
 
   return (
     <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-app text-ink">
