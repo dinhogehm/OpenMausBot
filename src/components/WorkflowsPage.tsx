@@ -17,6 +17,7 @@ import {
   isMissedWorkflowRun,
   latestRunsByWorkflow,
   validationSummary,
+  withLiveIssues,
   type WorkflowListItem,
 } from "@/lib/workflow-state";
 import { nextRename } from "@/lib/rename";
@@ -384,6 +385,11 @@ export function WorkflowsPage() {
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   // one pass over the runs instead of a scan per row
   const latestRuns = useMemo(() => latestRunsByWorkflow(state.workflowRuns), [state.workflowRuns]);
+  // Rows are judged live, never from the stored snapshot: capability issues
+  // depend on the bots' flags, which arrive on their own `bot` frames, so a
+  // permission flipped in a profile has to move the badge and the Run gate
+  // here without a save or a reload — the same union the canvas draws.
+  const workflows = useMemo(() => withLiveIssues(state.workflows, state.bots), [state.workflows, state.bots]);
 
   // One in-flight action per row. A failure lands inline on that row and
   // leaves local state untouched: the SSE fold (and the echoed response) is
@@ -440,7 +446,10 @@ export function WorkflowsPage() {
   };
 
   // Selecting a workflow opens its canvas in place of the list; the store
-  // owns the selection, so Back is just clearing it.
+  // owns the selection, so Back is just clearing it. The canvas takes the
+  // STORED row: it strips `issues` and judges the document itself, and a
+  // live row would be a fresh object on every `bot` frame — churn the editor
+  // has no use for.
   const opened = state.workflows.find((workflow) => workflow.id === state.selectedWorkflowId) ?? null;
   if (opened) {
     const back = () => dispatch({ type: "selectWorkflow", workflowId: null });
@@ -500,13 +509,13 @@ export function WorkflowsPage() {
             </button>
           </div>
         )}
-        {state.workflows.length === 0 ? (
+        {workflows.length === 0 ? (
           <div className="max-w-[720px] rounded-xl border border-dashed border-hairline bg-panel px-4 py-8 text-center text-[12.5px] text-ink-secondary">
             No workflows yet. Create one to start designing a pipeline your bots run without you watching.
           </div>
         ) : (
           <ul className="max-w-[900px] space-y-2">
-            {state.workflows.map((workflow) => (
+            {workflows.map((workflow) => (
               <WorkflowRow
                 key={workflow.id}
                 workflow={workflow}

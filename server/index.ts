@@ -57,6 +57,7 @@ import { cloudBackendChangeError, vpsAliasChangeError } from "./cloud-backend.ts
 import * as composio from "./composio.ts";
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { openMausStatusSystemPrompt } from "./openmaus-status-capsule.ts";
+import { standingPermissionsPrompt } from "./standing-permissions.ts";
 import {
   containerComputerAction,
   containerComputerExists,
@@ -195,6 +196,7 @@ import {
 import { fetchSkillFromSource } from "./skill-fetch.ts";
 import { expandLearnTurnText, learnSource } from "./skill-learn.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
+import type { BotCapabilities } from "../shared/workflow.ts";
 import { readCuaConnection } from "./local-computer.ts";
 import { LocalVmIdleTimer } from "./local-vm-idle.ts";
 import { LocalVmLease, LocalVmLeasePool } from "./local-vm-lease.ts";
@@ -832,7 +834,17 @@ const wireTask = ({ resumeCursors: _resumeCursors, lastInstanceId: _lastInstance
 
 const wireBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => {
   const { resumeCursors: _resumeCursors, tasks, ...rest } = bot;
-  return { ...rest, avatarUrl: rest.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
+  return {
+    ...rest,
+    avatarUrl: rest.avatarUrl ?? null,
+    // Always present, never omitted-when-false: the renderer merges bot
+    // frames over its record, so a frame that dropped a flag switched OFF
+    // elsewhere would leave a stale "allowed" behind — and these two gate
+    // what a bot may merge or deploy.
+    canMerge: rest.canMerge === true,
+    canDeploy: rest.canDeploy === true,
+    ...(tasks ? { tasks: tasks.map(wireTask) } : {}),
+  };
 };
 
 /** Profile URLs are app-owned references, not merely strings with a trusted
@@ -2947,6 +2959,9 @@ async function startTurn(
           credentialPrompt +
           routinePrompt +
           learnPrompt +
+          // Read fresh: a flag flipped while this turn was being set up must
+          // reach the bot as it is now, on this turn — chat, room or workflow.
+          standingPermissionsPrompt(store.bot(bot.id) ?? bot) +
           sectionContextSystemPrompt(bot.section) +
           (privateWorkspace ? memorySystemPrompt(bot.id) + skillsSystemPrompt(bot.id) : "") +
           skillInstructions +
@@ -3189,6 +3204,13 @@ workflowStore = new WorkflowStore({ emit: broadcast });
  * room UI labels the cluster by this name and colour, and responder
  * selection falls through to a real member. */
 const WORKFLOW_AUTHOR = Object.freeze({ botId: "workflow", name: "Workflow", color: "purple" });
+/** The merge/deploy flags the engine and the workflow API gate on, read from
+ * the store on every check so a toggle a person flips lands on the very
+ * next one — never cached on a run. null for a bot that no longer exists. */
+const botCapabilities = (botId: string): BotCapabilities | null => {
+  const bot = store.bot(botId);
+  return bot ? { canMerge: bot.canMerge === true, canDeploy: bot.canDeploy === true } : null;
+};
 workflowEngine = new WorkflowEngine({
   store: workflowStore,
   emit: broadcast,
@@ -3196,6 +3218,7 @@ workflowEngine = new WorkflowEngine({
     const bot = store.bot(botId);
     return !bot ? "missing" : bot.busy ? "busy" : "ready";
   },
+  botCapabilities,
   createTask: (botId, title) => {
     // Detached like a routine's task: the bot's active thread stays where the
     // user left it, and the node's transcript is auditable in its task list.
@@ -3705,6 +3728,9 @@ async function runGroupMemberTurn(
       "If the user explicitly asks to list or review, schedule, run, or change routines, use list_routines and propose_routine or propose_routine_action. A proposal is not applied until the user confirms its in-app card, so never claim the action completed before that confirmation.",
     skillAuthoring &&
       "If the user sends /learn or asks you to save a reusable procedure from this work, use skills_list and skill_manage. Create new skills; update an existing learned skill only when the user explicitly asks to revise that exact name. Include source provenance and wait for the review card decision.",
+    // Same standing permissions as a 1:1 turn — the room is a different
+    // conversation, not a different bot.
+    standingPermissionsPrompt(store.bot(bot.id) ?? bot).trim(),
     orchestration?.systemInstructions,
   ]
     .filter(Boolean)
@@ -5883,6 +5909,7 @@ const server = createServer(async (req, res) => {
       {
         store: workflowStore!,
         engine: workflowEngine!,
+        botCapabilities,
         // A webhook aimed at a deleted workflow is released the same way a
         // webhook aimed at a deleted MAUS is.
         onWorkflowDeleted: (workflowId) => webhooks.disableForWorkflow(workflowId),
@@ -7296,6 +7323,14 @@ const server = createServer(async (req, res) => {
           return json(res, 400, { error: "autoReview must be off, shadow, or enforce" });
         }
         patch.autoReview = body.autoReview;
+      }
+      // The standing merge/deploy permissions decide which workflow nodes
+      // may run on this bot and are announced on its every turn: booleans
+      // only, never coerced.
+      for (const flag of ["canMerge", "canDeploy"] as const) {
+        if (body[flag] === undefined) continue;
+        if (typeof body[flag] !== "boolean") return json(res, 400, { error: `${flag} must be true or false` });
+        patch[flag] = body[flag];
       }
       // "Auto on this Mac" hands a bot the user's real session, so the grant
       // must prove a human saw the warning. The desktop dialog is the only

@@ -172,6 +172,19 @@ Registrados aqui porque mudam o contrato, não só o código. Datados de 2026-09
    here"), decidido antes de olhar os resultados anteriores, para que um nó já executado num
    ciclo não seja pintado como concluído.
 
+### Permissões por bot (adicionado em 2026-09-02, a pedido do usuário)
+
+Um bot só faz merge de pull request ou deploy em produção se uma pessoa marcou isso no perfil
+dele (`canMerge`, `canDeploy`; ausente = não). O nó de agente declara o que exige (`requires:
+["merge"]`, `["deploy"]`). Três barreiras, de fora para dentro: o canvas e o `GET /api/workflows`
+mostram `missing-capability` como erro (e o botão de rodar desabilita); `startRun`/`resumeRun`
+recusam um grafo com essa pendência; e no despacho de cada nó o motor relê os flags atuais —
+revogar a permissão no meio de um run derruba o run naquele nó, de forma terminal (repetir não
+ajudaria). Além disso, todo turno do bot, em chat ou em workflow, recebe uma linha de system
+prompt dizendo o que ele pode e não pode, para que ele nem tente. É o "escopo de permissão
+mínimo por agente" da lista original de melhorias, na forma mais barata que fecha o buraco
+real: o repositório privado do usuário não tem proteção de branch disponível no plano dele.
+
 ## Fora do MVP entregue
 
 - **Export/import `openmaus.workflow`**: o formato está descrito neste documento, mas não foi

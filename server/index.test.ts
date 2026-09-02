@@ -2466,6 +2466,67 @@ describe("harness HTTP API", () => {
     await api("DELETE", `/api/bots/${bot.id}`);
   });
 
+  it("stores a bot's merge and deploy permissions as booleans only, off until a person flips them", async () => {
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    try {
+      // Always on the wire as booleans: the renderer merges bot frames over
+      // its record, so an omitted flag could leave a stale "allowed" behind.
+      expect(bot).toMatchObject({ canMerge: false, canDeploy: false });
+      const flagged = await api("PATCH", `/api/bots/${bot.id}`, { canMerge: true, canDeploy: false });
+      expect(flagged.status).toBe(200);
+      expect(flagged.body.bot).toMatchObject({ canMerge: true, canDeploy: false });
+      // The flags decide what runs unattended, so they are type-checked, never coerced.
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { canDeploy: "yes" })).status).toBe(400);
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { canMerge: 1 })).status).toBe(400);
+      const listed = (await api("GET", "/api/bots")).body.bots.find((candidate: { id: string }) => candidate.id === bot.id);
+      expect(listed).toMatchObject({ canMerge: true, canDeploy: false });
+    } finally {
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("carries a bot's merge and deploy permissions on every bot frame as explicit booleans", async () => {
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    // The renderer merges bot frames over its record, so a frame that
+    // omitted a flag could leave a stale "allowed" behind: both flags ride
+    // every frame, false included — and the same on the wire, not just in
+    // the HTTP responses.
+    const stream = await openSse(`${BASE}/api/events`);
+    try {
+      await api("PATCH", `/api/bots/${bot.id}`, { unread: true });
+      const fresh = await stream.until((frame) => frame.kind === "bot" && frame.bot?.id === bot.id);
+      expect(fresh.bot).toMatchObject({ canMerge: false, canDeploy: false });
+
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { canMerge: true })).status).toBe(200);
+      const flagged = await stream.until(
+        (frame) => frame.kind === "bot" && frame.bot?.id === bot.id && frame.bot.canMerge === true,
+      );
+      expect(flagged.bot).toMatchObject({ canMerge: true, canDeploy: false });
+    } finally {
+      stream.close();
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("tells a bot its standing permissions on every turn", async () => {
+    const bot = (await api("POST", "/api/bots", {})).body.bot;
+    try {
+      expect((await api("PATCH", `/api/bots/${bot.id}`, {
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+        canMerge: true,
+      })).status).toBe(200);
+      rmSync(fakeClaudeDump, { force: true });
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "What are you allowed to do?" })).status).toBe(202);
+      const seen = await readJsonFileWhenReady<{ systemPrompt?: string }>(fakeClaudeDump);
+      expect(seen.systemPrompt ?? "").toContain(
+        "Standing permissions: merging pull requests: allowed. Deploying to production: not allowed.",
+      );
+    } finally {
+      await api("POST", `/api/bots/${bot.id}/interrupt`);
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
   it("stores only known approval-review modes", async () => {
     const bot = (await api("POST", "/api/bots")).body.bot;
     for (const autoReview of ["off", "shadow", "enforce"]) {

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { Workflow, WorkflowRun } from "../../shared/workflow";
-import { initialState, reducer, type AppState } from "./store";
+import { validationSummary, withLiveIssues } from "../lib/workflow-state";
+import { initialState, reducer, type AppState, type BotAnnouncement } from "./store";
 
 const draft = (overrides: Partial<Workflow> = {}): Workflow => ({
   id: "wf-1",
@@ -107,5 +108,46 @@ describe("workflows slice", () => {
     expect(next.workflowRuns).toHaveLength(1);
     // an unknown id is a no-op
     expect(reducer(next, { type: "workflowDeleted", workflowId: "ghost" }).workflows).toBe(next.workflows);
+  });
+});
+
+describe("standing permissions and the list", () => {
+  const scout = (canMerge: boolean): BotAnnouncement => ({
+    id: "bot-a",
+    threadId: "thread-a",
+    name: "Scout",
+    title: "",
+    description: "",
+    notifications: false,
+    color: "green",
+    unread: false,
+    modelSelection: { instanceId: "local", model: "test-model" },
+    canMerge,
+  });
+  const requiresMerge = draft({
+    entryNodeId: "a",
+    nodes: [{ kind: "agent", id: "a", botId: "bot-a", instructions: "merge it", outcomes: ["done"], requires: ["merge"] }],
+  });
+  const missing = (workflows: ReturnType<typeof withLiveIssues>) =>
+    workflows[0]!.issues.filter((issue) => issue.code === "missing-capability").length;
+
+  it("a `bot` frame flipping canMerge moves the derived issues of a workflow that requires merge", () => {
+    const hydrated = reducer(reducer(initialState, { type: "botPatched", bot: scout(true) }), {
+      type: "workflowsHydrated",
+      workflows: [{ ...requiresMerge, issues: [] }],
+      runs: [],
+    });
+    expect(missing(withLiveIssues(hydrated.workflows, hydrated.bots))).toBe(0);
+
+    const revoked = reducer(hydrated, { type: "botPatched", bot: scout(false) });
+    // the stored row did not move — only the roster did — and the list must
+    // still say so, or Run stays open on a workflow the server would refuse
+    expect(revoked.workflows).toBe(hydrated.workflows);
+    const refused = withLiveIssues(revoked.workflows, revoked.bots);
+    expect(missing(refused)).toBe(1);
+    expect(validationSummary(refused[0]!.issues).errors).toBe(1);
+
+    const granted = reducer(revoked, { type: "botPatched", bot: scout(true) });
+    expect(missing(withLiveIssues(granted.workflows, granted.bots))).toBe(0);
   });
 });

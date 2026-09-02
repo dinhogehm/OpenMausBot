@@ -258,6 +258,11 @@ export interface Bot {
   autoReview?: "off" | "shadow" | "enforce";
   /** tools this bot may always use without asking */
   alwaysAllow?: string[];
+  /** Workflow permissions a person grants in the profile: an agent node that
+   * `requires` merge or deploy refuses to run on a bot without the flag.
+   * Absent = not allowed. */
+  canMerge?: boolean;
+  canDeploy?: boolean;
   /** speak this bot's replies aloud as they settle */
   speakReplies?: boolean;
   /** this bot's own voice id (falls back to the app-wide one) */

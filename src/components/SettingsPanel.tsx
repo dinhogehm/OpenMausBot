@@ -11,6 +11,7 @@ import { requestNotificationPermission } from "@/lib/notify";
 import { botUsage, costCaption, formatTokens, formatUsd, hasFiniteCost } from "@/lib/usage";
 import { shortPath } from "@/lib/short-path";
 import { instanceSupportsLocalComputer, localComputerDisabledReason, localComputerSelectable } from "@/lib/local-computer";
+import { BotCapabilitiesCard } from "./BotCapabilitiesCard";
 import { BotProfileAvatarCard } from "./BotProfileAvatarCard";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
 import { VoiceSettings } from "./VoiceSettings";
@@ -559,6 +560,8 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         | "avatarCrop"
         | "autoApprove"
         | "autoReview"
+        | "canMerge"
+        | "canDeploy"
         | "speakReplies"
         | "voice"
         | "chiefOfStaff"
@@ -765,6 +768,8 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
               className="disabled:cursor-not-allowed"
             />
           </div>
+
+          <BotCapabilitiesCard bot={bot} onPatch={patch} />
 
           <div className="rounded-xl bg-card p-4">
             <ModelPicker

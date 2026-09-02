@@ -366,6 +366,20 @@ describe("Store", () => {
     );
   });
 
+  it("persists a bot's merge and deploy permissions across a restart, defaulting to unset", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    expect(bot.canMerge).toBeUndefined();
+    expect(bot.canDeploy).toBeUndefined();
+
+    store.patchBot(bot.id, { canMerge: true, canDeploy: false });
+
+    const reloaded = new Store(selection);
+    expect(reloaded.bot(bot.id)).toMatchObject({ canMerge: true, canDeploy: false });
+    const persisted: BotRecord[] = JSON.parse(readFileSync(join(DATA_DIR, "bots.json"), "utf8"));
+    expect(persisted.find((candidate) => candidate.id === bot.id)).toMatchObject({ canMerge: true, canDeploy: false });
+  });
+
   it("persists a bot's effort level across a restart, defaulting to unset", () => {
     const store = new Store(selection);
     const bot = store.createBot();

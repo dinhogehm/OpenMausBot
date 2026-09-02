@@ -709,3 +709,27 @@ describe("messageAdded leaf adoption", () => {
     expect(next.bots[0].messages.map((m) => m.id)).toContain("shot");
   });
 });
+
+describe("standing permissions on bot frames", () => {
+  const announced = (flags: { canMerge: boolean; canDeploy: boolean }): Bot => ({
+    id: "bot-perm",
+    threadId: "thread-perm",
+    name: "Scout",
+    title: "",
+    description: "",
+    notifications: false,
+    color: "green",
+    unread: false,
+    modelSelection: { instanceId: "local", model: "test-model" },
+    messages: [],
+    ...flags,
+  });
+
+  it("a `bot` frame carrying an explicit false overwrites a flag the record held as true", () => {
+    const granted = reducer(initialState, { type: "botPatched", bot: announced({ canMerge: true, canDeploy: true }) });
+    expect(granted.bots.find((bot) => bot.id === "bot-perm")).toMatchObject({ canMerge: true, canDeploy: true });
+
+    const revoked = reducer(granted, { type: "botPatched", bot: announced({ canMerge: false, canDeploy: true }) });
+    expect(revoked.bots.find((bot) => bot.id === "bot-perm")).toMatchObject({ canMerge: false, canDeploy: true });
+  });
+});

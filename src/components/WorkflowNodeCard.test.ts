@@ -105,6 +105,43 @@ describe("WorkflowNodeCard — agent", () => {
   });
 });
 
+describe("WorkflowNodeCard — capability requirements", () => {
+  const needsMerge: WorkflowNode = { ...agent, requires: ["merge"] };
+
+  it("tags each requirement, red with a textual cue when the bot lacks it", () => {
+    const markup = card(needsMerge, { bot: { name: "Scout", color: "green" } });
+    const flat = text(markup);
+
+    expect(flat).toContain("needs merge");
+    expect(markup).toMatch(/text-danger[^>]*>needs merge/);
+    // colour is never the only signal
+    expect(flat).toContain("bot not allowed");
+    expect(markup).not.toContain("title=");
+  });
+
+  it("draws the tag quietly when the bot holds the capability", () => {
+    const markup = card(needsMerge, { bot: { name: "Scout", color: "green", canMerge: true } });
+
+    expect(text(markup)).toContain("needs merge");
+    expect(markup).not.toMatch(/text-danger[^>]*>needs merge/);
+    expect(text(markup)).not.toContain("bot not allowed");
+  });
+
+  it("tags every requirement, judging each on its own flag", () => {
+    const both: WorkflowNode = { ...agent, requires: ["merge", "deploy"] };
+    const markup = card(both, { bot: { name: "Scout", color: "green", canMerge: true } });
+
+    expect(markup).not.toMatch(/text-danger[^>]*>needs merge/);
+    expect(markup).toMatch(/text-danger[^>]*>needs deploy/);
+  });
+
+  it("shows no tag for a node that requires nothing", () => {
+    const flat = text(card(agent, { bot: { name: "Scout", color: "green", canMerge: true } }));
+    expect(flat).not.toContain("needs merge");
+    expect(flat).not.toContain("needs deploy");
+  });
+});
+
 describe("WorkflowNodeCard — approval and notify", () => {
   it("shows the approval prompt and both decision outcomes", () => {
     const flat = text(card({ kind: "approval", id: "approval-1", prompt: "Ship the release?" }));
