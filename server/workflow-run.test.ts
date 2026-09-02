@@ -13,6 +13,8 @@ import {
   WORKFLOW_CONTROL_OPEN,
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
   workflowRoutingFingerprint,
+  type BotCapabilities,
+  type WorkflowCapability,
   type WorkflowNode,
   type WorkflowNotificationKind,
   type WorkflowRun,
@@ -68,6 +70,8 @@ function harness({
   let startTurnRejects: string | null = null;
   let startTurnThrows: string | null = null;
   let botStateFn: (botId: string) => "ready" | "busy" | "missing" = () => "ready";
+  /** No flags by default: a node that requires nothing must never notice. */
+  let botCapabilitiesFn: (botId: string) => BotCapabilities | null = () => ({});
   /** While set, interruptTurn stays pending until releaseInterrupts() — lets
    * tests land events in the middle of an engine `await interruptTurn`. */
   let interruptGate: Promise<void> | null = null;
@@ -76,6 +80,7 @@ function harness({
     store,
     now: () => now,
     botState: (botId) => botStateFn(botId),
+    botCapabilities: (botId) => botCapabilitiesFn(botId),
     createTask: (botId, title) => {
       if (createTaskThrows !== null) throw new Error(createTaskThrows);
       if (createTaskFails) return null;
@@ -142,6 +147,7 @@ function harness({
       store: restartedStore,
       now: () => now,
       botState: (botId) => botStateFn(botId),
+      botCapabilities: (botId) => botCapabilitiesFn(botId),
       createTask: (botId, title) => {
         restartedTasks.push({ botId, title });
         return { threadId: `re-thread-${++restartedSeq}` };
@@ -186,6 +192,7 @@ function harness({
     throwCreateTask: (message: string) => (createTaskThrows = message),
     throwStartTurn: (message: string) => (startTurnThrows = message),
     setBotState: (fn: (botId: string) => "ready" | "busy" | "missing") => (botStateFn = fn),
+    setBotCapabilities: (fn: (botId: string) => BotCapabilities | null) => (botCapabilitiesFn = fn),
     holdInterrupts: () => {
       interruptGate = new Promise<void>((resolve) => (releaseInterrupt = resolve));
     },
@@ -2332,5 +2339,130 @@ describe("WorkflowEngine approval and notify edge cases", () => {
     expect(done.status).toBe("completed");
     expect(done.attempt).toBe(0);
     expect(h.dispatches).toHaveLength(2); // nothing re-ran
+  });
+});
+
+describe("WorkflowEngine bot capabilities", () => {
+  /** plan --done--> deploy, where deploy (bot "ops") is a pure sink that
+   * `requires` what the test says — absent when undefined. */
+  const release = (requires?: WorkflowCapability[]): WorkflowInput => ({
+    name: "Release",
+    entryNodeId: "plan",
+    nodes: [
+      { kind: "agent", id: "plan", botId: "planner", instructions: "Plan.", outcomes: ["done"] },
+      {
+        kind: "agent",
+        id: "deploy",
+        botId: "ops",
+        instructions: "Deploy.",
+        outcomes: ["deployed"],
+        ...(requires === undefined ? {} : { requires }),
+      },
+    ],
+    edges: [{ from: "plan", outcome: "done", to: "deploy" }],
+    layout: {},
+  });
+
+  it("refuses to start a run whose node requires a capability its bot lacks, creating no run", () => {
+    const h = harness();
+    const workflow = h.store.create(release(["deploy"]));
+    expect(() => h.engine.startRun(workflow.id, "go", "manual")).toThrow(
+      /^invalid workflow: Node "deploy" requires "deploy" but its bot "ops" is not allowed to deploy/,
+    );
+    expect(h.store.listRuns()).toEqual([]);
+    expect(h.dispatches).toHaveLength(0);
+
+    // A person flags the bot: the same graph starts.
+    h.setBotCapabilities((botId) => (botId === "ops" ? { canDeploy: true } : {}));
+    expect(h.engine.startRun(workflow.id, "go", "manual").status).toBe("running");
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("fails closed at the node whose bot lost the capability mid-run — terminal, notified, resumable once re-flagged", () => {
+    const h = harness();
+    h.setBotCapabilities((botId) => (botId === "ops" ? { canDeploy: true } : {}));
+    const workflow = h.store.create(release(["deploy"]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(run.status).toBe("running");
+
+    // A person revokes the flag while plan is still running.
+    h.setBotCapabilities(() => ({ canDeploy: false }));
+    h.setNow(2_000);
+    h.completeTurn("thread-1", envelope("done", "planned"));
+
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("failed");
+    expect(persisted.currentNodeId).toBe("deploy");
+    expect(persisted.error).toMatch(/Node "deploy" requires "deploy" but its bot "ops" is not allowed to deploy/);
+    expect(persisted.endedAt).toBe(2_000);
+    // Terminal, not retryable: no retry parked, no task or turn for deploy,
+    // and plan's result is kept on the receipt.
+    expect(persisted.nextAttemptAt).toBeUndefined();
+    expect(persisted.currentThreadId).toBeUndefined();
+    expect(h.tasks.map((task) => task.botId)).toEqual(["planner"]);
+    expect(h.dispatches).toHaveLength(1);
+    expect(persisted.nodeResults.map((result) => result.nodeId)).toEqual(["plan"]);
+    expect(h.notifications).toEqual([
+      { runId: run.id, message: expect.stringMatching(/at node "deploy": .*not allowed to deploy/), kind: "failed" },
+    ]);
+
+    // Resume is refused while the flag is missing, and picks up AT deploy once it is back.
+    expect(() => h.engine.resumeRun(run.id)).toThrow(/^invalid workflow: Node "deploy" requires "deploy"/);
+    expect(h.dispatches).toHaveLength(1);
+    h.setBotCapabilities(() => ({ canDeploy: true }));
+    expect(h.engine.resumeRun(run.id).status).toBe("running");
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.dispatches[1]!.botId).toBe("ops");
+    expect(h.tasks.at(-1)).toEqual({ botId: "ops", title: "Workflow Release — deploy" });
+    expect(h.store.getRun(run.id)!.nodeResults.map((result) => result.nodeId)).toEqual(["plan"]);
+  });
+
+  it("re-checks the flags on a retry dispatch too, never only at the first one", async () => {
+    const h = harness();
+    h.setBotCapabilities(() => ({ canDeploy: true }));
+    const workflow = h.store.create(release(["deploy"]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.dispatches).toHaveLength(2);
+    // deploy's first attempt dies on a dispatch error and a retry is parked…
+    h.dispatches[1]!.onDispatchError("box unavailable");
+    expect(h.store.getRun(run.id)!.nextAttemptAt).toBe(61_000);
+    // …and the flag is revoked before the retry comes due.
+    h.setBotCapabilities(() => ({}));
+    h.setNow(61_000);
+    await h.engine.tick();
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("failed");
+    expect(persisted.error).toMatch(/not allowed to deploy/);
+    expect(h.dispatches).toHaveLength(2);
+  });
+
+  it("leaves a node that requires nothing, or an empty list, alone whatever the bot's flags", () => {
+    const h = harness();
+    h.setBotCapabilities(() => ({}));
+    const plain = h.store.create(release());
+    const empty = h.store.create(release([]));
+    expect(h.engine.startRun(plain.id, "go", "manual").status).toBe("running");
+    expect(h.engine.startRun(empty.id, "go", "manual").status).toBe("running");
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("done"));
+    expect(h.dispatches.map((dispatch) => dispatch.botId)).toEqual(["planner", "planner", "ops", "ops"]);
+    expect(h.notifications).toEqual([]);
+    expect(h.store.listRuns().map((run) => run.status)).toEqual(["running", "running"]);
+  });
+
+  it("fails closed at dispatch when the capability lookup knows nothing about a bot that requires one", () => {
+    const h = harness();
+    h.setBotCapabilities(() => null);
+    const workflow = h.store.create(release(["deploy"]));
+    // The validator lets an unknown bot through (reported elsewhere); the
+    // dispatch does not: a permission nobody granted is not a permission.
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.completeTurn("thread-1", envelope("done"));
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("failed");
+    expect(persisted.currentNodeId).toBe("deploy");
+    expect(persisted.error).toMatch(/not allowed to deploy/);
+    expect(h.dispatches).toHaveLength(1);
   });
 });

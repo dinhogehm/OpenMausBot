@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  capabilityIssues,
+  missingCapabilities,
   parseWorkflowOutcome,
   validateWorkflow,
+  WORKFLOW_CAPABILITIES,
   WORKFLOW_FAIL_OUTCOME,
   workflowRoutingFingerprint,
+  type BotCapabilities,
   type Workflow,
 } from "./workflow.ts";
 
@@ -431,5 +435,84 @@ describe("validateWorkflow", () => {
       expect(bad({ type: "once", at }), String(at)).toEqual([error]);
     }
     expect(bad({ type: "weekly", time: "09:00" })).toEqual([error]);
+  });
+});
+
+describe("capabilities", () => {
+  /** wf() with `requires` set on one node (review runs on bot b2). Typed
+   * loosely so the shape checks can be fed what a raw JSON body could carry. */
+  const gated = (requires: unknown, nodeId = "review"): Workflow =>
+    wf({
+      nodes: wf().nodes.map((node) => (node.id === nodeId ? { ...node, requires } : node)) as unknown as Workflow["nodes"],
+    });
+  const badRequires = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-requires");
+
+  it("names exactly merge and deploy", () => {
+    expect(WORKFLOW_CAPABILITIES).toEqual(["merge", "deploy"]);
+  });
+
+  it("validateWorkflow accepts an absent, empty, or well-formed requires list", () => {
+    expect(badRequires(wf())).toEqual([]);
+    expect(badRequires(gated([]))).toEqual([]);
+    expect(badRequires(gated(["merge"]))).toEqual([]);
+    expect(badRequires(gated(["deploy", "merge"]))).toEqual([]);
+  });
+
+  it("validateWorkflow flags an unknown capability, a duplicate, and a non-list as bad-requires", () => {
+    const error = expect.objectContaining({ severity: "error", code: "bad-requires", nodeId: "review" });
+    expect(badRequires(gated(["ship"]))).toEqual([error]);
+    expect(badRequires(gated(["ship"]))[0]?.message).toMatch(/"ship".*merge, deploy/);
+    expect(badRequires(gated(["deploy", "deploy"]))).toEqual([error]);
+    expect(badRequires(gated(["deploy", "deploy"]))[0]?.message).toMatch(/more than once/);
+    expect(badRequires(gated("merge"))).toEqual([error]);
+    expect(badRequires(gated([3]))).toEqual([error]);
+    // The shape rule is per node: a clean sibling is not blamed.
+    expect(badRequires(gated(["ship"])).map((issue) => issue.nodeId)).toEqual(["review"]);
+  });
+
+  it("capabilityIssues flags a node whose bot lacks a required capability, naming node, bot and capability", () => {
+    const lookup = (botId: string): BotCapabilities | null =>
+      botId === "b2" ? { canMerge: false } : { canMerge: true, canDeploy: true };
+    expect(capabilityIssues(gated(["merge", "deploy"]), lookup)).toEqual([
+      {
+        severity: "error",
+        code: "missing-capability",
+        nodeId: "review",
+        message: 'Node "review" requires "merge" but its bot "b2" is not allowed to merge.',
+      },
+      {
+        severity: "error",
+        code: "missing-capability",
+        nodeId: "review",
+        message: 'Node "review" requires "deploy" but its bot "b2" is not allowed to deploy.',
+      },
+    ]);
+  });
+
+  it("capabilityIssues is silent for a flagged bot, a node that requires nothing, and an unknown bot", () => {
+    expect(capabilityIssues(gated(["merge", "deploy"]), () => ({ canMerge: true, canDeploy: true }))).toEqual([]);
+    expect(capabilityIssues(wf(), () => ({}))).toEqual([]);
+    expect(capabilityIssues(gated([]), () => ({}))).toEqual([]);
+    // An unknown bot is reported elsewhere (the engine's missing-bot path).
+    expect(capabilityIssues(gated(["deploy"]), () => null)).toEqual([]);
+  });
+
+  it("capabilityIssues treats an absent flag as not allowed and leaves shape problems to the validator", () => {
+    expect(capabilityIssues(gated(["merge"]), () => ({ canDeploy: true }))).toHaveLength(1);
+    // A duplicate reports once; an unknown name is bad-requires, never missing-capability.
+    expect(capabilityIssues(gated(["merge", "merge", "ship"]), () => ({}))).toHaveLength(1);
+  });
+
+  it("missingCapabilities lists what a bot lacks, in declaration order, once each", () => {
+    expect(missingCapabilities(["deploy", "merge"], {})).toEqual(["deploy", "merge"]);
+    expect(missingCapabilities(["deploy", "merge"], { canMerge: true })).toEqual(["deploy"]);
+    expect(missingCapabilities(["deploy", "merge"], { canMerge: true, canDeploy: true })).toEqual([]);
+    expect(missingCapabilities(undefined, {})).toEqual([]);
+    expect(missingCapabilities(["merge", "merge"], {})).toEqual(["merge"]);
+    expect(missingCapabilities(["merge"], { canMerge: false })).toEqual(["merge"]);
+  });
+
+  it("requires never changes the routing fingerprint — it gates a dispatch, it steers nothing", () => {
+    expect(workflowRoutingFingerprint(gated(["merge"]))).toBe(workflowRoutingFingerprint(wf()));
   });
 });

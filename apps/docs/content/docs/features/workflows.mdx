@@ -124,6 +124,14 @@ Practically: a node that needs to `git push` will card. The request waits in tha
 
 So design around it. Give unattended pipelines bots whose tools do not card for the routine path, keep the operations that genuinely need a human behind an **Approval** node where the waiting is explicit and has a deadline, and set node timeouts long enough to cover how quickly you actually answer.
 
+### Merging and deploying need a flag on the bot
+
+Two things a pipeline does are irreversible enough to get a switch of their own: merging a pull request and deploying to production. Every bot carries two toggles, **Can merge** and **Can deploy**, both off until a person turns them on. A node that does either says so in its **Requires** field (`merge`, `deploy`, or both). The validator then checks the node's bot, not just the graph: a node whose bot lacks the flag is an **error** on the canvas — `missing-capability`, naming the node, the bot and the permission — so the run cannot start, from **Run**, a schedule or a webhook alike.
+
+The engine checks again at the moment it dispatches each node, against the flags as they are right then. Switch a bot's **Can deploy** off while a run is in flight and the run stops at the `deploy` node, marked failed with that reason, and you get a notification. It is not retried and it does not take the `failed` edge, because no retry can grant a permission only you can. Turn the flag back on and resume the run: it picks up at that node.
+
+Every turn of the bot — in chat, in a room, in a workflow — is also told what it is and is not allowed to do, so a bot without the flag does not try. The toggles sit on top of the permission cards, not in their place: a bot allowed to deploy still cards for any tool that needs approval.
+
 ## Where the work lands
 
 Every agent node runs in its own task inside that bot's chat, titled `Workflow <name> — <node id>`. Nothing is hidden: open the bot and read the full transcript, the tool calls, the approvals. That task is the audit trail.

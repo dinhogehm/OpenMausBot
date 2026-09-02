@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { Workflow, WorkflowIssue, WorkflowRun } from "../shared/workflow.ts";
+import type { BotCapabilities, Workflow, WorkflowIssue, WorkflowRun } from "../shared/workflow.ts";
 import {
   handleWorkflowRequest,
   workflowNotificationBotId,
@@ -35,10 +35,14 @@ function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: strin
   /** Test-settable seam: onInterrupt runs inside the engine's await of
    * interruptTurn — the window in which a trigger could start a fresh run. */
   const hooks: { onInterrupt: (() => void) | null } = { onInterrupt: null };
+  /** Per-bot flags a test sets; a bot not listed carries none. */
+  const capabilities = new Map<string, BotCapabilities>();
+  const botCapabilities = (botId: string): BotCapabilities | null => capabilities.get(botId) ?? {};
   const engine = new WorkflowEngine({
     store,
     now,
     botState: () => "ready",
+    botCapabilities,
     createTask: () => ({ threadId: `thread-${++taskSeq}` }),
     startTurn: (botId, threadId, prompt) => {
       dispatches.push({ botId, threadId, prompt });
@@ -49,7 +53,7 @@ function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: strin
       hooks.onInterrupt?.();
     },
   });
-  const deps: WorkflowApiDeps = { store, engine, ...(onWorkflowDeleted ? { onWorkflowDeleted } : {}) };
+  const deps: WorkflowApiDeps = { store, engine, botCapabilities, ...(onWorkflowDeleted ? { onWorkflowDeleted } : {}) };
   const call = (method: string, target: string, body?: unknown) => {
     const url = new URL(target, "http://omb.test");
     return handleWorkflowRequest(deps, {
@@ -59,7 +63,7 @@ function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: strin
       readBody: async () => body ?? {},
     });
   };
-  return { store, engine, deps, call, dispatches, interrupts, hooks };
+  return { store, engine, deps, call, dispatches, interrupts, hooks, capabilities };
 }
 
 const agentGraph = (): WorkflowInput => ({
@@ -608,5 +612,87 @@ describe("workflowNotificationBotId", () => {
     expect(workflowNotificationBotId(graph, run({ currentNodeId: "b", currentThreadId: "t-b" }), lookup([]))).toBeUndefined();
     expect(workflowNotificationBotId(null, run(), lookup(["bot-a"]))).toBeUndefined();
     expect(workflowNotificationBotId(workflow([{ kind: "approval", id: "gate", prompt: "?" }]), run({ currentNodeId: "gate" }), lookup(["bot-a"]))).toBeUndefined();
+  });
+});
+
+describe("workflow capabilities", () => {
+  /** agentGraph() whose one node is "merge" and requires the merge flag. */
+  const mergeGraph = (): WorkflowInput => ({
+    ...agentGraph(),
+    entryNodeId: "merge",
+    nodes: [
+      { kind: "agent", id: "merge", botId: "bot-a", instructions: "Merge the PR.", outcomes: ["done"], requires: ["merge"] },
+    ],
+    layout: {},
+  });
+  const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);
+
+  it("lists a node whose bot lacks the required capability as a missing-capability error, cleared once the bot is flagged", async () => {
+    const { call, capabilities } = harness();
+    const created = await call("POST", "/api/workflows", mergeGraph());
+    expect(created?.status).toBe(201);
+    const workflow = bodyOf(created).workflow as Workflow & { issues: WorkflowIssue[] };
+    expect(workflow.nodes[0]).toMatchObject({ requires: ["merge"] });
+    expect(workflow.issues).toContainEqual({
+      severity: "error",
+      code: "missing-capability",
+      nodeId: "merge",
+      message: 'Node "merge" requires "merge" but its bot "bot-a" is not allowed to merge.',
+    });
+    // The structural issues still ride along: the two lists are merged, not replaced.
+    expect(codes(workflow.issues)).toContain("unwired-failure");
+
+    const listed = bodyOf(await call("GET", "/api/workflows")).workflows as Array<Workflow & { issues: WorkflowIssue[] }>;
+    expect(codes(listed[0]!.issues)).toContain("missing-capability");
+
+    capabilities.set("bot-a", { canMerge: true });
+    const relisted = bodyOf(await call("GET", "/api/workflows")).workflows as Array<Workflow & { issues: WorkflowIssue[] }>;
+    expect(codes(relisted[0]!.issues)).not.toContain("missing-capability");
+    expect(errors(relisted[0]!.issues)).toEqual([]);
+  });
+
+  it("refuses to start a run on a missing capability, answering the combined issues, and starts once granted", async () => {
+    const { call, capabilities, dispatches, store } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", mergeGraph())).workflow.id as string;
+    const refused = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(refused?.status).toBe(400);
+    expect(bodyOf(refused).error).toMatch(/^invalid workflow: Node "merge" requires "merge" but its bot "bot-a" is not allowed to merge/);
+    expect(codes(bodyOf(refused).issues)).toContain("missing-capability");
+    expect(codes(bodyOf(refused).issues)).toContain("unwired-failure");
+    expect(store.listRuns(id)).toEqual([]);
+    expect(dispatches).toHaveLength(0);
+
+    capabilities.set("bot-a", { canMerge: true });
+    expect((await call("POST", `/api/workflows/${id}/runs`, {}))?.status).toBe(201);
+    expect(dispatches).toHaveLength(1);
+  });
+
+  it("refuses an unknown capability name at the door and PATCHes known ones through, null clearing the field", async () => {
+    const { call, store } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id as string;
+    const unknown = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], requires: ["ship"] }],
+    });
+    expect(unknown?.status).toBe(400);
+    expect(bodyOf(unknown).error).toMatch(/^nodes\.0\.requires/);
+    expect(store.get(id)?.nodes[0]).not.toHaveProperty("requires");
+
+    const known = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], requires: ["deploy", "merge"] }],
+    });
+    expect(known?.status).toBe(200);
+    expect(store.get(id)?.nodes[0]).toMatchObject({ requires: ["deploy", "merge"] });
+    // A duplicate is a shape the validator reports; the draft still saves.
+    const doubled = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], requires: ["merge", "merge"] }],
+    });
+    expect(doubled?.status).toBe(200);
+    expect(codes(bodyOf(doubled).workflow.issues)).toContain("bad-requires");
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], requires: null }],
+    });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.nodes[0]).not.toHaveProperty("requires");
   });
 });

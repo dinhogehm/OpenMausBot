@@ -440,6 +440,12 @@ export interface BotRecord {
   /** Tools this bot may always use without asking, even outside auto mode
    * (set by "Always allow" on an approval card). */
   alwaysAllow?: string[];
+  /** Standing permission to merge pull requests. A workflow node that
+   * `requires` "merge" is only dispatched on a bot a person flagged this
+   * way, and every turn of the bot is told whether it may. Unset means no. */
+  canMerge?: boolean;
+  /** Standing permission to deploy to production; same contract as canMerge. */
+  canDeploy?: boolean;
   /** Speak this bot's replies aloud as they settle, without being asked.
    * Off by default: a hosted voice costs money per character, so speaking
    * is something you turn on, never something that happens to you. */

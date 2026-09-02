@@ -22,6 +22,23 @@ export const WORKFLOW_SCHEDULE_CATCH_UP_MS = 12 * 60 * 60_000;
 /** 24-hour wall-clock time for a daily schedule; shared with the API schema
  * so the door and the validator agree on what the scheduler can arm. */
 export const WORKFLOW_SCHEDULE_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** What a person may allow a bot to do beyond its ordinary tools. A node
+ * declares what it `requires`; a run only dispatches it on a bot carrying
+ * the matching flag, re-read at every dispatch so a permission revoked
+ * mid-run stops the run at the next node that needs it. */
+export const WORKFLOW_CAPABILITIES = ["merge", "deploy"] as const;
+export type WorkflowCapability = (typeof WORKFLOW_CAPABILITIES)[number];
+
+/** The per-bot flags as the bot record and the wire carry them. Undefined
+ * means false: a permission nobody granted is not a permission. */
+export interface BotCapabilities {
+  canMerge?: boolean;
+  canDeploy?: boolean;
+}
+
+const CAPABILITY_FLAG: Record<WorkflowCapability, keyof BotCapabilities> = { merge: "canMerge", deploy: "canDeploy" };
+const isWorkflowCapability = (value: unknown): value is WorkflowCapability =>
+  (WORKFLOW_CAPABILITIES as readonly unknown[]).includes(value);
 
 export type WorkflowNode =
   | {
@@ -32,6 +49,8 @@ export type WorkflowNode =
       outcomes: string[];
       timeoutMinutes?: number;
       retries?: number;
+      /** Capabilities the bot must carry for this node to be dispatched. */
+      requires?: WorkflowCapability[];
     }
   | { kind: "approval"; id: string; prompt: string; expiresHours?: number; onExpire?: "approved" | "rejected" }
   | { kind: "notify"; id: string; targetGroupId: string; template: string };
@@ -225,7 +244,9 @@ export interface WorkflowIssue {
     | "unreachable"
     | "reserved-outcome"
     | "bad-numbers"
-    | "bad-schedule";
+    | "bad-schedule"
+    | "bad-requires"
+    | "missing-capability";
   nodeId?: string;
   message: string;
 }
@@ -309,6 +330,30 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
         });
       }
       declared.add(outcome);
+    }
+    // `requires` gates a dispatch on the bot's flags: a name outside the
+    // known set could never be granted, a repeat is a typo the canvas should
+    // show, and a non-list is what a raw JSON body may carry in its place.
+    if (node.requires !== undefined) {
+      const badRequires = (message: string) => {
+        issues.push({ severity: "error", code: "bad-requires", nodeId: node.id, message });
+      };
+      const requires: unknown = node.requires;
+      const known = WORKFLOW_CAPABILITIES.join(", ");
+      if (!Array.isArray(requires)) {
+        badRequires(`Node "${node.id}" requires must be a list of capabilities (${known}).`);
+      } else {
+        const seen = new Set<WorkflowCapability>();
+        for (const capability of requires) {
+          if (!isWorkflowCapability(capability)) {
+            badRequires(`Node "${node.id}" requires an unknown capability "${String(capability)}"; known ones are ${known}.`);
+          } else if (seen.has(capability)) {
+            badRequires(`Node "${node.id}" requires "${capability}" more than once.`);
+          } else {
+            seen.add(capability);
+          }
+        }
+      }
     }
   }
 
@@ -484,5 +529,55 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
     }
   }
 
+  return issues;
+}
+
+/** The capabilities `requires` names that `capabilities` does not grant, in
+ * declaration order, once each. Names the validator refuses (unknown, or
+ * not a list at all) are skipped here: they are a `bad-requires` shape
+ * problem, not a missing flag. Pure, and shared by the engine's dispatch
+ * check and capabilityIssues so the two can never disagree. */
+export function missingCapabilities(
+  requires: WorkflowCapability[] | undefined,
+  capabilities: BotCapabilities,
+): WorkflowCapability[] {
+  const missing: WorkflowCapability[] = [];
+  if (!Array.isArray(requires)) return missing;
+  for (const capability of requires) {
+    if (!isWorkflowCapability(capability) || missing.includes(capability)) continue;
+    if (capabilities[CAPABILITY_FLAG[capability]] !== true) missing.push(capability);
+  }
+  return missing;
+}
+
+/** One wording for a missing flag, whether the canvas paints it or the
+ * engine records it as the reason a run stopped. */
+export function missingCapabilityMessage(node: { id: string; botId: string }, capability: WorkflowCapability): string {
+  return `Node "${node.id}" requires "${capability}" but its bot "${node.botId}" is not allowed to ${capability}.`;
+}
+
+/** Pure: flags nodes whose bot lacks a required capability. `lookup` returns
+ * null for an unknown bot (that case is already reported elsewhere). Kept
+ * apart from validateWorkflow because it needs the bot roster — the shared
+ * validator judges the graph alone; this judges the graph against the bots
+ * it will run on, and both sets gate a run the same way. */
+export function capabilityIssues(
+  workflow: Workflow,
+  lookup: (botId: string) => BotCapabilities | null,
+): WorkflowIssue[] {
+  const issues: WorkflowIssue[] = [];
+  for (const node of workflow.nodes) {
+    if (node.kind !== "agent" || !node.requires?.length) continue;
+    const capabilities = lookup(node.botId);
+    if (capabilities === null) continue;
+    for (const capability of missingCapabilities(node.requires, capabilities)) {
+      issues.push({
+        severity: "error",
+        code: "missing-capability",
+        nodeId: node.id,
+        message: missingCapabilityMessage(node, capability),
+      });
+    }
+  }
   return issues;
 }

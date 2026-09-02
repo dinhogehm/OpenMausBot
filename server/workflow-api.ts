@@ -9,9 +9,12 @@
 import { z } from "zod";
 
 import {
+  capabilityIssues,
   validateWorkflow,
   WORKFLOW_APPROVAL_OUTCOMES,
+  WORKFLOW_CAPABILITIES,
   WORKFLOW_SCHEDULE_TIME_RE,
+  type BotCapabilities,
   type Workflow,
   type WorkflowEdge,
   type WorkflowIssue,
@@ -27,6 +30,10 @@ import type { WorkflowInput, WorkflowStore } from "./workflow-store.ts";
 export interface WorkflowApiDeps {
   store: WorkflowStore;
   engine: WorkflowEngine;
+  /** The merge/deploy flags a bot carries (store.bot in index.ts); null for
+   * a bot that no longer exists. Read on every listing and every start, so
+   * the canvas and the run gate see a toggle the moment a person flips it. */
+  botCapabilities: (botId: string) => BotCapabilities | null;
   /** Called once a definition is actually gone, so what pointed AT it can be
    * released — index.ts pauses the webhooks that targeted it, which would
    * otherwise answer 410 forever. A throw here is logged, never turned into
@@ -65,6 +72,9 @@ const agentNodeSchema = z.object({
   outcomes: z.array(outcomeName).max(100),
   timeoutMinutes: optionalNumber,
   retries: optionalNumber,
+  // The one node field with a closed vocabulary: a name outside it could
+  // never be granted, so the door refuses it like the validator would.
+  requires: z.array(z.enum(WORKFLOW_CAPABILITIES)).optional(),
 });
 const approvalNodeSchema = z.object({
   kind: z.literal("approval"),
@@ -208,16 +218,26 @@ const nullField = (field: string): WorkflowApiResponse => {
 };
 
 export type WorkflowWithIssues = Workflow & { issues: WorkflowIssue[] };
-const withIssues = (workflow: Workflow): WorkflowWithIssues => ({ ...workflow, issues: validateWorkflow(workflow) });
+/** The structural issues plus the per-bot capability ones — the same union
+ * the engine gates a start on, so what the canvas paints in red is exactly
+ * what Run is refused for. */
+const issuesOf = (deps: WorkflowApiDeps, workflow: Workflow): WorkflowIssue[] => [
+  ...validateWorkflow(workflow),
+  ...capabilityIssues(workflow, deps.botCapabilities),
+];
+const withIssues = (deps: WorkflowApiDeps, workflow: Workflow): WorkflowWithIssues => ({
+  ...workflow,
+  issues: issuesOf(deps, workflow),
+});
 
 const LIVE_RUN_STATUSES = new Set<WorkflowRunStatus>(["queued", "running", "waiting-approval"]);
 
 // ── handlers ──────────────────────────────────────────────────────────
-export function listWorkflows({ store }: WorkflowApiDeps): WorkflowApiResponse {
-  return { status: 200, body: { workflows: store.list().map(withIssues) } };
+export function listWorkflows(deps: WorkflowApiDeps): WorkflowApiResponse {
+  return { status: 200, body: { workflows: deps.store.list().map((workflow) => withIssues(deps, workflow)) } };
 }
 
-export function createWorkflow({ store }: WorkflowApiDeps, body: unknown): WorkflowApiResponse {
+export function createWorkflow(deps: WorkflowApiDeps, body: unknown): WorkflowApiResponse {
   // Before the parse: stripNulls would turn `edges: null` into a missing
   // field, and "expected array, received undefined" hides what was sent.
   const nulled = nullRequiredField(body);
@@ -225,13 +245,14 @@ export function createWorkflow({ store }: WorkflowApiDeps, body: unknown): Workf
   const parsed = workflowCreateSchema.safeParse(body);
   if (!parsed.success) return badBody(parsed.error);
   const input: WorkflowInput = parsed.data;
-  return { status: 201, body: { workflow: withIssues(store.create(input)) } };
+  return { status: 201, body: { workflow: withIssues(deps, deps.store.create(input)) } };
 }
 
 /** A draft is saveable at every stage, so a graph the validator flags is a
  * 200 carrying its issues — never a 400. Only running one is refused
  * (POST /runs), which is the moment the issues actually matter. */
-export function patchWorkflow({ store }: WorkflowApiDeps, workflowId: string, body: unknown): WorkflowApiResponse {
+export function patchWorkflow(deps: WorkflowApiDeps, workflowId: string, body: unknown): WorkflowApiResponse {
+  const { store } = deps;
   if (!store.get(workflowId)) return notFound("workflow");
   const nulled = nullRequiredField(body);
   if (nulled !== undefined) return nullField(nulled);
@@ -242,7 +263,7 @@ export function patchWorkflow({ store }: WorkflowApiDeps, workflowId: string, bo
   for (const field of CLEARABLE_FIELDS) {
     if (raw?.[field] === null) patch[field] = undefined;
   }
-  return { status: 200, body: { workflow: withIssues(store.update(workflowId, patch)) } };
+  return { status: 200, body: { workflow: withIssues(deps, store.update(workflowId, patch)) } };
 }
 
 const liveRuns = (store: WorkflowStore, workflowId: string) =>
@@ -304,7 +325,8 @@ export function listAllRuns({ store }: WorkflowApiDeps, limitParam: string | nul
   return { status: 200, body: { runs: store.listRuns().slice(0, limit) } };
 }
 
-export function startRun({ store, engine }: WorkflowApiDeps, workflowId: string, body: unknown): WorkflowApiResponse {
+export function startRun(deps: WorkflowApiDeps, workflowId: string, body: unknown): WorkflowApiResponse {
+  const { store, engine } = deps;
   const workflow = store.get(workflowId);
   if (!workflow) return notFound("workflow");
   const parsed = startRunBodySchema.safeParse(body ?? {});
@@ -314,7 +336,9 @@ export function startRun({ store, engine }: WorkflowApiDeps, workflowId: string,
   } catch (error) {
     if (isUnknownEntity(error)) return notFound("workflow");
     if (isInvalidWorkflow(error)) {
-      return { status: 400, body: { error: errorMessage(error), issues: validateWorkflow(workflow) } };
+      // The engine refused on the same union the listing paints, capability
+      // issues included; answer with all of it so the canvas can show why.
+      return { status: 400, body: { error: errorMessage(error), issues: issuesOf(deps, workflow) } };
     }
     throw error;
   }

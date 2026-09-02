@@ -10,6 +10,9 @@
  * and the notify node; the real harness wiring (Task 6) plugs into the DI
  * surface declared here. */
 import {
+  capabilityIssues,
+  missingCapabilities,
+  missingCapabilityMessage,
   parseWorkflowOutcome,
   validateWorkflow,
   WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H,
@@ -23,7 +26,9 @@ import {
   WORKFLOW_NOTIFY_OUTCOME,
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
   workflowRoutingFingerprint,
+  type BotCapabilities,
   type Workflow,
+  type WorkflowIssue,
   type WorkflowNode,
   type WorkflowNodeResult,
   type WorkflowNotificationKind,
@@ -48,6 +53,11 @@ export interface WorkflowEngineOptions {
   /** Gates dispatch: "busy" parks the run for the reconciler's per-bot FIFO,
    * "missing" fails it terminally (the bot was deleted). */
   botState: (botId: string) => "ready" | "busy" | "missing";
+  /** The merge/deploy flags a bot carries RIGHT NOW (store.bot in index.ts);
+   * null for a bot that no longer exists. Read at every start, resume and
+   * dispatch — never cached on the run — so a permission a person revokes
+   * mid-run stops the run at the next node that needs it. */
+  botCapabilities: (botId: string) => BotCapabilities | null;
   /** Creates the isolated TaskRecord where a node runs (auditable transcript
    * in the bot's chat). */
   createTask: (botId: string, title: string) => { threadId: string } | null;
@@ -508,7 +518,7 @@ export class WorkflowEngine {
   ): WorkflowRun {
     const workflow = this.store.get(workflowId);
     if (!workflow) throw new Error(`unknown workflow: ${workflowId}`);
-    const firstError = validateWorkflow(workflow).find((issue) => issue.severity === "error");
+    const firstError = this.executionIssues(workflow).find((issue) => issue.severity === "error");
     if (firstError) throw new Error(`invalid workflow: ${firstError.message}`);
     // One active run per workflow: a second start waits its turn in FIFO order.
     const hasActive = this.store
@@ -529,6 +539,13 @@ export class WorkflowEngine {
     if (hasActive) return run;
     this.dispatchNode(run.id, workflow.entryNodeId);
     return this.store.getRun(run.id) ?? run;
+  }
+
+  /** Everything that gates EXECUTION: the structural issues plus the per-bot
+   * capability ones — the same union the API paints, so a run is refused for
+   * exactly what the canvas shows in red. */
+  private executionIssues(workflow: Workflow): WorkflowIssue[] {
+    return [...validateWorkflow(workflow), ...capabilityIssues(workflow, this.options.botCapabilities)];
   }
 
   /** Runs a webhook still owns — what its pending cap counts. */
@@ -567,7 +584,7 @@ export class WorkflowEngine {
     // run with an honest reason rather than a validation message).
     const workflow = this.store.get(run.workflowId);
     if (workflow) {
-      const firstError = validateWorkflow(workflow).find((issue) => issue.severity === "error");
+      const firstError = this.executionIssues(workflow).find((issue) => issue.severity === "error");
       if (firstError) throw new Error(`invalid workflow: ${firstError.message}`);
     }
     const hasActive = this.store
@@ -845,6 +862,28 @@ export class WorkflowEngine {
     const botState = this.options.botState(node.botId);
     if (botState === "missing") {
       this.failNode(runId, `the bot for node "${node.id}" no longer exists`);
+      return;
+    }
+    // Re-read at EVERY dispatch, not only when the run started: a person may
+    // have revoked the flag while an earlier node ran. A lookup that knows
+    // nothing about the bot (null under a botState that did not say missing)
+    // counts as carrying nothing — a permission nobody granted is not a
+    // permission. Terminal, not retryable: no retry can grant what only a
+    // person can, so this never enters attemptFailure or takes the "failed"
+    // edge — the run stops here and says why.
+    const lacking = missingCapabilities(node.requires, this.options.botCapabilities(node.botId) ?? {});
+    if (lacking.length > 0) {
+      // Point the receipt at THIS node first, so the failure reads "at node
+      // deploy" and a resume — once the flag is back — picks up here rather
+      // than re-running the node that just finished.
+      const refused = this.store.patchRun(runId, {
+        currentNodeId: node.id,
+        dispatchedAt: undefined,
+        nextAttemptAt: undefined,
+        currentThreadId: undefined,
+      });
+      if (!refused) return;
+      this.failNode(runId, missingCapabilityMessage(node, lacking[0]!));
       return;
     }
     if (botState === "busy") {
