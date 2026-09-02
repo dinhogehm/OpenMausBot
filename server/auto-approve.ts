@@ -140,10 +140,16 @@ export function autoVerdict(
     // opposite kind of decision: a person named that exact program and said
     // "this one, always" — and a bot that may not run it while nobody is
     // watching can never finish a workflow node, only time out three times.
-    // So the named grant stands; only the blanket mode is withheld. A guard
-    // that would have carded anyway keeps its own name; the block is only
-    // the story when it is the thing that changed the outcome.
-    if (grant?.source === "always-allow") return grant;
+    // So the named grant stands; only the blanket mode is withheld. Two
+    // shapes of "named" are not narrow enough to stand with nobody watching:
+    // a grant on the user's live desktop (this branch runs before the
+    // local-computer one, and unattended must never be MORE permissive than
+    // attended), and a command-tool key with no program segment — "approve
+    // the command I could not even name". A guard that would have carded
+    // anyway keeps its own name; the block is only the story when it is the
+    // thing that changed the outcome.
+    const namedNarrowly = context?.scope !== "local-computer" && key !== tool;
+    if (grant?.source === "always-allow" && namedNarrowly) return grant;
     if (grant) return { approve: null, source: "unattended-block", rule: grant.rule };
     if (destructive) return { approve: null, source: "destructive-guard", rule: destructive };
     if (sensitive) return { approve: null, source: "sensitive-guard", rule: sensitive };

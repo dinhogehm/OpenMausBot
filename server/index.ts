@@ -1805,6 +1805,9 @@ bus.subscribe((event: RuntimeEvent) => {
               decision: "auto-approved",
               source: verdict.source,
               rule: verdict.rule,
+              // a named grant may now fire with nobody watching; the log must
+              // be able to tell those rows from the ones a person was present for
+              unattended: unattended || undefined,
             });
           } catch {
             // couldn't answer it for them — hand it back to the human

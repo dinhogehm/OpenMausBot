@@ -156,4 +156,33 @@ describe("unattended turns", () => {
     expect(autoDecision(bot, "Bash", "ls -la")).toBeTruthy();
     expect(autoDecision(bot, "Bash", "ls -la", { unattended: false })).toBeTruthy();
   });
+
+  it("never lets a grant on the live desktop fire unattended — unattended must not out-permit attended", () => {
+    const desktop = { alwaysAllow: ["local-computer:mcp__computer__click"] };
+    const unattended = autoVerdict(desktop, "mcp__computer__click", "Click Submit", {
+      unattended: true,
+      scope: "local-computer",
+    });
+    expect(unattended.approve).toBeNull();
+    expect(unattended.source).toBe("unattended-block");
+    // attended, the same grant is refused too (host control is not a remembered thing)
+    expect(autoDecision(desktop, "mcp__computer__click", "Click Submit", { scope: "local-computer" })).toBeNull();
+  });
+
+  it("withholds a command-tool grant that names no program: nobody can approve a command they could not name", () => {
+    const bare = { alwaysAllow: ["Bash"] };
+    const verdict = autoVerdict(bare, "Bash", "", { unattended: true });
+    expect(verdict.approve).toBeNull();
+    expect(verdict.source).toBe("unattended-block");
+  });
+
+  it("lets the sensitive guard beat a named grant unattended, just as it does attended", () => {
+    const reader = { alwaysAllow: ["Bash:cat"] };
+    const unattended = autoVerdict(reader, "Bash", "cat ~/.ssh/id_rsa", { unattended: true });
+    expect(unattended.approve).toBeNull();
+    expect(unattended.source).toBe("sensitive-guard");
+    expect(autoVerdict(reader, "Bash", "cat ~/.ssh/id_rsa").source).toBe("sensitive-guard");
+    // the same grant still works on an innocent file, unattended
+    expect(autoDecision(reader, "Bash", "cat README.md", { unattended: true })).toBeTruthy();
+  });
 });
