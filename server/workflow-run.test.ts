@@ -1945,7 +1945,7 @@ describe("WorkflowEngine schedules", () => {
     h.setNow(10_000);
     await h.engine.tick();
     const slot = h.store.get(workflow.id)!.nextRunAt!;
-    const advances: Array<{ value: number | null; dispatchesSoFar: number }> = [];
+    const advances: Array<{ value: number | null | undefined; dispatchesSoFar: number }> = [];
     const setNextRunAt = h.store.setNextRunAt.bind(h.store);
     vi.spyOn(h.store, "setNextRunAt").mockImplementation((id, value) => {
       advances.push({ value, dispatchesSoFar: h.dispatches.length });
@@ -2192,8 +2192,42 @@ describe("WorkflowEngine schedules", () => {
       const workflow = h.store.create(daily());
       h.setNow(10_000);
       await expect(h.engine.tick()).resolves.toBeUndefined();
-      expect(h.store.get(workflow.id)?.nextRunAt ?? null).toBeNull();
+      // Unarmed, never disarmed: a recurring schedule must not retire itself
+      // because one date calculation threw.
+      expect(h.store.get(workflow.id)?.nextRunAt).toBeUndefined();
       expect(warn).toHaveBeenCalledWith(expect.stringMatching(/nextOccurrence failed: clock is broken/));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("re-arms a daily schedule whose advance could not be computed", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let broken = false;
+      const h = harness({
+        nextOccurrence: (_schedule, after) => {
+          if (broken) throw new Error("clock is broken");
+          return after + HOUR;
+        },
+      });
+      const workflow = h.store.create(daily());
+      h.setNow(10_000);
+      await h.engine.tick();
+      const slot = h.store.get(workflow.id)!.nextRunAt!;
+
+      // The slot fires, but computing the NEXT one throws.
+      broken = true;
+      h.setNow(slot);
+      await h.engine.tick();
+      expect(h.store.get(workflow.id)?.nextRunAt).toBeUndefined();
+
+      // A later tick with a working clock arms it again — the workflow was
+      // never silently retired.
+      broken = false;
+      h.setNow(slot + HOUR);
+      await h.engine.tick();
+      expect(typeof h.store.get(workflow.id)?.nextRunAt).toBe("number");
     } finally {
       warn.mockRestore();
     }

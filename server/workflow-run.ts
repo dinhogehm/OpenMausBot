@@ -242,16 +242,22 @@ export class WorkflowEngine {
       // re-arms it, by putting the field back to undefined.
       if (workflow.nextRunAt === null) continue;
       if (workflow.nextRunAt === undefined) {
-        this.store.setNextRunAt(workflow.id, this.initialOccurrence(workflow, schedule, now));
+        const first = this.initialOccurrence(workflow, schedule, now);
+        // Same reasoning as the advance below: only a `once` that can never
+        // happen is a deliberate disarm. A recurring schedule with no slot
+        // stays unarmed so the next sweep tries the computation again.
+        if (first !== null || schedule.type === "once") this.store.setNextRunAt(workflow.id, first);
         continue;
       }
       const scheduledFor = workflow.nextRunAt;
       if (scheduledFor > now) continue;
-      // Persist the advance FIRST — the double-fire guard.
-      this.store.setNextRunAt(
-        workflow.id,
-        schedule.type === "once" ? null : this.occurrenceAfter(schedule, Math.max(now, scheduledFor)),
-      );
+      // Persist the advance FIRST — the double-fire guard. `null` is reserved
+      // for a deliberate disarm (a spent `once`), which the sweep then skips
+      // forever: a recurring schedule whose next slot could not be computed
+      // goes back to `undefined` instead, so the next tick re-arms it rather
+      // than silently retiring the workflow on one bad date calculation.
+      const advanced = schedule.type === "once" ? null : this.occurrenceAfter(schedule, Math.max(now, scheduledFor));
+      this.store.setNextRunAt(workflow.id, schedule.type !== "once" && advanced === null ? undefined : advanced);
       if (now - scheduledFor > WORKFLOW_SCHEDULE_CATCH_UP_MS) {
         this.recordMissedRun(workflow, scheduledFor, now);
         continue;

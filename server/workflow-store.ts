@@ -167,11 +167,14 @@ export class WorkflowStore {
    * delete. An unchanged value (null and undefined count as equal) is a
    * no-op, so a sweep that keeps computing "nothing to arm" never rewrites
    * the file every tick. */
-  setNextRunAt(id: string, value: number | null): Workflow | null {
+  setNextRunAt(id: string, value: number | null | undefined): Workflow | null {
     const at = this.workflows.findIndex((workflow) => workflow.id === id);
     if (at === -1) return null;
     const current = this.workflows[at]!;
-    if ((current.nextRunAt ?? null) === value) return structuredClone(current);
+    // The three states are distinct and the difference is load-bearing:
+    // `undefined` re-arms on the next sweep, `null` stays disarmed. Folding
+    // them together here would make a disarm unrecoverable.
+    if (current.nextRunAt === value) return structuredClone(current);
     const patched: Workflow = { ...current, nextRunAt: value };
     const next = this.workflows.slice();
     next[at] = patched;

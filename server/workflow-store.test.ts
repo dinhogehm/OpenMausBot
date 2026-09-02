@@ -187,15 +187,20 @@ describe("WorkflowStore nextRunAt", () => {
     expect(h.open().get(created.id)?.nextRunAt).toBeNull();
   });
 
-  it("setNextRunAt is a no-op on an unchanged value and null on an unknown id", () => {
+  it("setNextRunAt keeps the three clock states apart and is a no-op on an unchanged one", () => {
     const h = harness();
     const created = h.store.create(input());
     const emittedBefore = h.emitted.length;
-    // undefined and null both mean "nothing armed": no write, no frame.
-    expect(h.store.setNextRunAt(created.id, null)?.nextRunAt).toBeUndefined();
+    // Disarming an unarmed workflow is a real transition: `undefined` means
+    // "the sweep will arm this", `null` means "leave it alone forever", and
+    // folding them together would make a disarm impossible to express.
+    expect(h.store.setNextRunAt(created.id, null)?.nextRunAt).toBeNull();
+    // Back to unarmed, so the next sweep recomputes the slot.
+    expect(h.store.setNextRunAt(created.id, undefined)?.nextRunAt).toBeUndefined();
     h.store.setNextRunAt(created.id, 9_000);
     expect(h.store.setNextRunAt(created.id, 9_000)?.nextRunAt).toBe(9_000);
-    expect(h.emitted.slice(emittedBefore)).toHaveLength(1);
+    // Three writes, three frames; the repeated 9_000 adds none.
+    expect(h.emitted.slice(emittedBefore)).toHaveLength(3);
     expect(h.store.setNextRunAt("nope", 1)).toBeNull();
   });
 
