@@ -26,13 +26,15 @@ const draft = (overrides: Partial<Workflow> = {}): Workflow => ({
   ...overrides,
 });
 
-/** A single agent node whose only outcome is wired nowhere: a terminal sink
- * with the implicit `failed` edge missing — valid, one warning. */
+/** A single agent node that wires its one outcome back to itself, leaving
+ * the implicit `failed` edge unwired — valid, one warning. (A node that
+ * wires nothing at all is a terminal sink and carries no warning.) */
 const validWithWarning = (overrides: Partial<Workflow> = {}): Workflow =>
   draft({
     id: "wf-2",
     entryNodeId: "a",
     nodes: [{ kind: "agent", id: "a", botId: "bot", instructions: "go", outcomes: ["done"] }],
+    edges: [{ from: "a", outcome: "done", to: "a" }],
     ...overrides,
   });
 

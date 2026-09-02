@@ -80,6 +80,8 @@ describe("workflows slice", () => {
       workflow: draft({
         entryNodeId: "a",
         nodes: [{ kind: "agent", id: "a", botId: "bot", instructions: "go", outcomes: ["done"] }],
+        // wired to itself so the node is not a silent terminal sink: one warning remains
+        edges: [{ from: "a", outcome: "done", to: "a" }],
       }),
     });
     expect(fixed.workflows[0]!.issues.map((issue) => issue.severity)).toEqual(["warning"]);

@@ -185,6 +185,21 @@ prompt dizendo o que ele pode e não pode, para que ele nem tente. É o "escopo 
 mínimo por agente" da lista original de melhorias, na forma mais barata que fecha o buraco
 real: o repositório privado do usuário não tem proteção de branch disponível no plano dele.
 
+### Aprovação de ferramentas em turno não assistido (2026-09-02, achado em produção)
+
+O primeiro run real parou 54 minutos na triagem: três timeouts de 15 min. Causa: turnos de
+workflow rodam `unattended`, e a regra de auto-aprovação bloqueava **qualquer** grant nesse
+modo — inclusive o `alwaysAllow` explícito do bot (`Bash:gh`, `Bash:git`…), que o usuário
+já tinha concedido. Um bot que não pode rodar sua ferramenta enquanto ninguém olha nunca
+termina um nó. Regra ajustada: o grant nomeado (`always-allow`) vale em turno não assistido;
+só o modo automático amplo (`autoApprove`) continua bloqueado ("unattended-block"); os guards
+de destrutivo/sensível seguem acima de tudo. Vale para webhooks e rotinas também — um grant
+explícito é explícito independentemente de quem iniciou o turno.
+
+Dois ajustes de UX do mesmo episódio: o aviso "sem aresta failed" deixou de aparecer em nós
+terminais (não há para onde uma falha ir), e o botão Run fica bloqueado, com motivo visível,
+enquanto o workflow já tem um run ativo — cinco cliques nervosos viraram cinco runs na fila.
+
 ## Fora do MVP entregue
 
 - **Export/import `openmaus.workflow`**: o formato está descrito neste documento, mas não foi

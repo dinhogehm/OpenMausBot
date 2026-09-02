@@ -21,6 +21,7 @@ import {
   type WorkflowListItem,
 } from "@/lib/workflow-state";
 import { nextRename } from "@/lib/rename";
+import { isActiveWorkflowRun } from "@/lib/workflow-observation";
 import type { WorkflowRun, WorkflowRunStatus } from "../../shared/workflow";
 import { cn } from "@/lib/cn";
 
@@ -224,7 +225,9 @@ export function WorkflowRow({
       ? `Fix ${errors} ${errors === 1 ? "error" : "errors"} before running`
       : busy !== null
         ? "Another action is still running"
-        : null;
+        : latestRun && isActiveWorkflowRun(latestRun)
+          ? "A run is already active — it finishes before another can start"
+          : null;
 
   useEffect(() => {
     if (!editing) return;

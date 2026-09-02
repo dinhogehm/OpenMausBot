@@ -119,6 +119,19 @@ describe("WorkflowRow", () => {
     expect(markup).toMatch(/Fix 1 error/);
   });
 
+  it("blocks Run with a visible reason while a run of this workflow is still active", () => {
+    const markup = row({ latestRun: run({ status: "running" }) });
+
+    expect(markup).toContain('aria-disabled="true"');
+    expect(markup.replace(/<[^>]*>/g, "")).toContain("A run is already active");
+  });
+
+  it("lets Run through again once the latest run is over", () => {
+    const markup = row({ latestRun: run({ status: "completed" }) });
+
+    expect(markup).not.toContain('aria-disabled="true"');
+  });
+
   it("leaves Run available when the graph only carries warnings", () => {
     const markup = row({
       workflow: workflow({

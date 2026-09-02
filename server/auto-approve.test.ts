@@ -4,7 +4,7 @@
 // question is never answered by the machine.
 import { describe, expect, it } from "vitest";
 
-import { approvalKey, autoDecision, looksDestructive, looksSensitive } from "./auto-approve.ts";
+import { approvalKey, autoDecision, autoVerdict, looksDestructive, looksSensitive } from "./auto-approve.ts";
 
 describe("looksDestructive", () => {
   const dangerous = [
@@ -136,15 +136,24 @@ describe("unattended turns", () => {
   const bot = { autoApprove: true, alwaysAllow: ["Bash:git"] };
 
   it("does not inherit auto mode when nobody started the turn", () => {
-    expect(autoDecision(bot, "Bash", "git status", { unattended: true })).toBeNull();
+    // `ls` is covered only by the blanket auto mode, not by a named grant
+    expect(autoDecision(bot, "Bash", "ls -la", { unattended: true })).toBeNull();
+    expect(autoVerdict(bot, "Bash", "ls -la", { unattended: true }).source).toBe("unattended-block");
   });
 
-  it("does not inherit an always-allow grant either", () => {
-    expect(autoDecision(bot, "Bash", "git log", { unattended: true })).toBeNull();
+  it("keeps an explicit always-allow grant: the person named that exact program", () => {
+    expect(autoDecision(bot, "Bash", "git log", { unattended: true })).toBeTruthy();
+    expect(autoVerdict(bot, "Bash", "git log", { unattended: true }).source).toBe("always-allow");
+  });
+
+  it("never lets a named grant widen into the destructive guard, unattended or not", () => {
+    const trusting = { autoApprove: true, alwaysAllow: ["Bash:rm"] };
+    expect(autoDecision(trusting, "Bash", "rm -rf /", { unattended: true })).toBeNull();
+    expect(autoDecision(trusting, "Bash", "rm -rf /")).toBeNull();
   });
 
   it("still auto-approves the same action when a person started the turn", () => {
-    expect(autoDecision(bot, "Bash", "git status")).toBeTruthy();
-    expect(autoDecision(bot, "Bash", "git status", { unattended: false })).toBeTruthy();
+    expect(autoDecision(bot, "Bash", "ls -la")).toBeTruthy();
+    expect(autoDecision(bot, "Bash", "ls -la", { unattended: false })).toBeTruthy();
   });
 });
