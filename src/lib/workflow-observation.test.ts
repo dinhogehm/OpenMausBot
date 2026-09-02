@@ -16,6 +16,7 @@ import {
   runDurationMs,
   runEdgeDecorator,
   runStatusLabel,
+  runStatusPhrase,
   traversedEdgeCounts,
   traversedEdgeKey,
   workflowRunsFor,
@@ -126,10 +127,25 @@ describe("nodeTone", () => {
       endedAt: 5_000,
     });
     expect(nodeTone(finished, "publish")).toBe("done");
-    // A cancelled run stopped somewhere without finishing that node — it is
-    // neither done nor failed, and claiming either would be a lie.
+  });
+
+  it("marks where a cancelled run stopped, instead of pretending it never got there", () => {
     const stopped = run({ status: "cancelled", currentNodeId: "review", endedAt: 5_000 });
-    expect(nodeTone(stopped, "review")).toBe("idle");
+    expect(nodeTone(stopped, "review")).toBe("stopped");
+    expect(nodeTone(stopped, "plan")).toBe("idle");
+  });
+
+  it("a cancelled run's node is stopped even when an earlier pass of it finished", () => {
+    // The loop case: "done" here would claim the pass that was cut short had
+    // produced an outcome, which is exactly what cancelling prevented.
+    const cancelledMidLoop = run({
+      status: "cancelled",
+      currentNodeId: "plan",
+      endedAt: 9_000,
+      nodeResults: [result({ nodeId: "plan", outcome: "revise" }), result({ nodeId: "review", outcome: "changes" })],
+    });
+    expect(nodeTone(cancelledMidLoop, "plan")).toBe("stopped");
+    expect(nodeTone(cancelledMidLoop, "review")).toBe("done");
   });
 
   it("a node running again in a loop is current, not done", () => {
@@ -239,6 +255,16 @@ describe("run labels and durations", () => {
     expect(runStatusLabel(missed)).toBe("Missed");
     expect(runStatusLabel(run({ status: "failed", error: "provider exploded" }))).toBe("Failed");
     expect(runStatusLabel(run({ status: "waiting-approval" }))).toBe("Waiting for approval");
+  });
+
+  it("phrases a status as a predicate so it can be read as a sentence", () => {
+    const sentence = (candidate: WorkflowRun) => `Observing a run that ${runStatusPhrase(candidate)}`;
+    expect(sentence(run({ status: "waiting-approval" }))).toBe("Observing a run that is waiting for approval");
+    expect(sentence(run({ status: "cancelled", endedAt: 2_000 }))).toBe("Observing a run that was cancelled");
+    expect(sentence(run({ status: "failed", error: "boom", endedAt: 2_000 }))).toBe("Observing a run that has failed");
+    expect(
+      sentence(run({ status: "failed", trigger: "schedule", error: "missed: closed", endedAt: 2_000 })),
+    ).toBe("Observing a run that was missed");
   });
 
   it("measures a finished run end to end and a live one up to now", () => {

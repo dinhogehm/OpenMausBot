@@ -76,20 +76,22 @@ import { validationSummary, type WorkflowListItem } from "@/lib/workflow-state";
 import { createSaveQueue, type SaveStatus } from "@/lib/workflow-save-queue";
 import {
   isActiveWorkflowRun,
-  nodeTone,
   observedRunFor,
   runEdgeDecorator,
-  runStatusLabel,
+  runStatusPhrase,
   workflowRunsFor,
 } from "@/lib/workflow-observation";
+import {
+  createObserveMode,
+  initialObserveModeState,
+  type ObserveModeState,
+} from "@/lib/workflow-observe-mode";
 import { useDesktopCapabilities } from "./DesktopCapabilities";
-import { WorkflowNodeCard } from "./WorkflowNodeCard";
-import { WorkflowRunNodeFooter } from "./WorkflowRunNodeFooter";
+import { WorkflowCanvasNode, type WorkflowObservation } from "./WorkflowCanvasNode";
 import { WorkflowRunTimeline } from "./WorkflowRunTimeline";
 import { WorkflowNodePanel, type WorkflowPanelBot } from "./WorkflowNodePanel";
 import {
   WORKFLOW_NODE_TYPE,
-  WORKFLOW_TARGET_HANDLE,
   addOutcome,
   connectEdge,
   connectionToWorkflowEdge,
@@ -122,7 +124,6 @@ import {
   validateWorkflow,
   type Workflow,
   type WorkflowNodeResult,
-  type WorkflowRun,
   type WorkflowSchedule,
   type WorkflowTriggers,
 } from "../../shared/workflow";
@@ -150,28 +151,17 @@ const NODE_KIND_META: Record<WorkflowNodeKind, { label: string; icon: typeof Use
 // ── the custom node ───────────────────────────────────────────────────
 type WorkflowFlowNode = Node<WorkflowGraphNodeData, typeof WORKFLOW_NODE_TYPE>;
 
-/** What the observation mode hands down to every card. It is a context and
- * not node data on purpose (see the file header): run state must never enter
- * the document ⇄ graph mapping, or a run frame would rebuild the node array
- * and un-measure the graph. `null` is the editor. */
-interface WorkflowObservation {
-  run: WorkflowRun;
-  /** The node an approve/reject/resume was issued for, and how it went —
-   * pinned to that node so the answer lands on the card that was pressed
-   * even after the run has moved on. */
-  action: { nodeId: string; busy: boolean; error: string | null } | null;
-  decide: (decision: "approved" | "rejected") => void;
-  resume: () => void;
-  openThread: (nodeId: string, threadId: string) => void;
-}
-
 const ObservationContext = createContext<WorkflowObservation | null>(null);
 
 /** Resolves its own roster references so the mapping stays pure and a bot
  * rename repaints the card without rebuilding the graph. The same
  * subscription is what makes a `workflow-run` frame repaint the run
- * decoration: the tone and footer below are derived here, per render, from
- * whatever the store currently holds. */
+ * decoration: `WorkflowCanvasNode` derives tone and footer per render from
+ * whatever the store currently holds.
+ *
+ * Everything below this line is xyflow-specific and nothing else: the roster
+ * lookups, and turning a `WorkflowHandleSpec` into a real `<Handle>`. The
+ * decisions live in `WorkflowCanvasNode`, where they can be tested. */
 function WorkflowFlowNodeRenderer({ data, selected, isConnectable }: NodeProps<WorkflowFlowNode>) {
   const { state } = useStore();
   const observation = useContext(ObservationContext);
@@ -181,52 +171,23 @@ function WorkflowFlowNodeRenderer({ data, selected, isConnectable }: NodeProps<W
     node.kind === "notify"
       ? (state.groups.find((group) => group.id === node.targetGroupId)?.name ?? null)
       : null;
-  const run = observation?.run ?? null;
-  // The answer to an action belongs to the card whose button was pressed.
-  const acting = observation?.action?.nodeId === node.id ? observation.action : null;
 
   return (
-    <WorkflowNodeCard
+    <WorkflowCanvasNode
       data={data}
       bot={bot}
       groupName={groupName}
       selected={selected}
-      tone={nodeTone(run, node.id)}
-      footer={
-        observation && (
-          <WorkflowRunNodeFooter
-            run={observation.run}
-            nodeId={node.id}
-            busy={acting?.busy ?? false}
-            error={acting?.error ?? null}
-            onApprove={() => observation.decide("approved")}
-            onReject={() => observation.decide("rejected")}
-            onResume={observation.resume}
-            onOpenThread={(threadId) => observation.openThread(node.id, threadId)}
-          />
-        )
-      }
-      // `isConnectable` has to be forwarded by hand: xyflow computes it from
-      // `nodesConnectable` and hands it to the NODE, while `<Handle>` defaults
-      // its own to true. Without this, Observe mode's `nodesConnectable={false}`
-      // still let a drag pull a new edge out of a read-only card.
-      renderTargetHandle={() => (
+      isConnectable={isConnectable}
+      observation={observation}
+      renderHandle={(handle) => (
         <Handle
-          type="target"
-          position={Position.Left}
-          id={WORKFLOW_TARGET_HANDLE}
-          isConnectable={isConnectable}
-          className="wf-handle-target"
-        />
-      )}
-      renderSourceHandle={(handle) => (
-        <Handle
-          key={handle.outcome}
-          type="source"
-          position={Position.Right}
-          id={handle.outcome}
-          isConnectable={isConnectable}
-          className={cn("wf-handle-source", handle.implicit && "wf-handle-implicit")}
+          key={handle.key}
+          type={handle.side}
+          position={handle.side === "target" ? Position.Left : Position.Right}
+          id={handle.id}
+          isConnectable={handle.isConnectable}
+          className={handle.className}
         />
       )}
     />
@@ -477,16 +438,11 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   const [nameDraft, setNameDraft] = useState<string | null>(null);
 
   // ── observation ─────────────────────────────────────────────────────
-  const [observing, setObserving] = useState(false);
-  const [switchingMode, setSwitchingMode] = useState(false);
-  /** Set only when the author picks a run by hand; null means "follow the
-   * live run", which is what makes entering Observe during a run follow it. */
-  const [pickedRunId, setPickedRunId] = useState<string | null>(null);
-  /** The node a run action was issued for, and how it went. Keyed by node
-   * because the run MOVES: approving a gate advances the run, so a failure
-   * reported against "the current node" would surface on whichever card the
-   * run reached next rather than on the button that was pressed. */
-  const [nodeAction, setNodeAction] = useState<{ nodeId: string; busy: boolean; error: string | null } | null>(null);
+  // One state object, because `createObserveMode` owns the transitions
+  // between its fields: the mode, the pick, and the action in flight all
+  // move together and their ordering rules are tested in the lib.
+  const [mode, setMode] = useState<ObserveModeState>(initialObserveModeState);
+  const { observing, switching, pickedRunId, action: nodeAction } = mode;
   const [cancelling, setCancelling] = useState(false);
 
   // The document is owned locally while it is dirty; refs carry the pieces
@@ -587,8 +543,11 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   }, [liveRun]);
 
   const edges = useMemo(
-    () => toGraphEdges(doc, selectedEdgeId, observing ? runEdgeDecorator(observedRun) : undefined),
-    [doc, selectedEdgeId, observing, observedRun],
+    // Guarded on the RUN, not the mode: with no run to compare against,
+    // muting every edge would make an un-run workflow read as a disabled
+    // one. Nothing to decorate, so the editor's own mapping stands.
+    () => toGraphEdges(doc, selectedEdgeId, observedRun ? runEdgeDecorator(observedRun) : undefined),
+    [doc, selectedEdgeId, observedRun],
   );
   const selectedNode = observing ? null : (doc.nodes.find((node) => node.id === selectedNodeId) ?? null);
   // Every node is a legal destination, itself included — review loops are a
@@ -624,6 +583,27 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
     }
     pendingKindRef.current = null;
   }, []);
+
+  // ── mode and run actions ────────────────────────────────────────────
+  // The ordering rules — save before pausing, refuse rather than park an
+  // unsaved edit, unpause and drain on the way out, and pin an action's
+  // answer to the run AND node it was issued for — live in
+  // `@/lib/workflow-observe-mode`, where they are unit-tested against the
+  // real save queue. What is left here is wiring.
+  const observeMode = useMemo(
+    () =>
+      createObserveMode({
+        queue,
+        cancelDebounce,
+        patch: (next) => setMode((current) => ({ ...current, ...next })),
+        send: async (runId, path, body) => {
+          const { run: next } = await api(`/api/workflow-runs/${runId}/${path}`, { method: "POST", body });
+          return next ?? null;
+        },
+        adopt: (next) => dispatch({ type: "workflowRunPatched", run: next }),
+      }),
+    [queue, cancelDebounce, dispatch],
+  );
 
   const schedule = useCallback(
     (kind: SaveKind) => {
@@ -680,7 +660,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
       // Unpause first: leaving the canvas while observing must still write
       // anything that was outstanding, and a paused queue's flush sends
       // nothing at all.
-      queue.setPaused(false);
+      observeMode.release();
       if (!queue.snapshot().dirty) return;
       void queue.flush().then((result) => {
         if (!result.ok) dispatch({ type: "error", message: `Workflow not saved: ${result.error}` });
@@ -740,6 +720,11 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
 
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => {
+      // Selection is an EDITING affordance: while observing, accent means
+      // "the run walked this", and a selected edge would wear the same paint
+      // with no panel to explain it — the edge panel is an editor's. Nothing
+      // is removable here either, so the whole handler is a no-op.
+      if (observing) return;
       let picked: string | null | undefined;
       const removed: string[] = [];
       for (const change of changes) {
@@ -761,7 +746,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
         });
       }
     },
-    [commit, selectedEdgeId],
+    [commit, selectedEdgeId, observing],
   );
 
   const onConnect = useCallback(
@@ -824,70 +809,12 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
     }
   };
 
-  // ── mode ────────────────────────────────────────────────────────────
-  // Observe is not allowed to be lossy. Anything outstanding is written
-  // BEFORE the queue is paused, and a write that fails keeps the canvas in
-  // Edit rather than parking unsaved work behind a paused queue. Pausing —
-  // instead of teaching `commit`/`schedule` about modes — is what guarantees
-  // the reverse direction too: an edit that somehow happens while observing
-  // stays dirty and goes out the moment Edit comes back.
-  const observe = async () => {
-    setSwitchingMode(true);
-    setRunError(null);
-    try {
-      cancelDebounce();
-      const flushed = await queue.flush();
-      if (!flushed.ok) {
-        setRunError(`Still editing — the latest changes could not be saved first: ${flushed.error}`);
-        return;
-      }
-      queue.setPaused(true);
-      // Follow whatever is live right now; a stale pick from an earlier visit
-      // would otherwise hide the run the author came to watch.
-      setPickedRunId(null);
-      setNodeAction(null);
-      setSelectedEdgeId(null);
-      setObserving(true);
-    } finally {
-      setSwitchingMode(false);
-    }
-  };
-
-  const edit = () => {
-    queue.setPaused(false);
-    setObserving(false);
-    setRunError(null);
-    if (queue.snapshot().dirty) {
-      cancelDebounce();
-      void queue.flush();
-    }
-  };
-
-  // ── run actions ─────────────────────────────────────────────────────
-  // Every response is folded into the store exactly like the SSE frame that
-  // will follow it, so the canvas never holds a private run. A 409 (someone
-  // else resolved the gate from the chat card, another window, or the expiry
-  // sweep) is reported as-is: the store already has — or is about to get —
-  // the real state, so there is nothing to undo, only something to say.
-  const runNodeAction = async (target: WorkflowRun, path: string, body: string) => {
-    const nodeId = target.currentNodeId;
-    if (!nodeId) return;
-    setNodeAction({ nodeId, busy: true, error: null });
-    try {
-      const { run: next } = await api(`/api/workflow-runs/${target.id}/${path}`, { method: "POST", body });
-      if (next) dispatch({ type: "workflowRunPatched", run: next });
-      setNodeAction(null);
-    } catch (cause) {
-      setNodeAction({ nodeId, busy: false, error: errorText(cause) });
-    }
-  };
-
   const decide = (decision: "approved" | "rejected") => {
-    if (observedRun) void runNodeAction(observedRun, "approval", JSON.stringify({ decision }));
+    if (observedRun) void observeMode.act(observedRun, "approval", JSON.stringify({ decision }));
   };
 
   const resume = () => {
-    if (observedRun) void runNodeAction(observedRun, "resume", "{}");
+    if (observedRun) void observeMode.act(observedRun, "resume", "{}");
   };
 
   const cancelRun = async () => {
@@ -978,11 +905,14 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
             value={nameDraft ?? doc.name}
             maxLength={120}
             aria-label="Workflow name"
-            // The one editing control that is not in the palette; leaving it
-            // writable in Observe would be the single way to dirty a paused
-            // document.
-            readOnly={observing}
-            aria-describedby={observing ? "wf-canvas-mode-reason" : undefined}
+            // The one editing control that is not in the palette. It locks
+            // from the moment the switch STARTS, not once it lands: entering
+            // Observe awaits a save, and a keystroke during that await is an
+            // edit the flush already missed.
+            readOnly={observing || switching}
+            aria-describedby={
+              observing ? "wf-canvas-mode-reason" : switching ? "wf-canvas-mode-busy" : undefined
+            }
             onChange={(event) => {
               const next = event.target.value;
               setNameDraft(next);
@@ -1012,7 +942,10 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
             )}
             {saveLabel}
           </span>
-          {saveState === "error" && (
+          {/* A paused queue's flush sends nothing, so this button would be
+              a lie while observing. Entering Observe already refuses on an
+              unsaved document, so there is nothing here to retry. */}
+          {saveState === "error" && !observing && (
             <button
               type="button"
               onClick={() => {
@@ -1033,7 +966,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                 type="button"
                 aria-pressed={!observing}
                 onClick={() => {
-                  if (observing) edit();
+                  if (observing) observeMode.leave();
                 }}
                 className={cn(
                   "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11.5px] font-medium",
@@ -1047,14 +980,16 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                 type="button"
                 aria-pressed={observing}
                 onClick={() => {
-                  if (!observing && !switchingMode) void observe();
+                  if (!observing && !switching) void observeMode.enter();
                 }}
+                aria-disabled={switching ? true : undefined}
+                aria-describedby={switching ? "wf-canvas-mode-busy" : undefined}
                 className={cn(
                   "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11.5px] font-medium",
                   observing ? "bg-accent/15 text-accent" : "text-ink-secondary hover:bg-raised hover:text-ink",
                 )}
               >
-                {switchingMode ? (
+                {switching ? (
                   <Loader2 size={12} className="animate-spin" aria-hidden />
                 ) : (
                   <Eye size={12} aria-hidden />
@@ -1193,8 +1128,18 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
               the id the read-only name field points its description at. */}
           {observing && (
             <span id="wf-canvas-mode-reason" className="text-[11px] text-ink-secondary">
-              Observing{observedRun ? ` a ${runStatusLabel(observedRun).toLowerCase()} run` : ""} — the drawing is
-              read-only. Switch to Edit to change it.
+              Observing{observedRun ? ` a run that ${runStatusPhrase(observedRun)}` : ""} — the drawing is read-only.
+              Switch to Edit to change it.
+            </span>
+          )}
+          {switching && (
+            <span id="wf-canvas-mode-busy" role="status" className="text-[11px] text-ink-secondary">
+              Saving before it switches — Observe opens once the document is safely on the server.
+            </span>
+          )}
+          {mode.error && (
+            <span role="alert" className="min-w-0 text-[11px] text-danger">
+              {mode.error}
             </span>
           )}
           {headerIssues.length > 0 && (
@@ -1279,10 +1224,10 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
               pickedId={pickedRunId}
               now={now}
               onPick={(runId) => {
-                // A failure belongs to the run it happened on; carrying it
-                // into another run's view would be a lie.
-                setNodeAction(null);
-                setPickedRunId(runId);
+                // `actionOn` already refuses to show one run's failure on
+                // another's card; dropping it here also stops it coming back
+                // when the author returns to the run it happened on.
+                setMode((current) => ({ ...current, action: null, pickedRunId: runId }));
               }}
               onOpenStep={openStep}
             />

@@ -25,7 +25,7 @@ import type { WorkflowGraphEdgeDecoration } from "./workflow-graph";
 
 /** How a run decorates a node card. Lives here rather than in the card
  * because the vocabulary is an observation concept; the card re-exports it. */
-export type WorkflowNodeTone = "idle" | "current" | "done" | "failed" | "waiting";
+export type WorkflowNodeTone = "idle" | "current" | "done" | "failed" | "waiting" | "stopped";
 
 /** A run the engine may still move. Everything else is a receipt. */
 const ACTIVE_RUN_STATUSES: ReadonlySet<WorkflowRunStatus> = new Set<WorkflowRunStatus>([
@@ -63,15 +63,22 @@ export function observedRunFor(
 
 /** `current` is deliberately narrow: only a run the engine can still move
  * has a node in flight. A completed run's `currentNodeId` is simply where it
- * ended (that node is `done`), and a cancelled run's is a node that never
- * finished — neither done nor failed, so it stays idle rather than claiming
- * an outcome that was never recorded. */
+ * ended, and that node has a result, so the fallback below calls it `done`.
+ *
+ * A cancelled run is the case worth stating: its `currentNodeId` is a node
+ * that was interrupted mid-flight, and "where did it stop?" is the only
+ * question the author has after cancelling. `idle` would assert the run
+ * never got there; and in a review loop, where that node ALSO carries an
+ * earlier result, the fallback would call it `done` — claiming the pass that
+ * was cut short had finished. `stopped` is the honest answer, which is why
+ * it is decided here rather than left to the `nodeResults` fallback. */
 export function nodeTone(run: WorkflowRun | null | undefined, nodeId: string): WorkflowNodeTone {
   if (!run) return "idle";
   if (run.currentNodeId === nodeId) {
     if (run.status === "failed") return "failed";
     if (run.status === "waiting-approval") return "waiting";
     if (run.status === "running") return "current";
+    if (run.status === "cancelled") return "stopped";
   }
   return run.nodeResults.some((result) => result.nodeId === nodeId) ? "done" : "idle";
 }
@@ -156,6 +163,23 @@ const RUN_STATUS_LABEL: Record<WorkflowRunStatus, string> = {
  * author hunting for a broken graph that is not broken. */
 export function runStatusLabel(run: WorkflowRun): string {
   return isMissedWorkflowRun(run) ? "Missed" : RUN_STATUS_LABEL[run.status];
+}
+
+/** The same six states as a PREDICATE, for prose. Lowercasing a label reads
+ * "a waiting for approval run"; a phrase map is what turns that into a
+ * sentence — "a run that is waiting for approval". Tense carries the rest:
+ * a receipt `has`/`was`, a live run `is`. */
+const RUN_STATUS_PHRASE: Record<WorkflowRunStatus, string> = {
+  queued: "is queued",
+  running: "is running",
+  "waiting-approval": "is waiting for approval",
+  completed: "has completed",
+  failed: "has failed",
+  cancelled: "was cancelled",
+};
+
+export function runStatusPhrase(run: WorkflowRun): string {
+  return isMissedWorkflowRun(run) ? "was missed" : RUN_STATUS_PHRASE[run.status];
 }
 
 /** Never negative: a receipt written across a clock adjustment (or a live

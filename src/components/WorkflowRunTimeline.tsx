@@ -4,6 +4,7 @@
 // the `workflow-run` SSE frame keeps live — so there is no second copy of
 // run state anywhere, and a frame repaints it for free. No xyflow here
 // either: the whole panel is static markup a test can render.
+import { useEffect, useRef } from "react";
 import { AlertTriangle, ExternalLink, Loader2 } from "lucide-react";
 
 import { cn } from "@/lib/cn";
@@ -15,6 +16,7 @@ import {
   stepDurationMs,
 } from "@/lib/workflow-observation";
 import { isMissedWorkflowRun } from "@/lib/workflow-state";
+import { excerpt } from "./WorkflowNodeCard";
 import type { WorkflowNodeResult, WorkflowRun, WorkflowRunStatus } from "../../shared/workflow";
 
 const STATUS_TONE: Record<WorkflowRunStatus, string> = {
@@ -64,6 +66,11 @@ export interface WorkflowRunTimelineProps {
 }
 
 export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenStep }: WorkflowRunTimelineProps) {
+  const observedRowRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    observedRowRef.current?.scrollIntoView({ block: "nearest" });
+  }, [run?.id]);
+
   if (runs.length === 0) {
     return (
       <div className="space-y-2">
@@ -80,7 +87,9 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <section className="min-h-0 shrink-0">
         <div className="flex items-center justify-between gap-2">
-          <h2 className="text-[13.5px] font-semibold text-ink">Runs</h2>
+          <h2 id="wf-run-picker-heading" className="text-[13.5px] font-semibold text-ink">
+            Runs
+          </h2>
           {pickedId !== null && (
             <button
               type="button"
@@ -91,13 +100,21 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             </button>
           )}
         </div>
-        <ul className="mt-1.5 max-h-[168px] space-y-1 overflow-y-auto pr-0.5">
+        <ul
+          aria-labelledby="wf-run-picker-heading"
+          className="mt-1.5 max-h-[168px] space-y-1 overflow-y-auto pr-0.5"
+        >
           {runs.map((candidate) => {
             const observed = candidate.id === run?.id;
             return (
               <li key={candidate.id}>
                 <button
                   type="button"
+                  // The list scrolls and the followed run can be anywhere in
+                  // it — a live run started days after the one below it, or
+                  // an old one the author picked. Keeping the observed row
+                  // in view is what makes the panel readable without hunting.
+                  ref={observed ? observedRowRef : undefined}
                   onClick={() => onPick(candidate.id)}
                   aria-current={observed ? "true" : undefined}
                   className={cn(
@@ -190,7 +207,11 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                     </div>
                     {result.summary && (
                       <p className="mt-0.5 break-words text-[10.5px] leading-snug text-ink-secondary">
-                        {result.summary}
+                        {/* A summary is bounded at 2000 chars by the engine;
+                            printed whole it buries every other step in a
+                            320px column. The full text is one click away in
+                            the transcript. */}
+                        {excerpt(result.summary, 200)}
                       </p>
                     )}
                   </>

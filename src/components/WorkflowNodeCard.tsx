@@ -24,17 +24,20 @@ const TONE_RING: Record<WorkflowNodeTone, string> = {
   done: "ring-1 ring-success/50",
   failed: "ring-2 ring-danger/70",
   waiting: "ring-2 ring-warning/70",
+  stopped: "ring-2 ring-ink-secondary/60",
 };
 
-/** A ring is a hint; the badge is the sentence. Three of the five tones say
+/** A ring is a hint; the badge is the sentence. Four of the six tones say
  * something a reader must not have to infer from a colour — which node is in
- * flight, which one is holding a gate open, and where a run stopped — so
- * each is a word in the DOM. `done` needs none: the footer prints the
- * outcome the node actually produced. */
+ * flight, which one is holding a gate open, where a run broke, and where a
+ * cancelled one was interrupted — so each is a word in the DOM. `done` needs
+ * none: the footer prints the outcome the node actually produced, and `idle`
+ * is the editor's own resting state. */
 const TONE_BADGE: Partial<Record<WorkflowNodeTone, { label: string; className: string; pulse: boolean }>> = {
   current: { label: "Running", className: "bg-accent/15 text-accent", pulse: true },
   waiting: { label: "Waiting", className: "bg-warning/15 text-warning", pulse: true },
   failed: { label: "Stopped here", className: "bg-danger/15 text-danger", pulse: false },
+  stopped: { label: "Cancelled here", className: "bg-control text-ink-secondary", pulse: false },
 };
 
 const KIND_LABEL: Record<WorkflowNode["kind"], string> = {
