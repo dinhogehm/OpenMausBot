@@ -9,6 +9,7 @@ import {
   upsertWorkflow,
   upsertWorkflowRun,
   validationSummary,
+  withLiveIssues,
   WORKFLOW_RUNS_KEPT,
   type WorkflowListItem,
 } from "./workflow-state";
@@ -181,5 +182,32 @@ describe("validationSummary", () => {
         { severity: "warning", code: "unwired-failure", message: "" },
       ]),
     ).toEqual({ errors: 2, warnings: 1 });
+  });
+});
+
+describe("withLiveIssues", () => {
+  const requiresMerge = validWithWarning({
+    nodes: [{ kind: "agent", id: "a", botId: "bot", instructions: "go", outcomes: ["done"], requires: ["merge"] }],
+  });
+  const row = (workflow: Workflow, issues: WorkflowListItem["issues"] = []): WorkflowListItem => ({
+    ...workflow,
+    issues,
+  });
+
+  it("judges each row against the roster as it stands, never the stored snapshot", () => {
+    const stale = row(requiresMerge, [
+      { severity: "error", code: "missing-capability", nodeId: "a", message: "judged before the flag was granted" },
+    ]);
+    const [allowed] = withLiveIssues([stale], [{ id: "bot", canMerge: true }]);
+    expect(allowed!.issues.map((issue) => issue.code)).toEqual(["unwired-failure"]);
+
+    const [refused] = withLiveIssues([row(requiresMerge)], [{ id: "bot", canMerge: false }]);
+    expect(refused!.issues.map((issue) => issue.code)).toEqual(["unwired-failure", "missing-capability"]);
+    expect(validationSummary(refused!.issues).errors).toBe(1);
+  });
+
+  it("keeps the structural pass when the roster no longer has the bot", () => {
+    const [orphan] = withLiveIssues([row(requiresMerge)], []);
+    expect(orphan!.issues.map((issue) => issue.code)).toEqual(["unwired-failure"]);
   });
 });

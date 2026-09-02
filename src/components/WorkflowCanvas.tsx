@@ -72,7 +72,7 @@ import "./workflow-canvas.css";
 
 import { api, openNotificationTarget, useStore } from "@/state/store";
 import { cn } from "@/lib/cn";
-import { validationSummary, type WorkflowListItem } from "@/lib/workflow-state";
+import { liveWorkflowIssues, validationSummary, type WorkflowListItem } from "@/lib/workflow-state";
 import { capabilityLookup } from "@/lib/workflow-capabilities";
 import { createSaveQueue, type SaveStatus } from "@/lib/workflow-save-queue";
 import {
@@ -122,7 +122,6 @@ import {
 } from "@/lib/workflow-graph";
 import {
   WORKFLOW_SCHEDULE_TIME_RE,
-  capabilityIssues,
   validateWorkflow,
   type Workflow,
   type WorkflowNodeResult,
@@ -485,31 +484,35 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
     }),
   );
 
+  // The whole roster, hidden bots included: a node may still be bound to
+  // one, and the panel has to resolve it (and judge its permissions) rather
+  // than call it missing. Only `offeredBots` is handed out for a NEW binding.
   const bots = useMemo<WorkflowPanelBot[]>(
     () =>
-      state.bots
-        .filter((bot) => !bot.hidden)
-        .map(({ id, name, color, avatarUrl, avatarCrop, mascotBody, canMerge, canDeploy }) => ({
-          id,
-          name,
-          color,
-          avatarUrl,
-          avatarCrop,
-          mascotBody,
-          canMerge,
-          canDeploy,
-        })),
+      state.bots.map(({ id, name, color, avatarUrl, avatarCrop, mascotBody, canMerge, canDeploy, hidden }) => ({
+        id,
+        name,
+        color,
+        avatarUrl,
+        avatarCrop,
+        mascotBody,
+        canMerge,
+        canDeploy,
+        hidden,
+      })),
     [state.bots],
   );
+  const offeredBots = useMemo(() => bots.filter((bot) => !bot.hidden), [bots]);
   const groups = useMemo(() => state.groups.map(({ id, name }) => ({ id, name })), [state.groups]);
 
   // The same validators the server runs, on the document as it stands right
   // now — that is what keeps a badge from lying between two saves. The
   // capability pass reads the roster as the STORE holds it (hidden bots
   // included: a node may still point at one), so flipping "can merge" in a
-  // profile repaints the node that requires it with no save in between.
+  // profile repaints the node that requires it with no save in between. The
+  // list draws the same union, so the two can never disagree.
   const lookup = useMemo(() => capabilityLookup(state.bots), [state.bots]);
-  const issues = useMemo(() => [...validateWorkflow(doc), ...capabilityIssues(doc, lookup)], [doc, lookup]);
+  const issues = useMemo(() => liveWorkflowIssues(doc, lookup), [doc, lookup]);
   const { errors, warnings } = validationSummary(issues);
   const headerIssues = useMemo(() => documentIssues(issues), [issues]);
   const nodeIssues = useMemo(() => issuesByNode(issues), [issues]);
@@ -771,7 +774,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
 
   const addNode = (kind: WorkflowNodeKind) => {
     const id = nextNodeId(docRef.current, kind);
-    const node = createWorkflowNode(kind, id, { botId: bots[0]?.id, targetGroupId: groups[0]?.id });
+    const node = createWorkflowNode(kind, id, { botId: offeredBots[0]?.id, targetGroupId: groups[0]?.id });
     if (!node) return;
     const rect = paneRef.current?.getBoundingClientRect();
     const preferred = rect
@@ -794,7 +797,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   // text tied to the control with aria-describedby, never a `title` a
   // keyboard or touch user can never surface.
   const paletteBlocked: Partial<Record<WorkflowNodeKind, string>> = {
-    ...(bots.length === 0 ? { agent: "Add a bot before you can add an agent node" } : {}),
+    ...(offeredBots.length === 0 ? { agent: "Add a bot before you can add an agent node" } : {}),
     ...(groups.length === 0 ? { notify: "Create a room before you can add a notify node" } : {}),
   };
 

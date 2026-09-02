@@ -21,17 +21,20 @@ import {
   type WorkflowNode,
 } from "../../shared/workflow";
 
-/** The roster as the panel sees it: enough to draw the avatar, and the two
- * permission flags, so the picker can tag a bot and the Requires group can
- * say which requirement the chosen one falls short of. */
-export type WorkflowPanelBot = BotAvatarProps["bot"] & BotCapabilities & { id: string; name: string };
+/** The roster as the panel sees it: enough to draw the avatar, the two
+ * permission flags (so the picker can tag a bot and the Requires group can
+ * say which requirement the chosen one falls short of), and whether the bot
+ * is hidden in the sidebar — a node may still be bound to one. */
+export type WorkflowPanelBot = BotAvatarProps["bot"] & BotCapabilities & { id: string; name: string; hidden?: boolean };
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
 
 /** What the picker prints for a bot: its name, then the permissions it
- * holds. A native `<option>` can carry text and nothing else, so the tag IS
- * the text — which is also what a screen reader gets. */
+ * holds, then whether it is hidden. A native `<option>` can carry text and
+ * nothing else, so the tag IS the text — which is also what a screen reader
+ * gets. */
 export function botOptionLabel(bot: WorkflowPanelBot): string {
-  return [bot.name, ...grantedCapabilities(bot)].join(" · ");
+  const label = [bot.name, ...grantedCapabilities(bot)].join(" · ");
+  return bot.hidden ? `${label} (hidden)` : label;
 }
 
 export interface WorkflowPanelGroup {
@@ -210,6 +213,10 @@ export interface WorkflowNodePanelProps {
   node: WorkflowNode;
   issues: WorkflowIssue[];
   entry: boolean;
+  /** The whole roster, hidden bots included. Only visible bots are OFFERED
+   * for a new binding; a hidden one is resolved (avatar, name, permissions)
+   * while it is the bound bot, and listed as such, rather than called
+   * missing — which would be a lie the author cannot act on. */
   bots: WorkflowPanelBot[];
   groups: WorkflowPanelGroup[];
   /** Every outcome this node can route on, implicit failure path included. */
@@ -339,11 +346,13 @@ export function WorkflowNodePanel({
                       {node.botId ? `Missing bot ${node.botId}` : "Pick a bot"}
                     </option>
                   )}
-                  {bots.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {botOptionLabel(candidate)}
-                    </option>
-                  ))}
+                  {bots
+                    .filter((candidate) => !candidate.hidden || candidate.id === node.botId)
+                    .map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {botOptionLabel(candidate)}
+                      </option>
+                    ))}
                 </select>
               </div>
             </div>

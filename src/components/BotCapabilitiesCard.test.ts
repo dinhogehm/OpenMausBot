@@ -35,4 +35,11 @@ describe("BotCapabilitiesCard", () => {
     expect(text).toContain("Workflow steps that deploy will refuse to run on this bot otherwise.");
     expect(card({})).not.toContain("title=");
   });
+
+  it("presents the flags as standing permissions that reach chat and rooms, not a workflow-only setting", () => {
+    const text = card({}).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
+    expect(text).toContain("Standing permissions");
+    expect(text).toContain("Applies in chat and rooms too: the bot is told each turn what it may do.");
+    expect(text).not.toContain("Workflow permissions");
+  });
 });

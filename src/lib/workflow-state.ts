@@ -2,9 +2,20 @@
 // SSE fold both call these so the same merge rules are unit-testable
 // without a React tree: workflows keep server order and are patched in
 // place, runs stay newest-first under a fixed cap, and a `workflow` frame
-// that arrives without server-computed issues gets them recomputed here —
-// the validator is shared with the server, so the badge never drifts.
-import { validateWorkflow, type Workflow, type WorkflowIssue, type WorkflowRun } from "../../shared/workflow";
+// that arrives without server-computed issues gets structural ones
+// recomputed here. What a row STORES is only ever a snapshot, though:
+// capability issues depend on the bots' flags, which move on their own
+// `bot` frames, so the list is drawn from `withLiveIssues` over the current
+// roster — the same union the canvas draws — never from the stored value.
+import {
+  capabilityIssues,
+  validateWorkflow,
+  type BotCapabilities,
+  type Workflow,
+  type WorkflowIssue,
+  type WorkflowRun,
+} from "../../shared/workflow";
+import { capabilityLookup, type CapabilityBearer } from "./workflow-capabilities";
 
 /** How many runs the renderer keeps across every workflow. The boot
  * snapshot asks the server for exactly this many; live frames are capped
@@ -20,10 +31,37 @@ export type WorkflowListItem = Workflow & { issues: WorkflowIssue[] };
 export type WorkflowFrame = Workflow & { issues?: WorkflowIssue[] };
 
 /** Strip `issues` before validating: the validator only reads the model
- * fields, but keeping the list item shape honest costs nothing. */
+ * fields, but keeping the list item shape honest costs nothing. Only the
+ * structural pass is possible here — the slice knows no bots — which is one
+ * more reason the stored list is a snapshot and the rendered one is not. */
 function withIssues(workflow: WorkflowFrame): WorkflowListItem {
   const { issues, ...definition } = workflow;
   return { ...definition, issues: issues ?? validateWorkflow(definition) };
+}
+
+/** Every issue the server would report for this definition right now: the
+ * structural pass plus the capability pass against the given roster. The
+ * canvas and the list both draw this union, so a flag flipped in a bot's
+ * profile moves the badge and the Run gate without a save or a reload. */
+export function liveWorkflowIssues(
+  workflow: Workflow,
+  lookup: (botId: string) => BotCapabilities | null,
+): WorkflowIssue[] {
+  return [...validateWorkflow(workflow), ...capabilityIssues(workflow, lookup)];
+}
+
+/** The rows as they should be drawn. The stored `issues` snapshot is
+ * REPLACED, never merged: it may have been judged against a roster whose
+ * flags have since moved. */
+export function withLiveIssues(
+  workflows: readonly WorkflowListItem[],
+  bots: readonly CapabilityBearer[],
+): WorkflowListItem[] {
+  const lookup = capabilityLookup(bots);
+  return workflows.map((workflow) => {
+    const { issues: _snapshot, ...definition } = workflow;
+    return { ...definition, issues: liveWorkflowIssues(definition, lookup) };
+  });
 }
 
 export function upsertWorkflow(workflows: WorkflowListItem[], incoming: WorkflowFrame): WorkflowListItem[] {

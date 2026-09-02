@@ -13,6 +13,7 @@ import type { WorkflowNode } from "../../shared/workflow";
 
 const scout: WorkflowPanelBot = { id: "bot-a", name: "Scout", color: "green" };
 const rook: WorkflowPanelBot = { id: "bot-b", name: "Rook", color: "blue", canMerge: true, canDeploy: true };
+const ghost: WorkflowPanelBot = { id: "bot-h", name: "Ghost", color: "green", hidden: true };
 
 const agent = (overrides: Partial<Extract<WorkflowNode, { kind: "agent" }>> = {}): WorkflowNode => ({
   kind: "agent",
@@ -94,5 +95,28 @@ describe("WorkflowNodePanel — bot picker", () => {
     expect(markup).toContain(">Scout</option>");
     expect(markup).toContain(">Rook · merge · deploy</option>");
     expect(botOptionLabel({ id: "x", name: "Ivy", color: "green", canDeploy: true })).toBe("Ivy · deploy");
+  });
+});
+
+describe("WorkflowNodePanel — hidden bots", () => {
+  it("resolves the bound bot from the whole roster even when it is hidden, and says so", () => {
+    const markup = panel(agent({ botId: "bot-h", requires: ["merge"] }), [scout, ghost]);
+    const flat = text(markup);
+
+    expect(markup).toContain(">Ghost (hidden)</option>");
+    expect(flat).not.toContain("Missing bot");
+    // …and judges its permissions like any other bound bot
+    expect(flat).toContain("Ghost is not allowed to merge — enable it in the bot's settings");
+  });
+
+  it("never offers a hidden bot for a new binding", () => {
+    const markup = panel(agent(), [scout, ghost]);
+
+    expect(markup).toContain(">Scout</option>");
+    expect(markup).not.toContain("Ghost");
+  });
+
+  it("keeps the hidden mark after the permission tags", () => {
+    expect(botOptionLabel({ ...ghost, canMerge: true })).toBe("Ghost · merge (hidden)");
   });
 });
