@@ -980,7 +980,13 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                 type="button"
                 aria-pressed={observing}
                 onClick={() => {
-                  if (!observing && !switching) void observeMode.enter();
+                  if (!observing && !switching) {
+                    // Observe cannot deselect anything (onEdgesChange bails), so a
+                    // selection carried in from Edit would stay painted accent and
+                    // read as a traversed edge with no panel to explain it.
+                    setSelectedEdgeId(null);
+                    void observeMode.enter();
+                  }
                 }}
                 aria-disabled={switching ? true : undefined}
                 aria-describedby={switching ? "wf-canvas-mode-busy" : undefined}
