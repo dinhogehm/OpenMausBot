@@ -8,7 +8,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { Workflow, WorkflowIssue, WorkflowRun } from "../shared/workflow.ts";
-import { handleWorkflowRequest, workflowNotificationBotId, type WorkflowApiDeps } from "./workflow-api.ts";
+import {
+  handleWorkflowRequest,
+  workflowNotificationBotId,
+  type NotificationBotLookup,
+  type WorkflowApiDeps,
+} from "./workflow-api.ts";
 import { WorkflowEngine } from "./workflow-run.ts";
 import { WorkflowStore, type WorkflowInput } from "./workflow-store.ts";
 
@@ -92,27 +97,66 @@ describe("workflow definitions", () => {
     expect(workflows[0].issues.map((issue) => issue.code)).toContain("bad-entry");
   });
 
-  it("rejects a malformed body with field-level details", async () => {
+  it("rejects a malformed body with the house first-issue line plus every detail", async () => {
     const { call } = harness();
     const blankName = await call("POST", "/api/workflows", { ...draftGraph(), name: "   " });
     expect(blankName?.status).toBe(400);
-    expect(bodyOf(blankName).details.join("\n")).toMatch(/name/);
+    expect(bodyOf(blankName).error).toMatch(/^name /);
+    expect(bodyOf(blankName).details.join("\n")).toMatch(/^name:/m);
 
     const unknownKind = await call("POST", "/api/workflows", {
       ...draftGraph(),
       nodes: [{ kind: "robot", id: "r" }],
     });
     expect(unknownKind?.status).toBe(400);
+    expect(bodyOf(unknownKind).error).toMatch(/^nodes\.0/);
 
     const stringNumber = await call("POST", "/api/workflows", {
       ...agentGraph(),
       nodes: [{ ...agentGraph().nodes[0], retries: "2" }],
     });
     expect(stringNumber?.status).toBe(400);
+    expect(bodyOf(stringNumber).error).toMatch(/^nodes\.0\.retries /);
     expect(bodyOf(stringNumber).details.join("\n")).toMatch(/retries/);
 
     const missing = await call("POST", "/api/workflows", { name: "No graph" });
     expect(missing?.status).toBe(400);
+    expect(bodyOf(missing).details.length).toBeGreaterThan(1);
+  });
+
+  it("never rewrites identifiers: surrounding whitespace on an id is a 400, not a trim", async () => {
+    const { call } = harness();
+    const node = agentGraph().nodes[0];
+    const cases: Array<[string, WorkflowInput | Record<string, unknown>]> = [
+      ["node id", { ...agentGraph(), nodes: [{ ...node, id: " triage " }] }],
+      ["botId", { ...agentGraph(), nodes: [{ ...node, botId: " bot-a" }] }],
+      ["entryNodeId", { ...agentGraph(), entryNodeId: "triage " }],
+      ["layout key", { ...agentGraph(), layout: { " triage": { x: 0, y: 0 } } }],
+      ["edge endpoint", { ...agentGraph(), edges: [{ from: "triage", outcome: "done", to: " triage" }] }],
+      ["targetGroupId", { ...draftGraph(), nodes: [{ kind: "notify", id: "n", targetGroupId: " g ", template: "x" }] }],
+      ["webhookId", { ...agentGraph(), triggers: { webhookId: " hook " } }],
+    ];
+    for (const [label, body] of cases) {
+      const response = await call("POST", "/api/workflows", body);
+      expect(response?.status, label).toBe(400);
+      // zod words a refused record key as "Invalid key in record"; the point
+      // is that the id is refused, never trimmed.
+      expect(bodyOf(response).error, label).toMatch(/must not have surrounding whitespace|Invalid key in record/);
+    }
+    expect(bodyOf(await call("GET", "/api/workflows")).workflows).toEqual([]);
+    // Display text is still tidied.
+    const created = await call("POST", "/api/workflows", { ...agentGraph(), name: "  Triage  " });
+    expect(created?.status).toBe(201);
+    expect(bodyOf(created).workflow.name).toBe("Triage");
+  });
+
+  it("caps description like the other prose fields", async () => {
+    const { call } = harness();
+    const long = "d".repeat(20_000);
+    expect((await call("POST", "/api/workflows", { ...draftGraph(), description: long }))?.status).toBe(201);
+    const over = await call("POST", "/api/workflows", { ...draftGraph(), description: `${long}!` });
+    expect(over?.status).toBe(400);
+    expect(bodyOf(over).error).toMatch(/^description /);
   });
 
   it("drops nulls on optional fields instead of handing them to the validator", async () => {
@@ -145,15 +189,33 @@ describe("workflow definitions", () => {
     const { call, store } = harness();
     const id = bodyOf(await call("POST", "/api/workflows", { ...agentGraph(), maxNodeExecutions: 5, description: "x" })).workflow.id;
     expect(store.get(id)?.maxNodeExecutions).toBe(5);
-    const cleared = await call("PATCH", `/api/workflows/${id}`, { maxNodeExecutions: null, description: null });
+    const cleared = await call("PATCH", `/api/workflows/${id}`, { maxNodeExecutions: null, description: null, triggers: null });
     expect(cleared?.status).toBe(200);
     expect(store.get(id)?.maxNodeExecutions).toBeUndefined();
     expect(store.get(id)?.description).toBeUndefined();
+    expect(store.get(id)?.triggers).toBeUndefined();
     // Absent keys leave fields alone.
     const untouched = await call("PATCH", `/api/workflows/${id}`, { name: "Renamed" });
     expect(untouched?.status).toBe(200);
     expect(store.get(id)?.name).toBe("Renamed");
     expect(store.get(id)?.nodes).toHaveLength(1);
+  });
+
+  it("refuses null on a required field instead of turning it into a no-op", async () => {
+    const { call, store } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
+    for (const field of ["name", "nodes", "edges", "entryNodeId", "layout"]) {
+      const response = await call("PATCH", `/api/workflows/${id}`, { [field]: null });
+      expect(response?.status, field).toBe(400);
+      expect(bodyOf(response).error, field).toBe(`${field}: cannot be null`);
+      expect(bodyOf(response).details, field).toEqual([`${field}: cannot be null`]);
+    }
+    expect(store.get(id)).toMatchObject({ ...agentGraph(), id });
+    // Same rule on create — a null required field is not "omitted".
+    const created = await call("POST", "/api/workflows", { ...agentGraph(), edges: null });
+    expect(created?.status).toBe(400);
+    expect(bodyOf(created).error).toBe("edges: cannot be null");
+    expect(bodyOf(await call("GET", "/api/workflows")).workflows).toHaveLength(1);
   });
 
   it("refuses an invalid PATCH with the merged draft's issues and leaves the store alone", async () => {
@@ -191,6 +253,33 @@ describe("workflow definitions", () => {
     expect(first).toEqual({ status: 204 });
     expect(await call("DELETE", `/api/workflows/${id}`)).toEqual({ status: 204 });
     expect(bodyOf(await call("GET", "/api/workflows")).workflows).toEqual([]);
+  });
+
+  it("cancels every live run before the definition goes, without dispatching the queue", async () => {
+    const { call, store, dispatches, interrupts } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
+    const running = bodyOf(await call("POST", `/api/workflows/${id}/runs`, { input: "1" })).run as WorkflowRun;
+    await call("POST", `/api/workflows/${id}/runs`, { input: "2" });
+    await call("POST", `/api/workflows/${id}/runs`, { input: "3" });
+    expect(store.listRuns(id).map((run) => run.status).sort()).toEqual(["queued", "queued", "running"]);
+    expect(dispatches).toHaveLength(1);
+
+    expect(await call("DELETE", `/api/workflows/${id}`)).toEqual({ status: 204 });
+    expect(store.get(id)).toBeNull();
+    expect(store.listRuns(id).map((run) => run.status)).toEqual(["cancelled", "cancelled", "cancelled"]);
+    // The active run was interrupted once; no queued run was ever promoted
+    // into a task and a turn just to be cancelled.
+    expect(interrupts).toEqual([running.currentThreadId]);
+    expect(dispatches).toHaveLength(1);
+
+    // A run parked on an approval gate is live too.
+    const gateId = bodyOf(await call("POST", "/api/workflows", gateGraph())).workflow.id;
+    const waiting = bodyOf(await call("POST", `/api/workflows/${gateId}/runs`, {})).run as WorkflowRun;
+    expect(waiting.status).toBe("waiting-approval");
+    expect(await call("DELETE", `/api/workflows/${gateId}`)).toEqual({ status: 204 });
+    expect(store.getRun(waiting.id)?.status).toBe("cancelled");
+    // Terminal receipts are left as history.
+    expect(store.listRuns()).toHaveLength(4);
   });
 
   it("leaves non-workflow routes and unsupported methods to the caller", async () => {
@@ -310,7 +399,9 @@ describe("workflow runs", () => {
 });
 
 describe("workflowNotificationBotId", () => {
-  const run = (currentNodeId?: string): WorkflowRun => ({
+  const run = (
+    overrides: Partial<Pick<WorkflowRun, "currentNodeId" | "currentThreadId" | "nodeResults">> = {},
+  ): WorkflowRun => ({
     id: "r",
     workflowId: "w",
     status: "failed",
@@ -318,7 +409,7 @@ describe("workflowNotificationBotId", () => {
     input: "",
     nodeResults: [],
     startedAt: 1,
-    ...(currentNodeId === undefined ? {} : { currentNodeId }),
+    ...overrides,
   });
   const workflow = (nodes: Workflow["nodes"]): Workflow => ({
     id: "w",
@@ -330,17 +421,53 @@ describe("workflowNotificationBotId", () => {
     createdAt: 1,
     updatedAt: 1,
   });
+  const lookup = (bots: string[], threads: Record<string, string> = {}): NotificationBotLookup => ({
+    exists: (botId) => bots.includes(botId),
+    botByThread: (threadId) => threads[threadId],
+  });
+  const graph = workflow([
+    { kind: "approval", id: "gate", prompt: "?" },
+    { kind: "agent", id: "a", botId: "bot-a", instructions: "", outcomes: ["ok"] },
+    { kind: "agent", id: "b", botId: "bot-b", instructions: "", outcomes: ["ok"] },
+  ]);
 
-  it("prefers the current agent node's bot, then the first agent node, then nothing", () => {
-    const graph = workflow([
-      { kind: "approval", id: "gate", prompt: "?" },
-      { kind: "agent", id: "a", botId: "bot-a", instructions: "", outcomes: ["ok"] },
-      { kind: "agent", id: "b", botId: "bot-b", instructions: "", outcomes: ["ok"] },
-    ]);
-    expect(workflowNotificationBotId(graph, run("b"))).toBe("bot-b");
-    expect(workflowNotificationBotId(graph, run("gate"))).toBe("bot-a");
-    expect(workflowNotificationBotId(graph, run())).toBe("bot-a");
-    expect(workflowNotificationBotId(workflow([{ kind: "approval", id: "gate", prompt: "?" }]), run("gate"))).toBeUndefined();
-    expect(workflowNotificationBotId(null, run("a"))).toBeUndefined();
+  it("prefers the current agent node's bot, then the first agent node", () => {
+    const all = lookup(["bot-a", "bot-b"]);
+    expect(workflowNotificationBotId(graph, run({ currentNodeId: "b" }), all)).toBe("bot-b");
+    expect(workflowNotificationBotId(graph, run({ currentNodeId: "gate" }), all)).toBe("bot-a");
+    expect(workflowNotificationBotId(graph, run(), all)).toBe("bot-a");
+  });
+
+  it("skips a deleted bot — the failing node's own — for a surviving agent bot", () => {
+    const only = lookup(["bot-a"]);
+    expect(workflowNotificationBotId(graph, run({ currentNodeId: "b", currentThreadId: "t-b" }), only)).toBe("bot-a");
+    expect(workflowNotificationBotId(graph, run({ currentNodeId: "a" }), lookup(["bot-b"]))).toBe("bot-b");
+  });
+
+  it("falls back to the owner of the run's threads when the workflow itself is gone", () => {
+    // Current thread first: the task thread of the node that just failed.
+    expect(
+      workflowNotificationBotId(null, run({ currentThreadId: "t-9" }), lookup(["bot-x"], { "t-9": "bot-x" })),
+    ).toBe("bot-x");
+    // Then the most recent node result's thread.
+    const results = run({
+      nodeResults: [
+        { nodeId: "a", outcome: "ok", summary: "", threadId: "t-1", startedAt: 1, endedAt: 2 },
+        { nodeId: "b", outcome: "ok", summary: "", threadId: "t-2", startedAt: 3, endedAt: 4 },
+      ],
+    });
+    expect(workflowNotificationBotId(null, results, lookup(["bot-1", "bot-2"], { "t-1": "bot-1", "t-2": "bot-2" }))).toBe("bot-2");
+    // A thread whose owner is gone too is skipped for an older one.
+    expect(workflowNotificationBotId(null, results, lookup(["bot-1"], { "t-1": "bot-1", "t-2": "bot-2" }))).toBe("bot-1");
+    // The graph's surviving bots still come before thread owners.
+    expect(
+      workflowNotificationBotId(graph, run({ currentNodeId: "b", currentThreadId: "t-9" }), lookup(["bot-a", "bot-x"], { "t-9": "bot-x" })),
+    ).toBe("bot-a");
+  });
+
+  it("reports nobody only when no candidate exists", () => {
+    expect(workflowNotificationBotId(graph, run({ currentNodeId: "b", currentThreadId: "t-b" }), lookup([]))).toBeUndefined();
+    expect(workflowNotificationBotId(null, run(), lookup(["bot-a"]))).toBeUndefined();
+    expect(workflowNotificationBotId(workflow([{ kind: "approval", id: "gate", prompt: "?" }]), run({ currentNodeId: "gate" }), lookup(["bot-a"]))).toBeUndefined();
   });
 });

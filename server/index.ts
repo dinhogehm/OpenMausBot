@@ -3188,7 +3188,7 @@ workflowStore = new WorkflowStore({ emit: broadcast });
 /** Author on a notify node's channel post. Not a member of any room: the
  * room UI labels the cluster by this name and colour, and responder
  * selection falls through to a real member. */
-const WORKFLOW_AUTHOR = { botId: "workflow", name: "Workflow", color: "purple" };
+const WORKFLOW_AUTHOR = Object.freeze({ botId: "workflow", name: "Workflow", color: "purple" });
 workflowEngine = new WorkflowEngine({
   store: workflowStore,
   emit: broadcast,
@@ -3227,15 +3227,20 @@ workflowEngine = new WorkflowEngine({
   postGroupMessage: (groupId, text) => {
     const group = store.group(groupId);
     if (!group) throw new Error(`channel "${groupId}" no longer exists`);
-    store.appendMessage(group.threadId, { role: "bot", kind: "text", text, from: WORKFLOW_AUTHOR });
+    store.appendMessage(group.threadId, { role: "bot", kind: "text", text, from: { ...WORKFLOW_AUTHOR } });
     store.patchGroup(group.id, { unread: true });
   },
   // A notification needs a bot to land on (its toggle, its avatar, a thread
-  // to open). Agent nodes have one; approval/notify nodes borrow the graph's
-  // first agent bot; a workflow with no agent node at all only logs.
+  // to open). The first bot that still exists wins: the current node's, any
+  // other agent node's, then the owner of the run's task threads — which is
+  // what is left when the workflow itself was deleted under the run. Only a
+  // run with nobody left to tell logs instead.
   notifyUser: (run, message, kind) => {
     const workflow = workflowStore?.get(run.workflowId) ?? null;
-    const botId = workflowNotificationBotId(workflow, run);
+    const botId = workflowNotificationBotId(workflow, run, {
+      exists: (candidate) => Boolean(store.bot(candidate)),
+      botByThread: (threadId) => store.botByThread(threadId)?.id,
+    });
     const bot = botId === undefined ? undefined : store.bot(botId);
     if (!bot) {
       console.warn(`workflow: no bot to notify for run ${run.id} (${kind}) of workflow ${run.workflowId}`);
@@ -5848,18 +5853,17 @@ const server = createServer(async (req, res) => {
     }
 
     // ── workflows ──────────────────────────────────────────────────────
-    if (path.startsWith("/api/workflow")) {
-      const response = await handleWorkflowRequest(
-        { store: workflowStore!, engine: workflowEngine! },
-        { method, path, searchParams: url.searchParams, readBody: () => readBody(req) },
-      );
-      if (response) {
-        if (response.body === undefined) {
-          res.writeHead(response.status);
-          return res.end();
-        }
-        return json(res, response.status, response.body);
+    // The router answers null for every path it does not own.
+    const workflowResponse = await handleWorkflowRequest(
+      { store: workflowStore!, engine: workflowEngine! },
+      { method, path, searchParams: url.searchParams, readBody: () => readBody(req) },
+    );
+    if (workflowResponse) {
+      if (workflowResponse.body === undefined) {
+        res.writeHead(workflowResponse.status);
+        return res.end();
       }
+      return json(res, workflowResponse.status, workflowResponse.body);
     }
 
     // ── scheduled room sessions ────────────────────────────────────────

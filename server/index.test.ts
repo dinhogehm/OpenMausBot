@@ -2987,6 +2987,22 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("rejects a PATCH that nulls a required workflow field over the socket", async () => {
+    const created = await api("POST", "/api/workflows", { name: "Null guard", entryNodeId: "", nodes: [], edges: [], layout: {} });
+    expect(created.status).toBe(201);
+    const id = created.body.workflow.id as string;
+    try {
+      const nulled = await api("PATCH", `/api/workflows/${id}`, { name: null });
+      expect(nulled.status).toBe(400);
+      expect(nulled.body.error).toBe("name: cannot be null");
+      expect(nulled.body.details).toEqual(["name: cannot be null"]);
+      const kept = (await api("GET", "/api/workflows")).body.workflows.find((workflow: { id: string }) => workflow.id === id);
+      expect(kept?.name).toBe("Null guard");
+    } finally {
+      expect((await fetch(`${BASE}/api/workflows/${id}`, { method: "DELETE" })).status).toBe(204);
+    }
+  });
+
   it("refuses to delete a bot while one of its routines is active", async () => {
     const bot = (await api("POST", "/api/bots", {
       modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },

@@ -15,7 +15,9 @@ import {
   type WorkflowIssue,
   type WorkflowNode,
   type WorkflowRun,
+  type WorkflowRunStatus,
 } from "../shared/workflow.ts";
+import { schemaIssue } from "./schema.ts";
 import type { WorkflowEngine } from "./workflow-run.ts";
 import type { WorkflowInput, WorkflowStore } from "./workflow-store.ts";
 
@@ -34,7 +36,12 @@ export interface WorkflowApiResponse {
 // Shapes only. Bounds exist so a body cannot be arbitrarily large, not to
 // pre-empt validateWorkflow: a padded or over-long outcome name is a
 // validator issue the canvas must be able to show, so it passes here.
-const id = z.string().trim().min(1).max(200);
+// Identifiers are never rewritten (no trim): a node id is also a layout key
+// and an edge endpoint, and a botId or group id is a foreign key — silently
+// trimming one copy would let the others drift.
+const untrimmed = (value: string) => value === value.trim();
+const NO_SURROUNDING_WHITESPACE = "must not have surrounding whitespace";
+const id = z.string().min(1).max(200).refine(untrimmed, NO_SURROUNDING_WHITESPACE);
 const outcomeName = z.string().max(1_000);
 const longText = z.string().max(20_000);
 const optionalNumber = z.number().finite().optional();
@@ -63,7 +70,7 @@ const notifyNodeSchema = z.object({
 });
 const nodeSchema = z.discriminatedUnion("kind", [agentNodeSchema, approvalNodeSchema, notifyNodeSchema]);
 const edgeSchema = z.object({ from: id, outcome: outcomeName, to: id });
-const layoutSchema = z.record(z.string().max(200), z.object({ x: z.number().finite(), y: z.number().finite() }));
+const layoutSchema = z.record(id, z.object({ x: z.number().finite(), y: z.number().finite() }));
 const triggersSchema = z.object({
   schedule: z
     .discriminatedUnion("type", [
@@ -73,6 +80,26 @@ const triggersSchema = z.object({
     .optional(),
   webhookId: id.optional(),
 });
+
+const workflowInputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  description: longText.optional(),
+  // A fresh canvas has no entry yet. validateWorkflow reports it, so a
+  // draft can still be saved and the badge can still be painted.
+  entryNodeId: z.string().max(200).refine(untrimmed, NO_SURROUNDING_WHITESPACE),
+  nodes: z.array(nodeSchema).max(200),
+  edges: z.array(edgeSchema).max(2_000),
+  layout: layoutSchema,
+  triggers: triggersSchema.optional(),
+  maxNodeExecutions: optionalNumber,
+});
+
+// Compile-time drift guard: the schema's output must be exactly the model's
+// input type, in both directions. A field added to shared/workflow.ts
+// without a schema line (or vice versa) fails typecheck here.
+type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+const _schemaMatchesModel: Exact<z.infer<typeof workflowInputSchema>, WorkflowInput> = true;
+void _schemaMatchesModel;
 
 /** JSON clients say "no value" with `null`; the model and the validator
  * only know an omitted field (validateWorkflow rejects null outright). Nulls
@@ -88,26 +115,27 @@ function stripNulls(value: unknown): unknown {
   return out;
 }
 
-const workflowInputSchema = z.object({
-  name: z.string().trim().min(1).max(120),
-  description: z.string().max(2_000).optional(),
-  // A fresh canvas has no entry yet. validateWorkflow reports it, so a
-  // draft can still be saved and the badge can still be painted.
-  entryNodeId: z.string().trim().max(200),
-  nodes: z.array(nodeSchema).max(200),
-  edges: z.array(edgeSchema).max(2_000),
-  layout: layoutSchema,
-  triggers: triggersSchema.optional(),
-  maxNodeExecutions: optionalNumber,
-});
 const workflowCreateSchema = z.preprocess(stripNulls, workflowInputSchema);
 const workflowPatchSchema = z.preprocess(stripNulls, workflowInputSchema.partial());
 
-/** Top-level optional fields a PATCH may clear with an explicit `null`.
- * stripNulls turned the null into an absent key — which a merge would read
- * as "leave alone" — so the intent is restored as an explicit undefined
- * that the store's spread overwrites and the JSON file then omits. */
+/** The only top-level fields a client may null: on a PATCH that clears
+ * them (stripNulls made the key absent — which a merge would read as
+ * "leave alone" — so the intent is restored as an explicit undefined the
+ * store's spread overwrites and the JSON file then omits). A null on any
+ * other top-level field is refused outright rather than becoming a silent
+ * no-op. Single source of truth for both rules. */
 const CLEARABLE_FIELDS = ["description", "triggers", "maxNodeExecutions"] as const;
+const isClearable = (key: string) => (CLEARABLE_FIELDS as readonly string[]).includes(key);
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+
+/** The first top-level key whose value is null and which is not clearable. */
+function nullRequiredField(body: unknown): string | undefined {
+  const record = asRecord(body);
+  if (!record) return undefined;
+  return Object.keys(record).find((key) => record[key] === null && !isClearable(key));
+}
 
 const startRunBodySchema = z.object({ input: z.string().max(100_000).optional() });
 const approvalBodySchema = z.object({ decision: z.enum(WORKFLOW_APPROVAL_OUTCOMES) });
@@ -119,16 +147,24 @@ const isInvalidWorkflow = (error: unknown) => errorMessage(error).startsWith("in
 
 const notFound = (what: "workflow" | "run"): WorkflowApiResponse => ({ status: 404, body: { error: `no such ${what}` } });
 const conflict = (error: unknown): WorkflowApiResponse => ({ status: 409, body: { error: errorMessage(error) } });
+/** `error` is the house first-issue line (schemaIssue, as webhooks use);
+ * `details` lists every issue for a form to paint. */
 const badBody = (error: z.ZodError): WorkflowApiResponse => ({
   status: 400,
   body: {
-    error: "invalid request body",
+    error: schemaIssue(error, "invalid request body"),
     details: error.issues.map((issue) => `${issue.path.map(String).join(".") || "body"}: ${issue.message}`),
   },
 });
+const nullField = (field: string): WorkflowApiResponse => {
+  const detail = `${field}: cannot be null`;
+  return { status: 400, body: { error: detail, details: [detail] } };
+};
 
 export type WorkflowWithIssues = Workflow & { issues: WorkflowIssue[] };
 const withIssues = (workflow: Workflow): WorkflowWithIssues => ({ ...workflow, issues: validateWorkflow(workflow) });
+
+const LIVE_RUN_STATUSES = new Set<WorkflowRunStatus>(["queued", "running", "waiting-approval"]);
 
 // ── handlers ──────────────────────────────────────────────────────────
 export function listWorkflows({ store }: WorkflowApiDeps): WorkflowApiResponse {
@@ -136,6 +172,10 @@ export function listWorkflows({ store }: WorkflowApiDeps): WorkflowApiResponse {
 }
 
 export function createWorkflow({ store }: WorkflowApiDeps, body: unknown): WorkflowApiResponse {
+  // Before the parse: stripNulls would turn `edges: null` into a missing
+  // field, and "expected array, received undefined" hides what was sent.
+  const nulled = nullRequiredField(body);
+  if (nulled !== undefined) return nullField(nulled);
   const parsed = workflowCreateSchema.safeParse(body);
   if (!parsed.success) return badBody(parsed.error);
   const input: WorkflowInput = parsed.data;
@@ -145,13 +185,14 @@ export function createWorkflow({ store }: WorkflowApiDeps, body: unknown): Workf
 export function patchWorkflow({ store }: WorkflowApiDeps, workflowId: string, body: unknown): WorkflowApiResponse {
   const current = store.get(workflowId);
   if (!current) return notFound("workflow");
+  const nulled = nullRequiredField(body);
+  if (nulled !== undefined) return nullField(nulled);
   const parsed = workflowPatchSchema.safeParse(body);
   if (!parsed.success) return badBody(parsed.error);
   const patch: Partial<WorkflowInput> = parsed.data;
-  if (typeof body === "object" && body !== null) {
-    for (const field of CLEARABLE_FIELDS) {
-      if ((body as Record<string, unknown>)[field] === null) patch[field] = undefined;
-    }
+  const raw = asRecord(body);
+  for (const field of CLEARABLE_FIELDS) {
+    if (raw?.[field] === null) patch[field] = undefined;
   }
   try {
     return { status: 200, body: { workflow: withIssues(store.update(workflowId, patch)) } };
@@ -164,7 +205,28 @@ export function patchWorkflow({ store }: WorkflowApiDeps, workflowId: string, bo
   }
 }
 
-export function deleteWorkflow({ store }: WorkflowApiDeps, workflowId: string): WorkflowApiResponse {
+/** Idempotent. Live runs are cancelled BEFORE the definition goes: a run
+ * left running on a deleted workflow would keep driving its bot until the
+ * engine noticed. Queued runs go first — cancelling the active run promotes
+ * the oldest queued one (drainQueue), so emptying the queue while the active
+ * run still holds the slot keeps every cancellation dispatch-free. */
+export async function deleteWorkflow({ store, engine }: WorkflowApiDeps, workflowId: string): Promise<WorkflowApiResponse> {
+  // Bounded re-scan: a cancel awaits the provider's interrupt, and a run
+  // can change state under that await.
+  for (let pass = 0; pass < 4; pass++) {
+    const live = store
+      .listRuns(workflowId)
+      .filter((run) => LIVE_RUN_STATUSES.has(run.status))
+      .sort((a, b) => Number(a.status !== "queued") - Number(b.status !== "queued"));
+    if (live.length === 0) break;
+    for (const run of live) {
+      try {
+        await engine.cancelRun(run.id);
+      } catch (error) {
+        if (!isUnknownEntity(error)) throw error; // pruned meanwhile: nothing to cancel
+      }
+    }
+  }
   store.remove(workflowId);
   return { status: 204 };
 }
@@ -238,14 +300,41 @@ export function resolveApproval({ engine }: WorkflowApiDeps, runId: string, body
 }
 
 // ── wiring helpers ────────────────────────────────────────────────────
-/** The bot a workflow notification lands on: the current node's bot when it
- * is an agent node, else the graph's first agent bot (approval and notify
- * nodes have none of their own). undefined when the workflow is gone or has
- * no agent node at all — the caller then logs instead of notifying. */
-export function workflowNotificationBotId(workflow: Workflow | null, run: WorkflowRun): string | undefined {
-  if (!workflow) return undefined;
-  const agents = workflow.nodes.filter((node): node is Extract<WorkflowNode, { kind: "agent" }> => node.kind === "agent");
-  return agents.find((node) => node.id === run.currentNodeId)?.botId ?? agents[0]?.botId;
+export interface NotificationBotLookup {
+  /** Whether a bot with this id still exists. */
+  exists: (botId: string) => boolean;
+  /** The bot that owns a thread (a bot's own thread or one of its task
+   * threads — store.botByThread), or undefined. */
+  botByThread: (threadId: string) => string | undefined;
+}
+
+/** The bot a workflow notification lands on. The most common terminal
+ * failures are exactly the ones where the obvious bot is gone — "this
+ * node's bot was deleted", "the workflow was deleted" — so the answer is
+ * the first bot that still EXISTS among: the current node's bot, every
+ * other agent node's bot in graph order, then the owner of the run's
+ * current thread and of the most recent node-result threads (a workflow
+ * deleted under a run leaves no graph, but its task threads still name
+ * their bots). undefined only when nobody is left to tell. */
+export function workflowNotificationBotId(
+  workflow: Workflow | null,
+  run: WorkflowRun,
+  lookup: NotificationBotLookup,
+): string | undefined {
+  const agents = (workflow?.nodes ?? []).filter(
+    (node): node is Extract<WorkflowNode, { kind: "agent" }> => node.kind === "agent",
+  );
+  const candidates: string[] = [];
+  const current = agents.find((node) => node.id === run.currentNodeId);
+  if (current) candidates.push(current.botId);
+  for (const node of agents) candidates.push(node.botId);
+  const threads = [run.currentThreadId, ...run.nodeResults.map((result) => result.threadId).reverse()];
+  for (const threadId of threads) {
+    if (threadId === undefined) continue;
+    const owner = lookup.botByThread(threadId);
+    if (owner !== undefined) candidates.push(owner);
+  }
+  return candidates.find((botId) => lookup.exists(botId));
 }
 
 // ── router ────────────────────────────────────────────────────────────
