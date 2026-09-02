@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   CalendarClock,
@@ -27,6 +27,42 @@ import { cn } from "@/lib/cn";
  * from must not pay for it, and the static component suite must not import
  * it either. */
 const WorkflowCanvas = lazy(async () => ({ default: (await import("./WorkflowCanvas")).WorkflowCanvas }));
+
+/** A chunk that fails to load (an offline reload after a deploy, a blocked
+ * request) would otherwise strand the reader on the Suspense fallback with no
+ * way back to the list. The boundary keeps Back reachable and says what
+ * happened, instead of a blank pane forever. */
+class CanvasBoundary extends Component<
+  { onBack: () => void; children: ReactNode },
+  { failed: string | null }
+> {
+  state: { failed: string | null } = { failed: null };
+
+  static getDerivedStateFromError(cause: unknown) {
+    return { failed: cause instanceof Error ? cause.message : String(cause) };
+  }
+
+  render() {
+    if (this.state.failed === null) return this.props.children;
+    return (
+      <main className="flex min-w-0 flex-1 flex-col items-center justify-center gap-3 bg-app px-6 text-center">
+        <p role="alert" className="max-w-[420px] text-[12.5px] text-danger">
+          The workflow editor could not be loaded: {this.state.failed}
+        </p>
+        <p className="max-w-[420px] text-[12px] text-ink-secondary">
+          Reloading the app usually fixes this. Your workflow is unchanged.
+        </p>
+        <button
+          type="button"
+          onClick={this.props.onBack}
+          className="rounded-lg border border-hairline/50 px-3 py-1.5 text-[12.5px] font-medium text-ink hover:bg-raised"
+        >
+          Back to workflows
+        </button>
+      </main>
+    );
+  }
+}
 
 /** "New workflow" posts an empty canvas. The server saves it as a draft and
  * reports the missing entry node as an issue until the canvas adds one. */
@@ -407,19 +443,19 @@ export function WorkflowsPage() {
   // owns the selection, so Back is just clearing it.
   const opened = state.workflows.find((workflow) => workflow.id === state.selectedWorkflowId) ?? null;
   if (opened) {
+    const back = () => dispatch({ type: "selectWorkflow", workflowId: null });
     return (
-      <Suspense
-        fallback={
-          <main className="flex min-w-0 flex-1 items-center justify-center bg-app text-[12.5px] text-ink-secondary">
-            Loading canvas…
-          </main>
-        }
-      >
-        <WorkflowCanvas
-          workflow={opened}
-          onBack={() => dispatch({ type: "selectWorkflow", workflowId: null })}
-        />
-      </Suspense>
+      <CanvasBoundary onBack={back}>
+        <Suspense
+          fallback={
+            <main className="flex min-w-0 flex-1 items-center justify-center bg-app text-[12.5px] text-ink-secondary">
+              Loading canvas…
+            </main>
+          }
+        >
+          <WorkflowCanvas workflow={opened} onBack={back} />
+        </Suspense>
+      </CanvasBoundary>
     );
   }
 

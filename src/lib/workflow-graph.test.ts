@@ -207,6 +207,23 @@ describe("toGraphEdges", () => {
     expect(new Set(ids).size).toBe(2);
   });
 
+  it("merges a decorator's presentation over the mapping, leaving routing alone", () => {
+    const decorated = toGraphEdges(workflow(), null, (edge) =>
+      edge.outcome === "ok" ? { className: "wf-edge-traversed", animated: true, label: "ok ✓" } : undefined,
+    );
+
+    expect(decorated[0]).toMatchObject({
+      className: "wf-edge-traversed",
+      animated: true,
+      label: "ok ✓",
+      sourceHandle: "ok",
+      target: "approval-1",
+    });
+    expect(decorated[0]!.data).toEqual({ outcome: "ok", implicit: false });
+    expect(decorated[1]!.className).toBeUndefined();
+    expect(decorated[1]!.animated).toBeUndefined();
+  });
+
   it("round-trips a graph id back to the workflow edge it came from", () => {
     const graph = workflow();
     const id = graphEdgeId(graph.edges[1]!);

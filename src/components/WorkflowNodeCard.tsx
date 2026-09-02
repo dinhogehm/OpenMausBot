@@ -47,7 +47,9 @@ export interface WorkflowNodeCardProps {
   /** Rendered once per source handle, inside that outcome's row. */
   renderSourceHandle?: (handle: WorkflowOutcomeHandle) => ReactNode;
   renderTargetHandle?: () => ReactNode;
-  /** Slot the observation view fills with run controls. */
+  /** Slot the observation view fills with run controls (approve / reject /
+   * resume). Wrapped in `nodrag nopan` below, or clicking a control inside it
+   * would drag the node instead. */
   footer?: ReactNode;
 }
 
@@ -173,7 +175,7 @@ export function WorkflowNodeCard({
         ))}
       </ul>
 
-      {footer}
+      {footer && <div className="nodrag nopan">{footer}</div>}
     </div>
   );
 }

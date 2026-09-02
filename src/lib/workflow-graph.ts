@@ -70,6 +70,15 @@ export interface WorkflowGraphEdgeData extends Record<string, unknown> {
   implicit: boolean;
 }
 
+/** Presentation an observation layer can add per edge without the mapping
+ * knowing what a run is: light a traversed edge, animate the live one. */
+export interface WorkflowGraphEdgeDecoration {
+  className?: string;
+  style?: Record<string, string | number>;
+  animated?: boolean;
+  label?: string;
+}
+
 export interface WorkflowGraphEdge {
   id: string;
   source: string;
@@ -79,6 +88,9 @@ export interface WorkflowGraphEdge {
   label: string;
   selected: boolean;
   data: WorkflowGraphEdgeData;
+  className?: string;
+  style?: Record<string, string | number>;
+  animated?: boolean;
 }
 
 /** What a client may PATCH. The engine-owned fields (`id`, `createdAt`,
@@ -230,7 +242,14 @@ export function findEdgeByGraphId(workflow: Workflow, id: string): WorkflowEdge 
   return workflow.edges.find((edge) => graphEdgeId(edge) === id) ?? null;
 }
 
-export function toGraphEdges(workflow: Workflow, selectedEdgeId?: string | null): WorkflowGraphEdge[] {
+export function toGraphEdges(
+  workflow: Workflow,
+  selectedEdgeId?: string | null,
+  /** Called once per edge; whatever it returns is merged over the mapping.
+   * The editor passes nothing — this exists so a run view can light edges
+   * without a second mapping or a fork of this one. */
+  decorate?: (edge: WorkflowEdge) => WorkflowGraphEdgeDecoration | undefined,
+): WorkflowGraphEdge[] {
   const implicitByNode = new Map<string, Set<string>>();
   for (const node of workflow.nodes) {
     implicitByNode.set(
@@ -255,6 +274,7 @@ export function toGraphEdges(workflow: Workflow, selectedEdgeId?: string | null)
       label: edge.outcome,
       selected: id === selectedEdgeId,
       data: { outcome: edge.outcome, implicit: implicitByNode.get(edge.from)?.has(edge.outcome) ?? false },
+      ...decorate?.(edge),
     };
   });
 }

@@ -6,6 +6,7 @@ import { Flag, Plus, Trash2, X } from "lucide-react";
 
 import { cn } from "@/lib/cn";
 import type { BotAvatarProps } from "./Avatar";
+import type { WorkflowOutcomeHandle } from "@/lib/workflow-graph";
 import { BotAvatar } from "./Avatar";
 import {
   WORKFLOW_APPROVAL_OUTCOMES,
@@ -21,6 +22,10 @@ export type WorkflowPanelBot = BotAvatarProps["bot"] & { id: string; name: strin
 export interface WorkflowPanelGroup {
   id: string;
   name: string;
+}
+export interface WorkflowRouteTarget {
+  id: string;
+  label: string;
 }
 
 const FIELD =
@@ -141,6 +146,14 @@ export interface WorkflowNodePanelProps {
   entry: boolean;
   bots: WorkflowPanelBot[];
   groups: WorkflowPanelGroup[];
+  /** Every outcome this node can route on, implicit failure path included. */
+  outcomes: WorkflowOutcomeHandle[];
+  /** Every node an outcome may be routed to, self included — loops are legal. */
+  targets: WorkflowRouteTarget[];
+  /** outcome -> target node id, for the outcomes that are wired. */
+  routes: Record<string, string>;
+  /** An empty `to` unwires the outcome. */
+  onRoute: (outcome: string, to: string) => void;
   onUpdate: (next: WorkflowNode) => void;
   onAddOutcome: (name: string) => void;
   onRenameOutcome: (from: string, to: string) => void;
@@ -156,6 +169,10 @@ export function WorkflowNodePanel({
   entry,
   bots,
   groups,
+  outcomes,
+  targets,
+  routes,
+  onRoute,
   onUpdate,
   onAddOutcome,
   onRenameOutcome,
@@ -445,6 +462,46 @@ export function WorkflowNodePanel({
             </div>
           </>
         )}
+
+        {/* Routing is the editor's central action and, on the canvas, a mouse
+            drag between two handles. This is the same edit for anyone who
+            cannot (or would rather not) drag. */}
+        <div>
+          <span className={LABEL}>Routing</span>
+          <p className="mt-0.5 text-[10.5px] text-ink-secondary">
+            Where each outcome sends the run — the keyboard equivalent of dragging from a handle on the card.
+          </p>
+          <ul className="mt-1.5 space-y-1.5">
+            {outcomes.map((handle) => (
+              <li key={handle.outcome} className="flex items-center gap-1.5">
+                <span
+                  className={cn(
+                    "w-[76px] shrink-0 truncate font-mono text-[11px]",
+                    handle.implicit ? "font-medium text-danger" : "text-ink-secondary",
+                  )}
+                >
+                  {handle.outcome}
+                </span>
+                <span aria-hidden className="shrink-0 text-[11px] text-ink-secondary">
+                  →
+                </span>
+                <select
+                  aria-label={`Routes to, for outcome "${handle.outcome}" on ${node.id}`}
+                  value={routes[handle.outcome] ?? ""}
+                  onChange={(event) => onRoute(handle.outcome, event.target.value)}
+                  className={cn(FIELD, "min-w-0 flex-1")}
+                >
+                  <option value="">Ends the run</option>
+                  {targets.map((target) => (
+                    <option key={target.id} value={target.id}>
+                      {target.label}
+                    </option>
+                  ))}
+                </select>
+              </li>
+            ))}
+          </ul>
+        </div>
 
         <button
           type="button"

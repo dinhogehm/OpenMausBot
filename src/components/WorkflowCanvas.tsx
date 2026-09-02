@@ -50,6 +50,7 @@ import "./workflow-canvas.css";
 import { api, useStore } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { validationSummary, type WorkflowListItem } from "@/lib/workflow-state";
+import { createSaveQueue, type SaveStatus } from "@/lib/workflow-save-queue";
 import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { WorkflowNodeCard } from "./WorkflowNodeCard";
 import { WorkflowNodePanel, type WorkflowPanelBot } from "./WorkflowNodePanel";
@@ -66,6 +67,7 @@ import {
   issuesByNode,
   moveNodes,
   nextFreePosition,
+  outcomeHandles,
   nextNodeId,
   reconcileGraphNodes,
   removeEdges,
@@ -169,27 +171,55 @@ function TriggersPanel({
   workflow,
   onChange,
   onClose,
+  anchorRef,
 }: {
   workflow: Workflow;
   onChange: (triggers: WorkflowTriggers | undefined) => void;
   onClose: () => void;
+  /** The toggle that opened this, so a click on it is not treated as an
+   * outside click (which would close and immediately reopen), and so focus
+   * has somewhere to go back to. */
+  anchorRef: React.RefObject<HTMLButtonElement | null>;
 }) {
   const schedule = workflow.triggers?.schedule;
   const [error, setError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
-  // Escape closes the popover the way it closes every other overlay here; a
-  // panel that only the mouse can dismiss is a keyboard trap.
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
+  const close = useCallback(
+    (restoreFocus: boolean) => {
       closeRef.current();
+      // Only a deliberate dismissal pulls focus back; a click elsewhere on
+      // the page has already chosen where focus belongs.
+      if (restoreFocus) anchorRef.current?.focus();
+    },
+    [anchorRef],
+  );
+
+  // Escape and click-outside both dismiss it — a panel only the mouse can
+  // close is a keyboard trap, and one that ignores outside clicks is a
+  // sticky overlay. Escape is deliberately NOT preventDefault-ed: the canvas
+  // uses the same key to clear its selection, and swallowing it globally
+  // would break that everywhere the popover happens to be open.
+  useEffect(() => {
+    panelRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close(true);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as globalThis.Node | null;
+      if (!target) return;
+      if (panelRef.current?.contains(target) || anchorRef.current?.contains(target)) return;
+      close(false);
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onPointerDown, true);
+    };
+  }, [close, anchorRef]);
 
   const commit = (next: WorkflowSchedule | undefined) => {
     const triggers = next ? { schedule: next } : undefined;
@@ -211,12 +241,18 @@ function TriggersPanel({
   const mode = schedule?.type ?? "none";
 
   return (
-    <div className="absolute right-0 top-full z-30 mt-2 w-[320px] rounded-2xl border border-hairline/50 bg-panel p-4 shadow-2xl">
+    <div
+      ref={panelRef}
+      tabIndex={-1}
+      role="group"
+      aria-label="Schedule"
+      className="absolute right-0 top-full z-30 mt-2 w-[320px] rounded-2xl border border-hairline/50 bg-panel p-4 shadow-2xl outline-none"
+    >
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-[13px] font-semibold text-ink">Schedule</h2>
         <button
           type="button"
-          onClick={onClose}
+          onClick={() => close(true)}
           aria-label="Close schedule editor"
           className="rounded-lg p-1 text-ink-secondary hover:bg-raised hover:text-ink"
         >
@@ -342,11 +378,12 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   const { capabilities } = useDesktopCapabilities();
   const { screenToFlowPosition } = useReactFlow();
   const paneRef = useRef<HTMLDivElement>(null);
+  const scheduleButtonRef = useRef<HTMLButtonElement>(null);
 
   const [doc, setDoc] = useState<Workflow>(() => toDocument(row));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [saveState, setSaveState] = useState<"clean" | "dirty" | "saving" | "saved" | "error">("clean");
+  const [saveState, setSaveState] = useState<SaveStatus>("clean");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -358,17 +395,39 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   // the debounced save and the unmount flush need without re-subscribing.
   const docRef = useRef(doc);
   docRef.current = doc;
-  const dirtyRef = useRef(false);
   /** A drag moved something since the last drop; armed by the position
    * frames, disarmed by the drop that saves them. */
   const draggedRef = useRef(false);
-  const revisionRef = useRef(0);
-  const savingRef = useRef(false);
-  const resaveRef = useRef(false);
-  const aliveRef = useRef(true);
   const timerRef = useRef<number | null>(null);
   const pendingKindRef = useRef<SaveKind | null>(null);
   const workflowId = row.id;
+
+  // One PATCH at a time, newest document wins, failures reported. Those rules
+  // live in `createSaveQueue` so they can be tested without a React tree; the
+  // debounce below stays here, because which edits are worth coalescing is a
+  // UI decision.
+  const sendRef = useRef<() => Promise<void>>(async () => {});
+  sendRef.current = async () => {
+    const { workflow } = await api(`/api/workflows/${workflowId}`, {
+      method: "PATCH",
+      body: JSON.stringify(workflowPatchBody(docRef.current)),
+    });
+    // The response carries the saved definition AND its fresh issues; the
+    // store adopts it so the list badge and the canvas agree.
+    if (workflow) dispatch({ type: "workflowPatched", workflow });
+  };
+  const [queue] = useState(() =>
+    createSaveQueue({
+      send: () => sendRef.current(),
+      onStatus: (status, failure) => {
+        setSaveState(status);
+        setSaveError(failure);
+        // "Not started — the changes could not be saved" is only true until
+        // they are; leaving it up after a good save is a stale accusation.
+        if (status === "saved") setRunError(null);
+      },
+    }),
+  );
 
   const bots = useMemo<WorkflowPanelBot[]>(
     () => state.bots.filter((bot) => !bot.hidden).map(({ id, name, color, avatarUrl, avatarCrop, mascotBody }) => ({
@@ -409,47 +468,39 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   }, [doc, issues, selectedNodeId]);
   const edges = useMemo(() => toGraphEdges(doc, selectedEdgeId), [doc, selectedEdgeId]);
   const selectedNode = doc.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  // Every node is a legal destination, itself included — review loops are a
+  // supported shape, not a mistake.
+  const routeTargets = useMemo(
+    () =>
+      doc.nodes.map((node) => ({
+        id: node.id,
+        label:
+          node.kind === "agent"
+            ? `${node.id} · ${bots.find((bot) => bot.id === node.botId)?.name ?? "missing bot"}`
+            : node.kind === "notify"
+              ? `${node.id} · ${groups.find((group) => group.id === node.targetGroupId)?.name ?? "missing room"}`
+              : `${node.id} · approval`,
+      })),
+    [doc.nodes, bots, groups],
+  );
+  const routesFrom = useCallback(
+    (nodeId: string) => {
+      const routes: Record<string, string> = {};
+      for (const edge of doc.edges) if (edge.from === nodeId) routes[edge.outcome] = edge.to;
+      return routes;
+    },
+    [doc.edges],
+  );
   const selectedEdge = selectedEdgeId ? findEdgeByGraphId(doc, selectedEdgeId) : null;
 
-  const save = useCallback(async () => {
+  /** Cancels a pending debounce; the caller is about to flush by hand. */
+  const cancelDebounce = useCallback(() => {
     if (timerRef.current !== null) {
       window.clearTimeout(timerRef.current);
       timerRef.current = null;
     }
     pendingKindRef.current = null;
-    // One PATCH at a time: a second one queues behind the first rather than
-    // racing it, so the server's last write is always the newest document.
-    if (savingRef.current) {
-      resaveRef.current = true;
-      return;
-    }
-    const revision = revisionRef.current;
-    savingRef.current = true;
-    setSaveState("saving");
-    try {
-      const { workflow } = await api(`/api/workflows/${workflowId}`, {
-        method: "PATCH",
-        body: JSON.stringify(workflowPatchBody(docRef.current)),
-      });
-      // The response carries the saved definition AND its fresh issues; the
-      // store adopts it so the list badge and the canvas agree.
-      if (workflow) dispatch({ type: "workflowPatched", workflow });
-      if (!aliveRef.current) return;
-      if (revisionRef.current === revision) dirtyRef.current = false;
-      setSaveError(null);
-      setSaveState(revisionRef.current === revision ? "saved" : "dirty");
-    } catch (cause) {
-      if (!aliveRef.current) return;
-      setSaveError(errorText(cause));
-      setSaveState("error");
-    } finally {
-      savingRef.current = false;
-      if (resaveRef.current && aliveRef.current) {
-        resaveRef.current = false;
-        void save();
-      }
-    }
-  }, [workflowId, dispatch]);
+  }, []);
 
   const schedule = useCallback(
     (kind: SaveKind) => {
@@ -457,9 +508,13 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
       // must never hold a real change hostage.
       pendingKindRef.current = pendingKindRef.current === "structure" ? "structure" : kind;
       if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-      timerRef.current = window.setTimeout(() => void save(), SAVE_DEBOUNCE_MS[pendingKindRef.current]);
+      timerRef.current = window.setTimeout(() => {
+        timerRef.current = null;
+        pendingKindRef.current = null;
+        void queue.flush();
+      }, SAVE_DEBOUNCE_MS[pendingKindRef.current]);
     },
-    [save],
+    [queue],
   );
 
   /** Every edit funnels through here: pure change in, one save schedule out.
@@ -469,38 +524,42 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
       const next = change(docRef.current);
       if (next === docRef.current) return;
       docRef.current = next;
-      dirtyRef.current = true;
-      revisionRef.current += 1;
       setDoc(next);
-      setSaveState("dirty");
+      queue.markDirty();
       schedule(kind);
     },
-    [schedule],
+    [queue, schedule],
   );
 
   // A server frame is adopted only while nothing local is outstanding —
   // otherwise a live SSE update would silently undo what is being typed.
+  //
+  // The flip side is deliberate last-write-wins ACROSS sessions: a `workflow`
+  // frame that lands while this canvas is dirty is dropped, so the next PATCH
+  // overwrites whatever another window (or the phone) saved in the meantime,
+  // with nothing shown to either author. A workflow is a single-author
+  // document in practice, and making concurrent editing safe needs a version
+  // precondition on the API — a server change, not a canvas one.
   useEffect(() => {
-    if (dirtyRef.current || savingRef.current) return;
+    const { dirty, saving } = queue.snapshot();
+    if (dirty || saving) return;
     setDoc(toDocument(row));
-  }, [row]);
+  }, [row, queue]);
 
-  // Leaving the canvas must not drop a debounced edit. The flush is
-  // fire-and-forget by necessity (the component is gone), so a failure is
-  // reported through the app-level error banner rather than swallowed.
+  // Leaving the canvas must not drop a debounced edit — and must not race the
+  // PATCH that may already be in flight, so it drains the same queue instead
+  // of firing a second whole-document write with no ordering guarantee. The
+  // component is gone by then, so a failure is reported through the app-level
+  // error banner rather than the header.
   useEffect(
     () => () => {
-      aliveRef.current = false;
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-      if (!dirtyRef.current) return;
-      void api(`/api/workflows/${workflowId}`, {
-        method: "PATCH",
-        body: JSON.stringify(workflowPatchBody(docRef.current)),
-      }).catch((cause: unknown) => {
-        dispatch({ type: "error", message: `Workflow not saved: ${errorText(cause)}` });
+      cancelDebounce();
+      if (!queue.snapshot().dirty) return;
+      void queue.flush().then((result) => {
+        if (!result.ok) dispatch({ type: "error", message: `Workflow not saved: ${result.error}` });
       });
     },
-    [workflowId, dispatch],
+    [queue, cancelDebounce, dispatch],
   );
 
   const onNodesChange = useCallback(
@@ -533,17 +592,15 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
         const next = moveNodes(docRef.current, moved);
         if (next !== docRef.current) {
           docRef.current = next;
-          dirtyRef.current = true;
           draggedRef.current = true;
-          revisionRef.current += 1;
           setDoc(next);
+          queue.markDirty();
         }
       }
       // The drop's own change carries `dragging: false` and no position, so
       // the save cannot be armed inside the branch above — it would never run.
       if (settled && draggedRef.current) {
         draggedRef.current = false;
-        setSaveState("dirty");
         schedule("layout");
       }
       if (removed.length > 0) {
@@ -551,7 +608,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
         commit((current) => removeNodes(current, removed));
       }
     },
-    [commit, schedule, selectedNodeId],
+    [commit, queue, schedule, selectedNodeId],
   );
 
   const onEdgesChange = useCallback(
@@ -609,12 +666,28 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
         ? "A run is already starting"
         : null;
 
+  // An agent node needs a bot and a notify node a room — both are foreign
+  // keys the API refuses empty. Like the Run button, the reason is visible
+  // text tied to the control with aria-describedby, never a `title` a
+  // keyboard or touch user can never surface.
+  const paletteBlocked: Partial<Record<WorkflowNodeKind, string>> = {
+    ...(bots.length === 0 ? { agent: "Add a bot before you can add an agent node" } : {}),
+    ...(groups.length === 0 ? { notify: "Create a room before you can add a notify node" } : {}),
+  };
+
   const run = async () => {
     setRunning(true);
     setRunError(null);
     try {
-      // The debounced document must reach the server before the run reads it.
-      if (dirtyRef.current || timerRef.current !== null) await save();
+      // The debounced document must reach the server before the run reads it,
+      // and a run planned on a FAILED save would execute the previous graph —
+      // so the flush is awaited to completion and its verdict is honoured.
+      cancelDebounce();
+      const flushed = await queue.flush();
+      if (!flushed.ok) {
+        setRunError(`Not started — the latest changes could not be saved: ${flushed.error}`);
+        return;
+      }
       const { run: started } = await api(`/api/workflows/${workflowId}/runs`, { method: "POST", body: "{}" });
       if (started) dispatch({ type: "workflowRunPatched", run: started });
     } catch (cause) {
@@ -671,7 +744,10 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
             className="min-w-[160px] max-w-[300px] flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1 text-[16px] font-semibold text-ink outline-none hover:border-hairline/50 focus:border-accent focus:bg-inset"
           />
 
+          {/* A status region: the save outcome is the one thing on this page
+              that changes without the author doing anything. */}
           <span
+            role="status"
             className={cn(
               "inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium",
               saveState === "error" ? "bg-danger/15 text-danger" : "bg-control text-ink-secondary",
@@ -691,7 +767,10 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
           {saveState === "error" && (
             <button
               type="button"
-              onClick={() => void save()}
+              onClick={() => {
+                cancelDebounce();
+                void queue.flush();
+              }}
               className="shrink-0 rounded-lg border border-danger/40 px-2 py-1 text-[11px] font-medium text-danger hover:bg-danger/10"
             >
               Retry save
@@ -702,12 +781,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
             <span className="mr-1 text-[11px] text-ink-secondary">Add</span>
             {(Object.keys(NODE_KIND_META) as WorkflowNodeKind[]).map((kind) => {
               const { label, icon: Icon } = NODE_KIND_META[kind];
-              const blocked =
-                kind === "agent" && bots.length === 0
-                  ? "Create a bot first"
-                  : kind === "notify" && groups.length === 0
-                    ? "Create a room first"
-                    : null;
+              const blocked = paletteBlocked[kind] ?? null;
               return (
                 <button
                   key={kind}
@@ -716,7 +790,8 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                     if (!blocked) addNode(kind);
                   }}
                   aria-disabled={blocked ? true : undefined}
-                  title={blocked ?? `Add ${label.toLowerCase()} node`}
+                  aria-describedby={blocked ? `wf-canvas-add-${kind}-reason` : undefined}
+                  aria-label={`Add ${label.toLowerCase()} node`}
                   className={cn(
                     "inline-flex items-center gap-1.5 rounded-lg border border-hairline/50 px-2.5 py-1.5 text-[11.5px] font-medium",
                     blocked ? "cursor-not-allowed text-ink-secondary opacity-40" : "text-ink-secondary hover:bg-raised hover:text-ink",
@@ -730,6 +805,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
 
             <div className="relative">
               <button
+                ref={scheduleButtonRef}
                 type="button"
                 onClick={() => setScheduleOpen((open) => !open)}
                 aria-expanded={scheduleOpen}
@@ -744,6 +820,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
               {scheduleOpen && (
                 <TriggersPanel
                   workflow={doc}
+                  anchorRef={scheduleButtonRef}
                   onChange={(triggers) => commit((current) => ({ ...current, triggers }))}
                   onClose={() => setScheduleOpen(false)}
                 />
@@ -793,6 +870,11 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
               {runBlockedReason}
             </span>
           )}
+          {Object.entries(paletteBlocked).map(([kind, reason]) => (
+            <span key={kind} id={`wf-canvas-add-${kind}-reason`} className="text-[11px] text-ink-secondary">
+              {reason}
+            </span>
+          ))}
           {headerIssues.length > 0 && (
             <ul className="min-w-0 flex-1 space-y-0.5 text-[11px] leading-relaxed">
               {headerIssues.map((issue, index) => (
@@ -834,6 +916,12 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             deleteKeyCode={["Delete", "Backspace"]}
+            // Selection is single by design: the change handlers keep one
+            // selected id, so a rubber-band or shift-click that looked like a
+            // multi-selection would still delete just one node. Turning the
+            // gestures off is honest; a real multi-select is a separate change.
+            selectionKeyCode={null}
+            multiSelectionKeyCode={null}
             fitView
             fitViewOptions={{ padding: 0.3, maxZoom: 1 }}
             minZoom={0.25}
@@ -852,12 +940,35 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
             entry={doc.entryNodeId === selectedNode.id}
             bots={bots}
             groups={groups}
+            outcomes={outcomeHandles(selectedNode)}
+            targets={routeTargets}
+            routes={routesFrom(selectedNode.id)}
+            onRoute={(outcome, to) =>
+              commit((current) =>
+                to
+                  ? connectEdge(current, { from: selectedNode.id, outcome, to })
+                  : removeEdges(
+                      current,
+                      current.edges.filter((edge) => edge.from === selectedNode.id && edge.outcome === outcome),
+                    ),
+              )
+            }
             onUpdate={(next) => commit((current) => updateNode(current, next.id, () => next))}
             onAddOutcome={(name) => commit((current) => addOutcome(current, selectedNode.id, name))}
             onRenameOutcome={(from, to) => commit((current) => renameOutcome(current, selectedNode.id, from, to))}
             onRemoveOutcome={(name) => commit((current) => removeOutcome(current, selectedNode.id, name))}
             onMakeEntry={() => commit((current) => setEntryNode(current, selectedNode.id))}
             onDelete={() => {
+              // Deleting from the panel is a deliberate, named action that
+              // cascades to every edge touching the node and can clear the
+              // entry point — so it asks. The Delete KEY stays unconfirmed,
+              // the way a canvas is expected to behave.
+              const edges = doc.edges.filter(
+                (edge) => edge.from === selectedNode.id || edge.to === selectedNode.id,
+              ).length;
+              const entryWarning = doc.entryNodeId === selectedNode.id ? " It is the entry node." : "";
+              const edgeWarning = edges === 0 ? "" : ` ${edges} ${edges === 1 ? "edge" : "edges"} go with it.`;
+              if (!window.confirm(`Delete node “${selectedNode.id}”?${edgeWarning}${entryWarning}`)) return;
               setSelectedNodeId(null);
               commit((current) => removeNodes(current, [selectedNode.id]));
             }}
