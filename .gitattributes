@@ -5,3 +5,10 @@
 # nothing to do with drift. Pin them to LF on every platform.
 shared/mascot-bodies.ts text eol=lf
 ios/Sources/CompanionCore/MausBodies.swift text eol=lf
+
+# Source is always text, even when a string literal happens to carry a control
+# byte. Without this, a NUL inside git's first 8000 bytes makes the whole file
+# "binary" — it stops appearing in diffs and review, which is how a 200-line
+# module once shipped unreviewed.
+*.ts text
+*.tsx text
