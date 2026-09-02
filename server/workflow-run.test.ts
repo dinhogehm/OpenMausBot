@@ -1687,6 +1687,69 @@ describe("WorkflowEngine notification safety", () => {
   });
 });
 
+describe("WorkflowEngine webhook runs", () => {
+  it("persists the webhook source on a run and counts the webhook's live runs", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const first = h.engine.startRun(workflow.id, "event 1", "webhook", { webhookId: "hook-1", deliveryId: "d-1" });
+    expect(first).toMatchObject({ status: "running", trigger: "webhook", webhookId: "hook-1", deliveryId: "d-1" });
+    expect(h.reload().getRun(first.id)).toMatchObject({ webhookId: "hook-1", deliveryId: "d-1" });
+    // The run input is exactly what the webhook handed over, framed untrusted.
+    expect(h.dispatches[0]!.prompt).toContain("event 1");
+
+    const second = h.engine.startRun(workflow.id, "event 2", "webhook", { webhookId: "hook-1" });
+    expect(second.status).toBe("queued");
+    expect("deliveryId" in second).toBe(false);
+    const manual = h.engine.startRun(workflow.id, "by hand", "manual");
+    expect("webhookId" in manual).toBe(false);
+    h.engine.startRun(workflow.id, "event 3", "webhook", { webhookId: "hook-2" });
+    expect(h.engine.liveRunCountForWebhook("hook-1")).toBe(2);
+    expect(h.engine.liveRunCountForWebhook("hook-2")).toBe(1);
+    expect(h.engine.liveRunCountForWebhook("hook-9")).toBe(0);
+
+    // Finishing the running one promotes the next queued (a hook-1 run):
+    // still two live for hook-1 until that one ends too.
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(first.id)?.status).toBe("completed");
+    expect(h.store.getRun(second.id)?.status).toBe("running");
+    expect(h.engine.liveRunCountForWebhook("hook-1")).toBe(1);
+  });
+
+  it("cancels only the webhook's queued runs and reports how many", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const running = h.engine.startRun(workflow.id, "a", "webhook", { webhookId: "hook-1" });
+    const queued = h.engine.startRun(workflow.id, "b", "webhook", { webhookId: "hook-1" });
+    const other = h.engine.startRun(workflow.id, "c", "webhook", { webhookId: "hook-2" });
+    const manual = h.engine.startRun(workflow.id, "d", "manual");
+    h.setNow(2_000);
+    expect(h.engine.cancelQueuedForWebhook("hook-1", "The webhook was paused before this delivery started")).toBe(1);
+    expect(h.store.getRun(queued.id)).toMatchObject({
+      status: "cancelled",
+      error: "The webhook was paused before this delivery started",
+      endedAt: 2_000,
+    });
+    expect(h.reload().getRun(queued.id)?.status).toBe("cancelled");
+    expect(h.store.getRun(running.id)?.status).toBe("running");
+    expect(h.store.getRun(other.id)?.status).toBe("queued");
+    expect(h.store.getRun(manual.id)?.status).toBe("queued");
+    expect(h.interrupts).toEqual([]);
+    expect(h.engine.liveRunCountForWebhook("hook-1")).toBe(1);
+    expect(h.engine.cancelQueuedForWebhook("hook-1", "again")).toBe(0);
+    expect(h.engine.cancelQueuedForWebhook("hook-9", "nobody")).toBe(0);
+    // The reason is scrubbed like any persisted error.
+    const secretRun = h.engine.startRun(workflow.id, "e", "webhook", { webhookId: "hook-3" });
+    h.engine.cancelQueuedForWebhook("hook-3", `leaked ${SECRET}`);
+    expect(h.store.getRun(secretRun.id)?.error).not.toContain(SECRET);
+    // When the running run ends, the cancelled one is skipped: the oldest
+    // survivor (hook-2's) is promoted.
+    await h.engine.cancelRun(running.id);
+    expect(h.store.getRun(other.id)?.status).toBe("running");
+    expect(h.store.getRun(manual.id)?.status).toBe("queued");
+  });
+});
+
 describe("WorkflowEngine schedules", () => {
   const daily = (overrides: Partial<WorkflowInput> = {}): WorkflowInput =>
     pipeline({ ...overrides, triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1, 2, 3, 4, 5] } } });

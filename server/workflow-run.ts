@@ -86,6 +86,9 @@ type NotifyNode = Extract<WorkflowNode, { kind: "notify" }>;
 export type ApprovalDecision = (typeof WORKFLOW_APPROVAL_OUTCOMES)[number];
 
 const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
+/** Still owns work: what a webhook's pending cap counts, the same
+ * "unfinished" set routines count (queued / running / waiting). */
+const LIVE_RUN_STATUSES = new Set<WorkflowRunStatus>(["queued", "running", "waiting-approval"]);
 
 const MISSED_SLOT_REASON = "missed: this computer was offline for more than 12 hours after the scheduled time";
 
@@ -459,8 +462,16 @@ export class WorkflowEngine {
   }
 
   /** Start (or queue) a run. Creation validates even though the store's
-   * `update` already gates persistence, because `create` accepts drafts. */
-  startRun(workflowId: string, input: string, trigger: WorkflowRunTrigger): WorkflowRun {
+   * `update` already gates persistence, because `create` accepts drafts.
+   * `source` names the webhook (and delivery) behind a "webhook" run; it is
+   * persisted on the receipt so the webhook's pending cap and its
+   * pause/delete cancellation can find the runs it owns. */
+  startRun(
+    workflowId: string,
+    input: string,
+    trigger: WorkflowRunTrigger,
+    source?: { webhookId: string; deliveryId?: string },
+  ): WorkflowRun {
     const workflow = this.store.get(workflowId);
     if (!workflow) throw new Error(`unknown workflow: ${workflowId}`);
     const firstError = validateWorkflow(workflow).find((issue) => issue.severity === "error");
@@ -473,6 +484,8 @@ export class WorkflowEngine {
       workflowId,
       status: hasActive ? "queued" : "running",
       trigger,
+      ...(source === undefined ? {} : { webhookId: source.webhookId }),
+      ...(source?.deliveryId === undefined ? {} : { deliveryId: source.deliveryId }),
       attempt: 0,
       input,
       nodeResults: [],
@@ -481,6 +494,29 @@ export class WorkflowEngine {
     if (hasActive) return run;
     this.dispatchNode(run.id, workflow.entryNodeId);
     return this.store.getRun(run.id) ?? run;
+  }
+
+  /** Runs a webhook still owns — what its pending cap counts. */
+  liveRunCountForWebhook(webhookId: string): number {
+    return this.store.listRuns().filter((run) => run.webhookId === webhookId && LIVE_RUN_STATUSES.has(run.status)).length;
+  }
+
+  /** A paused or deleted webhook drops the runs it has not started: only
+   * QUEUED runs, as routines do — a running one keeps its bot's turn and
+   * finishes on its own. A queued run held no slot, so nothing is drained.
+   * Returns how many were cancelled. */
+  cancelQueuedForWebhook(webhookId: string, reason: string): number {
+    let cancelled = 0;
+    for (const run of this.store.listRuns()) {
+      if (run.webhookId !== webhookId || run.status !== "queued") continue;
+      const patched = this.store.patchRun(run.id, {
+        status: "cancelled",
+        error: redactSecretsInText(reason).slice(0, 500),
+        endedAt: this.now(),
+      });
+      if (patched) cancelled++;
+    }
+    return cancelled;
   }
 
   /** Bring a failed run back to life at its current node, with a fresh retry

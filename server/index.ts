@@ -3414,18 +3414,34 @@ function resolveAndSendRoutine(
   return sendRoutineResolution(res, result);
 }
 
-// Webhook definitions are independent from calendar schedules, but every
-// delivery joins the same RoutineManager queue. That keeps unattended work
-// ordered behind a busy MAUS and gives webhook runs the same durable receipts.
+// Webhook definitions are independent from calendar schedules. A delivery
+// becomes a run of whatever the webhook targets: a MAUS-targeted webhook
+// joins the RoutineManager queue (ordered behind a busy MAUS, same durable
+// receipts), a workflow-targeted one starts a workflow run with the event
+// data block as its input. The cap and the pause/delete cancellation see
+// both kinds of receipt.
 const webhooks = new WebhookManager({
   emit: broadcast,
   botState: (botId) => {
     const bot = store.bot(botId);
     return !bot ? "missing" : bot.busy ? "busy" : "ready";
   },
-  enqueue: (input) => routines!.enqueueWebhook(input),
-  cancelQueued: (webhookId, message) => routines!.cancelQueuedWebhook(webhookId, message),
-  pendingRuns: (webhookId) => routines!.activeWebhookRunCount(webhookId),
+  workflowExists: (workflowId) => Boolean(workflowStore?.get(workflowId)),
+  enqueue: (input) =>
+    input.workflowId === undefined
+      ? routines!.enqueueWebhook(input)
+      : {
+          id: workflowEngine!.startRun(input.workflowId, input.eventText, "webhook", {
+            webhookId: input.webhookId,
+            deliveryId: input.deliveryId,
+          }).id,
+        },
+  cancelQueued: (webhookId, message) => {
+    routines!.cancelQueuedWebhook(webhookId, message);
+    workflowEngine!.cancelQueuedForWebhook(webhookId, message);
+  },
+  pendingRuns: (webhookId) =>
+    routines!.activeWebhookRunCount(webhookId) + workflowEngine!.liveRunCountForWebhook(webhookId),
 });
 
 let webhookIngress: WebhookIngress | null = null;

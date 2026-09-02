@@ -51,20 +51,38 @@ export interface WebhookReceiveResult {
   ignored?: boolean;
 }
 
+/** Where deliveries go: a MAUS (a routine-style task turn) or a workflow (a
+ * workflow run). Exactly one — the webhook owns the link, and a record that
+ * named both would leave "delete this MAUS" and "which run?" ambiguous. */
+export type WebhookTarget = { botId: string; workflowId?: undefined } | { workflowId: string; botId?: undefined };
+
+export type WebhookEnqueueInput = {
+  webhookId: string;
+  webhookName: string;
+  /** The full routine prompt: the webhook's instruction block plus the
+   * untrusted event data section. */
+  prompt: string;
+  /** The untrusted event data section alone — what a workflow run takes as
+   * its input, since the graph's nodes carry their own instructions. */
+  eventText: string;
+  runOn: RoutineRunOn;
+  deliveryId: string;
+  receivedAt: number;
+} & WebhookTarget;
+
 export interface WebhookManagerOptions {
   file?: string;
   now?: () => number;
   emit?: (event: WebhookManagerEvent) => void;
   botState: (botId: string) => "ready" | "busy" | "missing";
-  enqueue: (input: {
-    webhookId: string;
-    webhookName: string;
-    prompt: string;
-    botId: string;
-    runOn: RoutineRunOn;
-    deliveryId: string;
-    receivedAt: number;
-  }) => { id: string };
+  /** Whether a workflow with this id still exists. Absent, none does: a
+   * workflow-targeted webhook then answers 410 rather than enqueueing into
+   * a void. */
+  workflowExists?: (workflowId: string) => boolean;
+  /** The delivery sink. A throw here (a workflow that fails validation,
+   * a MAUS gone between the guard and the queue) is recorded as a rejected
+   * attempt and surfaces as the error's own status, or 422. */
+  enqueue: (input: WebhookEnqueueInput) => { id: string };
   cancelQueued?: (webhookId: string, message: string) => void;
   pendingRuns?: (webhookId: string) => number;
 }
@@ -83,28 +101,47 @@ const MAX_PENDING_RUNS = 3;
 
 const runOnSchema = z.enum(["maus", "cloud"]);
 const eventTypesSchema = z.array(z.string()).max(20).optional();
-const triggerInputSchema = z.object({
+// A workflow id is a foreign key into the workflow store and is never
+// rewritten: surrounding whitespace is refused, not trimmed (as the
+// workflow API treats every identifier).
+const workflowIdSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .refine((value) => value === value.trim(), "must not have surrounding whitespace");
+const hasTarget = (value: { botId?: string; workflowId?: string }) =>
+  value.botId !== undefined || value.workflowId !== undefined;
+const triggerFieldsSchema = z.object({
   name: z.string(),
-  prompt: z.string(),
-  botId: z.string(),
+  /** Instructions for a MAUS-targeted webhook; a workflow's nodes carry
+   * their own, so it is optional and defaults to empty. */
+  prompt: z.string().optional(),
+  botId: z.string().optional(),
+  workflowId: workflowIdSchema.optional(),
   runOn: runOnSchema.optional(),
   enabled: z.boolean().optional(),
   verificationPending: z.boolean().optional(),
   eventTypes: eventTypesSchema,
 });
-const triggerPatchSchema = triggerInputSchema.partial();
+const triggerInputSchema = triggerFieldsSchema.refine(hasTarget, "botId or workflowId is required");
+// A patch may name neither (leave the target alone); the merged result is
+// re-checked by cleanInput.
+const triggerPatchSchema = triggerFieldsSchema.partial();
 const verificationSampleSchema = z.object({
   receivedAt: z.number().finite().nonnegative(),
   eventName: z.string().optional(),
   contentType: z.string().optional(),
   preview: z.string(),
 });
+// botId went optional when workflow targets arrived; every record written
+// before then carries a botId and no workflowId, so it still parses.
 const storedWebhookSchema = z.object({
   id: z.string().min(1),
   endpointId: z.string().min(1),
   name: z.string(),
   prompt: z.string(),
-  botId: z.string().min(1),
+  botId: z.string().min(1).optional(),
+  workflowId: z.string().min(1).optional(),
   runOn: runOnSchema,
   enabled: z.boolean(),
   createdAt: z.number().finite().nonnegative(),
@@ -117,7 +154,7 @@ const storedWebhookSchema = z.object({
   verificationSample: verificationSampleSchema.optional(),
   eventTypes: eventTypesSchema,
   secretHash: z.string().regex(/^[a-f0-9]{64}$/),
-});
+}).refine(hasTarget, "botId or workflowId is required");
 const deliveryReceiptSchema = z.object({
   key: z.string().min(1),
   runId: z.string().min(1),
@@ -173,11 +210,15 @@ function newSecret(): string {
 
 function cleanInput(input: WebhookTriggerInput): CleanWebhookInput {
   const name = input.name.trim().slice(0, 80);
-  const prompt = input.prompt.trim().slice(0, 20_000);
-  const botId = input.botId.trim();
+  const prompt = (input.prompt ?? "").trim().slice(0, 20_000);
+  // A blank botId is "no MAUS", so a form that always sends the field can
+  // still pick a workflow.
+  const botId = input.botId?.trim() || undefined;
+  const workflowId = input.workflowId;
   const runOn = input.runOn ?? "maus";
   if (!name) fail(400, "Give the webhook a name");
-  if (!botId) fail(400, "Choose a MAUS");
+  if (botId !== undefined && workflowId !== undefined) fail(400, "Choose either a MAUS or a workflow, not both");
+  if (botId === undefined && workflowId === undefined) fail(400, "Choose a MAUS or a workflow");
   if (runOn !== "maus" && runOn !== "cloud") fail(400, "Choose where this webhook runs");
   const eventTypes = Array.from(new Set(
     (input.eventTypes ?? [])
@@ -188,13 +229,22 @@ function cleanInput(input: WebhookTriggerInput): CleanWebhookInput {
   const clean: CleanWebhookInput = {
     name,
     prompt,
-    botId,
     runOn,
     enabled,
     verificationPending: enabled ? false : input.verificationPending === true,
   };
+  if (workflowId !== undefined) clean.workflowId = workflowId;
+  else clean.botId = botId;
   if (eventTypes.length) clean.eventTypes = eventTypes;
   return clean;
+}
+
+/** Exactly one of the two by the schemas' refine; the "neither" arm is
+ * unreachable but keeps the union honest without an assertion. */
+function targetOf(trigger: Pick<StoredWebhookTrigger, "botId" | "workflowId">): WebhookTarget {
+  if (trigger.workflowId !== undefined) return { workflowId: trigger.workflowId };
+  if (trigger.botId !== undefined) return { botId: trigger.botId };
+  fail(500, "This webhook has no target");
 }
 
 function parseTriggerInput(value: JsonValue): WebhookTriggerInput {
@@ -240,7 +290,11 @@ function taskFromPayload(payload: JsonValue): string {
   return task.trim().slice(0, 20_000);
 }
 
-function eventPrompt(trigger: StoredWebhookTrigger, event: WebhookEvent, receivedAt: number, deliveryId: string): string {
+/** The untrusted section of a delivery prompt — metadata plus the bounded,
+ * serialized payload between the markers — and nothing else. A workflow run
+ * takes exactly this as its input: the graph's nodes carry their own
+ * instructions, so no webhook prompt is prepended. */
+export function eventDataBlock(event: WebhookEvent, receivedAt: number, deliveryId: string): string {
   const metadata = [
     `Received: ${new Date(receivedAt).toISOString()}`,
     `Delivery ID: ${deliveryId}`,
@@ -248,6 +302,17 @@ function eventPrompt(trigger: StoredWebhookTrigger, event: WebhookEvent, receive
     event.contentType && `Content-Type: ${event.contentType.slice(0, 200)}`,
     event.userAgent && `Sender: ${event.userAgent.slice(0, 300)}`,
   ].filter(Boolean);
+  return [
+    "[UNTRUSTED WEBHOOK EVENT DATA]",
+    ...metadata,
+    "",
+    serializePayload(event.payload),
+    "[/UNTRUSTED WEBHOOK EVENT DATA]",
+  ].join("\n");
+}
+
+/** The routine prompt: the instruction block, then the event data block. */
+function eventPrompt(trigger: StoredWebhookTrigger, event: WebhookEvent, receivedAt: number, deliveryId: string): string {
   const configured = trigger.prompt.trim();
   const requestedTask = configured ? "" : taskFromPayload(event.payload);
   const instructionBlock = configured
@@ -259,15 +324,7 @@ function eventPrompt(trigger: StoredWebhookTrigger, event: WebhookEvent, receive
           "Review the incoming event and summarize what happened. Do not take external actions unless the event clearly requires them and existing permissions allow them.",
           "[/DEFAULT WEBHOOK INSTRUCTIONS]",
         ];
-  return [
-    ...instructionBlock,
-    "",
-    "[UNTRUSTED WEBHOOK EVENT DATA]",
-    ...metadata,
-    "",
-    serializePayload(event.payload),
-    "[/UNTRUSTED WEBHOOK EVENT DATA]",
-  ].join("\n");
+  return [...instructionBlock, "", eventDataBlock(event, receivedAt, deliveryId)].join("\n");
 }
 
 export class WebhookManager {
@@ -306,7 +363,7 @@ export class WebhookManager {
 
   create(input: JsonValue): CreatedWebhook {
     const clean = cleanInput(parseTriggerInput(input));
-    if (this.options.botState(clean.botId) === "missing") fail(400, "That MAUS no longer exists");
+    this.assertTargetExists(clean);
     const now = this.now();
     const secret = newSecret();
     const trigger: StoredWebhookTrigger = {
@@ -328,17 +385,24 @@ export class WebhookManager {
     const trigger = this.webhooks.find((candidate) => candidate.id === id);
     if (!trigger) return null;
     const patch = parseTriggerPatch(value);
+    // The target is replaced as a unit: naming either side of it drops the
+    // other, so one field moves a webhook between a MAUS and a workflow and
+    // a record never carries both.
+    const retarget = patch.botId !== undefined || patch.workflowId !== undefined;
     const clean = cleanInput({
       name: patch.name ?? trigger.name,
       prompt: patch.prompt ?? trigger.prompt,
-      botId: patch.botId ?? trigger.botId,
+      botId: retarget ? patch.botId : trigger.botId,
+      workflowId: retarget ? patch.workflowId : trigger.workflowId,
       runOn: patch.runOn ?? trigger.runOn,
       enabled: patch.enabled ?? trigger.enabled,
       verificationPending: patch.verificationPending ?? trigger.verificationPending,
       eventTypes: patch.eventTypes ?? trigger.eventTypes,
     });
-    if (this.options.botState(clean.botId) === "missing") fail(400, "That MAUS no longer exists");
+    this.assertTargetExists(clean);
     Object.assign(trigger, clean, { updatedAt: this.now() });
+    if (clean.botId === undefined) delete trigger.botId;
+    if (clean.workflowId === undefined) delete trigger.workflowId;
     if (!clean.eventTypes?.length) delete trigger.eventTypes;
     if (patch.enabled === false) {
       this.options.cancelQueued?.(trigger.id, "The webhook was paused before this delivery started");
@@ -372,6 +436,9 @@ export class WebhookManager {
     return { webhook: publicTrigger(trigger), secret };
   }
 
+  /** A deleted MAUS pauses the webhooks aimed at it. Workflow-targeted
+   * webhooks have no botId and are never touched — the workflow's own
+   * nodes decide what a missing bot means. */
   disableForBot(botId: string): void {
     let changed = false;
     for (const trigger of this.webhooks) {
@@ -423,9 +490,24 @@ export class WebhookManager {
     return this.recordRejectedForTrigger(trigger, statusCode, reason, event);
   }
 
+  /** Management-time check that the target still exists (400); dispatch
+   * makes the same check at delivery time (410). */
+  private assertTargetExists(target: Pick<CleanWebhookInput, "botId" | "workflowId">): void {
+    if (target.workflowId !== undefined) {
+      if (!this.options.workflowExists?.(target.workflowId)) fail(400, "That workflow no longer exists");
+      return;
+    }
+    if (target.botId === undefined || this.options.botState(target.botId) === "missing") fail(400, "That MAUS no longer exists");
+  }
+
   private dispatch(trigger: StoredWebhookTrigger, event: WebhookEvent): WebhookReceiveResult {
     if (!trigger.enabled) fail(409, "This webhook is paused");
-    if (this.options.botState(trigger.botId) === "missing") fail(410, "The assigned MAUS no longer exists");
+    const target = targetOf(trigger);
+    if (target.workflowId !== undefined) {
+      if (!this.options.workflowExists?.(target.workflowId)) fail(410, "The target workflow no longer exists");
+    } else if (this.options.botState(target.botId) === "missing") {
+      fail(410, "The assigned MAUS no longer exists");
+    }
 
     const allowed = trigger.eventTypes ?? [];
     if (allowed.length > 0 && (!event.eventName || !allowed.includes(event.eventName))) {
@@ -470,15 +552,28 @@ export class WebhookManager {
     this.rate.set(trigger.endpointId, recent);
 
     const deliveryId = requestedDeliveryId || randomUUID();
-    const run = this.options.enqueue({
-      webhookId: trigger.id,
-      webhookName: trigger.name,
-      prompt: eventPrompt(trigger, event, now, deliveryId),
-      botId: trigger.botId,
-      runOn: trigger.runOn,
-      deliveryId,
-      receivedAt: now,
-    });
+    let run: { id: string };
+    try {
+      run = this.options.enqueue({
+        webhookId: trigger.id,
+        webhookName: trigger.name,
+        prompt: eventPrompt(trigger, event, now, deliveryId),
+        eventText: eventDataBlock(event, now, deliveryId),
+        runOn: trigger.runOn,
+        deliveryId,
+        receivedAt: now,
+        ...target,
+      });
+    } catch (error) {
+      // Nothing was queued, so the delivery id stays unspent and the
+      // sender's retry is a fresh attempt, not a "duplicate". receive()
+      // records the rejection; the status is the sink's own when it names
+      // one (a MAUS gone: 410), else 422 — the event was well-formed, the
+      // target could not take it (a workflow that fails validation).
+      const parsedError = statusErrorSchema.safeParse(error);
+      const status = parsedError.success && parsedError.data.status !== undefined ? parsedError.data.status : 422;
+      fail(status, error instanceof Error ? error.message : String(error));
+    }
     this.deliveries.push({ key: `${trigger.endpointId}:${deliveryId}`, runId: run.id, at: now });
     if (this.deliveries.length > MAX_DELIVERIES) {
       this.deliveries.splice(0, this.deliveries.length - MAX_DELIVERIES);
