@@ -442,8 +442,12 @@ export interface AppState {
   webhookIngress: WebhookIngressStatus | null;
   /** GET /api/workflows rows: definitions with their validator output */
   workflows: WorkflowListItem[];
-  /** every workflow's runs, newest first (boot snapshot capped at 200) */
+  /** every workflow's runs, newest first, capped at WORKFLOW_RUNS_KEPT by
+   * upsertWorkflowRun — the cap holds for live frames, not just the snapshot */
   workflowRuns: WorkflowRun[];
+  /** the workflow whose editor is open. Lives here, not in the page: the
+   * page unmounts on every view switch and the open canvas must survive it. */
+  selectedWorkflowId: string | null;
   settingsOpen: boolean;
   pluginsOpen: boolean;
   computerOpen: boolean;
@@ -540,6 +544,7 @@ export type Action =
   | { type: "showTeamMap" }
   | { type: "showSkillRecorder" }
   | { type: "showWorkflows" }
+  | { type: "selectWorkflow"; workflowId: string | null }
   | { type: "workflowsHydrated"; workflows: WorkflowFrame[]; runs: WorkflowRun[] }
   | { type: "workflowPatched"; workflow: WorkflowFrame }
   | { type: "workflowRunPatched"; run: WorkflowRun }
@@ -804,9 +809,19 @@ export function reducer(state: AppState, action: Action): AppState {
         appSettingsOpen: false,
         pluginsOpen: false,
       };
+    case "selectWorkflow":
+      return { ...state, selectedWorkflowId: action.workflowId };
     case "workflowsHydrated": {
       const merged = mergeWorkflowSnapshot(action.workflows, action.runs);
-      return { ...state, workflows: merged.workflows, workflowRuns: merged.runs };
+      // a workflow deleted while this client was away must not leave the
+      // editor pointing at an id the snapshot no longer knows
+      const stillThere = merged.workflows.some((workflow) => workflow.id === state.selectedWorkflowId);
+      return {
+        ...state,
+        workflows: merged.workflows,
+        workflowRuns: merged.runs,
+        selectedWorkflowId: stillThere ? state.selectedWorkflowId : null,
+      };
     }
     case "workflowPatched":
       return { ...state, workflows: upsertWorkflow(state.workflows, action.workflow) };
@@ -815,7 +830,11 @@ export function reducer(state: AppState, action: Action): AppState {
     // runs are kept on purpose: a deleted workflow's history stays readable
     // until the next snapshot drops it
     case "workflowDeleted":
-      return { ...state, workflows: removeWorkflow(state.workflows, action.workflowId) };
+      return {
+        ...state,
+        workflows: removeWorkflow(state.workflows, action.workflowId),
+        selectedWorkflowId: state.selectedWorkflowId === action.workflowId ? null : state.selectedWorkflowId,
+      };
     case "routinesHydrated":
       return { ...state, routines: action.routines, routineRuns: action.runs };
     case "routinePatched": {
@@ -1326,6 +1345,7 @@ export const initialState: AppState = {
   webhookIngress: null,
   workflows: [],
   workflowRuns: [],
+  selectedWorkflowId: null,
   settingsOpen: false,
   pluginsOpen: false,
   computerOpen: false,

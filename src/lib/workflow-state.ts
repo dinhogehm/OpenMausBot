@@ -1,10 +1,16 @@
 // Pure state helpers for the workflows slice. The store's reducer and the
 // SSE fold both call these so the same merge rules are unit-testable
 // without a React tree: workflows keep server order and are patched in
-// place, runs stay newest-first, and a `workflow` frame that arrives
-// without server-computed issues gets them recomputed here — the validator
-// is shared with the server, so the badge never disagrees with it.
+// place, runs stay newest-first under a fixed cap, and a `workflow` frame
+// that arrives without server-computed issues gets them recomputed here —
+// the validator is shared with the server, so the badge never drifts.
 import { validateWorkflow, type Workflow, type WorkflowIssue, type WorkflowRun } from "../../shared/workflow";
+
+/** How many runs the renderer keeps across every workflow. The boot
+ * snapshot asks the server for exactly this many; live frames are capped
+ * against the same number so a long-lived window cannot grow without
+ * bound. The list only ever shows the newest run per workflow. */
+export const WORKFLOW_RUNS_KEPT = 200;
 
 /** One row of GET /api/workflows — a definition plus its validator output. */
 export type WorkflowListItem = Workflow & { issues: WorkflowIssue[] };
@@ -37,19 +43,19 @@ export function removeWorkflow(workflows: WorkflowListItem[], id: string): Workf
   return workflows.filter((workflow) => workflow.id !== id);
 }
 
-/** Newest-first by startedAt, the same key the server sorts on. Sorting is
- * stable, so a patch to one of two runs that started at the same instant
- * keeps them where they were. */
-function sortRuns(runs: WorkflowRun[]): WorkflowRun[] {
-  return runs.slice().sort((a, b) => b.startedAt - a.startedAt);
+/** Newest-first by startedAt, the same key the server sorts on, then cut to
+ * the cap. Sorting is stable, so a patch to one of two runs that started at
+ * the same instant keeps them where they were. */
+function sortAndCapRuns(runs: WorkflowRun[]): WorkflowRun[] {
+  return runs.slice().sort((a, b) => b.startedAt - a.startedAt).slice(0, WORKFLOW_RUNS_KEPT);
 }
 
 export function upsertWorkflowRun(runs: WorkflowRun[], incoming: WorkflowRun): WorkflowRun[] {
   const at = runs.findIndex((run) => run.id === incoming.id);
-  if (at === -1) return sortRuns([incoming, ...runs]);
+  if (at === -1) return sortAndCapRuns([incoming, ...runs]);
   const copy = runs.slice();
   copy[at] = incoming;
-  return sortRuns(copy);
+  return sortAndCapRuns(copy);
 }
 
 /** Boot snapshot: the REST rows already carry issues; tolerate a row that
@@ -58,12 +64,17 @@ export function mergeWorkflowSnapshot(
   workflows: WorkflowFrame[],
   runs: WorkflowRun[],
 ): { workflows: WorkflowListItem[]; runs: WorkflowRun[] } {
-  return { workflows: workflows.map(withIssues), runs: sortRuns(runs) };
+  return { workflows: workflows.map(withIssues), runs: sortAndCapRuns(runs) };
 }
 
-/** Newest run of one workflow, relying on the slice being newest-first. */
-export function latestWorkflowRun(runs: WorkflowRun[], workflowId: string): WorkflowRun | null {
-  return runs.find((run) => run.workflowId === workflowId) ?? null;
+/** Newest run per workflow in one pass, so a list of rows does not rescan
+ * the whole slice for each row. Relies on the slice being newest-first. */
+export function latestRunsByWorkflow(runs: WorkflowRun[]): Map<string, WorkflowRun> {
+  const latest = new Map<string, WorkflowRun>();
+  for (const run of runs) {
+    if (!latest.has(run.workflowId)) latest.set(run.workflowId, run);
+  }
+  return latest;
 }
 
 /** The engine records a scheduled slot it could not honour (the app was

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CalendarClock,
@@ -15,10 +15,11 @@ import {
 import { api, useStore } from "@/state/store";
 import {
   isMissedWorkflowRun,
-  latestWorkflowRun,
+  latestRunsByWorkflow,
   validationSummary,
   type WorkflowListItem,
 } from "@/lib/workflow-state";
+import { nextRename } from "@/lib/rename";
 import type { WorkflowRun, WorkflowRunStatus } from "../../shared/workflow";
 import { cn } from "@/lib/cn";
 
@@ -60,57 +61,84 @@ function formatWhen(at: number): string {
   return new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-function scheduleLabel(workflow: WorkflowListItem): string {
-  if (workflow.triggers?.schedule && typeof workflow.nextRunAt === "number") {
-    return `Next run: ${new Date(workflow.nextRunAt).toLocaleString()}`;
-  }
-  return "Not scheduled";
+/** `nextRunAt` is engine state: null right after a schedule edit and after a
+ * one-time schedule fires, with the real instant arriving on a later frame.
+ * "Pending" is the honest word for that gap — "not scheduled" would be a lie. */
+export function scheduleLabel(workflow: WorkflowListItem): string {
+  if (!workflow.triggers?.schedule) return "Not scheduled";
+  if (typeof workflow.nextRunAt !== "number") return "Scheduled · next run pending";
+  return `Next run: ${formatWhen(workflow.nextRunAt)}`;
 }
 
-function ValidationBadge({ issues }: { issues: WorkflowListItem["issues"] }) {
+/** Errors and warnings are counted, never merged: only errors block a run.
+ * The messages sit in a `details` so a keyboard or screen-reader user can
+ * open them — a `title` tooltip is mouse-only and invisible on touch. */
+export function ValidationBadge({ issues }: { issues: WorkflowListItem["issues"] }) {
   const { errors, warnings } = validationSummary(issues);
-  const detail = issues.map((issue) => issue.message).join("\n");
-  const base = "inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-medium";
-  if (errors > 0) {
+  const label =
+    errors > 0
+      ? `${errors} ${errors === 1 ? "error" : "errors"}`
+      : `${warnings} ${warnings === 1 ? "warning" : "warnings"}`;
+
+  if (issues.length === 0) {
     return (
-      <span title={detail} className={cn(base, "bg-danger/15 text-danger")}>
-        <AlertTriangle size={11} /> {errors} {errors === 1 ? "error" : "errors"}
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 text-[10.5px] font-medium text-success">
+        <CheckCircle2 size={11} aria-hidden /> Valid
       </span>
     );
   }
-  if (warnings > 0) {
-    return (
-      <span title={detail} className={cn(base, "bg-warning/15 text-warning")}>
-        <AlertTriangle size={11} /> {warnings} {warnings === 1 ? "warning" : "warnings"}
-      </span>
-    );
-  }
+
   return (
-    <span className={cn(base, "bg-success/15 text-success")}>
-      <CheckCircle2 size={11} /> Valid
-    </span>
+    <details className="group min-w-0">
+      <summary
+        className={cn(
+          "inline-flex cursor-pointer list-none items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-medium [&::-webkit-details-marker]:hidden",
+          errors > 0 ? "bg-danger/15 text-danger" : "bg-warning/15 text-warning",
+        )}
+      >
+        <AlertTriangle size={11} aria-hidden />
+        {label}
+        <span className="sr-only">— show details</span>
+      </summary>
+      <ul className="mt-1.5 space-y-1 rounded-lg border border-hairline/40 bg-inset px-2.5 py-2 text-[11.5px] leading-relaxed">
+        {issues.map((issue, index) => (
+          <li key={`${issue.code}:${issue.nodeId ?? ""}:${index}`} className="flex gap-1.5">
+            <span className={cn("shrink-0 font-medium", issue.severity === "error" ? "text-danger" : "text-warning")}>
+              {issue.severity === "error" ? "Error" : "Warning"}
+            </span>
+            <span className="min-w-0 text-ink-secondary">{issue.message}</span>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 
-function RunPill({ run }: { run: WorkflowRun | null }) {
+/** The pill is decorative on its own — the accessible name carries the
+ * status, the time and the failure reason, which are otherwise mouse-only. */
+export function RunPill({ run }: { run: WorkflowRun | null }) {
   if (!run) return <span className="text-[11px] text-ink-secondary">No runs yet</span>;
   const missed = isMissedWorkflowRun(run);
+  const label = missed ? "Missed" : RUN_LABEL[run.status];
+  const when = formatWhen(run.startedAt);
   return (
     <span
-      title={run.error}
+      aria-label={`Last run: ${label}, ${when}${run.error ? `. ${run.error}` : ""}`}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10.5px] font-medium",
         missed ? "bg-warning/15 text-warning" : RUN_TONE[run.status],
       )}
     >
       {run.status === "running" && <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />}
-      {missed ? "Missed" : RUN_LABEL[run.status]}
-      <span className="font-normal opacity-80">{formatWhen(run.startedAt)}</span>
+      <span aria-hidden>{label}</span>
+      <span aria-hidden className="font-normal tabular-nums opacity-80">
+        {when}
+      </span>
     </span>
   );
 }
 
-interface WorkflowRowProps {
+export interface WorkflowRowProps {
   workflow: WorkflowListItem;
   latestRun: WorkflowRun | null;
   selected: boolean;
@@ -123,7 +151,7 @@ interface WorkflowRowProps {
   onDismissError: () => void;
 }
 
-function WorkflowRow({
+export function WorkflowRow({
   workflow,
   latestRun,
   selected,
@@ -138,13 +166,22 @@ function WorkflowRow({
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(workflow.name);
   const inputRef = useRef<HTMLInputElement>(null);
+  const renameButtonRef = useRef<HTMLButtonElement>(null);
+  const deleteButtonRef = useRef<HTMLButtonElement>(null);
   // Enter and Escape settle the edit themselves; the blur that follows the
   // input unmounting (or a click elsewhere) goes through the same one-shot
   // gate, so a rename can never PATCH twice and a blur the browser defers
-  // (an unfocused window) cannot leave the row stuck in edit mode.
+  // cannot leave the row stuck in edit mode.
   const settledRef = useRef(false);
   const { errors } = validationSummary(workflow.issues);
-  const canRun = errors === 0 && busy === null;
+  // Never a bare `disabled`: that drops the button out of the tab order AND
+  // suppresses its tooltip, so nobody ever learns why running is refused.
+  const runBlockedReason =
+    errors > 0
+      ? `Fix ${errors} ${errors === 1 ? "error" : "errors"} before running`
+      : busy !== null
+        ? "Another action is still running"
+        : null;
 
   useEffect(() => {
     if (!editing) return;
@@ -162,10 +199,12 @@ function WorkflowRow({
     if (settledRef.current) return;
     settledRef.current = true;
     setEditing(false);
+    // the input is gone after this render; put focus back where the edit
+    // started instead of dropping it on the document
+    renameButtonRef.current?.focus();
     if (!commit) return;
-    const name = draftName.trim();
-    if (!name || name === workflow.name) return;
-    onRename(name);
+    const name = nextRename(workflow.name, draftName);
+    if (name) onRename(name);
   };
 
   return (
@@ -179,7 +218,7 @@ function WorkflowRow({
       <div className="flex items-center gap-3 px-3 py-2.5">
         <WorkflowIcon size={18} className={cn("shrink-0", selected ? "text-accent" : "text-ink-secondary")} aria-hidden />
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
             {editing ? (
               <input
                 ref={inputRef}
@@ -187,9 +226,10 @@ function WorkflowRow({
                 maxLength={120}
                 aria-label="Workflow name"
                 onChange={(event) => setDraftName(event.target.value)}
-                onBlur={() => finishEditing(true)}
+                // clicking Delete must not also commit a half-typed rename
+                onBlur={(event) => finishEditing(event.relatedTarget !== deleteButtonRef.current)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter") {
+                  if (event.key === "Enter" && !event.nativeEvent.isComposing) {
                     event.preventDefault();
                     finishEditing(true);
                   } else if (event.key === "Escape") {
@@ -211,6 +251,7 @@ function WorkflowRow({
               </button>
             )}
             <ValidationBadge issues={workflow.issues} />
+            {errors > 0 && <span className="text-[11px] text-danger">{runBlockedReason}</span>}
           </div>
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-ink-secondary">
             <RunPill run={latestRun} />
@@ -222,6 +263,7 @@ function WorkflowRow({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <button
+            ref={renameButtonRef}
             type="button"
             onClick={startEditing}
             disabled={busy !== null || editing}
@@ -233,15 +275,21 @@ function WorkflowRow({
           </button>
           <button
             type="button"
-            onClick={onRun}
-            disabled={!canRun}
+            onClick={() => {
+              if (!runBlockedReason) onRun();
+            }}
+            aria-disabled={runBlockedReason ? true : undefined}
             aria-label={`Run ${workflow.name}`}
-            title={errors > 0 ? `Fix ${errors} ${errors === 1 ? "error" : "errors"} before running` : "Run now"}
-            className="rounded-lg p-2 text-ink-secondary hover:bg-raised hover:text-success disabled:opacity-40"
+            title={runBlockedReason ?? "Run now"}
+            className={cn(
+              "rounded-lg p-2 text-ink-secondary",
+              runBlockedReason ? "cursor-not-allowed opacity-40" : "hover:bg-raised hover:text-success",
+            )}
           >
             {busy === "run" ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} />}
           </button>
           <button
+            ref={deleteButtonRef}
             type="button"
             onClick={onDelete}
             disabled={busy !== null}
@@ -256,7 +304,7 @@ function WorkflowRow({
       {error && (
         <div
           role="alert"
-          className="flex items-start gap-2 border-t border-danger/20 bg-danger/10 px-3 py-2 text-[12px] text-danger"
+          className="flex items-start gap-2 border-t border-danger/30 bg-danger/10 px-3 py-2 text-[12px] text-danger"
         >
           <span className="min-w-0 flex-1 break-words">{error}</span>
           <button
@@ -275,19 +323,12 @@ function WorkflowRow({
 
 export function WorkflowsPage() {
   const { state, dispatch } = useStore();
-  // The row → canvas hook for the editor: selecting a row is what opens it.
-  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const [busy, setBusy] = useState<Record<string, RowBusy>>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
-
-  // a selected row deleted from another client must not linger
-  useEffect(() => {
-    if (selectedWorkflowId && !state.workflows.some((workflow) => workflow.id === selectedWorkflowId)) {
-      setSelectedWorkflowId(null);
-    }
-  }, [selectedWorkflowId, state.workflows]);
+  // one pass over the runs instead of a scan per row
+  const latestRuns = useMemo(() => latestRunsByWorkflow(state.workflowRuns), [state.workflowRuns]);
 
   // One in-flight action per row. A failure lands inline on that row and
   // leaves local state untouched: the SSE fold (and the echoed response) is
@@ -312,7 +353,7 @@ export function WorkflowsPage() {
       if (workflow) {
         // the SSE frame carries the same row; upsert is idempotent
         dispatch({ type: "workflowPatched", workflow });
-        setSelectedWorkflowId(workflow.id);
+        dispatch({ type: "selectWorkflow", workflowId: workflow.id });
       }
     } catch (cause) {
       setPageError(errorText(cause));
@@ -323,6 +364,8 @@ export function WorkflowsPage() {
 
   const rename = (id: string, name: string) =>
     void withRow(id, "rename", async () => {
+      // the response carries the saved definition AND its issues, so the
+      // badge updates from the same round trip that renamed the row
       const { workflow } = await api(`/api/workflows/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
       if (workflow) dispatch({ type: "workflowPatched", workflow });
     });
@@ -358,7 +401,7 @@ export function WorkflowsPage() {
           type="button"
           onClick={() => void create()}
           disabled={creating}
-          className="flex shrink-0 items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-white hover:brightness-110 disabled:opacity-40"
+          className="flex shrink-0 items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-accent-ink hover:brightness-110 disabled:opacity-40"
         >
           {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
           New workflow
@@ -367,8 +410,19 @@ export function WorkflowsPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-7 py-6">
         {pageError && (
-          <div role="alert" className="mb-4 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-[12px] text-danger">
-            {pageError}
+          <div
+            role="alert"
+            className="mb-4 flex max-w-[900px] items-start gap-2 rounded-xl border border-danger/30 bg-danger/10 px-3 py-2 text-[12px] text-danger"
+          >
+            <span className="min-w-0 flex-1 break-words">{pageError}</span>
+            <button
+              type="button"
+              onClick={() => setPageError(null)}
+              aria-label="Dismiss error"
+              className="shrink-0 rounded p-0.5 hover:bg-danger/15"
+            >
+              <X size={12} />
+            </button>
           </div>
         )}
         {state.workflows.length === 0 ? (
@@ -381,11 +435,11 @@ export function WorkflowsPage() {
               <WorkflowRow
                 key={workflow.id}
                 workflow={workflow}
-                latestRun={latestWorkflowRun(state.workflowRuns, workflow.id)}
-                selected={workflow.id === selectedWorkflowId}
+                latestRun={latestRuns.get(workflow.id) ?? null}
+                selected={workflow.id === state.selectedWorkflowId}
                 busy={busy[workflow.id] ?? null}
                 error={rowErrors[workflow.id] ?? null}
-                onSelect={() => setSelectedWorkflowId(workflow.id)}
+                onSelect={() => dispatch({ type: "selectWorkflow", workflowId: workflow.id })}
                 onRename={(name) => rename(workflow.id, name)}
                 onRun={() => run(workflow.id)}
                 onDelete={() => remove(workflow)}

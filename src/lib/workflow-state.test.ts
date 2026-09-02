@@ -3,12 +3,13 @@ import { describe, expect, it } from "vitest";
 import type { Workflow, WorkflowRun } from "../../shared/workflow";
 import {
   isMissedWorkflowRun,
-  latestWorkflowRun,
+  latestRunsByWorkflow,
   mergeWorkflowSnapshot,
   removeWorkflow,
   upsertWorkflow,
   upsertWorkflowRun,
   validationSummary,
+  WORKFLOW_RUNS_KEPT,
   type WorkflowListItem,
 } from "./workflow-state";
 
@@ -97,6 +98,23 @@ describe("upsertWorkflowRun", () => {
     expect(completed[1]).toMatchObject({ id: "r-mid", status: "completed" });
   });
 
+  it("caps the slice at WORKFLOW_RUNS_KEPT, dropping the oldest run", () => {
+    const full = Array.from({ length: WORKFLOW_RUNS_KEPT }, (_, index) =>
+      run({ id: `r-${index}`, startedAt: 1_000 + index }),
+    );
+    const runs = full.reduce<WorkflowRun[]>((acc, item) => upsertWorkflowRun(acc, item), []);
+    expect(runs).toHaveLength(WORKFLOW_RUNS_KEPT);
+
+    const withNewest = upsertWorkflowRun(runs, run({ id: "newest", startedAt: 99_000 }));
+    expect(withNewest).toHaveLength(WORKFLOW_RUNS_KEPT);
+    expect(withNewest[0]!.id).toBe("newest");
+    expect(withNewest.some((item) => item.id === "r-0")).toBe(false);
+
+    // patching an existing run must not evict anything
+    const patched = upsertWorkflowRun(withNewest, { ...withNewest[1]!, status: "completed" });
+    expect(patched).toHaveLength(WORKFLOW_RUNS_KEPT);
+  });
+
   it("keeps a stable order for runs that started at the same instant", () => {
     const first = run({ id: "r-a", startedAt: 1_000 });
     const second = run({ id: "r-b", startedAt: 1_000 });
@@ -117,21 +135,29 @@ describe("mergeWorkflowSnapshot", () => {
     expect(merged.runs.map((item) => item.id)).toEqual(["new", "old"]);
   });
 
+  it("caps the snapshot at WORKFLOW_RUNS_KEPT", () => {
+    const many = Array.from({ length: WORKFLOW_RUNS_KEPT + 25 }, (_, index) =>
+      run({ id: `r-${index}`, startedAt: index }),
+    );
+    expect(mergeWorkflowSnapshot([], many).runs).toHaveLength(WORKFLOW_RUNS_KEPT);
+  });
+
   it("fills in issues for a snapshot row that lacks them", () => {
     const merged = mergeWorkflowSnapshot([draft()], []);
     expect(merged.workflows[0]!.issues.map((issue) => issue.code)).toEqual(["bad-entry"]);
   });
 });
 
-describe("latestWorkflowRun", () => {
-  it("returns the newest run for the workflow, or null", () => {
-    const runs = [
+describe("latestRunsByWorkflow", () => {
+  it("keeps the newest run per workflow and omits workflows with none", () => {
+    const latest = latestRunsByWorkflow([
       run({ id: "other", workflowId: "wf-9", startedAt: 9_000 }),
       run({ id: "mine-new", startedAt: 8_000 }),
       run({ id: "mine-old", startedAt: 1_000 }),
-    ];
-    expect(latestWorkflowRun(runs, "wf-1")?.id).toBe("mine-new");
-    expect(latestWorkflowRun(runs, "nope")).toBeNull();
+    ]);
+    expect(latest.get("wf-1")?.id).toBe("mine-new");
+    expect(latest.get("wf-9")?.id).toBe("other");
+    expect(latest.get("nope")).toBeUndefined();
   });
 });
 
