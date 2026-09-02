@@ -676,6 +676,13 @@ describe("workflow capabilities", () => {
     expect(unknown?.status).toBe(400);
     expect(bodyOf(unknown).error).toMatch(/^nodes\.0\.requires/);
     expect(store.get(id)?.nodes[0]).not.toHaveProperty("requires");
+    // Longer than the vocabulary can only be padding: refused at the door
+    // rather than handed to the validator one entry at a time.
+    const padded = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], requires: ["merge", "deploy", "merge"] }],
+    });
+    expect(padded?.status).toBe(400);
+    expect(bodyOf(padded).error).toMatch(/^nodes\.0\.requires/);
 
     const known = await call("PATCH", `/api/workflows/${id}`, {
       nodes: [{ ...agentGraph().nodes[0], requires: ["deploy", "merge"] }],

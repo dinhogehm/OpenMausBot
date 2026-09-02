@@ -158,6 +158,8 @@ function renderNotifyTemplate(template: string, workflow: Workflow, run: Workflo
 }
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+/** startRun's own refusal — the documented prefix the API maps to a 400. */
+const isInvalidWorkflow = (error: unknown): boolean => errorMessage(error).startsWith("invalid workflow:");
 
 const isThenable = (value: unknown): value is PromiseLike<unknown> =>
   typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
@@ -275,10 +277,15 @@ export class WorkflowEngine {
       try {
         this.startRun(workflow.id, `Scheduled run for ${new Date(scheduledFor).toISOString()}`, "schedule");
       } catch (error) {
-        // An invalid graph (or a workflow deleted under the sweep) is not the
-        // tick's failure: the next slot tries again, and the canvas already
-        // paints the issues.
-        console.warn(`workflow: scheduled run of ${workflow.id} not started: ${errorMessage(error)}`);
+        // Never the tick's failure: the next slot tries again either way. A
+        // REFUSED start (the graph carries an error — a permission a person
+        // revoked away from the canvas, or a structure broken since the
+        // schedule was saved) is a slot that did not run, so it is recorded
+        // and announced like a missed one rather than left to a log line
+        // nobody watches at 3am. A workflow deleted under the sweep has no
+        // receipt to leave.
+        if (isInvalidWorkflow(error)) this.recordRefusedRun(workflow, scheduledFor, now, errorMessage(error));
+        else console.warn(`workflow: scheduled run of ${workflow.id} not started: ${errorMessage(error)}`);
       }
     }
   }
@@ -330,6 +337,25 @@ export class WorkflowEngine {
       endedAt: now,
     });
     this.safeNotify(run, `Workflow "${workflow.name}" scheduled run ${MISSED_SLOT_REASON}`, "failed");
+  }
+
+  /** A slot the engine refused to start: same shape as a missed one — a
+   * terminal receipt stamped with the slot's time, carrying the refusal —
+   * so the row shows "Failed" with the reason and the user is told. The
+   * slot was already advanced by the caller (the double-fire guard). */
+  private recordRefusedRun(workflow: Workflow, scheduledFor: number, now: number, reason: string): void {
+    const run = this.store.createRun({
+      workflowId: workflow.id,
+      status: "failed",
+      trigger: "schedule",
+      attempt: 0,
+      input: "",
+      nodeResults: [],
+      error: redactSecretsInText(reason).slice(0, 500),
+      startedAt: scheduledFor,
+      endedAt: now,
+    });
+    this.safeNotify(run, `Workflow "${workflow.name}" scheduled run was not started: ${run.error ?? reason}`, "failed");
   }
 
   /** A human gate never holds the queue forever: past its deadline the node's

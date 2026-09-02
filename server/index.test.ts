@@ -2485,6 +2485,29 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("carries a bot's merge and deploy permissions on every bot frame as explicit booleans", async () => {
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    // The renderer merges bot frames over its record, so a frame that
+    // omitted a flag could leave a stale "allowed" behind: both flags ride
+    // every frame, false included — and the same on the wire, not just in
+    // the HTTP responses.
+    const stream = await openSse(`${BASE}/api/events`);
+    try {
+      await api("PATCH", `/api/bots/${bot.id}`, { unread: true });
+      const fresh = await stream.until((frame) => frame.kind === "bot" && frame.bot?.id === bot.id);
+      expect(fresh.bot).toMatchObject({ canMerge: false, canDeploy: false });
+
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { canMerge: true })).status).toBe(200);
+      const flagged = await stream.until(
+        (frame) => frame.kind === "bot" && frame.bot?.id === bot.id && frame.bot.canMerge === true,
+      );
+      expect(flagged.bot).toMatchObject({ canMerge: true, canDeploy: false });
+    } finally {
+      stream.close();
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
   it("tells a bot its standing permissions on every turn", async () => {
     const bot = (await api("POST", "/api/bots", {})).body.bot;
     try {

@@ -2143,7 +2143,7 @@ describe("WorkflowEngine schedules", () => {
     expect(h.store.listRuns(workflow.id).filter((run) => run.status === "running")).toHaveLength(1);
   });
 
-  it("warns and advances the slot when the due workflow is invalid, never rejecting the tick", async () => {
+  it("records a refused slot as a failed receipt and advances, when the due workflow is invalid, never rejecting the tick", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const h = harness({ nextOccurrence: stub });
@@ -2153,13 +2153,80 @@ describe("WorkflowEngine schedules", () => {
       await h.engine.tick();
       h.setNow(10_000 + HOUR);
       await expect(h.engine.tick()).resolves.toBeUndefined();
-      expect(h.store.listRuns()).toEqual([]);
+      // A slot that did not run is a receipt, not a log line: the row shows
+      // "Failed" with the reason and the user is told, like a missed slot.
+      const runs = h.store.listRuns(workflow.id);
+      expect(runs).toHaveLength(1);
+      // Stamped with the SLOT's time (armed from updatedAt), ended at the tick.
+      expect(runs[0]).toMatchObject({
+        status: "failed",
+        trigger: "schedule",
+        startedAt: workflow.updatedAt + HOUR,
+        endedAt: 10_000 + HOUR,
+        error: expect.stringMatching(/^invalid workflow: /),
+      });
+      expect(h.notifications).toEqual([
+        { runId: runs[0]!.id, message: expect.stringMatching(/Release.*not started: invalid workflow/), kind: "failed" },
+      ]);
       expect(h.dispatches).toHaveLength(0);
       expect(h.store.get(workflow.id)?.nextRunAt).toBe(10_000 + 2 * HOUR);
-      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/scheduled run of .* not started: invalid workflow/));
+      expect(warn).not.toHaveBeenCalled();
+
+      // The slot is spent: the same instant again leaves no second receipt.
+      await h.engine.tick();
+      expect(h.store.listRuns(workflow.id)).toHaveLength(1);
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("records a slot refused by a revoked capability as a failed receipt with the reason, and notifies", async () => {
+    const h = harness({ nextOccurrence: stub });
+    h.setBotCapabilities((botId) => (botId === "shipper" ? { canDeploy: true } : {}));
+    const workflow = h.store.create(
+      daily({
+        nodes: [
+          { kind: "agent", id: "plan", botId: "planner", instructions: "Draft the release plan.", outcomes: ["done"] },
+          { kind: "agent", id: "ship", botId: "shipper", instructions: "Ship it.", outcomes: ["shipped"], requires: ["deploy"] },
+        ],
+      }),
+    );
+    h.setNow(10_000);
+    await h.engine.tick();
+    // A healthy slot fires as usual…
+    h.setNow(10_000 + HOUR);
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id).map((run) => run.status)).toEqual(["running"]);
+    expect(h.dispatches).toHaveLength(1);
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.listRuns(workflow.id).map((run) => run.status)).toEqual(["completed"]);
+
+    // …then a person revokes the flag away from the canvas, and the next
+    // slot comes due. Nothing is dispatched, and nothing is silent.
+    h.setBotCapabilities(() => ({}));
+    h.setNow(10_000 + 2 * HOUR);
+    await h.engine.tick();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs.map((run) => run.status)).toEqual(["failed", "completed"]);
+    expect(runs[0]).toMatchObject({
+      trigger: "schedule",
+      startedAt: 10_000 + 2 * HOUR,
+      endedAt: 10_000 + 2 * HOUR,
+      error: 'invalid workflow: Node "ship" requires "deploy" but its bot "shipper" is not allowed to deploy.',
+    });
+    expect(h.notifications).toEqual([
+      { runId: runs[0]!.id, message: expect.stringMatching(/Release.*not started: .*not allowed to deploy/), kind: "failed" },
+    ]);
+    expect(h.dispatches).toHaveLength(2);
+    // The slot advanced before the refusal (double-fire guard), so the
+    // schedule keeps going once the flag is back.
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(10_000 + 3 * HOUR);
+    h.setBotCapabilities(() => ({ canDeploy: true }));
+    h.setNow(10_000 + 3 * HOUR);
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id).map((run) => run.status)).toEqual(["running", "failed", "completed"]);
+    expect(h.dispatches).toHaveLength(3);
   });
 
   it("clears a stale clock on a workflow whose schedule is gone", async () => {

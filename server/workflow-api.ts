@@ -73,8 +73,10 @@ const agentNodeSchema = z.object({
   timeoutMinutes: optionalNumber,
   retries: optionalNumber,
   // The one node field with a closed vocabulary: a name outside it could
-  // never be granted, so the door refuses it like the validator would.
-  requires: z.array(z.enum(WORKFLOW_CAPABILITIES)).optional(),
+  // never be granted, so the door refuses it like the validator would, and
+  // a list longer than the vocabulary can only be padding. Duplicates
+  // within that length stay the validator's (bad-requires), as pinned.
+  requires: z.array(z.enum(WORKFLOW_CAPABILITIES)).max(WORKFLOW_CAPABILITIES.length).optional(),
 });
 const approvalNodeSchema = z.object({
   kind: z.literal("approval"),
