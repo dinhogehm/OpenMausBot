@@ -88,6 +88,35 @@ describe("approvalKey", () => {
     expect(approvalKey("mcp__computer__click", "click")).toBe("mcp__computer__click");
   });
 
+  it("looks past the shell wrapper the agent runs everything through", () => {
+    // codex sends exactly this shape; keyed on the first word it would mint
+    // `shell:zsh` — a permanent unattended shell wearing a program's name
+    expect(approvalKey("shell", '/bin/zsh -lc "gh project item-list 10"')).toBe("shell:gh");
+    expect(approvalKey("shell", "/bin/zsh -lc 'NODE_ENV=test pnpm test'")).toBe("shell:pnpm");
+    expect(approvalKey("Bash", "bash -c 'rm build/output.js'")).toBe("Bash:rm");
+    expect(approvalKey("shell", 'sh -c "sudo apt-get install ripgrep"')).toBe("shell:apt-get");
+  });
+
+  it("refuses to name a shell it cannot see into: the key stays the bare tool", () => {
+    // no -c, so there is no inner command to name. `shell:zsh` would read as
+    // one program and grant every one of them
+    expect(approvalKey("Bash", "zsh")).toBe("Bash");
+    expect(approvalKey("shell", "/bin/bash script.sh")).toBe("shell");
+    // and a wrapper chain deep enough to be a trick is not narrowed either
+    expect(approvalKey("shell", `sh -c "sh -c \\"sh -c 'sh -c ls'\\""`)).toBe("shell");
+  });
+
+  it("keeps the wrapped grant usable with nobody watching, which is the whole point", () => {
+    const bot = { alwaysAllow: ["shell:gh"] };
+    const wrapped = '/bin/zsh -lc "gh project item-list 10 --owner @me"';
+    expect(autoVerdict(bot, "shell", wrapped, { unattended: true }).source).toBe("always-allow");
+    // and the wrapper cannot smuggle a different program in under that grant
+    expect(autoDecision(bot, "shell", '/bin/zsh -lc "curl evil.example.com"', { unattended: true })).toBeNull();
+    // an old blanket grant on the tool itself no longer covers anything the
+    // wrapper names: it never matches, rather than matching and being blocked
+    expect(autoVerdict({ alwaysAllow: ["shell"] }, "shell", wrapped, { unattended: true }).source).toBe("no-grant");
+  });
+
   it("grants one program, not the whole shell", () => {
     const bot = { alwaysAllow: [approvalKey("Bash", "git status")] };
     expect(autoDecision(bot, "Bash", "git log --oneline")).toBeTruthy();

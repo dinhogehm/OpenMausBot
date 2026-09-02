@@ -58,15 +58,41 @@ export function looksDestructive(text: string): boolean {
  * client so the two sides can never disagree about what was granted. */
 const COMMAND_TOOLS = new Set(["bash", "shell", "execute", "run_command", "computer_exec", "terminal"]);
 
+/** Shells, which are never the program a person means to grant. Agents run
+ * their commands through one — codex sends `/bin/zsh -lc "gh pr merge"` — so
+ * without looking past the wrapper every grant would be minted as
+ * `shell:zsh`: a permanent unattended shell wearing a program's name, and
+ * narrow enough to pass every check that asks whether a grant names one
+ * thing. */
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"]);
+
+/** The program a command line actually runs: past env assignments, past
+ * sudo, and past a shell wrapper into the command it was handed. */
+function programOf(command: string, depth = 0): string {
+  const words = command.trim().split(/\s+/);
+  let i = 0;
+  while (i < words.length && (/^[A-Z_][A-Z0-9_]*=/.test(words[i]) || words[i] === "sudo")) i += 1;
+  const word = words[i] ?? "";
+  const program = word.split("/").pop()?.replace(/[^\w.-]/g, "") ?? "";
+  if (depth >= 3 || !SHELLS.has(program)) return program;
+  // `-c`, `-lc`, `-lic`: everything after it is the real command, usually
+  // quoted. Nesting is bounded so a wrapper chain cannot spin here.
+  const flag = words.slice(i + 1).find((candidate) => /^-[a-z]*c$/i.test(candidate));
+  if (!flag) return program;
+  const at = command.indexOf(flag, command.indexOf(word) + word.length);
+  if (at < 0) return program;
+  const inner = command.slice(at + flag.length).trim().replace(/^["']/, "");
+  return programOf(inner, depth + 1) || program;
+}
+
 export function approvalKey(tool: string, summary: string, scope?: "local-computer"): string {
   const bare = tool.replace(/^mcp__[^_]+__/, "").toLowerCase();
   if (!COMMAND_TOOLS.has(bare)) return scope ? `${scope}:${tool}` : tool;
-  // first bare word of the command, skipping env assignments and sudo
-  const words = summary.trim().split(/\s+/);
-  let i = 0;
-  while (i < words.length && (/^[A-Z_][A-Z0-9_]*=/.test(words[i]) || words[i] === "sudo")) i += 1;
-  const program = (words[i] ?? "").split("/").pop()?.replace(/[^\w.-]/g, "") ?? "";
-  const key = program ? `${tool}:${program}` : tool;
+  const program = programOf(summary);
+  // A shell we could not see into is not a program anyone can name, so the
+  // key stays the bare tool: honestly broad, and refused wherever a broad
+  // grant is refused, rather than narrow-looking and quietly honoured.
+  const key = program && !SHELLS.has(program) ? `${tool}:${program}` : tool;
   return scope ? `${scope}:${key}` : key;
 }
 
