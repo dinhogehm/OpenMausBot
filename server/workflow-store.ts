@@ -10,7 +10,13 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { validateWorkflow, type Workflow, type WorkflowRun, type WorkflowRunStatus } from "../shared/workflow.ts";
+import {
+  validateWorkflow,
+  type Workflow,
+  type WorkflowRun,
+  type WorkflowRunStatus,
+  type WorkflowSchedule,
+} from "../shared/workflow.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
 
@@ -63,6 +69,11 @@ function loadArray<T extends { id: string }>(path: string, key: string): T[] {
     return [];
   }
 }
+
+/** Identity of a schedule, for change detection on update. Both sides come
+ * through the same API schema, so key order matches; a false "changed" only
+ * costs one harmless re-arm, which is why a plain serialization is enough. */
+const scheduleKey = (schedule: WorkflowSchedule | undefined): string => JSON.stringify(schedule ?? null);
 
 /** Oldest terminal receipts go first; live runs (queued/running/waiting)
  * survive the cap because they are the engine's crash-recovery state. The
@@ -122,9 +133,14 @@ export class WorkflowStore {
       createdAt: current.createdAt,
       updatedAt: this.now(),
     };
-    // A changed (or cleared) schedule invalidates the engine's computed next
-    // occurrence; null tells the engine's sweep to recompute on its next tick.
-    if ("triggers" in patch) patched.nextRunAt = null;
+    // Only a CHANGED schedule invalidates the engine's computed occurrence;
+    // null tells the sweep to recompute on its next tick. Resetting on every
+    // triggers patch would let a canvas that saves the whole document (an
+    // identical triggers object on each layout nudge) push the next slot
+    // away on every save — and rewrite the file and emit a frame for nothing.
+    if (scheduleKey(current.triggers?.schedule) !== scheduleKey(patched.triggers?.schedule)) {
+      patched.nextRunAt = null;
+    }
     const firstError = validateWorkflow(patched).find((issue) => issue.severity === "error");
     if (firstError) throw new Error(`invalid workflow: ${firstError.message}`);
     const next = this.workflows.slice();

@@ -235,7 +235,7 @@ export class WorkflowEngine {
         continue;
       }
       if (workflow.nextRunAt === undefined || workflow.nextRunAt === null) {
-        this.store.setNextRunAt(workflow.id, this.occurrenceAfter(schedule, now));
+        this.store.setNextRunAt(workflow.id, this.initialOccurrence(workflow, schedule, now));
         continue;
       }
       const scheduledFor = workflow.nextRunAt;
@@ -258,6 +258,21 @@ export class WorkflowEngine {
         console.warn(`workflow: scheduled run of ${workflow.id} not started: ${errorMessage(error)}`);
       }
     }
+  }
+
+  /** The first slot a newly armed schedule fires. Arming happens on a tick,
+   * which can land AFTER the slot the definition was saved for (a schedule
+   * edited seconds before it), so a `daily` schedule is anchored at the
+   * definition's own updatedAt instead of at `now`: the slot in between is
+   * then found and fired — late, but inside the catch-up window — rather
+   * than silently skipped. The anchor never reaches further back than that
+   * window, so a schedule left unarmed for days (a file from a build with no
+   * scheduler, a hand edit) catches up at most one slot. A `once` schedule
+   * keeps "strictly after now": its instant is absolute, and a time the user
+   * chose that has already passed is simply gone. */
+  private initialOccurrence(workflow: Workflow, schedule: WorkflowSchedule, now: number): number | null {
+    if (schedule.type === "once") return this.occurrenceAfter(schedule, now);
+    return this.occurrenceAfter(schedule, Math.max(workflow.updatedAt, now - WORKFLOW_SCHEDULE_CATCH_UP_MS));
   }
 
   /** nextOccurrence is an injected wrapper; a throw there must not take the

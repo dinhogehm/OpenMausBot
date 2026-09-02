@@ -1767,13 +1767,18 @@ describe("WorkflowEngine schedules", () => {
     expect(h.store.listRuns()).toEqual([]);
   });
 
-  it("arms a fresh schedule on the next tick without firing it or touching updatedAt", async () => {
+  it("arms a fresh daily schedule from the definition's updatedAt, not from the tick", async () => {
     const h = harness({ nextOccurrence: stub });
     const workflow = h.store.create(daily());
     h.setNow(10_000);
     await h.engine.tick();
-    expect(h.store.get(workflow.id)).toMatchObject({ nextRunAt: 10_000 + HOUR, updatedAt: workflow.updatedAt });
-    expect(h.reload().get(workflow.id)?.nextRunAt).toBe(10_000 + HOUR);
+    // Anchored at updatedAt (1_000), so the slot the definition was saved
+    // for cannot fall into the gap before the first tick.
+    expect(h.store.get(workflow.id)).toMatchObject({
+      nextRunAt: workflow.updatedAt + HOUR,
+      updatedAt: workflow.updatedAt,
+    });
+    expect(h.reload().get(workflow.id)?.nextRunAt).toBe(workflow.updatedAt + HOUR);
     expect(h.store.listRuns()).toEqual([]);
     expect(h.dispatches).toHaveLength(0);
   });
@@ -1783,6 +1788,7 @@ describe("WorkflowEngine schedules", () => {
     const workflow = h.store.create(daily());
     h.setNow(10_000);
     await h.engine.tick();
+    const slot = h.store.get(workflow.id)!.nextRunAt!;
     const advances: Array<{ value: number | null; dispatchesSoFar: number }> = [];
     const setNextRunAt = h.store.setNextRunAt.bind(h.store);
     vi.spyOn(h.store, "setNextRunAt").mockImplementation((id, value) => {
@@ -1790,7 +1796,6 @@ describe("WorkflowEngine schedules", () => {
       return setNextRunAt(id, value);
     });
 
-    const slot = 10_000 + HOUR;
     h.setNow(slot);
     await h.engine.tick();
     const runs = h.store.listRuns(workflow.id);
@@ -1810,6 +1815,66 @@ describe("WorkflowEngine schedules", () => {
     await h.engine.tick();
     expect(h.store.listRuns(workflow.id)).toHaveLength(1);
     expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("keeps the armed slot across a patch that does not change the schedule", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const workflow = h.store.create(daily());
+    h.setNow(10_000);
+    await h.engine.tick();
+    const armed = h.store.get(workflow.id)!.nextRunAt!;
+
+    // What a canvas saving the whole document on every layout nudge sends:
+    // the same triggers object, over and over.
+    h.setNow(20_000);
+    expect(h.store.update(workflow.id, { ...daily(), layout: { plan: { x: 1, y: 2 } } }).nextRunAt).toBe(armed);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(armed);
+    expect(h.store.listRuns()).toEqual([]);
+
+    // …and the slot still fires at its original time.
+    h.setNow(armed);
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+    expect(h.store.listRuns(workflow.id)[0]).toMatchObject({ trigger: "schedule", startedAt: armed });
+  });
+
+  it("still fires a slot seconds away when the schedule was edited just before it", async () => {
+    const SLOT = 5_000_000;
+    const DAY = 24 * HOUR;
+    // A wall clock, not an offset: the daily slot is a fixed instant.
+    const h = harness({
+      nextOccurrence: (schedule, after) =>
+        schedule.type === "once" ? (schedule.at > after ? schedule.at : null) : after < SLOT ? SLOT : SLOT + DAY,
+    });
+    const workflow = h.store.create(daily());
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(SLOT);
+
+    // A genuine edit 3s before the slot clears the clock…
+    h.setNow(SLOT - 3_000);
+    expect(
+      h.store.update(workflow.id, { triggers: { schedule: { type: "daily", time: "10:00", weekdays: [1] } } }).nextRunAt,
+    ).toBeNull();
+    // …and the next tick lands after the slot. Anchoring the re-arm at
+    // updatedAt finds it (late, inside the catch-up window) instead of
+    // skipping to tomorrow; arming and firing are separate tick steps, so
+    // the run starts one pass later — late by a tick, never lost.
+    h.setNow(SLOT + 5_000);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(SLOT);
+    expect(h.store.listRuns()).toEqual([]);
+    await h.engine.tick();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs).toHaveLength(1);
+    // The run names the slot it belongs to; startedAt is when it really began.
+    expect(runs[0]).toMatchObject({
+      trigger: "schedule",
+      status: "running",
+      input: `Scheduled run for ${new Date(SLOT).toISOString()}`,
+      startedAt: SLOT + 5_000,
+    });
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(SLOT + DAY);
   });
 
   it("queues a scheduled run behind an active one", async () => {
@@ -1856,7 +1921,7 @@ describe("WorkflowEngine schedules", () => {
     const workflow = h.store.create(daily());
     h.setNow(10_000);
     await h.engine.tick();
-    const slot = 10_000 + HOUR;
+    const slot = h.store.get(workflow.id)!.nextRunAt!;
     const late = slot + WORKFLOW_SCHEDULE_CATCH_UP_MS + 1;
     h.setNow(late);
     await h.engine.tick();
@@ -1915,7 +1980,7 @@ describe("WorkflowEngine schedules", () => {
     const workflow = h.store.create(daily());
     h.setNow(10_000);
     await h.engine.tick();
-    expect(h.store.get(workflow.id)?.nextRunAt).toBe(10_000 + HOUR);
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(workflow.updatedAt + HOUR);
     h.setNow(20_000);
     const edited = h.store.update(workflow.id, {
       triggers: { schedule: { type: "daily", time: "10:00", weekdays: [1] } },

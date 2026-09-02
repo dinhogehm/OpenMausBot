@@ -5,7 +5,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { Workflow, WorkflowIssue, WorkflowRun } from "../shared/workflow.ts";
 import {
@@ -23,7 +23,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function harness() {
+function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: string) => void } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "omb-workflow-api-"));
   dirs.push(dir);
   let clock = 1_000;
@@ -49,7 +49,7 @@ function harness() {
       hooks.onInterrupt?.();
     },
   });
-  const deps: WorkflowApiDeps = { store, engine };
+  const deps: WorkflowApiDeps = { store, engine, ...(onWorkflowDeleted ? { onWorkflowDeleted } : {}) };
   const call = (method: string, target: string, body?: unknown) => {
     const url = new URL(target, "http://omb.test");
     return handleWorkflowRequest(deps, {
@@ -349,6 +349,43 @@ describe("workflow definitions", () => {
     expect(await call("DELETE", `/api/workflows/${id}`)).toEqual({ status: 204 });
     expect(store.get(id)).toBeNull();
     expect(store.listRuns(id).every((run) => run.status === "cancelled")).toBe(true);
+  });
+
+  it("tells the caller once a definition is really gone, so its triggers can be released", async () => {
+    const released: string[] = [];
+    const { call, engine, hooks } = harness({ onWorkflowDeleted: (workflowId) => released.push(workflowId) });
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
+    expect(await call("DELETE", `/api/workflows/${id}`)).toEqual({ status: 204 });
+    expect(released).toEqual([id]);
+    // Idempotent deletes still report: nothing points at it either way.
+    expect(await call("DELETE", `/api/workflows/${id}`)).toEqual({ status: 204 });
+    expect(released).toEqual([id, id]);
+
+    // A refused delete must NOT release anything — the workflow is still there.
+    const busy = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
+    await call("POST", `/api/workflows/${busy}/runs`, { input: "first" });
+    hooks.onInterrupt = () => {
+      engine.startRun(busy, "again", "webhook");
+    };
+    expect((await call("DELETE", `/api/workflows/${busy}`))?.status).toBe(409);
+    expect(released).toEqual([id, id]);
+  });
+
+  it("keeps the 204 when releasing triggers throws — the definition is already gone", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { call, store } = harness({
+        onWorkflowDeleted: () => {
+          throw new Error("webhook file is read-only");
+        },
+      });
+      const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
+      expect(await call("DELETE", `/api/workflows/${id}`)).toEqual({ status: 204 });
+      expect(store.get(id)).toBeNull();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(id), expect.any(Error));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("leaves non-workflow routes and unsupported methods to the caller", async () => {

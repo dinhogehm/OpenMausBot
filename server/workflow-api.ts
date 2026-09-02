@@ -27,6 +27,11 @@ import type { WorkflowInput, WorkflowStore } from "./workflow-store.ts";
 export interface WorkflowApiDeps {
   store: WorkflowStore;
   engine: WorkflowEngine;
+  /** Called once a definition is actually gone, so what pointed AT it can be
+   * released — index.ts pauses the webhooks that targeted it, which would
+   * otherwise answer 410 forever. A throw here is logged, never turned into
+   * a failed DELETE: the definition is already deleted by then. */
+  onWorkflowDeleted?: (workflowId: string) => void;
 }
 
 export interface WorkflowApiResponse {
@@ -258,7 +263,10 @@ const liveRuns = (store: WorkflowStore, workflowId: string) =>
  * that await, so the sweep is bounded and re-checked synchronously right
  * before removal: with anything still live, nothing is removed and the
  * caller gets a 409 to retry — never a definition-less run driving a bot. */
-export async function deleteWorkflow({ store, engine }: WorkflowApiDeps, workflowId: string): Promise<WorkflowApiResponse> {
+export async function deleteWorkflow(
+  { store, engine, onWorkflowDeleted }: WorkflowApiDeps,
+  workflowId: string,
+): Promise<WorkflowApiResponse> {
   for (let pass = 0; pass < 4; pass++) {
     const live = liveRuns(store, workflowId).sort((a, b) => Number(a.status !== "queued") - Number(b.status !== "queued"));
     if (live.length === 0) break;
@@ -279,6 +287,12 @@ export async function deleteWorkflow({ store, engine }: WorkflowApiDeps, workflo
     };
   }
   store.remove(workflowId);
+  try {
+    onWorkflowDeleted?.(workflowId);
+  } catch (error) {
+    // The definition is gone; failing the DELETE now would be a lie.
+    console.warn(`workflow: releasing triggers of deleted workflow ${workflowId} failed`, error);
+  }
   return { status: 204 };
 }
 

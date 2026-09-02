@@ -193,17 +193,30 @@ describe("WorkflowStore nextRunAt", () => {
     expect(h.store.setNextRunAt("nope", 1)).toBeNull();
   });
 
-  it("update resets the clock when triggers change or are cleared, and keeps it otherwise", () => {
+  it("update resets the clock when the schedule changes or is cleared, and keeps it otherwise", () => {
     const h = harness();
-    const created = h.store.create(input());
-    h.store.setNextRunAt(created.id, 9_000);
-    expect(h.store.update(created.id, { name: "Renamed" }).nextRunAt).toBe(9_000);
     const daily = { schedule: { type: "daily" as const, time: "09:00", weekdays: [1] } };
-    expect(h.store.update(created.id, { triggers: daily }).nextRunAt).toBeNull();
+    const created = h.store.create(input({ triggers: daily }));
+    h.store.setNextRunAt(created.id, 9_000);
+    // An unrelated field, and the SAME schedule sent again (what a canvas
+    // that saves the whole document does), leave the armed slot alone.
+    expect(h.store.update(created.id, { name: "Renamed" }).nextRunAt).toBe(9_000);
+    const emittedBefore = h.emitted.length;
+    expect(h.store.update(created.id, { triggers: { schedule: { ...daily.schedule, weekdays: [1] } } }).nextRunAt).toBe(9_000);
+    // One frame for the update itself — none for a clock that did not move.
+    expect(h.emitted).toHaveLength(emittedBefore + 1);
+    expect(h.open().get(created.id)?.nextRunAt).toBe(9_000);
+
+    // A real edit, and clearing the triggers, both disarm.
+    expect(h.store.update(created.id, { triggers: { schedule: { type: "daily", time: "10:00", weekdays: [1] } } }).nextRunAt)
+      .toBeNull();
     h.store.setNextRunAt(created.id, 9_000);
     expect(h.store.update(created.id, { triggers: undefined }).nextRunAt).toBeNull();
     expect(h.open().get(created.id)?.triggers).toBeUndefined();
     expect(h.open().get(created.id)?.nextRunAt).toBeNull();
+    // Arming a workflow that never had a schedule is a change too.
+    h.store.setNextRunAt(created.id, 9_000);
+    expect(h.store.update(created.id, { triggers: daily }).nextRunAt).toBeNull();
   });
 
   it("update refuses a schedule the scheduler could not arm", () => {

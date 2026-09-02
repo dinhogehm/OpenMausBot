@@ -5880,7 +5880,13 @@ const server = createServer(async (req, res) => {
     // ── workflows ──────────────────────────────────────────────────────
     // The router answers null for every path it does not own.
     const workflowResponse = await handleWorkflowRequest(
-      { store: workflowStore!, engine: workflowEngine! },
+      {
+        store: workflowStore!,
+        engine: workflowEngine!,
+        // A webhook aimed at a deleted workflow is released the same way a
+        // webhook aimed at a deleted MAUS is.
+        onWorkflowDeleted: (workflowId) => webhooks.disableForWorkflow(workflowId),
+      },
       { method, path, searchParams: url.searchParams, readBody: () => readBody(req) },
     );
     if (workflowResponse) {
