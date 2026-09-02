@@ -73,6 +73,7 @@ import "./workflow-canvas.css";
 import { api, openNotificationTarget, useStore } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { validationSummary, type WorkflowListItem } from "@/lib/workflow-state";
+import { capabilityLookup } from "@/lib/workflow-capabilities";
 import { createSaveQueue, type SaveStatus } from "@/lib/workflow-save-queue";
 import {
   isActiveWorkflowRun,
@@ -121,6 +122,7 @@ import {
 } from "@/lib/workflow-graph";
 import {
   WORKFLOW_SCHEDULE_TIME_RE,
+  capabilityIssues,
   validateWorkflow,
   type Workflow,
   type WorkflowNodeResult,
@@ -484,21 +486,30 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   );
 
   const bots = useMemo<WorkflowPanelBot[]>(
-    () => state.bots.filter((bot) => !bot.hidden).map(({ id, name, color, avatarUrl, avatarCrop, mascotBody }) => ({
-      id,
-      name,
-      color,
-      avatarUrl,
-      avatarCrop,
-      mascotBody,
-    })),
+    () =>
+      state.bots
+        .filter((bot) => !bot.hidden)
+        .map(({ id, name, color, avatarUrl, avatarCrop, mascotBody, canMerge, canDeploy }) => ({
+          id,
+          name,
+          color,
+          avatarUrl,
+          avatarCrop,
+          mascotBody,
+          canMerge,
+          canDeploy,
+        })),
     [state.bots],
   );
   const groups = useMemo(() => state.groups.map(({ id, name }) => ({ id, name })), [state.groups]);
 
-  // The same validator the server runs, on the document as it stands right
-  // now — that is what keeps a badge from lying between two saves.
-  const issues = useMemo(() => validateWorkflow(doc), [doc]);
+  // The same validators the server runs, on the document as it stands right
+  // now — that is what keeps a badge from lying between two saves. The
+  // capability pass reads the roster as the STORE holds it (hidden bots
+  // included: a node may still point at one), so flipping "can merge" in a
+  // profile repaints the node that requires it with no save in between.
+  const lookup = useMemo(() => capabilityLookup(state.bots), [state.bots]);
+  const issues = useMemo(() => [...validateWorkflow(doc), ...capabilityIssues(doc, lookup)], [doc, lookup]);
   const { errors, warnings } = validationSummary(issues);
   const headerIssues = useMemo(() => documentIssues(issues), [issues]);
   const nodeIssues = useMemo(() => issuesByNode(issues), [issues]);

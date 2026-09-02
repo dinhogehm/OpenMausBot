@@ -7,18 +7,33 @@ import { Flag, Plus, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { BotAvatarProps } from "./Avatar";
 import type { WorkflowOutcomeHandle } from "@/lib/workflow-graph";
+import { grantedCapabilities, missingCapabilities, toggleRequirement } from "@/lib/workflow-capabilities";
 import { BotAvatar } from "./Avatar";
 import {
   WORKFLOW_APPROVAL_OUTCOMES,
+  WORKFLOW_CAPABILITIES,
   WORKFLOW_FAIL_OUTCOME,
   WORKFLOW_NODE_RETRIES_DEFAULT,
   WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN,
   WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H,
+  type BotCapabilities,
   type WorkflowIssue,
   type WorkflowNode,
 } from "../../shared/workflow";
 
-export type WorkflowPanelBot = BotAvatarProps["bot"] & { id: string; name: string };
+/** The roster as the panel sees it: enough to draw the avatar, and the two
+ * permission flags, so the picker can tag a bot and the Requires group can
+ * say which requirement the chosen one falls short of. */
+export type WorkflowPanelBot = BotAvatarProps["bot"] & BotCapabilities & { id: string; name: string };
+type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
+
+/** What the picker prints for a bot: its name, then the permissions it
+ * holds. A native `<option>` can carry text and nothing else, so the tag IS
+ * the text — which is also what a screen reader gets. */
+export function botOptionLabel(bot: WorkflowPanelBot): string {
+  return [bot.name, ...grantedCapabilities(bot)].join(" · ");
+}
+
 export interface WorkflowPanelGroup {
   id: string;
   name: string;
@@ -137,6 +152,57 @@ function OutcomeRow({
         <Trash2 size={14} />
       </button>
     </li>
+  );
+}
+
+/** What the bot must be allowed to do before the engine will dispatch this
+ * node. The document stores the list only when it is non-empty (an absent
+ * key, never `[]` or `null` — `toggleRequirement` owns that rule), and the
+ * shortfall is printed as a sentence under the boxes: the canvas already
+ * lists the `missing-capability` issue above, but "which bot, which
+ * permission, where to fix it" belongs next to the control that caused it. */
+function RequiresGroup({
+  node,
+  bot,
+  onUpdate,
+}: {
+  node: AgentNode;
+  bot: WorkflowPanelBot | undefined;
+  onUpdate: (next: WorkflowNode) => void;
+}) {
+  const required = node.requires ?? [];
+  const lacking = bot ? missingCapabilities(node.requires, bot) : [];
+
+  return (
+    <div>
+      <span className={LABEL}>Requires</span>
+      <p className="mt-0.5 text-[10.5px] text-ink-secondary">
+        What the bot must be allowed to do before this step can run. Granted per bot, in its profile.
+      </p>
+      <div className="mt-1.5 flex items-center gap-4">
+        {WORKFLOW_CAPABILITIES.map((capability) => (
+          <label key={capability} className="inline-flex items-center gap-1.5 text-[12px] text-ink">
+            <input
+              type="checkbox"
+              checked={required.includes(capability)}
+              onChange={(event) => {
+                const { requires: _requires, ...rest } = node;
+                const requires = toggleRequirement(node.requires, capability, event.target.checked);
+                onUpdate(requires ? { ...rest, requires } : rest);
+              }}
+              className="accent-accent"
+            />
+            {capability}
+          </label>
+        ))}
+      </div>
+      {bot &&
+        lacking.map((capability) => (
+          <p key={capability} className="mt-1.5 text-[11.5px] leading-snug text-danger">
+            {`${bot.name} is not allowed to ${capability} — enable it in the bot's settings`}
+          </p>
+        ))}
+    </div>
   );
 }
 
@@ -275,12 +341,14 @@ export function WorkflowNodePanel({
                   )}
                   {bots.map((candidate) => (
                     <option key={candidate.id} value={candidate.id}>
-                      {candidate.name}
+                      {botOptionLabel(candidate)}
                     </option>
                   ))}
                 </select>
               </div>
             </div>
+
+            <RequiresGroup node={node} bot={bot} onUpdate={onUpdate} />
 
             <div>
               <label className={LABEL} htmlFor={field("instructions")}>

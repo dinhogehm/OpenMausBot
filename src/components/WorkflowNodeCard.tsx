@@ -8,9 +8,10 @@ import { AlertTriangle, CircleUserRound, Flag, MessageSquare, ShieldQuestion } f
 
 import { BotAvatar, type BotAvatarProps } from "./Avatar";
 import { cn } from "@/lib/cn";
+import { hasCapability } from "@/lib/workflow-capabilities";
 import type { WorkflowGraphNodeData, WorkflowOutcomeHandle } from "@/lib/workflow-graph";
 import type { WorkflowNodeTone } from "@/lib/workflow-observation";
-import type { WorkflowNode } from "../../shared/workflow";
+import type { BotCapabilities, WorkflowNode } from "../../shared/workflow";
 
 /** How a run decorates a card. `idle` is the editor's only value; the rest
  * are what the observation view asks for, which is why the vocabulary lives
@@ -56,8 +57,10 @@ export function excerpt(text: string, max = 90): string {
 
 export interface WorkflowNodeCardProps {
   data: WorkflowGraphNodeData;
-  /** The bot an agent node points at, or null when the id no longer resolves. */
-  bot?: BotAvatarProps["bot"] | null;
+  /** The bot an agent node points at, or null when the id no longer resolves.
+   * Its permission flags ride along so a requirement tag can be painted red
+   * without the card knowing where the roster lives. */
+  bot?: (BotAvatarProps["bot"] & BotCapabilities) | null;
   /** The room a notify node posts into, or null when it no longer resolves. */
   groupName?: string | null;
   selected?: boolean;
@@ -166,6 +169,30 @@ export function WorkflowNodeCard({
           </p>
         )}
       </div>
+
+      {/* One tag per permission the step needs. Red is the hint; the words
+          are the diagnostic — the validator's `missing-capability` issue is
+          listed below, and the tag itself carries the shortfall in sr-only
+          copy, so a colour is never the only thing that says so. */}
+      {node.kind === "agent" && node.requires && node.requires.length > 0 && (
+        <ul className="mt-1.5 flex flex-wrap gap-1 px-3">
+          {node.requires.map((capability) => {
+            const lacking = !hasCapability(bot, capability);
+            return (
+              <li
+                key={capability}
+                className={cn(
+                  "rounded-full px-1.5 py-px text-[9.5px] font-medium",
+                  lacking ? "bg-danger/15 text-danger" : "bg-control text-ink-secondary",
+                )}
+              >
+                {`needs ${capability}`}
+                {lacking && <span className="sr-only"> (bot not allowed)</span>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
 
       {issues.length > 0 && (
         <ul className="mx-3 mt-2 space-y-1 rounded-lg border border-hairline/40 bg-inset px-2 py-1.5 text-[10px] leading-snug">

@@ -153,6 +153,19 @@ describe("reconcileGraphNodes", () => {
       node.kind === "agent" ? { ...node, timeoutMinutes: 5 } : node,
     );
     expect(reconcileGraphNodes(first, toGraphNodes(withTimeout, issues))[0]).not.toBe(first[0]);
+
+    // `requires` is the node's second array: compared element-wise, so a
+    // swapped requirement of the same length is still a change
+    const needsMerge = updateNode(graph, "agent-1", (node) =>
+      node.kind === "agent" ? { ...node, requires: ["merge"] } : node,
+    );
+    const requiring = toGraphNodes(needsMerge, issues);
+    expect(reconcileGraphNodes(first, requiring)[0]).not.toBe(first[0]);
+    const needsDeploy = updateNode(needsMerge, "agent-1", (node) =>
+      node.kind === "agent" ? { ...node, requires: ["deploy"] } : node,
+    );
+    expect(reconcileGraphNodes(requiring, toGraphNodes(needsDeploy, issues))[0]).not.toBe(requiring[0]);
+    expect(reconcileGraphNodes(requiring, toGraphNodes(needsMerge, issues))[0]).toBe(requiring[0]);
   });
 
   it("replaces the object when position, selection, entry, issues or the node itself change", () => {
