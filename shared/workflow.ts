@@ -99,13 +99,14 @@ export interface WorkflowRun {
   /** What started this run; the UI timeline shows it, so it must survive a
    * restart. Optional so pre-existing receipts load unchanged. */
   trigger?: WorkflowRunTrigger;
-  /** `updatedAt` of the definition this run was planned against, stamped
-   * when the run starts (and re-stamped when a queued run is promoted or a
-   * failed one resumed). Definitions persist as drafts, so the graph can
-   * change under a live run; this is what lets the engine tell "this node
-   * is a deliberate sink" from "the rest of the workflow was deleted while
-   * I was running". Optional so pre-existing receipts load unchanged. */
-  definitionUpdatedAt?: number;
+  /** workflowRoutingFingerprint of the definition this run was planned
+   * against, stamped when the run starts (and re-stamped when a queued run
+   * is promoted or a failed one resumed). Definitions persist as drafts, so
+   * the graph can change under a live run; this is what lets the engine tell
+   * "this node is a deliberate sink" from "the rest of the workflow was
+   * deleted while I was running". Optional so pre-existing receipts load
+   * unchanged. */
+  routingFingerprint?: string;
   /** The webhook (and its delivery) that started a "webhook" run, so the
    * webhook's pending cap and its pause/delete cancellation can find the
    * runs it owns. */
@@ -148,6 +149,36 @@ export function nodeOutcomes(node: WorkflowNode): string[] {
     case "notify":
       return [WORKFLOW_NOTIFY_OUTCOME];
   }
+}
+
+/** Two 32-bit FNV-1a passes with different multipliers, hex-joined: a
+ * 64-bit-wide digest with no crypto dependency, so the same function runs in
+ * the renderer and the server. */
+function hash64(text: string): string {
+  let low = 0x811c9dc5;
+  let high = 0x01000193;
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index);
+    low = Math.imul(low ^ code, 0x01000193);
+    high = Math.imul(high ^ code, 0x85ebca6b);
+  }
+  return (low >>> 0).toString(16).padStart(8, "0") + (high >>> 0).toString(16).padStart(8, "0");
+}
+
+/** Identity of everything that decides WHERE A RUN CAN GO NEXT: the entry,
+ * each node's id, kind and routable outcomes, and every edge. Deliberately
+ * NOT the layout, name, description, triggers or execution knobs — a canvas
+ * that autosaves the whole document on a node drag must be invisible to a
+ * run in flight, while an edge or an outcome disappearing under it must not
+ * be. Everything is sorted before serializing, so node order, edge order and
+ * outcome order cannot produce a false difference; the result is hashed
+ * because it is stamped on every run receipt. */
+export function workflowRoutingFingerprint(workflow: Workflow): string {
+  const nodes = workflow.nodes
+    .map((node) => JSON.stringify([node.id, node.kind, [...nodeOutcomes(node)].sort()]))
+    .sort();
+  const edges = workflow.edges.map((edge) => JSON.stringify([edge.from, edge.outcome, edge.to])).sort();
+  return hash64(JSON.stringify([workflow.entryNodeId, nodes, edges]));
 }
 
 export interface ParsedWorkflowOutcome {

@@ -12,6 +12,7 @@ import {
   WORKFLOW_CONTROL_CLOSE,
   WORKFLOW_CONTROL_OPEN,
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
+  workflowRoutingFingerprint,
   type WorkflowNode,
   type WorkflowNotificationKind,
   type WorkflowRun,
@@ -1708,7 +1709,7 @@ describe("WorkflowEngine definition changes under a live run", () => {
     const h = harness();
     const workflow = h.store.create(chain());
     const run = h.engine.startRun(workflow.id, "go", "manual");
-    expect(h.store.getRun(run.id)?.definitionUpdatedAt).toBe(workflow.updatedAt);
+    expect(h.store.getRun(run.id)?.routingFingerprint).toBe(workflowRoutingFingerprint(workflow));
 
     // While "a" is running, the tail of the workflow is deleted. Saving that
     // is legal (drafts persist), so the run must notice rather than treat
@@ -1727,35 +1728,96 @@ describe("WorkflowEngine definition changes under a live run", () => {
     expect(h.notifications.at(-1)).toMatchObject({ runId: run.id, kind: "failed" });
   });
 
-  it("completes on a real sink when the definition is untouched, and re-stamps a promoted run", () => {
+  it("fails closed when a node's declared outcome vanishes mid-run, edges untouched", () => {
+    const h = harness();
+    // "ship" is a sink declaring two outcomes; no edge leaves it, so the
+    // edge set below never changes and only the outcome component of the
+    // fingerprint can notice this edit.
+    const workflow = h.store.create(
+      pipeline({
+        nodes: [
+          { kind: "agent", id: "plan", botId: "planner", instructions: "Draft.", outcomes: ["done"] },
+          { kind: "agent", id: "ship", botId: "shipper", instructions: "Ship.", outcomes: ["shipped", "skipped"] },
+        ],
+      }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+
+    const before = h.store.get(workflow.id)!;
+    h.store.update(workflow.id, {
+      nodes: [
+        before.nodes[0]!,
+        { kind: "agent", id: "ship", botId: "shipper", instructions: "Ship.", outcomes: ["shipped"] },
+      ],
+    });
+    expect(h.store.get(workflow.id)!.edges).toEqual(before.edges);
+
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    const finished = h.store.getRun(run.id)!;
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toMatch(/changed while this run was in flight/);
+  });
+
+  it("ignores a layout autosave and a rename under a live run, completing on its sink", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    const stamp = h.store.getRun(run.id)!.routingFingerprint;
+
+    // Exactly what the canvas saves on a debounced node drag: the WHOLE
+    // document, same graph, new coordinates — plus a rename and a schedule
+    // for good measure. None of it may disturb a run in flight.
+    h.setNow(2_000);
+    h.store.update(workflow.id, {
+      ...pipeline(),
+      name: "Renamed mid-run",
+      description: "now with a description",
+      layout: { plan: { x: 120, y: 40 }, ship: { x: 260, y: 40 } },
+      triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1] } },
+      maxNodeExecutions: 12,
+    });
+    expect(workflowRoutingFingerprint(h.store.get(workflow.id)!)).toBe(stamp);
+
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(run.id)?.status).toBe("completed");
+    expect(h.store.getRun(run.id)?.error).toBeUndefined();
+    expect(h.notifications).toEqual([]);
+  });
+
+  it("re-stamps a promoted run and a resumed one against the graph they will traverse", () => {
     const h = harness();
     const workflow = h.store.create(pipeline());
     const first = h.engine.startRun(workflow.id, "one", "manual");
     const second = h.engine.startRun(workflow.id, "two", "manual");
     expect(second.status).toBe("queued");
 
-    // An edit while both runs are alive. The RUNNING one was planned against
-    // the old definition, so it fails closed at its sink (a rename is a false
-    // positive of that guard — resuming it re-stamps and completes).
+    // The tail of the graph is deleted while one run is live and one waits:
+    // "plan" becomes the ending it never was. (The tail NODE goes with the
+    // edge, or the leftover node would be unreachable — which the resume
+    // gate below would rightly refuse.)
     h.setNow(2_000);
-    h.store.update(workflow.id, { name: "Renamed" });
+    const trimmed = h.store.update(workflow.id, { nodes: [pipeline().nodes[0]!], edges: [] });
     h.completeTurn("thread-1", envelope("done"));
-    h.completeTurn("thread-2", envelope("shipped"));
+    // The live run was planned against the old routing, so it fails closed.
     expect(h.store.getRun(first.id)?.status).toBe("failed");
 
-    // The queued run was promoted against the CURRENT definition, so its own
-    // sink is a genuine ending.
+    // The queued run is promoted against the CURRENT graph, so ending at
+    // "plan" is a genuine sink for it.
     const promoted = h.store.getRun(second.id)!;
-    expect(promoted).toMatchObject({ status: "running", definitionUpdatedAt: 2_000 });
-    h.completeTurn("thread-3", envelope("done"));
-    h.completeTurn("thread-4", envelope("shipped"));
+    expect(promoted).toMatchObject({ status: "running", routingFingerprint: workflowRoutingFingerprint(trimmed) });
+    h.completeTurn("thread-2", envelope("done"));
     expect(h.store.getRun(second.id)?.status).toBe("completed");
     expect(h.store.getRun(second.id)?.error).toBeUndefined();
 
-    // Resuming the false positive re-stamps it and it completes.
+    // Resuming re-stamps too: the failed run finishes under the new graph.
     h.engine.resumeRun(first.id);
-    h.completeTurn("thread-5", envelope("shipped"));
-    expect(h.store.getRun(first.id)).toMatchObject({ status: "completed", definitionUpdatedAt: 2_000 });
+    h.completeTurn("thread-3", envelope("done"));
+    expect(h.store.getRun(first.id)).toMatchObject({
+      status: "completed",
+      routingFingerprint: workflowRoutingFingerprint(trimmed),
+    });
   });
 
   it("refuses to resume a run whose graph is no longer valid, dispatching nothing", () => {

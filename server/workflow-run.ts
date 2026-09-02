@@ -22,6 +22,7 @@ import {
   WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN,
   WORKFLOW_NOTIFY_OUTCOME,
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
+  workflowRoutingFingerprint,
   type Workflow,
   type WorkflowNode,
   type WorkflowNodeResult,
@@ -511,7 +512,7 @@ export class WorkflowEngine {
       workflowId,
       status: hasActive ? "queued" : "running",
       trigger,
-      definitionUpdatedAt: workflow.updatedAt,
+      routingFingerprint: workflowRoutingFingerprint(workflow),
       ...(source === undefined ? {} : { webhookId: source.webhookId }),
       ...(source?.deliveryId === undefined ? {} : { deliveryId: source.deliveryId }),
       attempt: 0,
@@ -573,7 +574,7 @@ export class WorkflowEngine {
       endedAt: undefined,
       nextAttemptAt: undefined,
       // It resumes against the graph as it is NOW.
-      ...(workflow === undefined || workflow === null ? {} : { definitionUpdatedAt: workflow.updatedAt }),
+      ...(workflow ? { routingFingerprint: workflowRoutingFingerprint(workflow) } : {}),
     });
     if (!patched) throw new Error(`unknown run: ${runId}`);
     if (hasActive) return patched;
@@ -785,11 +786,13 @@ export class WorkflowEngine {
       // definition this run was planned against. Drafts persist, so the edge
       // that carried this outcome may simply have been DELETED mid-run, and
       // reporting that as success would claim a workflow finished while
-      // silently skipping the rest of it. Any change to the definition since
-      // the run started fails it closed instead: a plain rename is a false
-      // positive, which resuming the run (it re-stamps) clears. Receipts
-      // written before this guard carry no stamp and keep completing.
-      if (run.definitionUpdatedAt !== undefined && run.definitionUpdatedAt !== workflow.updatedAt) {
+      // silently skipping the rest of it. The comparison is the ROUTING
+      // shape, not the definition's timestamp: a canvas autosaving a node
+      // drag, a rename or a schedule change leaves a live run alone, while a
+      // vanished edge or outcome fails it closed (resuming re-stamps it).
+      // Receipts written before this guard carry no fingerprint and keep
+      // completing.
+      if (run.routingFingerprint !== undefined && run.routingFingerprint !== workflowRoutingFingerprint(workflow)) {
         this.failNode(
           run.id,
           `the workflow changed while this run was in flight, so the outcome "${outcome}" of node "${node.id}" has nowhere to go`,
@@ -1067,7 +1070,10 @@ export class WorkflowEngine {
     }
     // A queued run traverses the graph as it is at PROMOTION, so that is the
     // definition it is judged against — not the one it was queued under.
-    const promoted = this.store.patchRun(oldest.id, { status: "running", definitionUpdatedAt: workflow.updatedAt });
+    const promoted = this.store.patchRun(oldest.id, {
+      status: "running",
+      routingFingerprint: workflowRoutingFingerprint(workflow),
+    });
     if (!promoted) return;
     // A freshly queued run starts at the entry; a resumed one re-queued
     // behind an active run picks up at the node where it failed.

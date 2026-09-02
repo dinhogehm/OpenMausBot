@@ -3,6 +3,7 @@ import {
   parseWorkflowOutcome,
   validateWorkflow,
   WORKFLOW_FAIL_OUTCOME,
+  workflowRoutingFingerprint,
   type Workflow,
 } from "./workflow.ts";
 
@@ -69,6 +70,67 @@ describe("parseWorkflowOutcome", () => {
       allowed,
     );
     expect(parsed?.summary).toHaveLength(2000);
+  });
+});
+
+describe("workflowRoutingFingerprint", () => {
+  const print = (overrides: Partial<Workflow> = {}) => workflowRoutingFingerprint(wf(overrides));
+
+  it("ignores everything that cannot change where a run goes next", () => {
+    const base = print();
+    // Presentation and scheduling: a canvas autosaving a node drag, a
+    // rename, a schedule change must all be invisible to a run in flight.
+    expect(print({ layout: { code: { x: 10, y: 20 } } })).toBe(base);
+    expect(print({ name: "Renamed" })).toBe(base);
+    expect(print({ description: "explained" })).toBe(base);
+    expect(print({ triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1] } } })).toBe(base);
+    expect(print({ maxNodeExecutions: 7 })).toBe(base);
+    expect(print({ createdAt: 5, updatedAt: 9, id: "other" })).toBe(base);
+    // Node instructions and timing knobs steer nothing either.
+    expect(
+      print({
+        nodes: wf().nodes.map((node) =>
+          node.id === "code" ? { ...node, instructions: "rewritten", timeoutMinutes: 5, retries: 0 } : node,
+        ),
+      }),
+    ).toBe(base);
+  });
+
+  it("is stable under node, edge and outcome ORDER", () => {
+    const base = print();
+    expect(print({ nodes: [...wf().nodes].reverse() })).toBe(base);
+    expect(print({ edges: [...wf().edges].reverse() })).toBe(base);
+    expect(
+      print({
+        nodes: wf().nodes.map((node) =>
+          node.id === "review" && node.kind === "agent" ? { ...node, outcomes: ["rejected", "approved"] } : node,
+        ),
+      }),
+    ).toBe(base);
+  });
+
+  it("changes for anything that does steer a run", () => {
+    const base = print();
+    expect(print({ entryNodeId: "review" })).not.toBe(base);
+    // An edge removed, retargeted, or added.
+    expect(print({ edges: wf().edges.slice(1) })).not.toBe(base);
+    expect(print({ edges: [{ from: "code", outcome: "done", to: "code" }, ...wf().edges.slice(1)] })).not.toBe(base);
+    expect(print({ edges: [...wf().edges, { from: "code", outcome: "extra", to: "review" }] })).not.toBe(base);
+    // A declared outcome deleted, renamed, or added.
+    const withOutcomes = (outcomes: string[]) =>
+      print({ nodes: wf().nodes.map((node) => (node.id === "review" ? { ...node, outcomes } : node)) });
+    expect(withOutcomes(["approved"])).not.toBe(base);
+    expect(withOutcomes(["approved", "declined"])).not.toBe(base);
+    expect(withOutcomes(["approved", "rejected", "deferred"])).not.toBe(base);
+    // A node removed, renamed, or turned into another kind.
+    expect(print({ nodes: wf().nodes.slice(0, 1) })).not.toBe(base);
+    expect(print({ nodes: [{ kind: "notify", id: "code", targetGroupId: "g", template: "t" }, wf().nodes[1]!] }))
+      .not.toBe(base);
+  });
+
+  it("is a short, stable digest — it rides on every run receipt", () => {
+    expect(print()).toMatch(/^[0-9a-f]{16}$/);
+    expect(print()).toBe(print());
   });
 });
 
