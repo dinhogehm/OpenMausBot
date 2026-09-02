@@ -6,9 +6,15 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { WORKFLOW_CONTROL_CLOSE, WORKFLOW_CONTROL_OPEN, type WorkflowNode } from "../shared/workflow.ts";
+import {
+  WORKFLOW_CONTROL_CLOSE,
+  WORKFLOW_CONTROL_OPEN,
+  type WorkflowNode,
+  type WorkflowNotificationKind,
+  type WorkflowRun,
+} from "../shared/workflow.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 import { WorkflowEngine } from "./workflow-run.ts";
 import { WorkflowStore, type WorkflowInput } from "./workflow-store.ts";
@@ -43,13 +49,17 @@ function harness({ channel = true }: { channel?: boolean } = {}) {
   const tasks: Array<{ botId: string; title: string }> = [];
   const dispatches: CapturedDispatch[] = [];
   const interrupts: Array<{ botId: string; threadId: string }> = [];
-  const notifications: Array<{ runId: string; message: string }> = [];
+  const notifications: Array<{ runId: string; message: string; kind: WorkflowNotificationKind }> = [];
   const posts: Array<{ groupId: string; text: string }> = [];
   let postThrows: string | null = null;
+  let postMode: "sync" | "resolves" | "rejects" = "sync";
+  let notifyThrows: string | null = null;
   let taskSeq = 0;
   let eventSeq = 0;
   let createTaskFails = false;
+  let createTaskThrows: string | null = null;
   let startTurnRejects: string | null = null;
+  let startTurnThrows: string | null = null;
   let botStateFn: (botId: string) => "ready" | "busy" | "missing" = () => "ready";
   /** While set, interruptTurn stays pending until releaseInterrupts() — lets
    * tests land events in the middle of an engine `await interruptTurn`. */
@@ -60,11 +70,13 @@ function harness({ channel = true }: { channel?: boolean } = {}) {
     now: () => now,
     botState: (botId) => botStateFn(botId),
     createTask: (botId, title) => {
+      if (createTaskThrows !== null) throw new Error(createTaskThrows);
       if (createTaskFails) return null;
       tasks.push({ botId, title });
       return { threadId: `thread-${++taskSeq}` };
     },
     startTurn: (botId, threadId, prompt, onDispatchError) => {
+      if (startTurnThrows !== null) throw new Error(startTurnThrows);
       dispatches.push({ botId, threadId, prompt, onDispatchError });
       return startTurnRejects === null ? Promise.resolve() : Promise.reject(new Error(startTurnRejects));
     },
@@ -72,13 +84,17 @@ function harness({ channel = true }: { channel?: boolean } = {}) {
       interrupts.push({ botId, threadId });
       return interruptGate ?? Promise.resolve();
     },
-    notifyUser: (run, message) => {
-      notifications.push({ runId: run.id, message });
+    notifyUser: (run, message, kind) => {
+      if (notifyThrows !== null) throw new Error(notifyThrows);
+      notifications.push({ runId: run.id, message, kind });
     },
     ...(channel
       ? {
           postGroupMessage: (groupId: string, text: string) => {
             if (postThrows !== null) throw new Error(postThrows);
+            // An async transport breaks the sync contract: the engine must fail closed.
+            if (postMode === "resolves") return Promise.resolve();
+            if (postMode === "rejects") return Promise.reject(new Error("late failure"));
             posts.push({ groupId, text });
           },
         }
@@ -157,6 +173,10 @@ function harness({ channel = true }: { channel?: boolean } = {}) {
     failCreateTask: () => (createTaskFails = true),
     rejectStartTurn: (message: string) => (startTurnRejects = message),
     failPosts: (message: string) => (postThrows = message),
+    setPostMode: (mode: "sync" | "resolves" | "rejects") => (postMode = mode),
+    failNotifications: (message: string | null) => (notifyThrows = message),
+    throwCreateTask: (message: string) => (createTaskThrows = message),
+    throwStartTurn: (message: string) => (startTurnThrows = message),
     setBotState: (fn: (botId: string) => "ready" | "busy" | "missing") => (botStateFn = fn),
     holdInterrupts: () => {
       interruptGate = new Promise<void>((resolve) => (releaseInterrupt = resolve));
@@ -309,6 +329,37 @@ const pingOnly = (template: string): WorkflowInput => ({
   layout: {},
 });
 
+/** plan (1 retry) --done--> ship; plan --failed--> ping ("Plan failed: {{summary}}") --sent--> gate (approval sink). */
+const failureGated = (): WorkflowInput => ({
+  name: "Guarded",
+  entryNodeId: "plan",
+  nodes: [
+    { kind: "agent", id: "plan", botId: "planner", instructions: "Draft.", outcomes: ["done"], retries: 1 },
+    { kind: "agent", id: "ship", botId: "shipper", instructions: "Ship.", outcomes: ["shipped"] },
+    { kind: "notify", id: "ping", targetGroupId: "grp-1", template: "Plan failed: {{summary}}" },
+    { kind: "approval", id: "gate", prompt: "Retry manually?" },
+  ],
+  edges: [
+    { from: "plan", outcome: "done", to: "ship" },
+    { from: "plan", outcome: "failed", to: "ping" },
+    { from: "ping", outcome: "sent", to: "gate" },
+  ],
+  layout: {},
+});
+
+/** A raw run receipt as a crash would leave it on disk: status "running" with
+ * whatever markers the interrupted step had already persisted. */
+const receipt = (workflowId: string, extra: Partial<Omit<WorkflowRun, "id">> = {}): Omit<WorkflowRun, "id"> => ({
+  workflowId,
+  status: "running",
+  trigger: "manual",
+  attempt: 0,
+  input: "go",
+  nodeResults: [],
+  startedAt: 1_000,
+  ...extra,
+});
+
 /** Drives a gated() run up to its approval node at `at`. */
 function reachGate(h: ReturnType<typeof harness>, workflowId: string, at = 2_000): string {
   const run = h.engine.startRun(workflowId, "go", "manual");
@@ -408,7 +459,7 @@ describe("WorkflowEngine startRun", () => {
     expect(run.approvalRequestedAt).toBe(1_000);
     expect(h.tasks).toHaveLength(0);
     expect(h.dispatches).toHaveLength(0);
-    expect(h.notifications).toEqual([{ runId: run.id, message: "OK to proceed?" }]);
+    expect(h.notifications).toEqual([{ runId: run.id, message: "OK to proceed?", kind: "approval" }]);
   });
 
   it("fails the run when the bot's task cannot be created", () => {
@@ -835,6 +886,7 @@ describe("WorkflowEngine retries and backoff", () => {
     expect(h.notifications).toHaveLength(1);
     expect(h.notifications[0]!.runId).toBe(run.id);
     expect(h.notifications[0]!.message).toContain("boom 3");
+    expect(h.notifications[0]!.kind).toBe("failed");
   });
 });
 
@@ -1155,7 +1207,7 @@ describe("WorkflowEngine approval gate", () => {
     expect(waiting.nextAttemptAt).toBeUndefined();
     expect(h.tasks).toHaveLength(1);
     expect(h.dispatches).toHaveLength(1);
-    expect(h.notifications).toEqual([{ runId, message: "OK to proceed?" }]);
+    expect(h.notifications).toEqual([{ runId, message: "OK to proceed?", kind: "approval" }]);
 
     // The superseded thread routes nothing, and the reconciler leaves an open
     // gate alone: no timeout, no orphan re-dispatch.
@@ -1259,8 +1311,8 @@ describe("WorkflowEngine approval gate", () => {
     h.setNow(2_000 + HOUR);
     await h.engine.tick();
     expect(h.notifications).toEqual([
-      { runId, message: "OK to proceed?" },
-      { runId, message: "Reminder: OK to proceed?" },
+      { runId, message: "OK to proceed?", kind: "approval" },
+      { runId, message: "Reminder: OK to proceed?", kind: "reminder" },
     ]);
     expect(h.reload().getRun(runId)!.approvalRemindedAt).toBe(2_000 + HOUR);
 
@@ -1311,8 +1363,8 @@ describe("WorkflowEngine approval gate", () => {
     expect(promoted.status).toBe("waiting-approval");
     expect(promoted.approvalRequestedAt).toBe(3_000);
     expect(h.notifications).toEqual([
-      { runId: first.id, message: "OK to proceed?" },
-      { runId: second.id, message: "OK to proceed?" },
+      { runId: first.id, message: "OK to proceed?", kind: "approval" },
+      { runId: second.id, message: "OK to proceed?", kind: "approval" },
     ]);
   });
 
@@ -1399,7 +1451,13 @@ describe("WorkflowEngine notify", () => {
     expect(failed.error).toBe("notification channel unavailable");
     expect(failed.currentNodeId).toBe("ping");
     expect(failed.nodeResults).toHaveLength(1);
-    expect(h.notifications).toEqual([{ runId: run.id, message: expect.stringMatching(/at node "ping": notification channel unavailable/) }]);
+    expect(h.notifications).toEqual([
+      {
+        runId: run.id,
+        message: expect.stringMatching(/at node "ping": notification channel unavailable/),
+        kind: "failed",
+      },
+    ]);
     expect(h.dispatches).toHaveLength(1);
   });
 
@@ -1414,5 +1472,311 @@ describe("WorkflowEngine notify", () => {
     expect(run.error).toContain("«redacted");
     expect(run.nodeResults).toEqual([]);
     expect(h.posts).toEqual([]);
+  });
+});
+
+describe("WorkflowEngine stranded-run recovery", () => {
+  it("dispatches the entry node of a run that was created but never dispatched", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.store.createRun(receipt(workflow.id));
+    h.setNow(2_000);
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect(h.dispatches[0]!.botId).toBe("planner");
+    const recovered = h.store.getRun(run.id)!;
+    expect(recovered.status).toBe("running");
+    expect(recovered.currentNodeId).toBe("plan");
+    expect(recovered.currentThreadId).toBe("thread-1");
+    expect(recovered.attempt).toBe(0);
+  });
+
+  it("re-runs a notify node that was parked before it posted — notifications are at-least-once", async () => {
+    const h = harness();
+    const workflow = h.store.create(notifying());
+    const run = h.store.createRun(
+      receipt(workflow.id, {
+        currentNodeId: "ping",
+        nodeResults: [{ nodeId: "plan", outcome: "done", summary: "plan ready", startedAt: 1_000, endedAt: 1_500 }],
+      }),
+    );
+    h.setNow(2_000);
+    await h.engine.tick();
+    expect(h.posts).toEqual([{ groupId: "grp-1", text: "Release: plan ready / go" }]);
+    const recovered = h.store.getRun(run.id)!;
+    expect(recovered.nodeResults.map((result) => `${result.nodeId}:${result.outcome}`)).toEqual(["plan:done", "ping:sent"]);
+    expect(recovered.currentNodeId).toBe("ship");
+    expect(h.dispatches[0]!.botId).toBe("shipper");
+  });
+
+  it("follows the recorded edge of a node whose successor dispatch was lost, without re-running it", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated());
+    const run = h.store.createRun(
+      receipt(workflow.id, {
+        currentNodeId: "gate",
+        nodeResults: [
+          { nodeId: "plan", outcome: "done", summary: "plan ready", startedAt: 1_000, endedAt: 1_500 },
+          { nodeId: "gate", outcome: "approved", summary: "approved by user", startedAt: 1_500, endedAt: 1_800 },
+        ],
+      }),
+    );
+    h.setNow(2_000);
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect(h.dispatches[0]!.botId).toBe("merger");
+    const recovered = h.store.getRun(run.id)!;
+    expect(recovered.nodeResults).toHaveLength(2); // the gate was not re-opened
+    expect(recovered.status).toBe("running");
+    expect(h.notifications).toEqual([]);
+  });
+
+  it("never re-executes an agent node whose result is recorded, even with a stale thread on the receipt", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    // The shape an older engine left behind: result appended, thread and
+    // dispatch time still pointing at the finished turn.
+    const run = h.store.createRun(
+      receipt(workflow.id, {
+        currentNodeId: "plan",
+        currentThreadId: "dead-thread",
+        dispatchedAt: 1_000,
+        nodeResults: [{ nodeId: "plan", outcome: "done", summary: "plan ready", startedAt: 1_000, endedAt: 1_500 }],
+      }),
+    );
+    h.setNow(2_000);
+    await h.engine.tick();
+    expect(h.tasks).toEqual([{ botId: "shipper", title: "Workflow Release — ship" }]);
+    const recovered = h.store.getRun(run.id)!;
+    expect(recovered.nodeResults).toHaveLength(1);
+    expect(recovered.currentNodeId).toBe("ship");
+    expect(recovered.attempt).toBe(0);
+  });
+
+  it("clears the finished dispatch's thread and time from the receipt when a node advances", () => {
+    const h = harness();
+    const workflow = h.store.create(soloOn("Solo", "worker"));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(2_000);
+    h.completeTurn("thread-1", envelope("done"));
+    const completed = h.reload().getRun(run.id)!;
+    expect(completed.status).toBe("completed");
+    expect(completed.currentThreadId).toBeUndefined();
+    expect(completed.dispatchedAt).toBeUndefined();
+    expect(completed.nodeResults[0]!.threadId).toBe("thread-1"); // the audit link survives on the result
+  });
+
+  it("recovers a lost successor after a failed edge without re-running the failed node", async () => {
+    const h = harness();
+    const workflow = h.store.create(failureGated());
+    const run = h.store.createRun(
+      receipt(workflow.id, {
+        currentNodeId: "plan",
+        nodeResults: [{ nodeId: "plan", outcome: "failed", summary: "provider exploded", startedAt: 1_000, endedAt: 1_500 }],
+      }),
+    );
+    h.setNow(2_000);
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(0);
+    expect(h.posts).toEqual([{ groupId: "grp-1", text: "Plan failed: provider exploded" }]);
+    expect(h.store.getRun(run.id)!.status).toBe("waiting-approval");
+  });
+
+  it("leaves a run waiting on a retry or on a busy bot alone", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.store.createRun(receipt(workflow.id, { currentNodeId: "plan", attempt: 1, nextAttemptAt: 5_000 }));
+    h.setNow(2_000);
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(0);
+    expect(h.store.getRun(run.id)!.nextAttemptAt).toBe(5_000);
+  });
+
+  it("fails terminally when createTask throws instead of leaving the run stranded", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    h.throwCreateTask("bot roster locked");
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/could not create a task for node "plan": bot roster locked/);
+    expect(h.notifications).toEqual([
+      { runId: run.id, message: expect.stringMatching(/bot roster locked/), kind: "failed" },
+    ]);
+    // The same throw inside the reconciler must not escape tick().
+    const stranded = h.store.createRun(receipt(workflow.id, { startedAt: 2_000 }));
+    await expect(h.engine.tick()).resolves.toBeUndefined();
+    expect(h.store.getRun(stranded.id)!.status).toBe("failed");
+  });
+
+  it("treats a startTurn that throws synchronously as a dispatch error", () => {
+    const h = harness();
+    const workflow = h.store.create(noRetryPipeline());
+    h.throwStartTurn("provider not initialised");
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(run.status).toBe("failed");
+    expect(run.error).toBe("provider not initialised");
+  });
+});
+
+describe("WorkflowEngine notification safety", () => {
+  it("survives a throwing notifyUser on the reminder and retries it until it goes out", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const h = harness();
+      const workflow = h.store.create(gated({ expiresHours: 2 }));
+      const runId = reachGate(h, workflow.id);
+      h.failNotifications("push service down");
+
+      h.setNow(2_000 + HOUR);
+      await expect(h.engine.tick()).resolves.toBeUndefined();
+      expect(h.notifications).toHaveLength(1);
+      expect(h.store.getRun(runId)!.approvalRemindedAt).toBeUndefined();
+      expect(errors).toHaveBeenCalledTimes(1);
+
+      h.setNow(2_000 + HOUR + 10_000);
+      await h.engine.tick(); // still down: retried, still not persisted
+      expect(h.store.getRun(runId)!.approvalRemindedAt).toBeUndefined();
+      expect(errors).toHaveBeenCalledTimes(2);
+
+      h.failNotifications(null);
+      h.setNow(2_000 + HOUR + 20_000);
+      await h.engine.tick();
+      expect(h.notifications[1]).toEqual({ runId, message: "Reminder: OK to proceed?", kind: "reminder" });
+      expect(h.reload().getRun(runId)!.approvalRemindedAt).toBe(2_000 + HOUR + 20_000);
+
+      await h.engine.tick();
+      expect(h.notifications).toHaveLength(2); // sent once, never again
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("never lets a throwing notifyUser escape a gate opening or a terminal failure", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const h = harness({ channel: false });
+      h.failNotifications("push service down");
+      const gate = h.engine.startRun(h.store.create(gateOnly()).id, "go", "manual");
+      expect(gate.status).toBe("waiting-approval");
+      const failed = h.engine.startRun(h.store.create(pingOnly("hi")).id, "go", "manual");
+      expect(failed.status).toBe("failed");
+      expect(failed.error).toBe("notification channel unavailable");
+      expect(errors).toHaveBeenCalledTimes(2);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("fails a notify node closed when postGroupMessage returns a promise", () => {
+    for (const mode of ["resolves", "rejects"] as const) {
+      const h = harness();
+      h.setPostMode(mode);
+      const run = h.engine.startRun(h.store.create(pingOnly("hi")).id, "go", "manual");
+      expect(run.status).toBe("failed");
+      expect(run.error).toBe("postGroupMessage must be synchronous");
+      expect(run.nodeResults).toEqual([]);
+      expect(h.posts).toEqual([]);
+    }
+  });
+});
+
+describe("WorkflowEngine approval and notify edge cases", () => {
+  it("parks an expired gate's successor as due while its bot is busy and dispatches it once freed", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated({ expiresHours: 2, onExpire: "approved" }));
+    const runId = reachGate(h, workflow.id);
+    h.setBotState((botId) => (botId === "merger" ? "busy" : "ready"));
+
+    h.setNow(2_000 + 2 * HOUR + 1);
+    await h.engine.tick();
+    const parked = h.store.getRun(runId)!;
+    expect(parked.status).toBe("running");
+    expect(parked.currentNodeId).toBe("merge");
+    expect(parked.nextAttemptAt).toBe(2_000 + 2 * HOUR + 1);
+    expect(parked.approvalRequestedAt).toBeUndefined();
+    expect(h.dispatches).toHaveLength(1);
+
+    await h.engine.tick(); // still busy: reconsidered, not dispatched, not failed
+    expect(h.dispatches).toHaveLength(1);
+    expect(h.store.getRun(runId)!.status).toBe("running");
+
+    h.setBotState(() => "ready");
+    h.setNow(2_000 + 2 * HOUR + 10_000);
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.dispatches[1]!.botId).toBe("merger");
+    expect(h.store.getRun(runId)!.nextAttemptAt).toBeUndefined();
+  });
+
+  it("cancels a run waiting for approval without interrupting anything and lets the queue move on", async () => {
+    const h = harness();
+    const workflow = h.store.create(gateOnly());
+    const first = h.engine.startRun(workflow.id, "first", "manual");
+    h.setNow(1_500);
+    const second = h.engine.startRun(workflow.id, "second", "manual");
+    expect(h.store.getRun(second.id)!.status).toBe("queued");
+
+    h.setNow(4_000);
+    const cancelled = await h.engine.cancelRun(first.id);
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.endedAt).toBe(4_000);
+    expect(cancelled.approvalRequestedAt).toBeUndefined();
+    expect(h.interrupts).toEqual([]);
+    expect(h.store.getRun(second.id)!.status).toBe("waiting-approval");
+    expect(() => h.engine.resolveApproval(first.id, "approved")).toThrow(/run is cancelled/);
+
+    h.setNow(4_000 + 48 * HOUR);
+    await h.engine.tick(); // a cancelled gate is neither reminded nor expired
+    expect(h.store.getRun(first.id)!.status).toBe("cancelled");
+    expect(h.notifications.filter((n) => n.runId === first.id)).toHaveLength(1);
+  });
+
+  it("rejects an unknown decision string without touching the gate", () => {
+    const h = harness();
+    const workflow = h.store.create(gated());
+    const runId = reachGate(h, workflow.id);
+    expect(() => h.engine.resolveApproval(runId, "maybe" as never)).toThrow(/invalid approval decision: maybe/);
+    expect(h.store.getRun(runId)!.status).toBe("waiting-approval");
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("renders replacement-pattern characters inside values literally", () => {
+    const h = harness();
+    const workflow = h.store.create(pingOnly("{{workflow}}: {{input}}"));
+    const input = "costs $$ and $& and $1 and $<x> and $'";
+    h.engine.startRun(workflow.id, input, "manual");
+    expect(h.posts).toEqual([{ groupId: "grp-1", text: `Ping: ${input}` }]);
+  });
+
+  it("carries a retried node's failure reason through a notify into a gate, with the attempt counter reset", async () => {
+    const h = harness();
+    const workflow = h.store.create(failureGated());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError("provider exploded");
+    expect(h.store.getRun(run.id)!.attempt).toBe(1);
+
+    h.setNow(61_000);
+    await h.engine.tick(); // backoff elapsed: second attempt
+    expect(h.dispatches).toHaveLength(2);
+    h.dispatches[1]!.onDispatchError("provider exploded again");
+
+    // Retries exhausted: the failed edge runs the notify, which opens the gate.
+    expect(h.posts).toEqual([{ groupId: "grp-1", text: "Plan failed: provider exploded again" }]);
+    const waiting = h.store.getRun(run.id)!;
+    expect(waiting.status).toBe("waiting-approval");
+    expect(waiting.currentNodeId).toBe("gate");
+    expect(waiting.attempt).toBe(0);
+    expect(waiting.nodeResults.map((result) => `${result.nodeId}:${result.outcome}`)).toEqual(["plan:failed", "ping:sent"]);
+    expect(h.notifications[h.notifications.length - 1]).toEqual({
+      runId: run.id,
+      message: "Retry manually?",
+      kind: "approval",
+    });
+
+    h.setNow(70_000);
+    const done = h.engine.resolveApproval(run.id, "approved");
+    expect(done.status).toBe("completed");
+    expect(done.attempt).toBe(0);
+    expect(h.dispatches).toHaveLength(2); // nothing re-ran
   });
 });

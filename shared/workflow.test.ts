@@ -312,4 +312,39 @@ describe("validateWorkflow", () => {
     expect(bothMissing).toBeDefined();
     expect(bothMissing?.nodeId).toBeUndefined();
   });
+
+  it("flags timing knobs that are not positive numbers and counts that are not whole numbers", () => {
+    const bad = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-numbers");
+    const withCode = (extra: Record<string, unknown>): Workflow["nodes"] =>
+      wf().nodes.map((node) => (node.id === "code" ? { ...node, ...extra } : node)) as unknown as Workflow["nodes"];
+    for (const timeoutMinutes of [0, -5, Number.NaN, Number.POSITIVE_INFINITY, "5"]) {
+      expect(bad(wf({ nodes: withCode({ timeoutMinutes }) }))).toEqual([
+        expect.objectContaining({ severity: "error", code: "bad-numbers", nodeId: "code" }),
+      ]);
+    }
+    for (const retries of [-1, 1.5, Number.NaN, "2"]) {
+      expect(bad(wf({ nodes: withCode({ retries }) }))).toEqual([
+        expect.objectContaining({ severity: "error", code: "bad-numbers", nodeId: "code" }),
+      ]);
+    }
+    for (const maxNodeExecutions of [0, 2.5, Number.NaN, -1]) {
+      expect(bad(wf({ maxNodeExecutions }))).toEqual([expect.objectContaining({ severity: "error", code: "bad-numbers" })]);
+    }
+    expect(bad(wf({ nodes: withCode({ timeoutMinutes: 0.5, retries: 0 }), maxNodeExecutions: 1 }))).toEqual([]);
+  });
+
+  it("flags an approval window that is not a positive number of hours", () => {
+    const gated = (expiresHours: unknown): Workflow =>
+      wf({
+        entryNodeId: "gate",
+        nodes: [{ kind: "approval", id: "gate", prompt: "ok?", expiresHours } as unknown as Workflow["nodes"][number]],
+        edges: [],
+      });
+    const bad = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-numbers");
+    for (const value of [0, -1, Number.NaN, "24"]) {
+      expect(bad(gated(value))).toEqual([expect.objectContaining({ severity: "error", code: "bad-numbers", nodeId: "gate" })]);
+    }
+    expect(bad(gated(0.5))).toEqual([]);
+    expect(bad(gated(undefined))).toEqual([]);
+  });
 });

@@ -58,6 +58,10 @@ export type WorkflowRunStatus = "queued" | "running" | "waiting-approval" | "com
 
 export type WorkflowRunTrigger = "manual" | "schedule" | "webhook";
 
+/** Why the engine is calling notifyUser: a run paused on a terminal failure,
+ * an approval gate opened, or that gate's single reminder. */
+export type WorkflowNotificationKind = "failed" | "approval" | "reminder";
+
 export interface WorkflowNodeResult {
   nodeId: string;
   outcome: string;
@@ -155,7 +159,8 @@ export interface WorkflowIssue {
     | "unwired-outcome"
     | "unwired-failure"
     | "unreachable"
-    | "reserved-outcome";
+    | "reserved-outcome"
+    | "bad-numbers";
   nodeId?: string;
   message: string;
 }
@@ -237,6 +242,31 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
         });
       }
       declared.add(outcome);
+    }
+  }
+
+  // Numeric knobs feed timers and counters directly: a zero or negative
+  // window is an instant expiry, a NaN never compares, a fractional retry
+  // count never reaches its limit. Reject anything the engine could not
+  // honour — including the string a raw JSON body may carry in a number's place.
+  const positive = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0;
+  const whole = (value: unknown, min: number) => typeof value === "number" && Number.isInteger(value) && value >= min;
+  const badNumber = (message: string, nodeId?: string) => {
+    issues.push({ severity: "error", code: "bad-numbers", ...(nodeId === undefined ? {} : { nodeId }), message });
+  };
+  if (workflow.maxNodeExecutions !== undefined && !whole(workflow.maxNodeExecutions, 1)) {
+    badNumber("maxNodeExecutions must be a whole number of at least 1.");
+  }
+  for (const node of workflow.nodes) {
+    if (node.kind === "agent") {
+      if (node.timeoutMinutes !== undefined && !positive(node.timeoutMinutes)) {
+        badNumber(`Node "${node.id}" timeoutMinutes must be a positive number.`, node.id);
+      }
+      if (node.retries !== undefined && !whole(node.retries, 0)) {
+        badNumber(`Node "${node.id}" retries must be a whole number of zero or more.`, node.id);
+      }
+    } else if (node.kind === "approval" && node.expiresHours !== undefined && !positive(node.expiresHours)) {
+      badNumber(`Node "${node.id}" expiresHours must be a positive number.`, node.id);
     }
   }
 

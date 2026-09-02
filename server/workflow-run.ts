@@ -24,6 +24,7 @@ import {
   type Workflow,
   type WorkflowNode,
   type WorkflowNodeResult,
+  type WorkflowNotificationKind,
   type WorkflowRun,
   type WorkflowRunStatus,
   type WorkflowRunTrigger,
@@ -58,12 +59,18 @@ export interface WorkflowEngineOptions {
     onDispatchError: (message: string) => void,
   ) => Promise<void>;
   interruptTurn?: (botId: string, threadId: string) => Promise<void>;
-  /** Where notify nodes post. Absent, a notify node fails terminally — a
+  /** Where notify nodes post. MUST be synchronous: throw to fail the node,
+   * never return a promise — the node advances in the same step, so the
+   * engine cannot await a transport, and it fails the node closed when it
+   * gets a thenable back. Absent, a notify node fails terminally: a
    * notification the graph promised is never skipped silently. */
   postGroupMessage?: (groupId: string, text: string) => void;
   /** Called on every terminal failure (a paused 24/7 workflow must never be
-   * silent), when an approval gate opens, and for the gate's one reminder. */
-  notifyUser?: (run: WorkflowRun, message: string) => void;
+   * silent), when an approval gate opens, and for the gate's one reminder;
+   * `kind` says which, so a wrapper never branches on run.status. A throw
+   * here is logged and swallowed — and a reminder that failed to go out is
+   * retried on the next tick. */
+  notifyUser?: (run: WorkflowRun, message: string, kind: WorkflowNotificationKind) => void;
 }
 
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
@@ -127,6 +134,11 @@ function renderNotifyTemplate(template: string, workflow: Workflow, run: Workflo
   return template.replace(/\{\{(input|summary|workflow)\}\}/g, (_match, token: string) => values[token] ?? "");
 }
 
+const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+const isThenable = (value: unknown): value is PromiseLike<unknown> =>
+  typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
+
 export class WorkflowEngine {
   private readonly options: WorkflowEngineOptions;
   private readonly store: WorkflowStore;
@@ -171,8 +183,9 @@ export class WorkflowEngine {
    * gate past its deadline resolves first (it depends on no thread, and the
    * node it advances to is dispatched, or parked as due, within this same
    * tick), a timed-out dispatch becomes a due retry, a due retry becomes a
-   * live dispatch, and only what is left counts as an orphan or a stranded
-   * queue. */
+   * live dispatch, whatever is still "running" with nothing live behind it
+   * is stranded and re-driven, and only then can a queue be judged
+   * stranded. */
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
@@ -181,7 +194,7 @@ export class WorkflowEngine {
       this.sweepApprovals(now);
       await this.sweepTimeouts(now);
       this.dispatchDue(now);
-      this.redispatchOrphans();
+      this.recoverStranded();
       this.drainStrandedQueues();
     } finally {
       this.ticking = false;
@@ -189,14 +202,19 @@ export class WorkflowEngine {
   }
 
   /** A human gate never holds the queue forever: past its deadline the node's
-   * default decision is taken, and at half the window the user is reminded
-   * exactly once. Both clocks run from the persisted approvalRequestedAt, so
-   * a restart changes nothing. Expiry is not a failure and is not announced:
-   * the run's new state is visible in the UI, and a terminal failure further
-   * down still notifies through failNode. */
+   * default decision is taken, and from half the window on the user is
+   * reminded once (retried each tick until it actually goes out). Both
+   * clocks run from the persisted approvalRequestedAt, so a restart changes
+   * nothing. Expiry is not a failure and is not announced: the run's new
+   * state is visible in the UI, and a terminal failure further down still
+   * notifies through failNode. */
   private sweepApprovals(now: number): void {
-    for (const run of this.store.listRuns()) {
-      if (run.status !== "waiting-approval") continue;
+    for (const stale of this.store.listRuns()) {
+      if (stale.status !== "waiting-approval") continue;
+      // Re-read: an earlier iteration may have moved this run (a failNode
+      // draining the queue, for one).
+      const run = this.store.getRun(stale.id);
+      if (!run || run.status !== "waiting-approval") continue;
       const gate = this.openGateOf(run);
       if (!gate) {
         this.failNode(run.id, "the workflow was deleted or edited under this run and its approval node is gone");
@@ -217,8 +235,12 @@ export class WorkflowEngine {
         continue;
       }
       if (run.approvalRemindedAt === undefined && now >= run.approvalRequestedAt + windowMs / 2) {
-        const patched = this.store.patchRun(run.id, { approvalRemindedAt: now });
-        if (patched) this.options.notifyUser?.(patched, `Reminder: ${node.prompt}`);
+        // The marker is persisted only once the reminder actually went out,
+        // so a transport hiccup retries next tick instead of losing the one
+        // reminder for good.
+        if (this.safeNotify(run, `Reminder: ${node.prompt}`, "reminder")) {
+          this.store.patchRun(run.id, { approvalRemindedAt: now });
+        }
       }
     }
   }
@@ -293,18 +315,44 @@ export class WorkflowEngine {
     }
   }
 
-  /** Crash recovery: a running run whose current thread is not registered in
-   * this process (and that is not merely waiting on nextAttemptAt) was
-   * dispatched by a process that died — re-dispatch the same node on a fresh
-   * task, with no attempt increment: an orphan is not a failure. */
-  private redispatchOrphans(): void {
-    for (const run of this.store.listRuns()) {
-      if (run.status !== "running") continue;
-      if (run.currentThreadId === undefined || run.currentNodeId === undefined) continue;
-      if (run.nextAttemptAt !== undefined) continue;
-      if (this.runByThread.has(run.currentThreadId)) continue;
-      this.dispatchNode(run.id, run.currentNodeId);
+  /** Crash recovery: a "running" run with no live dispatch in this process
+   * and no retry pending is stranded, whichever window it fell into — a turn
+   * dispatched by a process that died (the classic orphan), a run created or
+   * promoted before its entry was dispatched, a notify node parked before it
+   * posted, or a node whose result was recorded but whose successor dispatch
+   * was lost. The recorded results say which: when the last result belongs
+   * to the current node, that node finished and only its edge remains to
+   * follow; otherwise the node itself is (re)dispatched on a fresh task with
+   * no attempt increment — an orphan is not a failure. A notify node
+   * re-driven this way posts again: notifications are at-least-once across a
+   * crash, by design. */
+  private recoverStranded(): void {
+    for (const stale of this.store.listRuns()) {
+      if (!this.isStranded(stale)) continue;
+      // Re-read: an earlier iteration may have advanced or failed this run.
+      const run = this.store.getRun(stale.id);
+      if (!run || !this.isStranded(run)) continue;
+      const workflow = this.store.get(run.workflowId);
+      if (!workflow) {
+        this.failNode(run.id, "the workflow definition was deleted");
+        continue;
+      }
+      const last = run.nodeResults[run.nodeResults.length - 1];
+      if (run.currentNodeId !== undefined && last?.nodeId === run.currentNodeId) {
+        const node = workflow.nodes.find((candidate) => candidate.id === run.currentNodeId);
+        if (!node) {
+          this.failNode(run.id, `node "${run.currentNodeId}" no longer exists in the workflow`);
+          continue;
+        }
+        this.follow(run, workflow, node, last.outcome);
+        continue;
+      }
+      this.dispatchNode(run.id, run.currentNodeId ?? workflow.entryNodeId);
     }
+  }
+
+  private isStranded(run: WorkflowRun): boolean {
+    return run.status === "running" && run.nextAttemptAt === undefined && !this.hasLiveDispatch(run);
   }
 
   /** A workflow with queued runs but no active one lost a terminal patch or
@@ -533,12 +581,14 @@ export class WorkflowEngine {
     this.advance(run, workflow, node, result);
   }
 
-  /** The one advance path: record the node's result, reset the per-node
-   * counters, then follow the single edge wired for the outcome or complete
-   * the run on a pure sink. Agent envelopes, approval decisions, expiries and
-   * notify posts all funnel here, so edge-following exists exactly once.
-   * `patch` carries the caller's own state cleanup (a closing approval gate)
-   * and lands in the same write as the result. */
+  /** The one advance path: record the node's result and, in the same write,
+   * the caller's own cleanup (a closing approval gate) plus the reset of
+   * every per-dispatch marker — thread, dispatch time, attempt, re-prompt,
+   * retry. The receipt then reads "this node is finished, its successor is
+   * not dispatched yet", which is exactly what recoverStranded needs to
+   * re-drive a crash between this write and the next; leaving the finished
+   * thread on it would make a restart re-run the node or time it out. Then
+   * follow the outcome's edge. */
   private advance(
     run: WorkflowRun,
     workflow: Workflow,
@@ -546,33 +596,37 @@ export class WorkflowEngine {
     result: WorkflowNodeResult,
     patch: Partial<WorkflowRun> = {},
   ): void {
-    const nodeResults = [...run.nodeResults, result];
-    const edge = workflow.edges.find(
-      (candidate) => candidate.from === node.id && candidate.outcome === result.outcome,
-    );
+    const patched = this.store.patchRun(run.id, {
+      ...patch,
+      nodeResults: [...run.nodeResults, result],
+      attempt: 0,
+      repromptedAt: undefined,
+      currentThreadId: undefined,
+      dispatchedAt: undefined,
+      nextAttemptAt: undefined,
+    });
+    if (!patched) return;
+    this.follow(patched, workflow, node, result.outcome);
+  }
+
+  /** Edge-following exists exactly once: dispatch the single successor wired
+   * for `outcome`, complete the run on a pure sink, or — impossible under a
+   * validated workflow — fail deterministically rather than hang. Agent
+   * envelopes, approval decisions, expiries, exhausted retries, notify posts
+   * and stranded-run recovery all funnel here. */
+  private follow(run: WorkflowRun, workflow: Workflow, node: WorkflowNode, outcome: string): void {
+    const edge = workflow.edges.find((candidate) => candidate.from === node.id && candidate.outcome === outcome);
     if (edge) {
-      const patched = this.store.patchRun(run.id, { ...patch, nodeResults, attempt: 0, repromptedAt: undefined });
-      if (!patched) return;
       this.dispatchNode(run.id, edge.to);
       return;
     }
     if (!workflow.edges.some((candidate) => candidate.from === node.id)) {
       // Pure sink: the graph deliberately ends here.
-      const patched = this.store.patchRun(run.id, {
-        ...patch,
-        nodeResults,
-        attempt: 0,
-        repromptedAt: undefined,
-        status: "completed",
-        endedAt: this.now(),
-      });
+      const patched = this.store.patchRun(run.id, { status: "completed", endedAt: this.now() });
       if (patched) this.drainQueue(patched.workflowId);
       return;
     }
-    // A validated workflow forbids partial wiring, so this cannot happen —
-    // still record the result and fail deterministically rather than hang.
-    this.store.patchRun(run.id, { ...patch, nodeResults });
-    this.failNode(run.id, `no edge is wired for outcome "${result.outcome}" of node "${node.id}"`);
+    this.failNode(run.id, `no edge is wired for outcome "${outcome}" of node "${node.id}"`);
   }
 
   /** Dispatch `nodeId` as the run's current node. Bookkeeping is persisted
@@ -621,7 +675,15 @@ export class WorkflowEngine {
       });
       return;
     }
-    const task = this.options.createTask(node.botId, `Workflow ${workflow.name} — ${node.id}`);
+    let task: { threadId: string } | null;
+    try {
+      task = this.options.createTask(node.botId, `Workflow ${workflow.name} — ${node.id}`);
+    } catch (error) {
+      // A throwing wrapper must neither leave a "running" receipt with
+      // nothing behind it nor escape into tick(): it is a terminal failure.
+      this.failNode(runId, `could not create a task for node "${node.id}": ${errorMessage(error)}`);
+      return;
+    }
     if (!task) {
       this.failNode(runId, `could not create a task for node "${node.id}" — the bot may no longer exist`);
       return;
@@ -652,12 +714,17 @@ export class WorkflowEngine {
       currentThreadId: undefined,
     });
     if (!patched) return;
-    this.options.notifyUser?.(patched, node.prompt);
+    this.safeNotify(patched, node.prompt, "approval");
   }
 
   /** Post the rendered template to its group and advance in the same step —
-   * no task, no thread, nothing for the reconciler to wait on. A missing or
-   * throwing transport is terminal, never a silent skip. */
+   * no task, no thread, nothing for the reconciler to wait on. A missing,
+   * throwing or asynchronous transport is terminal, never a silent skip.
+   * The park receipt below is written before the post, so a crash between
+   * the two is re-driven by recoverStranded and the message posts again:
+   * notifications are at-least-once across a crash. Recording "sent" first
+   * would make them at-most-once, and a dropped alert is the worse failure
+   * for a 24/7 workflow. */
   private executeNotify(run: WorkflowRun, workflow: Workflow, node: NotifyNode): void {
     // The receipt names this node before anything can fail on its behalf.
     const parked = this.store.patchRun(run.id, {
@@ -674,11 +741,19 @@ export class WorkflowEngine {
     }
     // Scrubbed before it leaves the process and before it is persisted.
     const text = redactSecretsInText(renderNotifyTemplate(node.template, workflow, parked));
+    let returned: unknown;
     try {
-      post(node.targetGroupId, text);
+      returned = post(node.targetGroupId, text);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      this.failNode(run.id, `could not post to group "${node.targetGroupId}": ${reason}`);
+      this.failNode(run.id, `could not post to group "${node.targetGroupId}": ${errorMessage(error)}`);
+      return;
+    }
+    if (isThenable(returned)) {
+      // Fail closed: a promise would hide its failure from a node that has
+      // already advanced. Its eventual rejection is swallowed so an async
+      // wrapper cannot take the process down with an unhandled rejection.
+      void returned.then(undefined, () => {});
+      this.failNode(run.id, "postGroupMessage must be synchronous");
       return;
     }
     const at = this.now();
@@ -691,12 +766,17 @@ export class WorkflowEngine {
     });
   }
 
+  /** A dispatch error is a dispatch error whether the wrapper rejects or
+   * throws before it even returns its promise: both reach attemptFailure, so
+   * neither can escape into an event handler or tick(). */
   private startTurnSafely(botId: string, threadId: string, prompt: string, runId: string): void {
-    void this.options
-      .startTurn(botId, threadId, prompt, (message) => this.attemptFailure(runId, message, threadId))
-      .catch((error: unknown) =>
-        this.attemptFailure(runId, error instanceof Error ? error.message : String(error), threadId),
-      );
+    try {
+      void this.options
+        .startTurn(botId, threadId, prompt, (message) => this.attemptFailure(runId, message, threadId))
+        .catch((error: unknown) => this.attemptFailure(runId, errorMessage(error), threadId));
+    } catch (error) {
+      this.attemptFailure(runId, errorMessage(error), threadId);
+    }
   }
 
   /** The RETRYABLE failure funnel — dispatch errors, envelope double-misses,
@@ -735,25 +815,18 @@ export class WorkflowEngine {
     const failedEdge = workflow?.edges.find(
       (candidate) => candidate.from === run.currentNodeId && candidate.outcome === WORKFLOW_FAIL_OUTCOME,
     );
-    if (workflow && failedEdge && run.currentNodeId !== undefined) {
+    if (workflow && node && failedEdge) {
+      // Exhaustion is an outcome like any other: it goes through the same
+      // advance path, so the receipt is cleaned the same way.
       const at = this.now();
-      const result: WorkflowNodeResult = {
-        nodeId: run.currentNodeId,
+      this.advance(run, workflow, node, {
+        nodeId: node.id,
         outcome: WORKFLOW_FAIL_OUTCOME,
         summary: redactSecretsInText(reason).slice(0, 500),
         startedAt: run.dispatchedAt ?? at,
         endedAt: at,
         ...(run.currentThreadId === undefined ? {} : { threadId: run.currentThreadId }),
-      };
-      const patched = this.store.patchRun(runId, {
-        nodeResults: [...run.nodeResults, result],
-        attempt: 0,
-        repromptedAt: undefined,
-        dispatchedAt: undefined,
-        nextAttemptAt: undefined,
       });
-      if (!patched) return;
-      this.dispatchNode(runId, failedEdge.to);
       return;
     }
     this.failNode(runId, reason);
@@ -778,9 +851,10 @@ export class WorkflowEngine {
     if (!patched) return;
     const workflow = this.store.get(patched.workflowId);
     const where = patched.currentNodeId === undefined ? "" : ` at node "${patched.currentNodeId}"`;
-    this.options.notifyUser?.(
+    this.safeNotify(
       patched,
       `Workflow "${workflow?.name ?? patched.workflowId}" run failed${where}: ${patched.error ?? reason}`,
+      "failed",
     );
     this.drainQueue(patched.workflowId);
   }
@@ -821,6 +895,22 @@ export class WorkflowEngine {
     // A freshly queued run starts at the entry; a resumed one re-queued
     // behind an active run picks up at the node where it failed.
     this.dispatchNode(oldest.id, promoted.currentNodeId ?? workflow.entryNodeId);
+  }
+
+  /** notifyUser is a wrapper the engine does not control. A throw there must
+   * neither escape into tick() (an unhandled rejection kills the process) nor
+   * pass for delivery: callers persist a "sent" marker only on `true`. Same
+   * stance as RoutineManager.notifyRunChanged — reporting is secondary to
+   * engine truth, and the run state is already on disk by the time this is
+   * called. */
+  private safeNotify(run: WorkflowRun, message: string, kind: WorkflowNotificationKind): boolean {
+    try {
+      this.options.notifyUser?.(run, message, kind);
+      return true;
+    } catch (error) {
+      console.error(`workflow: notifyUser (${kind}) failed for run ${run.id}`, error);
+      return false;
+    }
   }
 
   private forgetThread(threadId: string): void {
