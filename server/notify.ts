@@ -10,7 +10,14 @@
 // listening decides what to do with it — desktop and paired-phone local
 // notifications today, and closed-app APNs delivery once a relay exists.
 
-export type NotifyKind = "approval" | "question" | "done" | "routine-failed" | "takeover";
+export type NotifyKind =
+  | "approval"
+  | "question"
+  | "done"
+  | "routine-failed"
+  | "takeover"
+  | "workflow-failed"
+  | "workflow-approval";
 
 export interface Notification {
   kind: NotifyKind;
@@ -64,7 +71,11 @@ export function buildNotification(
           ? `${bot.name} needs your hands`
           : kind === "routine-failed"
             ? `${bot.name}'s routine failed`
-            : `${bot.name} finished`;
+            : kind === "workflow-failed"
+              ? `${bot.name}'s workflow failed`
+              : kind === "workflow-approval"
+                ? `${bot.name}'s workflow needs approval`
+                : `${bot.name} finished`;
 
   // A "finished" with nothing to say is not worth a notification — the
   // badge in the sidebar already carries that much.

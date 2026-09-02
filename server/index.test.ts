@@ -2963,6 +2963,30 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("creates, lists and deletes a workflow draft over HTTP", async () => {
+    const created = await api("POST", "/api/workflows", {
+      name: "HTTP smoke",
+      entryNodeId: "triage",
+      nodes: [{ kind: "agent", id: "triage", botId: "no-such-bot", instructions: "Look.", outcomes: ["done"], retries: null }],
+      edges: [],
+      layout: { triage: { x: 0, y: 0 } },
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.workflow.id as string;
+    try {
+      const listed = await api("GET", "/api/workflows");
+      expect(listed.status).toBe(200);
+      const found = listed.body.workflows.find((workflow: { id: string }) => workflow.id === id);
+      expect(found?.name).toBe("HTTP smoke");
+      expect(found?.issues.map((issue: { code: string }) => issue.code)).toEqual(["unwired-failure"]);
+      expect("retries" in found.nodes[0]).toBe(false);
+      expect((await api("GET", "/api/workflow-runs")).body.runs).toEqual([]);
+    } finally {
+      const removed = await fetch(`${BASE}/api/workflows/${id}`, { method: "DELETE" });
+      expect(removed.status).toBe(204);
+    }
+  });
+
   it("refuses to delete a bot while one of its routines is active", async () => {
     const bot = (await api("POST", "/api/bots", {
       modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
