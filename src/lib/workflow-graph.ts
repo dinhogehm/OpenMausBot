@@ -235,7 +235,7 @@ export function reconcileGraphNodes(
 /** Content-addressed so selection survives a re-render, and so an id can be
  * mapped back to its edge without keeping a side table. */
 export function graphEdgeId(edge: WorkflowEdge): string {
-  return `${edge.from} ${edge.outcome} ${edge.to}`;
+  return `${edge.from}\0${edge.outcome}\0${edge.to}`;
 }
 
 export function findEdgeByGraphId(workflow: Workflow, id: string): WorkflowEdge | null {
