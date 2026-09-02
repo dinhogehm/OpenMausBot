@@ -3029,7 +3029,10 @@ describe("harness HTTP API", () => {
       name: "HTTP smoke",
       entryNodeId: "triage",
       nodes: [{ kind: "agent", id: "triage", botId: "no-such-bot", instructions: "Look.", outcomes: ["done"], retries: null }],
-      edges: [],
+      // wired to itself, so the node is not a deliberate end of the run and
+      // its missing failure edge is still worth a warning — the point here is
+      // that the listing carries the server's derived issues at all
+      edges: [{ from: "triage", outcome: "done", to: "triage" }],
       layout: { triage: { x: 0, y: 0 } },
     });
     expect(created.status).toBe(201);

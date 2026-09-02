@@ -4,7 +4,14 @@
 // question is never answered by the machine.
 import { describe, expect, it } from "vitest";
 
-import { approvalKey, autoDecision, autoVerdict, looksDestructive, looksSensitive } from "./auto-approve.ts";
+import {
+  approvalKey,
+  autoDecision,
+  autoVerdict,
+  heldReason,
+  looksDestructive,
+  looksSensitive,
+} from "./auto-approve.ts";
 
 describe("looksDestructive", () => {
   const dangerous = [
@@ -129,6 +136,31 @@ describe("autoDecision", () => {
         scope: "local-computer",
       }),
     ).toBeNull();
+  });
+});
+
+describe("heldReason", () => {
+  const reasonFor = (bot: Parameters<typeof autoVerdict>[0], tool: string, summary: string, context?: Parameters<typeof autoVerdict>[3]) =>
+    heldReason(autoVerdict(bot, tool, summary, context).source);
+
+  it("names the rule that actually held the request, not the bot's mode", () => {
+    const bot = { autoApprove: true, alwaysAllow: ["Bash:git"] };
+    // the old text said "this looked destructive" about every card an
+    // auto-mode bot raised; a listing held only because nobody started the
+    // turn must not claim to be a near-miss with `rm -rf`
+    expect(reasonFor(bot, "Bash", "ls -la", { unattended: true })).toMatch(/nobody started this turn/i);
+    expect(reasonFor(bot, "Bash", "rm -rf /")).toMatch(/destructive/i);
+    expect(reasonFor(bot, "Bash", "cat ~/.ssh/id_rsa")).toMatch(/credentials/i);
+    expect(reasonFor({ alwaysAllow: ["local-computer:mcp__computer__click"] }, "mcp__computer__click", "Click Submit", {
+      scope: "local-computer",
+    })).toMatch(/controls your computer/i);
+  });
+
+  it("says nothing when nothing held it: an ordinary ask needs no excuse", () => {
+    expect(reasonFor({}, "Bash", "ls -la")).toBeUndefined();
+    expect(heldReason("always-allow")).toBeUndefined();
+    expect(heldReason("auto-mode")).toBeUndefined();
+    expect(heldReason(undefined)).toBeUndefined();
   });
 });
 

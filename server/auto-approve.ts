@@ -99,6 +99,30 @@ export interface AutoVerdict {
   rule?: string;
 }
 
+/** The one line a card shows above "Allow / Deny" to say why the bot could
+ * not answer this itself, or undefined when nothing held it back and the
+ * request is an ordinary ask.
+ *
+ * It reads from the verdict rather than from the bot's mode: a bot in auto
+ * mode now has four different ways to reach a card, and telling someone
+ * "this looked destructive" about a directory listing that was only held
+ * because nobody started the turn is worse than saying nothing — it teaches
+ * them to distrust the one sentence that explains their own permissions. */
+export function heldReason(source: AutoVerdictSource | undefined): string | undefined {
+  switch (source) {
+    case "destructive-guard":
+      return "This looked destructive, so it stopped to ask.";
+    case "sensitive-guard":
+      return "This touches credentials or keys, so it stopped to ask.";
+    case "unattended-block":
+      return "Nobody started this turn, so auto mode does not answer for the bot.";
+    case "local-computer-block":
+      return "This controls your computer, which is never approved from memory.";
+    default:
+      return undefined;
+  }
+}
+
 /** The verdict AND its provenance. The decision itself is unchanged from
  * autoDecision below — this exists so the decision log can record which
  * rule decided without the call site re-deriving (and eventually

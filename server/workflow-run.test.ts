@@ -2409,6 +2409,48 @@ describe("WorkflowEngine approval and notify edge cases", () => {
   });
 });
 
+describe("WorkflowEngine activeRunForBot", () => {
+  it("names the run and the task thread holding a bot, so a stop can reach a turn nobody else can find", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    const dispatched = h.dispatches[0]!;
+
+    expect(h.engine.activeRunForBot("planner")).toEqual({ runId: run.id, threadId: dispatched.threadId });
+    // the bot the run has not reached yet is free, and so is a stranger
+    expect(h.engine.activeRunForBot("shipper")).toBeNull();
+    expect(h.engine.activeRunForBot("nobody")).toBeNull();
+
+    // the run moves on: the first bot is released the moment the second holds it
+    h.completeTurn(dispatched.threadId, envelope("done"));
+    await flush();
+    expect(h.engine.activeRunForBot("planner")).toBeNull();
+    expect(h.engine.activeRunForBot("shipper")).toEqual({
+      runId: run.id,
+      threadId: h.dispatches[1]!.threadId,
+    });
+  });
+
+  it("frees the bot once the run is no longer live: a queued or settled run holds nobody", async () => {
+    const h = harness();
+    const workflow = h.store.create(soloOn("Solo", "planner"));
+    const first = h.engine.startRun(workflow.id, "first", "manual");
+    const second = h.engine.startRun(workflow.id, "second", "manual");
+    expect(h.store.getRun(second.id)!.status).toBe("queued");
+    // the queued run wants the same bot but holds no turn — reporting it would
+    // send a stop at a thread that does not exist
+    expect(h.engine.activeRunForBot("planner")!.runId).toBe(first.id);
+
+    await h.engine.cancelRun(first.id);
+    // cancelling drains the queue onto the same bot: the answer follows the
+    // live dispatch rather than the run that used to own it
+    expect(h.engine.activeRunForBot("planner")!.runId).toBe(second.id);
+
+    await h.engine.cancelRun(second.id);
+    expect(h.engine.activeRunForBot("planner")).toBeNull();
+  });
+});
+
 describe("WorkflowEngine bot capabilities", () => {
   /** plan --done--> deploy, where deploy (bot "ops") is a pure sink that
    * `requires` what the test says — absent when undefined. */

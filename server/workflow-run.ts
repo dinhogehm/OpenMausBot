@@ -574,6 +574,24 @@ export class WorkflowEngine {
     return [...validateWorkflow(workflow), ...capabilityIssues(workflow, this.options.botCapabilities)];
   }
 
+  /** The run currently holding this bot's turn, if any.
+   *
+   * A workflow node runs in its own task thread, so a bot can be busy on a
+   * conversation the rest of the harness has never heard of. Anything that
+   * asks "what is this bot doing, and how do I stop it" — the interrupt
+   * route above all — has to be able to find that thread, or it reaches for
+   * the bot's main thread, interrupts nothing, and leaves the person holding
+   * a stop button that does not stop. */
+  activeRunForBot(botId: string): { runId: string; threadId: string } | null {
+    for (const run of this.store.listRuns()) {
+      if (run.status !== "running" || !this.hasLiveDispatch(run)) continue;
+      const node = this.store.get(run.workflowId)?.nodes.find((candidate) => candidate.id === run.currentNodeId);
+      if (node?.kind !== "agent" || node.botId !== botId) continue;
+      return { runId: run.id, threadId: run.currentThreadId! };
+    }
+    return null;
+  }
+
   /** Runs a webhook still owns — what its pending cap counts. */
   liveRunCountForWebhook(webhookId: string): number {
     return this.store.listRuns().filter((run) => run.webhookId === webhookId && LIVE_RUN_STATUSES.has(run.status)).length;

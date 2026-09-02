@@ -19,7 +19,7 @@ import {
   type CredentialTargetId,
 } from "../shared/credential-request.ts";
 
-import { approvalKey, autoVerdict } from "./auto-approve.ts";
+import { approvalKey, autoVerdict, heldReason } from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import {
   BrowserCleanupCoordinator,
@@ -1864,11 +1864,9 @@ bus.subscribe((event: RuntimeEvent) => {
             permission && !event.approvalScope
               ? approvalKey(event.tool, event.summary, event.approvalScope)
               : undefined,
-          // in auto mode a card can only mean the guard stopped it — say so
-          held:
-            permission && asker?.autoApprove
-              ? "This looked destructive, so auto mode stopped to ask."
-              : undefined,
+          // the verdict already knows which rule sent this to a human; the
+          // card repeats that rule rather than guessing from the bot's mode
+          held: permission ? heldReason(verdict?.source) : undefined,
           approvalScope: event.approvalScope,
         },
       });
@@ -2817,6 +2815,7 @@ async function startTurn(
           requested: undefined,
           hostPlatform: process.platform,
           providerSupportsLocal: mountsLocalComputer,
+          unattended: isUnattended(bot.id),
         })
       ) {
         const cua = readCuaConnection();
@@ -3231,10 +3230,11 @@ workflowEngine = new WorkflowEngine({
     return task ? { threadId: task.threadId } : null;
   },
   // `unattended: true` is the design's call for 24/7 runs: nobody is watching,
-  // so auto-approve and always-allow grants do NOT apply — every permission
-  // request cards for a human (autoVerdict's unattended block), exactly as
-  // for a webhook turn. A node that needs a permission therefore waits on a
-  // person or hits its timeout; it never self-approves at 3am.
+  // so the bot's blanket auto mode does NOT apply, exactly as for a webhook
+  // turn. What survives is the narrow kind of grant a person actually named —
+  // "Bash:gh, always" — because a node that may not run the one program it was
+  // built around can only time out three times and fail. Everything else cards
+  // for a human and waits, or hits its timeout; nothing self-approves at 3am.
   // `automationSource: "workflow"` fences the run input as untrusted in the
   // system prompt and keeps the unattended mark from being cleared.
   startTurn: (botId, threadId, prompt, onDispatchError) =>
@@ -7985,6 +7985,23 @@ const server = createServer(async (req, res) => {
         cancelDirectTurnDispatch(bot.id, routineRun.threadId ?? expectedThreadId);
         if (routineRun.threadId) await releaseBrowserCapabilityForThread(routineRun.threadId);
         await routines!.cancelRun(routineRun.id);
+        return json(res, 200, { ok: true });
+      }
+      // A workflow node runs in a task thread of its own, which nothing below
+      // knows how to find: without this branch the stop reaches for the bot's
+      // main thread, interrupts a turn that is not there, and the person is
+      // left pressing a button that does nothing while their queued message
+      // waits behind a bot that never goes idle. Stopping the bot stops the
+      // run, exactly as it cancels a routine.
+      const workflowRun = workflowEngine?.activeRunForBot(bot.id) ?? null;
+      if (workflowRun) {
+        if (expectedThreadId !== undefined && workflowRun.threadId !== expectedThreadId) {
+          return json(res, 409, { error: "this bot is running a workflow node in another conversation" });
+        }
+        cancelDirectTurnDispatch(bot.id, workflowRun.threadId);
+        await releaseBrowserCapabilityForThread(workflowRun.threadId);
+        await workflowEngine!.cancelRun(workflowRun.runId).catch(() => {});
+        closeOpenApprovals(workflowRun.threadId);
         return json(res, 200, { ok: true });
       }
       const instance = registry.get(bot.modelSelection.instanceId);
