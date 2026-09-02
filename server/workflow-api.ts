@@ -12,10 +12,12 @@ import {
   validateWorkflow,
   WORKFLOW_APPROVAL_OUTCOMES,
   type Workflow,
+  type WorkflowEdge,
   type WorkflowIssue,
   type WorkflowNode,
   type WorkflowRun,
   type WorkflowRunStatus,
+  type WorkflowTriggers,
 } from "../shared/workflow.ts";
 import { schemaIssue } from "./schema.ts";
 import type { WorkflowEngine } from "./workflow-run.ts";
@@ -94,12 +96,39 @@ const workflowInputSchema = z.object({
   maxNodeExecutions: optionalNumber,
 });
 
-// Compile-time drift guard: the schema's output must be exactly the model's
-// input type, in both directions. A field added to shared/workflow.ts
-// without a schema line (or vice versa) fails typecheck here.
+// Compile-time drift guards. Exact<> catches value-type drift, but two object
+// types that differ only by an OPTIONAL key are mutually assignable — and an
+// optional field added to the model without a schema line is exactly what
+// zod's non-strict objects would then strip on every PATCH. SameKeys<>
+// compares the key sets at every object level, so either kind of drift
+// fails typecheck here.
 type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+type SameKeys<A, B> = Exact<keyof A, keyof B>;
+type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
+type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
+type NotifyNode = Extract<WorkflowNode, { kind: "notify" }>;
+type Schedule = NonNullable<WorkflowTriggers["schedule"]>;
+type SchemaSchedule = NonNullable<z.infer<typeof triggersSchema>["schedule"]>;
 const _schemaMatchesModel: Exact<z.infer<typeof workflowInputSchema>, WorkflowInput> = true;
-void _schemaMatchesModel;
+const _workflowKeys: SameKeys<z.infer<typeof workflowInputSchema>, WorkflowInput> = true;
+const _agentKeys: SameKeys<z.infer<typeof agentNodeSchema>, AgentNode> = true;
+const _approvalKeys: SameKeys<z.infer<typeof approvalNodeSchema>, ApprovalNode> = true;
+const _notifyKeys: SameKeys<z.infer<typeof notifyNodeSchema>, NotifyNode> = true;
+const _edgeKeys: SameKeys<z.infer<typeof edgeSchema>, WorkflowEdge> = true;
+const _triggerKeys: SameKeys<z.infer<typeof triggersSchema>, WorkflowTriggers> = true;
+const _dailyKeys: SameKeys<Extract<SchemaSchedule, { type: "daily" }>, Extract<Schedule, { type: "daily" }>> = true;
+const _onceKeys: SameKeys<Extract<SchemaSchedule, { type: "once" }>, Extract<Schedule, { type: "once" }>> = true;
+void [
+  _schemaMatchesModel,
+  _workflowKeys,
+  _agentKeys,
+  _approvalKeys,
+  _notifyKeys,
+  _edgeKeys,
+  _triggerKeys,
+  _dailyKeys,
+  _onceKeys,
+];
 
 /** JSON clients say "no value" with `null`; the model and the validator
  * only know an omitted field (validateWorkflow rejects null outright). Nulls
@@ -130,11 +159,16 @@ const isClearable = (key: string) => (CLEARABLE_FIELDS as readonly string[]).inc
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 
-/** The first top-level key whose value is null and which is not clearable. */
+/** Every top-level field the model knows. Unknown keys are not judged here:
+ * zod strips them silently, and a null in one is no different. */
+const WORKFLOW_FIELDS = new Set(Object.keys(workflowInputSchema.shape));
+
+/** The first known top-level field whose value is null and which is not
+ * clearable. */
 function nullRequiredField(body: unknown): string | undefined {
   const record = asRecord(body);
   if (!record) return undefined;
-  return Object.keys(record).find((key) => record[key] === null && !isClearable(key));
+  return Object.keys(record).find((key) => WORKFLOW_FIELDS.has(key) && record[key] === null && !isClearable(key));
 }
 
 const startRunBodySchema = z.object({ input: z.string().max(100_000).optional() });
@@ -205,19 +239,21 @@ export function patchWorkflow({ store }: WorkflowApiDeps, workflowId: string, bo
   }
 }
 
+const liveRuns = (store: WorkflowStore, workflowId: string) =>
+  store.listRuns(workflowId).filter((run) => LIVE_RUN_STATUSES.has(run.status));
+
 /** Idempotent. Live runs are cancelled BEFORE the definition goes: a run
  * left running on a deleted workflow would keep driving its bot until the
  * engine noticed. Queued runs go first — cancelling the active run promotes
  * the oldest queued one (drainQueue), so emptying the queue while the active
- * run still holds the slot keeps every cancellation dispatch-free. */
+ * run still holds the slot keeps every cancellation dispatch-free. A cancel
+ * awaits the provider's interrupt, and a trigger can start a fresh run under
+ * that await, so the sweep is bounded and re-checked synchronously right
+ * before removal: with anything still live, nothing is removed and the
+ * caller gets a 409 to retry — never a definition-less run driving a bot. */
 export async function deleteWorkflow({ store, engine }: WorkflowApiDeps, workflowId: string): Promise<WorkflowApiResponse> {
-  // Bounded re-scan: a cancel awaits the provider's interrupt, and a run
-  // can change state under that await.
   for (let pass = 0; pass < 4; pass++) {
-    const live = store
-      .listRuns(workflowId)
-      .filter((run) => LIVE_RUN_STATUSES.has(run.status))
-      .sort((a, b) => Number(a.status !== "queued") - Number(b.status !== "queued"));
+    const live = liveRuns(store, workflowId).sort((a, b) => Number(a.status !== "queued") - Number(b.status !== "queued"));
     if (live.length === 0) break;
     for (const run of live) {
       try {
@@ -226,6 +262,14 @@ export async function deleteWorkflow({ store, engine }: WorkflowApiDeps, workflo
         if (!isUnknownEntity(error)) throw error; // pruned meanwhile: nothing to cancel
       }
     }
+  }
+  // Synchronous from here to the removal: no await in between.
+  const remaining = liveRuns(store, workflowId).length;
+  if (remaining > 0) {
+    return {
+      status: 409,
+      body: { error: `workflow still has ${remaining} live run${remaining === 1 ? "" : "s"} — retry` },
+    };
   }
   store.remove(workflowId);
   return { status: 204 };
@@ -321,9 +365,7 @@ export function workflowNotificationBotId(
   run: WorkflowRun,
   lookup: NotificationBotLookup,
 ): string | undefined {
-  const agents = (workflow?.nodes ?? []).filter(
-    (node): node is Extract<WorkflowNode, { kind: "agent" }> => node.kind === "agent",
-  );
+  const agents = (workflow?.nodes ?? []).filter((node): node is AgentNode => node.kind === "agent");
   const candidates: string[] = [];
   const current = agents.find((node) => node.id === run.currentNodeId);
   if (current) candidates.push(current.botId);

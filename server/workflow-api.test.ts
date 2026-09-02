@@ -32,6 +32,9 @@ function harness() {
   const dispatches: Array<{ botId: string; threadId: string; prompt: string }> = [];
   const interrupts: string[] = [];
   let taskSeq = 0;
+  /** Test-settable seam: onInterrupt runs inside the engine's await of
+   * interruptTurn — the window in which a trigger could start a fresh run. */
+  const hooks: { onInterrupt: (() => void) | null } = { onInterrupt: null };
   const engine = new WorkflowEngine({
     store,
     now,
@@ -43,6 +46,7 @@ function harness() {
     },
     interruptTurn: async (_botId, threadId) => {
       interrupts.push(threadId);
+      hooks.onInterrupt?.();
     },
   });
   const deps: WorkflowApiDeps = { store, engine };
@@ -55,7 +59,7 @@ function harness() {
       readBody: async () => body ?? {},
     });
   };
-  return { store, engine, deps, call, dispatches, interrupts };
+  return { store, engine, deps, call, dispatches, interrupts, hooks };
 }
 
 const agentGraph = (): WorkflowInput => ({
@@ -211,6 +215,11 @@ describe("workflow definitions", () => {
       expect(bodyOf(response).details, field).toEqual([`${field}: cannot be null`]);
     }
     expect(store.get(id)).toMatchObject({ ...agentGraph(), id });
+    // Unknown keys are zod-stripped; a null in one is not an error either.
+    const bogus = await call("PATCH", `/api/workflows/${id}`, { bogus: null, name: "Kept" });
+    expect(bogus?.status).toBe(200);
+    expect(store.get(id)?.name).toBe("Kept");
+    expect("bogus" in (store.get(id) as object)).toBe(false);
     // Same rule on create — a null required field is not "omitted".
     const created = await call("POST", "/api/workflows", { ...agentGraph(), edges: null });
     expect(created?.status).toBe(400);
@@ -280,6 +289,29 @@ describe("workflow definitions", () => {
     expect(store.getRun(waiting.id)?.status).toBe("cancelled");
     // Terminal receipts are left as history.
     expect(store.listRuns()).toHaveLength(4);
+  });
+
+  it("refuses to remove a definition while runs keep appearing under the cancel sweep", async () => {
+    const { call, store, engine, hooks } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
+    await call("POST", `/api/workflows/${id}/runs`, { input: "first" });
+    // A trigger fires inside every interrupt await: each cancelled run is
+    // replaced by a fresh one before the sweep can look again.
+    let started = 0;
+    hooks.onInterrupt = () => {
+      engine.startRun(id, `again ${++started}`, "webhook");
+    };
+    const refused = await call("DELETE", `/api/workflows/${id}`);
+    expect(refused?.status).toBe(409);
+    expect(bodyOf(refused).error).toBe("workflow still has 1 live run — retry");
+    expect(store.get(id)).not.toBeNull();
+    expect(started).toBeGreaterThan(0);
+    expect(store.listRuns(id).filter((run) => run.status === "running")).toHaveLength(1);
+    // Once the triggers stop, the retry the 409 asked for succeeds.
+    hooks.onInterrupt = null;
+    expect(await call("DELETE", `/api/workflows/${id}`)).toEqual({ status: 204 });
+    expect(store.get(id)).toBeNull();
+    expect(store.listRuns(id).every((run) => run.status === "cancelled")).toBe(true);
   });
 
   it("leaves non-workflow routes and unsupported methods to the caller", async () => {

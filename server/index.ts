@@ -3247,8 +3247,14 @@ workflowEngine = new WorkflowEngine({
       return;
     }
     // A failure opens the failed node's task so its transcript is one tap
-    // away; a gate has no thread of its own and opens the bot's chat.
-    const threadId = kind === "failed" && run.currentThreadId ? run.currentThreadId : bot.threadId;
+    // away — but only when the notified bot owns that task: a fallback bot
+    // never gets a tap into another bot's (possibly deleted) thread. A gate
+    // has no thread of its own and opens the bot's chat.
+    const currentThread = run.currentThreadId;
+    const threadId =
+      kind === "failed" && currentThread !== undefined && store.botByThread(currentThread)?.id === bot.id
+        ? currentThread
+        : bot.threadId;
     // The engine already names the workflow in a failure message.
     const detail = kind === "failed" ? message : `${workflow?.name ?? "Workflow"}: ${message}`;
     notify(buildNotification(
