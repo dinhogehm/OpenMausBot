@@ -26,9 +26,11 @@ the harness server itself is portable Node and the test suite runs on macOS, Lin
 git clone https://github.com/milind-soni/OpenMausBot && cd OpenMausBot
 pnpm install
 
+pnpm dev:desktop   # Electron shell — starts the harness server and Vite, stops them when the window closes
+
+# browser-only alternative (two terminals):
 pnpm dev:server    # harness server → 127.0.0.1:8799
 pnpm dev           # app → http://127.0.0.1:5199
-pnpm dev:desktop   # Electron shell (macOS/Ubuntu; keep server + Vite running)
 
 pnpm typecheck     # app + server
 pnpm test          # vitest suite (server unit + driver contract + API smoke)
@@ -39,7 +41,7 @@ pnpm package:mac   # DMG + ZIP; requires Swift/Xcode tools
 pnpm package:linux # Ubuntu x64 .deb + AppImage; no Swift required
 ```
 
-`pnpm dev:desktop` downloads and verifies the pinned Cloudflare Tunnel connector for the current
+`pnpm dev:desktop` refuses to start when the server port already answers as another OpenMausBot (usually the installed app) — quit it, or set `OMB_PORT` to use a different port. It also downloads and verifies the pinned Cloudflare Tunnel connector for the current
 platform and architecture before Electron starts. Later launches re-verify and reuse the staged
 binary. Packaging continues to use `pnpm build:cloudflared`, which stages every architecture the
 host's desktop package build requires. To stage only the current development target without

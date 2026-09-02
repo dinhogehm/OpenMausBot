@@ -33,7 +33,7 @@
     "dev:server": "node --experimental-strip-types server/index.ts",
     "mcp": "node --experimental-strip-types scripts/mcp-server.ts",
     "control:omb": "node --experimental-strip-types scripts/control-omb.ts",
-    "dev:desktop": "node scripts/prepare-cloudflared.mjs --current && electron .",
+    "dev:desktop": "node scripts/dev-desktop.mjs",
     "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
     "typecheck": "tsc -b && tsc -p tsconfig.server.json",
     "test": "vitest run && pnpm broker:test && pnpm test:electron && pnpm test:packaged-server",
