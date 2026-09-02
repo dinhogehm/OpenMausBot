@@ -390,7 +390,10 @@ export function WorkflowNodePanel({
                   }}
                   className={cn(FIELD, "mt-1")}
                 >
-                  <option value="">Fail the run</option>
+                  {/* The engine falls back to `rejected` when onExpire is unset
+                      (sweepApprovals: `node.onExpire ?? "rejected"`), so the default
+                      must not promise a failure it never produces. */}
+                  <option value="">Route to rejected (default)</option>
                   {WORKFLOW_APPROVAL_OUTCOMES.map((outcome) => (
                     <option key={outcome} value={outcome}>
                       Route to {outcome}
