@@ -145,6 +145,41 @@ Registrados aqui porque mudam o contrato, não só o código. Datados de 2026-09
    promessa reprova o nó), e `notifyUser` recebe um `kind` (`failed`/`approval`/
    `reminder`) e pode lançar sem derrubar o tick.
 
+### Desvios da implementação (interface)
+
+1. **O canvas pausa os saves ao observar.** Editar e observar dividem o mesmo componente e
+   o mesmo documento local. Entrar em "Observar" primeiro descarrega o que estiver pendente
+   e **recusa entrar** se essa gravação falhar; enquanto observa, a fila fica pausada
+   (`setPaused`) em vez de os saves serem curto-circuitados espalhados pelo código.
+
+2. **A decoração dos nós é derivada no renderizador, não no mapeamento.** O xyflow guarda o
+   tamanho medido de um nó pela identidade do objeto: reconstruir o array a cada frame de run
+   faria o grafo piscar. Como o renderizador já lê o estado global, o run observado chega por
+   contexto e o mapeamento permanece intocado. As arestas não têm esse contrato de identidade,
+   então usam o decorador de `toGraphEdges`.
+
+3. **Seleção é de um nó só, assumidamente.** O xyflow habilita seleção múltipla por padrão,
+   mas o editor age sobre um nó por vez; em vez de deixar a caixa de seleção prometer o que o
+   Delete não cumpre, as teclas de multisseleção foram desligadas.
+
+4. **Ligar saídas também pelo teclado.** Arrastar de um conector é a única forma na maioria dos
+   editores de grafo; aqui cada nó lista suas saídas com um seletor "Routes to →", incluindo a
+   saída implícita `failed`, para que desenhar um fluxo não dependa do mouse.
+
+5. **Run cancelado não marca onde parou.** Um run cancelado não é nem concluído nem falho, e
+   não existe um tom "interrompido"; o nó volta a `idle` e quem conta a história é a linha do
+   tempo. Decisão consciente, revisável se atrapalhar na prática.
+
+## Fora do MVP entregue
+
+- **Export/import `openmaus.workflow`**: o formato está descrito neste documento, mas não foi
+  implementado (já estava listado como fase 2).
+- **Webhook apontando para um workflow tem servidor, não tem tela**: o alvo existe e funciona
+  pela API, mas o painel de webhooks ainda só oferece bots. Criar um hoje é uma chamada
+  `POST /api/webhooks { name, workflowId }`.
+- **Aprovação por card no chat**: hoje um portão aberto aparece como run `waiting-approval`
+  no canvas e como notificação; a decisão sai pelo canvas ou pela API.
+
 ## Canvas (página "Workflows")
 
 - Evolução da `src/components/TeamMapPage.tsx`; **única dependência nova:
