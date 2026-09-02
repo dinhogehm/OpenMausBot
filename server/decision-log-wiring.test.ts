@@ -227,10 +227,13 @@ posixOnly("authorization decisions are logged", () => {
   it(
     "an unattended block writes the row that says a grant was withheld",
     async () => {
-      // Auto mode on AND the exact key granted: an attended turn would sail
-      // straight through, so the only thing carding this one is the
-      // unattended block — which is precisely what the row must say.
-      const bot = await makePermissionBot({ name: "Nightshift", autoApprove: true, alwaysAllow: ["shell:echo"] });
+      // Auto mode on and nothing named. An attended turn would sail straight
+      // through on the blanket mode, so the only thing carding this one is
+      // the unattended block — which is precisely what the row must say.
+      // The named grant is deliberately absent: "shell:echo, always" is a
+      // decision a person made about one exact program, and it outlives their
+      // presence, so granting it here would run the tool and leave no card.
+      const bot = await makePermissionBot({ name: "Nightshift", autoApprove: true });
 
       const hook = await api("POST", "/api/webhooks", {
         name: "Nightly build",
@@ -255,7 +258,8 @@ posixOnly("authorization decisions are logged", () => {
       const row = await waitForDecision((r) => r.threadId === threadId && r.decision === "card-shown");
       expect(row, "the unattended block never reached the decision log").not.toBeNull();
       expect(row!.source).toBe("unattended-block");
-      expect(row!.rule).toBe("shell:echo");
+      // the blanket mode has no identity narrower than itself to name
+      expect(row!.rule).toBeUndefined();
       expect(row!.unattended).toBe(true);
       expect(row!.botId).toBe(bot.id);
     },
