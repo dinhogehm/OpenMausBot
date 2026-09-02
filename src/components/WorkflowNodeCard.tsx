@@ -9,11 +9,14 @@ import { AlertTriangle, CircleUserRound, Flag, MessageSquare, ShieldQuestion } f
 import { BotAvatar, type BotAvatarProps } from "./Avatar";
 import { cn } from "@/lib/cn";
 import type { WorkflowGraphNodeData, WorkflowOutcomeHandle } from "@/lib/workflow-graph";
+import type { WorkflowNodeTone } from "@/lib/workflow-observation";
 import type { WorkflowNode } from "../../shared/workflow";
 
-/** How a run decorates a card. `idle` is the editor's only value; Task 10
- * owns the rest, which is why they live in the card and not in the mapping. */
-export type WorkflowNodeTone = "idle" | "current" | "done" | "failed" | "waiting";
+/** How a run decorates a card. `idle` is the editor's only value; the rest
+ * are what the observation view asks for, which is why the vocabulary lives
+ * in `@/lib/workflow-observation` (a type-only import, so the card still
+ * pulls in nothing at runtime) and not in the document ⇄ graph mapping. */
+export type { WorkflowNodeTone };
 
 const TONE_RING: Record<WorkflowNodeTone, string> = {
   idle: "",
@@ -23,14 +26,26 @@ const TONE_RING: Record<WorkflowNodeTone, string> = {
   waiting: "ring-2 ring-warning/70",
 };
 
+/** A ring is a hint; the badge is the sentence. Three of the five tones say
+ * something a reader must not have to infer from a colour — which node is in
+ * flight, which one is holding a gate open, and where a run stopped — so
+ * each is a word in the DOM. `done` needs none: the footer prints the
+ * outcome the node actually produced. */
+const TONE_BADGE: Partial<Record<WorkflowNodeTone, { label: string; className: string; pulse: boolean }>> = {
+  current: { label: "Running", className: "bg-accent/15 text-accent", pulse: true },
+  waiting: { label: "Waiting", className: "bg-warning/15 text-warning", pulse: true },
+  failed: { label: "Stopped here", className: "bg-danger/15 text-danger", pulse: false },
+};
+
 const KIND_LABEL: Record<WorkflowNode["kind"], string> = {
   agent: "Agent",
   approval: "Approval",
   notify: "Notify",
 };
 
-/** One line of body copy, cut so a long instruction cannot stretch the card. */
-function excerpt(text: string, max = 90): string {
+/** One line of body copy, cut so a long instruction cannot stretch the card.
+ * Exported so the run footer cuts a node summary exactly the same way. */
+export function excerpt(text: string, max = 90): string {
   const flat = text.replace(/\s+/g, " ").trim();
   if (!flat) return "";
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
@@ -65,6 +80,7 @@ export function WorkflowNodeCard({
 }: WorkflowNodeCardProps) {
   const { node, entry, issues, outcomes } = data;
   const errors = issues.filter((issue) => issue.severity === "error").length;
+  const badge = TONE_BADGE[tone];
 
   return (
     <div
@@ -106,6 +122,17 @@ export function WorkflowNodeCard({
               <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-accent/15 px-1.5 py-px text-[9.5px] font-medium text-accent">
                 <Flag size={9} aria-hidden />
                 Entry
+              </span>
+            )}
+            {badge && (
+              <span
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-px text-[9.5px] font-medium",
+                  badge.className,
+                )}
+              >
+                {badge.pulse && <span className="size-1 animate-pulse rounded-full bg-current" aria-hidden />}
+                {badge.label}
               </span>
             )}
           </div>

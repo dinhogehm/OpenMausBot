@@ -117,3 +117,46 @@
   color: var(--color-ink-secondary);
   opacity: 0.55;
 }
+
+/* ── run observation ──────────────────────────────────────────────────
+ * The classes below arrive through `toGraphEdges`'s `decorate` callback
+ * (see `runEdgeDecorator`), so the document ⇄ graph mapping still knows
+ * nothing about runs: it merges whatever decoration it is handed.
+ *
+ * The contrast is the whole message — an edge the run actually walked has
+ * to be readable at a glance against the ones it did not. */
+.workflow-canvas .react-flow__edge.wf-edge-traversed .react-flow__edge-path {
+  stroke: var(--color-accent);
+  stroke-width: 2.5;
+}
+
+.workflow-canvas .react-flow__edge.wf-edge-traversed .react-flow__edge-text {
+  fill: var(--color-accent);
+  font-weight: 600;
+}
+
+/* Not "invisible": an untaken branch is still part of the drawing being
+ * read, it just did not happen on this run. */
+.workflow-canvas .react-flow__edge.wf-edge-untaken .react-flow__edge-path {
+  stroke: color-mix(in srgb, var(--color-ink) 18%, transparent);
+}
+
+.workflow-canvas .react-flow__edge.wf-edge-untaken .react-flow__edge-text {
+  fill: color-mix(in srgb, var(--color-ink) 45%, transparent);
+}
+
+/* Selection still wins over both: clicking an edge to read it must show
+ * which one was clicked. */
+.workflow-canvas .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--color-accent);
+}
+
+/* Nothing can be connected while observing, so the handles must stop
+ * advertising that they can. */
+.workflow-canvas-observing .react-flow__handle {
+  opacity: 0.35;
+}
+
+.workflow-canvas-observing .react-flow__handle:hover {
+  background-color: var(--color-panel);
+}

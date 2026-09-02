@@ -32,6 +32,32 @@ const agent: WorkflowNode = {
 
 const text = (markup: string) => markup.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
 
+describe("WorkflowNodeCard — run tone", () => {
+  const bot = { name: "Scout", color: "green" } as const;
+
+  it("names the state a run puts the node in, rather than only colouring it", () => {
+    expect(text(card(agent, { bot, tone: "current" }))).toContain("Running");
+    expect(text(card(agent, { bot, tone: "waiting" }))).toContain("Waiting");
+    expect(text(card(agent, { bot, tone: "failed" }))).toContain("Stopped here");
+  });
+
+  it("pulses the node in flight and the gate holding the run, and nothing else", () => {
+    expect(card(agent, { bot, tone: "current" })).toContain("animate-pulse");
+    expect(card(agent, { bot, tone: "waiting" })).toContain("animate-pulse");
+    expect(card(agent, { bot, tone: "failed" })).not.toContain("animate-pulse");
+    // `done` says what it produced in the footer, so it needs no badge
+    expect(text(card(agent, { bot, tone: "done" }))).not.toContain("Running");
+    expect(card(agent, { bot, tone: "idle" })).not.toContain("animate-pulse");
+  });
+
+  it("renders the run controls the observation view puts in the footer slot", () => {
+    const markup = card(agent, { bot, footer: "Approve or reject" });
+    expect(markup).toContain("Approve or reject");
+    // the slot is drag-proof, or clicking a control would move the node
+    expect(markup).toContain("nodrag nopan");
+  });
+});
+
 describe("WorkflowNodeCard — agent", () => {
   it("names the bot, the node id and every outcome including the implicit failure path", () => {
     const markup = card(agent, { bot: { name: "Scout", color: "green" } });

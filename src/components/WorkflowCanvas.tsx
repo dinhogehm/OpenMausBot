@@ -7,10 +7,30 @@
 // what a save would report. Drafts are saveable by design: the PATCH goes out
 // even when the graph is broken, and only running is gated.
 //
-// A later observation mode decorates this without a rewrite: node visuals are
-// driven entirely by `WorkflowNodeCard` props (`tone`, `footer`), and the
-// document ⇄ graph mapping knows nothing about editing.
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+// Observation decorates this without touching either of those rules. The
+// mode switch pauses the same save queue (`setPaused`) rather than teaching
+// the save path about modes, the run is read from the store's live
+// `workflowRuns` rather than copied, and the decoration reaches the drawing
+// through the two seams that were left for it: `WorkflowNodeCard`'s `tone`
+// and `footer` props, and `toGraphEdges`'s `decorate` callback.
+//
+// Node tone is derived in the NODE RENDERER, not in the document ⇄ graph
+// mapping. The renderer already subscribes to the store, so a `workflow-run`
+// frame repaints the cards on its own — while putting run state into
+// `WorkflowGraphNodeData` would rebuild the node array on every frame, and a
+// rebuilt node object loses the `measured` size xyflow keys off identity
+// (the whole graph blinks). Edges have no such identity contract, so they go
+// through `decorate` exactly as designed.
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   Background,
   BackgroundVariant,
@@ -34,11 +54,14 @@ import {
   CalendarClock,
   Check,
   CircleAlert,
+  Eye,
   Loader2,
   MessageSquare,
+  Pencil,
   Play,
   Plus,
   ShieldQuestion,
+  Square,
   Trash2,
   UserRound,
   X,
@@ -47,12 +70,22 @@ import {
 import "@xyflow/react/dist/base.css";
 import "./workflow-canvas.css";
 
-import { api, useStore } from "@/state/store";
+import { api, openNotificationTarget, useStore } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { validationSummary, type WorkflowListItem } from "@/lib/workflow-state";
 import { createSaveQueue, type SaveStatus } from "@/lib/workflow-save-queue";
+import {
+  isActiveWorkflowRun,
+  nodeTone,
+  observedRunFor,
+  runEdgeDecorator,
+  runStatusLabel,
+  workflowRunsFor,
+} from "@/lib/workflow-observation";
 import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { WorkflowNodeCard } from "./WorkflowNodeCard";
+import { WorkflowRunNodeFooter } from "./WorkflowRunNodeFooter";
+import { WorkflowRunTimeline } from "./WorkflowRunTimeline";
 import { WorkflowNodePanel, type WorkflowPanelBot } from "./WorkflowNodePanel";
 import {
   WORKFLOW_NODE_TYPE,
@@ -88,6 +121,8 @@ import {
   WORKFLOW_SCHEDULE_TIME_RE,
   validateWorkflow,
   type Workflow,
+  type WorkflowNodeResult,
+  type WorkflowRun,
   type WorkflowSchedule,
   type WorkflowTriggers,
 } from "../../shared/workflow";
@@ -115,16 +150,40 @@ const NODE_KIND_META: Record<WorkflowNodeKind, { label: string; icon: typeof Use
 // ── the custom node ───────────────────────────────────────────────────
 type WorkflowFlowNode = Node<WorkflowGraphNodeData, typeof WORKFLOW_NODE_TYPE>;
 
+/** What the observation mode hands down to every card. It is a context and
+ * not node data on purpose (see the file header): run state must never enter
+ * the document ⇄ graph mapping, or a run frame would rebuild the node array
+ * and un-measure the graph. `null` is the editor. */
+interface WorkflowObservation {
+  run: WorkflowRun;
+  /** The node an approve/reject/resume was issued for, and how it went —
+   * pinned to that node so the answer lands on the card that was pressed
+   * even after the run has moved on. */
+  action: { nodeId: string; busy: boolean; error: string | null } | null;
+  decide: (decision: "approved" | "rejected") => void;
+  resume: () => void;
+  openThread: (nodeId: string, threadId: string) => void;
+}
+
+const ObservationContext = createContext<WorkflowObservation | null>(null);
+
 /** Resolves its own roster references so the mapping stays pure and a bot
- * rename repaints the card without rebuilding the graph. */
-function WorkflowFlowNodeRenderer({ data, selected }: NodeProps<WorkflowFlowNode>) {
+ * rename repaints the card without rebuilding the graph. The same
+ * subscription is what makes a `workflow-run` frame repaint the run
+ * decoration: the tone and footer below are derived here, per render, from
+ * whatever the store currently holds. */
+function WorkflowFlowNodeRenderer({ data, selected, isConnectable }: NodeProps<WorkflowFlowNode>) {
   const { state } = useStore();
+  const observation = useContext(ObservationContext);
   const { node } = data;
   const bot = node.kind === "agent" ? (state.bots.find((candidate) => candidate.id === node.botId) ?? null) : null;
   const groupName =
     node.kind === "notify"
       ? (state.groups.find((group) => group.id === node.targetGroupId)?.name ?? null)
       : null;
+  const run = observation?.run ?? null;
+  // The answer to an action belongs to the card whose button was pressed.
+  const acting = observation?.action?.nodeId === node.id ? observation.action : null;
 
   return (
     <WorkflowNodeCard
@@ -132,8 +191,33 @@ function WorkflowFlowNodeRenderer({ data, selected }: NodeProps<WorkflowFlowNode
       bot={bot}
       groupName={groupName}
       selected={selected}
+      tone={nodeTone(run, node.id)}
+      footer={
+        observation && (
+          <WorkflowRunNodeFooter
+            run={observation.run}
+            nodeId={node.id}
+            busy={acting?.busy ?? false}
+            error={acting?.error ?? null}
+            onApprove={() => observation.decide("approved")}
+            onReject={() => observation.decide("rejected")}
+            onResume={observation.resume}
+            onOpenThread={(threadId) => observation.openThread(node.id, threadId)}
+          />
+        )
+      }
+      // `isConnectable` has to be forwarded by hand: xyflow computes it from
+      // `nodesConnectable` and hands it to the NODE, while `<Handle>` defaults
+      // its own to true. Without this, Observe mode's `nodesConnectable={false}`
+      // still let a drag pull a new edge out of a read-only card.
       renderTargetHandle={() => (
-        <Handle type="target" position={Position.Left} id={WORKFLOW_TARGET_HANDLE} className="wf-handle-target" />
+        <Handle
+          type="target"
+          position={Position.Left}
+          id={WORKFLOW_TARGET_HANDLE}
+          isConnectable={isConnectable}
+          className="wf-handle-target"
+        />
       )}
       renderSourceHandle={(handle) => (
         <Handle
@@ -141,6 +225,7 @@ function WorkflowFlowNodeRenderer({ data, selected }: NodeProps<WorkflowFlowNode
           type="source"
           position={Position.Right}
           id={handle.outcome}
+          isConnectable={isConnectable}
           className={cn("wf-handle-source", handle.implicit && "wf-handle-implicit")}
         />
       )}
@@ -391,6 +476,19 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   /** A half-typed (or momentarily empty) name the document must not adopt. */
   const [nameDraft, setNameDraft] = useState<string | null>(null);
 
+  // ── observation ─────────────────────────────────────────────────────
+  const [observing, setObserving] = useState(false);
+  const [switchingMode, setSwitchingMode] = useState(false);
+  /** Set only when the author picks a run by hand; null means "follow the
+   * live run", which is what makes entering Observe during a run follow it. */
+  const [pickedRunId, setPickedRunId] = useState<string | null>(null);
+  /** The node a run action was issued for, and how it went. Keyed by node
+   * because the run MOVES: approving a gate advances the run, so a failure
+   * reported against "the current node" would surface on whichever card the
+   * run reached next rather than on the button that was pressed. */
+  const [nodeAction, setNodeAction] = useState<{ nodeId: string; busy: boolean; error: string | null } | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+
   // The document is owned locally while it is dirty; refs carry the pieces
   // the debounced save and the unmount flush need without re-subscribing.
   const docRef = useRef(doc);
@@ -466,8 +564,33 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
     graphNodesRef.current = reconcileGraphNodes(graphNodesRef.current, mapped);
     return graphNodesRef.current;
   }, [doc, issues, selectedNodeId]);
-  const edges = useMemo(() => toGraphEdges(doc, selectedEdgeId), [doc, selectedEdgeId]);
-  const selectedNode = doc.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  // The observed run is DERIVED from the store on every render — there is no
+  // second copy of it here, so a `workflow-run` SSE frame and the response to
+  // an approve/resume/cancel land the same way and cannot disagree.
+  const workflowRuns = useMemo(
+    () => workflowRunsFor(state.workflowRuns, workflowId),
+    [state.workflowRuns, workflowId],
+  );
+  const observedRun = useMemo(
+    () => (observing ? observedRunFor(workflowRuns, workflowId, pickedRunId) : null),
+    [observing, workflowRuns, workflowId, pickedRunId],
+  );
+  const liveRun = observedRun !== null && isActiveWorkflowRun(observedRun);
+  // A live run's elapsed time would otherwise only move when a frame lands;
+  // this is a clock, not a poll — nothing is asked of the server.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!liveRun) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, [liveRun]);
+
+  const edges = useMemo(
+    () => toGraphEdges(doc, selectedEdgeId, observing ? runEdgeDecorator(observedRun) : undefined),
+    [doc, selectedEdgeId, observing, observedRun],
+  );
+  const selectedNode = observing ? null : (doc.nodes.find((node) => node.id === selectedNodeId) ?? null);
   // Every node is a legal destination, itself included — review loops are a
   // supported shape, not a mistake.
   const routeTargets = useMemo(
@@ -491,7 +614,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
     },
     [doc.edges],
   );
-  const selectedEdge = selectedEdgeId ? findEdgeByGraphId(doc, selectedEdgeId) : null;
+  const selectedEdge = !observing && selectedEdgeId ? findEdgeByGraphId(doc, selectedEdgeId) : null;
 
   /** Cancels a pending debounce; the caller is about to flush by hand. */
   const cancelDebounce = useCallback(() => {
@@ -554,6 +677,10 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   useEffect(
     () => () => {
       cancelDebounce();
+      // Unpause first: leaving the canvas while observing must still write
+      // anything that was outstanding, and a paused queue's flush sends
+      // nothing at all.
+      queue.setPaused(false);
       if (!queue.snapshot().dirty) return;
       void queue.flush().then((result) => {
         if (!result.ok) dispatch({ type: "error", message: `Workflow not saved: ${result.error}` });
@@ -697,6 +824,122 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
     }
   };
 
+  // ── mode ────────────────────────────────────────────────────────────
+  // Observe is not allowed to be lossy. Anything outstanding is written
+  // BEFORE the queue is paused, and a write that fails keeps the canvas in
+  // Edit rather than parking unsaved work behind a paused queue. Pausing —
+  // instead of teaching `commit`/`schedule` about modes — is what guarantees
+  // the reverse direction too: an edit that somehow happens while observing
+  // stays dirty and goes out the moment Edit comes back.
+  const observe = async () => {
+    setSwitchingMode(true);
+    setRunError(null);
+    try {
+      cancelDebounce();
+      const flushed = await queue.flush();
+      if (!flushed.ok) {
+        setRunError(`Still editing — the latest changes could not be saved first: ${flushed.error}`);
+        return;
+      }
+      queue.setPaused(true);
+      // Follow whatever is live right now; a stale pick from an earlier visit
+      // would otherwise hide the run the author came to watch.
+      setPickedRunId(null);
+      setNodeAction(null);
+      setSelectedEdgeId(null);
+      setObserving(true);
+    } finally {
+      setSwitchingMode(false);
+    }
+  };
+
+  const edit = () => {
+    queue.setPaused(false);
+    setObserving(false);
+    setRunError(null);
+    if (queue.snapshot().dirty) {
+      cancelDebounce();
+      void queue.flush();
+    }
+  };
+
+  // ── run actions ─────────────────────────────────────────────────────
+  // Every response is folded into the store exactly like the SSE frame that
+  // will follow it, so the canvas never holds a private run. A 409 (someone
+  // else resolved the gate from the chat card, another window, or the expiry
+  // sweep) is reported as-is: the store already has — or is about to get —
+  // the real state, so there is nothing to undo, only something to say.
+  const runNodeAction = async (target: WorkflowRun, path: string, body: string) => {
+    const nodeId = target.currentNodeId;
+    if (!nodeId) return;
+    setNodeAction({ nodeId, busy: true, error: null });
+    try {
+      const { run: next } = await api(`/api/workflow-runs/${target.id}/${path}`, { method: "POST", body });
+      if (next) dispatch({ type: "workflowRunPatched", run: next });
+      setNodeAction(null);
+    } catch (cause) {
+      setNodeAction({ nodeId, busy: false, error: errorText(cause) });
+    }
+  };
+
+  const decide = (decision: "approved" | "rejected") => {
+    if (observedRun) void runNodeAction(observedRun, "approval", JSON.stringify({ decision }));
+  };
+
+  const resume = () => {
+    if (observedRun) void runNodeAction(observedRun, "resume", "{}");
+  };
+
+  const cancelRun = async () => {
+    if (!observedRun) return;
+    if (!window.confirm("Cancel this run? The node in flight stops where it is and the rest of the graph is skipped."))
+      return;
+    setCancelling(true);
+    setRunError(null);
+    try {
+      const { run: cancelled } = await api(`/api/workflow-runs/${observedRun.id}/cancel`, {
+        method: "POST",
+        body: "{}",
+      });
+      if (cancelled) dispatch({ type: "workflowRunPatched", run: cancelled });
+    } catch (cause) {
+      setRunError(errorText(cause));
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  /** A step's transcript lives in the bot's task thread. The node names the
+   * bot; if the node is gone (a step of a graph that has since changed) the
+   * thread's own owner is the fallback, and when neither resolves the canvas
+   * says so instead of selecting an id that does not exist. */
+  const openThread = (nodeId: string, threadId: string) => {
+    const node = docRef.current.nodes.find((candidate) => candidate.id === nodeId);
+    const botId =
+      node?.kind === "agent"
+        ? node.botId
+        : (state.bots.find(
+            (bot) => bot.threadId === threadId || (bot.tasks ?? []).some((task) => task.threadId === threadId),
+          )?.id ?? null);
+    if (!botId) {
+      setRunError("That transcript is no longer available — its bot or task was deleted.");
+      return;
+    }
+    setRunError(null);
+    openNotificationTarget(dispatch, { botId, threadId }, state);
+  };
+
+  const openStep = (result: WorkflowNodeResult) => {
+    if (result.threadId) openThread(result.nodeId, result.threadId);
+  };
+
+  // Deliberately not memoised: in Edit it is a stable `null`, and in Observe
+  // the canvas only re-renders when the store (which every card already
+  // subscribes to) or the clock moves, so a fresh object costs nothing.
+  const observation: WorkflowObservation | null = observedRun
+    ? { run: observedRun, action: nodeAction, decide, resume, openThread }
+    : null;
+
   const macInset = capabilities.windowChrome === "mac-inset";
   const windowDragStyle = macInset ? ({ WebkitAppRegion: "drag" } as CSSProperties) : undefined;
   // The canvas surface itself must opt out, or dragging empty space moves the
@@ -735,6 +978,11 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
             value={nameDraft ?? doc.name}
             maxLength={120}
             aria-label="Workflow name"
+            // The one editing control that is not in the palette; leaving it
+            // writable in Observe would be the single way to dirty a paused
+            // document.
+            readOnly={observing}
+            aria-describedby={observing ? "wf-canvas-mode-reason" : undefined}
             onChange={(event) => {
               const next = event.target.value;
               setNameDraft(next);
@@ -778,70 +1026,135 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
           )}
 
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
-            <span className="mr-1 text-[11px] text-ink-secondary">Add</span>
-            {(Object.keys(NODE_KIND_META) as WorkflowNodeKind[]).map((kind) => {
-              const { label, icon: Icon } = NODE_KIND_META[kind];
-              const blocked = paletteBlocked[kind] ?? null;
-              return (
-                <button
-                  key={kind}
-                  type="button"
-                  onClick={() => {
-                    if (!blocked) addNode(kind);
-                  }}
-                  aria-disabled={blocked ? true : undefined}
-                  aria-describedby={blocked ? `wf-canvas-add-${kind}-reason` : undefined}
-                  aria-label={`Add ${label.toLowerCase()} node`}
-                  className={cn(
-                    "inline-flex items-center gap-1.5 rounded-lg border border-hairline/50 px-2.5 py-1.5 text-[11.5px] font-medium",
-                    blocked ? "cursor-not-allowed text-ink-secondary opacity-40" : "text-ink-secondary hover:bg-raised hover:text-ink",
-                  )}
-                >
-                  <Icon size={13} aria-hidden />
-                  {label}
-                </button>
-              );
-            })}
-
-            <div className="relative">
+            {/* Edit ⇄ Observe. Entering Observe saves first and can refuse,
+                so it is a real action with a spinner, not a display toggle. */}
+            <div role="group" aria-label="Canvas mode" className="mr-1 flex items-center gap-0.5 rounded-lg border border-hairline/50 p-0.5">
               <button
-                ref={scheduleButtonRef}
                 type="button"
-                onClick={() => setScheduleOpen((open) => !open)}
-                aria-expanded={scheduleOpen}
+                aria-pressed={!observing}
+                onClick={() => {
+                  if (observing) edit();
+                }}
                 className={cn(
-                  "inline-flex items-center gap-1.5 rounded-lg border border-hairline/50 px-2.5 py-1.5 text-[11.5px] font-medium",
-                  doc.triggers?.schedule ? "text-accent" : "text-ink-secondary hover:bg-raised hover:text-ink",
+                  "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11.5px] font-medium",
+                  observing ? "text-ink-secondary hover:bg-raised hover:text-ink" : "bg-accent/15 text-accent",
                 )}
               >
-                <CalendarClock size={13} aria-hidden />
-                {doc.triggers?.schedule ? "Scheduled" : "Schedule"}
+                <Pencil size={12} aria-hidden />
+                Edit
               </button>
-              {scheduleOpen && (
-                <TriggersPanel
-                  workflow={doc}
-                  anchorRef={scheduleButtonRef}
-                  onChange={(triggers) => commit((current) => ({ ...current, triggers }))}
-                  onClose={() => setScheduleOpen(false)}
-                />
-              )}
+              <button
+                type="button"
+                aria-pressed={observing}
+                onClick={() => {
+                  if (!observing && !switchingMode) void observe();
+                }}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11.5px] font-medium",
+                  observing ? "bg-accent/15 text-accent" : "text-ink-secondary hover:bg-raised hover:text-ink",
+                )}
+              >
+                {switchingMode ? (
+                  <Loader2 size={12} className="animate-spin" aria-hidden />
+                ) : (
+                  <Eye size={12} aria-hidden />
+                )}
+                Observe
+              </button>
             </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                if (!runBlockedReason) void run();
-              }}
-              aria-disabled={runBlockedReason ? true : undefined}
-              aria-describedby={runBlockedReason ? "wf-canvas-run-reason" : undefined}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink",
-                runBlockedReason ? "cursor-not-allowed opacity-40" : "hover:brightness-110",
-              )}
-            >
-              {running ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <Play size={13} aria-hidden />}
-              Run
-            </button>
+            {observing && observedRun && isActiveWorkflowRun(observedRun) && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!cancelling) void cancelRun();
+                }}
+                aria-disabled={cancelling ? true : undefined}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-lg border border-danger/40 px-2.5 py-1.5 text-[11.5px] font-medium text-danger",
+                  cancelling ? "cursor-not-allowed opacity-50" : "hover:bg-danger/10",
+                )}
+              >
+                {cancelling ? (
+                  <Loader2 size={13} className="animate-spin" aria-hidden />
+                ) : (
+                  <Square size={13} aria-hidden />
+                )}
+                Cancel run
+              </button>
+            )}
+
+            {/* Everything that writes the document is gone in Observe — the
+                palette, the schedule editor and Run. The mode line below
+                says so in visible text. */}
+            {!observing && (
+              <>
+                <span className="mr-1 text-[11px] text-ink-secondary">Add</span>
+                {(Object.keys(NODE_KIND_META) as WorkflowNodeKind[]).map((kind) => {
+                  const { label, icon: Icon } = NODE_KIND_META[kind];
+                  const blocked = paletteBlocked[kind] ?? null;
+                  return (
+                    <button
+                      key={kind}
+                      type="button"
+                      onClick={() => {
+                        if (!blocked) addNode(kind);
+                      }}
+                      aria-disabled={blocked ? true : undefined}
+                      aria-describedby={blocked ? `wf-canvas-add-${kind}-reason` : undefined}
+                      aria-label={`Add ${label.toLowerCase()} node`}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-lg border border-hairline/50 px-2.5 py-1.5 text-[11.5px] font-medium",
+                        blocked ? "cursor-not-allowed text-ink-secondary opacity-40" : "text-ink-secondary hover:bg-raised hover:text-ink",
+                      )}
+                    >
+                      <Icon size={13} aria-hidden />
+                      {label}
+                    </button>
+                  );
+                })}
+
+                <div className="relative">
+                  <button
+                    ref={scheduleButtonRef}
+                    type="button"
+                    onClick={() => setScheduleOpen((open) => !open)}
+                    aria-expanded={scheduleOpen}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-lg border border-hairline/50 px-2.5 py-1.5 text-[11.5px] font-medium",
+                      doc.triggers?.schedule ? "text-accent" : "text-ink-secondary hover:bg-raised hover:text-ink",
+                    )}
+                  >
+                    <CalendarClock size={13} aria-hidden />
+                    {doc.triggers?.schedule ? "Scheduled" : "Schedule"}
+                  </button>
+                  {scheduleOpen && (
+                    <TriggersPanel
+                      workflow={doc}
+                      anchorRef={scheduleButtonRef}
+                      onChange={(triggers) => commit((current) => ({ ...current, triggers }))}
+                      onClose={() => setScheduleOpen(false)}
+                    />
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!runBlockedReason) void run();
+                  }}
+                  aria-disabled={runBlockedReason ? true : undefined}
+                  aria-describedby={runBlockedReason ? "wf-canvas-run-reason" : undefined}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-accent-ink",
+                    runBlockedReason ? "cursor-not-allowed opacity-40" : "hover:brightness-110",
+                  )}
+                >
+                  {running ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <Play size={13} aria-hidden />}
+                  Run
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -870,11 +1183,20 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
               {runBlockedReason}
             </span>
           )}
-          {Object.entries(paletteBlocked).map(([kind, reason]) => (
-            <span key={kind} id={`wf-canvas-add-${kind}-reason`} className="text-[11px] text-ink-secondary">
-              {reason}
+          {!observing &&
+            Object.entries(paletteBlocked).map(([kind, reason]) => (
+              <span key={kind} id={`wf-canvas-add-${kind}-reason`} className="text-[11px] text-ink-secondary">
+                {reason}
+              </span>
+            ))}
+          {/* Why the palette and the name field are gone. Visible text, and
+              the id the read-only name field points its description at. */}
+          {observing && (
+            <span id="wf-canvas-mode-reason" className="text-[11px] text-ink-secondary">
+              Observing{observedRun ? ` a ${runStatusLabel(observedRun).toLowerCase()} run` : ""} — the drawing is
+              read-only. Switch to Edit to change it.
             </span>
-          ))}
+          )}
           {headerIssues.length > 0 && (
             <ul className="min-w-0 flex-1 space-y-0.5 text-[11px] leading-relaxed">
               {headerIssues.map((issue, index) => (
@@ -906,34 +1228,66 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <div ref={paneRef} className="workflow-canvas min-w-0 flex-1" style={windowNoDragStyle}>
-          <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            nodeTypes={NODE_TYPES}
-            defaultEdgeOptions={EDGE_DEFAULTS}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            deleteKeyCode={["Delete", "Backspace"]}
-            // Selection is single by design: the change handlers keep one
-            // selected id, so a rubber-band or shift-click that looked like a
-            // multi-selection would still delete just one node. Turning the
-            // gestures off is honest; a real multi-select is a separate change.
-            selectionKeyCode={null}
-            multiSelectionKeyCode={null}
-            fitView
-            fitViewOptions={{ padding: 0.3, maxZoom: 1 }}
-            minZoom={0.25}
-            maxZoom={1.75}
-            proOptions={{ hideAttribution: false }}
-          >
-            <Background variant={BackgroundVariant.Dots} gap={22} size={1} />
-            <Controls showInteractive={false} />
-          </ReactFlow>
+        <div
+          ref={paneRef}
+          className={cn("workflow-canvas min-w-0 flex-1", observing && "workflow-canvas-observing")}
+          style={windowNoDragStyle}
+        >
+          {/* The run reaches the cards through context rather than through
+              their data, so a run frame never rebuilds the node array. */}
+          <ObservationContext.Provider value={observation}>
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              nodeTypes={NODE_TYPES}
+              defaultEdgeOptions={EDGE_DEFAULTS}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onConnect={onConnect}
+              // Read-only while observing: nothing drags, nothing connects and
+              // Delete does nothing. Selection stays on, because clicking a
+              // card to look at it is the point.
+              nodesDraggable={!observing}
+              nodesConnectable={!observing}
+              deleteKeyCode={observing ? null : ["Delete", "Backspace"]}
+              // Selection is single by design: the change handlers keep one
+              // selected id, so a rubber-band or shift-click that looked like a
+              // multi-selection would still delete just one node. Turning the
+              // gestures off is honest; a real multi-select is a separate change.
+              selectionKeyCode={null}
+              multiSelectionKeyCode={null}
+              fitView
+              fitViewOptions={{ padding: 0.3, maxZoom: 1 }}
+              minZoom={0.25}
+              maxZoom={1.75}
+              proOptions={{ hideAttribution: false }}
+            >
+              <Background variant={BackgroundVariant.Dots} gap={22} size={1} />
+              <Controls showInteractive={false} />
+            </ReactFlow>
+          </ObservationContext.Provider>
         </div>
 
-        {selectedNode ? (
+        {observing ? (
+          <aside
+            aria-label="Run observation"
+            className="flex w-[320px] shrink-0 flex-col border-l border-hairline/40 bg-panel px-4 py-4"
+          >
+            <WorkflowRunTimeline
+              runs={workflowRuns}
+              run={observedRun}
+              pickedId={pickedRunId}
+              now={now}
+              onPick={(runId) => {
+                // A failure belongs to the run it happened on; carrying it
+                // into another run's view would be a lie.
+                setNodeAction(null);
+                setPickedRunId(runId);
+              }}
+              onOpenStep={openStep}
+            />
+          </aside>
+        ) : selectedNode ? (
           <WorkflowNodePanel
             node={selectedNode}
             issues={nodeIssues.get(selectedNode.id) ?? []}
