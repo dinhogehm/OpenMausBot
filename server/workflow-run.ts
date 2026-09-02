@@ -21,6 +21,7 @@ import {
   WORKFLOW_NODE_RETRIES_DEFAULT,
   WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN,
   WORKFLOW_NOTIFY_OUTCOME,
+  WORKFLOW_SCHEDULE_CATCH_UP_MS,
   type Workflow,
   type WorkflowNode,
   type WorkflowNodeResult,
@@ -28,6 +29,7 @@ import {
   type WorkflowRun,
   type WorkflowRunStatus,
   type WorkflowRunTrigger,
+  type WorkflowSchedule,
 } from "../shared/workflow.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 import { redactSecretsInText } from "./redact.ts";
@@ -71,6 +73,11 @@ export interface WorkflowEngineOptions {
    * here is logged and swallowed — and a reminder that failed to go out is
    * retried on the next tick. */
   notifyUser?: (run: WorkflowRun, message: string, kind: WorkflowNotificationKind) => void;
+  /** Occurrence math for `triggers.schedule` — index.ts injects the routine
+   * scheduler's `nextOccurrence` (local timezone, strictly after `after`),
+   * so a workflow's "daily at 09:00" and a routine's agree. Absent, the
+   * engine never arms or fires a schedule. */
+  nextOccurrence?: (schedule: WorkflowSchedule, after: number) => number | null;
 }
 
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
@@ -79,6 +86,8 @@ type NotifyNode = Extract<WorkflowNode, { kind: "notify" }>;
 export type ApprovalDecision = (typeof WORKFLOW_APPROVAL_OUTCOMES)[number];
 
 const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
+
+const MISSED_SLOT_REASON = "missed: this computer was offline for more than 12 hours after the scheduled time";
 
 function envelopeContract(node: AgentNode): string {
   const allowed = node.outcomes.map((outcome) => `"${outcome}"`).join(", ");
@@ -185,7 +194,8 @@ export class WorkflowEngine {
    * tick), a timed-out dispatch becomes a due retry, a due retry becomes a
    * live dispatch, whatever is still "running" with nothing live behind it
    * is stranded and re-driven, and only then can a queue be judged
-   * stranded. */
+   * stranded. Schedules fire last, so a run they start joins queues that
+   * are already consistent. */
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
@@ -196,9 +206,84 @@ export class WorkflowEngine {
       this.dispatchDue(now);
       this.recoverStranded();
       this.drainStrandedQueues();
+      this.sweepSchedules(now);
     } finally {
       this.ticking = false;
     }
+  }
+
+  /** The cron trigger. Timing state lives on the definition (`nextRunAt`),
+   * armed lazily here — so a fresh or edited schedule is picked up on the
+   * next tick rather than inside an API handler — and ADVANCED BEFORE the
+   * run starts, so a crash between the two skips a slot rather than firing
+   * it twice (the same double-fire guard as routines). A `once` schedule is
+   * disarmed (null) when it fires; one already in the past when armed
+   * computes to null and never fires — the user chose a time that is gone,
+   * and there is no earlier tick to have missed. A slot late by more than
+   * the catch-up window is recorded as a missed run and announced like any
+   * failure, never executed hours late. */
+  private sweepSchedules(now: number): void {
+    if (!this.options.nextOccurrence) return;
+    for (const workflow of this.store.list()) {
+      const schedule = workflow.triggers?.schedule;
+      if (!schedule) {
+        // A schedule removed from the definition leaves its clock behind.
+        if (typeof workflow.nextRunAt === "number") this.store.setNextRunAt(workflow.id, null);
+        continue;
+      }
+      if (workflow.nextRunAt === undefined || workflow.nextRunAt === null) {
+        this.store.setNextRunAt(workflow.id, this.occurrenceAfter(schedule, now));
+        continue;
+      }
+      const scheduledFor = workflow.nextRunAt;
+      if (scheduledFor > now) continue;
+      // Persist the advance FIRST — the double-fire guard.
+      this.store.setNextRunAt(
+        workflow.id,
+        schedule.type === "once" ? null : this.occurrenceAfter(schedule, Math.max(now, scheduledFor)),
+      );
+      if (now - scheduledFor > WORKFLOW_SCHEDULE_CATCH_UP_MS) {
+        this.recordMissedRun(workflow, scheduledFor, now);
+        continue;
+      }
+      try {
+        this.startRun(workflow.id, `Scheduled run for ${new Date(scheduledFor).toISOString()}`, "schedule");
+      } catch (error) {
+        // An invalid graph (or a workflow deleted under the sweep) is not the
+        // tick's failure: the next slot tries again, and the canvas already
+        // paints the issues.
+        console.warn(`workflow: scheduled run of ${workflow.id} not started: ${errorMessage(error)}`);
+      }
+    }
+  }
+
+  /** nextOccurrence is an injected wrapper; a throw there must not take the
+   * tick down, and "no next occurrence" is its honest fallback. */
+  private occurrenceAfter(schedule: WorkflowSchedule, after: number): number | null {
+    try {
+      return this.options.nextOccurrence?.(schedule, after) ?? null;
+    } catch (error) {
+      console.warn(`workflow: nextOccurrence failed: ${errorMessage(error)}`);
+      return null;
+    }
+  }
+
+  /** A slot the computer slept through: a terminal receipt stamped with the
+   * slot's time, announced through the same channel as a failed node, so a
+   * 24/7 workflow that stopped firing is never a silent one. */
+  private recordMissedRun(workflow: Workflow, scheduledFor: number, now: number): void {
+    const run = this.store.createRun({
+      workflowId: workflow.id,
+      status: "failed",
+      trigger: "schedule",
+      attempt: 0,
+      input: "",
+      nodeResults: [],
+      error: MISSED_SLOT_REASON,
+      startedAt: scheduledFor,
+      endedAt: now,
+    });
+    this.safeNotify(run, `Workflow "${workflow.name}" scheduled run ${MISSED_SLOT_REASON}`, "failed");
   }
 
   /** A human gate never holds the queue forever: past its deadline the node's

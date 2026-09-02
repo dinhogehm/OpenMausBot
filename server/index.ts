@@ -201,7 +201,7 @@ import { LocalVmLease, LocalVmLeasePool } from "./local-vm-lease.ts";
 import { RepeatDetector, callKey } from "./repeat-detector.ts";
 import { redactSecretsInText } from "./redact.ts";
 import * as vps from "./vps-computer.ts";
-import { RoutineManager, type RoutineRun, type RoutineRunOn, type RoutineRunTrigger } from "./routines.ts";
+import { nextOccurrence, RoutineManager, type RoutineRun, type RoutineRunOn, type RoutineRunTrigger } from "./routines.ts";
 import { handleWorkflowRequest, workflowNotificationBotId } from "./workflow-api.ts";
 import { WorkflowEngine } from "./workflow-run.ts";
 import { WorkflowStore } from "./workflow-store.ts";
@@ -3265,6 +3265,9 @@ workflowEngine = new WorkflowEngine({
       { avatarUrl: bot.avatarUrl },
     ));
   },
+  // The routine scheduler's occurrence math — same timezone, same weekday
+  // semantics — so a workflow's "daily at 09:00" and a routine's agree.
+  nextOccurrence,
 });
 workflowEngine.start();
 

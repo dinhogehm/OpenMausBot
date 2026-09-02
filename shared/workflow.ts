@@ -15,6 +15,13 @@ export const WORKFLOW_NODE_RETRIES_DEFAULT = 2;
  * miswired loop from running a workflow forever. */
 export const WORKFLOW_MAX_NODE_EXECUTIONS = 30;
 export const WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H = 24;
+/** A scheduled run more than this late (the computer was asleep or the app
+ * closed past the slot) is recorded as missed, never executed late — the
+ * same 12-hour catch-up window routines use. */
+export const WORKFLOW_SCHEDULE_CATCH_UP_MS = 12 * 60 * 60_000;
+/** 24-hour wall-clock time for a daily schedule; shared with the API schema
+ * so the door and the validator agree on what the scheduler can arm. */
+export const WORKFLOW_SCHEDULE_TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export type WorkflowNode =
   | {
@@ -35,9 +42,15 @@ export interface WorkflowEdge {
   to: string;
 }
 
+/** Structurally identical to a routine's schedule so the engine can borrow
+ * the routine scheduler's occurrence math: local timezone, `daily` at HH:MM
+ * on the given weekdays (0 = Sunday), `once` at an epoch-ms instant. */
+export type WorkflowSchedule = { type: "daily"; time: string; weekdays: number[] } | { type: "once"; at: number };
+
+/** Webhooks are not listed here: a webhook owns its link to a workflow
+ * (`workflowId` on the webhook), so a workflow has nothing to keep in sync. */
 export interface WorkflowTriggers {
-  schedule?: { type: "daily"; time: string; weekdays: number[] } | { type: "once"; at: number };
-  webhookId?: string;
+  schedule?: WorkflowSchedule;
 }
 
 export interface Workflow {
@@ -50,6 +63,11 @@ export interface Workflow {
   layout: Record<string, { x: number; y: number }>;
   triggers?: WorkflowTriggers;
   maxNodeExecutions?: number;
+  /** Engine-owned timing state for `triggers.schedule`: the next instant the
+   * schedule fires; `null` once a `once` schedule has fired or until the
+   * engine (re)computes it. Never settable by a client — the API strips
+   * it — and reset whenever `triggers` change. */
+  nextRunAt?: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -78,6 +96,11 @@ export interface WorkflowRun {
   /** What started this run; the UI timeline shows it, so it must survive a
    * restart. Optional so pre-existing receipts load unchanged. */
   trigger?: WorkflowRunTrigger;
+  /** The webhook (and its delivery) that started a "webhook" run, so the
+   * webhook's pending cap and its pause/delete cancellation can find the
+   * runs it owns. */
+  webhookId?: string;
+  deliveryId?: string;
   currentNodeId?: string;
   /** Task thread where the current node is executing (engine bookkeeping). */
   currentThreadId?: string;
@@ -160,7 +183,8 @@ export interface WorkflowIssue {
     | "unwired-failure"
     | "unreachable"
     | "reserved-outcome"
-    | "bad-numbers";
+    | "bad-numbers"
+    | "bad-schedule";
   nodeId?: string;
   message: string;
 }
@@ -267,6 +291,35 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
       }
     } else if (node.kind === "approval" && node.expiresHours !== undefined && !positive(node.expiresHours)) {
       badNumber(`Node "${node.id}" expiresHours must be a positive number.`, node.id);
+    }
+  }
+
+  // A schedule the scheduler could not arm must never be persisted: a
+  // malformed time never matches a wall clock, an empty weekday set never
+  // fires, a day outside 0..6 is a slot that does not exist.
+  const schedule = workflow.triggers?.schedule;
+  if (schedule) {
+    const badSchedule = (message: string) => {
+      issues.push({ severity: "error", code: "bad-schedule", message });
+    };
+    if (schedule.type === "daily") {
+      if (typeof schedule.time !== "string" || !WORKFLOW_SCHEDULE_TIME_RE.test(schedule.time)) {
+        badSchedule("Schedule time must be HH:MM (24-hour).");
+      }
+      const weekdays: unknown = schedule.weekdays;
+      if (!Array.isArray(weekdays) || weekdays.length === 0) {
+        badSchedule("Schedule needs at least one weekday.");
+      } else if (!weekdays.every((day) => whole(day, 0) && (day as number) <= 6)) {
+        badSchedule("Schedule weekdays must be whole numbers from 0 (Sunday) to 6 (Saturday).");
+      } else if (new Set(weekdays).size !== weekdays.length) {
+        badSchedule("Schedule weekdays must not repeat.");
+      }
+    } else if (schedule.type === "once") {
+      if (typeof schedule.at !== "number" || !Number.isFinite(schedule.at)) {
+        badSchedule("A one-time schedule needs a finite timestamp.");
+      }
+    } else {
+      badSchedule("Schedule type must be daily or once.");
     }
   }
 

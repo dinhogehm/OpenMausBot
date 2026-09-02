@@ -11,9 +11,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   WORKFLOW_CONTROL_CLOSE,
   WORKFLOW_CONTROL_OPEN,
+  WORKFLOW_SCHEDULE_CATCH_UP_MS,
   type WorkflowNode,
   type WorkflowNotificationKind,
   type WorkflowRun,
+  type WorkflowSchedule,
 } from "../shared/workflow.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 import { WorkflowEngine } from "./workflow-run.ts";
@@ -39,8 +41,12 @@ interface CapturedDispatch {
 }
 
 /** `channel: false` builds an engine with no `postGroupMessage` wired — the
- * shape Task 6 hands the engine when no group transport exists. */
-function harness({ channel = true }: { channel?: boolean } = {}) {
+ * shape Task 6 hands the engine when no group transport exists.
+ * `nextOccurrence` is the schedule stub; absent, the engine never arms. */
+function harness({
+  channel = true,
+  nextOccurrence,
+}: { channel?: boolean; nextOccurrence?: (schedule: WorkflowSchedule, after: number) => number | null } = {}) {
   const dir = tempDir();
   let now = 1_000;
   const file = join(dir, "workflows.json");
@@ -99,6 +105,7 @@ function harness({ channel = true }: { channel?: boolean } = {}) {
           },
         }
       : {}),
+    ...(nextOccurrence ? { nextOccurrence } : {}),
   });
   const base = (threadId: string) => ({
     eventId: `e${++eventSeq}`,
@@ -1676,6 +1683,201 @@ describe("WorkflowEngine notification safety", () => {
       expect(run.error).toBe("postGroupMessage must be synchronous");
       expect(run.nodeResults).toEqual([]);
       expect(h.posts).toEqual([]);
+    }
+  });
+});
+
+describe("WorkflowEngine schedules", () => {
+  const daily = (overrides: Partial<WorkflowInput> = {}): WorkflowInput =>
+    pipeline({ ...overrides, triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1, 2, 3, 4, 5] } } });
+  /** Stub scheduler: the next daily slot is always one hour after `after`;
+   * a once slot is its own instant, strictly in the future. */
+  const stub = (schedule: WorkflowSchedule, after: number) =>
+    schedule.type === "once" ? (schedule.at > after ? schedule.at : null) : after + HOUR;
+
+  it("never arms or fires without an injected scheduler", async () => {
+    const h = harness();
+    const workflow = h.store.create(daily());
+    h.setNow(10_000);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeUndefined();
+    expect(h.store.listRuns()).toEqual([]);
+  });
+
+  it("arms a fresh schedule on the next tick without firing it or touching updatedAt", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const workflow = h.store.create(daily());
+    h.setNow(10_000);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)).toMatchObject({ nextRunAt: 10_000 + HOUR, updatedAt: workflow.updatedAt });
+    expect(h.reload().get(workflow.id)?.nextRunAt).toBe(10_000 + HOUR);
+    expect(h.store.listRuns()).toEqual([]);
+    expect(h.dispatches).toHaveLength(0);
+  });
+
+  it("fires a due slot exactly once, advancing nextRunAt before the dispatch", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const workflow = h.store.create(daily());
+    h.setNow(10_000);
+    await h.engine.tick();
+    const advances: Array<{ value: number | null; dispatchesSoFar: number }> = [];
+    const setNextRunAt = h.store.setNextRunAt.bind(h.store);
+    vi.spyOn(h.store, "setNextRunAt").mockImplementation((id, value) => {
+      advances.push({ value, dispatchesSoFar: h.dispatches.length });
+      return setNextRunAt(id, value);
+    });
+
+    const slot = 10_000 + HOUR;
+    h.setNow(slot);
+    await h.engine.tick();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      trigger: "schedule",
+      status: "running",
+      input: `Scheduled run for ${new Date(slot).toISOString()}`,
+      startedAt: slot,
+    });
+    expect(h.dispatches).toHaveLength(1);
+    // The advance was persisted while nothing had been dispatched yet.
+    expect(advances).toEqual([{ value: slot + HOUR, dispatchesSoFar: 0 }]);
+    expect(h.reload().get(workflow.id)?.nextRunAt).toBe(slot + HOUR);
+
+    // Same instant again: the slot is spent.
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("queues a scheduled run behind an active one", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const workflow = h.store.create(daily());
+    h.engine.startRun(workflow.id, "manual first", "manual");
+    h.setNow(10_000);
+    await h.engine.tick();
+    h.setNow(10_000 + HOUR);
+    await h.engine.tick();
+    const scheduled = h.store.listRuns(workflow.id).find((run) => run.trigger === "schedule");
+    expect(scheduled?.status).toBe("queued");
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("disarms a once schedule when it fires and never re-arms it", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const workflow = h.store.create(pipeline({ triggers: { schedule: { type: "once", at: 50_000 } } }));
+    h.setNow(10_000);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(50_000);
+    h.setNow(50_000);
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeNull();
+    h.setNow(60_000);
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeNull();
+  });
+
+  it("never fires a once schedule that was already in the past when armed", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const workflow = h.store.create(pipeline({ triggers: { schedule: { type: "once", at: 5_000 } } }));
+    h.setNow(10_000);
+    await h.engine.tick();
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt ?? null).toBeNull();
+    expect(h.store.listRuns()).toEqual([]);
+  });
+
+  it("records a missed run instead of executing a slot more than 12 hours late", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const workflow = h.store.create(daily());
+    h.setNow(10_000);
+    await h.engine.tick();
+    const slot = 10_000 + HOUR;
+    const late = slot + WORKFLOW_SCHEDULE_CATCH_UP_MS + 1;
+    h.setNow(late);
+    await h.engine.tick();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "failed",
+      trigger: "schedule",
+      input: "",
+      attempt: 0,
+      nodeResults: [],
+      startedAt: slot,
+      endedAt: late,
+    });
+    expect(runs[0]!.error).toMatch(/^missed: .*12 hours/);
+    expect(h.notifications).toEqual([{ runId: runs[0]!.id, message: expect.stringMatching(/Release.*missed/), kind: "failed" }]);
+    expect(h.dispatches).toHaveLength(0);
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(late + HOUR);
+    // Exactly 12h late still runs.
+    h.setNow(late + HOUR + WORKFLOW_SCHEDULE_CATCH_UP_MS);
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id).filter((run) => run.status === "running")).toHaveLength(1);
+  });
+
+  it("warns and advances the slot when the due workflow is invalid, never rejecting the tick", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness({ nextOccurrence: stub });
+      // create() accepts drafts; a dangling edge makes startRun refuse it.
+      const workflow = h.store.create(daily({ edges: [{ from: "plan", outcome: "done", to: "ghost" }] }));
+      h.setNow(10_000);
+      await h.engine.tick();
+      h.setNow(10_000 + HOUR);
+      await expect(h.engine.tick()).resolves.toBeUndefined();
+      expect(h.store.listRuns()).toEqual([]);
+      expect(h.dispatches).toHaveLength(0);
+      expect(h.store.get(workflow.id)?.nextRunAt).toBe(10_000 + 2 * HOUR);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/scheduled run of .* not started: invalid workflow/));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("clears a stale clock on a workflow whose schedule is gone", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const workflow = h.store.create(pipeline());
+    h.store.setNextRunAt(workflow.id, 5_000);
+    h.setNow(10_000);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeNull();
+    expect(h.store.listRuns()).toEqual([]);
+  });
+
+  it("re-arms from scratch after the triggers are edited", async () => {
+    const h = harness({ nextOccurrence: stub });
+    const workflow = h.store.create(daily());
+    h.setNow(10_000);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(10_000 + HOUR);
+    h.setNow(20_000);
+    const edited = h.store.update(workflow.id, {
+      triggers: { schedule: { type: "daily", time: "10:00", weekdays: [1] } },
+    });
+    expect(edited.nextRunAt).toBeNull();
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(20_000 + HOUR);
+    expect(h.store.listRuns()).toEqual([]);
+  });
+
+  it("treats a throwing scheduler as no next occurrence", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = harness({
+        nextOccurrence: () => {
+          throw new Error("clock is broken");
+        },
+      });
+      const workflow = h.store.create(daily());
+      h.setNow(10_000);
+      await expect(h.engine.tick()).resolves.toBeUndefined();
+      expect(h.store.get(workflow.id)?.nextRunAt ?? null).toBeNull();
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/nextOccurrence failed: clock is broken/));
+    } finally {
+      warn.mockRestore();
     }
   });
 });

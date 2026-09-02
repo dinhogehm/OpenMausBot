@@ -164,6 +164,58 @@ describe("WorkflowStore definitions", () => {
   });
 });
 
+describe("WorkflowStore nextRunAt", () => {
+  it("setNextRunAt persists the clock and emits, without touching updatedAt", () => {
+    const h = harness();
+    h.setNow(1_000);
+    const created = h.store.create(input());
+    h.setNow(5_000);
+    const emittedBefore = h.emitted.length;
+    const armed = h.store.setNextRunAt(created.id, 9_000);
+    expect(armed).toMatchObject({ id: created.id, nextRunAt: 9_000, updatedAt: 1_000 });
+    expect(h.open().get(created.id)?.nextRunAt).toBe(9_000);
+    expect(h.emitted.slice(emittedBefore)).toEqual([
+      { kind: "workflow", workflow: expect.objectContaining({ id: created.id, nextRunAt: 9_000, updatedAt: 1_000 }) },
+    ]);
+    expect(h.store.setNextRunAt(created.id, null)?.nextRunAt).toBeNull();
+    expect(h.open().get(created.id)?.nextRunAt).toBeNull();
+  });
+
+  it("setNextRunAt is a no-op on an unchanged value and null on an unknown id", () => {
+    const h = harness();
+    const created = h.store.create(input());
+    const emittedBefore = h.emitted.length;
+    // undefined and null both mean "nothing armed": no write, no frame.
+    expect(h.store.setNextRunAt(created.id, null)?.nextRunAt).toBeUndefined();
+    h.store.setNextRunAt(created.id, 9_000);
+    expect(h.store.setNextRunAt(created.id, 9_000)?.nextRunAt).toBe(9_000);
+    expect(h.emitted.slice(emittedBefore)).toHaveLength(1);
+    expect(h.store.setNextRunAt("nope", 1)).toBeNull();
+  });
+
+  it("update resets the clock when triggers change or are cleared, and keeps it otherwise", () => {
+    const h = harness();
+    const created = h.store.create(input());
+    h.store.setNextRunAt(created.id, 9_000);
+    expect(h.store.update(created.id, { name: "Renamed" }).nextRunAt).toBe(9_000);
+    const daily = { schedule: { type: "daily" as const, time: "09:00", weekdays: [1] } };
+    expect(h.store.update(created.id, { triggers: daily }).nextRunAt).toBeNull();
+    h.store.setNextRunAt(created.id, 9_000);
+    expect(h.store.update(created.id, { triggers: undefined }).nextRunAt).toBeNull();
+    expect(h.open().get(created.id)?.triggers).toBeUndefined();
+    expect(h.open().get(created.id)?.nextRunAt).toBeNull();
+  });
+
+  it("update refuses a schedule the scheduler could not arm", () => {
+    const h = harness();
+    const created = h.store.create(input());
+    expect(() =>
+      h.store.update(created.id, { triggers: { schedule: { type: "daily", time: "9:00", weekdays: [1] } } }),
+    ).toThrow(/^invalid workflow: Schedule time/);
+    expect(h.open().get(created.id)?.triggers).toBeUndefined();
+  });
+});
+
 describe("WorkflowStore runs", () => {
   it("createRun and patchRun persist and round-trip through disk", () => {
     const h = harness();

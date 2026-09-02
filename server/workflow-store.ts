@@ -23,7 +23,10 @@ export interface WorkflowStoreOptions {
   emit?: (payload: Record<string, unknown>) => void;
 }
 
-export type WorkflowInput = Omit<Workflow, "id" | "createdAt" | "updatedAt">;
+/** What a client may send. `nextRunAt` is engine-owned timing state: it
+ * is excluded here so no create/update can set it — the API's key-set guard
+ * then keeps it out of the request schema as well. */
+export type WorkflowInput = Omit<Workflow, "id" | "createdAt" | "updatedAt" | "nextRunAt">;
 
 interface WorkflowFile {
   version: 1;
@@ -119,6 +122,9 @@ export class WorkflowStore {
       createdAt: current.createdAt,
       updatedAt: this.now(),
     };
+    // A changed (or cleared) schedule invalidates the engine's computed next
+    // occurrence; null tells the engine's sweep to recompute on its next tick.
+    if ("triggers" in patch) patched.nextRunAt = null;
     const firstError = validateWorkflow(patched).find((issue) => issue.severity === "error");
     if (firstError) throw new Error(`invalid workflow: ${firstError.message}`);
     const next = this.workflows.slice();
@@ -135,6 +141,26 @@ export class WorkflowStore {
     this.writeWorkflows(next);
     this.workflows = next;
     this.emit?.({ kind: "workflow.deleted", id });
+  }
+
+  /** Engine-owned timing state. Persists like any mutation (save-then-swap,
+   * keyed frame) but leaves `updatedAt` alone: the definition did not change,
+   * only the scheduler's clock. Null on an unknown id — the sweep may race a
+   * delete. An unchanged value (null and undefined count as equal) is a
+   * no-op, so a sweep that keeps computing "nothing to arm" never rewrites
+   * the file every tick. */
+  setNextRunAt(id: string, value: number | null): Workflow | null {
+    const at = this.workflows.findIndex((workflow) => workflow.id === id);
+    if (at === -1) return null;
+    const current = this.workflows[at]!;
+    if ((current.nextRunAt ?? null) === value) return structuredClone(current);
+    const patched: Workflow = { ...current, nextRunAt: value };
+    const next = this.workflows.slice();
+    next[at] = patched;
+    this.writeWorkflows(next);
+    this.workflows = next;
+    this.emitWorkflow(patched);
+    return structuredClone(patched);
   }
 
   get(id: string): Workflow | null {

@@ -347,4 +347,27 @@ describe("validateWorkflow", () => {
     expect(bad(gated(0.5))).toEqual([]);
     expect(bad(gated(undefined))).toEqual([]);
   });
+
+  it("flags a schedule the scheduler could not arm", () => {
+    const bad = (schedule: unknown) =>
+      validateWorkflow(wf({ triggers: { schedule } as Workflow["triggers"] })).filter((issue) => issue.code === "bad-schedule");
+    const error = expect.objectContaining({ severity: "error", code: "bad-schedule" });
+    expect(bad({ type: "daily", time: "09:00", weekdays: [1, 3, 5] })).toEqual([]);
+    expect(bad({ type: "daily", time: "00:00", weekdays: [0, 6] })).toEqual([]);
+    expect(bad({ type: "once", at: 1_700_000_000_000 })).toEqual([]);
+    expect(validateWorkflow(wf({ triggers: {} })).filter((issue) => issue.code === "bad-schedule")).toEqual([]);
+    for (const time of ["9:00", "24:00", "09:60", "09:00:00", " 09:00", "", 900]) {
+      expect(bad({ type: "daily", time, weekdays: [1] }), String(time)).toEqual([error]);
+    }
+    expect(bad({ type: "daily", time: "9:00", weekdays: [1] })[0]?.message).toMatch(/HH:MM/);
+    for (const weekdays of [[], [7], [-1], [1.5], ["1"], [1, 1]]) {
+      expect(bad({ type: "daily", time: "09:00", weekdays }), JSON.stringify(weekdays)).toEqual([error]);
+    }
+    expect(bad({ type: "daily", time: "09:00", weekdays: [] })[0]?.message).toMatch(/at least one weekday/);
+    expect(bad({ type: "daily", time: "09:00", weekdays: [2, 2] })[0]?.message).toMatch(/repeat/);
+    for (const at of [Number.NaN, Number.POSITIVE_INFINITY, "1700000000000"]) {
+      expect(bad({ type: "once", at }), String(at)).toEqual([error]);
+    }
+    expect(bad({ type: "weekly", time: "09:00" })).toEqual([error]);
+  });
 });

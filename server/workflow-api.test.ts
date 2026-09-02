@@ -138,7 +138,6 @@ describe("workflow definitions", () => {
       ["layout key", { ...agentGraph(), layout: { " triage": { x: 0, y: 0 } } }],
       ["edge endpoint", { ...agentGraph(), edges: [{ from: "triage", outcome: "done", to: " triage" }] }],
       ["targetGroupId", { ...draftGraph(), nodes: [{ kind: "notify", id: "n", targetGroupId: " g ", template: "x" }] }],
-      ["webhookId", { ...agentGraph(), triggers: { webhookId: " hook " } }],
     ];
     for (const [label, body] of cases) {
       const response = await call("POST", "/api/workflows", body);
@@ -225,6 +224,44 @@ describe("workflow definitions", () => {
     expect(created?.status).toBe(400);
     expect(bodyOf(created).error).toBe("edges: cannot be null");
     expect(bodyOf(await call("GET", "/api/workflows")).workflows).toHaveLength(1);
+  });
+
+  it("refuses a schedule the scheduler could not arm at the door, and strips nextRunAt from clients", async () => {
+    const { call, store } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
+    const schedule = (patch: Record<string, unknown>) =>
+      call("PATCH", `/api/workflows/${id}`, { triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1], ...patch } } });
+    const badTime = await schedule({ time: "9:00" });
+    expect(badTime?.status).toBe(400);
+    expect(bodyOf(badTime).error).toBe("triggers.schedule.time must be HH:MM (24-hour)");
+    const noDays = await schedule({ weekdays: [] });
+    expect(noDays?.status).toBe(400);
+    expect(bodyOf(noDays).error).toMatch(/^triggers\.schedule\.weekdays /);
+    expect((await schedule({ weekdays: [7] }))?.status).toBe(400);
+    expect((await schedule({ weekdays: [1.5] }))?.status).toBe(400);
+    expect(store.get(id)?.triggers).toBeUndefined();
+    // A valid schedule lands, reset to "not armed yet"; the client's own
+    // nextRunAt is engine state and is dropped, not applied.
+    const armed = await call("PATCH", `/api/workflows/${id}`, {
+      triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1, 5] } },
+      nextRunAt: 123,
+    });
+    expect(armed?.status).toBe(200);
+    expect(bodyOf(armed).workflow.nextRunAt).toBeNull();
+    expect(store.get(id)?.nextRunAt).toBeNull();
+  });
+
+  it("shows the engine's nextRunAt on the workflow as a read-only field", async () => {
+    const { call, store } = harness();
+    const id = bodyOf(
+      await call("POST", "/api/workflows", { ...agentGraph(), triggers: { schedule: { type: "once", at: 5_000 } } }),
+    ).workflow.id;
+    store.setNextRunAt(id, 5_000);
+    const listed = bodyOf(await call("GET", "/api/workflows")).workflows as Workflow[];
+    expect(listed.find((workflow) => workflow.id === id)?.nextRunAt).toBe(5_000);
+    // Not settable on create either.
+    const created = bodyOf(await call("POST", "/api/workflows", { ...agentGraph(), nextRunAt: 1 })).workflow as Workflow;
+    expect("nextRunAt" in created).toBe(false);
   });
 
   it("refuses an invalid PATCH with the merged draft's issues and leaves the store alone", async () => {

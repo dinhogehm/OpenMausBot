@@ -11,6 +11,7 @@ import { z } from "zod";
 import {
   validateWorkflow,
   WORKFLOW_APPROVAL_OUTCOMES,
+  WORKFLOW_SCHEDULE_TIME_RE,
   type Workflow,
   type WorkflowEdge,
   type WorkflowIssue,
@@ -40,7 +41,10 @@ export interface WorkflowApiResponse {
 // validator issue the canvas must be able to show, so it passes here.
 // Identifiers are never rewritten (no trim): a node id is also a layout key
 // and an edge endpoint, and a botId or group id is a foreign key — silently
-// trimming one copy would let the others drift.
+// trimming one copy would let the others drift. The schedule is the one
+// place a shape rule doubles as a semantic one: a time or weekday the
+// scheduler could not arm is refused at the door as well as by the
+// validator, since a draft has nothing to gain from keeping it.
 const untrimmed = (value: string) => value === value.trim();
 const NO_SURROUNDING_WHITESPACE = "must not have surrounding whitespace";
 const id = z.string().min(1).max(200).refine(untrimmed, NO_SURROUNDING_WHITESPACE);
@@ -76,11 +80,14 @@ const layoutSchema = z.record(id, z.object({ x: z.number().finite(), y: z.number
 const triggersSchema = z.object({
   schedule: z
     .discriminatedUnion("type", [
-      z.object({ type: z.literal("daily"), time: z.string().max(20), weekdays: z.array(z.number().finite()).max(7) }),
+      z.object({
+        type: z.literal("daily"),
+        time: z.string().regex(WORKFLOW_SCHEDULE_TIME_RE, "must be HH:MM (24-hour)"),
+        weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+      }),
       z.object({ type: z.literal("once"), at: z.number().finite() }),
     ])
     .optional(),
-  webhookId: id.optional(),
 });
 
 const workflowInputSchema = z.object({
