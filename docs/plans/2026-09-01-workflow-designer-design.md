@@ -166,9 +166,11 @@ Registrados aqui porque mudam o contrato, não só o código. Datados de 2026-09
    editores de grafo; aqui cada nó lista suas saídas com um seletor "Routes to →", incluindo a
    saída implícita `failed`, para que desenhar um fluxo não dependa do mouse.
 
-5. **Run cancelado não marca onde parou.** Um run cancelado não é nem concluído nem falho, e
-   não existe um tom "interrompido"; o nó volta a `idle` e quem conta a história é a linha do
-   tempo. Decisão consciente, revisável se atrapalhar na prática.
+5. **Run cancelado marca onde parou.** A primeira versão devolvia o nó a `idle`, mas `idle`
+   não é neutro — afirma "o run nunca chegou aqui", que é falso e esconde a única pergunta
+   que se faz depois de cancelar. O nó onde o run parou recebe o tom `stopped` ("Cancelled
+   here"), decidido antes de olhar os resultados anteriores, para que um nó já executado num
+   ciclo não seja pintado como concluído.
 
 ## Fora do MVP entregue
 
