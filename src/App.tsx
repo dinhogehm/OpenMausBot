@@ -20,6 +20,7 @@ import { LocalVmWorkspace } from "@/components/LocalVmWorkspace";
 import { BrowserWorkspace } from "@/components/BrowserWorkspace";
 import { SkillRecorderPage } from "@/components/SkillRecorderPage";
 import { TeamMapPage } from "@/components/TeamMapPage";
+import { WorkflowsPage } from "@/components/WorkflowsPage";
 import { heldComputerControlBotIds } from "@/lib/computer-control";
 import { skillRecorderEnabled } from "@/lib/feature-flags";
 import { setLocale } from "@/lib/i18n";
@@ -51,7 +52,7 @@ function Shell() {
   const [browserWorkspaceBotId, setBrowserWorkspaceBotId] = useState<string | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const previousViewRef = useRef(state.activeView);
-  const calendarOriginRef = useRef<"chat" | "team-map" | "skill-recorder">("chat");
+  const calendarOriginRef = useRef<"chat" | "team-map" | "skill-recorder" | "workflows">("chat");
   const group = state.groups.find((g) => g.id === state.selectedId);
   const bot = group ? undefined : (state.bots.find((b) => b.id === state.selectedId) ?? state.bots[0]);
   const calendarFocus = state.activeView === "routines";
@@ -173,6 +174,10 @@ function Shell() {
       dispatch({ type: "showTeamMap" });
       return;
     }
+    if (calendarOriginRef.current === "workflows") {
+      dispatch({ type: "showWorkflows" });
+      return;
+    }
     if (calendarOriginRef.current === "skill-recorder" && skillRecorderEnabled(state.config)) {
       dispatch({ type: "showSkillRecorder" });
       return;
@@ -247,6 +252,8 @@ function Shell() {
       />}
       {state.activeView === "team-map" ? (
         <TeamMapPage />
+      ) : state.activeView === "workflows" ? (
+        <WorkflowsPage />
       ) : state.activeView === "routines" ? (
         <RoutinesPage onBack={closeCalendar} onOpenRoom={openCalendarRoom} />
       ) : state.activeView === "skill-recorder" ? (

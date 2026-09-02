@@ -29,6 +29,7 @@ import {
   Puzzle,
   Trash2,
   Users,
+  Workflow as WorkflowIcon,
   X,
 } from "lucide-react";
 import { api, useStore, formatTime, visibleMessages, type Bot, type Group } from "@/state/store";
@@ -1675,6 +1676,19 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         >
           <Network size={20} className={state.activeView === "team-map" ? "text-accent" : "text-ink-secondary"} />
           <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Team map</span>
+        </button>
+        <button
+          onClick={() => dispatch({ type: "showWorkflows" })}
+          aria-label={density === "icons" ? "Workflows" : undefined}
+          title={density === "icons" ? "Workflows" : undefined}
+          className={cn(
+            "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
+            density === "icons" ? "justify-center px-2" : "gap-3 px-3",
+            state.activeView === "workflows" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+          )}
+        >
+          <WorkflowIcon size={20} className={state.activeView === "workflows" ? "text-accent" : "text-ink-secondary"} />
+          <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Workflows</span>
         </button>
         {skillRecorderEnabled(state.config) && (
           <button

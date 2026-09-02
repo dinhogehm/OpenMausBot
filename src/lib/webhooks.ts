@@ -5,7 +5,10 @@ export interface WebhookTrigger {
   endpointId: string;
   name: string;
   prompt: string;
-  botId: string;
+  /** Exactly one of botId / workflowId: a delivery starts a MAUS task turn
+   * or a workflow run. Mirrors server/webhooks.ts. */
+  botId?: string;
+  workflowId?: string;
   runOn: RoutineRunOn;
   enabled: boolean;
   createdAt: number;
@@ -21,8 +24,11 @@ export interface WebhookTrigger {
 
 export interface WebhookTriggerInput {
   name: string;
-  prompt: string;
-  botId: string;
+  /** Optional for a workflow target (its nodes carry their own instructions). */
+  prompt?: string;
+  /** Naming either target on a PATCH replaces the other. */
+  botId?: string;
+  workflowId?: string;
   runOn?: RoutineRunOn;
   enabled?: boolean;
   verificationPending?: boolean;

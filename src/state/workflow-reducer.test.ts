@@ -1,0 +1,111 @@
+import { describe, expect, it } from "vitest";
+
+import type { Workflow, WorkflowRun } from "../../shared/workflow";
+import { initialState, reducer, type AppState } from "./store";
+
+const draft = (overrides: Partial<Workflow> = {}): Workflow => ({
+  id: "wf-1",
+  name: "Untitled workflow",
+  entryNodeId: "",
+  nodes: [],
+  edges: [],
+  layout: {},
+  createdAt: 1_000,
+  updatedAt: 1_000,
+  ...overrides,
+});
+
+const run = (overrides: Partial<WorkflowRun> = {}): WorkflowRun => ({
+  id: "run-1",
+  workflowId: "wf-1",
+  status: "queued",
+  attempt: 0,
+  input: "",
+  nodeResults: [],
+  startedAt: 5_000,
+  ...overrides,
+});
+
+describe("workflows view", () => {
+  it("showWorkflows opens the view and closes every side panel, like the other views", () => {
+    const open: AppState = {
+      ...initialState,
+      settingsOpen: true,
+      computerOpen: true,
+      inspectorOpen: true,
+      appSettingsOpen: true,
+      pluginsOpen: true,
+    };
+    const next = reducer(open, { type: "showWorkflows" });
+    expect(next.activeView).toBe("workflows");
+    expect(next).toMatchObject({
+      settingsOpen: false,
+      computerOpen: false,
+      inspectorOpen: false,
+      appSettingsOpen: false,
+      pluginsOpen: false,
+    });
+  });
+});
+
+describe("workflows slice", () => {
+  it("starts empty", () => {
+    expect(initialState.workflows).toEqual([]);
+    expect(initialState.workflowRuns).toEqual([]);
+  });
+
+  it("workflowsHydrated adopts the boot snapshot with server issues and newest-first runs", () => {
+    const next = reducer(initialState, {
+      type: "workflowsHydrated",
+      workflows: [{ ...draft(), issues: [{ severity: "error", code: "bad-entry", message: "server said so" }] }],
+      runs: [run({ id: "old", startedAt: 1 }), run({ id: "new", startedAt: 2 })],
+    });
+    expect(next.workflows[0]!.issues[0]!.message).toBe("server said so");
+    expect(next.workflowRuns.map((item) => item.id)).toEqual(["new", "old"]);
+  });
+
+  it("a `workflow` frame upserts by id and recomputes issues when the frame carries none", () => {
+    const created = reducer(initialState, { type: "workflowPatched", workflow: draft() });
+    expect(created.workflows).toHaveLength(1);
+    expect(created.workflows[0]!.issues.map((issue) => issue.code)).toEqual(["bad-entry"]);
+
+    const renamed = reducer(created, { type: "workflowPatched", workflow: draft({ name: "Triage", updatedAt: 2_000 }) });
+    expect(renamed.workflows).toHaveLength(1);
+    expect(renamed.workflows[0]).toMatchObject({ name: "Triage", updatedAt: 2_000 });
+    expect(renamed.workflows[0]!.issues.map((issue) => issue.code)).toEqual(["bad-entry"]);
+
+    const fixed = reducer(renamed, {
+      type: "workflowPatched",
+      workflow: draft({
+        entryNodeId: "a",
+        nodes: [{ kind: "agent", id: "a", botId: "bot", instructions: "go", outcomes: ["done"] }],
+      }),
+    });
+    expect(fixed.workflows[0]!.issues.map((issue) => issue.severity)).toEqual(["warning"]);
+  });
+
+  it("a `workflow-run` frame upserts by id and keeps the list newest-first", () => {
+    let state = reducer(initialState, { type: "workflowRunPatched", run: run({ id: "r-1", startedAt: 1_000 }) });
+    state = reducer(state, { type: "workflowRunPatched", run: run({ id: "r-2", startedAt: 3_000 }) });
+    state = reducer(state, { type: "workflowRunPatched", run: run({ id: "r-3", startedAt: 2_000 }) });
+    expect(state.workflowRuns.map((item) => item.id)).toEqual(["r-2", "r-3", "r-1"]);
+
+    const settled = reducer(state, {
+      type: "workflowRunPatched",
+      run: run({ id: "r-3", startedAt: 2_000, status: "completed", endedAt: 2_500 }),
+    });
+    expect(settled.workflowRuns).toHaveLength(3);
+    expect(settled.workflowRuns[1]).toMatchObject({ id: "r-3", status: "completed" });
+  });
+
+  it("`workflow.deleted` removes the definition but keeps its runs", () => {
+    let state = reducer(initialState, { type: "workflowPatched", workflow: draft() });
+    state = reducer(state, { type: "workflowPatched", workflow: draft({ id: "wf-2" }) });
+    state = reducer(state, { type: "workflowRunPatched", run: run() });
+    const next = reducer(state, { type: "workflowDeleted", workflowId: "wf-1" });
+    expect(next.workflows.map((workflow) => workflow.id)).toEqual(["wf-2"]);
+    expect(next.workflowRuns).toHaveLength(1);
+    // an unknown id is a no-op
+    expect(reducer(next, { type: "workflowDeleted", workflowId: "ghost" }).workflows).toBe(next.workflows);
+  });
+});
