@@ -44,10 +44,10 @@ pnpm install --frozen-lockfile
 Run the harness, web UI, and Electron shell in separate terminals:
 
 ```bash
-pnpm dev:server
-pnpm dev
-pnpm dev:desktop
+pnpm dev:desktop   # starts the server and Vite, then opens the Electron shell
 ```
+
+To work in a browser instead of the desktop shell, run `pnpm dev:server` and `pnpm dev` in two terminals and open the address Vite prints.
 
 ## Where data lives
 
