@@ -28,4 +28,18 @@ describe("standingPermissionsPrompt", () => {
     expect(prompt).toMatch(/never attempt/i);
     expect(standingPermissionsPrompt({ canMerge: true, canDeploy: true })).not.toMatch(/never attempt/i);
   });
+
+  it("lets the step go to a teammate who holds the permission, and refuses the laundering shapes", () => {
+    // A team keeps one merger and one deployer on purpose. A coordinator told
+    // never to delegate reads its own missing flag as a wall and stops the
+    // pipeline, which is what happened on a real run.
+    const prompt = standingPermissionsPrompt({});
+    expect(prompt).toMatch(/hand that step to a teammate who carries the permission/i);
+    expect(prompt).toMatch(/never to one who lacks it/i);
+    expect(prompt).toMatch(/never by asking anyone to bypass/i);
+    // and when nobody can, the answer is still an honest stop
+    expect(prompt).toMatch(/if nobody carries it, stop there and say which permission is missing/i);
+    // the bot that holds both is told none of this
+    expect(standingPermissionsPrompt({ canMerge: true, canDeploy: true })).not.toMatch(/teammate/i);
+  });
 });
