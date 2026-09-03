@@ -47,7 +47,7 @@ struct BotAvatarView: View {
             guard crop != .mascot, bot.avatarUrl != nil else { return }
             let data = await session.avatarData(for: bot)
             guard !Task.isCancelled else { return }
-            guard let data, let decoded = UIImage(data: data) else {
+            guard let data, let decoded = Self.decode(data) else {
                 failed = true
                 return
             }
@@ -56,13 +56,37 @@ struct BotAvatarView: View {
         }
     }
 
+    /// SwiftUI's `Image` draws only a `UIImage`'s static representation, so a
+    /// multi-frame attachment has to go through the UIKit view that plays
+    /// `images` itself. Stills keep the original path.
+    @ViewBuilder
+    private func attachment(_ image: UIImage) -> some View {
+        if image.images == nil {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+        } else {
+            AnimatedAttachmentView(image: image)
+        }
+    }
+
+    /// An animated GIF or WebP becomes an animated `UIImage`; everything else
+    /// — and anything whose frames will not decode — stays a still.
+    private static func decode(_ data: Data) -> UIImage? {
+        if let animation = AnimatedImageDecoder.decode(data) {
+            let frames = animation.frames.map { UIImage(cgImage: $0) }
+            if let animated = UIImage.animatedImage(with: frames, duration: animation.duration) {
+                return animated
+            }
+        }
+        return UIImage(data: data)
+    }
+
     /// Only reached with a decoded image: `resolveBotAvatarOutcome` returns
     /// `.flatImage` solely when one exists.
     @ViewBuilder private var flatImage: some View {
         if let image {
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
+            attachment(image)
                 .frame(width: size, height: size)
                 .clipShape(mask)
         }
@@ -80,6 +104,32 @@ struct BotAvatarView: View {
         case .rounded: AnyShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
         case .square, .mascot: AnyShape(Rectangle())
         }
+    }
+}
+
+/// `UIImageView` plays an animated `UIImage` on its own; SwiftUI has no
+/// equivalent. Sizing is left entirely to the SwiftUI frame around it, so the
+/// view never fights the layout with an intrinsic size taken from the file.
+private struct AnimatedAttachmentView: UIViewRepresentable {
+    let image: UIImage
+
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView(image: image)
+        view.contentMode = .scaleAspectFill
+        view.clipsToBounds = true
+        view.isAccessibilityElement = false
+        for axis in [NSLayoutConstraint.Axis.horizontal, .vertical] {
+            view.setContentHuggingPriority(.defaultLow, for: axis)
+            view.setContentCompressionResistancePriority(.defaultLow, for: axis)
+        }
+        view.startAnimating()
+        return view
+    }
+
+    func updateUIView(_ view: UIImageView, context: Context) {
+        guard view.image !== image else { return }
+        view.image = image
+        view.startAnimating()
     }
 }
 

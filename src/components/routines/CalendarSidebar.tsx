@@ -1,5 +1,5 @@
 import { useMemo, useState, type DragEvent } from "react";
-import { GripVertical, Plus, Search, UsersRound } from "lucide-react";
+import { GripVertical, Search, UsersRound } from "lucide-react";
 import { BotAvatar } from "@/components/Avatar";
 import type { Bot } from "@/state/store";
 import { MiniMonth } from "./MiniMonth";
@@ -10,10 +10,9 @@ export interface CalendarSidebarProps {
   bots: Bot[];
   anchor: number;
   onSelectDate: (at: number) => void;
-  onCreate: () => void;
 }
 
-export function CalendarSidebar({ bots, anchor, onSelectDate, onCreate }: CalendarSidebarProps) {
+export function CalendarSidebar({ bots, anchor, onSelectDate }: CalendarSidebarProps) {
   const [query, setQuery] = useState("");
   const filteredBots = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -31,20 +30,9 @@ export function CalendarSidebar({ bots, anchor, onSelectDate, onCreate }: Calend
 
   return (
     <aside
-      aria-label="Calendar sidebar"
+      aria-label="Schedule sidebar"
       className="flex h-full w-[320px] shrink-0 flex-col overflow-hidden border-r border-hairline/40 bg-panel"
     >
-      <div className="px-4 pb-2 pt-4">
-        <button
-          type="button"
-          onClick={onCreate}
-          className="group flex h-11 w-full items-center justify-center gap-2 rounded-full bg-accent px-5 text-[13px] font-semibold text-white shadow-lg shadow-accent/15 transition hover:-translate-y-px hover:brightness-110 hover:shadow-xl hover:shadow-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-offset-2 focus-visible:ring-offset-panel active:translate-y-0"
-        >
-          <Plus size={17} strokeWidth={2.5} aria-hidden="true" />
-          Create
-        </button>
-      </div>
-
       <MiniMonth anchor={anchor} onSelect={onSelectDate} />
 
       <div className="mx-4 border-t border-hairline/40" />
@@ -84,8 +72,8 @@ export function CalendarSidebar({ bots, anchor, onSelectDate, onCreate }: Calend
               onDragStart={(event) => beginBotDrag(event, bot)}
               role="listitem"
               className="group flex cursor-grab items-center gap-2 rounded-xl px-2 py-2 transition-colors hover:bg-raised/80 active:cursor-grabbing"
-              aria-label={`Drag ${bot.name} onto the calendar`}
-              title={`Drag ${bot.name} onto a time slot`}
+              aria-label={`Drag ${bot.name} onto the schedule`}
+              title={`Drag ${bot.name} onto the schedule`}
             >
               <GripVertical
                 size={13}

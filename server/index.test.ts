@@ -9,7 +9,7 @@ import { createServer, request, type Server } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -22,6 +22,7 @@ import { FILE_MAX_BYTES, IMAGE_MAX_BYTES } from "./attachments.ts";
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(SERVER_DIR, "..");
 const FAKE_CLAUDE_CLI = join(SERVER_DIR, "testing", "fake-claude-cli.ts");
+const FAKE_MCP_SERVER = join(SERVER_DIR, "testing", "fake-mcp-server.ts");
 const PORT = 18800 + Math.floor(Math.random() * 10_000);
 const BASE = `http://127.0.0.1:${PORT}`;
 const WEBHOOK_PORT = 39000 + Math.floor(Math.random() * 10_000);
@@ -204,7 +205,166 @@ beforeAll(async () => {
         createdAt: 2,
         pinnedCwd: null,
       },
+      {
+        id: "test-linked-file-room",
+        threadId: "test-linked-file-room-thread",
+        name: "Linked file room",
+        // Bot A authored the stored links before being removed from this room.
+        memberIds: ["test-bot-b"],
+        defaultResponder: { kind: "member", botId: "test-bot-b" },
+        bulletin: "",
+        unread: false,
+        createdAt: 5,
+        dm: true,
+        pinnedCwd: null,
+      },
+      {
+        id: "test-goal-restart-room",
+        threadId: "test-goal-restart-thread",
+        name: "Restarted goal room",
+        memberIds: ["test-bot-a"],
+        defaultResponder: { kind: "member", botId: "test-bot-a" },
+        bulletin: "",
+        unread: false,
+        createdAt: 6,
+      },
     ]),
+  );
+
+  const linkedWorkspace = join(home, ".openmausbot", "workspaces", "test-bot-a");
+  const linkedFile = join(linkedWorkspace, "phone report.md");
+  const linkedImage = join(linkedWorkspace, "preview.png");
+  const privateAttachments = join(home, ".openmausbot", "attachments");
+  const userAttachment = join(privateAttachments, "shared-notes.pdf");
+  mkdirSync(linkedWorkspace, { recursive: true });
+  mkdirSync(privateAttachments, { recursive: true, mode: 0o700 });
+  writeFileSync(linkedFile, "# Phone-ready report\n");
+  writeFileSync(linkedImage, "png preview bytes");
+  writeFileSync(userAttachment, "%PDF shared from the phone\n", { mode: 0o600 });
+  writeFileSync(
+    join(home, ".openmausbot", "messages-test-linked-file-room-thread.json"),
+    JSON.stringify({
+      activeLeafId: "user-outside-file-message",
+      messages: [
+        {
+          id: "linked-file-message",
+          at: 5,
+          parentId: null,
+          role: "bot",
+          kind: "text",
+          text: `[Open the report](<${pathToFileURL(linkedFile).href}>)`,
+          from: { botId: "test-bot-a", name: "Test bot A", color: "purple" },
+        },
+        {
+          id: "prose-file-message",
+          at: 6,
+          parentId: "linked-file-message",
+          role: "bot",
+          kind: "text",
+          text: `I saved another copy at ${linkedFile}.`,
+          from: { botId: "test-bot-a", name: "Test bot A", color: "purple" },
+        },
+        {
+          id: "linked-image-message",
+          at: 6.5,
+          parentId: "prose-file-message",
+          role: "bot",
+          kind: "text",
+          text: `![Preview](<${pathToFileURL(linkedImage).href}>)`,
+          from: { botId: "test-bot-a", name: "Test bot A", color: "purple" },
+        },
+        {
+          id: "user-attached-file-message",
+          at: 7,
+          parentId: "linked-image-message",
+          role: "user",
+          kind: "text",
+          text: `<attached-file path="${userAttachment}" name="Trip notes.exe" />`,
+        },
+        {
+          id: "user-outside-file-message",
+          at: 8,
+          parentId: "user-attached-file-message",
+          role: "user",
+          kind: "text",
+          text: `<attached-file path="${linkedFile}" />`,
+        },
+      ],
+    }),
+  );
+
+  // Goal orchestration is process-local. This durable card simulates either
+  // a manual or scheduled goal whose process exited before it could settle.
+  writeFileSync(
+    join(home, ".openmausbot", "messages-test-goal-restart-thread.json"),
+    JSON.stringify({
+      activeLeafId: "settled-routine-goal-card",
+      messages: [
+        {
+          id: "restarted-goal-card",
+          at: 5,
+          parentId: null,
+          role: "bot",
+          kind: "goal.run",
+          text: "Goal in progress: Test bot A is coordinating this goal.",
+          goalRun: {
+            runId: "restarted-goal-run",
+            goal: "Prepare the report",
+            status: "working",
+            coordinatorBotId: "test-bot-a",
+            coordinatorName: "Test bot A",
+            turnCount: 2,
+            maxTurns: 12,
+            startedAt: 4,
+          },
+        },
+        {
+          id: "settled-routine-goal-card",
+          at: 6,
+          parentId: "restarted-goal-card",
+          role: "bot",
+          kind: "goal.run",
+          text: "Goal in progress: Test bot A is coordinating this goal.",
+          goalRun: {
+            runId: "settled-routine-goal-run",
+            goal: "Ship the report",
+            status: "working",
+            coordinatorBotId: "test-bot-a",
+            coordinatorName: "Test bot A",
+            turnCount: 3,
+            maxTurns: 12,
+            startedAt: 5,
+          },
+        },
+      ],
+    }),
+  );
+  writeFileSync(
+    join(home, ".openmausbot", "routines.json"),
+    JSON.stringify({
+      version: 1,
+      routines: [],
+      runs: [{
+        id: "settled-routine-goal-run",
+        routineId: "settled-routine",
+        routineName: "Settled room goal",
+        prompt: "Ship the report",
+        target: "room-goal",
+        goalStatus: "completed",
+        groupId: "test-goal-restart-room",
+        botId: "test-bot-a",
+        runOn: "maus",
+        scheduledFor: 5,
+        status: "completed",
+        manual: false,
+        triggerSource: "schedule",
+        threadId: "test-goal-restart-thread",
+        startedAt: 5,
+        finishedAt: 6,
+        output: "The scheduled report shipped successfully.",
+        createdAt: 5,
+      }],
+    }),
   );
 
   // A room transcript carrying an approval that outlived its turn: the card
@@ -362,6 +522,36 @@ afterAll(async () => {
 });
 
 describe("harness HTTP API", () => {
+  it("reconciles durable working goal cards with scheduler truth after a restart", async () => {
+    const state = await api("GET", "/api/bots?messages=30");
+    const room = state.body.groups.find(
+      (candidate: { id: string }) => candidate.id === "test-goal-restart-room",
+    );
+    expect(room.working).toBe(false);
+    expect(room.messages.find(
+      (message: { id: string }) => message.id === "restarted-goal-card",
+    )).toMatchObject({
+      text: "Goal failed: OpenMausBot restarted before this goal finished.",
+      goalRun: {
+        status: "failed",
+        detail: "OpenMausBot restarted before this goal finished.",
+        turnCount: 2,
+        finishedAt: expect.any(Number),
+      },
+    });
+    expect(room.messages.find(
+      (message: { id: string }) => message.id === "settled-routine-goal-card",
+    )).toMatchObject({
+      text: "Goal completed: The scheduled report shipped successfully.",
+      goalRun: {
+        status: "completed",
+        detail: "The scheduled report shipped successfully.",
+        turnCount: 3,
+        finishedAt: 6,
+      },
+    });
+  });
+
   it("rejects non-loopback authorities while accepting IPv4 and IPv6 loopback forms", async () => {
     expect(await statusWithHeaders({ host: "example.com" })).toBe(403);
     expect(await statusWithHeaders({ origin: "https://example.com" })).toBe(403);
@@ -480,6 +670,50 @@ describe("harness HTTP API", () => {
     } finally {
       await api("DELETE", `/api/groups/${room.id}`);
       for (const bot of [first, second, third]) await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("protects a team-goal lead and pauses the routine when its room is deleted", async () => {
+    const [lead, other] = await Promise.all([api("POST", "/api/bots"), api("POST", "/api/bots")]).then(
+      (created) => created.map((response) => response.body.bot),
+    );
+    const room = (await api("POST", "/api/groups", {
+      name: "Scheduled team",
+      memberIds: [lead.id, other.id],
+      setup: { bulletin: "", defaultResponder: { kind: "member", botId: lead.id } },
+    })).body.group;
+    const created = await api("POST", "/api/routines", {
+      name: "Daily room goal",
+      prompt: "Prepare the daily team report",
+      target: "room-goal",
+      groupId: room.id,
+      botId: lead.id,
+      runOn: "maus",
+      enabled: true,
+      schedule: { type: "daily", time: "10:00", weekdays: [1, 2, 3, 4, 5] },
+    });
+    expect(created.status).toBe(201);
+    const routineId = created.body.routine.id;
+    try {
+      const blocked = await api("PATCH", `/api/groups/${room.id}`, { memberIds: [other.id] });
+      expect(blocked.status).toBe(409);
+      expect(blocked.body.error).toMatch(/pause or reassign.*team-goal routine/i);
+
+      expect((await api("PATCH", `/api/routines/${routineId}`, {
+        botId: other.id,
+      })).status).toBe(200);
+      expect((await api("PATCH", `/api/groups/${room.id}`, { memberIds: [other.id] })).status).toBe(200);
+
+      expect((await api("DELETE", `/api/groups/${room.id}`)).status).toBe(200);
+      const afterDelete = (await api("GET", "/api/routines")).body.routines.find(
+        (routine: { id: string }) => routine.id === routineId,
+      );
+      expect(afterDelete).toMatchObject({ enabled: false, nextRunAt: null, groupId: room.id });
+    } finally {
+      await api("DELETE", `/api/routines/${routineId}`).catch(() => undefined);
+      await api("DELETE", `/api/groups/${room.id}`).catch(() => undefined);
+      await api("DELETE", `/api/bots/${lead.id}`).catch(() => undefined);
+      await api("DELETE", `/api/bots/${other.id}`).catch(() => undefined);
     }
   });
 
@@ -1698,6 +1932,144 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("updates a paired bot's model, persists it, broadcasts it, and clears effort", async () => {
+    const instances = (await api("GET", "/api/instances")).body.instances;
+    const claude = instances.find((instance: { instanceId: string }) => instance.instanceId === "claude");
+    expect(claude).toMatchObject({
+      snapshot: { state: "available" },
+      capabilities: { effortLevels: expect.arrayContaining(["high"]) },
+    });
+    const selection = { instanceId: claude.instanceId, model: claude.models.default };
+    const bot = (await api("POST", "/api/bots", {
+      modelSelection: selection,
+      requireAvailableModel: true,
+    })).body.bot;
+    const stream = await openSse(`${BASE}/api/events`);
+    try {
+      await stream.until((frame) => frame.kind === "hello");
+      const saved = await api("PATCH", `/api/bots/${bot.id}/model`, {
+        ...selection,
+        effort: "high",
+      });
+      expect(saved.status).toBe(200);
+      expect(saved.body.bot.modelSelection).toEqual({ ...selection, effort: "high" });
+      expect(saved.body.bot).not.toHaveProperty("resumeCursors");
+
+      const setFrame = await stream.until(
+        (frame) => frame.kind === "bot" &&
+          frame.bot?.id === bot.id &&
+          frame.bot?.modelSelection?.effort === "high",
+      );
+      expect(setFrame.bot.modelSelection).toEqual({ ...selection, effort: "high" });
+      const afterSet = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(afterSet.modelSelection).toEqual({ ...selection, effort: "high" });
+
+      // Omitting effort is the complete "use the engine default" selection,
+      // rather than a partial patch that accidentally preserves the old one.
+      const cleared = await api("PATCH", `/api/bots/${bot.id}/model`, selection);
+      expect(cleared.status).toBe(200);
+      expect(cleared.body.bot.modelSelection).toEqual(selection);
+      const clearFrame = await stream.until(
+        (frame) => frame.kind === "bot" &&
+          frame.bot?.id === bot.id &&
+          frame.bot?.modelSelection?.model === selection.model &&
+          frame.bot?.modelSelection?.effort === undefined,
+      );
+      expect(clearFrame.bot.modelSelection).toEqual(selection);
+      const afterClear = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(afterClear.modelSelection).toEqual(selection);
+    } finally {
+      stream.close();
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("keeps paired model writes inside the live catalog and exact request shape", async () => {
+    const instances = (await api("GET", "/api/instances")).body.instances;
+    const claude = instances.find((instance: { instanceId: string }) => instance.instanceId === "claude");
+    const selection = { instanceId: claude.instanceId, model: claude.models.default };
+    const bot = (await api("POST", "/api/bots", {
+      modelSelection: selection,
+      requireAvailableModel: true,
+    })).body.bot;
+    try {
+      const cases: Array<{ body: unknown; error: RegExp }> = [
+        { body: { instanceId: "missing", model: "anything" }, error: /instance .* unavailable/i },
+        { body: { ...selection, model: `${selection.model}-not-offered` }, error: /not offered/i },
+        { body: { ...selection, effort: "turbo" }, error: /not recognized/i },
+        { body: { ...selection, effort: "none" }, error: /not offered/i },
+        { body: { instanceId: selection.instanceId }, error: /modelSelection\.model/i },
+        { body: { ...selection, autoApprove: true }, error: /unsupported model field: autoApprove/i },
+      ];
+      for (const testCase of cases) {
+        const rejected = await api("PATCH", `/api/bots/${bot.id}/model`, testCase.body);
+        expect(rejected.status).toBe(400);
+        expect(rejected.body.error).toMatch(testCase.error);
+      }
+
+      for (const raw of ["null", "[]"]) {
+        const rejected = await fetch(`${BASE}/api/bots/${bot.id}/model`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: raw,
+        });
+        expect(rejected.status).toBe(400);
+      }
+      expect((await api("PATCH", "/api/bots/no-such-bot/model", selection)).status).toBe(404);
+
+      const after = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(after.modelSelection).toEqual(selection);
+      expect(after.autoApprove).toBeUndefined();
+    } finally {
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("refuses paired model changes while the bot is working", async () => {
+    const instances = (await api("GET", "/api/instances")).body.instances;
+    const claude = instances.find((instance: { instanceId: string }) => instance.instanceId === "claude");
+    const selection = { instanceId: claude.instanceId, model: claude.models.default };
+    const bot = (await api("POST", "/api/bots", {
+      modelSelection: selection,
+      requireAvailableModel: true,
+    })).body.bot;
+    try {
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "keep running" })).status).toBe(202);
+      await expect.poll(async () => {
+        const current = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+          (candidate: { id: string }) => candidate.id === bot.id,
+        );
+        return current?.busy;
+      }).toBe(true);
+
+      const blocked = await api("PATCH", `/api/bots/${bot.id}/model`, {
+        ...selection,
+        effort: "high",
+      });
+      expect(blocked.status).toBe(409);
+      expect(blocked.body.error).toMatch(/working.*stop it before changing models/i);
+      const unchanged = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(unchanged.modelSelection).toEqual(selection);
+    } finally {
+      await api("POST", `/api/bots/${bot.id}/interrupt`, {});
+      await expect.poll(async () => {
+        const current = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+          (candidate: { id: string }) => candidate.id === bot.id,
+        );
+        return current?.busy;
+      }, { timeout: 5_000 }).toBe(false);
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
   it("exports every visible bot and imports the team without creating a room", async () => {
     const first = (await api("POST", "/api/bots")).body.bot;
     const second = (await api("POST", "/api/bots")).body.bot;
@@ -2178,6 +2550,166 @@ describe("harness HTTP API", () => {
 
     expect(patched.status).toBe(400);
     expect(patched.body.error).toContain("not recognized");
+  });
+
+  it("buzzes when a turn dies before it can start", async () => {
+    // A dispatch failure already leaves an error row in the thread, but the
+    // person who has to fix it is often not looking at the thread — the cause
+    // is usually a setting, so no retry can clear it on its own. A routine
+    // failure already buzzes; an interactive turn should behave the same.
+    //
+    // The cloud destination with no Box configured fails inside dispatch
+    // without touching the network, which keeps this deterministic wherever
+    // it runs in the file.
+    let botId: string | undefined;
+    let stream: Awaited<ReturnType<typeof openSse>> | undefined;
+    try {
+      expect((await api("PUT", "/api/config", { box: { token: "" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud" })).status).toBe(200);
+      stream = await openSse(`${BASE}/api/events`);
+      await stream.until((frame) => frame.kind === "hello");
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "go" })).status).toBe(202);
+      const buzz = await stream.until(
+        (frame) => frame.kind === "notify" && frame.notification?.kind === "turn-failed",
+        5_000,
+      );
+      expect(buzz.notification).toMatchObject({
+        botId: bot.id,
+        threadId: bot.threadId,
+        title: `${bot.name} couldn't start`,
+      });
+      expect(String(buzz.notification.body)).toMatch(/box|cloud/i);
+
+      // the error row the chat already renders stays exactly as it was
+      await expect.poll(async () => {
+        const current = (await api("GET", "/api/bots?messages=20")).body.bots
+          .find((candidate: { id: string }) => candidate.id === bot.id);
+        return Boolean(current?.messages.at(-1)?.tool?.name?.startsWith("error: "));
+      }).toBe(true);
+    } finally {
+      stream?.close();
+      if (botId) await api("DELETE", `/api/bots/${botId}`);
+      // the token is write-only, so there is no prior value to restore —
+      // leave the box unconfigured rather than half-set for whatever runs next
+      await api("PUT", "/api/config", { box: { token: "" } });
+    }
+  });
+
+  it("leaves a failed credential-card continuation on the card without buzzing twice", async () => {
+    let botId: string | undefined;
+    let stream: Awaited<ReturnType<typeof openSse>> | undefined;
+    try {
+      expect((await api("PUT", "/api/config", { box: { token: "" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      expect((await api("PATCH", `/api/bots/${bot.id}`, {
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      })).status).toBe(200);
+      stream = await openSse(`${BASE}/api/events`);
+      await stream.until((frame) => frame.kind === "hello");
+
+      rmSync(fakeClaudeDump, { force: true });
+      expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "stay active" })).status).toBe(202);
+      const dump = await readJsonFileWhenReady<{
+        mcpConfig: { mcpServers: { agents: { env: { OMB_COMMS_TOKEN: string } } } };
+      }>(fakeClaudeDump);
+      const token = dump.mcpConfig.mcpServers.agents.env.OMB_COMMS_TOKEN;
+      const requested = await fetch(`${BASE}/api/internal/request-credential`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          fromBotId: bot.id,
+          fromThreadId: bot.threadId,
+          credentialId: "openaiImageApiKey",
+          reason: "needed for the task",
+        }),
+      });
+      expect(requested.status).toBe(201);
+      const { messageId } = (await requested.json()) as { messageId: string };
+      const directCard = (await api("GET", "/api/bots?messages=20")).body.bots
+        .find((candidate: { id: string }) => candidate.id === bot.id)?.messages
+        .find((message: { id: string }) => message.id === messageId);
+      expect(directCard).toMatchObject({
+        kind: "secret",
+        text: "Open this conversation in OpenMausBot on your computer to securely enter the OpenAI API key. Credential entry is not available in the mobile app.",
+      });
+      expect(directCard).not.toHaveProperty("from");
+
+      expect((await api("POST", `/api/bots/${bot.id}/interrupt`)).status).toBe(200);
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud" })).status).toBe(200);
+      expect((await api("POST", `/api/bots/${bot.id}/secret-cards/${messageId}/dismiss`, {
+        threadId: bot.threadId,
+      })).status).toBe(200);
+
+      await expect.poll(async () => {
+        const current = (await api("GET", "/api/bots?messages=20")).body.bots
+          .find((candidate: { id: string }) => candidate.id === bot.id);
+        return current?.messages.find((message: { id: string }) => message.id === messageId)?.secret?.error;
+      }).toMatch(/box|cloud/i);
+      expect(stream.frames.some(
+        (frame) => frame.kind === "notify" && frame.notification?.kind === "turn-failed",
+      )).toBe(false);
+    } finally {
+      if (botId) await api("POST", `/api/bots/${botId}/interrupt`, {}).catch(() => undefined);
+      stream?.close();
+      if (botId) await api("DELETE", `/api/bots/${botId}`);
+      await api("PUT", "/api/config", { box: { token: "" } });
+      rmSync(fakeClaudeDump, { force: true });
+    }
+  });
+
+  it("reports a failed routine once, not twice", async () => {
+    // A routine reaches the same dispatch catch as an interactive turn and
+    // then reports through onDispatchError, which raises routine-failed.
+    // Without the interactive guard the person would be buzzed twice for one
+    // failure, so this pins the count rather than merely the presence.
+    let botId: string | undefined;
+    let routineId: string | undefined;
+    let stream: Awaited<ReturnType<typeof openSse>> | undefined;
+    try {
+      expect((await api("PUT", "/api/config", { box: { token: "" } })).status).toBe(200);
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      botId = bot.id;
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud" })).status).toBe(200);
+      const created = await api("POST", "/api/routines", {
+        name: "Cloud check",
+        prompt: "look at the cloud desktop",
+        target: "bot",
+        botId: bot.id,
+        runOn: "maus",
+        enabled: true,
+        schedule: { type: "daily", time: "10:00", weekdays: [1, 2, 3, 4, 5] },
+      });
+      expect(created.status).toBe(201);
+      routineId = created.body.routine.id;
+      stream = await openSse(`${BASE}/api/events`);
+      await stream.until((frame) => frame.kind === "hello");
+      expect((await api("POST", `/api/routines/${created.body.routine.id}/run`)).status).toBe(201);
+      await stream.until(
+        (frame) =>
+          frame.kind === "notify" &&
+          frame.notification?.kind === "routine-failed" &&
+          frame.notification?.botId === bot.id,
+        5_000,
+      );
+      const buzzes = stream.frames.filter(
+        (frame: { kind?: string; notification?: { kind?: string; botId?: string } }) =>
+          frame.kind === "notify" && frame.notification?.botId === bot.id,
+      );
+      expect(buzzes.map((frame: { notification: { kind: string } }) => frame.notification.kind)).toEqual([
+        "routine-failed",
+      ]);
+    } finally {
+      stream?.close();
+      if (routineId) await api("DELETE", `/api/routines/${routineId}`);
+      if (botId) await api("DELETE", `/api/bots/${botId}`);
+      await api("PUT", "/api/config", { box: { token: "" } });
+    }
   });
 
   it("creates a fully configured bot in one request and greets with its final name", async () => {
@@ -2701,6 +3233,52 @@ describe("harness HTTP API", () => {
     expect(nothing.status).toBe(400);
   });
 
+  it("manages and probes custom MCP servers without returning secret values", async () => {
+    const secret = "mcp-secret-that-must-never-render";
+    const created = await api("POST", "/api/mcp/servers", {
+      name: "fixture",
+      command: process.execPath,
+      args: ["--experimental-strip-types", FAKE_MCP_SERVER],
+      env: { FIXTURE_TOKEN: secret, REMOVE_ME: "old" },
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.servers).toEqual([expect.objectContaining({
+      name: "fixture",
+      enabled: false,
+      envKeys: ["FIXTURE_TOKEN", "REMOVE_ME"],
+    })]);
+    expect(JSON.stringify(created.body)).not.toContain(secret);
+
+    const tested = await api("POST", "/api/mcp/servers/fixture/test");
+    expect(tested).toEqual({
+      status: 200,
+      body: { ok: true, tools: [{ name: "read_notes", description: "Read saved notes" }] },
+    });
+
+    const updated = await api("PUT", "/api/mcp/servers/fixture", {
+      command: process.execPath,
+      args: ["--experimental-strip-types", FAKE_MCP_SERVER],
+      env: { FIXTURE_TOKEN: true, NEXT: "fresh" },
+      enabled: false,
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body.servers[0].envKeys).toEqual(["FIXTURE_TOKEN", "NEXT"]);
+    expect(JSON.stringify(updated.body)).not.toContain(secret);
+
+    const enabled = await api("PATCH", "/api/mcp/servers/fixture", { enabled: true });
+    expect(enabled.body.servers[0].enabled).toBe(true);
+    const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
+    expect(disk.mcpServers.fixture.env).toEqual({ FIXTURE_TOKEN: secret, NEXT: "fresh" });
+
+    const reserved = await api("POST", "/api/mcp/servers", { name: "computer", command: "evil" });
+    expect(reserved.status).toBe(400);
+
+    const removed = await api("DELETE", "/api/mcp/servers/fixture");
+    expect(removed).toEqual({ status: 200, body: { servers: [] } });
+    const after = await api("GET", "/api/mcp/servers");
+    expect(after).toEqual({ status: 200, body: { servers: [] } });
+  });
+
   it("round-trips the UI language and clears it back to system", async () => {
     const set = await api("PUT", "/api/config", { language: "de" });
     expect(set.status).toBe(200);
@@ -2935,10 +3513,13 @@ describe("harness HTTP API", () => {
       });
       expect(edited.status).toBe(200);
       expect(edited.body.call.schedule).toEqual({ type: "daily", time: "11:15", weekdays: [1, 2, 3, 4, 5] });
-      const invalidPatch = await api("PATCH", `/api/calendar-calls/${callId}`, { durationMinutes: 5 });
+      const fiveMinutePatch = await api("PATCH", `/api/calendar-calls/${callId}`, { durationMinutes: 5 });
+      expect(fiveMinutePatch.status).toBe(200);
+      expect(fiveMinutePatch.body.call.durationMinutes).toBe(5);
+      const invalidPatch = await api("PATCH", `/api/calendar-calls/${callId}`, { durationMinutes: 4 });
       expect(invalidPatch.status).toBe(400);
       expect((await api("GET", "/api/calendar-calls")).body.calls).toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: callId, name: "Weekly bot sync" })]),
+        expect.arrayContaining([expect.objectContaining({ id: callId, name: "Weekly bot sync", durationMinutes: 5 })]),
       );
 
       expect((await api("DELETE", `/api/calendar-calls/${callId}`)).status).toBe(200);
@@ -2986,7 +3567,7 @@ describe("harness HTTP API", () => {
           message.sendId?.startsWith(`calendar_${callId}_`)
         )?.text;
       }, { timeout: 5_000 }).toBe(
-        '@everyone Review the launch plan.\n\n<attached-file path="/tmp/a&quot;&amp;&lt;&gt;.txt" />',
+        '@everyone Review the launch plan.\n\n<attached-file path="/tmp/a&quot;&amp;&lt;&gt;.txt" name="Launch brief.txt" />',
       );
 
       const snapshot = await api("GET", "/api/bots?messages=50");
@@ -4140,6 +4721,15 @@ describe("harness HTTP API", () => {
       expect(requested.status).toBe(201);
       const { messageId } = (await requested.json()) as { messageId: string };
 
+      const roomCard = (await api("GET", "/api/bots?messages=20")).body.groups
+        .find((candidate: { id: string }) => candidate.id === room.id)?.messages
+        .find((message: { id: string }) => message.id === messageId);
+      expect(roomCard).toMatchObject({
+        kind: "secret",
+        text: "Open this conversation in OpenMausBot on your computer to securely enter the OpenAI API key. Credential entry is not available in the mobile app.",
+        from: { botId: second.id, name: second.name, color: second.color },
+      });
+
       const resumed = await api("POST", `/api/bots/${second.id}/secret-cards/${messageId}/dismiss`, {
         threadId: room.threadId,
       });
@@ -4782,6 +5372,16 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("rejects oversized Box console commands instead of executing a truncated prefix", async () => {
+    const bot = (await api("GET", "/api/bots?messages=0")).body.bots[0];
+    const response = await api("POST", `/api/bots/${bot.id}/computer/exec`, {
+      command: "x".repeat(4001),
+    });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toContain("maximum 4000 characters");
+  });
+
   it("validates the non-secret VPS alias and keeps old bots on Box by default", async () => {
     const before = await api("GET", "/api/bots");
     const bot = before.body.bots[0];
@@ -5307,6 +5907,94 @@ describe("message pages", () => {
     expect(res.status).toBe(404);
   });
 
+  it("downloads only a file linked by the exact stored bot message", async () => {
+    const threadId = "test-linked-file-room-thread";
+    const linkedFile = join(home, ".openmausbot", "workspaces", "test-bot-a", "phone report.md");
+    const response = await fetch(
+      `${BASE}/api/threads/${threadId}/messages/linked-file-message/file`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // Native URL handling decodes the `%20` carried by the stored href.
+        body: JSON.stringify({ path: linkedFile }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("# Phone-ready report\n");
+    expect(response.headers.get("content-type")).toContain("text/markdown");
+    expect(response.headers.get("content-disposition")).toContain("phone%20report.md");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+
+    // Merely mentioning the exact same path in prose does not grant a file
+    // capability. It must be an actual Markdown/autolink/attachment target.
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/prose-file-message/file`,
+      { path: linkedFile },
+    )).status).toBe(403);
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/linked-file-message/file`,
+      { path: join(home, ".openmausbot", "workspaces", "test-bot-a", "other.md") },
+    )).status).toBe(403);
+    expect((await fetch(`${BASE}/api/threads/${threadId}/messages/no-such-message/file`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: linkedFile }),
+    })).status).toBe(404);
+  });
+
+  it("downloads an image rendered by the exact stored bot message", async () => {
+    const threadId = "test-linked-file-room-thread";
+    const linkedImage = join(home, ".openmausbot", "workspaces", "test-bot-a", "preview.png");
+    const response = await fetch(`${BASE}/api/threads/${threadId}/messages/linked-image-message/file`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: linkedImage }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("png preview bytes");
+    expect(response.headers.get("content-type")).toBe("image/png");
+  });
+
+  it("downloads an exact user attachment only from the private attachment store", async () => {
+    const threadId = "test-linked-file-room-thread";
+    const shared = join(home, ".openmausbot", "attachments", "shared-notes.pdf");
+    const response = await fetch(
+      `${BASE}/api/threads/${threadId}/messages/user-attached-file-message/file`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: shared }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("%PDF shared from the phone\n");
+    expect(response.headers.get("content-type")).toBe("application/pdf");
+    expect(response.headers.get("content-disposition")).toContain("Trip%20notes.pdf");
+    expect(response.headers.get("content-disposition")).not.toContain(".exe");
+    expect(response.headers.get("content-disposition")).not.toContain("shared-notes.pdf");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/prose-file-message/file`,
+      { path: shared },
+    )).status).toBe(403);
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/user-attached-file-message/file`,
+      { path: join(home, ".openmausbot", "attachments", "different.pdf") },
+    )).status).toBe(403);
+    expect((await api(
+      "POST",
+      `/api/threads/${threadId}/messages/user-outside-file-message/file`,
+      { path: join(home, ".openmausbot", "workspaces", "test-bot-a", "phone report.md") },
+    )).status).toBe(403);
+  });
+
   it("404s an image on a conversation that does not exist, without inventing one", async () => {
     // `messagesFor` materialises and caches a ThreadState for any id it is
     // given, so an unguarded route lets a client grow that map by asking
@@ -5543,6 +6231,21 @@ describe("instance CLI override API", () => {
     expect(res.body.ok).toBe(false);
     expect(res.body.message).toContain("more than 64 KiB");
     expect(res.body.install).toBeUndefined();
+  });
+
+  it("updates only the configured Claude instance and verifies its version", async () => {
+    const res = await api("POST", "/api/instances/claude/claude-update", {});
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, version: "2.1.232 (Claude Code)" });
+
+    expect((await api("POST", "/api/instances/ghost/claude-update", {})).status).toBe(400);
+    expect((await api("POST", "/api/instances/missing/claude-update", {})).status).toBe(404);
+  });
+
+  it("requires JSON before launching the Claude updater", async () => {
+    const res = await fetch(`${BASE}/api/instances/claude/claude-update`, { method: "POST" });
+    expect(res.status).toBe(415);
+    expect(await res.json()).toEqual({ error: "content-type must be application/json" });
   });
 
   it("rejects overlapping provider configuration writes", async () => {

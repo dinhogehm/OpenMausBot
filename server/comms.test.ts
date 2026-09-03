@@ -10,7 +10,8 @@
 // turned it into `node <script>` on Windows too, so the e2e half now runs
 // everywhere alongside the mention-resolution units.
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,7 +23,6 @@ import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url));
 const FAKE_CLI = join(SERVER_DIR, "testing", "fake-acp-cli.ts");
-const FAKE_AGY_CLI = join(SERVER_DIR, "testing", "fake-agy-cli.ts");
 const PORT = 18800 + Math.floor(Math.random() * 10_000);
 const BASE = `http://127.0.0.1:${PORT}`;
 
@@ -105,9 +105,31 @@ describe("comms e2e (fake ACP fleet)", () => {
 
   beforeAll(async () => {
     chmodSync(FAKE_CLI, 0o755);
-    chmodSync(FAKE_AGY_CLI, 0o755);
     home = mkdtempSync(join(tmpdir(), "omb-comms-test-"));
     gateFile = join(home, "helper-gate");
+    const antigravityDirectory = join(home, "fake-antigravity");
+    const antigravityCli = join(antigravityDirectory, "agy_acp_server.ts");
+    const antigravityHarness = join(
+      antigravityDirectory,
+      process.platform === "win32" ? "localharness_external.exe" : "localharness_external",
+    );
+    mkdirSync(antigravityDirectory, { recursive: true });
+    copyFileSync(FAKE_CLI, antigravityCli);
+    copyFileSync(FAKE_CLI, antigravityHarness);
+    if (process.platform !== "win32") {
+      chmodSync(antigravityCli, 0o755);
+      chmodSync(antigravityHarness, 0o755);
+    }
+    const antigravityProfile = join(
+      home,
+      ".openmausbot",
+      "providers",
+      "antigravity",
+      createHash("sha256").update("geminiAsker").digest("hex"),
+      "antigravity-acp",
+    );
+    mkdirSync(antigravityProfile, { recursive: true });
+    writeFileSync(join(antigravityProfile, "acp_token.json"), "{}\n");
     mkdirSync(join(home, ".openmausbot"), { recursive: true });
     writeFileSync(
       join(home, ".openmausbot", "config.json"),
@@ -121,13 +143,17 @@ describe("comms e2e (fake ACP fleet)", () => {
             environment: { FAKE_ACP_MODE: "ask-peer" },
             config: { cli: FAKE_CLI, fullAuto: true },
           },
-          // Normal Gemini 3.x bots use Antigravity print mode rather than
-          // the standalone Gemini ACP driver. This instance proves its
-          // leased global MCP mount reaches the same agents proxy safely.
+          // Antigravity uses Google's official ACP server. This instance
+          // proves its session-scoped MCP mount reaches the same agents proxy.
           geminiAsker: {
             driver: "antigravityAgent",
-            environment: { FAKE_AGY_MODE: "ask-peer" },
-            config: { cli: FAKE_AGY_CLI, fullAuto: true },
+            environment: {
+              FAKE_ACP_MODE: "ask-peer",
+              FAKE_ACP_AUTH_METHOD: "oauth-personal",
+              FAKE_ACP_MODELS: "gemini-3.8-flash-high",
+              FAKE_ACP_MODES: "default,yolo",
+            },
+            config: { cli: antigravityCli, fullAuto: true },
           },
           // a separate asker instance for the async-handoff e2e. B can stay
           // on `grok` because its depth-1 turn runs without the agents
@@ -142,7 +168,11 @@ describe("comms e2e (fake ACP fleet)", () => {
           // answers ordinary follow-ups while the worker remains gated.
           chiefAsync: {
             driver: "grokAgent",
-            environment: { FAKE_ACP_MODE: "chief-delegate" },
+            environment: {
+              FAKE_ACP_MODE: "chief-delegate",
+              FAKE_ACP_TASKID_FILE: join(home, "chief-task-id"),
+              FAKE_ACP_LOG_FILE: join(home, "chief-fake.log"),
+            },
             config: { cli: FAKE_CLI, fullAuto: true },
           },
           chiefCreator: {
@@ -310,7 +340,7 @@ describe("comms e2e (fake ACP fleet)", () => {
       await api("PATCH", `/api/bots/${asker.id}`, {
         name: "Gemini Asker",
         section,
-        modelSelection: { instanceId: "geminiAsker", model: "gemini-3.7-flash-high" },
+        modelSelection: { instanceId: "geminiAsker", model: "gemini-3.8-flash-high" },
       });
 
       const send = await api("POST", `/api/bots/${asker.id}/messages`, {
@@ -367,15 +397,11 @@ describe("comms e2e (fake ACP fleet)", () => {
         (message: any) => message.kind === "text" && message.role === "user",
       );
       expect(inbound.text).toContain("[Message from @Gemini Asker");
-      expect(inbound.text).toContain("ping from fake Gemini");
+      expect(inbound.text).toContain("ping from fake");
 
-      // Antigravity's global MCP config briefly carries a bearer token for
-      // this one process. It must be gone once the turn exits so neither a
-      // later bot nor the user's own agy session can inherit the capability.
-      await expect.poll(
-        () => existsSync(join(home, ".gemini", "config", "mcp_config.json")),
-        { timeout: 5_000 },
-      ).toBe(false);
+      // Official ACP receives the agents server in session/new. It must never
+      // write the capability or its bearer token to a user's global config.
+      expect(existsSync(join(home, ".gemini", "config", "mcp_config.json"))).toBe(false);
     },
     45_000,
   );
@@ -479,7 +505,12 @@ describe("comms e2e (fake ACP fleet)", () => {
             && m.text?.includes("replied to the delegated task")
             && m.text?.includes("hello from fake acp"),
         );
-        if (askerDelegated && note && helperReplied && resultReturned && !helperBot.busy) break;
+        // The source is now revived automatically once the peer replies:
+        // it must settle again (idle) and have synthesized the result.
+        const woke = askerBot.messages.some(
+          (m: any) => m.role === "bot" && m.kind === "text" && m.text?.includes("woke after delegation"),
+        );
+        if (askerDelegated && note && helperReplied && resultReturned && woke && !helperBot.busy && !askerBot.busy) break;
         if (Date.now() > deadline) {
           throw new Error(
             `delegate handoff never settled. asker busy=${askerBot.busy} helper busy=${helperBot.busy}\n` +
@@ -544,6 +575,11 @@ describe("comms e2e (fake ACP fleet)", () => {
       expect(helperNote?.comm?.groupId).toBe(note.comm.groupId);
       expect(helperBot.busy).toBeFalsy();
       expect(askerBot.busy).toBeFalsy();
+      // the source did not need a user nudge: it was revived and folded the
+      // peer's reply back into the conversation on its own.
+      expect(
+        askerBot.messages.some((m: any) => m.role === "bot" && m.text?.includes("woke after delegation: saw the result")),
+      ).toBe(true);
     },
     45_000,
   );
@@ -615,20 +651,18 @@ describe("comms e2e (fake ACP fleet)", () => {
           );
         }, 20_000, "worker result did not return to the Chief conversation");
 
-        // The result is not only visible in storage/UI. It was appended
-        // outside the Chief provider's native session, so the next resumed
-        // turn must replay it into model context before answering.
-        expect((await api("POST", `/api/bots/${chief.id}/messages`, {
-          text: "CHIEF_RESULT_CONTEXT: what did LongWorker report?",
-        })).status).toBe(202);
+        // The Chief is revived automatically once the worker replies — no
+        // user message needed. The revived turn replays the appended result
+        // into model context and the Chief synthesizes it on its own.
         await waitUntil(async () => {
           chiefBot = (await api("GET", "/api/bots")).body.bots.find((bot: any) => bot.id === chief.id);
           return chiefBot.messages.some(
             (message: any) =>
               message.kind === "text"
-              && message.text === "chief saw delegated result: long delegated task",
+              && message.text === "woke after delegation: saw the result",
           );
-        }, 20_000, "Chief provider did not receive the delegated result on its next turn");
+        }, 20_000, "Chief did not wake with the delegated result");
+        expect(chiefBot.busy).toBeFalsy();
       } finally {
         writeFileSync(gateFile, "go");
         await waitUntil(async () => {
@@ -791,6 +825,17 @@ describe("comms e2e (fake ACP fleet)", () => {
             && m.text?.includes("ping from fake"),
         );
       }, 30_000, "provider reload left the waiting delegation stranded");
+
+      // The revived turn must NOT ask for approval again — it folds the
+      // already-approved result in and settles.
+      await waitUntil(async () => {
+        finalAsker = (await api("GET", "/api/bots")).body.bots.find((b: any) => b.id === asker.id);
+        return Boolean(
+          finalAsker.messages.some(
+            (m: any) => m.role === "bot" && m.kind === "text" && m.text?.includes("woke after delegation"),
+          ) && !finalAsker.busy,
+        );
+      }, 20_000, "revived asker did not settle without re-asking");
 
       const approvalCards = finalAsker.messages.filter((m: any) => m.kind === "options");
       expect(approvalCards.filter((m: any) => m.card?.tool === "ask_bot")).toHaveLength(1);

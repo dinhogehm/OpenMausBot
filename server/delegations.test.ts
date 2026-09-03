@@ -11,14 +11,21 @@ import type { CommsBus } from "./comms-visibility.ts";
 import { DATA_DIR } from "./config.ts";
 import type { ModelSelection } from "./contracts.ts";
 import {
+  buildDelegationFailurePrompt,
+  buildDelegationRevivalPrompt,
+  DELEGATION_WAKE_MAX_PER_WINDOW,
+  DELEGATION_WAKE_WINDOW_MS,
+  DelegationWakeBudget,
   drainDelegations,
   findDelegationReceipt,
+  formatDelegationElapsed,
   MAX_BUSY_ATTEMPTS,
   pendingDelegationInfo,
   pendingDelegationSnapshot,
   queueDelegation,
   recordDelegationReceipt,
   releaseDelegationsWaitingOn,
+  summarizeDelegatedActivity,
   threadsWaitingOn,
   _pendingCount,
 } from "./delegations.ts";
@@ -736,5 +743,87 @@ describe("busy retries and receipts", () => {
     discardDelegations(commsBus, from.threadId);
     expect(_pendingCount(from.threadId)).toBe(0);
     expect(findDelegationReceipt(queued.id!)).toMatchObject({ status: "dropped" });
+  });
+});
+
+describe("peer wake helpers", () => {
+  it("buildDelegationRevivalPrompt names the peer and instructs the source to answer", () => {
+    const prompt = buildDelegationRevivalPrompt("Helper");
+    expect(prompt).toContain("@Helper");
+    expect(prompt).toContain("answer the user with the outcome");
+    expect(prompt).toContain("Do not re-delegate the same task");
+  });
+
+  it("buildDelegationFailurePrompt carries the reason and forbids an unchanged retry", () => {
+    const prompt = buildDelegationFailurePrompt("Helper", "delegated turn stalled");
+    expect(prompt).toContain("@Helper");
+    expect(prompt).toContain("delegated turn stalled");
+    expect(prompt).toContain("tell the user what failed");
+    expect(prompt).toContain("Do not re-delegate the exact same task unchanged");
+  });
+
+  it("DelegationWakeBudget caps bursts per thread and expires with the window", () => {
+    let now = 1_000_000;
+    const budget = new DelegationWakeBudget(() => now);
+
+    for (let i = 0; i < DELEGATION_WAKE_MAX_PER_WINDOW; i++) {
+      expect(budget.tryAcquire("t1")).toBe(true);
+    }
+    // cap reached — no further wakes within the same window
+    expect(budget.tryAcquire("t1")).toBe(false);
+
+    // a different thread has its own budget
+    expect(budget.tryAcquire("t2")).toBe(true);
+
+    // the window rolls over and the cap resets
+    now += DELEGATION_WAKE_WINDOW_MS + 1;
+    expect(budget.tryAcquire("t1")).toBe(true);
+  });
+
+  it("DelegationWakeBudget.reset clears the debt for a thread", () => {
+    let now = 1_000_000;
+    const budget = new DelegationWakeBudget(() => now);
+    for (let i = 0; i < DELEGATION_WAKE_MAX_PER_WINDOW; i++) budget.tryAcquire("t1");
+    expect(budget.tryAcquire("t1")).toBe(false);
+    budget.reset("t1");
+    expect(budget.tryAcquire("t1")).toBe(true);
+  });
+});
+
+describe("delegated turn status helpers", () => {
+  it("formats elapsed time compactly", () => {
+    expect(formatDelegationElapsed(5_000)).toBe("5s");
+    expect(formatDelegationElapsed(65_000)).toBe("65s");
+    expect(formatDelegationElapsed(95_000)).toBe("1m 35s");
+    expect(formatDelegationElapsed(180_000)).toBe("3m");
+  });
+
+  it("summarizeDelegatedActivity keeps only post-dispatch activity, newest last, bounded", () => {
+    const messages = [
+      { at: 900, kind: "text", text: "before dispatch (the user's ask)" },
+      { at: 1_100, kind: "activity", tool: { name: "Delegated to @Helper: followup" } },
+      { at: 1_200, kind: "text", text: "peer inbound message" },
+      { at: 1_300, kind: "activity", tool: { name: "tool: Bash" } },
+      { at: 1_400, kind: "text", text: "  multi  space   reply " },
+      { at: 1_500, kind: "activity" },
+      { at: 1_600, kind: "unknown-kind" },
+    ];
+    const lines = summarizeDelegatedActivity(messages, 1_000, 5);
+    expect(lines).toEqual([
+      "tool: Delegated to @Helper: followup",
+      "text: peer inbound message",
+      "tool: tool: Bash",
+      "text: multi space reply",
+    ]);
+  });
+
+  it("summarizeDelegatedActivity bounds the list to the newest lines", () => {
+    const messages = Array.from({ length: 9 }, (_, index) => ({
+      at: 1_000 + index,
+      kind: "activity",
+      tool: { name: `step-${index}` },
+    }));
+    const lines = summarizeDelegatedActivity(messages, 1_000, 3);
+    expect(lines).toEqual(["tool: step-6", "tool: step-7", "tool: step-8"]);
   });
 });

@@ -15,7 +15,15 @@ ipcRenderer.on("package:install", (_event, url) => {
   for (const listener of packageInstallListeners) listener(url);
 });
 
-contextBridge.exposeInMainWorld("ogb", {
+// The bridge is built once, then exposed in full only to the local server's
+// UI. A remote server's page (Server menu) gets the safe subset: nothing that
+// captures this screen, touches this computer's files or logins, or runs
+// helpers here. Main enforces the same rule on the sensitive channels.
+const localOrigin = process.argv.find((arg) => arg.startsWith("--omb-local-origin="))?.slice("--omb-local-origin=".length) ?? null;
+const isLocalPage = !localOrigin || location.origin === localOrigin;
+const REMOTE_SAFE = new Set(["platform", "getCapabilities", "onCapabilitiesChanged", "applySkin", "setUnreadCount", "openExternal", "getPathForFile", "permStatus", "environments"]);
+
+const bridge = {
   /** Host platform ("darwin" | "win32" | "linux") — for platform-aware UI. */
   platform: process.platform,
   getCapabilities: () => ipcRenderer.invoke("desktop:capabilities"),
@@ -221,4 +229,19 @@ contextBridge.exposeInMainWorld("ogb", {
       return () => ipcRenderer.removeListener("update:state", handler);
     },
   },
-});
+
+  /** Saved servers and the active one (Server menu). Switching, adding and
+   * forgetting are local-only: a remote page may read the list but not change
+   * where this window goes. */
+  environments: {
+    state: () => ipcRenderer.invoke("environments:state"),
+    switch: (id) => ipcRenderer.invoke("environments:switch", id),
+    addFromLink: (link) => ipcRenderer.invoke("environments:add-from-link", link),
+    forget: (id) => ipcRenderer.invoke("environments:forget", id),
+  },
+};
+
+contextBridge.exposeInMainWorld(
+  "ogb",
+  isLocalPage ? bridge : Object.fromEntries(Object.entries(bridge).filter(([key]) => REMOTE_SAFE.has(key))),
+);

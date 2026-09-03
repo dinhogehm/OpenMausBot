@@ -219,9 +219,33 @@ describe("ACP turns (fake CLI)", () => {
     delete process.env.FAKE_ACP_MODELS;
     delete process.env.FAKE_ACP_MODEL_STICKS;
     delete process.env.FAKE_ACP_USAGE_ROOT;
+    delete process.env.FAKE_ACP_LOAD_NULL;
     recorder?.stop();
     await instance?.dispose();
     await removeTempDir(scratch);
+  });
+
+  it("names the resolved executable when spawning it fails", async () => {
+    const missing = join(scratch, "resolved-managed-runtime");
+    const driver = createAcpDriver({
+      ...SELECT_MODEL_SUPPORT,
+      selectModel: undefined,
+      resolveCommand: async () => ({ command: missing }),
+    });
+    instance = await driver.create({
+      instanceId: "resolved-spawn-error",
+      displayName: "Resolved spawn error",
+      environment: {},
+      enabled: true,
+      config: { cli: "managed-alias", fullAuto: false },
+    });
+    recorder = recordEvents(instance.adapter);
+
+    await instance.adapter.sendTurn({ threadId: "t-resolved-spawn-error", text: "go" });
+    await recorder.until((event) => event.type === "turn.completed");
+    const error = recorder.events.find((event) => event.type === "runtime.error");
+    expect(error?.message).toContain(missing);
+    expect(error?.message).not.toContain("managed-alias");
   });
 
   it("normalizes a full turn into the canonical event sequence", async () => {
@@ -276,6 +300,27 @@ describe("ACP turns (fake CLI)", () => {
       .filter((e) => e.type === "item.completed" && (e as { itemType?: string }).itemType === "assistant_text")
       .map((e) => (e as { text: string }).text);
     expect(texts).toEqual(["before one", "before two", "after"]);
+  });
+
+  it("normalizes a structured ACP image block without treating it as text", async () => {
+    await create(GeminiAgentDriver, "image");
+    await instance.adapter.sendTurn({ threadId: "t-image", text: "draw it" });
+    await recorder.until((event) => event.type === "turn.completed");
+
+    const image = recorder.events.find(
+      (event) => event.type === "item.completed" && event.itemType === "assistant_image",
+    );
+    expect(image).toMatchObject({
+      type: "item.completed",
+      itemType: "assistant_image",
+      alt: "Generated image",
+    });
+    expect(image && "data" in image ? image.data : "").toMatch(/^iVBOR/);
+    expect(
+      recorder.events.some(
+        (event) => event.type === "item.completed" && event.itemType === "assistant_text",
+      ),
+    ).toBe(false);
   });
 
   it("reads token usage from the root of the prompt result", async () => {
@@ -652,6 +697,35 @@ describe("ACP turns (fake CLI)", () => {
     // hook must fire on a resumed thread as well
     const started = await recorder.until((e) => e.type === "session.started");
     expect(started).toMatchObject({ sessionId: "resumed-thread-1", model: "m-two" });
+    const done = await recorder.until((e) => e.type === "turn.completed");
+    expect(done).toMatchObject({ ok: true });
+  });
+
+  it("reuses a resume cursor when session/load returns a session", async () => {
+    await create(GrokAgentDriver);
+    await instance.adapter.sendTurn({
+      threadId: "t-resume-truthy",
+      text: "go",
+      resumeCursor: "resumed-cursor-1",
+    });
+
+    const started = await recorder.until((e) => e.type === "session.started");
+    expect(started).toMatchObject({ sessionId: "resumed-cursor-1" });
+    const done = await recorder.until((e) => e.type === "turn.completed");
+    expect(done).toMatchObject({ ok: true });
+  });
+
+  it("falls through to session/new when session/load returns null", async () => {
+    process.env.FAKE_ACP_LOAD_NULL = "1";
+    await create(GrokAgentDriver);
+    await instance.adapter.sendTurn({
+      threadId: "t-resume-null",
+      text: "go",
+      resumeCursor: "gone-cursor",
+    });
+
+    const started = await recorder.until((e) => e.type === "session.started");
+    expect(started).toMatchObject({ sessionId: "fake-acp-session" });
     const done = await recorder.until((e) => e.type === "turn.completed");
     expect(done).toMatchObject({ ok: true });
   });

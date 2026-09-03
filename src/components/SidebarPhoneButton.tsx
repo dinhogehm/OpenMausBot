@@ -117,7 +117,7 @@ export const phoneSettingsAction = (): ToggleAppSettingsAction => ({
   section: "companion",
 });
 
-function useSidebarPhoneStatus(): SidebarPhoneStatus {
+export function useSidebarPhoneStatus(): SidebarPhoneStatus {
   const [snapshot, setSnapshot] = useState<SidebarPhoneSnapshot | null>();
 
   useEffect(() => {

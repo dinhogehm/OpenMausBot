@@ -5,6 +5,7 @@
 # nothing to do with drift. Pin them to LF on every platform.
 shared/mascot-bodies.ts text eol=lf
 ios/Sources/CompanionCore/MausBodies.swift text eol=lf
+android/app/src/main/kotlin/com/openmausbot/companion/ui/MausBodies.kt text eol=lf
 
 # Source is always text, even when a string literal happens to carry a control
 # byte. Without this, a NUL inside git's first 8000 bytes makes the whole file

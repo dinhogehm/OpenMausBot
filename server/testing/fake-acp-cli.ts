@@ -5,7 +5,9 @@
 // session/prompt, and streams session/update notifications for a scripted
 // turn. Failure modes mirror how real ACP agents misbehave:
 //
-//   FAKE_ACP_MODE   happy (default) | empty-reply | exit-early | fail-after-text | hang | no-auth | auth-required | permission
+//   FAKE_ACP_LOAD_NULL  return null for session/load so the resume cursor is
+//                       ignored and the driver falls through to session/new
+//   FAKE_ACP_MODE   happy (default) | image | empty-reply | exit-early | fail-after-text | hang | hang-initialize | no-auth | auth-required | permission | question
 //                   | interleave (message → tool → message → tool → message)
 //                   | no-session-config (reject session/set_mode + set_model
 //                     with -32601, i.e. an agent predating those methods)
@@ -37,18 +39,50 @@
 //
 // Keep this file dependency-free — it runs as a bare `node` subprocess.
 import { spawn } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const mode = process.env.FAKE_ACP_MODE ?? "happy";
+const ONE_PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 // opencode-shaped surface: the session carries its own model catalog and the
 // model is chosen with session/set_config_option, because `opencode acp` takes
 // no -m. Off unless FAKE_ACP_MODELS is set, so every existing mode is byte-
 // identical to before.
 const models = (process.env.FAKE_ACP_MODELS ?? "").split(",").filter(Boolean);
 let currentModel: string | null = models[0] ?? null;
-const configOptions = () =>
-  models.length
-    ? [
+const modes = (process.env.FAKE_ACP_MODES ?? "").split(",").filter(Boolean);
+let currentMode: string | null = modes[0] ?? null;
+// task id captured from the last delegate_bot reply, for a later
+// check_delegation call. Each turn is a fresh process, so the id is passed
+// through a file (same state-passing pattern as FAKE_ACP_GATE_FILE).
+const taskIdFile = process.env.FAKE_ACP_TASKID_FILE ?? "";
+const logFile = process.env.FAKE_ACP_LOG_FILE ?? "";
+function fakeLog(line: string): void {
+  if (!logFile) return;
+  try {
+    appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`);
+  } catch {}
+}
+let chiefDelegatedTaskId = "";
+function rememberDelegatedTaskId(id: string): void {
+  chiefDelegatedTaskId = id;
+  if (taskIdFile) {
+    try {
+      writeFileSync(taskIdFile, id);
+    } catch {}
+  }
+}
+function savedDelegatedTaskId(): string {
+  if (chiefDelegatedTaskId) return chiefDelegatedTaskId;
+  if (taskIdFile && existsSync(taskIdFile)) {
+    try {
+      chiefDelegatedTaskId = readFileSync(taskIdFile, "utf8").trim();
+    } catch {}
+  }
+  return chiefDelegatedTaskId;
+}
+const configOptions = () => {
+  const options = [
+    ...(models.length ? [
         {
           id: "model",
           name: "Model",
@@ -57,8 +91,18 @@ const configOptions = () =>
           currentValue: currentModel,
           options: models.map((value) => ({ value, name: value })),
         },
-      ]
-    : null;
+      ] : []),
+    ...(modes.length ? [{
+      id: "mode",
+      name: "Mode",
+      category: "mode",
+      type: "select",
+      currentValue: currentMode,
+      options: modes.map((value) => ({ value, name: value })),
+    }] : []),
+  ];
+  return options.length ? options : null;
+};
 // cursor-shaped surface: the session advertises `models.availableModels` with
 // parameterised ids (`default[]`) that differ from the argv `--model` slugs
 // (`auto`). Off unless FAKE_ACP_SESSION_MODELS is set, so every existing mode
@@ -101,6 +145,9 @@ const dumpEnv = Object.fromEntries(
     "KIMI_MODEL_DISPLAY_NAME",
     "TEST_TURN_MODEL",
     "MY_AGENT_TOKEN",
+    "GEMINI_HOME",
+    "AGY_ACP_FORCE_FILE_STORAGE",
+    "ANTIGRAVITY_HARNESS_PATH",
   ].flatMap((key) => (process.env[key] === undefined ? [] : [[key, process.env[key]]] as const)),
 );
 const dumpState: Record<string, unknown> = { argv, env: dumpEnv };
@@ -267,12 +314,26 @@ function handle(msg: any) {
 
   switch (msg.method) {
     case "initialize": {
+      if (mode === "hang-initialize") {
+        setInterval(() => {}, 1_000);
+        return;
+      }
       if (mode === "exit-early") {
         process.stderr.write("fake-acp: simulated crash before result\n");
         process.exit(3);
       }
-      const authMethods = mode === "no-auth" ? [] : [{ id: "cached_token" }];
-      result(msg.id, { protocolVersion: 1, authMethods, _meta: { modelState: { currentModelId: "fake-acp-model" } } });
+      const authMethods = mode === "no-auth" ? [] : [{ id: process.env.FAKE_ACP_AUTH_METHOD ?? "cached_token" }];
+      result(msg.id, {
+        protocolVersion: 1,
+        authMethods,
+        agentInfo: process.env.FAKE_ACP_AGENT_NAME
+          ? { name: process.env.FAKE_ACP_AGENT_NAME, version: process.env.FAKE_ACP_AGENT_VERSION ?? "test" }
+          : undefined,
+        agentCapabilities: process.env.FAKE_ACP_AGENT_NAME
+          ? { loadSession: true, sessionCapabilities: { resume: true }, auth: { logout: true } }
+          : undefined,
+        _meta: { modelState: { currentModelId: "fake-acp-model" } },
+      });
       break;
     }
     case "authenticate":
@@ -306,6 +367,16 @@ function handle(msg: any) {
       break;
     }
     case "session/load": {
+      if (process.env.FAKE_ACP_LOAD_NULL) {
+        result(msg.id, null);
+        break;
+      }
+      const opts = configOptions();
+      const mdls = sessionModels();
+      result(msg.id, { ...(opts ? { configOptions: opts } : {}), ...(mdls ? { models: mdls } : {}) });
+      break;
+    }
+    case "session/resume": {
       const opts = configOptions();
       const mdls = sessionModels();
       result(msg.id, { ...(opts ? { configOptions: opts } : {}), ...(mdls ? { models: mdls } : {}) });
@@ -344,6 +415,15 @@ function handle(msg: any) {
     }
     case "session/set_config_option": {
       const { configId, value } = msg.params ?? {};
+      if (configId === "mode" && modes.includes(value)) {
+        currentMode = value;
+        configCalls.push({ method: msg.method, params: msg.params });
+        if (process.env.FAKE_ACP_DUMP) {
+          writeFileSync(`${process.env.FAKE_ACP_DUMP}.config.json`, JSON.stringify(configCalls, null, 2));
+        }
+        result(msg.id, process.env.FAKE_ACP_EMPTY_MODE_ACK ? {} : { configOptions: configOptions() });
+        break;
+      }
       if (configId !== "model" || !models.includes(value)) {
         out({
           jsonrpc: "2.0",
@@ -356,6 +436,10 @@ function handle(msg: any) {
       // in the protocol forbids it, and it is the shape core.ts's confirmation
       // guard exists for — an error is loud, this is silent.
       if (!process.env.FAKE_ACP_MODEL_STICKS) currentModel = value;
+      configCalls.push({ method: msg.method, params: msg.params });
+      if (process.env.FAKE_ACP_DUMP) {
+        writeFileSync(`${process.env.FAKE_ACP_DUMP}.config.json`, JSON.stringify(configCalls, null, 2));
+      }
       result(msg.id, { configOptions: configOptions() });
       break;
     }
@@ -387,6 +471,59 @@ function handle(msg: any) {
         );
       };
       const promptText = String(msg.params?.prompt?.[0]?.text ?? "");
+      // A delegated reply woke this bot (control-plane continuation): the
+      // harness revived it to fold the result in. Synthesize instead of
+      // driving the mode's usual delegate/ask flow, which would loop or
+      // re-ask for approval on a turn the user did not initiate.
+      const wokeFromDelegation = promptText.includes("[A delegated task just completed]")
+        || promptText.includes("[A delegated task failed]");
+      if (wokeFromDelegation) {
+        fakeLog("branch: wokeFromDelegation");
+        const failed = promptText.includes("[A delegated task failed]");
+        const sawResult = promptText.includes("replied to the delegated task");
+        out({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: {
+                text: failed
+                  ? "woke after delegation failure: will tell the user"
+                  : sawResult
+                    ? "woke after delegation: saw the result"
+                    : "woke after delegation: no result",
+              },
+            },
+          },
+        });
+        complete();
+        return;
+      }
+      if (mode === "chief-delegate" && agentsMcp && promptText.includes("CHECK_STATUS")) {
+        fakeLog(`branch: CHECK_STATUS savedTaskId=${JSON.stringify(savedDelegatedTaskId())}`);
+        const savedTaskId = savedDelegatedTaskId();
+        if (!savedTaskId) {
+          out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: "status check skipped: no delegated task id" } } } });
+          complete();
+          return;
+        }
+        void driveMcp(agentsMcp, [
+          {
+            name: "check_delegation",
+            args: () => ({ task_id: savedTaskId }),
+          },
+        ])
+          .then((reply) => {
+            out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: `status: ${reply}` } } } });
+            complete();
+          })
+          .catch((e) => {
+            out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: `status error: ${(e as Error).message}` } } } });
+            complete();
+          });
+        return;
+      }
       if (mode === "chief-delegate" && promptText.includes("CHIEF_RESULT_CONTEXT")) {
         const sawDelegatedResult =
           promptText.includes("@LongWorker replied to the delegated task")
@@ -426,6 +563,7 @@ function handle(msg: any) {
           },
         ])
           .then((reply) => {
+            rememberDelegatedTaskId(/Task id: ([\w-]+)/.exec(reply)?.[1] ?? "");
             out({ jsonrpc: "2.0", method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { text: `assigned: ${reply}` } } } });
             complete();
           })
@@ -533,7 +671,18 @@ function handle(msg: any) {
           });
         return;
       }
-      if (mode === "interleave") playInterleaveTurn();
+      if (mode === "image") {
+        out({
+          jsonrpc: "2.0",
+          method: "session/update",
+          params: {
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "image", data: ONE_PIXEL_PNG, mimeType: "image/png" },
+            },
+          },
+        });
+      } else if (mode === "interleave") playInterleaveTurn();
       else if (mode !== "empty-reply") playTurn();
       if (mode === "permission") {
         // ask the client to approve a tool, then complete once answered
@@ -548,6 +697,27 @@ function handle(msg: any) {
             options: [
               { optionId: "allow-once", kind: "allow_once" },
               { optionId: "reject", kind: "reject_once" },
+            ],
+          },
+        });
+        return;
+      }
+      if (mode === "question") {
+        pendingPermissionId = 9002;
+        onPermissionAnswered = complete;
+        out({
+          jsonrpc: "2.0",
+          id: pendingPermissionId,
+          method: "session/request_permission",
+          params: {
+            toolCall: { toolCallId: "interaction_color", kind: "other", title: "Which color?" },
+            options: [
+              { optionId: "blue-id", kind: "allow_once", name: "Blue" },
+              {
+                optionId: "green-id",
+                kind: "allow_once",
+                name: process.env.FAKE_ACP_PAD_QUESTION_OPTION ? " Green " : "Green",
+              },
             ],
           },
         });

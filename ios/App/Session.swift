@@ -19,6 +19,14 @@ import UIKit
 /// the transitions are worth being able to read.
 private let log = Logger(subsystem: "com.openmausbot.companion", category: "stream")
 
+private final class CachedAttachmentDownload: NSObject {
+    let value: DownloadedFile
+
+    init(_ value: DownloadedFile) {
+        self.value = value
+    }
+}
+
 @MainActor
 final class Session: ObservableObject {
     enum Status: Equatable {
@@ -88,6 +96,20 @@ final class Session: ObservableObject {
     /// for the same attachment path.
     private var avatarFetches: [String: (id: UUID, task: Task<Data?, Never>)] = [:]
     private var avatarCacheGeneration = 0
+    /// Full image bytes are already fetched to draw a thumbnail. Keep a small,
+    /// cost-bounded window so tapping that thumbnail opens immediately instead
+    /// of downloading the same image twice.
+    private let attachmentCache: NSCache<NSString, CachedAttachmentDownload> = {
+        let cache = NSCache<NSString, CachedAttachmentDownload>()
+        cache.countLimit = 12
+        cache.totalCostLimit = 32 * 1_024 * 1_024
+        return cache
+    }()
+    private var attachmentCacheGeneration = 0
+    /// An ambiguous network failure may happen after the server accepted a
+    /// message. Reusing this id for the exact same retained draft makes Retry
+    /// idempotent instead of sending the attachment twice.
+    private var attachmentSendIDs: [AttachmentDraftKey: String] = [:]
     /// A saved connection exists, but its token could not be read yet. Keeps
     /// "the keychain is locked" from being mistaken for "not paired".
     private var restorePending = false
@@ -96,10 +118,17 @@ final class Session: ObservableObject {
     /// paired client can be rebuilt after unlock.
     private var pendingNotification: NotificationTarget?
 
+    private struct AttachmentDraftKey: Hashable {
+        let destination: MessageDestination
+        let text: String
+        let attachmentIDs: [UUID]
+    }
+
     private var registry = CompanionConnectionRegistry()
     // MARK: - Pairing
 
     init() {
+        Self.removeStaleFilePreviews()
         _ = NotificationCoordinator.shared
         NotificationCoordinator.shared.responseHandler = { [weak self] target in
             Task { @MainActor in await self?.openNotification(target) }
@@ -402,6 +431,8 @@ final class Session: ObservableObject {
         rotation = CandidateRotation(hosts: [])
         state = CompanionState()
         resetAvatarCache()
+        resetAttachmentCache()
+        attachmentSendIDs.removeAll()
         NotificationCoordinator.shared.setBadge(0)
         status = .unpaired
     }
@@ -432,6 +463,8 @@ final class Session: ObservableObject {
         token = nil
         state = CompanionState()
         resetAvatarCache()
+        resetAttachmentCache()
+        attachmentSendIDs.removeAll()
         NotificationCoordinator.shared.setBadge(0)
     }
 
@@ -766,6 +799,297 @@ final class Session: ObservableObject {
         }
     }
 
+    /// Send a composer draft with app-owned attachments. The destination
+    /// includes the exact active thread at tap time, so neither a desktop task
+    /// switch nor an upload delay can move the message elsewhere. Callers only
+    /// clear their draft when this returns true.
+    func send(
+        text: String,
+        attachments: [PendingMessageAttachment],
+        to chat: Chat
+    ) async -> Bool {
+        guard let client else {
+            actionError = "This computer is offline."
+            return false
+        }
+        actionError = nil
+        do {
+            try AttachmentPolicy.validate(attachments)
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty || !attachments.isEmpty else {
+                actionError = "Write a message or attach a file first."
+                return false
+            }
+
+            if attachments.contains(where: { $0.kind == .image }) {
+                let capable: Set<String>
+                do {
+                    capable = try await client.imageCapableInstanceIDs()
+                } catch APIError.status(code: 404, message: _) {
+                    actionError = "Update OpenMausBot on this computer before sending images."
+                    return false
+                }
+                guard imageSupported(by: chat, capableInstances: capable) else {
+                    actionError = imageCompatibilityMessage(for: chat)
+                    return false
+                }
+            }
+
+            let destination: MessageDestination
+            switch chat {
+            case let .bot(bot):
+                destination = .bot(id: bot.id, threadId: bot.threadId)
+            case let .room(room):
+                destination = .room(id: room.id, threadId: room.threadId)
+            }
+            let draftKey = AttachmentDraftKey(
+                destination: destination,
+                text: text,
+                attachmentIDs: attachments.map(\.id)
+            )
+            if attachmentSendIDs.count >= 20, attachmentSendIDs[draftKey] == nil {
+                attachmentSendIDs.removeAll(keepingCapacity: true)
+            }
+            let sendID = attachmentSendIDs[draftKey] ?? UUID().uuidString
+            attachmentSendIDs[draftKey] = sendID
+
+            var uploaded: [SharedAttachmentReference] = []
+            uploaded.reserveCapacity(attachments.count)
+            for attachment in attachments {
+                try Task.checkCancellation()
+                let mime = AttachmentPolicy.normalizedMIME(attachment.mime)
+                switch attachment.kind {
+                case .image:
+                    let path = try await client.uploadImage(
+                        data: attachment.data,
+                        mime: mime,
+                        uploadId: attachment.id.uuidString
+                    )
+                    uploaded.append(SharedAttachmentReference(
+                        path: path,
+                        kind: .image,
+                        displayName: attachment.name
+                    ))
+                case .file:
+                    let file = try await client.uploadFile(
+                        data: attachment.data,
+                        name: attachment.name,
+                        mime: mime,
+                        uploadId: attachment.id.uuidString
+                    )
+                    uploaded.append(SharedAttachmentReference(
+                        path: file.path,
+                        kind: .file,
+                        displayName: file.name
+                    ))
+                }
+            }
+
+            let message = SharedMessageComposer.compose(
+                instruction: text,
+                text: [],
+                urls: [],
+                attachments: uploaded
+            )
+            try await client.send(text: message, to: destination, sendId: sendID)
+            attachmentSendIDs.removeValue(forKey: draftKey)
+            actionError = nil
+            return true
+        } catch is CancellationError {
+            return false
+        } catch let error as APIError where error.isUnauthorized {
+            status = .unauthorized
+            actionError = error.localizedDescription
+            return false
+        } catch {
+            actionError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func imageSupported(by chat: Chat, capableInstances: Set<String>) -> Bool {
+        switch chat {
+        case let .bot(bot):
+            return capableInstances.contains(bot.modelSelection.instanceId)
+        case let .room(room):
+            return !room.memberIds.isEmpty && room.memberIds.allSatisfy { id in
+                guard let bot = state.bot(id) else { return false }
+                return capableInstances.contains(bot.modelSelection.instanceId)
+            }
+        }
+    }
+
+    private func imageCompatibilityMessage(for chat: Chat) -> String {
+        switch chat {
+        case let .bot(bot):
+            return "\(bot.name)'s current model doesn't support images. Choose another model or remove the image."
+        case .room:
+            return "Every bot that may answer in this channel must use a model that supports images."
+        }
+    }
+
+    /// Fetch one app-owned attachment through the message that introduced it.
+    /// The caller owns presentation errors so a failed thumbnail or preview can
+    /// explain itself beside the attachment that was tapped.
+    func fetchAttachment(
+        threadId: String,
+        messageId: String,
+        path: String,
+        cacheResult: Bool = false
+    ) async throws -> DownloadedFile {
+        guard let client else {
+            throw APIError.transport("This computer is offline.")
+        }
+        let cacheKey = "\(threadId)\u{1F}\(messageId)\u{1F}\(path)"
+        if cacheResult,
+           let cached = attachmentCache.object(forKey: cacheKey as NSString) {
+            return cached.value
+        }
+        let generation = attachmentCacheGeneration
+        do {
+            // Keep this structured. When the row scrolls away SwiftUI cancels
+            // its task, which now propagates directly into URLSession instead
+            // of leaving a shared unstructured download running.
+            let download = try await client.downloadFile(
+                threadId: threadId,
+                messageId: messageId,
+                path: path
+            )
+            try Task.checkCancellation()
+            guard generation == attachmentCacheGeneration else { throw CancellationError() }
+            if cacheResult {
+                attachmentCache.setObject(
+                    CachedAttachmentDownload(download),
+                    forKey: cacheKey as NSString,
+                    cost: download.data.count
+                )
+            }
+            return download
+        } catch let error as APIError where error.isUnauthorized {
+            // A cancelled request from the previous computer may finish after
+            // a switch. Its 401 belongs to that old token and must not evict
+            // the current live session.
+            guard generation == attachmentCacheGeneration, !Task.isCancelled else {
+                throw CancellationError()
+            }
+            status = .unauthorized
+            throw error
+        } catch {
+            if Task.isCancelled || generation != attachmentCacheGeneration {
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+
+    /// Fetch and materialize an attachment in a protected temporary directory
+    /// for Quick Look, markdown/text preview, and the system share sheet.
+    func prepareAttachmentPreview(
+        threadId: String,
+        messageId: String,
+        path: String,
+        cacheResult: Bool = false
+    ) async throws -> DownloadedFile {
+        let download = try await fetchAttachment(
+            threadId: threadId,
+            messageId: messageId,
+            path: path,
+            cacheResult: cacheResult
+        )
+        try Task.checkCancellation()
+        let preparation = Task.detached(priority: .userInitiated) {
+            // Content-Disposition is the server's canonical, sanitised name.
+            // The transport tag's `name` is presentation-only and must never
+            // choose the on-disk preview/share filename.
+            try Self.materializePreview(download: download, filename: download.filename)
+        }
+        let prepared = try await withTaskCancellationHandler {
+            try await preparation.value
+        } onCancel: {
+            preparation.cancel()
+        }
+        do {
+            try Task.checkCancellation()
+            return prepared
+        } catch {
+            Self.removePreview(at: prepared.localURL)
+            throw error
+        }
+    }
+
+    /// Compatibility for file links in assistant markdown. User attachment
+    /// cards use the throwing API above so their feedback remains local.
+    func downloadFile(
+        threadId: String,
+        messageId: String,
+        path: String
+    ) async -> DownloadedFile? {
+        actionError = nil
+        do {
+            let download = try await prepareAttachmentPreview(
+                threadId: threadId,
+                messageId: messageId,
+                path: path
+            )
+            actionError = nil
+            return download
+        } catch is CancellationError {
+            return nil
+        } catch {
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    private func resetAttachmentCache() {
+        attachmentCacheGeneration += 1
+        attachmentCache.removeAllObjects()
+    }
+
+    nonisolated private static func materializePreview(
+        download: DownloadedFile,
+        filename: String
+    ) throws -> DownloadedFile {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory
+            .appendingPathComponent("OpenMausBotFilePreviews", isDirectory: true)
+        let directory = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try Task.checkCancellation()
+        try manager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+        )
+        let fileURL = directory.appendingPathComponent(filename, isDirectory: false)
+        do {
+            try download.data.write(
+                to: fileURL,
+                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+            )
+            try Task.checkCancellation()
+            return DownloadedFile(
+                data: download.data,
+                filename: filename,
+                contentType: download.contentType,
+                localURL: fileURL
+            )
+        } catch {
+            try? manager.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    nonisolated private static func removePreview(at fileURL: URL?) {
+        guard let fileURL else { return }
+        try? FileManager.default.removeItem(at: fileURL.deletingLastPathComponent())
+    }
+
+    private static func removeStaleFilePreviews() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OpenMausBotFilePreviews", isDirectory: true)
+        try? FileManager.default.removeItem(at: root)
+    }
+
     func answer(chat: Chat, card: OptionCard, choice: String, rememberingPermission: Bool = true) async {
         guard let requestId = card.requestId else { return }
         if rememberingPermission, card.shouldRememberPermission(for: choice), case let .bot(bot) = chat {
@@ -1005,6 +1329,31 @@ final class Session: ObservableObject {
     }
 
     // MARK: - Agent profile
+
+    /// The model catalog lives on the paired computer because availability
+    /// depends on which engines are installed and signed in there.
+    func modelInstances() async -> [Instance] {
+        guard let client else { return [] }
+        do {
+            return try await client.instances()
+        } catch {
+            if !Task.isCancelled { actionError = error.localizedDescription }
+            return []
+        }
+    }
+
+    func updateModel(_ selection: ModelSelection, for bot: Bot) async -> Bot? {
+        guard let client else { return nil }
+        do {
+            let updated = try await client.updateModel(botId: bot.id, selection: selection)
+            guard !Task.isCancelled else { return nil }
+            state.apply(.bot(updated))
+            return updated
+        } catch {
+            if !Task.isCancelled { actionError = error.localizedDescription }
+            return nil
+        }
+    }
 
     func updateProfile(_ patch: BotProfilePatch, for bot: Bot) async -> Bot? {
         guard let client else { return nil }

@@ -1,5 +1,6 @@
 package com.openmausbot.companion.ui
 
+import com.openmausbot.companion.core.AttachedMessageContent
 import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.Chat
 import com.openmausbot.companion.core.ChatSummary
@@ -187,7 +188,7 @@ object SearchPolicy {
  * with a task list get the same task controls as an agent. Exporting is not a
  * bot idea — a room has a transcript like anything else.
  */
-enum class ChatActionId { NEW_TASK, TASKS, WATCH_COMPUTER, SHARE_MARKDOWN, SHARE_JSON, INTERRUPT }
+enum class ChatActionId { PHOTOS, FILES, NEW_TASK, TASKS, WATCH_COMPUTER, SHARE_MARKDOWN, SHARE_JSON, INTERRUPT }
 
 data class ChatAction(
     val id: ChatActionId,
@@ -207,9 +208,24 @@ object ChatActions {
      * fresh thread over the one question on screen that only a person can
      * answer.
      */
-    fun sheet(chat: Chat, hasPendingApproval: Boolean): List<ChatAction> {
+    fun sheet(chat: Chat, hasPendingApproval: Boolean, canAddAttachment: Boolean): List<ChatAction> {
         val bot = (chat as? Chat.BotChat)?.bot
         val out = mutableListOf<ChatAction>()
+        // Attachments first, for a bot and a room alike — the order of iOS's
+        // `plusActions`. [canAddAttachment] is false at the four-item cap and
+        // while a send or an import is in flight.
+        out += ChatAction(
+            id = ChatActionId.PHOTOS,
+            title = "Photo Library",
+            subtitle = "Add a photo to this message",
+            enabled = canAddAttachment,
+        )
+        out += ChatAction(
+            id = ChatActionId.FILES,
+            title = "Choose File",
+            subtitle = "Add a document from Files",
+            enabled = canAddAttachment,
+        )
         if (bot != null) {
             out += ChatAction(
                 id = ChatActionId.NEW_TASK,
@@ -461,7 +477,10 @@ object SearchHitRole {
 object MessageActions {
     /** The text worth putting on the clipboard, or null when there is none. */
     fun copyableText(message: Message): String? = when (message.kind) {
-        Message.Kind.TEXT, Message.Kind.UNKNOWN -> message.text?.takeIf { it.isNotBlank() }
+        Message.Kind.TEXT, Message.Kind.UNKNOWN -> message.text
+            ?.let { AttachedMessageContent.parse(it) }
+            ?.text
+            ?.takeIf { it.isNotBlank() }
         // An approval card is worth copying for what it is asking to do.
         Message.Kind.OPTIONS -> message.card
             ?.let { card -> listOf(card.title, card.subtitle).filter { it.isNotBlank() } }
@@ -469,6 +488,18 @@ object MessageActions {
             ?.joinToString("\n\n")
         // A tool chip is context, and a screenshot is pixels.
         Message.Kind.ACTIVITY, Message.Kind.SCREEN -> null
+    }
+
+    /**
+     * Original user text can be retried only when it has no uploaded payload.
+     * Retrying an attachment message would either leak its computer-local path
+     * or silently resend a message without the file.
+     */
+    fun editableText(message: Message): String? {
+        if (message.role != Message.Role.USER || message.kind != Message.Kind.TEXT) return null
+        val raw = message.text ?: return null
+        if (AttachedMessageContent.parse(raw).attachments.isNotEmpty()) return null
+        return raw
     }
 }
 
@@ -662,9 +693,11 @@ object ComposerAccessories {
         busy: Boolean,
         pendingApproval: Boolean,
         hasQuickReplies: Boolean,
+        /** A pending attachment is half a message too; a chip would send without it. */
+        hasAttachments: Boolean,
     ): ComposerAccessory = when {
         hudOpen -> ComposerAccessory.HUD
-        draft.isEmpty() && !busy && !pendingApproval && hasQuickReplies -> ComposerAccessory.CHIPS
+        draft.isEmpty() && !hasAttachments && !busy && !pendingApproval && hasQuickReplies -> ComposerAccessory.CHIPS
         else -> ComposerAccessory.NONE
     }
 }

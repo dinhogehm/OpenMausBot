@@ -306,9 +306,13 @@ pnpm package:linux # Ubuntu x64 .deb + AppImage → release/
 
 ### Routines and webhook triggers
 
-Routines can run once or on selected weekdays, using either a MAUS's configured model/computer or the
-Cloud VM runner. Webhook triggers are independent from schedules but reuse the same queued task executor
-and calendar receipts.
+Routines can run once, on selected weekdays, or every 5–1,440 minutes, using either a MAUS's configured
+model/computer or the Cloud VM runner. Interval schedules stay aligned to their chosen start time and skip
+an occurrence when the previous run is still active, so slow work cannot build an unbounded queue. A
+separate optional Advanced run limit can safely stop stuck work; no timeout is imposed unless one is chosen.
+The existing duration field remains calendar/display metadata. Webhook triggers are independent from schedules
+but reuse the same queued task executor and calendar
+receipts.
 
 OpenMausBot starts a webhook-only receiver on `127.0.0.1:8800` by default (or one port above `OMB_PORT`).
 Set `OMB_WEBHOOK_PORT` to choose another port. A webhook secret is shown once when the trigger is created

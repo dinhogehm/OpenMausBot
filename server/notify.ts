@@ -6,6 +6,11 @@
 // a bot that *finished* is worth one if you asked for it; everything else a
 // bot does while it works is not.
 //
+// A turn that dies before it starts is the first case, not the last: the
+// bot is not working, and the fix is usually a setting only a person can
+// change, so a retry cannot clear it. A routine failure already buzzed;
+// this makes an interactive turn behave the same way.
+//
 // Delivery is a separate concern. The harness emits a frame; whoever is
 // listening decides what to do with it — desktop and paired-phone local
 // notifications today, and closed-app APNs delivery once a relay exists.
@@ -15,6 +20,7 @@ export type NotifyKind =
   | "question"
   | "done"
   | "routine-failed"
+  | "turn-failed"
   | "takeover"
   | "workflow-failed"
   | "workflow-approval";
@@ -71,11 +77,13 @@ export function buildNotification(
           ? `${bot.name} needs your hands`
           : kind === "routine-failed"
             ? `${bot.name}'s routine failed`
-            : kind === "workflow-failed"
-              ? `${bot.name}'s workflow failed`
-              : kind === "workflow-approval"
-                ? `${bot.name}'s workflow needs approval`
-                : `${bot.name} finished`;
+            : kind === "turn-failed"
+              ? `${bot.name} couldn't start`
+              : kind === "workflow-failed"
+                ? `${bot.name}'s workflow failed`
+                : kind === "workflow-approval"
+                  ? `${bot.name}'s workflow needs approval`
+                  : `${bot.name} finished`;
 
   // A "finished" with nothing to say is not worth a notification — the
   // badge in the sidebar already carries that much.

@@ -100,6 +100,20 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(schedule.weekdays, [1])
     }
 
+    func testDecodesAnIntervalRoutineSchedule() throws {
+        let schedule = try JSONDecoder().decode(
+            RoutineSchedule.self,
+            from: Data(#"{"type":"interval","everyMinutes":5,"anchorAt":1788384600000}"#.utf8)
+        )
+
+        XCTAssertEqual(schedule.type, .interval)
+        XCTAssertEqual(schedule.everyMinutes, 5)
+        XCTAssertEqual(schedule.anchorAt, 1_788_384_600_000)
+        XCTAssertNil(schedule.at)
+        XCTAssertNil(schedule.time)
+        XCTAssertNil(schedule.weekdays)
+    }
+
     func testNotificationTargetRequiresBothExactIds() {
         XCTAssertEqual(
             NotificationTarget(payload: ["botId": "bot-1", "threadId": "detached-task-2"]),
@@ -291,6 +305,54 @@ final class DecodingTests: XCTestCase {
         // the onboarding card has no request behind it, so it is history
         XCTAssertFalse(card.isPending)
         XCTAssertFalse(card.isPermission)
+    }
+
+    func testDecodesADirectCredentialRequestWithoutSenderMetadata() throws {
+        let json = """
+        {
+          "id": "secret-1", "role": "bot", "kind": "secret", "at": 1786742413762,
+          "text": "Complete this credential request securely on your computer.",
+          "secret": {
+            "target": "ttsKey", "label": "ElevenLabs API key",
+            "description": "Enables text-to-speech voices in calls.",
+            "placeholder": "Paste your ElevenLabs API key",
+            "helpUrl": "https://elevenlabs.io/app/settings/api-keys",
+            "requestKey": "request-key-1"
+          }
+        }
+        """
+        let message = try JSONDecoder().decode(Message.self, from: Data(json.utf8))
+
+        XCTAssertEqual(message.kind, .secret)
+        XCTAssertNil(message.from, "a direct chat gets its bot identity from the enclosing chat")
+        XCTAssertEqual(message.secret?.target, "ttsKey")
+        XCTAssertEqual(message.secret?.label, "ElevenLabs API key")
+        XCTAssertEqual(message.secret?.requestKey, "request-key-1")
+        XCTAssertTrue(try XCTUnwrap(message.secret).isPending)
+        XCTAssertEqual(previewText(of: message), "ElevenLabs API key")
+    }
+
+    func testDecodesAChannelCredentialRequestWithItsSender() throws {
+        let json = """
+        {
+          "id": "secret-2", "role": "bot", "kind": "secret", "at": 1786742413762,
+          "from": {"botId": "bot-2", "name": "Robyn", "color": "purple"},
+          "secret": {
+            "target": "ttsKey", "label": "ElevenLabs API key",
+            "description": "Enables voices.", "placeholder": "Paste key",
+            "helpUrl": "https://elevenlabs.io/app/settings/api-keys",
+            "requestKey": "request-key-2", "provided": true, "resumed": true
+          }
+        }
+        """
+        let message = try JSONDecoder().decode(Message.self, from: Data(json.utf8))
+
+        XCTAssertEqual(message.kind, .secret)
+        XCTAssertEqual(message.from?.botId, "bot-2")
+        XCTAssertEqual(message.from?.name, "Robyn")
+        XCTAssertFalse(try XCTUnwrap(message.secret).isPending)
+        XCTAssertEqual(message.secret?.provided, true)
+        XCTAssertEqual(message.secret?.resumed, true)
     }
 
     func testAPendingApprovalIsActionableAndAnAnsweredOneIsNot() throws {

@@ -55,6 +55,7 @@ describe("what the app may do", () => {
     ["PATCH", "/api/bots/bot_123/tasks/th_1"],
     ["DELETE", "/api/bots/bot_123/tasks/th_1"],
     ["PATCH", "/api/bots/bot_123/profile"],
+    ["PATCH", "/api/bots/bot_123/model"],
     ["POST", "/api/bots/bot_123/avatar/generate"],
     ["POST", "/api/bots/bot_123/computer/join"],
     ["POST", "/api/groups/room-1/messages"],
@@ -65,6 +66,7 @@ describe("what the app may do", () => {
     ["DELETE", "/api/groups/room-1/tasks/th_1"],
     ["GET", "/api/threads/th_1/messages"],
     ["GET", "/api/threads/th_1/messages/msg_2/image"],
+    ["POST", "/api/threads/th_1/messages/msg_2/file"],
     ["POST", "/api/threads/th_1/messages/msg_2/reactions"],
     ["GET", "/api/threads/th_1/export"],
     ["POST", "/api/threads/th_1/respond"],
@@ -165,8 +167,13 @@ describe("what it may not", () => {
     expect(allowed("GET", "/api/bots")).toBe(true);
     expect(allowed("DELETE", "/api/bots/bot_123")).toBe(false);
     expect(allowed("POST", "/api/threads/th_1/messages")).toBe(false);
+    expect(allowed("GET", "/api/threads/th_1/messages/msg_2/file")).toBe(false);
+    expect(allowed("POST", "/api/threads/th_1/messages/msg_2/file/extra")).toBe(false);
     expect(allowed("GET", "/api/groups/room-1")).toBe(false);
     expect(allowed("PATCH", "/api/bots/bot_123")).toBe(false);
+    expect(allowed("GET", "/api/bots/bot_123/model")).toBe(false);
+    expect(allowed("POST", "/api/bots/bot_123/model")).toBe(false);
+    expect(allowed("PATCH", "/api/bots/bot_123/model/extra")).toBe(false);
     expect(allowed("PATCH", "/api/bots/bot_123/profile/execution-policy")).toBe(false);
     expect(allowed("GET", "/api/sidebar-sections")).toBe(false);
     expect(allowed("PATCH", "/api/sidebar-sections")).toBe(false);

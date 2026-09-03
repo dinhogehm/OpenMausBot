@@ -73,6 +73,7 @@ type Phase =
   | "vps-stopped"
   | "local"
   | "local-unavailable"
+  | "browser"
   | "off"
   | "error";
 
@@ -106,6 +107,9 @@ function routineScheduleLabel(routine: Routine) {
       hour: "numeric",
       minute: "2-digit",
     });
+  }
+  if (routine.schedule.type === "interval") {
+    return `Every ${routine.schedule.everyMinutes} min`;
   }
   const days = routine.schedule.weekdays;
   const cadence =
@@ -210,6 +214,19 @@ export function ComputerPanel({
   const selectedInstance = state.instances.find(
     (instance) => instance.instanceId === bot.modelSelection.instanceId,
   );
+  // "Works on: Browser" needs the same things as the browser switch minus
+  // the switch itself — picking it turns the switch on. The box-native
+  // Computer engine runs inside the box, so it has no browser-only mode.
+  const browserSelectable =
+    builtInBrowserEnabled(state.config) &&
+    Boolean(window.ogb?.browser) &&
+    selectedInstance?.capabilities?.browserMcp === true &&
+    selectedInstance.driverKind !== "boxAgent";
+  const browserDisabledReason = !window.ogb?.browser
+    ? "The built-in browser needs the OpenMausBot desktop app"
+    : !builtInBrowserEnabled(state.config)
+      ? "The built-in browser is switched off under App Settings → Experimental"
+      : "This model engine cannot use the built-in browser";
 
   const selectPanelView = (view: ComputerPanelView) => {
     setPanelView(view);
@@ -279,6 +296,8 @@ export function ComputerPanel({
         ? "the Local VM"
       : bot.computer === "local"
         ? "this computer"
+      : bot.computer === "browser"
+        ? "the built-in browser"
         : bot.computer === "off"
           ? null
           : phase === "ready"
@@ -302,6 +321,12 @@ export function ComputerPanel({
     setError(null);
     if (bot.computer === "off") {
       setPhase("off");
+      return;
+    }
+    // Browser-only bots own no desktop: the Browser tab is their whole
+    // screen, so this tab must not wake a box or start host capture.
+    if (bot.computer === "browser") {
+      setPhase("browser");
       return;
     }
     if (bot.computer === "local") {
@@ -823,6 +848,7 @@ export function ComputerPanel({
     "vps-stopped": "The managed VPS computer is stopped",
     "local-unavailable": localDisabledReason ?? "Local computer control isn't ready.",
     "vm-unavailable": "The Local VM isn't available for this bot",
+    browser: "This bot works in the built-in browser — no desktop here",
     off: "This bot's computer is off",
     error: "Couldn't reach the computer",
   } satisfies Record<Exclude<Phase, "ready" | "local" | "vm">, string>;
@@ -986,6 +1012,14 @@ export function ComputerPanel({
                   className="mt-1 rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink hover:bg-raised-hover"
                 >
                   Open Settings
+                </button>
+              )}
+              {phase === "browser" && browserEnabled && (
+                <button
+                  onClick={() => selectPanelView("browser")}
+                  className="mt-1 rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink hover:bg-raised-hover"
+                >
+                  Open the Browser tab
                 </button>
               )}
               {phase === "vm-unavailable" && (
@@ -1215,7 +1249,7 @@ export function ComputerPanel({
 
         {/* Computer source */}
           <div className="mt-4 rounded-xl bg-card p-4">
-            <div className="text-[15px] font-medium text-ink">Runs on</div>
+            <div className="text-[15px] font-medium text-ink">Works on</div>
             <div className="mt-0.5 text-[13px] text-ink-secondary">
               {!bot.computer &&
                 (isLinux || !localSelectable
@@ -1225,9 +1259,9 @@ export function ComputerPanel({
                   : cloudBackend === "vps"
                     ? "Auto reuses a ready VPS when one exists, otherwise this computer. "
                     : "Auto uses a cloud box when one exists, otherwise this computer. ")}
-              Pick where this bot's computer lives. <b className="text-ink">Local VM</b> is a Cua-controlled Linux desktop
+              Pick where this bot works. <b className="text-ink">Local VM</b> is a Cua-controlled Linux desktop
               in a container on this machine — free and separate from your own desktop. Set it up in App
-              Settings → Local VM.
+              Settings → Local VM. <b className="text-ink">Browser</b> is the built-in browser tab only; no desktop.
           </div>
           <div className="mt-3 flex overflow-hidden rounded-lg border border-hairline/40">
             {(
@@ -1235,6 +1269,7 @@ export function ComputerPanel({
                 ["cloud", "Cloud"],
                 ["vm", "Local VM"],
                 ["local", "This computer"],
+                ["browser", "Browser"],
                 ["off", "Off"],
               ] as const
             ).map(([mode, label], i) => (
@@ -1242,7 +1277,8 @@ export function ComputerPanel({
                 const disabled =
                   (mode === "cloud" && !cloudSupported) ||
                   (mode === "vm" && !vmSupported) ||
-                  (mode === "local" && !localSelectable);
+                  (mode === "local" && !localSelectable) ||
+                  (mode === "browser" && !browserSelectable);
                 const unavailableTitle =
                   mode === "vm" && !vmSupported
                     ? "This model engine cannot use the Local VM"
@@ -1250,6 +1286,8 @@ export function ComputerPanel({
                       ? "This model engine cannot use cloud computer tools"
                       : mode === "local" && !localSelectable
                         ? localDisabledReason ?? "Local computer control isn't ready"
+                        : mode === "browser"
+                          ? browserSelectable ? "The built-in browser tab only; no desktop" : browserDisabledReason
                           : undefined;
                 return (
               <button
@@ -1259,6 +1297,9 @@ export function ComputerPanel({
                 onClick={() => {
                   if (mode === bot.computer) return;
                   if (mode === "local" && bot.autoApprove) setLocalAutoWarning(true);
+                  // a browser-only bot must actually have its browser: flip
+                  // the per-bot switch on with the destination
+                  else if (mode === "browser") dispatch({ type: "updateBot", botId: bot.id, patch: { computer: mode, browser: true } });
                   else dispatch({ type: "updateBot", botId: bot.id, patch: { computer: mode } });
                 }}
                 className={cn(

@@ -1,10 +1,21 @@
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 
+// The About dialog shows the shipped version; package.json is the one place
+// it is already maintained, so it is inlined at build time rather than
+// round-tripped through the preload bridge (which is absent in dev).
+const { version } = JSON.parse(
+  readFileSync(fileURLToPath(new URL("./package.json", import.meta.url)), "utf8"),
+) as { version: string };
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: {
+    __APP_VERSION__: JSON.stringify(version),
+  },
   test: {
     environment: "node",
     include: [
@@ -13,6 +24,7 @@ export default defineConfig({
       "electron/**/*.test.mjs",
       "src/**/*.test.ts",
       "companion/**/*.test.ts",
+      "enterprise/**/*.test.ts",
       "scripts/**/*.test.mjs",
     ],
     setupFiles: ["server/testing/setup.ts"],

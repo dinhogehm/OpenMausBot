@@ -1,4 +1,4 @@
-import { BookOpen, ChevronDown, ChevronLeft, Crown, FolderOpen, Trash2, X } from "lucide-react";
+import { BookOpen, CalendarClock, ChevronDown, ChevronLeft, Crown, FolderOpen, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, useStore, type Bot } from "@/state/store";
 import { stateForBot } from "@/lib/mascot";
@@ -17,6 +17,7 @@ import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
 import { VoiceSettings } from "./VoiceSettings";
 import { BOT_PROFILE_LIMITS } from "../../shared/bot-profile";
 import { Switch } from "./SettingsPrimitives";
+import { RoutineEditor } from "./RoutinesPage";
 
 function Field({
   label,
@@ -541,6 +542,8 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
   const providerSupportsLocal = instanceSupportsLocalComputer(state.instances, bot);
   const localSelectable = localComputerSelectable({ capabilities, providerSupportsLocal });
   const [localAutoWarning, setLocalAutoWarning] = useState<"auto" | "local" | null>(null);
+  const [creatingRoutine, setCreatingRoutine] = useState(false);
+  useEffect(() => setCreatingRoutine(false), [bot.id]);
   const localDisabledReason = localComputerDisabledReason({ capabilities, providerSupportsLocal });
   const patch = (
     p: Partial<
@@ -587,12 +590,22 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
   const browserFeature = builtInBrowserEnabled(state.config);
   const browserAllowed = bot.browser !== false;
   const browserEnabled = browserFeature && browserAllowed;
+  // "Works on: Browser" needs everything the switch needs except the switch
+  // itself; the box-native Computer engine has no browser-only mode.
+  const browserSelectable = desktopBrowser && browserFeature && canUseBrowser && engine?.driverKind !== "boxAgent";
+  const browserDisabledReason = !desktopBrowser
+    ? "The built-in browser needs the OpenMausBot desktop app"
+    : !browserFeature
+      ? "The built-in browser is switched off under App Settings → Experimental"
+      : "This model engine cannot use the built-in browser";
   const sectionName = bot.section?.trim() || "General";
   const currentChief = state.bots.find(
     (candidate) =>
       candidate.chiefOfStaff &&
       (candidate.section?.trim() || "") === (bot.section?.trim() || ""),
   );
+  const botRoutines = state.routines.filter((routine) => routine.botId === bot.id);
+  const activeBotRoutines = botRoutines.filter((routine) => routine.enabled).length;
 
   return (
     <>
@@ -653,6 +666,33 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
               onChange={(e) => patch({ description: e.target.value })}
             />
           </Field>
+
+          <div className="rounded-xl bg-card p-4">
+            <div className="flex items-center gap-2">
+              <CalendarClock size={16} className="text-accent" />
+              <div className="min-w-0 flex-1 text-[15px] font-medium text-ink">Scheduled tasks</div>
+              <span className="shrink-0 text-[11.5px] tabular-nums text-ink-secondary">
+                {activeBotRoutines} active · {botRoutines.length} total
+              </span>
+            </div>
+            <div className="mt-3 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setCreatingRoutine(true)}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white hover:brightness-110"
+              >
+                <Plus size={14} />
+                New schedule
+              </button>
+              <button
+                type="button"
+                onClick={() => dispatch({ type: "showRoutines" })}
+                className="rounded-lg bg-control px-3 py-2 text-[13px] text-ink hover:bg-raised-hover"
+              >
+                Manage
+              </button>
+            </div>
+          </div>
 
           <div className={cn(
             "rounded-xl border p-4",
@@ -820,30 +860,40 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
           )}
 
           <div className="rounded-xl bg-card p-4">
-            <div className="text-[15px] font-medium text-ink">Computer</div>
+            <div className="text-[15px] font-medium text-ink">Works on</div>
             <div className="mt-0.5 text-[13px] text-ink-secondary">
-              Where this bot's computer runs{bot.computer ? "" : " (currently: auto)"}
+              Where this bot works{bot.computer ? "" : " (currently: auto)"}. Browser is the built-in browser tab only; no desktop.
             </div>
             <div className="mt-3 flex overflow-hidden rounded-lg border border-hairline/40">
               {([
                 ["cloud", "Cloud"],
                 ["vm", "Local VM"],
                 ["local", "This computer"],
+                ["browser", "Browser"],
                 ["off", "Off"],
               ] as const).map(([mode, label], i) => (
                 <button
                   key={mode}
-                  disabled={mode === "local" && !localSelectable}
-                  title={mode === "local" && !localSelectable ? localDisabledReason ?? undefined : undefined}
+                  disabled={(mode === "local" && !localSelectable) || (mode === "browser" && !browserSelectable)}
+                  title={
+                    mode === "local" && !localSelectable
+                      ? localDisabledReason ?? undefined
+                      : mode === "browser"
+                        ? browserSelectable ? "The built-in browser tab only; no desktop" : browserDisabledReason
+                        : undefined
+                  }
                   onClick={() => {
                     if (mode === bot.computer) return;
                     if (mode === "local" && bot.autoApprove) setLocalAutoWarning("local");
+                    // a browser-only bot must actually have its browser: flip
+                    // the per-bot switch on with the destination
+                    else if (mode === "browser") patch({ computer: mode, browser: true });
                     else patch({ computer: mode });
                   }}
                   className={cn(
                     "flex-1 py-1.5 text-[13px] capitalize",
                     i > 0 && "border-l border-hairline/40",
-                    mode === "local" && !localSelectable && "cursor-not-allowed opacity-40",
+                    ((mode === "local" && !localSelectable) || (mode === "browser" && !browserSelectable)) && "cursor-not-allowed opacity-40",
                     bot.computer === mode
                       ? "bg-control text-ink"
                       : "text-ink-secondary hover:bg-control/60 hover:text-ink",
@@ -969,6 +1019,14 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         </div>
       </div>
     </aside>
+    {creatingRoutine && (
+      <RoutineEditor
+        key={bot.id}
+        bots={[bot]}
+        lockedBotId={bot.id}
+        onClose={() => setCreatingRoutine(false)}
+      />
+    )}
     <LocalComputerAutoWarning
       open={localAutoWarning !== null}
       onCancel={() => setLocalAutoWarning(null)}

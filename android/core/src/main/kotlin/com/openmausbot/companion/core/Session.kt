@@ -69,6 +69,8 @@ class Session(
     private val metadataFn: suspend (CompanionClient) -> CompanionConnectionMetadata = { client ->
         client.connectionMetadata()
     },
+    /** Test seam for the handoff between a completed transfer and its caller. */
+    private val afterAttachmentDownload: suspend () -> Unit = {},
 ) {
     sealed interface Status {
         data object Unpaired : Status
@@ -127,6 +129,7 @@ class Session(
     private var screenWatchers = 0
     private val gate = Mutex()
     private val notificationGate = Mutex()
+    private val attachmentDownloads = AttachmentDownloadCache(scope)
     private val restored = CompletableDeferred<Unit>()
     /** QR credentials authoritatively rejected or redeemed — never start a new request (§6). */
     private val spentQrCredentials = mutableSetOf<String>()
@@ -398,6 +401,7 @@ class Session(
     }
 
     fun signOut() {
+        attachmentSendIds.clear()
         streamJob?.cancel()
         streamJob = null
         scope.launch {
@@ -502,6 +506,7 @@ class Session(
     }
 
     private fun stopActiveRuntimeLocked() {
+        attachmentDownloads.clear()
         streamGeneration += 1
         streamJob?.cancel()
         streamJob = null
@@ -1033,6 +1038,169 @@ class Session(
                 is Chat.BotChat -> it.sendToBot(to.bot.id, text)
                 is Chat.RoomChat -> it.sendToRoom(to.room.id, text)
             }
+        }
+    }
+
+    /**
+     * An ambiguous network failure may happen after the server accepted a
+     * message. Reusing the id for the exact same retained draft makes Retry
+     * idempotent instead of sending the attachment twice.
+     */
+    private data class AttachmentDraftKey(
+        val destination: MessageDestination,
+        val text: String,
+        val attachmentIds: List<String>,
+    )
+
+    private val attachmentSendIds = LinkedHashMap<AttachmentDraftKey, String>()
+
+    /**
+     * Send a composer draft with app-owned attachments — the port of
+     * `Session.send(text:attachments:to:)`. The destination includes the exact
+     * active thread at tap time, so neither a desktop task switch nor an upload
+     * delay can move the message elsewhere. Callers only clear their draft when
+     * this returns true.
+     */
+    suspend fun send(text: String, attachments: List<PendingMessageAttachment>, to: Chat): Boolean {
+        val activeClient = client ?: run {
+            _actionError.value = "This computer is offline."
+            return false
+        }
+        val connectionId = _connection.value?.id
+        _actionError.value = null
+        return try {
+            AttachmentPolicy.validate(attachments)
+            if (text.isBlank() && attachments.isEmpty()) {
+                _actionError.value = "Write a message or attach a file first."
+                return false
+            }
+            if (attachments.any { it.kind == PendingMessageAttachment.Kind.IMAGE }) {
+                val capable = try {
+                    activeClient.imageCapableInstanceIds()
+                } catch (error: APIError.Status) {
+                    if (error.code != 404) throw error
+                    _actionError.value = "Update OpenMausBot on this computer before sending images."
+                    return false
+                }
+                if (!imageSupported(to, capable)) {
+                    _actionError.value = imageCompatibilityMessage(to)
+                    return false
+                }
+            }
+            val destination = when (to) {
+                is Chat.BotChat -> MessageDestination.Bot(to.bot.id, to.bot.threadId)
+                is Chat.RoomChat -> MessageDestination.Room(to.room.id, to.room.threadId)
+            }
+            val key = AttachmentDraftKey(destination, text, attachments.map { it.id })
+            if (attachmentSendIds.size >= 20 && key !in attachmentSendIds) attachmentSendIds.clear()
+            val sendId = attachmentSendIds.getOrPut(key) { UUID.randomUUID().toString() }
+
+            val uploaded = attachments.map { attachment ->
+                currentCoroutineContext().ensureActive()
+                val mime = AttachmentPolicy.normalizedMime(attachment.mime)
+                when (attachment.kind) {
+                    PendingMessageAttachment.Kind.IMAGE -> SharedAttachmentReference(
+                        path = activeClient.uploadImage(attachment.data, mime, attachment.id),
+                        kind = SharedAttachmentKind.IMAGE,
+                        displayName = attachment.name,
+                    )
+                    PendingMessageAttachment.Kind.FILE -> {
+                        val file = activeClient.uploadFile(attachment.data, attachment.name, mime, attachment.id)
+                        SharedAttachmentReference(file.path, SharedAttachmentKind.FILE, file.name)
+                    }
+                }
+            }
+            val message = SharedMessageComposer.compose(
+                instruction = text,
+                text = emptyList(),
+                urls = emptyList(),
+                attachments = uploaded,
+            )
+            activeClient.send(message, destination, sendId)
+            attachmentSendIds.remove(key)
+            _actionError.value = null
+            true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: APIError) {
+            if (error.isUnauthorized) {
+                gate.withLock {
+                    if (connectionId != null && _connection.value?.id == connectionId) {
+                        _status.value = Status.Unauthorized
+                    }
+                }
+            }
+            _actionError.value = error.message
+            false
+        } catch (error: Throwable) {
+            _actionError.value = error.message
+            false
+        }
+    }
+
+    private fun imageSupported(chat: Chat, capableInstances: Set<String>): Boolean = when (chat) {
+        is Chat.BotChat -> chat.bot.modelSelection.instanceId in capableInstances
+        is Chat.RoomChat -> chat.room.memberIds.isNotEmpty() && chat.room.memberIds.all { id ->
+            val bot = _state.value.bot(id) ?: return@all false
+            bot.modelSelection.instanceId in capableInstances
+        }
+    }
+
+    private fun imageCompatibilityMessage(chat: Chat): String = when (chat) {
+        is Chat.BotChat ->
+            "${chat.bot.name}'s current model doesn't support images. Choose another model or remove the image."
+        is Chat.RoomChat ->
+            "Every bot that may answer in this channel must use a model that supports images."
+    }
+
+    /**
+     * Download one desktop path through its originating transcript message.
+     * Where the bytes are kept for viewing is the app's business (it owns a
+     * cache directory); this only fetches and reports.
+     */
+    suspend fun downloadFile(
+        threadId: String,
+        messageId: String,
+        path: String,
+        reportError: Boolean = true,
+        cacheResult: Boolean = false,
+    ): DownloadedFile? {
+        val activeClient = client ?: run {
+            if (reportError) _actionError.value = "This computer is offline."
+            return null
+        }
+        val connectionId = _connection.value?.id
+        if (reportError) _actionError.value = null
+        return try {
+            val id = connectionId ?: throw APIError.Transport("This computer is offline.")
+            val download = attachmentDownloads.getOrLoad(
+                AttachmentDownloadKey(id, threadId, messageId, path),
+                retainResult = cacheResult,
+            ) {
+                activeClient.downloadFile(threadId, messageId, path)
+            }
+            afterAttachmentDownload()
+            currentCoroutineContext().ensureActive()
+            // A computer switch invalidates the meaning of every local path.
+            // The cache is cleared during the switch, but a transfer that won
+            // the completion race must still never surface old-computer bytes.
+            if (_connection.value?.id != id) return null
+            download
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: APIError) {
+            if (error.isUnauthorized) {
+                gate.withLock {
+                    if (connectionId != null && _connection.value?.id == connectionId) {
+                        _status.value = Status.Unauthorized
+                    }
+                }
+            }
+            if (reportError) _actionError.value = error.message
+            null
+        } catch (error: Throwable) {
+            if (reportError) _actionError.value = error.message
+            null
         }
     }
 

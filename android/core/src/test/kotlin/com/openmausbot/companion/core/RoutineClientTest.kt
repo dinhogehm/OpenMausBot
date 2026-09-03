@@ -1,6 +1,7 @@
 package com.openmausbot.companion.core
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -39,6 +40,7 @@ class RoutineClientTest {
             """{"routine":$routine}""",
             """{"routine":$routine}""",
             """{"routine":$routine}""",
+            """{"routine":$routine}""",
             """{"run":$run}""",
             "{}",
         ).forEach { server.enqueue(json(it)) }
@@ -46,6 +48,8 @@ class RoutineClientTest {
         val listed = client.routines()
         assertEquals(listOf("routine-1"), listed.routines.map(Routine::id))
         assertEquals(listOf("run-1"), listed.runs.map(RoutineRun::id))
+        assertEquals(null, listed.routines.single().timeoutMinutes)
+        assertEquals(null, listed.runs.single().timeoutMinutes)
 
         val exactName = "n".repeat(80)
         val exactPrompt = "p".repeat(20_000)
@@ -55,7 +59,7 @@ class RoutineClientTest {
                 prompt = exactPrompt,
                 botId = "bot-1",
                 schedule = RoutineSchedule.once(2_000_000.0),
-                durationMinutes = 15,
+                durationMinutes = 5,
             ),
         )
         client.updateRoutine(
@@ -68,17 +72,32 @@ class RoutineClientTest {
                 enabled = false,
                 schedule = RoutineSchedule.daily("08:05", listOf(1, 2, 3, 4, 5)),
                 durationMinutes = 240,
+                timeoutMinutes = 240,
+            ),
+        )
+        client.updateRoutine(
+            "routine-1",
+            RoutineInput(
+                name = exactName,
+                prompt = exactPrompt,
+                botId = "bot-1",
+                schedule = RoutineSchedule.interval(
+                    everyMinutes = 15,
+                    anchorAtMillis = 2_500_000L,
+                ),
+                clearTimeout = true,
             ),
         )
         client.setRoutineEnabled("routine-1", true)
         client.runRoutine("routine-1")
         client.deleteRoutine("routine-1")
 
-        val requests = List(6) { server.takeRequest() }
+        val requests = List(7) { server.takeRequest() }
         assertEquals(
             listOf(
                 "GET /api/routines",
                 "POST /api/routines",
+                "PATCH /api/routines/routine-1",
                 "PATCH /api/routines/routine-1",
                 "PATCH /api/routines/routine-1",
                 "POST /api/routines/routine-1/run",
@@ -90,13 +109,21 @@ class RoutineClientTest {
 
         val create = CompanionJson.parseToJsonElement(requests[1].body.readUtf8()).jsonObject
         assertEquals(
-            setOf("name", "prompt", "botId", "runOn", "schedule", "durationMinutes"),
+            setOf(
+                "name",
+                "prompt",
+                "botId",
+                "runOn",
+                "schedule",
+                "durationMinutes",
+            ),
             create.keys,
         )
         assertEquals(exactName, create.getValue("name").jsonPrimitive.content)
         assertEquals(exactPrompt, create.getValue("prompt").jsonPrimitive.content)
         assertEquals("maus", create.getValue("runOn").jsonPrimitive.content)
-        assertEquals(15, create.getValue("durationMinutes").jsonPrimitive.content.toInt())
+        assertEquals(5, create.getValue("durationMinutes").jsonPrimitive.content.toInt())
+        assertFalse("timeoutMinutes" in create)
         assertEquals(
             mapOf("type" to "once", "at" to "2000000.0"),
             create.getValue("schedule").jsonObject.mapValues { it.value.jsonPrimitive.content },
@@ -106,6 +133,7 @@ class RoutineClientTest {
         assertEquals("cloud", update.getValue("runOn").jsonPrimitive.content)
         assertFalse(update.getValue("enabled").jsonPrimitive.content.toBoolean())
         assertEquals(240, update.getValue("durationMinutes").jsonPrimitive.content.toInt())
+        assertEquals(240, update.getValue("timeoutMinutes").jsonPrimitive.content.toInt())
         val schedule = update.getValue("schedule").jsonObject
         assertEquals("daily", schedule.getValue("type").jsonPrimitive.content)
         assertEquals("08:05", schedule.getValue("time").jsonPrimitive.content)
@@ -114,13 +142,25 @@ class RoutineClientTest {
             schedule.getValue("weekdays").jsonArray.map { it.jsonPrimitive.content.toInt() },
         )
 
+        val intervalUpdate = CompanionJson.parseToJsonElement(requests[3].body.readUtf8()).jsonObject
+        val interval = intervalUpdate.getValue("schedule").jsonObject
+        assertEquals(
+            mapOf(
+                "type" to "interval",
+                "everyMinutes" to "15",
+                "anchorAt" to "2500000",
+            ),
+            interval.mapValues { it.value.jsonPrimitive.content },
+        )
+        assertEquals(JsonNull, intervalUpdate.getValue("timeoutMinutes"))
+
         assertEquals(
             mapOf("enabled" to "true"),
-            CompanionJson.parseToJsonElement(requests[3].body.readUtf8())
+            CompanionJson.parseToJsonElement(requests[4].body.readUtf8())
                 .jsonObject.mapValues { it.value.jsonPrimitive.content },
         )
-        assertEquals(0, requests[4].bodySize)
         assertEquals(0, requests[5].bodySize)
+        assertEquals(0, requests[6].bodySize)
 
         assertFailsWith<APIError.Transport> {
             client.createRoutine(
@@ -136,7 +176,32 @@ class RoutineClientTest {
                 ),
             )
         }
-        assertEquals(6, server.requestCount)
+        assertFailsWith<APIError.Transport> {
+            client.createRoutine(
+                RoutineInput(
+                    name = "Broken interval",
+                    prompt = "Do work",
+                    botId = "bot-1",
+                    schedule = RoutineSchedule(
+                        type = RoutineSchedule.Kind.INTERVAL,
+                        everyMinutes = 4,
+                        anchorAt = 2_500_000L,
+                    ),
+                ),
+            )
+        }
+        assertFailsWith<APIError.Transport> {
+            client.createRoutine(
+                RoutineInput(
+                    name = "Broken timeout",
+                    prompt = "Do work",
+                    botId = "bot-1",
+                    schedule = RoutineSchedule.daily("09:00", listOf(1)),
+                    timeoutMinutes = 241,
+                ),
+            )
+        }
+        assertEquals(7, server.requestCount)
     }
 
     private fun json(body: String): MockResponse = MockResponse()

@@ -18,11 +18,13 @@ describe("buildNotification", () => {
     expect(buildNotification("question", bot, "thread-1", "which branch?")?.title).toBe("Scout has a question");
     expect(buildNotification("done", bot, "thread-1", "pushed the branch")?.title).toBe("Scout finished");
     expect(buildNotification("routine-failed", bot, "thread-1", "boom")?.title).toBe("Scout's routine failed");
+    expect(buildNotification("turn-failed", bot, "thread-1", "the Local VM is not ready")?.title)
+      .toBe("Scout couldn't start");
   });
 
   it("stays silent for a bot whose notifications are off", () => {
     const quiet = { ...bot, notifications: false };
-    for (const kind of ["approval", "question", "done", "routine-failed"] as const) {
+    for (const kind of ["approval", "question", "done", "routine-failed", "turn-failed"] as const) {
       expect(buildNotification(kind, quiet, "thread-1", "anything")).toBeNull();
     }
     // absent means "not turned off" — older bot records predate the flag
@@ -35,6 +37,7 @@ describe("buildNotification", () => {
     expect(buildNotification("done", bot, "thread-1", "")).toBeNull();
     // ...but a blocked bot is worth knowing about even with a thin summary
     expect(buildNotification("approval", bot, "thread-1", "")).not.toBeNull();
+    expect(buildNotification("turn-failed", bot, "thread-1", "")).not.toBeNull();
   });
 
   it("uses the thread it was raised on, not the bot's current one", () => {

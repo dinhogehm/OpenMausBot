@@ -25,3 +25,21 @@ export function showWorkingDots(
   if (!settledReply) return true;
   return speakerBotId !== undefined && lastMessage.from?.botId !== speakerBotId;
 }
+
+/** rooms: the member the room is waiting on before anyone has the floor.
+ *
+ * A responder busy in another conversation takes its turn when it frees.
+ * Until then the room is working with no speaker, and the newest message is
+ * that member's neutral wait chip — an activity with no verdict yet. Naming
+ * them keeps the presence row honest; otherwise the room sits silent for as
+ * long as the wait lasts. A settled chip (promise kept, or the cap's verdict)
+ * or any other tail means nobody is being waited on. */
+export function awaitedMemberId(
+  working: boolean | undefined,
+  speakerBotId: string | null | undefined,
+  lastMessage: Message | undefined,
+): string | undefined {
+  if (!working || speakerBotId) return undefined;
+  if (lastMessage?.kind !== "activity" || !lastMessage.tool || lastMessage.tool.ok !== undefined) return undefined;
+  return lastMessage.from?.botId;
+}

@@ -44,6 +44,25 @@ import { createBotPatchQueue, type BotUpdatePatch } from "./bot-patch-queue";
 import { skillRecorderEnabled } from "@/lib/feature-flags";
 import { openLiveEvents } from "@/lib/live-events";
 
+const MAX_ROUTINE_RUNS = 2_000;
+const ACTIVE_ROUTINE_RUN_STATUSES = new Set<RoutineRun["status"]>(["queued", "running", "waiting"]);
+
+function trimRoutineRuns(runs: readonly RoutineRun[]): RoutineRun[] {
+  const sorted = [...runs].sort((a, b) => b.scheduledFor - a.scheduledFor);
+  if (sorted.length <= MAX_ROUTINE_RUNS) return sorted;
+  const activeCount = sorted.reduce(
+    (count, run) => count + (ACTIVE_ROUTINE_RUN_STATUSES.has(run.status) ? 1 : 0),
+    0,
+  );
+  let terminalSlots = Math.max(0, MAX_ROUTINE_RUNS - activeCount);
+  return sorted.filter((run) => {
+    if (ACTIVE_ROUTINE_RUN_STATUSES.has(run.status)) return true;
+    if (terminalSlots === 0) return false;
+    terminalSlots -= 1;
+    return true;
+  });
+}
+
 export type { MausColor } from "@/lib/mascot";
 export type { RoutineRunCardData } from "../../shared/routine-run";
 
@@ -97,6 +116,8 @@ export interface Message {
   role: "bot" | "user";
   kind: "text" | "options" | "activity" | "screen" | "connector" | "secret" | "routine.run" | "goal.run";
   text?: string;
+  /** Provider-generated files attached to this assistant response. */
+  attachments?: Array<{ kind: "image"; path: string; mime: string }>;
   card?: OptionCardData;
   connector?: ConnectorCardData;
   secret?: SecretRequestCardData;
@@ -244,8 +265,9 @@ export interface Bot {
   /** what the bot is doing, as the harness sees it; busy is derived from it */
   activity?: "working" | "waiting-on-you" | "idle" | "no-signal" | "dead";
   modelSelection: ModelSelection;
-  /** Where this bot's computer runs; unset = auto (cloud box if one exists, else local). */
-  computer?: "cloud" | "vm" | "local" | "off";
+  /** Where this bot works: a computer, only the built-in browser tab, or
+   * nowhere; unset = auto (cloud box if one exists, else local). */
+  computer?: "cloud" | "vm" | "local" | "browser" | "off";
   /** Which cloud computer backs `computer: "cloud"`; absent means Box. */
   cloudBackend?: CloudBackend;
   /** Allow Auto to prepare/start the managed VPS container. Off by default. */
@@ -382,6 +404,7 @@ export interface EngineInstall {
   docsUrl?: string;
   signInCommand?: string;
   needsNode?: boolean;
+  managed?: { label: string; downloadBytes: number };
 }
 
 /** One row of GET /api/instances — the model picker's data. */
@@ -842,7 +865,7 @@ export function reducer(state: AppState, action: Action): AppState {
         selectedWorkflowId: state.selectedWorkflowId === action.workflowId ? null : state.selectedWorkflowId,
       };
     case "routinesHydrated":
-      return { ...state, routines: action.routines, routineRuns: action.runs };
+      return { ...state, routines: action.routines, routineRuns: trimRoutineRuns(action.runs) };
     case "routinePatched": {
       const exists = state.routines.some((routine) => routine.id === action.routine.id);
       return {
@@ -859,7 +882,10 @@ export function reducer(state: AppState, action: Action): AppState {
       const runs = exists
         ? state.routineRuns.map((run) => (run.id === action.run.id ? action.run : run))
         : [action.run, ...state.routineRuns];
-      return { ...state, routineRuns: runs.sort((a, b) => b.scheduledFor - a.scheduledFor) };
+      return {
+        ...state,
+        routineRuns: trimRoutineRuns(runs),
+      };
     }
     case "webhooksHydrated":
       return { ...state, webhooks: action.webhooks, webhookAttempts: action.attempts, webhookIngress: action.ingress };
@@ -1047,7 +1073,9 @@ export function reducer(state: AppState, action: Action): AppState {
         return { ...b, messages, activeLeafId: adoptsLeaf ? action.message.id : b.activeLeafId };
       });
       const motion =
-        action.message.kind === "options"
+        action.message.role === "user" && action.message.kind === "text" && Boolean(action.message.queueId)
+          ? "working"
+          : action.message.kind === "options"
           ? "thinking"
           : action.message.kind === "activity"
             ? action.message.tool?.ok === false
@@ -1435,6 +1463,8 @@ const StoreContext = createContext<{
   flushBotPatches: (botId: string) => Promise<void>;
   /** Re-fetch engine availability — after an install, without a restart. */
   refreshInstances: () => Promise<void>;
+  /** Explicit provider/network model discovery. */
+  refreshModels: (instanceId: string) => Promise<void>;
 } | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
@@ -2272,6 +2302,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshModels = useCallback(async (instanceId: string) => {
+    const { instances } = await api(`/api/instances/${encodeURIComponent(instanceId)}/refresh-models`, {
+      method: "POST",
+    });
+    rawDispatch({ type: "instances", instances });
+  }, []);
+
   // Installing a CLI or signing one in happens in a terminal, outside this
   // window — so the moment the user comes back is exactly when our engine
   // snapshot is most likely stale. Re-probe on focus, throttled so that
@@ -2293,8 +2330,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [botPatchQueue],
   );
   const value = useMemo(
-    () => ({ state, dispatch, flushBotPatches, refreshInstances }),
-    [state, dispatch, flushBotPatches, refreshInstances],
+    () => ({ state, dispatch, flushBotPatches, refreshInstances, refreshModels }),
+    [state, dispatch, flushBotPatches, refreshInstances, refreshModels],
   );
   return (
     <StoreContext.Provider value={value}>

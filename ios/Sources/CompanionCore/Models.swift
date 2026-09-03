@@ -106,6 +106,26 @@ public struct ToolActivity: Codable, Hashable, Sendable {
     public var setup: Bool?
 }
 
+/// A credential request created by the desktop for one paused task.
+///
+/// Paired phones deliberately cannot write host credentials. Keeping the
+/// payload lets the companion render an honest handoff card instead of
+/// turning this newer message kind into an invisible row.
+public struct SecretRequestCardData: Codable, Hashable, Sendable {
+    public var target: String?
+    public var label: String?
+    public var description: String?
+    public var placeholder: String?
+    public var helpUrl: String?
+    public var requestKey: String?
+    public var provided: Bool?
+    public var dismissed: Bool?
+    public var resumed: Bool?
+    public var error: String?
+
+    public var isPending: Bool { provided != true && dismissed != true }
+}
+
 public struct Sender: Codable, Hashable, Sendable {
     public var botId: String
     public var name: String
@@ -126,7 +146,7 @@ public struct CommChip: Codable, Hashable, Sendable {
 
 public struct Message: Codable, Hashable, Identifiable, Sendable {
     public enum Kind: String, Codable, Sendable {
-        case text, options, activity, screen
+        case text, options, activity, screen, secret
         /// A kind this build has never heard of.
         ///
         /// Not decorative. `kind` is not optional, so without this a single
@@ -163,6 +183,7 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     public var at: Double
     public var text: String?
     public var card: OptionCard?
+    public var secret: SecretRequestCardData?
     public var tool: ToolActivity?
     /// The message this one follows; nil at the thread root. Two messages
     /// sharing a parent are a fork.
@@ -186,6 +207,15 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
 public struct ModelSelection: Codable, Hashable, Sendable {
     public var instanceId: String
     public var model: String
+    /// Optional reasoning effort passed through to engines that support it.
+    /// Older computers omit this field, which means the engine default.
+    public var effort: String?
+
+    public init(instanceId: String, model: String, effort: String? = nil) {
+        self.instanceId = instanceId
+        self.model = model
+        self.effort = effort
+    }
 }
 
 public struct BotTask: Codable, Hashable, Sendable {
@@ -480,12 +510,24 @@ public struct ModelCatalog: Codable, Hashable, Sendable {
     public var options: [ModelOption]
 }
 
+/// The small, phone-safe part of an engine's capabilities needed by bot
+/// settings. Missing capabilities or effort levels mean the engine does not
+/// offer a reasoning control.
+public struct InstanceCapabilities: Codable, Hashable, Sendable {
+    public var effortLevels: [String]?
+
+    public init(effortLevels: [String]? = nil) {
+        self.effortLevels = effortLevels
+    }
+}
+
 public struct Instance: Codable, Hashable, Identifiable, Sendable {
     public var instanceId: String
     public var driverKind: String
     public var displayName: String?
     public var snapshot: ProviderSnapshot
     public var models: ModelCatalog
+    public var capabilities: InstanceCapabilities? = nil
 
     public var id: String { instanceId }
 }
@@ -634,7 +676,7 @@ public struct Voice: Codable, Hashable, Identifiable, Sendable {
 
 public struct RoutineSchedule: Codable, Hashable, Sendable {
     public enum Kind: String, Codable, Sendable {
-        case once, daily
+        case once, daily, interval
         /// A schedule introduced by a newer desktop. It remains visible but
         /// cannot be toggled or saved until the user chooses a supported kind.
         case unknown
@@ -653,6 +695,8 @@ public struct RoutineSchedule: Codable, Hashable, Sendable {
     public var at: Double?
     public var time: String?
     public var weekdays: [Int]?
+    public var everyMinutes: Int?
+    public var anchorAt: Int64?
 
     public static func once(at: Date) -> Self {
         .init(type: .once, at: at.timeIntervalSince1970 * 1_000, time: nil, weekdays: nil)
@@ -660,6 +704,17 @@ public struct RoutineSchedule: Codable, Hashable, Sendable {
 
     public static func daily(time: String, weekdays: [Int]) -> Self {
         .init(type: .daily, at: nil, time: time, weekdays: weekdays)
+    }
+
+    public static func interval(everyMinutes: Int, anchorAt: Date) -> Self {
+        .init(
+            type: .interval,
+            at: nil,
+            time: nil,
+            weekdays: nil,
+            everyMinutes: everyMinutes,
+            anchorAt: Int64((anchorAt.timeIntervalSince1970 * 1_000).rounded())
+        )
     }
 }
 
@@ -672,6 +727,7 @@ public struct Routine: Codable, Hashable, Identifiable, Sendable {
     public var enabled: Bool
     public var schedule: RoutineSchedule
     public var durationMinutes: Int
+    public var timeoutMinutes: Int?
     public var nextRunAt: Double?
     public var createdAt: Double
     public var updatedAt: Double
@@ -683,6 +739,7 @@ public struct RoutineRun: Codable, Hashable, Identifiable, Sendable {
     public var routineName: String
     public var prompt: String?
     public var durationMinutes: Int?
+    public var timeoutMinutes: Int?
     public var botId: String
     public var runOn: String
     public var scheduledFor: Double
@@ -706,10 +763,15 @@ public struct RoutineInput: Encodable, Sendable {
     public var enabled: Bool?
     public var schedule: RoutineSchedule
     public var durationMinutes: Int
+    /// A value replaces the stored limit; nil leaves it unchanged on PATCH.
+    public var timeoutMinutes: Int?
+    /// Explicitly writes JSON null when `timeoutMinutes` is nil.
+    public var clearTimeout: Bool
 
     public init(
         name: String, prompt: String, botId: String, runOn: String = "maus",
-        enabled: Bool? = nil, schedule: RoutineSchedule, durationMinutes: Int = 30
+        enabled: Bool? = nil, schedule: RoutineSchedule, durationMinutes: Int = 30,
+        timeoutMinutes: Int? = nil, clearTimeout: Bool = false
     ) {
         self.name = name
         self.prompt = prompt
@@ -718,6 +780,25 @@ public struct RoutineInput: Encodable, Sendable {
         self.enabled = enabled
         self.schedule = schedule
         self.durationMinutes = durationMinutes
+        self.timeoutMinutes = timeoutMinutes
+        self.clearTimeout = clearTimeout
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, prompt, botId, runOn, enabled, schedule, durationMinutes, timeoutMinutes
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(name, forKey: .name)
+        try values.encode(prompt, forKey: .prompt)
+        try values.encode(botId, forKey: .botId)
+        try values.encode(runOn, forKey: .runOn)
+        try values.encodeIfPresent(enabled, forKey: .enabled)
+        try values.encode(schedule, forKey: .schedule)
+        try values.encode(durationMinutes, forKey: .durationMinutes)
+        if let timeoutMinutes { try values.encode(timeoutMinutes, forKey: .timeoutMinutes) }
+        else if clearTimeout { try values.encodeNil(forKey: .timeoutMinutes) }
     }
 }
 
@@ -759,6 +840,8 @@ public extension Routine {
         switch schedule.type {
         case .daily:
             true
+        case .interval:
+            (5...1_440).contains(schedule.everyMinutes ?? 0) && schedule.anchorAt != nil
         case .once:
             (schedule.at ?? -.infinity) > date.timeIntervalSince1970 * 1_000
         case .unknown:

@@ -18,6 +18,7 @@ import java.time.ZoneId
 import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -94,6 +95,24 @@ class RoutineRulesTest {
         val schedule = RoutineSchedule(RoutineSchedule.Kind.UNKNOWN)
 
         assertEquals("Newer schedule", RoutineRules.scheduleSummary(schedule, utc, en))
+    }
+
+    @Test
+    fun `an interval schedule reads as its cadence`() {
+        assertEquals(
+            "Every 5 min · starting Nov 14, 2023, 10:13 PM",
+            spacesNormalized(
+                RoutineRules.scheduleSummary(
+                    RoutineSchedule.interval(5, 1_700_000_000_000L),
+                    utc,
+                    en,
+                ),
+            ),
+        )
+        assertEquals(
+            "Interval unavailable",
+            RoutineRules.scheduleSummary(RoutineSchedule(RoutineSchedule.Kind.INTERVAL), utc, en),
+        )
     }
 
     @Test
@@ -303,6 +322,29 @@ class RoutineRulesTest {
         assertTrue(ok(RoutineSchedule.Kind.DAILY, setOf(1)))
         assertFalse(ok(RoutineSchedule.Kind.DAILY, emptySet()))
         assertTrue(ok(RoutineSchedule.Kind.ONCE, emptySet()), "one-time needs no weekdays")
+        assertFalse(ok(RoutineSchedule.Kind.INTERVAL, emptySet()), "an interval needs its cadence")
+        assertTrue(
+            RoutineRules.canSave(
+                false,
+                RoutineSchedule.Kind.INTERVAL,
+                "n",
+                "p",
+                "b",
+                emptySet(),
+                everyMinutes = 5,
+            ),
+        )
+        assertFalse(
+            RoutineRules.canSave(
+                false,
+                RoutineSchedule.Kind.INTERVAL,
+                "n",
+                "p",
+                "b",
+                emptySet(),
+                everyMinutes = 4,
+            ),
+        )
         assertFalse(ok(RoutineSchedule.Kind.UNKNOWN, setOf(1)))
 
         assertFalse(RoutineRules.canSave(true, RoutineSchedule.Kind.ONCE, "n", "p", "b", setOf(1)))
@@ -320,14 +362,17 @@ class RoutineRulesTest {
             runOn = RoutineRunLocation.CLOUD,
             enabled = false,
             schedule = RoutineSchedule.daily("09:00", listOf(1)),
-            durationMinutes = 45,
+            durationMinutes = 5,
+            timeoutMinutes = 45,
         )
 
         assertEquals(80, input.name.length)
         assertEquals(20_000, input.prompt.length)
         assertEquals("cloud", input.runOn)
         assertEquals(false, input.enabled)
-        assertEquals(45, input.durationMinutes)
+        assertEquals(5, input.durationMinutes)
+        assertEquals(45, input.timeoutMinutes)
+        assertFalse(input.clearTimeout)
     }
 
     @Test
@@ -339,11 +384,13 @@ class RoutineRulesTest {
             runOn = RoutineRunLocation.MAUS,
             enabled = null,
             schedule = RoutineSchedule.daily("09:00", listOf(1)),
-            durationMinutes = RoutineRules.DEFAULT_DURATION,
+            durationMinutes = RoutineRules.LEGACY_DURATION_MINUTES,
         )
 
         assertNull(input.enabled)
         assertEquals(30, input.durationMinutes)
+        assertNull(input.timeoutMinutes)
+        assertTrue(input.clearTimeout)
     }
 
     @Test
@@ -697,6 +744,54 @@ class RoutineRulesTest {
         assertNull(daily.at)
         assertEquals("07:05", daily.time)
         assertEquals(listOf(1, 3), daily.weekdays, "weekdays go out sorted")
+
+        val interval = RoutineRules.schedule(
+            RoutineSchedule.Kind.INTERVAL,
+            onceAtMillis = 1_700_000_000_000.0,
+            hour = 7,
+            minute = 5,
+            weekdays = setOf(1),
+            everyMinutes = 15,
+        )
+        assertNull(interval.at)
+        assertNull(interval.time)
+        assertNull(interval.weekdays)
+        assertEquals(15, interval.everyMinutes)
+        assertEquals(1_700_000_000_000L, interval.anchorAt)
+    }
+
+    @Test
+    fun `interval minutes accept five minutes through one day`() {
+        assertEquals(listOf(5, 10, 15, 30, 60), RoutineRules.INTERVAL_PRESETS)
+        assertEquals(15, RoutineRules.DEFAULT_INTERVAL)
+        assertEquals(5, RoutineRules.intervalMinutes("5"))
+        assertEquals(1_440, RoutineRules.intervalMinutes(" 1440 "))
+        assertNull(RoutineRules.intervalMinutes(""))
+        assertNull(RoutineRules.intervalMinutes("4"))
+        assertNull(RoutineRules.intervalMinutes("1441"))
+        assertNull(RoutineRules.intervalMinutes("five"))
+    }
+
+    @Test
+    fun `a new interval starts one default cadence from now and gets one timeout default`() {
+        val now = 1_700_000_000_000L
+
+        assertEquals(
+            now + 15 * 60_000L,
+            RoutineRules.defaultIntervalAnchor(now),
+        )
+        assertEquals(
+            30,
+            RoutineRules.intervalTimeoutOnFirstSelection(null, defaultAlreadyApplied = false),
+        )
+        assertNull(
+            RoutineRules.intervalTimeoutOnFirstSelection(null, defaultAlreadyApplied = true),
+            "an existing routine with no timeout must stay at No limit",
+        )
+        assertEquals(
+            45,
+            RoutineRules.intervalTimeoutOnFirstSelection(45, defaultAlreadyApplied = true),
+        )
     }
 
     @Test
@@ -719,11 +814,32 @@ class RoutineRulesTest {
     }
 
     @Test
-    fun `the duration stepper walks 15 to 240 in quarter hours`() {
-        assertEquals(15, RoutineRules.steppedDuration(15, -15))
-        assertEquals(30, RoutineRules.steppedDuration(15, 15))
-        assertEquals(240, RoutineRules.steppedDuration(240, 15))
-        assertEquals(225, RoutineRules.steppedDuration(240, -15))
+    fun `timeout is optional and only offers valid five-minute choices`() {
+        assertEquals(30, RoutineRules.LEGACY_DURATION_MINUTES)
+        assertEquals(30, RoutineRules.DEFAULT_INTERVAL_TIMEOUT)
+        assertEquals(5, RoutineRules.TIMEOUT_RANGE.first)
+        assertEquals(240, RoutineRules.TIMEOUT_RANGE.last)
+        assertEquals(5, RoutineRules.TIMEOUT_OPTIONS.first())
+        assertEquals(240, RoutineRules.TIMEOUT_OPTIONS.last())
+        assertEquals(48, RoutineRules.TIMEOUT_OPTIONS.size)
+        assertTrue(RoutineRules.validTimeout(null))
+        assertTrue(RoutineRules.validTimeout(5))
+        assertTrue(RoutineRules.validTimeout(240))
+        assertFalse(RoutineRules.validTimeout(4))
+        assertFalse(RoutineRules.validTimeout(241))
+
+        assertFailsWith<IllegalArgumentException> {
+            RoutineRules.input(
+                name = "Nightly",
+                prompt = "Do the thing",
+                botId = "bot-1",
+                runOn = RoutineRunLocation.MAUS,
+                enabled = null,
+                schedule = RoutineSchedule.daily("09:00", listOf(1)),
+                durationMinutes = RoutineRules.LEGACY_DURATION_MINUTES,
+                timeoutMinutes = 4,
+            )
+        }
     }
 
     @Test

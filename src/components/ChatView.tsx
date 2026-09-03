@@ -7,7 +7,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Bug,
-  Clock,
   Copy,
   Crown,
   Folder,
@@ -318,10 +317,11 @@ function Bubble({
   const webhookView = user ? webhookMessageView(text) : null;
   const attachments = user && !webhookView ? splitTranscriptAttachments(text) : null;
   const visibleText = webhookView?.task ?? attachments?.display ?? text;
+  const hasAttachments = Boolean(attachments && (attachments.images.length || attachments.files.length));
   const collapsible =
     user && !webhookView && !expanded && (visibleText.length > USER_COLLAPSE_CHARS || visibleText.split("\n").length > USER_COLLAPSE_LINES);
 
-  if (user && editing && !webhookView) {
+  if (user && editing && !webhookView && !hasAttachments) {
     return (
       <div className="flex w-full justify-end">
         <BubbleEditor initial={text} onCancel={onCancelEdit} onSubmit={onSubmitEdit} />
@@ -341,7 +341,7 @@ function Bubble({
       <div className={cn("flex w-full items-center gap-1.5", user ? "justify-end" : "justify-start")}>
         {/* editing rewinds the thread, so it waits for the turn to end —
             same rule as the version switcher below */}
-        {user && message.kind === "text" && !webhookView && !bot.busy && (
+        {user && message.kind === "text" && !webhookView && !hasAttachments && !bot.busy && (
           <button
             onClick={onStartEdit}
             aria-label="Edit message"
@@ -351,7 +351,7 @@ function Bubble({
             <Pencil size={14} />
           </button>
         )}
-        {user && <CopyButton text={visibleText} />}
+        {user && Boolean(visibleText.trim()) && <CopyButton text={visibleText} />}
         {user && (
           <>
             <button
@@ -426,7 +426,7 @@ function Bubble({
                 <AttachedImageGallery paths={attachments.images} />
               )}
               {attachments && attachments.files.length > 0 && (
-                <AttachedFileChips files={attachments.files} className={!visibleText ? "mb-0" : undefined} />
+                <AttachedFileChips files={attachments.files} message={{ threadId: bot.threadId, messageId: message.id }} className={!visibleText ? "mb-0" : undefined} />
               )}
               {visibleText && (
                 <div
@@ -452,16 +452,22 @@ function Bubble({
               )}
             </>
           ) : (
-            <MessageBoundary fallbackText={text}>
-              <ChatMarkdown text={text} />
+            <MessageBoundary fallbackText={text || "Generated image"}>
+              {message.attachments?.length ? (
+                <AttachedImageGallery
+                  paths={message.attachments.map((attachment) => attachment.path)}
+                  className={text ? "justify-start" : "mb-0 justify-start"}
+                />
+              ) : null}
+              {text ? <ChatMarkdown text={text} message={{ threadId: bot.threadId, messageId: message.id }} /> : null}
             </MessageBoundary>
           )}
         </div>
         {!user && (
           <>
             <div className="flex flex-col gap-0.5 self-end pb-0.5">
-              <CopyButton text={text} />
-              {message.kind === "text" && (
+              {text && <CopyButton text={text} />}
+              {message.kind === "text" && text && (
                 <SpeakButton text={text} botId={bot.id} messageId={message.id} voiceId={bot.voice} />
               )}
               {isLastBotText && !bot.busy && onRegenerate && (
@@ -917,6 +923,11 @@ export function ChatView({ bot }: { bot: Bot }) {
     () => [...messages].reverse().find((m) => m.role === "user" && m.kind === "text"),
     [messages],
   );
+  const lastUserMessageHasAttachments = useMemo(() => {
+    if (!lastUserMessage?.text) return false;
+    const attached = splitTranscriptAttachments(lastUserMessage.text);
+    return attached.images.length > 0 || attached.files.length > 0;
+  }, [lastUserMessage]);
 
   // Mascot while the turn works. Streaming stays invisible — when the reply
   // is finished, the whole bubble pops in above the mascot.
@@ -945,6 +956,7 @@ export function ChatView({ bot }: { bot: Bot }) {
     return () => clearTimeout(timer);
   }, [lastMessage?.id, lastMessage?.role, lastMessage?.kind, lastMessage?.text]);
   const presenceVisible = waiting || popping !== null;
+  const poppingMessage = popping ? messages.find((message) => message.id === popping.id) : undefined;
   // Wall-clock anchor for the working row's elapsed readout — set when the
   // turn starts, cleared when it settles, reset on bot switch.
   const [busySince, setBusySince] = useState<number | null>(null);
@@ -1289,39 +1301,18 @@ export function ChatView({ bot }: { bot: Bot }) {
           >
             {popping ? (
               <div className="w-fit max-w-[min(42rem,78%)] rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed text-ink">
-                <MessageBoundary fallbackText={popping.text}>
-                  <ChatMarkdown text={popping.text} />
+                <MessageBoundary fallbackText={popping.text || "Generated image"}>
+                  {poppingMessage?.attachments?.length ? (
+                    <AttachedImageGallery
+                      paths={poppingMessage.attachments.map((attachment) => attachment.path)}
+                      className={popping.text ? "justify-start" : "mb-0 justify-start"}
+                    />
+                  ) : null}
+                  {popping.text ? <ChatMarkdown text={popping.text} message={{ threadId: bot.threadId, messageId: popping.id }} /> : null}
                 </MessageBoundary>
               </div>
             ) : null}
           </TurnPresence>
-          {/* Ghost tail: 1:1 sends made mid-turn wait in the server's steer
-              queue and stay off the transcript until drain (they must never
-              become the active leaf). These rows are that queue made visible,
-              in send order, each with its own cancel. */}
-          {bot.busy &&
-            (state.pendingQueued[bot.threadId] ?? []).map((entry) => (
-              <div key={entry.queueId} className="flex flex-col items-end">
-                <div className="w-fit max-w-[min(42rem,78%)] rounded-2xl border border-dashed border-hairline/70 bg-panel/60 px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap text-ink-secondary">
-                  {entry.text}
-                </div>
-                <div className="mt-1 flex items-center gap-1 pr-1 text-[11px] text-ink-secondary/70">
-                  <Clock size={11} aria-hidden="true" />
-                  <span>Queued — wait, or inject now</span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      dispatch({ type: "cancelQueued", botId: bot.id, queueId: entry.queueId })
-                    }
-                    aria-label="Cancel queued message"
-                    title="Cancel queued message"
-                    className="ml-0.5 flex size-4 shrink-0 items-center justify-center rounded text-ink-secondary hover:bg-raised hover:text-ink"
-                  >
-                    <X size={11} strokeWidth={2.5} />
-                  </button>
-                </div>
-              </div>
-            ))}
         </div>
       </div>
 
@@ -1349,7 +1340,9 @@ export function ChatView({ bot }: { bot: Bot }) {
         onClearReply={clearReply}
         onConsumeReply={consumeReply}
         onRestoreReply={restoreReply}
-        onEditLast={lastUserMessage && !bot.busy ? () => setEditingId(lastUserMessage.id) : undefined}
+        onEditLast={lastUserMessage && !lastUserMessageHasAttachments && !bot.busy
+          ? () => setEditingId(lastUserMessage.id)
+          : undefined}
       />
       </div>
       </div>

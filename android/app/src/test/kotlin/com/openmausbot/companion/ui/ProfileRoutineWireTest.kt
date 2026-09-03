@@ -216,7 +216,15 @@ class ProfileRoutineWireTest {
         assertEquals("/api/routines", request.path)
         val sent = body(request)
         assertEquals(
-            setOf("name", "prompt", "botId", "runOn", "schedule", "durationMinutes"),
+            setOf(
+                "name",
+                "prompt",
+                "botId",
+                "runOn",
+                "schedule",
+                "durationMinutes",
+                "timeoutMinutes",
+            ),
             sent.keys,
             "a new routine sends no enabled flag",
         )
@@ -224,6 +232,7 @@ class ProfileRoutineWireTest {
         assertEquals("Do the thing", sent.getValue("prompt").jsonPrimitive.content)
         assertEquals("maus", sent.getValue("runOn").jsonPrimitive.content)
         assertEquals(45, sent.getValue("durationMinutes").jsonPrimitive.int)
+        assertEquals(JsonNull, sent.getValue("timeoutMinutes"))
 
         val wire = sent.getValue("schedule").jsonObject
         assertEquals(setOf("type", "time", "weekdays"), wire.keys, "no cron field, and no instant")
@@ -233,6 +242,42 @@ class ProfileRoutineWireTest {
             listOf(1, 5),
             wire.getValue("weekdays").jsonArray.map { it.jsonPrimitive.int },
         )
+    }
+
+    @Test
+    fun `an interval routine posts only its cadence and anchor`() = runTest {
+        val session = session()
+        server.enqueue(json("""{"routine":${CompanionJson.encodeToString(routineJson())}}"""))
+
+        session.saveRoutine(
+            RoutineRules.input(
+                name = "Frequent check",
+                prompt = "Check for updates",
+                botId = "bot-1",
+                runOn = RoutineRunLocation.MAUS,
+                enabled = null,
+                schedule = RoutineRules.schedule(
+                    kind = RoutineSchedule.Kind.INTERVAL,
+                    onceAtMillis = 1_700_000_000_000.0,
+                    hour = 0,
+                    minute = 0,
+                    weekdays = emptySet(),
+                    everyMinutes = 5,
+                ),
+                durationMinutes = RoutineRules.LEGACY_DURATION_MINUTES,
+                timeoutMinutes = RoutineRules.DEFAULT_INTERVAL_TIMEOUT,
+            ),
+            id = null,
+        )
+
+        val sent = body(server.takeRequest())
+        assertEquals(30, sent.getValue("durationMinutes").jsonPrimitive.int)
+        assertEquals(30, sent.getValue("timeoutMinutes").jsonPrimitive.int)
+        val wire = sent.getValue("schedule").jsonObject
+        assertEquals(setOf("type", "everyMinutes", "anchorAt"), wire.keys)
+        assertEquals("interval", wire.getValue("type").jsonPrimitive.content)
+        assertEquals(5, wire.getValue("everyMinutes").jsonPrimitive.int)
+        assertEquals("1700000000000", wire.getValue("anchorAt").jsonPrimitive.content)
     }
 
     @Test

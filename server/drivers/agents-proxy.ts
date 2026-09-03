@@ -58,12 +58,12 @@ const ROUTINE_SCHEDULE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   description:
-    'Either {"type":"once","at":RFC3339} for one future run, {"type":"weekly","time":"HH:MM","weekdays":[...]} for chosen days, or {"type":"daily","time":"HH:MM"} to run every day. Sub-day intervals (every N minutes/hours) are not supported.',
+    'Either {"type":"once","at":RFC3339} for one future run, {"type":"weekly","time":"HH:MM","weekdays":[...]} for chosen days, {"type":"daily","time":"HH:MM"} for every day, or {"type":"interval","every_minutes":15,"starts_at":RFC3339} to repeat from an optional starting point.',
   properties: {
     type: {
       type: "string",
-      enum: ["once", "weekly", "daily"],
-      description: "once = a single future run; weekly = chosen weekdays; daily = every day of the week.",
+      enum: ["once", "weekly", "daily", "interval"],
+      description: "once = a single future run; weekly = chosen weekdays; daily = every day; interval = every N minutes.",
     },
     at: {
       type: "string",
@@ -78,6 +78,17 @@ const ROUTINE_SCHEDULE_SCHEMA = {
       type: "array",
       items: { type: "string", enum: WEEKDAYS },
       description: "Only for type weekly: which days the routine runs, in the computer's local timezone.",
+    },
+    every_minutes: {
+      type: "integer",
+      minimum: 5,
+      maximum: 1_440,
+      description: "Only for type interval: whole minutes between runs, from 5 to 1440.",
+    },
+    starts_at: {
+      type: "string",
+      description:
+        "Optional for type interval: RFC3339 date-time with an explicit timezone offset that anchors the cadence. Omit to start one interval after confirmation.",
     },
   },
   required: ["type"],
@@ -98,7 +109,8 @@ const SHORT_WEEKDAYS = {
 
 const SUPPORTED_SCHEDULES =
   'Supported schedules: {"type":"once","at":"2026-09-01T09:00:00+05:30"} (future RFC3339 with explicit offset), ' +
-  '{"type":"weekly","time":"09:00","weekdays":["monday","friday"]}, or {"type":"daily","time":"09:00"} for every day.';
+  '{"type":"weekly","time":"09:00","weekdays":["monday","friday"]}, {"type":"daily","time":"09:00"}, ' +
+  'or {"type":"interval","every_minutes":15}.';
 
 /** The outcome of coercing a model-sent schedule: the harness-dialect
  * schedule, or a message telling the model exactly what to send instead. */
@@ -155,8 +167,26 @@ function normalizeScheduleInput(args: Json): NormalizedSchedule {
     }
     return { schedule: { type: "weekly", time, weekdays: normalized } };
   }
-  if (type === "interval" || type === "cron" || type === "hourly" || type === "minutes") {
-    return { error: `Routines cannot run on sub-day intervals. ${SUPPORTED_SCHEDULES} Pick the closest daily or weekly time and tell the user about this limit.` };
+  if (type === "interval") {
+    const rawMinutes = raw.every_minutes ?? raw.everyMinutes;
+    const everyMinutes = Number(rawMinutes);
+    if (!Number.isInteger(everyMinutes) || everyMinutes < 5 || everyMinutes > 1_440) {
+      return { error: 'An interval schedule needs "every_minutes": a whole number from 5 to 1440.' };
+    }
+    const rawStart = raw.starts_at ?? raw.anchorAt;
+    if (rawStart !== undefined && (typeof rawStart !== "string" || !rawStart.trim())) {
+      return { error: '"starts_at" must be an RFC3339 date-time with an explicit timezone offset.' };
+    }
+    return {
+      schedule: {
+        type: "interval",
+        everyMinutes,
+        ...(typeof rawStart === "string" ? { anchorAt: rawStart.trim() } : {}),
+      },
+    };
+  }
+  if (type === "cron" || type === "hourly" || type === "minutes") {
+    return { error: `Use an interval schedule for every-N-minutes work. ${SUPPORTED_SCHEDULES}` };
   }
   return { error: `Unknown schedule type "${type || "(missing)"}". ${SUPPORTED_SCHEDULES}` };
 }
@@ -175,11 +205,16 @@ const ROUTINE_FIELDS_SCHEMA = {
     enum: ["maus", "cloud"],
     description: "Where the routine runs. Defaults to maus (this OpenMausBot setup).",
   },
-  duration_minutes: {
+  timeout_minutes: {
     type: "integer",
-    minimum: 15,
+    minimum: 5,
     maximum: 240,
-    description: "Maximum run duration in minutes. Defaults to 30.",
+    description:
+      "Optional safety limit for active work, from 5 to 240 minutes. Omit for no limit.",
+  },
+  clear_timeout: {
+    type: "boolean",
+    description: "Only for updates: set true to remove an existing safety limit. Do not combine with timeout_minutes.",
   },
 } as const;
 
@@ -206,7 +241,7 @@ const TOOLS = [
   {
     name: "delegate_bot",
     description:
-      "DEFAULT FOR ASSIGNING WORK. Hand a task to another bot asynchronously: this returns immediately, your turn can end, and you remain available while the peer works. The peer starts after your current turn finishes and its result is delivered automatically to the originating conversation. Acknowledge the assignment; do not call check_delegation or wait_delegation in this same turn.",
+      "DEFAULT FOR ASSIGNING WORK. Hand a task to another bot asynchronously: this returns immediately, your turn can end, and you remain available while the peer works. The peer starts after your current turn finishes and its outcome is delivered automatically to the originating conversation — success or failure wakes you with it. Acknowledge the assignment; do not call check_delegation or wait_delegation in this same turn.",
     inputSchema: {
       type: "object",
       properties: {
@@ -220,7 +255,7 @@ const TOOLS = [
   {
     name: "check_delegation",
     description:
-      "In a later turn, check what happened to a delegation without waiting: still queued, running, or finished. Do not poll this immediately after delegate_bot; completion is delivered to the conversation automatically.",
+      "In a later turn, check what happened to a delegation without waiting: still queued, running (with elapsed time and the peer's recent activity), or finished with the result. Prefer this when a delegated bot is taking long or might be stuck — empty recent activity usually means it is stuck, not working. Do not poll it right after delegate_bot; completion is delivered to the conversation automatically.",
     inputSchema: {
       type: "object",
       properties: {
@@ -259,7 +294,7 @@ const TOOLS = [
   {
     name: "request_credential",
     description:
-      "Ask the user for a supported API key through OpenMausBot's secure credential card. Use this instead of asking them to paste a secret into chat. The secret is saved by the desktop app and is never returned to you. After calling this tool, end the turn; OpenMausBot resumes the task after the user saves or declines.",
+      "Ask the user for a supported API key through OpenMausBot's secure credential flow. On desktop this shows a secure entry card; on mobile it only shows a handoff telling the user to open the conversation on their computer, because credentials cannot be entered from the mobile app. Never claim a secure field opened on mobile, and never ask the user to paste a secret into chat. The secret is saved by the desktop app and is never returned to you. After calling this tool, end the turn; OpenMausBot resumes the task after the user saves or declines.",
     inputSchema: {
       type: "object",
       properties: {
@@ -402,6 +437,9 @@ function routineAction(value: unknown): RoutineAction | null {
 
 function routineFields(args: Json): { fields: Json; error?: string } {
   const fields: Json = {};
+  if (args.clear_timeout === true && typeof args.timeout_minutes === "number") {
+    return { fields, error: "Choose timeout_minutes or clear_timeout, not both." };
+  }
   if (typeof args.name === "string") fields.name = args.name.trim();
   if (typeof args.instructions === "string") fields.instructions = args.instructions.trim();
   if (args.schedule !== undefined && args.schedule !== null) {
@@ -410,7 +448,8 @@ function routineFields(args: Json): { fields: Json; error?: string } {
     fields.schedule = normalized.schedule;
   }
   if (typeof args.run_on === "string") fields.runOn = args.run_on;
-  if (typeof args.duration_minutes === "number") fields.durationMinutes = args.duration_minutes;
+  if (args.clear_timeout === true) fields.timeoutMinutes = null;
+  else if (typeof args.timeout_minutes === "number") fields.timeoutMinutes = args.timeout_minutes;
   return { fields };
 }
 
@@ -515,7 +554,16 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
       return { text: `Task ${taskId} is still queued — ${who} hasn't picked it up yet${waitMs ? ` after ${timeout}s` : ""}. Keep working and check again later.` };
     }
     if (r.status === "running") {
-      return { text: `Task ${taskId} is running with ${who}${waitMs ? ` (still going after ${timeout}s)` : ""}. Check again shortly.` };
+      const elapsedMs = Number.isFinite(r.elapsedMs) ? Number(r.elapsedMs) : 0;
+      const minutes = Math.floor(elapsedMs / 60_000);
+      const elapsed = minutes >= 1 ? `${minutes} minute${minutes === 1 ? "" : "s"}` : `${Math.round(elapsedMs / 1000)}s`;
+      const activity = Array.isArray(r.recentActivity) ? r.recentActivity.filter((line: unknown) => typeof line === "string") : [];
+      const recent = activity.length
+        ? activity.map((line: string) => `  - ${line}`).join("\n")
+        : "  (no visible activity yet — if this stays empty, the peer may be stuck, not working; say so instead of promising progress)";
+      return {
+        text: `Task ${taskId} is running with ${who} — going on ${elapsed} now.${waitMs ? ` (still going after ${timeout}s)` : ""}\nRecent activity:\n${recent}\nJudge progress by this activity, not by waiting: real work keeps producing lines; the same silence for a long stretch usually means stuck.`,
+      };
     }
     return { text: `Task ${taskId} ended without a reply — ${String(r.status ?? "unknown")}${r.result ? `: ${String(r.result)}` : ""}.`, isError: true };
   }
@@ -563,7 +611,7 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
       return { text: `${r.label ?? CREDENTIAL_TARGETS[credentialId].label} is already configured. Continue the task.` };
     }
     return {
-      text: `A secure ${r.label ?? CREDENTIAL_TARGETS[credentialId].label} card is now visible to the user. End this turn; OpenMausBot will resume the task after they save or decline. Never ask them to paste the key into chat.`,
+      text: `A secure ${r.label ?? CREDENTIAL_TARGETS[credentialId].label} request is ready. The desktop app shows its secure entry card; the mobile app only shows a handoff to open this conversation on the computer and does not accept the credential. End this turn; OpenMausBot will resume the task after the user saves or declines. Do not claim a secure field opened on mobile, and never ask them to paste the key into chat.`,
     };
   }
   if (name === "list_routines") {

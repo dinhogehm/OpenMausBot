@@ -5,6 +5,7 @@ import XCTest
 private final class ShareRequestStub: URLProtocol {
     static var responseBody = Data()
     static var statusCode = 200
+    static var responseHeaders = ["Content-Type": "application/json"]
     static var capturedRequest: URLRequest?
     static var capturedBody: Data?
 
@@ -18,7 +19,7 @@ private final class ShareRequestStub: URLProtocol {
             url: request.url!,
             statusCode: Self.statusCode,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
+            headerFields: Self.responseHeaders
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Self.responseBody)
@@ -52,6 +53,7 @@ final class ShareClientTests: XCTestCase {
         super.setUp()
         ShareRequestStub.responseBody = Data()
         ShareRequestStub.statusCode = 200
+        ShareRequestStub.responseHeaders = ["Content-Type": "application/json"]
         ShareRequestStub.capturedRequest = nil
         ShareRequestStub.capturedBody = nil
         let configuration = URLSessionConfiguration.ephemeral
@@ -79,7 +81,11 @@ final class ShareClientTests: XCTestCase {
             text: ["  A useful excerpt.\n", "A useful excerpt.", "  "],
             urls: [url, url],
             attachments: [
-                SharedAttachmentReference(path: "/tmp/a&\"b.png", kind: .image),
+                SharedAttachmentReference(
+                    path: "/tmp/a&\"b.png",
+                    kind: .image,
+                    displayName: "Launch & hero.png"
+                ),
                 SharedAttachmentReference(
                     path: "/tmp/notes<final>.pdf",
                     kind: .file,
@@ -95,10 +101,21 @@ final class ShareClientTests: XCTestCase {
 
         https://example.com/story
 
-        <attached-image path="/tmp/a&amp;&quot;b.png" />
+        <attached-image path="/tmp/a&amp;&quot;b.png" name="Launch &amp; hero.png" />
 
         <attached-file path="/tmp/notes&lt;final&gt;.pdf" name="Project notes.pdf" />
         """)
+    }
+
+    func testComposesLegacyUnnamedImageTagWhenNoDisplayNameIsAvailable() {
+        let message = SharedMessageComposer.compose(
+            instruction: "",
+            text: [],
+            urls: [],
+            attachments: [SharedAttachmentReference(path: "/tmp/image.png", kind: .image)]
+        )
+
+        XCTAssertEqual(message, #"<attached-image path="/tmp/image.png" />"#)
     }
 
     func testRawImageUploadKeepsBytesOutOfJSONAndReturnsMacPath() async throws {
@@ -262,5 +279,121 @@ final class ShareClientTests: XCTestCase {
         try await shortClient.send(text: "hello", toBot: "bot-1")
 
         XCTAssertEqual(ShareRequestStub.capturedRequest?.timeoutInterval, 7)
+    }
+
+    func testAuthenticatedFileDownloadPostsPathAndSanitizesResponseMetadata() async throws {
+        ShareRequestStub.responseBody = Data("# Report".utf8)
+        ShareRequestStub.responseHeaders = [
+            "Content-Type": "Text/Markdown; charset=utf-8",
+            "Content-Disposition": "attachment; filename*=UTF-8''Quarter%20Report.md",
+        ]
+
+        let file = try await client.downloadFile(
+            threadId: "thread-1",
+            messageId: "message-1",
+            path: "/Users/test/Documents/report.md"
+        )
+
+        XCTAssertEqual(ShareRequestStub.capturedRequest?.url?.path, "/api/threads/thread-1/messages/message-1/file")
+        XCTAssertEqual(ShareRequestStub.capturedRequest?.httpMethod, "POST")
+        XCTAssertEqual(ShareRequestStub.capturedRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer paired-token")
+        let body = try XCTUnwrap(ShareRequestStub.capturedBody)
+        XCTAssertEqual(
+            try JSONSerialization.jsonObject(with: body) as? [String: String],
+            ["path": "/Users/test/Documents/report.md"]
+        )
+        XCTAssertEqual(file.data, Data("# Report".utf8))
+        XCTAssertEqual(file.filename, "Quarter Report.md")
+        XCTAssertEqual(file.contentType, "text/markdown")
+        XCTAssertNil(file.localURL)
+    }
+
+    func testFileDownloadStripsPathAndControlsFromResponseFilename() async throws {
+        ShareRequestStub.responseBody = Data([1])
+        ShareRequestStub.responseHeaders = [
+            "Content-Type": "not a mime",
+            "Content-Disposition": "attachment; filename=\"../secret\u{202E}.txt\"",
+        ]
+
+        let file = try await client.downloadFile(
+            threadId: "thread-1",
+            messageId: "message-1",
+            path: "/Users/test/fallback.txt"
+        )
+
+        XCTAssertEqual(file.filename, "secret .txt")
+        XCTAssertEqual(file.contentType, "application/octet-stream")
+    }
+
+    func testFileDownloadBoundsUnicodeFilenameByUTF8BytesAndKeepsExtension() async throws {
+        ShareRequestStub.responseBody = Data([1])
+        let encodedEmoji = String(repeating: "%F0%9F%93%84", count: 100)
+        ShareRequestStub.responseHeaders = [
+            "Content-Type": "application/pdf",
+            "Content-Disposition": "attachment; filename*=UTF-8''\(encodedEmoji).pdf",
+        ]
+
+        let file = try await client.downloadFile(
+            threadId: "thread-1",
+            messageId: "message-1",
+            path: "/Users/test/fallback.pdf"
+        )
+
+        XCTAssertLessThanOrEqual(file.filename.utf8.count, 180)
+        XCTAssertTrue(file.filename.hasSuffix(".pdf"))
+    }
+
+    func testFileDownloadRejectsUnsafeRequestBeforeNetworking() async {
+        do {
+            _ = try await client.downloadFile(
+                threadId: "../thread",
+                messageId: "message-1",
+                path: "relative/report.md"
+            )
+            XCTFail("expected local route rejection")
+        } catch APIError.badURL {
+            XCTAssertNil(ShareRequestStub.capturedRequest)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testFileDownloadAllowsScopedRelativeMarkdownTargets() async throws {
+        ShareRequestStub.responseBody = Data("# Report".utf8)
+        ShareRequestStub.responseHeaders = [
+            "Content-Type": "text/markdown",
+            "Content-Disposition": "attachment; filename=report.md",
+        ]
+
+        _ = try await client.downloadFile(
+            threadId: "thread-1",
+            messageId: "message-1",
+            path: "docs/Quarter%20Report.md?download=1#latest"
+        )
+
+        let body = try XCTUnwrap(ShareRequestStub.capturedBody)
+        XCTAssertEqual(
+            try JSONSerialization.jsonObject(with: body) as? [String: String],
+            ["path": "docs/Quarter Report.md"]
+        )
+    }
+
+    func testFileDownloadRejectsOversizedDeclaredResponse() async {
+        ShareRequestStub.responseBody = Data([1])
+        ShareRequestStub.responseHeaders = [
+            "Content-Type": "text/plain",
+            "Content-Length": String(CompanionClient.maximumFileDownloadBytes + 1),
+        ]
+
+        do {
+            _ = try await client.downloadFile(
+                threadId: "thread-1",
+                messageId: "message-1",
+                path: "/Users/test/large.txt"
+            )
+            XCTFail("expected declared size rejection")
+        } catch {
+            XCTAssertNotNil(ShareRequestStub.capturedRequest)
+        }
     }
 }

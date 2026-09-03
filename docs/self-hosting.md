@@ -7,10 +7,11 @@ path **today**; first-class remote access is coming — see
 
 > **Security first:** the server deliberately trusts only loopback — any
 > process that can reach `127.0.0.1:8799` has full control, including the
-> shell your bots can use. **Never reverse-proxy it to the public internet
-> and never bind it to a public interface.** Reach it through an SSH tunnel
-> (below) or a private network you trust. Proper token-based remote auth is
-> exactly what the Remote Workspace plan adds.
+> shell your bots can use. **Never expose that port directly and never bind
+> it to a public interface.** Reach it through an SSH tunnel, a private
+> network you trust, or the Docker stack below, which puts a login wall
+> (Caddy) in front. Proper token-based remote auth is exactly what the
+> Remote Workspace plan adds.
 
 ## What works headless (and what doesn't)
 
@@ -30,7 +31,56 @@ Desktop-only for now (needs the Mac/Linux app):
 - the built-in browser panel, the skill recorder, dictation/voice,
   controlling the host desktop
 
-## Setup
+## Docker (recommended)
+
+One tenant = one container for the server plus Caddy for HTTPS.
+Requirements: Docker with Compose, a DNS name pointing at the machine, and
+ports 80/443 open.
+
+```sh
+git clone https://github.com/milind-soni/OpenMausBot && cd OpenMausBot/deploy
+cp .env.example .env            # set DOMAIN
+docker compose pull omb && docker compose up -d
+```
+
+That uses the image CI publishes on every `main` push
+(`ghcr.io/milind-soni/openmausbot`, tagged `latest`, `sha-…` and `v…`).
+To build from your checkout instead: `docker compose up -d --build`.
+
+Then sign the engine CLIs in **inside the container** (their logins live on
+the `data` volume, so they survive restarts and image upgrades) and mint a
+pairing code for your first device:
+
+```sh
+docker compose exec omb claude                       # each CLI you listed in ENGINES
+docker compose exec omb node dist-server/pair-cli.js # prints a code and a link
+```
+
+Open the link (`https://<DOMAIN>/pair#code=…`) in a browser and it is
+paired; see "Using it from your computer" for what a session is. Webhook
+URLs (`https://<DOMAIN>/hooks/wh_…`) work without a session, and that is the
+base the app prints on new hooks because the stack sets
+`OMB_WEBHOOK_PUBLIC_URL`.
+
+What the stack does, so you can adapt it:
+
+- [`Dockerfile`](../Dockerfile) builds the UI and the self-contained
+  server bundle, and runs them as an unprivileged user with `HOME=/data`.
+  `--build-arg ENGINES="…"` (or `ENGINES=` in `.env`) bakes engine CLIs
+  into the image.
+- [`deploy/docker-compose.yml`](../deploy/docker-compose.yml) runs Caddy
+  **in the server's network namespace**, so Caddy reaches the server on
+  `127.0.0.1` and the server never binds anything public.
+- [`deploy/Caddyfile`](../deploy/Caddyfile) terminates TLS and forwards
+  the real `Host` plus `X-Forwarded-For`/`X-Forwarded-Proto`; the server's
+  own pairing is the login. A shared-password `basic_auth` block is there,
+  commented out, if you want a second wall in front of pairing.
+
+Upgrade with `docker compose pull omb && docker compose up -d` (or
+`git pull && docker compose up -d --build`). State (chats, routines,
+engine logins, paired sessions) is on the `data` volume; back that up.
+
+## From source
 
 Requirements: Node 24+, pnpm, and at least one agent CLI installed and
 signed in on the server.
@@ -69,20 +119,77 @@ that user (`sudo -u maus claude` etc.) before starting the service.
 
 ## Using it from your computer
 
-Open an SSH tunnel and use the web UI in any browser:
+Pair once, then use the server from any browser on any machine that can
+reach it. On the server:
+
+```sh
+pnpm pair                                  # from a checkout
+docker compose exec omb node dist-server/pair-cli.js   # Docker
+```
+
+It prints a 12-character code (single use, five minutes) and, when the
+server knows its public address (`OMB_PUBLIC_URL`, set by the Docker stack),
+a link like `https://maus.example.com/pair#code=XXXX-XXXX-XXXX`. Open the
+link, or open `/pair` on the address you use and type the code. The browser
+gets a session cookie (30 days, revocable) and the app loads. Sessions are
+listed and revoked at `GET`/`DELETE /api/auth/sessions` for now; a Settings
+screen follows.
+
+From the **desktop app**, use the Server menu: "Add Server from Copied
+Pairing Link…" reads the link you copied from the server, asks once, and
+opens that server's own UI in the app; the app stays signed in to it across
+restarts, and the menu switches between Local and any saved server (on
+Windows and Linux press Alt to show the menu bar). While a remote server is
+shown, this computer's screen, microphone, files and local control are not
+offered to it. "Forget" signs the app out of that server; revoke the
+session on the server too if the device is gone.
+
+What this changes about the trust model: the server still binds loopback
+and still trusts loopback as the owner. A **paired session** is the second
+way in: a bearer token or the cookie, same-origin only, with a scope (`admin`
+by default, `--client` for a device that may chat but not change settings or
+pair others). Five bad codes from one address lock that address out for ten
+minutes. Over plain HTTP (a LAN address without TLS) the cookie is not
+marked `Secure` and travels in clear: use the Docker stack, Tailscale, or
+another TLS front for anything beyond a trusted private network.
+
+Native clients (CLI, scripts) send the token as `Authorization: Bearer …`
+and take a 5-minute ticket from `POST /api/auth/stream-ticket` for the
+event stream, because `EventSource` cannot set headers:
+`GET /api/events?ticket=…`.
+
+`GET /.well-known/openmausbot/environment` is public and tells a client what
+it is talking to: a stable `environmentId`, the label, the version and
+capabilities. Saved connections check the id so a reused address that now
+points at a different server is refused loudly.
+
+An SSH tunnel still works, and is the right answer when the server has no
+address of its own:
 
 ```sh
 ssh -L 8799:localhost:8799 you@your-server
-# then open http://localhost:8799
+# then open http://localhost:8799 — loopback, so no pairing needed
 ```
 
-The server serves the full app UI itself — no desktop install needed on the
-client. The tunnel keeps the loopback trust model intact: to the server,
-you look local, because through the tunnel you are.
+## Putting a proxy in front
 
-Note: plain `tailscale serve`/reverse proxies will currently be refused —
-the server checks that requests look like loopback on purpose. Use the SSH
-tunnel until Remote Workspace lands.
+Any reverse proxy works, given three things:
+
+1. **Forward the real `Host`** and set `X-Forwarded-Proto`. Any request that
+   carries forwarded headers is treated as remote and needs a session, so a
+   proxy that rewrites `Host` to `127.0.0.1`, or forwards a stranger's
+   `Host: localhost`, gains nothing. The proxy's scheme decides whether the
+   session cookie is `Secure` and is part of the same-origin check.
+2. **Set `X-Forwarded-For` yourself** (Caddy and nginx do by default) and
+   drop any the client sent: the pairing lockout counts failures per first
+   forwarded address.
+3. **Do not buffer** the event stream (`flush_interval -1` in Caddy,
+   `proxy_buffering off` in nginx); the UI streams events over SSE.
+
+Plus one convenience: set `OMB_PUBLIC_URL=https://your.domain` so pairing
+links, and `OMB_WEBHOOK_PUBLIC_URL=https://your.domain` so hook URLs, are
+printed with the public address. [`deploy/Caddyfile`](../deploy/Caddyfile)
+is the reference implementation.
 
 ## Using it from your phone
 
@@ -99,7 +206,8 @@ per-device credentials on pairing — see the pairing screen in the iOS app.
 ## Updating
 
 ```sh
-git pull && pnpm install && sudo systemctl restart openmausbot
+docker compose -f deploy/docker-compose.yml pull omb && docker compose -f deploy/docker-compose.yml up -d   # Docker
+git pull && pnpm install && sudo systemctl restart openmausbot          # from source
 ```
 
 Routines and queued work survive restarts; in-flight turns do not, so

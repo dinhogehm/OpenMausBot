@@ -12,6 +12,8 @@ class ProfileRoutinePolicyTest {
         val now = 2_000_000.0
 
         assertTrue(routine(RoutineSchedule.daily("09:00", listOf(1))).canToggle(now))
+        assertTrue(routine(RoutineSchedule.interval(5, now.toLong())).canToggle(now))
+        assertFalse(routine(RoutineSchedule(RoutineSchedule.Kind.INTERVAL, everyMinutes = 4)).canToggle(now))
         assertTrue(routine(RoutineSchedule.once(now + 1_000)).canToggle(now))
         assertFalse(routine(RoutineSchedule.once(now)).canToggle(now))
         assertFalse(routine(RoutineSchedule.once(now - 1_000)).canToggle(now))

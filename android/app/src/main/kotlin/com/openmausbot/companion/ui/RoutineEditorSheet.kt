@@ -17,13 +17,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -62,6 +63,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openmausbot.companion.R
@@ -132,8 +134,35 @@ internal fun RoutineEditorSheet(
     var weekdays by rememberSaveable(stateSaver = WeekdaysSaver) {
         mutableStateOf(seed?.schedule?.weekdays?.toSet() ?: RoutineRules.DEFAULT_WEEKDAYS)
     }
-    var duration by rememberSaveable {
-        mutableIntStateOf(seed?.durationMinutes ?: RoutineRules.DEFAULT_DURATION)
+    var intervalMinutesText by rememberSaveable {
+        mutableStateOf(
+            (seed?.schedule?.everyMinutes ?: RoutineRules.DEFAULT_INTERVAL).toString(),
+        )
+    }
+    var intervalUsesCustom by rememberSaveable {
+        mutableStateOf(
+            seed?.schedule?.everyMinutes?.let { it !in RoutineRules.INTERVAL_PRESETS } ?: false,
+        )
+    }
+    var intervalMenuExpanded by remember { mutableStateOf(false) }
+    var intervalAnchor by rememberSaveable(stateSaver = OnceDraftSaver) {
+        mutableStateOf(
+            OnceDraft(
+                seed?.schedule?.anchorAt
+                    ?: RoutineRules.defaultIntervalAnchor(
+                        nowMillis = System.currentTimeMillis(),
+                        everyMinutes = seed?.schedule?.everyMinutes ?: RoutineRules.DEFAULT_INTERVAL,
+                    ),
+            ),
+        )
+    }
+    val legacyDurationMinutes = seed?.durationMinutes ?: RoutineRules.LEGACY_DURATION_MINUTES
+    var timeoutMinutes by rememberSaveable { mutableStateOf(seed?.timeoutMinutes) }
+    var newIntervalTimeoutApplied by rememberSaveable { mutableStateOf(seed != null) }
+    var advancedExpanded by rememberSaveable {
+        mutableStateOf(
+            seed?.timeoutMinutes?.let { it != RoutineRules.DEFAULT_INTERVAL_TIMEOUT } ?: false,
+        )
     }
     var saving by remember { mutableStateOf(false) }
     var availability by remember { mutableStateOf<RoutineRunAvailability?>(null) }
@@ -156,7 +185,16 @@ internal fun RoutineEditorSheet(
     }
 
     val cloudSelectable = RoutineRules.cloudSelectable(availability, runOn)
-    val canSave = RoutineRules.canSave(saving, kind, name, prompt, agent.botId, weekdays)
+    val intervalMinutes = RoutineRules.intervalMinutes(intervalMinutesText)
+    val canSave = RoutineRules.canSave(
+        saving = saving,
+        kind = kind,
+        name = name,
+        prompt = prompt,
+        botId = agent.botId,
+        weekdays = weekdays,
+        everyMinutes = intervalMinutes,
+    )
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -186,10 +224,15 @@ internal fun RoutineEditorSheet(
                             saving = true
                             val schedule = RoutineRules.schedule(
                                 kind = kind,
-                                onceAtMillis = once.millis.toDouble(),
+                                onceAtMillis = if (kind == RoutineSchedule.Kind.INTERVAL) {
+                                    intervalAnchor.millis.toDouble()
+                                } else {
+                                    once.millis.toDouble()
+                                },
                                 hour = dailyMinuteOfDay / 60,
                                 minute = dailyMinuteOfDay % 60,
                                 weekdays = weekdays,
+                                everyMinutes = intervalMinutes ?: RoutineRules.DEFAULT_INTERVAL,
                             )
                             val saved = session.saveRoutine(
                                 RoutineRules.input(
@@ -199,7 +242,8 @@ internal fun RoutineEditorSheet(
                                     runOn = runOn,
                                     enabled = opened.enabled,
                                     schedule = schedule,
-                                    durationMinutes = duration,
+                                    durationMinutes = legacyDurationMinutes,
+                                    timeoutMinutes = timeoutMinutes,
                                 ),
                                 opened.routineId,
                             )
@@ -241,43 +285,6 @@ internal fun RoutineEditorSheet(
                     modifier = Modifier.fillMaxWidth(),
                 )
 
-                Row(
-                    modifier = Modifier.fillMaxWidth().heightIn(min = MIN_TOUCH_TARGET),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "Allow up to $duration minutes",
-                        fontSize = 15.sp,
-                        modifier = Modifier.weight(1f),
-                    )
-                    ChromeButton(
-                        painter = painterResource(R.drawable.ic_remove),
-                        contentDescription = "Fewer minutes",
-                        enabled = duration > RoutineRules.DURATION_RANGE.first,
-                        onClick = {
-                            duration = RoutineRules.steppedDuration(
-                                duration,
-                                -RoutineRules.DURATION_STEP,
-                            )
-                        },
-                        size = 40.dp,
-                        glyph = 18.dp,
-                    )
-                    Box(modifier = Modifier.size(8.dp))
-                    ChromeButton(
-                        icon = Icons.Filled.Add,
-                        contentDescription = "More minutes",
-                        enabled = duration < RoutineRules.DURATION_RANGE.last,
-                        onClick = {
-                            duration = RoutineRules.steppedDuration(
-                                duration,
-                                RoutineRules.DURATION_STEP,
-                            )
-                        },
-                        size = 40.dp,
-                        glyph = 18.dp,
-                    )
-                }
             }
 
             FormSection(
@@ -317,7 +324,14 @@ internal fun RoutineEditorSheet(
                 }
             }
 
-            FormSection(header = "Schedule", footer = RoutineRules.SCHEDULE_FOOTER) {
+            FormSection(
+                header = "Schedule",
+                footer = if (kind == RoutineSchedule.Kind.INTERVAL) {
+                    RoutineRules.INTERVAL_SCHEDULE_FOOTER
+                } else {
+                    RoutineRules.SCHEDULE_FOOTER
+                },
+            ) {
                 if (kind == RoutineSchedule.Kind.UNKNOWN) {
                     RadioRow(
                         label = "Newer schedule",
@@ -335,6 +349,18 @@ internal fun RoutineEditorSheet(
                     label = "Selected days",
                     selected = kind == RoutineSchedule.Kind.DAILY,
                     onSelect = { kind = RoutineSchedule.Kind.DAILY },
+                )
+                RadioRow(
+                    label = "Every X minutes",
+                    selected = kind == RoutineSchedule.Kind.INTERVAL,
+                    onSelect = {
+                        kind = RoutineSchedule.Kind.INTERVAL
+                        timeoutMinutes = RoutineRules.intervalTimeoutOnFirstSelection(
+                            current = timeoutMinutes,
+                            defaultAlreadyApplied = newIntervalTimeoutApplied,
+                        )
+                        newIntervalTimeoutApplied = true
+                    },
                 )
 
                 when (kind) {
@@ -371,32 +397,154 @@ internal fun RoutineEditorSheet(
                             }
                         }
                     }
+                    RoutineSchedule.Kind.INTERVAL -> {
+                        FlowRow(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                "Runs every",
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.padding(vertical = 12.dp),
+                            )
+                            Box {
+                                TextButton(
+                                    onClick = { intervalMenuExpanded = true },
+                                    modifier = Modifier.semantics {
+                                        contentDescription = if (intervalUsesCustom) {
+                                            "Choose a custom repeat interval"
+                                        } else {
+                                            "Repeat interval, $intervalMinutesText minutes"
+                                        }
+                                    },
+                                ) {
+                                    Text(
+                                        if (intervalUsesCustom) "Custom" else intervalMinutesText,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                    )
+                                    ExposedDropdownMenuDefaults.TrailingIcon(
+                                        expanded = intervalMenuExpanded,
+                                    )
+                                }
+                                DropdownMenu(
+                                    expanded = intervalMenuExpanded,
+                                    onDismissRequest = { intervalMenuExpanded = false },
+                                ) {
+                                    RoutineRules.INTERVAL_PRESETS.forEach { minutes ->
+                                        DropdownMenuItem(
+                                            text = { Text(minutes.toString()) },
+                                            onClick = {
+                                                intervalMenuExpanded = false
+                                                intervalUsesCustom = false
+                                                intervalMinutesText = minutes.toString()
+                                            },
+                                        )
+                                    }
+                                    DropdownMenuItem(
+                                        text = { Text("Custom") },
+                                        onClick = {
+                                            intervalMenuExpanded = false
+                                            if (!intervalUsesCustom) intervalMinutesText = ""
+                                            intervalUsesCustom = true
+                                        },
+                                    )
+                                }
+                            }
+                            Text(
+                                "minutes, starting",
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.padding(vertical = 12.dp),
+                            )
+                            TextButton(
+                                onClick = { pickingDate = true },
+                                modifier = Modifier.semantics {
+                                    contentDescription = "Change when the interval starts"
+                                },
+                            ) {
+                                Text(
+                                    RelativeStamp.dateAndTime(
+                                        intervalAnchor.millis.toDouble(),
+                                        zone,
+                                    ),
+                                    style = MaterialTheme.typography.bodyLarge,
+                                )
+                            }
+                            Text(
+                                ".",
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.padding(vertical = 12.dp),
+                            )
+                        }
+                        if (intervalUsesCustom) {
+                            OutlinedTextField(
+                                value = intervalMinutesText,
+                                onValueChange = { value ->
+                                    if (value.length <= 4 && value.all(Char::isDigit)) {
+                                        intervalMinutesText = value
+                                    }
+                                },
+                                label = { Text("Custom interval") },
+                                suffix = { Text("minutes") },
+                                supportingText = { Text("From 5 minutes to 24 hours") },
+                                isError = intervalMinutes == null,
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
                     RoutineSchedule.Kind.UNKNOWN -> IconNote(
                         text = RoutineRules.UNKNOWN_SCHEDULE_NOTE,
                         icon = Icons.Filled.Warning,
                     )
                 }
             }
+
+            FormSection(
+                header = null,
+                footer = if (advancedExpanded) {
+                    "Optional. This only stops a stuck run; it does not control how often the routine starts."
+                } else {
+                    null
+                },
+            ) {
+                ValueRow(
+                    label = "Advanced",
+                    value = if (advancedExpanded) {
+                        "Hide"
+                    } else {
+                        timeoutMinutes?.let { "$it min limit" } ?: "No limit"
+                    },
+                    onClick = { advancedExpanded = !advancedExpanded },
+                )
+                if (advancedExpanded) {
+                    TimeoutPicker(value = timeoutMinutes, onSelect = { timeoutMinutes = it })
+                }
+            }
         }
     }
 
     if (pickingDate) {
+        val editingIntervalAnchor = kind == RoutineSchedule.Kind.INTERVAL
+        val draft = if (editingIntervalAnchor) intervalAnchor else once
         val today = remember { LocalDate.now(zone) }
-        val opensOn = remember(once) { once.date(zone) }
+        val opensOn = remember(draft) { draft.date(zone) }
         val datePickerState = rememberDatePickerState(
             initialSelectedDateMillis = opensOn
                 .atStartOfDay(ZoneOffset.UTC)
                 .toInstant()
                 .toEpochMilli(),
-            selectableDates = remember(today) {
+            selectableDates = remember(today, editingIntervalAnchor) {
                 object : SelectableDates {
                     override fun isSelectableDate(utcTimeMillis: Long): Boolean =
-                        !Instant.ofEpochMilli(utcTimeMillis)
+                        editingIntervalAnchor || !Instant.ofEpochMilli(utcTimeMillis)
                             .atZone(ZoneOffset.UTC)
                             .toLocalDate()
                             .isBefore(today)
 
-                    override fun isSelectableYear(year: Int): Boolean = year >= today.year
+                    override fun isSelectableYear(year: Int): Boolean =
+                        editingIntervalAnchor || year >= today.year
                 }
             },
         )
@@ -405,7 +553,11 @@ internal fun RoutineEditorSheet(
             // the committed instant does not.
             onDismissRequest = {
                 pickingDate = false
-                once = once.discard()
+                if (editingIntervalAnchor) {
+                    intervalAnchor = intervalAnchor.discard()
+                } else {
+                    once = once.discard()
+                }
             },
             confirmButton = {
                 TextButton(
@@ -414,11 +566,14 @@ internal fun RoutineEditorSheet(
                         // Staged, not written. `Date()...` bounds the instant the
                         // user confirms, and they have not confirmed one yet.
                         if (picked != null) {
-                            once = once.stage(
-                                Instant.ofEpochMilli(picked)
-                                    .atZone(ZoneOffset.UTC)
-                                    .toLocalDate(),
-                            )
+                            val date = Instant.ofEpochMilli(picked)
+                                .atZone(ZoneOffset.UTC)
+                                .toLocalDate()
+                            if (editingIntervalAnchor) {
+                                intervalAnchor = intervalAnchor.stage(date)
+                            } else {
+                                once = once.stage(date)
+                            }
                         }
                         pickingDate = false
                         // The instant is a day and a time; Material picks them in
@@ -431,7 +586,11 @@ internal fun RoutineEditorSheet(
                 TextButton(
                     onClick = {
                         pickingDate = false
-                        once = once.discard()
+                        if (editingIntervalAnchor) {
+                            intervalAnchor = intervalAnchor.discard()
+                        } else {
+                            once = once.discard()
+                        }
                     },
                 ) { Text("Cancel") }
             },
@@ -441,16 +600,20 @@ internal fun RoutineEditorSheet(
     }
 
     if (pickingTime) {
+        val editingIntervalAnchor = kind == RoutineSchedule.Kind.INTERVAL
+        val draft = if (editingIntervalAnchor) intervalAnchor else once
         val bounded = kind == RoutineSchedule.Kind.ONCE
-        val day = remember(once) { once.date(zone) }
-        val start = remember(bounded, once, dailyMinuteOfDay) {
+        val day = remember(draft) { draft.date(zone) }
+        val start = remember(bounded, draft, dailyMinuteOfDay) {
             if (bounded) {
                 RoutineRules.onceTimeStart(
                     date = day,
-                    time = once.time(zone),
+                    time = draft.time(zone),
                     now = Instant.now(),
                     zone = zone,
                 )
+            } else if (editingIntervalAnchor) {
+                draft.time(zone)
             } else {
                 LocalTime.of(dailyMinuteOfDay / 60, dailyMinuteOfDay % 60)
             }
@@ -462,7 +625,11 @@ internal fun RoutineEditorSheet(
         )
         val cancel = {
             pickingTime = false
-            once = once.discard()
+            if (editingIntervalAnchor) {
+                intervalAnchor = intervalAnchor.discard()
+            } else {
+                once = once.discard()
+            }
         }
         // The Material dialog rather than an AlertDialog with a TimePicker in
         // its text slot: the clock face is wider than a platform-default alert,
@@ -485,7 +652,13 @@ internal fun RoutineEditorSheet(
                     enabled = selectable,
                     onClick = {
                         pickingTime = false
-                        if (bounded) {
+                        if (editingIntervalAnchor) {
+                            intervalAnchor = intervalAnchor.confirm(
+                                timeState.hour,
+                                timeState.minute,
+                                zone,
+                            )
+                        } else if (bounded) {
                             once = once.confirm(timeState.hour, timeState.minute, zone)
                         } else {
                             // "Selected days" never opens the date dialog, so
@@ -500,9 +673,58 @@ internal fun RoutineEditorSheet(
             dismissButton = {
                 TextButton(onClick = cancel) { Text("Cancel") }
             },
-            title = { Text(if (bounded) "Run" else "Time") },
+            title = {
+                Text(
+                    when (kind) {
+                        RoutineSchedule.Kind.INTERVAL -> "Alignment time"
+                        RoutineSchedule.Kind.ONCE -> "Run"
+                        else -> "Time"
+                    },
+                )
+            },
         ) {
             TimePicker(state = timeState)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TimeoutPicker(value: Int?, onSelect: (Int?) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        OutlinedTextField(
+            value = value?.let { "$it minutes" } ?: "No limit",
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("Stop if still running after") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
+                .fillMaxWidth()
+                .semantics { contentDescription = "Routine timeout" },
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text("No limit") },
+                onClick = {
+                    expanded = false
+                    onSelect(null)
+                },
+            )
+            RoutineRules.TIMEOUT_OPTIONS.forEach { minutes ->
+                DropdownMenuItem(
+                    text = { Text("$minutes minutes") },
+                    onClick = {
+                        expanded = false
+                        onSelect(minutes)
+                    },
+                )
+            }
         }
     }
 }

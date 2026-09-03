@@ -91,9 +91,14 @@ describe("pinned cloudflared packaging", () => {
   });
 
   it("stages the current target for development without narrowing package preparation", () => {
-    expect(packageJson.scripts["dev:desktop"]).toBe(
-      "node scripts/prepare-cloudflared.mjs --current && electron .",
-    );
+    // dev:desktop is a launcher script here, not a one-liner: it also starts
+    // the server and Vite before opening the shell. The current-target stage
+    // still has to happen, so assert it inside that script rather than in the
+    // package.json string.
+    expect(packageJson.scripts["dev:desktop"]).toBe("node scripts/dev-desktop.mjs");
+    const devDesktop = readFileSync(new URL("./dev-desktop.mjs", import.meta.url), "utf8");
+    expect(devDesktop).toMatch(/prepare-cloudflared\.mjs/);
+    expect(devDesktop).toMatch(/"--current"/);
     expect(packageJson.scripts["build:cloudflared"]).toBe(
       "node scripts/prepare-cloudflared.mjs",
     );

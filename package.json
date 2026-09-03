@@ -1,7 +1,7 @@
 {
   "name": "openmausbot",
   "private": true,
-  "version": "0.1.46",
+  "version": "0.1.50",
   "description": "A local-first chat app for running a team of AI agents.",
   "homepage": "https://github.com/milind-soni/OpenMausBot",
   "repository": {
@@ -30,6 +30,7 @@
     "docs:build": "pnpm --filter @openmausbot/docs build",
     "docs:preview": "pnpm --filter @openmausbot/docs preview",
     "companion": "node --experimental-strip-types companion/src/index.ts",
+    "pair": "node --experimental-strip-types server/pair-cli.ts",
     "dev:server": "node --experimental-strip-types server/index.ts",
     "mcp": "node --experimental-strip-types scripts/mcp-server.ts",
     "control:omb": "node --experimental-strip-types scripts/control-omb.ts",
@@ -82,6 +83,7 @@
     "@xyflow/react": "^12.11.6",
     "clsx": "^2.1.1",
     "lucide-react": "^0.539.0",
+    "mdast-util-from-markdown": "^2.0.3",
     "posthog-js": "^1.415.6",
     "qrcode.react": "^4.2.0",
     "react": "^19.1.0",

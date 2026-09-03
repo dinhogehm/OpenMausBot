@@ -231,11 +231,14 @@ describe("agents-proxy MCP surface", () => {
     const ask = list.result.tools.find((tool: { name: string }) => tool.name === "ask_bot");
     const delegate = list.result.tools.find((tool: { name: string }) => tool.name === "delegate_bot");
     const wait = list.result.tools.find((tool: { name: string }) => tool.name === "wait_delegation");
+    const credential = list.result.tools.find((tool: { name: string }) => tool.name === "request_credential");
     expect(ask.description).toContain("SYNCHRONOUS consultation");
     expect(ask.description).toContain("Do not use for assigning work");
     expect(delegate.description).toContain("DEFAULT FOR ASSIGNING WORK");
     expect(delegate.description).toContain("delivered automatically");
     expect(wait.description).toContain("Never call it in the same turn as delegate_bot");
+    expect(credential.description).toContain("on mobile it only shows a handoff");
+    expect(credential.description).toContain("Never claim a secure field opened on mobile");
   });
 
   it("publishes a flat routine schedule schema that survives provider conversion", async () => {
@@ -250,7 +253,7 @@ describe("agents-proxy MCP surface", () => {
     expect(JSON.stringify(create.inputSchema)).not.toMatch(/"oneOf"|"anyOf"|"allOf"|"const"/);
     expect(schedule.type).toBe("object");
     expect(schedule.required).toEqual(["type"]);
-    expect(schedule.properties.type.enum).toEqual(["once", "weekly", "daily"]);
+    expect(schedule.properties.type.enum).toEqual(["once", "weekly", "daily", "interval"]);
     expect(schedule.properties.weekdays.items.enum).toEqual([
       "monday",
       "tuesday",
@@ -260,6 +263,10 @@ describe("agents-proxy MCP surface", () => {
       "saturday",
       "sunday",
     ]);
+    expect(create.inputSchema.properties).not.toHaveProperty("duration_minutes");
+    expect(create.inputSchema.properties.timeout_minutes).toMatchObject({ minimum: 5, maximum: 240 });
+    expect(create.inputSchema.properties.clear_timeout.type).toBe("boolean");
+    expect(schedule.properties.every_minutes).toMatchObject({ minimum: 5, maximum: 1_440 });
     expect(create.description).toContain("does NOT enable");
   });
 
@@ -387,7 +394,9 @@ describe("agents-proxy MCP surface", () => {
       credential_id: "opencodeGoApiKey",
       reason: "The selected model needs it.",
     });
-    expect(res.result.content[0].text).toContain("secure OpenCode API key card");
+    expect(res.result.content[0].text).toContain("secure OpenCode API key request");
+    expect(res.result.content[0].text).toContain("mobile app only shows a handoff");
+    expect(res.result.content[0].text).toContain("Do not claim a secure field opened on mobile");
     expect(res.result.content[0].text).toContain("End this turn");
     expect(lastCredentialBody).toEqual({
       fromBotId: "bot-asker",
@@ -480,6 +489,7 @@ describe("agents-proxy MCP surface", () => {
       schedule: { type: "weekly", time: "09:00", weekdays: ["monday", "friday"] },
       run_on: "maus",
       duration_minutes: 45,
+      timeout_minutes: 15,
     });
     expect(lastRoutineRequestBody).toEqual({
       fromBotId: "bot-asker",
@@ -490,7 +500,7 @@ describe("agents-proxy MCP surface", () => {
         instructions: "Summarize today's priorities.",
         schedule: { type: "weekly", time: "09:00", weekdays: ["monday", "friday"] },
         runOn: "maus",
-        durationMinutes: 45,
+        timeoutMinutes: 15,
       },
     });
     expect(res.result.content[0].text).toContain("confirmation card");
@@ -526,18 +536,35 @@ describe("agents-proxy MCP surface", () => {
     });
   });
 
+  it("proposes an interval routine with an optional start anchor", async () => {
+    await callTool("propose_routine", {
+      name: "Frequent check",
+      instructions: "Check the queue.",
+      schedule: {
+        type: "interval",
+        every_minutes: 5,
+        starts_at: "2026-09-01T09:00:00+05:30",
+      },
+    });
+    expect(lastRoutineRequestBody.routine.schedule).toEqual({
+      type: "interval",
+      everyMinutes: 5,
+      anchorAt: "2026-09-01T09:00:00+05:30",
+    });
+  });
+
   it("proposes routine updates and destructive actions without applying them", async () => {
     const update = await callTool("propose_routine_action", {
       routine_id: "routine-1",
       action: "update",
-      changes: { name: "Weekday brief", duration_minutes: 60 },
+      changes: { name: "Weekday brief", clear_timeout: true },
     });
     expect(lastRoutineRequestBody).toEqual({
       fromBotId: "bot-asker",
       fromThreadId: "thread-asker-routine",
       action: "update",
       routineId: "routine-1",
-      changes: { name: "Weekday brief", durationMinutes: 60 },
+      changes: { name: "Weekday brief", timeoutMinutes: null },
     });
     expect(update.result.content[0].text).toContain("has not been applied");
 
@@ -581,7 +608,7 @@ describe("agents-proxy MCP surface", () => {
     expect(lastRoutineRequestBody.routine.schedule).toEqual({ type: "weekly", time: "09:00", weekdays: ["monday"] });
   });
 
-  it("answers unsupported schedules with instructions, before calling the harness", async () => {
+  it("answers invalid and unsupported schedules with instructions, before calling the harness", async () => {
     lastRoutineRequestBody = null;
     const interval = await callTool("propose_routine", {
       name: "Interval",
@@ -589,8 +616,7 @@ describe("agents-proxy MCP surface", () => {
       schedule: { type: "interval", minutes: 30 },
     });
     expect(interval.result.isError).toBe(true);
-    expect(interval.result.content[0].text).toContain("sub-day intervals");
-    expect(interval.result.content[0].text).toContain('"type":"daily"');
+    expect(interval.result.content[0].text).toContain("every_minutes");
 
     const noDays = await callTool("propose_routine", {
       name: "NoDays",

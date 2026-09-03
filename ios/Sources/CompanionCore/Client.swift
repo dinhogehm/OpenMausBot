@@ -404,11 +404,10 @@ public enum SharedMessageComposer {
 
         for attachment in attachments {
             let tag = attachment.kind == .image ? "attached-image" : "attached-file"
-            if attachment.kind == .file,
-               let displayName = attachment.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+            if let displayName = attachment.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
                !displayName.isEmpty {
                 parts.append(
-                    "<attached-file path=\"\(escapeAttribute(attachment.path))\" " +
+                    "<\(tag) path=\"\(escapeAttribute(attachment.path))\" " +
                     "name=\"\(escapeAttribute(displayName))\" />"
                 )
             } else {
@@ -463,8 +462,9 @@ private struct InstanceCapabilityResponse: Decodable {
 }
 
 public struct CompanionClient: Sendable {
-    public static let maximumImageUploadBytes = 10 * 1_024 * 1_024
-    public static let maximumFileUploadBytes = 25 * 1_024 * 1_024
+    public static let maximumImageUploadBytes = AttachmentPolicy.maximumImageBytes
+    public static let maximumFileUploadBytes = AttachmentPolicy.maximumFileBytes
+    public static let maximumFileDownloadBytes = AttachmentPolicy.maximumFileBytes
 
     public let connection: Connection
     private let token: String?
@@ -807,6 +807,101 @@ public struct CompanionClient: Sendable {
         return data
     }
 
+    /// Fetch an app-owned file mentioned by one transcript message. The path
+    /// still names the file on the paired computer, so it is sent in an
+    /// authenticated JSON body rather than placed in the URL. The server
+    /// verifies both message provenance and its attachment roots.
+    public func downloadFile(
+        threadId: String,
+        messageId: String,
+        path rawPath: String
+    ) async throws -> DownloadedFile {
+        guard Self.validRouteID(threadId), Self.validRouteID(messageId),
+              case let .desktopFile(path) = LocalMessageLink.resolve(rawPath)
+        else { throw APIError.badURL }
+        let request = try makeRequest(
+            "POST",
+            "/api/threads/\(threadId)/messages/\(messageId)/file",
+            body: ["path": path]
+        )
+        let (data, response) = try await perform(request)
+        try Self.check(response, data)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.transport("The computer sent something this app couldn't read.")
+        }
+        if http.expectedContentLength > Self.maximumFileDownloadBytes ||
+            data.count > Self.maximumFileDownloadBytes {
+            throw APIError.transport("That file is larger than 25 MB.")
+        }
+        let disposition = http.value(forHTTPHeaderField: "Content-Disposition")
+        let filename = Self.downloadFilename(from: disposition, fallbackPath: path)
+        let rawContentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+        let contentType = AttachmentPolicy.validMIME(rawContentType)
+            ? AttachmentPolicy.normalizedMIME(rawContentType)
+            : "application/octet-stream"
+        return DownloadedFile(data: data, filename: filename, contentType: contentType)
+    }
+
+    private static func downloadFilename(from disposition: String?, fallbackPath: String) -> String {
+        let parameters = disposition?.split(separator: ";").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        } ?? []
+        let encoded = parameters.first(where: { $0.lowercased().hasPrefix("filename*=") })
+            .map { String($0.dropFirst("filename*=".count)) }
+        let ordinary = parameters.first(where: { $0.lowercased().hasPrefix("filename=") })
+            .map { String($0.dropFirst("filename=".count)) }
+        let decodedEncoded = encoded.flatMap { value -> String? in
+            let unquoted = value.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            let payload = unquoted.split(separator: "'", maxSplits: 2, omittingEmptySubsequences: false)
+            let encodedValue = payload.count == 3 ? String(payload[2]) : unquoted
+            return encodedValue.removingPercentEncoding
+        }
+        let candidate = decodedEncoded
+            ?? ordinary?.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            ?? fallbackPath.components(separatedBy: CharacterSet(charactersIn: "/\\"))
+                .last(where: { !$0.isEmpty })
+            ?? "file"
+        let basename = candidate.components(separatedBy: CharacterSet(charactersIn: "/\\"))
+            .last(where: { !$0.isEmpty }) ?? "file"
+        let cleaned = basename.unicodeScalars.map { scalar -> String in
+            let code = scalar.value
+            let isBidiControl = (0x202A...0x202E).contains(code) || (0x2066...0x2069).contains(code)
+            return CharacterSet.controlCharacters.contains(scalar) || isBidiControl ? " " : String(scalar)
+        }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        let shortened = boundedFilename(cleaned)
+        return shortened.isEmpty || shortened == "." || shortened == ".." ? "file" : shortened
+    }
+
+    /// APFS limits one path component by bytes, not Swift characters. Keep
+    /// enough room for the preview cache's own suffix and retain a useful
+    /// extension whenever it fits.
+    private static func boundedFilename(_ value: String, maximumUTF8Bytes: Int = 180) -> String {
+        guard value.utf8.count > maximumUTF8Bytes else { return value }
+        let pathExtension = (value as NSString).pathExtension
+        let suffix = pathExtension.isEmpty ? "" : ".\(pathExtension)"
+        if !suffix.isEmpty,
+           suffix.utf8.count <= 32,
+           suffix.utf8.count < maximumUTF8Bytes {
+            let stem = String(value.dropLast(suffix.count))
+            let prefix = utf8Prefix(stem, maximumBytes: maximumUTF8Bytes - suffix.utf8.count)
+            if !prefix.isEmpty { return prefix + suffix }
+        }
+        return utf8Prefix(value, maximumBytes: maximumUTF8Bytes)
+    }
+
+    private static func utf8Prefix(_ value: String, maximumBytes: Int) -> String {
+        var result = ""
+        var bytes = 0
+        for character in value {
+            let piece = String(character)
+            let pieceBytes = piece.utf8.count
+            guard bytes + pieceBytes <= maximumBytes else { break }
+            result.append(character)
+            bytes += pieceBytes
+        }
+        return result
+    }
+
     /// Fetch an app-owned avatar with the paired-device bearer token. Custom
     /// avatars never go through `AsyncImage`, which cannot attach that token.
     public func avatar(path: String) async throws -> Data {
@@ -863,6 +958,17 @@ public struct CompanionClient: Sendable {
         ).bot
     }
 
+    /// Change only the engine, model and optional reasoning effort. This uses
+    /// the companion's narrow model route rather than the desktop's general
+    /// bot PATCH, which also owns execution policy and computer settings.
+    public func updateModel(botId: String, selection: ModelSelection) async throws -> Bot {
+        guard Self.validRouteID(botId) else { throw APIError.badURL }
+        return try await send(
+            try makeRequest("PATCH", "/api/bots/\(botId)/model", encodedBody: selection),
+            as: BotResponse.self
+        ).bot
+    }
+
     /// Upload raw image bytes and return the path the agent can open on its
     /// Mac. This is also the primitive used by avatar upload and sharing.
     public func uploadImage(
@@ -870,10 +976,9 @@ public struct CompanionClient: Sendable {
         mime: String,
         uploadId: String? = nil
     ) async throws -> String {
-        let allowed = ["image/png", "image/jpeg", "image/gif", "image/webp"]
         let normalizedMime = mime.lowercased()
         guard Self.validUploadID(uploadId) else { throw APIError.badURL }
-        guard allowed.contains(normalizedMime),
+        guard AttachmentPolicy.imageMIMETypes.contains(normalizedMime),
               data.count <= Self.maximumImageUploadBytes
         else {
             throw APIError.transport("Choose a PNG, JPEG, GIF, or WebP image up to 10 MB.")
@@ -1022,10 +1127,14 @@ public struct CompanionClient: Sendable {
         if let at = input.schedule.at { schedule["at"] = at }
         if let time = input.schedule.time { schedule["time"] = time }
         if let weekdays = input.schedule.weekdays { schedule["weekdays"] = weekdays }
+        if let everyMinutes = input.schedule.everyMinutes { schedule["everyMinutes"] = everyMinutes }
+        if let anchorAt = input.schedule.anchorAt { schedule["anchorAt"] = anchorAt }
         var body: [String: Any] = [
             "name": input.name, "prompt": input.prompt, "botId": input.botId,
             "runOn": input.runOn, "schedule": schedule, "durationMinutes": input.durationMinutes,
         ]
+        if let timeoutMinutes = input.timeoutMinutes { body["timeoutMinutes"] = timeoutMinutes }
+        else if input.clearTimeout { body["timeoutMinutes"] = NSNull() }
         if let enabled = input.enabled { body["enabled"] = enabled }
         return body
     }

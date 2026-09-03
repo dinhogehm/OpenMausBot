@@ -28,10 +28,17 @@ object RoutineRules {
     /** `String(prompt.trimming….prefix(20_000))`. */
     const val PROMPT_LIMIT: Int = 20_000
 
-    /** `Stepper(value: $duration, in: 15...240, step: 15)`. */
-    val DURATION_RANGE: IntRange = 15..240
-    const val DURATION_STEP: Int = 15
-    const val DEFAULT_DURATION: Int = 30
+    /** Kept on requests for compatibility with desktop builds that still require the field. */
+    const val LEGACY_DURATION_MINUTES: Int = 30
+
+    /** Optional execution guard. It is deliberately separate from cadence and calendar size. */
+    val TIMEOUT_RANGE: IntRange = 5..240
+    val TIMEOUT_OPTIONS: List<Int> = TIMEOUT_RANGE.step(5).toList()
+    const val DEFAULT_INTERVAL_TIMEOUT: Int = 30
+
+    val INTERVAL_RANGE: IntRange = 5..1_440
+    val INTERVAL_PRESETS: List<Int> = listOf(5, 10, 15, 30, 60)
+    const val DEFAULT_INTERVAL: Int = 15
 
     /** `.prefix(50)` on the sorted receipts. */
     const val RECEIPT_LIMIT: Int = 50
@@ -73,9 +80,12 @@ object RoutineRules {
 
     const val SCHEDULE_FOOTER: String =
         "Each occurrence creates a fresh task. No cron syntax is used."
+    const val INTERVAL_SCHEDULE_FOOTER: String =
+        "Each occurrence creates a fresh task. If the previous run is still active, " +
+            "the next occurrence is skipped instead of queued."
     const val UNKNOWN_SCHEDULE_NOTE: String =
-        "This routine uses a schedule added by a newer OpenMausBot. Choose One time or " +
-            "Selected days before saving."
+        "This routine uses a schedule added by a newer OpenMausBot. Choose One time, " +
+            "Selected days, or Every X minutes before saving."
 
     const val CHECKING_CLOUD: String = "Checking Cloud VM availability…"
     const val CLOUD_STATUS_UNAVAILABLE: String = "Cloud VM status is unavailable"
@@ -119,6 +129,12 @@ object RoutineRules {
             RoutineSchedule.Kind.ONCE -> {
                 val at = schedule.at ?: return "One time · date unavailable"
                 return RelativeStamp.dateAndTime(at, zone, locale)
+            }
+            RoutineSchedule.Kind.INTERVAL -> {
+                val minutes = schedule.everyMinutes ?: return "Interval unavailable"
+                val cadence = "Every $minutes min"
+                val anchor = schedule.anchorAt ?: return cadence
+                return "$cadence · starting ${RelativeStamp.dateAndTime(anchor.toDouble(), zone, locale)}"
             }
             RoutineSchedule.Kind.UNKNOWN -> return "Newer schedule"
             RoutineSchedule.Kind.DAILY -> Unit
@@ -202,12 +218,26 @@ object RoutineRules {
         prompt: String,
         botId: String,
         weekdays: Set<Int>,
+        everyMinutes: Int? = null,
     ): Boolean = !saving &&
         kind != RoutineSchedule.Kind.UNKNOWN &&
         name.trim().isNotEmpty() &&
         prompt.trim().isNotEmpty() &&
         botId.isNotEmpty() &&
-        !(kind == RoutineSchedule.Kind.DAILY && weekdays.isEmpty())
+        !(kind == RoutineSchedule.Kind.DAILY && weekdays.isEmpty()) &&
+        !(kind == RoutineSchedule.Kind.INTERVAL &&
+            (everyMinutes == null || everyMinutes !in INTERVAL_RANGE))
+
+    fun intervalMinutes(raw: String): Int? =
+        raw.trim().toIntOrNull()?.takeIf { it in INTERVAL_RANGE }
+
+    fun defaultIntervalAnchor(nowMillis: Long, everyMinutes: Int = DEFAULT_INTERVAL): Long =
+        nowMillis + everyMinutes * 60_000L
+
+    fun intervalTimeoutOnFirstSelection(current: Int?, defaultAlreadyApplied: Boolean): Int? =
+        if (defaultAlreadyApplied) current else DEFAULT_INTERVAL_TIMEOUT
+
+    fun validTimeout(minutes: Int?): Boolean = minutes == null || minutes in TIMEOUT_RANGE
 
     /** `"%02d:%02d"` — what `DateFormatter("HH:mm")` writes for a wall-clock time. */
     fun timeText(hour: Int, minute: Int): String =
@@ -282,10 +312,14 @@ object RoutineRules {
         hour: Int,
         minute: Int,
         weekdays: Set<Int>,
-    ): RoutineSchedule = if (kind == RoutineSchedule.Kind.ONCE) {
-        RoutineSchedule.once(onceAtMillis)
-    } else {
-        RoutineSchedule.daily(timeText(hour, minute), weekdays.sorted())
+        everyMinutes: Int = DEFAULT_INTERVAL,
+    ): RoutineSchedule = when (kind) {
+        RoutineSchedule.Kind.ONCE -> RoutineSchedule.once(onceAtMillis)
+        RoutineSchedule.Kind.DAILY ->
+            RoutineSchedule.daily(timeText(hour, minute), weekdays.sorted())
+        RoutineSchedule.Kind.INTERVAL ->
+            RoutineSchedule.interval(everyMinutes, onceAtMillis.toLong())
+        RoutineSchedule.Kind.UNKNOWN -> RoutineSchedule(kind)
     }
 
     fun input(
@@ -296,18 +330,23 @@ object RoutineRules {
         enabled: Boolean?,
         schedule: RoutineSchedule,
         durationMinutes: Int,
-    ): RoutineInput = RoutineInput(
-        name = name.trim().take(NAME_LIMIT),
-        prompt = prompt.trim().take(PROMPT_LIMIT),
-        botId = botId,
-        runOn = runOn.wireValue,
-        enabled = enabled,
-        schedule = schedule,
-        durationMinutes = durationMinutes,
-    )
-
-    fun steppedDuration(current: Int, delta: Int): Int =
-        (current + delta).coerceIn(DURATION_RANGE.first, DURATION_RANGE.last)
+        timeoutMinutes: Int? = null,
+    ): RoutineInput {
+        require(validTimeout(timeoutMinutes)) {
+            "Timeout must be empty or a whole number from 5 to 240"
+        }
+        return RoutineInput(
+            name = name.trim().take(NAME_LIMIT),
+            prompt = prompt.trim().take(PROMPT_LIMIT),
+            botId = botId,
+            runOn = runOn.wireValue,
+            enabled = enabled,
+            schedule = schedule,
+            durationMinutes = durationMinutes,
+            timeoutMinutes = timeoutMinutes,
+            clearTimeout = timeoutMinutes == null,
+        )
+    }
 }
 
 /**

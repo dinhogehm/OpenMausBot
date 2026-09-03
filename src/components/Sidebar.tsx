@@ -22,10 +22,8 @@ import {
   Pin,
   PinOff,
   Plus,
-  RefreshCw,
   Search,
   Sparkles,
-  Settings,
   Puzzle,
   Trash2,
   Users,
@@ -36,7 +34,6 @@ import { api, useStore, formatTime, visibleMessages, type Bot, type Group } from
 
 import { BotAvatar, InitialsAvatar } from "./Avatar";
 import { stateForBot } from "@/lib/mascot";
-import { useUpdaterState } from "@/lib/updater";
 import { cn } from "@/lib/cn";
 import { skillRecorderEnabled } from "@/lib/feature-flags";
 import { nextRename } from "@/lib/rename";
@@ -78,97 +75,9 @@ import {
 } from "@/lib/sidebar-layout";
 import { sidebarSectionAttention } from "@/lib/sidebar-attention";
 import { phoneSettingsAction, SidebarPhoneButton } from "./SidebarPhoneButton";
+import { SidebarMoreMenu } from "./SidebarMoreMenu";
+import { profileInitials, SidebarProfileMenu } from "./SidebarProfileMenu";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
-
-/** "Milind Soni" → "MS", "milind" → "M", "you@x.dev" → "Y", unset → "?" */
-function profileInitials(profile?: { name?: string; email?: string }): string {
-  const name = profile?.name?.trim();
-  if (name) {
-    const words = name.split(/\s+/);
-    return words
-      .slice(0, 2)
-      .map((w) => w[0]!.toUpperCase())
-      .join("");
-  }
-  const email = profile?.email?.trim();
-  return email ? email[0]!.toUpperCase() : "?";
-}
-
-/** Manual update check, next to the settings gear. Packaged app only (no
- * bridge in dev/browser). One button, state-dependent: check → download →
- * restart, with a brief "up to date" tick when a check finds nothing so a
- * click is never silent. The bottom-left popup handles the loud cases. */
-function UpdateButton() {
-  const s = useUpdaterState();
-  const [checkedAt, setCheckedAt] = useState(0);
-  const updater = window.ogb?.updater;
-  const status = s?.status ?? "idle";
-  // download and install both round-trip through main before the status
-  // changes — spin on the click itself, and let the new status clear it
-  const [pending, setPending] = useState(false);
-  useEffect(() => setPending(false), [status]);
-  // a check that found nothing lands back on idle — acknowledge it for 3s
-  const upToDate = Boolean(checkedAt) && (!s || s.status === "idle") && Date.now() - checkedAt < 3000;
-  useEffect(() => {
-    if (!upToDate) return;
-    const timer = setTimeout(() => setCheckedAt(0), 3000);
-    return () => clearTimeout(timer);
-  }, [upToDate]);
-  if (!updater) return null;
-
-  const working =
-    pending || status === "checking" || status === "downloading" || status === "installing";
-  const label =
-    status === "available"
-      ? `Version ${s?.version ?? ""} available — download`
-      : status === "downloading"
-        ? s?.percent == null
-          ? "Starting download…"
-          : `Downloading… ${Math.round(s.percent)}%`
-        : status === "downloaded"
-          ? `Version ${s?.version ?? ""} ready — restart to update`
-          : status === "installing"
-            ? "Restarting to update…"
-            : status === "checking"
-              ? "Checking for updates…"
-              : upToDate
-                ? "You're up to date"
-                : "Check for updates";
-
-  return (
-    <button
-      onClick={() => {
-        if (status === "downloaded") {
-          setPending(true);
-          return void updater.install();
-        }
-        if (status === "available") {
-          setPending(true);
-          return void updater.download();
-        }
-        setCheckedAt(Date.now());
-        void updater.check();
-      }}
-      disabled={working}
-      title={label}
-      aria-label={label}
-      className="relative flex size-10 items-center justify-center rounded-md text-accent hover:bg-raised disabled:opacity-60"
-    >
-      {working ? (
-        <Loader2 size={18} className="animate-spin" />
-      ) : upToDate ? (
-        <Check size={18} />
-      ) : status === "available" ? (
-        <ArrowDownToLine size={18} />
-      ) : (
-        <RefreshCw size={18} />
-      )}
-      {status === "downloaded" && (
-        <span className="absolute right-1.5 top-1.5 size-2 rounded-full bg-accent" />
-      )}
-    </button>
-  );
-}
 
 function preview(bot: Bot): string {
   if (bot.activity === "waiting-on-you") return "Waiting for you…";
@@ -1664,105 +1573,152 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
 
       {/* Footer */}
       <div className={cn("pb-3 pt-2", density === "icons" ? "px-2" : "px-3")}>
+        {density === "icons" && (
+          <>
         <button
-          onClick={() => dispatch({ type: "showTeamMap" })}
-          aria-label={density === "icons" ? "Team map" : undefined}
-          title={density === "icons" ? "Team map" : undefined}
-          className={cn(
-            "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
-            density === "icons" ? "justify-center px-2" : "gap-3 px-3",
-            state.activeView === "team-map" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
-          )}
-        >
-          <Network size={20} className={state.activeView === "team-map" ? "text-accent" : "text-ink-secondary"} />
-          <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Team map</span>
-        </button>
-        <button
-          onClick={() => dispatch({ type: "showWorkflows" })}
-          aria-label={density === "icons" ? "Workflows" : undefined}
-          title={density === "icons" ? "Workflows" : undefined}
-          className={cn(
-            "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
-            density === "icons" ? "justify-center px-2" : "gap-3 px-3",
-            state.activeView === "workflows" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
-          )}
-        >
-          <WorkflowIcon size={20} className={state.activeView === "workflows" ? "text-accent" : "text-ink-secondary"} />
-          <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Workflows</span>
-        </button>
-        {skillRecorderEnabled(state.config) && (
-          <button
-            onClick={() => dispatch({ type: "showSkillRecorder" })}
-            aria-label={density === "icons" ? "Teach a skill" : undefined}
-            title={density === "icons" ? "Teach a skill" : undefined}
+            onClick={() => dispatch({ type: "showTeamMap" })}
+            aria-label={density === "icons" ? "Team map" : undefined}
+            title={density === "icons" ? "Team map" : undefined}
             className={cn(
               "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
               density === "icons" ? "justify-center px-2" : "gap-3 px-3",
-              state.activeView === "skill-recorder" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+              state.activeView === "team-map" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
             )}
           >
-            <Sparkles size={20} className={state.activeView === "skill-recorder" ? "text-accent" : "text-ink-secondary"} />
-            <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Teach a skill</span>
+            <Network size={20} className={state.activeView === "team-map" ? "text-accent" : "text-ink-secondary"} />
+            <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Team map</span>
           </button>
+          <button
+            onClick={() => dispatch({ type: "showWorkflows" })}
+            aria-label={density === "icons" ? "Workflows" : undefined}
+            title={density === "icons" ? "Workflows" : undefined}
+            className={cn(
+              "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
+              density === "icons" ? "justify-center px-2" : "gap-3 px-3",
+              state.activeView === "workflows" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+            )}
+          >
+            <WorkflowIcon size={20} className={state.activeView === "workflows" ? "text-accent" : "text-ink-secondary"} />
+            <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Workflows</span>
+          </button>
+          {skillRecorderEnabled(state.config) && (
+            <button
+              onClick={() => dispatch({ type: "showSkillRecorder" })}
+              aria-label={density === "icons" ? "Teach a skill" : undefined}
+              title={density === "icons" ? "Teach a skill" : undefined}
+              className={cn(
+                "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
+                density === "icons" ? "justify-center px-2" : "gap-3 px-3",
+                state.activeView === "skill-recorder" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+              )}
+            >
+              <Sparkles size={20} className={state.activeView === "skill-recorder" ? "text-accent" : "text-ink-secondary"} />
+              <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Teach a skill</span>
+            </button>
+          )}
+          <button
+            onClick={() => dispatch({ type: "showRoutines" })}
+            aria-label={density === "icons" ? "Automations" : undefined}
+            title={density === "icons" ? "Automations" : undefined}
+            className={cn(
+              "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
+              density === "icons" ? "justify-center px-2" : "gap-3 px-3",
+              state.activeView === "routines" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+            )}
+          >
+            <CalendarDays size={20} className={state.activeView === "routines" ? "text-accent" : "text-ink-secondary"} />
+            <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Automations</span>
+            {state.routineRuns.some((run) => ["failed", "missed"].includes(run.status) && !run.seenAt) && (
+              <span className="size-2 rounded-full bg-danger" />
+            )}
+          </button>
+          <button
+            onClick={() => dispatch({ type: "togglePlugins", open: true })}
+            className={cn("flex min-h-10 w-full items-center rounded-xl py-2 text-left hover:bg-raised/50", density === "icons" ? "justify-center px-2" : "gap-3 px-3")}
+            aria-label={density === "icons" ? "Connected apps" : undefined}
+            title={density === "icons" ? "Connected apps" : undefined}
+          >
+            <Puzzle size={20} className="text-ink-secondary" />
+            <span className={cn("text-[14px] text-ink", density === "icons" && "hidden")}>Connected apps</span>
+          </button>
+          </>
         )}
-        <button
-          onClick={() => dispatch({ type: "showRoutines" })}
-          aria-label={density === "icons" ? "Calendar" : undefined}
-          title={density === "icons" ? "Calendar" : undefined}
-          className={cn(
-            "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
-            density === "icons" ? "justify-center px-2" : "gap-3 px-3",
-            state.activeView === "routines" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
-          )}
-        >
-          <CalendarDays size={20} className={state.activeView === "routines" ? "text-accent" : "text-ink-secondary"} />
-          <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Calendar</span>
-          {state.routineRuns.some((run) => ["failed", "missed"].includes(run.status) && !run.seenAt) && (
-            <span className="size-2 rounded-full bg-danger" />
-          )}
-        </button>
-        <button
-          onClick={() => dispatch({ type: "togglePlugins", open: true })}
-          className={cn("flex min-h-10 w-full items-center rounded-xl py-2 text-left hover:bg-raised/50", density === "icons" ? "justify-center px-2" : "gap-3 px-3")}
-          aria-label={density === "icons" ? "Connected apps" : undefined}
-          title={density === "icons" ? "Connected apps" : undefined}
-        >
-          <Puzzle size={20} className="text-ink-secondary" />
-          <span className={cn("text-[14px] text-ink", density === "icons" && "hidden")}>Connected apps</span>
-        </button>
         {density === "icons" && (
           <SidebarPhoneButton
             density={density}
             onOpen={() => dispatch(phoneSettingsAction())}
           />
         )}
-        <div className={cn("flex items-center", density === "icons" && "justify-center")}>
-          <button
-            onClick={() => dispatch({ type: "toggleAppSettings" })}
-            className={cn("flex min-w-0 items-center rounded-xl py-2 text-left hover:bg-raised/50", density === "icons" ? "justify-center px-2" : "flex-1 gap-3 px-3")}
-            aria-label={density === "icons" ? "App settings" : undefined}
-            title={density === "icons" ? (state.config?.profile?.name?.trim() || "App settings") : undefined}
-          >
-            <InitialsAvatar initials={profileInitials(state.config?.profile)} size={28} />
-            <span className={cn("truncate text-[14px] text-ink", density === "icons" && "hidden")}>
-              {state.config?.profile?.name?.trim() || state.config?.profile?.email?.trim() || "You"}
-            </span>
-          </button>
           {density !== "icons" && (
-            <SidebarPhoneButton
-              density={density}
-              onOpen={() => dispatch(phoneSettingsAction())}
-            />
-          )}
-          {density !== "icons" && <UpdateButton />}
-          {density !== "icons" && <button
-            onClick={() => dispatch({ type: "toggleAppSettings" })}
-            className="flex size-10 items-center justify-center rounded-md text-ink-secondary hover:bg-raised hover:text-ink"
-            title="App settings"
-          >
-            <Settings size={18} />
-          </button>}
-        </div>
+          <SidebarMoreMenu
+            items={[
+              {
+                key: "team-map",
+                label: "Team map",
+                icon: <Network size={18} />,
+                active: state.activeView === "team-map",
+                onSelect: () => dispatch({ type: "showTeamMap" }),
+              },
+              {
+                key: "workflows",
+                label: "Workflows",
+                icon: <WorkflowIcon size={18} />,
+                active: state.activeView === "workflows",
+                onSelect: () => dispatch({ type: "showWorkflows" }),
+              },
+              ...(skillRecorderEnabled(state.config)
+                ? [
+                    {
+                      key: "skill-recorder",
+                      label: "Teach a skill",
+                      icon: <Sparkles size={18} />,
+                      active: state.activeView === "skill-recorder",
+                      onSelect: () => dispatch({ type: "showSkillRecorder" }),
+                    },
+                  ]
+                : []),
+              {
+                key: "routines",
+                label: "Automations",
+                icon: <CalendarDays size={18} />,
+                active: state.activeView === "routines",
+                // folded away, this dot would otherwise vanish with the row
+                attention: state.routineRuns.some(
+                  (run) => ["failed", "missed"].includes(run.status) && !run.seenAt,
+                ),
+                onSelect: () => dispatch({ type: "showRoutines" }),
+              },
+              {
+                key: "plugins",
+                label: "Connected apps",
+                icon: <Puzzle size={18} />,
+                onSelect: () => dispatch({ type: "togglePlugins", open: true }),
+              },
+            ]}
+          />
+        )}
+        {density === "icons" ? (
+          <div className="flex items-center justify-center">
+            <button
+              onClick={() => dispatch({ type: "toggleAppSettings" })}
+              className="flex min-w-0 items-center justify-center rounded-xl px-2 py-2 text-left hover:bg-raised/50"
+              aria-label="App settings"
+              title={state.config?.profile?.name?.trim() || "App settings"}
+            >
+              <InitialsAvatar initials={profileInitials(state.config?.profile)} size={28} />
+            </button>
+          </div>
+        ) : (
+          // The Tools row and the profile row are two different kinds of
+          // thing — places to go, versus who you are and what the app is —
+          // so they get clear space between them. A hairline lived here
+          // briefly and made it worse: full-bleed, it ran within a few pixels
+          // of the profile row's rounded hover pill, and the two hover states
+          // read as one crowded block rather than two rows.
+          <div className="mt-3">
+            <SidebarProfileMenu />
+          </div>
+        )}
       </div>
 
       {menu && (

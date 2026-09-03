@@ -157,6 +157,8 @@ func previewText(of message: Message) -> String {
     case .options:
         guard let card = message.card else { return "" }
         return card.isPending && !card.subtitle.isEmpty ? card.subtitle : card.title
+    case .secret:
+        return message.secret?.label ?? message.text ?? "Credential required"
     case .activity: return message.tool?.name ?? ""
     case .screen: return "Screenshot"
     case .unknown: return message.text ?? ""
