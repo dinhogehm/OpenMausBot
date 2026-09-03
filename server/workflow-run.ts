@@ -43,6 +43,16 @@ import type { WorkflowStore } from "./workflow-store.ts";
 
 export type { WorkflowRunTrigger } from "../shared/workflow.ts";
 
+/** The harness's refusal to start a turn on a bot that already has one. It
+ * is a 409 with this wording, and index.ts already keys two other recoveries
+ * off the same phrase — a dispatch that never began is contention, and every
+ * caller that treats it as a failure is wrong in the same way. */
+const BUSY_DISPATCH = /already working/i;
+/** How long a contended dispatch waits before trying again. Short, because
+ * the reconciler serves waiting runs oldest-first as bots free up and the
+ * only thing being waited on is somebody else's turn ending. */
+const BUSY_REPARK_MS = 30_000;
+
 export interface WorkflowEngineOptions {
   store: WorkflowStore;
   now?: () => number;
@@ -1067,6 +1077,22 @@ export class WorkflowEngine {
     if (run.currentThreadId !== undefined) this.forgetThread(run.currentThreadId);
     const workflow = this.store.get(run.workflowId);
     const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
+    // A dispatch the harness refused because that bot is already working is
+    // CONTENTION, not a failure of this node: nothing was attempted, nothing
+    // was learned, and the node's own budget must not pay for someone else's
+    // turn. The busy check before dispatch cannot close this window on its
+    // own — the bot can take a turn between the check and the call — so the
+    // answer is the same one the busy check gives: park, and let the
+    // reconciler serve this run when the bot frees, oldest first.
+    if (node?.kind === "agent" && BUSY_DISPATCH.test(reason)) {
+      this.store.patchRun(runId, {
+        currentNodeId: node.id,
+        nextAttemptAt: this.now() + BUSY_REPARK_MS,
+        dispatchedAt: undefined,
+        currentThreadId: undefined,
+      });
+      return;
+    }
     const retries = node?.kind === "agent" ? (node.retries ?? WORKFLOW_NODE_RETRIES_DEFAULT) : 0;
     if (run.attempt < retries) {
       const attempt = run.attempt + 1;

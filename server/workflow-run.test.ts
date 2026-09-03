@@ -2409,6 +2409,58 @@ describe("WorkflowEngine approval and notify edge cases", () => {
   });
 });
 
+describe("WorkflowEngine contended dispatch", () => {
+  it("parks a dispatch the harness refused as busy instead of spending the node's attempts", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    // the bot took a turn between the engine's busy check and the call
+    h.dispatches[0]!.onDispatchError("the bot is already working — interrupt it first");
+
+    const parked = h.store.getRun(run.id)!;
+    expect(parked.status).toBe("running");
+    expect(parked.currentNodeId).toBe("plan");
+    // nothing was attempted, so nothing was spent
+    expect(parked.attempt).toBe(0);
+    expect(parked.nextAttemptAt).toBe(1_000 + 30_000);
+    expect(parked.currentThreadId).toBeUndefined();
+
+    // and it goes out again once the bot is free, still on its first attempt
+    h.setNow(1_000 + 30_000);
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.dispatches[1]!.botId).toBe("planner");
+    expect(h.store.getRun(run.id)!.attempt).toBe(0);
+  });
+
+  it("survives contention for longer than the node's retries would have allowed", async () => {
+    // noRetryPipeline has retries: 0 — one ordinary failure is terminal, so
+    // this pins that contention is not counted as one at all
+    const h = harness();
+    const workflow = h.store.create(noRetryPipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      h.dispatches.at(-1)!.onDispatchError("the bot is already working — interrupt it first");
+      expect(h.store.getRun(run.id)!.status).toBe("running");
+      h.setNow(1_000 + (attempt + 1) * 30_000);
+      await h.engine.tick();
+    }
+    expect(h.dispatches).toHaveLength(4);
+    expect(h.store.getRun(run.id)!.attempt).toBe(0);
+  });
+
+  it("still spends an attempt on a dispatch error that is not contention", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError("the model engine is not installed");
+
+    const failed = h.store.getRun(run.id)!;
+    expect(failed.attempt).toBe(1);
+    expect(failed.nextAttemptAt).toBe(1_000 + 60_000);
+  });
+});
+
 describe("WorkflowEngine activeRunForBot", () => {
   it("names the run and the task thread holding a bot, so a stop can reach a turn nobody else can find", async () => {
     const h = harness();
