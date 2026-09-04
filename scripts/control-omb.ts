@@ -14,6 +14,15 @@ import { freePortBlock } from "../server/testing/ports.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const FAKE_CLI = join(ROOT, "server", "testing", "fake-claude-cli.ts");
+// The fixture server runs with an empty PATH on purpose: nothing it does may
+// reach the developer's real tools. That also leaves the fake CLI's
+// `#!/usr/bin/env node` shebang with nothing to resolve — macOS' fallback
+// PATH is /usr/bin:/bin:/usr/sbin:/sbin, and a Homebrew or nvm node is in
+// none of them, so the driver probes the fixture as "CLI not found" and every
+// engine reports unavailable. Name this process' own Node instead of leaning
+// on a PATH we deliberately emptied. Quoted because either path may contain
+// spaces; resolveCliSpawn tokenizes this string.
+const FAKE_CLI_COMMAND = `"${process.execPath}" "${FAKE_CLI}"`;
 const MUTATING = new Set(["new-bot", "new-channel", "send", "send-channel", "interrupt"]);
 
 export class ControlOmbError extends Error {
@@ -276,7 +285,7 @@ export async function launchVerificationServer(
       claude: {
         driver: "claudeAgent",
         displayName: "Verification fixture",
-        config: { cli: FAKE_CLI },
+        config: { cli: FAKE_CLI_COMMAND },
       },
     },
   }, null, 2));
