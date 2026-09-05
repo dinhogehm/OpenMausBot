@@ -15,6 +15,7 @@ import { newId, type CloudBackend, type ModelSelection, type ThreadId } from "./
 import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { botAvatarProfile, type BotAvatarCrop } from "../shared/bot-avatar.ts";
+import { isApprovalMode, type ApprovalMode } from "../shared/approval-mode.ts";
 import type { MascotBodyId } from "../shared/mascot-bodies.ts";
 import type { RoutineRequestCardData } from "../shared/routine-request.ts";
 import type { RoutineRunCardData } from "../shared/routine-run.ts";
@@ -86,6 +87,9 @@ export interface SecretRequestCardData {
   placeholder: string;
   helpUrl: string;
   requestKey: string;
+  /** Exact successful HPKE operation. This contains no plaintext and prevents
+   * a freshly sealed value from being mistaken for a lost-response retry. */
+  phoneOperationId?: string;
   provided?: boolean;
   dismissed?: boolean;
   resumed?: boolean;
@@ -143,6 +147,12 @@ export interface Message {
   channelMode?: "chat" | "goal";
   /** group threads: which member said this (sender attribution). */
   from?: { botId: string; name: string; color: string };
+  /** Set on a room message a bot pushed in with post_to_room instead of by
+   * taking a turn there. Internal transport changes custody, not authorship:
+   * a reader's turn wraps this one in a provenance preamble rather than
+   * letting it read as ordinary room conversation. `unattended` records that
+   * nobody was watching the bot that posted it. */
+  peerPost?: { unattended?: boolean };
   /** emoji reactions; by = "user" or a member botId. */
   reactions?: Array<{ emoji: string; by: string }>;
   /** comm chips: "Messaged @X" in the caller's chat, linking to the
@@ -439,6 +449,18 @@ export interface BotRecord {
    * working instead of stopping to ask. Questions it asks YOU still come
    * through, and a short list of destructive commands still stops it. */
   autoApprove?: boolean;
+  /** Canonical approval level. Missing means a legacy record and resolves
+   * through autoApprove (true = safe Auto, otherwise Ask). */
+  approvalMode?: ApprovalMode;
+  /** Server-private elevation journal. Full/Custom executes as Ask until
+   * Electron confirms the exact prepared reply and then activates it over
+   * the utility-process channel. Any marker surviving a restart is revoked
+   * during Store load. */
+  approvalGrant?: {
+    requestId: string;
+    mode: "full" | "custom";
+    phase: "prepared" | "confirmed" | "activated" | "committed";
+  };
   /** Optional model review of otherwise undecided, attended approval cards.
    * Unknown persisted values are treated as off by the review boundary. */
   autoReview?: "off" | "shadow" | "enforce";
@@ -476,6 +498,15 @@ export interface BotRecord {
    * delegate_bot). Off by default: a chief-of-staff-style bot is most
    * useful when it can coordinate without nagging. */
   approvePeerComms?: boolean;
+  /** Bot ids this bot is allowed to contact. Unset keeps the rule the app
+   * shipped with — every visible bot in the same section — because that is
+   * what every existing workspace already relies on. An explicit list wires
+   * this bot to exactly those peers (and `[]` to none), which is the only
+   * way to bound one bot's reach inside the unsectioned team, where every
+   * bot the user never filed shares a section. Enforced in one place, by
+   * peer-roster.ts, for the roster, list_bots, ask_bot and delegate_bot
+   * alike. */
+  peers?: string[];
   /** Whether this bot may use the workspace's connected apps (Composio).
    * Unset/true = allowed (the user configured the key deliberately);
    * false = this bot never receives the connection. Imported team members
@@ -669,6 +700,21 @@ export class Store {
       }
       if (b.autoStartVps !== undefined && b.autoStartVps !== true && b.autoStartVps !== false) {
         delete b.autoStartVps;
+        botsMigrated = true;
+      }
+      if (b.approvalMode !== undefined && !isApprovalMode(b.approvalMode)) {
+        delete b.approvalMode;
+        botsMigrated = true;
+      }
+      // A trusted elevation is a prepare/confirm/activate commit. If the
+      // desktop process or its private reply path died before activation,
+      // the durable marker survives beside the mode in the same atomic
+      // bots.json write. Revoke it before schedulers, listeners, or HTTP can
+      // start any new work.
+      if (b.approvalGrant !== undefined) {
+        b.approvalMode = "ask";
+        b.autoApprove = false;
+        delete b.approvalGrant;
         botsMigrated = true;
       }
       const avatar = botAvatarProfile(b);
@@ -1063,6 +1109,14 @@ export class Store {
 
   messagesFor(threadId: string): Message[] {
     return this.thread(threadId).messages;
+  }
+
+  /** Used only with newly allocated import threads. No live actions are
+   * replayed: the importer supplies inert text and freshly remapped IDs. */
+  importTranscript(threadId: string, messages: Message[], activeLeafId: string | null): void {
+    if (this.messagesFor(threadId).length) throw new Error("Cannot import over an existing conversation");
+    mdb.importThread(threadId, messages, activeLeafId);
+    this.threads.delete(threadId);
   }
 
   activeLeaf(threadId: string): string | null {

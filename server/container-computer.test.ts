@@ -24,9 +24,11 @@ import {
   containerComputerStatus,
   containerRuntimeStatus,
   containerRunArgs,
+  localVmRecreatableOnDemand,
   managedImageDockerfile,
   perBotLocalVmTarget,
   podmanSecurityIsHardened,
+  SHARED_LOCAL_VM_TARGET,
   setupCommands,
   type CommandRunner,
   type LocalVmTarget,
@@ -507,7 +509,7 @@ describe("containerComputerStatus", () => {
     expect(fake.calls).not.toContain(readinessProbe);
   });
 
-  it("rejects a lookalike container with a different driver or base-image label", async () => {
+  it("keeps an owned stale container removable without treating it as ready", async () => {
     const fake = runner({
       "/usr/bin/which docker": "docker\n",
       "/usr/bin/which podman": new Error("missing"),
@@ -516,13 +518,20 @@ describe("containerComputerStatus", () => {
       [`docker inspect ${CONTAINER}`]: readyInspect({
         Config: {
           Image: IMAGE,
-          Labels: { [MANAGED_LABEL]: "1", [DRIVER_LABEL]: "0.12.4", [BASE_IMAGE_LABEL]: "wrong" },
+          Labels: {
+            [MANAGED_LABEL]: "1",
+            [DRIVER_LABEL]: "0.12.4",
+            [BASE_IMAGE_LABEL]: "wrong",
+            [IMAGE_LAYER_LABEL]: "old",
+            [WORKSPACE_LABEL]: "1",
+          },
         },
       }),
     });
 
     const status = await containerComputerStatus(fake.run, "linux");
 
+    expect(status.managed).toBe(true);
     expect(status.imageMatches).toBe(false);
     expect(status.ready).toBe(false);
     expect(status.problem).toContain("older desktop or Cua Driver");
@@ -646,6 +655,50 @@ describe("Cua integration", () => {
 });
 
 describe("containerComputerAction", () => {
+  it("never removes an exact-name container without OpenMausBot ownership labels", async () => {
+    const fake = runner({
+      "/usr/bin/which docker": "docker\n",
+      "/usr/bin/which podman": new Error("missing"),
+      "docker info --format {{.ServerVersion}}": "29\n",
+      [`docker image inspect ${IMAGE}`]: preparedImageInspect(),
+      [`docker inspect ${CONTAINER}`]: readyInspect({
+        Config: { Image: IMAGE, Labels: {}, Env: [] },
+      }),
+    });
+
+    await expect(containerComputerAction("remove", fake.run, "linux")).rejects.toThrow(
+      /not created by OpenMausBot.*remove it manually/i,
+    );
+    expect(fake.calls).not.toContain(`docker rm -f ${CONTAINER}`);
+  });
+
+  it("removes a verified OpenMausBot container even when its version labels are stale", async () => {
+    const fake = runner({
+      "/usr/bin/which docker": "docker\n",
+      "/usr/bin/which podman": new Error("missing"),
+      "docker info --format {{.ServerVersion}}": "29\n",
+      [`docker image inspect ${IMAGE}`]: preparedImageInspect(),
+      [`docker inspect ${CONTAINER}`]: readyInspect({
+        Config: {
+          Image: IMAGE,
+          Labels: {
+            [MANAGED_LABEL]: "1",
+            [DRIVER_LABEL]: "0.12.4",
+            [BASE_IMAGE_LABEL]: "old",
+            [IMAGE_LAYER_LABEL]: "old",
+            [WORKSPACE_LABEL]: "1",
+          },
+          Env: [],
+        },
+      }),
+      [`docker rm -f ${CONTAINER}`]: "",
+    });
+
+    await containerComputerAction("remove", fake.run, "linux");
+
+    expect(fake.calls).toContain(`docker rm -f ${CONTAINER}`);
+  });
+
   it("fails closed instead of giving Apple container an invalid dynamic-port spec", async () => {
     const target = perBotLocalVmTarget("bot-a");
     const fake = runner({
@@ -781,5 +834,70 @@ describe("setupCommands", () => {
 
   it("offers the supported Podman Desktop installer on Windows", () => {
     expect(setupCommands(null, "win32").install).toBe("winget install -e --id RedHat.Podman-Desktop");
+  });
+});
+
+describe("localVmRecreatableOnDemand", () => {
+  const linuxPodman = {
+    "/usr/bin/which docker": new Error("missing"),
+    "/usr/bin/which podman": "podman\n",
+    "podman info --format json": '{"host":{"arch":"amd64"}}\n',
+  };
+
+  it("recreates a Local VM the idle timer removed", async () => {
+    const target = SHARED_LOCAL_VM_TARGET;
+    const fake = runner({
+      ...linuxPodman,
+      [`podman image inspect ${IMAGE}`]: preparedImageInspect(),
+      [`podman inspect ${target.containerName}`]: new Error("no such container"),
+    });
+
+    const status = await containerComputerStatus(fake.run, "linux", target);
+
+    expect(status.container).toBe("missing");
+    expect(status.problem).toBe("Create the Local VM");
+    expect(localVmRecreatableOnDemand(status)).toBe(true);
+  });
+
+  it("leaves a stopped container alone, because it is asked to be recreated not started", async () => {
+    const target = SHARED_LOCAL_VM_TARGET;
+    const detail = JSON.parse(readyInspect())[0];
+    detail.State = { Running: false, Status: "exited" };
+    const fake = runner({
+      ...linuxPodman,
+      [`podman image inspect ${IMAGE}`]: preparedImageInspect(),
+      [`podman inspect ${target.containerName}`]: JSON.stringify([detail]),
+    });
+
+    const status = await containerComputerStatus(fake.run, "linux", target);
+
+    expect(status.container).toBe("stopped");
+    expect(localVmRecreatableOnDemand(status)).toBe(false);
+  });
+
+  it("does not create anything when no container runtime is installed", async () => {
+    const fake = runner({
+      "/usr/bin/which docker": new Error("missing"),
+      "/usr/bin/which podman": new Error("missing"),
+    });
+
+    const status = await containerComputerStatus(fake.run, "linux", SHARED_LOCAL_VM_TARGET);
+
+    expect(status.runtime).toBeNull();
+    expect(localVmRecreatableOnDemand(status)).toBe(false);
+  });
+
+  it("does not create anything before the desktop image has been prepared", async () => {
+    const target = SHARED_LOCAL_VM_TARGET;
+    const fake = runner({
+      ...linuxPodman,
+      [`podman image inspect ${IMAGE}`]: new Error("no such image"),
+      [`podman inspect ${target.containerName}`]: new Error("no such container"),
+    });
+
+    const status = await containerComputerStatus(fake.run, "linux", target);
+
+    expect(status.image).toBe(false);
+    expect(localVmRecreatableOnDemand(status)).toBe(false);
   });
 });

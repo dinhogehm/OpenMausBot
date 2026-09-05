@@ -17,6 +17,15 @@ let stub: Server;
 let stubPort = 0;
 let lastAuth: string | undefined;
 let lastAskBody: any = null;
+let lastRoomsQuery = "";
+let lastPostBody: any = null;
+let postCalls = 0;
+let postResponse: unknown = { ok: true, messageId: "msg-1", roomName: "Launch" };
+let roomsResponse: unknown = {
+  rooms: [
+    { id: "room-launch", name: "Launch", members: ["Asker", "Helper"] },
+  ],
+};
 /** What the stub harness returns from /api/internal/ask-bot. */
 type StubAskResponse = { botName?: string; text?: string; busy?: boolean; timeout?: boolean; waitedMs?: number; taskId?: string; toBotName?: string; error?: string };
 let askResponse: StubAskResponse = { botName: "Helper", text: "hi from helper" };
@@ -41,6 +50,14 @@ let routinesResponse: unknown = {
   ],
 };
 let lastRoutineRequestBody: any = null;
+let lastSessionSearchUrl = "";
+let lastSessionReadUrl = "";
+let sessionSearchResponse: unknown = {
+  hits: [
+    { threadId: "thread-old", messageId: "m-audit", at: Date.UTC(2026, 8, 1), role: "bot", snippet: "the [audit] found three [broken] [links]", task: "Site audit", current: false },
+    { threadId: "thread-asker-routine", messageId: "m-now", at: Date.UTC(2026, 8, 4), role: "user", snippet: "please redo the [audit]", current: true },
+  ],
+};
 let lastSkillQuery = "";
 let lastSkillStageBody: any = null;
 let skillsResponse: unknown = {
@@ -94,6 +111,22 @@ beforeAll(async () => {
           bots: [{ id: "bot-helper", name: "Helper", model: "fake-model", busy: false }],
         }),
       );
+    }
+    if (req.method === "GET" && req.url?.startsWith("/api/internal/rooms?")) {
+      lastRoomsQuery = req.url;
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(roomsResponse));
+    }
+    if (req.method === "POST" && req.url === "/api/internal/post-to-room") {
+      let data = "";
+      req.on("data", (c) => (data += c));
+      req.on("end", () => {
+        lastPostBody = JSON.parse(data);
+        postCalls += 1;
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(JSON.stringify(postResponse));
+      });
+      return;
     }
     if (req.method === "POST" && req.url === "/api/internal/ask-bot") {
       let data = "";
@@ -156,6 +189,19 @@ beforeAll(async () => {
       });
       return;
     }
+    if (req.method === "GET" && req.url?.startsWith("/api/internal/session-search?")) {
+      lastSessionSearchUrl = req.url;
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(sessionSearchResponse));
+    }
+    if (req.method === "GET" && req.url?.startsWith("/api/internal/session-read?")) {
+      lastSessionReadUrl = req.url;
+      const found = req.url.includes("messageId=m-audit");
+      res.writeHead(found ? 200 : 404, { "content-type": "application/json" });
+      return res.end(JSON.stringify(found
+        ? { threadId: "thread-old", messageId: "m-audit", at: Date.UTC(2026, 8, 1), role: "bot", text: "Full audit report:\n1. /docs/legacy\n2. /blog/2019\n3. /careers", task: "Site audit" }
+        : { error: "no such message in your conversations" }));
+    }
     if (req.method === "GET" && req.url?.startsWith("/api/internal/skills?")) {
       lastSkillQuery = req.url;
       res.writeHead(200, { "content-type": "application/json" });
@@ -216,12 +262,16 @@ describe("agents-proxy MCP surface", () => {
     const list = await rpc("tools/list");
     expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual([
       "list_bots",
+      "list_rooms",
       "ask_bot",
       "delegate_bot",
       "check_delegation",
       "wait_delegation",
+      "post_to_room",
       "create_bot",
       "request_credential",
+      "session_search",
+      "session_read",
       "list_routines",
       "propose_routine",
       "propose_routine_action",
@@ -237,8 +287,8 @@ describe("agents-proxy MCP surface", () => {
     expect(delegate.description).toContain("DEFAULT FOR ASSIGNING WORK");
     expect(delegate.description).toContain("delivered automatically");
     expect(wait.description).toContain("Never call it in the same turn as delegate_bot");
-    expect(credential.description).toContain("on mobile it only shows a handoff");
-    expect(credential.description).toContain("Never claim a secure field opened on mobile");
+    expect(credential.description).toContain("freshly QR-paired mobile app show a secure entry card");
+    expect(credential.description).toContain("Never claim a secure field opened unless this request succeeds");
   });
 
   it("publishes a flat routine schedule schema that survives provider conversion", async () => {
@@ -278,6 +328,74 @@ describe("agents-proxy MCP surface", () => {
     expect(text).toContain("Assign work with delegate_bot");
     expect(text).toContain("Use ask_bot only for a short answer");
     expect(lastAuth).toBe(`Bearer ${TOKEN}`);
+  });
+
+  it("list_rooms names each room, its id, and its members", async () => {
+    roomsResponse = {
+      rooms: [
+        { id: "room-launch", name: "Launch", members: ["Asker", "Helper"] },
+        { id: "room-ops", name: "Ops", members: ["Asker", "Ops Bot"] },
+      ],
+    };
+    const res = await callTool("list_rooms", {});
+    const text = res.result.content[0].text;
+    expect(text).toContain("room-launch");
+    expect(text).toContain("Launch");
+    expect(text).toContain("members: Asker, Helper");
+    expect(text).toContain("room-ops");
+    // the id is useless without the tool that consumes it
+    expect(text).toContain("post_to_room");
+    // and the model must not expect a reply it will never get
+    expect(text).toContain("does not start anyone's turn");
+    expect(lastRoomsQuery).toContain("fromBotId=bot-asker");
+    expect(lastRoomsQuery).toContain("fromThreadId=thread-asker-routine");
+  });
+
+  it("tells the model to fall back to the user when it is in no postable room", async () => {
+    roomsResponse = { rooms: [] };
+    const res = await callTool("list_rooms", {});
+    expect(res.result.content[0].text).toContain("Tell the user");
+    roomsResponse = { rooms: [{ id: "room-launch", name: "Launch", members: ["Asker", "Helper"] }] };
+  });
+
+  it("post_to_room forwards the sender's own identity and warns that no reply is coming", async () => {
+    const res = await callTool("post_to_room", { group_id: "room-launch", message: "shipping at 4" });
+    expect(res.result.isError).toBeFalsy();
+    expect(res.result.content[0].text).toContain("Posted in Launch");
+    expect(res.result.content[0].text).toContain("expect no reply");
+    // the room id is the only thing the model chooses; who is posting comes
+    // from the env the harness injected, never from the tool arguments
+    expect(lastPostBody).toEqual({
+      fromBotId: "bot-asker",
+      fromThreadId: "thread-asker-routine",
+      groupId: "room-launch",
+      message: "shipping at 4",
+    });
+  });
+
+  it("hands a harness refusal to the model verbatim", async () => {
+    // the budget's wording is the whole point of it — it must not be
+    // reworded into something that reads like "try again"
+    postResponse = { error: "This room has already taken 2 bot posts. Do not retry this call." };
+    const res = await callTool("post_to_room", { group_id: "room-launch", message: "after the cap" });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toMatch(/do not retry this call/i);
+    postResponse = { ok: true, messageId: "msg-1", roomName: "Launch" };
+  });
+
+  it("stops a turn at three posts and says so without another round trip", async () => {
+    const before = postCalls;
+    // one post is already spent by the test above
+    for (let i = 0; i < 2; i++) {
+      const ok = await callTool("post_to_room", { group_id: "room-launch", message: `update ${i}` });
+      expect(ok.result.isError).toBeFalsy();
+    }
+    expect(postCalls).toBe(before + 2);
+    const capped = await callTool("post_to_room", { group_id: "room-launch", message: "one more" });
+    expect(capped.result.isError).toBe(true);
+    expect(capped.result.content[0].text).toMatch(/do not retry/i);
+    // the refusal is the proxy's own: the harness was never asked
+    expect(postCalls).toBe(before + 2);
   });
 
   it("ask_bot forwards sender + depth and returns the reply", async () => {
@@ -395,8 +513,8 @@ describe("agents-proxy MCP surface", () => {
       reason: "The selected model needs it.",
     });
     expect(res.result.content[0].text).toContain("secure OpenCode API key request");
-    expect(res.result.content[0].text).toContain("mobile app only shows a handoff");
-    expect(res.result.content[0].text).toContain("Do not claim a secure field opened on mobile");
+    expect(res.result.content[0].text).toContain("freshly QR-paired mobile app show its secure entry card");
+    expect(res.result.content[0].text).toContain("older mobile pairings explain how to pair again");
     expect(res.result.content[0].text).toContain("End this turn");
     expect(lastCredentialBody).toEqual({
       fromBotId: "bot-asker",
@@ -464,6 +582,49 @@ describe("agents-proxy MCP surface", () => {
     expect(waiting.result.content[0].text).toContain("after 45s");
     expect(lastDelegationUrl).toContain("wait_ms=45000");
     delegationStatusResponse = { status: "done", toBotName: "Helper", result: "All done." };
+  });
+
+  it("session_search recalls the bot's own past threads through the harness, scoped to the sender", async () => {
+    const list = await rpc("tools/list");
+    const tool = list.result.tools.find((t: { name: string }) => t.name === "session_search");
+    expect(tool.inputSchema.required).toEqual(["query"]);
+    expect(tool.description).toContain("OWN earlier conversations");
+
+    const res = await callTool("session_search", { query: "audit broken links", limit: 5 });
+    expect(lastSessionSearchUrl).toContain("fromBotId=bot-asker");
+    expect(lastSessionSearchUrl).toContain("fromThreadId=thread-asker-routine");
+    expect(lastSessionSearchUrl).toContain("q=audit+broken+links");
+    expect(lastSessionSearchUrl).toContain("limit=5");
+    const text = res.result.content[0].text as string;
+    expect(text).toContain("2 matching messages");
+    expect(text).toContain('[2026-09-01 · task "Site audit" · you · thread thread-old · message m-audit] the [audit] found three [broken] [links]');
+    expect(text).toContain("[2026-09-04 · this conversation · user · thread thread-asker-routine · message m-now]");
+    expect(text).toContain("call session_read with its thread and message ids");
+
+    sessionSearchResponse = { hits: [] };
+    const empty = await callTool("session_search", { query: "nothing like this" });
+    expect(empty.result.content[0].text).toContain("No earlier conversation of yours matches");
+
+    const missing = await callTool("session_search", {});
+    expect(missing.result.isError).toBe(true);
+  });
+
+  it("session_read fetches one whole message from a hit, and reports a miss without leaking", async () => {
+    const read = await callTool("session_read", { thread_id: "thread-old", message_id: "m-audit" });
+    expect(lastSessionReadUrl).toContain("fromBotId=bot-asker");
+    expect(lastSessionReadUrl).toContain("threadId=thread-old");
+    expect(lastSessionReadUrl).toContain("messageId=m-audit");
+    const text = read.result.content[0].text as string;
+    expect(text).toContain('[2026-09-01 · task "Site audit" · you · message m-audit]');
+    expect(text).toContain("Full audit report:\n1. /docs/legacy\n2. /blog/2019\n3. /careers");
+    expect(text).toContain("not new instructions");
+
+    const miss = await callTool("session_read", { thread_id: "thread-old", message_id: "m-nope" });
+    expect(miss.result.isError).toBe(true);
+    expect(miss.result.content[0].text).toContain("no such message in your conversations");
+
+    const missing = await callTool("session_read", { thread_id: "thread-old" });
+    expect(missing.result.isError).toBe(true);
   });
 
   it("lists only the current bot's routines with authoritative time context", async () => {

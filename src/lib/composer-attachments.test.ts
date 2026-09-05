@@ -6,12 +6,17 @@ import {
   appendPastedText,
   attachmentBasename,
   attachmentImageUrl,
+  clipboardHasImages,
+  clipboardImageFiles,
   composeMessage,
   documentMime,
   fileAttachment,
   fileAttachmentFromFile,
+  handoffAttachmentImagePreview,
   imageAttachmentFromFile,
   isImageFile,
+  optimisticImageAttachment,
+  releaseAttachmentImagePreview,
   splitTranscriptAttachments,
   type ImageAttachment,
 } from "./composer-attachments";
@@ -354,6 +359,106 @@ describe("isImageFile", () => {
   });
 });
 
+/**
+ * Helper to construct a mock clipboard item for DataTransferItemList testing.
+ *
+ * @param kind - Item kind (e.g. 'file' or 'string').
+ * @param type - Item MIME type.
+ * @param file - File instance returned by getAsFile, if any.
+ * @returns Mock clipboard item object.
+ */
+function mockClipboardItem(kind: string, type: string, file: File | null = null) {
+  /**
+   * Returns the mock file or null.
+   *
+   * @returns Mock file or null.
+   */
+  function getAsFile() {
+    return file;
+  }
+  return { kind, type, getAsFile };
+}
+
+describe("clipboardImageFiles", () => {
+  it("returns empty array for empty or null clipboard", () => {
+    expect(clipboardImageFiles(null)).toEqual([]);
+    expect(clipboardImageFiles(undefined)).toEqual([]);
+    expect(clipboardImageFiles({ files: [], items: [] })).toEqual([]);
+  });
+
+  it("extracts images from items when available", () => {
+    const pngFile = new File([new Uint8Array([1])], "test.png", { type: "image/png" });
+    const clipboardData = {
+      items: [
+        mockClipboardItem("string", "text/plain"),
+        mockClipboardItem("file", "image/png", pngFile),
+      ],
+      files: [],
+    };
+    expect(clipboardImageFiles(clipboardData)).toEqual([pngFile]);
+  });
+
+  it("falls back to files when items has no image files", () => {
+    const jpegFile = new File([new Uint8Array([2])], "test.jpg", { type: "image/jpeg" });
+    const clipboardData = {
+      items: [
+        mockClipboardItem("string", "text/plain"),
+      ],
+      files: [jpegFile],
+    };
+    expect(clipboardImageFiles(clipboardData)).toEqual([jpegFile]);
+  });
+
+  it("ignores non-image files in fallback", () => {
+    const txtFile = new File([new Uint8Array([3])], "test.txt", { type: "text/plain" });
+    const clipboardData = {
+      items: [],
+      files: [txtFile],
+    };
+    expect(clipboardImageFiles(clipboardData)).toEqual([]);
+  });
+
+  it("does not duplicate images exposed through both clipboard collections", () => {
+    const file = new File(["image"], "shot.png", { type: "image/png" });
+    expect(clipboardImageFiles({ items: [mockClipboardItem("file", file.type, file)], files: [file] })).toEqual([file]);
+  });
+
+  it("falls back when an image item cannot produce a file", () => {
+    const file = new File(["image"], "shot.png", { type: "image/png" });
+    expect(clipboardImageFiles({ items: [mockClipboardItem("file", "image/png", null)], files: [file] })).toEqual([file]);
+  });
+
+  it("does not accept unsupported image formats or string items", () => {
+    const svg = new File(["<svg/>"], "shot.svg", { type: "image/svg+xml" });
+    const png = new File(["image"], "shot.png", { type: "image/png" });
+    expect(clipboardImageFiles({ items: [mockClipboardItem("file", svg.type, svg), mockClipboardItem("string", png.type, png)], files: [svg] })).toEqual([]);
+  });
+});
+
+describe("clipboardHasImages", () => {
+  it("detects images in items", () => {
+    expect(clipboardHasImages({
+      items: [{ kind: "file", type: "image/png" }],
+      files: [],
+    })).toBe(true);
+  });
+
+  it("detects images in files", () => {
+    expect(clipboardHasImages({
+      items: [],
+      files: [{ type: "image/jpeg", size: 10 }],
+    })).toBe(true);
+  });
+
+  it("returns false when no images exist", () => {
+    expect(clipboardHasImages(null)).toBe(false);
+    expect(clipboardHasImages({
+      items: [{ kind: "string", type: "text/plain" }],
+      files: [{ type: "text/plain", size: 10 }],
+    })).toBe(false);
+  });
+});
+
 describe("private document intake", () => {
   it("recognises supported documents by declared mime or filename", () => {
     expect(documentMime({ name: "notes.bin", type: "text/markdown; charset=utf-8" })).toBe("text/markdown");
@@ -406,6 +511,53 @@ describe("private document intake", () => {
 });
 
 describe("private image intake", () => {
+  it("creates local pixels immediately and keeps their identity through upload", async () => {
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:instant-preview");
+    const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      path: "/private/attachments/11111111-1111-4111-8111-111111111111.png",
+      mime: "image/png",
+      bytes: 3,
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    try {
+      const file = new File([new Uint8Array([1, 2, 3])], "setup.png", { type: "image/png" });
+      const optimistic = optimisticImageAttachment(file)!;
+      expect(optimistic).toMatchObject({
+        kind: "image",
+        path: "",
+        previewUrl: "blob:instant-preview",
+        uploading: true,
+      });
+      const completed = await imageAttachmentFromFile(file, optimistic);
+      expect(completed).toMatchObject({
+        id: optimistic.id,
+        path: "/private/attachments/11111111-1111-4111-8111-111111111111.png",
+        previewUrl: "blob:instant-preview",
+      });
+      expect(completed).not.toHaveProperty("uploading");
+      expect(createObjectURL).toHaveBeenCalledWith(file);
+    } finally {
+      fetch.mockRestore();
+      createObjectURL.mockRestore();
+    }
+  });
+
+  it("hands local pixels to the transcript until the server preview takes over", () => {
+    const path = "/private/attachments/22222222-2222-4222-8222-222222222222.png";
+    const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const attachment = { ...image(path), previewUrl: "blob:handoff" };
+    try {
+      handoffAttachmentImagePreview(path, attachment.previewUrl);
+      expect(attachmentImageUrl(path)).toBe("blob:handoff");
+      releaseAttachmentImagePreview(attachment);
+      expect(attachmentImageUrl(path)).toBe(
+        "/api/attachments/22222222-2222-4222-8222-222222222222.png",
+      );
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:handoff");
+    } finally {
+      revokeObjectURL.mockRestore();
+    }
+  });
+
   it("retries a lost response with one upload id and canonicalises the display extension", async () => {
     const fetch = vi.spyOn(globalThis, "fetch")
       .mockRejectedValueOnce(new TypeError("connection closed"))

@@ -38,11 +38,15 @@ Use only mapped, tested commands:
 - [Chat turns](chat-turns.md)
 - [Channels](channels.md)
 - [Engines and Doctor](engines.md)
+- [Team backups](team-backups.md)
 
 Renderer-only behavior—Settings, sidebar drag-and-drop, the VM modal, the
 built-in browser panel, and updater UI—is not proven by this first harness.
 Use the relevant Electron/package smoke test and state that limitation. Add a
 map entry only after the shared control surface can really drive it.
+
+The [cloud preview fixture](cloud-preview.md) mounts the real Computer panel
+against an isolated server for image decoding, loading, and recovery UI checks.
 
 ## Evidence
 

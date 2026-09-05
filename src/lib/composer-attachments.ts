@@ -24,6 +24,10 @@ export type ImageAttachment = {
   name: string;
   size: number;
   mime: string;
+  /** Browser-local pixels shown immediately while the durable upload is in
+   * flight and briefly handed to the transcript after Send. Never persisted. */
+  previewUrl?: string;
+  uploading?: boolean;
 };
 
 export type Attachment = PasteAttachment | FileAttachment | ImageAttachment;
@@ -138,11 +142,78 @@ export function documentMime(file: Pick<File, "name" | "type">): string | null {
   return DOCUMENT_MIMES[extension] ?? null;
 }
 
-export function isImageFile(file: { type: string; size: number }): boolean {
+/**
+ * Checks if a given file or descriptor has a supported image MIME type.
+ *
+ * @param file - Object with a MIME `type` and optional `size`.
+ * @returns `true` if the file is a supported image format (PNG, JPEG, GIF, WebP).
+ */
+export function isImageFile(file: { type: string; size?: number }): boolean {
   return (
     file.type.startsWith("image/") &&
     ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.type.split(";")[0]!.trim().toLowerCase())
   );
+}
+
+/**
+ * Extracts valid image files from clipboard data, checking items first because
+ * Chromium on macOS exposes screenshots and copied image bitmaps via items
+ * while clipboardData.files may remain empty.
+ *
+ * @param clipboardData - The clipboard DataTransfer object or mock data.
+ * @returns Array of valid image File objects found in the clipboard.
+ */
+export function clipboardImageFiles(
+  clipboardData: {
+    files?: Iterable<File> | null;
+    items?: Iterable<{ kind: string; type: string; getAsFile(): File | null }> | null;
+  } | null | undefined,
+): File[] {
+  if (!clipboardData) return [];
+  if (clipboardData.items) {
+    const fromItems: File[] = [];
+    for (const item of clipboardData.items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file && isImageFile(file)) {
+          fromItems.push(file);
+        }
+      }
+    }
+    if (fromItems.length > 0) return fromItems;
+  }
+  if (clipboardData.files) {
+    return Array.from(clipboardData.files).filter(isImageFile);
+  }
+  return [];
+}
+
+/**
+ * Detects if the clipboard data contains any image items or files.
+ *
+ * @param clipboardData - The clipboard DataTransfer object or mock data.
+ * @returns `true` if any image file or item is present in the clipboard.
+ */
+export function clipboardHasImages(
+  clipboardData: {
+    files?: Iterable<{ type: string; size?: number }> | null;
+    items?: Iterable<{ kind: string; type: string }> | null;
+  } | null | undefined,
+): boolean {
+  if (!clipboardData) return false;
+  if (clipboardData.items) {
+    for (const item of clipboardData.items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        return true;
+      }
+    }
+  }
+  if (clipboardData.files) {
+    for (const file of clipboardData.files) {
+      if (isImageFile(file)) return true;
+    }
+  }
+  return false;
 }
 
 const IMAGE_EXTENSION_BY_MIME: Readonly<Record<string, string>> = {
@@ -206,7 +277,27 @@ function canonicalImageName(originalName: string, path: string, mime: string): s
 /** Persist a pasted image server-side and return the attachment chip data.
  * The server writes ~/.openmausbot/attachments/<uuid>.<ext> and answers
  * with the path; the prompt references that path so every CLI can open it. */
-export async function imageAttachmentFromFile(file: File): Promise<ImageAttachment | null> {
+export function optimisticImageAttachment(file: File): ImageAttachment | null {
+  if (!isImageFile(file)) return null;
+  if (file.size > IMAGE_MAX_BYTES) throw Object.assign(new Error(`${file.name} exceeds 10 MB`), { status: 413 });
+  const mime = file.type.split(";", 1)[0]!.trim().toLowerCase();
+  const previewUrl = typeof URL.createObjectURL === "function" ? URL.createObjectURL(file) : undefined;
+  return {
+    kind: "image",
+    id: newId(),
+    path: "",
+    name: file.name || "image",
+    size: file.size,
+    mime,
+    ...(previewUrl ? { previewUrl } : {}),
+    uploading: true,
+  };
+}
+
+export async function imageAttachmentFromFile(
+  file: File,
+  optimistic?: Pick<ImageAttachment, "id" | "previewUrl">,
+): Promise<ImageAttachment | null> {
   if (!isImageFile(file)) return null;
   if (file.size > IMAGE_MAX_BYTES) throw Object.assign(new Error(`${file.name} exceeds 10 MB`), { status: 413 });
   const bytes = new Uint8Array(await file.arrayBuffer());
@@ -221,11 +312,12 @@ export async function imageAttachmentFromFile(file: File): Promise<ImageAttachme
   );
   return {
     kind: "image",
-    id: newId(),
+    id: optimistic?.id ?? newId(),
     path: saved.path,
     name: canonicalImageName(file.name, saved.path, saved.mime),
     size: saved.bytes,
     mime: saved.mime,
+    ...(optimistic?.previewUrl ? { previewUrl: optimistic.previewUrl } : {}),
   };
 }
 
@@ -591,11 +683,50 @@ export function attachmentBasename(path: string): string {
   return parts[parts.length - 1] ?? "";
 }
 
+const previewHandoffs = new Map<string, { url: string; timer: ReturnType<typeof setTimeout> }>();
+const PREVIEW_HANDOFF_MS = 60_000;
+
+function revokeBlobUrl(url: string | undefined): void {
+  if (!url?.startsWith("blob:") || typeof URL.revokeObjectURL !== "function") return;
+  URL.revokeObjectURL(url);
+}
+
+/** Keep the already-decoded local image visible while the canonical message
+ * and its cacheable server URL replace the optimistic row. */
+export function handoffAttachmentImagePreview(path: string, previewUrl: string | undefined): void {
+  if (!path || !previewUrl?.startsWith("blob:")) return;
+  const previous = previewHandoffs.get(path);
+  if (previous) {
+    clearTimeout(previous.timer);
+    if (previous.url !== previewUrl) revokeBlobUrl(previous.url);
+  }
+  const timer = setTimeout(() => {
+    if (previewHandoffs.get(path)?.url !== previewUrl) return;
+    previewHandoffs.delete(path);
+    revokeBlobUrl(previewUrl);
+  }, PREVIEW_HANDOFF_MS);
+  (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
+  previewHandoffs.set(path, { url: previewUrl, timer });
+}
+
+/** Remove a draft image and its local pixels. Sent images deliberately skip
+ * this path so their optimistic-to-server handoff can finish. */
+export function releaseAttachmentImagePreview(attachment: ImageAttachment): void {
+  const handed = attachment.path ? previewHandoffs.get(attachment.path) : undefined;
+  if (handed && handed.url === attachment.previewUrl) {
+    clearTimeout(handed.timer);
+    previewHandoffs.delete(attachment.path);
+  }
+  revokeBlobUrl(attachment.previewUrl);
+}
+
 /** The renderer never loads a transcript-provided URL directly. Only names
  * the attachment server itself can have generated become same-origin image
  * URLs; malformed and executable-image paths render nothing, while a string
  * that looks remote can at most resolve to a local generated filename. */
 export function attachmentImageUrl(path: string): string | null {
+  const local = previewHandoffs.get(path);
+  if (local) return local.url;
   const name = attachmentBasename(path);
   if (!/^[A-Za-z0-9-]+\.(png|jpg|gif|webp)$/.test(name)) return null;
   return `/api/attachments/${encodeURIComponent(name)}`;
@@ -620,35 +751,43 @@ export async function intakeFiles<T extends DroppedFile & { type: string }>(
     if (!file.arrayBuffer) return null;
     return fileAttachmentFromFile(file as unknown as File);
   });
-  const attachments: Attachment[] = [];
-  const rejectedNames: string[] = [];
-  const uploadErrors: string[] = [];
-  // Finish each selected file in sequence so the chips retain the order in
-  // which the user chose or dropped them.
-  for (const file of files) {
+  // Promise.all starts every optimistic image preview immediately while its
+  // result array still preserves the order in which files were selected.
+  const results = await Promise.all(files.map(async (file): Promise<{
+    attachments: Attachment[];
+    rejectedNames: string[];
+    uploadError?: string;
+  }> => {
     if (allowImages && isImageFile(file)) {
       try {
         const attachment = await uploadImage(file);
-        if (attachment) attachments.push(attachment);
+        return { attachments: attachment ? [attachment] : [], rejectedNames: [] };
       } catch (err) {
-        uploadErrors.push(`${file.name}: ${err instanceof Error ? err.message : "upload failed"}`);
+        return {
+          attachments: [],
+          rejectedNames: [],
+          uploadError: `${file.name}: ${err instanceof Error ? err.message : "upload failed"}`,
+        };
       }
-      continue;
     }
     try {
       const attachment = await uploadFile(file);
       if (attachment) {
-        attachments.push(attachment);
-        continue;
+        return { attachments: [attachment], rejectedNames: [] };
       }
     } catch (err) {
-      uploadErrors.push(`${file.name}: ${err instanceof Error ? err.message : "upload failed"}`);
-      continue;
+      return {
+        attachments: [],
+        rejectedNames: [],
+        uploadError: `${file.name}: ${err instanceof Error ? err.message : "upload failed"}`,
+      };
     }
     const result = await attachmentsFromDroppedFiles([file], getPath);
-    attachments.push(...result.attachments);
-    rejectedNames.push(...result.rejectedNames);
-  }
+    return result;
+  }));
+  const attachments = results.flatMap((result) => result.attachments);
+  const rejectedNames = results.flatMap((result) => result.rejectedNames);
+  const uploadErrors = results.flatMap((result) => result.uploadError ? [result.uploadError] : []);
   const pathless = rejectedNames.length
     ? `${rejectedNames.join(", ")} — that file has no path on disk. Save it first, then attach it from Finder.`
     : null;

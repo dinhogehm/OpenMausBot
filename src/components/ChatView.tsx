@@ -25,6 +25,7 @@ import {
 import { WorkingDots } from "@/components/WorkingIndicator";
 import { cachedInput, costCaption, formatTokens, formatUsd, hasFiniteCost, usageChip, usageDetail } from "@/lib/usage";
 import {
+  api,
   useStore,
   useStreaming,
   formatTime,
@@ -290,6 +291,8 @@ function BubbleEditor({
 function Bubble({
   bot,
   message,
+  emerging = false,
+  eagerAttachments = false,
   editing,
   isLastBotText,
   onStartEdit,
@@ -301,6 +304,8 @@ function Bubble({
 }: {
   bot: Bot;
   message: Message;
+  emerging?: boolean;
+  eagerAttachments?: boolean;
   editing: boolean;
   isLastBotText: boolean;
   onStartEdit: () => void;
@@ -311,6 +316,7 @@ function Bubble({
   onReply: () => void;
 }) {
   const { dispatch } = useStore();
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   const user = message.role === "user";
   const [expanded, setExpanded] = useState(false);
   const text = message.text ?? "";
@@ -372,7 +378,10 @@ function Bubble({
                 })
               }
               aria-label={bot.pinnedMessageId === message.id ? "Unpin message" : "Pin message"}
-              className="rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+              className={cn(
+                "rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100",
+                remoteClient && "hidden",
+              )}
               title={
                 bot.pinnedMessageId === message.id
                   ? "Unpin this message"
@@ -386,6 +395,7 @@ function Bubble({
         <div
           className={cn(
             "w-fit max-w-[min(42rem,78%)] rounded-2xl text-[15px] leading-relaxed",
+            emerging && "turn-answer",
             user && webhookView
               ? "overflow-hidden border border-accent/25 bg-card text-ink shadow-[0_10px_30px_rgba(0,0,0,0.18)]"
               : user
@@ -423,7 +433,7 @@ function Bubble({
           ) : user ? (
             <>
               {attachments && attachments.images.length > 0 && (
-                <AttachedImageGallery paths={attachments.images} />
+                <AttachedImageGallery paths={attachments.images} eager={eagerAttachments} />
               )}
               {attachments && attachments.files.length > 0 && (
                 <AttachedFileChips files={attachments.files} message={{ threadId: bot.threadId, messageId: message.id }} className={!visibleText ? "mb-0" : undefined} />
@@ -457,6 +467,7 @@ function Bubble({
                 <AttachedImageGallery
                   paths={message.attachments.map((attachment) => attachment.path)}
                   className={text ? "justify-start" : "mb-0 justify-start"}
+                  eager={eagerAttachments}
                 />
               ) : null}
               {text ? <ChatMarkdown text={text} message={{ threadId: bot.threadId, messageId: message.id }} /> : null}
@@ -499,7 +510,10 @@ function Bubble({
                 })
               }
               aria-label={bot.pinnedMessageId === message.id ? "Unpin message" : "Pin message"}
-              className="rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+              className={cn(
+                "rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100",
+                remoteClient && "hidden",
+              )}
               title={
                 bot.pinnedMessageId === message.id
                   ? "Unpin this message"
@@ -645,6 +659,8 @@ const MessagesList = memo(function MessagesList({
   // Finished tool chips become compact runs; settled assistant narration
   // becomes one reversible turn row while the terminal answer stays visible.
   const items = useMemo(() => groupTranscript(messages), [messages]);
+  const newestMessageId = messages.at(-1)?.id;
+  const newestUserMessageId = [...messages].reverse().find((message) => message.role === "user")?.id;
   // A search hit inside a folded run has to open it: the fold keeps the
   // row out of the DOM, and there is nothing for the scroll to land on.
   const focus = state.focusMessage;
@@ -656,7 +672,15 @@ const MessagesList = memo(function MessagesList({
           <BotAvatar bot={bot} state="idle" size={64} motion="none" motionKey={0} />
           <RenameTitle
             value={bot.name}
-            onCommit={(name) => dispatch({ type: "updateBot", botId: bot.id, patch: { name } })}
+            onCommit={(name) => {
+              if (window.ogb?.remoteClient?.active) {
+                void api(`/api/bots/${bot.id}/profile`, { method: "PATCH", body: JSON.stringify({ name }) })
+                  .then(({ bot: updated }) => dispatch({ type: "botPatched", bot: updated }))
+                  .catch((cause) => dispatch({ type: "error", message: cause instanceof Error ? cause.message : String(cause) }));
+              } else {
+                dispatch({ type: "updateBot", botId: bot.id, patch: { name } });
+              }
+            }}
             className="text-[17px] font-semibold text-ink"
             inputClassName="rounded bg-inset px-1.5 py-0.5 text-center text-[17px] font-semibold"
           />
@@ -715,7 +739,6 @@ const MessagesList = memo(function MessagesList({
           );
         }
         const m = item.message;
-        if (m.id === emergingId) return null;
         const row = (() => {
           switch (m.kind) {
             case "secret":
@@ -769,6 +792,8 @@ const MessagesList = memo(function MessagesList({
                 <Bubble
                   bot={bot}
                   message={m}
+                  emerging={m.id === emergingId}
+                  eagerAttachments={m.id === newestMessageId || m.id === newestUserMessageId}
                   editing={editingId === m.id}
                   isLastBotText={m.id === lastBotTextId}
                   onStartEdit={() => onStartEdit(m.id)}
@@ -807,7 +832,7 @@ function PinnedBanner({
   pinnedId?: string;
   messages: Message[];
   onJump: (messageId: string) => void;
-  onUnpin: () => void;
+  onUnpin?: () => void;
 }) {
   const pinned = messages.find((m) => m.id === pinnedId);
   if (!pinned || pinned.kind !== "text") return null;
@@ -827,14 +852,14 @@ function PinnedBanner({
           <span className="shrink-0 text-[11.5px] font-medium text-accent">{sender}</span>
           <span className="truncate text-[12.5px] text-ink-secondary">{text}</span>
         </button>
-        <button
+        {onUnpin && <button
           onClick={onUnpin}
           aria-label="Unpin message"
           title="Unpin"
           className="shrink-0 rounded p-0.5 text-ink-secondary hover:bg-raised hover:text-ink"
         >
           <X size={13} />
-        </button>
+        </button>}
       </div>
     </div>
   );
@@ -842,6 +867,7 @@ function PinnedBanner({
 
 export function ChatView({ bot }: { bot: Bot }) {
   const { state, dispatch } = useStore();
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerDockRef = useRef<HTMLDivElement>(null);
   const composerDock = useComposerDockPad(composerDockRef);
@@ -940,23 +966,32 @@ export function ChatView({ bot }: { bot: Bot }) {
       showWorkingDots(bot.busy, lastMessage),
   );
   const wasWaiting = useRef(false);
-  const [popping, setPopping] = useState<{ id: string; text: string } | null>(null);
-  useEffect(() => {
+  const [popping, setPopping] = useState<string | null>(null);
+  const poppingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (poppingTimer.current) clearTimeout(poppingTimer.current);
+  }, []);
+  useLayoutEffect(() => {
+    if (poppingTimer.current) clearTimeout(poppingTimer.current);
+    poppingTimer.current = null;
     wasWaiting.current = false;
     setPopping(null);
   }, [bot.id]);
   useEffect(() => {
     if (waiting) wasWaiting.current = true;
   }, [waiting]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (lastMessage?.role !== "bot" || lastMessage.kind !== "text" || !wasWaiting.current) return;
     wasWaiting.current = false;
-    setPopping({ id: lastMessage.id, text: lastMessage.text ?? "" });
-    const timer = setTimeout(() => setPopping(null), 520);
-    return () => clearTimeout(timer);
-  }, [lastMessage?.id, lastMessage?.role, lastMessage?.kind, lastMessage?.text]);
+    const messageId = lastMessage.id;
+    if (poppingTimer.current) clearTimeout(poppingTimer.current);
+    setPopping(messageId);
+    poppingTimer.current = setTimeout(() => {
+      poppingTimer.current = null;
+      setPopping((current) => current === messageId ? null : current);
+    }, 520);
+  }, [lastMessage?.id, lastMessage?.role, lastMessage?.kind]);
   const presenceVisible = waiting || popping !== null;
-  const poppingMessage = popping ? messages.find((message) => message.id === popping.id) : undefined;
   // Wall-clock anchor for the working row's elapsed readout — set when the
   // turn starts, cleared when it settles, reset on bot switch.
   const [busySince, setBusySince] = useState<number | null>(null);
@@ -1102,7 +1137,15 @@ export function ChatView({ bot }: { bot: Bot }) {
           </button>
           <RenameTitle
             value={bot.name}
-            onCommit={(name) => dispatch({ type: "updateBot", botId: bot.id, patch: { name } })}
+            onCommit={(name) => {
+              if (window.ogb?.remoteClient?.active) {
+                void api(`/api/bots/${bot.id}/profile`, { method: "PATCH", body: JSON.stringify({ name }) })
+                  .then(({ bot: updated }) => dispatch({ type: "botPatched", bot: updated }))
+                  .catch((cause) => dispatch({ type: "error", message: cause instanceof Error ? cause.message : String(cause) }));
+              } else {
+                dispatch({ type: "updateBot", botId: bot.id, patch: { name } });
+              }
+            }}
             onActivate={() => dispatch({ type: "toggleSettings", open: true })}
             showEditButton
             className="truncate text-[15px] font-semibold text-ink"
@@ -1143,8 +1186,8 @@ export function ChatView({ bot }: { bot: Bot }) {
           )}
           <TaskPicker bot={bot} />
           <UsageChip bot={bot} />
-          <WorkingFolderChip bot={bot} />
-          <ModelPicker bot={bot} />
+          {!remoteClient && <WorkingFolderChip bot={bot} />}
+          {!remoteClient && <ModelPicker bot={bot} />}
           <CallButton bot={bot} />
           <button
             onClick={() => dispatch({ type: "toggleComputer" })}
@@ -1156,7 +1199,7 @@ export function ChatView({ bot }: { bot: Bot }) {
           >
             <Monitor size={18} />
           </button>
-          <button
+          {!remoteClient && <button
             onClick={() => dispatch({ type: "toggleInspector" })}
             aria-label="Inspector"
             aria-pressed={state.inspectorOpen}
@@ -1167,7 +1210,7 @@ export function ChatView({ bot }: { bot: Bot }) {
             title="Inspector — runtime events and raw protocol for this thread"
           >
             <Bug size={18} />
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -1190,7 +1233,7 @@ export function ChatView({ bot }: { bot: Bot }) {
         onJump={(messageId) =>
           dispatch({ type: "focusMessage", threadId: bot.threadId, messageId })
         }
-        onUnpin={() =>
+        onUnpin={remoteClient ? undefined : () =>
           dispatch({ type: "updateBot", botId: bot.id, patch: { pinnedMessageId: "" } })
         }
       />
@@ -1256,7 +1299,7 @@ export function ChatView({ bot }: { bot: Bot }) {
             transcript={messages}
             editingId={editingId}
             lastBotTextId={lastBotTextId}
-            emergingId={popping?.id}
+            emergingId={popping}
             canRetryLast={!bot.busy && Boolean(lastUserMessage)}
             engine={state.instances.find((i) => i.instanceId === bot.modelSelection.instanceId)}
             onStartEdit={startEdit}
@@ -1298,21 +1341,7 @@ export function ChatView({ bot }: { bot: Bot }) {
             label={activityLabel}
             answering={popping !== null}
             since={busySince}
-          >
-            {popping ? (
-              <div className="w-fit max-w-[min(42rem,78%)] rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed text-ink">
-                <MessageBoundary fallbackText={popping.text || "Generated image"}>
-                  {poppingMessage?.attachments?.length ? (
-                    <AttachedImageGallery
-                      paths={poppingMessage.attachments.map((attachment) => attachment.path)}
-                      className={popping.text ? "justify-start" : "mb-0 justify-start"}
-                    />
-                  ) : null}
-                  {popping.text ? <ChatMarkdown text={popping.text} message={{ threadId: bot.threadId, messageId: popping.id }} /> : null}
-                </MessageBoundary>
-              </div>
-            ) : null}
-          </TurnPresence>
+          />
         </div>
       </div>
 

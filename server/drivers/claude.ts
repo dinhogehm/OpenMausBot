@@ -509,6 +509,58 @@ function firstText(content: unknown): string {
   return "";
 }
 
+type ClaudeImage = NonNullable<SendTurnInput["images"]>[number];
+type ClaudeUserContent =
+  | { type: "image"; source: { type: "base64"; media_type: ClaudeImage["mime"]; data: string } }
+  | { type: "text"; text: string };
+type ClaudeUserMessage = {
+  type: "user";
+  message: { role: "user"; content: string | ClaudeUserContent[] };
+};
+
+/** Claude's stream-json input accepts the same image source blocks as the
+ * Anthropic Messages API. Keep the old string form for text-only turns so a
+ * CLI update cannot disturb the overwhelmingly common path. */
+function claudeUserMessage(
+  text: string,
+  images: readonly ClaudeImage[] | undefined,
+): ClaudeUserMessage {
+  if (!images?.length) return { type: "user", message: { role: "user", content: text } };
+  const content: ClaudeUserContent[] = images.map((image) => ({
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: image.mime,
+      data: readFileSync(image.path).toString("base64"),
+    },
+  }));
+  if (text) content.push({ type: "text", text });
+  return { type: "user", message: { role: "user", content } };
+}
+
+/** Native traces are routinely attached to bug reports. Preserve the image
+ * block's shape and size for debugging, but never persist its base64 bytes. */
+function diagnosticClaudeUserMessage(message: ClaudeUserMessage): ClaudeUserMessage {
+  if (!Array.isArray(message.message.content)) return message;
+  return {
+    ...message,
+    message: {
+      ...message.message,
+      content: message.message.content.map((block) =>
+        block.type === "image"
+          ? {
+              ...block,
+              source: {
+                ...block.source,
+                data: `[image data: ${block.source.data.length} base64 chars]`,
+              },
+            }
+          : block,
+      ),
+    },
+  };
+}
+
 export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
   driverKind: DRIVER_KIND,
   metadata: { displayName: "Claude", supportsMultipleInstances: true },
@@ -603,14 +655,17 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       s.idleTimer = setTimeout(() => closeSession(threadId, "idle"), SESSION_IDLE_MS);
       s.idleTimer.unref?.();
     };
-    const writeUser = (s: Session, threadId: string, text: string): Promise<boolean> => {
-      const promptMsg = { type: "user", message: { role: "user", content: text } };
+    const writeUser = (s: Session, threadId: string, promptMsg: ClaudeUserMessage): Promise<boolean> => {
       if (!s.child.stdin.writable || s.child.stdin.destroyed) return Promise.resolve(false);
       return new Promise((resolve) => {
         try {
           s.child.stdin.write(JSON.stringify(promptMsg) + "\n", (error) => {
             if (error) return resolve(false);
-            appendNative(threadId, { dir: "out", source: "claude.sdk.message", msg: promptMsg });
+            appendNative(threadId, {
+              dir: "out",
+              source: "claude.sdk.message",
+              msg: diagnosticClaudeUserMessage(promptMsg),
+            });
             resolve(true);
           });
         } catch {
@@ -636,10 +691,22 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     const sendTurn = async (turn: SendTurnInput) => {
       const { threadId } = turn;
       if (active.has(threadId)) throw new Error("a turn is already running on this thread");
+      // A bot-level mode is authoritative for this turn. In particular, an
+      // old provider instance may still be configured with
+      // `bypassPermissions`; Ask/Auto must restore Claude's interactive
+      // broker instead of inheriting that silent bypass. Calls without a
+      // per-turn mode keep the legacy adapter behavior.
+      const permissionMode = turn.approvalMode === undefined
+        ? config.permissionMode
+        : turn.approvalMode === "full" ? "bypassPermissions"
+          : turn.approvalMode === "auto" ? "auto" : "default";
       const controlsHost = turn.integrations?.localComputer?.scope === "local-computer";
-      if (controlsHost && config.permissionMode === "bypassPermissions") {
+      if (controlsHost && permissionMode === "bypassPermissions" && turn.approvalMode !== "full") {
         throw new Error("local computer control requires the interactive approval broker");
       }
+      // Materialize before creating a broker or process. A missing/corrupt
+      // attachment must fail this call without leaving a live session behind.
+      const promptMsg = claudeUserMessage(turn.text, turn.images);
       const turnId = newId();
       const retryAbort = new AbortController();
       const retry = retryState.get(threadId) ?? { attempt: 0, cancelled: false };
@@ -659,7 +726,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         // token-level streaming: content_block_delta events between the
         // whole-message frames, so the bubble grows as the model writes
         "--include-partial-messages",
-        "--permission-mode", config.permissionMode === "auto" ? "acceptEdits" : config.permissionMode,
+        "--permission-mode", permissionMode,
       ];
       if (config.tools !== undefined) args.push("--tools", config.tools.join(","));
       if (config.disallowedTools?.length) {
@@ -709,7 +776,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // agentsIntegration(); pre-allowing matters doubly here, or the CLI's
       // own ListAgents look-alike shadows it and "@Bot" asks go nowhere
       if (turn.integrations?.agents) {
-        mcpServers.agents = { ...turn.integrations.agents };
+        // Coordination is foundational, not an optional deferred lookup.
+        // Claude waits for always-loaded tools before building the prompt.
+        mcpServers.agents = { ...turn.integrations.agents, alwaysLoad: true };
         allowed.push("mcp__agents");
       }
       if (turn.integrations?.phone) {
@@ -742,17 +811,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         if (name in mcpServers) continue;
         mcpServers[name] = { ...server };
       }
-      // permission broker: anything acceptEdits would silently deny becomes
-      // an Allow/Deny card in chat, and the agent gets ask_user. Skipped in
-      // bypassPermissions (fullAuto) — nothing would ever ask.
+      // Keep ask_user available even in Full access. Native bypass skips
+      // permission prompts, not questions requiring a person's answer.
       let broker: Awaited<ReturnType<typeof createPermissionBroker>> | undefined;
-      let socketPath: string | null = null;
-      if (config.permissionMode !== "bypassPermissions") {
-        socketPath = permissionSocketPath(threadId);
+      const socketPath = permissionSocketPath(threadId);
+      if (permissionMode !== "bypassPermissions") {
         args.push("--permission-prompt-tool", "mcp__ogb__approve");
-        mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, socketPath], env: { ...NODE_ENV_FLAG } };
-        allowed.push("mcp__ogb");
       }
+      mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, socketPath], env: { ...NODE_ENV_FLAG }, alwaysLoad: true };
+      allowed.push("mcp__ogb");
       // The MCP config carries credentials — a Composio consumer key in a
       // header, the box token in the computer proxy's env, the comms token in
       // the agents proxy's env. On argv every one of those is world-readable
@@ -767,6 +834,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       }
 
       const env = claudeEnvironment(turnModel, turnEnvironment);
+      // Our approvals and browser credentials expire at the user-turn
+      // boundary. Native background workers cannot outlive that boundary;
+      // parallel bot work must use the harness's durable delegate_bot path.
+      env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
       const cwd = turn.cwd ?? homedir();
       // Everything that shapes the process, minus session/turn-specific temp
       // paths. Their contents are represented directly in the key instead.
@@ -790,7 +861,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         live.turn = { turnId, settled: false, sawStreamDelta: false };
         active.set(threadId, { stop: () => killCliTree(live.child), turnId, broker: live.broker });
         emit({ ...base(threadId, turnId), type: "turn.started" });
-        const written = await writeUser(live, threadId, turn.text);
+        const written = await writeUser(live, threadId, promptMsg);
         if (!written) {
           active.delete(threadId);
           live.turn = null;
@@ -886,7 +957,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           // the base path: the nonce is not part of the spawn contract, and a
           // retained session keeps its own broker object anyway.
           if (broker.socketPath !== socketPath && mcpConfigPath) {
-            mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, broker.socketPath], env: { ...NODE_ENV_FLAG } };
+            mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, broker.socketPath], env: { ...NODE_ENV_FLAG }, alwaysLoad: true };
           }
         }
 
@@ -1031,6 +1102,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             }
             break;
           case "result":
+            // A synthetic background completion is not the result of the
+            // submitted user turn. Settling it would revoke browser access
+            // and deny approvals while that user turn is still running.
+            if (o.origin?.kind === "task-notification") break;
             // result.usage is this invocation's total — one process per turn,
             // so it is the turn's figure. cache reads count as input: they
             // are billed (at the cache rate) and they fill the window — but
@@ -1192,7 +1267,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // prompt over stdin as a stream-json message — never argv (ARG_MAX).
       // stdin stays OPEN: that is what keeps the session alive for a
       // mid-turn steer or the next turn; closeSession() ends it.
-      if (!(await writeUser(session, threadId, turn.text))) {
+      if (!(await writeUser(session, threadId, promptMsg))) {
         settle(false, "stdin_write_failed");
         closeSession(threadId, "stdin write failed");
       }
@@ -1205,7 +1280,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     const steer = async (threadId: string, text: string): Promise<boolean> => {
       const s = sessions.get(threadId);
       if (!s || !s.turn || s.turn.settled || s.closing || s.child.exitCode !== null) return false;
-      return writeUser(s, threadId, text);
+      return writeUser(s, threadId, claudeUserMessage(text, undefined));
     };
 
     const snapshot = async (): Promise<ProviderSnapshot> => {
@@ -1302,9 +1377,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           phoneMcp: true,
           browserMcp: true,
           images: true,
+          nativeImageInput: true,
           effortLevels: ["low", "medium", "high", "xhigh", "max"],
           queueing: true,
-          localComputerMcp: config.permissionMode !== "bypassPermissions",
+          // Harness turns reassert a per-bot mode and restore the broker even
+          // when an old instance was configured with bypassPermissions.
+          localComputerMcp: true,
         },
         sendTurn,
         steer,

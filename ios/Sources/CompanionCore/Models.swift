@@ -108,9 +108,8 @@ public struct ToolActivity: Codable, Hashable, Sendable {
 
 /// A credential request created by the desktop for one paused task.
 ///
-/// Paired phones deliberately cannot write host credentials. Keeping the
-/// payload lets the companion render an honest handoff card instead of
-/// turning this newer message kind into an invisible row.
+/// The phone may fill this request only through the QR-pinned HPKE transport.
+/// The payload contains identifiers and display copy, never the credential.
 public struct SecretRequestCardData: Codable, Hashable, Sendable {
     public var target: String?
     public var label: String?
@@ -248,6 +247,9 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     /// Desktop sidebar section. Missing or blank means the built-in Bots area.
     public var section: String?
     public var chiefOfStaff: Bool?
+    /// ask, auto, full, or custom. Missing on older harnesses; autoApprove
+    /// remains the compatibility mirror for older companion builds.
+    public var approvalMode: String?
     public var autoApprove: Bool?
     public var alwaysAllow: [String]?
     public var computer: String?

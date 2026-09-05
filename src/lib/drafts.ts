@@ -7,6 +7,7 @@ import { isAttachment, type Attachment } from "./composer-attachments.js";
 const KEY = "omb-drafts";
 const ATTACHMENTS_KEY = "omb-draft-attachments";
 const SEND_IDS_KEY = "omb-draft-send-ids";
+const CHANNEL_MODES_KEY = "omb-draft-channel-modes";
 // A task can be unmounted and mounted again while its POST is still in
 // flight. Keep the edit generation outside React so a late failure from the
 // old component cannot overwrite a newer draft created by the new one.
@@ -15,7 +16,8 @@ const draftRevisions = new Map<string, number>();
 // so task navigation and a rejected send can resolve the original message
 // without duplicating message contents in storage.
 const replyDrafts = new Map<string, string>();
-type DraftRestore = { text: string; attachments: Attachment[] };
+type ChannelMode = "chat" | "goal";
+type DraftRestore = { text: string; attachments: Attachment[]; channelMode?: ChannelMode };
 type DraftRestoreListener = (draft: DraftRestore) => void;
 const restoreListeners = new Map<string, Set<DraftRestoreListener>>();
 const attachmentPendingCounts = new Map<string, number>();
@@ -52,6 +54,8 @@ const fallbackTextDrafts = new Map<string, string>();
 const fallbackAttachmentDrafts = new Map<string, Attachment[]>();
 const textDraftsByStore = new WeakMap<object, Map<string, string>>();
 const attachmentDraftsByStore = new WeakMap<object, Map<string, Attachment[]>>();
+const fallbackChannelModes = new Map<string, ChannelMode>();
+const channelModesByStore = new WeakMap<object, Map<string, ChannelMode>>();
 
 function memoryFor<T>(
   store: Store,
@@ -101,6 +105,28 @@ export function setDraft(store: Store, id: string, text: string): void {
   }
 }
 
+export function getDraftChannelMode(store: Store, id: string): ChannelMode {
+  const memory = memoryFor(store, channelModesByStore, fallbackChannelModes);
+  if (memory.has(id)) return memory.get(id)!;
+  // Existing drafts predate delivery-mode persistence and remain ordinary
+  // chat; a literal /goal is still interpreted by the composer as before.
+  const mode = read(store, CHANNEL_MODES_KEY)[id] === "goal" ? "goal" : "chat";
+  memory.set(id, mode);
+  return mode;
+}
+
+export function setDraftChannelMode(store: Store, id: string, mode: ChannelMode): void {
+  memoryFor(store, channelModesByStore, fallbackChannelModes).set(id, mode);
+  const modes = read(store, CHANNEL_MODES_KEY);
+  if (mode === "goal") modes[id] = mode;
+  else delete modes[id];
+  try {
+    store?.setItem(CHANNEL_MODES_KEY, JSON.stringify(modes));
+  } catch {
+    /* best-effort persistence; navigation still uses the in-memory mode */
+  }
+}
+
 export function getDraftAttachments(store: Store, id: string): Attachment[] {
   const memory = memoryFor(store, attachmentDraftsByStore, fallbackAttachmentDrafts);
   if (memory.has(id)) return [...memory.get(id)!];
@@ -113,7 +139,22 @@ export function getDraftAttachments(store: Store, id: string): Attachment[] {
 export function setDraftAttachments(store: Store, id: string, attachments: Attachment[]): void {
   memoryFor(store, attachmentDraftsByStore, fallbackAttachmentDrafts).set(id, [...attachments]);
   const drafts = read(store, ATTACHMENTS_KEY);
-  if (attachments.length) drafts[id] = attachments;
+  // Blob URLs exist only for this document, and an in-flight image has no
+  // durable path yet. Keep both in memory for task switching, but persist
+  // only upload-complete attachment metadata across an app restart.
+  const durable = attachments.flatMap((attachment): Attachment[] => {
+    if (attachment.kind !== "image") return [attachment];
+    if (!attachment.path || attachment.uploading) return [];
+    return [{
+      kind: "image",
+      id: attachment.id,
+      path: attachment.path,
+      name: attachment.name,
+      size: attachment.size,
+      mime: attachment.mime,
+    }];
+  });
+  if (durable.length) drafts[id] = durable;
   else delete drafts[id];
   try {
     store?.setItem(ATTACHMENTS_KEY, JSON.stringify(drafts));
@@ -241,6 +282,7 @@ export function restoreComposerDraft(id: string, draft: DraftRestore): void {
   const store = getStore();
   setDraft(store, id, draft.text);
   setDraftAttachments(store, id, draft.attachments);
+  setDraftChannelMode(store, id, draft.channelMode ?? "chat");
   for (const listener of restoreListeners.get(id) ?? []) listener(draft);
 }
 
@@ -256,6 +298,26 @@ export function appendDraftAttachments(id: string, additions: Attachment[]): voi
   };
   setDraftAttachments(store, id, draft.attachments);
   for (const listener of restoreListeners.get(id) ?? []) listener(draft);
+}
+
+/** Replace an optimistic upload in the keyed draft even if the composer that
+ * started it has unmounted. A missing id means the user already removed it. */
+export function replaceDraftAttachment(
+  id: string,
+  attachmentId: string,
+  replacement: Attachment | null,
+): boolean {
+  const store = getStore();
+  const current = getDraftAttachments(store, id);
+  const index = current.findIndex((attachment) => attachment.id === attachmentId);
+  if (index === -1) return false;
+  const attachments = replacement
+    ? current.map((attachment, at) => (at === index ? replacement : attachment))
+    : current.filter((_, at) => at !== index);
+  const draft = { text: getDraft(store, id), attachments };
+  setDraftAttachments(store, id, attachments);
+  for (const listener of restoreListeners.get(id) ?? []) listener(draft);
+  return true;
 }
 
 /** Track upload work outside the mounted composer so task navigation cannot
@@ -338,6 +400,7 @@ export function recoverFailedComposerSend(sent: ComposerSendSnapshot): "restored
   restoreComposerDraft(sent.draftId, {
     text: sent.text,
     attachments: sent.attachments,
+    channelMode: sent.channelMode,
   });
   // If the response vanished after server acceptance, the next Send must
   // reuse this identity instead of starting a duplicate turn.
@@ -376,6 +439,23 @@ function getStore(): Store {
   } catch {
     return undefined;
   }
+}
+
+/** Goal intent belongs to the same task and failed-send recovery as its text. */
+export function useComposerChannelMode(id: string): [ChannelMode, (next: SetStateAction<ChannelMode>) => void] {
+  const store = getStore();
+  const [mode, setMode] = useState(() => getDraftChannelMode(store, id));
+  useEffect(() => {
+    const unsubscribe = subscribeToDraftRestores(id, () => setMode(getDraftChannelMode(store, id)));
+    setMode(getDraftChannelMode(store, id));
+    return unsubscribe;
+  }, [id, store]);
+  const set = useCallback((next: SetStateAction<ChannelMode>) => {
+    const value = typeof next === "function" ? next(getDraftChannelMode(store, id)) : next;
+    setDraftChannelMode(store, id, value);
+    setMode(value);
+  }, [id, store]);
+  return [mode, set];
 }
 
 /** useState for the composer text, persisted under `id` (a bot or room). */

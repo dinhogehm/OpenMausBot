@@ -127,6 +127,13 @@ type SkillRecordingPayload = {
     code?: "load-failed" | "renderer-gone";
   }
 
+  interface DesktopRemoteClientState {
+    active: boolean;
+    endpoint?: string;
+    serverName?: string;
+    deviceId?: string;
+  }
+
   interface Window {
     ogb?: {
       platform: NodeJS.Platform;
@@ -145,12 +152,27 @@ type SkillRecordingPayload = {
       };
       getCapabilities(): Promise<DesktopCapabilities>;
       onCapabilitiesChanged(cb: (capabilities: DesktopCapabilities) => void): () => void;
+      remoteClient?: {
+        active: boolean;
+        state(): Promise<DesktopRemoteClientState>;
+        pair(endpoint: string, code: string): Promise<DesktopRemoteClientState>;
+        disconnect(): Promise<DesktopRemoteClientState>;
+      };
       companionAccount?: {
         state(): Promise<CompanionAccountState>;
         requestCode(email: string): Promise<CompanionAccountState>;
         verifyCode(email: string, code: string): Promise<CompanionAccountState>;
         retry(): Promise<CompanionAccountState>;
         signOut(): Promise<CompanionAccountState>;
+      };
+      /** Local-shell-only bridge for trusted approval-mode transitions. It is
+       * absent on remote server pages and in older desktop builds. */
+      approvals?: {
+        setMode(
+          botId: string,
+          mode: import("../../shared/approval-mode").ApprovalMode,
+          options?: { acknowledgeLocalAuto?: boolean },
+        ): Promise<import("../state/store").Bot>;
       };
       localControl: {
         status(): Promise<LinuxLocalControlStatus>;

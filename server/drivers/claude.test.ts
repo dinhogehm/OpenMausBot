@@ -6,14 +6,14 @@
 // These used to be POSIX-only: the fake CLI is a shebang script Windows
 // cannot exec, and the broker is a unix socket. Both now go through
 // resolveCliSpawn / permissionSocketPath, so they run everywhere.
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect, createServer as createNetServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { ensureDirs } from "../config.ts";
+import { ensureDirs, NATIVE_DIR } from "../config.ts";
 import type { ProviderInstance } from "../contracts.ts";
 import { recordEvents, type EventRecorder } from "../testing/events.ts";
 import { brokerSocketCandidates, ClaudeDriver, createPermissionBroker, permissionSocketPath, type ClaudeConfig } from "./claude.ts";
@@ -119,7 +119,7 @@ describe("ClaudeDriver.decodeConfig", () => {
     expect(permissionSocketPath("t-perm-dup-1")).not.toBe(permissionSocketPath("t-perm-dup-2"));
   });
 
-  it("does not advertise or accept local CUA in bypassPermissions mode", async () => {
+  it("advertises per-bot local CUA but rejects legacy bypass turns without a mode", async () => {
     const bypass = await ClaudeDriver.create({
       instanceId: "claude-bypass",
       displayName: "Claude Bypass",
@@ -127,7 +127,7 @@ describe("ClaudeDriver.decodeConfig", () => {
       enabled: true,
       config: { cli: FAKE_CLI, permissionMode: "bypassPermissions" },
     });
-    expect(bypass.adapter.capabilities.localComputerMcp).toBe(false);
+    expect(bypass.adapter.capabilities.localComputerMcp).toBe(true);
     await expect(
       bypass.adapter.sendTurn({
         threadId: "t-bypass-local",
@@ -362,6 +362,119 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.env.OMB_TTS_KEY).toBeUndefined();
   });
 
+  it("per-bot Ask restores the broker on a legacy bypass instance", async () => {
+    await create(undefined, {}, { permissionMode: "bypassPermissions" });
+    const dump = join(scratch, "ask-overrides-bypass.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+
+    await instance.adapter.sendTurn({
+      threadId: "t-ask-overrides-bypass",
+      text: "go",
+      approvalMode: "ask",
+    });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.argv).toContain("--permission-mode");
+    expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe("default");
+    expect(seen.argv).toContain("--permission-prompt-tool");
+  });
+
+  it("reapplies Full, Auto, and Ask on the same resumed conversation", async () => {
+    await create(undefined, {}, { permissionMode: "bypassPermissions" });
+    const dump = join(scratch, "approval-transitions.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    for (const [approvalMode, nativeMode] of [["full", "bypassPermissions"], ["auto", "auto"], ["ask", "default"]] as const) {
+      const { turnId } = await instance.adapter.sendTurn({
+        threadId: "t-mode-transitions",
+        text: "hello",
+        approvalMode,
+        resumeCursor: "11111111-1111-4111-8111-111111111111",
+      });
+      await recorder.until((e) => e.type === "turn.completed" && e.turnId === turnId);
+      const seen = JSON.parse(readFileSync(dump, "utf8"));
+      expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe(nativeMode);
+      expect(seen.argv.includes("--permission-prompt-tool")).toBe(approvalMode !== "full");
+      expect(seen.argv).toContain("--resume");
+    }
+  });
+
+  it("keeps questions answerable in per-bot Full access", async () => {
+    await create("hang");
+    await instance.adapter.sendTurn({ threadId: "t-full-question", text: "go", approvalMode: "full" });
+    const conn = await connectSocket(permissionSocketPath("t-full-question"));
+    try {
+      conn.write(JSON.stringify({ t: "ask", kind: "question", id: "full-question", tool: "ask_user", input: { question: "Which account?" } }) + "\n");
+      const opened = await recorder.until((e) => e.type === "request.opened");
+      expect(opened).toMatchObject({ requestType: "question" });
+      expect(await instance.adapter.respondToRequest("t-full-question", (opened as { requestId: string }).requestId, { behavior: "answer", message: "Work" })).toBe("answered");
+    } finally {
+      conn.destroy();
+    }
+  });
+
+  it("sends attached images as native blocks before text without logging their bytes", async () => {
+    await create();
+    const dump = join(scratch, "dump-images.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 5, 6, 7]);
+    const pngPath = join(scratch, "one.png");
+    const jpegPath = join(scratch, "two.jpg");
+    writeFileSync(pngPath, png);
+    writeFileSync(jpegPath, jpeg);
+
+    await instance.adapter.sendTurn({
+      threadId: "t-native-images",
+      text: "describe both",
+      images: [
+        { path: pngPath, mime: "image/png", bytes: png.length },
+        { path: jpegPath, mime: "image/jpeg", bytes: jpeg.length },
+      ],
+    });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.prompt).toEqual({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: png.toString("base64") },
+          },
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/jpeg", data: jpeg.toString("base64") },
+          },
+          { type: "text", text: "describe both" },
+        ],
+      },
+    });
+
+    const nativeLog = readFileSync(join(NATIVE_DIR, "t-native-images.ndjson"), "utf8");
+    expect(nativeLog).not.toContain(png.toString("base64"));
+    expect(nativeLog).not.toContain(jpeg.toString("base64"));
+    const outgoing = nativeLog
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((row) => row.dir === "out" && row.source === "claude.sdk.message")
+      .at(-1);
+    expect(outgoing.msg.message.content).toEqual([
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "[image data: 12 base64 chars]" },
+      },
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/jpeg", data: "[image data: 12 base64 chars]" },
+      },
+      { type: "text", text: "describe both" },
+    ]);
+  });
+
   it("launches with a Windows-sized system prompt without putting it on argv", async () => {
     await create();
     const dump = join(scratch, "dump-long-system.json");
@@ -445,6 +558,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     expect(seen.mcpConfig.mcpServers.agents).toMatchObject({
+      alwaysLoad: true,
       args: ["/fake/agents-proxy.js"],
       env: { OMB_BOT_ID: "b1", OMB_COMMS_TOKEN: "tok" },
     });
@@ -453,6 +567,42 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(JSON.stringify(seen.argv)).not.toContain("tok");
     const allowed = seen.argv[seen.argv.indexOf("--allowedTools") + 1];
     expect(allowed).toContain("mcp__agents");
+    expect(seen.mcpConfig.mcpServers.ogb.alwaysLoad).toBe(true);
+  });
+
+  it("keeps native background workers inside the harness-owned turn", async () => {
+    const dump = join(scratch, "background-policy.json");
+    await create(undefined, { FAKE_CLAUDE_DUMP: dump, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "0" });
+    await instance.adapter.sendTurn({ threadId: "t-background-policy", text: "hi" });
+    await recorder.until((e) => e.type === "turn.completed");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe("1");
+    expect(seen.argv[seen.argv.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+    expect(seen.argv).not.toContain("--dangerously-skip-permissions");
+  });
+
+  it("does not end the current turn or its approvals on a background-task result", async () => {
+    const gate = join(scratch, "finish-parent");
+    await create("background-result", { FAKE_CLAUDE_FINISH_GATE: gate });
+    const { turnId } = await instance.adapter.sendTurn({ threadId: "t-background-result", text: "hi" });
+    await recorder.until((e) => e.type === "content.delta" && e.delta === "parent still working");
+    expect(recorder.events.filter((e) => e.type === "turn.completed")).toHaveLength(0);
+    expect(instance.adapter.hasSession("t-background-result")).toBe(true);
+    const conn = await connectSocket(permissionSocketPath("t-background-result"));
+    try {
+      const answer = answerQueue(conn)();
+      conn.write(JSON.stringify({ t: "ask", id: "network-after-background", tool: "WebFetch", input: { url: "https://example.com" } }) + "\n");
+      await recorder.until((e) => e.type === "request.opened" && e.requestId === "network-after-background");
+      await expect(instance.adapter.respondToRequest("t-background-result", "network-after-background", { behavior: "allow" })).resolves.toBe("allowed-once");
+      await expect(answer).resolves.toMatchObject({ behavior: "allow" });
+      writeFileSync(gate, "finish");
+      await recorder.until((e) => e.type === "turn.completed");
+      expect(recorder.events.filter((e) => e.type === "turn.completed")).toEqual([
+        expect.objectContaining({ turnId, ok: true, cost: 0.01 }),
+      ]);
+    } finally {
+      conn.destroy();
+    }
   });
 
   it("mounts custom MCP servers without pre-allowing their tools", async () => {
@@ -640,14 +790,28 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await create();
     const dump = join(scratch, "dump.json");
     process.env.FAKE_CLAUDE_DUMP = dump;
+    const image = Buffer.from([0x47, 0x49, 0x46, 0x38]);
+    const imagePath = join(scratch, "resume.gif");
+    writeFileSync(imagePath, image);
 
-    await instance.adapter.sendTurn({ threadId: "t-resume", text: "again", resumeCursor: "sess-123" });
+    await instance.adapter.sendTurn({
+      threadId: "t-resume",
+      text: "",
+      images: [{ path: imagePath, mime: "image/gif", bytes: image.length }],
+      resumeCursor: "sess-123",
+    });
     const started = await recorder.until((e) => e.type === "session.started");
     expect(started).toMatchObject({ sessionId: "sess-123" });
 
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     expect(seen.argv).toContain("--resume");
     expect(seen.argv).not.toContain("--session-id");
+    expect(seen.prompt.message.content).toEqual([
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/gif", data: image.toString("base64") },
+      },
+    ]);
   });
 
   it("rejects a second turn while one is in flight", async () => {
@@ -771,8 +935,17 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     process.env.FAKE_CLAUDE_TRANSIENTS = "2";
     process.env.FAKE_CLAUDE_STATE = join(scratch, "launches");
     process.env.FAKE_CLAUDE_RETRY_SCALE = "0.001";
+    const dump = join(scratch, "retry-images.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    const image = Buffer.from([0x52, 0x49, 0x46, 0x46]);
+    const imagePath = join(scratch, "retry.webp");
+    writeFileSync(imagePath, image);
     await create();
-    await instance.adapter.sendTurn({ threadId: "t-retry", text: "go" });
+    await instance.adapter.sendTurn({
+      threadId: "t-retry",
+      text: "go",
+      images: [{ path: imagePath, mime: "image/webp", bytes: image.length }],
+    });
 
     await recorder.until((e) => e.type === "turn.completed" && e.ok === true);
     const retries = recorder.events.filter((e) => e.type === "turn.retrying");
@@ -781,6 +954,13 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     // exactly one settled reply across all three launches
     const replies = recorder.events.filter((e) => e.type === "item.completed" && e.itemType === "assistant_text");
     expect(replies).toHaveLength(1);
+    expect(JSON.parse(readFileSync(dump, "utf8")).prompt.message.content).toEqual([
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/webp", data: image.toString("base64") },
+      },
+      { type: "text", text: "go" },
+    ]);
   }, 20_000);
 
   it("stops retrying at the attempt cap and settles the turn as failed", async () => {
@@ -872,10 +1052,11 @@ describe("ClaudeDriver turns (fake CLI)", () => {
   });
 
   it("brokers a permission ask into request.opened and answers over the socket", async () => {
-    await create("hang");
+    await create("hang", {}, { permissionMode: "bypassPermissions" });
     await instance.adapter.sendTurn({
       threadId: "t-perm-abc",
       text: "go",
+      approvalMode: "ask",
       integrations: {
         localComputer: {
           command: "/cua-driver",

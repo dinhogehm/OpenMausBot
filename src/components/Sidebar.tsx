@@ -40,7 +40,7 @@ import { nextRename } from "@/lib/rename";
 import { downloadAllBots } from "@/lib/team-files";
 import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { MIN_QUERY, SearchResults } from "./SearchResults";
-import { TeamLibraryPanel, type TeamImportResult } from "./TeamLibraryPanel";
+import { TeamLibraryPanel } from "./TeamLibraryPanel";
 import { RenameTitle } from "./RenameTitle";
 import { BotPickerList } from "./BotPickerList";
 import {
@@ -74,6 +74,7 @@ import {
   type SectionDropPlace,
 } from "@/lib/sidebar-layout";
 import { sidebarSectionAttention } from "@/lib/sidebar-attention";
+import { botListItemPointerIntent } from "@/lib/sidebar-selection";
 import { phoneSettingsAction, SidebarPhoneButton } from "./SidebarPhoneButton";
 import { SidebarMoreMenu } from "./SidebarMoreMenu";
 import { profileInitials, SidebarProfileMenu } from "./SidebarProfileMenu";
@@ -212,6 +213,7 @@ function RoomContextMenu({
   onMoveToSection: (groupId: string) => void;
 }) {
   const { state, dispatch } = useStore();
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   const group = state.groups.find((g) => g.id === menu.groupId);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(group?.name ?? "");
@@ -246,7 +248,7 @@ function RoomContextMenu({
       style={{ top, left }}
       className="fixed z-40 w-[228px] overflow-hidden rounded-xl border border-hairline/50 bg-card py-1.5 shadow-2xl shadow-black/60"
     >
-      {renaming ? (
+      {!remoteClient && (renaming ? (
         <div className="flex items-center gap-1 px-2 py-1">
           <input
             autoFocus
@@ -297,8 +299,8 @@ function RoomContextMenu({
           <Pencil size={16} className="text-ink-secondary" />
           {isBotChat ? "Rename chat" : "Rename Channel"}
         </button>
-      )}
-      {!isBotChat && (
+      ))}
+      {!remoteClient && !isBotChat && (
         <button
           onClick={() => {
             onClose();
@@ -320,7 +322,7 @@ function RoomContextMenu({
         <ClipboardCopy size={16} className="text-ink-secondary" />
         Copy conversation ID
       </button>
-      <button
+      {!remoteClient && <button
         onClick={() => {
           dispatch({ type: "deleteGroup", groupId: group.id });
           onClose();
@@ -329,7 +331,7 @@ function RoomContextMenu({
       >
         <Trash2 size={16} />
         {isBotChat ? "Delete chat" : "Delete Channel"}
-      </button>
+      </button>}
     </div>,
     document.body,
   );
@@ -544,6 +546,7 @@ function BotContextMenu({
   onMoveToSection: (botId: string) => void;
 }) {
   const { state, dispatch } = useStore();
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   const bot = state.bots.find((b) => b.id === menu.botId);
 
   useEffect(() => {
@@ -562,6 +565,7 @@ function BotContextMenu({
   }, [onClose]);
 
   if (!bot) return null;
+  const deleting = state.deletingBots[bot.id] === true;
   const engine = state.instances.find((instance) => instance.instanceId === bot.modelSelection.instanceId);
   const canCoordinate = engine?.capabilities?.agentsMcp === true;
   const visibleBotCount = state.bots.filter((candidate) => !candidate.hidden).length;
@@ -607,7 +611,19 @@ function BotContextMenu({
       style={{ top, left }}
       className="fixed z-40 w-[228px] overflow-hidden rounded-xl border border-hairline/50 bg-card py-1.5 shadow-2xl shadow-black/60"
     >
-      {[
+      {remoteClient ? [
+        item(<FolderPlus size={16} className="text-ink-secondary" />, "Move to section", () => {
+          onClose();
+          onMoveToSection(bot.id);
+        }),
+        item(<Pencil size={16} className="text-ink-secondary" />, "Edit Profile", () => {
+          dispatch({ type: "select", id: bot.id });
+          dispatch({ type: "toggleSettings", open: true });
+        }),
+        item(<ClipboardCopy size={16} className="text-ink-secondary" />, "Copy conversation ID", () => {
+          void navigator.clipboard?.writeText(bot.threadId);
+        }),
+      ] : [
         item(
           bot.pinned ? <PinOff size={16} className="text-ink-secondary" /> : <Pin size={16} className="text-ink-secondary" />,
           bot.pinned ? "Unpin" : "Pin",
@@ -651,15 +667,39 @@ function BotContextMenu({
             hint: archiveHint,
           },
         ),
-        item(<Trash2 size={16} />, "Delete", () => dispatch({ type: "deleteBot", botId: bot.id }), {
-          danger: true,
-        }),
+        <BotDeleteMenuItem
+          key="delete"
+          deleting={deleting}
+          onClick={() => {
+            dispatch({ type: "deleteBot", botId: bot.id });
+            onClose();
+          }}
+        />,
       ]}
     </div>
   );
 }
 
-function BotListItem({
+export function BotDeleteMenuItem({ deleting, onClick }: { deleting: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      disabled={deleting}
+      aria-busy={deleting || undefined}
+      onClick={onClick}
+      title={deleting ? "Checking for persistent computers before deleting this bot" : undefined}
+      className={cn(
+        "flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-danger",
+        deleting ? "cursor-default opacity-40" : "hover:bg-raised/70",
+      )}
+    >
+      {deleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+      {deleting ? "Checking computers…" : "Delete"}
+    </button>
+  );
+}
+
+export function BotListItem({
   bot,
   density,
   onMenu,
@@ -673,8 +713,10 @@ function BotListItem({
   archiveDisabled: boolean;
 }) {
   const { state, dispatch } = useStore();
+  const remoteClient = typeof window !== "undefined" && window.ogb?.remoteClient?.active === true;
   const [renaming, setRenaming] = useState(false);
   const selected = state.activeView === "chat" && state.selectedId === bot.id;
+  const deleting = state.deletingBots[bot.id] === true;
   const mascotMotion = selected && state.mascotMotion?.botId === bot.id ? state.mascotMotion : null;
   const iconOnly = density === "icons";
   useEffect(() => {
@@ -720,7 +762,15 @@ function BotListItem({
             <RenameTitle
               key={iconOnly ? "icons" : "expanded"}
               value={bot.name}
-              onCommit={(name) => dispatch({ type: "updateBot", botId: bot.id, patch: { name } })}
+              onCommit={(name) => {
+                if (remoteClient) {
+                  void api(`/api/bots/${bot.id}/profile`, { method: "PATCH", body: JSON.stringify({ name }) })
+                    .then(({ bot: updated }) => dispatch({ type: "botPatched", bot: updated }))
+                    .catch((cause) => dispatch({ type: "error", message: cause instanceof Error ? cause.message : String(cause) }));
+                } else {
+                  dispatch({ type: "updateBot", botId: bot.id, patch: { name } });
+                }
+              }}
               onEditingChange={setRenaming}
               className="truncate"
               inputClassName="w-full rounded bg-inset px-1 py-0.5 text-[15px] font-semibold"
@@ -733,15 +783,22 @@ function BotListItem({
           )}
         </div>
         <div className="flex items-center justify-between gap-2">
-          <span className="flex min-w-0 items-center gap-1.5 truncate text-[13px] text-ink-secondary">
-            {bot.chiefOfStaff && (
-              <span className="flex shrink-0 items-center gap-1 text-[11.5px] font-medium text-accent">
-                <Crown size={11} /> Chief of Staff
-              </span>
-            )}
-            {bot.chiefOfStaff && preview(bot) && <span className="shrink-0 text-ink-secondary/60">·</span>}
-            <span className="truncate">{preview(bot)}</span>
-          </span>
+          {deleting ? (
+            <span role="status" className="flex min-w-0 items-center gap-1.5 truncate text-[13px] text-ink-secondary">
+              <Loader2 size={12} className="shrink-0 animate-spin" />
+              Checking computers before deleting…
+            </span>
+          ) : (
+            <span className="flex min-w-0 items-center gap-1.5 truncate text-[13px] text-ink-secondary">
+              {bot.chiefOfStaff && (
+                <span className="flex shrink-0 items-center gap-1 text-[11.5px] font-medium text-accent">
+                  <Crown size={11} /> Chief of Staff
+                </span>
+              )}
+              {bot.chiefOfStaff && preview(bot) && <span className="shrink-0 text-ink-secondary/60">·</span>}
+              <span className="truncate">{preview(bot)}</span>
+            </span>
+          )}
           {bot.unread && (
             <span className="size-2 shrink-0 rounded-full bg-accent" />
           )}
@@ -753,25 +810,29 @@ function BotListItem({
     event.preventDefault();
     onMenu({ botId: bot.id, x: event.clientX, y: event.clientY });
   };
-
-  // Keep the rename <input> out of role="button" — a button's descendants
-  // are presentational, which hides the field from assistive tech.
-  if (renaming) {
-    return (
-      <div className={rowClass} onContextMenu={onContextMenu}>
-        {body}
-      </div>
-    );
-  }
+  const onSelect = (event: React.MouseEvent) => {
+    if (renaming) return;
+    const insideRenameInput = event.target instanceof HTMLInputElement;
+    if (botListItemPointerIntent(event.type, insideRenameInput) === "select") {
+      dispatch({ type: "select", id: bot.id });
+    }
+  };
 
   return (
     <div className="group relative" title={iconOnly ? bot.name : undefined}>
+      {/* Keep this wrapper mounted while RenameTitle swaps its label for an
+          input. Replacing the wrapper tree remounts RenameTitle, loses its
+          editing state, and leaves the row stuck in rename mode. Omitting
+          role=button also keeps the input visible to assistive technology. */}
       <div
-        role="button"
-        tabIndex={0}
-        aria-label={iconOnly ? bot.name : undefined}
-        onClick={() => dispatch({ type: "select", id: bot.id })}
+        role={renaming ? undefined : "button"}
+        tabIndex={renaming ? undefined : 0}
+        aria-label={!renaming && iconOnly ? (deleting ? `${bot.name}, checking computers before deleting` : bot.name) : undefined}
+        aria-busy={deleting || undefined}
+        data-sidebar-bot-row={bot.id}
+        onClick={onSelect}
         onKeyDown={(event) => {
+          if (renaming) return;
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             dispatch({ type: "select", id: bot.id });
@@ -782,22 +843,22 @@ function BotListItem({
       >
         {body}
       </div>
-      {iconOnly && bot.unread && (
+      {!renaming && iconOnly && bot.unread && (
         <span className="pointer-events-none absolute bottom-1.5 right-1.5 size-2 rounded-full border border-panel bg-accent" />
       )}
-      {!iconOnly && <button
+      {deleting && iconOnly && (
+        <span className="pointer-events-none absolute bottom-1 right-1 rounded-full bg-card p-1 text-ink-secondary">
+          <Loader2 size={12} className="animate-spin" />
+        </span>
+      )}
+      {/* Disabled buttons still own their pixels in Chromium, even at zero
+          opacity. Omit the unavailable action so the entire row stays live. */}
+      {!remoteClient && !renaming && !deleting && !iconOnly && !archiveDisabled && !bot.chiefOfStaff && <button
         type="button"
-        disabled={archiveDisabled}
         onClick={() => onArchive(bot)}
         aria-label={`Archive ${bot.name}`}
-        title={
-          bot.chiefOfStaff
-            ? "Choose another Chief of Staff first"
-            : archiveDisabled
-              ? "Keep at least one active bot"
-              : `Archive ${bot.name}`
-        }
-        className="absolute right-1 top-1/2 flex size-10 -translate-y-1/2 items-center justify-center rounded-lg bg-card/90 text-ink-secondary opacity-0 shadow-sm transition hover:bg-raised hover:text-ink focus:opacity-100 disabled:cursor-default disabled:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100"
+        title={`Archive ${bot.name}`}
+        className="absolute right-1 top-1/2 flex size-10 -translate-y-1/2 items-center justify-center rounded-lg bg-card/90 text-ink-secondary opacity-0 shadow-sm transition hover:bg-raised hover:text-ink focus:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 max-md:opacity-100"
       >
         <Archive size={14} />
       </button>}
@@ -942,6 +1003,7 @@ function ArchivedBotsPanel({
 
 export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { state, dispatch } = useStore();
+  const remoteClient = window.ogb?.remoteClient?.active === true;
   const { capabilities } = useDesktopCapabilities();
   const importReturnRef = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
@@ -957,7 +1019,6 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
   const [teamFeedback, setTeamFeedback] = useState<{
     error: boolean;
     text: string;
-    undo?: TeamImportResult;
     restoreBot?: { id: string; name: string };
   } | null>(null);
   const [query, setQuery] = useState("");
@@ -1018,11 +1079,12 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
   }, [densityOpen]);
 
   useEffect(() => {
+    if (remoteClient) return;
     return window.ogb?.onPackageInstall?.((url) => {
       setTeamInstallUrl(url);
       setTeamLibraryOpen(true);
     });
-  }, []);
+  }, [remoteClient]);
 
   useEffect(() => {
     if (!teamFeedback) return;
@@ -1035,8 +1097,8 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
     setTeamFeedback(null);
     try {
       const exported = await downloadAllBots();
-      track("team_exported", { members: exported.members, scope: "all_visible" });
-      setTeamFeedback({ error: false, text: `${exported.members} bots exported` });
+      track("team_exported", { members: exported.members, scope: "backup" });
+      setTeamFeedback({ error: false, text: `Backup downloaded · ${exported.members} bots and conversation text. ${exported.warnings.length ? `${exported.warnings.length} backup notes about deleted bots/rooms—review them when importing. ` : ""}Keep this file private.` });
     } catch (cause) {
       setTeamFeedback({
         error: true,
@@ -1047,59 +1109,6 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
     }
   };
 
-  const undoTeamLoad = async (result: TeamImportResult) => {
-    setTeamFeedback(null);
-    try {
-      await Promise.all([
-        ...result.importedRoutineIds.map((routineId) =>
-          api(`/api/routines/${routineId}`, { method: "DELETE" }).then(() =>
-            dispatch({ type: "routineDeleted", routineId }),
-          ),
-        ),
-        ...result.importedGroupIds.map((groupId) =>
-          api(`/api/groups/${groupId}`, { method: "DELETE" }).then(() =>
-            dispatch({ type: "groupDeleted", groupId }),
-          ),
-        ),
-      ]);
-      const archiveNew = await Promise.all(
-        result.importedBotIds.map((botId) =>
-          api(`/api/bots/${botId}`, {
-            method: "PATCH",
-            body: JSON.stringify({ hidden: true, chiefOfStaff: false }),
-          }),
-        ),
-      );
-      for (const response of archiveNew) dispatch({ type: "botPatched", bot: response.bot });
-
-      const previousChiefs = result.archived.filter((bot) => bot.chiefOfStaff);
-      const restoreOthers = await Promise.all(
-        result.archived
-          .filter((bot) => !bot.chiefOfStaff)
-          .map((bot) =>
-            api(`/api/bots/${bot.id}`, {
-              method: "PATCH",
-              body: JSON.stringify({ hidden: false }),
-            }),
-          ),
-      );
-      for (const response of restoreOthers) dispatch({ type: "botPatched", bot: response.bot });
-      const restoredChiefs = await Promise.all(
-        previousChiefs.map((previousChief) =>
-          api(`/api/bots/${previousChief.id}`, {
-            method: "PATCH",
-            body: JSON.stringify({ hidden: false, chiefOfStaff: true }),
-          }),
-        ),
-      );
-      for (const response of restoredChiefs) dispatch({ type: "botPatched", bot: response.bot });
-      const first = result.archived[0];
-      if (first) dispatch({ type: "select", id: first.id });
-      setTeamFeedback({ error: false, text: "Previous team restored" });
-    } catch (cause) {
-      setTeamFeedback({ error: true, text: cause instanceof Error ? cause.message : String(cause) });
-    }
-  };
 
   const archiveBot = async (bot: Bot) => {
     const activeBots = state.bots.filter((candidate) => !candidate.hidden);
@@ -1267,7 +1276,6 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
   };
   const activeBotCount = state.bots.filter((bot) => !bot.hidden).length;
   const archivedBots = state.bots.filter((bot) => bot.hidden);
-  const pendingTeamUndo = teamFeedback?.undo;
   const pendingBotUndo = teamFeedback?.restoreBot;
 
   return (
@@ -1359,9 +1367,9 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           <button
             ref={importReturnRef}
             onClick={() => setPlusOpen((o) => !o)}
-            aria-label="New or share"
+            aria-label={remoteClient ? "New" : "New or share"}
             className="flex size-10 items-center justify-center rounded-md text-ink-secondary hover:bg-raised hover:text-ink"
-            title="New or share"
+            title={remoteClient ? "New" : "New or share"}
           >
             <Plus size={20} strokeWidth={2} />
           </button>
@@ -1393,16 +1401,18 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                   <Users size={16} className="text-ink-secondary" />
                   New Channel
                 </button>
+                {!remoteClient && <>
                 <button
                   onClick={() => {
                     setPlusOpen(false);
                     void exportAllBots();
                   }}
                   disabled={exportingTeam}
+                  title="Private backup of bot setup and conversation text. Files, images, workspace memory and connections are not included."
                   className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
                 >
                   {exportingTeam ? <Loader2 size={16} className="animate-spin text-ink-secondary" /> : <ArrowDownToLine size={16} className="text-ink-secondary" />}
-                  {exportingTeam ? "Exporting…" : "Export all bots"}
+                  {exportingTeam ? "Exporting…" : "Export backup"}
                 </button>
                 <button
                   onClick={() => {
@@ -1427,6 +1437,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                     <span className="text-[11.5px] text-ink-secondary">{archivedBots.length}</span>
                   </button>
                 )}
+                </>}
               </div>
             </>
           )}
@@ -1575,7 +1586,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
       <div className={cn("pb-3 pt-2", density === "icons" ? "px-2" : "px-3")}>
         {density === "icons" && (
           <>
-        <button
+          <button
             onClick={() => dispatch({ type: "showTeamMap" })}
             aria-label={density === "icons" ? "Team map" : undefined}
             title={density === "icons" ? "Team map" : undefined}
@@ -1588,7 +1599,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             <Network size={20} className={state.activeView === "team-map" ? "text-accent" : "text-ink-secondary"} />
             <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Team map</span>
           </button>
-          <button
+          {!remoteClient && <button
             onClick={() => dispatch({ type: "showWorkflows" })}
             aria-label={density === "icons" ? "Workflows" : undefined}
             title={density === "icons" ? "Workflows" : undefined}
@@ -1600,8 +1611,8 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           >
             <WorkflowIcon size={20} className={state.activeView === "workflows" ? "text-accent" : "text-ink-secondary"} />
             <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Workflows</span>
-          </button>
-          {skillRecorderEnabled(state.config) && (
+          </button>}
+          {!remoteClient && skillRecorderEnabled(state.config) && (
             <button
               onClick={() => dispatch({ type: "showSkillRecorder" })}
               aria-label={density === "icons" ? "Teach a skill" : undefined}
@@ -1659,14 +1670,14 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                 active: state.activeView === "team-map",
                 onSelect: () => dispatch({ type: "showTeamMap" }),
               },
-              {
+              ...(!remoteClient ? [{
                 key: "workflows",
                 label: "Workflows",
                 icon: <WorkflowIcon size={18} />,
                 active: state.activeView === "workflows",
                 onSelect: () => dispatch({ type: "showWorkflows" }),
-              },
-              ...(skillRecorderEnabled(state.config)
+              }] : []),
+              ...(!remoteClient && skillRecorderEnabled(state.config)
                 ? [
                     {
                       key: "skill-recorder",
@@ -1734,7 +1745,18 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           current={state.bots.find((b) => b.id === sectionPicker.botId)?.section}
           anchor={sectionPicker}
           onClose={() => setSectionPicker(null)}
-          onAssign={(section) => dispatch({ type: "updateBot", botId: sectionPicker.botId, patch: { section } })}
+          onAssign={(section) => {
+            if (!remoteClient) {
+              dispatch({ type: "updateBot", botId: sectionPicker.botId, patch: { section } });
+              return;
+            }
+            void api("/api/sidebar-sections", {
+              method: "POST",
+              body: JSON.stringify({ name: section, botIds: [sectionPicker.botId] }),
+            })
+              .then(({ bots }) => bots.forEach((bot: Bot) => dispatch({ type: "botPatched", bot })))
+              .catch((cause) => dispatch({ type: "error", message: cause instanceof Error ? cause.message : String(cause) }));
+          }}
         />
       )}
       {roomMenu && (
@@ -1756,14 +1778,14 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         />
       )}
       {newRoom && <NewRoomPanel onClose={() => setNewRoom(false)} />}
-      {archivedBotsOpen && (
+      {!remoteClient && archivedBotsOpen && (
         <ArchivedBotsPanel
           bots={archivedBots}
           onClose={() => setArchivedBotsOpen(false)}
           onRestored={(message) => setTeamFeedback({ error: false, text: message })}
         />
       )}
-      {teamLibraryOpen && (
+      {!remoteClient && teamLibraryOpen && (
         <TeamLibraryPanel
           returnFocusRef={importReturnRef}
           initialUrl={teamInstallUrl ?? undefined}
@@ -1774,18 +1796,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           onImported={(result) => {
             setTeamLibraryOpen(false);
             setTeamInstallUrl(null);
-            setTeamFeedback(
-              result.archived.length > 0
-                ? {
-                    error: false,
-                    text: `${result.name} loaded · ${result.members} ${result.members === 1 ? "bot" : "bots"}`,
-                    undo: result,
-                  }
-                : {
-                    error: false,
-                    text: `${result.name} loaded · ${result.members} ${result.members === 1 ? "bot" : "bots"}`,
-                  },
-            );
+            setTeamFeedback({ error: false, text: `${result.members} ${result.members === 1 ? "bot" : "bots"} added · existing bots and chats kept` });
           }}
         />
       )}
@@ -1802,14 +1813,6 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           >
             <div className="flex items-center gap-3">
               <span>{teamFeedback.text}</span>
-              {pendingTeamUndo && (
-                <button
-                  onClick={() => void undoTeamLoad(pendingTeamUndo)}
-                  className="rounded-md px-1.5 py-0.5 font-medium text-accent hover:bg-raised"
-                >
-                  Undo
-                </button>
-              )}
               {pendingBotUndo && (
                 <button
                   onClick={() => void undoBotArchive(pendingBotUndo)}

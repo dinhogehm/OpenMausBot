@@ -5,14 +5,299 @@ import {
   initialState,
   loadSnapshotBoundary,
   openNotificationTarget,
+  persistBotUpdate,
   reducer,
+  requestConfirmedBotDeletion,
   visibleNotificationThread,
   type Bot,
+  type BotAnnouncement,
   type Group,
   type Message,
 } from "./store";
 import { openLiveEvents, type LiveEventSourceLike, type LiveEventsPlatform } from "../lib/live-events";
 import type { RoutineRun } from "../lib/routines";
+
+describe("trusted approval-mode persistence", () => {
+  const announcement = (approvalMode: Bot["approvalMode"] = "ask") => ({
+    id: "bot-1",
+    threadId: "thread-1",
+    name: "Maus",
+    title: "Helper",
+    description: "",
+    notifications: true,
+    color: "green" as const,
+    unread: false,
+    modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+    approvalMode,
+  });
+
+  it("commits ordinary edits before granting Full through the private bridge", async () => {
+    const order: string[] = [];
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => {
+      order.push("http");
+      return { bot: announcement("ask") };
+    });
+    const setMode = vi.fn(async () => {
+      order.push("private");
+      return announcement("full");
+    });
+
+    await expect(persistBotUpdate(
+      "bot-1",
+      { approvalMode: "full", confirmFullAccess: true, title: "Ops" },
+      new AbortController().signal,
+      request,
+      { setMode },
+    )).resolves.toMatchObject({ approvalMode: "full" });
+
+    expect(order).toEqual(["http", "private"]);
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({ title: "Ops" });
+    expect(setMode).toHaveBeenCalledWith("bot-1", "full", { acknowledgeLocalAuto: false });
+  });
+
+  it("never sends a Full confirmation over HTTP after a rapid switch back to Ask", async () => {
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => ({ bot: announcement("ask") }));
+    await persistBotUpdate(
+      "bot-1",
+      { approvalMode: "ask", confirmFullAccess: true },
+      new AbortController().signal,
+      request,
+    );
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({ approvalMode: "ask" });
+  });
+
+  it("fails closed when trusted modes have no packaged desktop bridge", async () => {
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => ({ bot: announcement("ask") }));
+    await expect(persistBotUpdate(
+      "bot-1",
+      { approvalMode: "custom" },
+      new AbortController().signal,
+      request,
+      undefined,
+    )).rejects.toThrow("packaged desktop app");
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("uses the private bridge to leave Custom instead of the bot-callable HTTP API", async () => {
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => ({ bot: announcement("custom") }));
+    const setMode = vi.fn(async () => announcement("ask"));
+
+    await expect(persistBotUpdate(
+      "bot-1",
+      { approvalMode: "ask" },
+      new AbortController().signal,
+      request,
+      { setMode },
+      announcement("custom"),
+    )).resolves.toMatchObject({ approvalMode: "ask" });
+
+    expect(request).not.toHaveBeenCalled();
+    expect(setMode).toHaveBeenCalledWith("bot-1", "ask", { acknowledgeLocalAuto: false });
+  });
+
+  it("revokes a trusted mode that completes after its save was cancelled", async () => {
+    let finishFull!: (bot: BotAnnouncement) => void;
+    const lateFull = new Promise<BotAnnouncement>((resolve) => {
+      finishFull = resolve;
+    });
+    const calls: string[] = [];
+    const setMode = vi.fn(async (_botId: string, mode: "ask" | "auto" | "full" | "custom") => {
+      calls.push(mode);
+      return mode === "full" ? lateFull : announcement(mode);
+    });
+    const controller = new AbortController();
+    const pending = persistBotUpdate(
+      "bot-1",
+      { approvalMode: "full", confirmFullAccess: true },
+      controller.signal,
+      vi.fn(),
+      { setMode },
+      announcement("ask"),
+    );
+    await Promise.resolve();
+
+    controller.abort();
+    finishFull(announcement("full"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toEqual(["full", "ask"]);
+  });
+
+  it("revokes a late Custom-to-Full grant when a newer save supersedes it", async () => {
+    let finishFull!: (bot: BotAnnouncement) => void;
+    const lateFull = new Promise<BotAnnouncement>((resolve) => {
+      finishFull = resolve;
+    });
+    const calls: string[] = [];
+    const setMode = vi.fn(async (_botId: string, mode: "ask" | "auto" | "full" | "custom") => {
+      calls.push(mode);
+      return mode === "full" ? lateFull : announcement(mode);
+    });
+    const controller = new AbortController();
+    const pending = persistBotUpdate(
+      "bot-1",
+      { approvalMode: "full", confirmFullAccess: true },
+      controller.signal,
+      vi.fn(),
+      { setMode },
+      announcement("custom"),
+    );
+    await Promise.resolve();
+
+    controller.abort();
+    finishFull(announcement("full"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toEqual(["full", "ask"]);
+  });
+
+  it("leaves Custom before persisting a coalesced non-Codex model switch", async () => {
+    const order: string[] = [];
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => {
+      order.push("http");
+      return {
+        bot: {
+          ...announcement("ask"),
+          modelSelection: { instanceId: "gemini", model: "gemini-3.1-pro" },
+        },
+      };
+    });
+    const setMode = vi.fn(async () => {
+      order.push("private");
+      return announcement("ask");
+    });
+
+    await expect(persistBotUpdate(
+      "bot-1",
+      {
+        approvalMode: "ask",
+        modelSelection: { instanceId: "gemini", model: "gemini-3.1-pro" },
+      },
+      new AbortController().signal,
+      request,
+      { setMode },
+      announcement("custom"),
+    )).resolves.toMatchObject({
+      approvalMode: "ask",
+      modelSelection: { instanceId: "gemini", model: "gemini-3.1-pro" },
+    });
+
+    expect(order).toEqual(["private", "http"]);
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({
+      modelSelection: { instanceId: "gemini", model: "gemini-3.1-pro" },
+    });
+    expect(setMode).toHaveBeenCalledWith("bot-1", "ask", { acknowledgeLocalAuto: false });
+  });
+
+  it("keeps local-computer consent on an ordinary PATCH coalesced with a private mode", async () => {
+    const request = vi.fn(async (_path: string, _init?: RequestInit) => ({
+      bot: { ...announcement("auto"), computer: "local" as const },
+    }));
+    const setMode = vi.fn(async () => announcement("full"));
+
+    await persistBotUpdate(
+      "bot-1",
+      {
+        computer: "local",
+        acknowledgeLocalAuto: true,
+        approvalMode: "full",
+        confirmFullAccess: true,
+      },
+      new AbortController().signal,
+      request,
+      { setMode },
+      announcement("auto"),
+    );
+
+    expect(JSON.parse(String(request.mock.calls[0]?.[1]?.body))).toEqual({
+      computer: "local",
+      acknowledgeLocalAuto: true,
+    });
+    expect(setMode).toHaveBeenCalledWith("bot-1", "full", { acknowledgeLocalAuto: true });
+  });
+});
+
+describe("server-authoritative bot deletion", () => {
+  const bot = {
+    id: "bot-delete",
+    threadId: "thread-delete",
+    name: "Keeper",
+    messages: [],
+  } as never as Bot;
+
+  const stateWithQueuedWork = () => reducer(
+    reducer(initialState, { type: "botAdded", bot }),
+    { type: "pendingQueued", threadId: bot.threadId, queueId: "queued-1", text: "keep this" },
+  );
+
+  it.each([409, 503])("keeps the bot, selection, and queued work when DELETE is rejected with %s", async (status) => {
+    let state = stateWithQueuedWork();
+    const cancel = vi.fn();
+
+    await expect(requestConfirmedBotDeletion(
+      bot.id,
+      async () => { throw new Error(`${status} computer cleanup required`); },
+      (botId) => {
+        cancel(botId);
+        state = reducer(state, { type: "deleteBot", botId });
+      },
+    )).rejects.toThrow(String(status));
+
+    expect(cancel).not.toHaveBeenCalled();
+    expect(state.selectedId).toBe(bot.id);
+    expect(state.bots.map((candidate) => candidate.id)).toContain(bot.id);
+    expect(state.pendingQueued[bot.threadId]).toEqual([
+      { queueId: "queued-1", text: "keep this" },
+    ]);
+  });
+
+  it("removes the bot only after DELETE succeeds", async () => {
+    let state = stateWithQueuedWork();
+    const cancel = vi.fn();
+    const requestDelete = vi.fn(async () => ({ ok: true }));
+
+    await requestConfirmedBotDeletion(bot.id, requestDelete, (botId) => {
+      cancel(botId);
+      state = reducer(state, { type: "deleteBot", botId });
+    });
+
+    expect(requestDelete).toHaveBeenCalledWith(bot.id);
+    expect(cancel).toHaveBeenCalledWith(bot.id);
+    expect(state.bots).toHaveLength(0);
+  });
+
+  it("coalesces repeated delete clicks while the server request is pending", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const requestDelete = vi.fn(async () => gate);
+    const onConfirmed = vi.fn();
+
+    const first = requestConfirmedBotDeletion(bot.id, requestDelete, onConfirmed);
+    const second = requestConfirmedBotDeletion(bot.id, requestDelete, onConfirmed);
+    expect(requestDelete).toHaveBeenCalledTimes(1);
+    release();
+    await Promise.all([first, second]);
+
+    expect(onConfirmed).toHaveBeenCalledTimes(1);
+    expect(onConfirmed).toHaveBeenCalledWith(bot.id);
+  });
+
+  it("keeps a visible pending marker until deletion settles or fails", () => {
+    const state = stateWithQueuedWork();
+    const pending = reducer(state, { type: "botDeletionPending", botId: bot.id, on: true });
+
+    expect(pending.bots.map((candidate) => candidate.id)).toContain(bot.id);
+    expect(pending.deletingBots).toEqual({ [bot.id]: true });
+
+    const failed = reducer(pending, { type: "botDeletionPending", botId: bot.id, on: false });
+    expect(failed.bots.map((candidate) => candidate.id)).toContain(bot.id);
+    expect(failed.deletingBots).toEqual({});
+
+    const removed = reducer(pending, { type: "deleteBot", botId: bot.id });
+    expect(removed.bots).toHaveLength(0);
+    expect(removed.deletingBots).toEqual({});
+  });
+});
 
 type SnapshotFrame =
   | { kind: "hello"; resumed: boolean; cursor: string }
@@ -335,6 +620,116 @@ describe("onboarding quiz", () => {
   });
 });
 
+describe("optimistic sent messages", () => {
+  const root: Message = { id: "root", role: "bot", kind: "text", text: "Ready", at: 1 };
+  const bot: Bot = {
+    id: "preview-bot",
+    threadId: "preview-thread",
+    name: "Preview",
+    title: "",
+    description: "",
+    notifications: true,
+    color: "purple",
+    unread: false,
+    modelSelection: { instanceId: "claude", model: "default" },
+    messages: [root],
+    activeLeafId: root.id,
+  };
+
+  it("shows a direct send immediately and replaces it with the canonical server message", () => {
+    const sent = reducer(
+      { ...initialState, bots: [bot] },
+      {
+        type: "send",
+        botId: bot.id,
+        threadId: bot.threadId,
+        sendId: "send-preview",
+        text: "look\n\n<attached-image path=\"/private/photo.png\" />",
+      },
+    );
+    expect(sent.bots[0]?.messages.at(-1)).toMatchObject({
+      id: "optimistic-send-preview",
+      role: "user",
+      sendId: "send-preview",
+    });
+    expect(sent.bots[0]?.activeLeafId).toBe("optimistic-send-preview");
+
+    const canonical: Message = {
+      id: "server-message",
+      role: "user",
+      kind: "text",
+      text: "look\n\n<attached-image path=\"/private/photo.png\" />",
+      at: 2,
+      parentId: root.id,
+      sendId: "send-preview",
+    };
+    const reconciled = reducer(sent, {
+      type: "messageAdded",
+      threadId: bot.threadId,
+      message: canonical,
+    });
+    expect(reconciled.bots[0]?.messages).toEqual([root, canonical]);
+    expect(reconciled.bots[0]?.activeLeafId).toBe(canonical.id);
+  });
+
+  it("removes only the optimistic row when a send queues or fails", () => {
+    const sent = reducer(
+      { ...initialState, bots: [bot] },
+      { type: "send", botId: bot.id, sendId: "send-failed", text: "later" },
+    );
+    const removed = reducer(sent, {
+      type: "optimisticMessageRemoved",
+      threadId: bot.threadId,
+      sendId: "send-failed",
+    });
+    expect(removed.bots[0]?.messages).toEqual([root]);
+    expect(removed.bots[0]?.activeLeafId).toBe(root.id);
+  });
+
+  it("uses the same immediate reconciliation for a channel", () => {
+    const group: Group = {
+      id: "preview-room",
+      threadId: "preview-room-thread",
+      name: "Preview room",
+      memberIds: [bot.id],
+      defaultResponder: { kind: "member", botId: bot.id },
+      bulletin: "",
+      unread: false,
+      createdAt: 1,
+      messages: [],
+    };
+    const sent = reducer(
+      { ...initialState, groups: [group] },
+      {
+        type: "sendGroup",
+        groupId: group.id,
+        threadId: group.threadId,
+        sendId: "room-preview",
+        text: "show this",
+        mode: "chat",
+      },
+    );
+    expect(sent.groups[0]?.messages).toEqual([
+      expect.objectContaining({ id: "optimistic-room-preview", sendId: "room-preview" }),
+    ]);
+
+    const canonical: Message = {
+      id: "server-room-message",
+      role: "user",
+      kind: "text",
+      text: "show this",
+      at: 2,
+      sendId: "room-preview",
+    };
+    const reconciled = reducer(sent, {
+      type: "messageAdded",
+      threadId: group.threadId,
+      message: canonical,
+    });
+    expect(reconciled.groups[0]?.messages).toEqual([canonical]);
+  });
+});
+
 describe("cross-client bot creation", () => {
   it("adds an announced bot before its greeting frames arrive", () => {
     const announced = {
@@ -512,6 +907,17 @@ describe("section Chiefs", () => {
     expect(next.bots.find((candidate) => candidate.id === workChief.id)?.chiefOfStaff).toBe(false);
     expect(next.bots.find((candidate) => candidate.id === workCandidate.id)?.chiefOfStaff).toBe(true);
     expect(next.bots.find((candidate) => candidate.id === personalChief.id)?.chiefOfStaff).toBe(true);
+  });
+
+  it("optimistically clears an explicit computer when Auto is selected", () => {
+    const current = { ...bot("cloud-bot", "Work"), computer: "cloud" as const, messages: [] };
+    const next = reducer({ ...initialState, bots: [current] }, {
+      type: "updateBot",
+      botId: current.id,
+      patch: { computer: null },
+    });
+
+    expect(next.bots[0]?.computer).toBeUndefined();
   });
 });
 

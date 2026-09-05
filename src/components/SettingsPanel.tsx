@@ -14,10 +14,14 @@ import { instanceSupportsLocalComputer, localComputerDisabledReason, localComput
 import { BotCapabilitiesCard } from "./BotCapabilitiesCard";
 import { BotProfileAvatarCard } from "./BotProfileAvatarCard";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
+import { ApprovalModeSelector } from "./ApprovalModeSelector";
+import { FullAccessWarning } from "./FullAccessWarning";
 import { VoiceSettings } from "./VoiceSettings";
 import { BOT_PROFILE_LIMITS } from "../../shared/bot-profile";
+import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode";
 import { Switch } from "./SettingsPrimitives";
 import { RoutineEditor } from "./RoutinesPage";
+import { BotInstructionsDialog } from "./BotInstructionsDialog";
 
 function Field({
   label,
@@ -541,9 +545,17 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
   const { capabilities } = useDesktopCapabilities();
   const providerSupportsLocal = instanceSupportsLocalComputer(state.instances, bot);
   const localSelectable = localComputerSelectable({ capabilities, providerSupportsLocal });
-  const [localAutoWarning, setLocalAutoWarning] = useState<"auto" | "local" | null>(null);
+  const [localAutoWarning, setLocalAutoWarning] = useState<{
+    botId: string;
+    kind: "auto" | "local";
+  } | null>(null);
+  const [fullAccessTarget, setFullAccessTarget] = useState<string | null>(null);
   const [creatingRoutine, setCreatingRoutine] = useState(false);
-  useEffect(() => setCreatingRoutine(false), [bot.id]);
+  const [instructionsOpen, setInstructionsOpen] = useState(false);
+  useEffect(() => {
+    setCreatingRoutine(false);
+    setInstructionsOpen(false);
+  }, [bot.id]);
   const localDisabledReason = localComputerDisabledReason({ capabilities, providerSupportsLocal });
   const patch = (
     p: Partial<
@@ -553,7 +565,6 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         | "title"
         | "description"
         | "notifications"
-        | "computer"
         | "cloudBackend"
         | "autoStartVps"
         | "color"
@@ -562,6 +573,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         | "avatarUrl"
         | "avatarCrop"
         | "autoApprove"
+        | "approvalMode"
         | "autoReview"
         | "canMerge"
         | "canDeploy"
@@ -573,11 +585,28 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         | "browser"
         | "modelSelection"
       >
-    > & { acknowledgeLocalAuto?: boolean },
+    > & {
+      computer?: Bot["computer"] | null;
+      acknowledgeLocalAuto?: boolean;
+      confirmFullAccess?: boolean;
+    },
   ) => dispatch({ type: "updateBot", botId: bot.id, patch: p });
   const activeState = stateForBot(bot);
   const mascotMotion = state.mascotMotion?.botId === bot.id ? state.mascotMotion : null;
   const engine = state.instances.find((instance) => instance.instanceId === bot.modelSelection.instanceId);
+  const approvalMode = approvalModeFor(bot);
+  const setApprovalMode = (mode: ApprovalMode) => {
+    if (bot.busy || mode === approvalMode) return;
+    if (mode === "full") {
+      setFullAccessTarget(bot.id);
+      return;
+    }
+    if (mode === "auto" && bot.computer === "local") {
+      setLocalAutoWarning({ botId: bot.id, kind: "auto" });
+      return;
+    }
+    patch({ approvalMode: mode });
+  };
   const canAutoReview = engine?.capabilities?.approvalReview === true;
   const canCoordinate = engine?.capabilities?.agentsMcp === true;
   const canUseConnectedApps = engine?.capabilities?.composioMcp === true;
@@ -657,15 +686,33 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
               onChange={(e) => patch({ title: e.target.value })}
             />
           </Field>
-          <Field label="Description">
+          <div className="block">
+            <div className="mb-1.5 flex items-center justify-between gap-3">
+              <label htmlFor={`bot-instructions-${bot.id}`} className="text-[13px] text-ink-secondary">Instructions</label>
+              <button
+                type="button"
+                onClick={() => setInstructionsOpen(true)}
+                className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[11.5px] font-medium text-accent-text hover:bg-accent/10"
+              >
+                <BookOpen size={12} /> View full
+              </button>
+            </div>
             <textarea
-              className={cn(inputCls, "min-h-[96px] resize-none")}
+              id={`bot-instructions-${bot.id}`}
+              className={cn(inputCls, "min-h-[176px] resize-y leading-relaxed")}
               maxLength={BOT_PROFILE_LIMITS.description}
-              placeholder="What this agent is for"
+              placeholder="Describe this bot’s role, priorities, working style, and boundaries"
+              aria-label="Bot instructions"
               value={bot.description}
               onChange={(e) => patch({ description: e.target.value })}
             />
-          </Field>
+            <div className="mt-1.5 flex items-start justify-between gap-3 text-[11px] text-ink-secondary">
+              <span>Included in this bot’s context on every turn.</span>
+              <span className="shrink-0 tabular-nums">
+                {bot.description.length.toLocaleString()} / {BOT_PROFILE_LIMITS.description.toLocaleString()}
+              </span>
+            </div>
+          </div>
 
           <div className="rounded-xl bg-card p-4">
             <div className="flex items-center gap-2">
@@ -866,6 +913,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
             </div>
             <div className="mt-3 flex overflow-hidden rounded-lg border border-hairline/40">
               {([
+                [null, "Auto"],
                 ["cloud", "Cloud"],
                 ["vm", "Local VM"],
                 ["local", "This computer"],
@@ -873,7 +921,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                 ["off", "Off"],
               ] as const).map(([mode, label], i) => (
                 <button
-                  key={mode}
+                  key={mode ?? "auto"}
                   disabled={(mode === "local" && !localSelectable) || (mode === "browser" && !browserSelectable)}
                   title={
                     mode === "local" && !localSelectable
@@ -883,8 +931,10 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                         : undefined
                   }
                   onClick={() => {
-                    if (mode === bot.computer) return;
-                    if (mode === "local" && bot.autoApprove) setLocalAutoWarning("local");
+                    if ((mode === null && bot.computer === undefined) || mode === bot.computer) return;
+                    if (mode === "local" && approvalMode === "auto") {
+                      setLocalAutoWarning({ botId: bot.id, kind: "local" });
+                    }
                     // a browser-only bot must actually have its browser: flip
                     // the per-bot switch on with the destination
                     else if (mode === "browser") patch({ computer: mode, browser: true });
@@ -894,7 +944,7 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                     "flex-1 py-1.5 text-[13px] capitalize",
                     i > 0 && "border-l border-hairline/40",
                     ((mode === "local" && !localSelectable) || (mode === "browser" && !browserSelectable)) && "cursor-not-allowed opacity-40",
-                    bot.computer === mode
+                    (mode === null ? bot.computer === undefined : bot.computer === mode)
                       ? "bg-control text-ink"
                       : "text-ink-secondary hover:bg-control/60 hover:text-ink",
                   )}
@@ -905,6 +955,12 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
             </div>
             {(!bot.computer || bot.computer === "cloud") && (
               <>
+                {!bot.computer && (
+                  <div className="mt-3 rounded-lg bg-inset px-3 py-2.5 text-[11.5px] leading-relaxed text-ink-secondary">
+                    <span className="font-medium text-ink">Auto cloud preference.</span>{" "}
+                    This chooses what Auto may reuse during a task; viewing settings does not create or wake a computer.
+                  </div>
+                )}
                 <CloudBackendPicker
                   value={bot.cloudBackend ?? "box"}
                   vpsSupported={canUseVps}
@@ -937,33 +993,32 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
 
           <LearnedSkillsCard key={`skills-${bot.id}`} bot={bot} />
 
-          <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4">
-            <div>
-              <div className="text-[15px] font-medium text-ink">Auto mode</div>
-              <div className="mt-0.5 text-[13px] text-ink-secondary">
-                {bot.computer === "local"
-                  ? bot.autoApprove
-                    ? "Keeps going on this computer — you'll still be asked about anything destructive, and about questions it asks you."
-                    : "Approve each action on this computer yourself. Turn on to let this bot keep working without stopping to ask."
-                  : bot.autoApprove
-                  ? "Keeps going on its own — you'll still be asked about anything destructive, and about questions it asks you."
-                  : "Approve each action yourself. Turn on to let this bot keep working without stopping to ask."}
-              </div>
+          <div className="rounded-xl bg-card p-4">
+            <div className="text-[15px] font-medium text-ink">Approval level</div>
+            <div className="mt-0.5 text-[13px] text-ink-secondary">
+              Choose how much this bot can do before it stops to ask you.
             </div>
-            <Switch
-              checked={Boolean(bot.autoApprove)}
-              aria-label="Auto mode"
-              onClick={() => {
-                if (!bot.autoApprove && bot.computer === "local") setLocalAutoWarning("auto");
-                else patch({ autoApprove: !bot.autoApprove });
-              }}
-            />
+            <div className="mt-3">
+              <ApprovalModeSelector
+                approvalMode={bot.approvalMode}
+                autoApprove={bot.autoApprove}
+                providerName={engine?.displayName ?? bot.name}
+                driverKind={engine?.driverKind ?? ""}
+                onSelect={setApprovalMode}
+                menuDirection="down"
+                wide
+                disabled={Boolean(bot.busy)}
+                trustedModesAvailable={Boolean(window.ogb?.approvals && capabilities.host.packaged)}
+              />
+            </div>
           </div>
 
           <div className="rounded-xl bg-card p-4">
             <div className="text-[15px] font-medium text-ink">Review routine approvals</div>
             <div className="mt-0.5 text-[13px] text-ink-secondary">
-              {canAutoReview
+              {approvalMode === "custom"
+                ? "Custom follows your Codex config.toml and its approval prompts. Routine auto-review stays off in this mode."
+                : canAutoReview
                 ? "The same engine reviews ordinary approval cards. Existing safety rules, unattended turns, local-computer access, and questions still wait for you."
                 : "This engine cannot run an isolated review safely, so approval cards continue to wait for you."}
             </div>
@@ -975,12 +1030,20 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
                   ["enforce", "On", "Answer only reviews that return a strict approval."],
                 ] as const
               ).map(([value, label, hint]) => {
-                const current = bot.autoReview === "shadow" || bot.autoReview === "enforce" ? bot.autoReview : "off";
-                const disabled = value !== "off" && !canAutoReview;
+                const current = approvalMode === "custom"
+                  ? "off"
+                  : bot.autoReview === "shadow" || bot.autoReview === "enforce"
+                    ? bot.autoReview
+                    : "off";
+                const disabled = value !== "off" && (approvalMode === "custom" || !canAutoReview);
                 return (
                   <button
                     key={value}
-                    title={disabled ? "Not supported by this engine" : hint}
+                    title={disabled
+                      ? approvalMode === "custom"
+                        ? "Custom approval behavior is controlled by config.toml"
+                        : "Not supported by this engine"
+                      : hint}
                     disabled={disabled}
                     onClick={() => patch({ autoReview: value })}
                     className={cn(
@@ -1027,13 +1090,35 @@ export function SettingsPanel({ bot }: { bot: Bot }) {
         onClose={() => setCreatingRoutine(false)}
       />
     )}
+    {instructionsOpen && <BotInstructionsDialog bot={bot} onClose={() => setInstructionsOpen(false)} />}
     <LocalComputerAutoWarning
       open={localAutoWarning !== null}
       onCancel={() => setLocalAutoWarning(null)}
       onConfirm={() => {
-        if (localAutoWarning === "auto") patch({ autoApprove: true, acknowledgeLocalAuto: true });
-        if (localAutoWarning === "local") patch({ computer: "local", acknowledgeLocalAuto: true });
+        const target = localAutoWarning;
         setLocalAutoWarning(null);
+        if (!target) return;
+        dispatch({
+          type: "updateBot",
+          botId: target.botId,
+          patch: target.kind === "auto"
+            ? { approvalMode: "auto", acknowledgeLocalAuto: true }
+            : { computer: "local", acknowledgeLocalAuto: true },
+        });
+      }}
+    />
+    <FullAccessWarning
+      open={fullAccessTarget !== null}
+      onCancel={() => setFullAccessTarget(null)}
+      onConfirm={() => {
+        if (fullAccessTarget) {
+          dispatch({
+            type: "updateBot",
+            botId: fullAccessTarget,
+            patch: { approvalMode: "full", confirmFullAccess: true },
+          });
+        }
+        setFullAccessTarget(null);
       }}
     />
     </>
