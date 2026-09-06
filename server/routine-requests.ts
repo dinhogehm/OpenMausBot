@@ -70,6 +70,7 @@ const routineToolDefinitionSchema = z.object({
   runOn: z.enum(["maus", "cloud"]).optional(),
   durationMinutes: z.number().optional(),
   timeoutMinutes: z.number().nullable().optional(),
+  continuity: z.boolean().optional(),
 }).strict();
 
 const routineToolChangesSchema = routineToolDefinitionSchema
@@ -121,6 +122,7 @@ const storedDefinitionSchema = z.object({
   runOn: z.enum(["maus", "cloud"]),
   durationMinutes: z.number().int().min(5).max(240),
   timeoutMinutes: z.number().int().min(5).max(240).optional(),
+  continuity: z.boolean().optional(),
 }).strict();
 const storedChangesSchema = storedDefinitionSchema
   .omit({ timeoutMinutes: true })
@@ -382,6 +384,7 @@ function normalizeDefinition(input: RoutineToolDefinitionInput, now: number): Ro
     runOn: runOn(input.runOn),
     durationMinutes: duration(input.durationMinutes),
     ...(timeoutMinutes == null ? {} : { timeoutMinutes }),
+    ...(input.continuity === true ? { continuity: true } : {}),
   };
 }
 
@@ -393,6 +396,7 @@ function normalizeChanges(input: RoutineToolChangesInput, now: number): RoutineR
   if (input.runOn !== undefined) changes.runOn = runOn(input.runOn);
   if (input.durationMinutes !== undefined) changes.durationMinutes = duration(input.durationMinutes);
   if (input.timeoutMinutes !== undefined) changes.timeoutMinutes = timeout(input.timeoutMinutes);
+  if (input.continuity !== undefined) changes.continuity = input.continuity === true;
   return changes;
 }
 
@@ -476,7 +480,7 @@ function formatInstant(at: number, timeZone: string): string {
   }
 }
 
-function scheduleText(schedule: RoutineRequestSchedule, timeZone: string): string {
+export function scheduleText(schedule: RoutineRequestSchedule, timeZone: string): string {
   if (schedule.type === "once") return `${formatInstant(schedule.at, timeZone)} (${timeZone})`;
   if (schedule.type === "interval") {
     return schedule.anchorAt === undefined
@@ -485,6 +489,24 @@ function scheduleText(schedule: RoutineRequestSchedule, timeZone: string): strin
   }
   const days = schedule.weekdays.map((day) => WEEKDAY_LABEL[day]).join(", ");
   return `${days} at ${schedule.time} (${timeZone})`;
+}
+
+/** One plain sentence describing how often a routine will actually run, so
+ * the approval card states the consequence rather than just the schedule. */
+export function consequenceLine(schedule: RoutineRequestSchedule, continuity = false): string {
+  // A continuity routine still gets a fresh session per run; what carries
+  // over is the previous run's report, so say that rather than contradict
+  // the Continuity line above it.
+  const session = continuity ? "each run starts a fresh session with the previous run's report" : "each run starts a fresh session";
+  if (schedule.type === "once") return "Will run once; that run starts a fresh session.";
+  if (schedule.type === "interval") {
+    const runsPerDay = Math.round(1440 / schedule.everyMinutes);
+    const cadence = runsPerDay <= 1 ? "about once a day" : `about ${runsPerDay} times a day`;
+    return `Will run ${cadence}; ${session}.`;
+  }
+  const days = schedule.weekdays.length;
+  const cadence = days === 7 ? "every day" : days === 1 ? "one day a week" : `${days} days a week`;
+  return `Will run ${cadence}; ${session}.`;
 }
 
 function effectiveDefinition(operation: RoutineRequestOperation, manager: RoutineManager): RoutineRequestDefinition | null {
@@ -498,6 +520,7 @@ function effectiveDefinition(operation: RoutineRequestOperation, manager: Routin
     runOn: existing.runOn,
     durationMinutes: existing.durationMinutes,
     ...(existing.timeoutMinutes === undefined ? {} : { timeoutMinutes: existing.timeoutMinutes }),
+    ...(existing.continuity ? { continuity: true } : {}),
   };
   if (operation.action !== "update") return base;
   const { timeoutMinutes, ...changes } = operation.changes;
@@ -567,6 +590,12 @@ function cardCopy(
       `Next run: ${nextDescription}`,
       `Runs on: ${destination}`,
       `Run limit: ${definition.timeoutMinutes === undefined ? "No limit" : `${definition.timeoutMinutes} minutes`}`,
+      `Continuity: ${definition.continuity ? "Carries the previous run's report into the next run" : "Each run starts fresh"}`,
+      // Last before the instructions: the one sentence that says what
+      // confirming actually does, in the reader's terms.
+      ...(operation.action === "create" || operation.action === "update"
+        ? [consequenceLine(definition.schedule, Boolean(definition.continuity))]
+        : []),
       "",
       "Instructions:",
       visibleInstructions,
@@ -586,6 +615,7 @@ function inputFromDefinition(definition: RoutineRequestDefinition, botId: string
     schedule: asSchedule(definition.schedule, now),
     durationMinutes: definition.durationMinutes,
     ...(definition.timeoutMinutes === undefined ? {} : { timeoutMinutes: definition.timeoutMinutes }),
+    ...(definition.continuity ? { continuity: true } : {}),
   };
 }
 
@@ -597,6 +627,7 @@ function updateFromChanges(changes: RoutineRequestChanges, now: number): Partial
   if (changes.runOn !== undefined) patch.runOn = changes.runOn;
   if (changes.durationMinutes !== undefined) patch.durationMinutes = changes.durationMinutes;
   if (changes.timeoutMinutes !== undefined) patch.timeoutMinutes = changes.timeoutMinutes;
+  if (changes.continuity !== undefined) patch.continuity = changes.continuity;
   return patch;
 }
 

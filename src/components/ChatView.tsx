@@ -1328,8 +1328,10 @@ export function ChatView({ bot }: { bot: Bot }) {
           )}
           <TurnPresence
             avatar={
-              <MausAvatar
-                color={bot.color}
+              // BotAvatar, not a bare MausAvatar: an uploaded profile image
+              // (and a chosen mascot body) must match the sidebar row.
+              <BotAvatar
+                bot={bot}
                 state={toolInFlight ? "working" : "thinking"}
                 size={36}
                 forward={false}
@@ -1403,7 +1405,7 @@ function UsageChip({ bot }: { bot: Bot }) {
   const short = usage.costUsd !== null ? formatUsd(usage.costUsd) : formatTokens(usage.input + usage.output);
   return (
     <button
-      onClick={() => dispatch({ type: "toggleSettings", open: true })}
+      onClick={() => dispatch({ type: "toggleSettings", open: true, section: "usage" })}
       className="whitespace-nowrap rounded-full border border-hairline/40 bg-raised/60 px-2.5 py-1 text-[12px] tabular-nums text-ink-secondary hover:bg-raised hover:text-ink @max-4xl/chathead:px-2"
       title={detail}
     >
@@ -1424,7 +1426,7 @@ function WorkingFolderChip({ bot }: { bot: Bot }) {
   const name = folder.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || folder;
   return (
     <button
-      onClick={() => dispatch({ type: "toggleSettings", open: true })}
+      onClick={() => dispatch({ type: "toggleSettings", open: true, section: "access" })}
       className={cn(
         "flex max-w-[180px] items-center gap-1.5 rounded-full border border-hairline/40 bg-raised/60 px-2.5 py-1 text-[12.5px] text-ink-secondary hover:bg-raised hover:text-ink",
         COMPACT_SQUARE,

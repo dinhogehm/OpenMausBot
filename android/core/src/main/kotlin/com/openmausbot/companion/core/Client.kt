@@ -284,6 +284,9 @@ class CompanionClient(
 
     suspend fun routines(): RoutinesResponse = send(makeRequest("GET", "/api/routines"))
 
+    suspend fun overview(botId: String): BotOverview =
+        send(makeRequest("GET", "/api/bots/${segment(botId)}/overview"))
+
     suspend fun createBot(): Bot = send<CreatedBot>(makeRequest("POST", "/api/bots")).bot
 
     /**
@@ -306,6 +309,18 @@ class CompanionClient(
         val body = CompanionJson.encodeToJsonElement(BotProfilePatch.serializer(), patch).jsonObject
         return send<BotResponse>(
             makeRequest("PATCH", "/api/bots/${segment(botId)}/profile", body = body),
+        ).bot
+    }
+
+    /**
+     * Change only the engine, model and optional reasoning effort. This uses the
+     * companion's narrow model route rather than the desktop's general bot PATCH,
+     * which also owns execution policy and computer settings.
+     */
+    suspend fun updateModel(botId: String, selection: ModelSelection): Bot {
+        val body = CompanionJson.encodeToJsonElement(ModelSelection.serializer(), selection).jsonObject
+        return send<BotResponse>(
+            makeRequest("PATCH", "/api/bots/${segment(botId)}/model", body = body),
         ).bot
     }
 

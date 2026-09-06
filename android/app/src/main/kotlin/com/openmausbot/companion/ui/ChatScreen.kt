@@ -46,7 +46,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -136,6 +136,7 @@ fun ChatScreen(
     onResolved: (ChatTarget) -> Unit,
     onBack: () -> Unit,
     onOpenComputer: (String) -> Unit,
+    onOpenOverview: (String) -> Unit,
     /**
      * True while this conversation is still on the navigator stack (including
      * under Computer). Used on dispose to keep the in-memory draft across a
@@ -163,7 +164,7 @@ fun ChatScreen(
             // that is open is the one deleted.
             val resolved = (destination as? Destination.Thread)?.let { resolution.chat.target }
             LaunchedEffect(resolved) { if (resolved != null) onResolved(resolved) }
-            LoadedChat(resolution.chat, state, onBack, onOpenComputer, retainsDraft)
+            LoadedChat(resolution.chat, state, onBack, onOpenComputer, onOpenOverview, retainsDraft)
         }
     }
 }
@@ -192,6 +193,7 @@ private fun LoadedChat(
     state: CompanionState,
     onBack: () -> Unit,
     onOpenComputer: (String) -> Unit,
+    onOpenOverview: (String) -> Unit,
     retainsDraft: (chatId: String) -> Boolean,
 ) {
     // The bot's *current* thread, not the one the destination named. Switching or
@@ -600,6 +602,7 @@ private fun LoadedChat(
                 dictation.stop()
                 if (bot != null) onOpenComputer(bot.id)
             }
+            ChatActionId.SETTINGS -> if (bot != null) showingProfile = true
             ChatActionId.SHARE_MARKDOWN -> share(scope, environment, threadId, ShareFormat.MARKDOWN)
             ChatActionId.SHARE_JSON -> share(scope, environment, threadId, ShareFormat.JSON)
             ChatActionId.INTERRUPT -> if (bot != null) scope.launch { session.interrupt(bot) }
@@ -952,7 +955,14 @@ private fun LoadedChat(
     }
 
     if (showingProfile && bot != null) {
-        AgentProfileSheet(bot = bot, onDismiss = { showingProfile = false })
+        AgentProfileSheet(
+            bot = bot,
+            onDismiss = { showingProfile = false },
+            onOpenOverview = {
+                onOpenOverview(it)
+                showingProfile = false
+            },
+        )
     }
 
     filePreview?.let { item ->
@@ -1072,7 +1082,7 @@ private fun ChatHeader(
                 modifier = if (chat is Chat.BotChat) {
                     Modifier
                         .clickable(role = Role.Button, onClick = onOpenProfile)
-                        .semantics { contentDescription = "Open ${chat.name} profile" }
+                        .semantics { contentDescription = "Open ${chat.name} settings" }
                 } else {
                     Modifier
                 },
@@ -1135,7 +1145,7 @@ private fun NamePill(chat: Chat, onOpen: () -> Unit) {
             .clickable(
                 role = Role.Button,
                 onClickLabel = if (isBot) {
-                    "Open ${chat.name} profile"
+                    "Open ${chat.name} settings"
                 } else {
                     "Open ${chat.name} chat options"
                 },
@@ -1164,7 +1174,7 @@ private fun NamePill(chat: Chat, onOpen: () -> Unit) {
             )
         }
         Icon(
-            imageVector = if (isBot) Icons.Filled.Person else Icons.Filled.MoreVert,
+            imageVector = if (isBot) Icons.Filled.Settings else Icons.Filled.MoreVert,
             contentDescription = null,
             tint = secondaryTint,
             modifier = Modifier.size(16.dp),
@@ -1310,6 +1320,8 @@ private fun ChatActionIcon(id: ChatActionId, tint: Color) {
             Icon(Icons.AutoMirrored.Filled.List, null, tint = tint, modifier = modifier)
         ChatActionId.WATCH_COMPUTER ->
             Icon(painterResource(R.drawable.ic_display), null, tint = tint, modifier = modifier)
+        ChatActionId.SETTINGS ->
+            Icon(Icons.Filled.Settings, null, tint = tint, modifier = modifier)
         ChatActionId.SHARE_MARKDOWN, ChatActionId.SHARE_JSON ->
             Icon(Icons.Filled.Share, null, tint = tint, modifier = modifier)
         ChatActionId.INTERRUPT ->

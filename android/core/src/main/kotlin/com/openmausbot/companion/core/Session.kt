@@ -1725,6 +1725,35 @@ class Session(
         }
     }
 
+    /**
+     * The model catalog lives on the paired computer because availability
+     * depends on which engines are installed and signed in there.
+     */
+    suspend fun modelInstances(): List<Instance> {
+        val activeClient = client ?: return emptyList()
+        return try {
+            activeClient.instances()
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            emptyList()
+        }
+    }
+
+    suspend fun updateModel(selection: ModelSelection, forBot: Bot): Bot? {
+        val activeClient = client ?: return null
+        return try {
+            val updated = activeClient.updateModel(forBot.id, selection)
+            currentCoroutineContext().ensureActive()
+            _state.update { it.apply(Frame.Bot(updated)) }
+            updated
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
     suspend fun uploadAvatar(
         data: ByteArray,
         mime: String,
@@ -1844,6 +1873,20 @@ class Session(
             if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             RoutinesResponse(emptyList(), emptyList())
+        }
+    }
+
+    suspend fun loadOverview(botId: String): BotOverview? {
+        val activeClient = client ?: return null
+        val connectionId = _connection.value?.id
+        return try {
+            val overview = activeClient.overview(botId)
+            currentCoroutineContext().ensureActive()
+            overview.takeIf { _connection.value?.id == connectionId }
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            if (_connection.value?.id == connectionId) _actionError.value = error.message
+            null
         }
     }
 
