@@ -622,7 +622,8 @@ function TriggersPanel({
           />
           <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
             A run that has not moved to another node for this long is announced once, then at most once per further
-            period. Retries of the same node do not reset it. Wait nodes are exempt; a gate is judged on its own expiry.
+            period (twelve times at most). Retries of the same node do not reset it; a provider outage does. Wait
+            nodes are exempt; a gate is judged on its own expiry.
           </p>
         </div>
         <label className="flex items-center gap-2 text-[11.5px] text-ink">
@@ -646,7 +647,7 @@ function TriggersPanel({
               onChange={(event) => {
                 const time = event.target.value;
                 if (!WORKFLOW_SCHEDULE_TIME_RE.test(time)) {
-                  setError("digestAt must be HH:MM (24-hour).");
+                  setError("Digest time must be HH:MM (24-hour).");
                   return;
                 }
                 commitMonitoring({ digestAt: time });
@@ -654,8 +655,8 @@ function TriggersPanel({
               className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
             />
             <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-              Runs that ended in the 24 hours before this time: how many completed, failed and were cancelled, the
-              average run time, the nodes that failed most and the denials seen most.
+              Runs that ended since the previous digest: how many completed, failed and were cancelled, the average
+              run time, the nodes that failed most and the denials seen most.
             </p>
           </div>
         )}

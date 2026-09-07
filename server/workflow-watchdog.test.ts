@@ -293,8 +293,10 @@ describe("run watchdog", () => {
     expect(kinds(h)).toEqual(["approval", "completed"]);
 
     // An outage wait has two announcements of its own and is never
-    // "stuck" while it waits — even past the patience. A turn that is
-    // live again after the wait is judged like any other.
+    // "stuck" while it waits — even past the patience. When the wait ends
+    // the stay starts OVER: hours the provider was away are not hours the
+    // run sat unexplained, so the first tick after a long outage must not
+    // call a run that is moving again "stuck" (nor flip the health probe).
     const outage = h.store.create(pipeline({ stuckAfterMinutes: 10, providerOutage: { horizonHours: 1 } }));
     const waiting = h.engine.startRun(outage.id, "go", "manual");
     const parkedAt = T0 + 24 * HOUR + MIN;
@@ -312,8 +314,40 @@ describe("run watchdog", () => {
     await h.engine.tick(); // twelve minutes into the stay, past the patience, but waiting
     expect(h.notifications.filter((n) => n.runId === waiting.id).map((n) => n.kind)).toEqual(["outage"]);
     h.setNow(parkedAt + 15 * MIN);
-    await h.engine.tick(); // live again: judged like any other turn
+    await h.engine.tick(); // live again, on a fresh stay
+    expect(h.notifications.filter((n) => n.runId === waiting.id).map((n) => n.kind)).toEqual(["outage"]);
+    expect(h.store.getRun(waiting.id)).toMatchObject({ nodeEnteredAt: parkedAt + 15 * MIN, outage: { attempts: 4 } });
+    expect(h.engine.health().runs.stuck.map((entry) => entry.runId)).not.toContain(waiting.id);
+    h.setNow(parkedAt + 25 * MIN);
+    await h.engine.tick(); // ten minutes into the new stay, still on the same turn: not yet
+    expect(h.notifications.filter((n) => n.runId === waiting.id).map((n) => n.kind)).toEqual(["outage"]);
+    h.setNow(parkedAt + 26 * MIN);
+    await h.engine.tick(); // eleven: now it is
     expect(h.notifications.filter((n) => n.runId === waiting.id).map((n) => n.kind)).toEqual(["outage", "stuck"]);
+    expect(h.notifications.at(-1)!.message).toContain('stuck at node "plan" for 11m');
+  });
+
+  it("stops after twelve announcements for one stay, says so on the last, and starts over on the next node", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({ stuckAfterMinutes: 10 }));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    for (let period = 1; period <= 20; period++) {
+      h.setNow(T0 + period * 10 * MIN + 10_000);
+      await h.engine.tick();
+    }
+    expect(h.notifications).toHaveLength(12);
+    expect(h.notifications[10]!.message).not.toContain("last stuck announcement");
+    expect(h.notifications[11]!.message).toMatch(/for 2h \(.*— last stuck announcement for this stay; quiet until the run moves$/);
+    expect(h.store.getRun(run.id)).toMatchObject({ stuckAnnouncements: 12 });
+    // Still listed for a monitor while it is quiet.
+    expect(h.engine.health().runs.stuck.map((entry) => entry.runId)).toEqual([run.id]);
+
+    h.completeTurn(h.dispatches[0]!.threadId, envelope("done"));
+    expect(h.store.getRun(run.id)!.stuckAnnouncements).toBeUndefined();
+    h.setNow(T0 + 4 * HOUR);
+    await h.engine.tick();
+    expect(h.notifications).toHaveLength(13);
+    expect(h.notifications[12]!.message).toContain('stuck at node "ship"');
   });
 
   it("lists a gate past 1.5 times its window as stuck in the health document", () => {
@@ -436,7 +470,7 @@ describe("every transition is announced, and mirrored in the audit room", () => 
     h.dispatches.at(-1)!.onDispatchError("boom");
     expect(h.store.getRun(second.id)!.status).toBe("failed");
     expect(h.notifications.at(-1)).toMatchObject({ kind: "failed", message: 'Workflow "Gated" run failed at node "ship": boom' });
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("audit room post (failed) failed"));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('audit room "audit" of Gated no longer exists; failed not posted'));
     expect(h.posts.at(-1)!.text).toBe('[Gated] needs approval at node "gate": Ship it?'); // nothing landed after the room went
   });
 
@@ -472,20 +506,17 @@ describe("every transition is announced, and mirrored in the audit room", () => 
     expect(h.posts[1]!.text).not.toContain("sk-ant-abcdefghijklmnop1234");
   });
 
-  it("refuses to start a workflow whose audit room does not exist, and never checks without a room lookup", () => {
+  it("a workflow whose audit room does not exist still runs: the person is told, the post is skipped with a log line", () => {
     const h = harness();
     const workflow = h.store.create(pipeline({ auditGroupId: "nope" }));
-    expect(() => h.engine.startRun(workflow.id, "go", "manual")).toThrow(
-      'invalid workflow: The audit room "nope" no longer exists; pick another room or turn the audit room off.',
-    );
-    const blind = new WorkflowEngine({
-      store: h.store,
-      botState: () => "ready",
-      botCapabilities: () => ({}),
-      createTask: () => ({ threadId: "t" }),
-      startTurn: () => Promise.resolve(),
-    });
-    expect(blind.startRun(workflow.id, "go", "manual").status).toBe("running");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(run.status).toBe("running");
+    h.completeTurn(h.dispatches[0]!.threadId, envelope("done"));
+    h.completeTurn(h.dispatches[1]!.threadId, envelope("shipped"));
+    expect(kinds(h)).toEqual(["completed"]);
+    expect(h.posts).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('audit room "nope" of Release no longer exists; completed not posted'));
   });
 });
 
@@ -514,7 +545,7 @@ describe("daily digest", () => {
     h.setNow(local(2026, 9, 7, 18, 0));
     await h.engine.tick();
     const digest =
-      'Workflow "Release" daily digest for 2026-09-07: 2 runs ended in the last 24h — 1 completed, 1 failed, 0 cancelled; average run time 10m; nodes that failed most: plan ×1';
+      'Workflow "Release" daily digest for 2026-09-07: 2 runs ended since the previous digest — 1 completed, 1 failed, 0 cancelled; average run time 10m; nodes that failed most: plan ×1';
     expect(h.notifications).toEqual([{ runId: expect.any(String), kind: "digest", message: digest }]);
     expect(h.posts).toEqual([{ groupId: "audit", text: `[Release] ${digest.slice('Workflow "Release" '.length)}` }]);
     expect(h.store.get(workflow.id)!.lastDigestAt).toBe(local(2026, 9, 7, 18, 0));
@@ -526,7 +557,7 @@ describe("daily digest", () => {
     h.setNow(local(2026, 9, 8, 18, 0));
     await h.engine.tick();
     expect(h.notifications).toHaveLength(2);
-    expect(h.notifications[1]!.message).toBe('Workflow "Release" daily digest for 2026-09-08: no run ended in the last 24h');
+    expect(h.notifications[1]!.message).toBe('Workflow "Release" daily digest for 2026-09-08: no run ended since the previous digest');
   });
 
   it("does not duplicate across a restart, and a computer that slept through days sends one digest on waking", async () => {
@@ -551,6 +582,53 @@ describe("daily digest", () => {
     expect(re.store.get(workflow.id)!.lastDigestAt).toBe(local(2026, 9, 10, 18, 0));
   });
 
+  it("records the slot only once the digest went out, so a transport hiccup retries on the next tick", async () => {
+    const h = harness();
+    const workflow = withDigest(h);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    h.failNotifications("phone off");
+    h.setNow(local(2026, 9, 7, 18, 0));
+    await h.engine.tick();
+    expect(kinds(h)).toEqual([]);
+    expect(h.store.get(workflow.id)!.lastDigestAt).toBeUndefined();
+    expect(errors).toHaveBeenCalled();
+    h.failNotifications(null);
+    h.setNow(local(2026, 9, 7, 18, 0) + 10_000);
+    await h.engine.tick();
+    expect(kinds(h)).toEqual(["digest"]);
+    expect(h.store.get(workflow.id)!.lastDigestAt).toBe(local(2026, 9, 7, 18, 0));
+  });
+
+  describe("across the DST fall-back night (America/New_York)", () => {
+    const tz = process.env.TZ;
+    afterEach(() => {
+      if (tz === undefined) delete process.env.TZ;
+      else process.env.TZ = tz;
+    });
+
+    it("sends October 31 once and November 1 once, 25 hours later", async () => {
+      process.env.TZ = "America/New_York";
+      const h = harness();
+      h.setNow(local(2026, 10, 30, 9, 0));
+      const workflow = withDigest(h);
+      h.setNow(local(2026, 10, 31, 18, 0));
+      await h.engine.tick();
+      expect(kinds(h)).toEqual(["digest"]);
+      // Just after midnight on the 1st — the clock has not fallen back yet
+      // (that is at 02:00) but "today's slot minus 24 hours" already lies.
+      for (const at of [local(2026, 11, 1, 0, 5), local(2026, 11, 1, 3, 0), local(2026, 11, 1, 17, 59)]) {
+        h.setNow(at);
+        await h.engine.tick();
+      }
+      expect(kinds(h)).toEqual(["digest"]);
+      h.setNow(local(2026, 11, 1, 18, 0));
+      await h.engine.tick();
+      expect(kinds(h)).toEqual(["digest", "digest"]);
+      expect(h.notifications[1]!.message).toContain("daily digest for 2026-11-01");
+      expect(h.store.get(workflow.id)!.lastDigestAt! - local(2026, 10, 31, 18, 0)).toBe(25 * HOUR);
+    });
+  });
+
   it("a workflow with no runs at all is still reported, and one without digestAt never is", async () => {
     const h = harness();
     withDigest(h);
@@ -558,7 +636,7 @@ describe("daily digest", () => {
     h.setNow(local(2026, 9, 7, 18, 0));
     await h.engine.tick();
     expect(h.notifications).toEqual([
-      { runId: expect.stringMatching(/^digest-/), kind: "digest", message: 'Workflow "Release" daily digest for 2026-09-07: no run ended in the last 24h' },
+      { runId: expect.stringMatching(/^digest-/), kind: "digest", message: 'Workflow "Release" daily digest for 2026-09-07: no run ended since the previous digest' },
     ]);
   });
 });

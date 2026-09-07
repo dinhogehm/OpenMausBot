@@ -5634,6 +5634,16 @@ describe("harness HTTP API", () => {
       });
       // "health" is never treated as a workflow id by the other verbs.
       expect((await fetch(`${BASE}/api/workflows/health`, { method: "DELETE" })).status).toBe(404);
+      // A remote caller with no session (a forwarded request is never the
+      // loopback owner) is refused like every other workflow route — while
+      // the public reachability probe still answers, and names nothing.
+      const remote = { headers: { "x-forwarded-for": "203.0.113.9" } };
+      const refused = await fetch(`${BASE}/api/workflows/health`, remote);
+      expect([401, 403]).toContain(refused.status); // the gate's own answer, whatever it is for this origin
+      expect(await refused.json()).toEqual({ error: expect.any(String) });
+      const probe = await fetch(`${BASE}/api/health`, remote);
+      expect(probe.status).toBe(200);
+      expect(await probe.json()).toEqual({ app: "openmausbot" });
     } finally {
       expect((await fetch(`${BASE}/api/workflows/${id}`, { method: "DELETE" })).status).toBe(204);
     }

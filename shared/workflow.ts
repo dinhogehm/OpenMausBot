@@ -53,6 +53,11 @@ export const WORKFLOW_STUCK_AFTER_MAX = 1_440;
  * counts the run as stuck: the expiry sweep should have settled it long
  * before, so a gate still open here is one the engine could not close. */
 export const WORKFLOW_STUCK_APPROVAL_FACTOR = 1.5;
+/** How many times one stay is announced at most (the first, then one per
+ * period): a run nobody acts on for a day of announcements is not going
+ * to be acted on because of a thirteenth, and the health endpoint still
+ * lists it. The last announcement says it is the last. */
+export const WORKFLOW_STUCK_ANNOUNCEMENTS_MAX = 12;
 /** A scheduled run more than this late (the computer was asleep or the app
  * closed past the slot) is recorded as missed, never executed late — the
  * same 12-hour catch-up window routines use. */
@@ -346,6 +351,9 @@ export interface WorkflowRun {
    * node (engine bookkeeping). Persisted so a restart neither repeats the
    * announcement nor forgets it; cleared the moment the run moves on. */
   stuckNotifiedAt?: number;
+  /** How many stuck announcements this stay has had (engine bookkeeping);
+   * capped at WORKFLOW_STUCK_ANNOUNCEMENTS_MAX, cleared with the marker. */
+  stuckAnnouncements?: number;
   input: string;
   nodeResults: WorkflowNodeResult[];
   error?: string;

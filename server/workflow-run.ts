@@ -29,6 +29,7 @@ import {
   WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN,
   WORKFLOW_OUTAGE_HORIZON_DEFAULT_H,
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
+  WORKFLOW_STUCK_ANNOUNCEMENTS_MAX,
   WORKFLOW_WAIT_OUTCOME,
   workflowRoutingFingerprint,
   type BotCapabilities,
@@ -64,6 +65,7 @@ import {
   buildDigest,
   describeStuck,
   digestSlotAt,
+  digestWindowStart,
   formatDuration,
   nodeSince,
   stuckAnnouncementDue,
@@ -364,8 +366,12 @@ export class WorkflowEngine {
   private sweepStuck(now: number): void {
     for (const { run, node, verdict } of this.stuckRuns(now)) {
       if (!stuckAnnouncementDue(run, verdict, now)) continue;
-      if (this.announce(run, "stuck", describeStuck(run, node, verdict, now))) {
-        this.store.patchRun(run.id, { stuckNotifiedAt: now });
+      const count = (run.stuckAnnouncements ?? 0) + 1;
+      // The cap is said out loud: a person who stops hearing about a run
+      // must know it is the engine being quiet, not the run being fixed.
+      const last = count >= WORKFLOW_STUCK_ANNOUNCEMENTS_MAX ? " — last stuck announcement for this stay; quiet until the run moves" : "";
+      if (this.announce(run, "stuck", describeStuck(run, node, verdict, now) + last)) {
+        this.store.patchRun(run.id, { stuckNotifiedAt: now, stuckAnnouncements: count });
       }
     }
   }
@@ -388,9 +394,11 @@ export class WorkflowEngine {
   /** The daily digest. `digestAt` names a local wall-clock time; the most
    * recent such instant at or before now is the slot, and the digest fires
    * once the slot is newer than the last one sent — `lastDigestAt` is
-   * persisted BEFORE anything is posted, the same double-fire guard the
-   * schedules use, so a restart or a crash mid-post costs at most one
-   * digest and never sends a day twice. A computer that slept through
+   * the slot, persisted once the person's channel took the digest, so a
+   * transport hiccup retries on the next tick and a restart after a sent
+   * digest never sends the day twice (a crash in the instant between the
+   * send and the write repeats one digest: the better failure). A computer
+   * that slept through
    * several slots sends one digest on waking, for the 24 hours up to the
    * slot it woke into. A digest configured for the first time is anchored
    * at the definition's own updatedAt (as a fresh daily schedule is): it
@@ -402,9 +410,8 @@ export class WorkflowEngine {
       if (workflow.digestAt === undefined) continue;
       const slot = digestSlotAt(workflow.digestAt, now);
       if (slot <= (workflow.lastDigestAt ?? workflow.updatedAt)) continue;
-      if (!this.store.setLastDigestAt(workflow.id, slot)) continue;
       const runs = this.store.listRuns(workflow.id);
-      const digest = buildDigest(runs, slot - 24 * 3_600_000, slot);
+      const digest = buildDigest(runs, digestWindowStart(workflow.digestAt, slot), slot);
       // The newest receipt gives the notification a bot to land on; a
       // workflow that never ran is told about on a receipt-less stub.
       const carrier: WorkflowRun = runs[0] ?? {
@@ -417,7 +424,10 @@ export class WorkflowEngine {
         startedAt: slot,
         endedAt: slot,
       };
-      this.announce(carrier, "digest", digest);
+      // The marker is written once the digest actually went out to the
+      // person (a throwing wrapper retries next tick); the slot comparison
+      // above is what keeps a day from being sent twice.
+      if (this.announce(carrier, "digest", digest)) this.store.setLastDigestAt(workflow.id, slot);
     }
   }
 
@@ -794,7 +804,14 @@ export class WorkflowEngine {
         this.failNode(run.id, "run has no current node recorded and its workflow is gone");
         continue;
       }
-      const patched = this.store.patchRun(run.id, { nextAttemptAt: undefined });
+      // Leaving an outage wait starts the watchdog's stay over: the hours
+      // the PROVIDER was away are not hours the run sat unexplained, and
+      // the outage had its own announcement. Without this, the first tick
+      // after a long outage would call a run that is moving again "stuck".
+      const patched = this.store.patchRun(run.id, {
+        nextAttemptAt: undefined,
+        ...(run.outage === undefined ? {} : { nodeEnteredAt: now, stuckNotifiedAt: undefined, stuckAnnouncements: undefined }),
+      });
       if (!patched) continue;
       this.dispatchNode(run.id, nodeId, parkedFor);
     }
@@ -1036,7 +1053,7 @@ export class WorkflowEngine {
       // marker start over, or a run resumed after a day away would be
       // announced as stuck on its first tick.
       nodeEnteredAt: this.now(),
-      stuckNotifiedAt: undefined,
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
       // It resumes against the graph as it is NOW.
       ...(workflow ? { routingFingerprint: workflowRoutingFingerprint(workflow) } : {}),
     });
@@ -1080,7 +1097,7 @@ export class WorkflowEngine {
       approvalRemindedAt: undefined,
       waitUntil: undefined,
       waitStartedAt: undefined,
-      stuckNotifiedAt: undefined,
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
     });
     if (!patched) return fresh;
     const where = patched.currentNodeId === undefined ? " before its first node" : ` at node "${patched.currentNodeId}"`;
@@ -1264,7 +1281,7 @@ export class WorkflowEngine {
       // The node is done: whatever the successor is (even this same node,
       // on a self-loop), the stay the watchdog measures starts now.
       nodeEnteredAt: this.now(),
-      stuckNotifiedAt: undefined,
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
     });
     if (!patched) return;
     this.follow(patched, workflow, node, result.outcome);
@@ -1303,7 +1320,7 @@ export class WorkflowEngine {
       // too — the summary of its last step is what the person would have
       // opened the app to read.
       const endedAt = this.now();
-      const patched = this.store.patchRun(run.id, { status: "completed", endedAt, stuckNotifiedAt: undefined });
+      const patched = this.store.patchRun(run.id, { status: "completed", endedAt, stuckNotifiedAt: undefined, stuckAnnouncements: undefined });
       if (!patched) return;
       const last = patched.nodeResults[patched.nodeResults.length - 1];
       const summary = last === undefined ? "" : ` — last step "${last.nodeId}": ${last.outcome} — ${last.summary}`;
@@ -1441,7 +1458,7 @@ export class WorkflowEngine {
    * freed, a fallback hand-off) keeps the stay running, because "three dead
    * attempts on one node" is one long stay to the person waiting on it. */
   private nodeEntry(run: WorkflowRun, nodeId: string): NodeEntry {
-    if (run.currentNodeId !== nodeId) return { nodeEnteredAt: this.now(), stuckNotifiedAt: undefined };
+    if (run.currentNodeId !== nodeId) return { nodeEnteredAt: this.now(), stuckNotifiedAt: undefined, stuckAnnouncements: undefined };
     // A receipt written before the stamp existed: fix the stay at what the
     // old fields say BEFORE this dispatch overwrites `dispatchedAt`, so an
     // upgrade under a run that has sat for a day does not read as "just
@@ -1873,7 +1890,7 @@ export class WorkflowEngine {
       approvalRemindedAt: undefined,
       waitUntil: undefined,
       waitStartedAt: undefined,
-      stuckNotifiedAt: undefined,
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
     });
     if (!patched) return;
     const where = patched.currentNodeId === undefined ? "" : ` at node "${patched.currentNodeId}"`;
@@ -1919,7 +1936,7 @@ export class WorkflowEngine {
       routingFingerprint: workflowRoutingFingerprint(workflow),
       // Time spent queued behind another run is not time stuck on a node.
       nodeEnteredAt: this.now(),
-      stuckNotifiedAt: undefined,
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
     });
     if (!promoted) return;
     // A freshly queued run starts at the entry; a resumed one re-queued
