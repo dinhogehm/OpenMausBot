@@ -342,6 +342,36 @@ export function effectiveAlwaysAllow(
   return [...new Set([...fromBot, ...fromNode])];
 }
 
+/** Of a workflow node's grants (bot's and node's), the keys autoVerdict
+ * would actually honour on that node's turn — what the node prompt may
+ * promise the bot. Same exclusions as the unattended branch of the verdict,
+ * by key alone (the guards judge the command text and cannot be listed):
+ * nothing on the live desktop, no command-tool key without a program (or
+ * with a shell for one), and a blind file-edit key only when the NODE
+ * declared it. A prompt that listed anything else would send the bot
+ * straight into a denial it was told could not happen. */
+export function unattendedHonoredGrants(
+  botKeys: readonly string[] | null | undefined,
+  nodeKeys: readonly string[] | null | undefined,
+): string[] {
+  const fromNode = new Set(nodeKeys ?? []);
+  const honored: string[] = [];
+  for (const key of new Set([...(botKeys ?? []), ...(nodeKeys ?? [])])) {
+    if (key.startsWith("local-computer:")) continue;
+    const at = key.indexOf(":");
+    const tool = at < 0 ? key : key.slice(0, at);
+    const program = at < 0 ? "" : key.slice(at + 1);
+    const bare = bareTool(tool);
+    if (COMMAND_TOOLS.has(bare)) {
+      if (!program || SHELLS.has(program)) continue;
+    } else if (BLIND_EDIT_TOOLS.has(bare) && !fromNode.has(key)) {
+      continue;
+    }
+    honored.push(key);
+  }
+  return honored;
+}
+
 /** The one line a fail-fast denial carries — on the card, in the decision
  * log, and in the run receipt — naming the tool, what it asked, and the
  * exact key an "always allow" on the bot or the node would have needed.

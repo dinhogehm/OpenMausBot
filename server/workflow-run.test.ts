@@ -1007,12 +1007,15 @@ describe("WorkflowEngine unattended denials", () => {
 
   it("tells the bot which keys the turn may use — the bot's and the node's, once each — or that there are none", () => {
     const h = harness();
-    h.setBotGrants((botId) => (botId === "planner" ? ["shell:git", "shell:gh"] : null));
-    const workflow = h.store.create(triage(["shell:gh", "session_search"]));
+    // bare `Bash` would be refused unattended, so the prompt never promises
+    // it; `edit` is kept only because the node declares it too (bot order)
+    h.setBotGrants((botId) => (botId === "planner" ? ["edit", "Bash", "shell:git", "shell:gh"] : null));
+    const workflow = h.store.create(triage(["shell:gh", "session_search", "edit"]));
     h.engine.startRun(workflow.id, "go", "manual");
     expect(h.dispatches[0]!.prompt).toContain(
-      "Tools pre-approved for this node, by approval key: shell:git, shell:gh, session_search.",
+      "Tools pre-approved for this node, by approval key: edit, shell:git, shell:gh, session_search.",
     );
+    expect(h.dispatches[0]!.prompt).not.toMatch(/approval key:[^.]*\bBash\b/);
     expect(h.dispatches[0]!.prompt).toContain("denied at once with no explanation from the provider");
     // the second node's bot grants nothing and the node declares nothing
     h.completeTurn("thread-1", envelope("done"));

@@ -279,7 +279,7 @@ import * as vps from "./vps-computer.ts";
 import { nextOccurrence, RoutineManager, type RoutineRun, type RoutineRunOn, type RoutineRunTrigger } from "./routines.ts";
 import { handleWorkflowRequest, workflowNotificationBotId } from "./workflow-api.ts";
 import { WorkflowEngine } from "./workflow-run.ts";
-import { turnProvenanceFor, type TurnProvenance } from "./turn-provenance.ts";
+import { turnProvenanceFor, unattendedByEither, type TurnProvenance } from "./turn-provenance.ts";
 import { denyUnattendedWorkflowCard } from "./workflow-unattended-card.ts";
 import { WorkflowStore } from "./workflow-store.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
@@ -2522,8 +2522,7 @@ const turnProvenanceByThread = new Map<string, TurnProvenance>();
  * mark. Never narrower than the bot mark alone, so nothing that asked a
  * human before asks a bot now. */
 function isUnattendedTurn(botId: string | null | undefined, threadId: string | undefined): boolean {
-  const byThread = threadId === undefined ? undefined : turnProvenanceByThread.get(threadId);
-  return byThread?.unattended === true || isUnattended(botId);
+  return unattendedByEither(threadId === undefined ? undefined : turnProvenanceByThread.get(threadId), isUnattended(botId));
 }
 
 /** How long a card raised on a workflow node's thread stays open for a

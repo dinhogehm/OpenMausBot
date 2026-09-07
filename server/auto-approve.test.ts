@@ -20,6 +20,7 @@ import {
   looksSensitive,
   rememberableApprovalKey,
   unattendedDenial,
+  unattendedHonoredGrants,
   type AutoVerdictSource,
 } from "./auto-approve.ts";
 
@@ -440,6 +441,56 @@ describe("effectiveAlwaysAllow — a workflow node's grants join the bot's", () 
       approve: null,
       source: "unattended-block",
     });
+  });
+});
+
+describe("unattendedHonoredGrants — what a node prompt may promise", () => {
+  /** A request that would match `key` exactly, on a workflow turn. */
+  const verdictFor = (bot: { alwaysAllow: string[] }, key: string, nodeKeys: string[]) => {
+    const scoped = key.replace(/^local-computer:/, "");
+    const at = scoped.indexOf(":");
+    const tool = at < 0 ? scoped : scoped.slice(0, at);
+    const summary = at < 0 ? "" : `${scoped.slice(at + 1)} --version`;
+    return autoVerdict(bot, tool, summary, {
+      unattended: true,
+      workflowGrants: nodeKeys,
+      ...(key.startsWith("local-computer:") ? { scope: "local-computer" as const } : {}),
+    });
+  };
+
+  it("drops the keys the verdict would refuse unattended, and keeps the rest in order", () => {
+    expect(unattendedHonoredGrants(["edit", "Bash", "session_search", "Bash:gh"], undefined)).toEqual([
+      "session_search",
+      "Bash:gh",
+    ]);
+    // a shell named as the program is no program; the desktop is never listed
+    expect(unattendedHonoredGrants(["shell:zsh", "local-computer:mcp__computer__click", "shell:gh"], [])).toEqual([
+      "shell:gh",
+    ]);
+    // a blind edit key is honoured only when the node declared it
+    expect(unattendedHonoredGrants(["edit"], ["edit"])).toEqual(["edit"]);
+    expect(unattendedHonoredGrants(["fileChange"], ["shell:gh"])).toEqual(["shell:gh"]);
+    // union, bot first, once each
+    expect(unattendedHonoredGrants(["Bash:git", "Bash:gh"], ["Bash:gh", "list_bots"])).toEqual([
+      "Bash:git",
+      "Bash:gh",
+      "list_bots",
+    ]);
+    expect(unattendedHonoredGrants(undefined, undefined)).toEqual([]);
+  });
+
+  it("promises nothing the verdict refuses, and refuses nothing it promises", () => {
+    const botKeys = ["edit", "Bash", "shell:zsh", "session_search", "Bash:gh", "local-computer:mcp__computer__click"];
+    const nodeKeys = ["fileChange", "mcp__agents__list_bots"];
+    const bot = { alwaysAllow: [...new Set([...botKeys, ...nodeKeys])] };
+    const honored = unattendedHonoredGrants(botKeys, nodeKeys);
+    expect(honored).toEqual(["session_search", "Bash:gh", "fileChange", "mcp__agents__list_bots"]);
+    for (const key of honored) {
+      expect(verdictFor(bot, key, nodeKeys), key).toMatchObject({ source: "always-allow", rule: key });
+    }
+    for (const key of [...botKeys, ...nodeKeys].filter((candidate) => !honored.includes(candidate))) {
+      expect(verdictFor(bot, key, nodeKeys).approve, key).toBeNull();
+    }
   });
 });
 

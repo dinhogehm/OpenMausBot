@@ -37,6 +37,7 @@ import {
   type WorkflowRunTrigger,
   type WorkflowSchedule,
 } from "../shared/workflow.ts";
+import { unattendedHonoredGrants } from "./auto-approve.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 import { redactSecretsInText } from "./redact.ts";
 import type { WorkflowStore } from "./workflow-store.ts";
@@ -168,10 +169,11 @@ export function _buildNodePrompt(workflow: Workflow, node: AgentNode, run: Workf
   return lines.join("\n");
 }
 
-/** What the node's turn may use without a card: the bot's own keys and the
- * node's, bot first, once each — the same union the harness judges by. */
+/** What the node's turn may use without a card: the bot's keys and the
+ * node's, bot first, once each, minus everything the verdict would refuse
+ * unattended anyway — the prompt promises only what will be honoured. */
 function effectiveGrants(botGrants: string[] | null | undefined, node: AgentNode): string[] {
-  return [...new Set([...(botGrants ?? []), ...(node.alwaysAllow ?? [])])];
+  return unattendedHonoredGrants(botGrants, node.alwaysAllow);
 }
 
 function buildRepromptMessage(node: AgentNode): string {
