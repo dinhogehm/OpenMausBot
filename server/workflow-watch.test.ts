@@ -105,6 +105,10 @@ describe("stuckThresholdMs", () => {
     // An older receipt (no waitUntil) parked on a backoff is judged too:
     // the safe side is to speak.
     expect(stuckThresholdMs(workflow(), run({ outage: consumed, nextAttemptAt: 99 }), agent)).toBe(120 * MIN);
+    // A run in pre-flight (checks running, or parked for a busy bot's
+    // re-check) answers to the checks' own clock.
+    expect(stuckThresholdMs(workflow(), run({ preflightStartedAt: 5 }), agent)).toBeNull();
+    expect(stuckThresholdMs(workflow(), run({ preflightStartedAt: 5, nextAttemptAt: 99 }), agent)).toBeNull();
     expect(stuckThresholdMs(workflow(), run({ status: "queued" }), agent)).toBeNull();
     expect(stuckThresholdMs(workflow(), run({ status: "completed" }), agent)).toBeNull();
   });
@@ -320,6 +324,7 @@ describe("workflowEngineHealth", () => {
             lastNotifiedAt: 3_000,
           },
         ],
+        preflight: [],
       },
       lastFailure: { runId: "new-fail", workflowId: "wf-1", workflowName: "Release", nodeId: "ship", at: 4_000, error: "newer" },
       workflows: [
@@ -353,11 +358,32 @@ describe("workflowEngineHealth", () => {
     });
   });
 
+  it("lists a run in pre-flight under its own column, never as stuck", () => {
+    const wf = workflow({ id: "wf-1", name: "Release" });
+    const checking = run({ id: "chk", workflowId: "wf-1", currentNodeId: "entry", preflightStartedAt: 7_000 });
+    const parked = run({ id: "prk", workflowId: "wf-1", currentNodeId: "entry", preflightStartedAt: 6_000, nextAttemptAt: 10_030 });
+    const health = workflowEngineHealth({
+      version: "x",
+      now: 10_000,
+      startedAt: 5,
+      lastTickAt: null,
+      workflows: [wf],
+      runs: [checking, parked],
+      stuck: [],
+    });
+    expect(health.ok).toBe(true);
+    expect(health.runs.preflight).toEqual([
+      { runId: "chk", workflowId: "wf-1", workflowName: "Release", nodeId: "entry", since: 7_000, inPreflightForMs: 3_000, waitingForBot: false },
+      { runId: "prk", workflowId: "wf-1", workflowName: "Release", nodeId: "entry", since: 6_000, inPreflightForMs: 4_000, waitingForBot: true },
+    ]);
+  });
+
   it("is ok with nothing stuck and an empty store", () => {
     const health = workflowEngineHealth({ version: "x", now: 5, startedAt: 5, lastTickAt: null, workflows: [], runs: [], stuck: [] });
     expect(health.ok).toBe(true);
     expect(health.engine).toEqual({ startedAt: 5, uptimeMs: 0, lastTickAt: null });
     expect(health.lastFailure).toBeNull();
     expect(health.workflows).toEqual([]);
+    expect(health.runs.preflight).toEqual([]);
   });
 });

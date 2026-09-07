@@ -1081,7 +1081,7 @@ describe("workflow monitoring — audit room, watchdog patience, digest and heal
       ok: true,
       version: "unknown",
       engine: { lastTickAt: null },
-      runs: { live: 1, running: 1, queued: 0, waitingApproval: 0, stuck: [] },
+      runs: { live: 1, running: 1, queued: 0, waitingApproval: 0, stuck: [], preflight: [] },
       lastFailure: null,
     });
     expect(body.workflows).toEqual([

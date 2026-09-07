@@ -53,7 +53,9 @@ export function inOutageBackoff(run: WorkflowRun): boolean {
 /** How long a run may sit on `node` before the watchdog speaks, or null
  * when the node is exempt. A wait node's whole purpose is to sit, and its
  * timer is the tick's business; a run in a provider outage's backoff has a
- * horizon and two announcements of its own; a human gate is judged
+ * horizon and two announcements of its own; a run whose pre-flight is
+ * still running (or re-checking a busy bot) answers to the checks' own
+ * clock; a human gate is judged
  * against its own expiry — the expiry sweep settles it at the deadline, so
  * a gate still open well past it is one the engine could not close. A gate
  * that asks AGAIN on expiry (`renotify`) is deliberately held open for
@@ -69,6 +71,11 @@ export function stuckThresholdMs(workflow: Workflow, run: WorkflowRun, node: Wor
   if (run.status !== "running") return null;
   if (node?.kind === "wait" || run.waitUntil !== undefined) return null;
   if (inOutageBackoff(run)) return null;
+  // A run in pre-flight is waiting on its checks, not on a node: the checks
+  // have a deadline of their own, a bounded wait for a busy bot, and a
+  // terminal verdict that names the check — the health document lists the
+  // run under `preflight`, never as stuck.
+  if (run.preflightStartedAt !== undefined) return null;
   return (workflow.stuckAfterMinutes ?? WORKFLOW_STUCK_AFTER_DEFAULT_MIN) * 60_000;
 }
 
@@ -258,6 +265,11 @@ export interface WorkflowEngineHealth {
     running: number;
     waitingApproval: number;
     stuck: WorkflowStuckRunHealth[];
+    /** Runs whose pre-flight checks are running or re-checking a busy bot:
+     * live, exempt from the watchdog, and worth a monitor's own column —
+     * a pipeline that never gets past its checks is not stuck, it is being
+     * refused, and the receipts say by which check. */
+    preflight: WorkflowPreflightRunHealth[];
   };
   /** The most recent failed run across every workflow, or null. */
   lastFailure: WorkflowFailureHealth | null;
@@ -274,6 +286,21 @@ export interface WorkflowStuckRunHealth {
   stuckForMs: number;
   attempt: number;
   lastNotifiedAt: number | null;
+}
+
+export interface WorkflowPreflightRunHealth {
+  runId: string;
+  workflowId: string;
+  workflowName: string;
+  /** The node the checks guard. */
+  nodeId: string | null;
+  /** When the FIRST check started — the clock a busy-bot wait is budgeted
+   * against. */
+  since: number;
+  inPreflightForMs: number;
+  /** True once a verdict came back transient (busy bots) and the run is
+   * parked for a re-check; false while the checks themselves are running. */
+  waitingForBot: boolean;
 }
 
 export interface WorkflowFailureHealth {
@@ -373,6 +400,17 @@ export function workflowEngineHealth(input: {
         attempt: run.attempt,
         lastNotifiedAt: run.stuckNotifiedAt ?? null,
       })),
+      preflight: runs
+        .filter((run) => run.status === "running" && run.preflightStartedAt !== undefined)
+        .map((run) => ({
+          runId: run.id,
+          workflowId: run.workflowId,
+          workflowName: nameOf(run.workflowId),
+          nodeId: run.currentNodeId ?? null,
+          since: run.preflightStartedAt!,
+          inPreflightForMs: Math.max(0, now - run.preflightStartedAt!),
+          waitingForBot: run.nextAttemptAt !== undefined,
+        })),
     },
     lastFailure,
     workflows: rows,

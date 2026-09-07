@@ -4499,6 +4499,55 @@ describe("WorkflowEngine pre-flight", () => {
       expect(h.store.getRun(second.id)?.preflight?.checks[0]?.transient).toBeUndefined();
     });
 
+    it("the watchdog leaves a run in pre-flight alone, and the stay it measures starts at the dispatch the checks cleared", async () => {
+      const h = harness();
+      let busy = true;
+      busyThen(h, () => busy);
+      // Patience shorter than the pre-flight's wait: without the exemption
+      // the second re-check would already be "stuck".
+      const workflow = h.store.create(checked([{ kind: "bots-ready", name: "bots", waitMinutes: 60 }], { stuckAfterMinutes: 10 }));
+      h.setNow(10_000);
+      const run = h.engine.startRun(workflow.id, "go", "manual");
+      await flush();
+      expect(h.store.getRun(run.id)).toMatchObject({ preflightStartedAt: 10_000, nodeEnteredAt: 10_000, nextAttemptAt: 40_000 });
+
+      // Twenty minutes of re-checks against a busy bot: not one stuck line,
+      // and the health document lists the run under pre-flight instead.
+      for (let at = 40_000; at <= 10_000 + 20 * 60_000; at += 30_000) {
+        h.setNow(at);
+        await h.engine.tick();
+        await flush();
+      }
+      expect(h.notifications.filter((n) => n.kind === "stuck")).toEqual([]);
+      const health = h.engine.health();
+      expect(health.ok).toBe(true);
+      expect(health.runs.stuck).toEqual([]);
+      expect(health.runs.preflight).toEqual([
+        expect.objectContaining({ runId: run.id, nodeId: "plan", since: 10_000, waitingForBot: true }),
+      ]);
+
+      // The bot frees: the checks pass and the node dispatches — with the
+      // watchdog's clock at the dispatch, not at the first check.
+      busy = false;
+      const freedAt = 10_000 + 21 * 60_000;
+      h.setNow(freedAt);
+      await h.engine.tick();
+      await flush();
+      const dispatched = h.store.getRun(run.id)!;
+      expect(dispatched).toMatchObject({ status: "running", currentNodeId: "plan", nodeEnteredAt: freedAt });
+      expect(dispatched.preflightStartedAt).toBeUndefined();
+      expect(h.dispatches).toHaveLength(1);
+      expect(h.engine.health().runs.preflight).toEqual([]);
+
+      // And from there the patience is the ordinary one: ten minutes on a
+      // live turn is a stuck line, measured from the dispatch.
+      h.setNow(freedAt + 11 * 60_000);
+      await h.engine.tick();
+      const stuck = h.notifications.filter((n) => n.kind === "stuck");
+      expect(stuck).toHaveLength(1);
+      expect(stuck[0]!.message).toContain('stuck at node "plan" for 11m');
+    });
+
     it("a busy bot beside a real failure does not wait: the real failure refuses the run now", async () => {
       const h = harness();
       busyThen(h, () => true);

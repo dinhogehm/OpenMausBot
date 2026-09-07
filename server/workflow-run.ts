@@ -1135,6 +1135,10 @@ export class WorkflowEngine {
       return;
     }
     const parked = this.store.patchRun(runId, {
+      // The watchdog's clock is stamped here as a dispatch would stamp it,
+      // so the health document can say since when the run has been in
+      // pre-flight; the watchdog itself leaves a run in pre-flight alone.
+      ...this.nodeEntry(run, nodeId),
       currentNodeId: nodeId,
       // The FIRST start survives the re-checks a busy bot earns: it is the
       // clock the wait is budgeted against.
@@ -1186,7 +1190,18 @@ export class WorkflowEngine {
     const run = this.store.getRun(runId);
     if (!run || run.status !== "running" || run.preflightStartedAt === undefined) return;
     if (result.ok) {
-      const passed = this.store.patchRun(runId, { preflight: result, preflightStartedAt: undefined });
+      // The stay the watchdog measures starts NOW, not when the checks
+      // began: the minutes spent waiting for a busy bot in pre-flight had
+      // their own clock and their own refusal, and a node that dispatches
+      // the instant its checks pass must not be called stuck ten minutes
+      // sooner than a node with no checks at all.
+      const passed = this.store.patchRun(runId, {
+        preflight: result,
+        preflightStartedAt: undefined,
+        nodeEnteredAt: this.now(),
+        stuckNotifiedAt: undefined,
+        stuckAnnouncements: undefined,
+      });
       if (!passed) return;
       // The guarded node may already have its result on the receipt (a
       // resume of a run that failed AFTER the node finished — an edge gone
