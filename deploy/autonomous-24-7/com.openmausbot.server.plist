@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent do servidor OpenMausBot headless. TEMPLATE: install-headless.sh
+  substitui os __PLACEHOLDERS__ por caminhos absolutos (launchd não expande
+  ~ nem $VARS) e instala em ~/Library/LaunchAgents/com.openmausbot.server.plist.
+
+  Processo: caffeinate (flags s, i) executa node cli.js serve com as flags
+  no_pair, port P e data_dir D (ver ProgramArguments abaixo; hífens duplos
+  não podem aparecer num comentário XML).
+    * caffeinate -s: sem sleep do sistema (só vale ligado à corrente); -i: sem
+      idle sleep. Segura a asserção enquanto o filho viver.
+    * `openmausbot serve` (server/cli.ts:242-566) sobe o servidor (serverEntry
+      :411-422, node dist-server/index.js) com OMB_DATA_DIR/OMB_PORT e espera
+      /api/health; no_pair evita imprimir um código de pareamento no log.
+    * O servidor toma o lease do data dir (server/index.ts:382,
+      electron/data-dir-lease.mjs): o app desktop NÃO pode usar o mesmo
+      ~/.openmausbot em simultâneo; ver README §4 (migração do desktop).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.openmausbot.server</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-s</string>
+    <string>-i</string>
+    <string>__NODE__</string>
+    <string>__CLI__</string>
+    <string>serve</string>
+    <string>--no-pair</string>
+    <string>--port</string>
+    <string>__PORT__</string>
+    <string>--data-dir</string>
+    <string>__DATA_DIR__</string>
+    <string>--label</string>
+    <string>__LABEL__</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- gh, git, node, pnpm, codex, claude vivem no Homebrew; um agente do
+         launchd não herda o PATH do shell. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+    <key>OMB_PORT</key>
+    <string>__PORT__</string>
+    <key>OMB_DATA_DIR</key>
+    <string>__DATA_DIR__</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- não reiniciar em loop apertado se o servidor morrer ao arrancar -->
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <!-- tempo para o `serve` mandar SIGTERM ao filho e este fechar limpo -->
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <!-- "Standard" evita o throttling de CPU/IO dos jobs "Background" -->
+  <key>ProcessType</key>
+  <string>Standard</string>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/OpenMausBot/serve.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/OpenMausBot/serve.log</string>
+</dict>
+</plist>
