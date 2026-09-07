@@ -343,6 +343,22 @@ describe("resolveWorkflowApprovalCard", () => {
     expect(f.cards("chat-reviewer")[0]).toMatchObject({ answered: "unavailable", dismissed: true });
   });
 
+  it("a decision that landed is 200 and the card answered even when the successor failed synchronously in the same call", () => {
+    const f = fakeStore();
+    const reach = createWorkflowApprovalReach({ store: f.store, botFor: () => "reviewer", roomAuthor: ROOM_AUTHOR });
+    reach.announce(announcement());
+    const resolve = vi.fn(() => ({
+      ...run(),
+      status: "failed" as const,
+      error: 'could not post to group "grp-1": channel "grp-1" no longer exists',
+      nodeResults: [...run().nodeResults, { nodeId: "gate", outcome: "approved", summary: "approved by user", startedAt: 20, endedAt: 30 }],
+    }));
+    const requestId = workflowApprovalRequestId(run());
+    const result = resolveWorkflowApprovalCard({ store: f.store, resolve, run: () => run() }, { threadId: "chat-reviewer", requestId, behavior: "allow" });
+    expect(result).toEqual({ claimed: true, status: 200, body: { ok: true, outcome: "allowed-once", decision: "approved" } });
+    expect(f.cards("chat-reviewer")[0]).toMatchObject({ answered: "allow", dismissed: true });
+  });
+
   it("finds the gate's own result even when the run advanced through a notify step in the same call", () => {
     const f = fakeStore();
     const reach = createWorkflowApprovalReach({ store: f.store, botFor: () => "reviewer", roomAuthor: ROOM_AUTHOR });

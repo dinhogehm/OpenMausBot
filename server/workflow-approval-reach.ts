@@ -283,11 +283,14 @@ export function resolveWorkflowApprovalCard(
   // recorded. The receipt is the truth — the answer must say what it says,
   // never "approved" for a decision that never landed. The gate's result is
   // found by its opening instant, since the run may already have advanced
-  // through a notify node in the same call.
+  // through a notify node in the same call. Only the ABSENCE of that result
+  // is a refusal: a decision that landed and whose successor then failed
+  // synchronously (a notify room gone, a bot deleted) was still decided,
+  // and the card must say so — the run's failure is the timeline's story.
   const recorded = settled.nodeResults.some(
     (result) => result.nodeId === payload.nodeId && result.startedAt === current.approvalRequestedAt && result.outcome === decision,
   );
-  if (settled.status === "failed" || !recorded) {
+  if (!recorded) {
     deps.store.patchMessage(args.threadId, existing.id, { card: settledCard(card, "unavailable") });
     return {
       claimed: true,
