@@ -19,8 +19,13 @@ describe("approval modes", () => {
       expect(requiresNativeApproval(driver, "auto")).toBe(true);
     }
     for (const driver of [undefined, "customAgent", "pi"]) expect(supportsApprovalMode(driver, "full")).toBe(false);
-    expect(requiresNativeApproval("antigravityAgent", "full")).toBe(true);
+    expect(requiresNativeApproval("antigravityAgent", "full")).toBe(false);
+    expect(requiresNativeApproval("antigravityAgent", "ask")).toBe(false);
     expect(requiresNativeApproval("opencodeGo", "full")).toBe(false);
+    expect(requiresNativeApproval("codex", "full")).toBe(false);
+    for (const driver of ["claudeAgent", "cursorAgent", "grokAgent"]) {
+      expect(requiresNativeApproval(driver, "full")).toBe(true);
+    }
   });
   it("recognizes only the four durable values", () => {
     expect(APPROVAL_MODES).toEqual(["ask", "auto", "full", "custom"]);

@@ -45,10 +45,23 @@ export const APPROVAL_MODE_OPTIONS: ReadonlyArray<{
 export function approvalModeOptionsFor(driverKind: string, trustedModesAvailable = true) {
   return APPROVAL_MODE_OPTIONS
     .filter((option) => supportsApprovalMode(driverKind, option.mode)
+      // Antigravity has no native reviewer. Offer its explicit full-access
+      // grant as Auto instead of a second choice that actually behaves as Ask.
+      && (driverKind !== "antigravityAgent" || option.mode !== "auto")
       && (trustedModesAvailable || option.mode === "ask" || option.mode === "auto"))
-    .map((option) => option.mode === "auto" && !hasNativeAutoReview(driverKind)
-      ? { ...option, description: "This provider has no automatic review; behaves like Ask" }
-      : option);
+    .map((option) => {
+      if (driverKind === "antigravityAgent" && option.mode === "full") {
+        return {
+          ...option,
+          label: "Auto (full access)",
+          chip: "Auto",
+          description: "Automatically approve tool requests for this bot, including commands, edits, and computer actions. No automatic review.",
+        };
+      }
+      return option.mode === "auto" && !hasNativeAutoReview(driverKind)
+        ? { ...option, description: "This provider has no automatic review; behaves like Ask" }
+        : option;
+    });
 }
 
 export function approvalModeSelectionRequiresLocalDesktop(
@@ -86,8 +99,13 @@ export function ApprovalModeSelector({
 }) {
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const mode = approvalModeFor({ approvalMode, autoApprove });
-  const current = APPROVAL_MODE_OPTIONS.find((option) => option.mode === mode) ?? APPROVAL_MODE_OPTIONS[0];
+  const savedMode = approvalModeFor({ approvalMode, autoApprove });
+  // Old Antigravity Auto settings still ask. Do not display or silently grant
+  // the new Auto/full-access behavior until the user explicitly selects it.
+  const mode = driverKind === "antigravityAgent" && savedMode === "auto" ? "ask" : savedMode;
+  const current = approvalModeOptionsFor(driverKind).find((option) => option.mode === mode)
+    ?? APPROVAL_MODE_OPTIONS.find((option) => option.mode === mode)
+    ?? APPROVAL_MODE_OPTIONS[0];
   const visibleOptions = approvalModeOptionsFor(driverKind, trustedModesAvailable);
   const requiresLocalDesktop = approvalModeSelectionRequiresLocalDesktop(
     mode,
@@ -196,11 +214,13 @@ export function ApprovalModeSelector({
                 </button>
               );
             })}
-            {!trustedModesAvailable && (driverKind === "codex" || requiresLocalDesktop) && (
+            {!trustedModesAvailable && (driverKind === "codex" || driverKind === "antigravityAgent" || requiresLocalDesktop) && (
               <div className="border-t border-hairline/20 px-4 py-2.5 text-[11.5px] leading-snug text-ink-secondary">
                 {requiresLocalDesktop
                   ? "Custom approval must be changed in the local packaged desktop app."
-                  : "Full and Custom are available in the packaged desktop app."}
+                  : driverKind === "antigravityAgent"
+                    ? "Auto (full access) is available in the local packaged desktop app."
+                    : "Full and Custom are available in the packaged desktop app."}
               </div>
             )}
           </div>

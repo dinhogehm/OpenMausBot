@@ -80,6 +80,9 @@ export interface OptionCardData {
   tool?: string;
   /** why auto mode stopped to ask anyway */
   held?: string;
+  /** catalog key for `held` when it is a fixed note, so it reads in the
+   * viewer's language; absent for free-text errors and older cards */
+  heldCode?: string;
   /** the narrow grant "always allow" remembers, e.g. "Bash:git" */
   allowKey?: string;
   approvalScope?: "local-computer";
@@ -378,8 +381,20 @@ export interface ConfigStatus {
   language?: string;
   /** Opt-in flags. Absent means off. */
   features?: { skillRecorder: boolean; showToolCalls?: boolean; browser?: boolean };
+  /** Which browser this server can give bots: the desktop app's surface, the
+   * agent-browser engine, or nothing yet (with the reason). */
+  browserEngine?: BrowserEngineSummary;
   /** Named browser sessions any bot can be pointed at. */
   browserProfiles?: BrowserProfile[];
+}
+
+export interface BrowserEngineSummary {
+  kind: "engine" | "unavailable";
+  reason?: string;
+  installable?: boolean;
+  version?: string;
+  installing?: boolean;
+  installError?: string;
 }
 
 export interface BrowserProfile {
@@ -392,7 +407,7 @@ export interface BrowserProfile {
 
 export type ConfigStatusFrame = Pick<
   ConfigStatus,
-  "xai" | "composio" | "box" | "vps" | "rooms" | "localVm" | "opencodeGo" | "tts" | "imageGen" | "profile" | "language" | "features" | "browserProfiles"
+  "xai" | "composio" | "box" | "vps" | "rooms" | "localVm" | "opencodeGo" | "tts" | "imageGen" | "profile" | "language" | "features" | "browserEngine" | "browserProfiles"
 >;
 
 export function configStatusFromFrame(frame: ConfigStatusFrame): ConfigStatus {
@@ -409,6 +424,7 @@ export function configStatusFromFrame(frame: ConfigStatusFrame): ConfigStatus {
     profile: frame.profile,
     language: frame.language,
     features: frame.features,
+    browserEngine: frame.browserEngine,
     browserProfiles: frame.browserProfiles,
   };
 }

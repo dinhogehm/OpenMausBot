@@ -46,14 +46,20 @@ app.whenReady().then(async () => {
   const harness = join(home, process.platform === "win32" ? "localharness_external.exe" : "localharness_external");
   writeFileSync(harness, "fake harness");
   if (process.platform !== "win32") { chmodSync(agy, 0o755); chmodSync(harness, 0o755); }
-  const auth = join(home, "providers/antigravity", createHash("sha256").update("agy").digest("hex"), "antigravity-acp");
-  mkdirSync(auth, { recursive: true });
-  writeFileSync(join(auth, "acp_token.json"), "{}");
+  for (const instanceId of ["agy", "agy-question"]) {
+    const auth = join(home, "providers/antigravity", createHash("sha256").update(instanceId).digest("hex"), "antigravity-acp");
+    mkdirSync(auth, { recursive: true });
+    writeFileSync(join(auth, "acp_token.json"), "{}");
+  }
+  const agyDump = join(home, "agy.json");
+  const agyRpc = join(home, "agy-rpc.json");
   writeFileSync(join(home, "config.json"), JSON.stringify({ instances: {
     claude: { driver: "claudeAgent", config: { cli: join(root, "server/testing/fake-claude-cli.ts") } },
-    agy: { driver: "antigravityAgent", config: { cli: agy } },
+    agy: { driver: "antigravityAgent", config: { cli: agy }, environment: { FAKE_ACP_DUMP: agyDump, FAKE_ACP_RPC_DUMP: agyRpc } },
+    "agy-question": { driver: "antigravityAgent", config: { cli: agy }, environment: { FAKE_ACP_MODE: "question" } },
   } }));
   const dump = join(home, "claude-argv.json");
+  const testCapabilityKey = randomUUID();
   const coordinator = createTrustedApprovalModeCoordinator({ randomId: randomUUID });
   child = utilityProcess.fork(join(root, "server/index.ts"), [], {
     cwd: root,
@@ -62,9 +68,10 @@ app.whenReady().then(async () => {
       HOME: home, USERPROFILE: home, OMB_DATA_DIR: home, PATH: "",
       ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
       OMB_PORT: String(port), OMB_WEBHOOK_PORT: String(webhookPort),
+      OMB_TEST_INTERNAL_CAPABILITY_KEY: testCapabilityKey,
       FAKE_CLAUDE_MODE: "happy", FAKE_CLAUDE_DUMP: dump,
       FAKE_ACP_MODE: "permission", FAKE_ACP_AUTH_METHOD: "oauth-personal",
-      FAKE_ACP_MODELS: "gemini-3.8-flash-high", FAKE_ACP_MODES: "default,yolo",
+      FAKE_ACP_MODELS: "gemini-3.8-flash-high,gemini-3.8-flash-low", FAKE_ACP_MODES: "default,yolo",
     },
     stdio: "pipe",
   });
@@ -72,9 +79,9 @@ app.whenReady().then(async () => {
   child.stderr.on("data", (chunk) => { logs += chunk; });
   child.on("message", (message) => coordinator.receive(child, message));
   child.on("exit", () => coordinator.rejectProcess(child));
-  const api = async (path, method = "GET", body) => {
+  const api = async (path, method = "GET", body, headers = {}) => {
     const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-      method, headers: { "content-type": "application/json" },
+      method, headers: { "content-type": "application/json", ...headers },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
     return { status: response.status, body: await response.json() };
@@ -95,20 +102,68 @@ app.whenReady().then(async () => {
     console.log(JSON.stringify({ mode, native, privateGrant: true, turnSettled: true }));
   }
   await assert.rejects(coordinator.request(child, id, "custom"), /only for Codex/);
-  const agyBot = (await api("/api/bots", "POST", { modelSelection: { instanceId: "agy", model: "gemini-3.8-flash-high" } })).body.bot;
-  for (const mode of ["full", "auto", "ask"]) {
-    await coordinator.request(child, agyBot.id, mode);
-    await until(async () => (await api("/api/bots?messages=0")).body.bots.find((bot) => bot.id === agyBot.id)?.approvalMode === mode);
-    assert.equal((await api(`/api/bots/${agyBot.id}/messages`, "POST", { text: `Verify native ${mode} approval` })).status, 202);
-    const card = await until(async () => {
-      const bot = (await api("/api/bots")).body.bots.find((bot) => bot.id === agyBot.id);
-      return bot.messages.find((message) => message.card?.requestId && !message.card.answered && !message.card.dismissed)?.card;
-    });
-    if (mode !== "ask") assert.equal(card.held, "The provider requires your approval for this action.");
-    assert.equal((await api(`/api/bots/${agyBot.id}/respond`, "POST", { requestId: card.requestId, behavior: "allow" })).status, 200);
-    await until(async () => !(await api("/api/bots?messages=0")).body.bots.find((bot) => bot.id === agyBot.id)?.busy);
-    console.log(JSON.stringify({ provider: "antigravity", mode, nativeApprovalShown: true, humanApproved: true }));
+  const pendingCard = (bot) => bot.messages.find((message) => message.card?.requestId && !message.card.answered && !message.card.dismissed)?.card;
+  for (const model of ["gemini-3.8-flash-high", "gemini-3.8-flash-low"]) {
+    const agyBot = (await api("/api/bots", "POST", { modelSelection: { instanceId: "agy", model } })).body.bot;
+    assert.equal((await api(`/api/bots/${agyBot.id}`, "PATCH", { approvalMode: "full", acknowledgeFullAccess: true })).status, 403);
+    for (const [turn, mode] of ["full", "full", "ask", "auto"].entries()) {
+      await coordinator.request(child, agyBot.id, mode);
+      await until(async () => (await api("/api/bots?messages=0")).body.bots.find((bot) => bot.id === agyBot.id)?.approvalMode === mode);
+      const before = (await api("/api/bots")).body.bots.find((bot) => bot.id === agyBot.id).messages.length;
+      assert.equal((await api(`/api/bots/${agyBot.id}/messages`, "POST", { text: `Verify ${model} ${mode} turn ${turn}` })).status, 202);
+      if (mode === "full") {
+        const settled = await until(async () => {
+          const bot = (await api("/api/bots")).body.bots.find((bot) => bot.id === agyBot.id);
+          assert.equal(pendingCard(bot), undefined, "Full must answer residual tool permissions without a manual card");
+          return !bot.busy && bot;
+        });
+        assert.ok(settled.messages.slice(before).some((message) => message.tool?.name.includes("(full access)")));
+        await until(async () => (await api("/api/decisions")).body.decisions.filter((row) => row.botId === agyBot.id && row.source === "full-access" && row.decision === "auto-approved").length === turn + 1);
+      } else {
+        const card = await until(async () => pendingCard((await api("/api/bots")).body.bots.find((bot) => bot.id === agyBot.id)));
+        if (mode === "auto") assert.equal(card.held, "The provider requires your approval for this action.");
+        assert.equal((await api(`/api/bots/${agyBot.id}/respond`, "POST", { requestId: card.requestId, behavior: "allow" })).status, 200);
+        await until(async () => !(await api("/api/bots?messages=0")).body.bots.find((bot) => bot.id === agyBot.id)?.busy);
+      }
+      const native = mode === "full" ? "yolo" : "default";
+      const calls = JSON.parse(readFileSync(`${agyDump}.config.json`, "utf8"));
+      assert.equal(calls.find((call) => call.params.configId === "mode")?.params.value, native);
+      // The first advertised model is already selected by session/new/load.
+      assert.equal(calls.find((call) => call.params.configId === "model")?.params.value ?? "gemini-3.8-flash-high", model);
+      const rpc = JSON.parse(readFileSync(agyRpc, "utf8"));
+      assert.ok(rpc.includes(turn === 0 ? "session/new" : "session/resume"));
+      console.log(JSON.stringify({ provider: "antigravity", model, mode, native, resumed: turn > 0, autoApproved: mode === "full", humanApproved: mode !== "full" }));
+    }
   }
+  const questionBot = (await api("/api/bots", "POST", { modelSelection: { instanceId: "agy-question", model: "gemini-3.8-flash-high" } })).body.bot;
+  await coordinator.request(child, questionBot.id, "full");
+  assert.equal((await api(`/api/bots/${questionBot.id}/messages`, "POST", { text: "Ask me a question under Full" })).status, 202);
+  const question = await until(async () => pendingCard((await api("/api/bots")).body.bots.find((bot) => bot.id === questionBot.id)));
+  assert.deepEqual(question.options, ["Blue", "Green"]);
+  assert.equal((await api(`/api/bots/${questionBot.id}/respond`, "POST", { requestId: question.requestId, behavior: "answer", message: "Green" })).status, 200);
+  await until(async () => !(await api("/api/bots?messages=0")).body.bots.find((bot) => bot.id === questionBot.id)?.busy);
+  console.log(JSON.stringify({ provider: "antigravity", mode: "full", questionRemainedInteractive: true }));
+  // The test-only capability drives the real peer dispatch route without
+  // introducing another fake-agent workflow or weakening production auth.
+  const peerTarget = (await api("/api/bots", "POST", { modelSelection: { instanceId: "agy", model: "gemini-3.8-flash-high" } })).body.bot;
+  await coordinator.request(child, peerTarget.id, "full");
+  assert.equal((await api(`/api/bots/${id}`, "PATCH", { approvePeerComms: false })).status, 200);
+  const capability = await api("/api/testing/internal-capability", "POST", { botId: id, threadId: created.body.bot.threadId }, { "x-openmausbot-test-capability": testCapabilityKey });
+  assert.equal(capability.status, 201);
+  const peerRequest = api("/api/internal/ask-bot", "POST", { toBotId: peerTarget.id, message: "Peer-initiated permission fixture" }, { authorization: `Bearer ${capability.body.token}` });
+  void peerRequest.catch(() => {});
+  const peerCard = await until(async () => pendingCard((await api("/api/bots")).body.bots.find((bot) => bot.id === peerTarget.id)));
+  assert.equal(peerCard.held, "The provider requires your approval for this action.");
+  const peerCalls = JSON.parse(readFileSync(`${agyDump}.config.json`, "utf8"));
+  assert.equal(peerCalls.find((call) => call.params.configId === "mode")?.params.value, "default");
+  assert.equal((await api(`/api/bots/${peerTarget.id}/respond`, "POST", { requestId: peerCard.requestId, behavior: "allow" })).status, 200);
+  assert.equal((await peerRequest).status, 200);
+  const peerDecisions = await until(async () => {
+    const rows = (await api("/api/decisions")).body.decisions.filter((row) => row.botId === peerTarget.id);
+    return rows.some((row) => row.source === "native-approval" && row.decision === "card-shown") && rows;
+  });
+  assert.ok(!peerDecisions.some((row) => row.source === "full-access"));
+  console.log(JSON.stringify({ provider: "antigravity", mode: "full", peerInitiated: true, native: "default", nativeApprovalShown: true, humanApproved: true }));
   console.log("Approval smoke passed; HTTP elevation rejected, private grant and resumed mode transitions verified.");
 }).catch((error) => {
   console.error(error);

@@ -16,9 +16,10 @@ export function hasNativeAutoReview(driverKind: string | undefined): boolean {
 
 /** A native reviewer has already declined to decide, or Auto has no native
  * equivalent. Never second-guess that request with the app's heuristic rules.
- * OpenCode's Full mode is implemented by approving individual ACP requests. */
+ * Antigravity and OpenCode Full approve residual ACP tool-permission requests
+ * through the app's explicit Full-access grant. Questions remain interactive. */
 export function requiresNativeApproval(driverKind: string, mode: ApprovalMode): boolean {
-  return mode === "auto" || (mode === "full" && ["claudeAgent", "antigravityAgent", "cursorAgent", "grokAgent"].includes(driverKind));
+  return mode === "auto" || (mode === "full" && ["claudeAgent", "cursorAgent", "grokAgent"].includes(driverKind));
 }
 
 export function isApprovalMode(value: unknown): value is ApprovalMode {

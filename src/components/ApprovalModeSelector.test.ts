@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   APPROVAL_MODE_OPTIONS,
+  ApprovalModeSelector,
   approvalModeOptionsFor,
   approvalModeSelectionRequiresLocalDesktop,
 } from "./ApprovalModeSelector";
@@ -46,13 +49,37 @@ describe("approval mode selector", () => {
     ]);
   });
 
-  it.each(["antigravityAgent", "cursorAgent", "grokAgent", "opencodeGo"])("offers Full access for %s", (kind) => {
+  it.each(["cursorAgent", "grokAgent", "opencodeGo"])("offers Full access for %s", (kind) => {
     expect(approvalModeOptionsFor(kind).map((option) => option.mode)).toEqual(["ask", "auto", "full"]);
     expect(approvalModeOptionsFor(kind, false).map((option) => option.mode)).toEqual(["ask", "auto"]);
   });
 
+  it("offers Antigravity Auto as the explicit full-access grant, not native review", () => {
+    const options = approvalModeOptionsFor("antigravityAgent");
+    expect(options.map(({ mode, label }) => ({ mode, label }))).toEqual([
+      { mode: "ask", label: "Ask for approval" },
+      { mode: "full", label: "Auto (full access)" },
+    ]);
+    expect(options[1].chip).toBe("Auto");
+    expect(options[1].description).toContain("Automatically approve tool requests");
+    expect(approvalModeOptionsFor("antigravityAgent", false).map((option) => option.mode)).toEqual(["ask"]);
+  });
+
+  it("shows the effective Antigravity mode without upgrading saved Auto settings", () => {
+    const render = (mode: "ask" | "auto" | "full" | undefined, autoApprove = false, trustedModesAvailable = true) => renderToStaticMarkup(createElement(ApprovalModeSelector, {
+      approvalMode: mode, autoApprove, trustedModesAvailable,
+      providerName: "Antigravity", driverKind: "antigravityAgent", onSelect: () => {},
+    }));
+    for (const html of [render("ask"), render("auto"), render(undefined, true)]) {
+      expect(html).toContain('aria-label="Ask for approval for Antigravity"');
+      expect(html).not.toContain('aria-label="Auto (full access)');
+    }
+    expect(render("full")).toContain('aria-label="Auto (full access) for Antigravity"');
+    expect(render("full", false, false)).toContain('aria-label="Auto (full access) for Antigravity"');
+  });
+
   it("explains Auto fallbacks and does not elevate unknown providers", () => {
-    expect(approvalModeOptionsFor("antigravityAgent").find((option) => option.mode === "auto")?.description).toContain("behaves like Ask");
+    expect(approvalModeOptionsFor("grokAgent").find((option) => option.mode === "auto")?.description).toContain("behaves like Ask");
     expect(approvalModeOptionsFor("customAgent").map((option) => option.mode)).toEqual(["ask", "auto"]);
   });
 
@@ -67,5 +94,10 @@ describe("approval mode selector", () => {
     expect(approvalModeSelectionRequiresLocalDesktop("custom", false)).toBe(true);
     expect(approvalModeSelectionRequiresLocalDesktop("ask", false)).toBe(false);
     expect(approvalModeSelectionRequiresLocalDesktop("custom", true)).toBe(false);
+    const html = renderToStaticMarkup(createElement(ApprovalModeSelector, {
+      approvalMode: "custom", trustedModesAvailable: false,
+      providerName: "Missing provider", driverKind: "", onSelect: () => {},
+    }));
+    expect(html).toContain('aria-label="Custom (config.toml) for Missing provider"');
   });
 });

@@ -39,7 +39,7 @@ import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { RoutineEditor } from "./RoutinesPage";
 import { AndroidDevicePanel, useAndroidUsbDevices } from "./AndroidDevicePanel";
 import { BrowserPanel } from "./BrowserPanel";
-import { builtInBrowserEnabled } from "@/lib/feature-flags";
+import { browserAvailable, browserUnavailableReason, builtInBrowserEnabled } from "@/lib/feature-flags";
 import { transitionComputerControlLease, type ComputerControlAction } from "@/lib/computer-control";
 import { LocalScreenPreview } from "./LocalScreenPreview";
 import { LinuxLocalControl } from "./LinuxLocalControl";
@@ -161,11 +161,9 @@ function readPanelWidth(): number {
 export function ComputerPanel({
   bot,
   onOpenVmWorkspace,
-  onExpandBrowser,
 }: {
   bot: Bot;
   onOpenVmWorkspace?: (botId: string) => void;
-  onExpandBrowser?: (botId: string) => void;
 }) {
   // The panel is a fixed column by default; a drag handle on its left edge
   // makes it wide enough to actually read a page in the Browser tab.
@@ -285,8 +283,11 @@ export function ComputerPanel({
   const [panelView, setPanelView] = useState<ComputerPanelView>(() => readComputerPanelView(bot.id));
   const androidStatus = useAndroidUsbDevices();
   const androidConnected = androidStatus.devices.length > 0;
-  // the built-in browser: a per-bot switch in Settings, and only the desktop app has one
-  const browserEnabled = builtInBrowserEnabled(state.config) && bot.browser !== false && Boolean(window.ogb?.browser);
+  // Keep installation reachable before the engine is ready. Actual browser
+  // operations below still require browserAvailableHere.
+  const browserAvailableHere = browserAvailable(state.config);
+  const browserEnabled = builtInBrowserEnabled(state.config) && bot.browser !== false
+    && (browserAvailableHere || state.config?.browserEngine?.installable === true);
   // bumped when a Box API key is saved inline, to re-run the spin-up flow
   const [retry, setRetry] = useState(0);
   const vmReadinessAttempts = useRef(0);
@@ -298,11 +299,11 @@ export function ComputerPanel({
   // Computer engine runs inside the box, so it has no browser-only mode.
   const browserSelectable =
     builtInBrowserEnabled(state.config) &&
-    Boolean(window.ogb?.browser) &&
+    browserAvailableHere &&
     selectedInstance?.capabilities?.browserMcp === true &&
     selectedInstance.driverKind !== "boxAgent";
-  const browserDisabledReason = !window.ogb?.browser
-    ? "The built-in browser needs the OpenMausBot desktop app"
+  const browserDisabledReason = !browserAvailableHere
+    ? browserUnavailableReason(state.config)
     : !builtInBrowserEnabled(state.config)
       ? "The built-in browser is switched off under App Settings → Experimental"
       : "This model engine cannot use the built-in browser";
@@ -794,12 +795,8 @@ export function ComputerPanel({
     return snap;
   }, [bot.id, dispatch]);
 
-  const setNativeBrowserControl = useCallback(async (held: boolean): Promise<boolean> => {
-    const setter = window.ogb?.browser?.setHumanControl;
-    if (!setter) return true;
-    const profile = bot.browserProfile === "guest" ? "guest" : bot.browserProfile ?? "";
-    return (await setter(bot.id, held, profile)) === true;
-  }, [bot.browserProfile, bot.id]);
+  // The engine owns its browser; there is no native surface to hold.
+  const setNativeBrowserControl = useCallback(async (): Promise<boolean> => true, []);
 
   const transitionControl = useCallback(async (action: ComputerControlAction) => {
     // BrowserPanel performs the same two-phase transition itself. Every
@@ -828,9 +825,6 @@ export function ComputerPanel({
     }
   }, [transitionControl]);
 
-  const expandBrowser = useCallback(() => {
-    onExpandBrowser?.(bot.id);
-  }, [bot.id, onExpandBrowser]);
 
   const openDesktop = async () => {
     setPending("join");
@@ -1084,13 +1078,7 @@ export function ComputerPanel({
 
       {panelView === "browser" && browserEnabled ? (
         <div className="flex min-h-0 flex-1 flex-col px-4 pb-4">
-          <BrowserPanel
-            bot={bot}
-            control={control}
-            controlPending={controlPending}
-            onControl={controlAction}
-            onExpand={onExpandBrowser ? expandBrowser : undefined}
-          />
+          <BrowserPanel bot={bot} />
           {error && (
             <div role="alert" className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[12px] text-danger">
               {error}
