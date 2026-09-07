@@ -813,6 +813,26 @@ describe("pre-flight", () => {
         ],
       }),
     ).toEqual(['Pre-flight check 2 repeats the name "same"; every check needs its own.']);
+    // Compared trimmed: padding does not make a second name.
+    expect(
+      badPreflight({
+        checks: [
+          { kind: "bots-ready", name: "same" },
+          { kind: "bots-ready", name: " same " },
+        ],
+      }),
+    ).toHaveLength(1);
+  });
+
+  it("validateWorkflow bounds a bots-ready wait to whole minutes from 0 to 120", () => {
+    const only = (waitMinutes: unknown) => badPreflight({ checks: [{ kind: "bots-ready", name: "b", waitMinutes }] });
+    expect(only(undefined)).toEqual([]);
+    expect(only(0)).toEqual([]);
+    expect(only(120)).toEqual([]);
+    expect(only(121)).toEqual(['Pre-flight check "b" waitMinutes must be a whole number from 0 to 120.']);
+    expect(only(1.5)).toHaveLength(1);
+    expect(only(-1)).toHaveLength(1);
+    expect(only("10")).toHaveLength(1);
   });
 
   it("validateWorkflow flags an empty command, a bad cwd, a fractional exit code and an invalid regex", () => {

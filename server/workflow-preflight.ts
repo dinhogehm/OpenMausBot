@@ -69,6 +69,13 @@ export function maskPreflightOutput(text: string): string {
 /** Bounded capture: a check that streams megabytes must not hold them in
  * memory for the sake of a 500-char excerpt. */
 const CAPTURE_MAX = 64 * 1024;
+/** How much of stdout `expectStdoutMatch` is tested against: a regex over
+ * an unbounded buffer is an unbounded amount of work. */
+export const PREFLIGHT_MATCH_MAX = 16 * 1024;
+/** After the deadline, how long a runner or hook has to hand back what it
+ * captured (the killed child's partial output) before its check is judged
+ * on nothing. */
+const DEADLINE_GRACE_MS = 5_000;
 
 /** The default runner: `/bin/sh -c <command>` (cmd.exe on Windows), no
  * TTY, stdin closed, the server's own environment plus the app's augmented
@@ -104,7 +111,18 @@ export const runPreflightCommand: PreflightCommandRunner = (check, signal) =>
     };
     const onAbort = () => {
       timedOut = true;
-      void killCliTree(child);
+      // SIGTERM first, the whole group; a shell that ignores TERM (and
+      // the children it exec'd, which inherit the ignore) survives that,
+      // so an unanswered TERM escalates to SIGKILL on the group.
+      void killCliTree(child).then((stopped) => {
+        if (stopped || settled) return;
+        try {
+          if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {
+          // already gone
+        }
+      });
     };
     if (signal.aborted) onAbort();
     else signal.addEventListener("abort", onAbort, { once: true });
@@ -155,7 +173,7 @@ function judgeCommand(check: CommandCheck, outcome: PreflightCommandOutcome, tim
       // carry it, and a check that cannot be judged must not pass.
       return { ...base, ok: false, detail: `expectStdoutMatch is not a valid regular expression` };
     }
-    if (!pattern.test(outcome.stdout)) {
+    if (!pattern.test(outcome.stdout.slice(0, PREFLIGHT_MATCH_MAX))) {
       return { ...base, ok: false, detail: `exited with code ${outcome.exitCode} but stdout did not match /${check.expectStdoutMatch}/` };
     }
   }
@@ -169,12 +187,23 @@ function judgeBots(
 ): Omit<WorkflowPreflightCheckResult, "durationMs"> {
   const ids = check.botIds ?? preflightBotIds(workflow);
   const problems: string[] = [];
+  let missing = false;
   for (const botId of ids) {
     const state = botState(botId);
-    if (state === "missing") problems.push(`bot "${botId}" does not exist`);
-    else if (state === "busy") problems.push(`bot "${botId}" is busy`);
+    if (state === "missing") {
+      missing = true;
+      problems.push(`bot "${botId}" does not exist`);
+    } else if (state === "busy") {
+      problems.push(`bot "${botId}" is busy`);
+    }
   }
-  if (problems.length > 0) return { name: check.name, kind: check.kind, ok: false, detail: problems.join("; ") };
+  // A busy bot is contention, the thing the engine waits out everywhere
+  // else (the per-bot FIFO, the busy re-park); a deleted bot is not. Only a
+  // failure made of nothing but "busy" is transient — the engine re-checks
+  // it until the check's wait runs out.
+  if (problems.length > 0) {
+    return { name: check.name, kind: check.kind, ok: false, detail: problems.join("; "), ...(missing ? {} : { transient: true }) };
+  }
   return {
     name: check.name,
     kind: check.kind,
@@ -200,9 +229,19 @@ export async function runWorkflowPreflight(
   const timer = setTimeout(() => controller.abort(), timeoutSeconds * 1_000);
   timer.unref?.();
   // The deadline as a promise every async check races against, so a hook
-  // that ignores the signal still cannot hold the run past it.
+  // that ignores the signal still cannot hold the run past it. It resolves
+  // a grace period AFTER the abort: the runner is told first and gets that
+  // long to hand back what its killed child had printed — the partial
+  // output is often the diagnosis ("Logged in… scopes: read:project").
   const deadline = new Promise<"timeout">((resolve) => {
-    controller.signal.addEventListener("abort", () => resolve("timeout"), { once: true });
+    controller.signal.addEventListener(
+      "abort",
+      () => {
+        const grace = setTimeout(() => resolve("timeout"), DEADLINE_GRACE_MS);
+        grace.unref?.();
+      },
+      { once: true },
+    );
   });
   const runOne = async (check: WorkflowPreflightCheck): Promise<WorkflowPreflightCheckResult> => {
     const started = performance.now();

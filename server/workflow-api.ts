@@ -160,6 +160,7 @@ const preflightCheckSchema = z.discriminatedUnion("kind", [
     kind: z.literal("bots-ready"),
     name: preflightCheckName,
     botIds: z.array(id).max(200).optional(),
+    waitMinutes: optionalNumber,
   }),
   z.object({
     kind: z.literal("engine-health"),

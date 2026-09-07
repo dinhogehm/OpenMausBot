@@ -12,6 +12,7 @@ import {
 } from "../shared/workflow.ts";
 import {
   maskPreflightOutput,
+  PREFLIGHT_MATCH_MAX,
   preflightBotIds,
   preflightRefusal,
   runPreflightCommand,
@@ -100,6 +101,32 @@ describe("runPreflightCommand", () => {
     // A shell reports a missing program as exit 127; a failed spawn as an error.
     expect(outcome.exitCode === 127 || outcome.error !== undefined).toBe(true);
   });
+
+  it("keeps what the child printed before the deadline killed it", async () => {
+    const controller = new AbortController();
+    const started = runPreflightCommand(
+      { kind: "command", name: "diag", command: node("console.log('diagnostic-line'); setTimeout(() => {}, 30000)") },
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 300);
+    const outcome = await started;
+    expect(outcome.timedOut).toBe(true);
+    expect(outcome.stdout.trim()).toBe("diagnostic-line");
+  });
+
+  it.skipIf(process.platform === "win32")("escalates to SIGKILL on the group when the shell ignores TERM", async () => {
+    const controller = new AbortController();
+    const started = runPreflightCommand(
+      { kind: "command", name: "stubborn", command: "trap '' TERM; sleep 777" },
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 200);
+    const at = performance.now();
+    const outcome = await started;
+    expect(outcome.timedOut).toBe(true);
+    // killCliTree waits up to 5 s for TERM to land before the escalation.
+    expect(performance.now() - at).toBeLessThan(12_000);
+  }, 20_000);
 
   it("kills the child when the signal aborts and says the kill was the deadline's", async () => {
     const controller = new AbortController();
@@ -201,6 +228,50 @@ describe("runWorkflowPreflight", () => {
     ]);
   }, 20_000);
 
+  it("a check that timed out still carries the output it had printed, masked", async () => {
+    const result = await runWorkflowPreflight(
+      workflow(
+        [
+          {
+            kind: "command",
+            name: "slow gh",
+            command: node("console.log('Logged in with token ghp_abcdefghijklmnopqrstuvwxyz0123, scopes: read:project'); setTimeout(() => {}, 60000)"),
+          },
+        ],
+        5,
+      ),
+      ready,
+    );
+    const [check] = result.checks;
+    expect(check).toMatchObject({ ok: false, detail: "timed out after 5s" });
+    expect(check!.stdout).toContain("scopes: read:project");
+    expect(check!.stdout).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz0123");
+  }, 20_000);
+
+  it("tests expectStdoutMatch against the first 16 KB of stdout only", async () => {
+    const result = await runWorkflowPreflight(
+      workflow([
+        {
+          kind: "command",
+          name: "late needle",
+          command: node(`process.stdout.write('x'.repeat(${PREFLIGHT_MATCH_MAX + 10}) + 'NEEDLE')`),
+          expectStdoutMatch: "NEEDLE",
+        },
+        {
+          kind: "command",
+          name: "early needle",
+          command: node("process.stdout.write('NEEDLE' + 'x'.repeat(100))"),
+          expectStdoutMatch: "NEEDLE",
+        },
+      ]),
+      ready,
+    );
+    expect(result.checks.map((check) => [check.name, check.ok])).toEqual([
+      ["late needle", false],
+      ["early needle", true],
+    ]);
+  });
+
   it("times out a health hook that never answers instead of holding the run", async () => {
     const result = await runWorkflowPreflight(workflow([{ kind: "engine-health", name: "engine", botId: "planner" }], 5), {
       ...ready,
@@ -224,6 +295,11 @@ describe("runWorkflowPreflight", () => {
       ["planner only", true, "1 bot ready"],
       ["ghost", false, 'bot "ghost" does not exist; bot "shipper" is busy'],
     ]);
+    // Only busy: transient, the engine's to wait out. A missing bot in
+    // the mix makes the whole check terminal.
+    expect(result.checks[0]!.transient).toBe(true);
+    expect(result.checks[2]!.transient).toBeUndefined();
+    expect(result.checks[1]!.transient).toBeUndefined();
   });
 
   it("bots-ready passes a workflow with no agent nodes", async () => {
