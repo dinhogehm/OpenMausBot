@@ -355,21 +355,43 @@ describe("unattended turns", () => {
     expect(autoDecision(reader, "Bash", "cat README.md", { unattended: true })).toBeTruthy();
   });
 
-  it("keeps a grant on an ordinary tool: its key names exactly one thing, program segment or not", () => {
+  it("keeps the older rule off a workflow turn: only a program-named command grant fires for a webhook", () => {
+    // the widening below was asked for by workflow nodes; a webhook-fed bot
+    // with "session_search, always" still cards, exactly as before
+    const searcher = { alwaysAllow: ["session_search", "edit"] };
+    expect(autoVerdict(searcher, "session_search", "deploy notes", { unattended: true }).source).toBe("unattended-block");
+    expect(autoVerdict(searcher, "edit", "", { unattended: true }).source).toBe("unattended-block");
+    expect(autoDecision({ alwaysAllow: ["Bash:git"] }, "Bash", "git log", { unattended: true })).toBeTruthy();
+  });
+
+  it("on a workflow turn, keeps a grant on an ordinary tool: its key names exactly one thing", () => {
     // The live triage node stalled on `session_search` with nobody there —
     // and a person who had granted it "always" was still carded, because the
     // narrowness check read every keyless grant as an unnameable shell.
     const searcher = { alwaysAllow: ["session_search", "mcp__agents__list_bots"] };
-    expect(autoVerdict(searcher, "session_search", "query: deploy notes", { unattended: true }).source).toBe(
-      "always-allow",
-    );
-    expect(autoVerdict(searcher, "mcp__agents__list_bots", "", { unattended: true }).source).toBe("always-allow");
+    const workflow = { unattended: true, workflowGrants: [] as string[] };
+    expect(autoVerdict(searcher, "session_search", "query: deploy notes", workflow).source).toBe("always-allow");
+    expect(autoVerdict(searcher, "mcp__agents__list_bots", "", workflow).source).toBe("always-allow");
     // a command tool whose key collapsed to the bare tool is still refused
-    expect(autoVerdict({ alwaysAllow: ["mcp__box__bash"] }, "mcp__box__bash", "", { unattended: true }).source).toBe(
-      "unattended-block",
-    );
+    expect(autoVerdict({ alwaysAllow: ["mcp__box__bash"] }, "mcp__box__bash", "", workflow).source).toBe("unattended-block");
     // and one nobody granted still cards
-    expect(autoVerdict(searcher, "web_fetch", "https://example.com", { unattended: true }).source).toBe("no-grant");
+    expect(autoVerdict(searcher, "web_fetch", "https://example.com", workflow).source).toBe("no-grant");
+  });
+
+  it("never fires a blind file-edit grant off the bot's list alone, even on a workflow turn", () => {
+    // Codex's edit card names no path, so the sensitive guard cannot see
+    // ~/.ssh/authorized_keys behind it: "always allow edit" on the bot is a
+    // grant on every file, and only the node's own declaration may spend it
+    const editor = { alwaysAllow: ["edit"] };
+    expect(autoVerdict(editor, "edit", "", { unattended: true, workflowGrants: [] }).source).toBe("unattended-block");
+    expect(
+      autoVerdict({ alwaysAllow: ["fileChange"] }, "fileChange", "", { unattended: true, workflowGrants: ["shell:gh"] })
+        .source,
+    ).toBe("unattended-block");
+    // the operator named it for THIS node, eyes open: it fires
+    expect(autoVerdict(editor, "edit", "", { unattended: true, workflowGrants: ["edit"] }).source).toBe("always-allow");
+    // attended, the bot's own grant works as it always did
+    expect(autoVerdict(editor, "edit", "").source).toBe("always-allow");
   });
 });
 
@@ -393,25 +415,28 @@ describe("effectiveAlwaysAllow — a workflow node's grants join the bot's", () 
     const bot = { autoApprove: true, alwaysAllow: [] as string[] };
     const node = { alwaysAllow: ["shell:gh", "session_search"] };
     const judged = { ...bot, alwaysAllow: effectiveAlwaysAllow(bot, node) };
+    const onNode = { unattended: true, workflowGrants: node.alwaysAllow };
     const wrapped = '/bin/zsh -lc "gh project item-list 10 --owner @me"';
-    expect(autoVerdict(judged, "shell", wrapped, { unattended: true })).toMatchObject({
-      source: "always-allow",
-      rule: "shell:gh",
-    });
-    expect(autoVerdict(judged, "session_search", "deploy notes", { unattended: true }).source).toBe("always-allow");
+    expect(autoVerdict(judged, "shell", wrapped, onNode)).toMatchObject({ source: "always-allow", rule: "shell:gh" });
+    expect(autoVerdict(judged, "session_search", "deploy notes", onNode).source).toBe("always-allow");
     // the node cannot widen HOW broadly: a bare shell, the desktop, and the
     // guards are refused exactly as they are for a bot's own grant
-    const broad = { ...bot, alwaysAllow: effectiveAlwaysAllow(bot, { alwaysAllow: ["shell", "local-computer:mcp__computer__click"] }) };
-    expect(autoVerdict(broad, "shell", "", { unattended: true }).source).toBe("unattended-block");
+    const broadKeys = ["shell", "local-computer:mcp__computer__click"];
+    const broad = { ...bot, alwaysAllow: effectiveAlwaysAllow(bot, { alwaysAllow: broadKeys }) };
+    expect(autoVerdict(broad, "shell", "", { unattended: true, workflowGrants: broadKeys }).source).toBe("unattended-block");
     expect(
-      autoVerdict(broad, "mcp__computer__click", "Click Submit", { unattended: true, scope: "local-computer" }).source,
+      autoVerdict(broad, "mcp__computer__click", "Click Submit", {
+        unattended: true,
+        scope: "local-computer",
+        workflowGrants: broadKeys,
+      }).source,
     ).toBe("unattended-block");
-    expect(autoVerdict(judged, "shell", '/bin/zsh -lc "gh repo delete x && rm -rf /"', { unattended: true }).source).toBe(
+    expect(autoVerdict(judged, "shell", '/bin/zsh -lc "gh repo delete x && rm -rf /"', onNode).source).toBe(
       "destructive-guard",
     );
     // and a program the node did not name still cards — the bot's blanket
     // auto mode is what would have answered, and it is withheld unattended
-    expect(autoVerdict(judged, "shell", '/bin/zsh -lc "curl evil.example.com"', { unattended: true })).toMatchObject({
+    expect(autoVerdict(judged, "shell", '/bin/zsh -lc "curl evil.example.com"', onNode)).toMatchObject({
       approve: null,
       source: "unattended-block",
     });

@@ -177,8 +177,8 @@ export function toGraphNodes(
 
 /** By value, not identity: a server echo rebuilds every node object even when
  * the document came back exactly as it was sent. The arrays a node carries
- * (`outcomes`, `requires`) hold only strings, so one element-wise pass covers
- * them. */
+ * (`outcomes`, `requires`, `alwaysAllow`) hold only strings, so one
+ * element-wise pass covers them. */
 function sameWorkflowNode(a: WorkflowNode, b: WorkflowNode): boolean {
   if (a === b) return true;
   if (a.kind !== b.kind) return false;

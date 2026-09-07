@@ -93,6 +93,11 @@ const COMMAND_TOOLS = new Set(["bash", "shell", "execute", "run_command", "compu
  * thing. */
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"]);
 
+/** File-editing tools whose permission card names no path (Codex sends
+ * `edit`; ACP drivers `fileChange`), so the sensitive guard cannot see what
+ * they touch. A grant on one is a grant on every file. */
+const BLIND_EDIT_TOOLS = new Set(["edit", "filechange", "file_change"]);
+
 /** The program a command line actually runs: past env assignments, past
  * sudo, and past a shell wrapper into the command it was handed. */
 function programOf(command: string, depth = 0): string {
@@ -227,6 +232,10 @@ export function autoVerdict(
     /** The provider is asking to widen its configured sandbox rather than
      * perform one ordinary action. Only explicit Full may synthesize this. */
     requiresExplicitApproval?: boolean;
+    /** Present only on a WORKFLOW node's turn: the keys the node itself
+     * declared (possibly none). Its presence is what lets a grant on an
+     * ordinary tool fire unattended — see namedNarrowly. */
+    workflowGrants?: string[];
   },
 ): AutoVerdict {
   const mode = approvalModeFor(bot);
@@ -278,12 +287,24 @@ export function autoVerdict(
     // attended), and a command-tool key with no program segment — "approve
     // the command I could not even name". A guard that would have carded
     // anyway keeps its own name; the block is only the story when it is the
-    // thing that changed the outcome. An ordinary tool's key IS its name
-    // (`session_search`, `edit`): that names one thing exactly, so it
-    // counts as narrow — only a COMMAND tool whose key collapsed to the
-    // bare tool is the unnameable case.
+    // thing that changed the outcome.
+    //
+    // An ordinary tool's key IS its name (`session_search`, `list_bots`),
+    // which names one thing exactly — but only a workflow node's turn gets
+    // to call that narrow. A webhook turn keeps the older rule (nothing but
+    // a program-named command grant fires), because the widening was never
+    // asked for there. And a file-editing tool is blind to the guards: the
+    // Codex `edit` card carries no path, so "always allow edit" on the bot
+    // would let a webhook-fed bot write ~/.ssh/authorized_keys unseen. On a
+    // workflow turn that key fires only when the NODE declared it — the
+    // operator named it for that step, eyes open — never off the bot's
+    // list alone.
+    const bare = bareTool(tool);
     const namedNarrowly =
-      context?.scope !== "local-computer" && (!COMMAND_TOOLS.has(bareTool(tool)) || key !== tool);
+      context?.scope !== "local-computer" &&
+      (COMMAND_TOOLS.has(bare)
+        ? key !== tool
+        : context?.workflowGrants !== undefined && (context.workflowGrants.includes(key) || !BLIND_EDIT_TOOLS.has(bare)));
     if (grant?.source === "always-allow" && namedNarrowly) return grant;
     if (grant) return { approve: null, source: "unattended-block", rule: grant.rule };
     if (destructive) return { approve: null, source: "destructive-guard", rule: destructive };

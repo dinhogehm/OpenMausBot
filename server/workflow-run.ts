@@ -75,6 +75,10 @@ export interface WorkflowEngineOptions {
    * dispatch — never cached on the run — so a permission a person revokes
    * mid-run stops the run at the next node that needs it. */
   botCapabilities: (botId: string) => BotCapabilities | null;
+  /** The bot's own always-allow keys RIGHT NOW, so the node prompt can list
+   * what the turn may use without a card (its union with the node's list).
+   * Absent or null: the bot grants nothing of its own. */
+  botGrants?: (botId: string) => string[] | null | undefined;
   /** Creates the isolated TaskRecord where a node runs (auditable transcript
    * in the bot's chat). */
   createTask: (botId: string, title: string) => { threadId: string } | null;
@@ -135,7 +139,7 @@ function envelopeContract(node: AgentNode): string {
  * the node's instructions + the envelope contract. Only DECLARED outcomes are
  * offered — the reserved failure outcome belongs to the engine alone.
  * Module-private in spirit; exported for prompt-content tests. */
-export function _buildNodePrompt(workflow: Workflow, node: AgentNode, run: WorkflowRun): string {
+export function _buildNodePrompt(workflow: Workflow, node: AgentNode, run: WorkflowRun, grants: string[] = []): string {
   const lines: string[] = [
     `You are executing node "${node.id}" of the workflow "${workflow.name}".`,
     "",
@@ -150,8 +154,24 @@ export function _buildNodePrompt(workflow: Workflow, node: AgentNode, run: Workf
       lines.push(`- ${result.nodeId}: ${result.outcome} — ${result.summary}`);
     }
   }
+  // The bot is told what it may use, not what was refused: the provider
+  // answers a denied permission with a bare decline (Codex discards the
+  // harness's note), so this list is the only way the bot learns which
+  // tools it can lean on and can name the one it lacked in its summary.
+  lines.push(
+    "",
+    grants.length > 0
+      ? `Nobody is at the keyboard. Tools pre-approved for this node, by approval key: ${grants.join(", ")}. Any other permission request is denied at once with no explanation from the provider — do not retry it; use the pre-approved tools, or finish with the failure outcome and name in your summary the tool you needed.`
+      : "Nobody is at the keyboard and no tool is pre-approved for this node: every permission request is denied at once with no explanation from the provider — do not retry one; use only tools that need no approval, or finish with the failure outcome and name in your summary the tool you needed.",
+  );
   lines.push("", "Your instructions for this node:", node.instructions, "", envelopeContract(node));
   return lines.join("\n");
+}
+
+/** What the node's turn may use without a card: the bot's own keys and the
+ * node's, bot first, once each — the same union the harness judges by. */
+function effectiveGrants(botGrants: string[] | null | undefined, node: AgentNode): string[] {
+  return [...new Set([...(botGrants ?? []), ...(node.alwaysAllow ?? [])])];
 }
 
 function buildRepromptMessage(node: AgentNode): string {
@@ -254,6 +274,7 @@ export class WorkflowEngine {
       this.recoverStranded();
       this.drainStrandedQueues();
       this.sweepSchedules(now);
+      this.pruneDenials();
     } finally {
       this.ticking = false;
     }
@@ -464,13 +485,8 @@ export class WorkflowEngine {
       ) {
         continue;
       }
-      if (run.currentThreadId !== undefined) {
-        // What the dead attempt was refused belongs to the node, not the
-        // thread: park it on the run before the thread's buffers go.
-        const refused = this.takeDenials(run.id, run.currentThreadId);
-        if (refused.length > 0) this.denialsByRun.set(run.id, refused);
-        this.forgetThread(run.currentThreadId);
-      }
+      // attemptFailure forgets the dead thread itself — after taking what
+      // the attempt was refused, so the receipt keeps it.
       this.attemptFailure(run.id, "node timed out");
     }
   }
@@ -640,6 +656,15 @@ export class WorkflowEngine {
     const lines = this.denialsByThread.get(threadId) ?? [];
     if (!lines.includes(line)) lines.push(line);
     this.denialsByThread.set(threadId, lines);
+  }
+
+  /** Denials parked for a run the store has since pruned (the receipt cap)
+   * or settled would sit in memory for the life of the process. */
+  private pruneDenials(): void {
+    for (const runId of [...this.denialsByRun.keys()]) {
+      const run = this.store.getRun(runId);
+      if (!run || TERMINAL_RUN_STATUSES.has(run.status)) this.denialsByRun.delete(runId);
+    }
   }
 
   /** Every denial the current node has collected — earlier attempts' plus
@@ -1034,7 +1059,8 @@ export class WorkflowEngine {
     if (!patched) return; // run pruned mid-flight: stop driving it silently
     this.runByThread.set(task.threadId, runId);
     this.lastAssistantText.delete(task.threadId);
-    this.startTurnSafely(node, task.threadId, _buildNodePrompt(workflow, node, patched), runId);
+    const grants = effectiveGrants(this.options.botGrants?.(node.botId), node);
+    this.startTurnSafely(node, task.threadId, _buildNodePrompt(workflow, node, patched, grants), runId);
   }
 
   /** Park the run on a human gate: no task, no turn, one notification. From

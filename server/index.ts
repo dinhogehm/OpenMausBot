@@ -35,7 +35,6 @@ import {
   autoVerdict,
   effectiveAlwaysAllow,
   rememberableApprovalKey,
-  unattendedDenial,
 } from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
@@ -280,6 +279,8 @@ import * as vps from "./vps-computer.ts";
 import { nextOccurrence, RoutineManager, type RoutineRun, type RoutineRunOn, type RoutineRunTrigger } from "./routines.ts";
 import { handleWorkflowRequest, workflowNotificationBotId } from "./workflow-api.ts";
 import { WorkflowEngine } from "./workflow-run.ts";
+import { turnProvenanceFor, type TurnProvenance } from "./turn-provenance.ts";
+import { denyUnattendedWorkflowCard } from "./workflow-unattended-card.ts";
 import { WorkflowStore } from "./workflow-store.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
 import { BUILT_IN_BROWSER_SYSTEM_PROMPT } from "./browser-engine.ts";
@@ -316,7 +317,7 @@ import { installedPlaybookInstructions } from "./installed-playbooks.ts";
 import { createBotPackageExport } from "./package-export.ts";
 import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
 import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
-import { shouldMountLocalComputer, turnRunsUnattended } from "./local-routing.ts";
+import { shouldMountLocalComputer } from "./local-routing.ts";
 import { resolveSurface } from "./surface.ts";
 import {
   PendingTurnCancellations,
@@ -2515,12 +2516,6 @@ function isUnattended(botId?: string | null): boolean {
  * resumes the same dispatch) and is only ever replaced by the next
  * dispatch on the thread. One small record per thread that ever ran a
  * turn in this process — bounded by the task list, not by traffic. */
-interface TurnProvenance {
-  automationSource?: RoutineRunTrigger | "workflow";
-  unattended: boolean;
-  /** grants the workflow node pre-approves for this turn, if any */
-  alwaysAllow?: string[];
-}
 const turnProvenanceByThread = new Map<string, TurnProvenance>();
 
 /** Unattended by either record — the thread's own dispatch, or the bot's
@@ -2999,6 +2994,8 @@ bus.subscribe((event: RuntimeEvent) => {
             unattended,
             scope: event.approvalScope,
             requiresExplicitApproval: event.requiresExplicitApproval,
+            // present only on a workflow turn: what the node itself declared
+            ...(workflowTurn ? { workflowGrants: provenance.alwaysAllow ?? [] } : {}),
             // Antigravity's residual asks must use a peer-started turn's
             // effective safe Auto mode, not its durable Full grant.
             // Preserve the existing policy of every other provider.
@@ -3106,84 +3103,54 @@ bus.subscribe((event: RuntimeEvent) => {
       if (workflowTurn && permission && asker && event.requestId && verdict) {
         const requestId = event.requestId;
         const { tool, summary } = event;
-        const denial = unattendedDenial(tool, summary, verdict, event.approvalScope);
-        const grace = WORKFLOW_DENY_GRACE_MS;
-        const card = pushMessage({
-          role: "bot",
-          kind: "options",
-          card: {
-            title: grace > 0 ? "Approval needed" : "Denied unattended",
-            subtitle: summary,
-            options: ["Allow", "Deny"],
-            requestId,
-            tool,
-            // free text, no catalog key: the line names this request's own
-            // tool and grant, which no fixed note could
-            held: denial,
-            approvalScope: event.approvalScope,
-          },
-        });
-        askMessageByRequest.set(`${event.threadId}:${requestId}`, card.id);
-        workflowEngine?.noteDenial(event.threadId, denial);
         const instance = event.providerInstanceId
           ? registry.get(event.providerInstanceId)
           : registry.get(asker.modelSelection.instanceId);
-        const deny = async () => {
-          const open = store.messagesFor(event.threadId).find((candidate) => candidate.id === card.id)?.card;
-          // a person got there within the grace, or the ask already settled
-          if (!open || open.answered) return;
-          try {
-            if (!instance) throw new Error("provider unavailable");
-            const outcome = await instance.adapter.respondToRequest(event.threadId, requestId, {
-              behavior: "deny",
-              message: denial,
-            });
-            if (outcome === "unavailable") throw new Error("the ask is no longer open");
-            // The driver's request.resolved marks the card answered; the
-            // audit row is written only once the provider took the answer.
-            appendDecision(DATA_DIR, {
-              threadId: event.threadId,
-              requestId,
-              botId: asker.id,
-              botName: asker.name,
-              tool,
-              summary,
-              decision: "auto-denied",
-              source: verdict.source,
-              rule: verdict.rule,
-              unattended: true,
-            });
-          } catch {
-            // The denial could not be delivered, so the card stays open and
-            // the node's timeout is the backstop it always was — say so on
-            // the card rather than claim a refusal nothing received.
-            store.patchMessage(event.threadId, card.id, {
-              card: { ...open, held: `${denial} — the denial could not be delivered, so this card is waiting on you` },
-            });
-            appendDecision(DATA_DIR, {
-              threadId: event.threadId,
-              requestId,
-              botId: asker.id,
-              botName: asker.name,
-              tool,
-              summary,
-              decision: "card-shown",
-              source: "auto-fallback",
-              rule: verdict.rule,
-              unattended: true,
-            });
-          }
-        };
-        if (grace > 0) {
-          // A grace is for a person who watches their runs: tell them, and
-          // give them the window before the harness answers.
-          if (asker.busy) store.setActivity(asker.id, "waiting-on-you");
-          notify(buildNotification("approval", asker, event.threadId, event.summary));
-          const timer = setTimeout(() => void deny(), grace);
-          timer.unref?.();
-        } else {
-          void deny();
-        }
+        const findCard = (messageId: string) =>
+          store.messagesFor(event.threadId).find((candidate) => candidate.id === messageId)?.card;
+        const decided = denyUnattendedWorkflowCard(
+          { requestId, tool, summary, scope: event.approvalScope, verdict },
+          {
+            graceMs: WORKFLOW_DENY_GRACE_MS,
+            pushCard: (card) => {
+              const message = pushMessage({ role: "bot", kind: "options", card });
+              askMessageByRequest.set(`${event.threadId}:${requestId}`, message.id);
+              return message.id;
+            },
+            readCard: findCard,
+            patchCard: (messageId, card) => store.patchMessage(event.threadId, messageId, { card }),
+            respond: async (message) => {
+              if (!instance) throw new Error("provider unavailable");
+              return instance.adapter.respondToRequest(event.threadId, requestId, { behavior: "deny", message });
+            },
+            appendDecision: (row) =>
+              appendDecision(DATA_DIR, {
+                threadId: event.threadId,
+                requestId,
+                botId: asker.id,
+                botName: asker.name,
+                tool,
+                summary,
+                decision: row.decision,
+                source: row.source,
+                rule: verdict.rule,
+                unattended: true,
+              }),
+            noteDenial: (line) => workflowEngine?.noteDenial(event.threadId, line),
+            // the same hand-off an ordinary card makes: the bot is waiting
+            // on a person now, and the person is told
+            notifyHuman: () => {
+              const current = store.bot(asker.id);
+              if (current?.busy) store.setActivity(asker.id, "waiting-on-you");
+              notify(buildNotification("approval", asker, event.threadId, event.summary));
+            },
+            schedule: (fn, ms) => {
+              const timer = setTimeout(fn, ms);
+              timer.unref?.();
+            },
+          },
+        );
+        void decided.settled;
         break;
       }
       // A card can outlive the bot record that raised it. Without one there is
@@ -4062,26 +4029,24 @@ async function startTurn(
   // integrations. Completion and interrupt paths do the same; this is the
   // final backstop against a retained proxy process.
   revokeInternalCapabilitiesForThread(threadId);
-  // a webhook turn, or one inherited from a bot already running unattended
-  if (opts?.automationSource === "webhook" || opts?.unattended) markUnattended(bot.id);
+  // The thread's own record of this dispatch — the ONE place "nobody at the
+  // keyboard" is decided (turn-provenance.ts) — written before any await so
+  // the fold and the computer mount below read what THIS turn was told,
+  // not whatever the bot mark says by then. A card continuation keeps the
+  // record of the turn it resumes.
+  const provenance: TurnProvenance = turnProvenanceFor(
+    opts,
+    opts?.cardContinuation ? turnProvenanceByThread.get(threadId) : undefined,
+  );
+  turnProvenanceByThread.set(threadId, provenance);
+  // The bot mark follows the same decision: it is what a peer hop and a
+  // delegation inherit, since those know the bot but not always the thread.
+  if (provenance.unattended) markUnattended(bot.id);
   // a person typing into this bot ends the unattended window immediately
   else if (opts?.automationSource === undefined && !opts?.commsDepth && !opts?.cardContinuation) {
     clearUnattended(bot.id);
     delegationWakeBudget.reset(threadId);
   }
-  // The thread's own record of this dispatch, written before any await so
-  // the fold and the computer mount below read what THIS turn was told,
-  // not whatever the bot mark says by then. A card continuation resumes
-  // the turn a previous dispatch began and keeps that dispatch's record —
-  // a connector or credential card answered on a workflow node's thread
-  // resumes a workflow turn, not a person's.
-  const inherited = opts?.cardContinuation ? turnProvenanceByThread.get(threadId) : undefined;
-  const provenance: TurnProvenance = inherited ?? {
-    automationSource: opts?.automationSource,
-    unattended: opts?.automationSource === "webhook" || opts?.unattended === true,
-    ...(opts?.alwaysAllow?.length ? { alwaysAllow: [...opts.alwaysAllow] } : {}),
-  };
-  turnProvenanceByThread.set(threadId, provenance);
   const task = store.taskByThread(bot.id, threadId);
   if (!task) throw Object.assign(new Error("no such task"), { status: 404 });
   const instance = opts?.runOn === "cloud"
@@ -4488,13 +4453,13 @@ async function startTurn(
 
       // Auto-only host fallback. Electron owns cua-driver/TCC attribution;
       // the harness only reads its already-running connection descriptor.
-      // Unattended is judged from this dispatch's own record first (a
-      // workflow node, a webhook, an inherited unattended hop) and the bot
-      // mark second: the mark is a mutable per-bot flag that a person's
-      // message clears and a TTL ages out, and a scheduled run must never
-      // land on the live desktop because of what happened to that flag in
-      // the meantime — that mount would tag every card in the turn
-      // local-computer scope, which no grant may answer with nobody there.
+      // Unattended is the same answer the fold and the approval mode get —
+      // this dispatch's own record first, the bot mark second. The mark is
+      // a mutable per-bot flag that a person's message clears and a TTL
+      // ages out, and a scheduled run must never land on the live desktop
+      // because of what happened to that flag in the meantime — that mount
+      // would tag every card in the turn local-computer scope, which no
+      // grant may answer with nobody there.
       if (
         !integrations.computer &&
         !integrations.localComputer &&
@@ -4503,7 +4468,7 @@ async function startTurn(
           requested: undefined,
           hostPlatform: process.platform,
           providerSupportsLocal: mountsLocalComputer,
-          unattended: turnRunsUnattended(provenance, isUnattended(bot.id)),
+          unattended: isUnattendedTurn(bot.id, threadId),
         })
       ) {
         const cua = readCuaConnection();
@@ -5050,6 +5015,9 @@ workflowEngine = new WorkflowEngine({
     return !bot ? "missing" : bot.busy ? "busy" : "ready";
   },
   botCapabilities,
+  // Read at dispatch, like the flags: a grant a person adds mid-run reaches
+  // the next node's prompt.
+  botGrants: (botId) => store.bot(botId)?.alwaysAllow,
   createTask: (botId, title) => {
     // Detached like a routine's task: the bot's active thread stays where the
     // user left it, and the node's transcript is auditable in its task list.

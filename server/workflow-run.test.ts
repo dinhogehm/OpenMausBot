@@ -74,6 +74,8 @@ function harness({
   let botStateFn: (botId: string) => "ready" | "busy" | "missing" = () => "ready";
   /** No flags by default: a node that requires nothing must never notice. */
   let botCapabilitiesFn: (botId: string) => BotCapabilities | null = () => ({});
+  /** No grants by default: a node prompt then says so. */
+  let botGrantsFn: (botId: string) => string[] | null | undefined = () => undefined;
   /** While set, interruptTurn stays pending until releaseInterrupts() — lets
    * tests land events in the middle of an engine `await interruptTurn`. */
   let interruptGate: Promise<void> | null = null;
@@ -83,6 +85,7 @@ function harness({
     now: () => now,
     botState: (botId) => botStateFn(botId),
     botCapabilities: (botId) => botCapabilitiesFn(botId),
+    botGrants: (botId) => botGrantsFn(botId),
     createTask: (botId, title) => {
       if (createTaskThrows !== null) throw new Error(createTaskThrows);
       if (createTaskFails) return null;
@@ -195,6 +198,7 @@ function harness({
     throwStartTurn: (message: string) => (startTurnThrows = message),
     setBotState: (fn: (botId: string) => "ready" | "busy" | "missing") => (botStateFn = fn),
     setBotCapabilities: (fn: (botId: string) => BotCapabilities | null) => (botCapabilitiesFn = fn),
+    setBotGrants: (fn: (botId: string) => string[] | null | undefined) => (botGrantsFn = fn),
     holdInterrupts: () => {
       interruptGate = new Promise<void>((resolve) => (releaseInterrupt = resolve));
     },
@@ -1001,6 +1005,24 @@ describe("WorkflowEngine unattended denials", () => {
     layout: {},
   });
 
+  it("tells the bot which keys the turn may use — the bot's and the node's, once each — or that there are none", () => {
+    const h = harness();
+    h.setBotGrants((botId) => (botId === "planner" ? ["shell:git", "shell:gh"] : null));
+    const workflow = h.store.create(triage(["shell:gh", "session_search"]));
+    h.engine.startRun(workflow.id, "go", "manual");
+    expect(h.dispatches[0]!.prompt).toContain(
+      "Tools pre-approved for this node, by approval key: shell:git, shell:gh, session_search.",
+    );
+    expect(h.dispatches[0]!.prompt).toContain("denied at once with no explanation from the provider");
+    // the second node's bot grants nothing and the node declares nothing
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.dispatches[1]!.prompt).toContain("no tool is pre-approved for this node");
+    expect(h.dispatches[1]!.prompt).not.toContain("shell:gh");
+    // the list comes before the node's own instructions, so it reads as context, not as a task
+    const prompt = h.dispatches[0]!.prompt;
+    expect(prompt.indexOf("pre-approved for this node")).toBeLessThan(prompt.indexOf("Your instructions for this node:"));
+  });
+
   it("hands the node's pre-approved keys to every dispatch and re-prompt, and none when the node has none", () => {
     const h = harness();
     const workflow = h.store.create(triage(["shell:gh", "session_search"]));
@@ -1088,6 +1110,20 @@ describe("WorkflowEngine unattended denials", () => {
     expect(persisted.status).toBe("failed");
     expect(persisted.error).toBe(`the bot did not complete this node — ${DENIED_GH}`);
     expect(h.notifications[0]!.message).toContain(DENIED_GH);
+  });
+
+  it("drops denials parked for a run the store pruned, on the next tick", async () => {
+    const h = harness();
+    const workflow = h.store.create(triage());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.engine.noteDenial("thread-1", DENIED_GH);
+    h.setNow(1_001 + 15 * 60_000);
+    await h.engine.tick(); // timeout: the denial is now parked on the run for the retry
+    const parked = (h.engine as unknown as { denialsByRun: Map<string, string[]> }).denialsByRun;
+    expect(parked.get(run.id)).toEqual([DENIED_GH]);
+    h.removeRun(run.id);
+    await h.engine.tick();
+    expect(parked.has(run.id)).toBe(false);
   });
 
   it("forgets a cancelled or superseded thread's denials instead of blaming a later node", async () => {
