@@ -257,6 +257,65 @@ describe("workflow definitions", () => {
     expect(store.get(id)?.nextRunAt).toBeUndefined();
   });
 
+  it("accepts an interval schedule and refuses one too short to arm or with a window it could not honour", async () => {
+    const { call, store } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
+    const schedule = (patch: Record<string, unknown>) =>
+      call("PATCH", `/api/workflows/${id}`, { triggers: { schedule: { type: "interval", minutes: 60, ...patch } } });
+    const tooShort = await schedule({ minutes: 4 });
+    expect(tooShort?.status).toBe(400);
+    expect(bodyOf(tooShort).error).toMatch(/^triggers\.schedule\.minutes /);
+    expect((await schedule({ minutes: 7.5 }))?.status).toBe(400);
+    expect((await schedule({ minutes: "60" }))?.status).toBe(400);
+    const badWindow = await schedule({ activeHours: { start: "9:00", end: "18:00" } });
+    expect(badWindow?.status).toBe(400);
+    expect(bodyOf(badWindow).error).toBe("triggers.schedule.activeHours.start must be HH:MM (24-hour)");
+    expect((await schedule({ activeHours: { start: "09:00" } }))?.status).toBe(400);
+    expect((await schedule({ activeHours: { start: "09:00", end: "18:00", weekdays: [] } }))?.status).toBe(400);
+    expect((await schedule({ activeHours: { start: "09:00", end: "18:00", weekdays: [7] } }))?.status).toBe(400);
+    expect(store.get(id)?.triggers).toBeUndefined();
+
+    const plain = await schedule({});
+    expect(plain?.status).toBe(200);
+    expect(store.get(id)?.triggers).toEqual({ schedule: { type: "interval", minutes: 60 } });
+    const windowed = await schedule({ activeHours: { start: "09:00", end: "18:00", weekdays: [1, 2, 3, 4, 5] } });
+    expect(windowed?.status).toBe(200);
+    expect(store.get(id)?.triggers?.schedule).toEqual({
+      type: "interval",
+      minutes: 60,
+      activeHours: { start: "09:00", end: "18:00", weekdays: [1, 2, 3, 4, 5] },
+    });
+    // A changed schedule goes back to "not armed yet" for the engine's sweep.
+    expect(store.get(id)?.nextRunAt).toBeUndefined();
+  });
+
+  it("accepts a wait node, leaving its range to the validator like every other numeric knob", async () => {
+    const { call, store } = harness();
+    const graph = agentGraph();
+    const paced: WorkflowInput = {
+      ...graph,
+      nodes: [...graph.nodes, { kind: "wait", id: "pause", minutes: 30 }],
+    };
+    const created = await call("POST", "/api/workflows", paced);
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id;
+    expect(store.get(id)?.nodes.find((node) => node.id === "pause")).toEqual({ kind: "wait", id: "pause", minutes: 30 });
+    // Out of range is a draft with a badge, not a 400 — the same stance as
+    // a zero timeout on an agent node.
+    const wild = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [...graph.nodes, { kind: "wait", id: "pause", minutes: 0 }],
+    });
+    expect(wild?.status).toBe(200);
+    expect(bodyOf(wild).workflow.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "bad-numbers", nodeId: "pause" })]),
+    );
+    // A non-number is a shape problem the door refuses.
+    const wrong = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [...graph.nodes, { kind: "wait", id: "pause", minutes: "30" }],
+    });
+    expect(wrong?.status).toBe(400);
+  });
+
   it("shows the engine's nextRunAt on the workflow as a read-only field", async () => {
     const { call, store } = harness();
     const id = bodyOf(
