@@ -3612,15 +3612,15 @@ describe("WorkflowEngine pre-flight", () => {
     expect(h.store.getRun(run.id)!.preflight!.checks[0]!.stdout).toBe("M server/index.ts");
   });
 
-  it("a busy or missing bot refuses the start through bots-ready, before any dispatch would have parked the run", async () => {
+  it("a missing bot refuses the start through bots-ready, before any dispatch would have failed the run", async () => {
     const h = harness();
-    h.setBotState((botId) => (botId === "shipper" ? "busy" : "ready"));
+    h.setBotState((botId) => (botId === "shipper" ? "missing" : "ready"));
     const workflow = h.store.create(checked([{ kind: "bots-ready", name: "bots" }]));
     const run = h.engine.startRun(workflow.id, "go", "manual");
     await flush();
     expect(h.store.getRun(run.id)).toMatchObject({
       status: "failed",
-      error: 'pre-flight check "bots" failed: bot "shipper" is busy',
+      error: 'pre-flight check "bots" failed: bot "shipper" does not exist',
     });
     expect(h.dispatches).toHaveLength(0);
   });
@@ -3917,6 +3917,189 @@ describe("WorkflowEngine pre-flight", () => {
     expect(() => h.engine.startRun(workflow.id, "go", "manual")).toThrow(/^invalid workflow: Pre-flight check 1 needs a name/);
     expect(ran).not.toHaveBeenCalled();
     expect(h.store.listRuns()).toEqual([]);
+  });
+
+  it("checks removed between the process dying mid-pre-flight and the restart: the node is dispatched and the marker dropped", async () => {
+    const h = harness();
+    h.setRunCommand(() => new Promise(() => {}));
+    const workflow = h.store.create(checked([GH]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(h.store.getRun(run.id)?.preflightStartedAt).toBe(1_000);
+    // The owner removes the checks (PATCH preflight: null) before restarting.
+    h.store.update(workflow.id, { preflight: undefined });
+    const restarted = h.reloadEngine();
+    await restarted.engine.tick();
+    const recovered = restarted.store.getRun(run.id)!;
+    expect(recovered).toMatchObject({ status: "running", currentNodeId: "plan", currentThreadId: "re-thread-1" });
+    expect(recovered.preflightStartedAt).toBeUndefined();
+    expect(recovered.preflight).toBeUndefined();
+    expect(restarted.dispatches.map((dispatch) => dispatch.botId)).toEqual(["planner"]);
+    // Nothing on later ticks takes the run for a pre-flight to redo.
+    await restarted.engine.tick();
+    expect(restarted.dispatches).toHaveLength(1);
+  });
+
+  it("a stale marker on a receipt whose current node already finished: the restart follows the edge, never re-runs the node", async () => {
+    const h = harness();
+    const workflow = h.store.create(checked([GH]));
+    // A receipt no engine writes any more (a build that left the marker
+    // behind, a hand edit): the entry's result is recorded, the edge not
+    // yet followed, and the marker still set. Re-running the entry here
+    // would be a merge or a deploy executed twice.
+    const run = h.store.createRun({
+      workflowId: workflow.id,
+      status: "running",
+      trigger: "manual",
+      attempt: 0,
+      input: "go",
+      currentNodeId: "plan",
+      preflightStartedAt: 900,
+      nodeResults: [{ nodeId: "plan", outcome: "done", summary: "planned", startedAt: 900, endedAt: 950 }],
+      startedAt: 900,
+    });
+    await h.engine.tick();
+    expect(h.dispatches.map((dispatch) => dispatch.botId)).toEqual(["shipper"]);
+    const followed = h.store.getRun(run.id)!;
+    expect(followed).toMatchObject({ currentNodeId: "ship", status: "running" });
+    expect(followed.preflightStartedAt).toBeUndefined();
+    expect(followed.nodeResults).toHaveLength(1);
+  });
+
+  it("the marker never outlives a dispatch: a passing pre-flight before a wait, an approval or a notify node clears it too", async () => {
+    const h = harness();
+    h.setRunCommand(answering({}));
+    const workflow = h.store.create(
+      checked([GH], {
+        entryNodeId: "pause",
+        nodes: [{ kind: "wait", id: "pause", minutes: 5 }, { kind: "agent", id: "ship", botId: "shipper", instructions: "Ship.", outcomes: ["shipped"] }],
+        edges: [{ from: "pause", outcome: "elapsed", to: "ship" }],
+      }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    await flush();
+    const parked = h.store.getRun(run.id)!;
+    expect(parked.waitUntil).toBeDefined();
+    expect(parked.preflightStartedAt).toBeUndefined();
+    expect(parked.preflight?.ok).toBe(true);
+  });
+
+  describe("busy bots are waited out, not refused", () => {
+    const busyThen = (h: ReturnType<typeof harness>, busyUntil: () => boolean) =>
+      h.setBotState((botId) => (botId === "shipper" && busyUntil() ? "busy" : "ready"));
+
+    it("a bot that is only busy parks the run for a re-check every 30 s, then dispatches once it frees, with the verdict refreshed", async () => {
+      const h = harness();
+      let busy = true;
+      busyThen(h, () => busy);
+      const workflow = h.store.create(checked([GH, { kind: "bots-ready", name: "bots" }]));
+      h.setNow(5_000);
+      const run = h.engine.startRun(workflow.id, "go", "manual");
+      await flush();
+      const waiting = h.store.getRun(run.id)!;
+      expect(waiting).toMatchObject({ status: "running", currentNodeId: "plan", preflightStartedAt: 5_000, nextAttemptAt: 35_000 });
+      expect(waiting.preflight).toMatchObject({ ok: false });
+      expect(waiting.preflight!.checks[1]).toMatchObject({ name: "bots", ok: false, transient: true, detail: 'bot "shipper" is busy' });
+      expect(h.notifications).toEqual([]);
+      expect(h.dispatches).toHaveLength(0);
+
+      // Not due yet: nothing happens. Due and still busy: re-checked, re-parked.
+      h.setNow(20_000);
+      await h.engine.tick();
+      expect(h.store.getRun(run.id)?.nextAttemptAt).toBe(35_000);
+      h.setNow(35_000);
+      await h.engine.tick();
+      await flush();
+      expect(h.store.getRun(run.id)).toMatchObject({ preflightStartedAt: 5_000, nextAttemptAt: 65_000 });
+      expect(h.store.getRun(run.id)?.preflight?.at).toBe(35_000);
+
+      // Freed: the next due re-check passes and dispatches the entry.
+      busy = false;
+      h.setNow(65_000);
+      await h.engine.tick();
+      await flush();
+      const started = h.store.getRun(run.id)!;
+      expect(started.preflight).toMatchObject({ at: 65_000, ok: true });
+      expect(started.preflightStartedAt).toBeUndefined();
+      expect(started.nextAttemptAt).toBeUndefined();
+      expect(h.dispatches.map((dispatch) => dispatch.botId)).toEqual(["planner"]);
+      expect(h.notifications).toEqual([]);
+    });
+
+    it("the wait is budgeted from the FIRST start and survives a restart; past it the run is refused naming the wait", async () => {
+      const h = harness();
+      busyThen(h, () => true);
+      const workflow = h.store.create(checked([{ kind: "bots-ready", name: "bots", waitMinutes: 2 }]));
+      h.setNow(10_000);
+      const run = h.engine.startRun(workflow.id, "go", "manual");
+      await flush();
+      expect(h.store.getRun(run.id)).toMatchObject({ preflightStartedAt: 10_000, nextAttemptAt: 40_000 });
+
+      const restarted = h.reloadEngine();
+      h.setNow(40_000);
+      await restarted.engine.tick();
+      await flush();
+      // Same clock, next slot — a restart neither reset nor lost the budget.
+      expect(restarted.store.getRun(run.id)).toMatchObject({ status: "running", preflightStartedAt: 10_000, nextAttemptAt: 70_000 });
+
+      // 10_000 + 2 min = 130_000: the re-check at 100_000 can still park
+      // (130_000 fits), the one at 130_000 cannot.
+      h.setNow(100_000);
+      await restarted.engine.tick();
+      await flush();
+      expect(restarted.store.getRun(run.id)).toMatchObject({ status: "running", nextAttemptAt: 130_000 });
+      h.setNow(130_000);
+      await restarted.engine.tick();
+      await flush();
+      const refused = restarted.store.getRun(run.id)!;
+      expect(refused).toMatchObject({ status: "failed", currentNodeId: "plan" });
+      expect(refused.error).toBe('pre-flight check "bots" failed: bot "shipper" is busy — still busy after 2 min');
+      expect(refused.preflightStartedAt).toBeUndefined();
+      expect(restarted.dispatches).toHaveLength(0);
+    });
+
+    it("waitMinutes 0 refuses a busy bot at once; a missing bot is terminal whatever the wait", async () => {
+      const h = harness();
+      busyThen(h, () => true);
+      const zero = h.store.create(checked([{ kind: "bots-ready", name: "bots", waitMinutes: 0 }]));
+      const run = h.engine.startRun(zero.id, "go", "manual");
+      await flush();
+      expect(h.store.getRun(run.id)?.status).toBe("failed");
+      expect(h.store.getRun(run.id)?.error).toContain("still busy after 1 min");
+
+      h.setBotState((botId) => (botId === "shipper" ? "missing" : "ready"));
+      const gone = h.store.create(checked([{ kind: "bots-ready", name: "bots", waitMinutes: 60 }]));
+      const second = h.engine.startRun(gone.id, "go", "manual");
+      await flush();
+      expect(h.store.getRun(second.id)).toMatchObject({ status: "failed", error: 'pre-flight check "bots" failed: bot "shipper" does not exist' });
+      expect(h.store.getRun(second.id)?.preflight?.checks[0]?.transient).toBeUndefined();
+    });
+
+    it("a busy bot beside a real failure does not wait: the real failure refuses the run now", async () => {
+      const h = harness();
+      busyThen(h, () => true);
+      h.setRunCommand(answering({ "gh auth": { exitCode: 1 } }));
+      const workflow = h.store.create(checked([GH, { kind: "bots-ready", name: "bots" }]));
+      const run = h.engine.startRun(workflow.id, "go", "manual");
+      await flush();
+      expect(h.store.getRun(run.id)).toMatchObject({ status: "failed" });
+      expect(h.store.getRun(run.id)?.error).toBe('pre-flight check "gh auth" failed: exited with code 1 (expected 0) (and 1 more)');
+    });
+
+    it("cancelling a run parked on a busy bot ends it cleanly", async () => {
+      const h = harness();
+      busyThen(h, () => true);
+      const workflow = h.store.create(checked([{ kind: "bots-ready", name: "bots" }]));
+      const run = h.engine.startRun(workflow.id, "go", "manual");
+      await flush();
+      expect(h.store.getRun(run.id)?.nextAttemptAt).toBeDefined();
+      const cancelled = await h.engine.cancelRun(run.id);
+      expect(cancelled).toMatchObject({ status: "cancelled" });
+      expect(cancelled.nextAttemptAt).toBeUndefined();
+      expect(cancelled.preflightStartedAt).toBeUndefined();
+      h.setNow(100_000);
+      await h.engine.tick();
+      expect(h.dispatches).toHaveLength(0);
+    });
   });
 
   it("a receipt written before pre-flights existed loads and is re-driven as before", async () => {

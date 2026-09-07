@@ -27,6 +27,7 @@ import {
   WORKFLOW_NOTIFY_OUTCOME,
   WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN,
   WORKFLOW_OUTAGE_HORIZON_DEFAULT_H,
+  WORKFLOW_PREFLIGHT_WAIT_DEFAULT_MIN,
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
   WORKFLOW_WAIT_OUTCOME,
   workflowRoutingFingerprint,
@@ -39,6 +40,7 @@ import {
   type WorkflowNodeResult,
   type WorkflowNotificationKind,
   type WorkflowOutage,
+  type WorkflowPreflightCheckResult,
   type WorkflowPreflightResult,
   type WorkflowRun,
   type WorkflowRunStatus,
@@ -248,6 +250,18 @@ const withDenials = (reason: string, denials: string[]): string =>
   denials.length === 0 ? reason : `${reason} — ${denials.join("; ")}`;
 /** startRun's own refusal — the documented prefix the API maps to a 400. */
 const isInvalidWorkflow = (error: unknown): boolean => errorMessage(error).startsWith("invalid workflow:");
+
+/** The longest wait the transient-failed `bots-ready` checks ask for: each
+ * check's own `waitMinutes`, the default for one that does not say. */
+function preflightWaitMinutes(workflow: Workflow | null, failed: WorkflowPreflightCheckResult[]): number {
+  let minutes = 0;
+  for (const result of failed) {
+    const check = workflow?.preflight?.checks.find((candidate) => candidate.name === result.name);
+    const wait = check?.kind === "bots-ready" ? (check.waitMinutes ?? WORKFLOW_PREFLIGHT_WAIT_DEFAULT_MIN) : WORKFLOW_PREFLIGHT_WAIT_DEFAULT_MIN;
+    minutes = Math.max(minutes, wait);
+  }
+  return minutes;
+}
 
 const isThenable = (value: unknown): value is PromiseLike<unknown> =>
   typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
@@ -689,13 +703,21 @@ export class WorkflowEngine {
       if (!run || run.status !== "running" || run.nextAttemptAt === undefined || run.nextAttemptAt > now) continue;
       const workflow = this.store.get(run.workflowId);
       const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
-      const parkedFor = this.parkedFallbackBot(run);
-      if (node?.kind === "agent" && this.options.botState(parkedFor ?? node.botId) === "busy") continue;
       const nodeId = run.currentNodeId ?? workflow?.entryNodeId;
       if (nodeId === undefined) {
         this.failNode(run.id, "run has no current node recorded and its workflow is gone");
         continue;
       }
+      // A pre-flight parked on a busy bot re-checks when due — through
+      // launch, so the verdict is refreshed and the wait is charged to the
+      // same clock — rather than dispatching the node the checks guard.
+      if (run.preflightStartedAt !== undefined) {
+        const rechecking = this.store.patchRun(run.id, { nextAttemptAt: undefined });
+        if (rechecking) this.launch(run.id, nodeId);
+        continue;
+      }
+      const parkedFor = this.parkedFallbackBot(run);
+      if (node?.kind === "agent" && this.options.botState(parkedFor ?? node.botId) === "busy") continue;
       const patched = this.store.patchRun(run.id, { nextAttemptAt: undefined });
       if (!patched) continue;
       this.dispatchNode(run.id, nodeId, parkedFor);
@@ -724,14 +746,6 @@ export class WorkflowEngine {
         this.failNode(run.id, "the workflow definition was deleted");
         continue;
       }
-      // A pre-flight the process died in the middle of: the checks are run
-      // AGAIN, never skipped — the node they were guarding is not dispatched
-      // on a verdict nobody recorded. The marker was written before the
-      // checks started, so this window has no gap.
-      if (run.preflightStartedAt !== undefined) {
-        this.launch(run.id, run.currentNodeId ?? workflow.entryNodeId);
-        continue;
-      }
       const last = run.nodeResults[run.nodeResults.length - 1];
       if (run.currentNodeId !== undefined && last?.nodeId === run.currentNodeId) {
         const node = workflow.nodes.find((candidate) => candidate.id === run.currentNodeId);
@@ -739,7 +753,22 @@ export class WorkflowEngine {
           this.failNode(run.id, `node "${run.currentNodeId}" no longer exists in the workflow`);
           continue;
         }
-        this.follow(run, workflow, node, last.outcome);
+        // A finished node is followed, never re-run — judged BEFORE the
+        // pre-flight marker below, so a marker left on a receipt (a file
+        // from a build that did not clear it, a hand edit) can never turn
+        // a recorded merge or deploy into a second one. The marker is
+        // dropped here: the checks that guarded this node are its past.
+        const followed = run.preflightStartedAt === undefined ? run : this.store.patchRun(run.id, { preflightStartedAt: undefined });
+        if (!followed) continue;
+        this.follow(followed, workflow, node, last.outcome);
+        continue;
+      }
+      // A pre-flight the process died in the middle of: the checks are run
+      // AGAIN, never skipped — the node they were guarding is not dispatched
+      // on a verdict nobody recorded. The marker was written before the
+      // checks started, so this window has no gap.
+      if (run.preflightStartedAt !== undefined) {
+        this.launch(run.id, run.currentNodeId ?? workflow.entryNodeId);
         continue;
       }
       this.dispatchNode(run.id, run.currentNodeId ?? workflow.entryNodeId, this.parkedFallbackBot(run));
@@ -856,12 +885,19 @@ export class WorkflowEngine {
     if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return;
     const workflow = this.store.get(run.workflowId);
     if (!workflow || (workflow.preflight?.checks.length ?? 0) === 0) {
+      // No checks — including checks REMOVED since a marker was written
+      // (a run in pre-flight when the process died, edited before the
+      // restart): the marker is dropped with the dispatch, or a receipt
+      // would read "checks running" for the rest of the run and a later
+      // restart would take the marker for a pre-flight to redo.
       this.dispatchNode(runId, nodeId);
       return;
     }
     const parked = this.store.patchRun(runId, {
       currentNodeId: nodeId,
-      preflightStartedAt: this.now(),
+      // The FIRST start survives the re-checks a busy bot earns: it is the
+      // clock the wait is budgeted against.
+      preflightStartedAt: run.preflightStartedAt ?? this.now(),
       dispatchedAt: undefined,
       nextAttemptAt: undefined,
       currentThreadId: undefined,
@@ -894,17 +930,37 @@ export class WorkflowEngine {
     this.preflightFlights.delete(runId);
     const run = this.store.getRun(runId);
     if (!run || run.status !== "running" || run.preflightStartedAt === undefined) return;
-    const patched = this.store.patchRun(runId, { preflight: result, preflightStartedAt: undefined });
-    if (!patched) return;
     if (result.ok) {
-      this.dispatchNode(runId, nodeId);
+      const passed = this.store.patchRun(runId, { preflight: result, preflightStartedAt: undefined });
+      if (passed) this.dispatchNode(runId, nodeId);
+      return;
+    }
+    // A failure made of nothing but busy bots is CONTENTION — the thing the
+    // engine waits out everywhere else (the per-bot FIFO, the busy re-park)
+    // — not a broken environment: the run keeps its marker and its verdict
+    // and is re-checked when due, until the checks' wait is spent. The
+    // budget runs from the FIRST start, so a restart mid-wait neither
+    // resets it nor loses it.
+    const failed = result.checks.filter((check) => !check.ok);
+    if (failed.every((check) => check.transient === true)) {
+      const workflow = this.store.get(run.workflowId);
+      const waitMs = preflightWaitMinutes(workflow, failed) * 60_000;
+      const now = this.now();
+      if (now + BUSY_REPARK_MS <= run.preflightStartedAt + waitMs) {
+        this.store.patchRun(runId, { preflight: result, nextAttemptAt: now + BUSY_REPARK_MS });
+        return;
+      }
+      const waited = Math.max(1, Math.round((now - run.preflightStartedAt) / 60_000));
+      const spent = this.store.patchRun(runId, { preflight: result, preflightStartedAt: undefined });
+      if (spent) this.failNode(runId, `${preflightRefusal(result)} — still busy after ${waited} min`);
       return;
     }
     // Terminal, not retryable: nothing the engine can do makes a token grow
     // a scope or an engine come back — a person has to, and a resume runs
     // the checks again once they have. currentNodeId already names the
     // guarded node, so the receipt reads "failed at node X: pre-flight …".
-    this.failNode(runId, preflightRefusal(result));
+    const refused = this.store.patchRun(runId, { preflight: result, preflightStartedAt: undefined });
+    if (refused) this.failNode(runId, preflightRefusal(result));
   }
 
   private preflightEnvironment(): PreflightEnvironment {
@@ -1320,6 +1376,10 @@ export class WorkflowEngine {
       this.failNode(runId, `node "${nodeId}" no longer exists in the workflow`);
       return;
     }
+    // A dispatch is the end of whatever pre-flight guarded this node: the
+    // marker never outlives it, whichever kind of node this is and
+    // whichever write below (or none — a cap refusal) follows.
+    if (run.preflightStartedAt !== undefined && !this.store.patchRun(runId, { preflightStartedAt: undefined })) return;
     // The cap bounds BOT WORK, so it is checked only when bot work is about
     // to be dispatched and counts only the bot work already done: a wait or
     // a notify after the last allowed agent turn still runs, so a cycle's
