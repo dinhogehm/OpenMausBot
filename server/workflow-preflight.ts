@@ -74,8 +74,10 @@ const CAPTURE_MAX = 64 * 1024;
 export const PREFLIGHT_MATCH_MAX = 16 * 1024;
 /** After the deadline, how long a runner or hook has to hand back what it
  * captured (the killed child's partial output) before its check is judged
- * on nothing. */
-const DEADLINE_GRACE_MS = 5_000;
+ * on nothing. Longer than killCliTree's 5 s TERM wait, so a shell that
+ * ignores TERM is SIGKILLed and reports its buffers inside the grace
+ * rather than racing it. */
+const DEADLINE_GRACE_MS = 7_000;
 
 /** The default runner: `/bin/sh -c <command>` (cmd.exe on Windows), no
  * TTY, stdin closed, the server's own environment plus the app's augmented

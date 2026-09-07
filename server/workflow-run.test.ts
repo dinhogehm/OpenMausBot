@@ -3939,7 +3939,53 @@ describe("WorkflowEngine pre-flight", () => {
     expect(restarted.dispatches).toHaveLength(1);
   });
 
-  it("a stale marker on a receipt whose current node already finished: the restart follows the edge, never re-runs the node", async () => {
+  it("a resume re-armed after a node finished (edge deleted, then restored): a restart mid-pre-flight re-runs the checks and dispatches NOTHING until a verdict is recorded", async () => {
+    const h = harness();
+    h.setRunCommand(answering({}));
+    const workflow = h.store.create(checked([GH]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    await flush();
+    // The edge plan --done--> ship is deleted in flight; plan finishes;
+    // follow refuses "workflow changed" with plan's result recorded.
+    h.store.update(workflow.id, { edges: [] });
+    h.completeTurn("thread-1", envelope("done", "planned"));
+    const failed = h.store.getRun(run.id)!;
+    expect(failed).toMatchObject({ status: "failed", currentNodeId: "plan" });
+    expect(failed.nodeResults.map((result) => result.nodeId)).toEqual(["plan"]);
+    // The owner puts the edge back and resumes; the checks never answer
+    // in this process, which then dies.
+    h.store.update(workflow.id, { edges: [{ from: "plan", outcome: "done", to: "ship" }] });
+    h.setRunCommand(() => new Promise(() => {}));
+    h.engine.resumeRun(run.id);
+    expect(h.store.getRun(run.id)).toMatchObject({ status: "running", preflightStartedAt: 1_000 });
+    expect(h.store.getRun(run.id)?.preflight).toBeUndefined();
+
+    // Restart with checks STILL unanswered: nothing may be dispatched.
+    const mute = h.reloadEngine();
+    await mute.engine.tick();
+    await flush();
+    await mute.engine.tick();
+    expect(mute.dispatches).toEqual([]);
+    expect(mute.store.getRun(run.id)).toMatchObject({ status: "running", currentNodeId: "plan", preflightStartedAt: 1_000 });
+    expect(mute.store.getRun(run.id)?.preflight).toBeUndefined();
+
+    // Restart with checks answering: the verdict is recorded first, and
+    // the node whose result is on the receipt is FOLLOWED, not re-run.
+    h.setRunCommand(answering({}));
+    h.setNow(2_000);
+    const restarted = h.reloadEngine();
+    await restarted.engine.tick();
+    await flush();
+    const followed = restarted.store.getRun(run.id)!;
+    expect(followed.preflight).toMatchObject({ at: 2_000, ok: true });
+    expect(followed.preflightStartedAt).toBeUndefined();
+    expect(restarted.dispatches.map((dispatch) => dispatch.botId)).toEqual(["shipper"]);
+    expect(followed).toMatchObject({ currentNodeId: "ship", status: "running" });
+    expect(followed.nodeResults.map((result) => result.nodeId)).toEqual(["plan"]);
+    expect(h.dispatches).toHaveLength(1); // only the original plan dispatch, in the first process
+  });
+
+  it("a stale marker on a receipt whose current node already finished: the restart re-checks, then follows the edge, never re-runs the node", async () => {
     const h = harness();
     const workflow = h.store.create(checked([GH]));
     // A receipt no engine writes any more (a build that left the marker
@@ -3958,9 +4004,13 @@ describe("WorkflowEngine pre-flight", () => {
       startedAt: 900,
     });
     await h.engine.tick();
+    // Nothing until the verdict; then the edge, never plan again.
+    expect(h.dispatches).toEqual([]);
+    await flush();
     expect(h.dispatches.map((dispatch) => dispatch.botId)).toEqual(["shipper"]);
     const followed = h.store.getRun(run.id)!;
     expect(followed).toMatchObject({ currentNodeId: "ship", status: "running" });
+    expect(followed.preflight?.ok).toBe(true);
     expect(followed.preflightStartedAt).toBeUndefined();
     expect(followed.nodeResults).toHaveLength(1);
   });
@@ -4002,15 +4052,28 @@ describe("WorkflowEngine pre-flight", () => {
       expect(h.notifications).toEqual([]);
       expect(h.dispatches).toHaveLength(0);
 
-      // Not due yet: nothing happens. Due and still busy: re-checked, re-parked.
+      // Not due yet: nothing happens. Due and still busy: ONLY the
+      // transient check is asked again; the command's earlier answer is
+      // carried into the refreshed verdict.
+      const commands: string[] = [];
+      h.setRunCommand(async (check) => {
+        commands.push(check.command);
+        return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+      });
       h.setNow(20_000);
       await h.engine.tick();
       expect(h.store.getRun(run.id)?.nextAttemptAt).toBe(35_000);
       h.setNow(35_000);
       await h.engine.tick();
       await flush();
-      expect(h.store.getRun(run.id)).toMatchObject({ preflightStartedAt: 5_000, nextAttemptAt: 65_000 });
-      expect(h.store.getRun(run.id)?.preflight?.at).toBe(35_000);
+      expect(commands).toEqual([]);
+      const rechecked = h.store.getRun(run.id)!;
+      expect(rechecked).toMatchObject({ preflightStartedAt: 5_000, nextAttemptAt: 65_000 });
+      expect(rechecked.preflight?.at).toBe(35_000);
+      expect(rechecked.preflight?.checks.map((check) => [check.name, check.ok])).toEqual([
+        ["gh auth", true],
+        ["bots", false],
+      ]);
 
       // Freed: the next due re-check passes and dispatches the entry.
       busy = false;
@@ -4019,6 +4082,8 @@ describe("WorkflowEngine pre-flight", () => {
       await flush();
       const started = h.store.getRun(run.id)!;
       expect(started.preflight).toMatchObject({ at: 65_000, ok: true });
+      expect(started.preflight!.checks.map((check) => check.name)).toEqual(["gh auth", "bots"]);
+      expect(commands).toEqual([]);
       expect(started.preflightStartedAt).toBeUndefined();
       expect(started.nextAttemptAt).toBeUndefined();
       expect(h.dispatches.map((dispatch) => dispatch.botId)).toEqual(["planner"]);
@@ -4064,7 +4129,7 @@ describe("WorkflowEngine pre-flight", () => {
       const run = h.engine.startRun(zero.id, "go", "manual");
       await flush();
       expect(h.store.getRun(run.id)?.status).toBe("failed");
-      expect(h.store.getRun(run.id)?.error).toContain("still busy after 1 min");
+      expect(h.store.getRun(run.id)?.error).toBe('pre-flight check "bots" failed: bot "shipper" is busy — no wait configured for a busy bot');
 
       h.setBotState((botId) => (botId === "shipper" ? "missing" : "ready"));
       const gone = h.store.create(checked([{ kind: "bots-ready", name: "bots", waitMinutes: 60 }]));
