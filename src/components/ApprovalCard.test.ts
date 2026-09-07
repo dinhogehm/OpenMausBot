@@ -1,9 +1,9 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ApprovalCard } from "./ApprovalCard";
-import { PendingApprovalPanel, spokenApprovalPrompt, type Pending } from "./PendingApproval";
+import { PendingApprovalPanel, pendingApprovals, spokenApprovalPrompt, type Pending } from "./PendingApproval";
 import type { Bot, Message } from "@/state/store";
 import { skillRequestBehavior } from "../../shared/skill-request";
 
@@ -352,5 +352,73 @@ describe("ApprovalCard learned skills", () => {
     message.card!.skillRequest!.action = "update";
     expect(renderToStaticMarkup(createElement(ApprovalCard, { message })))
       .toContain("propose the update again");
+  });
+});
+
+describe("ApprovalCard workflow gates", () => {
+  const scout: Bot = {
+    id: "bot-1",
+    name: "Scout",
+    threadId: "thread-1",
+    color: "green",
+    messages: [],
+  } as unknown as Bot;
+  const gateCard = (answered?: string): NonNullable<Message["card"]> => ({
+    title: 'Workflow "Delivery" needs your decision at "merge-gate"',
+    subtitle: "Merge PR #42?\n\nPrevious step: tests green",
+    options: ["Approve", "Deny"],
+    requestId: "workflow-approval:run-1:merge-gate:20",
+    tool: "workflow_approval",
+    held: "Waiting for a decision since 1970-01-01T00:00:00.020Z; if nobody answers, the workflow asks again up to 5 times and then rejects.",
+    workflowApproval: { runId: "run-1", workflowId: "wf-1", nodeId: "merge-gate" },
+    ...(answered ? { answered } : {}),
+  });
+  const message = (answered?: string): Message => ({ id: "gate-card", role: "bot", kind: "options", at: 1, card: gateCard(answered) });
+
+  it("reads as the workflow waiting on the person, with the prompt, the previous step and the expiry note", () => {
+    const html = renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message() }));
+    expect(html).toContain("Scout&#x27;s workflow needs your decision");
+    expect(html).not.toContain("wants to");
+    expect(html).toContain("Merge PR #42?");
+    expect(html).toContain("Previous step: tests green");
+    expect(html).toContain("asks again up to 5 times");
+    expect(html).toContain("Waiting for your decision");
+  });
+
+  it("records the decision — approved, rejected, or closed by the run moving on", () => {
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message("allow") }))).toContain("Approved — the run continues");
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message("deny") }))).toContain("Rejected — the run takes its rejected path");
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message("unavailable") }))).toContain("No longer waiting");
+  });
+
+  it("never takes over the composer: a gate is not a pending approval, and decides on the card itself", () => {
+    expect(pendingApprovals([message()])).toEqual([]);
+    // an ordinary permission card on the same thread still does
+    const permission: Message = {
+      id: "perm",
+      role: "bot",
+      kind: "options",
+      at: 2,
+      card: { title: "Approval needed", subtitle: "rm -rf build", options: ["Allow", "Deny"], requestId: "req-1", tool: "Bash" },
+    };
+    expect(pendingApprovals([message(), permission]).map((pending) => pending.requestId)).toEqual(["req-1"]);
+
+    const onDecide = vi.fn();
+    const html = renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message(), onDecide }));
+    expect(html).toContain(">Approve</button>");
+    expect(html).toContain(">Reject</button>");
+    // Buttons only while open, and only where a decision can be sent.
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message("allow"), onDecide }))).not.toContain(">Approve</button>");
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message() }))).not.toContain(">Approve</button>");
+  });
+
+  it("names the workflow, not 'someone', on the room copy the workflow signed", () => {
+    const signed: Message = { ...message(), from: { botId: "workflow", name: "Workflow", color: "purple" } };
+    const html = renderToStaticMarkup(createElement(ApprovalCard, { bot: undefined, message: signed }));
+    expect(html).toContain("A workflow needs your decision");
+    expect(html).not.toContain("Someone");
+    expect(html).not.toContain("wants to");
+    // A bot's own chat copy still names the bot.
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message() }))).toContain("Scout&#x27;s workflow needs your decision");
   });
 });

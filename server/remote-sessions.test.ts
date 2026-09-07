@@ -314,6 +314,62 @@ describe("pairing", () => {
     expect(JSON.stringify(config.body)).not.toContain("partitionId");
   });
 
+  it("lets only an admin session decide a workflow gate's card, though the respond route itself is client-allowed", async () => {
+    const created = await call("/api/bots", { method: "POST", body: JSON.stringify({ name: "Gatekeeper" }) });
+    const botId: string | undefined = created.body?.id ?? created.body?.bot?.id;
+    const threadId: string | undefined = created.body?.threadId ?? created.body?.bot?.threadId;
+    expect(botId).toBeTruthy();
+    expect(threadId).toBeTruthy();
+    const workflow = await call("/api/workflows", {
+      method: "POST",
+      body: JSON.stringify({
+        name: "Scoped gate",
+        entryNodeId: "gate",
+        nodes: [
+          { kind: "approval", id: "gate", prompt: "Merge?" },
+          { kind: "agent", id: "merge", botId, instructions: "Merge.", outcomes: ["done"] },
+          { kind: "wait", id: "pause", minutes: 1440 },
+        ],
+        edges: [
+          { from: "gate", outcome: "approved", to: "merge" },
+          { from: "gate", outcome: "rejected", to: "pause" },
+        ],
+        layout: {},
+      }),
+    });
+    expect(workflow.status).toBe(201);
+    const workflowId = workflow.body.workflow.id as string;
+    try {
+      const started = await call(`/api/workflows/${workflowId}/runs`, { method: "POST", body: "{}" });
+      expect(started.status).toBe(201);
+      const run = started.body.run;
+      const requestId = `workflow-approval:${run.id}:gate:${run.approvalRequestedAt}`;
+
+      const viewer = await pairingCode(["client"]);
+      const viewerPaired = await call("/api/auth/pair", { method: "POST", headers: remote("10.0.0.41"), body: JSON.stringify({ code: viewer.code, label: "viewer" }) });
+      const asViewer = remote("10.0.0.41", { authorization: `Bearer ${viewerPaired.body.token}` });
+      const refused = await call(`/api/threads/${threadId}/respond`, { method: "POST", headers: asViewer, body: JSON.stringify({ requestId, behavior: "allow" }) });
+      expect(refused.status).toBe(403);
+      expect(refused.body.error).toContain("admin scope");
+      const viaBot = await call(`/api/bots/${botId}/respond`, { method: "POST", headers: asViewer, body: JSON.stringify({ requestId, behavior: "allow" }) });
+      expect(viaBot.status).toBe(403);
+      const runs = await call(`/api/workflows/${workflowId}/runs`);
+      expect(runs.body.runs[0].status).toBe("waiting-approval");
+
+      // A default pairing (admin + client — the owner's phone) decides it.
+      const owner = await pairingCode();
+      const ownerPaired = await call("/api/auth/pair", { method: "POST", headers: remote("10.0.0.42"), body: JSON.stringify({ code: owner.code, label: "phone" }) });
+      const asOwner = remote("10.0.0.42", { authorization: `Bearer ${ownerPaired.body.token}` });
+      const decided = await call(`/api/threads/${threadId}/respond`, { method: "POST", headers: asOwner, body: JSON.stringify({ requestId, behavior: "deny" }) });
+      expect(decided.status).toBe(200);
+      expect(decided.body).toMatchObject({ ok: true, outcome: "rejected", decision: "rejected" });
+      expect((await call(`/api/workflows/${workflowId}/runs`)).body.runs[0].nodeResults[0]).toMatchObject({ nodeId: "gate", outcome: "rejected" });
+    } finally {
+      expect((await call(`/api/workflows/${workflowId}`, { method: "DELETE" })).status).toBe(204);
+      await call(`/api/bots/${botId}`, { method: "DELETE" });
+    }
+  });
+
   it("locks a source out after repeated bad codes and says how long", async () => {
     for (let i = 0; i < LOCKOUT.failures; i++) {
       const r = await call("/api/auth/pair", { method: "POST", headers: remote("10.0.0.99"), body: JSON.stringify({ code: `BAD${i}-BADB-ADBA` }) });

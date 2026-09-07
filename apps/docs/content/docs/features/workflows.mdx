@@ -25,12 +25,24 @@ Reach for a workflow when you already know the steps and the decision points, an
 | Kind | What it is for | What you fill in |
 |---|---|---|
 | **Agent** | A bot does real work — write the code, review the PR, run the deploy | Bot from your roster, instructions, the outcome names it may finish with, timeout (default 30 min), retries (default 2), pre-approved tools (approval keys, one per line) |
-| **Approval** | A person decides before the run continues | The prompt shown to you, expiry (default 24 h), which decision expiry takes |
+| **Approval** | A person decides before the run continues | The prompt shown to you, expiry (default 24 h), what expiry does (ask again, or take a decision), optionally a room to ask in as well |
 | **Notify** | Post a message into a room | Target room and a message template |
 
 An agent node inherits everything from the bot you picked: model, instructions, working folder, tools, memory, permissions. The workflow is the choreography; your roster is the cast.
 
 Notify templates substitute three tokens once, literally: `{{workflow}}` (the workflow's name), `{{input}}` (what started the run), and `{{summary}}` (the previous node's summary). Everything else in the template is posted as written. A notify node has one outcome, `sent`, and an approval node has exactly two, `approved` and `rejected`.
+
+### The approval node reaches you
+
+A gate is not a card you have to go and find on the canvas. When a run reaches an approval node it posts a decision card into the chat of the bot that ran the previous step (or the entry node's bot, when nothing ran before the gate) — the workflow's name and the node, the node's prompt, the previous step's summary, and **Approve** / **Reject** on the card itself — and sends the same notification every approval card sends, so the desktop banner and the companion app's push open that chat. Unlike a permission card, a gate never takes over the composer: you can keep talking to the bot, or in the room, while it waits. Pick a room under **Also ask in room** and the same card is posted there too, signed by the workflow. Approve or reject in the chat, in the room, or on the canvas: all three go through the same decision, the run takes the same edge, and every copy of the card is marked with what happened. A second answer anywhere is a no-op that tells you what was already decided. Deciding a gate needs the `admin` scope, like every other workflow action — a phone paired the normal way has it; a session paired with `omb pair --client` can see the card but not decide it.
+
+**On expiry** is what happens when the window (default 24 h) runs out with nobody answering:
+
+- **Ask again, then route to rejected** — the default for a new gate. The window is re-armed and you are asked again (fresh notification, card refreshed, a line in the room), up to **Ask again up to (times)** rounds (default 5, at most 30). Only after the last round is `rejected` taken. Every round, and every halfway reminder, is a line on the run's receipt — the timeline says *waiting for a decision since …, reminder sent at …, re-notified N×*.
+- **Route to approved** / **Route to rejected** — the window runs out once and that decision is taken.
+- A gate saved before this choice existed (no policy set) keeps the older behaviour: one window, then `rejected`.
+
+Halfway through every window you get one reminder through the same card and notification. The clocks are kept on the run, so a restart mid-wait changes nothing; cancelling the run closes its cards.
 
 ## Outcomes are the contract
 
@@ -100,7 +112,7 @@ Send the event to the webhook's `/hooks/…` endpoint on the local receiver with
 - **Per-node timeouts.** A node past its budget (default 30 minutes) is interrupted and enters the same retry path.
 - **A reconciler.** Every 10 seconds the engine re-checks every run: a turn that hung, a dispatch lost to a crash, a retry that came due, a queue with nothing running. No state ever waits without a timer, so a crash or a restart mid-run is recovered rather than mourned.
 - **FIFO fairness.** When several workflows share a bot, waiting runs are served oldest-first across all of them. One busy workflow cannot starve another.
-- **Approval gates expire.** A gate takes its default decision at the deadline (24 hours unless you change it, `rejected` unless you pick otherwise) and reminds you once at the halfway mark. A human who never answers cannot hold the queue forever.
+- **Approval gates expire — without throwing work away.** A gate reminds you halfway through its window (24 hours unless you change it) and, when the window runs out, does what its **On expiry** says: a new gate asks again, up to its round count, before taking `rejected`; a gate set to a decision takes it. A human who never answers cannot hold the queue forever, and a finished PR is not discarded because the card was on a screen nobody had open.
 - **Per-run caps.** Cycles are legal — a review loop that sends work back for another pass is exactly what you want — and a run stops after 30 node executions so a miswired loop cannot spin forever.
 
 ### What it does not

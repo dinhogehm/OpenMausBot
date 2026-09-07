@@ -11,6 +11,7 @@ import { z } from "zod";
 import {
   capabilityIssues,
   validateWorkflow,
+  WORKFLOW_APPROVAL_ON_EXPIRE,
   WORKFLOW_APPROVAL_OUTCOMES,
   WORKFLOW_CAPABILITIES,
   WORKFLOW_INTERVAL_MINUTES_MIN,
@@ -92,7 +93,14 @@ const approvalNodeSchema = z.object({
   id,
   prompt: longText,
   expiresHours: optionalNumber,
-  onExpire: z.enum(WORKFLOW_APPROVAL_OUTCOMES).optional(),
+  // Closed vocabulary, so the door refuses a policy the sweep could not
+  // honour; the range of maxRenotify stays the validator's
+  // (bad-approval-config), as every other numeric knob does.
+  onExpire: z.enum(WORKFLOW_APPROVAL_ON_EXPIRE).optional(),
+  maxRenotify: optionalNumber,
+  // A foreign key like a notify node's room; whether the room exists is
+  // judged when the gate opens (a missing room is logged, never a failure).
+  notifyTargetGroupId: id.optional(),
 });
 const notifyNodeSchema = z.object({
   kind: z.literal("notify"),
@@ -468,6 +476,40 @@ export function workflowNotificationBotId(
     if (owner !== undefined) candidates.push(owner);
   }
   return candidates.find((botId) => lookup.exists(botId));
+}
+
+/** The bot whose chat an approval gate's card lands in — the one the
+ * person already associates with the work: the bot of the LAST agent step
+ * before the gate (the reviewer that wrote the summary the card carries),
+ * or, when the gate is the entry or only notify/wait steps precede it,
+ * the entry node's bot. A bot deleted since then falls through to the
+ * general notification pick, so the card never has nowhere to go while a
+ * bot of the workflow still exists. undefined only when nobody is left. */
+export function workflowApprovalBotId(
+  workflow: Workflow | null,
+  run: WorkflowRun,
+  lookup: NotificationBotLookup,
+): string | undefined {
+  const candidates: string[] = [];
+  if (workflow) {
+    const agentById = new Map(
+      workflow.nodes.filter((node): node is AgentNode => node.kind === "agent").map((node) => [node.id, node]),
+    );
+    for (let index = run.nodeResults.length - 1; index >= 0; index--) {
+      const result = run.nodeResults[index]!;
+      const previous = agentById.get(result.nodeId);
+      if (!previous) continue;
+      candidates.push(previous.botId);
+      // The step may have run on a fallback bot: its transcript, and so the
+      // person's attention, is there when the node's own bot is gone.
+      const owner = result.threadId === undefined ? undefined : lookup.botByThread(result.threadId);
+      if (owner !== undefined) candidates.push(owner);
+      break;
+    }
+    const entry = agentById.get(workflow.entryNodeId);
+    if (entry) candidates.push(entry.botId);
+  }
+  return candidates.find((botId) => lookup.exists(botId)) ?? workflowNotificationBotId(workflow, run, lookup);
 }
 
 // ── router ────────────────────────────────────────────────────────────

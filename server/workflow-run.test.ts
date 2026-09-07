@@ -21,7 +21,11 @@ import {
   type WorkflowSchedule,
 } from "../shared/workflow.ts";
 import type { RuntimeEvent } from "./contracts.ts";
-import { WorkflowEngine } from "./workflow-run.ts";
+import {
+  WorkflowEngine,
+  type WorkflowApprovalAnnouncement,
+  type WorkflowApprovalReachKind,
+} from "./workflow-run.ts";
 import { WorkflowStore, type WorkflowInput } from "./workflow-store.ts";
 
 const dirs: string[] = [];
@@ -35,6 +39,16 @@ function tempDir() {
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+interface CapturedAnnouncement {
+  runId: string;
+  nodeId: string;
+  kind: WorkflowApprovalReachKind;
+  round: number;
+  maxRounds: number;
+  summary: string;
+  requestedAt: number | undefined;
+}
 
 interface CapturedDispatch {
   botId: string;
@@ -62,6 +76,29 @@ function harness({
   const interrupts: Array<{ botId: string; threadId: string }> = [];
   const notifications: Array<{ runId: string; message: string; kind: WorkflowNotificationKind }> = [];
   const posts: Array<{ groupId: string; text: string }> = [];
+  /** The gate's card, as the harness would post it: one entry per reach. */
+  const announcements: CapturedAnnouncement[] = [];
+  const settlements: Array<{ runId: string; threadIds: string[]; outcome: string }> = [];
+  let announceThreads: string[] = ["chat-1"];
+  let announceThrows: string | null = null;
+  const approvalReach = {
+    announce: (announcement: WorkflowApprovalAnnouncement) => {
+      if (announceThrows !== null) throw new Error(announceThrows);
+      announcements.push({
+        runId: announcement.run.id,
+        nodeId: announcement.node.id,
+        kind: announcement.kind,
+        round: announcement.round,
+        maxRounds: announcement.maxRounds,
+        summary: announcement.summary,
+        requestedAt: announcement.run.approvalRequestedAt,
+      });
+      return [...announceThreads];
+    },
+    settle: (run: WorkflowRun, threadIds: string[], outcome: string) => {
+      settlements.push({ runId: run.id, threadIds, outcome });
+    },
+  };
   let postThrows: string | null = null;
   let postMode: "sync" | "resolves" | "rejects" = "sync";
   let notifyThrows: string | null = null;
@@ -105,6 +142,7 @@ function harness({
       if (notifyThrows !== null) throw new Error(notifyThrows);
       notifications.push({ runId: run.id, message, kind });
     },
+    approvalReach,
     ...(channel
       ? {
           postGroupMessage: (groupId: string, text: string) => {
@@ -147,12 +185,20 @@ function harness({
     const restartedTasks: Array<{ botId: string; title: string }> = [];
     const restartedDispatches: CapturedDispatch[] = [];
     const restartedInterrupts: Array<{ botId: string; threadId: string }> = [];
+    const restartedNotifications: Array<{ runId: string; message: string; kind: WorkflowNotificationKind }> = [];
     let restartedSeq = 0;
     const restartedEngine = new WorkflowEngine({
       store: restartedStore,
       now: () => now,
       botState: (botId) => botStateFn(botId),
       botCapabilities: (botId) => botCapabilitiesFn(botId),
+      notifyUser: (run, message, kind) => {
+        restartedNotifications.push({ runId: run.id, message, kind });
+      },
+      // The same card hooks: a restarted process posts and settles the
+      // same way, and the captures below tell the two engines apart by
+      // what they recorded (announcements are shared by reference).
+      approvalReach,
       createTask: (botId, title) => {
         restartedTasks.push({ botId, title });
         return { threadId: `re-thread-${++restartedSeq}` };
@@ -172,6 +218,7 @@ function harness({
       tasks: restartedTasks,
       dispatches: restartedDispatches,
       interrupts: restartedInterrupts,
+      notifications: restartedNotifications,
     };
   };
   return {
@@ -182,6 +229,10 @@ function harness({
     interrupts,
     notifications,
     posts,
+    announcements,
+    settlements,
+    setAnnounceThreads: (threadIds: string[]) => (announceThreads = threadIds),
+    failAnnouncements: (message: string | null) => (announceThrows = message),
     completeTurn,
     endTurn,
     runtimeError,
@@ -1585,6 +1636,8 @@ describe("WorkflowEngine approval gate", () => {
       summary: "expired without a decision",
       startedAt: 2_000,
       endedAt: 2_000 + 2 * HOUR + 1,
+      // The reminder that went out at the halfway mark rides on the receipt.
+      notices: [{ at: 2_000 + 2 * HOUR, kind: "reminder" }],
     });
     expect(h.dispatches[1]!.botId).toBe("merger");
     // Expiry is not a failure: the only extra notification is the reminder.
@@ -1694,6 +1747,292 @@ describe("WorkflowEngine approval gate", () => {
     expect(failed.error).toMatch(/approval node/);
     expect(h.notifications[1]!.message).toMatch(/run failed at node "gate"/);
     expect(() => h.engine.resolveApproval(runId, "approved")).toThrow(/waiting for approval/);
+  });
+});
+
+// The gate reaches the person: a card in the chat (and a room) through the
+// injected `approvalReach`, then the notification — and an expiry under
+// `renotify` asks again instead of discarding the work.
+describe("WorkflowEngine approval reach", () => {
+  it("posts the card before the notification and persists the threads that carry it", () => {
+    const h = harness();
+    const workflow = h.store.create(gated());
+    const runId = reachGate(h, workflow.id);
+
+    expect(h.announcements).toEqual([
+      { runId, nodeId: "gate", kind: "approval", round: 0, maxRounds: 5, summary: "plan ready", requestedAt: 2_000 },
+    ]);
+    expect(h.notifications).toEqual([{ runId, message: "OK to proceed?", kind: "approval" }]);
+    const waiting = h.reload().getRun(runId)!;
+    expect(waiting.approvalThreadIds).toEqual(["chat-1"]);
+    expect(waiting.approvalRenotified).toBeUndefined();
+    expect(waiting.approvalNotices).toBeUndefined();
+  });
+
+  it("marks every copy of the card answered when the canvas decides, after the receipt is written", () => {
+    const h = harness();
+    h.setAnnounceThreads(["chat-1", "room-1"]);
+    const workflow = h.store.create(gated());
+    const runId = reachGate(h, workflow.id);
+    expect(h.store.getRun(runId)!.approvalThreadIds).toEqual(["chat-1", "room-1"]);
+
+    h.setNow(5_000);
+    h.engine.resolveApproval(runId, "approved");
+    expect(h.settlements).toEqual([{ runId, threadIds: ["chat-1", "room-1"], outcome: "approved" }]);
+    const settled = h.store.getRun(runId)!;
+    expect(settled.approvalThreadIds).toBeUndefined();
+    expect(settled.nodeResults[1]!.notices).toBeUndefined();
+  });
+
+  it("marks the card rejected on a rejection and unavailable on a cancel", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated());
+    const first = reachGate(h, workflow.id);
+    h.engine.resolveApproval(first, "rejected");
+    expect(h.settlements).toEqual([{ runId: first, threadIds: ["chat-1"], outcome: "rejected" }]);
+
+    const second = h.engine.startRun(workflow.id, "again", "manual");
+    expect(h.store.getRun(second.id)!.status).toBe("queued");
+    // Cancelling the running run (rework, on a bot) promotes the queued one
+    // to the gate's predecessor; drive it to the gate, then cancel.
+    await h.engine.cancelRun(first);
+    const dispatch = h.dispatches[h.dispatches.length - 1]!;
+    h.completeTurn(dispatch.threadId, envelope("done", "second plan"));
+    expect(h.store.getRun(second.id)!.status).toBe("waiting-approval");
+    await h.engine.cancelRun(second.id);
+    expect(h.settlements[1]).toEqual({ runId: second.id, threadIds: ["chat-1"], outcome: "unavailable" });
+    expect(h.store.getRun(second.id)!.approvalThreadIds).toBeUndefined();
+  });
+
+  it("marks the card unavailable when the gate's node is edited away under the run", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated());
+    const runId = reachGate(h, workflow.id);
+    h.store.update(workflow.id, {
+      nodes: [
+        { kind: "agent", id: "plan", botId: "planner", instructions: "Draft the release plan.", outcomes: ["done"] },
+        { kind: "agent", id: "merge", botId: "merger", instructions: "Merge it.", outcomes: ["done"] },
+      ],
+      edges: [{ from: "plan", outcome: "done", to: "merge" }],
+    });
+    await h.engine.tick();
+    expect(h.store.getRun(runId)!.status).toBe("failed");
+    expect(h.settlements).toEqual([{ runId, threadIds: ["chat-1"], outcome: "unavailable" }]);
+  });
+
+  it("a card that could not be posted never blocks the gate: the notification still goes out and the sweep does not retry every tick", async () => {
+    const h = harness();
+    h.failAnnouncements("chat store down");
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const workflow = h.store.create(gated());
+      const runId = reachGate(h, workflow.id);
+      expect(h.notifications).toEqual([{ runId, message: "OK to proceed?", kind: "approval" }]);
+      expect(h.store.getRun(runId)!.approvalThreadIds).toEqual([]);
+      h.setNow(3_000);
+      await h.engine.tick();
+      await h.engine.tick();
+      expect(h.notifications).toHaveLength(1);
+      // Nothing to mark when nothing was posted.
+      h.engine.resolveApproval(runId, "approved");
+      expect(h.settlements).toEqual([]);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("posts the card on the next sweep for a waiting receipt that never recorded one (crash between park and post, or an upgrade)", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated());
+    const runId = reachGate(h, workflow.id);
+    // Strip what this engine recorded, as a receipt from before cards
+    // existed would look — the store keeps the omitted key omitted.
+    h.store.patchRun(runId, { approvalThreadIds: undefined });
+    expect(h.store.getRun(runId)!.approvalThreadIds).toBeUndefined();
+
+    const restarted = h.reloadEngine();
+    h.setNow(3_000);
+    await restarted.engine.tick();
+    expect(h.announcements.map((a) => a.kind)).toEqual(["approval", "approval"]);
+    expect(restarted.notifications).toEqual([{ runId, message: "OK to proceed?", kind: "approval" }]);
+    expect(restarted.store.getRun(runId)!.approvalThreadIds).toEqual(["chat-1"]);
+    // Still the same gate opening: the card's request id did not change.
+    expect(h.announcements[1]!.requestedAt).toBe(2_000);
+  });
+
+  it("the reminder refreshes the card, buzzes, and lands on the receipt", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated({ expiresHours: 2 }));
+    const runId = reachGate(h, workflow.id);
+    h.setNow(2_000 + HOUR);
+    await h.engine.tick();
+    expect(h.announcements.map((a) => a.kind)).toEqual(["approval", "reminder"]);
+    expect(h.notifications[1]).toEqual({ runId, message: "Reminder: OK to proceed?", kind: "reminder" });
+    expect(h.reload().getRun(runId)!.approvalNotices).toEqual([{ at: 2_000 + HOUR, kind: "reminder" }]);
+
+    h.setNow(2_000 + HOUR + 60_000);
+    h.engine.resolveApproval(runId, "approved");
+    expect(h.store.getRun(runId)!.nodeResults[1]!.notices).toEqual([{ at: 2_000 + HOUR, kind: "reminder" }]);
+  });
+
+  it("renotify: an expiry re-arms the window, asks again everywhere, and each round is a receipt line", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated({ expiresHours: 2, onExpire: "renotify", maxRenotify: 2 }));
+    const runId = reachGate(h, workflow.id);
+
+    // Round 1: reminder at 1h, expiry just past 2h asks again.
+    h.setNow(2_000 + HOUR);
+    await h.engine.tick();
+    h.setNow(2_000 + 2 * HOUR + 1);
+    await h.engine.tick();
+    let run = h.reload().getRun(runId)!;
+    expect(run.status).toBe("waiting-approval");
+    expect(run.approvalRequestedAt).toBe(2_000);
+    expect(run.approvalRenotified).toBe(1);
+    expect(run.approvalRenotifiedAt).toBe(2_000 + 2 * HOUR + 1);
+    expect(run.approvalRemindedAt).toBeUndefined();
+    expect(run.approvalNotices).toEqual([
+      { at: 2_000 + HOUR, kind: "reminder" },
+      { at: 2_000 + 2 * HOUR + 1, kind: "renotify" },
+    ]);
+    expect(h.announcements.map((a) => [a.kind, a.round])).toEqual([["approval", 0], ["reminder", 0], ["renotify", 1]]);
+    expect(h.notifications[2]).toEqual({
+      runId,
+      message: "Still waiting for your decision (asked again, 1 of 2): OK to proceed?",
+      kind: "renotify",
+    });
+    expect(h.dispatches).toHaveLength(1);
+
+    // The new window has its own halfway reminder; before it, nothing.
+    h.setNow(2_000 + 2 * HOUR + 1 + HOUR - 1);
+    await h.engine.tick();
+    expect(h.notifications).toHaveLength(3);
+    h.setNow(2_000 + 2 * HOUR + 1 + HOUR);
+    await h.engine.tick();
+    expect(h.notifications[3]!.kind).toBe("reminder");
+
+    // Round 2 at the second expiry; the third expiry is the last word.
+    h.setNow(2_000 + 4 * HOUR + 2);
+    await h.engine.tick();
+    run = h.store.getRun(runId)!;
+    expect(run.status).toBe("waiting-approval");
+    expect(run.approvalRenotified).toBe(2);
+    expect(h.notifications[4]!.message).toMatch(/asked again, 2 of 2/);
+
+    h.setNow(2_000 + 6 * HOUR + 3);
+    await h.engine.tick();
+    run = h.store.getRun(runId)!;
+    expect(run.status).toBe("running");
+    expect(run.nodeResults[1]).toEqual({
+      nodeId: "gate",
+      outcome: "rejected",
+      summary: "expired without a decision after 2 re-notifications",
+      startedAt: 2_000,
+      endedAt: 2_000 + 6 * HOUR + 3,
+      notices: [
+        { at: 2_000 + HOUR, kind: "reminder" },
+        { at: 2_000 + 2 * HOUR + 1, kind: "renotify" },
+        { at: 2_000 + 3 * HOUR + 1, kind: "reminder" },
+        { at: 2_000 + 4 * HOUR + 2, kind: "renotify" },
+      ],
+    });
+    expect(run.approvalRenotified).toBeUndefined();
+    expect(run.approvalNotices).toBeUndefined();
+    expect(h.dispatches[1]!.botId).toBe("fixer");
+    expect(h.settlements).toEqual([{ runId, threadIds: ["chat-1"], outcome: "rejected" }]);
+  });
+
+  it("renotify defaults to five rounds and a decision in any round settles the gate with its history", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated({ expiresHours: 1, onExpire: "renotify" }));
+    const runId = reachGate(h, workflow.id);
+    for (let round = 1; round <= 5; round++) {
+      h.setNow(2_000 + round * (HOUR + 1));
+      await h.engine.tick();
+      expect(h.store.getRun(runId)!.approvalRenotified).toBe(round);
+      expect(h.announcements[h.announcements.length - 1]).toMatchObject({ kind: "renotify", round, maxRounds: 5 });
+    }
+    h.setNow(2_000 + 5 * (HOUR + 1) + 60_000);
+    h.engine.resolveApproval(runId, "approved");
+    const settled = h.store.getRun(runId)!;
+    expect(settled.nodeResults[1]!.summary).toBe("approved by user");
+    expect(settled.nodeResults[1]!.notices!.filter((n) => n.kind === "renotify")).toHaveLength(5);
+    expect(h.dispatches[1]!.botId).toBe("merger");
+  });
+
+  it("a second decision after the first is refused by the engine, and the receipt is untouched", () => {
+    const h = harness();
+    const workflow = h.store.create(gated());
+    const runId = reachGate(h, workflow.id);
+    h.engine.resolveApproval(runId, "approved");
+    const after = h.store.getRun(runId)!;
+    expect(() => h.engine.resolveApproval(runId, "rejected")).toThrow(/not waiting for approval/);
+    expect(h.store.getRun(runId)).toEqual(after);
+    expect(h.settlements).toHaveLength(1);
+  });
+
+  it("renotify survives a restart: the re-armed window and the round count are read from disk", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated({ expiresHours: 2, onExpire: "renotify", maxRenotify: 1 }));
+    const runId = reachGate(h, workflow.id);
+    h.setNow(2_000 + 2 * HOUR + 1);
+    await h.engine.tick();
+    expect(h.store.getRun(runId)!.approvalRenotified).toBe(1);
+
+    const restarted = h.reloadEngine();
+    // Not yet: the re-armed window runs from the re-notification, not the
+    // opening — this instant is its halfway reminder, not its end.
+    h.setNow(2_000 + 3 * HOUR + 1);
+    await restarted.engine.tick();
+    expect(restarted.store.getRun(runId)!.status).toBe("waiting-approval");
+    expect(restarted.notifications.map((n) => n.kind)).toEqual(["reminder"]);
+    // The re-armed window ends: one round was allowed, so this rejects.
+    h.setNow(2_000 + 4 * HOUR + 2);
+    await restarted.engine.tick();
+    const settled = restarted.store.getRun(runId)!;
+    expect(settled.status).toBe("running");
+    expect(settled.nodeResults[1]!.summary).toBe("expired without a decision after 1 re-notification");
+    expect(settled.nodeResults[1]!.startedAt).toBe(2_000);
+    expect(restarted.dispatches[0]!.botId).toBe("fixer");
+    expect(h.settlements).toEqual([{ runId, threadIds: ["chat-1"], outcome: "rejected" }]);
+  });
+
+  it("a gate saved without onExpire keeps the older behaviour: one window, then rejected", async () => {
+    const h = harness();
+    const workflow = h.store.create(gated({ expiresHours: 1 }));
+    const runId = reachGate(h, workflow.id);
+    h.setNow(2_000 + HOUR + 1);
+    await h.engine.tick();
+    expect(h.store.getRun(runId)!.nodeResults[1]!.outcome).toBe("rejected");
+    expect(h.announcements.map((a) => a.kind)).toEqual(["approval"]);
+  });
+
+  it("a cycle through the same gate opens a fresh card each time", async () => {
+    const h = harness();
+    // gate approved --> loop (agent) --done--> gate; rejected --> end.
+    const workflow = h.store.create({
+      name: "Loop gate",
+      entryNodeId: "gate",
+      nodes: [
+        { kind: "approval", id: "gate", prompt: "Again?" },
+        { kind: "agent", id: "loop", botId: "looper", instructions: "Go.", outcomes: ["done"] },
+        { kind: "agent", id: "end", botId: "ender", instructions: "Stop.", outcomes: ["done"] },
+      ],
+      edges: [
+        { from: "gate", outcome: "approved", to: "loop" },
+        { from: "gate", outcome: "rejected", to: "end" },
+        { from: "loop", outcome: "done", to: "gate" },
+      ],
+      layout: {},
+    });
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(3_000);
+    h.engine.resolveApproval(run.id, "approved");
+    h.setNow(4_000);
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)!.status).toBe("waiting-approval");
+    expect(h.announcements.map((a) => a.requestedAt)).toEqual([1_000, 4_000]);
+    expect(h.settlements).toEqual([{ runId: run.id, threadIds: ["chat-1"], outcome: "approved" }]);
   });
 });
 

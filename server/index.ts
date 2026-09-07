@@ -250,7 +250,7 @@ import { fetchSkillFromSource } from "./skill-fetch.ts";
 import { expandLearnTurnText, learnSource } from "./skill-learn.ts";
 import { expandSetupTurnText, setupModeActive, setupSystemPrompt } from "./setup-mode.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
-import type { BotCapabilities } from "../shared/workflow.ts";
+import type { BotCapabilities, Workflow, WorkflowRun } from "../shared/workflow.ts";
 import { checkSoulDrift, readSoulDrift, soulFile, writeSoulMirror } from "./bot-folder.ts";
 import {
   buildSystemPrompt,
@@ -277,7 +277,12 @@ import { RepeatDetector, callKey } from "./repeat-detector.ts";
 import { redactSecretsInText } from "./redact.ts";
 import * as vps from "./vps-computer.ts";
 import { nextOccurrence, RoutineManager, type RoutineRun, type RoutineRunOn, type RoutineRunTrigger } from "./routines.ts";
-import { handleWorkflowRequest, workflowNotificationBotId } from "./workflow-api.ts";
+import { handleWorkflowRequest, workflowApprovalBotId, workflowNotificationBotId } from "./workflow-api.ts";
+import {
+  createWorkflowApprovalReach,
+  resolveWorkflowApprovalCard,
+  type WorkflowApprovalReachStore,
+} from "./workflow-approval-reach.ts";
 import { WorkflowEngine } from "./workflow-run.ts";
 import { turnProvenanceFor, unattendedByEither, type TurnProvenance } from "./turn-provenance.ts";
 import { denyUnattendedWorkflowCard } from "./workflow-unattended-card.ts";
@@ -340,6 +345,7 @@ import {
   resolveRequestAuth,
   serializeSessionCookie,
   sessionCookieName,
+  type RequestAuth,
 } from "./request-auth.ts";
 import { formatPairingCode, SESSION_TTL_MS, SessionRegistry, type Scope } from "./sessions.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
@@ -2253,7 +2259,10 @@ function closeOpenApprovals(threadId: string): void {
   for (const message of store.messagesFor(threadId)) {
     const card = message.card;
     if (!card?.requestId || card.answered || card.dismissed) continue;
-    if (card.routineRequest || card.skillRequest) continue;
+    // A workflow gate's card is owned by the engine, not by any turn: it
+    // stays open until the gate settles, and closing it here would leave
+    // a run waiting on a card nobody can answer.
+    if (card.routineRequest || card.skillRequest || card.workflowApproval) continue;
     store.patchMessage(threadId, message.id, { card: { ...card, answered: "unavailable", dismissed: true } });
     askMessageByRequest.delete(`${threadId}:${card.requestId}`);
   }
@@ -5006,6 +5015,38 @@ const botCapabilities = (botId: string): BotCapabilities | null => {
   const bot = store.bot(botId);
   return bot ? { canMerge: bot.canMerge === true, canDeploy: bot.canDeploy === true } : null;
 };
+const workflowBotLookup = {
+  exists: (candidate: string) => Boolean(store.bot(candidate)),
+  botByThread: (threadId: string) => store.botByThread(threadId)?.id,
+};
+/** The chat an approval gate's card (and its notification) lands in: the
+ * bot of the step before the gate, whose transcript the person is already
+ * following. One pick shared by the card and the buzz, so the tap on the
+ * notification opens the thread that carries the card. */
+const workflowApprovalBot = (workflow: Workflow | null, run: WorkflowRun) =>
+  workflowApprovalBotId(workflow, run, workflowBotLookup);
+/** The gate's card in a bot's chat and, when the node names one, a room —
+ * the same option-card mechanism a routine proposal uses (durable, a
+ * `requestId` the respond routes intercept), posted with the same store
+ * calls a notify node's channel post makes. */
+const workflowApprovalReachStore: WorkflowApprovalReachStore = {
+  messagesFor: (threadId) => store.messagesFor(threadId),
+  appendMessage: (threadId, message) => store.appendMessage(threadId, message),
+  patchMessage: (threadId, messageId, patch) => store.patchMessage(threadId, messageId, patch),
+  botThread: (botId) => store.bot(botId)?.threadId ?? null,
+  groupThread: (groupId) => store.group(groupId)?.threadId ?? null,
+  markBotUnread: (botId) => {
+    store.patchBot(botId, { unread: true });
+  },
+  markGroupUnread: (groupId) => {
+    store.patchGroup(groupId, { unread: true });
+  },
+};
+const workflowApprovalReach = createWorkflowApprovalReach({
+  store: workflowApprovalReachStore,
+  botFor: ({ workflow, run }) => workflowApprovalBot(workflow, run),
+  roomAuthor: WORKFLOW_AUTHOR,
+});
 workflowEngine = new WorkflowEngine({
   store: workflowStore,
   emit: broadcast,
@@ -5066,12 +5107,15 @@ workflowEngine = new WorkflowEngine({
   // other agent node's, then the owner of the run's task threads — which is
   // what is left when the workflow itself was deleted under the run. Only a
   // run with nobody left to tell logs instead.
+  approvalReach: workflowApprovalReach,
   notifyUser: (run, message, kind) => {
     const workflow = workflowStore?.get(run.workflowId) ?? null;
-    const botId = workflowNotificationBotId(workflow, run, {
-      exists: (candidate) => Boolean(store.bot(candidate)),
-      botByThread: (threadId) => store.botByThread(threadId)?.id,
-    });
+    // A gate's buzz opens the chat that carries its card — the same pick
+    // the card was posted with — so the tap lands on the decision.
+    const gateKind = kind === "approval" || kind === "reminder" || kind === "renotify";
+    const botId = gateKind
+      ? workflowApprovalBot(workflow, run)
+      : workflowNotificationBotId(workflow, run, workflowBotLookup);
     const bot = botId === undefined ? undefined : store.bot(botId);
     if (!bot) {
       console.warn(`workflow: no bot to notify for run ${run.id} (${kind}) of workflow ${run.workflowId}`);
@@ -5268,6 +5312,58 @@ function resolveAndSendRoutine(
     });
   }
   return sendRoutineResolution(res, result);
+}
+/** A click on a workflow gate's card, from the bot's chat or a room. The
+ * decision is the engine's own `resolveApproval` — the canvas's route —
+ * so all three places settle the same receipt; a second click answers
+ * what already happened. Logged as a person's decision like every other
+ * card a human answered. */
+function resolveAndSendWorkflowApproval(
+  res: ServerResponse,
+  auth: RequestAuth,
+  args: { threadId: string; requestId: string; behavior: string },
+): boolean {
+  if (!workflowEngine || !workflowStore) return false;
+  const engine = workflowEngine;
+  const runs = workflowStore;
+  // The respond routes are client-allowed (a paired phone answers permission
+  // cards), but a gate decides what /api/workflows/* only lets an admin
+  // start, cancel or approve: the same scope applies to the card, whoever
+  // clicks it. Judged only once the card is known to be a gate's, so an
+  // ordinary card on the same thread is untouched. A default pairing holds
+  // admin; only `omb pair --client` does not.
+  const isGateCard = store
+    .messagesFor(args.threadId)
+    .some((message) => message.card?.requestId === args.requestId && message.card.workflowApproval);
+  if (isGateCard && auth.kind === "session" && !auth.scopes.includes("admin")) {
+    json(res, 403, { error: "forbidden: deciding a workflow approval needs the admin scope" });
+    return true;
+  }
+  const result = resolveWorkflowApprovalCard(
+    {
+      store: workflowApprovalReachStore,
+      resolve: (runId, decision) => engine.resolveApproval(runId, decision),
+      run: (runId) => runs.getRun(runId),
+    },
+    args,
+  );
+  if (!result.claimed) return false;
+  if (result.status === 200 && "decision" in result.body) {
+    const card = store.messagesFor(args.threadId).find((message) => message.card?.requestId === args.requestId)?.card;
+    const owner = store.botByThread(args.threadId);
+    appendDecision(DATA_DIR, {
+      threadId: args.threadId,
+      requestId: args.requestId,
+      botId: owner?.id,
+      botName: owner?.name,
+      tool: card?.tool,
+      summary: card?.subtitle,
+      decision: result.body.decision === "approved" ? "user-approved" : "user-denied",
+      source: "user",
+    });
+  }
+  json(res, result.status, result.body);
+  return true;
 }
 function resolveAndSendProfile(
   res: ServerResponse,
@@ -11682,6 +11778,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const behavior = requestBehavior(body.behavior);
       const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
+      // A workflow gate's card is harness-owned like a routine proposal:
+      // resolved here, never handed to the provider adapter.
+      if (resolveAndSendWorkflowApproval(res, auth, { threadId: bot.threadId, requestId: String(body.requestId), behavior })) return;
       if (resolveAndSendRoutine(res, {
         botId: bot.id,
         botName: bot.name,
@@ -11724,6 +11823,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const reviewedSha256 = typeof body.reviewedSha256 === "string" ? body.reviewedSha256 : undefined;
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
       const requestId = String(body.requestId);
+      // A room copy of a workflow gate's card: same engine call as the
+      // canvas, and the bot's chat copy is marked answered by the engine.
+      if (resolveAndSendWorkflowApproval(res, auth, { threadId, requestId, behavior })) return;
       const skillCard = store.messagesFor(threadId).find(
         (message) => message.card?.requestId === requestId && message.card.skillRequest,
       );

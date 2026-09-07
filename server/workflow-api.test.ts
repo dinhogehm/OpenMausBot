@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BotCapabilities, Workflow, WorkflowIssue, WorkflowRun } from "../shared/workflow.ts";
 import {
   handleWorkflowRequest,
+  workflowApprovalBotId,
   workflowNotificationBotId,
   type NotificationBotLookup,
   type WorkflowApiDeps,
@@ -895,5 +896,108 @@ describe("workflow fallback bot and provider outage", () => {
     const cleared = await call("PATCH", `/api/workflows/${id}`, { providerOutage: null });
     expect(cleared?.status).toBe(200);
     expect(store.get(id)?.providerOutage).toBeUndefined();
+  });
+});
+
+describe("approval node expiry policy", () => {
+  const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);
+  const gateWith = (extra: Record<string, unknown>): WorkflowInput => ({
+    ...gateGraph(),
+    nodes: [{ ...gateGraph().nodes[0]!, ...extra } as WorkflowInput["nodes"][number]],
+  });
+
+  it("stores onExpire renotify, maxRenotify and the room, reloads them from disk, and clears them on null", async () => {
+    const { call, store, reload } = harness();
+    const created = await call("POST", "/api/workflows", gateWith({ onExpire: "renotify", maxRenotify: 3, notifyTargetGroupId: "grp-1" }));
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(codes(bodyOf(created).workflow.issues)).not.toContain("bad-approval-config");
+    expect(reload().get(id)?.nodes[0]).toMatchObject({ onExpire: "renotify", maxRenotify: 3, notifyTargetGroupId: "grp-1" });
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...gateGraph().nodes[0], onExpire: null, maxRenotify: null, notifyTargetGroupId: null }],
+    });
+    expect(cleared?.status).toBe(200);
+    const node = store.get(id)?.nodes[0];
+    expect(node).not.toHaveProperty("onExpire");
+    expect(node).not.toHaveProperty("maxRenotify");
+    expect(node).not.toHaveProperty("notifyTargetGroupId");
+  });
+
+  it("refuses an unknown policy and a non-number at the door; paints an out-of-range round count as bad-approval-config", async () => {
+    const { call } = harness();
+    const unknown = await call("POST", "/api/workflows", gateWith({ onExpire: "ask-again" }));
+    expect(unknown?.status).toBe(400);
+    expect(bodyOf(unknown).error).toMatch(/^nodes\.0\.onExpire/);
+    const shape = await call("POST", "/api/workflows", gateWith({ maxRenotify: "5" }));
+    expect(shape?.status).toBe(400);
+    expect(bodyOf(shape).error).toMatch(/^nodes\.0\.maxRenotify/);
+    const blankRoom = await call("POST", "/api/workflows", gateWith({ notifyTargetGroupId: "" }));
+    expect(blankRoom?.status).toBe(400);
+
+    const tooMany = await call("POST", "/api/workflows", gateWith({ onExpire: "renotify", maxRenotify: 31 }));
+    expect(tooMany?.status).toBe(201); // a draft saves; the badge says why it will not run
+    expect(codes(bodyOf(tooMany).workflow.issues)).toContain("bad-approval-config");
+    const id = bodyOf(tooMany).workflow.id as string;
+    const refused = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(refused?.status).toBe(400);
+    expect(bodyOf(refused).error).toMatch(/maxRenotify must be a whole number from 1 to 30/);
+  });
+});
+
+describe("workflowApprovalBotId", () => {
+  const run = (overrides: Partial<Pick<WorkflowRun, "currentNodeId" | "nodeResults">> = {}): WorkflowRun => ({
+    id: "r",
+    workflowId: "w",
+    status: "waiting-approval",
+    attempt: 0,
+    input: "",
+    nodeResults: [],
+    startedAt: 1,
+    currentNodeId: "gate",
+    ...overrides,
+  });
+  const workflow = (entryNodeId: string, nodes: Workflow["nodes"]): Workflow => ({
+    id: "w",
+    name: "W",
+    entryNodeId,
+    nodes,
+    edges: [],
+    layout: {},
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const lookup = (bots: string[], threads: Record<string, string> = {}): NotificationBotLookup => ({
+    exists: (botId) => bots.includes(botId),
+    botByThread: (threadId) => threads[threadId],
+  });
+  const result = (nodeId: string, threadId?: string) => ({ nodeId, outcome: "ok", summary: "", threadId, startedAt: 1, endedAt: 2 });
+  const graph = workflow("triage", [
+    { kind: "agent", id: "triage", botId: "bot-t", instructions: "", outcomes: ["ok"] },
+    { kind: "agent", id: "review", botId: "bot-r", instructions: "", outcomes: ["ok"] },
+    { kind: "notify", id: "ping", targetGroupId: "g", template: "t" },
+    { kind: "approval", id: "gate", prompt: "?" },
+  ]);
+
+  it("picks the bot of the last AGENT step before the gate, looking past notify and wait steps", () => {
+    const all = lookup(["bot-t", "bot-r"]);
+    expect(workflowApprovalBotId(graph, run({ nodeResults: [result("triage"), result("review")] }), all)).toBe("bot-r");
+    expect(workflowApprovalBotId(graph, run({ nodeResults: [result("triage"), result("review"), result("ping")] }), all)).toBe("bot-r");
+  });
+
+  it("falls back to the entry node's bot when no agent step precedes the gate", () => {
+    expect(workflowApprovalBotId(graph, run(), lookup(["bot-t", "bot-r"]))).toBe("bot-t");
+    expect(workflowApprovalBotId(graph, run({ nodeResults: [result("ping")] }), lookup(["bot-t", "bot-r"]))).toBe("bot-t");
+  });
+
+  it("prefers the thread's owner (a fallback bot) when the node's own bot is gone, then the entry, then the general pick", () => {
+    const results = run({ nodeResults: [result("triage"), result("review", "t-r")] });
+    expect(workflowApprovalBotId(graph, results, lookup(["bot-f", "bot-t"], { "t-r": "bot-f" }))).toBe("bot-f");
+    expect(workflowApprovalBotId(graph, results, lookup(["bot-t"], { "t-r": "bot-f" }))).toBe("bot-t");
+    // Entry gone too: the first surviving agent bot in graph order.
+    const other = workflow("gate", [...graph.nodes]);
+    expect(workflowApprovalBotId(other, results, lookup(["bot-t"]))).toBe("bot-t");
+    expect(workflowApprovalBotId(null, results, lookup(["bot-f"], { "t-r": "bot-f" }))).toBe("bot-f");
+    expect(workflowApprovalBotId(graph, results, lookup([]))).toBeUndefined();
   });
 });

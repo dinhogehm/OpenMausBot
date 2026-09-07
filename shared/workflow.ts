@@ -30,6 +30,19 @@ export const WORKFLOW_WAIT_MINUTES_MAX = 1_440;
  * would be re-armed faster than a single bot turn usually finishes. */
 export const WORKFLOW_INTERVAL_MINUTES_MIN = 5;
 export const WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H = 24;
+/** What an approval gate does when its window runs out: take a decision
+ * (`approved` / `rejected`), or — `renotify` — re-arm the window and ask
+ * again, up to `maxRenotify` rounds, and only then reject. The live pipeline
+ * lost a finished PR to the 24-hour default because the person never saw
+ * the card; a gate that keeps asking cannot silently discard work. */
+export const WORKFLOW_APPROVAL_ON_EXPIRE = ["approved", "rejected", "renotify"] as const;
+export type WorkflowApprovalOnExpire = (typeof WORKFLOW_APPROVAL_ON_EXPIRE)[number];
+/** What a NEW approval node gets; a node saved without `onExpire` keeps the
+ * older `rejected` behaviour, so existing definitions do not change. */
+export const WORKFLOW_APPROVAL_ON_EXPIRE_DEFAULT_NEW: WorkflowApprovalOnExpire = "renotify";
+export const WORKFLOW_APPROVAL_RENOTIFY_DEFAULT = 5;
+export const WORKFLOW_APPROVAL_RENOTIFY_MIN = 1;
+export const WORKFLOW_APPROVAL_RENOTIFY_MAX = 30;
 /** A provider outage (5xx, a 404 from the provider's own backend, rate
  * limiting, a dropped connection, an engine process dying before it
  * answered) is waited out rather than retried: the run parks with a
@@ -89,7 +102,22 @@ export type WorkflowNode =
        * is free, and carries every capability in `requires`. */
       fallbackBotId?: string;
     }
-  | { kind: "approval"; id: string; prompt: string; expiresHours?: number; onExpire?: "approved" | "rejected" }
+  | {
+      kind: "approval";
+      id: string;
+      prompt: string;
+      expiresHours?: number;
+      /** Absent means `rejected` — the behaviour every gate had before
+       * `renotify` existed, kept for definitions saved back then. */
+      onExpire?: WorkflowApprovalOnExpire;
+      /** How many times a `renotify` gate asks again before it rejects
+       * (WORKFLOW_APPROVAL_RENOTIFY_DEFAULT when absent). */
+      maxRenotify?: number;
+      /** A room the gate's card is posted to as well as the bot's own chat,
+       * so a team sees it where it talks; a decision there settles the gate
+       * exactly as one in the chat or on the canvas does. */
+      notifyTargetGroupId?: string;
+    }
   | { kind: "notify"; id: string; targetGroupId: string; template: string }
   /** A pause: no bot, no thread — the run sits on `waitUntil` and the
    * engine's tick moves it on. This is what makes a continuous cycle
@@ -179,11 +207,50 @@ export type WorkflowRunStatus = "queued" | "running" | "waiting-approval" | "com
 export type WorkflowRunTrigger = "manual" | "schedule" | "webhook";
 
 /** Why the engine is calling notifyUser: a run paused on a terminal failure,
- * an approval gate opened, that gate's single reminder, or a continuous
- * cycle that COMPLETED because its execution cap closed the valve — a run
- * that ends after hundreds of bot turns is an event to see even when it is
- * not a failure. */
-export type WorkflowNotificationKind = "failed" | "approval" | "reminder" | "cap-reached";
+ * an approval gate opened, that gate's mid-window reminder, a gate that
+ * expired and is asking AGAIN (`renotify`), or a continuous cycle that
+ * COMPLETED because its execution cap closed the valve — a run that ends
+ * after hundreds of bot turns is an event to see even when it is not a
+ * failure. */
+export type WorkflowNotificationKind = "failed" | "approval" | "reminder" | "renotify" | "cap-reached";
+
+/** The kinds of notice an open gate sends after the first one. */
+export type WorkflowApprovalNoticeKind = "reminder" | "renotify";
+
+/** One line of the gate's receipt: when the person was nudged, and how.
+ * Kept on the run while the gate is open and copied onto the node's result
+ * when it settles, so "re-notified 3×, then approved" is readable after the
+ * fact and not only while it is happening. */
+export interface WorkflowApprovalNotice {
+  at: number;
+  kind: WorkflowApprovalNoticeKind;
+}
+
+/** The durable payload of a gate's option card in a bot's chat or a room:
+ * enough for the respond route to find the run and settle it through the
+ * same engine call the canvas uses, without a provider request behind it. */
+export interface WorkflowApprovalCardData {
+  runId: string;
+  workflowId: string;
+  nodeId: string;
+}
+
+/** The option labels a gate's card offers. "Deny" rather than "Reject"
+ * because the companion app maps only deny/cancel/dismiss to a refusal and
+ * treats any other label as consent — a "Reject" button that approved a
+ * merge would be worse than an ugly word. */
+export const WORKFLOW_APPROVAL_CARD_OPTIONS = ["Approve", "Deny"] as const;
+/** The pseudo-tool name on the gate's card; it is what makes the clients
+ * treat the card as an approval (decision in the composer, allow/deny on
+ * the wire) rather than a free-text question. */
+export const WORKFLOW_APPROVAL_CARD_TOOL = "workflow_approval";
+
+/** The request id of a gate's card: one per OPENING of the gate, so a run
+ * that visits the same approval node twice (a cycle) gets a fresh card each
+ * time and a stale click on the older one cannot settle the newer gate. */
+export function workflowApprovalRequestId(run: Pick<WorkflowRun, "id" | "currentNodeId" | "approvalRequestedAt">): string {
+  return `workflow-approval:${run.id}:${run.currentNodeId ?? ""}:${run.approvalRequestedAt ?? 0}`;
+}
 
 export interface WorkflowNodeResult {
   nodeId: string;
@@ -202,6 +269,9 @@ export interface WorkflowNodeResult {
    * its fallback bot instead: who ran it and the provider error that made
    * the engine switch. A receipt that says "done" must also say by whom. */
   fallback?: WorkflowFallbackRecord;
+  /** An approval gate's reminders and re-notifications, in order. Present
+   * only on a gate's result and only when at least one went out. */
+  notices?: WorkflowApprovalNotice[];
 }
 
 export interface WorkflowFallbackRecord {
@@ -275,8 +345,28 @@ export interface WorkflowRun {
   /** When the current approval gate opened; the expiry and reminder clocks
    * run from it, so it must survive a restart (engine bookkeeping). */
   approvalRequestedAt?: number;
-  /** Set once the gate's single mid-window reminder went out (engine bookkeeping). */
+  /** Set once the CURRENT window's single mid-way reminder went out; a
+   * re-notification opens a new window and clears it (engine bookkeeping). */
   approvalRemindedAt?: number;
+  /** How many times the gate expired and asked again (`onExpire:
+   * "renotify"`), and when the last of those windows opened: the expiry
+   * and reminder clocks run from `approvalRenotifiedAt ?? approvalRequestedAt`,
+   * while `approvalRequestedAt` stays the instant the gate OPENED, so the
+   * receipt's startedAt and the "waiting since" line survive every round
+   * (engine bookkeeping). */
+  approvalRenotified?: number;
+  approvalRenotifiedAt?: number;
+  /** Every reminder and re-notification of the open gate, oldest first;
+   * copied onto the node's result when the gate settles (engine bookkeeping). */
+  approvalNotices?: WorkflowApprovalNotice[];
+  /** The threads the gate's card was posted to (the bot's chat, a room),
+   * so a decision taken anywhere else — the canvas, the other thread, an
+   * expiry — can mark every copy answered, across a restart. `[]` records
+   * that nobody could be reached, which stops the sweep from trying every
+   * tick; absent means the card was never posted (a receipt written before
+   * cards existed, or a crash between the park and the post) and the next
+   * sweep posts it (engine bookkeeping). */
+  approvalThreadIds?: string[];
   /** When the current wait node's pause ends (engine bookkeeping). A run
    * carrying this is parked, not stranded: the tick advances it once the
    * instant passes, and a restart changes nothing because it is persisted.
@@ -411,6 +501,7 @@ export interface WorkflowIssue {
     | "fallback-same-bot"
     | "fallback-missing-bot"
     | "fallback-missing-capability"
+    | "bad-approval-config"
     | "cycle-without-wait";
   nodeId?: string;
   message: string;
@@ -611,8 +702,36 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
       if (node.retries !== undefined && !whole(node.retries, 0)) {
         badNumber(`Node "${node.id}" retries must be a whole number of zero or more.`, node.id);
       }
-    } else if (node.kind === "approval" && node.expiresHours !== undefined && !positive(node.expiresHours)) {
-      badNumber(`Node "${node.id}" expiresHours must be a positive number.`, node.id);
+    } else if (node.kind === "approval") {
+      if (node.expiresHours !== undefined && !positive(node.expiresHours)) {
+        badNumber(`Node "${node.id}" expiresHours must be a positive number.`, node.id);
+      }
+      // The expiry policy feeds the sweep directly: an unknown policy would
+      // fall through to the older default and silently discard work, a
+      // round count outside the range is either "never asks" or "asks for
+      // a month", and a blank room id is a post the notify path would throw
+      // on at 3am. A raw JSON body may carry any of these.
+      const badConfig = (message: string) => {
+        issues.push({ severity: "error", code: "bad-approval-config", nodeId: node.id, message });
+      };
+      const onExpire: unknown = node.onExpire;
+      if (onExpire !== undefined && !(WORKFLOW_APPROVAL_ON_EXPIRE as readonly unknown[]).includes(onExpire)) {
+        badConfig(`Node "${node.id}" onExpire must be one of ${WORKFLOW_APPROVAL_ON_EXPIRE.join(", ")}.`);
+      }
+      if (
+        node.maxRenotify !== undefined &&
+        (!whole(node.maxRenotify, WORKFLOW_APPROVAL_RENOTIFY_MIN) || node.maxRenotify > WORKFLOW_APPROVAL_RENOTIFY_MAX)
+      ) {
+        badConfig(
+          `Node "${node.id}" maxRenotify must be a whole number from ${WORKFLOW_APPROVAL_RENOTIFY_MIN} to ${WORKFLOW_APPROVAL_RENOTIFY_MAX}.`,
+        );
+      }
+      if (
+        node.notifyTargetGroupId !== undefined &&
+        (typeof node.notifyTargetGroupId !== "string" || !node.notifyTargetGroupId.trim())
+      ) {
+        badConfig(`Node "${node.id}" names a blank room to notify.`);
+      }
     } else if (
       node.kind === "wait" &&
       (!whole(node.minutes, WORKFLOW_WAIT_MINUTES_MIN) || node.minutes > WORKFLOW_WAIT_MINUTES_MAX)

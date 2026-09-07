@@ -412,7 +412,14 @@ describe("insertNode / nextNodeId / createWorkflowNode", () => {
   it("needs a bot for an agent node and a room for a notify node", () => {
     expect(createWorkflowNode("agent", "agent-9", {})).toBeNull();
     expect(createWorkflowNode("notify", "notify-9", {})).toBeNull();
-    expect(createWorkflowNode("approval", "approval-9", {})).toMatchObject({ kind: "approval", prompt: "" });
+    // A new gate re-notifies on expiry; only nodes saved before the policy
+    // existed (no onExpire) keep the older reject-on-expiry.
+    expect(createWorkflowNode("approval", "approval-9", {})).toEqual({
+      kind: "approval",
+      id: "approval-9",
+      prompt: "",
+      onExpire: "renotify",
+    });
     expect(createWorkflowNode("agent", "agent-9", { botId: "bot-a" })).toEqual({
       kind: "agent",
       id: "agent-9",

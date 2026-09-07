@@ -44,10 +44,24 @@ export function isProfileApproval(pending: Pending): boolean {
   return Boolean(pending.message.card?.profileRequest);
 }
 
-/** Open approvals on a thread, oldest first — answered/dismissed drop out. */
+
+/** Open approvals on a thread, oldest first — answered/dismissed drop out.
+ * A workflow gate's card is NOT one of these: it can sit open for days
+ * (its window times its re-notification rounds), and a card that took over
+ * the composer for that long would silence the reviewer's chat and the
+ * room. The gate is decided on the card itself (ApprovalCard's buttons);
+ * the composer stays free. */
 export function pendingApprovals(messages: Message[]): Pending[] {
   return messages
-    .filter((m) => m.kind === "options" && m.card?.requestId && m.card.tool && !m.card.answered && !m.card.dismissed)
+    .filter(
+      (m) =>
+        m.kind === "options" &&
+        m.card?.requestId &&
+        m.card.tool &&
+        !m.card.workflowApproval &&
+        !m.card.answered &&
+        !m.card.dismissed,
+    )
     .map((m) => ({
       message: m,
       requestId: m.card!.requestId!,

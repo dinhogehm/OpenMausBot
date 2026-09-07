@@ -219,3 +219,88 @@ describe("WorkflowNodePanel — wait", () => {
     expect(flat).toContain("elapsed");
   });
 });
+
+describe("WorkflowNodePanel — approval gate", () => {
+  type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
+  const gate = (overrides: Partial<ApprovalNode> = {}): ApprovalNode => ({ kind: "approval", id: "gate", prompt: "Merge?", ...overrides });
+  const rooms = [
+    { id: "grp-1", name: "Deploys" },
+    { id: "grp-2", name: "Reviews" },
+  ];
+  const gatePanel = (node: WorkflowNode, groups = rooms) =>
+    renderToStaticMarkup(
+      createElement(WorkflowNodePanel, {
+        node,
+        issues: [],
+        entry: false,
+        bots: [scout],
+        groups,
+        outcomes: outcomeHandles(node),
+        targets: [],
+        routes: {},
+        onRoute: vi.fn(),
+        onUpdate: vi.fn(),
+        onAddOutcome: vi.fn(),
+        onRenameOutcome: vi.fn(),
+        onRemoveOutcome: vi.fn(),
+        onMakeEntry: vi.fn(),
+        onDelete: vi.fn(),
+        onClose: vi.fn(),
+      }),
+    );
+  const expirySelect = (markup: string) => markup.match(/<select id="wf-gate-on-expire"[\s\S]*?<\/select>/)?.[0] ?? "";
+  const roomSelect = (markup: string) => markup.match(/<select id="wf-gate-approval-room"[\s\S]*?<\/select>/)?.[0] ?? "";
+
+  it("offers the three expiry policies, with the unset choice honest about what the engine does", () => {
+    const select = expirySelect(gatePanel(gate()));
+    expect(select).toMatch(/<option value="" selected="">Route to rejected \(unset\)<\/option>/);
+    expect(select).toContain('<option value="renotify">Ask again, then route to rejected</option>');
+    expect(select).toContain('<option value="approved">Route to approved</option>');
+    expect(select).toContain('<option value="rejected">Route to rejected</option>');
+    expect(expirySelect(gatePanel(gate({ onExpire: "renotify" })))).toMatch(/<option value="renotify" selected="">/);
+  });
+
+  it("shows the round count only under the renotify policy, with its default and bounds", () => {
+    const flat = text(gatePanel(gate({ onExpire: "renotify", maxRenotify: 3 })));
+    expect(flat).toContain("Ask again up to (times)");
+    expect(flat).toContain("(1–30 rounds)");
+    expect(gatePanel(gate({ onExpire: "renotify", maxRenotify: 3 }))).toMatch(/<input id="wf-gate-max-renotify"[^>]*value="3"/);
+    expect(gatePanel(gate({ onExpire: "renotify" }))).toMatch(/<input id="wf-gate-max-renotify"[^>]*placeholder="5"/);
+    expect(text(gatePanel(gate({ onExpire: "rejected" })))).not.toContain("Ask again up to");
+    expect(text(gatePanel(gate()))).not.toContain("Ask again up to");
+  });
+
+  it("offers every room with 'none' first, keeps a room the roster lost as missing, and says where the card always lands", () => {
+    const none = roomSelect(gatePanel(gate()));
+    expect(none).toMatch(/<option value="" selected="">None — the bot&#x27;s chat only<\/option>/);
+    expect(none).toContain('<option value="grp-1">Deploys</option>');
+    expect(none).not.toContain("Missing room");
+
+    const picked = roomSelect(gatePanel(gate({ notifyTargetGroupId: "grp-2" })));
+    expect(picked).toMatch(/<option value="grp-2" selected="">Reviews<\/option>/);
+
+    const missing = roomSelect(gatePanel(gate({ notifyTargetGroupId: "gone" })));
+    expect(missing).toMatch(/<option value="missing" disabled="" selected="">Missing room gone<\/option>/);
+
+    expect(text(gatePanel(gate()))).toContain("always lands in the chat of the bot that ran the previous step");
+  });
+
+  it("writes the room id when one is picked and drops the key on 'none'; leaving renotify drops the round count", () => {
+    // renderToStaticMarkup cannot fire events; the edits are the whole-node
+    // replacements the selects call, pinned here as data.
+    const withRoom: ApprovalNode = { ...gate(), notifyTargetGroupId: "grp-1" };
+    const { notifyTargetGroupId: _room, ...noRoom } = withRoom;
+    expect(_room).toBe("grp-1");
+    expect(noRoom).toEqual(gate());
+    const renotifying = gate({ onExpire: "renotify", maxRenotify: 4 });
+    const { maxRenotify: _rounds, ...rest } = renotifying;
+    expect(_rounds).toBe(4);
+    expect({ ...rest, onExpire: "approved" }).toEqual(gate({ onExpire: "approved" }));
+  });
+
+  it("only offers the expiry policy and the room on approval nodes", () => {
+    const markup = panel(agent(), [scout]);
+    expect(markup).not.toContain('id="wf-agent-1-on-expire"');
+    expect(markup).not.toContain('id="wf-agent-1-approval-room"');
+  });
+});
