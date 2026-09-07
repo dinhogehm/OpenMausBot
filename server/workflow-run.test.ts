@@ -2871,17 +2871,20 @@ describe("WorkflowEngine wait node", () => {
     expect(h.notifications).toHaveLength(1);
   });
 
-  it("stamps the receipt from the persisted start, not from the node's minutes as edited mid-pause", async () => {
+  it("re-reads the node's minutes mid-pause from the persisted start, in both directions", async () => {
     const h = harness();
     const workflow = h.store.create(pausing(5));
     const run = h.engine.startRun(workflow.id, "go", "manual");
     h.setNow(10_000);
     h.completeTurn("thread-1", envelope("done"));
     expect(h.store.getRun(run.id)).toMatchObject({ waitStartedAt: 10_000, waitUntil: 10_000 + 5 * MIN });
-    // The author lengthens the pause while it runs: the parked instant is
-    // what it was, and so is the step's start.
+    // Lengthened while parked: still measured from the same start.
     h.store.update(workflow.id, pausing(60));
     h.setNow(10_000 + 5 * MIN);
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "pause", waitUntil: 10_000 + 60 * MIN });
+    // Shortened again: over at once.
+    h.store.update(workflow.id, pausing(2));
     await h.engine.tick();
     const advanced = h.store.getRun(run.id)!;
     expect(advanced.nodeResults[1]).toMatchObject({ nodeId: "pause", startedAt: 10_000, endedAt: 10_000 + 5 * MIN, summary: "Waited 5 min" });
@@ -2938,6 +2941,98 @@ describe("WorkflowEngine wait node", () => {
     await h.engine.tick();
     expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
     expect(h.store.getRun(run.id)!.nodeResults[1]).toMatchObject({ startedAt: local(MONDAY, 10), summary: "Waited 120 min" });
+  });
+
+  it("a window removed or loosened mid-pause releases the run at the next tick, in both directions", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7;
+    const windowed = (activeHours?: { start: string; end: string }) =>
+      pausing(30, {
+        triggers: { schedule: { type: "interval", minutes: 60, ...(activeHours ? { activeHours } : {}) } },
+      });
+    const workflow = h.store.create(windowed({ start: "09:00", end: "18:00" }));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(local(MONDAY, 17, 45));
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)?.waitUntil).toBe(local(MONDAY + 1, 9)); // parked past 18:15
+
+    // The operator REMOVES the window at 18:00: the pause is 30 min from
+    // 17:45, so by 20:00 it is long over and the run must move now.
+    h.setNow(local(MONDAY, 18));
+    h.store.update(workflow.id, windowed());
+    h.setNow(local(MONDAY, 20));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+    expect(h.store.getRun(run.id)!.nodeResults[1]).toMatchObject({
+      startedAt: local(MONDAY, 17, 45),
+      endedAt: local(MONDAY, 20),
+      summary: "Waited 135 min",
+    });
+    expect(h.dispatches).toHaveLength(2);
+
+    // Loosened rather than removed: a window that now covers the evening
+    // releases it too, and the instant shown follows the recomputation.
+    const other = h.store.create(windowed({ start: "09:00", end: "18:00" }));
+    const second = h.engine.startRun(other.id, "go", "manual");
+    h.setNow(local(MONDAY + 1, 17, 45));
+    h.completeTurn("thread-3", envelope("done"));
+    expect(h.store.getRun(second.id)?.waitUntil).toBe(local(MONDAY + 2, 9));
+    h.store.update(other.id, windowed({ start: "09:00", end: "22:00" }));
+    h.setNow(local(MONDAY + 1, 18));
+    await h.engine.tick();
+    // Not yet due (18:15), but the receipt now says 18:15, not tomorrow.
+    expect(h.store.getRun(second.id)).toMatchObject({ currentNodeId: "pause", waitUntil: local(MONDAY + 1, 18, 15) });
+    h.setNow(local(MONDAY + 1, 18, 15));
+    await h.engine.tick();
+    expect(h.store.getRun(second.id)).toMatchObject({ currentNodeId: "ship" });
+  });
+
+  it("a window tightened mid-pause holds a run whose instant had already been shown as due", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7;
+    const workflow = h.store.create(
+      pausing(30, { triggers: { schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00" } } } }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(local(MONDAY, 16));
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)?.waitUntil).toBe(local(MONDAY, 16, 30));
+    h.store.update(workflow.id, {
+      ...pausing(30),
+      triggers: { schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "16:15" } } },
+    });
+    h.setNow(local(MONDAY, 16, 30));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "pause", waitUntil: local(MONDAY + 1, 9) });
+    expect(h.dispatches).toHaveLength(1);
+    h.setNow(local(MONDAY + 1, 9));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+  });
+
+  it("fails, naming why, when a hand-edited window allows no weekday instead of sleeping forever", async () => {
+    const h = harness();
+    const workflow = h.store.create(pausing(5));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(10_000);
+    h.completeTurn("thread-1", envelope("done"));
+    // Bypasses the validator, as a hand edit of workflows.json would.
+    const internals = h.store as unknown as { workflows: Array<{ id: string; triggers?: unknown }> };
+    internals.workflows.find((candidate) => candidate.id === workflow.id)!.triggers = {
+      schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00", weekdays: [] } },
+    };
+    h.setNow(10_000 + 5 * MIN);
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({
+      status: "failed",
+      currentNodeId: "pause",
+      error: "the schedule's active hours allow no weekday, so this wait could never end",
+    });
+    expect(h.notifications).toEqual([
+      { runId: run.id, message: expect.stringMatching(/^Workflow "Paced" run failed at node "pause": the schedule's/), kind: "failed" },
+    ]);
   });
 
   it("ignores the window of a daily schedule: only an interval trigger carries one", async () => {

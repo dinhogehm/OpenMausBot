@@ -474,39 +474,49 @@ export class WorkflowEngine {
     }
   }
 
-  /** A wait node's timer. The run was parked on `waitUntil` by dispatchNode
-   * (no task, no thread, nothing for a bot to do) and moves on here once the
-   * instant passes, through the same advance path as every other outcome.
-   * The clock is the persisted instant, so a restart neither restarts the
+  /** A wait node's timer. The run was parked by dispatchNode (no task, no
+   * thread, nothing for a bot to do) and moves on here once its pause is
+   * over, through the same advance path as every other outcome. The clock
+   * is the persisted `waitStartedAt`, so a restart neither restarts the
    * pause nor loses it. A wait whose node was edited away under the run
    * fails the run, as an orphaned approval gate does.
    *
-   * The interval trigger's active window is honoured HERE as well as at
-   * park time: a lap that loops inside one run never passes the trigger,
-   * so this is the only place that keeps "working hours only" true for the
-   * bot steps after a pause. Re-read on every pass, so a window edited
-   * during the pause applies — the persisted instant is moved to the next
-   * window start rather than left to read as overdue. */
+   * Everything else is RECOMPUTED on every pass from the definition as it
+   * is now — the node's minutes and the interval trigger's active window —
+   * because a lap that loops inside one run never passes the trigger, so
+   * this is the only place that keeps "working hours only" true for the bot
+   * steps after a pause, and an operator who loosens, tightens or removes
+   * the window mid-pause must see it take effect at the next tick, in
+   * either direction. `waitUntil` is only the instant the UI shows; it is
+   * rewritten whenever the recomputation disagrees with it, never trusted. */
   private sweepWaits(now: number): void {
     for (const stale of this.store.listRuns()) {
-      if (stale.status !== "running" || stale.waitUntil === undefined || stale.waitUntil > now) continue;
+      if (stale.status !== "running" || stale.waitUntil === undefined) continue;
       // Re-read: an earlier iteration may have moved this run.
       const run = this.store.getRun(stale.id);
-      if (!run || run.status !== "running" || run.waitUntil === undefined || run.waitUntil > now) continue;
+      if (!run || run.status !== "running" || run.waitUntil === undefined) continue;
       const workflow = this.store.get(run.workflowId);
       const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
       if (!workflow || node?.kind !== "wait") {
         this.failNode(run.id, "the workflow was deleted or edited under this run and its wait node is gone");
         continue;
       }
-      const resume = nextActiveWindowStart(this.activeHoursOf(workflow), now);
-      if (resume === null || resume > now) {
-        // Outside the window (or a window with no allowed day, which the
-        // validator refuses but a hand edit could leave): hold the pause.
-        if (resume !== null) this.store.patchRun(run.id, { waitUntil: resume });
+      // A receipt without the start (none is written by this engine, but a
+      // hand-edited file could) keeps the instant it was parked with.
+      const startedAt = run.waitStartedAt ?? run.waitUntil - node.minutes * 60_000;
+      const due = startedAt + node.minutes * 60_000;
+      const resume = nextActiveWindowStart(this.activeHoursOf(workflow), due);
+      if (resume === null) {
+        // A window with no allowed day — the validator refuses it, a hand
+        // edit can still leave it — would hold the run forever. Say so.
+        // failNode names the workflow and the node; the reason says only why.
+        this.failNode(run.id, "the schedule's active hours allow no weekday, so this wait could never end");
         continue;
       }
-      const startedAt = run.waitStartedAt ?? run.waitUntil - node.minutes * 60_000;
+      if (resume > now) {
+        if (run.waitUntil !== resume) this.store.patchRun(run.id, { waitUntil: resume });
+        continue;
+      }
       this.advance(run, workflow, node, {
         nodeId: node.id,
         outcome: WORKFLOW_WAIT_OUTCOME,
