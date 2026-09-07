@@ -108,8 +108,12 @@ function formatWhen(at: number): string {
  * one-time schedule fires, with the real instant arriving on a later frame.
  * "Pending" is the honest word for that gap — "not scheduled" would be a lie. */
 export function scheduleLabel(workflow: WorkflowListItem): string {
-  if (!workflow.triggers?.schedule) return "Not scheduled";
-  if (typeof workflow.nextRunAt !== "number") return "Scheduled · next run pending";
+  const schedule = workflow.triggers?.schedule;
+  if (!schedule) return "Not scheduled";
+  // An interval holds its clock while a run is live, so "pending" is the
+  // usual state there and the cadence is the useful part of the label.
+  const what = schedule.type === "interval" ? `Every ${schedule.minutes} min` : "Scheduled";
+  if (typeof workflow.nextRunAt !== "number") return `${what} · next run pending`;
   return `Next run: ${formatWhen(workflow.nextRunAt)}`;
 }
 
@@ -392,7 +396,10 @@ export function WorkflowsPage() {
   // depend on the bots' flags, which arrive on their own `bot` frames, so a
   // permission flipped in a profile has to move the badge and the Run gate
   // here without a save or a reload — the same union the canvas draws.
-  const workflows = useMemo(() => withLiveIssues(state.workflows, state.bots), [state.workflows, state.bots]);
+  const workflows = useMemo(
+    () => withLiveIssues(state.workflows, state.bots, state.groups),
+    [state.workflows, state.bots, state.groups],
+  );
 
   // One in-flight action per row. A failure lands inline on that row and
   // leaves local state untouched: the SSE fold (and the echoed response) is

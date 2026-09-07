@@ -67,6 +67,19 @@ public struct OptionCard: Codable, Hashable, Sendable {
     /// Permission cards carry a tool; questions do not.
     public var isPermission: Bool { tool != nil }
 
+    /// The pseudo-tool of a workflow approval gate's card (see
+    /// `shared/workflow.ts` `WORKFLOW_APPROVAL_CARD_TOOL`). A gate is
+    /// decided on the card itself and may stay open for days — its window
+    /// times its re-notification rounds — so it must never lock the
+    /// composer the way a provider's permission ask does.
+    public static let workflowApprovalTool = "workflow_approval"
+
+    /// Whether this card should hold the conversation until it is answered:
+    /// a live provider ask does, a workflow gate does not.
+    public var blocksComposer: Bool {
+        isPending && tool != Self.workflowApprovalTool
+    }
+
     /// The wire API accepts an approval behavior rather than the button's
     /// display text. Treat the one refusal as deny and every other offered
     /// permission choice as allow: providers may say "Approve", "Yes", or
@@ -85,7 +98,9 @@ public struct OptionCard: Codable, Hashable, Sendable {
     /// Shared by all of the app's card surfaces and by Live Activities.
     public static func isRefusal(_ choice: String) -> Bool {
         let normalized = choice.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return ["deny", "cancel", "dismiss"].contains(normalized)
+        // "reject" is the refusal of a workflow gate; the harness still sends
+        // "Deny" on the wire for older builds, which map only the first three.
+        return ["deny", "cancel", "dismiss", "reject"].contains(normalized)
     }
 
     /// A provider may include the standing grant as an option of its own.

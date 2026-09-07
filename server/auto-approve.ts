@@ -93,6 +93,11 @@ const COMMAND_TOOLS = new Set(["bash", "shell", "execute", "run_command", "compu
  * thing. */
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh"]);
 
+/** File-editing tools whose permission card names no path (Codex sends
+ * `edit`; ACP drivers `fileChange`), so the sensitive guard cannot see what
+ * they touch. A grant on one is a grant on every file. */
+const BLIND_EDIT_TOOLS = new Set(["edit", "filechange", "file_change"]);
+
 /** The program a command line actually runs: past env assignments, past
  * sudo, and past a shell wrapper into the command it was handed. */
 function programOf(command: string, depth = 0): string {
@@ -112,9 +117,12 @@ function programOf(command: string, depth = 0): string {
   return programOf(inner, depth + 1) || program;
 }
 
+/** The tool name as the command-tool check sees it: past an MCP server
+ * prefix, case-folded — `mcp__box__bash` and `Bash` are both a shell. */
+const bareTool = (tool: string): string => tool.replace(/^mcp__[^_]+__/, "").toLowerCase();
+
 export function approvalKey(tool: string, summary: string, scope?: "local-computer"): string {
-  const bare = tool.replace(/^mcp__[^_]+__/, "").toLowerCase();
-  if (!COMMAND_TOOLS.has(bare)) return scope ? `${scope}:${tool}` : tool;
+  if (!COMMAND_TOOLS.has(bareTool(tool))) return scope ? `${scope}:${tool}` : tool;
   const program = programOf(summary);
   // A shell we could not see into is not a program anyone can name, so the
   // key stays the bare tool: honestly broad, and refused wherever a broad
@@ -224,6 +232,10 @@ export function autoVerdict(
     /** The provider is asking to widen its configured sandbox rather than
      * perform one ordinary action. Only explicit Full may synthesize this. */
     requiresExplicitApproval?: boolean;
+    /** Present only on a WORKFLOW node's turn: the keys the node itself
+     * declared (possibly none). Its presence is what lets a grant on an
+     * ordinary tool fire unattended — see namedNarrowly. */
+    workflowGrants?: string[];
   },
 ): AutoVerdict {
   const mode = approvalModeFor(bot);
@@ -276,7 +288,23 @@ export function autoVerdict(
     // the command I could not even name". A guard that would have carded
     // anyway keeps its own name; the block is only the story when it is the
     // thing that changed the outcome.
-    const namedNarrowly = context?.scope !== "local-computer" && key !== tool;
+    //
+    // An ordinary tool's key IS its name (`session_search`, `list_bots`),
+    // which names one thing exactly — but only a workflow node's turn gets
+    // to call that narrow. A webhook turn keeps the older rule (nothing but
+    // a program-named command grant fires), because the widening was never
+    // asked for there. And a file-editing tool is blind to the guards: the
+    // Codex `edit` card carries no path, so "always allow edit" on the bot
+    // would let a webhook-fed bot write ~/.ssh/authorized_keys unseen. On a
+    // workflow turn that key fires only when the NODE declared it — the
+    // operator named it for that step, eyes open — never off the bot's
+    // list alone.
+    const bare = bareTool(tool);
+    const namedNarrowly =
+      context?.scope !== "local-computer" &&
+      (COMMAND_TOOLS.has(bare)
+        ? key !== tool
+        : context?.workflowGrants !== undefined && (context.workflowGrants.includes(key) || !BLIND_EDIT_TOOLS.has(bare)));
     if (grant?.source === "always-allow" && namedNarrowly) return grant;
     if (grant) return { approve: null, source: "unattended-block", rule: grant.rule };
     if (destructive) return { approve: null, source: "destructive-guard", rule: destructive };
@@ -296,6 +324,87 @@ export function autoVerdict(
   if (sensitive) return { approve: null, source: "sensitive-guard", rule: sensitive };
   if (grant) return { approve: grant.approve, source: grant.source, rule: grant.rule };
   return { approve: null, source: "no-grant" };
+}
+
+/** The grants a workflow node's turn runs under: the bot's own list plus
+ * what the node pre-approves, de-duplicated with the bot's entries first so
+ * the decision log's `rule` reads the same whichever list carried it. A
+ * union and nothing more — every entry is still judged by autoVerdict's
+ * unattended rules, so a node can widen WHICH programs are named but never
+ * how broadly (no bare shells, no desktop, no way past the guards). */
+export function effectiveAlwaysAllow(
+  bot: Pick<AutoApprover, "alwaysAllow"> | null | undefined,
+  node: { alwaysAllow?: string[] } | null | undefined,
+): string[] | undefined {
+  const fromBot = bot?.alwaysAllow ?? [];
+  const fromNode = node?.alwaysAllow ?? [];
+  if (fromNode.length === 0) return bot?.alwaysAllow;
+  return [...new Set([...fromBot, ...fromNode])];
+}
+
+/** Of a workflow node's grants (bot's and node's), the keys autoVerdict
+ * would actually honour on that node's turn — what the node prompt may
+ * promise the bot. Same exclusions as the unattended branch of the verdict,
+ * by key alone (the guards judge the command text and cannot be listed):
+ * nothing on the live desktop, no command-tool key without a program (or
+ * with a shell for one), and a blind file-edit key only when the NODE
+ * declared it. A prompt that listed anything else would send the bot
+ * straight into a denial it was told could not happen. */
+export function unattendedHonoredGrants(
+  botKeys: readonly string[] | null | undefined,
+  nodeKeys: readonly string[] | null | undefined,
+): string[] {
+  const fromNode = new Set(nodeKeys ?? []);
+  const honored: string[] = [];
+  for (const key of new Set([...(botKeys ?? []), ...(nodeKeys ?? [])])) {
+    if (key.startsWith("local-computer:")) continue;
+    const at = key.indexOf(":");
+    const tool = at < 0 ? key : key.slice(0, at);
+    const program = at < 0 ? "" : key.slice(at + 1);
+    const bare = bareTool(tool);
+    if (COMMAND_TOOLS.has(bare)) {
+      if (!program || SHELLS.has(program)) continue;
+    } else if (BLIND_EDIT_TOOLS.has(bare) && !fromNode.has(key)) {
+      continue;
+    }
+    honored.push(key);
+  }
+  return honored;
+}
+
+/** The one line a fail-fast denial carries — on the card, in the decision
+ * log, and in the run receipt — naming the tool, what it asked, and the
+ * exact key an "always allow" on the bot or the node would have needed.
+ * The key is the actionable half: a receipt reading "denied unattended:
+ * shell (key shell:gh)" is a one-line fix on the node panel, where "node
+ * timed out" was a guess. `why` is the verdict's own reason, so a guard
+ * that would have carded anyway is not blamed on the missing grant. */
+export function unattendedDenial(
+  tool: string,
+  summary: string,
+  verdict: Pick<AutoVerdict, "source" | "rule">,
+  scope?: "local-computer",
+): string {
+  const key = approvalKey(tool, summary, scope);
+  const what = summary.trim().replace(/\s+/g, " ").slice(0, 80);
+  const why =
+    verdict.source === "destructive-guard"
+      ? "looked destructive"
+      : verdict.source === "sensitive-guard"
+        ? "touches credentials or keys"
+        : verdict.source === "explicit-approval-block"
+          ? "widens the provider sandbox"
+          : verdict.source === "native-approval"
+            ? "the provider requires a person"
+            : scope === "local-computer"
+              ? "controls the live desktop, which no grant covers unattended"
+              : verdict.source === "unattended-block"
+                ? verdict.rule === undefined
+                  ? "auto mode does not answer with nobody watching"
+                  : `the grant "${verdict.rule}" names no program, so it cannot fire unattended`
+                : `no always-allow names "${key}"`;
+  const where = scope ? `, scope ${scope}` : "";
+  return `denied unattended: ${tool}${what ? ` "${what}"` : ""} (key ${key}${where}) — ${why}`;
 }
 
 /** Why this request may be answered without the human, or null to ask. */

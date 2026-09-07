@@ -227,7 +227,18 @@ const Transcript = memo(function Transcript({
             <ConnectorCard botId={m.from.botId} threadId={group.threadId} message={m} />
           ) : m.kind === "options" && m.card?.requestId && m.card.tool ? (
             <div className="flex justify-start">
-              <ApprovalCard bot={memberOf(m.from?.botId)} message={m} />
+              <ApprovalCard
+                bot={memberOf(m.from?.botId)}
+                message={m}
+                onDecide={(behavior) =>
+                  dispatch({
+                    type: "decideRequest",
+                    threadId: group.threadId,
+                    requestId: m.card!.requestId!,
+                    behavior,
+                    message: behavior === "deny" ? "Rejected by the user." : undefined,
+                  })}
+              />
             </div>
           ) : m.kind === "goal.run" ? (
             <div className="flex justify-start">

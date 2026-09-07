@@ -19,10 +19,11 @@ import type { BotAvatarCrop } from "../../shared/bot-avatar";
 import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode";
 import type { MascotBodyId } from "../../shared/mascot-bodies";
 import type { ProfileRequestCardData } from "../../shared/profile-request";
+import type { WorkflowApprovalCardData } from "../../shared/workflow";
 import type { RoutineRequestCardData } from "../../shared/routine-request";
 import type { RoutineRunCardData } from "../../shared/routine-run";
 import type { GroupGoalRunCardData } from "../../shared/group-goal-run";
-import type { WorkflowRun } from "../../shared/workflow";
+import type { WorkflowPreflightResult, WorkflowRun } from "../../shared/workflow";
 import {
   mergeWorkflowSnapshot,
   removeWorkflow,
@@ -92,6 +93,9 @@ export interface OptionCardData {
   skillRequest?: SkillRequestCardData;
   /** Persisted profile proposal used by the server when the user confirms it. */
   profileRequest?: ProfileRequestCardData;
+  /** A workflow approval gate: the decision goes to the workflow engine, and
+   * the same gate may also be decided on the canvas or in a room. */
+  workflowApproval?: WorkflowApprovalCardData;
 }
 
 export interface ConnectorCardData {
@@ -532,6 +536,10 @@ export interface AppState {
   /** the workflow whose editor is open. Lives here, not in the page: the
    * page unmounts on every view switch and the open canvas must survive it. */
   selectedWorkflowId: string | null;
+  /** the last "Test pre-flight" verdict per workflow id. Here rather than
+   * in the panel so closing the popover, or switching views, keeps what a
+   * 60-second check just found; never persisted, never on the server. */
+  workflowPreflightTests: Record<string, WorkflowPreflightResult>;
   settingsOpen: boolean;
   pluginsOpen: boolean;
   computerOpen: boolean;
@@ -637,6 +645,7 @@ export type Action =
   | { type: "workflowPatched"; workflow: WorkflowFrame }
   | { type: "workflowRunPatched"; run: WorkflowRun }
   | { type: "workflowDeleted"; workflowId: string }
+  | { type: "workflowPreflightTested"; workflowId: string; result: WorkflowPreflightResult }
   | { type: "routinesHydrated"; routines: Routine[]; runs: RoutineRun[] }
   | { type: "routinePatched"; routine: Routine }
   | { type: "routineDeleted"; routineId: string }
@@ -941,11 +950,19 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, workflowRuns: upsertWorkflowRun(state.workflowRuns, action.run) };
     // runs are kept on purpose: a deleted workflow's history stays readable
     // until the next snapshot drops it
-    case "workflowDeleted":
+    case "workflowDeleted": {
+      const { [action.workflowId]: _dropped, ...workflowPreflightTests } = state.workflowPreflightTests;
       return {
         ...state,
         workflows: removeWorkflow(state.workflows, action.workflowId),
         selectedWorkflowId: state.selectedWorkflowId === action.workflowId ? null : state.selectedWorkflowId,
+        workflowPreflightTests,
+      };
+    }
+    case "workflowPreflightTested":
+      return {
+        ...state,
+        workflowPreflightTests: { ...state.workflowPreflightTests, [action.workflowId]: action.result },
       };
     case "routinesHydrated":
       return { ...state, routines: action.routines, routineRuns: trimRoutineRuns(action.runs) };
@@ -1591,6 +1608,7 @@ export const initialState: AppState = {
   workflows: [],
   workflowRuns: [],
   selectedWorkflowId: null,
+  workflowPreflightTests: {},
   settingsOpen: false,
   pluginsOpen: false,
   computerOpen: false,

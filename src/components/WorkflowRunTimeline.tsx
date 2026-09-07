@@ -5,7 +5,7 @@
 // run state anywhere, and a frame repaints it for free. No xyflow here
 // either: the whole panel is static markup a test can render.
 import { useEffect, useRef } from "react";
-import { AlertTriangle, ExternalLink, Loader2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, Hourglass, Loader2, XCircle } from "lucide-react";
 
 import { cn } from "@/lib/cn";
 import {
@@ -17,7 +17,13 @@ import {
 } from "@/lib/workflow-observation";
 import { isMissedWorkflowRun } from "@/lib/workflow-state";
 import { excerpt } from "./WorkflowNodeCard";
-import type { WorkflowNodeResult, WorkflowRun, WorkflowRunStatus } from "../../shared/workflow";
+import {
+  workflowOutageWaitMessage,
+  type WorkflowApprovalNotice,
+  type WorkflowNodeResult,
+  type WorkflowRun,
+  type WorkflowRunStatus,
+} from "../../shared/workflow";
 
 const STATUS_TONE: Record<WorkflowRunStatus, string> = {
   queued: "bg-warning/15 text-warning",
@@ -36,6 +42,34 @@ function triggerLabel(run: WorkflowRun): string {
 
 function formatWhen(at: number): string {
   return new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/** A wait ends within a day, so the hour is the whole story; the date only
+ * matters when the pause crosses midnight, and then it is said. */
+function formatWaitUntil(at: number, now: number): string {
+  const time = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return new Date(at).toDateString() === new Date(now).toDateString() ? time : formatWhen(at);
+}
+
+/** A settled gate's nudges as one line: "reminded at …, re-notified 2× (…)"
+ * — the count is what a reader scans for, the instants are the detail. */
+export function approvalNoticesLine(notices: readonly WorkflowApprovalNotice[]): string {
+  const reminders = notices.filter((notice) => notice.kind === "reminder");
+  const renotified = notices.filter((notice) => notice.kind === "renotify");
+  const parts: string[] = [];
+  if (reminders.length > 0) {
+    parts.push(reminders.length === 1 ? `reminder sent at ${formatWhen(reminders[0]!.at)}` : `${reminders.length} reminders sent`);
+  }
+  if (renotified.length > 0) {
+    parts.push(`re-notified ${renotified.length}× (${renotified.map((notice) => formatWhen(notice.at)).join(", ")})`);
+  }
+  return parts.join(" · ");
+}
+
+/** A completed run may still carry a reason it ENDED — the execution cap
+ * closing a continuous cycle — and that is a note, not a failure. */
+function isEndedNote(run: WorkflowRun): boolean {
+  return run.status === "completed" && run.error !== undefined;
 }
 
 function statusClass(run: WorkflowRun): string {
@@ -63,9 +97,12 @@ export interface WorkflowRunTimelineProps {
   /** Absent when nothing can be opened; a step with no `threadId` never
    * offers navigation even when this is provided. */
   onOpenStep?: (result: WorkflowNodeResult) => void;
+  /** A bot's display name, for the step a fallback bot ran; undefined (or
+   * the prop absent) falls back to the id, which is still the truth. */
+  botName?: (botId: string) => string | undefined;
 }
 
-export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenStep }: WorkflowRunTimelineProps) {
+export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenStep, botName }: WorkflowRunTimelineProps) {
   const observedRowRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     observedRowRef.current?.scrollIntoView({ block: "nearest" });
@@ -167,15 +204,79 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             <p
               className={cn(
                 "mt-2 flex gap-1.5 rounded-lg px-2 py-1.5 text-[11px] leading-relaxed",
-                isMissedWorkflowRun(run) ? "bg-warning/10 text-warning" : "bg-danger/10 text-danger",
+                isMissedWorkflowRun(run) || isEndedNote(run) ? "bg-warning/10 text-warning" : "bg-danger/10 text-danger",
               )}
             >
               <AlertTriangle size={11} aria-hidden className="mt-0.5 shrink-0" />
               <span className="min-w-0 break-words">
-                <span className="sr-only">{isMissedWorkflowRun(run) ? "Missed: " : "Failed: "}</span>
+                <span className="sr-only">
+                  {isMissedWorkflowRun(run) ? "Missed: " : isEndedNote(run) ? "Ended: " : "Failed: "}
+                </span>
                 {failureText(run)}
               </span>
             </p>
+          )}
+
+          {run.status === "running" && run.preflightStartedAt !== undefined && (
+            // Between the start and the first dispatch: the checks are
+            // running — or, parked with a re-check due, waiting for a busy
+            // bot — and nothing has been asked of a bot yet.
+            <p role="status" className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
+              <Loader2 size={10} className="animate-spin" aria-hidden />
+              {run.nextAttemptAt !== undefined ? (
+                <span className="min-w-0 break-words">
+                  Pre-flight waiting for a busy bot before{" "}
+                  {run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>} — next check{" "}
+                  {formatWhen(run.nextAttemptAt)}
+                </span>
+              ) : (
+                <>
+                  Pre-flight checks running before
+                  {run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>}
+                </>
+              )}
+            </p>
+          )}
+
+          {run.preflight && (
+            <section className="mt-3 shrink-0">
+              <h3 className="text-[11px] font-medium uppercase tracking-wide text-ink-secondary">
+                Pre-flight{" "}
+                <span
+                  className={cn(
+                    "normal-case",
+                    run.preflight.ok ? "text-success" : run.preflightStartedAt !== undefined ? "text-warning" : "text-danger",
+                  )}
+                >
+                  · {run.preflight.ok ? "passed" : run.preflightStartedAt !== undefined ? "waiting" : "failed"}
+                </span>
+              </h3>
+              {/* Each check on its own line, verdict first: the receipt's
+                  point is WHICH check refused the run and what it printed,
+                  the two things a person needs to fix the environment. */}
+              <ul className="mt-1 space-y-0.5" aria-label="Pre-flight checks">
+                {run.preflight.checks.map((check) => (
+                  <li key={check.name} className="flex items-start gap-1.5 text-[10.5px]">
+                    {check.ok ? (
+                      <CheckCircle2 size={11} aria-hidden className="mt-0.5 shrink-0 text-success" />
+                    ) : (
+                      <XCircle size={11} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+                    )}
+                    <span className="min-w-0 break-words">
+                      <span className="sr-only">{check.ok ? "Passed: " : "Failed: "}</span>
+                      <span className="font-medium text-ink">{check.name}</span>
+                      <span className="text-ink-secondary"> · {check.detail}</span>
+                      {!check.ok && check.stderr && (
+                        <span className="block font-mono text-[10px] text-danger">{excerpt(check.stderr, 200)}</span>
+                      )}
+                      {!check.ok && check.stdout && (
+                        <span className="block font-mono text-[10px] text-ink-secondary">{excerpt(check.stdout, 200)}</span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
 
           <h3 className="mt-3 shrink-0 text-[11px] font-medium uppercase tracking-wide text-ink-secondary">Steps</h3>
@@ -214,6 +315,32 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                         {excerpt(result.summary, 200)}
                       </p>
                     )}
+                    {result.denials?.map((denial) => (
+                      // What the harness refused on the node's behalf: the
+                      // one line that names the grant key to add on the
+                      // node panel, kept whole because the key is the point.
+                      <p key={denial} className="mt-0.5 break-words font-mono text-[10px] leading-snug text-danger">
+                        {denial}
+                      </p>
+                    ))}
+                    {result.fallback && (
+                      // The receipt names who actually did the work: the
+                      // node's own bot was unreachable and its fallback ran
+                      // the step. The provider error is the reason, kept
+                      // short — the whole of it is in the run frame.
+                      <p className="mt-0.5 break-words text-[10.5px] leading-snug text-warning">
+                        Ran on fallback bot {botName?.(result.fallback.botId) ?? result.fallback.botId} because:{" "}
+                        {excerpt(result.fallback.because, 120)}
+                      </p>
+                    )}
+                    {result.notices && result.notices.length > 0 && (
+                      // A gate's own history: how many times the person was
+                      // nudged before this decision. One line, so a gate
+                      // that asked five times reads as such at a glance.
+                      <p className="mt-0.5 break-words text-[10.5px] leading-snug text-ink-secondary">
+                        {approvalNoticesLine(result.notices)}
+                      </p>
+                    )}
                   </>
                 );
                 const openable = result.threadId !== undefined && onOpenStep !== undefined;
@@ -243,12 +370,89 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             </ol>
           )}
 
-          {isActiveWorkflowRun(run) && run.nextAttemptAt !== undefined && (
-            <p className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
-              <Loader2 size={10} className="animate-spin" aria-hidden />
-              Retrying at {formatWhen(run.nextAttemptAt)}
-              {run.attempt > 0 && <span className="tabular-nums">· attempt {run.attempt + 1}</span>}
+          {run.status === "waiting-approval" && run.approvalRequestedAt !== undefined && (
+            // The open gate, as the engine keeps it: since when, whether the
+            // halfway reminder went out, how many times it asked again. The
+            // card the person answers is in the chat; this is the receipt
+            // in the making.
+            <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-accent">
+              <Hourglass size={10} aria-hidden className="mt-0.5 shrink-0" />
+              <span className="min-w-0 break-words">
+                Waiting for a decision since <span className="tabular-nums">{formatWhen(run.approvalRequestedAt)}</span>
+                {run.currentNodeId && <span className="font-mono"> · {run.currentNodeId}</span>}
+                {run.approvalRemindedAt !== undefined && (
+                  <>
+                    {" "}
+                    · reminder sent at <span className="tabular-nums">{formatWhen(run.approvalRemindedAt)}</span>
+                  </>
+                )}
+                {(run.approvalRenotified ?? 0) > 0 && run.approvalRenotifiedAt !== undefined && (
+                  <>
+                    {" "}
+                    · re-notified {run.approvalRenotified}× (last at{" "}
+                    <span className="tabular-nums">{formatWhen(run.approvalRenotifiedAt)}</span>)
+                  </>
+                )}
+              </span>
             </p>
+          )}
+
+          {run.status === "running" && run.waitUntil !== undefined && (
+            <p className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
+              <Hourglass size={10} aria-hidden />
+              {run.waitUntil > now ? "Waiting until " : "Wait ended at "}
+              <span className="tabular-nums">{formatWaitUntil(run.waitUntil, now)}</span>
+              {run.currentNodeId && <span className="font-mono">· {run.currentNodeId}</span>}
+            </p>
+          )}
+
+          {isActiveWorkflowRun(run) &&
+          run.outage?.fallbackBotId !== undefined &&
+          run.currentBotId === run.outage.fallbackBotId &&
+          run.nextAttemptAt !== undefined ? (
+            // Handed to the fallback but the fallback was busy: the run is
+            // parked for THAT bot (the engine keeps currentBotId aimed at
+            // it), not for the provider — say so, or the count below would
+            // read as an outage wait that never advances.
+            <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-warning">
+              <Loader2 size={10} className="mt-0.5 animate-spin" aria-hidden />
+              <span className="min-w-0 break-words">
+                Waiting for fallback bot {botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId} to be free
+                (it is busy) — next try {formatWhen(run.nextAttemptAt)}
+              </span>
+            </p>
+          ) : isActiveWorkflowRun(run) && run.outage && run.nextAttemptAt !== undefined ? (
+            // A provider outage is a wait, not a retry: nothing of the
+            // node's budget is being spent, so the line must not say
+            // "attempt" the way the retry line below does. The count is
+            // the outage's own — how many waits so far of how many the
+            // horizon allows.
+            <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-warning">
+              <Loader2 size={10} className="mt-0.5 animate-spin" aria-hidden />
+              <span className="min-w-0 break-words">
+                {workflowOutageWaitMessage(run, formatWhen)}
+                {run.outage.fallbackBotId !== undefined && (
+                  <> · fallback bot {botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId} was tried</>
+                )}
+              </span>
+            </p>
+          ) : isActiveWorkflowRun(run) && run.outage?.fallbackBotId !== undefined && run.currentBotId === run.outage.fallbackBotId ? (
+            <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-warning">
+              <Loader2 size={10} className="mt-0.5 animate-spin" aria-hidden />
+              <span className="min-w-0 break-words">
+                Running on fallback bot {botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId} because:{" "}
+                {excerpt(run.outage.reason, 120)}
+              </span>
+            </p>
+          ) : (
+            isActiveWorkflowRun(run) &&
+            run.nextAttemptAt !== undefined && (
+              <p className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
+                <Loader2 size={10} className="animate-spin" aria-hidden />
+                Retrying at {formatWhen(run.nextAttemptAt)}
+                {run.attempt > 0 && <span className="tabular-nums">· attempt {run.attempt + 1}</span>}
+              </p>
+            )
           )}
         </section>
       )}

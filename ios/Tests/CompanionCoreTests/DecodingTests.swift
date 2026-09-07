@@ -389,6 +389,8 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(card.responseBehavior(for: " deny "), "deny")
         XCTAssertEqual(card.responseBehavior(for: "Cancel"), "deny")
         XCTAssertEqual(card.responseBehavior(for: "Dismiss"), "deny")
+        XCTAssertEqual(card.responseBehavior(for: "Reject"), "deny")
+        XCTAssertTrue(card.blocksComposer, "a provider's ask holds the conversation")
         XCTAssertTrue(card.shouldRememberPermission(for: "Always allow"))
         XCTAssertFalse(card.shouldRememberPermission(for: "Allow"))
         XCTAssertFalse(card.shouldRememberPermission(for: " deny "))
@@ -674,5 +676,27 @@ final class DecodingTests: XCTestCase {
         XCTAssertEqual(threadId, "t1")
         XCTAssertEqual(message.kind, .unknown)
         XCTAssertEqual(message.text, "ran")
+    }
+
+    func testWorkflowGateCardIsPendingButNeverBlocksTheComposer() throws {
+        let json = """
+        {
+          "id": "m2", "role": "bot", "kind": "options", "at": 1786742413762,
+          "card": {
+            "title": "Workflow \"Delivery\" needs your decision at \"gate\"",
+            "subtitle": "Merge it?", "options": ["Approve", "Deny"],
+            "requestId": "workflow-approval:run-1:gate:20", "tool": "workflow_approval"
+          }
+        }
+        """
+        let card = try XCTUnwrap(try JSONDecoder().decode(Message.self, from: Data(json.utf8)).card)
+        XCTAssertTrue(card.isPending, "the card offers its buttons")
+        XCTAssertFalse(card.blocksComposer, "a gate may wait for days; the chat keeps working around it")
+        XCTAssertEqual(card.responseBehavior(for: "Approve"), "allow")
+        XCTAssertEqual(card.responseBehavior(for: "Deny"), "deny")
+        var answered = card
+        answered.answered = "allow"
+        XCTAssertFalse(answered.isPending)
+        XCTAssertFalse(answered.blocksComposer)
     }
 }

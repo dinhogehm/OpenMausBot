@@ -14,18 +14,25 @@
 //     unwiring a branch is the one outcome nobody wants. Deleting an outcome
 //     is the explicit way to drop its edge.
 import {
+  WORKFLOW_APPROVAL_ON_EXPIRE_DEFAULT_NEW,
   WORKFLOW_FAIL_OUTCOME,
   nodeOutcomes,
   type Workflow,
   type WorkflowEdge,
   type WorkflowIssue,
   type WorkflowNode,
+  type WorkflowPreflight,
   type WorkflowTriggers,
 } from "../../shared/workflow";
 
 export type WorkflowNodeKind = WorkflowNode["kind"];
 
-export const WORKFLOW_NODE_KINDS: readonly WorkflowNodeKind[] = ["agent", "approval", "notify"];
+export const WORKFLOW_NODE_KINDS: readonly WorkflowNodeKind[] = ["agent", "approval", "notify", "wait"];
+
+/** What a wait node dropped from the palette pauses for: long enough to
+ * read as a real pause between laps, short enough to notice on the canvas
+ * that it should be tuned. */
+export const WORKFLOW_WAIT_DEFAULT_MINUTES = 30;
 
 /** The one custom node type the canvas registers with xyflow. */
 export const WORKFLOW_NODE_TYPE = "workflowNode";
@@ -94,9 +101,9 @@ export interface WorkflowGraphEdge {
 }
 
 /** What a client may PATCH. The engine-owned fields (`id`, `createdAt`,
- * `updatedAt`, `nextRunAt`) are absent by construction, not by filtering:
- * the server strips `nextRunAt`, but a canvas that sent it would still be
- * claiming to own scheduler state. */
+ * `updatedAt`, `nextRunAt`, `lastDigestAt`) are absent by construction, not
+ * by filtering: the server strips them, but a canvas that sent them would
+ * still be claiming to own scheduler state. */
 export interface WorkflowPatchBody {
   name: string;
   description: string | null;
@@ -106,6 +113,10 @@ export interface WorkflowPatchBody {
   layout: Record<string, XY>;
   triggers: WorkflowTriggers | null;
   maxNodeExecutions: number | null;
+  stuckAfterMinutes: number | null;
+  auditGroupId: string | null;
+  digestAt: string | null;
+  preflight: WorkflowPreflight | null;
 }
 
 /** Where a node with no saved layout entry lands. Deterministic so two
@@ -177,8 +188,8 @@ export function toGraphNodes(
 
 /** By value, not identity: a server echo rebuilds every node object even when
  * the document came back exactly as it was sent. The arrays a node carries
- * (`outcomes`, `requires`) hold only strings, so one element-wise pass covers
- * them. */
+ * (`outcomes`, `requires`, `alwaysAllow`) hold only strings, so one
+ * element-wise pass covers them. */
 function sameWorkflowNode(a: WorkflowNode, b: WorkflowNode): boolean {
   if (a === b) return true;
   if (a.kind !== b.kind) return false;
@@ -469,15 +480,20 @@ export function createWorkflowNode(
     case "agent":
       return seed.botId ? { kind, id, botId: seed.botId, instructions: "", outcomes: ["done"] } : null;
     case "approval":
-      return { kind, id, prompt: "" };
+      // A NEW gate asks again on expiry instead of discarding the work;
+      // the engine's fallback for an absent policy stays `rejected`, so
+      // gates saved before the choice existed are unchanged.
+      return { kind, id, prompt: "", onExpire: WORKFLOW_APPROVAL_ON_EXPIRE_DEFAULT_NEW };
     case "notify":
       return seed.targetGroupId ? { kind, id, targetGroupId: seed.targetGroupId, template: "" } : null;
+    case "wait":
+      return { kind, id, minutes: WORKFLOW_WAIT_DEFAULT_MINUTES };
   }
 }
 
-/** `null` on the three clearable fields is how the API is told to drop them;
+/** `null` on the clearable fields is how the API is told to drop them;
  * omitting a key means "leave alone", which would make removing a schedule
- * impossible. */
+ * — or turning the audit room off — impossible. */
 export function workflowPatchBody(workflow: Workflow): WorkflowPatchBody {
   return {
     name: workflow.name,
@@ -488,5 +504,9 @@ export function workflowPatchBody(workflow: Workflow): WorkflowPatchBody {
     layout: workflow.layout,
     triggers: workflow.triggers ?? null,
     maxNodeExecutions: workflow.maxNodeExecutions ?? null,
+    stuckAfterMinutes: workflow.stuckAfterMinutes ?? null,
+    auditGroupId: workflow.auditGroupId ?? null,
+    digestAt: workflow.digestAt ?? null,
+    preflight: workflow.preflight ?? null,
   };
 }

@@ -9,10 +9,13 @@
 import { z } from "zod";
 
 import {
+  auditGroupIssues,
   capabilityIssues,
   validateWorkflow,
+  WORKFLOW_APPROVAL_ON_EXPIRE,
   WORKFLOW_APPROVAL_OUTCOMES,
   WORKFLOW_CAPABILITIES,
+  WORKFLOW_INTERVAL_MINUTES_MIN,
   WORKFLOW_SCHEDULE_TIME_RE,
   type BotCapabilities,
   type Workflow,
@@ -34,6 +37,9 @@ export interface WorkflowApiDeps {
    * a bot that no longer exists. Read on every listing and every start, so
    * the canvas and the run gate see a toggle the moment a person flips it. */
   botCapabilities: (botId: string) => BotCapabilities | null;
+  /** Whether a room exists (store.group in index.ts), for the audit room
+   * check. Absent, the listing never reports `missing-audit-group`. */
+  groupExists?: (groupId: string) => boolean;
   /** Called once a definition is actually gone, so what pointed AT it can be
    * released — index.ts pauses the webhooks that targeted it, which would
    * otherwise answer 410 forever. A throw here is logged, never turned into
@@ -77,13 +83,28 @@ const agentNodeSchema = z.object({
   // a list longer than the vocabulary can only be padding. Duplicates
   // within that length stay the validator's (bad-requires), as pinned.
   requires: z.array(z.enum(WORKFLOW_CAPABILITIES)).max(WORKFLOW_CAPABILITIES.length).optional(),
+  // Open vocabulary (keys are minted per tool and program), so only the
+  // shape is pinned here: blanks, padding and repeats stay the validator's
+  // (bad-always-allow), as the canvas must be able to show them. The cap
+  // matches the bot's own alwaysAllow list.
+  alwaysAllow: z.array(z.string().max(200)).max(200).optional(),
+  // A foreign key like botId; whether it names a real, different bot is
+  // the validator's finding (fallback-same-bot / fallback-missing-bot).
+  fallbackBotId: id.optional(),
 });
 const approvalNodeSchema = z.object({
   kind: z.literal("approval"),
   id,
   prompt: longText,
   expiresHours: optionalNumber,
-  onExpire: z.enum(WORKFLOW_APPROVAL_OUTCOMES).optional(),
+  // Closed vocabulary, so the door refuses a policy the sweep could not
+  // honour; the range of maxRenotify stays the validator's
+  // (bad-approval-config), as every other numeric knob does.
+  onExpire: z.enum(WORKFLOW_APPROVAL_ON_EXPIRE).optional(),
+  maxRenotify: optionalNumber,
+  // A foreign key like a notify node's room; whether the room exists is
+  // judged when the gate opens (a missing room is logged, never a failure).
+  notifyTargetGroupId: id.optional(),
 });
 const notifyNodeSchema = z.object({
   kind: z.literal("notify"),
@@ -91,7 +112,14 @@ const notifyNodeSchema = z.object({
   targetGroupId: id,
   template: longText,
 });
-const nodeSchema = z.discriminatedUnion("kind", [agentNodeSchema, approvalNodeSchema, notifyNodeSchema]);
+const waitNodeSchema = z.object({
+  kind: z.literal("wait"),
+  id,
+  // Range is the validator's (bad-numbers): a draft with a wild pause still
+  // saves and paints its badge, as every other numeric knob does.
+  minutes: z.number().finite(),
+});
+const nodeSchema = z.discriminatedUnion("kind", [agentNodeSchema, approvalNodeSchema, notifyNodeSchema, waitNodeSchema]);
 const edgeSchema = z.object({ from: id, outcome: outcomeName, to: id });
 const layoutSchema = z.record(id, z.object({ x: z.number().finite(), y: z.number().finite() }));
 const triggersSchema = z.object({
@@ -103,8 +131,58 @@ const triggersSchema = z.object({
         weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
       }),
       z.object({ type: z.literal("once"), at: z.number().finite() }),
+      // Same stance as daily: a window the scheduler could not honour is
+      // refused at the door, and so is an interval too short to arm.
+      z.object({
+        type: z.literal("interval"),
+        minutes: z.number().int().min(WORKFLOW_INTERVAL_MINUTES_MIN),
+        activeHours: z
+          .object({
+            start: z.string().regex(WORKFLOW_SCHEDULE_TIME_RE, "must be HH:MM (24-hour)"),
+            end: z.string().regex(WORKFLOW_SCHEDULE_TIME_RE, "must be HH:MM (24-hour)"),
+            weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
+          })
+          .optional(),
+      }),
     ])
     .optional(),
+});
+
+const providerOutageSchema = z.object({
+  maxBackoffMinutes: optionalNumber,
+  horizonHours: optionalNumber,
+});
+
+// Shapes only, as everywhere above: a blank name, a repeated one, an
+// empty command, a bad regex and an out-of-range timeout are the
+// validator's (bad-preflight), so a half-edited panel still saves and shows
+// its badge. The command is bounded like any long text; it is never
+// interpolated, so nothing here judges its contents.
+const preflightCheckName = z.string().max(120);
+const preflightCheckSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("command"),
+    name: preflightCheckName,
+    command: z.string().max(4_000),
+    cwd: z.string().max(1_000).optional(),
+    expectExitCode: optionalNumber,
+    expectStdoutMatch: z.string().max(1_000).optional(),
+  }),
+  z.object({
+    kind: z.literal("bots-ready"),
+    name: preflightCheckName,
+    botIds: z.array(id).max(200).optional(),
+    waitMinutes: optionalNumber,
+  }),
+  z.object({
+    kind: z.literal("engine-health"),
+    name: preflightCheckName,
+    botId: id,
+  }),
+]);
+const preflightSchema = z.object({
+  checks: z.array(preflightCheckSchema).max(50),
+  timeoutSeconds: optionalNumber,
 });
 
 const workflowInputSchema = z.object({
@@ -118,6 +196,16 @@ const workflowInputSchema = z.object({
   layout: layoutSchema,
   triggers: triggersSchema.optional(),
   maxNodeExecutions: optionalNumber,
+  providerOutage: providerOutageSchema.optional(),
+  // Range is the validator's (bad-numbers), as for every numeric knob.
+  stuckAfterMinutes: optionalNumber,
+  // A foreign key like a notify node's room; whether it exists is the
+  // listing's finding (missing-audit-group).
+  auditGroupId: id.optional(),
+  // Same stance as the schedule's time: a clock the digest could never
+  // fire on is refused at the door as well as by the validator.
+  digestAt: z.string().regex(WORKFLOW_SCHEDULE_TIME_RE, "must be HH:MM (24-hour)").optional(),
+  preflight: preflightSchema.optional(),
 });
 
 // Compile-time drift guards. Exact<> catches value-type drift, but two object
@@ -131,17 +219,44 @@ type SameKeys<A, B> = Exact<keyof A, keyof B>;
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
 type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
 type NotifyNode = Extract<WorkflowNode, { kind: "notify" }>;
+type WaitNode = Extract<WorkflowNode, { kind: "wait" }>;
 type Schedule = NonNullable<WorkflowTriggers["schedule"]>;
 type SchemaSchedule = NonNullable<z.infer<typeof triggersSchema>["schedule"]>;
+type ProviderOutage = NonNullable<Workflow["providerOutage"]>;
+type Preflight = NonNullable<Workflow["preflight"]>;
+type PreflightCheck = Preflight["checks"][number];
+type SchemaPreflightCheck = z.infer<typeof preflightCheckSchema>;
 const _schemaMatchesModel: Exact<z.infer<typeof workflowInputSchema>, WorkflowInput> = true;
 const _workflowKeys: SameKeys<z.infer<typeof workflowInputSchema>, WorkflowInput> = true;
 const _agentKeys: SameKeys<z.infer<typeof agentNodeSchema>, AgentNode> = true;
 const _approvalKeys: SameKeys<z.infer<typeof approvalNodeSchema>, ApprovalNode> = true;
 const _notifyKeys: SameKeys<z.infer<typeof notifyNodeSchema>, NotifyNode> = true;
+const _waitKeys: SameKeys<z.infer<typeof waitNodeSchema>, WaitNode> = true;
 const _edgeKeys: SameKeys<z.infer<typeof edgeSchema>, WorkflowEdge> = true;
 const _triggerKeys: SameKeys<z.infer<typeof triggersSchema>, WorkflowTriggers> = true;
 const _dailyKeys: SameKeys<Extract<SchemaSchedule, { type: "daily" }>, Extract<Schedule, { type: "daily" }>> = true;
 const _onceKeys: SameKeys<Extract<SchemaSchedule, { type: "once" }>, Extract<Schedule, { type: "once" }>> = true;
+const _outageKeys: SameKeys<z.infer<typeof providerOutageSchema>, ProviderOutage> = true;
+const _preflightKeys: SameKeys<z.infer<typeof preflightSchema>, Preflight> = true;
+const _preflightCommandKeys: SameKeys<
+  Extract<SchemaPreflightCheck, { kind: "command" }>,
+  Extract<PreflightCheck, { kind: "command" }>
+> = true;
+const _preflightBotsKeys: SameKeys<
+  Extract<SchemaPreflightCheck, { kind: "bots-ready" }>,
+  Extract<PreflightCheck, { kind: "bots-ready" }>
+> = true;
+const _preflightEngineKeys: SameKeys<
+  Extract<SchemaPreflightCheck, { kind: "engine-health" }>,
+  Extract<PreflightCheck, { kind: "engine-health" }>
+> = true;
+type IntervalSchedule = Extract<Schedule, { type: "interval" }>;
+type SchemaInterval = Extract<SchemaSchedule, { type: "interval" }>;
+const _intervalKeys: SameKeys<SchemaInterval, IntervalSchedule> = true;
+const _activeHoursKeys: SameKeys<
+  NonNullable<SchemaInterval["activeHours"]>,
+  NonNullable<IntervalSchedule["activeHours"]>
+> = true;
 void [
   _schemaMatchesModel,
   _workflowKeys,
@@ -152,6 +267,14 @@ void [
   _triggerKeys,
   _dailyKeys,
   _onceKeys,
+  _outageKeys,
+  _waitKeys,
+  _intervalKeys,
+  _activeHoursKeys,
+  _preflightKeys,
+  _preflightCommandKeys,
+  _preflightBotsKeys,
+  _preflightEngineKeys,
 ];
 
 /** JSON clients say "no value" with `null`; the model and the validator
@@ -177,7 +300,16 @@ const workflowPatchSchema = z.preprocess(stripNulls, workflowInputSchema.partial
  * store's spread overwrites and the JSON file then omits). A null on any
  * other top-level field is refused outright rather than becoming a silent
  * no-op. Single source of truth for both rules. */
-const CLEARABLE_FIELDS = ["description", "triggers", "maxNodeExecutions"] as const;
+const CLEARABLE_FIELDS = [
+  "description",
+  "triggers",
+  "maxNodeExecutions",
+  "providerOutage",
+  "stuckAfterMinutes",
+  "auditGroupId",
+  "digestAt",
+  "preflight",
+] as const;
 const isClearable = (key: string) => (CLEARABLE_FIELDS as readonly string[]).includes(key);
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
@@ -226,6 +358,7 @@ export type WorkflowWithIssues = Workflow & { issues: WorkflowIssue[] };
 const issuesOf = (deps: WorkflowApiDeps, workflow: Workflow): WorkflowIssue[] => [
   ...validateWorkflow(workflow),
   ...capabilityIssues(workflow, deps.botCapabilities),
+  ...(deps.groupExists ? auditGroupIssues(workflow, deps.groupExists) : []),
 ];
 const withIssues = (deps: WorkflowApiDeps, workflow: Workflow): WorkflowWithIssues => ({
   ...workflow,
@@ -237,6 +370,13 @@ const LIVE_RUN_STATUSES = new Set<WorkflowRunStatus>(["queued", "running", "wait
 // ── handlers ──────────────────────────────────────────────────────────
 export function listWorkflows(deps: WorkflowApiDeps): WorkflowApiResponse {
   return { status: 200, body: { workflows: deps.store.list().map((workflow) => withIssues(deps, workflow)) } };
+}
+
+/** What an uptime robot polls. Always 200 with `ok` in the body — a stuck
+ * run is the monitor's alert condition, not a broken endpoint — behind the
+ * same session gate as every other workflow route. */
+export function engineHealth({ engine }: WorkflowApiDeps): WorkflowApiResponse {
+  return { status: 200, body: engine.health() };
 }
 
 export function createWorkflow(deps: WorkflowApiDeps, body: unknown): WorkflowApiResponse {
@@ -346,6 +486,22 @@ export function startRun(deps: WorkflowApiDeps, workflowId: string, body: unknow
   }
 }
 
+/** The "Test pre-flight" button: runs the SAVED definition's checks and
+ * answers with the verdict; no run is created and nothing is persisted. It
+ * runs the saved checks, not a body's, so the request carries no command
+ * to execute — an endpoint that ran whatever it was posted would be a
+ * remote shell for anyone who can reach the socket. A workflow with no
+ * checks answers an empty, passing result. */
+export async function testPreflight({ store, engine }: WorkflowApiDeps, workflowId: string): Promise<WorkflowApiResponse> {
+  if (!store.get(workflowId)) return notFound("workflow");
+  try {
+    return { status: 200, body: { preflight: await engine.testPreflight(workflowId) } };
+  } catch (error) {
+    if (isUnknownEntity(error)) return notFound("workflow");
+    throw error;
+  }
+}
+
 export async function cancelRun({ engine }: WorkflowApiDeps, runId: string): Promise<WorkflowApiResponse> {
   try {
     return { status: 200, body: { run: await engine.cancelRun(runId) } };
@@ -420,6 +576,40 @@ export function workflowNotificationBotId(
   return candidates.find((botId) => lookup.exists(botId));
 }
 
+/** The bot whose chat an approval gate's card lands in — the one the
+ * person already associates with the work: the bot of the LAST agent step
+ * before the gate (the reviewer that wrote the summary the card carries),
+ * or, when the gate is the entry or only notify/wait steps precede it,
+ * the entry node's bot. A bot deleted since then falls through to the
+ * general notification pick, so the card never has nowhere to go while a
+ * bot of the workflow still exists. undefined only when nobody is left. */
+export function workflowApprovalBotId(
+  workflow: Workflow | null,
+  run: WorkflowRun,
+  lookup: NotificationBotLookup,
+): string | undefined {
+  const candidates: string[] = [];
+  if (workflow) {
+    const agentById = new Map(
+      workflow.nodes.filter((node): node is AgentNode => node.kind === "agent").map((node) => [node.id, node]),
+    );
+    for (let index = run.nodeResults.length - 1; index >= 0; index--) {
+      const result = run.nodeResults[index]!;
+      const previous = agentById.get(result.nodeId);
+      if (!previous) continue;
+      candidates.push(previous.botId);
+      // The step may have run on a fallback bot: its transcript, and so the
+      // person's attention, is there when the node's own bot is gone.
+      const owner = result.threadId === undefined ? undefined : lookup.botByThread(result.threadId);
+      if (owner !== undefined) candidates.push(owner);
+      break;
+    }
+    const entry = agentById.get(workflow.entryNodeId);
+    if (entry) candidates.push(entry.botId);
+  }
+  return candidates.find((botId) => lookup.exists(botId)) ?? workflowNotificationBotId(workflow, run, lookup);
+}
+
 // ── router ────────────────────────────────────────────────────────────
 export interface WorkflowApiRequest {
   method: string;
@@ -430,6 +620,7 @@ export interface WorkflowApiRequest {
 
 const WORKFLOW_PATH = /^\/api\/workflows\/([\w-]+)$/;
 const WORKFLOW_RUNS_PATH = /^\/api\/workflows\/([\w-]+)\/runs$/;
+const WORKFLOW_PREFLIGHT_PATH = /^\/api\/workflows\/([\w-]+)\/preflight$/;
 const RUN_ACTION_PATH = /^\/api\/workflow-runs\/([\w-]+)\/(cancel|resume|approval)$/;
 
 /** null when the request is not a workflow route, so index.ts's own
@@ -448,12 +639,18 @@ export async function handleWorkflowRequest(
   if (path === "/api/workflow-runs") {
     return method === "GET" ? listAllRuns(deps, request.searchParams.get("limit")) : null;
   }
+  // Before the `/api/workflows/:id` match: "health" is a route, never an id.
+  if (path === "/api/workflows/health") {
+    return method === "GET" ? engineHealth(deps) : null;
+  }
   let match = path.match(WORKFLOW_RUNS_PATH);
   if (match) {
     if (method === "GET") return listWorkflowRuns(deps, match[1]);
     if (method === "POST") return startRun(deps, match[1], await request.readBody());
     return null;
   }
+  match = path.match(WORKFLOW_PREFLIGHT_PATH);
+  if (match) return method === "POST" ? testPreflight(deps, match[1]) : null;
   match = path.match(WORKFLOW_PATH);
   if (match) {
     if (method === "PATCH") return patchWorkflow(deps, match[1], await request.readBody());

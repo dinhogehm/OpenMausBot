@@ -5,10 +5,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  alwaysAllowText,
   capabilityLookup,
   grantedCapabilities,
   hasCapability,
   missingCapabilities,
+  parseAlwaysAllowLines,
   toggleRequirement,
 } from "./workflow-capabilities";
 
@@ -66,5 +68,26 @@ describe("toggleRequirement", () => {
   it("returns undefined — the key to omit — rather than an empty list", () => {
     expect(toggleRequirement(["merge"], "merge", false)).toBeUndefined();
     expect(toggleRequirement(undefined, "merge", false)).toBeUndefined();
+  });
+});
+
+describe("parseAlwaysAllowLines / alwaysAllowText", () => {
+  it("reads one key per line, dropping blanks and padding and collapsing repeats, in order", () => {
+    expect(parseAlwaysAllowLines("Bash:gh\n\n  session_search \r\nBash:gh\nlist_bots")).toEqual([
+      "Bash:gh",
+      "session_search",
+      "list_bots",
+    ]);
+  });
+
+  it("yields the key to omit when nothing is left, so the document never carries [] or a blank entry", () => {
+    expect(parseAlwaysAllowLines("")).toBeUndefined();
+    expect(parseAlwaysAllowLines(" \n\n\t")).toBeUndefined();
+  });
+
+  it("round-trips every list the parser can produce", () => {
+    const keys = ["Bash:gh", "session_search"];
+    expect(parseAlwaysAllowLines(alwaysAllowText(keys))).toEqual(keys);
+    expect(alwaysAllowText(undefined)).toBe("");
   });
 });

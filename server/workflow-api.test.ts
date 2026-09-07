@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BotCapabilities, Workflow, WorkflowIssue, WorkflowRun } from "../shared/workflow.ts";
 import {
   handleWorkflowRequest,
+  workflowApprovalBotId,
   workflowNotificationBotId,
   type NotificationBotLookup,
   type WorkflowApiDeps,
@@ -34,7 +35,7 @@ function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: strin
   let taskSeq = 0;
   /** Test-settable seam: onInterrupt runs inside the engine's await of
    * interruptTurn — the window in which a trigger could start a fresh run. */
-  const hooks: { onInterrupt: (() => void) | null } = { onInterrupt: null };
+  const hooks: { onInterrupt: (() => void) | null; commandExit: number } = { onInterrupt: null, commandExit: 0 };
   /** Per-bot flags a test sets; a bot not listed carries none. */
   const capabilities = new Map<string, BotCapabilities>();
   const botCapabilities = (botId: string): BotCapabilities | null => capabilities.get(botId) ?? {};
@@ -52,6 +53,11 @@ function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: strin
       interrupts.push(threadId);
       hooks.onInterrupt?.();
     },
+    // No shell is spawned by an API test: a command check answers with
+    // the exit code the test set and echoes its command on stdout.
+    preflight: {
+      runCommand: async (check) => ({ exitCode: hooks.commandExit, stdout: `ran: ${check.command}`, stderr: "", timedOut: false }),
+    },
   });
   const deps: WorkflowApiDeps = { store, engine, botCapabilities, ...(onWorkflowDeleted ? { onWorkflowDeleted } : {}) };
   const call = (method: string, target: string, body?: unknown) => {
@@ -63,7 +69,18 @@ function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: strin
       readBody: async () => body ?? {},
     });
   };
-  return { store, engine, deps, call, dispatches, interrupts, hooks, capabilities };
+  return {
+    store,
+    engine,
+    deps,
+    call,
+    dispatches,
+    interrupts,
+    hooks,
+    capabilities,
+    /** Fresh store over the same files: proves the bytes on disk, not the cache. */
+    reload: () => new WorkflowStore({ file: join(dir, "workflows.json"), runsFile: join(dir, "workflow-runs.json"), now }),
+  };
 }
 
 const agentGraph = (): WorkflowInput => ({
@@ -255,6 +272,65 @@ describe("workflow definitions", () => {
     // next tick, and the client's own value never lands.
     expect(bodyOf(armed).workflow.nextRunAt).toBeUndefined();
     expect(store.get(id)?.nextRunAt).toBeUndefined();
+  });
+
+  it("accepts an interval schedule and refuses one too short to arm or with a window it could not honour", async () => {
+    const { call, store } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id;
+    const schedule = (patch: Record<string, unknown>) =>
+      call("PATCH", `/api/workflows/${id}`, { triggers: { schedule: { type: "interval", minutes: 60, ...patch } } });
+    const tooShort = await schedule({ minutes: 4 });
+    expect(tooShort?.status).toBe(400);
+    expect(bodyOf(tooShort).error).toMatch(/^triggers\.schedule\.minutes /);
+    expect((await schedule({ minutes: 7.5 }))?.status).toBe(400);
+    expect((await schedule({ minutes: "60" }))?.status).toBe(400);
+    const badWindow = await schedule({ activeHours: { start: "9:00", end: "18:00" } });
+    expect(badWindow?.status).toBe(400);
+    expect(bodyOf(badWindow).error).toBe("triggers.schedule.activeHours.start must be HH:MM (24-hour)");
+    expect((await schedule({ activeHours: { start: "09:00" } }))?.status).toBe(400);
+    expect((await schedule({ activeHours: { start: "09:00", end: "18:00", weekdays: [] } }))?.status).toBe(400);
+    expect((await schedule({ activeHours: { start: "09:00", end: "18:00", weekdays: [7] } }))?.status).toBe(400);
+    expect(store.get(id)?.triggers).toBeUndefined();
+
+    const plain = await schedule({});
+    expect(plain?.status).toBe(200);
+    expect(store.get(id)?.triggers).toEqual({ schedule: { type: "interval", minutes: 60 } });
+    const windowed = await schedule({ activeHours: { start: "09:00", end: "18:00", weekdays: [1, 2, 3, 4, 5] } });
+    expect(windowed?.status).toBe(200);
+    expect(store.get(id)?.triggers?.schedule).toEqual({
+      type: "interval",
+      minutes: 60,
+      activeHours: { start: "09:00", end: "18:00", weekdays: [1, 2, 3, 4, 5] },
+    });
+    // A changed schedule goes back to "not armed yet" for the engine's sweep.
+    expect(store.get(id)?.nextRunAt).toBeUndefined();
+  });
+
+  it("accepts a wait node, leaving its range to the validator like every other numeric knob", async () => {
+    const { call, store } = harness();
+    const graph = agentGraph();
+    const paced: WorkflowInput = {
+      ...graph,
+      nodes: [...graph.nodes, { kind: "wait", id: "pause", minutes: 30 }],
+    };
+    const created = await call("POST", "/api/workflows", paced);
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id;
+    expect(store.get(id)?.nodes.find((node) => node.id === "pause")).toEqual({ kind: "wait", id: "pause", minutes: 30 });
+    // Out of range is a draft with a badge, not a 400 — the same stance as
+    // a zero timeout on an agent node.
+    const wild = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [...graph.nodes, { kind: "wait", id: "pause", minutes: 0 }],
+    });
+    expect(wild?.status).toBe(200);
+    expect(bodyOf(wild).workflow.issues).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "bad-numbers", nodeId: "pause" })]),
+    );
+    // A non-number is a shape problem the door refuses.
+    const wrong = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [...graph.nodes, { kind: "wait", id: "pause", minutes: "30" }],
+    });
+    expect(wrong?.status).toBe(400);
   });
 
   it("shows the engine's nextRunAt on the workflow as a read-only field", async () => {
@@ -706,5 +782,430 @@ describe("workflow capabilities", () => {
     });
     expect(cleared?.status).toBe(200);
     expect(store.get(id)?.nodes[0]).not.toHaveProperty("requires");
+  });
+
+  it("persists a node's pre-approved keys through POST, PATCH and reload, refusing only the shape at the door", async () => {
+    const { call, store, reload } = harness();
+    const created = await call("POST", "/api/workflows", {
+      ...agentGraph(),
+      nodes: [{ ...agentGraph().nodes[0], alwaysAllow: ["Bash:gh", "session_search"] }],
+    });
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(bodyOf(created).workflow.nodes[0]).toMatchObject({ alwaysAllow: ["Bash:gh", "session_search"] });
+    expect(errors(bodyOf(created).workflow.issues)).toEqual([]);
+    // the bytes on disk carry it — a restart must not forget a grant
+    expect(reload().get(id)?.nodes[0]).toMatchObject({ alwaysAllow: ["Bash:gh", "session_search"] });
+
+    // a non-list is refused at the door, the stored draft untouched
+    const notAList = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], alwaysAllow: "Bash:gh" }],
+    });
+    expect(notAList?.status).toBe(400);
+    expect(bodyOf(notAList).error).toMatch(/^nodes\.0\.alwaysAllow/);
+    expect(store.get(id)?.nodes[0]).toMatchObject({ alwaysAllow: ["Bash:gh", "session_search"] });
+
+    // a blank or repeated entry is the validator's: the draft saves and is painted
+    const blank = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], alwaysAllow: ["Bash:gh", "", "Bash:gh"] }],
+    });
+    expect(blank?.status).toBe(200);
+    expect(codes(bodyOf(blank).workflow.issues)).toContain("bad-always-allow");
+    // and it gates a run, like every other error
+    const refused = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(refused?.status).toBe(400);
+    expect(bodyOf(refused).error).toMatch(/^invalid workflow: Node "\w+" alwaysAllow/);
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], alwaysAllow: null }],
+    });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.nodes[0]).not.toHaveProperty("alwaysAllow");
+  });
+});
+
+describe("workflow fallback bot and provider outage", () => {
+  const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);
+  /** The API harness's capability lookup answers `{}` for every bot, so a
+   * fallback exists as far as the roster is concerned unless a test says
+   * otherwise. */
+  const withFallback = (fallbackBotId: string): WorkflowInput => ({
+    ...agentGraph(),
+    nodes: [{ ...agentGraph().nodes[0]!, fallbackBotId } as WorkflowInput["nodes"][number]],
+  });
+
+  it("stores fallbackBotId, paints fallback-same-bot, and clears the field on null", async () => {
+    const { call, store } = harness();
+    const created = await call("POST", "/api/workflows", withFallback("bot-b"));
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(store.get(id)?.nodes[0]).toMatchObject({ fallbackBotId: "bot-b" });
+    expect(codes(bodyOf(created).workflow.issues)).not.toContain("fallback-same-bot");
+
+    const same = await call("PATCH", `/api/workflows/${id}`, { nodes: withFallback("bot-a").nodes });
+    expect(same?.status).toBe(200); // a draft still saves
+    expect(codes(bodyOf(same).workflow.issues)).toContain("fallback-same-bot");
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], fallbackBotId: null }],
+    });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.nodes[0]).not.toHaveProperty("fallbackBotId");
+  });
+
+  it("refuses a blank or padded fallbackBotId at the door, like any other id", async () => {
+    const { call } = harness();
+    const blank = await call("POST", "/api/workflows", withFallback(""));
+    expect(blank?.status).toBe(400);
+    expect(bodyOf(blank).error).toMatch(/^nodes\.0\.fallbackBotId/);
+    const padded = await call("POST", "/api/workflows", withFallback(" bot-b "));
+    expect(padded?.status).toBe(400);
+  });
+
+  it("lists a fallback the roster lacks as fallback-missing-bot on every listing, like a missing capability", async () => {
+    // The API's lookup is swapped here; the engine's own refusal to START on
+    // this issue is pinned in workflow-outage.test.ts, where the engine's
+    // lookup is the one being varied.
+    const { call, deps } = harness();
+    const roster = deps.botCapabilities;
+    deps.botCapabilities = (botId) => (botId === "ghost" ? null : roster(botId));
+    await call("POST", "/api/workflows", withFallback("ghost"));
+    const listed = bodyOf(await call("GET", "/api/workflows")).workflows as Array<Workflow & { issues: WorkflowIssue[] }>;
+    expect(listed[0]!.issues).toContainEqual({
+      severity: "error",
+      code: "fallback-missing-bot",
+      nodeId: "triage",
+      message: 'Node "triage" names a fallback bot "ghost" that does not exist.',
+    });
+    expect(codes(listed[0]!.issues)).not.toContain("missing-capability");
+  });
+
+  it("stores the outage knobs, paints bad ones as issues, refuses a non-number at the door, and clears on null", async () => {
+    const { call, store } = harness();
+    const created = await call("POST", "/api/workflows", {
+      ...agentGraph(),
+      providerOutage: { maxBackoffMinutes: 15, horizonHours: 2 },
+    });
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(store.get(id)?.providerOutage).toEqual({ maxBackoffMinutes: 15, horizonHours: 2 });
+
+    const zero = await call("PATCH", `/api/workflows/${id}`, { providerOutage: { horizonHours: 0 } });
+    expect(zero?.status).toBe(200);
+    expect(codes(bodyOf(zero).workflow.issues)).toContain("bad-numbers");
+
+    const shape = await call("PATCH", `/api/workflows/${id}`, { providerOutage: { horizonHours: "6" } });
+    expect(shape?.status).toBe(400);
+    expect(bodyOf(shape).error).toMatch(/^providerOutage\.horizonHours/);
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, { providerOutage: null });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.providerOutage).toBeUndefined();
+  });
+});
+
+describe("approval node expiry policy", () => {
+  const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);
+  const gateWith = (extra: Record<string, unknown>): WorkflowInput => ({
+    ...gateGraph(),
+    nodes: [{ ...gateGraph().nodes[0]!, ...extra } as WorkflowInput["nodes"][number]],
+  });
+
+  it("stores onExpire renotify, maxRenotify and the room, reloads them from disk, and clears them on null", async () => {
+    const { call, store, reload } = harness();
+    const created = await call("POST", "/api/workflows", gateWith({ onExpire: "renotify", maxRenotify: 3, notifyTargetGroupId: "grp-1" }));
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(codes(bodyOf(created).workflow.issues)).not.toContain("bad-approval-config");
+    expect(reload().get(id)?.nodes[0]).toMatchObject({ onExpire: "renotify", maxRenotify: 3, notifyTargetGroupId: "grp-1" });
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...gateGraph().nodes[0], onExpire: null, maxRenotify: null, notifyTargetGroupId: null }],
+    });
+    expect(cleared?.status).toBe(200);
+    const node = store.get(id)?.nodes[0];
+    expect(node).not.toHaveProperty("onExpire");
+    expect(node).not.toHaveProperty("maxRenotify");
+    expect(node).not.toHaveProperty("notifyTargetGroupId");
+  });
+
+  it("refuses an unknown policy and a non-number at the door; paints an out-of-range round count as bad-approval-config", async () => {
+    const { call } = harness();
+    const unknown = await call("POST", "/api/workflows", gateWith({ onExpire: "ask-again" }));
+    expect(unknown?.status).toBe(400);
+    expect(bodyOf(unknown).error).toMatch(/^nodes\.0\.onExpire/);
+    const shape = await call("POST", "/api/workflows", gateWith({ maxRenotify: "5" }));
+    expect(shape?.status).toBe(400);
+    expect(bodyOf(shape).error).toMatch(/^nodes\.0\.maxRenotify/);
+    const blankRoom = await call("POST", "/api/workflows", gateWith({ notifyTargetGroupId: "" }));
+    expect(blankRoom?.status).toBe(400);
+
+    const tooMany = await call("POST", "/api/workflows", gateWith({ onExpire: "renotify", maxRenotify: 31 }));
+    expect(tooMany?.status).toBe(201); // a draft saves; the badge says why it will not run
+    expect(codes(bodyOf(tooMany).workflow.issues)).toContain("bad-approval-config");
+    const id = bodyOf(tooMany).workflow.id as string;
+    const refused = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(refused?.status).toBe(400);
+    expect(bodyOf(refused).error).toMatch(/maxRenotify must be a whole number from 1 to 30/);
+  });
+});
+
+describe("workflowApprovalBotId", () => {
+  const run = (overrides: Partial<Pick<WorkflowRun, "currentNodeId" | "nodeResults">> = {}): WorkflowRun => ({
+    id: "r",
+    workflowId: "w",
+    status: "waiting-approval",
+    attempt: 0,
+    input: "",
+    nodeResults: [],
+    startedAt: 1,
+    currentNodeId: "gate",
+    ...overrides,
+  });
+  const workflow = (entryNodeId: string, nodes: Workflow["nodes"]): Workflow => ({
+    id: "w",
+    name: "W",
+    entryNodeId,
+    nodes,
+    edges: [],
+    layout: {},
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const lookup = (bots: string[], threads: Record<string, string> = {}): NotificationBotLookup => ({
+    exists: (botId) => bots.includes(botId),
+    botByThread: (threadId) => threads[threadId],
+  });
+  const result = (nodeId: string, threadId?: string) => ({ nodeId, outcome: "ok", summary: "", threadId, startedAt: 1, endedAt: 2 });
+  const graph = workflow("triage", [
+    { kind: "agent", id: "triage", botId: "bot-t", instructions: "", outcomes: ["ok"] },
+    { kind: "agent", id: "review", botId: "bot-r", instructions: "", outcomes: ["ok"] },
+    { kind: "notify", id: "ping", targetGroupId: "g", template: "t" },
+    { kind: "approval", id: "gate", prompt: "?" },
+  ]);
+
+  it("picks the bot of the last AGENT step before the gate, looking past notify and wait steps", () => {
+    const all = lookup(["bot-t", "bot-r"]);
+    expect(workflowApprovalBotId(graph, run({ nodeResults: [result("triage"), result("review")] }), all)).toBe("bot-r");
+    expect(workflowApprovalBotId(graph, run({ nodeResults: [result("triage"), result("review"), result("ping")] }), all)).toBe("bot-r");
+  });
+
+  it("falls back to the entry node's bot when no agent step precedes the gate", () => {
+    expect(workflowApprovalBotId(graph, run(), lookup(["bot-t", "bot-r"]))).toBe("bot-t");
+    expect(workflowApprovalBotId(graph, run({ nodeResults: [result("ping")] }), lookup(["bot-t", "bot-r"]))).toBe("bot-t");
+  });
+
+  it("prefers the thread's owner (a fallback bot) when the node's own bot is gone, then the entry, then the general pick", () => {
+    const results = run({ nodeResults: [result("triage"), result("review", "t-r")] });
+    expect(workflowApprovalBotId(graph, results, lookup(["bot-f", "bot-t"], { "t-r": "bot-f" }))).toBe("bot-f");
+    expect(workflowApprovalBotId(graph, results, lookup(["bot-t"], { "t-r": "bot-f" }))).toBe("bot-t");
+    // Entry gone too: the first surviving agent bot in graph order.
+    const other = workflow("gate", [...graph.nodes]);
+    expect(workflowApprovalBotId(other, results, lookup(["bot-t"]))).toBe("bot-t");
+    expect(workflowApprovalBotId(null, results, lookup(["bot-f"], { "t-r": "bot-f" }))).toBe("bot-f");
+    expect(workflowApprovalBotId(graph, results, lookup([]))).toBeUndefined();
+  });
+});
+
+describe("workflow monitoring — audit room, watchdog patience, digest and health", () => {
+  const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);
+
+  it("stores the monitoring fields, refuses a bad digest time at the door, paints a bad patience, and clears on null", async () => {
+    const { call, store } = harness();
+    const created = await call("POST", "/api/workflows", {
+      ...agentGraph(),
+      stuckAfterMinutes: 45,
+      auditGroupId: "room-1",
+      digestAt: "18:30",
+    });
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(store.get(id)).toMatchObject({ stuckAfterMinutes: 45, auditGroupId: "room-1", digestAt: "18:30" });
+
+    const clock = await call("PATCH", `/api/workflows/${id}`, { digestAt: "25:00" });
+    expect(clock?.status).toBe(400);
+    expect(bodyOf(clock).error).toMatch(/^digestAt/);
+
+    const impatient = await call("PATCH", `/api/workflows/${id}`, { stuckAfterMinutes: 5 });
+    expect(impatient?.status).toBe(200);
+    expect(codes(bodyOf(impatient).workflow.issues)).toContain("bad-numbers");
+
+    const padded = await call("PATCH", `/api/workflows/${id}`, { auditGroupId: " room-1 " });
+    expect(padded?.status).toBe(400);
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, { stuckAfterMinutes: null, auditGroupId: null, digestAt: null });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.stuckAfterMinutes).toBeUndefined();
+    expect(store.get(id)?.auditGroupId).toBeUndefined();
+    expect(store.get(id)?.digestAt).toBeUndefined();
+  });
+
+  it("strips lastDigestAt from clients and shows the engine's value read-only", async () => {
+    const { call, store } = harness();
+    const created = bodyOf(await call("POST", "/api/workflows", { ...agentGraph(), lastDigestAt: 5 })).workflow as Workflow;
+    expect("lastDigestAt" in created).toBe(false);
+    store.setLastDigestAt(created.id, 9_000);
+    const patched = await call("PATCH", `/api/workflows/${created.id}`, { name: "Renamed", lastDigestAt: 1 });
+    expect(patched?.status).toBe(200);
+    expect(bodyOf(patched).workflow.lastDigestAt).toBe(9_000);
+    expect(store.get(created.id)?.lastDigestAt).toBe(9_000);
+  });
+
+  it("strips refusalStreak from clients and shows the engine's value read-only", async () => {
+    const { call, store } = harness();
+    const created = bodyOf(await call("POST", "/api/workflows", { ...agentGraph(), refusalStreak: { count: 9, since: 1, lastReason: "x" } })).workflow as Workflow;
+    expect("refusalStreak" in created).toBe(false);
+    store.setRefusalStreak(created.id, { count: 2, since: 5_000, lastReason: "no token" });
+    const patched = await call("PATCH", `/api/workflows/${created.id}`, { name: "Renamed", refusalStreak: null });
+    expect(patched?.status).toBe(200);
+    expect(bodyOf(patched).workflow.refusalStreak).toEqual({ count: 2, since: 5_000, lastReason: "no token" });
+    expect(store.get(created.id)?.refusalStreak?.count).toBe(2);
+  });
+
+  it("paints missing-audit-group against the live rooms, and only when the deps can see rooms", async () => {
+    const { call, deps } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", { ...agentGraph(), auditGroupId: "gone" })).workflow.id as string;
+    // Without a room lookup the listing cannot judge it.
+    expect(codes(bodyOf(await call("GET", "/api/workflows")).workflows[0].issues)).not.toContain("missing-audit-group");
+    deps.groupExists = (groupId) => groupId === "room-1";
+    const listed = bodyOf(await call("GET", "/api/workflows")).workflows as Array<Workflow & { issues: WorkflowIssue[] }>;
+    expect(listed.find((workflow) => workflow.id === id)?.issues).toContainEqual({
+      severity: "warning",
+      code: "missing-audit-group",
+      message: 'The audit room "gone" no longer exists, so nothing is posted there; pick another room or turn the audit room off.',
+    });
+    // A warning: the run still starts (the room is a second copy of what
+    // the person is told anyway).
+    expect((await call("POST", `/api/workflows/${id}/runs`, {}))?.status).toBe(201);
+    const repointed = await call("PATCH", `/api/workflows/${id}`, { auditGroupId: "room-1" });
+    expect(codes(bodyOf(repointed).workflow.issues)).not.toContain("missing-audit-group");
+  });
+
+  it("answers GET /api/workflows/health with the engine's document and nothing else on that path", async () => {
+    const { call, engine, store } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id as string;
+    engine.startRun(id, "go", "manual");
+    const health = await call("GET", "/api/workflows/health");
+    expect(health?.status).toBe(200);
+    const body = bodyOf(health);
+    expect(body).toMatchObject({
+      ok: true,
+      version: "unknown",
+      engine: { lastTickAt: null },
+      runs: { live: 1, running: 1, queued: 0, waitingApproval: 0, stuck: [], preflight: [] },
+      lastFailure: null,
+    });
+    expect(body.workflows).toEqual([
+      expect.objectContaining({ id, name: "Triage", schedule: null, nextRunAt: null, liveRunId: store.listRuns(id)[0]!.id }),
+    ]);
+    expect(typeof body.now).toBe("number");
+    expect(typeof body.engine.uptimeMs).toBe("number");
+    // "health" is a route, never a workflow id: no PATCH/DELETE lands on it.
+    expect(await call("PATCH", "/api/workflows/health", { name: "x" })).toBeNull();
+    expect(await call("DELETE", "/api/workflows/health")).toBeNull();
+  });
+});
+
+describe("pre-flight over the API", () => {
+  const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);
+  const withPreflight = (): WorkflowInput => ({
+    ...agentGraph(),
+    preflight: {
+      timeoutSeconds: 30,
+      checks: [
+        { kind: "command", name: "gh auth", command: "gh auth status" },
+        { kind: "bots-ready", name: "bots" },
+      ],
+    },
+  });
+
+  it("stores the pre-flight, paints a bad one as bad-preflight, refuses a bad shape at the door, and clears on null", async () => {
+    const { call, store } = harness();
+    const created = await call("POST", "/api/workflows", withPreflight());
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(store.get(id)?.preflight).toEqual(withPreflight().preflight);
+    expect(codes(bodyOf(created).workflow.issues)).not.toContain("bad-preflight");
+
+    // A blank command and a bad regex are the validator's: saved, painted.
+    const blank = await call("PATCH", `/api/workflows/${id}`, {
+      preflight: { checks: [{ kind: "command", name: "x", command: "", expectStdoutMatch: "(" }] },
+    });
+    expect(blank?.status).toBe(200);
+    expect(codes(bodyOf(blank).workflow.issues).filter((code) => code === "bad-preflight")).toHaveLength(2);
+
+    // A shape zod cannot read is refused at the door.
+    const shape = await call("PATCH", `/api/workflows/${id}`, { preflight: { checks: [{ kind: "ping", name: "p" }] } });
+    expect(shape?.status).toBe(400);
+    expect(bodyOf(shape).error).toMatch(/^preflight\.checks/);
+    const notList = await call("PATCH", `/api/workflows/${id}`, { preflight: { checks: "gh" } });
+    expect(notList?.status).toBe(400);
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, { preflight: null });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.preflight).toBeUndefined();
+  });
+
+  it("a run is refused (400) for a bad pre-flight shape like any other error, before any check runs", async () => {
+    const { call, dispatches } = harness();
+    const created = await call("POST", "/api/workflows", {
+      ...agentGraph(),
+      preflight: { checks: [{ kind: "bots-ready", name: "" }] },
+    });
+    const id = bodyOf(created).workflow.id as string;
+    const refused = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(refused?.status).toBe(400);
+    expect(bodyOf(refused).error).toMatch(/^invalid workflow: Pre-flight check 1 needs a name/);
+    expect(dispatches).toHaveLength(0);
+  });
+
+  it("POST /runs answers 201 with the run parked on its entry; the verdict then lands on the run frame", async () => {
+    const { call, store, hooks, dispatches } = harness();
+    hooks.commandExit = 1;
+    const id = bodyOf(await call("POST", "/api/workflows", withPreflight())).workflow.id as string;
+    const started = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(started?.status).toBe(201);
+    const run = bodyOf(started).run as WorkflowRun;
+    expect(run).toMatchObject({ status: "running", currentNodeId: "triage" });
+    expect(run.preflightStartedAt).toBeDefined();
+    await new Promise((resolve) => setImmediate(resolve));
+    const settled = store.getRun(run.id)!;
+    expect(settled.status).toBe("failed");
+    expect(settled.error).toBe('pre-flight check "gh auth" failed: exited with code 1 (expected 0)');
+    expect(settled.preflight?.checks.map((check) => [check.name, check.ok])).toEqual([
+      ["gh auth", false],
+      ["bots", true],
+    ]);
+    expect(dispatches).toHaveLength(0);
+    // The listing carries the verdict for the timeline.
+    const listed = bodyOf(await call("GET", `/api/workflows/${id}/runs`)).runs as WorkflowRun[];
+    expect(listed[0]?.preflight?.ok).toBe(false);
+  });
+
+  it("POST /preflight runs the saved checks and answers with the verdict, creating no run", async () => {
+    const { call, store, hooks } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", withPreflight())).workflow.id as string;
+    const passed = await call("POST", `/api/workflows/${id}/preflight`, { command: "rm -rf /" });
+    expect(passed?.status).toBe(200);
+    const verdict = bodyOf(passed).preflight as { ok: boolean; checks: Array<{ name: string; ok: boolean; stdout?: string }> };
+    expect(verdict.ok).toBe(true);
+    // The body's command was ignored: only the saved one ran.
+    expect(verdict.checks[0]).toMatchObject({ name: "gh auth", ok: true, stdout: "ran: gh auth status" });
+    expect(store.listRuns()).toEqual([]);
+
+    hooks.commandExit = 2;
+    const failed = bodyOf(await call("POST", `/api/workflows/${id}/preflight`)).preflight as { ok: boolean };
+    expect(failed.ok).toBe(false);
+    expect(store.listRuns()).toEqual([]);
+
+    expect((await call("POST", "/api/workflows/nope/preflight"))?.status).toBe(404);
+    expect(await call("GET", `/api/workflows/${id}/preflight`)).toBeNull();
+  });
+
+  it("a workflow with no pre-flight answers an empty passing verdict", async () => {
+    const { call } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id as string;
+    const answer = bodyOf(await call("POST", `/api/workflows/${id}/preflight`)).preflight as { ok: boolean; checks: unknown[] };
+    expect(answer).toMatchObject({ ok: true, checks: [] });
   });
 });

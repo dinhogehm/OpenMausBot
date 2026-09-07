@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  auditGroupIssues,
   capabilityIssues,
+  countsTowardExecutionCap,
+  isValidPreflightPattern,
   missingCapabilities,
+  nodeOutcomes,
   parseWorkflowOutcome,
   validateWorkflow,
+  WORKFLOW_APPROVAL_ON_EXPIRE,
+  workflowApprovalRequestId,
   WORKFLOW_CAPABILITIES,
   WORKFLOW_FAIL_OUTCOME,
+  workflowOutageWaitMessage,
+  WORKFLOW_MAX_NODE_EXECUTIONS,
   workflowRoutingFingerprint,
   type BotCapabilities,
   type Workflow,
@@ -425,6 +433,41 @@ describe("validateWorkflow", () => {
     expect(bad(gated(undefined))).toEqual([]);
   });
 
+  it("flags an approval expiry policy the sweep could not honour (bad-approval-config)", () => {
+    const gated = (extra: Record<string, unknown>): Workflow =>
+      wf({
+        entryNodeId: "gate",
+        nodes: [{ kind: "approval", id: "gate", prompt: "ok?", ...extra } as unknown as Workflow["nodes"][number]],
+        edges: [],
+      });
+    const bad = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-approval-config");
+    const error = expect.objectContaining({ severity: "error", code: "bad-approval-config", nodeId: "gate" });
+    for (const onExpire of WORKFLOW_APPROVAL_ON_EXPIRE) expect(bad(gated({ onExpire }))).toEqual([]);
+    for (const onExpire of ["approve", "", "RENOTIFY", 1, null]) expect(bad(gated({ onExpire })), String(onExpire)).toEqual([error]);
+    expect(bad(gated({ onExpire: "x" }))[0]?.message).toMatch(/approved, rejected, renotify/);
+    for (const maxRenotify of [1, 5, 30]) expect(bad(gated({ maxRenotify }))).toEqual([]);
+    for (const maxRenotify of [0, 31, 2.5, -1, Number.NaN, "5"]) {
+      expect(bad(gated({ maxRenotify })), String(maxRenotify)).toEqual([error]);
+    }
+    expect(bad(gated({ maxRenotify: 0 }))[0]?.message).toMatch(/1 to 30/);
+    expect(bad(gated({ notifyTargetGroupId: "grp-1" }))).toEqual([]);
+    for (const notifyTargetGroupId of ["", "  ", 3]) expect(bad(gated({ notifyTargetGroupId }))).toEqual([error]);
+    // Each fault is its own line, and none of them touches the window check.
+    const all = validateWorkflow(gated({ onExpire: "x", maxRenotify: 0, notifyTargetGroupId: "", expiresHours: 0 }));
+    expect(all.filter((issue) => issue.code === "bad-approval-config")).toHaveLength(3);
+    expect(all.filter((issue) => issue.code === "bad-numbers")).toHaveLength(1);
+    // The policy is not an outcome: a "renotify" edge is still unknown.
+    expect(nodeOutcomes({ kind: "approval", id: "gate", prompt: "?", onExpire: "renotify" })).toEqual(["approved", "rejected"]);
+  });
+
+  it("names a card request per opening of the gate", () => {
+    expect(workflowApprovalRequestId({ id: "r1", currentNodeId: "gate", approvalRequestedAt: 5 })).toBe("workflow-approval:r1:gate:5");
+    expect(workflowApprovalRequestId({ id: "r1", currentNodeId: "gate", approvalRequestedAt: 6 })).not.toBe(
+      workflowApprovalRequestId({ id: "r1", currentNodeId: "gate", approvalRequestedAt: 5 }),
+    );
+    expect(workflowApprovalRequestId({ id: "r1" })).toBe("workflow-approval:r1::0");
+  });
+
   it("flags a schedule the scheduler could not arm", () => {
     const bad = (schedule: unknown) =>
       validateWorkflow(wf({ triggers: { schedule } as Workflow["triggers"] })).filter((issue) => issue.code === "bad-schedule");
@@ -446,6 +489,118 @@ describe("validateWorkflow", () => {
       expect(bad({ type: "once", at }), String(at)).toEqual([error]);
     }
     expect(bad({ type: "weekly", time: "09:00" })).toEqual([error]);
+  });
+
+  it("flags an interval too short to arm or an active window the scheduler could not honour", () => {
+    const bad = (schedule: unknown) =>
+      validateWorkflow(wf({ triggers: { schedule } as Workflow["triggers"] })).filter((issue) => issue.code === "bad-schedule");
+    const error = expect.objectContaining({ severity: "error", code: "bad-schedule" });
+    expect(bad({ type: "interval", minutes: 5 })).toEqual([]);
+    expect(bad({ type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00" } })).toEqual([]);
+    expect(bad({ type: "interval", minutes: 60, activeHours: { start: "22:00", end: "06:00", weekdays: [1, 5] } })).toEqual([]);
+    for (const minutes of [4, 0, -5, 7.5, Number.NaN, "60"]) {
+      expect(bad({ type: "interval", minutes }), String(minutes)).toEqual([error]);
+    }
+    expect(bad({ type: "interval", minutes: 1 })[0]?.message).toMatch(/at least 5 minutes/);
+    for (const activeHours of [
+      null,
+      "09:00-18:00",
+      [],
+      { start: "9:00", end: "18:00" },
+      { start: "09:00" },
+      { start: "09:00", end: "09:00" },
+      { start: "09:00", end: "18:00", weekdays: [] },
+      { start: "09:00", end: "18:00", weekdays: [7] },
+      { start: "09:00", end: "18:00", weekdays: [1, 1] },
+    ]) {
+      expect(bad({ type: "interval", minutes: 30, activeHours }), JSON.stringify(activeHours)).toEqual([error]);
+    }
+    expect(bad({ type: "interval", minutes: 30, activeHours: { start: "09:00", end: "09:00" } })[0]?.message).toMatch(
+      /differ/,
+    );
+  });
+});
+
+describe("wait nodes and the execution cap", () => {
+  const paced = (minutes: unknown): Workflow =>
+    wf({
+      entryNodeId: "code",
+      nodes: [
+        ...wf().nodes,
+        { kind: "wait", id: "pause", minutes } as unknown as Workflow["nodes"][number],
+      ],
+      edges: [
+        { from: "code", outcome: "done", to: "review" },
+        { from: "review", outcome: "approved", to: "pause" },
+        { from: "review", outcome: "rejected", to: "code" },
+        { from: "pause", outcome: "elapsed", to: "code" },
+      ],
+    });
+  const errors = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.severity === "error");
+
+  it("a wait node routes on exactly one outcome, elapsed, and is not bot work", () => {
+    expect(nodeOutcomes({ kind: "wait", id: "pause", minutes: 30 })).toEqual(["elapsed"]);
+    expect(countsTowardExecutionCap("wait")).toBe(false);
+    expect(countsTowardExecutionCap("notify")).toBe(false);
+    expect(countsTowardExecutionCap("agent")).toBe(true);
+    expect(countsTowardExecutionCap("approval")).toBe(true);
+  });
+
+  it("accepts a well-formed wait node and flags a pause outside 1..1440 whole minutes", () => {
+    expect(errors(paced(30))).toEqual([]);
+    expect(errors(paced(1))).toEqual([]);
+    expect(errors(paced(1_440))).toEqual([]);
+    for (const minutes of [0, 1_441, 2.5, -1, Number.NaN, "30", undefined]) {
+      expect(errors(paced(minutes)), String(minutes)).toEqual([
+        expect.objectContaining({ code: "bad-numbers", nodeId: "pause" }),
+      ]);
+    }
+    // An edge on an outcome a wait can never produce is the usual unknown-outcome error.
+    const miswired = paced(30);
+    miswired.edges = miswired.edges.map((edge) => (edge.from === "pause" ? { ...edge, outcome: "done" } : edge));
+    expect(errors(miswired).map((issue) => issue.code)).toEqual(["unknown-outcome", "unwired-outcome"]);
+  });
+
+  it("bounds maxNodeExecutions at 1000", () => {
+    const bad = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-numbers");
+    expect(bad(wf({ maxNodeExecutions: 1_000 }))).toEqual([]);
+    expect(bad(wf({ maxNodeExecutions: 1_001 }))).toEqual([expect.objectContaining({ severity: "error" })]);
+    expect(bad(wf({ maxNodeExecutions: 1_001 }))[0]?.message).toMatch(/1 to 1000/);
+    expect(WORKFLOW_MAX_NODE_EXECUTIONS).toBe(200);
+  });
+
+  it("warns, never errors, about a loop back to the entry with no wait node on it", () => {
+    const hot = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "cycle-without-wait");
+    // wf(): review --approved/rejected--> code (the entry), no pause anywhere.
+    expect(hot(wf())).toEqual([
+      expect.objectContaining({ severity: "warning", nodeId: "code", message: expect.stringMatching(/wait node/) }),
+    ]);
+    // paced(): the approved lap pauses, but the rejected lap still comes straight back.
+    expect(hot(paced(30))).toHaveLength(1);
+    // Every lap through the entry pauses: silent.
+    const cool = paced(30);
+    cool.edges = cool.edges.map((edge) => (edge.outcome === "rejected" ? { ...edge, to: "pause" } : edge));
+    expect(hot(cool)).toEqual([]);
+    // A cycle that does not pass through the entry is a review loop, not a hot loop.
+    const sideLoop = wf({
+      entryNodeId: "plan",
+      nodes: [{ kind: "agent", id: "plan", botId: "b0", instructions: "plan", outcomes: ["done"] }, ...wf().nodes],
+      edges: [
+        { from: "plan", outcome: "done", to: "code" },
+        { from: "code", outcome: "done", to: "review" },
+        { from: "review", outcome: "approved", to: "code" },
+        { from: "review", outcome: "rejected", to: "code" },
+      ],
+    });
+    expect(hot(sideLoop)).toEqual([]);
+    // The entry itself is a wait: every lap pauses, so never a hot loop.
+    const pausedEntry = paced(30);
+    pausedEntry.entryNodeId = "pause";
+    expect(hot(pausedEntry)).toEqual([]);
+    // No cycle at all: silent.
+    expect(hot(wf({ edges: [{ from: "code", outcome: "done", to: "review" }] }))).toEqual([]);
+    // A dead edge (unknown outcome) cannot carry a run, so it cannot make a hot loop.
+    expect(hot(wf({ edges: [{ from: "code", outcome: "done", to: "review" }, { from: "review", outcome: "nope", to: "code" }] }))).toEqual([]);
   });
 });
 
@@ -514,6 +669,39 @@ describe("capabilities", () => {
     expect(capabilityIssues(gated(["merge", "merge", "ship"]), () => ({}))).toHaveLength(1);
   });
 
+  it("validateWorkflow accepts an absent, empty, or well-formed alwaysAllow list and flags nothing else about it", () => {
+    const granting = (alwaysAllow: unknown): Workflow =>
+      wf({
+        nodes: wf().nodes.map((node) => (node.id === "review" ? { ...node, alwaysAllow } : node)) as unknown as Workflow["nodes"],
+      });
+    const badGrants = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-always-allow");
+    expect(badGrants(wf())).toEqual([]);
+    expect(badGrants(granting([]))).toEqual([]);
+    // the vocabulary is open — keys are minted per tool and program — so
+    // nothing here judges the names, only the shape
+    expect(badGrants(granting(["Bash:gh", "session_search", "local-computer:mcp__computer__click"]))).toEqual([]);
+    // and no error of any code: the fixture's own warnings are all that remain
+    expect(validateWorkflow(granting(["Bash:gh"])).filter((issue) => issue.severity === "error")).toEqual([]);
+  });
+
+  it("validateWorkflow flags a blank, padded, or repeated alwaysAllow entry and a non-list as bad-always-allow", () => {
+    const granting = (alwaysAllow: unknown): Workflow =>
+      wf({
+        nodes: wf().nodes.map((node) => (node.id === "review" ? { ...node, alwaysAllow } : node)) as unknown as Workflow["nodes"],
+      });
+    const badGrants = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-always-allow");
+    const error = expect.objectContaining({ severity: "error", code: "bad-always-allow", nodeId: "review" });
+    expect(badGrants(granting(["Bash:gh", ""]))).toEqual([error]);
+    expect(badGrants(granting(["Bash:gh", ""]))[0]?.message).toMatch(/blank entry/);
+    expect(badGrants(granting([" Bash:gh"]))[0]?.message).toMatch(/surrounding whitespace/);
+    expect(badGrants(granting(["Bash:gh", "Bash:gh"]))).toEqual([error]);
+    expect(badGrants(granting(["Bash:gh", "Bash:gh"]))[0]?.message).toMatch(/more than once/);
+    expect(badGrants(granting("Bash:gh"))).toEqual([error]);
+    expect(badGrants(granting([3]))).toEqual([error]);
+    // per node: a clean sibling is not blamed
+    expect(badGrants(granting([""])).map((issue) => issue.nodeId)).toEqual(["review"]);
+  });
+
   it("missingCapabilities lists what a bot lacks, in declaration order, once each", () => {
     expect(missingCapabilities(["deploy", "merge"], {})).toEqual(["deploy", "merge"]);
     expect(missingCapabilities(["deploy", "merge"], { canMerge: true })).toEqual(["deploy"]);
@@ -525,5 +713,277 @@ describe("capabilities", () => {
 
   it("requires never changes the routing fingerprint — it gates a dispatch, it steers nothing", () => {
     expect(workflowRoutingFingerprint(gated(["merge"]))).toBe(workflowRoutingFingerprint(wf()));
+  });
+});
+
+describe("fallback bot and provider outage", () => {
+  const withFallback = (fallbackBotId: unknown, nodeId = "review"): Workflow =>
+    wf({
+      nodes: wf().nodes.map((node) => (node.id === nodeId ? { ...node, fallbackBotId } : node)) as unknown as Workflow["nodes"],
+    });
+  const fallbackIssues = (workflow: Workflow) =>
+    validateWorkflow(workflow).filter((issue) => issue.code.startsWith("fallback-"));
+
+  it("validateWorkflow accepts an absent fallback and one naming another bot", () => {
+    expect(fallbackIssues(wf())).toEqual([]);
+    expect(fallbackIssues(withFallback("b9"))).toEqual([]);
+  });
+
+  it("validateWorkflow refuses a fallback that is the node's own bot", () => {
+    expect(fallbackIssues(withFallback("b2"))).toEqual([
+      {
+        severity: "error",
+        code: "fallback-same-bot",
+        nodeId: "review",
+        message: 'Node "review" names its own bot "b2" as the fallback; a fallback has to be a different bot.',
+      },
+    ]);
+  });
+
+  it("validateWorkflow refuses a blank or non-string fallback as fallback-missing-bot", () => {
+    const error = expect.objectContaining({ severity: "error", code: "fallback-missing-bot", nodeId: "review" });
+    expect(fallbackIssues(withFallback(""))).toEqual([error]);
+    expect(fallbackIssues(withFallback("   "))).toEqual([error]);
+    expect(fallbackIssues(withFallback(7))).toEqual([error]);
+  });
+
+  it("capabilityIssues flags a fallback the roster does not have, and is silent for one it has", () => {
+    const roster = (botId: string): BotCapabilities | null => (botId === "b1" || botId === "b2" ? {} : null);
+    expect(capabilityIssues(withFallback("ghost"), roster)).toEqual([
+      {
+        severity: "error",
+        code: "fallback-missing-bot",
+        nodeId: "review",
+        message: 'Node "review" names a fallback bot "ghost" that does not exist.',
+      },
+    ]);
+    expect(capabilityIssues(withFallback("b1"), roster)).toEqual([]);
+  });
+
+  it("capabilityIssues leaves a self-referencing or blank fallback to the validator — one finding per mistake", () => {
+    expect(capabilityIssues(withFallback("b2"), () => null)).toEqual([]);
+    expect(capabilityIssues(withFallback(""), () => null)).toEqual([]);
+  });
+
+  it("capabilityIssues warns when the fallback lacks what the node requires, since the engine will not use it", () => {
+    const gatedWithFallback: Workflow = wf({
+      nodes: wf().nodes.map((node) =>
+        node.id === "review" ? { ...node, requires: ["merge" as const], fallbackBotId: "b9" } : node,
+      ),
+    });
+    const roster = (botId: string): BotCapabilities | null =>
+      botId === "b2" ? { canMerge: true } : botId === "b9" ? { canDeploy: true } : null;
+    expect(capabilityIssues(gatedWithFallback, roster)).toEqual([
+      {
+        severity: "warning",
+        code: "fallback-missing-capability",
+        nodeId: "review",
+        message:
+          'Node "review" requires "merge" but its fallback bot "b9" is not allowed to merge; it will not take over during an outage.',
+      },
+    ]);
+    // The primary's own shortfall is still an error, and both are reported.
+    const both = capabilityIssues(gatedWithFallback, (botId) => (botId === "b9" ? { canDeploy: true } : {}));
+    expect(both.map((issue) => `${issue.severity}:${issue.code}`)).toEqual([
+      "error:missing-capability",
+      "warning:fallback-missing-capability",
+    ]);
+  });
+
+  it("fallbackBotId never changes the routing fingerprint", () => {
+    expect(workflowRoutingFingerprint(withFallback("b9"))).toBe(workflowRoutingFingerprint(wf()));
+  });
+
+  it("validateWorkflow accepts the outage knobs and refuses non-positive or non-object ones", () => {
+    const badNumbers = (overrides: Partial<Workflow>) =>
+      validateWorkflow(wf(overrides)).filter((issue) => issue.code === "bad-numbers");
+    expect(badNumbers({})).toEqual([]);
+    expect(badNumbers({ providerOutage: {} })).toEqual([]);
+    expect(badNumbers({ providerOutage: { maxBackoffMinutes: 15, horizonHours: 0.5 } })).toEqual([]);
+    expect(badNumbers({ providerOutage: { maxBackoffMinutes: 0 } })).toHaveLength(1);
+    expect(badNumbers({ providerOutage: { horizonHours: -1 } })).toHaveLength(1);
+    expect(badNumbers({ providerOutage: { maxBackoffMinutes: Number.NaN, horizonHours: 0 } })).toHaveLength(2);
+    expect(badNumbers({ providerOutage: "6h" as unknown as Workflow["providerOutage"] })).toHaveLength(1);
+    expect(badNumbers({ providerOutage: null as unknown as Workflow["providerOutage"] })).toHaveLength(1);
+  });
+
+  it("workflowOutageWaitMessage prints the wait, and nothing when the run is not waiting", () => {
+    const outage = { since: 0, until: 100, attempts: 3, of: 10, reason: "503" };
+    expect(workflowOutageWaitMessage({ outage, nextAttemptAt: 42 }, (at) => `t${at}`)).toBe(
+      "Waiting for the provider: next attempt t42 (attempt 3 of 10)",
+    );
+    expect(workflowOutageWaitMessage({ outage }, () => "x")).toBeNull();
+    expect(workflowOutageWaitMessage({ nextAttemptAt: 42 }, () => "x")).toBeNull();
+  });
+});
+
+describe("monitoring: watchdog patience, digest time and audit room", () => {
+  const byCode = (overrides: Partial<Workflow>, code: string) =>
+    validateWorkflow(wf(overrides)).filter((issue) => issue.code === code);
+
+  it("stuckAfterMinutes is a whole number of minutes from 10 to 1440", () => {
+    expect(byCode({}, "bad-numbers")).toEqual([]);
+    expect(byCode({ stuckAfterMinutes: 10 }, "bad-numbers")).toEqual([]);
+    expect(byCode({ stuckAfterMinutes: 1_440 }, "bad-numbers")).toEqual([]);
+    expect(byCode({ stuckAfterMinutes: 9 }, "bad-numbers")).toHaveLength(1);
+    expect(byCode({ stuckAfterMinutes: 1_441 }, "bad-numbers")).toHaveLength(1);
+    expect(byCode({ stuckAfterMinutes: 30.5 }, "bad-numbers")).toHaveLength(1);
+    expect(byCode({ stuckAfterMinutes: "60" as unknown as number }, "bad-numbers")).toHaveLength(1);
+    expect(byCode({ stuckAfterMinutes: 9 }, "bad-numbers")[0]!.message).toBe(
+      "stuckAfterMinutes must be a whole number from 10 to 1440.",
+    );
+  });
+
+  it("digestAt has the schedule's HH:MM shape, and the message names no field", () => {
+    expect(byCode({ digestAt: "18:00" }, "bad-digest")).toEqual([]);
+    expect(byCode({ digestAt: "6pm" }, "bad-digest")[0]!.message).toBe("Digest time must be HH:MM (24-hour).");
+    expect(byCode({ digestAt: "00:00" }, "bad-digest")).toEqual([]);
+    expect(byCode({ digestAt: "24:00" }, "bad-digest")).toHaveLength(1);
+    expect(byCode({ digestAt: "6pm" }, "bad-digest")).toHaveLength(1);
+    expect(byCode({ digestAt: 1800 as unknown as string }, "bad-digest")).toHaveLength(1);
+  });
+
+  it("a blank audit room id is the validator's error; whether it exists is auditGroupIssues' — a warning, against the rooms", () => {
+    expect(byCode({ auditGroupId: "room-1" }, "missing-audit-group")).toEqual([]);
+    expect(byCode({ auditGroupId: "  " }, "missing-audit-group")).toHaveLength(1);
+    const exists = (groupId: string) => groupId === "room-1";
+    expect(auditGroupIssues(wf(), exists)).toEqual([]);
+    expect(auditGroupIssues(wf({ auditGroupId: "room-1" }), exists)).toEqual([]);
+    // A blank id is not repeated here — validateWorkflow already paints it.
+    expect(auditGroupIssues(wf({ auditGroupId: " " }), exists)).toEqual([]);
+    expect(auditGroupIssues(wf({ auditGroupId: "room-9" }), exists)).toEqual([
+      {
+        severity: "warning",
+        code: "missing-audit-group",
+        message: 'The audit room "room-9" no longer exists, so nothing is posted there; pick another room or turn the audit room off.',
+      },
+    ]);
+  });
+
+  it("none of the monitoring fields changes the routing fingerprint", () => {
+    expect(
+      workflowRoutingFingerprint(wf({ stuckAfterMinutes: 30, auditGroupId: "room-1", digestAt: "18:00", lastDigestAt: 5 })),
+    ).toBe(workflowRoutingFingerprint(wf()));
+  });
+});
+
+describe("pre-flight", () => {
+  const badPreflight = (preflight: unknown) =>
+    validateWorkflow(wf({ preflight: preflight as Workflow["preflight"] }))
+      .filter((issue) => issue.code === "bad-preflight")
+      .map((issue) => issue.message);
+
+  it("validateWorkflow accepts an absent pre-flight, an empty one, and every well-formed check kind", () => {
+    expect(badPreflight(undefined)).toEqual([]);
+    expect(badPreflight({ checks: [] })).toEqual([]);
+    expect(
+      badPreflight({
+        timeoutSeconds: 30,
+        checks: [
+          { kind: "command", name: "gh", command: "gh auth status" },
+          { kind: "command", name: "clean tree", command: "git status --porcelain", cwd: "/repo", expectExitCode: 0, expectStdoutMatch: "^$" },
+          { kind: "bots-ready", name: "bots" },
+          { kind: "bots-ready", name: "some bots", botIds: ["b1", "b2"] },
+          { kind: "engine-health", name: "engine", botId: "b1" },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it("validateWorkflow flags a blank or repeated name — the receipt names the check that refused the run", () => {
+    expect(badPreflight({ checks: [{ kind: "bots-ready", name: "" }] })).toEqual(["Pre-flight check 1 needs a name."]);
+    expect(badPreflight({ checks: [{ kind: "bots-ready", name: "   " }] })).toEqual(["Pre-flight check 1 needs a name."]);
+    expect(
+      badPreflight({
+        checks: [
+          { kind: "bots-ready", name: "same" },
+          { kind: "engine-health", name: "same", botId: "b1" },
+        ],
+      }),
+    ).toEqual(['Pre-flight check 2 repeats the name "same"; every check needs its own.']);
+    // Compared trimmed: padding does not make a second name.
+    expect(
+      badPreflight({
+        checks: [
+          { kind: "bots-ready", name: "same" },
+          { kind: "bots-ready", name: " same " },
+        ],
+      }),
+    ).toHaveLength(1);
+  });
+
+  it("validateWorkflow bounds a bots-ready wait to whole minutes from 0 to 120", () => {
+    const only = (waitMinutes: unknown) => badPreflight({ checks: [{ kind: "bots-ready", name: "b", waitMinutes }] });
+    expect(only(undefined)).toEqual([]);
+    expect(only(0)).toEqual([]);
+    expect(only(120)).toEqual([]);
+    expect(only(121)).toEqual(['Pre-flight check "b" waitMinutes must be a whole number from 0 to 120.']);
+    expect(only(1.5)).toHaveLength(1);
+    expect(only(-1)).toHaveLength(1);
+    expect(only("10")).toHaveLength(1);
+  });
+
+  it("validateWorkflow flags an empty command, a bad cwd, a fractional exit code and an invalid regex", () => {
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "" }] })).toEqual([
+      'Pre-flight check "gh" has no command to run.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "  " }] })).toHaveLength(1);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "gh", cwd: "" }] })).toEqual([
+      'Pre-flight check "gh" cwd must be a directory path.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "gh", expectExitCode: 1.5 }] })).toEqual([
+      'Pre-flight check "gh" expectExitCode must be a whole number.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "gh", expectStdoutMatch: "(" }] })).toEqual([
+      'Pre-flight check "gh" expectStdoutMatch is not a valid regular expression.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "gh", expectStdoutMatch: 3 }] })).toHaveLength(1);
+  });
+
+  it("validateWorkflow flags an out-of-range or fractional timeout", () => {
+    const only = (timeoutSeconds: unknown) => badPreflight({ checks: [], timeoutSeconds });
+    expect(only(5)).toEqual([]);
+    expect(only(300)).toEqual([]);
+    expect(only(4)).toEqual(["preflight.timeoutSeconds must be a whole number from 5 to 300."]);
+    expect(only(301)).toHaveLength(1);
+    expect(only(10.5)).toHaveLength(1);
+    expect(only("60")).toHaveLength(1);
+  });
+
+  it("validateWorkflow flags the shapes a raw body may carry: a non-object, a non-list, an unknown kind, bad bot lists", () => {
+    expect(badPreflight("gh auth status")).toEqual(["preflight must be an object with a list of checks."]);
+    expect(badPreflight({ checks: "gh" })).toEqual(["preflight.checks must be a list."]);
+    expect(badPreflight({ checks: ["gh"] })).toEqual(["Pre-flight check 1 must be an object."]);
+    expect(badPreflight({ checks: [{ kind: "ping", name: "p" }] })).toEqual([
+      'Pre-flight check "p" kind must be command, bots-ready or engine-health.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "bots-ready", name: "b", botIds: ["b1", ""] }] })).toEqual([
+      'Pre-flight check "b" botIds must be a list of bot ids.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "bots-ready", name: "b", botIds: ["b1", "b1"] }] })).toEqual([
+      'Pre-flight check "b" lists the same bot more than once.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "engine-health", name: "e", botId: "" }] })).toEqual([
+      'Pre-flight check "e" needs the bot whose engine to check.',
+    ]);
+  });
+
+  it("a bad pre-flight is an error — it gates execution like every other shape problem", () => {
+    const issue = validateWorkflow(wf({ preflight: { checks: [{ kind: "command", name: "x", command: "" }] } })).find(
+      (candidate) => candidate.code === "bad-preflight",
+    );
+    expect(issue?.severity).toBe("error");
+    expect(issue?.nodeId).toBeUndefined();
+  });
+
+  it("the pre-flight never changes the routing fingerprint — it gates a start, it steers nothing", () => {
+    expect(workflowRoutingFingerprint(wf({ preflight: { checks: [{ kind: "bots-ready", name: "b" }] } }))).toBe(
+      workflowRoutingFingerprint(wf()),
+    );
+  });
+
+  it("isValidPreflightPattern says whether the engine could compile the regex", () => {
+    expect(isValidPreflightPattern("^$")).toBe(true);
+    expect(isValidPreflightPattern("(")).toBe(false);
   });
 });

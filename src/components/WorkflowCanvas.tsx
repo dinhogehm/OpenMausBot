@@ -54,7 +54,9 @@ import {
   CalendarClock,
   Check,
   CircleAlert,
+  ClipboardCheck,
   Eye,
+  Hourglass,
   Loader2,
   MessageSquare,
   Pencil,
@@ -90,6 +92,7 @@ import {
 import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { WorkflowCanvasNode, type WorkflowObservation } from "./WorkflowCanvasNode";
 import { WorkflowRunTimeline } from "./WorkflowRunTimeline";
+import { WorkflowPreflightPanel } from "./WorkflowPreflightPanel";
 import { WorkflowNodePanel, type WorkflowPanelBot } from "./WorkflowNodePanel";
 import {
   WORKFLOW_NODE_TYPE,
@@ -121,10 +124,16 @@ import {
   type XY,
 } from "@/lib/workflow-graph";
 import {
+  WORKFLOW_INTERVAL_MINUTES_MIN,
   WORKFLOW_SCHEDULE_TIME_RE,
+  WORKFLOW_STUCK_AFTER_DEFAULT_MIN,
+  WORKFLOW_STUCK_AFTER_MAX,
+  WORKFLOW_STUCK_AFTER_MIN,
   validateWorkflow,
   type Workflow,
+  type WorkflowActiveHours,
   type WorkflowNodeResult,
+  type WorkflowPreflightResult,
   type WorkflowSchedule,
   type WorkflowTriggers,
 } from "../../shared/workflow";
@@ -147,6 +156,7 @@ const NODE_KIND_META: Record<WorkflowNodeKind, { label: string; icon: typeof Use
   agent: { label: "Agent", icon: UserRound },
   approval: { label: "Approval", icon: ShieldQuestion },
   notify: { label: "Notify", icon: MessageSquare },
+  wait: { label: "Wait", icon: Hourglass },
 };
 
 // ── the custom node ───────────────────────────────────────────────────
@@ -211,17 +221,28 @@ function toLocalInput(at: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-/** Writes `triggers.schedule`. Every candidate goes through the shared
- * validator's `bad-schedule` rule first: the API refuses a malformed schedule
- * at the door, so an unarmable one must never reach the debounced save. */
+/** The workflow-level monitoring knobs the panel edits beside the trigger:
+ * where every transition is mirrored, how long a run may sit on one node
+ * before the watchdog speaks, and when the daily digest goes out. */
+export type WorkflowMonitoring = Pick<Workflow, "auditGroupId" | "stuckAfterMinutes" | "digestAt">;
+
+/** Writes `triggers.schedule` and the monitoring fields. Every candidate
+ * goes through the shared validator first (`bad-schedule`, `bad-numbers`,
+ * `bad-digest`): the API refuses a malformed schedule or digest time at the
+ * door, so an unarmable one must never reach the debounced save. */
 function TriggersPanel({
   workflow,
+  groups,
   onChange,
+  onMonitoringChange,
   onClose,
   anchorRef,
 }: {
   workflow: Workflow;
+  /** Rooms the audit trail may be posted to (id and name). */
+  groups: ReadonlyArray<{ id: string; name: string }>;
   onChange: (triggers: WorkflowTriggers | undefined) => void;
+  onMonitoringChange: (patch: WorkflowMonitoring) => void;
   onClose: () => void;
   /** The toggle that opened this, so a click on it is not treated as an
    * outside click (which would close and immediately reopen), and so focus
@@ -230,6 +251,13 @@ function TriggersPanel({
 }) {
   const schedule = workflow.triggers?.schedule;
   const [error, setError] = useState<string | null>(null);
+  // The interval field is committed on blur (or Enter), never per keystroke:
+  // typing "60" passes through "6", and each intermediate value would be a
+  // schedule change the store answers by resetting the armed clock.
+  const [minutesDraft, setMinutesDraft] = useState<string | null>(null);
+  /** Same blur-commit rule for the watchdog's patience: "120" passes
+   * through "1" and "12", both under the validator's floor. */
+  const [stuckDraft, setStuckDraft] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -279,13 +307,42 @@ function TriggersPanel({
     onChange(triggers);
   };
 
-  const setMode = (mode: "none" | "daily" | "once") => {
+  const setMode = (mode: "none" | "daily" | "once" | "interval") => {
     if (mode === "none") commit(undefined);
     else if (mode === "daily") commit({ type: "daily", time: "09:00", weekdays: [1, 2, 3, 4, 5] });
+    else if (mode === "interval") commit({ type: "interval", minutes: 60 });
     else commit({ type: "once", at: Date.now() + 60 * 60_000 });
   };
 
+  /** The monitoring fields are judged as the whole document too, so a
+   * digest time the clock could not read or a patience outside the band
+   * is a message in the panel, never a document the API would refuse. */
+  const commitMonitoring = (patch: WorkflowMonitoring) => {
+    const bad = validateWorkflow({ ...workflow, ...patch }).find(
+      (issue) => issue.code === "bad-digest" || (issue.code === "bad-numbers" && issue.nodeId === undefined && "stuckAfterMinutes" in patch),
+    );
+    if (bad) {
+      setError(bad.message);
+      return;
+    }
+    setError(null);
+    onMonitoringChange(patch);
+  };
+  const auditRoomKnown = workflow.auditGroupId === undefined || groups.some((group) => group.id === workflow.auditGroupId);
+
   const mode = schedule?.type ?? "none";
+  /** The window editor writes whole objects: every field change is
+   * validated as the complete schedule, so a half-typed time is a message
+   * in the panel, never a document the API would refuse. */
+  const setActiveHours = (patch: Partial<WorkflowActiveHours> | null) => {
+    if (schedule?.type !== "interval") return;
+    if (patch === null) {
+      const { activeHours: _dropped, ...rest } = schedule;
+      commit(rest);
+      return;
+    }
+    commit({ ...schedule, activeHours: { start: "09:00", end: "18:00", ...schedule.activeHours, ...patch } });
+  };
 
   return (
     <div
@@ -308,7 +365,7 @@ function TriggersPanel({
       </div>
 
       <div className="mt-3 flex items-center gap-1 rounded-lg border border-hairline/50 p-0.5">
-        {(["none", "daily", "once"] as const).map((option) => (
+        {(["none", "daily", "interval", "once"] as const).map((option) => (
           <button
             key={option}
             type="button"
@@ -378,6 +435,116 @@ function TriggersPanel({
         </div>
       )}
 
+      {schedule?.type === "interval" && (
+        <div className="mt-3 space-y-2.5">
+          <div>
+            <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-schedule-minutes">
+              Minutes after the last run ends
+            </label>
+            <input
+              id="wf-schedule-minutes"
+              type="number"
+              inputMode="numeric"
+              min={WORKFLOW_INTERVAL_MINUTES_MIN}
+              step={5}
+              value={minutesDraft ?? String(schedule.minutes)}
+              onChange={(event) => setMinutesDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }}
+              onBlur={() => {
+                if (minutesDraft === null) return;
+                const minutes = Number(minutesDraft);
+                setMinutesDraft(null);
+                if (!Number.isInteger(minutes) || minutes < WORKFLOW_INTERVAL_MINUTES_MIN) {
+                  setError(`Interval must be a whole number of at least ${WORKFLOW_INTERVAL_MINUTES_MIN} minutes.`);
+                  return;
+                }
+                if (minutes !== schedule.minutes) commit({ ...schedule, minutes });
+              }}
+              className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
+            />
+            <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+              The engine is the valve: a new run starts this long after the previous one finishes, and never while
+              one is live. A run you start by hand pushes the next one out.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-[11.5px] text-ink">
+            <input
+              type="checkbox"
+              checked={schedule.activeHours !== undefined}
+              onChange={(event) => setActiveHours(event.target.checked ? {} : null)}
+              className="accent-accent"
+            />
+            Only during active hours
+          </label>
+          {schedule.activeHours && (
+            <div className="space-y-2.5 rounded-lg border border-hairline/40 bg-inset p-2.5">
+              <div className="grid grid-cols-2 gap-2">
+                {(["start", "end"] as const).map((bound) => (
+                  <div key={bound}>
+                    <label
+                      className="block text-[11px] font-medium text-ink-secondary"
+                      htmlFor={`wf-schedule-hours-${bound}`}
+                    >
+                      {bound === "start" ? "From" : "Until"}
+                    </label>
+                    <input
+                      id={`wf-schedule-hours-${bound}`}
+                      type="time"
+                      value={schedule.activeHours?.[bound] ?? ""}
+                      onChange={(event) => {
+                        const time = event.target.value;
+                        if (!WORKFLOW_SCHEDULE_TIME_RE.test(time)) {
+                          setError("Active hours start and end must be HH:MM (24-hour).");
+                          return;
+                        }
+                        setActiveHours({ [bound]: time });
+                      }}
+                      className="mt-1 w-full rounded-lg border border-hairline/50 bg-panel px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
+                    />
+                  </div>
+                ))}
+              </div>
+              <div>
+                <span className="block text-[11px] font-medium text-ink-secondary">Days</span>
+                <div className="mt-1 flex gap-1">
+                  {WEEKDAYS.map((label, day) => {
+                    // No list means every day; the toggles show that as all on.
+                    const days = schedule.activeHours?.weekdays ?? [0, 1, 2, 3, 4, 5, 6];
+                    const on = days.includes(day);
+                    return (
+                      <button
+                        key={label}
+                        type="button"
+                        aria-pressed={on}
+                        aria-label={`Active on ${label}`}
+                        onClick={() =>
+                          setActiveHours({
+                            weekdays: on ? days.filter((value) => value !== day) : [...days, day].sort((a, b) => a - b),
+                          })
+                        }
+                        className={cn(
+                          "size-8 rounded-lg text-[10.5px] font-medium",
+                          on ? "bg-accent text-accent-ink" : "border border-hairline/50 text-ink-secondary hover:bg-raised",
+                        )}
+                      >
+                        {label.slice(0, 1)}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+                  Runs — and wait nodes — resume only inside this window. A window that crosses midnight is judged by
+                  the day each instant falls on: 22:00–06:00 on Mon covers Monday night until midnight, and Monday
+                  00:00–06:00 in the small hours.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {schedule?.type === "once" && (
         <div className="mt-3">
           <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-schedule-at">
@@ -399,6 +566,104 @@ function TriggersPanel({
           />
         </div>
       )}
+
+      <div className="mt-3 space-y-2.5 border-t border-hairline/40 pt-2.5">
+        <h3 className="text-[12px] font-semibold text-ink">Monitoring</h3>
+        <div>
+          <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-audit-room">
+            Audit room
+          </label>
+          <select
+            id="wf-audit-room"
+            value={workflow.auditGroupId ?? ""}
+            onChange={(event) => commitMonitoring({ auditGroupId: event.target.value === "" ? undefined : event.target.value })}
+            className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent"
+          >
+            <option value="">Off — notify me only</option>
+            {!auditRoomKnown && (
+              <option value={workflow.auditGroupId} disabled>
+                Missing room {workflow.auditGroupId}
+              </option>
+            )}
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+            Everything a run announces — waiting for approval, stuck, a provider outage, a fallback hand-off, failed,
+            cancelled, finished, the daily digest — is also posted here, prefixed with the workflow&apos;s name.
+          </p>
+        </div>
+        <div>
+          <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-stuck-after">
+            Announce a stuck run after (minutes)
+          </label>
+          <input
+            id="wf-stuck-after"
+            type="number"
+            inputMode="numeric"
+            min={WORKFLOW_STUCK_AFTER_MIN}
+            max={WORKFLOW_STUCK_AFTER_MAX}
+            step={5}
+            placeholder={String(WORKFLOW_STUCK_AFTER_DEFAULT_MIN)}
+            value={stuckDraft ?? (workflow.stuckAfterMinutes === undefined ? "" : String(workflow.stuckAfterMinutes))}
+            onChange={(event) => setStuckDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+            onBlur={() => {
+              if (stuckDraft === null) return;
+              const raw = stuckDraft.trim();
+              setStuckDraft(null);
+              // Blank puts the default back (the key is dropped).
+              const minutes = raw === "" ? undefined : Number(raw);
+              if (minutes !== workflow.stuckAfterMinutes) commitMonitoring({ stuckAfterMinutes: minutes });
+            }}
+            className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
+          />
+          <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+            A run that has not moved to another node for this long is announced once, then at most once per further
+            period (twelve times at most). Retries of the same node do not reset it; a provider outage does. Wait
+            nodes are exempt; a gate is judged on its own expiry.
+          </p>
+        </div>
+        <label className="flex items-center gap-2 text-[11.5px] text-ink">
+          <input
+            type="checkbox"
+            checked={workflow.digestAt !== undefined}
+            onChange={(event) => commitMonitoring({ digestAt: event.target.checked ? "18:00" : undefined })}
+            className="accent-accent"
+          />
+          Post a daily digest
+        </label>
+        {workflow.digestAt !== undefined && (
+          <div>
+            <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-digest-at">
+              Digest time
+            </label>
+            <input
+              id="wf-digest-at"
+              type="time"
+              value={workflow.digestAt}
+              onChange={(event) => {
+                const time = event.target.value;
+                if (!WORKFLOW_SCHEDULE_TIME_RE.test(time)) {
+                  setError("Digest time must be HH:MM (24-hour).");
+                  return;
+                }
+                commitMonitoring({ digestAt: time });
+              }}
+              className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
+            />
+            <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+              Runs that ended since the previous digest: how many completed, failed and were cancelled, the average
+              run time, the nodes that failed most and the denials seen most.
+            </p>
+          </div>
+        )}
+      </div>
 
       {error && (
         <p role="alert" className="mt-2.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[11.5px] text-danger">
@@ -426,6 +691,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   const { screenToFlowPosition } = useReactFlow();
   const paneRef = useRef<HTMLDivElement>(null);
   const scheduleButtonRef = useRef<HTMLButtonElement>(null);
+  const preflightButtonRef = useRef<HTMLButtonElement>(null);
 
   const [doc, setDoc] = useState<Workflow>(() => toDocument(row));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -435,6 +701,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   const [runError, setRunError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [preflightOpen, setPreflightOpen] = useState(false);
   /** A half-typed (or momentarily empty) name the document must not adopt. */
   const [nameDraft, setNameDraft] = useState<string | null>(null);
 
@@ -489,7 +756,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   // than call it missing. Only `offeredBots` is handed out for a NEW binding.
   const bots = useMemo<WorkflowPanelBot[]>(
     () =>
-      state.bots.map(({ id, name, color, avatarUrl, avatarCrop, mascotBody, canMerge, canDeploy, hidden }) => ({
+      state.bots.map(({ id, name, color, avatarUrl, avatarCrop, mascotBody, canMerge, canDeploy, hidden, modelSelection }) => ({
         id,
         name,
         color,
@@ -499,10 +766,14 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
         canMerge,
         canDeploy,
         hidden,
+        // The engine behind the bot, so the fallback picker can say when a
+        // choice shares the primary's engine and would never take over.
+        engine: modelSelection.instanceId,
       })),
     [state.bots],
   );
   const offeredBots = useMemo(() => bots.filter((bot) => !bot.hidden), [bots]);
+  const botName = useCallback((botId: string) => bots.find((bot) => bot.id === botId)?.name, [bots]);
   const groups = useMemo(() => state.groups.map(({ id, name }) => ({ id, name })), [state.groups]);
 
   // The same validators the server runs, on the document as it stands right
@@ -512,7 +783,8 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   // profile repaints the node that requires it with no save in between. The
   // list draws the same union, so the two can never disagree.
   const lookup = useMemo(() => capabilityLookup(state.bots), [state.bots]);
-  const issues = useMemo(() => liveWorkflowIssues(doc, lookup), [doc, lookup]);
+  const groupExists = useCallback((groupId: string) => groups.some((group) => group.id === groupId), [groups]);
+  const issues = useMemo(() => liveWorkflowIssues(doc, lookup, groupExists), [doc, lookup, groupExists]);
   const { errors, warnings } = validationSummary(issues);
   const headerIssues = useMemo(() => documentIssues(issues), [issues]);
   const nodeIssues = useMemo(() => issuesByNode(issues), [issues]);
@@ -575,7 +847,9 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
             ? `${node.id} · ${bots.find((bot) => bot.id === node.botId)?.name ?? "missing bot"}`
             : node.kind === "notify"
               ? `${node.id} · ${groups.find((group) => group.id === node.targetGroupId)?.name ?? "missing room"}`
-              : `${node.id} · approval`,
+              : node.kind === "wait"
+                ? `${node.id} · wait ${node.minutes} min`
+                : `${node.id} · approval`,
       })),
     [doc.nodes, bots, groups],
   );
@@ -827,6 +1101,19 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
     } finally {
       setRunning(false);
     }
+  };
+
+  // The checks run against the SAVED definition (the endpoint never takes
+  // a body — see workflow-api.ts), so the debounced edit is flushed first
+  // and a failed save refuses the test rather than testing yesterday's list.
+  const testPreflight = async (): Promise<WorkflowPreflightResult> => {
+    cancelDebounce();
+    const flushed = await queue.flush();
+    if (!flushed.ok) throw new Error(`Not tested — the latest changes could not be saved: ${flushed.error}`);
+    const { preflight } = await api(`/api/workflows/${workflowId}/preflight`, { method: "POST", body: "{}" });
+    if (!preflight) throw new Error("The server answered without a verdict.");
+    dispatch({ type: "workflowPreflightTested", workflowId, result: preflight });
+    return preflight;
   };
 
   const decide = (decision: "approved" | "rejected") => {
@@ -1092,9 +1379,38 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                   {scheduleOpen && (
                     <TriggersPanel
                       workflow={doc}
+                      groups={groups}
                       anchorRef={scheduleButtonRef}
                       onChange={(triggers) => commit((current) => ({ ...current, triggers }))}
+                      onMonitoringChange={(patch) => commit((current) => ({ ...current, ...patch }))}
                       onClose={() => setScheduleOpen(false)}
+                    />
+                  )}
+                </div>
+
+                <div className="relative">
+                  <button
+                    ref={preflightButtonRef}
+                    type="button"
+                    onClick={() => setPreflightOpen((open) => !open)}
+                    aria-expanded={preflightOpen}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-lg border border-hairline/50 px-2.5 py-1.5 text-[11.5px] font-medium",
+                      doc.preflight?.checks.length ? "text-accent" : "text-ink-secondary hover:bg-raised hover:text-ink",
+                    )}
+                  >
+                    <ClipboardCheck size={13} aria-hidden />
+                    Pre-flight
+                  </button>
+                  {preflightOpen && (
+                    <WorkflowPreflightPanel
+                      workflow={doc}
+                      bots={bots}
+                      anchorRef={preflightButtonRef}
+                      lastResult={state.workflowPreflightTests[workflowId] ?? null}
+                      onChange={(preflight) => commit((current) => ({ ...current, preflight }))}
+                      onTest={testPreflight}
+                      onClose={() => setPreflightOpen(false)}
                     />
                   )}
                 </div>
@@ -1256,6 +1572,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                 setMode((current) => ({ ...current, action: null, pickedRunId: runId }));
               }}
               onOpenStep={openStep}
+              botName={botName}
             />
           </aside>
         ) : selectedNode ? (

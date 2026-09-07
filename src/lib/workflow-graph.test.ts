@@ -32,6 +32,8 @@ import {
   toGraphEdges,
   toGraphNodes,
   updateNode,
+  WORKFLOW_NODE_KINDS,
+  WORKFLOW_WAIT_DEFAULT_MINUTES,
   workflowPatchBody,
 } from "./workflow-graph";
 
@@ -166,6 +168,19 @@ describe("reconcileGraphNodes", () => {
     );
     expect(reconcileGraphNodes(requiring, toGraphNodes(needsDeploy, issues))[0]).not.toBe(requiring[0]);
     expect(reconcileGraphNodes(requiring, toGraphNodes(needsMerge, issues))[0]).toBe(requiring[0]);
+
+    // `alwaysAllow` is the third array, compared the same way: a different
+    // key of the same length is a change, an identical list is not
+    const grantsGh = updateNode(graph, "agent-1", (node) =>
+      node.kind === "agent" ? { ...node, alwaysAllow: ["Bash:gh"] } : node,
+    );
+    const granting = toGraphNodes(grantsGh, issues);
+    expect(reconcileGraphNodes(first, granting)[0]).not.toBe(first[0]);
+    const grantsGit = updateNode(grantsGh, "agent-1", (node) =>
+      node.kind === "agent" ? { ...node, alwaysAllow: ["Bash:git"] } : node,
+    );
+    expect(reconcileGraphNodes(granting, toGraphNodes(grantsGit, issues))[0]).not.toBe(granting[0]);
+    expect(reconcileGraphNodes(granting, toGraphNodes(grantsGh, issues))[0]).toBe(granting[0]);
   });
 
   it("replaces the object when position, selection, entry, issues or the node itself change", () => {
@@ -383,10 +398,28 @@ describe("insertNode / nextNodeId / createWorkflowNode", () => {
     expect(nextNodeId(gapped, "agent")).toBe("agent-2");
   });
 
+  it("seeds a wait node with a default pause and no roster reference", () => {
+    expect(WORKFLOW_NODE_KINDS).toContain("wait");
+    expect(nextNodeId(workflow({ nodes: [] }), "wait")).toBe("wait-1");
+    expect(createWorkflowNode("wait", "wait-1", {})).toEqual({
+      kind: "wait",
+      id: "wait-1",
+      minutes: WORKFLOW_WAIT_DEFAULT_MINUTES,
+    });
+    expect(outcomeHandles({ kind: "wait", id: "wait-1", minutes: 5 })).toEqual([{ outcome: "elapsed", implicit: false }]);
+  });
+
   it("needs a bot for an agent node and a room for a notify node", () => {
     expect(createWorkflowNode("agent", "agent-9", {})).toBeNull();
     expect(createWorkflowNode("notify", "notify-9", {})).toBeNull();
-    expect(createWorkflowNode("approval", "approval-9", {})).toMatchObject({ kind: "approval", prompt: "" });
+    // A new gate re-notifies on expiry; only nodes saved before the policy
+    // existed (no onExpire) keep the older reject-on-expiry.
+    expect(createWorkflowNode("approval", "approval-9", {})).toEqual({
+      kind: "approval",
+      id: "approval-9",
+      prompt: "",
+      onExpire: "renotify",
+    });
     expect(createWorkflowNode("agent", "agent-9", { botId: "bot-a" })).toEqual({
       kind: "agent",
       id: "agent-9",
@@ -452,26 +485,49 @@ describe("issuesByNode / documentIssues", () => {
 describe("workflowPatchBody", () => {
   it("sends the whole document and never the engine-owned fields", () => {
     const body = workflowPatchBody(
-      workflow({ nextRunAt: 999, description: "d", maxNodeExecutions: 12, triggers: { schedule: { type: "once", at: 5 } } }),
+      workflow({
+        nextRunAt: 999,
+        lastDigestAt: 998,
+        description: "d",
+        maxNodeExecutions: 12,
+        triggers: { schedule: { type: "once", at: 5 } },
+        stuckAfterMinutes: 45,
+        auditGroupId: "room-1",
+        digestAt: "18:00",
+      }),
     );
     expect(Object.keys(body).sort()).toEqual([
+      "auditGroupId",
       "description",
+      "digestAt",
       "edges",
       "entryNodeId",
       "layout",
       "maxNodeExecutions",
       "name",
       "nodes",
+      "preflight",
+      "stuckAfterMinutes",
       "triggers",
     ]);
     expect(body.maxNodeExecutions).toBe(12);
     expect(body.triggers).toEqual({ schedule: { type: "once", at: 5 } });
+    expect(body).toMatchObject({ stuckAfterMinutes: 45, auditGroupId: "room-1", digestAt: "18:00" });
   });
 
-  it("nulls the clearable optionals so removing a schedule actually removes it", () => {
+  it("nulls the clearable optionals so removing a schedule — or an audit room — actually removes it", () => {
     const body = workflowPatchBody(workflow());
     expect(body.triggers).toBeNull();
     expect(body.description).toBeNull();
     expect(body.maxNodeExecutions).toBeNull();
+    expect(body.stuckAfterMinutes).toBeNull();
+    expect(body.auditGroupId).toBeNull();
+    expect(body.digestAt).toBeNull();
+    expect(body.preflight).toBeNull();
+  });
+
+  it("sends the pre-flight as saved, so the panel's checks reach the server whole", () => {
+    const preflight = { checks: [{ kind: "bots-ready" as const, name: "bots" }], timeoutSeconds: 30 };
+    expect(workflowPatchBody(workflow({ preflight })).preflight).toEqual(preflight);
   });
 });

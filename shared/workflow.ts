@@ -9,12 +9,113 @@ export const WORKFLOW_CONTROL_CLOSE = "</openmaus-workflow>";
 export const WORKFLOW_FAIL_OUTCOME = "failed";
 export const WORKFLOW_APPROVAL_OUTCOMES = ["approved", "rejected"] as const;
 export const WORKFLOW_NOTIFY_OUTCOME = "sent";
+/** The one outcome a wait node produces: its timer ran out. */
+export const WORKFLOW_WAIT_OUTCOME = "elapsed";
 export const WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN = 30;
 export const WORKFLOW_NODE_RETRIES_DEFAULT = 2;
-/** Cycles are legal by design (review loops); this cap is what keeps a
- * miswired loop from running a workflow forever. */
-export const WORKFLOW_MAX_NODE_EXECUTIONS = 30;
+/** Cycles are legal by design (review loops, and a continuous cycle that
+ * loops back to the entry); this cap is what keeps a miswired loop from
+ * running a workflow forever. It counts BOT WORK — agent and approval
+ * executions — never wait or notify steps, which cost nothing and would
+ * otherwise spend the budget of a slow continuous cycle on pauses. The
+ * default is sized for a day of cycling rather than one pass. */
+export const WORKFLOW_MAX_NODE_EXECUTIONS = 200;
+export const WORKFLOW_MAX_NODE_EXECUTIONS_LIMIT = 1_000;
+/** Bounds for a wait node: a minute is the shortest pause the 10-second
+ * tick can honour meaningfully, a day is the longest a run should sit idle
+ * — past that, a schedule is the right tool. */
+export const WORKFLOW_WAIT_MINUTES_MIN = 1;
+export const WORKFLOW_WAIT_MINUTES_MAX = 1_440;
+/** Shortest interval a continuous schedule may fire on: below this the run
+ * would be re-armed faster than a single bot turn usually finishes. */
+export const WORKFLOW_INTERVAL_MINUTES_MIN = 5;
 export const WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H = 24;
+/** What an approval gate does when its window runs out: take a decision
+ * (`approved` / `rejected`), or — `renotify` — re-arm the window and ask
+ * again, up to `maxRenotify` rounds, and only then reject. The live pipeline
+ * lost a finished PR to the 24-hour default because the person never saw
+ * the card; a gate that keeps asking cannot silently discard work. */
+export const WORKFLOW_APPROVAL_ON_EXPIRE = ["approved", "rejected", "renotify"] as const;
+export type WorkflowApprovalOnExpire = (typeof WORKFLOW_APPROVAL_ON_EXPIRE)[number];
+/** What a NEW approval node gets; a node saved without `onExpire` keeps the
+ * older `rejected` behaviour, so existing definitions do not change. */
+export const WORKFLOW_APPROVAL_ON_EXPIRE_DEFAULT_NEW: WorkflowApprovalOnExpire = "renotify";
+export const WORKFLOW_APPROVAL_RENOTIFY_DEFAULT = 5;
+export const WORKFLOW_APPROVAL_RENOTIFY_MIN = 1;
+export const WORKFLOW_APPROVAL_RENOTIFY_MAX = 30;
+/** A provider outage (5xx, a 404 from the provider's own backend, rate
+ * limiting, a dropped connection, an engine process dying before it
+ * answered) is waited out rather than retried: the run parks with a
+ * doubling backoff (1, 2, 4, 8 … minutes) that never spends one of the
+ * node's attempts, capped per wait at this many minutes by default and
+ * given up on — through the ordinary failure path — once the outage has
+ * lasted longer than the horizon. Both knobs live on the workflow. */
+export const WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN = 60;
+export const WORKFLOW_OUTAGE_HORIZON_DEFAULT_H = 6;
+/** A start the engine REFUSES (validation, a revoked capability, a missing
+ * bot, a failed pre-flight) under an interval trigger would otherwise be
+ * tried — and announced — every interval, all night. Consecutive refusals
+ * back the re-arm off instead: interval × 2^count, never past this cap,
+ * and the person hears about the first, the third and every tenth. */
+export const WORKFLOW_REFUSAL_BACKOFF_CAP_MS = 6 * 60 * 60_000;
+
+/** The re-arm delay after `count` refused starts in a row (1-based). */
+export function refusalBackoffMs(intervalMinutes: number, count: number): number {
+  const doubled = intervalMinutes * 60_000 * 2 ** Math.max(0, Math.min(count, 30));
+  return Math.min(doubled, WORKFLOW_REFUSAL_BACKOFF_CAP_MS);
+}
+
+/** Which refusals of a streak are said out loud: the first, the third, and
+ * every tenth — enough to know it started, that it did not clear itself,
+ * and that it is still going, without a buzz per interval. */
+export function refusalAnnounced(count: number): boolean {
+  return count === 1 || count === 3 || (count > 0 && count % 10 === 0);
+}
+
+/** Engine-owned: consecutive starts the engine refused before any node
+ * ran. Never settable by a client — the API strips it. Cleared by the
+ * first run that gets past its checks and dispatches a node. */
+export interface WorkflowRefusalStreak {
+  count: number;
+  /** When the first refusal of the streak happened. */
+  since: number;
+  /** The most recent refusal's reason, bounded like a run's error. */
+  lastReason: string;
+}
+/** The run watchdog: a live run whose current node has not changed for this
+ * long is announced as STUCK — once, then again at most every further
+ * period — so an operator learns about a node that hung from a
+ * notification and not from staring at the sidebar. Per workflow
+ * (`stuckAfterMinutes`), bounded so a typo can neither page every ten
+ * seconds nor never page at all. A wait node has its own clock and is
+ * exempt; an approval gate is judged against its own expiry instead. */
+export const WORKFLOW_STUCK_AFTER_DEFAULT_MIN = 120;
+export const WORKFLOW_STUCK_AFTER_MIN = 10;
+export const WORKFLOW_STUCK_AFTER_MAX = 1_440;
+/** How far past an approval gate's own expiry the watchdog waits before it
+ * counts the run as stuck: the expiry sweep should have settled it long
+ * before, so a gate still open here is one the engine could not close. */
+export const WORKFLOW_STUCK_APPROVAL_FACTOR = 1.5;
+/** How many times one stay is announced at most (the first, then one per
+ * period): a run nobody acts on for a day of announcements is not going
+ * to be acted on because of a thirteenth, and the health endpoint still
+ * lists it. The last announcement says it is the last. */
+export const WORKFLOW_STUCK_ANNOUNCEMENTS_MAX = 12;
+/** Bounds for the pre-flight's global timeout: every check runs inside one
+ * deadline, short enough that a hung `gh` never holds a slot for long, long
+ * enough for a real network round trip. */
+export const WORKFLOW_PREFLIGHT_TIMEOUT_DEFAULT_S = 60;
+export const WORKFLOW_PREFLIGHT_TIMEOUT_MIN_S = 5;
+export const WORKFLOW_PREFLIGHT_TIMEOUT_MAX_S = 300;
+/** How much of a check's output the receipt keeps, per stream. */
+export const WORKFLOW_PREFLIGHT_OUTPUT_MAX = 500;
+/** How long a `bots-ready` check keeps re-checking a bot that is merely
+ * BUSY before the run is refused: contention is what the engine waits out
+ * everywhere else, so a bot mid-turn at the trigger is a pause, not a
+ * failure. Whole minutes, bounded so a run cannot sit in pre-flight for a
+ * day. */
+export const WORKFLOW_PREFLIGHT_WAIT_DEFAULT_MIN = 10;
+export const WORKFLOW_PREFLIGHT_WAIT_MAX_MIN = 120;
 /** A scheduled run more than this late (the computer was asleep or the app
  * closed past the slot) is recorded as missed, never executed late — the
  * same 12-hour catch-up window routines use. */
@@ -51,9 +152,41 @@ export type WorkflowNode =
       retries?: number;
       /** Capabilities the bot must carry for this node to be dispatched. */
       requires?: WorkflowCapability[];
+      /** Approval keys pre-granted for THIS node's turns, in the same
+       * vocabulary as a bot's `alwaysAllow` (`Bash:gh`, `shell:gh`,
+       * `session_search`). A node turn runs with nobody watching, where only
+       * a grant a person named survives; a node built around one program
+       * should not depend on the bot carrying that grant for every chat too.
+       * Unioned with the bot's list, under the same unattended rules — never
+       * a way past the guards or onto the live desktop. */
+      alwaysAllow?: string[];
+      /** A second bot the engine may hand this node to — once per provider
+       * outage, and only when that bot runs on a DIFFERENT model engine
+       * than `botId` (a fallback on the same provider would be down too),
+       * is free, and carries every capability in `requires`. */
+      fallbackBotId?: string;
     }
-  | { kind: "approval"; id: string; prompt: string; expiresHours?: number; onExpire?: "approved" | "rejected" }
-  | { kind: "notify"; id: string; targetGroupId: string; template: string };
+  | {
+      kind: "approval";
+      id: string;
+      prompt: string;
+      expiresHours?: number;
+      /** Absent means `rejected` — the behaviour every gate had before
+       * `renotify` existed, kept for definitions saved back then. */
+      onExpire?: WorkflowApprovalOnExpire;
+      /** How many times a `renotify` gate asks again before it rejects
+       * (WORKFLOW_APPROVAL_RENOTIFY_DEFAULT when absent). */
+      maxRenotify?: number;
+      /** A room the gate's card is posted to as well as the bot's own chat,
+       * so a team sees it where it talks; a decision there settles the gate
+       * exactly as one in the chat or on the canvas does. */
+      notifyTargetGroupId?: string;
+    }
+  | { kind: "notify"; id: string; targetGroupId: string; template: string }
+  /** A pause: no bot, no thread — the run sits on `waitUntil` and the
+   * engine's tick moves it on. This is what makes a continuous cycle
+   * (`… → wait → entry`) idle between laps instead of spinning. */
+  | { kind: "wait"; id: string; minutes: number };
 
 export interface WorkflowEdge {
   from: string;
@@ -61,15 +194,114 @@ export interface WorkflowEdge {
   to: string;
 }
 
-/** Structurally identical to a routine's schedule so the engine can borrow
- * the routine scheduler's occurrence math: local timezone, `daily` at HH:MM
- * on the given weekdays (0 = Sunday), `once` at an epoch-ms instant. */
-export type WorkflowSchedule = { type: "daily"; time: string; weekdays: number[] } | { type: "once"; at: number };
+/** A daily window of wall-clock time (local timezone) on the given weekdays
+ * (0 = Sunday; absent means every day). `start` after `end` wraps past
+ * midnight ("22:00" to "06:00"); the weekday tested is the instant's own. */
+export interface WorkflowActiveHours {
+  start: string;
+  end: string;
+  weekdays?: number[];
+}
+
+/** The calendar shapes are structurally identical to a routine's schedule so
+ * the engine can borrow the routine scheduler's occurrence math: local
+ * timezone, `daily` at HH:MM on the given weekdays (0 = Sunday), `once` at an
+ * epoch-ms instant. */
+export type WorkflowCalendarSchedule =
+  | { type: "daily"; time: string; weekdays: number[] }
+  | { type: "once"; at: number };
+
+/** The continuous shape: the engine is the valve. Whenever the workflow has
+ * no live run, the next one is armed `minutes` after the last run ENDED (or
+ * after now, if it never ran), and only inside `activeHours` when given —
+ * outside the window the arm lands on the next window's start. There is no
+ * calendar slot to miss, so a computer that was asleep simply fires once on
+ * waking; and a run started by hand or by a webhook pushes the next armed
+ * run out, since the clock measures idleness, not the calendar. */
+export type WorkflowIntervalSchedule = {
+  type: "interval";
+  minutes: number;
+  activeHours?: WorkflowActiveHours;
+};
+
+export type WorkflowSchedule = WorkflowCalendarSchedule | WorkflowIntervalSchedule;
 
 /** Webhooks are not listed here: a webhook owns its link to a workflow
  * (`workflowId` on the webhook), so a workflow has nothing to keep in sync. */
 export interface WorkflowTriggers {
   schedule?: WorkflowSchedule;
+}
+
+/** How long a run waits out a provider outage. Both optional; the defaults
+ * above apply to an absent field so a definition saved before this existed
+ * behaves exactly as one that never set it. */
+export interface WorkflowProviderOutage {
+  /** The longest single wait between two attempts, in minutes. */
+  maxBackoffMinutes?: number;
+  /** Give up — through the node's ordinary failure path — once the outage
+   * has lasted this long, in hours. */
+  horizonHours?: number;
+}
+
+/** One pre-flight check: a question about the ENVIRONMENT a run is about
+ * to start in, asked before any bot turn is dispatched, so a token that
+ * lost a scope, a provider that is already down or a bot that is busy is
+ * said out loud before forty-five minutes of bot time are spent finding
+ * out. Three kinds:
+ *
+ * - `command` runs a program through the server's own identity (its user,
+ *   its environment, the app's augmented PATH) under `/bin/sh -c` — no
+ *   interactive shell, no TTY — and passes when the exit code is the
+ *   expected one (0 unless said otherwise) and, when given, stdout matches
+ *   `expectStdoutMatch` (a regular expression; an EMPTY stdout is asserted
+ *   with `^$`). Nothing from a run's input is ever interpolated into it:
+ *   the command is exactly the string the workflow's author saved.
+ * - `bots-ready` asks the engine whether every bot the workflow's agent
+ *   nodes use (or only `botIds`) exists and is not busy. A bot that is
+ *   only BUSY is re-checked every tick for up to `waitMinutes` (default
+ *   above) before the run is refused; a missing bot refuses it at once.
+ * - `engine-health` asks the driver behind a bot's model engine for its
+ *   snapshot — CLI present, signed in — which costs no tokens. */
+export type WorkflowPreflightCheck =
+  | {
+      kind: "command";
+      name: string;
+      command: string;
+      cwd?: string;
+      expectExitCode?: number;
+      expectStdoutMatch?: string;
+    }
+  | { kind: "bots-ready"; name: string; botIds?: string[]; waitMinutes?: number }
+  | { kind: "engine-health"; name: string; botId: string };
+
+export interface WorkflowPreflight {
+  checks: WorkflowPreflightCheck[];
+  /** One deadline for the whole set, in seconds (bounds above). */
+  timeoutSeconds?: number;
+}
+
+/** What one check answered, as the run's receipt and the "Test pre-flight"
+ * button both show it. Output is already bounded and scrubbed of secrets
+ * by the time it is here — it is persisted and broadcast as is. */
+export interface WorkflowPreflightCheckResult {
+  name: string;
+  kind: WorkflowPreflightCheck["kind"];
+  ok: boolean;
+  durationMs: number;
+  /** Why it failed, or what it found: the exit code, the missing bot, the
+   * engine's own reason. One line. */
+  detail: string;
+  stdout?: string;
+  stderr?: string;
+  /** A failure the engine may wait out rather than refuse the run on: so
+   * far only a `bots-ready` check whose every problem is a BUSY bot. */
+  transient?: true;
+}
+
+export interface WorkflowPreflightResult {
+  at: number;
+  ok: boolean;
+  checks: WorkflowPreflightCheckResult[];
 }
 
 export interface Workflow {
@@ -82,6 +314,31 @@ export interface Workflow {
   layout: Record<string, { x: number; y: number }>;
   triggers?: WorkflowTriggers;
   maxNodeExecutions?: number;
+  providerOutage?: WorkflowProviderOutage;
+  /** The watchdog's patience for this workflow, in minutes (default
+   * `WORKFLOW_STUCK_AFTER_DEFAULT_MIN`): a live run parked on one node for
+   * longer than this is announced as stuck. */
+  stuckAfterMinutes?: number;
+  /** A room every run transition is ALSO posted to, prefixed with the
+   * workflow's name — the audit trail a person scrolls on the phone. The
+   * notify nodes' channel path is reused; absent, nothing is posted. */
+  auditGroupId?: string;
+  /** Local wall-clock time (`HH:MM`) for a daily digest of the day's runs —
+   * completed, failed, cancelled, average time, the nodes that failed most
+   * and the denials seen — posted to the audit room and to the person.
+   * Absent: no digest. */
+  digestAt?: string;
+  /** Engine-owned: when the last digest went out, persisted BEFORE the
+   * digest is posted so a restart never sends the same day twice. Never
+   * settable by a client — the API strips it. */
+  lastDigestAt?: number;
+  /** Engine-owned: the refused-start streak behind the interval trigger's
+   * backoff and the quieting of its notifications. Never settable by a
+   * client — the API strips it. */
+  refusalStreak?: WorkflowRefusalStreak;
+  /** Checks a run must pass before its first node is dispatched. Absent or
+   * empty: nothing is checked, exactly as before this existed. */
+  preflight?: WorkflowPreflight;
   /** Engine-owned timing state for `triggers.schedule`, in three states:
    * `undefined` — not armed yet, so the engine computes the first slot;
    * a number — the instant the schedule next fires;
@@ -98,9 +355,68 @@ export type WorkflowRunStatus = "queued" | "running" | "waiting-approval" | "com
 
 export type WorkflowRunTrigger = "manual" | "schedule" | "webhook";
 
-/** Why the engine is calling notifyUser: a run paused on a terminal failure,
- * an approval gate opened, or that gate's single reminder. */
-export type WorkflowNotificationKind = "failed" | "approval" | "reminder";
+/** Why the engine is calling notifyUser. Every transition a person running
+ * a workflow unattended would want to hear about has a kind of its own, so
+ * a wrapper never branches on run.status: a terminal failure (`failed`),
+ * an approval gate opening (`approval`), its mid-window reminder
+ * (`reminder`) and a gate that expired and is asking AGAIN (`renotify`), a
+ * continuous cycle that COMPLETED because its execution cap closed the
+ * valve (`cap-reached` — a run that ends after hundreds of bot turns is an
+ * event to see even when it is not a failure), an ordinary completion
+ * (`completed`), a cancellation (`cancelled`), the watchdog's "this run has
+ * not moved" (`stuck`), a provider outage — first wait, and the horizon
+ * giving up (`outage`) — the hand-off of a node to its fallback bot
+ * (`fallback`), and the daily digest (`digest`). */
+export type WorkflowNotificationKind =
+  | "failed"
+  | "approval"
+  | "reminder"
+  | "renotify"
+  | "cap-reached"
+  | "completed"
+  | "cancelled"
+  | "stuck"
+  | "outage"
+  | "fallback"
+  | "digest";
+
+/** The kinds of notice an open gate sends after the first one. */
+export type WorkflowApprovalNoticeKind = "reminder" | "renotify";
+
+/** One line of the gate's receipt: when the person was nudged, and how.
+ * Kept on the run while the gate is open and copied onto the node's result
+ * when it settles, so "re-notified 3×, then approved" is readable after the
+ * fact and not only while it is happening. */
+export interface WorkflowApprovalNotice {
+  at: number;
+  kind: WorkflowApprovalNoticeKind;
+}
+
+/** The durable payload of a gate's option card in a bot's chat or a room:
+ * enough for the respond route to find the run and settle it through the
+ * same engine call the canvas uses, without a provider request behind it. */
+export interface WorkflowApprovalCardData {
+  runId: string;
+  workflowId: string;
+  nodeId: string;
+}
+
+/** The option labels a gate's card offers. "Deny" rather than "Reject"
+ * because the companion app maps only deny/cancel/dismiss to a refusal and
+ * treats any other label as consent — a "Reject" button that approved a
+ * merge would be worse than an ugly word. */
+export const WORKFLOW_APPROVAL_CARD_OPTIONS = ["Approve", "Deny"] as const;
+/** The pseudo-tool name on the gate's card; it is what makes the clients
+ * treat the card as an approval (decision in the composer, allow/deny on
+ * the wire) rather than a free-text question. */
+export const WORKFLOW_APPROVAL_CARD_TOOL = "workflow_approval";
+
+/** The request id of a gate's card: one per OPENING of the gate, so a run
+ * that visits the same approval node twice (a cycle) gets a fresh card each
+ * time and a stale click on the older one cannot settle the newer gate. */
+export function workflowApprovalRequestId(run: Pick<WorkflowRun, "id" | "currentNodeId" | "approvalRequestedAt">): string {
+  return `workflow-approval:${run.id}:${run.currentNodeId ?? ""}:${run.approvalRequestedAt ?? 0}`;
+}
 
 export interface WorkflowNodeResult {
   nodeId: string;
@@ -109,6 +425,50 @@ export interface WorkflowNodeResult {
   threadId?: string;
   startedAt: number;
   endedAt: number;
+  /** Permission requests the harness denied on the node's behalf because
+   * nobody was there to answer (one line each, naming the tool and the
+   * grant key that would have covered it). Present only when at least one
+   * was denied — a receipt that says WHICH grant the node was missing is
+   * what turns "failed again" into a one-line fix on the node panel. */
+  denials?: string[];
+  /** Present when the node's bot was unreachable and the result came from
+   * its fallback bot instead: who ran it and the provider error that made
+   * the engine switch. A receipt that says "done" must also say by whom. */
+  fallback?: WorkflowFallbackRecord;
+  /** An approval gate's reminders and re-notifications, in order. Present
+   * only on a gate's result and only when at least one went out. */
+  notices?: WorkflowApprovalNotice[];
+}
+
+export interface WorkflowFallbackRecord {
+  botId: string;
+  because: string;
+}
+
+/** A run waiting out a provider outage on its current node. `attempts`
+ * counts the waits taken so far and `of` how many the horizon allows on
+ * the nominal (jitter-free) schedule — what the UI prints as "attempt Y of
+ * Z"; the wait itself is the run's ordinary `nextAttemptAt`, so the
+ * reconciler's due-dispatch and crash recovery need no special case. */
+export interface WorkflowOutage {
+  /** When the first outage-class failure of this node was seen. */
+  since: number;
+  /** since + the workflow's horizon: no attempt is scheduled past it. */
+  until: number;
+  attempts: number;
+  of: number;
+  /** The provider error, redacted and bounded, for the UI and the receipt. */
+  reason: string;
+  /** Set once the node was handed to its fallback bot during THIS outage,
+   * so the hand-off happens at most once per outage. */
+  fallbackBotId?: string;
+  /** The instant the CURRENT backoff wait ends — the `nextAttemptAt` the
+   * wait was parked with. Present only while that wait is pending: the
+   * dispatch that consumes it clears it, so a later park for a busy bot
+   * (which keeps the outage record) is not mistaken for the provider
+   * still being away. The watchdog exempts the run only while this is
+   * set, and forgets the wait's duration when it ends. */
+  waitUntil?: number;
 }
 
 export interface WorkflowRun {
@@ -134,6 +494,16 @@ export interface WorkflowRun {
   currentNodeId?: string;
   /** Task thread where the current node is executing (engine bookkeeping). */
   currentThreadId?: string;
+  /** The bot the current node's live dispatch is on. Normally the node's own
+   * bot, and absent on receipts written before fallbacks existed; set to
+   * the fallback bot while it holds the node, so an interrupt, a timeout or
+   * a re-prompt reaches the bot actually working and not the one that was
+   * unreachable (engine bookkeeping). */
+  currentBotId?: string;
+  /** Present while the run waits out a provider outage on its current node
+   * (engine bookkeeping; cleared when the node advances or fails for a
+   * reason that is not the outage). */
+  outage?: WorkflowOutage;
   /** When the current node's turn was dispatched (engine bookkeeping). */
   dispatchedAt?: number;
   /** Set once the engine has re-prompted the current node for a missing or
@@ -148,13 +518,84 @@ export interface WorkflowRun {
   /** When the current approval gate opened; the expiry and reminder clocks
    * run from it, so it must survive a restart (engine bookkeeping). */
   approvalRequestedAt?: number;
-  /** Set once the gate's single mid-window reminder went out (engine bookkeeping). */
+  /** Set once the CURRENT window's single mid-way reminder went out; a
+   * re-notification opens a new window and clears it (engine bookkeeping). */
   approvalRemindedAt?: number;
+  /** How many times the gate expired and asked again (`onExpire:
+   * "renotify"`), and when the last of those windows opened: the expiry
+   * and reminder clocks run from `approvalRenotifiedAt ?? approvalRequestedAt`,
+   * while `approvalRequestedAt` stays the instant the gate OPENED, so the
+   * receipt's startedAt and the "waiting since" line survive every round
+   * (engine bookkeeping). */
+  approvalRenotified?: number;
+  approvalRenotifiedAt?: number;
+  /** Every reminder and re-notification of the open gate, oldest first;
+   * copied onto the node's result when the gate settles (engine bookkeeping). */
+  approvalNotices?: WorkflowApprovalNotice[];
+  /** The threads the gate's card was posted to (the bot's chat, a room),
+   * so a decision taken anywhere else — the canvas, the other thread, an
+   * expiry — can mark every copy answered, across a restart. `[]` records
+   * that nobody could be reached, which stops the sweep from trying every
+   * tick; absent means the card was never posted (a receipt written before
+   * cards existed, or a crash between the park and the post) and the next
+   * sweep posts it (engine bookkeeping). */
+  approvalThreadIds?: string[];
+  /** When the current wait node's pause ends (engine bookkeeping). A run
+   * carrying this is parked, not stranded: the tick advances it once the
+   * instant passes, and a restart changes nothing because it is persisted.
+   * Already moved into the interval trigger's active window when there is
+   * one, so the instant the UI shows is the one the run will move at. */
+  waitUntil?: number;
+  /** When the current wait began (engine bookkeeping): the receipt's
+   * startedAt for the step, kept apart from `dispatchedAt` so the timeout
+   * sweep never sees a wait as a dispatch, and persisted rather than
+   * derived from the node's minutes — which may be edited mid-pause. */
+  waitStartedAt?: number;
+  /** When the run ENTERED its current node (engine bookkeeping): stamped
+   * when the run moves to a different node, when a finished node's edge is
+   * followed, and on a resume — never on a retry of the same node, so
+   * three dead attempts on one node read as one long stay. The watchdog
+   * measures from here; absent on older receipts, where the last result's
+   * end (or the run's start) stands in. */
+  nodeEnteredAt?: number;
+  /** When the watchdog last announced this run as stuck on its current
+   * node (engine bookkeeping). Persisted so a restart neither repeats the
+   * announcement nor forgets it; cleared the moment the run moves on. */
+  stuckNotifiedAt?: number;
+  /** How many stuck announcements this stay has had (engine bookkeeping);
+   * capped at WORKFLOW_STUCK_ANNOUNCEMENTS_MAX, cleared with the marker. */
+  stuckAnnouncements?: number;
+  /** Set while the run's pre-flight is in flight (engine bookkeeping):
+   * from the FIRST check to the verdict that dispatches or refuses, across
+   * the re-checks a busy bot earns — so it is also the clock those
+   * re-checks are budgeted against. The run is "running" with no thread;
+   * with no timer either, this is what tells the reconciler after a
+   * restart to re-run the checks rather than dispatch the node they were
+   * guarding. Cleared by every dispatch and by the terminal verdict. */
+  preflightStartedAt?: number;
+  /** The pre-flight's verdict, check by check, once it has run — what the
+   * timeline shows above the steps. A run refused by it is `failed` with
+   * `error` naming the check; a run that passed keeps the receipt too, so
+   * "it was fine at 09:00" is on record. Absent on runs of a workflow with
+   * no checks and on receipts written before this existed. */
+  preflight?: WorkflowPreflightResult;
   input: string;
   nodeResults: WorkflowNodeResult[];
   error?: string;
   startedAt: number;
   endedAt?: number;
+}
+
+/** The line the UI prints while a run waits out a provider outage, and the
+ * receipt's wording when the wait ends in a failure. Null when the run is
+ * not waiting. Shared so the canvas and the engine say it the same way. */
+export function workflowOutageWaitMessage(
+  run: Pick<WorkflowRun, "outage" | "nextAttemptAt">,
+  formatWhen: (at: number) => string,
+): string | null {
+  const { outage, nextAttemptAt } = run;
+  if (!outage || nextAttemptAt === undefined) return null;
+  return `Waiting for the provider: next attempt ${formatWhen(nextAttemptAt)} (attempt ${outage.attempts} of ${outage.of})`;
 }
 
 /** Every outcome the engine may route on for a node — declared ones plus the
@@ -167,7 +608,17 @@ export function nodeOutcomes(node: WorkflowNode): string[] {
       return [...WORKFLOW_APPROVAL_OUTCOMES];
     case "notify":
       return [WORKFLOW_NOTIFY_OUTCOME];
+    case "wait":
+      return [WORKFLOW_WAIT_OUTCOME];
   }
+}
+
+/** Whether a node's execution counts against `maxNodeExecutions`. Only bot
+ * work does: an agent turn or a human gate. A wait is idle time and a notify
+ * is one synchronous post — neither can run away on its own, and counting
+ * them would make the cap bite a slow continuous cycle for pausing. */
+export function countsTowardExecutionCap(kind: WorkflowNode["kind"]): boolean {
+  return kind === "agent" || kind === "approval";
 }
 
 /** Two 32-bit FNV-1a passes with different multipliers, hex-joined: a
@@ -246,7 +697,16 @@ export interface WorkflowIssue {
     | "bad-numbers"
     | "bad-schedule"
     | "bad-requires"
-    | "missing-capability";
+    | "bad-always-allow"
+    | "missing-capability"
+    | "fallback-same-bot"
+    | "fallback-missing-bot"
+    | "fallback-missing-capability"
+    | "bad-approval-config"
+    | "cycle-without-wait"
+    | "bad-digest"
+    | "missing-audit-group"
+    | "bad-preflight";
   nodeId?: string;
   message: string;
 }
@@ -355,6 +815,54 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
         }
       }
     }
+    // `alwaysAllow` is matched against approval keys by exact string, so a
+    // blank or padded entry is a grant that can never fire, and a repeat is
+    // a typo the canvas should show. The vocabulary itself is open (keys are
+    // minted per tool and program), so nothing here judges the names.
+    if (node.alwaysAllow !== undefined) {
+      const badGrant = (message: string) => {
+        issues.push({ severity: "error", code: "bad-always-allow", nodeId: node.id, message });
+      };
+      const grants: unknown = node.alwaysAllow;
+      if (!Array.isArray(grants)) {
+        badGrant(`Node "${node.id}" alwaysAllow must be a list of approval keys (like "Bash:gh").`);
+      } else {
+        const seen = new Set<string>();
+        for (const grant of grants) {
+          if (typeof grant !== "string" || grant.trim() === "") {
+            badGrant(`Node "${node.id}" alwaysAllow has a blank entry; every entry must name an approval key.`);
+          } else if (grant !== grant.trim()) {
+            badGrant(`Node "${node.id}" alwaysAllow entry "${grant}" has surrounding whitespace and can never match.`);
+          } else if (seen.has(grant)) {
+            badGrant(`Node "${node.id}" alwaysAllow lists "${grant}" more than once.`);
+          } else {
+            seen.add(grant);
+          }
+        }
+      }
+    }
+    // A fallback is only a fallback if it is somebody else: the same bot
+    // would be re-dispatched on the same unreachable provider, which is
+    // what the outage backoff already does without the pretence. Whether
+    // the bot EXISTS is the roster's business (capabilityIssues); a blank
+    // id is the same shape mistake as a blank outcome name.
+    if (node.fallbackBotId !== undefined) {
+      if (typeof node.fallbackBotId !== "string" || !node.fallbackBotId.trim()) {
+        issues.push({
+          severity: "error",
+          code: "fallback-missing-bot",
+          nodeId: node.id,
+          message: `Node "${node.id}" names a blank fallback bot.`,
+        });
+      } else if (node.fallbackBotId === node.botId) {
+        issues.push({
+          severity: "error",
+          code: "fallback-same-bot",
+          nodeId: node.id,
+          message: `Node "${node.id}" names its own bot "${node.botId}" as the fallback; a fallback has to be a different bot.`,
+        });
+      }
+    }
   }
 
   // Numeric knobs feed timers and counters directly: a zero or negative
@@ -366,8 +874,49 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
   const badNumber = (message: string, nodeId?: string) => {
     issues.push({ severity: "error", code: "bad-numbers", ...(nodeId === undefined ? {} : { nodeId }), message });
   };
-  if (workflow.maxNodeExecutions !== undefined && !whole(workflow.maxNodeExecutions, 1)) {
-    badNumber("maxNodeExecutions must be a whole number of at least 1.");
+  // The cap is bounded above as well: it is the last defence against a hot
+  // loop, and a value in the millions is a cap in name only.
+  if (
+    workflow.maxNodeExecutions !== undefined &&
+    (!whole(workflow.maxNodeExecutions, 1) || workflow.maxNodeExecutions > WORKFLOW_MAX_NODE_EXECUTIONS_LIMIT)
+  ) {
+    badNumber(`maxNodeExecutions must be a whole number from 1 to ${WORKFLOW_MAX_NODE_EXECUTIONS_LIMIT}.`);
+  }
+  // The outage knobs feed a backoff clock: a zero cap is a busy loop, a
+  // zero horizon gives up on the first hiccup — neither is "waiting".
+  const outage: unknown = workflow.providerOutage;
+  if (outage !== undefined) {
+    if (typeof outage !== "object" || outage === null || Array.isArray(outage)) {
+      badNumber("providerOutage must be an object with maxBackoffMinutes and/or horizonHours.");
+    } else {
+      const { maxBackoffMinutes, horizonHours } = outage as WorkflowProviderOutage;
+      if (maxBackoffMinutes !== undefined && !positive(maxBackoffMinutes)) {
+        badNumber("providerOutage.maxBackoffMinutes must be a positive number.");
+      }
+      if (horizonHours !== undefined && !positive(horizonHours)) {
+        badNumber("providerOutage.horizonHours must be a positive number.");
+      }
+    }
+  }
+  // The watchdog's patience is a whole number of minutes inside a fixed
+  // band: below it the tick would page for an ordinary slow turn, above it
+  // the announcement would come too late to matter.
+  if (
+    workflow.stuckAfterMinutes !== undefined &&
+    (!whole(workflow.stuckAfterMinutes, WORKFLOW_STUCK_AFTER_MIN) || workflow.stuckAfterMinutes > WORKFLOW_STUCK_AFTER_MAX)
+  ) {
+    badNumber(
+      `stuckAfterMinutes must be a whole number from ${WORKFLOW_STUCK_AFTER_MIN} to ${WORKFLOW_STUCK_AFTER_MAX}.`,
+    );
+  }
+  // The digest fires on a wall clock, so it has the schedule's time shape;
+  // a blank room id is a promise to post nowhere (whether the room EXISTS
+  // is the roster's business — auditGroupIssues).
+  if (workflow.digestAt !== undefined && (typeof workflow.digestAt !== "string" || !WORKFLOW_SCHEDULE_TIME_RE.test(workflow.digestAt))) {
+    issues.push({ severity: "error", code: "bad-digest", message: "Digest time must be HH:MM (24-hour)." });
+  }
+  if (workflow.auditGroupId !== undefined && (typeof workflow.auditGroupId !== "string" || !workflow.auditGroupId.trim())) {
+    issues.push({ severity: "error", code: "missing-audit-group", message: "The audit room id is blank." });
   }
   for (const node of workflow.nodes) {
     if (node.kind === "agent") {
@@ -377,10 +926,50 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
       if (node.retries !== undefined && !whole(node.retries, 0)) {
         badNumber(`Node "${node.id}" retries must be a whole number of zero or more.`, node.id);
       }
-    } else if (node.kind === "approval" && node.expiresHours !== undefined && !positive(node.expiresHours)) {
-      badNumber(`Node "${node.id}" expiresHours must be a positive number.`, node.id);
+    } else if (node.kind === "approval") {
+      if (node.expiresHours !== undefined && !positive(node.expiresHours)) {
+        badNumber(`Node "${node.id}" expiresHours must be a positive number.`, node.id);
+      }
+      // The expiry policy feeds the sweep directly: an unknown policy would
+      // fall through to the older default and silently discard work, a
+      // round count outside the range is either "never asks" or "asks for
+      // a month", and a blank room id is a post the notify path would throw
+      // on at 3am. A raw JSON body may carry any of these.
+      const badConfig = (message: string) => {
+        issues.push({ severity: "error", code: "bad-approval-config", nodeId: node.id, message });
+      };
+      const onExpire: unknown = node.onExpire;
+      if (onExpire !== undefined && !(WORKFLOW_APPROVAL_ON_EXPIRE as readonly unknown[]).includes(onExpire)) {
+        badConfig(`Node "${node.id}" onExpire must be one of ${WORKFLOW_APPROVAL_ON_EXPIRE.join(", ")}.`);
+      }
+      if (
+        node.maxRenotify !== undefined &&
+        (!whole(node.maxRenotify, WORKFLOW_APPROVAL_RENOTIFY_MIN) || node.maxRenotify > WORKFLOW_APPROVAL_RENOTIFY_MAX)
+      ) {
+        badConfig(
+          `Node "${node.id}" maxRenotify must be a whole number from ${WORKFLOW_APPROVAL_RENOTIFY_MIN} to ${WORKFLOW_APPROVAL_RENOTIFY_MAX}.`,
+        );
+      }
+      if (
+        node.notifyTargetGroupId !== undefined &&
+        (typeof node.notifyTargetGroupId !== "string" || !node.notifyTargetGroupId.trim())
+      ) {
+        badConfig(`Node "${node.id}" names a blank room to notify.`);
+      }
+    } else if (
+      node.kind === "wait" &&
+      (!whole(node.minutes, WORKFLOW_WAIT_MINUTES_MIN) || node.minutes > WORKFLOW_WAIT_MINUTES_MAX)
+    ) {
+      // Whole minutes: the tick is coarser than a second anyway, and a
+      // fractional pause would only look precise.
+      badNumber(
+        `Node "${node.id}" minutes must be a whole number from ${WORKFLOW_WAIT_MINUTES_MIN} to ${WORKFLOW_WAIT_MINUTES_MAX}.`,
+        node.id,
+      );
     }
   }
+
+  issues.push(...preflightIssues(workflow.preflight));
 
   // A schedule the scheduler could not arm must never be persisted: a
   // malformed time never matches a wall clock, an empty weekday set never
@@ -390,24 +979,48 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
     const badSchedule = (message: string) => {
       issues.push({ severity: "error", code: "bad-schedule", message });
     };
-    if (schedule.type === "daily") {
-      if (typeof schedule.time !== "string" || !WORKFLOW_SCHEDULE_TIME_RE.test(schedule.time)) {
-        badSchedule("Schedule time must be HH:MM (24-hour).");
-      }
-      const weekdays: unknown = schedule.weekdays;
+    // Shared by the daily schedule and an interval's active window; an
+    // absent list means "every day" only where the caller says so.
+    const checkWeekdays = (weekdays: unknown, what: string) => {
       if (!Array.isArray(weekdays) || weekdays.length === 0) {
-        badSchedule("Schedule needs at least one weekday.");
+        badSchedule(`${what} needs at least one weekday.`);
       } else if (!weekdays.every((day) => whole(day, 0) && (day as number) <= 6)) {
-        badSchedule("Schedule weekdays must be whole numbers from 0 (Sunday) to 6 (Saturday).");
+        badSchedule(`${what} weekdays must be whole numbers from 0 (Sunday) to 6 (Saturday).`);
       } else if (new Set(weekdays).size !== weekdays.length) {
-        badSchedule("Schedule weekdays must not repeat.");
+        badSchedule(`${what} weekdays must not repeat.`);
       }
+    };
+    const isClockTime = (value: unknown): value is string =>
+      typeof value === "string" && WORKFLOW_SCHEDULE_TIME_RE.test(value);
+    if (schedule.type === "daily") {
+      if (!isClockTime(schedule.time)) badSchedule("Schedule time must be HH:MM (24-hour).");
+      checkWeekdays(schedule.weekdays, "Schedule");
     } else if (schedule.type === "once") {
       if (typeof schedule.at !== "number" || !Number.isFinite(schedule.at)) {
         badSchedule("A one-time schedule needs a finite timestamp.");
       }
+    } else if (schedule.type === "interval") {
+      if (!whole(schedule.minutes, WORKFLOW_INTERVAL_MINUTES_MIN)) {
+        badSchedule(`Interval must be a whole number of at least ${WORKFLOW_INTERVAL_MINUTES_MIN} minutes.`);
+      }
+      const hours: unknown = schedule.activeHours;
+      if (hours !== undefined) {
+        if (typeof hours !== "object" || hours === null || Array.isArray(hours)) {
+          badSchedule("Active hours must be an object with start and end times.");
+        } else {
+          const window = hours as Partial<WorkflowActiveHours>;
+          if (!isClockTime(window.start) || !isClockTime(window.end)) {
+            badSchedule("Active hours start and end must be HH:MM (24-hour).");
+          } else if (window.start === window.end) {
+            // Neither "always" nor "never" is a window; an author who wants
+            // no window leaves activeHours out.
+            badSchedule("Active hours start and end must differ.");
+          }
+          if (window.weekdays !== undefined) checkWeekdays(window.weekdays, "Active hours");
+        }
+      }
     } else {
-      badSchedule("Schedule type must be daily or once.");
+      badSchedule("Schedule type must be daily, once or interval.");
     }
   }
 
@@ -532,8 +1145,141 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
         });
       }
     }
+
+    // A loop back to the entry is how a workflow runs continuously, and it
+    // is legal — but a lap with no wait node in it re-dispatches the entry
+    // the instant the last node finishes, and the only thing that stops that
+    // hot loop is the execution cap. A warning, not an error: a review loop
+    // that happens to pass through the entry is a real shape. Walking the
+    // graph with every wait node removed is the test: if the entry can still
+    // reach itself, some lap has no pause in it.
+    const waitless = new Set(workflow.nodes.filter((node) => node.kind === "wait").map((node) => node.id));
+    const seen = new Set<string>();
+    // An entry that is itself a wait node pauses every lap by definition.
+    const stack = waitless.has(workflow.entryNodeId) ? [] : [...(adjacency.get(workflow.entryNodeId) ?? [])];
+    let hotLoop = false;
+    while (stack.length > 0 && !hotLoop) {
+      const current = stack.pop()!;
+      if (current === workflow.entryNodeId) {
+        hotLoop = true;
+        break;
+      }
+      if (seen.has(current) || waitless.has(current)) continue;
+      seen.add(current);
+      stack.push(...(adjacency.get(current) ?? []));
+    }
+    if (hotLoop) {
+      issues.push({
+        severity: "warning",
+        code: "cycle-without-wait",
+        nodeId: workflow.entryNodeId,
+        message: `The workflow loops back to its entry node "${workflow.entryNodeId}" with no wait node on the way; add one so the cycle idles between laps instead of running hot until the execution cap.`,
+      });
+    }
   }
 
+  return issues;
+}
+
+/** Whether a string is a regular expression the engine could run. Kept
+ * apart so the panel can judge a half-typed pattern the same way. */
+export function isValidPreflightPattern(pattern: string): boolean {
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The pre-flight's shape rules. Every check is named — the receipt and the
+ * notification say WHICH check refused the run, so a blank or repeated name
+ * would leave that sentence pointing nowhere. A blank command is nothing to
+ * run; an invalid regex would throw at the moment of the check; a timeout
+ * outside its bounds is either a check that cannot finish or a slot held
+ * for minutes. Shapes a raw JSON body may carry (a non-list, a string in a
+ * number's place) are refused too, as every other knob's are. */
+function preflightIssues(preflight: unknown): WorkflowIssue[] {
+  const issues: WorkflowIssue[] = [];
+  if (preflight === undefined) return issues;
+  const bad = (message: string) => {
+    issues.push({ severity: "error", code: "bad-preflight", message });
+  };
+  if (typeof preflight !== "object" || preflight === null || Array.isArray(preflight)) {
+    bad("preflight must be an object with a list of checks.");
+    return issues;
+  }
+  const { checks, timeoutSeconds } = preflight as Partial<WorkflowPreflight>;
+  if (
+    timeoutSeconds !== undefined &&
+    (typeof timeoutSeconds !== "number" ||
+      !Number.isInteger(timeoutSeconds) ||
+      timeoutSeconds < WORKFLOW_PREFLIGHT_TIMEOUT_MIN_S ||
+      timeoutSeconds > WORKFLOW_PREFLIGHT_TIMEOUT_MAX_S)
+  ) {
+    bad(
+      `preflight.timeoutSeconds must be a whole number from ${WORKFLOW_PREFLIGHT_TIMEOUT_MIN_S} to ${WORKFLOW_PREFLIGHT_TIMEOUT_MAX_S}.`,
+    );
+  }
+  if (!Array.isArray(checks)) {
+    bad("preflight.checks must be a list.");
+    return issues;
+  }
+  const names = new Set<string>();
+  checks.forEach((check: unknown, index) => {
+    const label = `Pre-flight check ${index + 1}`;
+    if (typeof check !== "object" || check === null || Array.isArray(check)) {
+      bad(`${label} must be an object.`);
+      return;
+    }
+    const raw = check as Record<string, unknown>;
+    const name = raw.name;
+    // Compared trimmed: "gh auth" and "gh auth " are the same name to a
+    // reader and would be the same name in a receipt.
+    if (typeof name !== "string" || name.trim() === "") {
+      bad(`${label} needs a name.`);
+    } else if (names.has(name.trim())) {
+      bad(`${label} repeats the name "${name.trim()}"; every check needs its own.`);
+    } else {
+      names.add(name.trim());
+    }
+    const who = typeof name === "string" && name.trim() !== "" ? `Pre-flight check "${name}"` : label;
+    const kind = raw.kind;
+    if (kind === "command") {
+      if (typeof raw.command !== "string" || raw.command.trim() === "") bad(`${who} has no command to run.`);
+      if (raw.cwd !== undefined && (typeof raw.cwd !== "string" || raw.cwd.trim() === "")) {
+        bad(`${who} cwd must be a directory path.`);
+      }
+      if (raw.expectExitCode !== undefined && !(typeof raw.expectExitCode === "number" && Number.isInteger(raw.expectExitCode))) {
+        bad(`${who} expectExitCode must be a whole number.`);
+      }
+      if (raw.expectStdoutMatch !== undefined) {
+        if (typeof raw.expectStdoutMatch !== "string" || !isValidPreflightPattern(raw.expectStdoutMatch)) {
+          bad(`${who} expectStdoutMatch is not a valid regular expression.`);
+        }
+      }
+    } else if (kind === "bots-ready") {
+      const botIds = raw.botIds;
+      if (botIds !== undefined) {
+        if (!Array.isArray(botIds) || botIds.some((id) => typeof id !== "string" || id.trim() === "")) {
+          bad(`${who} botIds must be a list of bot ids.`);
+        } else if (new Set(botIds).size !== botIds.length) {
+          bad(`${who} lists the same bot more than once.`);
+        }
+      }
+      const wait = raw.waitMinutes;
+      if (
+        wait !== undefined &&
+        (typeof wait !== "number" || !Number.isInteger(wait) || wait < 0 || wait > WORKFLOW_PREFLIGHT_WAIT_MAX_MIN)
+      ) {
+        bad(`${who} waitMinutes must be a whole number from 0 to ${WORKFLOW_PREFLIGHT_WAIT_MAX_MIN}.`);
+      }
+    } else if (kind === "engine-health") {
+      if (typeof raw.botId !== "string" || raw.botId.trim() === "") bad(`${who} needs the bot whose engine to check.`);
+    } else {
+      bad(`${who} kind must be command, bots-ready or engine-health.`);
+    }
+  });
   return issues;
 }
 
@@ -561,8 +1307,13 @@ export function missingCapabilityMessage(node: { id: string; botId: string }, ca
   return `Node "${node.id}" requires "${capability}" but its bot "${node.botId}" is not allowed to ${capability}.`;
 }
 
-/** Pure: flags nodes whose bot lacks a required capability. `lookup` returns
- * null for an unknown bot (that case is already reported elsewhere). Kept
+/** Pure: flags nodes whose bot lacks a required capability, and fallback
+ * bots the roster does not have or that could never take the node over.
+ * `lookup` returns null for an unknown bot — for the node's own bot that
+ * case is already reported elsewhere (the dispatch fails it), but a
+ * fallback that does not exist is a promise the engine can never keep, so
+ * it is an error here; a fallback short of a required flag is a warning,
+ * since the engine simply skips it and waits out the outage instead. Kept
  * apart from validateWorkflow because it needs the bot roster — the shared
  * validator judges the graph alone; this judges the graph against the bots
  * it will run on, and both sets gate a run the same way. */
@@ -572,10 +1323,9 @@ export function capabilityIssues(
 ): WorkflowIssue[] {
   const issues: WorkflowIssue[] = [];
   for (const node of workflow.nodes) {
-    if (node.kind !== "agent" || !node.requires?.length) continue;
-    const capabilities = lookup(node.botId);
-    if (capabilities === null) continue;
-    for (const capability of missingCapabilities(node.requires, capabilities)) {
+    if (node.kind !== "agent") continue;
+    const capabilities = node.requires?.length ? lookup(node.botId) : null;
+    for (const capability of capabilities === null ? [] : missingCapabilities(node.requires, capabilities)) {
       issues.push({
         severity: "error",
         code: "missing-capability",
@@ -583,6 +1333,47 @@ export function capabilityIssues(
         message: missingCapabilityMessage(node, capability),
       });
     }
+    // A blank or self-referencing fallback is validateWorkflow's finding;
+    // repeating it here would paint the same node twice.
+    const fallbackBotId = node.fallbackBotId;
+    if (typeof fallbackBotId !== "string" || !fallbackBotId.trim() || fallbackBotId === node.botId) continue;
+    const fallback = lookup(fallbackBotId);
+    if (fallback === null) {
+      issues.push({
+        severity: "error",
+        code: "fallback-missing-bot",
+        nodeId: node.id,
+        message: `Node "${node.id}" names a fallback bot "${fallbackBotId}" that does not exist.`,
+      });
+      continue;
+    }
+    for (const capability of missingCapabilities(node.requires, fallback)) {
+      issues.push({
+        severity: "warning",
+        code: "fallback-missing-capability",
+        nodeId: node.id,
+        message: `Node "${node.id}" requires "${capability}" but its fallback bot "${fallbackBotId}" is not allowed to ${capability}; it will not take over during an outage.`,
+      });
+    }
   }
   return issues;
+}
+
+/** Pure: the audit room the workflow names should exist, or the audit
+ * trail goes nowhere. A WARNING, not an error: the room is a second copy of
+ * what the person is told anyway, and a room somebody deleted must not
+ * stop a pipeline built to never stop — the engine skips the post and the
+ * canvas says so. Needs the room roster, so it lives beside
+ * capabilityIssues rather than in validateWorkflow (which reports a BLANK
+ * id itself, as an error: that one is a shape mistake). */
+export function auditGroupIssues(workflow: Workflow, groupExists: (groupId: string) => boolean): WorkflowIssue[] {
+  const groupId = workflow.auditGroupId;
+  if (typeof groupId !== "string" || !groupId.trim() || groupExists(groupId)) return [];
+  return [
+    {
+      severity: "warning",
+      code: "missing-audit-group",
+      message: `The audit room "${groupId}" no longer exists, so nothing is posted there; pick another room or turn the audit room off.`,
+    },
+  ];
 }

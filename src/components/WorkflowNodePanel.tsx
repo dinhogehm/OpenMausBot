@@ -7,8 +7,15 @@ import { Flag, Plus, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { BotAvatarProps } from "./Avatar";
 import type { WorkflowOutcomeHandle } from "@/lib/workflow-graph";
-import { grantedCapabilities, missingCapabilities, toggleRequirement } from "@/lib/workflow-capabilities";
+import {
+  alwaysAllowText,
+  grantedCapabilities,
+  missingCapabilities,
+  parseAlwaysAllowLines,
+  toggleRequirement,
+} from "@/lib/workflow-capabilities";
 import { BotAvatar } from "./Avatar";
+import { formatWaitMinutes } from "./WorkflowNodeCard";
 import {
   WORKFLOW_APPROVAL_OUTCOMES,
   WORKFLOW_CAPABILITIES,
@@ -16,7 +23,13 @@ import {
   WORKFLOW_NODE_RETRIES_DEFAULT,
   WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN,
   WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H,
+  WORKFLOW_APPROVAL_RENOTIFY_DEFAULT,
+  WORKFLOW_APPROVAL_RENOTIFY_MAX,
+  WORKFLOW_APPROVAL_RENOTIFY_MIN,
+  WORKFLOW_WAIT_MINUTES_MAX,
+  WORKFLOW_WAIT_MINUTES_MIN,
   type BotCapabilities,
+  type WorkflowApprovalOnExpire,
   type WorkflowIssue,
   type WorkflowNode,
 } from "../../shared/workflow";
@@ -25,8 +38,27 @@ import {
  * permission flags (so the picker can tag a bot and the Requires group can
  * say which requirement the chosen one falls short of), and whether the bot
  * is hidden in the sidebar — a node may still be bound to one. */
-export type WorkflowPanelBot = BotAvatarProps["bot"] & BotCapabilities & { id: string; name: string; hidden?: boolean };
+export type WorkflowPanelBot = BotAvatarProps["bot"] &
+  BotCapabilities & {
+    id: string;
+    name: string;
+    hidden?: boolean;
+    /** The model engine instance the bot runs on. The fallback picker uses it
+     * to say when a choice shares the primary's engine — the engine only
+     * switches to a fallback on a DIFFERENT engine, so that choice would
+     * never take over. Absent when the roster does not say. */
+    engine?: string;
+  };
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
+type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
+
+/** A node with one optional knob removed — how "none" is written, since an
+ * `undefined` value would still be a key the JSON body carries. */
+function withoutKey<K extends keyof ApprovalNode>(node: ApprovalNode, key: K): ApprovalNode {
+  const copy = { ...node };
+  delete copy[key];
+  return copy;
+}
 
 /** What the picker prints for a bot: its name, then the permissions it
  * holds, then whether it is hidden. A native `<option>` can carry text and
@@ -45,6 +77,13 @@ export interface WorkflowRouteTarget {
   id: string;
   label: string;
 }
+
+const PANEL_TITLE: Record<WorkflowNode["kind"], string> = {
+  agent: "Agent node",
+  approval: "Approval gate",
+  notify: "Notify room",
+  wait: "Wait",
+};
 
 const FIELD =
   "w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent";
@@ -209,6 +248,135 @@ function RequiresGroup({
   );
 }
 
+/** The keys this node's turns may use without a card — one per line, in the
+ * same vocabulary as a bot's "always allow". A node runs with nobody at the
+ * keyboard, where only a named grant survives; without this the bot would
+ * have to carry every node's programs for every chat it ever has. The draft
+ * is local: the parser drops blank lines and padding, and pushing that
+ * through the document on every keystroke would eat the newline a person
+ * just typed. Stored only when non-empty (an absent key, never `[]`). */
+function AlwaysAllowField({
+  id,
+  node,
+  onUpdate,
+}: {
+  id: string;
+  node: AgentNode;
+  onUpdate: (next: WorkflowNode) => void;
+}) {
+  const value = alwaysAllowText(node.alwaysAllow);
+  const [draft, setDraft] = useState(value);
+  // adopt a value the document changed underneath us (undo, a server echo)
+  const lastValue = useRef(value);
+  if (lastValue.current !== value) {
+    lastValue.current = value;
+    if (value !== alwaysAllowText(parseAlwaysAllowLines(draft))) setDraft(value);
+  }
+
+  return (
+    <div>
+      <label className={LABEL} htmlFor={id}>
+        Pre-approved tools on this node
+      </label>
+      <p className="mt-0.5 text-[10.5px] text-ink-secondary">
+        One key per line, as an approval card names it (<span className="font-mono">Bash:gh</span>,{" "}
+        <span className="font-mono">session_search</span>). Joined with the bot&apos;s own always-allow list for this
+        node&apos;s turns; anything else is denied at once, and the run receipt names the key it lacked. Never covers
+        destructive commands, credentials, or this computer.
+      </p>
+      <textarea
+        id={id}
+        value={draft}
+        rows={3}
+        maxLength={20_000}
+        spellCheck={false}
+        placeholder={"Bash:gh\nsession_search"}
+        onChange={(event) => {
+          const next = event.target.value;
+          setDraft(next);
+          const { alwaysAllow: _alwaysAllow, ...rest } = node;
+          const alwaysAllow = parseAlwaysAllowLines(next);
+          onUpdate(alwaysAllow ? { ...rest, alwaysAllow } : rest);
+        }}
+        className={cn(FIELD, "mt-1 resize-y font-mono text-[12px] leading-relaxed")}
+      />
+    </div>
+  );
+}
+
+/** The bot the engine hands this node to when the primary's provider is
+ * down — once per outage, only when that bot runs on another engine, is
+ * free, and holds every capability the node requires. The document stores
+ * the id only when one is chosen (an absent key, never `""` or `null`).
+ * Every other bot is offered, hidden ones included while they are the
+ * chosen one; the primary itself is not — the validator refuses it, and a
+ * picker should not offer what the validator will refuse. */
+function FallbackGroup({
+  node,
+  bot,
+  bots,
+  onUpdate,
+}: {
+  node: AgentNode;
+  bot: WorkflowPanelBot | undefined;
+  bots: WorkflowPanelBot[];
+  onUpdate: (next: WorkflowNode) => void;
+}) {
+  const fallback = node.fallbackBotId === undefined ? undefined : bots.find((candidate) => candidate.id === node.fallbackBotId);
+  const known = node.fallbackBotId === undefined || fallback !== undefined;
+  const sameEngine = bot?.engine !== undefined && fallback?.engine !== undefined && bot.engine === fallback.engine;
+  const lacking = fallback ? missingCapabilities(node.requires, fallback) : [];
+  const id = `wf-${node.id}-fallback`;
+
+  return (
+    <div>
+      <label className={LABEL} htmlFor={id}>
+        Fallback bot (other engine)
+      </label>
+      <p className="mt-0.5 text-[10.5px] text-ink-secondary">
+        Takes this step over when the bot&apos;s provider is down, if it runs on a different engine. Otherwise the run
+        waits for the provider to come back. The fallback runs with its own standing permissions (always-allow) —
+        grant it what this step needs, or it will stop to ask.
+      </p>
+      <select
+        id={id}
+        value={known ? (node.fallbackBotId ?? "") : ""}
+        onChange={(event) => {
+          const { fallbackBotId: _fallbackBotId, ...rest } = node;
+          const value = event.target.value;
+          onUpdate(value === "" ? rest : { ...rest, fallbackBotId: value });
+        }}
+        className={cn(FIELD, "mt-1")}
+      >
+        <option value="">None — wait for the provider</option>
+        {!known && (
+          <option value="" disabled>
+            Missing bot {node.fallbackBotId}
+          </option>
+        )}
+        {bots
+          .filter((candidate) => candidate.id !== node.botId && (!candidate.hidden || candidate.id === node.fallbackBotId))
+          .map((candidate) => (
+            <option key={candidate.id} value={candidate.id}>
+              {botOptionLabel(candidate)}
+            </option>
+          ))}
+      </select>
+      {sameEngine && bot && fallback && (
+        <p className="mt-1.5 text-[11.5px] leading-snug text-warning">
+          {`${fallback.name} runs on the same engine as ${bot.name} — it will not take over during an outage`}
+        </p>
+      )}
+      {fallback &&
+        lacking.map((capability) => (
+          <p key={capability} className="mt-1.5 text-[11.5px] leading-snug text-warning">
+            {`${fallback.name} is not allowed to ${capability} — it will not take over this step`}
+          </p>
+        ))}
+    </div>
+  );
+}
+
 export interface WorkflowNodePanelProps {
   node: WorkflowNode;
   issues: WorkflowIssue[];
@@ -275,7 +443,7 @@ export function WorkflowNodePanel({
       <div className="flex items-start gap-2 border-b border-hairline/40 px-4 py-3">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-[13.5px] font-semibold text-ink">
-            {node.kind === "agent" ? "Agent node" : node.kind === "approval" ? "Approval gate" : "Notify room"}
+            {PANEL_TITLE[node.kind]}
           </h2>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-ink-secondary">{node.id}</p>
         </div>
@@ -358,6 +526,9 @@ export function WorkflowNodePanel({
             </div>
 
             <RequiresGroup node={node} bot={bot} onUpdate={onUpdate} />
+
+            <AlwaysAllowField id={field("always-allow")} node={node} onUpdate={onUpdate} />
+            <FallbackGroup node={node} bot={bot} bots={bots} onUpdate={onUpdate} />
 
             <div>
               <label className={LABEL} htmlFor={field("instructions")}>
@@ -477,17 +648,21 @@ export function WorkflowNodePanel({
                   value={node.onExpire ?? ""}
                   onChange={(event) => {
                     const value = event.target.value;
-                    onUpdate({
-                      ...node,
-                      onExpire: value === "" ? undefined : (value as (typeof WORKFLOW_APPROVAL_OUTCOMES)[number]),
-                    });
+                    // Leaving the renotify policy drops its round count too:
+                    // a knob that no longer applies must not linger in the
+                    // document and come back the next time it is picked.
+                    const next = value === "" ? undefined : (value as WorkflowApprovalOnExpire);
+                    const base = next === "renotify" ? node : withoutKey(node, "maxRenotify");
+                    onUpdate(next === undefined ? withoutKey(base, "onExpire") : { ...base, onExpire: next });
                   }}
                   className={cn(FIELD, "mt-1")}
                 >
                   {/* The engine falls back to `rejected` when onExpire is unset
-                      (sweepApprovals: `node.onExpire ?? "rejected"`), so the default
-                      must not promise a failure it never produces. */}
-                  <option value="">Route to rejected (default)</option>
+                      (sweepApprovals: `node.onExpire ?? "rejected"`), so the unset
+                      choice must not promise anything else. New gates from the
+                      palette start on renotify. */}
+                  <option value="">Route to rejected (unset)</option>
+                  <option value="renotify">Ask again, then route to rejected</option>
                   {WORKFLOW_APPROVAL_OUTCOMES.map((outcome) => (
                     <option key={outcome} value={outcome}>
                       Route to {outcome}
@@ -495,6 +670,63 @@ export function WorkflowNodePanel({
                   ))}
                 </select>
               </div>
+            </div>
+            {node.onExpire === "renotify" && (
+              <div>
+                <NumberField
+                  id={field("max-renotify")}
+                  label="Ask again up to (times)"
+                  hint={String(WORKFLOW_APPROVAL_RENOTIFY_DEFAULT)}
+                  value={node.maxRenotify}
+                  min={WORKFLOW_APPROVAL_RENOTIFY_MIN}
+                  step={1}
+                  onChange={(maxRenotify) => onUpdate({ ...node, maxRenotify })}
+                />
+                <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+                  Each time the window runs out with no decision, the gate re-arms it and asks again — a fresh
+                  notification on every device, the card refreshed in the chat and the room ({WORKFLOW_APPROVAL_RENOTIFY_MIN}–
+                  {WORKFLOW_APPROVAL_RENOTIFY_MAX} rounds). Only after the last round does it route to rejected.
+                </p>
+              </div>
+            )}
+            <div>
+              <label className={LABEL} htmlFor={field("approval-room")}>
+                Also ask in room
+              </label>
+              <select
+                id={field("approval-room")}
+                value={
+                  node.notifyTargetGroupId !== undefined && groups.some((group) => group.id === node.notifyTargetGroupId)
+                    ? node.notifyTargetGroupId
+                    : node.notifyTargetGroupId === undefined
+                      ? ""
+                      : "missing"
+                }
+                onChange={(event) => {
+                  const value = event.target.value;
+                  // "None" drops the key rather than writing an empty id the
+                  // validator would flag.
+                  onUpdate(value === "" ? withoutKey(node, "notifyTargetGroupId") : { ...node, notifyTargetGroupId: value });
+                }}
+                className={cn(FIELD, "mt-1")}
+              >
+                <option value="">None — the bot's chat only</option>
+                {node.notifyTargetGroupId !== undefined && !groups.some((group) => group.id === node.notifyTargetGroupId) && (
+                  <option value="missing" disabled>
+                    Missing room {node.notifyTargetGroupId}
+                  </option>
+                )}
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+                The decision card always lands in the chat of the bot that ran the previous step (it opens from the
+                notification). Pick a room to post the same card there too; a decision in either place, or here on
+                the canvas, settles the gate once.
+              </p>
             </div>
           </>
         )}
@@ -538,6 +770,28 @@ export function WorkflowNodePanel({
               />
             </div>
           </>
+        )}
+
+        {node.kind === "wait" && (
+          <div>
+            <NumberField
+              id={field("minutes")}
+              label="Pause (minutes)"
+              hint={String(WORKFLOW_WAIT_MINUTES_MIN)}
+              value={node.minutes}
+              min={WORKFLOW_WAIT_MINUTES_MIN}
+              step={1}
+              // The model requires a number; an emptied field keeps the last
+              // real value rather than writing a node the validator rejects.
+              onChange={(minutes) => onUpdate({ ...node, minutes: minutes ?? node.minutes })}
+            />
+            <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+              No bot runs here: the run idles for {formatWaitMinutes(node.minutes)} (
+              {WORKFLOW_WAIT_MINUTES_MIN}–{WORKFLOW_WAIT_MINUTES_MAX}), survives a restart, and does not count toward
+              the execution cap. Put one on the edge that loops back to the entry so a continuous cycle breathes
+              between laps.
+            </p>
+          </div>
         )}
 
         {/* Routing is the editor's central action and, on the canvas, a mouse

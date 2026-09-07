@@ -70,3 +70,25 @@ export function toggleRequirement(
   const ordered = WORKFLOW_CAPABILITIES.filter((candidate) => next.has(candidate));
   return ordered.length === 0 ? undefined : ordered;
 }
+
+/** The node panel edits `alwaysAllow` as one key per line — the way a person
+ * copies keys off approval cards ("Bash:gh", "session_search"). Blank lines
+ * and padding are dropped and repeats collapse, so the document never
+ * carries an entry the validator would flag; `undefined` — the key to OMIT —
+ * when nothing is left, for the same reason `toggleRequirement` returns it.
+ * Order is kept: the union with the bot's list is read in this order, and
+ * two authors typing the same keys should write the same document. */
+export function parseAlwaysAllowLines(text: string): string[] | undefined {
+  const keys: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const key = line.trim();
+    if (key && !keys.includes(key)) keys.push(key);
+  }
+  return keys.length === 0 ? undefined : keys;
+}
+
+/** The textarea's value for a node's list — the inverse of
+ * parseAlwaysAllowLines for every document the parser can produce. */
+export function alwaysAllowText(alwaysAllow: readonly string[] | undefined): string {
+  return (alwaysAllow ?? []).join("\n");
+}

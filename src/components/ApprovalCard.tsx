@@ -46,18 +46,33 @@ function toolLabel(tool?: string): string {
     stage_skill: "approval.tool.enableSkill",
     update_skill: "approval.tool.updateSkill",
     update_profile: "approval.tool.updateProfile",
+    workflow_approval: "approval.tool.workflowApproval",
   };
   const key = nice[tool];
   return key ? t(key) : bare;
 }
 
+/** The one card that decides in place: a workflow gate never takes over
+ * the composer (it can wait for days), so its two answers live here. The
+ * caller binds the thread — a bot's chat or a room — and the action is the
+ * same `decideRequest` the composer sends for every other card. */
+export type ApprovalCardDecision = (behavior: "allow" | "deny") => void;
+
+/** How the workflow itself signs a card it posts into a room — the same
+ * author a notify node's post carries, never a member of the room. */
+export const WORKFLOW_AUTHOR_BOT_ID = "workflow";
+
 export function ApprovalCard({
   bot,
   message,
+  onDecide,
 }: {
   /** who is asking, for the "Name wants to …" line */
   bot?: Bot;
   message: Message;
+  /** Present where a workflow gate can be decided from this card; absent,
+   * a pending gate card only says it is waiting (a transcript export). */
+  onDecide?: ApprovalCardDecision;
 }) {
   const card = message.card;
   if (!card) return null;
@@ -65,6 +80,7 @@ export function ApprovalCard({
   const isRoutineRequest = Boolean(card.routineRequest);
   const isSkillRequest = Boolean(card.skillRequest);
   const isProfileRequest = Boolean(card.profileRequest);
+  const isWorkflowGate = Boolean(card.workflowApproval);
   const routineAction = card.routineRequest?.operation.action;
   const skillAction = card.skillRequest?.action;
   const heldNote = tFromServer(card.heldCode, card.held);
@@ -76,11 +92,22 @@ export function ApprovalCard({
       ? skillAction === "update" ? "update_skill" : "stage_skill"
     : isProfileRequest
       ? "update_profile"
+    : isWorkflowGate
+      ? "workflow_approval"
     : card.tool;
   // A cross-bot profile card is shown in the PROPOSER's thread, so
   // "wants to update its profile" (fine for a bot editing itself) would
   // silently claim the proposer's own profile is changing. Name the actual
   // target whenever it differs from the proposer.
+  // A gate is not the bot wanting anything: a workflow is waiting on the
+  // person, and the card's own title already names the workflow and node.
+  // In a room the card is signed by the workflow, not by any member, so
+  // the header names the workflow rather than "someone".
+  const workflowHeader = isWorkflowGate
+    ? message.from?.botId === WORKFLOW_AUTHOR_BOT_ID || !bot
+      ? t("approval.card.workflowGateUnowned")
+      : t("approval.card.workflowGate", { name: bot.name })
+    : undefined;
   const profileHeader = isProfileRequest && card.profileRequest
     ? card.profileRequest.targetBotId === card.profileRequest.botId
       ? t("approval.card.profileWantsToOwn", { name: bot?.name ?? t("approval.someone") })
@@ -99,7 +126,7 @@ export function ApprovalCard({
     >
       <div className="flex items-baseline justify-between gap-3">
         <div className="text-[15px] font-semibold text-ink">
-          {profileHeader ?? (
+          {workflowHeader ?? profileHeader ?? (
             <>
               {bot
                 ? t("approval.card.namedWantsTo", { name: bot.name, action: toolLabel(displayTool) })
@@ -135,6 +162,27 @@ export function ApprovalCard({
         </div>
       )}
 
+      {/* A gate decides HERE, not in the composer: the card may stay open
+          for days, and the chat must keep working around it. */}
+      {isWorkflowGate && !settled && onDecide && (
+        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => onDecide("deny")}
+            className="rounded-full border border-danger/40 px-3.5 py-1.5 text-[13.5px] text-danger transition-colors hover:bg-danger/10"
+          >
+            {t("approval.action.reject")}
+          </button>
+          <button
+            type="button"
+            onClick={() => onDecide("allow")}
+            className="rounded-full bg-accent px-3.5 py-1.5 text-[13.5px] font-medium text-white transition-colors hover:brightness-110"
+          >
+            {t("approval.action.approve")}
+          </button>
+        </div>
+      )}
+
       {/* The decision lives in the composer (one place to answer, and it
           can't be scrolled past); here we only record what happened. */}
       <div className="mt-3 flex items-center gap-1.5 text-[13px] text-ink-secondary">
@@ -143,26 +191,34 @@ export function ApprovalCard({
             <Check size={14} className="text-success" />
             {skillSettledLabel ??
               routineSettledLabel ??
-              (isProfileRequest
-                ? t("approval.status.profileUpdated")
-                : isRoutineRequest
-                  ? t("approval.status.routineConfirmed")
-                  : isSkillRequest
-                    ? t("approval.status.skillConfirmed")
-                    : t("approval.status.allowed"))}
+              (isWorkflowGate
+                ? t("approval.status.workflowApproved")
+                : isProfileRequest
+                  ? t("approval.status.profileUpdated")
+                  : isRoutineRequest
+                    ? t("approval.status.routineConfirmed")
+                    : isSkillRequest
+                      ? t("approval.status.skillConfirmed")
+                      : t("approval.status.allowed"))}
           </>
         ) : settled ? (
           <>
-            <X size={14} /> {isRoutineRequest || isSkillRequest || isProfileRequest
-              ? t("approval.status.cancelled")
-              : t("approval.status.denied")}
+            <X size={14} /> {isWorkflowGate
+              ? settled === "unavailable"
+                ? t("approval.status.workflowClosed")
+                : t("approval.status.workflowRejected")
+              : isRoutineRequest || isSkillRequest || isProfileRequest
+                ? t("approval.status.cancelled")
+                : t("approval.status.denied")}
           </>
         ) : (
           <>
             <ShieldCheck size={14} className="text-accent" />
-            {isRoutineRequest || isSkillRequest || isProfileRequest
-              ? t("approval.status.waitingConfirmation")
-              : t("approval.status.waitingAnswer")}
+            {isWorkflowGate
+              ? t("approval.status.waitingDecision")
+              : isRoutineRequest || isSkillRequest || isProfileRequest
+                ? t("approval.status.waitingConfirmation")
+                : t("approval.status.waitingAnswer")}
           </>
         )}
       </div>
