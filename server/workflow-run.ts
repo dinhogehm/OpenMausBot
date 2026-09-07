@@ -18,6 +18,7 @@ import {
   validateWorkflow,
   WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H,
   WORKFLOW_APPROVAL_OUTCOMES,
+  WORKFLOW_APPROVAL_RENOTIFY_DEFAULT,
   WORKFLOW_CONTROL_CLOSE,
   WORKFLOW_CONTROL_OPEN,
   WORKFLOW_FAIL_OUTCOME,
@@ -72,6 +73,27 @@ const BUSY_REPARK_MS = 30_000;
  * re-prompt so an edit on the canvas reaches the very next attempt. */
 export interface WorkflowTurnOptions {
   alwaysAllow?: string[];
+}
+
+/** Why the gate's card is being (re)posted: opened, the mid-window reminder,
+ * or an expiry that asks again. The same three kinds reach notifyUser. */
+export type WorkflowApprovalReachKind = "approval" | "reminder" | "renotify";
+
+export interface WorkflowApprovalAnnouncement {
+  run: WorkflowRun;
+  workflow: Workflow;
+  node: Extract<WorkflowNode, { kind: "approval" }>;
+  kind: WorkflowApprovalReachKind;
+  /** Re-notifications so far, and how many the node allows. */
+  round: number;
+  maxRounds: number;
+  /** The previous step's summary — what the person is deciding on. */
+  summary: string;
+}
+
+export interface WorkflowApprovalReach {
+  announce: (announcement: WorkflowApprovalAnnouncement) => string[];
+  settle: (run: WorkflowRun, threadIds: string[], outcome: ApprovalDecision | "unavailable") => void;
 }
 
 export interface WorkflowEngineOptions {
@@ -130,6 +152,17 @@ export interface WorkflowEngineOptions {
    * here is logged and swallowed — and a reminder that failed to go out is
    * retried on the next tick. */
   notifyUser?: (run: WorkflowRun, message: string, kind: WorkflowNotificationKind) => void;
+  /** The gate's card: where a person can DECIDE without opening the canvas.
+   * `announce` posts the card into the bot's chat (and the node's room, if
+   * it names one) the first time and refreshes it on a reminder or a
+   * re-notification; it returns the threads that now carry the card, which
+   * the engine persists so `settle` can mark every copy answered later —
+   * after a decision on the canvas, an expiry, a cancel, or a restart.
+   * Both MUST be synchronous, like postGroupMessage; a throw is logged and
+   * the gate stays open (the timer, not the card, is what keeps a run
+   * alive). Absent, a gate is reachable only through the canvas and
+   * notifyUser, as before. */
+  approvalReach?: WorkflowApprovalReach;
   /** Occurrence math for the CALENDAR schedules (`daily`, `once`) —
    * index.ts injects the routine scheduler's `nextOccurrence` (local
    * timezone, strictly after `after`), so a workflow's "daily at 09:00" and
@@ -151,6 +184,17 @@ const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed",
 const LIVE_RUN_STATUSES = new Set<WorkflowRunStatus>(["queued", "running", "waiting-approval"]);
 
 const MISSED_SLOT_REASON = "missed: this computer was offline for more than 12 hours after the scheduled time";
+
+/** Every gate marker reset in one place, so a settle, a cancel and a
+ * terminal failure cannot disagree on what a closed gate leaves behind. */
+const CLOSED_APPROVAL = Object.freeze({
+  approvalRequestedAt: undefined,
+  approvalRemindedAt: undefined,
+  approvalRenotified: undefined,
+  approvalRenotifiedAt: undefined,
+  approvalNotices: undefined,
+  approvalThreadIds: undefined,
+}) satisfies Partial<WorkflowRun>;
 
 function envelopeContract(node: AgentNode): string {
   const allowed = node.outcomes.map((outcome) => `"${outcome}"`).join(", ");
@@ -499,12 +543,15 @@ export class WorkflowEngine {
   }
 
   /** A human gate never holds the queue forever: past its deadline the node's
-   * default decision is taken, and from half the window on the user is
-   * reminded once (retried each tick until it actually goes out). Both
-   * clocks run from the persisted approvalRequestedAt, so a restart changes
-   * nothing. Expiry is not a failure and is not announced: the run's new
-   * state is visible in the UI, and a terminal failure further down still
-   * notifies through failNode. */
+   * expiry policy applies — a default decision, or (`renotify`) a fresh
+   * window and the person asked again, up to the node's round count, and
+   * only then a rejection — and from half of every window on the user is
+   * reminded once (retried each tick until it actually goes out). The
+   * clocks run from the persisted `approvalRenotifiedAt ?? approvalRequestedAt`,
+   * so a restart changes nothing. A decision taken at expiry is not a
+   * failure and is not announced: the run's new state is visible in the
+   * UI, and a terminal failure further down still notifies through
+   * failNode. A re-notification IS announced — it is the whole point. */
   private sweepApprovals(now: number): void {
     for (const stale of this.store.listRuns()) {
       if (stale.status !== "waiting-approval") continue;
@@ -524,19 +571,58 @@ export class WorkflowEngine {
         this.store.patchRun(run.id, { approvalRequestedAt: now });
         continue;
       }
-      const { node } = gate;
-      const windowMs = (node.expiresHours ?? WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H) * 3_600_000;
-      const deadline = run.approvalRequestedAt + windowMs;
-      if (now > deadline) {
-        this.settleApproval(run, gate, node.onExpire ?? "rejected", "expired without a decision");
+      if (run.approvalThreadIds === undefined) {
+        // The gate was parked but its card never posted: a crash between the
+        // two writes, or a receipt from before cards existed (an upgrade
+        // under a waiting run). Reach the person now — a gate nobody can
+        // see is the failure this exists to prevent. `[]` is recorded even
+        // when nobody could be reached, so this runs once, not every tick.
+        this.reachApproval(run, gate, "approval");
         continue;
       }
-      if (run.approvalRemindedAt === undefined && now >= run.approvalRequestedAt + windowMs / 2) {
+      const { node } = gate;
+      const windowMs = (node.expiresHours ?? WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H) * 3_600_000;
+      const windowStart = run.approvalRenotifiedAt ?? run.approvalRequestedAt;
+      const deadline = windowStart + windowMs;
+      if (now > deadline) {
+        const rounds = run.approvalRenotified ?? 0;
+        const onExpire = node.onExpire ?? "rejected";
+        if (onExpire !== "renotify") {
+          this.settleApproval(run, gate, onExpire, "expired without a decision");
+          continue;
+        }
+        if (rounds >= (node.maxRenotify ?? WORKFLOW_APPROVAL_RENOTIFY_DEFAULT)) {
+          this.settleApproval(
+            run,
+            gate,
+            "rejected",
+            `expired without a decision after ${rounds} re-notification${rounds === 1 ? "" : "s"}`,
+          );
+          continue;
+        }
+        // Re-arm FIRST, then reach out: the receipt must say "asked again
+        // at" before anything can fail on its behalf, and a notification
+        // that did not go out is retried by the next round, never by
+        // re-arming every tick. The reminder marker resets with the window
+        // so every round gets its halfway nudge.
+        const rearmed = this.store.patchRun(run.id, {
+          approvalRenotified: rounds + 1,
+          approvalRenotifiedAt: now,
+          approvalRemindedAt: undefined,
+          approvalNotices: [...(run.approvalNotices ?? []), { at: now, kind: "renotify" }],
+        });
+        if (rearmed) this.reachApproval(rearmed, gate, "renotify");
+        continue;
+      }
+      if (run.approvalRemindedAt === undefined && now >= windowStart + windowMs / 2) {
         // The marker is persisted only once the reminder actually went out,
         // so a transport hiccup retries next tick instead of losing the one
         // reminder for good.
-        if (this.safeNotify(run, `Reminder: ${node.prompt}`, "reminder")) {
-          this.store.patchRun(run.id, { approvalRemindedAt: now });
+        if (this.reachApproval(run, gate, "reminder")) {
+          this.store.patchRun(run.id, {
+            approvalRemindedAt: now,
+            approvalNotices: [...(run.approvalNotices ?? []), { at: now, kind: "reminder" }],
+          });
         }
       }
     }
@@ -942,12 +1028,14 @@ export class WorkflowEngine {
       endedAt: this.now(),
       nextAttemptAt: undefined,
       outage: undefined,
-      approvalRequestedAt: undefined,
-      approvalRemindedAt: undefined,
+      ...CLOSED_APPROVAL,
       waitUntil: undefined,
       waitStartedAt: undefined,
     });
     if (!patched) return fresh;
+    // A cancelled gate's card must not keep offering a decision the engine
+    // can no longer take.
+    this.settleApprovalCards(fresh, "unavailable");
     this.drainQueue(patched.workflowId);
     return patched;
   }
@@ -991,7 +1079,12 @@ export class WorkflowEngine {
   }
 
   /** Records the gate's decision and advances — one path for a user's click
-   * and for expiry, so both take the identical edge. */
+   * (canvas, chat card or room card alike) and for expiry, so every way of
+   * deciding takes the identical edge and leaves the identical receipt. The
+   * gate's notices ride onto the result, so "re-notified 3×, then approved"
+   * is still readable once the run has moved on; then every copy of the
+   * card is marked answered — AFTER the advance, so a card can never show
+   * a decision the receipt does not carry. */
   private settleApproval(
     run: WorkflowRun,
     gate: { workflow: Workflow; node: ApprovalNode },
@@ -999,13 +1092,77 @@ export class WorkflowEngine {
     summary: string,
   ): void {
     const at = this.now();
+    const notices = run.approvalNotices ?? [];
     this.advance(
       run,
       gate.workflow,
       gate.node,
-      { nodeId: gate.node.id, outcome: decision, summary, startedAt: run.approvalRequestedAt ?? at, endedAt: at },
-      { status: "running", approvalRequestedAt: undefined, approvalRemindedAt: undefined },
+      {
+        nodeId: gate.node.id,
+        outcome: decision,
+        summary,
+        startedAt: run.approvalRequestedAt ?? at,
+        endedAt: at,
+        ...(notices.length === 0 ? {} : { notices }),
+      },
+      { status: "running", ...CLOSED_APPROVAL },
     );
+    this.settleApprovalCards(run, decision);
+  }
+
+  /** Mark every copy of the gate's card with what became of it. Best-effort
+   * and never a reason to fail: the run's receipt is the truth and is
+   * already on disk. `run` is the receipt AS IT WAS while waiting — it still
+   * carries the request id and the thread list; the patched one does not. */
+  private settleApprovalCards(run: WorkflowRun, outcome: ApprovalDecision | "unavailable"): void {
+    const threadIds = run.approvalThreadIds ?? [];
+    if (threadIds.length === 0 || run.status !== "waiting-approval") return;
+    try {
+      this.options.approvalReach?.settle(run, threadIds, outcome);
+    } catch (error) {
+      console.error(`workflow: could not mark the approval card of run ${run.id} as ${outcome}`, error);
+    }
+  }
+
+  /** Reach the person about an open gate, all three ways at once: the
+   * card in the chat (and the room), then the notification that opens that
+   * chat on the desktop and on a paired phone. The card comes first because
+   * the notification's tap must land on something to click. The threads
+   * that carry the card are persisted the moment they are known — `[]`
+   * included, so a gate nobody can be reached about is not retried every
+   * tick — and the return value is the NOTIFICATION's, which is what the
+   * reminder marker waits on. */
+  private reachApproval(run: WorkflowRun, gate: { workflow: Workflow; node: ApprovalNode }, kind: WorkflowApprovalReachKind): boolean {
+    const { node, workflow } = gate;
+    const round = run.approvalRenotified ?? 0;
+    const maxRounds = node.maxRenotify ?? WORKFLOW_APPROVAL_RENOTIFY_DEFAULT;
+    let threadIds: string[] = [];
+    try {
+      threadIds = this.options.approvalReach?.announce({
+        run,
+        workflow,
+        node,
+        kind,
+        round,
+        maxRounds,
+        summary: run.nodeResults[run.nodeResults.length - 1]?.summary ?? "",
+      }) ?? [];
+    } catch (error) {
+      console.error(`workflow: could not post the approval card of run ${run.id} (${kind})`, error);
+    }
+    const known = run.approvalThreadIds ?? [];
+    const merged = [...new Set([...known, ...threadIds])];
+    const current =
+      run.approvalThreadIds === undefined || merged.length !== known.length
+        ? (this.store.patchRun(run.id, { approvalThreadIds: merged }) ?? run)
+        : run;
+    const message =
+      kind === "approval"
+        ? node.prompt
+        : kind === "reminder"
+          ? `Reminder: ${node.prompt}`
+          : `Still waiting for your decision (asked again, ${round} of ${maxRounds}): ${node.prompt}`;
+    return this.safeNotify(current, message, kind);
   }
 
   handleRuntimeEvent(event: RuntimeEvent): void {
@@ -1197,7 +1354,7 @@ export class WorkflowEngine {
       }
     }
     if (node.kind === "approval") {
-      this.openApproval(runId, node);
+      this.openApproval(runId, workflow, node);
       return;
     }
     if (node.kind === "notify") {
@@ -1369,20 +1526,24 @@ export class WorkflowEngine {
     });
   }
 
-  /** Park the run on a human gate: no task, no turn, one notification. From
-   * here the sweep in tick() owns the deadline and the reminder. */
-  private openApproval(runId: string, node: ApprovalNode): void {
+  /** Park the run on a human gate: no task, no turn, then the person is
+   * reached (card in the chat and the room, notification on every device).
+   * The park is persisted BEFORE the reach, so a crash between the two
+   * leaves a receipt with no `approvalThreadIds`, which the sweep posts on
+   * its next pass. From here the sweep in tick() owns the deadline, the
+   * reminder and the re-notifications. */
+  private openApproval(runId: string, workflow: Workflow, node: ApprovalNode): void {
     const patched = this.store.patchRun(runId, {
       status: "waiting-approval",
       currentNodeId: node.id,
+      ...CLOSED_APPROVAL,
       approvalRequestedAt: this.now(),
-      approvalRemindedAt: undefined,
       dispatchedAt: undefined,
       nextAttemptAt: undefined,
       currentThreadId: undefined,
     });
     if (!patched) return;
-    this.safeNotify(patched, node.prompt, "approval");
+    this.reachApproval(patched, { workflow, node }, "approval");
   }
 
   /** Post the rendered template to its group and advance in the same step —
@@ -1677,12 +1838,14 @@ export class WorkflowEngine {
       // dispatch that no longer exists, and a resume starts them afresh.
       outage: undefined,
       currentBotId: undefined,
-      approvalRequestedAt: undefined,
-      approvalRemindedAt: undefined,
+      ...CLOSED_APPROVAL,
       waitUntil: undefined,
       waitStartedAt: undefined,
     });
     if (!patched) return;
+    // A gate that died under the run (its node edited away) leaves a card
+    // that can no longer be answered; say so on the card too.
+    this.settleApprovalCards(run, "unavailable");
     const workflow = this.store.get(patched.workflowId);
     const where = patched.currentNodeId === undefined ? "" : ` at node "${patched.currentNodeId}"`;
     this.safeNotify(
