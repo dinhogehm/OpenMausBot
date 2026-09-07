@@ -7,6 +7,7 @@
 // separate one run from the next.
 import type { Message } from "@/state/store";
 import { formatElapsed } from "@/lib/working-time";
+import { t } from "@/lib/i18n";
 
 export type ActivityTranscriptItem =
   | { kind: "message"; message: Message }
@@ -66,7 +67,10 @@ function assistantTurnFolds(messages: Message[]): {
       }
     }
     const elapsed = Math.max(0, terminal.at - startedAt);
-    const label = elapsed >= 1_000 ? `Worked for ${formatElapsed(elapsed)}` : "Worked";
+    const label =
+      elapsed >= 1_000
+        ? t("chat.run.workedFor", { elapsed: formatElapsed(elapsed) })
+        : t("chat.run.worked");
     const fold: TurnFold = {
       kind: "turn",
       id: `turn:${terminal.turnId}`,
@@ -141,6 +145,6 @@ export function describeRun(messages: Message[]): string {
   }
   const names = [...counts].map(([name, count]) => (count > 1 ? `${name} ×${count}` : name));
   const shown = names.slice(0, MAX_NAMES).join(", ");
-  const rest = names.length > MAX_NAMES ? ` +${names.length - MAX_NAMES} more` : "";
-  return `${messages.length} steps · ${shown}${rest}`;
+  const rest = names.length > MAX_NAMES ? ` ${t("chat.run.more", { count: names.length - MAX_NAMES })}` : "";
+  return t("chat.run.steps", { count: messages.length, tools: `${shown}${rest}` });
 }

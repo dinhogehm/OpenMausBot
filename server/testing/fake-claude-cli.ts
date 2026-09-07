@@ -7,6 +7,8 @@
 //   FAKE_CLAUDE_MODE   happy (default) | exit-early | hang | malformed
 //                      | stream (partial-message text deltas before the
 //                        whole-message frame, plus subagent noise to drop)
+//                      | not-logged-in (the frames a signed-out CLI really
+//                        sends, captured from 2.1.263)
 //   FAKE_CLAUDE_DUMP   path to write {argv, env, prompt, systemPrompt,
 //                      mcpConfig} as JSON,
 //                      so the test can assert on argv shape and env hygiene.
@@ -222,6 +224,28 @@ const playTurn = (prompt: JsonValue) => {
 
   if (mode === "malformed") {
     process.stdout.write("this is not json\n{broken\n");
+  }
+
+  // A signed-out CLI answers every prompt with this, verbatim: the login
+  // instruction arrives as assistant text, and only the frame's own error
+  // fields say it is a failure at all.
+  if (mode === "not-logged-in") {
+    out({
+      type: "assistant",
+      message: { model: "<synthetic>", content: [{ type: "text", text: "Not logged in \u00b7 Please run /login" }] },
+      error: "authentication_failed",
+      is_api_error_message: true,
+    });
+    out({
+      type: "result",
+      is_error: true,
+      stop_reason: "stop_sequence",
+      terminal_reason: "api_error",
+      result: "Not logged in \u00b7 Please run /login",
+    });
+    turnRunning = false;
+    finishIfDone();
+    return;
   }
 
   if (mode === "stream") {

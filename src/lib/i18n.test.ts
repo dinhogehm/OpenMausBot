@@ -128,19 +128,11 @@ describe("tFromServer", () => {
     expect(tFromServer(undefined, undefined)).toBeUndefined();
   });
 
-  // ApprovalModeSelector renders these labels without t(), so a translated
-  // note has to keep pointing at the button the reader can actually see.
-  it("keeps the untranslated mode labels verbatim in every pack", () => {
-    for (const [code, pack] of Object.entries(locales)) {
-      for (const [key, value] of Object.entries(pack)) {
-        if (!key.startsWith("approval.held.")) continue;
-        for (const label of ["Approve for me", "Full access"]) {
-          if (!en[key as keyof typeof en].includes(label)) continue;
-          expect(value, `${code} → ${key}`).toContain(label);
-        }
-      }
-    }
-  });
+  // The rule these notes have to keep — a note must name a button the reader
+  // can see — now lives in ApprovalModeSelector.i18n.test.ts, which checks the
+  // note against the label the selector renders in that same language. The
+  // labels used to be hardcoded English, so this file pinned the English words
+  // instead; the selector reads the catalog now.
 
   it("prefers the catalog over stale text saved with an older card", () => {
     expect(tFromServer("approval.held.destructive", "This looked destructive, so auto mode stopped to ask."))

@@ -1,6 +1,6 @@
 // Run with `pnpm exec electron scripts/smoke-approval-modes.cjs`.
 // Exercises the real private Electron utility-process grant protocol using
-// only a disposable home and fake Claude/Antigravity CLIs. Never uses the live app.
+// only a disposable home and fake Claude/Antigravity/Codex CLIs. Never uses the live app.
 const { app, utilityProcess } = require("electron");
 const assert = require("node:assert/strict");
 const { randomUUID, createHash } = require("node:crypto");
@@ -53,8 +53,10 @@ app.whenReady().then(async () => {
   }
   const agyDump = join(home, "agy.json");
   const agyRpc = join(home, "agy-rpc.json");
+  const codexDump = join(home, "codex.json");
   writeFileSync(join(home, "config.json"), JSON.stringify({ instances: {
     claude: { driver: "claudeAgent", config: { cli: join(root, "server/testing/fake-claude-cli.ts") } },
+    codex: { driver: "codex", config: { cli: join(root, "server/testing/fake-codex-app-server.ts") }, environment: { FAKE_CODEX_MODE: "approval", FAKE_CODEX_DUMP: codexDump } },
     agy: { driver: "antigravityAgent", config: { cli: agy }, environment: { FAKE_ACP_DUMP: agyDump, FAKE_ACP_RPC_DUMP: agyRpc } },
     "agy-question": { driver: "antigravityAgent", config: { cli: agy }, environment: { FAKE_ACP_MODE: "question" } },
   } }));
@@ -152,18 +154,44 @@ app.whenReady().then(async () => {
   assert.equal(capability.status, 201);
   const peerRequest = api("/api/internal/ask-bot", "POST", { toBotId: peerTarget.id, message: "Peer-initiated permission fixture" }, { authorization: `Bearer ${capability.body.token}` });
   void peerRequest.catch(() => {});
-  const peerCard = await until(async () => pendingCard((await api("/api/bots")).body.bots.find((bot) => bot.id === peerTarget.id)));
-  assert.equal(peerCard.held, "The provider requires your approval for this action.");
-  const peerCalls = JSON.parse(readFileSync(`${agyDump}.config.json`, "utf8"));
-  assert.equal(peerCalls.find((call) => call.params.configId === "mode")?.params.value, "default");
-  assert.equal((await api(`/api/bots/${peerTarget.id}/respond`, "POST", { requestId: peerCard.requestId, behavior: "allow" })).status, 200);
-  assert.equal((await peerRequest).status, 200);
   const peerDecisions = await until(async () => {
     const rows = (await api("/api/decisions")).body.decisions.filter((row) => row.botId === peerTarget.id);
-    return rows.some((row) => row.source === "native-approval" && row.decision === "card-shown") && rows;
+    return rows.some((row) => row.source === "full-access") && rows;
   });
-  assert.ok(!peerDecisions.some((row) => row.source === "full-access"));
-  console.log(JSON.stringify({ provider: "antigravity", mode: "full", peerInitiated: true, native: "default", nativeApprovalShown: true, humanApproved: true }));
+  assert.equal((await peerRequest).status, 200);
+  const completedPeer = (await api("/api/bots")).body.bots.find((bot) => bot.id === peerTarget.id);
+  assert.ok(!pendingCard(completedPeer));
+  assert.ok(!peerDecisions.some((row) => row.decision === "card-shown"));
+  const peerCalls = JSON.parse(readFileSync(`${agyDump}.config.json`, "utf8"));
+  assert.equal(peerCalls.find((call) => call.params.configId === "mode")?.params.value, "yolo");
+  console.log(JSON.stringify({ provider: "antigravity", mode: "full", peerInitiated: true, native: "yolo", autoApproved: true, humanApproved: false }));
+
+  // Revoking the receiving bot's grant must restore prompts on the resumed
+  // delegated session, even when the sender itself has Full access.
+  await coordinator.request(child, id, "full");
+  await coordinator.request(child, peerTarget.id, "ask");
+  const askPeerRequest = api("/api/internal/ask-bot", "POST", { toBotId: peerTarget.id, message: "Ask target must not inherit sender Full" }, { authorization: `Bearer ${capability.body.token}` });
+  void askPeerRequest.catch(() => {});
+  const peerCard = await until(async () => pendingCard((await api("/api/bots")).body.bots.find((bot) => bot.id === peerTarget.id)));
+  const askPeerCalls = JSON.parse(readFileSync(`${agyDump}.config.json`, "utf8"));
+  assert.equal(askPeerCalls.find((call) => call.params.configId === "mode")?.params.value, "default");
+  assert.equal((await api(`/api/bots/${peerTarget.id}/respond`, "POST", { requestId: peerCard.requestId, behavior: "allow" })).status, 200);
+  assert.equal((await askPeerRequest).status, 200);
+  console.log(JSON.stringify({ provider: "antigravity", mode: "ask", senderMode: "full", peerInitiated: true, native: "default", humanApproved: true }));
+
+  // Custom is downgraded for delegated turns. Both the provider dispatch and
+  // the residual approval fold must use that same effective Auto mode.
+  const customTarget = (await api("/api/bots", "POST", { modelSelection: { instanceId: "codex", model: "gpt-fake-default" } })).body.bot;
+  await coordinator.request(child, customTarget.id, "custom");
+  const customRequest = api("/api/internal/ask-bot", "POST", { toBotId: customTarget.id, message: "Delegated Custom uses the native Auto reviewer" }, { authorization: `Bearer ${capability.body.token}` });
+  void customRequest.catch(() => {});
+  const customCard = await until(async () => pendingCard((await api("/api/bots")).body.bots.find((bot) => bot.id === customTarget.id)));
+  assert.equal(customCard.held, "The provider requires your approval for this action.");
+  assert.equal((await api(`/api/bots/${customTarget.id}/respond`, "POST", { requestId: customCard.requestId, behavior: "allow" })).status, 200);
+  assert.equal((await customRequest).status, 200);
+  const customCalls = JSON.parse(readFileSync(codexDump, "utf8")).calls;
+  assert.equal(customCalls.find((call) => call.method === "turn/start")?.params.approvalsReviewer, "auto_review");
+  console.log(JSON.stringify({ provider: "codex", mode: "custom", peerInitiated: true, effectiveMode: "auto", nativeApprovalShown: true }));
   console.log("Approval smoke passed; HTTP elevation rejected, private grant and resumed mode transitions verified.");
 }).catch((error) => {
   console.error(error);

@@ -33,6 +33,8 @@ import {
   type RecordedSkillEvent,
 } from "@/lib/skill-recorder";
 import { requestScreenPreview, stopScreenPreview } from "@/lib/screen-preview";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import { TRANSCRIPTION_STATUS_EVENT } from "@/lib/transcription-status";
 import { useStore } from "@/state/store";
 
@@ -79,7 +81,7 @@ export function SkillRecorderPage() {
   const [transcriptionConfigured, setTranscriptionConfigured] = useState<boolean | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<string | { key: LocaleKey }>("");
   const [saved, setSaved] = useState<{ id: string; path: string; events: number } | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const screenRef = useRef<MediaStream | null>(null);
@@ -193,12 +195,16 @@ export function SkillRecorderPage() {
       return;
     }
     updatePhase("starting");
+    let screenFailureKey: LocaleKey | undefined;
     try {
       const selected = await requestScreenPreview({
         beginIntent: () => window.ogb!.beginScreenPreviewIntent(),
         getDisplayMedia: (constraints) => navigator.mediaDevices.getDisplayMedia(constraints),
       });
-      if (!selected.ok) throw new Error(selected.message);
+      if (!selected.ok) {
+        screenFailureKey = selected.messageKey;
+        throw new Error(t(selected.messageKey));
+      }
       screenRef.current = selected.stream;
       const video = videoRef.current;
       if (!video) throw new Error("The recorder preview is unavailable");
@@ -250,7 +256,7 @@ export function SkillRecorderPage() {
       mediaRecorderRef.current = null;
       releaseStreams();
       updatePhase("idle");
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setError(screenFailureKey ? { key: screenFailureKey } : caught instanceof Error ? caught.message : String(caught));
     }
   };
 
@@ -510,7 +516,7 @@ export function SkillRecorderPage() {
             </div>
           )}
 
-          {error && <div role="alert" className="mx-auto mt-4 max-w-2xl rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-[12px] text-danger">{error}</div>}
+          {error && <div role="alert" className="mx-auto mt-4 max-w-2xl rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-[12px] text-danger">{typeof error === "string" ? error : t(error.key)}</div>}
         </div>
       </div>
     </main>

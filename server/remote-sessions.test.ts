@@ -80,6 +80,9 @@ beforeAll(async () => {
   // machine; remote-session behavior does not depend on an engine.
   writeFileSync(join(home, ".openmausbot", "config.json"), JSON.stringify({
     instances: { fixture: { driver: "remote-session-test-shadow" } },
+    profile: { name: "Security fixture", email: "private@example.invalid" },
+    vps: { sshAlias: "fixture-private-host" },
+    browserProfiles: [{ id: "fixture", name: "Fixture browser", partitionId: "fixture-private-partition" }],
   }));
   child = spawn(process.execPath, [join(SERVER_DIR, "index.ts")], {
     cwd: ROOT,
@@ -121,6 +124,16 @@ afterAll(async () => {
 });
 
 describe("before pairing", () => {
+  it.each(["//%5B", "//[", "http://["])("rejects malformed request target %s and stays healthy", async (path) => {
+    const response = await call(path, { headers: remote("10.0.0.1") });
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: "invalid request URL" });
+    const health = await call("/api/health");
+    expect(health.status).toBe(200);
+    expect(health.body).toMatchObject({ app: "openmausbot", pid: child.pid });
+    expect(child.exitCode).toBeNull();
+  });
+
   it("describes itself to anyone, but serves nothing else off-machine", async () => {
     const descriptor = await call("/.well-known/openmausbot/environment", { headers: remote("10.0.0.1") });
     expect(descriptor.status).toBe(200);
@@ -156,6 +169,7 @@ describe("pairing", () => {
     expect(opened.hint).toBeNull();
     const listed = await call("/api/auth/pairing");
     expect(listed.body.pairings.length).toBeGreaterThanOrEqual(1);
+    expect(listed.body.publicUrl).toBe(PUBLIC_URL);
   });
 
   it("refuses to mint or list codes from a client-only session", async () => {
@@ -232,6 +246,15 @@ describe("pairing", () => {
 
     const sameOrigin = await call("/api/bots", { headers: remote("10.0.0.4", { cookie, origin: `http://${REMOTE_HOST}` }) });
     expect(sameOrigin.status).toBe(200);
+    // Every cookie-authenticated response re-issues the cookie with the
+    // session's current remaining life (sliding expiry), never on a 401.
+    const refreshed = header(sameOrigin.headers, "set-cookie");
+    expect(refreshed.split(";")[0]).toBe(cookie);
+    expect(refreshed).toMatch(/Max-Age=\d+/);
+    expect(refreshed).toContain("HttpOnly");
+    const stranger = await call("/api/bots", { headers: remote("10.0.0.4", { cookie: `${cookie.split("=")[0]}=omb_sess_nope`, origin: `http://${REMOTE_HOST}` }) });
+    expect(stranger.status).toBe(401);
+    expect(header(stranger.headers, "set-cookie")).toBe("");
     const noOrigin = await call("/api/auth/session", { headers: remote("10.0.0.4", { cookie }) });
     expect(noOrigin.body).toMatchObject({ kind: "session", via: "cookie", label: "iPad in the kitchen" });
     const csrf = await call("/api/bots", { method: "POST", headers: remote("10.0.0.4", { cookie, origin: "https://evil.example" }), body: "{}" });
@@ -367,6 +390,75 @@ describe("pairing", () => {
     } finally {
       expect((await call(`/api/workflows/${workflowId}`, { method: "DELETE" })).status).toBe(204);
       await call(`/api/bots/${botId}`, { method: "DELETE" });
+    }
+  });
+
+  it("projects client config consistently for REST, live events, and replay without stripping admin events", async () => {
+    async function pair(scopes: string[], source: string) {
+      const opened = await pairingCode(scopes);
+      const paired = await call("/api/auth/pair", {
+        method: "POST", headers: remote(source), body: JSON.stringify({ code: opened.code }),
+      });
+      expect(paired.status).toBe(200);
+      return remote(source, { authorization: `Bearer ${paired.body.token}` });
+    }
+    const clientHeaders = await pair(["client"], "10.0.0.41");
+    const adminHeaders = await pair(["admin", "client"], "10.0.0.42");
+    const streams: Awaited<ReturnType<typeof openSse>>[] = [];
+    async function stream(headers: Record<string, string>, cursor?: string) {
+      const opened = await openSse(`${BASE}/api/events${cursor ? `?since=${encodeURIComponent(cursor)}` : ""}`, headers);
+      streams.push(opened);
+      return opened;
+    }
+    function expectClientConfig(config: any) {
+      expect(config.profile).toEqual({ name: "Updated fixture", email: "" });
+      expect(config.vps).toEqual({ configured: true, sshAlias: "" });
+      expect(config.browserProfiles).toEqual([{ id: "fixture", name: "Fixture browser" }]);
+    }
+    function expectAdminConfig(config: any) {
+      expect(config.profile).toEqual({ name: "Updated fixture", email: "updated-private@example.invalid" });
+      expect(config.vps).toEqual({ configured: true, sshAlias: "fixture-private-host" });
+      expect(config.browserProfiles).toEqual([{ id: "fixture", name: "Fixture browser", partitionId: "fixture-private-partition" }]);
+    }
+    try {
+      // Connect the client first so a mutation of the shared payload would
+      // also corrupt the administrator's live event and the replay buffer.
+      const client = await stream(clientHeaders);
+      const hello = await client.until((frame) => frame.kind === "hello");
+      const admin = await stream(adminHeaders);
+      await admin.until((frame) => frame.kind === "hello");
+      const changed = await call("/api/config", {
+        method: "PATCH", headers: adminHeaders,
+        body: JSON.stringify({ profile: { name: "Updated fixture", email: "updated-private@example.invalid" } }),
+      });
+      expect(changed.status).toBe(200);
+      expectAdminConfig(changed.body);
+      const clientFrame = await client.until((frame) => frame.kind === "config");
+      const adminFrame = await admin.until((frame) => frame.kind === "config");
+      expectClientConfig(clientFrame);
+      expectAdminConfig(adminFrame);
+      expect(clientFrame.seq).toBe(adminFrame.seq);
+      client.close();
+      admin.close();
+
+      const clientReplay = await stream(clientHeaders, hello.cursor);
+      expect((await clientReplay.until((frame) => frame.kind === "hello")).resumed).toBe(true);
+      expectClientConfig(await clientReplay.until((frame) => frame.kind === "config"));
+      const adminReplay = await stream(adminHeaders, hello.cursor);
+      expect((await adminReplay.until((frame) => frame.kind === "hello")).resumed).toBe(true);
+      expectAdminConfig(await adminReplay.until((frame) => frame.kind === "config"));
+
+      const clientRest = await call("/api/config", { headers: clientHeaders });
+      const adminRest = await call("/api/config", { headers: adminHeaders });
+      const ownerRest = await call("/api/config");
+      expect(clientRest.status).toBe(200);
+      expect(adminRest.status).toBe(200);
+      expect(ownerRest.status).toBe(200);
+      expectClientConfig(clientRest.body);
+      expectAdminConfig(adminRest.body);
+      expectAdminConfig(ownerRest.body);
+    } finally {
+      for (const opened of streams) opened.close();
     }
   });
 

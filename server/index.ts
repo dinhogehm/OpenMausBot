@@ -166,6 +166,7 @@ import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-g
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
 import { readMessageText, recallMessages, searchMessages } from "./message-db.ts";
+import { claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -192,6 +193,7 @@ import {
 } from "./send-idempotency.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ProviderRegistry } from "./harness/registry.ts";
+import { selectDefaultModelSelection } from "./default-model-selection.ts";
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -290,6 +292,7 @@ import { WorkflowStore } from "./workflow-store.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
 import { BUILT_IN_BROWSER_SYSTEM_PROMPT } from "./browser-engine.ts";
 import {
+  agentBrowserFrame,
   agentBrowserIntegration,
   browserEngineEncryptionKey,
   clearBrowserSessionState,
@@ -300,8 +303,8 @@ import {
   browserSessionId,
   describeBrowserEngine,
 } from "./browser-engine.ts";
-import { captureOutsideHumanControl } from "./private-screen-capture.ts";
-import { screenFrameHash, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
+import { createScreenFrameSource, type ScreenCapture } from "./screen-frame-source.ts";
+import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
 import { buildBotOverview, type BotOverview, connectedAppsFacts } from "./bot-overview.ts";
 import { ProfileRequestService } from "./profile-requests.ts";
@@ -343,11 +346,12 @@ import {
   requestOrigin,
   requestSource,
   resolveRequestAuth,
+  parseCookies,
   serializeSessionCookie,
   sessionCookieName,
   type RequestAuth,
 } from "./request-auth.ts";
-import { formatPairingCode, SESSION_TTL_MS, SessionRegistry, type Scope } from "./sessions.ts";
+import { cookieMaxAgeSeconds, formatPairingCode, SessionRegistry, type Scope } from "./sessions.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
 import {
   PHONE_SECRET_PROTOCOL_VERSION,
@@ -973,17 +977,9 @@ function askBotAndWait(targetBotId: string, message: string, depth: number, from
   });
 }
 
-// default selection for new bots: first available instance, claude preferred
+// New bots honor setup's saved choice; unconfigured workspaces prefer Claude.
 async function defaultSelection() {
-  const described = await registry.describe();
-  const available = described.filter((d) => d.snapshot.state === "available");
-  // Deliberately NO fallback to described[0]. Handing a bot an engine whose
-  // CLI isn't installed makes it look ready and then fail on send with a raw
-  // spawn ENOENT — the single worst first-run experience, and the one every
-  // user with no CLIs used to get. An empty selection is honest: the UI shows
-  // the setup path instead of a bot that cannot answer.
-  const pick = available.find((d) => d.driverKind === "claudeAgent") ?? available[0];
-  return { instanceId: pick?.instanceId ?? "", model: pick?.models.default ?? "" };
+  return selectDefaultModelSelection(await registry.describe(), cfg.defaultModelSelection);
 }
 
 function checkedModelSelection(
@@ -1290,8 +1286,10 @@ async function botOverview(bot: BotRecord): Promise<BotOverview> {
 /** Defense in depth for hand-edited/corrupt durable records: elevated
  * approval semantics require an implemented provider mapping. The trusted transition enforces
  * this too, but no provider dispatch or later permission callback relies on
- * persistence having been produced exclusively by that route. And a turn
- * another bot started never runs as Full — see approvalModeForOrigin. */
+ * persistence having been produced exclusively by that route. Delegation
+ * uses the receiving bot's grant, never the sender's — see approvalModeForOrigin.
+ * The thread id lets the unattended downgrade read the dispatch's own
+ * provenance record, not only the mutable per-bot mark. */
 const approvalModeForTurn = (bot: BotRecord, peerInitiated = false, threadId?: string): ApprovalMode => {
   const mode = approvalModeForOrigin(approvalModeFor(bot), { peerInitiated });
   if (!supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)) {
@@ -2092,6 +2090,7 @@ function messageWindow(threadId: string, messageId: string, limit: number) {
 /** One connected client, and what it asked to be sent. */
 interface SseClient {
   res: ServerResponse;
+  admin: boolean;
   /** Live screen frames carry a base64 desktop capture every few seconds
    * while a bot works. A client that isn't showing the computer panel —
    * a phone on cellular, most of all — should not pay for them. */
@@ -2131,7 +2130,7 @@ const SSE_HEARTBEAT_MS =
     ? configuredSseHeartbeatMs
     : 15_000;
 let lastSeq = 0;
-const replayBuffer: Array<{ seq: number; kind: string; frame: string | null }> = [];
+const replayBuffer: Array<{ seq: number; kind: string; frame: string | null; clientFrame: string | null }> = [];
 
 /** Screen frames are the only kind a client can decline. */
 const wants = (client: SseClient, kind: string) => kind !== "screen" || client.screens;
@@ -2151,15 +2150,20 @@ function broadcast(payload: Record<string, unknown>) {
   const seq = ++lastSeq;
   const kind = String(payload.kind ?? "");
   const frame = `id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify({ ...payload, seq })}\n\n`;
+  // Store both projections as immutable frames: live and reconnecting clients
+  // must receive the same filtered config without changing the admin event.
+  const clientFrame = kind === "config"
+    ? `id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify({ ...configForAccess(payload as ReturnType<typeof configStatus>, false), seq })}\n\n`
+    : frame;
   // Live desktop captures can each be hundreds of kilobytes and become stale
   // as soon as the next one arrives. Keep their sequence slots so resume-gap
   // detection stays honest, but never retain their base64 payloads.
-  replayBuffer.push({ seq, kind, frame: kind === "screen" ? null : frame });
+  replayBuffer.push({ seq, kind, frame: kind === "screen" ? null : frame, clientFrame: kind === "screen" ? null : clientFrame });
   if (replayBuffer.length > REPLAY_MAX) replayBuffer.shift();
   for (const client of [...sseClients]) {
     if (!wants(client, kind)) continue;
     try {
-      client.res.write(frame);
+      client.res.write(client.admin ? frame : clientFrame);
     } catch {
       sseClients.delete(client);
     }
@@ -2953,7 +2957,7 @@ bus.subscribe((event: RuntimeEvent) => {
         if (bot) {
           const touches = screenTouchingTool(toolName);
           if (touches || /computer|screenshot|click|type_text|press_key|scroll|open_url|wait_for|browser_/i.test(toolName)) {
-            pokeScreenPoller(bot.id, touches);
+            pokeScreenPoller(bot.id, touches, screenSurfaceForTool(toolName));
           }
         }
       }
@@ -2991,8 +2995,7 @@ bus.subscribe((event: RuntimeEvent) => {
       const effectiveApprovalMode = asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId), event.threadId) : "ask";
       const verdict = permission && asker && event.requestId
         ? autoVerdict({
-            // the same origin the dispatch used, so a peer-started turn's
-            // residual asks are judged as Approve for me here too
+            // Use the same receiving-bot mode as the provider dispatch.
             approvalMode: effectiveApprovalMode,
             autoApprove: false,
             // a workflow node's own pre-approved keys join the bot's; the
@@ -3004,11 +3007,10 @@ bus.subscribe((event: RuntimeEvent) => {
             requiresExplicitApproval: event.requiresExplicitApproval,
             // present only on a workflow turn: what the node itself declared
             ...(workflowTurn ? { workflowGrants: provenance.alwaysAllow ?? [] } : {}),
-            // Antigravity's residual asks must use a peer-started turn's
-            // effective safe Auto mode, not its durable Full grant.
-            // Preserve the existing policy of every other provider.
-            nativeApproval: requiresNativeApproval(event.provider, event.provider === "antigravityAgent"
-              ? effectiveApprovalMode : approvalModeForTurn(asker, false, event.threadId)),
+            // Match the dispatched mode for every provider, including
+            // delegated Custom and unattended Auto downgrades — the mode
+            // above was computed for this very thread.
+            nativeApproval: requiresNativeApproval(event.provider, effectiveApprovalMode),
           })
         : null;
       // The provider already received Ask for unattended Auto turns. Keep
@@ -3844,7 +3846,10 @@ const screenPollers = new Map<
   string,
   {
     timer: ReturnType<typeof setInterval> | null;
-    capture: () => Promise<void>;
+    capture: (fresh?: boolean) => Promise<void>;
+    /** Which surface the last screen-touching tool acted on. A bot with both
+     * a computer and a browser must be pictured on the one it just used. */
+    surface: "browser" | "computer";
     last: Frame | null;
     /** Did this turn actually reach for the screen? A bot that merely HAS
      * a computer would otherwise end every reply — a one-word "yes"
@@ -3868,49 +3873,25 @@ const SCREEN_MIN_GAP_MS = 3000;
  * shell-only turns are kept honest by the settle-time hash gate instead. */
 function startScreenPoller(
   botId: string,
-  capture: () => Promise<{ png: string; format: string }>,
+  captures: { computer?: ScreenCapture; browser?: ScreenCapture },
   { screenIsTheWork = false } = {},
 ) {
+  if (!captures.computer && !captures.browser) return;
   if (screenPollers.has(botId)) return;
-  // One capture at a time, shared by the interval, the pokes, and the
-  // turn-end grab: awaiting the in-flight promise (rather than dropping the
-  // call) is what lets the final frame be the settled one. The min-gap keeps
-  // a tool-heavy turn from spending the box's single command endpoint on
-  // previews the user isn't waiting for.
-  let current: Promise<void> | null = null;
-  let lastAt = 0;
-  const entry = {
+  // Assign rather than spread: the source's last-frame getter deliberately
+  // hides a stale frame as soon as the selected surface changes.
+  const entry = Object.assign(createScreenFrameSource({
+    captures,
+    control: () => ({
+      held: computerControl.snapshot(botId).held,
+      revision: computerControlRevision.get(botId) ?? 0,
+    }),
+    onFrame: (frame) => broadcast({ kind: "screen", botId, ...frame }),
+    minGapMs: SCREEN_MIN_GAP_MS,
+  }), {
     timer: null as ReturnType<typeof setInterval> | null,
-    capture: (): Promise<void> => {
-      // A person can type credentials while driving any browser/computer
-      // surface. Never take a preview during that lease: live frames and the
-      // settled transcript image must retain only the last pre-takeover view.
-      if (computerControl.snapshot(botId).held) return Promise.resolve();
-      if (!current && Date.now() - lastAt < SCREEN_MIN_GAP_MS) return Promise.resolve();
-      current ??= (async () => {
-        try {
-          const frame = await captureOutsideHumanControl(
-            () => ({
-              held: computerControl.snapshot(botId).held,
-              revision: computerControlRevision.get(botId) ?? 0,
-            }),
-            capture,
-          );
-          if (!frame) return;
-          entry.last = frame;
-          broadcast({ kind: "screen", botId, ...frame });
-        } catch {
-          /* box asleep or mid-command — try again next tick */
-        } finally {
-          lastAt = Date.now();
-          current = null;
-        }
-      })();
-      return current;
-    },
-    last: null as Frame | null,
     touched: screenIsTheWork,
-  };
+  });
   entry.timer = setInterval(() => void entry.capture(), SCREEN_POLL_MS);
   screenPollers.set(botId, entry);
 }
@@ -3919,7 +3900,7 @@ function startScreenPoller(
  * instead of waiting for the next interval tick. Rate-limited inside
  * capture() — a tool-heavy turn used to fire one full REST chain per
  * completed tool, competing with the agent for the same endpoint. */
-function pokeScreenPoller(botId: string, touches: boolean) {
+function pokeScreenPoller(botId: string, touches: boolean, surface?: "browser" | "computer") {
   const entry = screenPollers.get(botId);
   if (!entry) return;
   // the same signal, read twice: a completed computer tool is both the
@@ -3930,6 +3911,10 @@ function pokeScreenPoller(botId: string, touches: boolean) {
   // named mcp__computer__*, and matching that alone used to append an
   // untouched desktop to every curl-and-answer reply.
   if (touches) entry.touched = true;
+  // Picture the surface the tool acted on. Only a touching tool moves this:
+  // a status read on the computer must not redirect the picture away from a
+  // page the browser is still showing.
+  if (touches && surface) entry.surface = surface;
   void entry.capture();
 }
 
@@ -3970,7 +3955,7 @@ async function finalScreenFrame(botId: string, threadId: string): Promise<Frame 
   if (entry.timer) clearInterval(entry.timer);
   screenPollers.delete(botId);
   if (!entry.touched) return null;
-  await entry.capture();
+  await entry.capture(true);
   const frame = entry.last;
   if (!frame || !settledFrameIsNews(shownScreenHash(botId, threadId), frame.png)) return null;
   settledScreenHashes.set(botId, screenFrameHash(frame.png));
@@ -4309,6 +4294,7 @@ async function startTurn(
       }
       const wants = plan.computer;
       let previewCapture: (() => Promise<{ png: string; format: string }>) | null = null;
+      let browserCapture: (() => Promise<{ png: string; format: string }>) | null = null;
       let computerKind: "box" | "vps" | "vm" | "local" | null = null;
       let autoVpsProblem: string | null = null;
 
@@ -4574,6 +4560,16 @@ async function startTurn(
         const selectedProfile = liveBot.browserProfile;
         browser = browserIntegration(bot.id, selectedProfile);
         if (browser) integrations.browser = browser.integration;
+        // The browser lost its frame source when the Electron surface was
+        // removed: previewCapture is set by the computer branches above, and
+        // nothing replaced it here. A bot with only a browser was pictured
+        // not at all; a bot with both was pictured on its desktop even while
+        // the work was a web page, because agent-browser runs its own headless
+        // Chrome on the host rather than inside that desktop.
+        if (browser) {
+          const frame = { binaryPath: browser.integration.command, env: browser.integration.env };
+          browserCapture = () => agentBrowserFrame(frame);
+        }
       }
       // A cancelled adapter can be between accepting sendTurn and revealing
       // its provider turn id. Never overlap a replacement with that ambiguous
@@ -4660,8 +4656,12 @@ async function startTurn(
       // after its own turn.completed would never be torn down — it would
       // keep polling the box forever, carrying dead per-turn state. busy
       // is flipped false in the fold, so it is the honest "still running".
-      if (previewCapture && store.bot(bot.id)?.busy) {
-        startScreenPoller(bot.id, previewCapture, { screenIsTheWork: instance.driverKind === "boxAgent" });
+      if ((previewCapture || browserCapture) && store.bot(bot.id)?.busy) {
+        startScreenPoller(
+          bot.id,
+          { ...(previewCapture ? { computer: previewCapture } : {}), ...(browserCapture ? { browser: browserCapture } : {}) },
+          { screenIsTheWork: instance.driverKind === "boxAgent" },
+        );
       }
       // An adapter may publish completion synchronously just before its
       // dispatch promise resolves. The event could not use the turn-id map
@@ -7823,6 +7823,18 @@ function configStatus() {
   };
 }
 
+function configForAccess(status: ReturnType<typeof configStatus>, admin: boolean) {
+  if (admin) return status;
+  // Configured-or-not is fine; an SSH alias, an email, and a browser
+  // partition id are not a client's business. Preserve the source objects.
+  return {
+    ...status,
+    vps: { configured: status.vps.configured, sshAlias: "" },
+    profile: { name: status.profile.name, email: "" },
+    browserProfiles: status.browserProfiles.map((profile) => Object.fromEntries(Object.entries(profile).filter(([key]) => key !== "partitionId"))),
+  };
+}
+
 function mcpServerResponse() {
   return { servers: listMcpServers(cfg.mcpServers) };
 }
@@ -7966,7 +7978,12 @@ function readBody(req: IncomingMessage, limit = 1_000_000): Promise<any> {
 // origins outside loopback (blocks remote-web CSRF).
 
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
-  const url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+  let url: URL;
+  try {
+    url = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+  } catch {
+    return json(res, 400, { error: "invalid request URL" });
+  }
   const path = url.pathname;
   const method = req.method ?? "GET";
   /** scratch for route matches, shared by every `path.match` below */
@@ -8000,7 +8017,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const environment = environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED });
       if (wantsCookie) {
         const secure = requestOrigin(req)?.startsWith("https://") === true;
-        res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, result.token, { secure, maxAgeSeconds: SESSION_TTL_MS / 1000 }));
+        res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, result.token, { secure, maxAgeSeconds: cookieMaxAgeSeconds(result.session) }));
         return json(res, 200, { session: result.session, environment });
       }
       return json(res, 200, { token: result.token, session: result.session, environment });
@@ -8013,6 +8030,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       loopbackMutationToken: desktopMutationToken,
       companionMutationToken,
     });
+    // The browser's cookie carries the term it was set with, and the
+    // session's term slides on use (sessions.ts `renew`), so re-issue the
+    // cookie on every cookie-authenticated request. One small header; and
+    // unlike "send once per renewal" it survives a lost response and a
+    // restart. Later handlers that clear the cookie (logout, self-revoke)
+    // overwrite this header, which is the order we want.
+    if (gate.auth?.kind === "session" && gate.auth.via === "cookie") {
+      const presented = parseCookies(req.headers.cookie).get(SESSION_COOKIE);
+      if (presented) {
+        const secure = requestOrigin(req)?.startsWith("https://") === true;
+        res.setHeader("set-cookie", serializeSessionCookie(SESSION_COOKIE, presented, { secure, maxAgeSeconds: cookieMaxAgeSeconds(gate.auth.session) }));
+      }
+    }
     // Reachability probe, public: the phone races it across a server's
     // addresses before it has a session, and the tunnel verifier polls it.
     // A stranger learns only the app name; pid (the desktop boot probe keys
@@ -8068,7 +8098,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           : "this server has no public address to put in a link: set OMB_PUBLIC_URL, or open /pair on the address you use and type the code",
       });
     }
-    if (method === "GET" && path === "/api/auth/pairing") return json(res, 200, { pairings: sessions.openPairings() });
+    if (method === "GET" && path === "/api/auth/pairing") return json(res, 200, { pairings: sessions.openPairings(), publicUrl: PUBLIC_URL });
     m = path.match(/^\/api\/auth\/pairing\/([\w-]+)$/);
     if (m && method === "DELETE") {
       const cancelled = sessions.cancelPairing(m[1]);
@@ -8343,6 +8373,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // every task included. Own-bot only, on purpose — a bot's transcripts
       // are its notebook the same way MEMORY.md is (section-context.ts draws
       // that line), and search across bots would be an isolation change.
+      // Announce in the room that a bot reached outside it. Silent when the
+      // room has already been told about that thread, so a bot searching
+      // three times in one turn leaves one chip per source, not per search.
+      const discloseRecall = (bot: BotRecord, roomThreadId: string, sourceThreadIds: readonly string[]): void => {
+        const crossing = claimRecallCrossings(roomThreadId, sourceThreadIds);
+        if (!crossing.count) return;
+        store.appendMessage(roomThreadId, {
+          role: "bot",
+          kind: "activity",
+          from: { botId: bot.id, name: bot.name, color: bot.color },
+          tool: { name: recallCrossingLabel(bot.name, crossing.count), ok: true },
+        });
+      };
       if (method === "GET" && path === "/api/internal/session-search") {
         const fromBotId = String(url.searchParams.get("fromBotId") ?? "");
         const from = store.bot(fromBotId);
@@ -8356,11 +8399,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const rawLimit = Number(url.searchParams.get("limit"));
         const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.trunc(rawLimit), 25) : 12;
         const ownThreads = [...new Set([from.threadId, ...(from.tasks ?? []).map((task) => task.threadId)])];
+        // A room is the only place a recall can be a disclosure: in a 1:1 the
+        // user already owns every thread the bot can reach.
+        const inRoom = Boolean(store.groupByThread(fromThreadId));
         const hits = recallMessages(q, ownThreads, limit).map((hit) => ({
           ...hit,
           task: store.taskByThread(from.id, hit.threadId)?.title,
           current: hit.threadId === fromThreadId,
+          crossed: inRoom && hit.threadId !== fromThreadId,
         }));
+        if (inRoom) {
+          discloseRecall(from, fromThreadId, hits.filter((hit) => hit.crossed).map((hit) => hit.threadId));
+        }
         return json(res, 200, { hits });
       }
       // session_read: the whole message behind a session_search hit. Same
@@ -8380,8 +8430,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const own = threadId === from.threadId || Boolean(store.taskByThread(from.id, threadId));
         const message = own ? readMessageText(threadId, messageId) : null;
         if (!message) return json(res, 404, { error: "no such message in your conversations" });
+        const readInRoom = Boolean(store.groupByThread(fromThreadId));
+        const readCrossed = readInRoom && threadId !== fromThreadId;
+        if (readCrossed) discloseRecall(from, fromThreadId, [threadId]);
         return json(res, 200, {
           ...message,
+          crossed: readCrossed,
           text: message.text.length > SESSION_READ_MAX_CHARS ? `${message.text.slice(0, SESSION_READ_MAX_CHARS)}…` : message.text,
           task: store.taskByThread(from.id, threadId)?.title,
         });
@@ -9269,7 +9323,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
     // ── events stream ──
     if (method === "GET" && path === "/api/events") {
-      const client: SseClient = { res, screens: url.searchParams.get("screens") !== "off" };
+      const client: SseClient = { res, admin: auth.scopes.includes("admin"), screens: url.searchParams.get("screens") !== "off" };
       if (auth.kind === "session") client.sessionId = auth.session.id;
       res.writeHead(200, {
         "content-type": "text/event-stream",
@@ -9309,7 +9363,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       );
       if (resumed) {
         for (const buffered of replayBuffer) {
-          if (buffered.seq > since && buffered.frame && wants(client, buffered.kind)) res.write(buffered.frame);
+          const frame = client.admin ? buffered.frame : buffered.clientFrame;
+          if (buffered.seq > since && frame && wants(client, buffered.kind)) res.write(frame);
         }
       }
 
@@ -12591,18 +12646,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
     // ── app config (API keys — never echoed back, booleans only) ──
     if (method === "GET" && path === "/api/config") {
-      const status = configStatus();
-      if (auth.kind === "session" && !auth.scopes.includes("admin")) {
-        // configured-or-not is fine; an SSH alias, an email, a browser
-        // partition id are not a client's business
-        return json(res, 200, {
-          ...status,
-          vps: { configured: status.vps.configured, sshAlias: "" },
-          profile: { name: status.profile.name, email: "" },
-          browserProfiles: status.browserProfiles.map((profile) => Object.fromEntries(Object.entries(profile).filter(([key]) => key !== "partitionId"))),
-        });
-      }
-      return json(res, 200, status);
+      return json(res, 200, configForAccess(configStatus(), auth.scopes.includes("admin")));
     }
     if ((method === "PUT" || method === "PATCH") && path === "/api/config") {
       const body = await readBody(req);

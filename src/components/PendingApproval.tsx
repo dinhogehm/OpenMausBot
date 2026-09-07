@@ -142,6 +142,10 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
   pending: Pending;
   count: number;
   index: number;
+  /** The active locale. Not read here: it is the memo key, the same way the
+   * transcript takes one. Every line in this panel comes from the catalog,
+   * and nothing else about a pending approval changes with the language. */
+  locale?: string;
 }) {
   const heldNote = tFromServer(pending.heldCode, pending.held);
   return (

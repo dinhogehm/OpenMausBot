@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { t } from "@/lib/i18n";
 import {
   TASK_PICKER_DISMISS_MS,
-  TASK_RENAME_HINT,
   filterTasks,
   taskPickerPointerIntent,
 } from "./TaskPicker";
@@ -31,8 +31,9 @@ describe("taskPickerPointerIntent", () => {
 
 describe("task picker copy", () => {
   it("advertises both gestures the row actually handles", () => {
-    expect(TASK_RENAME_HINT).toContain("double-click");
-    expect(TASK_RENAME_HINT).toContain("right-click");
+    // the hint moved into the catalog with the rest of the picker's copy
+    expect(t("task.renameHint")).toContain("double-click");
+    expect(t("task.renameHint")).toContain("right-click");
     expect(TASK_PICKER_DISMISS_MS).toBeGreaterThanOrEqual(500);
   });
 });

@@ -79,7 +79,7 @@ extraResources:
 
 mac:
   # Two single-arch artifacts rather than one universal binary: the app is
-  # ~177 MB per arch, and universal would make every user download both halves.
+  # architecture-specific, and universal would make users download both halves.
   # electron-updater picks by filename (arm64-marked files on Apple silicon,
   # unmarked ones on Intel), so latest-mac.yml must list all four files.
   target:
@@ -108,6 +108,8 @@ mac:
       to: cua-sdk
     - from: dist-native/cloudflared/darwin-${arch}/cloudflared
       to: cloudflared/cloudflared
+    - from: dist-native/browser/darwin-${arch}
+      to: browser-engine
   extendInfo:
     NSMicrophoneUsageDescription: OpenMausBot uses the microphone for voice dictation into the composer.
     NSSpeechRecognitionUsageDescription: OpenMausBot transcribes your voice on-device to type messages for you.
@@ -134,6 +136,8 @@ win:
   extraResources:
     - from: dist-native/cloudflared/win32-x64/cloudflared.exe
       to: cloudflared/cloudflared.exe
+    - from: dist-native/browser/win32-x64
+      to: browser-engine
   # No signing config yet (would go under win.signtoolOptions or
   # win.azureSignOptions — eb 26 nests it, there is no top-level
   # win.certificateFile). The installer is unsigned, so SmartScreen shows
@@ -176,6 +180,10 @@ linux:
       to: cua-linux-x64
     - from: dist-native/cloudflared/linux-x64/cloudflared
       to: cloudflared/cloudflared
+    - from: dist-native/browser/linux-x64
+      to: browser-engine
+    - from: build/linux-openmausbot-browser.apparmor
+      to: openmausbot-browser.apparmor
   desktop:
     entry:
       Name: OpenMausBot
@@ -185,9 +193,13 @@ linux:
 deb:
   packageCategory: utils
   priority: optional
+  # Add the narrow browser policy's parser without replacing Electron's
+  # default shared-library dependencies.
+  fpm: ["--depends", "apparmor"]
   # dpkg can preserve legacy directory modes during an upgrade. This
   # idempotent hook repairs only the exact package-owned CUA path.
   afterInstall: build/linux-after-install.sh
+  afterRemove: build/linux-after-remove.sh
 
 # Static AppImage runtime: Ubuntu 24.04 can launch it without legacy FUSE 2.
 toolsets:

@@ -1,5 +1,7 @@
 import { CornerDownRight, Trash2 } from "lucide-react";
 
+import { t } from "@/lib/i18n";
+
 export function composerCanSteerQueuedMessages(
   busy: boolean,
   locked: boolean,
@@ -33,25 +35,29 @@ export function QueuedComposerMessages({
 
   const multiple = items.length > 1;
   const steerLabel = steering
-    ? "Steering…"
+    ? t("composer.queued.steering")
     : multiple
       ? steerMode === "all"
-        ? "Steer all"
-        : "Steer next"
-      : "Steer";
+        ? t("composer.queued.steerAll")
+        : t("composer.queued.steerNext")
+      : t("composer.queued.steer");
   const steerDescription = multiple
     ? steerMode === "all"
-      ? `Steer all ${items.length} queued messages now`
-      : "Steer the next queued message now"
-    : "Steer queued message now";
+      ? t("composer.queued.steerAllHint", { count: items.length })
+      : t("composer.queued.steerNextHint")
+    : t("composer.queued.steerHint");
 
   return (
     <div
       className="relative z-[1] mx-3 -mb-3 max-h-36 overflow-y-auto rounded-t-2xl border border-b-0 border-hairline/40 bg-raised/95 pb-3 shadow-sm backdrop-blur-sm"
-      aria-label={`${items.length} queued ${items.length === 1 ? "message" : "messages"}`}
+      aria-label={
+        items.length === 1
+          ? t("composer.queued.regionOne")
+          : t("composer.queued.regionMany", { count: items.length })
+      }
       aria-live="polite"
     >
-      <ul className="divide-y divide-hairline/25" aria-label="Queued messages">
+      <ul className="divide-y divide-hairline/25" aria-label={t("composer.queued.list")}>
         {items.map((item, index) => (
           <li key={item.queueId} className="flex min-h-10 min-w-0 items-center gap-2 px-2.5 py-1.5">
             <CornerDownRight
@@ -68,7 +74,7 @@ export function QueuedComposerMessages({
                 type="button"
                 onClick={onSteer}
                 disabled={steering}
-                aria-label={steering ? "Steering queued messages" : steerDescription}
+                aria-label={steering ? t("composer.queued.steeringAria") : steerDescription}
                 title={steerDescription}
                 className="flex h-7 shrink-0 items-center gap-1 rounded-lg px-2 text-[13px] font-medium text-ink-secondary outline-none hover:bg-raised-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/60 disabled:cursor-wait disabled:opacity-60"
               >
@@ -84,8 +90,8 @@ export function QueuedComposerMessages({
             <button
               type="button"
               onClick={() => onCancel(item.queueId)}
-              aria-label={`Delete queued message ${index + 1} of ${items.length}`}
-              title="Delete this queued message"
+              aria-label={t("composer.queued.deleteAria", { index: index + 1, count: items.length })}
+              title={t("composer.queued.deleteTitle")}
               className="flex size-7 shrink-0 items-center justify-center rounded-lg text-ink-secondary outline-none hover:bg-raised-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent/60"
             >
               <Trash2 size={14} aria-hidden="true" />

@@ -1,17 +1,26 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { FullAccessWarning } from "./FullAccessWarning";
 
 import {
-  APPROVAL_MODE_OPTIONS,
   ApprovalModeSelector,
+  approvalModeOptions,
   approvalModeOptionsFor,
   approvalModeSelectionRequiresLocalDesktop,
 } from "./ApprovalModeSelector";
 
 describe("approval mode selector", () => {
+  it("discloses delegated work in the Full access confirmation", () => {
+    const html = renderToStaticMarkup(createElement(FullAccessWarning, {
+      open: true, onCancel: () => {}, onConfirm: () => {},
+    }));
+    expect(html).toContain("tasks delegated by your Chief or other bots");
+    expect(html).toContain("does not enable Full access on other bots");
+    expect(html).not.toContain("Requests that come from another bot still get the usual checks");
+  });
   it("matches the four Codex approval levels and their plain-language copy", () => {
-    expect(APPROVAL_MODE_OPTIONS.map(({ mode, label, description }) => ({ mode, label, description }))).toEqual([
+    expect(approvalModeOptions().map(({ mode, label, description }) => ({ mode, label, description }))).toEqual([
       {
         mode: "ask",
         label: "Ask for approval",

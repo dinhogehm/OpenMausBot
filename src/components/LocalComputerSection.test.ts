@@ -1,6 +1,8 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { setLocale } from "@/lib/i18n";
 
 import {
   CloudComputersCard,
@@ -41,6 +43,8 @@ const ownedCloudComputer: CloudComputerInventoryInstance = {
   orphaned: false,
   inUse: false,
 };
+
+afterEach(() => setLocale("en"));
 
 describe("computer inventory request wiring", () => {
   it("keeps every mount and refresh request observation-only", () => {
@@ -308,6 +312,24 @@ describe("cloud computer inventory UI", () => {
     expect(cloudComputerInventoryState({ ...ownedCloudComputer, inUse: true })).toBe("In use");
   });
 
+  it("keeps cloud badge meaning and delete requests stable when the language changes", () => {
+    const englishPlan = cloudComputerActionPlan("delete", ownedCloudComputer);
+    for (const [locale, running, sleeping] of [
+      ["pt-br", "Em execução", "Dormindo"],
+      ["ja", "実行中", "スリープ中"],
+    ]) {
+      setLocale(locale);
+      expect(renderCard({ instances: [ownedCloudComputer] }))
+        .toContain(`bg-success/15 text-success">${running}</span>`);
+      expect(renderCard({ instances: [{ ...ownedCloudComputer, state: "archived" }] }))
+        .toContain(`bg-control text-ink-secondary">${sleeping}</span>`);
+      const translatedPlan = cloudComputerActionPlan("delete", ownedCloudComputer);
+      expect(translatedPlan.confirmation).not.toBe(englishPlan.confirmation);
+      expect(translatedPlan.confirmation).toContain(ownedCloudComputer.ownerName);
+      expect(translatedPlan.request).toEqual(englishPlan.request);
+    }
+  });
+
   it("does not let an eventually-consistent list resurrect a deleted computer", () => {
     const first = reconcileCloudInventorySnapshot(
       [ownedCloudComputer],
@@ -439,5 +461,15 @@ describe("VPS computer inventory UI", () => {
     expect(vpsComputerInventoryState({ ...ownedVps, state: "restarting" })).toBe("Restarting");
     expect(vpsComputerInventoryState({ ...ownedVps, state: "dead" })).toBe("Needs attention");
     expect(vpsComputerInventoryState({ ...ownedVps, inUse: true })).toBe("In use");
+  });
+
+  it("keeps running and paused VPS badge colors when labels are translated", () => {
+    setLocale("pt-br");
+    const running = renderCard({ instances: [ownedVps] });
+    expect(running).toContain('bg-success/15 text-success">Em execução</span>');
+    expect(running).toContain("Remover");
+    expect(running).not.toContain(">Remove</button>");
+    expect(renderCard({ instances: [{ ...ownedVps, state: "paused" }] }))
+      .toContain('bg-control text-ink-secondary">Pausado</span>');
   });
 });

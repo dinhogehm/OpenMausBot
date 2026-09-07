@@ -1,5 +1,7 @@
 // One-place setup for the isolated Local VM image and its shared/per-bot policy.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import {
   AlertTriangle,
   Check,
@@ -113,30 +115,73 @@ interface VpsComputerInventoryPayload {
   instances: VpsComputerInventoryInstance[];
 }
 
-const destinationLabels: Record<LocalVmInventoryInstance["destination"], string> = {
-  auto: "Auto",
-  cloud: "Cloud",
-  vm: "Local VM",
-  local: "This computer",
-  browser: "Browser",
-  off: "Off",
+const destinationLabelKeys: Record<LocalVmInventoryInstance["destination"], LocaleKey> = {
+  auto: "vm.dest.auto",
+  cloud: "vm.dest.cloud",
+  vm: "vm.dest.vm",
+  local: "vm.dest.local",
+  browser: "vm.dest.browser",
+  off: "vm.dest.off",
 };
 
+/** The badge's colour is decided by the kind, never by the label: a
+ * translated label would silently stop matching `=== "Running"`. */
+export type ComputerStateKind =
+  | "unmanaged"
+  | "in-use"
+  | "stopped"
+  | "running"
+  | "attention"
+  | "sleeping"
+  | "going-to-sleep"
+  | "starting"
+  | "restarting"
+  | "removing"
+  | "paused";
+
+const stateLabelKeys: Record<ComputerStateKind, LocaleKey> = {
+  unmanaged: "vm.state.notManaged",
+  "in-use": "vm.state.inUse",
+  stopped: "vm.state.stopped",
+  running: "vm.state.running",
+  attention: "vm.state.attention",
+  sleeping: "vm.state.sleeping",
+  "going-to-sleep": "vm.state.goingToSleep",
+  starting: "vm.state.starting",
+  restarting: "vm.state.restarting",
+  removing: "vm.state.removing",
+  paused: "vm.state.paused",
+};
+
+export function computerStateLabel(kind: ComputerStateKind): string {
+  return t(stateLabelKeys[kind]);
+}
+
+export function localVmInventoryStateKind(instance: LocalVmInventoryInstance): ComputerStateKind {
+  if (!instance.managed) return "unmanaged";
+  if (instance.inUse) return "in-use";
+  if (instance.container === "stopped") return "stopped";
+  if (instance.ready) return "running";
+  return "attention";
+}
+
 export function localVmInventoryState(instance: LocalVmInventoryInstance): string {
-  if (!instance.managed) return "Not managed";
-  if (instance.inUse) return "In use";
-  if (instance.container === "stopped") return "Stopped";
-  if (instance.ready) return "Running";
-  return "Needs attention";
+  return computerStateLabel(localVmInventoryStateKind(instance));
+}
+
+export function cloudComputerInventoryStateKind(
+  instance: CloudComputerInventoryInstance,
+): ComputerStateKind {
+  if (instance.inUse) return "in-use";
+  if (["archived", "stopped"].includes(instance.state)) return "sleeping";
+  if (["archiving", "stopping"].includes(instance.state)) return "going-to-sleep";
+  if (["idle", "ready", "running"].includes(instance.state)) return "running";
+  if (["init", "provisioning", "provisioned", "cloning", "starting"].includes(instance.state)) return "starting";
+  return "attention";
 }
 
 export function cloudComputerInventoryState(instance: CloudComputerInventoryInstance): string {
-  if (instance.inUse) return "In use";
-  if (["archived", "stopped"].includes(instance.state)) return "Sleeping";
-  if (["archiving", "stopping"].includes(instance.state)) return "Going to sleep";
-  if (["idle", "ready", "running"].includes(instance.state)) return "Running";
-  if (["init", "provisioning", "provisioned", "cloning", "starting"].includes(instance.state)) return "Starting";
-  return "Needs attention";
+  return computerStateLabel(cloudComputerInventoryStateKind(instance));
 }
 
 /** Box's account LIST is eventually consistent. Preserve the result of an
@@ -173,14 +218,20 @@ function cloudComputerCanSleep(instance: CloudComputerInventoryInstance): boolea
   return ["idle", "ready", "running"].includes(instance.state);
 }
 
+export function vpsComputerInventoryStateKind(
+  instance: VpsComputerInventoryInstance,
+): ComputerStateKind {
+  if (instance.inUse) return "in-use";
+  if (instance.state === "running") return "running";
+  if (instance.state === "restarting") return "restarting";
+  if (instance.state === "removing") return "removing";
+  if (["created", "exited"].includes(instance.state)) return "stopped";
+  if (instance.state === "paused") return "paused";
+  return "attention";
+}
+
 export function vpsComputerInventoryState(instance: VpsComputerInventoryInstance): string {
-  if (instance.inUse) return "In use";
-  if (instance.state === "running") return "Running";
-  if (instance.state === "restarting") return "Restarting";
-  if (instance.state === "removing") return "Removing";
-  if (["created", "exited"].includes(instance.state)) return "Stopped";
-  if (instance.state === "paused") return "Paused";
-  return "Needs attention";
+  return computerStateLabel(vpsComputerInventoryStateKind(instance));
 }
 
 export function vpsComputerShortId(name: string): string {
@@ -221,7 +272,7 @@ function jsonPostRequest(url: string, body: unknown): ComputerApiRequest {
 
 export function perBotLocalVmDeletePlan(instance: LocalVmInventoryInstance): ComputerActionPlan {
   return {
-    confirmation: `Delete ${instance.name}'s Local VM? Its durable workspace files will remain.`,
+    confirmation: t("vm.confirm.deleteBotVm", { name: instance.name }),
     request: jsonPostRequest(`/api/bots/${instance.botId}/local-computer/remove`, {}),
   };
 }
@@ -232,7 +283,11 @@ export function cloudComputerActionPlan(
 ): ComputerActionPlan {
   return {
     confirmation: action === "delete"
-      ? `Permanently delete ${instance.orphaned ? "this orphaned cloud computer" : `${instance.ownerName}'s cloud computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`
+      ? t("vm.confirm.deleteCloud", {
+          subject: instance.orphaned
+            ? t("vm.confirm.orphanCloud")
+            : t("vm.confirm.ownedCloud", { name: instance.ownerName ?? "" }),
+        })
       : null,
     request: jsonPostRequest(
       `/api/computers/boxes/${encodeURIComponent(instance.boxId)}/${action}`,
@@ -244,7 +299,11 @@ export function cloudComputerActionPlan(
 export function vpsComputerRemovePlan(instance: VpsComputerInventoryInstance): ComputerActionPlan {
   const shortId = vpsComputerShortId(instance.name);
   return {
-    confirmation: `Permanently remove ${instance.orphaned ? `orphaned VPS computer ID ${shortId}` : `${instance.ownerName}'s VPS computer`}? Its files and browser sign-ins will be erased. This cannot be undone.`,
+    confirmation: t("vm.confirm.removeVps", {
+      subject: instance.orphaned
+        ? t("vm.confirm.orphanVps", { id: shortId })
+        : t("vm.confirm.ownedVps", { name: instance.ownerName ?? "" }),
+    }),
     request: jsonPostRequest(`/api/computers/vps/${encodeURIComponent(instance.name)}/remove`, {
       confirmName: instance.name,
     }),
@@ -282,25 +341,25 @@ export function VpsComputersCard({
 }) {
   return (
     <Card
-      title="Self-hosted VPS computers"
-      subtitle="Persistent OpenMaus-managed Docker desktops on your VPS. Removing one permanently erases its files and browser sign-ins."
+      title={t("vm.vps.title")}
+      subtitle={t("vm.vps.subtitle")}
     >
       <div className="flex items-center justify-between gap-3">
         <div className="text-[12px] text-ink-secondary">
           {configured === true
-            ? `SSH host: ${sshAlias ?? "configured VPS"}. Old and orphaned computers stay visible here.`
+            ? t("vm.vps.sshHost", { alias: sshAlias ?? t("vm.vps.configuredFallback") })
             : configured === false
-              ? "Add a VPS SSH alias in Connections to use self-hosted computers."
-              : "Refresh to check OpenMaus-managed computers on your VPS."}
+              ? t("vm.vps.needsAlias")
+              : t("vm.vps.refreshHint")}
         </div>
         <button
           type="button"
           onClick={onRefresh}
           disabled={loading || removingName !== null}
-          aria-label="Refresh VPS computers"
+          aria-label={t("vm.vps.refreshAria")}
           className="flex shrink-0 items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-40"
         >
-          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> Refresh
+          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> {t("vm.refresh")}
         </button>
       </div>
 
@@ -308,12 +367,14 @@ export function VpsComputersCard({
 
       <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
         {loading
-          ? "Checking VPS computers."
+          ? t("vm.vps.checking")
           : unavailableReason
-            ? `VPS computer inventory unavailable: ${unavailableReason}`
+            ? t("vm.vps.unavailable", { reason: unavailableReason })
             : configured === false
-              ? "VPS is not configured."
-              : `${instances.length} VPS computer${instances.length === 1 ? "" : "s"} found.`}
+              ? t("vm.vps.notConfigured")
+              : instances.length === 1
+                ? t("vm.vps.foundOne")
+                : t("vm.vps.foundMany", { count: instances.length })}
       </p>
 
       <div
@@ -322,7 +383,7 @@ export function VpsComputersCard({
       >
         {loading && instances.length === 0 ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
-            <Loader2 size={13} className="animate-spin" /> Checking VPS computers…
+            <Loader2 size={13} className="animate-spin" /> {t("vm.vps.checkingList")}
           </div>
         ) : unavailableReason ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
@@ -330,12 +391,13 @@ export function VpsComputersCard({
           </div>
         ) : configured === false ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
-            <Server size={14} className="shrink-0" /> VPS is not configured.
+            <Server size={14} className="shrink-0" /> {t("vm.vps.notConfigured")}
           </div>
         ) : instances.length === 0 ? (
-          <div className="px-3 py-4 text-[13px] text-ink-secondary">No OpenMaus-managed VPS computers found.</div>
+          <div className="px-3 py-4 text-[13px] text-ink-secondary">{t("vm.vps.noneFound")}</div>
         ) : instances.map((instance, index) => {
-          const state = vpsComputerInventoryState(instance);
+          const kind = vpsComputerInventoryStateKind(instance);
+          const state = computerStateLabel(kind);
           const removing = removingName === instance.name;
           const shortId = vpsComputerShortId(instance.name);
           return (
@@ -349,14 +411,14 @@ export function VpsComputersCard({
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="truncate text-[13.5px] font-medium text-ink">
-                    {instance.orphaned ? `Orphaned VPS computer · ID ${shortId}` : instance.ownerName}
+                    {instance.orphaned ? t("vm.vps.orphan", { id: shortId }) : instance.ownerName}
                   </span>
                   <span
                     className={cn(
                       "rounded-full px-2 py-0.5 text-[11px]",
-                      instance.inUse || state === "Running"
+                      instance.inUse || kind === "running"
                         ? "bg-success/15 text-success"
-                        : state === "Stopped" || state === "Paused"
+                        : kind === "stopped" || kind === "paused"
                           ? "bg-control text-ink-secondary"
                           : "bg-warning/15 text-warning",
                     )}
@@ -365,10 +427,10 @@ export function VpsComputersCard({
                   </span>
                 </div>
                 <div className="mt-1 text-[11.5px] text-ink-secondary">
-                  {instance.orphaned ? "Its bot no longer exists" : "Owned by this bot"}
+                  {instance.orphaned ? t("vm.owner.gone") : t("vm.owner.owned")}
                 </div>
                 {instance.inUse && (
-                  <div className="mt-1 text-[11.5px] text-ink-secondary">Stop this bot's work before removing its VPS computer.</div>
+                  <div className="mt-1 text-[11.5px] text-ink-secondary">{t("vm.vps.stopFirst")}</div>
                 )}
               </div>
               <button
@@ -376,11 +438,11 @@ export function VpsComputersCard({
                 onClick={() => onRemove(instance)}
                 disabled={loading || instance.inUse || removingName !== null}
                 aria-busy={removing || undefined}
-                title="Permanently remove this VPS computer"
+                title={t("vm.vps.removeTitle")}
                 className="flex shrink-0 items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {removing ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                Remove
+                {t("vm.vps.remove")}
               </button>
             </div>
           );
@@ -413,25 +475,25 @@ export function CloudComputersCard({
 }) {
   return (
     <Card
-      title="Cloud computers"
-      subtitle="Persistent OpenMaus-managed Box desktops. Sleeping pauses compute use; deleting permanently erases that desktop and its files."
+      title={t("vm.cloud.title")}
+      subtitle={t("vm.cloud.subtitle")}
     >
       <div className="flex items-center justify-between gap-3">
         <div className="text-[12px] text-ink-secondary">
           {configured === true
-            ? "Includes computers left behind by deleted bots so they can still be cleaned up."
+            ? t("vm.cloud.includesOrphans")
             : configured === false
-              ? "Add a Box API key in Connections to create and manage cloud computers."
-              : "Refresh to check the OpenMaus-managed computers in your Box account."}
+              ? t("vm.cloud.needsKey")
+              : t("vm.cloud.refreshHint")}
         </div>
         <button
           type="button"
           onClick={onRefresh}
           disabled={loading || pending !== null}
-          aria-label="Refresh cloud computers"
+          aria-label={t("vm.cloud.refreshAria")}
           className="flex shrink-0 items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-40"
         >
-          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> Refresh
+          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> {t("vm.refresh")}
         </button>
       </div>
 
@@ -439,12 +501,14 @@ export function CloudComputersCard({
 
       <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
         {loading
-          ? "Checking cloud computers."
+          ? t("vm.cloud.checking")
           : unavailableReason
-            ? `Cloud computer inventory unavailable: ${unavailableReason}`
+            ? t("vm.cloud.unavailable", { reason: unavailableReason })
             : configured === false
-              ? "Box is not connected."
-              : `${instances.length} cloud computer${instances.length === 1 ? "" : "s"} found.`}
+              ? t("vm.cloud.notConnected")
+              : instances.length === 1
+                ? t("vm.cloud.foundOne")
+                : t("vm.cloud.foundMany", { count: instances.length })}
       </p>
 
       <div
@@ -453,7 +517,7 @@ export function CloudComputersCard({
       >
         {loading && instances.length === 0 ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
-            <Loader2 size={13} className="animate-spin" /> Checking cloud computers…
+            <Loader2 size={13} className="animate-spin" /> {t("vm.cloud.checkingList")}
           </div>
         ) : unavailableReason ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
@@ -461,12 +525,13 @@ export function CloudComputersCard({
           </div>
         ) : configured === false ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
-            <Cloud size={14} className="shrink-0" /> Box is not connected.
+            <Cloud size={14} className="shrink-0" /> {t("vm.cloud.notConnected")}
           </div>
         ) : instances.length === 0 ? (
-          <div className="px-3 py-4 text-[13px] text-ink-secondary">No OpenMaus-managed cloud computers found.</div>
+          <div className="px-3 py-4 text-[13px] text-ink-secondary">{t("vm.cloud.noneFound")}</div>
         ) : instances.map((instance, index) => {
-          const state = cloudComputerInventoryState(instance);
+          const kind = cloudComputerInventoryStateKind(instance);
+          const state = computerStateLabel(kind);
           const isPending = pending?.boxId === instance.boxId;
           const canSleep = cloudComputerCanSleep(instance);
           return (
@@ -480,14 +545,14 @@ export function CloudComputersCard({
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="truncate text-[13.5px] font-medium text-ink">
-                    {instance.orphaned ? "Orphaned computer" : instance.ownerName}
+                    {instance.orphaned ? t("vm.cloud.orphan") : instance.ownerName}
                   </span>
                   <span
                     className={cn(
                       "rounded-full px-2 py-0.5 text-[11px]",
-                      instance.inUse || state === "Running"
+                      instance.inUse || kind === "running"
                         ? "bg-success/15 text-success"
-                        : state === "Sleeping" || state === "Going to sleep"
+                        : kind === "sleeping" || kind === "going-to-sleep"
                           ? "bg-control text-ink-secondary"
                           : "bg-warning/15 text-warning",
                     )}
@@ -496,10 +561,10 @@ export function CloudComputersCard({
                   </span>
                 </div>
                 <div className="mt-1 break-all text-[11.5px] text-ink-secondary">
-                  {instance.orphaned ? "Its bot no longer exists" : "Owned by this bot"} · {instance.name}
+                  {instance.orphaned ? t("vm.owner.gone") : t("vm.owner.owned")} · {instance.name}
                 </div>
                 {instance.inUse && (
-                  <div className="mt-1 text-[11.5px] text-ink-secondary">Stop this bot's work before changing its computer.</div>
+                  <div className="mt-1 text-[11.5px] text-ink-secondary">{t("vm.cloud.stopFirst")}</div>
                 )}
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
@@ -508,22 +573,22 @@ export function CloudComputersCard({
                   onClick={() => onSleep(instance)}
                   disabled={loading || instance.inUse || pending !== null || !canSleep}
                   aria-busy={isPending && pending?.action === "sleep" ? true : undefined}
-                  title={canSleep ? "Put this cloud computer to sleep" : `This cloud computer is ${state.toLowerCase()}`}
+                  title={canSleep ? t("vm.cloud.sleepTitle") : t("vm.cloud.sleepBlocked", { state: state.toLowerCase() })}
                   className="flex items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {isPending && pending?.action === "sleep" ? <Loader2 size={12} className="animate-spin" /> : <Moon size={12} />}
-                  Sleep
+                  {t("vm.cloud.sleep")}
                 </button>
                 <button
                   type="button"
                   onClick={() => onDelete(instance)}
                   disabled={loading || instance.inUse || pending !== null}
                   aria-busy={isPending && pending?.action === "delete" ? true : undefined}
-                  title="Permanently delete this cloud computer"
+                  title={t("vm.cloud.deleteTitle")}
                   className="flex items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {isPending && pending?.action === "delete" ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                  Delete
+                  {t("common.delete")}
                 </button>
               </div>
             </div>
@@ -555,21 +620,25 @@ export function LocalVmInventoryCard({
 }) {
   return (
     <Card
-      title="Per-bot desktops"
-      subtitle={`${unavailableReason ? "Inventory unavailable." : `${instances.length}/${maxInstances} created.`} This list includes old desktops even when their bot now uses another destination.`}
+      title={t("vm.perBot.title")}
+      subtitle={t("vm.perBot.subtitle", {
+        count: unavailableReason
+          ? t("vm.perBot.inventoryUnavailable")
+          : t("vm.perBot.created", { count: instances.length, max: maxInstances }),
+      })}
     >
       <div className="flex items-center justify-between gap-3">
         <div className="text-[12px] text-ink-secondary">
-          Delete OpenMaus-managed desktops you no longer need to free a slot. Durable workspace files remain.
+          {t("vm.perBot.deleteHint")}
         </div>
         <button
           type="button"
           onClick={onRefresh}
           disabled={loading || deletingBotId !== null}
-          aria-label="Refresh per-bot desktops"
+          aria-label={t("vm.perBot.refreshAria")}
           className="flex shrink-0 items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-40"
         >
-          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> Refresh
+          <RefreshCw size={12} className={cn(loading && "animate-spin")} /> {t("vm.refresh")}
         </button>
       </div>
 
@@ -577,10 +646,12 @@ export function LocalVmInventoryCard({
 
       <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
         {loading
-          ? "Checking existing Local VM desktops."
+          ? t("vm.perBot.checking")
           : unavailableReason
-            ? `Local VM inventory unavailable: ${unavailableReason}`
-            : `${instances.length} per-bot desktop${instances.length === 1 ? "" : "s"} found.`}
+            ? t("vm.perBot.unavailable", { reason: unavailableReason })
+            : instances.length === 1
+              ? t("vm.perBot.foundOne")
+              : t("vm.perBot.foundMany", { count: instances.length })}
       </p>
 
       <div
@@ -589,14 +660,14 @@ export function LocalVmInventoryCard({
       >
         {loading && instances.length === 0 ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
-            <Loader2 size={13} className="animate-spin" /> Checking existing desktops…
+            <Loader2 size={13} className="animate-spin" /> {t("vm.perBot.checkingList")}
           </div>
         ) : unavailableReason ? (
           <div className="flex items-center gap-2 px-3 py-4 text-[13px] text-ink-secondary">
             <AlertTriangle size={14} className="shrink-0 text-warning" /> {unavailableReason}
           </div>
         ) : instances.length === 0 ? (
-          <div className="px-3 py-4 text-[13px] text-ink-secondary">No per-bot desktops have been created.</div>
+          <div className="px-3 py-4 text-[13px] text-ink-secondary">{t("vm.perBot.none")}</div>
         ) : instances.map((instance, index) => {
           const state = localVmInventoryState(instance);
           const deleting = deletingBotId === instance.botId;
@@ -628,18 +699,18 @@ export function LocalVmInventoryCard({
                   </span>
                 </div>
                 <div className="mt-1 text-[11.5px] text-ink-secondary">
-                  Current destination: {destinationLabels[instance.destination]}
+                  {t("vm.perBot.destination", { destination: t(destinationLabelKeys[instance.destination]) })}
                 </div>
                 {!managed && (
                   <div className="mt-1 text-[11.5px] text-warning">
-                    This container is not managed by OpenMausBot. Review and remove it directly in Docker or Podman.
+                    {t("vm.perBot.unmanaged")}
                   </div>
                 )}
                 {managed && instance.problem && !instance.inUse && (
                   <div className="mt-1 text-[11.5px] text-warning">{instance.problem}</div>
                 )}
                 {managed && instance.inUse && (
-                  <div className="mt-1 text-[11.5px] text-ink-secondary">Stop this bot's turn before deleting its desktop.</div>
+                  <div className="mt-1 text-[11.5px] text-ink-secondary">{t("vm.perBot.stopFirst")}</div>
                 )}
               </div>
               {managed && <button
@@ -647,11 +718,15 @@ export function LocalVmInventoryCard({
                 onClick={() => onDelete(instance)}
                 disabled={loading || instance.inUse || deletingBotId !== null}
                 aria-busy={deleting || undefined}
-                title={instance.inUse ? "Stop this bot's turn before deleting its Local VM" : `Delete ${instance.name}'s Local VM`}
+                title={
+                  instance.inUse
+                    ? t("vm.perBot.deleteBlocked")
+                    : t("vm.perBot.deleteTitle", { name: instance.name })
+                }
                 className="flex shrink-0 items-center gap-1.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[12px] font-medium text-danger hover:bg-danger/15 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
-                Delete
+                {t("common.delete")}
               </button>}
             </div>
           );
@@ -744,7 +819,7 @@ export function LocalComputerSection() {
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(...computerInventoryRequest("status", signal));
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error ?? `Status request failed (${response.status})`);
+    if (!response.ok) throw new Error(body.error ?? t("vm.err.status", { code: response.status }));
     setStatus(body as Status);
     setError(null);
   }, []);
@@ -752,18 +827,18 @@ export function LocalComputerSection() {
   const refreshInventory = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(...computerInventoryRequest("local-vms", signal));
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error ?? `Inventory request failed (${response.status})`);
+    if (!response.ok) throw new Error(body.error ?? t("vm.err.inventory", { code: response.status }));
     const payload = body as LocalVmInventoryPayload;
     setInventory(payload.instances);
     setInventoryMax(payload.maxInstances);
-    setInventoryUnavailableReason(payload.available ? null : (payload.problem ?? "Container runtime unavailable"));
+    setInventoryUnavailableReason(payload.available ? null : (payload.problem ?? t("vm.err.runtimeUnavailable")));
     setInventoryError(null);
   }, []);
 
   const refreshCloudInventory = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(...computerInventoryRequest("cloud", signal));
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error ?? `Cloud inventory request failed (${response.status})`);
+    if (!response.ok) throw new Error(body.error ?? t("vm.err.cloudInventory", { code: response.status }));
     const payload = body as CloudComputerInventoryPayload;
     const reconciled = reconcileCloudInventorySnapshot(
       Array.isArray(payload.instances) ? payload.instances : [],
@@ -777,7 +852,7 @@ export function LocalComputerSection() {
     setCloudUnavailableReason(
       payload.available || !payload.configured
         ? null
-        : (payload.problem ?? "Cloud computer inventory is unavailable"),
+        : (payload.problem ?? t("vm.err.cloudUnavailable")),
     );
     setCloudError(null);
   }, []);
@@ -785,7 +860,7 @@ export function LocalComputerSection() {
   const refreshVpsInventory = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(...computerInventoryRequest("vps", signal));
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error ?? `VPS inventory request failed (${response.status})`);
+    if (!response.ok) throw new Error(body.error ?? t("vm.err.vpsInventory", { code: response.status }));
     const payload = body as VpsComputerInventoryPayload;
     setVpsInventory(Array.isArray(payload.instances) ? payload.instances : []);
     setVpsConfigured(payload.configured === true);
@@ -793,7 +868,7 @@ export function LocalComputerSection() {
     setVpsUnavailableReason(
       payload.available || !payload.configured
         ? null
-        : (payload.problem ?? "VPS computer inventory is unavailable"),
+        : (payload.problem ?? t("vm.err.vpsUnavailable")),
     );
     setVpsError(null);
   }, []);
@@ -890,18 +965,25 @@ export function LocalComputerSection() {
       body: "{}",
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error ?? `${action} failed`);
+    const errorKeys: Record<Exclude<Action, "recreate">, LocaleKey> = {
+      pull: "vm.err.prepare",
+      run: "vm.err.create",
+      start: "vm.err.start",
+      stop: "vm.err.stop",
+      remove: "vm.deleteError",
+    };
+    if (!response.ok) throw new Error(body.error ?? t(errorKeys[action]));
     setStatus(body as Status);
   };
 
   const act = async (action: Action) => {
     if (
       action === "remove" &&
-      !window.confirm("Delete the Local VM? Files and browser sign-ins in its durable workspace will remain.")
+      !window.confirm(t("vm.confirm.deleteShared"))
     ) return;
     if (
       action === "recreate" &&
-      !window.confirm("Replace the existing Local VM with the pinned image and safety limits? Files and browser sign-ins in its durable workspace will remain.")
+      !window.confirm(t("vm.confirm.recreate"))
     ) return;
     setPending(action);
     setError(null);
@@ -915,7 +997,13 @@ export function LocalComputerSection() {
       // The desktop starts after the container process; keep the progress
       // state honest and let the regular poll mark it Ready a few seconds on.
       await refresh();
-      setAnnouncement(`Local VM ${action === "remove" ? "deleted" : action === "stop" ? "stopped" : "updated"}.`);
+      setAnnouncement(
+        action === "remove"
+          ? t("vm.announce.deleted")
+          : action === "stop"
+            ? t("vm.announce.stopped")
+            : t("vm.announce.updated"),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -933,7 +1021,7 @@ export function LocalComputerSection() {
         body: JSON.stringify({ localVm: { mode, maxInstances } }),
       });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error ?? "Could not save the Local VM isolation policy");
+      if (!response.ok) throw new Error(body.error ?? t("vm.policyError"));
       setStatus((current) => current ? { ...current, mode, max_instances: maxInstances } : current);
       await refresh();
     } catch (e) {
@@ -945,7 +1033,7 @@ export function LocalComputerSection() {
 
   const deletePerBotVm = async (instance: LocalVmInventoryInstance) => {
     if (!instance.managed) {
-      setInventoryError("This container is not managed by OpenMausBot and cannot be removed here.");
+      setInventoryError(t("vm.unmanagedError"));
       return;
     }
     const request = confirmComputerAction(
@@ -958,9 +1046,9 @@ export function LocalComputerSection() {
     try {
       const response = await fetch(...request);
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error ?? "Could not delete this Local VM");
+      if (!response.ok) throw new Error(body.error ?? t("vm.deleteError"));
       await refreshInventory();
-      setAnnouncement(`Deleted ${instance.name}'s Local VM.`);
+      setAnnouncement(t("vm.announce.deletedBot", { name: instance.name }));
     } catch (e) {
       setInventoryError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -980,7 +1068,7 @@ export function LocalComputerSection() {
     try {
       const response = await fetch(...request);
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error ?? `Could not ${action} this cloud computer`);
+      if (!response.ok) throw new Error(body.error ?? t(action === "delete" ? "vm.cloud.deleteError" : "vm.cloud.sleepError"));
       cloudOverridesRef.current = {
         ...cloudOverridesRef.current,
         [instance.boxId]: action === "delete" ? "deleted" : "sleeping",
@@ -993,13 +1081,15 @@ export function LocalComputerSection() {
       cloudOverridesRef.current = reconciled.overrides;
       cloudInventoryRef.current = reconciled.instances;
       setCloudInventory(reconciled.instances);
-      const subject = instance.orphaned ? "Orphaned cloud computer" : `${instance.ownerName}'s cloud computer`;
-      setAnnouncement(action === "delete" ? `${subject} deleted.` : `${subject} is sleeping.`);
+      const subject = instance.orphaned
+        ? t("vm.announce.orphanCloud")
+        : t("vm.confirm.ownedCloud", { name: instance.ownerName ?? "" });
+      setAnnouncement(t(action === "delete" ? "vm.announce.cloudDeleted" : "vm.announce.cloudSleeping", { subject }));
       try {
         await refreshCloudInventory();
       } catch (refreshError) {
         const detail = refreshError instanceof Error ? refreshError.message : String(refreshError);
-        setCloudError(`${subject} was ${action === "delete" ? "deleted" : "put to sleep"}, but the list could not refresh: ${detail}`);
+        setCloudError(t(action === "delete" ? "vm.cloud.deletedRefreshError" : "vm.cloud.sleepRefreshError", { subject, detail }));
       }
     } catch (e) {
       setCloudError(e instanceof Error ? e.message : String(e));
@@ -1020,9 +1110,15 @@ export function LocalComputerSection() {
     try {
       const response = await fetch(...request);
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error ?? "Could not remove this VPS computer");
+      if (!response.ok) throw new Error(body.error ?? t("vm.vpsRemoveError"));
       await refreshVpsInventory();
-      setAnnouncement(`${instance.orphaned ? `Orphaned VPS computer ${shortId}` : `${instance.ownerName}'s VPS computer`} removed.`);
+      setAnnouncement(
+        t("vm.announce.vpsRemoved", {
+          subject: instance.orphaned
+            ? t("vm.announce.orphanVps", { id: shortId })
+            : t("vm.confirm.ownedVps", { name: instance.ownerName ?? "" }),
+        }),
+      );
     } catch (e) {
       setVpsError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1043,7 +1139,7 @@ export function LocalComputerSection() {
         status?.persistence === "unsafe"),
   );
   const unavailable = !loading && !status;
-  const host = status?.platform === "darwin" ? "Mac" : "computer";
+  const host = status?.platform === "darwin" ? t("vm.host.mac") : t("vm.host.computer");
   const perBot = status?.mode === "per-bot";
   const perBotRuntimeUnsupported = perBot && status?.runtime === "container";
   const headerReady = perBot ? Boolean(status?.daemonUp && status?.image && !perBotRuntimeUnsupported) : ready;
@@ -1076,10 +1172,10 @@ export function LocalComputerSection() {
       />
 
       <Card
-        title="Local VM"
+        title={t("vm.main.title")}
         subtitle={perBot
-          ? `Private Cua Linux desktops on this ${host}, with one container and durable workspace per bot. Distinct bots can work concurrently and idle desktops stop after 8 hours.`
-          : `A shared Cua Linux sandbox on this ${host} for bots to browse and work in — isolated, backed by one durable workspace, and automatically recycled after 8 hours without activity.`}
+          ? t("vm.main.perBotSubtitle", { host })
+          : t("vm.main.sharedSubtitle", { host })}
       >
         <div className="flex flex-wrap items-center gap-2">
           <span
@@ -1091,16 +1187,16 @@ export function LocalComputerSection() {
           >
             {loading ? <Loader2 size={12} className="animate-spin" /> : headerReady ? <Check size={12} /> : <Circle size={9} />}
             {loading
-              ? "Checking…"
+              ? t("common.checking")
               : unavailable
-                ? "Status unavailable"
+                ? t("vm.main.statusUnavailable")
                 : perBot && headerReady
-                  ? "Ready for per-bot desktops"
+                  ? t("vm.main.readyPerBot")
                   : perBotRuntimeUnsupported
-                    ? "Per-bot mode requires Docker or Podman"
+                    ? t("vm.main.perBotUnsupported")
                   : ready
-                    ? "Ready"
-                    : (status?.problem ?? "Not ready")}
+                    ? t("vm.main.ready")
+                    : (status?.problem ?? t("vm.main.notReady"))}
           </span>
           <button
             onClick={() => {
@@ -1111,7 +1207,7 @@ export function LocalComputerSection() {
             disabled={loading || pending !== null}
             className="flex items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1 text-[12.5px] text-ink-secondary hover:bg-control hover:text-ink disabled:opacity-40"
           >
-            <RefreshCw size={12} /> Re-check
+            <RefreshCw size={12} /> {t("vm.main.recheck")}
           </button>
           {ready && !perBot && (
             <a
@@ -1120,7 +1216,7 @@ export function LocalComputerSection() {
               rel="noreferrer"
               className="flex items-center gap-1.5 rounded-lg border border-hairline/40 px-2.5 py-1 text-[12.5px] text-ink hover:bg-control"
             >
-              <ExternalLink size={12} /> Watch screen
+              <ExternalLink size={12} /> {t("vm.main.watch")}
             </a>
           )}
         </div>
@@ -1128,8 +1224,8 @@ export function LocalComputerSection() {
       </Card>
 
       <Card
-        title="Isolation"
-        subtitle="Shared keeps the original single-desktop behavior. Per bot gives each bot its own container, workspace, viewer port, lease, and idle timer."
+        title={t("vm.isolation.title")}
+        subtitle={t("vm.isolation.subtitle")}
       >
         <div className="flex overflow-hidden rounded-lg border border-hairline/40">
           {(["shared", "per-bot"] as const).map((mode, index) => (
@@ -1144,17 +1240,17 @@ export function LocalComputerSection() {
                 status?.mode === mode ? "bg-control text-ink" : "text-ink-secondary hover:text-ink",
               )}
             >
-              {mode === "shared" ? "Shared" : "Per bot"}
+              {mode === "shared" ? t("vm.isolation.shared") : t("vm.isolation.perBot")}
             </button>
           ))}
         </div>
         <div className="mt-3 flex items-center justify-between gap-3">
           <div>
-            <div className="text-[13px] text-ink">Maximum per-bot desktops</div>
-            <div className="text-[11.5px] text-ink-secondary">Limits storage and host resource use; each running desktop may use up to 4 GB and 2 CPUs.</div>
+            <div className="text-[13px] text-ink">{t("vm.isolation.max")}</div>
+            <div className="text-[11.5px] text-ink-secondary">{t("vm.isolation.maxDetail")}</div>
           </div>
           <select
-            aria-label="Maximum per-bot desktops"
+            aria-label={t("vm.isolation.maxAria")}
             value={status?.max_instances ?? 2}
             disabled={!status || policyPending}
             onChange={(event) => void savePolicy(status?.mode ?? "shared", Number(event.target.value))}
@@ -1163,55 +1259,63 @@ export function LocalComputerSection() {
             {[1, 2, 3, 4].map((value) => <option key={value} value={value}>{value}</option>)}
           </select>
         </div>
-        {policyPending && <div className="mt-2 flex items-center gap-1.5 text-[12px] text-ink-secondary"><Loader2 size={12} className="animate-spin" /> Saving…</div>}
+        {policyPending && <div className="mt-2 flex items-center gap-1.5 text-[12px] text-ink-secondary"><Loader2 size={12} className="animate-spin" /> {t("vm.saving")}</div>}
       </Card>
 
-      <Card title="Setup" subtitle="Once a container runtime is open, OpenMausBot prepares Cua and the VM for you.">
+      <Card title={t("vm.setup.title")} subtitle={t("vm.setup.subtitle")}>
         <div className="flex flex-col gap-4">
-          <Step n={1} title="Install a container runtime" done={Boolean(status?.runtime)}>
+          <Step n={1} title={t("vm.setup.step1")} done={Boolean(status?.runtime)}>
             <div className="text-[13px] leading-relaxed text-ink-secondary">
-              Podman and Colima are free. Docker Desktop may require a paid licence for larger companies and government use.
+              {t("vm.setup.step1Detail")}
             </div>
             {c?.install ? (
               <CommandLine command={c.install} />
             ) : (
               <a href="https://podman.io/docs/installation" target="_blank" rel="noreferrer" className="text-[13px] text-accent hover:underline">
-                Open the Podman installation guide
+                {t("vm.setup.podmanGuide")}
               </a>
             )}
           </Step>
 
           <Step
             n={2}
-            title={status?.runtime && !status.daemonUp ? `Open and start ${status.runtime}` : "Start the container runtime"}
+            title={
+              status?.runtime && !status.daemonUp
+                ? t("vm.setup.step2Open", { runtime: status.runtime })
+                : t("vm.setup.step2")
+            }
             done={Boolean(status?.daemonUp)}
           >
             {!status?.runtime ? null : c?.runtimeStart ? (
               <CommandLine command={c.runtimeStart} />
             ) : (
-              <div className="text-[13px] text-ink-secondary">Open the installed runtime and start its engine, then re-check.</div>
+              <div className="text-[13px] text-ink-secondary">{t("vm.setup.step2Detail")}</div>
             )}
           </Step>
 
-          <Step n={3} title="Prepare the Cua desktop (one-time download and build)" done={Boolean(status?.image)}>
+          <Step n={3} title={t("vm.setup.step3")} done={Boolean(status?.image)}>
             {status?.daemonUp && (
-              <ActionButton action="pull" pending={pending} onClick={() => void act("pull")}>Prepare Cua desktop</ActionButton>
+              <ActionButton action="pull" pending={pending} onClick={() => void act("pull")}>{t("vm.setup.prepare")}</ActionButton>
             )}
-            {c?.pull && <details className="text-[12px] text-ink-secondary"><summary className="cursor-pointer">Show base-image download</summary><div className="mt-2"><CommandLine command={c.pull} /></div></details>}
+            {c?.pull && <details className="text-[12px] text-ink-secondary"><summary className="cursor-pointer">{t("vm.setup.showPull")}</summary><div className="mt-2"><CommandLine command={c.pull} /></div></details>}
           </Step>
 
           <Step
             n={4}
-            title={perBot ? "Create a private desktop from each bot's Computer panel" : needsRecreate ? "Replace the older or unsafe VM" : "Create and start the Local VM"}
+            title={
+              perBot
+                ? t("vm.setup.step4PerBot")
+                : needsRecreate
+                  ? t("vm.setup.step4Recreate")
+                  : t("vm.setup.step4")
+            }
             done={!perBot && ready}
           >
             {perBot ? (
               <div className="text-[13px] leading-relaxed text-ink-secondary">
                 {perBotRuntimeUnsupported
-                  ? "Apple container requires an explicit host port, so OpenMausBot will not guess or expose one. Install or start Docker or Podman for safe per-bot dynamic loopback ports."
-                  : <>
-                      Choose <b className="text-ink">Local VM</b> for a bot, open that bot's Computer panel, then create its desktop there. OpenMausBot assigns a private workspace and an available loopback viewer port automatically.
-                    </>}
+                  ? t("vm.setup.applePort")
+                  : t("vm.setup.perBotHint")}
               </div>
             ) : needsRecreate ? (
               <>
@@ -1221,20 +1325,20 @@ export function LocalComputerSection() {
                 </div>
                 {status?.image ? (
                   <ActionButton action="recreate" pending={pending} onClick={() => void act("recreate")} danger>
-                    <RotateCcw size={13} /> Delete and recreate
+                    <RotateCcw size={13} /> {t("vm.setup.recreate")}
                   </ActionButton>
                 ) : (
-                  <div className="text-[13px] text-ink-secondary">Prepare the pinned Cua desktop above before replacing this VM.</div>
+                  <div className="text-[13px] text-ink-secondary">{t("vm.setup.prepareFirst")}</div>
                 )}
               </>
             ) : status?.container === "stopped" ? (
-              <ActionButton action="start" pending={pending} onClick={() => void act("start")}>Start Local VM</ActionButton>
+              <ActionButton action="start" pending={pending} onClick={() => void act("start")}>{t("vm.setup.start")}</ActionButton>
             ) : status?.container === "running" ? (
-              <div className="flex items-center gap-2 text-[13px] text-ink-secondary"><Loader2 size={13} className="animate-spin" /> Waiting for the desktop…</div>
+              <div className="flex items-center gap-2 text-[13px] text-ink-secondary"><Loader2 size={13} className="animate-spin" /> {t("vm.setup.waiting")}</div>
             ) : status?.image ? (
-              <ActionButton action="run" pending={pending} onClick={() => void act("run")}>Create Local VM</ActionButton>
+              <ActionButton action="run" pending={pending} onClick={() => void act("run")}>{t("vm.setup.create")}</ActionButton>
             ) : null}
-            {c?.run && <details className="text-[12px] text-ink-secondary"><summary className="cursor-pointer">Show command</summary><div className="mt-2"><CommandLine command={c.run} /></div></details>}
+            {c?.run && <details className="text-[12px] text-ink-secondary"><summary className="cursor-pointer">{t("vm.setup.showCommand")}</summary><div className="mt-2"><CommandLine command={c.run} /></div></details>}
           </Step>
         </div>
       </Card>
@@ -1256,33 +1360,38 @@ export function LocalComputerSection() {
         <Card>
           <div className="flex gap-2 text-[13px] text-ink-secondary">
             <AlertTriangle size={15} className="mt-0.5 shrink-0 text-warning" />
-            <span>OpenMausBot could not inspect the container runtime. Re-check, or review the app logs.</span>
+            <span>{t("vm.inspectFailed")}</span>
           </div>
         </Card>
       )}
 
       <Card
-        title="Safety and storage"
-        subtitle={perBot
-          ? `Cua Driver operates only each VM's desktop. Every bot gets a private host folder mounted at ${status?.workspace_guest_path ?? "/home/cua/workspace"}; its files and browser profile survive VM replacement. Viewers bind only to loopback, and exact bot-derived targets prevent one bot from attaching to another bot's container. Each VM keeps the existing 4 GB, 2 CPU, 512-process and dropped-capability limits. VMs can still reach the internet.`
-          : `Cua Driver operates only the VM's desktop. Exactly one private host folder is mounted at ${status?.workspace_guest_path ?? "/home/cua/workspace"}; files and browser sign-ins there survive VM replacement, while everything elsewhere in the VM remains disposable. The password-protected viewer is available only on this machine. Docker and Podman runs are limited to 4 GB memory, 2 CPUs and 512 processes; all Linux capabilities are dropped except the two the desktop supervisor needs to switch to its unprivileged user. The VM can still reach the internet, and bots share it one at a time.`}
+        title={t("vm.safety.title")}
+        subtitle={
+          perBot
+            ? t("vm.safety.perBot", { path: status?.workspace_guest_path ?? "/home/cua/workspace" })
+            : t("vm.safety.shared", { path: status?.workspace_guest_path ?? "/home/cua/workspace" })
+        }
       >
         {existing && (
           <div className="flex flex-wrap gap-2">
             {status?.container === "running" && (
               <ActionButton action="stop" pending={pending} onClick={() => void act("stop")}>
-                <Square size={12} /> Stop
+                <Square size={12} /> {t("vm.safety.stop")}
               </ActionButton>
             )}
             <ActionButton action="remove" pending={pending} onClick={() => void act("remove")} danger>
-              <Trash2 size={12} /> {perBot ? "Delete legacy shared VM" : "Delete VM"}
+              <Trash2 size={12} /> {perBot ? t("vm.safety.deleteLegacy") : t("vm.safety.deleteVm")}
             </ActionButton>
           </div>
         )}
         <div className="mt-3 break-all text-[11px] text-ink-secondary">
-          Durable workspace: {status?.workspace_path ?? "not created"} ·{" "}
-          Cua Driver: {status?.driver_version ?? "0.20.0"} · Local image: {status?.image_ref ?? "not prepared"}
-          {status?.base_image_ref ? <> · Base: {status.base_image_ref}</> : null}
+          {t("vm.safety.workspace", {
+            path: status?.workspace_path ?? t("vm.safety.notCreated"),
+            driver: status?.driver_version ?? "0.20.0",
+            image: status?.image_ref ?? t("vm.safety.notPrepared"),
+          })}
+          {status?.base_image_ref ? <> · {t("vm.safety.baseImage", { image: status.base_image_ref })}</> : null}
         </div>
       </Card>
     </>

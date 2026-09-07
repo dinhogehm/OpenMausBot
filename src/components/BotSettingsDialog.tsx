@@ -190,7 +190,11 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
       // review, the model picker's popover, a computer warning) owns Escape
       // and Tab while it is up: Escape closes only that layer, and the focus
       // trap below must not pull focus back out of it.
-      if (dialog?.querySelector('[role="dialog"], [role="alertdialog"]')) return;
+      // Only a *visible* nested dialog owns Escape/Tab. A hidden or
+      // zero-size leftover (display:none, empty hit box) must not trap
+      // the settings dialog's own dismiss paths.
+      const nested = dialog?.querySelector<HTMLElement>('[role="dialog"], [role="alertdialog"]');
+      if (nested && nested.getClientRects().length > 0) return;
       // BotInstructionsDialog portals to document.body, so it is not in this
       // subtree: a key pressed with focus outside this dialog belongs to
       // whatever holds focus, never to us.
@@ -293,21 +297,27 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
           </div>
         </nav>
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex items-center justify-between px-5 py-3">
+        {/* min-h-0 on the column + scroller, shrink-0 on the header: same
+            flex overflow trap the nav already documents. Soul's tall
+            textarea (and the drift banner) can otherwise shrink the
+            header's hit box to nothing while the X icon still paints —
+            clicks miss the button and only the outer backdrop dismisses. */}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex shrink-0 items-center justify-between px-5 py-3">
             <span className="text-[15px] font-semibold text-ink">
               {BOT_SECTIONS.find((s) => s.id === section)?.label}
             </span>
             <button
+              type="button"
               onClick={() => dispatch({ type: "toggleSettings", open: false })}
               aria-label="Close settings"
               className="rounded-md p-1 text-ink-secondary hover:bg-control hover:text-ink"
             >
-              <X size={18} />
+              <X size={18} className="pointer-events-none" />
             </button>
           </div>
 
-          <div className="flex flex-1 flex-col gap-4 overflow-y-auto px-5 pb-5">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-5 pb-5">
             {section === "overview" &&
               (overview === null && overviewError ? (
                 <div className="rounded-xl bg-card p-4 text-[13px] text-ink-secondary">Couldn’t load the overview.</div>
@@ -349,7 +359,7 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
 
             {section === "access" && <AccessSection bot={bot} derived={derived} />}
 
-            {section === "model" && <ModelSection bot={bot} derived={derived} />}
+            {section === "model" && <ModelSection bot={bot} />}
 
             {section === "permissions" && <PermissionsSection bot={bot} derived={derived} />}
 

@@ -2,6 +2,7 @@ import { ChevronDown, ChevronRight, GripVertical } from "lucide-react";
 import type { DragEvent, KeyboardEvent } from "react";
 
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
 import {
   sidebarAttentionLabel,
   type SidebarSectionAttention,
@@ -52,8 +53,12 @@ export function SidebarSectionHeader({
           aria-keyshortcuts={reorderable ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
           title={
             reorderable
-              ? `${collapsed ? "Expand" : "Collapse"} ${name}. Alt+Up/Down reorders it.`
-              : `${collapsed ? "Expand" : "Collapse"} ${name}`
+              ? collapsed
+                ? t("sidebar.section.expandReorder", { name })
+                : t("sidebar.section.collapseReorder", { name })
+              : collapsed
+                ? t("sidebar.section.expand", { name })
+                : t("sidebar.section.collapse", { name })
           }
           className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-0.5 text-left hover:bg-raised/50"
         >
@@ -100,7 +105,7 @@ export function SidebarSectionHeader({
         <span
           aria-hidden="true"
           draggable
-          title="Drag to reorder"
+          title={t("sidebar.section.dragToReorder")}
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
           className={cn(

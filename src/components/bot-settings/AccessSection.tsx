@@ -125,6 +125,7 @@ export function AccessSection({
     localSelectable,
     localDisabledReason,
   } = derived;
+  const browserInstallable = state.config?.browserEngine?.installable === true;
   const [localAutoWarning, setLocalAutoWarning] = useState<string | null>(null);
   const [inventory, setInventory] = useState<ConnectorInventory | null>(null);
 
@@ -278,7 +279,7 @@ export function AccessSection({
           <div className="text-[15px] font-medium text-ink">Browser</div>
           <div className="mt-0.5 text-[13px] text-ink-secondary">
             {!desktopBrowser
-              ? browserBlockedOnWindows
+              ? browserBlockedOnWindows && !browserInstallable
                 ? "Not available on this Windows machine yet: install the browser engine with `openmausbot browser install`."
                 : browserUnavailableReason(state.config)
               : !browserFeature
@@ -293,7 +294,7 @@ export function AccessSection({
         <Switch
           checked={browserEnabled}
           aria-label="Give this bot a built-in browser"
-          disabled={!browserEnabled && (!desktopBrowser || !browserFeature || !canUseBrowser)}
+          disabled={!browserEnabled && ((!desktopBrowser && !browserInstallable) || !browserFeature || !canUseBrowser)}
           onClick={() => patch({ browser: !browserAllowed })}
           className="disabled:cursor-not-allowed"
         />

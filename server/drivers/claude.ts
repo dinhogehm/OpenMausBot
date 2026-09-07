@@ -67,6 +67,23 @@ export function claudeSignedIn(
   });
 }
 
+/** Whether a stream frame is the CLI reporting that it has no login.
+ *
+ * The CLI flags its own api-error frames (`error`, `is_api_error_message`);
+ * a model reply never carries them. Requiring that flag first is what keeps
+ * an answer that merely discusses being logged out from being read as a
+ * failure — the text classifier runs only once the CLI has already called
+ * the frame an error, and covers CLI builds that flag the frame without
+ * naming the reason.
+ */
+export function claudeAuthFailure(
+  frame: { error?: unknown; is_api_error_message?: unknown },
+  text: string,
+): boolean {
+  if (frame.is_api_error_message !== true && typeof frame.error !== "string") return false;
+  return frame.error === "authentication_failed" || classifyError({ text }).reason === "auth";
+}
+
 /** The CLI environment shared by auth probes and real turns.
  *
  * Subscription users can be billed pay-as-you-go if an inherited API key
@@ -615,7 +632,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       /** the CLI's session id from `init`, what --resume takes later */
       sessionId: string | null;
       /** the running turn, or null between turns */
-      turn: { turnId: string; settled: boolean; sawStreamDelta: boolean } | null;
+      turn: { turnId: string; settled: boolean; sawStreamDelta: boolean; authFailed?: boolean } | null;
       idleTimer: ReturnType<typeof setTimeout> | null;
       closing: boolean;
       stderr: string;
@@ -1071,6 +1088,16 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           case "assistant": {
             const msg = o.message ?? {};
             const text = firstText(msg.content);
+            // An unauthenticated turn comes back as an api-error frame whose
+            // only content is the CLI's own "run /login" instruction — a
+            // command this app has no terminal to run, so relaying it as a
+            // reply strands the user. Every other engine reports this as a
+            // setup error; that is what routes them to the sign-in card.
+            if (claudeAuthFailure(o, text)) {
+              if (session.turn) session.turn.authFailed = true;
+              emit({ ...base(threadId, currentTurnId()), type: "runtime.error", message: text, setup: true });
+              break;
+            }
             if (text.trim()) {
               // fallback delta for CLIs/paths that never streamed the block
               if (!session.turn?.sawStreamDelta) {
@@ -1116,7 +1143,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             // of the figure was context re-read rather than new text.
             settle(
               o.is_error !== true,
-              o.stop_reason ?? o.terminal_reason ?? null,
+              session.turn?.authFailed ? "auth_required" : o.stop_reason ?? o.terminal_reason ?? null,
               o.total_cost_usd ?? null,
               o.usage
                 ? {

@@ -15,6 +15,7 @@
 // click close it, and the trigger is an ordinary focusable button.
 import { ChevronUp, Wrench } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
 import { SidebarPopoverMenu, type SidebarMenuItem } from "./SidebarPopoverMenu";
 
 export type MoreMenuItem = SidebarMenuItem;
@@ -22,7 +23,9 @@ export type MoreMenuItem = SidebarMenuItem;
 export function SidebarMoreMenu({
   items,
   compact = false,
-  label = "Tools",
+  // a default parameter is evaluated per call, so this follows the language
+  // the same way every other t() in the rail does
+  label = t("sidebar.tools"),
 }: {
   items: MoreMenuItem[];
   compact?: boolean;

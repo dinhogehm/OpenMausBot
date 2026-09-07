@@ -28,6 +28,7 @@ import { phoneSettingsAction, useSidebarPhoneStatus } from "./SidebarPhoneButton
 import { useStore } from "@/state/store";
 import { useUpdaterState, type UpdaterState } from "@/lib/updater";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
 import { FEEDBACK_URL, HELP_CENTER_URL, openExternalLink } from "@/lib/app-links";
 
 /** "Milind Soni" → "MS", "milind" → "M", "you@x.dev" → "Y", unset → "?" */
@@ -46,7 +47,7 @@ export function profileInitials(profile?: { name?: string; email?: string }): st
 
 /** The name shown on the row: the profile name, else the email, else "You". */
 export function profileLabel(profile?: { name?: string; email?: string }): string {
-  return profile?.name?.trim() || profile?.email?.trim() || "You";
+  return profile?.name?.trim() || profile?.email?.trim() || t("sidebar.profile.you");
 }
 
 export type UpdatePhase =
@@ -67,25 +68,37 @@ export function updatePhase(state: UpdaterState | null, upToDate: boolean): Upda
 export function updateLabel(phase: UpdatePhase, state: UpdaterState | null): string {
   switch (phase) {
     case "available":
-      return `Version ${state?.version ?? ""} available — download`.replace("  ", " ");
+      // an unknown version leaves a double space behind, in every language
+      return t("sidebar.update.available", { version: state?.version ?? "" }).replace("  ", " ");
     case "downloading":
-      return state?.percent == null ? "Starting download…" : `Downloading… ${Math.round(state.percent)}%`;
+      return state?.percent == null
+        ? t("sidebar.update.startingDownload")
+        : t("sidebar.update.downloading", { percent: Math.round(state.percent) });
     case "preparing":
-      return "Preparing update…";
+      return t("sidebar.update.preparing");
     case "downloaded":
-      return `Version ${state?.version ?? ""} ready — ${state?.installMode === "handoff" ? "install" : "restart"}`.replace("  ", " ");
+      return (
+        state?.installMode === "handoff"
+          ? t("sidebar.update.readyInstall", { version: state?.version ?? "" })
+          : t("sidebar.update.ready", { version: state?.version ?? "" })
+      ).replace("  ", " ");
     case "installing":
-      return state?.message || (state?.installMode === "handoff" ? "Opening a terminal…" : "Restarting to update…");
+      return (
+        state?.message ||
+        (state?.installMode === "handoff"
+          ? t("sidebar.update.openingTerminal")
+          : t("sidebar.update.installing"))
+      );
     case "checking":
-      return "Checking for updates…";
+      return t("sidebar.update.checking");
     case "handed-off":
-      return "Finish the update in your terminal";
+      return t("sidebar.update.handedOff");
     case "error":
-      return state?.message?.trim() || "Update failed — try again";
+      return state?.message?.trim() || t("sidebar.update.failed");
     case "up-to-date":
-      return "You're up to date";
+      return t("sidebar.update.upToDate");
     default:
-      return "Check for updates";
+      return t("sidebar.update.check");
   }
 }
 
@@ -184,7 +197,7 @@ export function SidebarProfileMenu() {
   const items: SidebarMenuItem[] = [
     {
       key: "phone",
-      label: phone.pairedCount ? "Your phone" : "Get OpenMausBot for iOS",
+      label: phone.pairedCount ? t("sidebar.menu.yourPhone") : t("sidebar.menu.getIos"),
       icon: <Smartphone size={18} />,
       trailing:
         phone.kind === "connected" ? (
@@ -194,27 +207,27 @@ export function SidebarProfileMenu() {
     },
     {
       key: "settings",
-      label: "Settings",
+      label: t("sidebar.menu.settings"),
       icon: <SettingsIcon size={18} />,
       onSelect: () => dispatch({ type: "toggleAppSettings" }),
     },
     ...(update ? [update.item] : []),
     {
       key: "about",
-      label: "About",
+      label: t("sidebar.menu.about"),
       icon: <Info size={18} />,
       separatorBefore: true,
       onSelect: () => setAboutOpen(true),
     },
     {
       key: "help",
-      label: "Help Center",
+      label: t("sidebar.menu.help"),
       icon: <HelpCircle size={18} />,
       onSelect: () => void openExternalLink(HELP_CENTER_URL),
     },
     {
       key: "feedback",
-      label: "Send Feedback",
+      label: t("sidebar.menu.feedback"),
       icon: <DiscordIcon size={17} />,
       onSelect: () => void openExternalLink(FEEDBACK_URL),
     },

@@ -7,7 +7,7 @@ when that provider resumes an existing native thread.
 | --- | --- |
 | **Ask for approval** | The provider asks before actions outside its normal workspace or network permissions. |
 | **Approve for me** | Uses native automatic review on Codex, Claude, and Cursor. Other providers fall back to Ask. Requests the native reviewer leaves for you are not overridden by OpenMausBot. Unattended Auto runs use Ask. |
-| **Full access** | Enables the provider's permissive mode for commands, edits, and selected-computer actions, including potentially destructive or sensitive work. Some providers still ask for approval. A turn another bot starts (ask_bot, delegate_bot) runs as **Approve for me** instead, so a teammate cannot hand a Full bot a destructive command with nobody watching. Questions and separate OpenMausBot confirmations still wait for you. |
+| **Full access** | Enables the provider's permissive mode for commands, edits, and selected-computer actions, including potentially destructive or sensitive work. Applies to this bot's direct, scheduled, and delegated work (ask_bot, delegate_bot); delegation uses the receiving bot's setting, never the sender's. Some providers still ask for approval. Questions and separate OpenMausBot confirmations still wait for you. |
 | **Custom (`config.toml`)** | Codex only. OpenMausBot reads and reapplies the effective approval and sandbox settings from your Codex configuration. |
 
 Full access is an elevated-risk standing approval. Full and Custom can only be
@@ -32,8 +32,11 @@ Choose Auto explicitly in the local packaged desktop app. Old Antigravity
 they never become unrestricted access on upgrade. Existing Full access bots
 now automatically answer remaining tool-permission requests too. Switching back
 to Ask restores prompts on the next turn. Questions, credential forms, and the
-separate confirmations described above still require an answer. Existing
-peer-started turn restrictions remain unchanged.
+separate confirmations described above still require an answer. A Chief or
+teammate can delegate work to this bot without downgrading its explicit Auto
+(full access) grant. This includes destructive commands and sensitive files:
+enable it only for bots you trust to run that work unattended. It does not
+enable Auto on any other bot, and the legacy Auto setting is not upgraded.
 
 Existing bots that used the old **Auto mode** keep that selection under
 **Approve for me** (except Antigravity, as described above), but now use native
@@ -73,6 +76,8 @@ private desktop-to-server grant protocol in a disposable fixture. It verifies
 HTTP elevation rejection, Full → Auto → Ask on resumed Claude turns, and
 Antigravity automatic tool approvals on new and resumed Full access turns across
 multiple model variants. It also checks that Ask and legacy Auto still prompt,
-peer-started Full turns still prompt, and questions remain interactive. Provider
+peer-started Full turns auto-approve, switching the receiving bot back to Ask
+restores prompts even for a Full-access sender, delegated Codex Custom uses the
+native Auto reviewer consistently, and questions remain interactive. Provider
 processes are scripted fakes; this does not verify live account eligibility or
 the quality of a provider's automatic reviewer. No live user data is used.

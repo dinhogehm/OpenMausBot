@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { t } from "@/lib/i18n";
 import { Laptop, Loader2, Unplug } from "lucide-react";
 import { Card } from "./SettingsPrimitives";
 
@@ -55,24 +56,24 @@ export function RemoteComputerSection() {
 
   return (
     <Card
-      title={state.active ? "Remote connection" : "Connect to another computer"}
-      subtitle="Use this desktop app as a secure client for OpenMausBot running on another computer."
+      title={state.active ? t("remote.client.active") : t("remote.client.idle")}
+      subtitle={t("remote.client.subtitle")}
     >
       {!bridge ? (
-        <p className="text-[13px] text-ink-secondary">Remote desktop pairing requires the installed app.</p>
+        <p className="text-[13px] text-ink-secondary">{t("remote.client.desktopOnly")}</p>
       ) : state.active ? (
         <div className="flex flex-col gap-4">
           <div className="flex items-start gap-3 rounded-lg border border-success/25 bg-success/10 px-3 py-3">
             <Laptop size={18} className="mt-0.5 shrink-0 text-success" />
             <div className="min-w-0">
               <div className="text-[14px] font-medium text-ink">
-                Connected to {state.serverName || "remote OpenMausBot"}
+                {t("remote.client.connected", { name: state.serverName || t("remote.client.fallbackName") })}
               </div>
               <div className="mt-1 break-all text-[12px] text-ink-secondary">{state.endpoint}</div>
             </div>
           </div>
           <p className="text-[12.5px] leading-relaxed text-ink-secondary">
-            This app is in client mode. Bots and conversations run on the other computer; the paired-device token stays in this computer&apos;s encrypted credential store.
+            {t("remote.client.mode")}
           </p>
           <button
             type="button"
@@ -81,16 +82,16 @@ export function RemoteComputerSection() {
             className="flex w-fit items-center gap-2 rounded-lg border border-danger/30 px-3 py-2 text-[13px] text-danger hover:bg-danger/10 disabled:opacity-50"
           >
             {busy ? <Loader2 size={14} className="animate-spin" /> : <Unplug size={14} />}
-            Disconnect and use this computer
+            {t("remote.client.disconnect")}
           </button>
         </div>
       ) : (
         <div className="flex flex-col gap-3">
           <p className="text-[12.5px] leading-relaxed text-ink-secondary">
-            On the host computer, open Settings → Remote access and open a pairing window over HTTPS, Tailscale, or Wi-Fi. Then enter its address and six-digit code here.
+            {t("remote.client.hostHint")}
           </p>
           <label className="flex flex-col gap-1.5 text-[12px] text-ink-secondary">
-            Host address
+            {t("remote.client.hostAddress")}
             <input
               value={endpoint}
               onChange={(event) => setEndpoint(event.target.value)}
@@ -102,7 +103,7 @@ export function RemoteComputerSection() {
             />
           </label>
           <label className="flex flex-col gap-1.5 text-[12px] text-ink-secondary">
-            Pairing code
+            {t("remote.client.pairingCode")}
             <input
               value={code}
               onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
@@ -120,10 +121,10 @@ export function RemoteComputerSection() {
             className="flex w-fit items-center gap-2 rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-white hover:brightness-110 disabled:opacity-50"
           >
             {busy ? <Loader2 size={14} className="animate-spin" /> : <Laptop size={14} />}
-            Pair and switch to client mode
+            {t("remote.client.pair")}
           </button>
           <p className="text-[11.5px] leading-relaxed text-ink-secondary">
-            Pairing restarts this app. Disconnecting later returns it to normal host mode.
+            {t("remote.client.restartNote")}
           </p>
         </div>
       )}

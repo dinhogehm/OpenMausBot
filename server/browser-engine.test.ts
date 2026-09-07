@@ -1,29 +1,123 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  agentBrowserFrame,
   agentBrowserIntegration,
   browserEngineEncryptionKey,
   browserEngineStatus,
   browserSessionId,
+  ensureChrome,
   installAgentBrowserBinary,
   isMusl,
   pinnedBinaryPath,
   resolveAgentBrowserBinary,
 } from "./browser-engine.ts";
-import { AGENT_BROWSER_VERSION, agentBrowserReleaseUrl, resolveAgentBrowserReleaseAsset } from "./browser-engine-release.ts";
+import { AGENT_BROWSER_VERSION, agentBrowserReleaseUrl, agentBrowserReleaseVersion, resolveAgentBrowserReleaseAsset } from "./browser-engine-release.ts";
+import { browserBundlePaths, browserBundleSpec, SUPPORTED_BROWSER_TARGETS } from "./browser-bundle-release.ts";
 import { removeTempDir } from "./testing/cleanup.ts";
 
 const posix = process.platform !== "win32";
 const scratch: string[] = [];
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 afterEach(async () => {
+  vi.unstubAllEnvs();
+  vi.mocked(spawn).mockReset();
   for (const dir of scratch.splice(0)) await removeTempDir(dir);
 });
 
 describe("finding the browser engine", () => {
+  it("pins the native-verified Windows revision in both download and desktop manifests", () => {
+    const asset = resolveAgentBrowserReleaseAsset("win32", "x64")!;
+    expect(asset).toEqual({
+      target: "win32-x64", version: "0.36.0-omb.1",
+      asset: "agent-browser-win32-x64-0.36.0-omb.1.exe",
+      url: "https://github.com/milind-soni/OpenMausBot/releases/download/browser-engine-v0.36.0-omb.1/agent-browser-win32-x64-0.36.0-omb.1.exe",
+      bytes: 13806080, sha256: "33bee834f6a6072ec8688b0914726e0262874d758f69f27e8baf7eaac6b5ed15",
+    });
+    expect(agentBrowserReleaseVersion(asset)).toBe("0.36.0-omb.1");
+    expect(browserBundleSpec("win32-x64").engine).toEqual({
+      version: asset.version, asset: asset.asset, url: asset.url,
+      bytes: asset.bytes, sha256: asset.sha256, executable: "agent-browser.exe",
+    });
+    for (const [platform, arch] of [["darwin", "arm64"], ["darwin", "x64"], ["linux", "arm64"], ["linux", "x64"]] as const) {
+      expect(agentBrowserReleaseVersion(resolveAgentBrowserReleaseAsset(platform, arch))).toBe("0.36.0");
+    }
+  });
+
+  it("does not reuse a pre-fix Windows managed install for a revised release", () => {
+    const dataDir = join(tmpdir(), "omb-versioned-browser-fixture");
+    const old = join(dataDir, "tools", "agent-browser", "0.36.0", "agent-browser.exe");
+    const revised = pinnedBinaryPath(dataDir, "win32", "x64");
+    expect(revised).toBe(join(dataDir, "tools", "agent-browser", "0.36.0-omb.1", "agent-browser.exe"));
+    const files = new Set([old]);
+    const options = { dataDir, platform: "win32" as const, arch: "x64", env: { PATH: "" }, exists: (file: string) => files.has(file) };
+    expect(resolveAgentBrowserBinary(options)).toBeNull();
+    files.add(revised);
+    expect(browserEngineStatus(options)).toMatchObject({ kind: "ready", binaryPath: revised, version: "0.36.0-omb.1" });
+    expect(resolveAgentBrowserBinary({ ...options, env: { PATH: "", OMB_AGENT_BROWSER_PATH: old } })).toBe(old);
+  });
+
+  it("retains default upstream versions and permits a pinned platform-specific asset URL", () => {
+    const official = resolveAgentBrowserReleaseAsset("linux", "x64")!;
+    expect(agentBrowserReleaseVersion(official)).toBe(AGENT_BROWSER_VERSION);
+    const revised = { ...official, version: "0.36.0-omb.1", url: "https://example.invalid/releases/download/fixed/fixture.exe" };
+    expect(agentBrowserReleaseVersion(revised)).toBe("0.36.0-omb.1");
+    expect(agentBrowserReleaseUrl(revised)).toBe(revised.url);
+  });
+
+  it.each(SUPPORTED_BROWSER_TARGETS)("uses the complete %s desktop bundle before old downloaded engines", (target) => {
+    const [platform, arch] = target.split("-");
+    const env = { OMB_RESOURCES_PATH: join(tmpdir(), "OMB resources"), PATH: "" };
+    const bundle = browserBundlePaths(join(env.OMB_RESOURCES_PATH, "browser-engine"), target);
+    const files = new Set([bundle.directory, bundle.engine, bundle.chrome, bundle.manifest, bundle.licenses]);
+    const options = { env, platform: platform as NodeJS.Platform, arch, exists: (p: string) => files.has(p) };
+    expect(resolveAgentBrowserBinary(options)).toBe(bundle.engine);
+    expect(browserEngineStatus(options)).toMatchObject({ kind: "ready", binaryPath: bundle.engine });
+    files.delete(bundle.chrome);
+    expect(resolveAgentBrowserBinary(options)).toBeNull();
+    expect(browserEngineStatus(options)).toMatchObject({ kind: "unavailable", installable: false, reason: expect.stringContaining("Reinstall") });
+    files.add(bundle.chrome);
+    files.delete(bundle.licenses);
+    expect(resolveAgentBrowserBinary(options)).toBeNull();
+    files.add(bundle.licenses);
+    files.delete(bundle.manifest);
+    expect(resolveAgentBrowserBinary(options)).toBeNull();
+    // A deliberately configured external runtime remains an explicit override.
+    const external = join(tmpdir(), "external-engine");
+    files.add(external);
+    expect(resolveAgentBrowserBinary({ ...options, env: { ...env, OMB_AGENT_BROWSER_PATH: external } })).toBe(external);
+  });
+
+  it("mounts the bundled browser with no download and keeps explicit Chrome overrides", async () => {
+    const resources = mkdtempSync(join(tmpdir(), "omb-browser-resources-"));
+    scratch.push(resources);
+    const env = { OMB_RESOURCES_PATH: resources, PATH: "" };
+    const bundle = browserBundlePaths(join(resources, "browser-engine"), `${process.platform}-${process.arch}`);
+    mkdirSync(bundle.licenses, { recursive: true });
+    for (const file of [bundle.engine, bundle.chrome, bundle.manifest]) {
+      mkdirSync(join(file, ".."), { recursive: true });
+      writeFileSync(file, "fixture, not executable");
+    }
+    expect(browserEngineStatus({ env })).toMatchObject({ kind: "ready", binaryPath: bundle.engine });
+    const spec = agentBrowserIntegration({ binaryPath: bundle.engine, session: "isolated", encryptionKey: "key", env });
+    expect(spec.env.AGENT_BROWSER_EXECUTABLE_PATH).toBe(bundle.chrome);
+    expect(spec.env.AGENT_BROWSER_SESSION).toBe("isolated");
+    expect(spec.env.AGENT_BROWSER_NO_WEBMCP).toBe("1");
+    expect(spec.env).not.toHaveProperty("OMB_RESOURCES_PATH");
+    const override = agentBrowserIntegration({ binaryPath: bundle.engine, session: "isolated", encryptionKey: "key", env: { ...env, AGENT_BROWSER_EXECUTABLE_PATH: "/explicit/chrome" } });
+    expect(override.env.AGENT_BROWSER_EXECUTABLE_PATH).toBe("/explicit/chrome");
+    // A spawn would fail because the fixture engine is not executable.
+    await expect(ensureChrome(bundle.engine, { env })).resolves.toBeUndefined();
+  });
+
   it("prefers the explicit path, then the pinned download, then PATH, and reports why when nothing is there", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "omb-engine-"));
     scratch.push(dataDir);
@@ -47,7 +141,7 @@ describe("finding the browser engine", () => {
     expect(resolveAgentBrowserBinary({ dataDir, env: { ...env, OMB_AGENT_BROWSER_PATH: override }, exists })).toBe(override);
     // an override that does not exist is an error, not a silent fallback
     expect(resolveAgentBrowserBinary({ dataDir, env: { ...env, OMB_AGENT_BROWSER_PATH: join(dataDir, "missing", name) }, exists })).toBeNull();
-    expect(browserEngineStatus({ dataDir, env, exists })).toMatchObject({ kind: "ready", binaryPath: pinned, version: AGENT_BROWSER_VERSION });
+    expect(browserEngineStatus({ dataDir, env, exists })).toMatchObject({ kind: "ready", binaryPath: pinned, version: agentBrowserReleaseVersion(resolveAgentBrowserReleaseAsset()) });
   });
 
   it("knows every target Vercel publishes, and picks the musl build on Alpine", () => {
@@ -55,7 +149,8 @@ describe("finding the browser engine", () => {
       const asset = resolveAgentBrowserReleaseAsset(platform, arch);
       expect(asset, `${platform}-${arch}`).not.toBeNull();
       expect(asset?.sha256).toMatch(/^[0-9a-f]{64}$/u);
-      expect(agentBrowserReleaseUrl(asset!)).toContain(`/v${AGENT_BROWSER_VERSION}/`);
+      if (asset?.url) expect(agentBrowserReleaseUrl(asset)).toBe(asset.url);
+      else expect(agentBrowserReleaseUrl(asset!)).toContain(`/v${AGENT_BROWSER_VERSION}/`);
     }
     expect(resolveAgentBrowserReleaseAsset("linux", "x64", true)?.target).toBe("linux-musl-x64");
     expect(resolveAgentBrowserReleaseAsset("freebsd", "x64")).toBeNull();
@@ -98,6 +193,43 @@ describe("installing the browser engine", () => {
 });
 
 describe("what a bot gets", () => {
+  it("forwards the explicit Chrome path without copying arbitrary environment or overriding session isolation", () => {
+    vi.stubEnv("AGENT_BROWSER_EXECUTABLE_PATH", "/process/chrome");
+    const spec = agentBrowserIntegration({
+      binaryPath: "/x/agent-browser", session: "bot-1", encryptionKey: "session-key",
+      env: {
+        PATH: "/usr/bin", AGENT_BROWSER_EXECUTABLE_PATH: "/opt/trusted chrome/chrome",
+        PRIVATE_WORKSPACE_SECRET: "synthetic-secret",
+        AGENT_BROWSER_SESSION: "wrong-session", AGENT_BROWSER_ENCRYPTION_KEY: "wrong-key",
+        AGENT_BROWSER_ARGS: "--no-sandbox", AGENT_BROWSER_NO_WEBMCP: "0",
+      },
+    });
+    expect(spec.env).toEqual({
+      AGENT_BROWSER_SESSION: "bot-1", AGENT_BROWSER_NO_WEBMCP: "1", AGENT_BROWSER_RESTORE: "bot-1",
+      AGENT_BROWSER_RESTORE_SAVE: "auto", AGENT_BROWSER_ENCRYPTION_KEY: "session-key",
+      AGENT_BROWSER_HEADLESS: "1", PATH: "/usr/bin",
+      AGENT_BROWSER_EXECUTABLE_PATH: "/opt/trusted chrome/chrome",
+    });
+  });
+
+  it("reads the configured Chrome path from the process only when no explicit environment is supplied", () => {
+    vi.stubEnv("PATH", "/usr/bin");
+    vi.stubEnv("AGENT_BROWSER_EXECUTABLE_PATH", "/opt/process-chrome/chrome");
+    vi.stubEnv("PRIVATE_WORKSPACE_SECRET", "synthetic-process-secret");
+    const spec = agentBrowserIntegration({ binaryPath: "/x/agent-browser", session: "bot-1", encryptionKey: "session-key" });
+    expect(spec.env).toEqual({
+      AGENT_BROWSER_SESSION: "bot-1", AGENT_BROWSER_NO_WEBMCP: "1", AGENT_BROWSER_RESTORE: "bot-1",
+      AGENT_BROWSER_RESTORE_SAVE: "auto", AGENT_BROWSER_ENCRYPTION_KEY: "session-key",
+      AGENT_BROWSER_HEADLESS: "1", PATH: "/usr/bin",
+      AGENT_BROWSER_EXECUTABLE_PATH: "/opt/process-chrome/chrome",
+    });
+    for (const env of [{}, { AGENT_BROWSER_EXECUTABLE_PATH: "" }]) {
+      const explicit = agentBrowserIntegration({ binaryPath: "/x", session: "s", encryptionKey: "k", env });
+      expect(explicit.env.AGENT_BROWSER_EXECUTABLE_PATH).toBeUndefined();
+      expect(explicit.env.PRIVATE_WORKSPACE_SECRET).toBeUndefined();
+    }
+  });
+
   it("mounts agent-browser's MCP server with the core tools, an isolated auto-restored session, and WebMCP off", () => {
     const spec = agentBrowserIntegration({ binaryPath: "/x/agent-browser", session: "bot-1", encryptionKey: "k".repeat(64), env: { PATH: "/usr/bin" } });
     expect(spec.command).toBe("/x/agent-browser");
@@ -136,5 +268,50 @@ describe("what a bot gets", () => {
     expect(fresh).toMatch(/^[0-9a-f]{64}$/u);
     expect(fresh).not.toBe(key);
     mkdirSync(join(dataDir, "unused"));
+  });
+});
+
+
+describe("agentBrowserFrame", () => {
+  /** Use a real Node child on every OS, not an unlaunchable Windows shebang.
+   * Only the executable is substituted; arguments, env and file IO are real. */
+  async function fakeBinary(body: string): Promise<string> {
+    const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    vi.mocked(spawn).mockImplementationOnce((_binary, args, options) => {
+      expect(_binary).toBe("fixture-agent-browser");
+      expect(args?.[0]).toBe("screenshot");
+      return actual.spawn(process.execPath, ["-e", body, ...args ?? []], options);
+    });
+    return "fixture-agent-browser";
+  }
+
+  it("returns the picture the browser wrote, base64 encoded", async () => {
+    // `screenshot <path>` is argument 2; the CLI writes the file there.
+    const binaryPath = await fakeBinary('require("node:fs").writeFileSync(process.argv[2], "PNGDATA")');
+    const frame = await agentBrowserFrame({ binaryPath, env: { AGENT_BROWSER_SESSION: "bot-1" } });
+    expect(frame.format).toBe("png");
+    expect(Buffer.from(frame.png, "base64").toString()).toBe("PNGDATA");
+    expect(existsSync(vi.mocked(spawn).mock.calls[0]![1]![1]!)).toBe(false);
+  });
+
+  it("carries the mount's session env, so it pictures the bot's own browser", async () => {
+    const binaryPath = await fakeBinary('require("node:fs").writeFileSync(process.argv[2], process.env.AGENT_BROWSER_SESSION)');
+    const frame = await agentBrowserFrame({ binaryPath, env: { AGENT_BROWSER_SESSION: "profile-x" } });
+    expect(Buffer.from(frame.png, "base64").toString()).toBe("profile-x");
+  });
+
+  it("fails with the browser's own reason when the capture fails", async () => {
+    const binaryPath = await fakeBinary('process.stderr.write("no open page"); process.exitCode = 3');
+    await expect(agentBrowserFrame({ binaryPath, env: {} })).rejects.toThrow(/no open page/);
+  });
+
+  it("fails rather than inventing a picture the browser never wrote", async () => {
+    const binaryPath = await fakeBinary("process.exitCode = 0");
+    await expect(agentBrowserFrame({ binaryPath, env: {} })).rejects.toThrow(/did not write/);
+  });
+
+  it("gives up on a hung browser instead of holding the turn open", async () => {
+    const binaryPath = await fakeBinary("setTimeout(() => {}, 5000)");
+    await expect(agentBrowserFrame({ binaryPath, env: {}, timeoutMs: 150 })).rejects.toThrow(/in time/);
   });
 });

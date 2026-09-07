@@ -18,9 +18,18 @@ export function resolveLocale(tag: string | undefined, available: ReadonlySet<st
 export function setLocale(tag: string | undefined): string {
   const resolved = resolveLocale(tag, new Set(Object.keys(locales)));
   activePack = locales[resolved] ?? en;
+  active = resolved;
   return resolved;
 }
 
+/** The locale t() is answering in. React cannot see a module variable, so a
+ * memoized subtree that renders catalog strings takes this as a prop and
+ * re-renders when it changes — the transcript does exactly that. */
+export function activeLocale(): string {
+  return active;
+}
+
+let active = "en";
 let activePack: LocalePack = en;
 setLocale(globalThis.navigator?.language);
 

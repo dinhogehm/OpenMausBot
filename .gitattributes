@@ -7,10 +7,13 @@ shared/mascot-bodies.ts text eol=lf
 deploy/podman/*.sh text eol=lf
 ios/Sources/CompanionCore/MausBodies.swift text eol=lf
 android/app/src/main/kotlin/com/openmausbot/companion/ui/MausBodies.kt text eol=lf
-
 # Source is always text, even when a string literal happens to carry a control
 # byte. Without this, a NUL inside git's first 8000 bytes makes the whole file
 # "binary" — it stops appearing in diffs and review, which is how a 200-line
 # module once shipped unreviewed.
 *.ts text
 *.tsx text
+
+# Vendor patch hashes and original notices must survive Windows checkout
+# byte-for-byte. Do not let core.autocrlf rewrite these reviewed inputs.
+third_party/browser/** text eol=lf

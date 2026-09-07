@@ -1,15 +1,20 @@
 // Compact model picker: providers live on a Cloud/Local rail. Ready engines
 // show a short suggested list with search and an explicit all-models view;
 // engines that need setup show one focused action instead of a disabled wall.
+// Reasoning effort rides along (EffortRow): model and effort are one choice to
+// the person making it, so the chat header and the settings dialog render the
+// same row and write through the same action.
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
 import { useStore, type Bot, type InstanceInfo, type ModelSelection } from "@/state/store";
+import type { EffortLevel } from "../../server/contracts.ts";
 import { filterCustomModels, partitionCustomModels, suggestedModels } from "@/lib/custom-models";
 import { isCustomOnly, splitEngineRail } from "@/lib/engine-rail";
 import { ProviderMark } from "./ProviderIcons";
 import { EngineSetup, EngineUpdateNotice, needsCli, needsSignIn } from "./EngineSetup";
 import { EngineGroupLabel } from "./EngineGroupLabel";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
 import { COMPACT_SQUARE } from "@/lib/compact-chip";
 
 type ModelOption = InstanceInfo["models"]["options"][number];
@@ -24,9 +29,70 @@ function modelProvider(instance: InstanceInfo | undefined, model: string): strin
 }
 
 export function engineStatus(instance: InstanceInfo): string {
-  if (needsCli(instance)) return "Setup required";
-  if (needsSignIn(instance)) return "Sign-in required";
-  return instance.snapshot.version ?? "Ready";
+  if (needsCli(instance)) return t("model.setupRequired");
+  if (needsSignIn(instance)) return t("model.signInRequired");
+  return instance.snapshot.version ?? t("model.ready");
+}
+
+/** The others capitalize cleanly; "xhigh" would read "Xhigh". */
+export function effortLabel(level: EffortLevel): string {
+  return level === "xhigh" ? "X-High" : level[0].toUpperCase() + level.slice(1);
+}
+
+/** How hard the bot thinks, for the engine it currently runs on. Rendered
+ * both in the picker's popover and in the settings dialog's Model section so
+ * the two cannot drift: one list of levels, one `setModel` dispatch.
+ *
+ * `undefined` ("Default") is not the `none` level — Default sends nothing and
+ * lets the engine decide, `none` is a level the engine is told to use. Only
+ * pi offers both, and dropping either would change what an existing bot
+ * sends, so both stay and the tooltips say which is which. */
+export function EffortRow({
+  bot,
+  className,
+  label,
+}: {
+  bot: Bot;
+  className?: string;
+  label?: ReactNode;
+}) {
+  const { state, dispatch } = useStore();
+  const selection = bot.modelSelection;
+  const levels = state.instances.find((instance) => instance.instanceId === selection.instanceId)?.capabilities
+    ?.effortLevels;
+  // An engine with no levels gets no control at all, not an empty one.
+  if (!levels?.length) return null;
+
+  return (
+    <div className={className}>
+      {label}
+      {/* wraps rather than dividing a fixed width: pi offers Default plus six
+          levels, which a segmented control would squeeze in the popover */}
+      <div className="mt-2 flex flex-wrap gap-1" role="group" aria-label="Reasoning effort">
+        {[undefined, ...levels].map((level) => (
+          <button
+            key={level ?? "default"}
+            type="button"
+            aria-pressed={selection.effort === level}
+            title={
+              level === undefined
+                ? "Send no effort level and let the engine decide"
+                : `Ask for ${effortLabel(level)} reasoning effort`
+            }
+            onClick={() => dispatch({ type: "setModel", botId: bot.id, selection: { ...selection, effort: level } })}
+            className={cn(
+              "rounded-full border px-2.5 py-1 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
+              selection.effort === level
+                ? "border-accent/60 bg-control text-ink"
+                : "border-hairline/40 text-ink-secondary hover:bg-control/60 hover:text-ink",
+            )}
+          >
+            {level === undefined ? "Default" : effortLabel(level)}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function ModelRow({
@@ -54,7 +120,7 @@ function ModelRow({
         {option.provider && (
           <span
             className="shrink-0 rounded bg-inset px-1.5 py-px text-[10px] text-ink-secondary"
-            title={`Provider: ${option.provider}`}
+            title={t("model.provider", { name: option.provider })}
           >
             {option.provider}
           </span>
@@ -94,8 +160,8 @@ function ModelSearch({
             event.stopPropagation();
             onEscape();
           }}
-          placeholder="Search models"
-          aria-label={local ? "Search local models" : "Search models"}
+          placeholder={t("model.search")}
+          aria-label={local ? t("model.searchLocal") : t("model.search")}
           className="w-full bg-transparent text-[12.5px] text-ink placeholder:text-ink-secondary focus:outline-none"
         />
       </div>
@@ -278,19 +344,28 @@ export function ModelPicker({
       )}
       title={
         bot.busy
-          ? "Stop this bot's turn before changing its model"
+          ? t("model.busy")
           : active
           ? `${active.displayName} · ${modelLabel(active, selection.model)}${
               modelProvider(active, selection.model) ? ` · ${modelProvider(active, selection.model)}` : ""
-            }`
+            }${selection.effort ? ` · ${effortLabel(selection.effort)} effort` : ""}`
           : selection.model
       }
     >
       {active && <ProviderMark driverKind={active.driverKind} size={14} />}
-      <span className={cn("max-w-[160px] truncate", !contained && active && "@max-4xl/chathead:hidden")}>
-        {modelLabel(active, selection.model)}
-        {active && modelProvider(active, selection.model) && (
-          <span className="text-ink-secondary"> · {modelProvider(active, selection.model)}</span>
+      <span className={cn("flex min-w-0 items-center gap-1", !contained && active && "@max-4xl/chathead:hidden")}>
+        <span className="max-w-[160px] truncate">
+          {modelLabel(active, selection.model)}
+          {active && modelProvider(active, selection.model) && (
+            <span className="text-ink-secondary"> · {modelProvider(active, selection.model)}</span>
+          )}
+        </span>
+        {/* outside the truncating span: a long model name must not be what
+            hides the effort the header exists to surface */}
+        {selection.effort && (
+          <span data-model-effort className="shrink-0 text-ink-secondary">
+            · {effortLabel(selection.effort)}
+          </span>
         )}
       </span>
       <ChevronDown
@@ -319,7 +394,7 @@ export function ModelPicker({
         <div
           data-model-picker-content
           role="dialog"
-          aria-label="Choose model"
+          aria-label={t("model.choose")}
           className={cn(
             "flex overflow-hidden rounded-2xl border border-hairline/50 bg-card",
             contained
@@ -382,10 +457,10 @@ export function ModelPicker({
                         onClick={refreshModels}
                         aria-label={
                           refreshing
-                            ? `Refreshing ${railInstance.displayName} models`
-                            : `Refresh ${railInstance.displayName} models`
+                            ? t("model.refreshing", { name: railInstance.displayName })
+                            : t("model.refresh", { name: railInstance.displayName })
                         }
-                        title="Refresh models"
+                        title={t("model.refreshTitle")}
                         className="flex size-6 items-center justify-center rounded-md text-ink-secondary hover:bg-control hover:text-ink disabled:cursor-wait disabled:opacity-70"
                       >
                         {refreshing ? (
@@ -400,14 +475,12 @@ export function ModelPicker({
                           blocked ? "bg-warning/10 text-warning" : "bg-success/10 text-success",
                         )}
                       >
-                        {pane === "custom" && !blocked ? "Local models" : engineStatus(railInstance)}
+                        {pane === "custom" && !blocked ? t("model.localModels") : engineStatus(railInstance)}
                       </span>
                     </div>
                   </div>
                   <div className="mt-0.5 text-[11.5px] text-ink-secondary">
-                    {pane === "custom"
-                      ? "Run this agent with a model already on your machine."
-                      : "Choose a model for this bot."}
+                    {pane === "custom" ? t("model.localHint") : t("model.chooseHint")}
                   </div>
                 </div>
 
@@ -420,7 +493,7 @@ export function ModelPicker({
                     }}
                     className="mx-2 mb-1 flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-[12px] text-ink-secondary hover:bg-control/60"
                   >
-                    <ChevronLeft size={13} /> Back to {railInstance.displayName} models
+                    <ChevronLeft size={13} /> {t("model.backTo", { name: railInstance.displayName })}
                   </button>
                 )}
 
@@ -429,8 +502,10 @@ export function ModelPicker({
                     <EngineSetup instance={railInstance} intent={pane === "custom" ? "inject" : "cloud"} />
                     <p className="mt-2 text-center text-[11.5px] text-ink-secondary/70">
                       {pane === "main" && official.length > 0
-                        ? `${official.length} ${official.length === 1 ? "model" : "models"} will appear after setup.`
-                        : "Local models will appear as soon as the agent is installed."}
+                        ? official.length === 1
+                          ? t("model.afterSetupOne")
+                          : t("model.afterSetupMany", { count: official.length })
+                        : t("model.localSoon")}
                     </p>
                   </div>
                 ) : (
@@ -458,12 +533,16 @@ export function ModelPicker({
                             <EngineUpdateNotice update={railInstance.snapshot.update} className="mx-1 mb-2" />
                           )}
                           <EngineGroupLabel className="px-2 pb-1 pt-0.5">
-                            {query ? `${filteredOfficial.length} results` : showAll ? `All models · ${official.length}` : "Suggested"}
+                            {query
+                              ? t("model.results", { count: filteredOfficial.length })
+                              : showAll
+                                ? t("model.allModels", { count: official.length })
+                                : t("model.suggested")}
                           </EngineGroupLabel>
                           {shownOfficial.map(renderRow)}
                           {shownOfficial.length === 0 && (
                             <div className="px-2 py-5 text-center text-[12.5px] text-ink-secondary">
-                              Nothing matches “{query.trim()}”
+                              {t("model.noMatch", { query: query.trim() })}
                             </div>
                           )}
                           {!query && !showAll && official.length > compactOfficial.length && (
@@ -472,7 +551,7 @@ export function ModelPicker({
                               onClick={() => setShowAll(true)}
                               className="mt-1 flex w-full items-center justify-between rounded-lg border-t border-hairline/40 px-2.5 py-2 text-[12.5px] font-medium text-ink-secondary hover:bg-control/60 hover:text-ink"
                             >
-                              Show all {official.length} models <ChevronDown size={13} />
+                              {t("model.showAll", { count: official.length })} <ChevronDown size={13} />
                             </button>
                           )}
                           {!query && showAll && official.length > COMPACT_MODEL_COUNT && (
@@ -481,14 +560,14 @@ export function ModelPicker({
                               onClick={() => setShowAll(false)}
                               className="mt-1 w-full rounded-lg px-2.5 py-2 text-[12px] text-ink-secondary hover:bg-control/60 hover:text-ink"
                             >
-                              Show suggested only
+                              {t("model.showSuggested")}
                             </button>
                           )}
                         </>
                       ) : (
                         <>
                           {pinned.length > 0 && (
-                            <EngineGroupLabel className="px-2 pb-1 pt-0.5">Loaded now</EngineGroupLabel>
+                            <EngineGroupLabel className="px-2 pb-1 pt-0.5">{t("model.loadedNow")}</EngineGroupLabel>
                           )}
                           {pinned.map(renderRow)}
                           {pinned.length > 0 && rest.length > 0 && (
@@ -497,15 +576,15 @@ export function ModelPicker({
                           {rest.map(renderRow)}
                           {custom.length === 0 && (
                             <div className="mx-1 rounded-xl border border-dashed border-hairline/50 px-3 py-5 text-center">
-                              <div className="text-[12.5px] font-medium text-ink">No local models found</div>
+                              <div className="text-[12.5px] font-medium text-ink">{t("model.noLocal")}</div>
                               <div className="mt-1 text-[11.5px] leading-relaxed text-ink-secondary">
-                                Start oMLX, Ollama, Unsloth, LM Studio, or EXO, then reopen this picker.
+                                {t("model.noLocalHint")}
                               </div>
                             </div>
                           )}
                           {custom.length > 0 && filteredCustom.length === 0 && (
                             <div className="px-2 py-5 text-center text-[12.5px] text-ink-secondary">
-                              Nothing matches “{query.trim()}”
+                              {t("model.noMatch", { query: query.trim() })}
                             </div>
                           )}
                         </>
@@ -514,11 +593,28 @@ export function ModelPicker({
                   </>
                 )}
 
+                {/* The header has nowhere else to put effort, so the popover
+                    carries it. `contained` callers (the settings dialog) render
+                    their own EffortRow card, and two copies of one control in
+                    one view read as a bug. Reads the bot's active engine, not
+                    the rail being browsed: effort applies to the model this bot
+                    runs on now, and picking a model on another rail closes the
+                    popover. */}
+                {!contained && (
+                  <EffortRow
+                    bot={bot}
+                    className="shrink-0 border-t border-hairline/40 px-4 py-3"
+                    label={<span className="text-[12.5px] font-medium text-ink">Effort</span>}
+                  />
+                )}
+
                 {pane === "main" && (
                   <button
                     type="button"
                     aria-label={
-                      custom.length > 0 ? `Use a local model (${custom.length} available)` : "Use a local model"
+                      custom.length > 0
+                        ? t("model.useLocalCount", { count: custom.length })
+                        : t("model.useLocal")
                     }
                     disabled={!canOpenCustom}
                     onClick={() => {
@@ -527,11 +623,11 @@ export function ModelPicker({
                     }}
                     className="flex w-full shrink-0 items-center justify-between gap-2 border-t border-hairline/40 px-4 py-3 text-left text-[12.5px] font-medium text-ink hover:bg-control/60 disabled:cursor-not-allowed disabled:text-ink-secondary/40 disabled:hover:bg-transparent"
                   >
-                    <span>Use a local model</span>
+                    <span>{t("model.useLocal")}</span>
                     <span className="flex items-center gap-2">
                       {custom.length > 0 && (
                         <span className="rounded-full bg-inset px-2 py-0.5 text-[10.5px] text-ink-secondary">
-                          {custom.length} available
+                          {t("model.available", { count: custom.length })}
                         </span>
                       )}
                       <ChevronRight size={14} className="text-ink-secondary" />
@@ -540,7 +636,7 @@ export function ModelPicker({
                 )}
               </>
             ) : (
-              <div className="px-4 py-5 text-[13px] text-ink-secondary">No model providers are available.</div>
+              <div className="px-4 py-5 text-[13px] text-ink-secondary">{t("model.noProviders")}</div>
             )}
           </div>
         </div>

@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 export interface FeatureFlagConfig {
   features?: { skillRecorder?: boolean; showToolCalls?: boolean; browser?: boolean };
   browserEngine?: { kind: "engine" | "unavailable"; reason?: string; installable?: boolean; installing?: boolean; installError?: string };
@@ -12,9 +14,9 @@ export function browserAvailable(config: FeatureFlagConfig | null | undefined): 
 /** Why a bot cannot have a browser right now, in the user's words. */
 export function browserUnavailableReason(config: FeatureFlagConfig | null | undefined): string {
   const engine = config?.browserEngine;
-  if (engine?.kind === "unavailable" && engine.installable) return "The browser engine is not installed on this machine yet. Install it from the bot's Browser panel, or run `openmausbot browser install` on the server.";
+  if (engine?.kind === "unavailable" && engine.installable) return t("browser.notInstalled");
   if (engine?.kind === "unavailable" && engine.reason) return engine.reason;
-  return "This server has no browser engine.";
+  return t("browser.noEngine");
 }
 
 /** Experimental features are available only after an explicit opt-in. */
