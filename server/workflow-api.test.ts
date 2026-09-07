@@ -34,7 +34,7 @@ function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: strin
   let taskSeq = 0;
   /** Test-settable seam: onInterrupt runs inside the engine's await of
    * interruptTurn — the window in which a trigger could start a fresh run. */
-  const hooks: { onInterrupt: (() => void) | null } = { onInterrupt: null };
+  const hooks: { onInterrupt: (() => void) | null; commandExit: number } = { onInterrupt: null, commandExit: 0 };
   /** Per-bot flags a test sets; a bot not listed carries none. */
   const capabilities = new Map<string, BotCapabilities>();
   const botCapabilities = (botId: string): BotCapabilities | null => capabilities.get(botId) ?? {};
@@ -51,6 +51,11 @@ function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: strin
     interruptTurn: async (_botId, threadId) => {
       interrupts.push(threadId);
       hooks.onInterrupt?.();
+    },
+    // No shell is spawned by an API test: a command check answers with
+    // the exit code the test set and echoes its command on stdout.
+    preflight: {
+      runCommand: async (check) => ({ exitCode: hooks.commandExit, stdout: `ran: ${check.command}`, stderr: "", timedOut: false }),
     },
   });
   const deps: WorkflowApiDeps = { store, engine, botCapabilities, ...(onWorkflowDeleted ? { onWorkflowDeleted } : {}) };
@@ -895,5 +900,109 @@ describe("workflow fallback bot and provider outage", () => {
     const cleared = await call("PATCH", `/api/workflows/${id}`, { providerOutage: null });
     expect(cleared?.status).toBe(200);
     expect(store.get(id)?.providerOutage).toBeUndefined();
+  });
+});
+
+describe("pre-flight over the API", () => {
+  const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);
+  const withPreflight = (): WorkflowInput => ({
+    ...agentGraph(),
+    preflight: {
+      timeoutSeconds: 30,
+      checks: [
+        { kind: "command", name: "gh auth", command: "gh auth status" },
+        { kind: "bots-ready", name: "bots" },
+      ],
+    },
+  });
+
+  it("stores the pre-flight, paints a bad one as bad-preflight, refuses a bad shape at the door, and clears on null", async () => {
+    const { call, store } = harness();
+    const created = await call("POST", "/api/workflows", withPreflight());
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(store.get(id)?.preflight).toEqual(withPreflight().preflight);
+    expect(codes(bodyOf(created).workflow.issues)).not.toContain("bad-preflight");
+
+    // A blank command and a bad regex are the validator's: saved, painted.
+    const blank = await call("PATCH", `/api/workflows/${id}`, {
+      preflight: { checks: [{ kind: "command", name: "x", command: "", expectStdoutMatch: "(" }] },
+    });
+    expect(blank?.status).toBe(200);
+    expect(codes(bodyOf(blank).workflow.issues).filter((code) => code === "bad-preflight")).toHaveLength(2);
+
+    // A shape zod cannot read is refused at the door.
+    const shape = await call("PATCH", `/api/workflows/${id}`, { preflight: { checks: [{ kind: "ping", name: "p" }] } });
+    expect(shape?.status).toBe(400);
+    expect(bodyOf(shape).error).toMatch(/^preflight\.checks/);
+    const notList = await call("PATCH", `/api/workflows/${id}`, { preflight: { checks: "gh" } });
+    expect(notList?.status).toBe(400);
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, { preflight: null });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.preflight).toBeUndefined();
+  });
+
+  it("a run is refused (400) for a bad pre-flight shape like any other error, before any check runs", async () => {
+    const { call, dispatches } = harness();
+    const created = await call("POST", "/api/workflows", {
+      ...agentGraph(),
+      preflight: { checks: [{ kind: "bots-ready", name: "" }] },
+    });
+    const id = bodyOf(created).workflow.id as string;
+    const refused = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(refused?.status).toBe(400);
+    expect(bodyOf(refused).error).toMatch(/^invalid workflow: Pre-flight check 1 needs a name/);
+    expect(dispatches).toHaveLength(0);
+  });
+
+  it("POST /runs answers 201 with the run parked on its entry; the verdict then lands on the run frame", async () => {
+    const { call, store, hooks, dispatches } = harness();
+    hooks.commandExit = 1;
+    const id = bodyOf(await call("POST", "/api/workflows", withPreflight())).workflow.id as string;
+    const started = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(started?.status).toBe(201);
+    const run = bodyOf(started).run as WorkflowRun;
+    expect(run).toMatchObject({ status: "running", currentNodeId: "triage" });
+    expect(run.preflightStartedAt).toBeDefined();
+    await new Promise((resolve) => setImmediate(resolve));
+    const settled = store.getRun(run.id)!;
+    expect(settled.status).toBe("failed");
+    expect(settled.error).toBe('pre-flight check "gh auth" failed: exited with code 1 (expected 0)');
+    expect(settled.preflight?.checks.map((check) => [check.name, check.ok])).toEqual([
+      ["gh auth", false],
+      ["bots", true],
+    ]);
+    expect(dispatches).toHaveLength(0);
+    // The listing carries the verdict for the timeline.
+    const listed = bodyOf(await call("GET", `/api/workflows/${id}/runs`)).runs as WorkflowRun[];
+    expect(listed[0]?.preflight?.ok).toBe(false);
+  });
+
+  it("POST /preflight runs the saved checks and answers with the verdict, creating no run", async () => {
+    const { call, store, hooks } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", withPreflight())).workflow.id as string;
+    const passed = await call("POST", `/api/workflows/${id}/preflight`, { command: "rm -rf /" });
+    expect(passed?.status).toBe(200);
+    const verdict = bodyOf(passed).preflight as { ok: boolean; checks: Array<{ name: string; ok: boolean; stdout?: string }> };
+    expect(verdict.ok).toBe(true);
+    // The body's command was ignored: only the saved one ran.
+    expect(verdict.checks[0]).toMatchObject({ name: "gh auth", ok: true, stdout: "ran: gh auth status" });
+    expect(store.listRuns()).toEqual([]);
+
+    hooks.commandExit = 2;
+    const failed = bodyOf(await call("POST", `/api/workflows/${id}/preflight`)).preflight as { ok: boolean };
+    expect(failed.ok).toBe(false);
+    expect(store.listRuns()).toEqual([]);
+
+    expect((await call("POST", "/api/workflows/nope/preflight"))?.status).toBe(404);
+    expect(await call("GET", `/api/workflows/${id}/preflight`)).toBeNull();
+  });
+
+  it("a workflow with no pre-flight answers an empty passing verdict", async () => {
+    const { call } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id as string;
+    const answer = bodyOf(await call("POST", `/api/workflows/${id}/preflight`)).preflight as { ok: boolean; checks: unknown[] };
+    expect(answer).toMatchObject({ ok: true, checks: [] });
   });
 });

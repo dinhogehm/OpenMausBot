@@ -141,6 +141,37 @@ const providerOutageSchema = z.object({
   horizonHours: optionalNumber,
 });
 
+// Shapes only, as everywhere above: a blank name, a repeated one, an
+// empty command, a bad regex and an out-of-range timeout are the
+// validator's (bad-preflight), so a half-edited panel still saves and shows
+// its badge. The command is bounded like any long text; it is never
+// interpolated, so nothing here judges its contents.
+const preflightCheckName = z.string().max(120);
+const preflightCheckSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("command"),
+    name: preflightCheckName,
+    command: z.string().max(4_000),
+    cwd: z.string().max(1_000).optional(),
+    expectExitCode: optionalNumber,
+    expectStdoutMatch: z.string().max(1_000).optional(),
+  }),
+  z.object({
+    kind: z.literal("bots-ready"),
+    name: preflightCheckName,
+    botIds: z.array(id).max(200).optional(),
+  }),
+  z.object({
+    kind: z.literal("engine-health"),
+    name: preflightCheckName,
+    botId: id,
+  }),
+]);
+const preflightSchema = z.object({
+  checks: z.array(preflightCheckSchema).max(50),
+  timeoutSeconds: optionalNumber,
+});
+
 const workflowInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: longText.optional(),
@@ -153,6 +184,7 @@ const workflowInputSchema = z.object({
   triggers: triggersSchema.optional(),
   maxNodeExecutions: optionalNumber,
   providerOutage: providerOutageSchema.optional(),
+  preflight: preflightSchema.optional(),
 });
 
 // Compile-time drift guards. Exact<> catches value-type drift, but two object
@@ -170,6 +202,9 @@ type WaitNode = Extract<WorkflowNode, { kind: "wait" }>;
 type Schedule = NonNullable<WorkflowTriggers["schedule"]>;
 type SchemaSchedule = NonNullable<z.infer<typeof triggersSchema>["schedule"]>;
 type ProviderOutage = NonNullable<Workflow["providerOutage"]>;
+type Preflight = NonNullable<Workflow["preflight"]>;
+type PreflightCheck = Preflight["checks"][number];
+type SchemaPreflightCheck = z.infer<typeof preflightCheckSchema>;
 const _schemaMatchesModel: Exact<z.infer<typeof workflowInputSchema>, WorkflowInput> = true;
 const _workflowKeys: SameKeys<z.infer<typeof workflowInputSchema>, WorkflowInput> = true;
 const _agentKeys: SameKeys<z.infer<typeof agentNodeSchema>, AgentNode> = true;
@@ -181,6 +216,19 @@ const _triggerKeys: SameKeys<z.infer<typeof triggersSchema>, WorkflowTriggers> =
 const _dailyKeys: SameKeys<Extract<SchemaSchedule, { type: "daily" }>, Extract<Schedule, { type: "daily" }>> = true;
 const _onceKeys: SameKeys<Extract<SchemaSchedule, { type: "once" }>, Extract<Schedule, { type: "once" }>> = true;
 const _outageKeys: SameKeys<z.infer<typeof providerOutageSchema>, ProviderOutage> = true;
+const _preflightKeys: SameKeys<z.infer<typeof preflightSchema>, Preflight> = true;
+const _preflightCommandKeys: SameKeys<
+  Extract<SchemaPreflightCheck, { kind: "command" }>,
+  Extract<PreflightCheck, { kind: "command" }>
+> = true;
+const _preflightBotsKeys: SameKeys<
+  Extract<SchemaPreflightCheck, { kind: "bots-ready" }>,
+  Extract<PreflightCheck, { kind: "bots-ready" }>
+> = true;
+const _preflightEngineKeys: SameKeys<
+  Extract<SchemaPreflightCheck, { kind: "engine-health" }>,
+  Extract<PreflightCheck, { kind: "engine-health" }>
+> = true;
 type IntervalSchedule = Extract<Schedule, { type: "interval" }>;
 type SchemaInterval = Extract<SchemaSchedule, { type: "interval" }>;
 const _intervalKeys: SameKeys<SchemaInterval, IntervalSchedule> = true;
@@ -202,6 +250,10 @@ void [
   _waitKeys,
   _intervalKeys,
   _activeHoursKeys,
+  _preflightKeys,
+  _preflightCommandKeys,
+  _preflightBotsKeys,
+  _preflightEngineKeys,
 ];
 
 /** JSON clients say "no value" with `null`; the model and the validator
@@ -227,7 +279,7 @@ const workflowPatchSchema = z.preprocess(stripNulls, workflowInputSchema.partial
  * store's spread overwrites and the JSON file then omits). A null on any
  * other top-level field is refused outright rather than becoming a silent
  * no-op. Single source of truth for both rules. */
-const CLEARABLE_FIELDS = ["description", "triggers", "maxNodeExecutions", "providerOutage"] as const;
+const CLEARABLE_FIELDS = ["description", "triggers", "maxNodeExecutions", "providerOutage", "preflight"] as const;
 const isClearable = (key: string) => (CLEARABLE_FIELDS as readonly string[]).includes(key);
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
@@ -396,6 +448,22 @@ export function startRun(deps: WorkflowApiDeps, workflowId: string, body: unknow
   }
 }
 
+/** The "Test pre-flight" button: runs the SAVED definition's checks and
+ * answers with the verdict; no run is created and nothing is persisted. It
+ * runs the saved checks, not a body's, so the request carries no command
+ * to execute — an endpoint that ran whatever it was posted would be a
+ * remote shell for anyone who can reach the socket. A workflow with no
+ * checks answers an empty, passing result. */
+export async function testPreflight({ store, engine }: WorkflowApiDeps, workflowId: string): Promise<WorkflowApiResponse> {
+  if (!store.get(workflowId)) return notFound("workflow");
+  try {
+    return { status: 200, body: { preflight: await engine.testPreflight(workflowId) } };
+  } catch (error) {
+    if (isUnknownEntity(error)) return notFound("workflow");
+    throw error;
+  }
+}
+
 export async function cancelRun({ engine }: WorkflowApiDeps, runId: string): Promise<WorkflowApiResponse> {
   try {
     return { status: 200, body: { run: await engine.cancelRun(runId) } };
@@ -480,6 +548,7 @@ export interface WorkflowApiRequest {
 
 const WORKFLOW_PATH = /^\/api\/workflows\/([\w-]+)$/;
 const WORKFLOW_RUNS_PATH = /^\/api\/workflows\/([\w-]+)\/runs$/;
+const WORKFLOW_PREFLIGHT_PATH = /^\/api\/workflows\/([\w-]+)\/preflight$/;
 const RUN_ACTION_PATH = /^\/api\/workflow-runs\/([\w-]+)\/(cancel|resume|approval)$/;
 
 /** null when the request is not a workflow route, so index.ts's own
@@ -504,6 +573,8 @@ export async function handleWorkflowRequest(
     if (method === "POST") return startRun(deps, match[1], await request.readBody());
     return null;
   }
+  match = path.match(WORKFLOW_PREFLIGHT_PATH);
+  if (match) return method === "POST" ? testPreflight(deps, match[1]) : null;
   match = path.match(WORKFLOW_PATH);
   if (match) {
     if (method === "PATCH") return patchWorkflow(deps, match[1], await request.readBody());

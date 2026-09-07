@@ -5103,6 +5103,26 @@ workflowEngine = new WorkflowEngine({
   // The routine scheduler's occurrence math — same timezone, same weekday
   // semantics — so a workflow's "daily at 09:00" and a routine's agree.
   nextOccurrence,
+  // The engine-health pre-flight check: the driver's own snapshot — a CLI
+  // version probe and a login-status probe, the same pair the model picker
+  // shows — which costs no tokens. An instance the registry could not
+  // bring up (a shadow) fails with the reason it recorded.
+  preflight: {
+    engineHealth: async (botId) => {
+      const bot = store.bot(botId);
+      if (!bot) return { ok: false, detail: `bot "${botId}" does not exist` };
+      const instanceId = bot.modelSelection.instanceId;
+      const entry = registry.entries().find((candidate) => candidate.instanceId === instanceId);
+      if (!entry) return { ok: false, detail: `engine "${instanceId}" is not configured` };
+      if (entry.shadow) return { ok: false, detail: `engine "${instanceId}" is unavailable: ${entry.shadow.reason}` };
+      const snapshot = await entry.live.snapshot();
+      if (snapshot.state !== "available") {
+        return { ok: false, detail: `engine "${instanceId}" is unavailable${snapshot.reason ? `: ${snapshot.reason}` : ""}` };
+      }
+      if (snapshot.authenticated === false) return { ok: false, detail: `engine "${instanceId}" is not signed in` };
+      return { ok: true, detail: `engine "${instanceId}" ready${snapshot.version ? ` (${snapshot.version})` : ""}` };
+    },
+  },
 });
 workflowEngine.start();
 
