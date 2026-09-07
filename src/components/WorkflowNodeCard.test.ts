@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { WorkflowNodeCard } from "./WorkflowNodeCard";
+import { WorkflowNodeCard, formatWaitMinutes } from "./WorkflowNodeCard";
 import { outcomeHandles } from "@/lib/workflow-graph";
 import type { WorkflowIssue, WorkflowNode } from "../../shared/workflow";
 
@@ -167,6 +167,23 @@ describe("WorkflowNodeCard — approval and notify", () => {
   it("says so when the target room no longer resolves", () => {
     const node: WorkflowNode = { kind: "notify", id: "notify-1", targetGroupId: "g1", template: "All done" };
     expect(text(card(node, { groupName: null }))).toContain("no longer exists");
+  });
+});
+
+describe("WorkflowNodeCard — wait", () => {
+  it("says how long the pause is and offers the single elapsed outcome", () => {
+    const flat = text(card({ kind: "wait", id: "wait-1", minutes: 30 }));
+    expect(flat).toContain("Wait");
+    expect(flat).toContain("wait-1");
+    expect(flat).toContain("Pauses the run for 30 min");
+    expect(flat).toContain("elapsed");
+  });
+
+  it("prints long pauses in hours", () => {
+    expect(formatWaitMinutes(60)).toBe("1 h");
+    expect(formatWaitMinutes(90)).toBe("1 h 30 min");
+    expect(formatWaitMinutes(1_440)).toBe("24 h");
+    expect(formatWaitMinutes(5)).toBe("5 min");
   });
 });
 

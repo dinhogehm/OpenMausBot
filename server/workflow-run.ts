@@ -11,6 +11,7 @@
  * surface declared here. */
 import {
   capabilityIssues,
+  countsTowardExecutionCap,
   missingCapabilities,
   missingCapabilityMessage,
   parseWorkflowOutcome,
@@ -27,9 +28,12 @@ import {
   WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN,
   WORKFLOW_OUTAGE_HORIZON_DEFAULT_H,
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
+  WORKFLOW_WAIT_OUTCOME,
   workflowRoutingFingerprint,
   type BotCapabilities,
   type Workflow,
+  type WorkflowCalendarSchedule,
+  type WorkflowIntervalSchedule,
   type WorkflowIssue,
   type WorkflowNode,
   type WorkflowNodeResult,
@@ -38,7 +42,6 @@ import {
   type WorkflowRun,
   type WorkflowRunStatus,
   type WorkflowRunTrigger,
-  type WorkflowSchedule,
 } from "../shared/workflow.ts";
 import { unattendedHonoredGrants } from "./auto-approve.ts";
 import type { RuntimeEvent } from "./contracts.ts";
@@ -54,6 +57,7 @@ import {
   type WorkflowFailureClass,
   type WorkflowTurnFailure,
 } from "./workflow-failure.ts";
+import { intervalFireAt, nextActiveWindowStart } from "./workflow-interval.ts";
 import type { WorkflowStore } from "./workflow-store.ts";
 
 export type { WorkflowRunTrigger } from "../shared/workflow.ts";
@@ -126,16 +130,19 @@ export interface WorkflowEngineOptions {
    * here is logged and swallowed — and a reminder that failed to go out is
    * retried on the next tick. */
   notifyUser?: (run: WorkflowRun, message: string, kind: WorkflowNotificationKind) => void;
-  /** Occurrence math for `triggers.schedule` — index.ts injects the routine
-   * scheduler's `nextOccurrence` (local timezone, strictly after `after`),
-   * so a workflow's "daily at 09:00" and a routine's agree. Absent, the
-   * engine never arms or fires a schedule. */
-  nextOccurrence?: (schedule: WorkflowSchedule, after: number) => number | null;
+  /** Occurrence math for the CALENDAR schedules (`daily`, `once`) —
+   * index.ts injects the routine scheduler's `nextOccurrence` (local
+   * timezone, strictly after `after`), so a workflow's "daily at 09:00" and
+   * a routine's agree. An `interval` schedule is not a calendar and never
+   * reaches this; the engine measures it itself. Absent, the engine never
+   * arms or fires a calendar schedule (an interval still runs). */
+  nextOccurrence?: (schedule: WorkflowCalendarSchedule, after: number) => number | null;
 }
 
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
 type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
 type NotifyNode = Extract<WorkflowNode, { kind: "notify" }>;
+type WaitNode = Extract<WorkflowNode, { kind: "wait" }>;
 export type ApprovalDecision = (typeof WORKFLOW_APPROVAL_OUTCOMES)[number];
 
 const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
@@ -288,13 +295,16 @@ export class WorkflowEngine {
    * live dispatch, whatever is still "running" with nothing live behind it
    * is stranded and re-driven, and only then can a queue be judged
    * stranded. Schedules fire last, so a run they start joins queues that
-   * are already consistent. */
+   * are already consistent. An elapsed wait sits with the approvals: it too
+   * depends on no thread, and its successor is dispatched in this same
+   * pass. */
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
     try {
       const now = this.now();
       this.sweepApprovals(now);
+      this.sweepWaits(now);
       await this.sweepTimeouts(now);
       this.dispatchDue(now);
       this.recoverStranded();
@@ -320,7 +330,6 @@ export class WorkflowEngine {
    * the next to fire it). Late, never lost — which is the trade for keeping
    * every write on the tick instead of in an API handler. */
   private sweepSchedules(now: number): void {
-    if (!this.options.nextOccurrence) return;
     for (const workflow of this.store.list()) {
       const schedule = workflow.triggers?.schedule;
       if (!schedule) {
@@ -331,6 +340,11 @@ export class WorkflowEngine {
       // Deliberately disarmed (a spent `once`): only an edit to the schedule
       // re-arms it, by putting the field back to undefined.
       if (workflow.nextRunAt === null) continue;
+      if (schedule.type === "interval") {
+        this.sweepInterval(workflow, schedule, now);
+        continue;
+      }
+      if (!this.options.nextOccurrence) continue;
       if (workflow.nextRunAt === undefined) {
         const first = this.initialOccurrence(workflow, schedule, now);
         // Same reasoning as the advance below: only a `once` that can never
@@ -368,6 +382,54 @@ export class WorkflowEngine {
     }
   }
 
+  /** The continuous trigger, with the engine as the valve. The same tri-state
+   * clock as the calendar schedules, read differently: while the workflow
+   * has a LIVE run (queued, running or waiting) the clock is held at
+   * `undefined` — nothing is armed, so a manual or webhook run pushes the
+   * next scheduled one out rather than stacking a queued run behind it. The
+   * moment the workflow is idle, the next run is armed `minutes` after the
+   * last run ended (after now, if no run is on record), moved into the
+   * active window when there is one. Firing disarms FIRST, then starts the
+   * run: a crash between the two leaves an idle workflow with no clock,
+   * which the next sweep re-arms one interval after the last run — a slot
+   * skipped, never a run fired twice. There is no missed-slot receipt: an
+   * interval has no calendar slot to miss, so a computer that slept simply
+   * fires once on waking (the armed instant is in the past, which is "due").
+   * A start the engine REFUSES leaves the same failed receipt a calendar
+   * schedule does; it ends "now", so the next arm lands one interval later
+   * — a natural backoff rather than a refusal every tick. */
+  private sweepInterval(workflow: Workflow, schedule: WorkflowIntervalSchedule, now: number): void {
+    const runs = this.store.listRuns(workflow.id);
+    if (runs.some((run) => LIVE_RUN_STATUSES.has(run.status))) {
+      if (typeof workflow.nextRunAt === "number") this.store.setNextRunAt(workflow.id, undefined);
+      return;
+    }
+    if (workflow.nextRunAt === undefined) {
+      // Receipts are capped, so "never ran" also covers a history that was
+      // pruned away; either way the honest anchor is now.
+      let lastEnded: number | undefined;
+      for (const run of runs) {
+        if (run.endedAt !== undefined && (lastEnded === undefined || run.endedAt > lastEnded)) lastEnded = run.endedAt;
+      }
+      const fire = intervalFireAt(schedule, lastEnded ?? now);
+      // No window in reach (cannot happen under a validated window; a
+      // hand-edited file could) stays unarmed so the next sweep tries again.
+      if (fire !== null) this.store.setNextRunAt(workflow.id, fire);
+      return;
+    }
+    const scheduledFor = workflow.nextRunAt;
+    // The caller already skips a disarmed (null) clock; nothing here ever
+    // writes null for an interval, so this is the type's guard, not a path.
+    if (scheduledFor === null || scheduledFor > now) return;
+    this.store.setNextRunAt(workflow.id, undefined);
+    try {
+      this.startRun(workflow.id, `Interval run armed for ${new Date(scheduledFor).toISOString()}`, "schedule");
+    } catch (error) {
+      if (isInvalidWorkflow(error)) this.recordRefusedRun(workflow, scheduledFor, now, errorMessage(error));
+      else console.warn(`workflow: interval run of ${workflow.id} not started: ${errorMessage(error)}`);
+    }
+  }
+
   /** The first slot a newly armed schedule fires. Arming happens on a tick,
    * which can land AFTER the slot the definition was saved for (a schedule
    * edited seconds before it), so nothing here is measured from `now`: a
@@ -383,14 +445,14 @@ export class WorkflowEngine {
    * back than the catch-up window — so one left unarmed for days (a file
    * from a build with no scheduler, a hand edit) catches up at most one
    * slot. */
-  private initialOccurrence(workflow: Workflow, schedule: WorkflowSchedule, now: number): number | null {
+  private initialOccurrence(workflow: Workflow, schedule: WorkflowCalendarSchedule, now: number): number | null {
     if (schedule.type === "once") return Number.isFinite(schedule.at) ? schedule.at : null;
     return this.occurrenceAfter(schedule, Math.max(workflow.updatedAt, now - WORKFLOW_SCHEDULE_CATCH_UP_MS));
   }
 
   /** nextOccurrence is an injected wrapper; a throw there must not take the
    * tick down, and "no next occurrence" is its honest fallback. */
-  private occurrenceAfter(schedule: WorkflowSchedule, after: number): number | null {
+  private occurrenceAfter(schedule: WorkflowCalendarSchedule, after: number): number | null {
     try {
       return this.options.nextOccurrence?.(schedule, after) ?? null;
     } catch (error) {
@@ -478,6 +540,71 @@ export class WorkflowEngine {
         }
       }
     }
+  }
+
+  /** A wait node's timer. The run was parked by dispatchNode (no task, no
+   * thread, nothing for a bot to do) and moves on here once its pause is
+   * over, through the same advance path as every other outcome. The clock
+   * is the persisted `waitStartedAt`, so a restart neither restarts the
+   * pause nor loses it. A wait whose node was edited away under the run
+   * fails the run, as an orphaned approval gate does.
+   *
+   * Everything else is RECOMPUTED on every pass from the definition as it
+   * is now — the node's minutes and the interval trigger's active window —
+   * because a lap that loops inside one run never passes the trigger, so
+   * this is the only place that keeps "working hours only" true for the bot
+   * steps after a pause, and an operator who loosens, tightens or removes
+   * the window mid-pause must see it take effect at the next tick, in
+   * either direction. `waitUntil` is only the instant the UI shows; it is
+   * rewritten whenever the recomputation disagrees with it, never trusted. */
+  private sweepWaits(now: number): void {
+    for (const stale of this.store.listRuns()) {
+      if (stale.status !== "running" || stale.waitUntil === undefined) continue;
+      // Re-read: an earlier iteration may have moved this run.
+      const run = this.store.getRun(stale.id);
+      if (!run || run.status !== "running" || run.waitUntil === undefined) continue;
+      const workflow = this.store.get(run.workflowId);
+      const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
+      if (!workflow || node?.kind !== "wait") {
+        this.failNode(run.id, "the workflow was deleted or edited under this run and its wait node is gone");
+        continue;
+      }
+      // A receipt without the start (none is written by this engine, but a
+      // hand-edited file could) keeps the instant it was parked with.
+      const startedAt = run.waitStartedAt ?? run.waitUntil - node.minutes * 60_000;
+      const due = startedAt + node.minutes * 60_000;
+      // Judged at NOW when the pause is already over, not at the instant it
+      // ended: a laptop that slept through 17:59 must not dispatch at 22:00
+      // because 17:59 was inside the window. `due` still wins while the
+      // pause is running, so an edit in either direction lands as before.
+      const resume = nextActiveWindowStart(this.activeHoursOf(workflow), Math.max(due, now));
+      if (resume === null) {
+        // A window with no allowed day — the validator refuses it, a hand
+        // edit can still leave it — would hold the run forever. Say so.
+        // failNode names the workflow and the node; the reason says only why.
+        this.failNode(run.id, "the schedule's active hours allow no weekday, so this wait could never end");
+        continue;
+      }
+      if (resume > now) {
+        if (run.waitUntil !== resume) this.store.patchRun(run.id, { waitUntil: resume });
+        continue;
+      }
+      this.advance(run, workflow, node, {
+        nodeId: node.id,
+        outcome: WORKFLOW_WAIT_OUTCOME,
+        summary: `Waited ${Math.max(1, Math.round((now - startedAt) / 60_000))} min`,
+        startedAt,
+        endedAt: now,
+      });
+    }
+  }
+
+  /** The window a wait must respect: the interval trigger's, when the
+   * workflow has one. A daily or one-off schedule has no window — it fires
+   * at its time and the lap runs to its end, as before. */
+  private activeHoursOf(workflow: Workflow) {
+    const schedule = workflow.triggers?.schedule;
+    return schedule?.type === "interval" ? schedule.activeHours : undefined;
   }
 
   /** A dispatched node past its budget is interrupted (best-effort) and sent
@@ -597,8 +724,16 @@ export class WorkflowEngine {
     return run.currentBotId !== undefined && run.currentBotId === run.outage?.fallbackBotId ? run.currentBotId : undefined;
   }
 
+  /** A parked wait is not stranded: its timer IS its liveness. Re-driving it
+   * would re-dispatch the wait node and push `waitUntil` out on every tick,
+   * so the pause would never end. */
   private isStranded(run: WorkflowRun): boolean {
-    return run.status === "running" && run.nextAttemptAt === undefined && !this.hasLiveDispatch(run);
+    return (
+      run.status === "running" &&
+      run.nextAttemptAt === undefined &&
+      run.waitUntil === undefined &&
+      !this.hasLiveDispatch(run)
+    );
   }
 
   /** A workflow with queued runs but no active one lost a terminal patch or
@@ -809,6 +944,8 @@ export class WorkflowEngine {
       outage: undefined,
       approvalRequestedAt: undefined,
       approvalRemindedAt: undefined,
+      waitUntil: undefined,
+      waitStartedAt: undefined,
     });
     if (!patched) return fresh;
     this.drainQueue(patched.workflowId);
@@ -985,6 +1122,8 @@ export class WorkflowEngine {
       dispatchedAt: undefined,
       nextAttemptAt: undefined,
       outage: undefined,
+      waitUntil: undefined,
+      waitStartedAt: undefined,
     });
     if (!patched) return;
     this.follow(patched, workflow, node, result.outcome);
@@ -1041,15 +1180,21 @@ export class WorkflowEngine {
       this.failNode(runId, "the workflow definition was deleted");
       return;
     }
-    const cap = workflow.maxNodeExecutions ?? WORKFLOW_MAX_NODE_EXECUTIONS;
-    if (run.nodeResults.length >= cap) {
-      this.failNode(runId, "node execution cap reached");
-      return;
-    }
     const node = workflow.nodes.find((candidate) => candidate.id === nodeId);
     if (!node) {
       this.failNode(runId, `node "${nodeId}" no longer exists in the workflow`);
       return;
+    }
+    // The cap bounds BOT WORK, so it is checked only when bot work is about
+    // to be dispatched and counts only the bot work already done: a wait or
+    // a notify after the last allowed agent turn still runs, so a cycle's
+    // closing notification is never the step the cap swallows.
+    if (countsTowardExecutionCap(node.kind)) {
+      const cap = workflow.maxNodeExecutions ?? WORKFLOW_MAX_NODE_EXECUTIONS;
+      if (this.countedExecutions(run, workflow) >= cap) {
+        this.endAtCap(run, workflow, node, cap);
+        return;
+      }
     }
     if (node.kind === "approval") {
       this.openApproval(runId, node);
@@ -1057,6 +1202,10 @@ export class WorkflowEngine {
     }
     if (node.kind === "notify") {
       this.executeNotify(run, workflow, node);
+      return;
+    }
+    if (node.kind === "wait") {
+      this.parkOnWait(runId, workflow, node);
       return;
     }
     const dispatchBotId = botId ?? node.botId;
@@ -1133,6 +1282,91 @@ export class WorkflowEngine {
     // node's own list — never the primary's keys on the fallback's turn.
     const grants = effectiveGrants(this.options.botGrants?.(dispatchBotId), node);
     this.startTurnSafely(node, dispatchBotId, task.threadId, _buildNodePrompt(workflow, node, patched, grants), runId);
+  }
+
+  /** Bot work already done in this run: agent turns and approval gates. A
+   * result whose node has since been deleted from the definition still
+   * counts — the cap is a safety net, and a step that cannot be classified
+   * must not widen it. */
+  private countedExecutions(run: WorkflowRun, workflow: Workflow): number {
+    let count = 0;
+    for (const result of run.nodeResults) {
+      const node = workflow.nodes.find((candidate) => candidate.id === result.nodeId);
+      if (!node || countsTowardExecutionCap(node.kind)) count++;
+    }
+    return count;
+  }
+
+  /** The run has spent its budget and `node` would be one more bot step.
+   * Which terminal state that is depends on what the cap is cutting off.
+   * `follow()` brought the run here along an edge, so the last node was not
+   * a sink; the question is whether that edge CLOSED A LAP on purpose. The
+   * one shape that says so is the continuous cycle the validator's
+   * cycle-without-wait warning describes: back at the ENTRY, arriving from
+   * a step that is NOT bot work (a wait, or the notify that ends a lap).
+   * There the cap is the valve the design leans on: the run is COMPLETE,
+   * with the receipt saying why it stopped, and an interval trigger starts
+   * the next lap later. An edge back to the entry from a bot step is a
+   * review loop that never converged — `code → test --retry--> code` two
+   * hundred times is not a finished run — and anywhere else a path is
+   * being cut short of work it was supposed to do; both are failures to
+   * announce and a cap to raise, with the receipt on the refused node,
+   * where a resume picks up. Both variants notify: two hundred bot turns
+   * ending is an event the operator must see, green or red. */
+  private endAtCap(run: WorkflowRun, workflow: Workflow, node: WorkflowNode, cap: number): void {
+    const reason = `execution cap of ${cap} bot steps reached before node "${node.id}"`;
+    const last = run.nodeResults[run.nodeResults.length - 1];
+    const lastNode = last === undefined ? undefined : workflow.nodes.find((candidate) => candidate.id === last.nodeId);
+    const lapClosedByPause = lastNode !== undefined && !countsTowardExecutionCap(lastNode.kind);
+    if (node.id === workflow.entryNodeId && lapClosedByPause) {
+      const patched = this.store.patchRun(run.id, {
+        status: "completed",
+        error: reason,
+        endedAt: this.now(),
+        nextAttemptAt: undefined,
+        dispatchedAt: undefined,
+        currentThreadId: undefined,
+        // Same hygiene as failNode: a terminal receipt carries no outage
+        // clock and no hand-off.
+        outage: undefined,
+        currentBotId: undefined,
+        waitUntil: undefined,
+        waitStartedAt: undefined,
+      });
+      if (!patched) return;
+      this.safeNotify(patched, `Workflow "${workflow.name}" run completed: ${reason}`, "cap-reached");
+      this.drainQueue(patched.workflowId);
+      return;
+    }
+    const refused = this.store.patchRun(run.id, {
+      currentNodeId: node.id,
+      dispatchedAt: undefined,
+      nextAttemptAt: undefined,
+      currentThreadId: undefined,
+    });
+    if (!refused) return;
+    this.failNode(run.id, reason);
+  }
+
+  /** Park the run on a wait node: no task, no turn, no notification — only
+   * a persisted instant the tick's sweepWaits watches. The receipt names
+   * the node first so a crash leaves "waiting on this node until then",
+   * which recoverStranded deliberately leaves alone. */
+  private parkOnWait(runId: string, workflow: Workflow, node: WaitNode): void {
+    const now = this.now();
+    const due = now + node.minutes * 60_000;
+    this.store.patchRun(runId, {
+      currentNodeId: node.id,
+      // Already inside the trigger's window when it has one, so the receipt
+      // names the instant the run will actually move (sweepWaits re-checks
+      // regardless, for a window edited mid-pause).
+      waitUntil: nextActiveWindowStart(this.activeHoursOf(workflow), due) ?? due,
+      waitStartedAt: now,
+      dispatchedAt: undefined,
+      nextAttemptAt: undefined,
+      currentThreadId: undefined,
+      repromptedAt: undefined,
+    });
   }
 
   /** Park the run on a human gate: no task, no turn, one notification. From
@@ -1445,6 +1679,8 @@ export class WorkflowEngine {
       currentBotId: undefined,
       approvalRequestedAt: undefined,
       approvalRemindedAt: undefined,
+      waitUntil: undefined,
+      waitStartedAt: undefined,
     });
     if (!patched) return;
     const workflow = this.store.get(patched.workflowId);

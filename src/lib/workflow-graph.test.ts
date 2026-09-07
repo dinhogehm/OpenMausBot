@@ -32,6 +32,8 @@ import {
   toGraphEdges,
   toGraphNodes,
   updateNode,
+  WORKFLOW_NODE_KINDS,
+  WORKFLOW_WAIT_DEFAULT_MINUTES,
   workflowPatchBody,
 } from "./workflow-graph";
 
@@ -394,6 +396,17 @@ describe("insertNode / nextNodeId / createWorkflowNode", () => {
       ],
     });
     expect(nextNodeId(gapped, "agent")).toBe("agent-2");
+  });
+
+  it("seeds a wait node with a default pause and no roster reference", () => {
+    expect(WORKFLOW_NODE_KINDS).toContain("wait");
+    expect(nextNodeId(workflow({ nodes: [] }), "wait")).toBe("wait-1");
+    expect(createWorkflowNode("wait", "wait-1", {})).toEqual({
+      kind: "wait",
+      id: "wait-1",
+      minutes: WORKFLOW_WAIT_DEFAULT_MINUTES,
+    });
+    expect(outcomeHandles({ kind: "wait", id: "wait-1", minutes: 5 })).toEqual([{ outcome: "elapsed", implicit: false }]);
   });
 
   it("needs a bot for an agent node and a room for a notify node", () => {

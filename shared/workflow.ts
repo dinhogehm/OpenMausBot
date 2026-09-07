@@ -9,11 +9,26 @@ export const WORKFLOW_CONTROL_CLOSE = "</openmaus-workflow>";
 export const WORKFLOW_FAIL_OUTCOME = "failed";
 export const WORKFLOW_APPROVAL_OUTCOMES = ["approved", "rejected"] as const;
 export const WORKFLOW_NOTIFY_OUTCOME = "sent";
+/** The one outcome a wait node produces: its timer ran out. */
+export const WORKFLOW_WAIT_OUTCOME = "elapsed";
 export const WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN = 30;
 export const WORKFLOW_NODE_RETRIES_DEFAULT = 2;
-/** Cycles are legal by design (review loops); this cap is what keeps a
- * miswired loop from running a workflow forever. */
-export const WORKFLOW_MAX_NODE_EXECUTIONS = 30;
+/** Cycles are legal by design (review loops, and a continuous cycle that
+ * loops back to the entry); this cap is what keeps a miswired loop from
+ * running a workflow forever. It counts BOT WORK — agent and approval
+ * executions — never wait or notify steps, which cost nothing and would
+ * otherwise spend the budget of a slow continuous cycle on pauses. The
+ * default is sized for a day of cycling rather than one pass. */
+export const WORKFLOW_MAX_NODE_EXECUTIONS = 200;
+export const WORKFLOW_MAX_NODE_EXECUTIONS_LIMIT = 1_000;
+/** Bounds for a wait node: a minute is the shortest pause the 10-second
+ * tick can honour meaningfully, a day is the longest a run should sit idle
+ * — past that, a schedule is the right tool. */
+export const WORKFLOW_WAIT_MINUTES_MIN = 1;
+export const WORKFLOW_WAIT_MINUTES_MAX = 1_440;
+/** Shortest interval a continuous schedule may fire on: below this the run
+ * would be re-armed faster than a single bot turn usually finishes. */
+export const WORKFLOW_INTERVAL_MINUTES_MIN = 5;
 export const WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H = 24;
 /** A provider outage (5xx, a 404 from the provider's own backend, rate
  * limiting, a dropped connection, an engine process dying before it
@@ -75,7 +90,11 @@ export type WorkflowNode =
       fallbackBotId?: string;
     }
   | { kind: "approval"; id: string; prompt: string; expiresHours?: number; onExpire?: "approved" | "rejected" }
-  | { kind: "notify"; id: string; targetGroupId: string; template: string };
+  | { kind: "notify"; id: string; targetGroupId: string; template: string }
+  /** A pause: no bot, no thread — the run sits on `waitUntil` and the
+   * engine's tick moves it on. This is what makes a continuous cycle
+   * (`… → wait → entry`) idle between laps instead of spinning. */
+  | { kind: "wait"; id: string; minutes: number };
 
 export interface WorkflowEdge {
   from: string;
@@ -83,10 +102,37 @@ export interface WorkflowEdge {
   to: string;
 }
 
-/** Structurally identical to a routine's schedule so the engine can borrow
- * the routine scheduler's occurrence math: local timezone, `daily` at HH:MM
- * on the given weekdays (0 = Sunday), `once` at an epoch-ms instant. */
-export type WorkflowSchedule = { type: "daily"; time: string; weekdays: number[] } | { type: "once"; at: number };
+/** A daily window of wall-clock time (local timezone) on the given weekdays
+ * (0 = Sunday; absent means every day). `start` after `end` wraps past
+ * midnight ("22:00" to "06:00"); the weekday tested is the instant's own. */
+export interface WorkflowActiveHours {
+  start: string;
+  end: string;
+  weekdays?: number[];
+}
+
+/** The calendar shapes are structurally identical to a routine's schedule so
+ * the engine can borrow the routine scheduler's occurrence math: local
+ * timezone, `daily` at HH:MM on the given weekdays (0 = Sunday), `once` at an
+ * epoch-ms instant. */
+export type WorkflowCalendarSchedule =
+  | { type: "daily"; time: string; weekdays: number[] }
+  | { type: "once"; at: number };
+
+/** The continuous shape: the engine is the valve. Whenever the workflow has
+ * no live run, the next one is armed `minutes` after the last run ENDED (or
+ * after now, if it never ran), and only inside `activeHours` when given —
+ * outside the window the arm lands on the next window's start. There is no
+ * calendar slot to miss, so a computer that was asleep simply fires once on
+ * waking; and a run started by hand or by a webhook pushes the next armed
+ * run out, since the clock measures idleness, not the calendar. */
+export type WorkflowIntervalSchedule = {
+  type: "interval";
+  minutes: number;
+  activeHours?: WorkflowActiveHours;
+};
+
+export type WorkflowSchedule = WorkflowCalendarSchedule | WorkflowIntervalSchedule;
 
 /** Webhooks are not listed here: a webhook owns its link to a workflow
  * (`workflowId` on the webhook), so a workflow has nothing to keep in sync. */
@@ -133,8 +179,11 @@ export type WorkflowRunStatus = "queued" | "running" | "waiting-approval" | "com
 export type WorkflowRunTrigger = "manual" | "schedule" | "webhook";
 
 /** Why the engine is calling notifyUser: a run paused on a terminal failure,
- * an approval gate opened, or that gate's single reminder. */
-export type WorkflowNotificationKind = "failed" | "approval" | "reminder";
+ * an approval gate opened, that gate's single reminder, or a continuous
+ * cycle that COMPLETED because its execution cap closed the valve — a run
+ * that ends after hundreds of bot turns is an event to see even when it is
+ * not a failure. */
+export type WorkflowNotificationKind = "failed" | "approval" | "reminder" | "cap-reached";
 
 export interface WorkflowNodeResult {
   nodeId: string;
@@ -228,6 +277,17 @@ export interface WorkflowRun {
   approvalRequestedAt?: number;
   /** Set once the gate's single mid-window reminder went out (engine bookkeeping). */
   approvalRemindedAt?: number;
+  /** When the current wait node's pause ends (engine bookkeeping). A run
+   * carrying this is parked, not stranded: the tick advances it once the
+   * instant passes, and a restart changes nothing because it is persisted.
+   * Already moved into the interval trigger's active window when there is
+   * one, so the instant the UI shows is the one the run will move at. */
+  waitUntil?: number;
+  /** When the current wait began (engine bookkeeping): the receipt's
+   * startedAt for the step, kept apart from `dispatchedAt` so the timeout
+   * sweep never sees a wait as a dispatch, and persisted rather than
+   * derived from the node's minutes — which may be edited mid-pause. */
+  waitStartedAt?: number;
   input: string;
   nodeResults: WorkflowNodeResult[];
   error?: string;
@@ -257,7 +317,17 @@ export function nodeOutcomes(node: WorkflowNode): string[] {
       return [...WORKFLOW_APPROVAL_OUTCOMES];
     case "notify":
       return [WORKFLOW_NOTIFY_OUTCOME];
+    case "wait":
+      return [WORKFLOW_WAIT_OUTCOME];
   }
+}
+
+/** Whether a node's execution counts against `maxNodeExecutions`. Only bot
+ * work does: an agent turn or a human gate. A wait is idle time and a notify
+ * is one synchronous post — neither can run away on its own, and counting
+ * them would make the cap bite a slow continuous cycle for pausing. */
+export function countsTowardExecutionCap(kind: WorkflowNode["kind"]): boolean {
+  return kind === "agent" || kind === "approval";
 }
 
 /** Two 32-bit FNV-1a passes with different multipliers, hex-joined: a
@@ -340,7 +410,8 @@ export interface WorkflowIssue {
     | "missing-capability"
     | "fallback-same-bot"
     | "fallback-missing-bot"
-    | "fallback-missing-capability";
+    | "fallback-missing-capability"
+    | "cycle-without-wait";
   nodeId?: string;
   message: string;
 }
@@ -508,8 +579,13 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
   const badNumber = (message: string, nodeId?: string) => {
     issues.push({ severity: "error", code: "bad-numbers", ...(nodeId === undefined ? {} : { nodeId }), message });
   };
-  if (workflow.maxNodeExecutions !== undefined && !whole(workflow.maxNodeExecutions, 1)) {
-    badNumber("maxNodeExecutions must be a whole number of at least 1.");
+  // The cap is bounded above as well: it is the last defence against a hot
+  // loop, and a value in the millions is a cap in name only.
+  if (
+    workflow.maxNodeExecutions !== undefined &&
+    (!whole(workflow.maxNodeExecutions, 1) || workflow.maxNodeExecutions > WORKFLOW_MAX_NODE_EXECUTIONS_LIMIT)
+  ) {
+    badNumber(`maxNodeExecutions must be a whole number from 1 to ${WORKFLOW_MAX_NODE_EXECUTIONS_LIMIT}.`);
   }
   // The outage knobs feed a backoff clock: a zero cap is a busy loop, a
   // zero horizon gives up on the first hiccup — neither is "waiting".
@@ -537,6 +613,16 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
       }
     } else if (node.kind === "approval" && node.expiresHours !== undefined && !positive(node.expiresHours)) {
       badNumber(`Node "${node.id}" expiresHours must be a positive number.`, node.id);
+    } else if (
+      node.kind === "wait" &&
+      (!whole(node.minutes, WORKFLOW_WAIT_MINUTES_MIN) || node.minutes > WORKFLOW_WAIT_MINUTES_MAX)
+    ) {
+      // Whole minutes: the tick is coarser than a second anyway, and a
+      // fractional pause would only look precise.
+      badNumber(
+        `Node "${node.id}" minutes must be a whole number from ${WORKFLOW_WAIT_MINUTES_MIN} to ${WORKFLOW_WAIT_MINUTES_MAX}.`,
+        node.id,
+      );
     }
   }
 
@@ -548,24 +634,48 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
     const badSchedule = (message: string) => {
       issues.push({ severity: "error", code: "bad-schedule", message });
     };
-    if (schedule.type === "daily") {
-      if (typeof schedule.time !== "string" || !WORKFLOW_SCHEDULE_TIME_RE.test(schedule.time)) {
-        badSchedule("Schedule time must be HH:MM (24-hour).");
-      }
-      const weekdays: unknown = schedule.weekdays;
+    // Shared by the daily schedule and an interval's active window; an
+    // absent list means "every day" only where the caller says so.
+    const checkWeekdays = (weekdays: unknown, what: string) => {
       if (!Array.isArray(weekdays) || weekdays.length === 0) {
-        badSchedule("Schedule needs at least one weekday.");
+        badSchedule(`${what} needs at least one weekday.`);
       } else if (!weekdays.every((day) => whole(day, 0) && (day as number) <= 6)) {
-        badSchedule("Schedule weekdays must be whole numbers from 0 (Sunday) to 6 (Saturday).");
+        badSchedule(`${what} weekdays must be whole numbers from 0 (Sunday) to 6 (Saturday).`);
       } else if (new Set(weekdays).size !== weekdays.length) {
-        badSchedule("Schedule weekdays must not repeat.");
+        badSchedule(`${what} weekdays must not repeat.`);
       }
+    };
+    const isClockTime = (value: unknown): value is string =>
+      typeof value === "string" && WORKFLOW_SCHEDULE_TIME_RE.test(value);
+    if (schedule.type === "daily") {
+      if (!isClockTime(schedule.time)) badSchedule("Schedule time must be HH:MM (24-hour).");
+      checkWeekdays(schedule.weekdays, "Schedule");
     } else if (schedule.type === "once") {
       if (typeof schedule.at !== "number" || !Number.isFinite(schedule.at)) {
         badSchedule("A one-time schedule needs a finite timestamp.");
       }
+    } else if (schedule.type === "interval") {
+      if (!whole(schedule.minutes, WORKFLOW_INTERVAL_MINUTES_MIN)) {
+        badSchedule(`Interval must be a whole number of at least ${WORKFLOW_INTERVAL_MINUTES_MIN} minutes.`);
+      }
+      const hours: unknown = schedule.activeHours;
+      if (hours !== undefined) {
+        if (typeof hours !== "object" || hours === null || Array.isArray(hours)) {
+          badSchedule("Active hours must be an object with start and end times.");
+        } else {
+          const window = hours as Partial<WorkflowActiveHours>;
+          if (!isClockTime(window.start) || !isClockTime(window.end)) {
+            badSchedule("Active hours start and end must be HH:MM (24-hour).");
+          } else if (window.start === window.end) {
+            // Neither "always" nor "never" is a window; an author who wants
+            // no window leaves activeHours out.
+            badSchedule("Active hours start and end must differ.");
+          }
+          if (window.weekdays !== undefined) checkWeekdays(window.weekdays, "Active hours");
+        }
+      }
     } else {
-      badSchedule("Schedule type must be daily or once.");
+      badSchedule("Schedule type must be daily, once or interval.");
     }
   }
 
@@ -689,6 +799,37 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
           message: `Node "${node.id}" is unreachable from the entry node.`,
         });
       }
+    }
+
+    // A loop back to the entry is how a workflow runs continuously, and it
+    // is legal — but a lap with no wait node in it re-dispatches the entry
+    // the instant the last node finishes, and the only thing that stops that
+    // hot loop is the execution cap. A warning, not an error: a review loop
+    // that happens to pass through the entry is a real shape. Walking the
+    // graph with every wait node removed is the test: if the entry can still
+    // reach itself, some lap has no pause in it.
+    const waitless = new Set(workflow.nodes.filter((node) => node.kind === "wait").map((node) => node.id));
+    const seen = new Set<string>();
+    // An entry that is itself a wait node pauses every lap by definition.
+    const stack = waitless.has(workflow.entryNodeId) ? [] : [...(adjacency.get(workflow.entryNodeId) ?? [])];
+    let hotLoop = false;
+    while (stack.length > 0 && !hotLoop) {
+      const current = stack.pop()!;
+      if (current === workflow.entryNodeId) {
+        hotLoop = true;
+        break;
+      }
+      if (seen.has(current) || waitless.has(current)) continue;
+      seen.add(current);
+      stack.push(...(adjacency.get(current) ?? []));
+    }
+    if (hotLoop) {
+      issues.push({
+        severity: "warning",
+        code: "cycle-without-wait",
+        nodeId: workflow.entryNodeId,
+        message: `The workflow loops back to its entry node "${workflow.entryNodeId}" with no wait node on the way; add one so the cycle idles between laps instead of running hot until the execution cap.`,
+      });
     }
   }
 

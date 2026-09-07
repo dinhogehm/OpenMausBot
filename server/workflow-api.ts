@@ -13,6 +13,7 @@ import {
   validateWorkflow,
   WORKFLOW_APPROVAL_OUTCOMES,
   WORKFLOW_CAPABILITIES,
+  WORKFLOW_INTERVAL_MINUTES_MIN,
   WORKFLOW_SCHEDULE_TIME_RE,
   type BotCapabilities,
   type Workflow,
@@ -99,7 +100,14 @@ const notifyNodeSchema = z.object({
   targetGroupId: id,
   template: longText,
 });
-const nodeSchema = z.discriminatedUnion("kind", [agentNodeSchema, approvalNodeSchema, notifyNodeSchema]);
+const waitNodeSchema = z.object({
+  kind: z.literal("wait"),
+  id,
+  // Range is the validator's (bad-numbers): a draft with a wild pause still
+  // saves and paints its badge, as every other numeric knob does.
+  minutes: z.number().finite(),
+});
+const nodeSchema = z.discriminatedUnion("kind", [agentNodeSchema, approvalNodeSchema, notifyNodeSchema, waitNodeSchema]);
 const edgeSchema = z.object({ from: id, outcome: outcomeName, to: id });
 const layoutSchema = z.record(id, z.object({ x: z.number().finite(), y: z.number().finite() }));
 const triggersSchema = z.object({
@@ -111,6 +119,19 @@ const triggersSchema = z.object({
         weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
       }),
       z.object({ type: z.literal("once"), at: z.number().finite() }),
+      // Same stance as daily: a window the scheduler could not honour is
+      // refused at the door, and so is an interval too short to arm.
+      z.object({
+        type: z.literal("interval"),
+        minutes: z.number().int().min(WORKFLOW_INTERVAL_MINUTES_MIN),
+        activeHours: z
+          .object({
+            start: z.string().regex(WORKFLOW_SCHEDULE_TIME_RE, "must be HH:MM (24-hour)"),
+            end: z.string().regex(WORKFLOW_SCHEDULE_TIME_RE, "must be HH:MM (24-hour)"),
+            weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
+          })
+          .optional(),
+      }),
     ])
     .optional(),
 });
@@ -145,6 +166,7 @@ type SameKeys<A, B> = Exact<keyof A, keyof B>;
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
 type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
 type NotifyNode = Extract<WorkflowNode, { kind: "notify" }>;
+type WaitNode = Extract<WorkflowNode, { kind: "wait" }>;
 type Schedule = NonNullable<WorkflowTriggers["schedule"]>;
 type SchemaSchedule = NonNullable<z.infer<typeof triggersSchema>["schedule"]>;
 type ProviderOutage = NonNullable<Workflow["providerOutage"]>;
@@ -153,11 +175,19 @@ const _workflowKeys: SameKeys<z.infer<typeof workflowInputSchema>, WorkflowInput
 const _agentKeys: SameKeys<z.infer<typeof agentNodeSchema>, AgentNode> = true;
 const _approvalKeys: SameKeys<z.infer<typeof approvalNodeSchema>, ApprovalNode> = true;
 const _notifyKeys: SameKeys<z.infer<typeof notifyNodeSchema>, NotifyNode> = true;
+const _waitKeys: SameKeys<z.infer<typeof waitNodeSchema>, WaitNode> = true;
 const _edgeKeys: SameKeys<z.infer<typeof edgeSchema>, WorkflowEdge> = true;
 const _triggerKeys: SameKeys<z.infer<typeof triggersSchema>, WorkflowTriggers> = true;
 const _dailyKeys: SameKeys<Extract<SchemaSchedule, { type: "daily" }>, Extract<Schedule, { type: "daily" }>> = true;
 const _onceKeys: SameKeys<Extract<SchemaSchedule, { type: "once" }>, Extract<Schedule, { type: "once" }>> = true;
 const _outageKeys: SameKeys<z.infer<typeof providerOutageSchema>, ProviderOutage> = true;
+type IntervalSchedule = Extract<Schedule, { type: "interval" }>;
+type SchemaInterval = Extract<SchemaSchedule, { type: "interval" }>;
+const _intervalKeys: SameKeys<SchemaInterval, IntervalSchedule> = true;
+const _activeHoursKeys: SameKeys<
+  NonNullable<SchemaInterval["activeHours"]>,
+  NonNullable<IntervalSchedule["activeHours"]>
+> = true;
 void [
   _schemaMatchesModel,
   _workflowKeys,
@@ -169,6 +199,9 @@ void [
   _dailyKeys,
   _onceKeys,
   _outageKeys,
+  _waitKeys,
+  _intervalKeys,
+  _activeHoursKeys,
 ];
 
 /** JSON clients say "no value" with `null`; the model and the validator

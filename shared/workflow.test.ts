@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   capabilityIssues,
+  countsTowardExecutionCap,
   missingCapabilities,
+  nodeOutcomes,
   parseWorkflowOutcome,
   validateWorkflow,
   WORKFLOW_CAPABILITIES,
   WORKFLOW_FAIL_OUTCOME,
   workflowOutageWaitMessage,
+  WORKFLOW_MAX_NODE_EXECUTIONS,
   workflowRoutingFingerprint,
   type BotCapabilities,
   type Workflow,
@@ -447,6 +450,118 @@ describe("validateWorkflow", () => {
       expect(bad({ type: "once", at }), String(at)).toEqual([error]);
     }
     expect(bad({ type: "weekly", time: "09:00" })).toEqual([error]);
+  });
+
+  it("flags an interval too short to arm or an active window the scheduler could not honour", () => {
+    const bad = (schedule: unknown) =>
+      validateWorkflow(wf({ triggers: { schedule } as Workflow["triggers"] })).filter((issue) => issue.code === "bad-schedule");
+    const error = expect.objectContaining({ severity: "error", code: "bad-schedule" });
+    expect(bad({ type: "interval", minutes: 5 })).toEqual([]);
+    expect(bad({ type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00" } })).toEqual([]);
+    expect(bad({ type: "interval", minutes: 60, activeHours: { start: "22:00", end: "06:00", weekdays: [1, 5] } })).toEqual([]);
+    for (const minutes of [4, 0, -5, 7.5, Number.NaN, "60"]) {
+      expect(bad({ type: "interval", minutes }), String(minutes)).toEqual([error]);
+    }
+    expect(bad({ type: "interval", minutes: 1 })[0]?.message).toMatch(/at least 5 minutes/);
+    for (const activeHours of [
+      null,
+      "09:00-18:00",
+      [],
+      { start: "9:00", end: "18:00" },
+      { start: "09:00" },
+      { start: "09:00", end: "09:00" },
+      { start: "09:00", end: "18:00", weekdays: [] },
+      { start: "09:00", end: "18:00", weekdays: [7] },
+      { start: "09:00", end: "18:00", weekdays: [1, 1] },
+    ]) {
+      expect(bad({ type: "interval", minutes: 30, activeHours }), JSON.stringify(activeHours)).toEqual([error]);
+    }
+    expect(bad({ type: "interval", minutes: 30, activeHours: { start: "09:00", end: "09:00" } })[0]?.message).toMatch(
+      /differ/,
+    );
+  });
+});
+
+describe("wait nodes and the execution cap", () => {
+  const paced = (minutes: unknown): Workflow =>
+    wf({
+      entryNodeId: "code",
+      nodes: [
+        ...wf().nodes,
+        { kind: "wait", id: "pause", minutes } as unknown as Workflow["nodes"][number],
+      ],
+      edges: [
+        { from: "code", outcome: "done", to: "review" },
+        { from: "review", outcome: "approved", to: "pause" },
+        { from: "review", outcome: "rejected", to: "code" },
+        { from: "pause", outcome: "elapsed", to: "code" },
+      ],
+    });
+  const errors = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.severity === "error");
+
+  it("a wait node routes on exactly one outcome, elapsed, and is not bot work", () => {
+    expect(nodeOutcomes({ kind: "wait", id: "pause", minutes: 30 })).toEqual(["elapsed"]);
+    expect(countsTowardExecutionCap("wait")).toBe(false);
+    expect(countsTowardExecutionCap("notify")).toBe(false);
+    expect(countsTowardExecutionCap("agent")).toBe(true);
+    expect(countsTowardExecutionCap("approval")).toBe(true);
+  });
+
+  it("accepts a well-formed wait node and flags a pause outside 1..1440 whole minutes", () => {
+    expect(errors(paced(30))).toEqual([]);
+    expect(errors(paced(1))).toEqual([]);
+    expect(errors(paced(1_440))).toEqual([]);
+    for (const minutes of [0, 1_441, 2.5, -1, Number.NaN, "30", undefined]) {
+      expect(errors(paced(minutes)), String(minutes)).toEqual([
+        expect.objectContaining({ code: "bad-numbers", nodeId: "pause" }),
+      ]);
+    }
+    // An edge on an outcome a wait can never produce is the usual unknown-outcome error.
+    const miswired = paced(30);
+    miswired.edges = miswired.edges.map((edge) => (edge.from === "pause" ? { ...edge, outcome: "done" } : edge));
+    expect(errors(miswired).map((issue) => issue.code)).toEqual(["unknown-outcome", "unwired-outcome"]);
+  });
+
+  it("bounds maxNodeExecutions at 1000", () => {
+    const bad = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-numbers");
+    expect(bad(wf({ maxNodeExecutions: 1_000 }))).toEqual([]);
+    expect(bad(wf({ maxNodeExecutions: 1_001 }))).toEqual([expect.objectContaining({ severity: "error" })]);
+    expect(bad(wf({ maxNodeExecutions: 1_001 }))[0]?.message).toMatch(/1 to 1000/);
+    expect(WORKFLOW_MAX_NODE_EXECUTIONS).toBe(200);
+  });
+
+  it("warns, never errors, about a loop back to the entry with no wait node on it", () => {
+    const hot = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "cycle-without-wait");
+    // wf(): review --approved/rejected--> code (the entry), no pause anywhere.
+    expect(hot(wf())).toEqual([
+      expect.objectContaining({ severity: "warning", nodeId: "code", message: expect.stringMatching(/wait node/) }),
+    ]);
+    // paced(): the approved lap pauses, but the rejected lap still comes straight back.
+    expect(hot(paced(30))).toHaveLength(1);
+    // Every lap through the entry pauses: silent.
+    const cool = paced(30);
+    cool.edges = cool.edges.map((edge) => (edge.outcome === "rejected" ? { ...edge, to: "pause" } : edge));
+    expect(hot(cool)).toEqual([]);
+    // A cycle that does not pass through the entry is a review loop, not a hot loop.
+    const sideLoop = wf({
+      entryNodeId: "plan",
+      nodes: [{ kind: "agent", id: "plan", botId: "b0", instructions: "plan", outcomes: ["done"] }, ...wf().nodes],
+      edges: [
+        { from: "plan", outcome: "done", to: "code" },
+        { from: "code", outcome: "done", to: "review" },
+        { from: "review", outcome: "approved", to: "code" },
+        { from: "review", outcome: "rejected", to: "code" },
+      ],
+    });
+    expect(hot(sideLoop)).toEqual([]);
+    // The entry itself is a wait: every lap pauses, so never a hot loop.
+    const pausedEntry = paced(30);
+    pausedEntry.entryNodeId = "pause";
+    expect(hot(pausedEntry)).toEqual([]);
+    // No cycle at all: silent.
+    expect(hot(wf({ edges: [{ from: "code", outcome: "done", to: "review" }] }))).toEqual([]);
+    // A dead edge (unknown outcome) cannot carry a run, so it cannot make a hot loop.
+    expect(hot(wf({ edges: [{ from: "code", outcome: "done", to: "review" }, { from: "review", outcome: "nope", to: "code" }] }))).toEqual([]);
   });
 });
 

@@ -549,20 +549,140 @@ describe("WorkflowEngine graph advance", () => {
     expect(persisted.nodeResults.map((result) => result.outcome)).toEqual(["done", "shipped"]);
   });
 
-  it("executes a declared cycle and kills the run at the node execution cap", () => {
+  it("executes a declared cycle and, at the cap, fails a review loop that never converged even at the entry", () => {
     const h = harness();
     const workflow = h.store.create(loop());
     const run = h.engine.startRun(workflow.id, "go", "manual");
+    const second = h.engine.startRun(workflow.id, "again", "manual");
+    expect(second.status).toBe("queued");
     h.completeTurn("thread-1", envelope("done")); // code #1
     h.completeTurn("thread-2", envelope("retry")); // test #1 -> back to code
     h.completeTurn("thread-3", envelope("done")); // code #2
-    h.completeTurn("thread-4", envelope("retry")); // test #2 -> cap reached
+    h.setNow(9_000);
+    h.completeTurn("thread-4", envelope("retry")); // test #2 -> cap reached before code (the entry)
+
+    const persisted = h.store.getRun(run.id)!;
+    // The edge led back to the entry, but from a BOT step: test rejected the
+    // code again, which is not a finished lap. Failed, announced, resumable
+    // at the refused node.
+    expect(persisted.status).toBe("failed");
+    expect(persisted.error).toBe('execution cap of 4 bot steps reached before node "code"');
+    expect(persisted.endedAt).toBe(9_000);
+    expect(persisted.currentNodeId).toBe("code");
+    expect(persisted.nodeResults).toHaveLength(4);
+    expect(h.notifications).toEqual([
+      { runId: run.id, message: expect.stringMatching(/at node "code": execution cap of 4/), kind: "failed" },
+    ]);
+    // The workflow's slot is free again: the queued run is promoted.
+    expect(h.store.getRun(second.id)!.status).toBe("running");
+    expect(h.dispatches).toHaveLength(5); // four for the first run, the queued run's entry
+    expect(h.dispatches[4]).toMatchObject({ botId: "coder" });
+  });
+
+  it("at the cap, completes a continuous cycle whose lap closed through a notify, and tells the operator", () => {
+    const h = harness();
+    // triage --done--> ping (notify) --sent--> triage: one bot step per lap, cap 2.
+    const workflow = h.store.create({
+      name: "Continuous",
+      entryNodeId: "triage",
+      nodes: [
+        { kind: "agent", id: "triage", botId: "triager", instructions: "Look.", outcomes: ["done"] },
+        { kind: "notify", id: "ping", targetGroupId: "grp-1", template: "lap done: {{summary}}" },
+      ],
+      edges: [
+        { from: "triage", outcome: "done", to: "ping" },
+        { from: "ping", outcome: "sent", to: "triage" },
+      ],
+      layout: {},
+      maxNodeExecutions: 2,
+    });
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    const second = h.engine.startRun(workflow.id, "again", "manual");
+    h.completeTurn("thread-1", envelope("done", "lap one"));
+    h.setNow(9_000);
+    h.completeTurn("thread-2", envelope("done", "lap two")); // -> ping -> triage refused at the cap
+
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("completed");
+    expect(persisted.error).toBe('execution cap of 2 bot steps reached before node "triage"');
+    expect(persisted.endedAt).toBe(9_000);
+    expect(persisted.currentNodeId).toBe("ping"); // the last step that finished
+    expect(persisted.nodeResults.map((result) => result.nodeId)).toEqual(["triage", "ping", "triage", "ping"]);
+    expect(h.posts).toHaveLength(2); // the closing notify still posted
+    expect(h.notifications).toEqual([
+      {
+        runId: run.id,
+        message: 'Workflow "Continuous" run completed: execution cap of 2 bot steps reached before node "triage"',
+        kind: "cap-reached",
+      },
+    ]);
+    expect(h.store.getRun(second.id)!.status).toBe("running");
+    expect(h.dispatches).toHaveLength(3);
+  });
+
+  it("at the cap, fails the run when the lap is cut mid-path rather than at the entry", () => {
+    const h = harness();
+    // plan --done--> code --done--> test --retry--> code: the loop never passes the entry.
+    const workflow = h.store.create({
+      ...loop(),
+      entryNodeId: "plan",
+      nodes: [
+        { kind: "agent", id: "plan", botId: "planner", instructions: "Plan.", outcomes: ["done"] },
+        ...loop().nodes,
+      ],
+      edges: [{ from: "plan", outcome: "done", to: "code" }, ...loop().edges],
+      maxNodeExecutions: 4,
+    });
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.completeTurn("thread-1", envelope("done")); // plan
+    h.completeTurn("thread-2", envelope("done")); // code #1
+    h.completeTurn("thread-3", envelope("retry")); // test #1
+    h.completeTurn("thread-4", envelope("done")); // code #2 -> cap reached before test
 
     const persisted = h.store.getRun(run.id)!;
     expect(persisted.status).toBe("failed");
-    expect(persisted.error).toBe("node execution cap reached");
+    expect(persisted.error).toBe('execution cap of 4 bot steps reached before node "test"');
+    // The receipt points at the refused node, where a resume picks up.
+    expect(persisted.currentNodeId).toBe("test");
     expect(persisted.nodeResults).toHaveLength(4);
-    expect(h.dispatches).toHaveLength(4); // the fifth dispatch never happened
+    expect(h.dispatches).toHaveLength(4);
+    expect(h.notifications).toEqual([
+      { runId: run.id, message: expect.stringMatching(/at node "test": execution cap of 4/), kind: "failed" },
+    ]);
+  });
+
+  it("counts only agent and approval steps toward the cap, so a notify or wait after the last one still runs", async () => {
+    const h = harness();
+    // plan --done--> ping (notify) --sent--> pause (wait) --elapsed--> ship, cap 1.
+    const workflow = h.store.create({
+      ...notifying(),
+      nodes: [...notifying().nodes, { kind: "wait", id: "pause", minutes: 1 }],
+      edges: [
+        { from: "plan", outcome: "done", to: "ping" },
+        { from: "ping", outcome: "sent", to: "pause" },
+        { from: "pause", outcome: "elapsed", to: "ship" },
+      ],
+      maxNodeExecutions: 1,
+    });
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(2_000);
+    h.completeTurn("thread-1", envelope("done", "planned"));
+    // plan spent the whole budget, yet the notify posted and the wait parked.
+    expect(h.posts).toHaveLength(1);
+    expect(h.store.getRun(run.id)).toMatchObject({ status: "running", currentNodeId: "pause", waitUntil: 62_000 });
+
+    h.setNow(62_000);
+    await h.engine.tick();
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.nodeResults.map((result) => `${result.nodeId}:${result.outcome}`)).toEqual([
+      "plan:done",
+      "ping:sent",
+      "pause:elapsed",
+    ]);
+    // ship is bot work: the cap refuses it, mid-path, so the run fails there.
+    expect(persisted).toMatchObject({ status: "failed", currentNodeId: "ship" });
+    expect(persisted.error).toBe('execution cap of 1 bot steps reached before node "ship"');
+    expect(h.dispatches).toHaveLength(1);
   });
 
   it("fails the run when the turn does not complete ok and the node has no retries", () => {
@@ -2798,5 +2918,575 @@ describe("WorkflowEngine bot capabilities", () => {
     expect(persisted.currentNodeId).toBe("deploy");
     expect(persisted.error).toMatch(/not allowed to deploy/);
     expect(h.dispatches).toHaveLength(1);
+  });
+});
+
+describe("WorkflowEngine wait node", () => {
+  /** plan --done--> pause (wait 5 min) --elapsed--> ship. */
+  const pausing = (minutes = 5, overrides: Partial<WorkflowInput> = {}): WorkflowInput => ({
+    name: "Paced",
+    entryNodeId: "plan",
+    nodes: [
+      { kind: "agent", id: "plan", botId: "planner", instructions: "Draft.", outcomes: ["done"] },
+      { kind: "wait", id: "pause", minutes },
+      { kind: "agent", id: "ship", botId: "shipper", instructions: "Ship.", outcomes: ["shipped"] },
+    ],
+    edges: [
+      { from: "plan", outcome: "done", to: "pause" },
+      { from: "pause", outcome: "elapsed", to: "ship" },
+    ],
+    layout: {},
+    ...overrides,
+  });
+  const MIN = 60_000;
+
+  it("parks the run on waitUntil with no task or turn, and advances only once the instant passes", async () => {
+    const h = harness();
+    const workflow = h.store.create(pausing());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(10_000);
+    h.completeTurn("thread-1", envelope("done", "planned"));
+
+    const parked = h.store.getRun(run.id)!;
+    expect(parked).toMatchObject({ status: "running", currentNodeId: "pause", waitUntil: 10_000 + 5 * MIN });
+    expect(parked.currentThreadId).toBeUndefined();
+    expect(parked.dispatchedAt).toBeUndefined();
+    expect(parked.nextAttemptAt).toBeUndefined();
+    expect(h.tasks).toHaveLength(1);
+    expect(h.reload().getRun(run.id)?.waitUntil).toBe(10_000 + 5 * MIN);
+
+    // Early ticks change nothing: not stranded, not timed out, not due.
+    h.setNow(10_000 + 5 * MIN - 1);
+    await h.engine.tick();
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "pause", waitUntil: 10_000 + 5 * MIN });
+    expect(h.dispatches).toHaveLength(1);
+
+    h.setNow(10_000 + 5 * MIN);
+    await h.engine.tick();
+    const advanced = h.store.getRun(run.id)!;
+    expect(advanced.waitUntil).toBeUndefined();
+    expect(advanced.nodeResults[1]).toEqual({
+      nodeId: "pause",
+      outcome: "elapsed",
+      summary: "Waited 5 min",
+      startedAt: 10_000,
+      endedAt: 10_000 + 5 * MIN,
+    });
+    expect(advanced.currentNodeId).toBe("ship");
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.dispatches[1]!.prompt).toContain("- pause: elapsed — Waited 5 min");
+  });
+
+  it("survives a restart: the persisted instant is neither restarted nor lost", async () => {
+    const h = harness();
+    const workflow = h.store.create(pausing());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(10_000);
+    h.completeTurn("thread-1", envelope("done"));
+    const due = h.store.getRun(run.id)!.waitUntil!;
+
+    const restarted = h.reloadEngine();
+    h.setNow(due - 1);
+    await restarted.engine.tick();
+    // recoverStranded left it alone: a re-dispatch would have pushed waitUntil out.
+    expect(restarted.store.getRun(run.id)).toMatchObject({ currentNodeId: "pause", waitUntil: due });
+    expect(restarted.dispatches).toHaveLength(0);
+
+    h.setNow(due);
+    await restarted.engine.tick();
+    expect(restarted.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+    expect(restarted.dispatches).toHaveLength(1);
+    expect(restarted.dispatches[0]).toMatchObject({ botId: "shipper" });
+  });
+
+  it("is a live run for scheduling and queueing purposes while parked", () => {
+    const h = harness();
+    const workflow = h.store.create(pausing());
+    h.engine.startRun(workflow.id, "go", "manual");
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.engine.startRun(workflow.id, "again", "manual").status).toBe("queued");
+  });
+
+  it("cancel clears the wait and promotes the next queued run", async () => {
+    const h = harness();
+    const workflow = h.store.create(pausing());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    const second = h.engine.startRun(workflow.id, "again", "manual");
+    h.completeTurn("thread-1", envelope("done"));
+    h.setNow(20_000);
+    const cancelled = await h.engine.cancelRun(run.id);
+    expect(cancelled).toMatchObject({ status: "cancelled", endedAt: 20_000 });
+    expect(cancelled.waitUntil).toBeUndefined();
+    expect(h.interrupts).toEqual([]); // nothing was in flight
+    expect(h.store.getRun(second.id)!.status).toBe("running");
+    // The stale instant never fires for a cancelled run.
+    h.setNow(20_000 + 10 * MIN);
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)!.status).toBe("cancelled");
+    expect(h.store.getRun(run.id)!.nodeResults).toHaveLength(1);
+  });
+
+  it("fails the run when the wait node was edited away before the pause ended", async () => {
+    const h = harness();
+    const workflow = h.store.create(pausing());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.completeTurn("thread-1", envelope("done"));
+    const due = h.store.getRun(run.id)!.waitUntil!;
+    h.store.update(workflow.id, { ...pipeline() });
+    h.setNow(due);
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({
+      status: "failed",
+      error: "the workflow was deleted or edited under this run and its wait node is gone",
+    });
+    expect(h.store.getRun(run.id)!.waitUntil).toBeUndefined();
+    expect(h.notifications).toHaveLength(1);
+  });
+
+  it("re-reads the node's minutes mid-pause from the persisted start, in both directions", async () => {
+    const h = harness();
+    const workflow = h.store.create(pausing(5));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(10_000);
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)).toMatchObject({ waitStartedAt: 10_000, waitUntil: 10_000 + 5 * MIN });
+    // Lengthened while parked: still measured from the same start.
+    h.store.update(workflow.id, pausing(60));
+    h.setNow(10_000 + 5 * MIN);
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "pause", waitUntil: 10_000 + 60 * MIN });
+    // Shortened again: over at once.
+    h.store.update(workflow.id, pausing(2));
+    await h.engine.tick();
+    const advanced = h.store.getRun(run.id)!;
+    expect(advanced.nodeResults[1]).toMatchObject({ nodeId: "pause", startedAt: 10_000, endedAt: 10_000 + 5 * MIN, summary: "Waited 5 min" });
+    expect(advanced.waitStartedAt).toBeUndefined();
+  });
+
+  it("honours the interval trigger's active window: a pause ending at night resumes at the next window start", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7; // 2026-09-07
+    const window = { start: "09:00", end: "18:00", weekdays: [1, 2, 3, 4, 5] };
+    const workflow = h.store.create(
+      pausing(30, { triggers: { schedule: { type: "interval", minutes: 60, activeHours: window } } }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    // Friday 17:45 + 30 min lands at 18:15, outside the window: parked
+    // straight to Monday 09:00, which is what the timeline shows.
+    h.setNow(local(MONDAY + 4, 17, 45));
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)).toMatchObject({
+      currentNodeId: "pause",
+      waitStartedAt: local(MONDAY + 4, 17, 45),
+      waitUntil: local(MONDAY + 7, 9),
+    });
+    h.setNow(local(MONDAY + 5, 12)); // Saturday noon
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(1);
+    h.setNow(local(MONDAY + 7, 9));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+    expect(h.dispatches).toHaveLength(2);
+  });
+
+  it("re-reads the window when the pause ends, so one edited mid-pause holds the run until it opens", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7;
+    const workflow = h.store.create(pausing(30));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(local(MONDAY, 10));
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)?.waitUntil).toBe(local(MONDAY, 10, 30));
+    // A window that excludes the morning is added while the run is parked.
+    h.store.update(workflow.id, {
+      ...pausing(30),
+      triggers: { schedule: { type: "interval", minutes: 60, activeHours: { start: "12:00", end: "18:00" } } },
+    });
+    h.setNow(local(MONDAY, 10, 30));
+    await h.engine.tick();
+    // Held, and the receipt now names the instant it will actually move at.
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "pause", waitUntil: local(MONDAY, 12) });
+    expect(h.dispatches).toHaveLength(1);
+    h.setNow(local(MONDAY, 12));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+    expect(h.store.getRun(run.id)!.nodeResults[1]).toMatchObject({ startedAt: local(MONDAY, 10), summary: "Waited 120 min" });
+  });
+
+  it("a window removed or loosened mid-pause releases the run at the next tick, in both directions", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7;
+    const windowed = (activeHours?: { start: string; end: string }) =>
+      pausing(30, {
+        triggers: { schedule: { type: "interval", minutes: 60, ...(activeHours ? { activeHours } : {}) } },
+      });
+    const workflow = h.store.create(windowed({ start: "09:00", end: "18:00" }));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(local(MONDAY, 17, 45));
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)?.waitUntil).toBe(local(MONDAY + 1, 9)); // parked past 18:15
+
+    // The operator REMOVES the window at 18:00: the pause is 30 min from
+    // 17:45, so by 20:00 it is long over and the run must move now.
+    h.setNow(local(MONDAY, 18));
+    h.store.update(workflow.id, windowed());
+    h.setNow(local(MONDAY, 20));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+    expect(h.store.getRun(run.id)!.nodeResults[1]).toMatchObject({
+      startedAt: local(MONDAY, 17, 45),
+      endedAt: local(MONDAY, 20),
+      summary: "Waited 135 min",
+    });
+    expect(h.dispatches).toHaveLength(2);
+
+    // Loosened rather than removed: a window that now covers the evening
+    // releases it too, and the instant shown follows the recomputation.
+    const other = h.store.create(windowed({ start: "09:00", end: "18:00" }));
+    const second = h.engine.startRun(other.id, "go", "manual");
+    h.setNow(local(MONDAY + 1, 17, 45));
+    h.completeTurn("thread-3", envelope("done"));
+    expect(h.store.getRun(second.id)?.waitUntil).toBe(local(MONDAY + 2, 9));
+    h.store.update(other.id, windowed({ start: "09:00", end: "22:00" }));
+    h.setNow(local(MONDAY + 1, 18));
+    await h.engine.tick();
+    // Not yet due (18:15), but the receipt now says 18:15, not tomorrow.
+    expect(h.store.getRun(second.id)).toMatchObject({ currentNodeId: "pause", waitUntil: local(MONDAY + 1, 18, 15) });
+    h.setNow(local(MONDAY + 1, 18, 15));
+    await h.engine.tick();
+    expect(h.store.getRun(second.id)).toMatchObject({ currentNodeId: "ship" });
+  });
+
+  it("judges a pause that ended while the computer slept at the tick, not at the instant it ended", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7;
+    const workflow = h.store.create(
+      pausing(30, { triggers: { schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00" } } } }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(local(MONDAY, 17, 29));
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)?.waitUntil).toBe(local(MONDAY, 17, 59)); // inside the window
+    // The laptop sleeps through 17:59; the first tick lands at 22:00.
+    h.setNow(local(MONDAY, 22));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "pause", waitUntil: local(MONDAY + 1, 9) });
+    expect(h.dispatches).toHaveLength(1);
+    h.setNow(local(MONDAY + 1, 9));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+    expect(h.store.getRun(run.id)!.nodeResults[1]).toMatchObject({ startedAt: local(MONDAY, 17, 29), endedAt: local(MONDAY + 1, 9) });
+  });
+
+  it("a restart across the end of the window keeps the run parked until the window reopens", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7;
+    const workflow = h.store.create(
+      pausing(30, { triggers: { schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00" } } } }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(local(MONDAY, 17, 29));
+    h.completeTurn("thread-1", envelope("done"));
+    const restarted = h.reloadEngine();
+    h.setNow(local(MONDAY + 1, 3));
+    await restarted.engine.tick();
+    await restarted.engine.tick();
+    expect(restarted.store.getRun(run.id)).toMatchObject({ status: "running", currentNodeId: "pause", waitUntil: local(MONDAY + 1, 9) });
+    expect(restarted.dispatches).toHaveLength(0);
+    h.setNow(local(MONDAY + 1, 9));
+    await restarted.engine.tick();
+    expect(restarted.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+    expect(restarted.dispatches).toHaveLength(1);
+  });
+
+  it("a window tightened mid-pause holds a run whose instant had already been shown as due", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7;
+    const workflow = h.store.create(
+      pausing(30, { triggers: { schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00" } } } }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(local(MONDAY, 16));
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)?.waitUntil).toBe(local(MONDAY, 16, 30));
+    h.store.update(workflow.id, {
+      ...pausing(30),
+      triggers: { schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "16:15" } } },
+    });
+    h.setNow(local(MONDAY, 16, 30));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "pause", waitUntil: local(MONDAY + 1, 9) });
+    expect(h.dispatches).toHaveLength(1);
+    h.setNow(local(MONDAY + 1, 9));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+  });
+
+  it("fails, naming why, when a hand-edited window allows no weekday instead of sleeping forever", async () => {
+    const h = harness();
+    const workflow = h.store.create(pausing(5));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(10_000);
+    h.completeTurn("thread-1", envelope("done"));
+    // Bypasses the validator, as a hand edit of workflows.json would.
+    const internals = h.store as unknown as { workflows: Array<{ id: string; triggers?: unknown }> };
+    internals.workflows.find((candidate) => candidate.id === workflow.id)!.triggers = {
+      schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00", weekdays: [] } },
+    };
+    h.setNow(10_000 + 5 * MIN);
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({
+      status: "failed",
+      currentNodeId: "pause",
+      error: "the schedule's active hours allow no weekday, so this wait could never end",
+    });
+    expect(h.notifications).toEqual([
+      { runId: run.id, message: expect.stringMatching(/^Workflow "Paced" run failed at node "pause": the schedule's/), kind: "failed" },
+    ]);
+  });
+
+  it("ignores the window of a daily schedule: only an interval trigger carries one", async () => {
+    const h = harness({ nextOccurrence: () => null });
+    const workflow = h.store.create(
+      pausing(5, { triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1] } } }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(10_000);
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)?.waitUntil).toBe(10_000 + 5 * MIN);
+  });
+
+  it("never times out a parked wait, however long the pause", async () => {
+    const h = harness();
+    const workflow = h.store.create(pausing(1_440));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.completeTurn("thread-1", envelope("done"));
+    h.setNow(1_000 + 12 * HOUR);
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ status: "running", currentNodeId: "pause", attempt: 0 });
+  });
+});
+
+describe("WorkflowEngine interval schedule", () => {
+  const MIN = 60_000;
+  type ActiveHours = NonNullable<Extract<WorkflowSchedule, { type: "interval" }>["activeHours"]>;
+  const interval = (minutes = 30, activeHours?: ActiveHours, overrides: Partial<WorkflowInput> = {}): WorkflowInput =>
+    pipeline({
+      ...overrides,
+      triggers: { schedule: { type: "interval", minutes, ...(activeHours ? { activeHours } : {}) } },
+    });
+  /** An epoch instant at a local wall-clock time, so the window tests hold
+   * in any timezone the suite runs in. `day` is a Monday. */
+  const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+  const MONDAY = 7; // 2026-09-07 is a Monday
+
+  it("arms without the calendar scheduler, one interval after now when the workflow never ran", async () => {
+    const h = harness();
+    const workflow = h.store.create(interval(30));
+    h.setNow(10_000);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(10_000 + 30 * MIN);
+    expect(h.reload().get(workflow.id)?.nextRunAt).toBe(10_000 + 30 * MIN);
+    expect(h.store.listRuns()).toEqual([]);
+  });
+
+  it("fires once when due, disarms while the run is live, and re-arms from the instant the run ended", async () => {
+    const h = harness();
+    const workflow = h.store.create(interval(30));
+    h.setNow(10_000);
+    await h.engine.tick();
+    const due = h.store.get(workflow.id)!.nextRunAt!;
+    const advances: Array<{ value: number | null | undefined; dispatchesSoFar: number }> = [];
+    const setNextRunAt = h.store.setNextRunAt.bind(h.store);
+    vi.spyOn(h.store, "setNextRunAt").mockImplementation((id, value) => {
+      advances.push({ value, dispatchesSoFar: h.dispatches.length });
+      return setNextRunAt(id, value);
+    });
+
+    h.setNow(due);
+    await h.engine.tick();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ trigger: "schedule", status: "running", startedAt: due });
+    expect(runs[0]!.input).toBe(`Interval run armed for ${new Date(due).toISOString()}`);
+    // Disarmed BEFORE the dispatch — the double-fire guard.
+    expect(advances).toEqual([{ value: undefined, dispatchesSoFar: 0 }]);
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeUndefined();
+
+    // Live run: nothing is armed, nothing fires, tick after tick.
+    h.setNow(due + 5 * MIN);
+    await h.engine.tick();
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeUndefined();
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+
+    // The run ends at T; the next one is armed for T + 30 min, not from the
+    // tick that noticed.
+    h.setNow(due + 20 * MIN);
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(runs[0]!.id)).toMatchObject({ status: "completed", endedAt: due + 20 * MIN });
+    h.setNow(due + 25 * MIN);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(due + 50 * MIN);
+  });
+
+  it("holds the clock while a manual run is live and measures the interval from that run's end", async () => {
+    const h = harness();
+    const workflow = h.store.create(interval(30));
+    h.setNow(10_000);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(10_000 + 30 * MIN);
+
+    h.setNow(10_000 + 10 * MIN);
+    const manual = h.engine.startRun(workflow.id, "by hand", "manual");
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeUndefined();
+
+    // Past the old slot with the manual run still live: no second run.
+    h.setNow(10_000 + 40 * MIN);
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+
+    h.setNow(10_000 + 50 * MIN);
+    await h.engine.cancelRun(manual.id);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(10_000 + 80 * MIN);
+  });
+
+  it("does not fire twice across a restart, whether the restart lands before or after the slot", async () => {
+    const h = harness();
+    const workflow = h.store.create(interval(30));
+    h.setNow(10_000);
+    await h.engine.tick();
+    const due = h.store.get(workflow.id)!.nextRunAt!;
+
+    // Restart before the slot: the armed instant is on disk and fires once.
+    const first = h.reloadEngine();
+    h.setNow(due);
+    await first.engine.tick();
+    await first.engine.tick();
+    expect(first.store.listRuns(workflow.id)).toHaveLength(1);
+    expect(first.dispatches).toHaveLength(1);
+
+    // Restart after the slot, with the run live: still one run, still no clock.
+    const second = h.reloadEngine();
+    h.setNow(due + 5 * MIN);
+    await second.engine.tick();
+    expect(second.store.listRuns(workflow.id)).toHaveLength(1);
+    expect(second.store.get(workflow.id)?.nextRunAt).toBeUndefined();
+    // The restarted engine re-drove the orphaned entry dispatch (recoverStranded), once.
+    expect(second.dispatches).toHaveLength(1);
+  });
+
+  it("records no missed slot: a computer that slept through the interval simply fires once on waking", async () => {
+    const h = harness();
+    const workflow = h.store.create(interval(30));
+    h.setNow(10_000);
+    await h.engine.tick();
+    const due = h.store.get(workflow.id)!.nextRunAt!;
+    h.setNow(due + 2 * 24 * HOUR);
+    await h.engine.tick();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "running", trigger: "schedule" });
+    expect(h.notifications).toEqual([]);
+  });
+
+  it("outside the active window, arms for the next window start; inside it, the plain interval", async () => {
+    const h = harness();
+    const window = { start: "09:00", end: "18:00", weekdays: [1, 2, 3, 4, 5] };
+    const workflow = h.store.create(interval(30, window));
+    // Friday 20:00 → Monday 09:00.
+    h.setNow(local(MONDAY + 4, 20));
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(local(MONDAY + 7, 9));
+
+    // Fire it, end it Monday 10:00: the next arm is 10:30, inside the window.
+    h.setNow(local(MONDAY + 7, 9));
+    await h.engine.tick();
+    const run = h.store.listRuns(workflow.id)[0]!;
+    h.setNow(local(MONDAY + 7, 10));
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(run.id)?.status).toBe("completed");
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(local(MONDAY + 7, 10, 30));
+  });
+
+  it("a run that ends just before the window closes is re-armed for the next morning, not fired at night", async () => {
+    const h = harness();
+    const workflow = h.store.create(interval(30, { start: "09:00", end: "18:00" }));
+    h.setNow(local(MONDAY, 17));
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(local(MONDAY, 17, 30));
+    h.setNow(local(MONDAY, 17, 30));
+    await h.engine.tick();
+    const run = h.store.listRuns(workflow.id)[0]!;
+    h.setNow(local(MONDAY, 17, 45));
+    h.completeTurn("thread-1", envelope("done"));
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(run.id)?.status).toBe("completed");
+    await h.engine.tick();
+    // 18:15 is past the window: the next lap waits for 09:00 tomorrow.
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(local(MONDAY + 1, 9));
+    h.setNow(local(MONDAY, 23));
+    await h.engine.tick();
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+  });
+
+  it("a refused start leaves a failed receipt and backs off one interval rather than retrying every tick", async () => {
+    const h = harness();
+    const workflow = h.store.create(interval(30));
+    h.setNow(10_000);
+    await h.engine.tick();
+    const due = h.store.get(workflow.id)!.nextRunAt!;
+    // Break the graph under the armed schedule: a missing bot capability.
+    h.store.update(workflow.id, {
+      ...interval(30),
+      nodes: interval(30).nodes.map((node) => (node.kind === "agent" ? { ...node, requires: ["merge"] } : node)),
+    });
+    h.setNow(due);
+    await h.engine.tick();
+    const runs = h.store.listRuns(workflow.id);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed", trigger: "schedule", startedAt: due, endedAt: due });
+    expect(runs[0]!.error).toMatch(/requires "merge"/);
+    expect(h.notifications).toHaveLength(1);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(due + 30 * MIN);
+    expect(h.store.listRuns(workflow.id)).toHaveLength(1);
+  });
+
+  it("switching a daily schedule to an interval re-arms from scratch, and removing it clears the clock", async () => {
+    const h = harness({
+      nextOccurrence: (schedule, after) => (schedule.type === "once" ? null : after + HOUR),
+    });
+    const workflow = h.store.create(
+      pipeline({ triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1] } } }),
+    );
+    h.setNow(10_000);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(workflow.updatedAt + HOUR);
+
+    h.setNow(20_000);
+    expect(h.store.update(workflow.id, interval(45)).nextRunAt).toBeUndefined();
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(20_000 + 45 * MIN);
+
+    // The store already drops the clock on a schedule change; no schedule
+    // means nothing to arm, and nothing fires.
+    h.store.update(workflow.id, { ...pipeline(), triggers: undefined });
+    h.setNow(20_000 + 60 * MIN);
+    await h.engine.tick();
+    expect(h.store.get(workflow.id)?.nextRunAt).toBeUndefined();
+    expect(h.store.listRuns(workflow.id)).toEqual([]);
   });
 });

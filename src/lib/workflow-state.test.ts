@@ -62,7 +62,11 @@ describe("upsertWorkflow", () => {
     expect(next[0]!.issues.map((issue) => issue.code)).toEqual(["bad-entry"]);
     const fixed = upsertWorkflow(next, validWithWarning({ id: "wf-1" }));
     expect(fixed).toHaveLength(1);
-    expect(fixed[0]!.issues.map((issue) => `${issue.severity}:${issue.code}`)).toEqual(["warning:unwired-failure"]);
+    // The fixture loops the entry onto itself with no pause: two warnings, no error.
+    expect(fixed[0]!.issues.map((issue) => `${issue.severity}:${issue.code}`)).toEqual([
+      "warning:unwired-failure",
+      "warning:cycle-without-wait",
+    ]);
   });
 
   it("replaces in place, preserving list order", () => {
@@ -201,15 +205,19 @@ describe("withLiveIssues", () => {
       { severity: "error", code: "missing-capability", nodeId: "a", message: "judged before the flag was granted" },
     ]);
     const [allowed] = withLiveIssues([stale], [{ id: "bot", canMerge: true }]);
-    expect(allowed!.issues.map((issue) => issue.code)).toEqual(["unwired-failure"]);
+    expect(allowed!.issues.map((issue) => issue.code)).toEqual(["unwired-failure", "cycle-without-wait"]);
 
     const [refused] = withLiveIssues([row(requiresMerge)], [{ id: "bot", canMerge: false }]);
-    expect(refused!.issues.map((issue) => issue.code)).toEqual(["unwired-failure", "missing-capability"]);
+    expect(refused!.issues.map((issue) => issue.code)).toEqual([
+      "unwired-failure",
+      "cycle-without-wait",
+      "missing-capability",
+    ]);
     expect(validationSummary(refused!.issues).errors).toBe(1);
   });
 
   it("keeps the structural pass when the roster no longer has the bot", () => {
     const [orphan] = withLiveIssues([row(requiresMerge)], []);
-    expect(orphan!.issues.map((issue) => issue.code)).toEqual(["unwired-failure"]);
+    expect(orphan!.issues.map((issue) => issue.code)).toEqual(["unwired-failure", "cycle-without-wait"]);
   });
 });

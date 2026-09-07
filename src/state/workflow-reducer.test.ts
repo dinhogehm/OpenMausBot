@@ -84,7 +84,9 @@ describe("workflows slice", () => {
         edges: [{ from: "a", outcome: "done", to: "a" }],
       }),
     });
-    expect(fixed.workflows[0]!.issues.map((issue) => issue.severity)).toEqual(["warning"]);
+    // A self-loop on the entry with no pause: two warnings (unwired failure,
+    // hot cycle), and no error — the run may still start.
+    expect(fixed.workflows[0]!.issues.map((issue) => issue.severity)).toEqual(["warning", "warning"]);
   });
 
   it("carries a node's pre-approved keys and a step's denials through the frames untouched", () => {

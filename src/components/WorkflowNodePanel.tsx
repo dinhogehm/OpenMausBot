@@ -15,6 +15,7 @@ import {
   toggleRequirement,
 } from "@/lib/workflow-capabilities";
 import { BotAvatar } from "./Avatar";
+import { formatWaitMinutes } from "./WorkflowNodeCard";
 import {
   WORKFLOW_APPROVAL_OUTCOMES,
   WORKFLOW_CAPABILITIES,
@@ -22,6 +23,8 @@ import {
   WORKFLOW_NODE_RETRIES_DEFAULT,
   WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN,
   WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H,
+  WORKFLOW_WAIT_MINUTES_MAX,
+  WORKFLOW_WAIT_MINUTES_MIN,
   type BotCapabilities,
   type WorkflowIssue,
   type WorkflowNode,
@@ -61,6 +64,13 @@ export interface WorkflowRouteTarget {
   id: string;
   label: string;
 }
+
+const PANEL_TITLE: Record<WorkflowNode["kind"], string> = {
+  agent: "Agent node",
+  approval: "Approval gate",
+  notify: "Notify room",
+  wait: "Wait",
+};
 
 const FIELD =
   "w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent";
@@ -420,7 +430,7 @@ export function WorkflowNodePanel({
       <div className="flex items-start gap-2 border-b border-hairline/40 px-4 py-3">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-[13.5px] font-semibold text-ink">
-            {node.kind === "agent" ? "Agent node" : node.kind === "approval" ? "Approval gate" : "Notify room"}
+            {PANEL_TITLE[node.kind]}
           </h2>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-ink-secondary">{node.id}</p>
         </div>
@@ -686,6 +696,28 @@ export function WorkflowNodePanel({
               />
             </div>
           </>
+        )}
+
+        {node.kind === "wait" && (
+          <div>
+            <NumberField
+              id={field("minutes")}
+              label="Pause (minutes)"
+              hint={String(WORKFLOW_WAIT_MINUTES_MIN)}
+              value={node.minutes}
+              min={WORKFLOW_WAIT_MINUTES_MIN}
+              step={1}
+              // The model requires a number; an emptied field keeps the last
+              // real value rather than writing a node the validator rejects.
+              onChange={(minutes) => onUpdate({ ...node, minutes: minutes ?? node.minutes })}
+            />
+            <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+              No bot runs here: the run idles for {formatWaitMinutes(node.minutes)} (
+              {WORKFLOW_WAIT_MINUTES_MIN}–{WORKFLOW_WAIT_MINUTES_MAX}), survives a restart, and does not count toward
+              the execution cap. Put one on the edge that loops back to the entry so a continuous cycle breathes
+              between laps.
+            </p>
+          </div>
         )}
 
         {/* Routing is the editor's central action and, on the canvas, a mouse

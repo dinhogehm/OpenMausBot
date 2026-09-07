@@ -202,3 +202,20 @@ describe("WorkflowNodePanel — fallback bot", () => {
     expect(text(panel({ kind: "approval", id: "gate", prompt: "Ship it?" }, [scout]))).not.toContain("Fallback bot");
   });
 });
+
+describe("WorkflowNodePanel — wait", () => {
+  it("offers the pause in minutes with its bounds, and no bot or room picker", () => {
+    const markup = panel({ kind: "wait", id: "wait-1", minutes: 45 }, [scout]);
+    const flat = text(markup);
+    expect(flat).toContain("Wait");
+    expect(flat).toContain("Pause (minutes)");
+    expect(markup).toMatch(/<input[^>]*type="number"[^>]*value="45"/);
+    expect(flat).toContain("1–1440");
+    expect(flat).toContain("does not count toward the execution cap");
+    expect(markup).not.toContain('id="wf-wait-1-bot"');
+    expect(markup).not.toContain('id="wf-wait-1-room"');
+    // Routing, which every node has: one row for the elapsed outcome.
+    expect(markup.match(/<select/g)).toHaveLength(1);
+    expect(flat).toContain("elapsed");
+  });
+});
