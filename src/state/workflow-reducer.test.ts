@@ -153,3 +153,53 @@ describe("standing permissions and the list", () => {
     expect(missing(withLiveIssues(granted.workflows, granted.bots))).toBe(0);
   });
 });
+
+describe("fallback bot and the list", () => {
+  const bot = (id: string, name: string): BotAnnouncement => ({
+    id,
+    threadId: `thread-${id}`,
+    name,
+    title: "",
+    description: "",
+    notifications: false,
+    color: "green",
+    unread: false,
+    modelSelection: { instanceId: "local", model: "test-model" },
+  });
+  const withFallback = draft({
+    entryNodeId: "a",
+    nodes: [{ kind: "agent", id: "a", botId: "bot-a", instructions: "plan", outcomes: ["done"], fallbackBotId: "bot-b" }],
+  });
+  const fallbackMissing = (workflows: ReturnType<typeof withLiveIssues>) =>
+    workflows[0]!.issues.filter((issue) => issue.code === "fallback-missing-bot").length;
+
+  it("a `workflow` frame keeps fallbackBotId, and the list judges it against the live roster", () => {
+    const state = reducer(reducer(initialState, { type: "botPatched", bot: bot("bot-a", "Scout") }), {
+      type: "workflowPatched",
+      workflow: withFallback,
+    });
+    const node = state.workflows[0]!.nodes[0]!;
+    expect(node.kind === "agent" && node.fallbackBotId).toBe("bot-b");
+    // The frame carried no issues, so the slice computed structural ones:
+    // a fallback naming a bot is structurally fine…
+    expect(state.workflows[0]!.issues.map((issue) => issue.code)).not.toContain("fallback-missing-bot");
+    // …but against a roster without bot-b the list paints the error, and Run
+    // must be refused the way the server would refuse it.
+    const judged = withLiveIssues(state.workflows, state.bots);
+    expect(fallbackMissing(judged)).toBe(1);
+    expect(validationSummary(judged[0]!.issues).errors).toBe(1);
+
+    const joined = reducer(state, { type: "botPatched", bot: bot("bot-b", "Rook") });
+    expect(joined.workflows).toBe(state.workflows); // only the roster moved
+    expect(fallbackMissing(withLiveIssues(joined.workflows, joined.bots))).toBe(0);
+  });
+
+  it("a `workflow-run` frame keeps the outage and currentBotId bookkeeping the timeline reads", () => {
+    const outage = { since: 1, until: 2, attempts: 3, of: 10, reason: "503", fallbackBotId: "bot-b" };
+    const state = reducer(initialState, {
+      type: "workflowRunPatched",
+      run: run({ status: "running", outage, currentBotId: "bot-b", nextAttemptAt: 9 }),
+    });
+    expect(state.workflowRuns[0]).toMatchObject({ outage, currentBotId: "bot-b", nextAttemptAt: 9 });
+  });
+});

@@ -17,7 +17,12 @@ import {
 } from "@/lib/workflow-observation";
 import { isMissedWorkflowRun } from "@/lib/workflow-state";
 import { excerpt } from "./WorkflowNodeCard";
-import type { WorkflowNodeResult, WorkflowRun, WorkflowRunStatus } from "../../shared/workflow";
+import {
+  workflowOutageWaitMessage,
+  type WorkflowNodeResult,
+  type WorkflowRun,
+  type WorkflowRunStatus,
+} from "../../shared/workflow";
 
 const STATUS_TONE: Record<WorkflowRunStatus, string> = {
   queued: "bg-warning/15 text-warning",
@@ -63,9 +68,12 @@ export interface WorkflowRunTimelineProps {
   /** Absent when nothing can be opened; a step with no `threadId` never
    * offers navigation even when this is provided. */
   onOpenStep?: (result: WorkflowNodeResult) => void;
+  /** A bot's display name, for the step a fallback bot ran; undefined (or
+   * the prop absent) falls back to the id, which is still the truth. */
+  botName?: (botId: string) => string | undefined;
 }
 
-export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenStep }: WorkflowRunTimelineProps) {
+export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenStep, botName }: WorkflowRunTimelineProps) {
   const observedRowRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     observedRowRef.current?.scrollIntoView({ block: "nearest" });
@@ -214,6 +222,16 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                         {excerpt(result.summary, 200)}
                       </p>
                     )}
+                    {result.fallback && (
+                      // The receipt names who actually did the work: the
+                      // node's own bot was unreachable and its fallback ran
+                      // the step. The provider error is the reason, kept
+                      // short — the whole of it is in the run frame.
+                      <p className="mt-0.5 break-words text-[10.5px] leading-snug text-warning">
+                        Ran on fallback bot {botName?.(result.fallback.botId) ?? result.fallback.botId} because:{" "}
+                        {excerpt(result.fallback.because, 120)}
+                      </p>
+                    )}
                   </>
                 );
                 const openable = result.threadId !== undefined && onOpenStep !== undefined;
@@ -243,12 +261,38 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             </ol>
           )}
 
-          {isActiveWorkflowRun(run) && run.nextAttemptAt !== undefined && (
-            <p className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
-              <Loader2 size={10} className="animate-spin" aria-hidden />
-              Retrying at {formatWhen(run.nextAttemptAt)}
-              {run.attempt > 0 && <span className="tabular-nums">· attempt {run.attempt + 1}</span>}
+          {isActiveWorkflowRun(run) && run.outage && run.nextAttemptAt !== undefined ? (
+            // A provider outage is a wait, not a retry: nothing of the
+            // node's budget is being spent, so the line must not say
+            // "attempt" the way the retry line below does. The count is
+            // the outage's own — how many waits so far of how many the
+            // horizon allows.
+            <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-warning">
+              <Loader2 size={10} className="mt-0.5 animate-spin" aria-hidden />
+              <span className="min-w-0 break-words">
+                {workflowOutageWaitMessage(run, formatWhen)}
+                {run.outage.fallbackBotId !== undefined && (
+                  <> · fallback bot {botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId} was tried</>
+                )}
+              </span>
             </p>
+          ) : isActiveWorkflowRun(run) && run.outage?.fallbackBotId !== undefined && run.currentBotId === run.outage.fallbackBotId ? (
+            <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-warning">
+              <Loader2 size={10} className="mt-0.5 animate-spin" aria-hidden />
+              <span className="min-w-0 break-words">
+                Running on fallback bot {botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId} because:{" "}
+                {excerpt(run.outage.reason, 120)}
+              </span>
+            </p>
+          ) : (
+            isActiveWorkflowRun(run) &&
+            run.nextAttemptAt !== undefined && (
+              <p className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
+                <Loader2 size={10} className="animate-spin" aria-hidden />
+                Retrying at {formatWhen(run.nextAttemptAt)}
+                {run.attempt > 0 && <span className="tabular-nums">· attempt {run.attempt + 1}</span>}
+              </p>
+            )
           )}
         </section>
       )}
