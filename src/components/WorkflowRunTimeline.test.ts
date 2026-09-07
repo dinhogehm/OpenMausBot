@@ -321,3 +321,67 @@ describe("WorkflowRunTimeline — approval gate", () => {
     expect(text(panel({ runs: [plain], run: plain }))).not.toContain("reminder");
   });
 });
+
+describe("WorkflowRunTimeline pre-flight", () => {
+  const verdict = (ok: boolean): NonNullable<WorkflowRun["preflight"]> => ({
+    at: 1_700_000_000_000,
+    ok,
+    checks: [
+      { name: "gh auth", kind: "command", ok, durationMs: 340, detail: ok ? "exited with code 0" : "exited with code 1 (expected 0)", ...(ok ? {} : { stderr: "You are not logged in" }) },
+      { name: "bots", kind: "bots-ready", ok: true, durationMs: 1, detail: "2 bots ready" },
+    ],
+  });
+
+  it("says the checks are running while the run is parked in pre-flight, naming the guarded node", () => {
+    const checking = run({ status: "running", currentNodeId: "triage", preflightStartedAt: 1_700_000_000_000 });
+    const flat = text(panel({ runs: [checking], run: checking }));
+    expect(flat).toContain("Pre-flight checks running before");
+    expect(flat).toContain("triage");
+    expect(flat).toContain("No node has finished yet");
+  });
+
+  it("says the run is waiting for a busy bot, with the next check, and paints the verdict as waiting rather than failed", () => {
+    const parked = run({
+      status: "running",
+      currentNodeId: "triage",
+      preflightStartedAt: 1_700_000_000_000,
+      nextAttemptAt: 1_700_000_030_000,
+      preflight: {
+        at: 1_700_000_000_000,
+        ok: false,
+        checks: [{ name: "bots", kind: "bots-ready", ok: false, transient: true, durationMs: 0, detail: 'bot "rook" is busy' }],
+      },
+    });
+    const flat = text(panel({ runs: [parked], run: parked }));
+    expect(flat).toContain("Pre-flight waiting for a busy bot before triage");
+    expect(flat).toContain("next check");
+    expect(flat).toContain("Pre-flight · waiting");
+    expect(flat).not.toContain("Pre-flight · failed");
+    expect(flat).toContain("Failed: bots · bot &quot;rook&quot; is busy");
+  });
+
+  it("lists every check with its verdict and detail, and the failed one's output", () => {
+    const refused = run({ status: "failed", currentNodeId: "triage", error: 'pre-flight check "gh auth" failed: exited with code 1 (expected 0)', preflight: verdict(false) });
+    const markup = panel({ runs: [refused], run: refused });
+    const flat = text(markup);
+    expect(flat).toContain("Pre-flight · failed");
+    expect(flat).toContain("Failed: gh auth · exited with code 1 (expected 0)");
+    expect(flat).toContain("You are not logged in");
+    expect(flat).toContain("Passed: bots · 2 bots ready");
+    expect(flat).toContain("Failed: pre-flight check &quot;gh auth&quot; failed");
+    expect(markup).not.toContain("Pre-flight checks running");
+  });
+
+  it("keeps a passing verdict on a run that went on, without printing its output", () => {
+    const passed = run({ status: "completed", preflight: verdict(true), nodeResults: [step({ nodeId: "triage" })] });
+    const flat = text(panel({ runs: [passed], run: passed }));
+    expect(flat).toContain("Pre-flight · passed");
+    expect(flat).toContain("Passed: gh auth · exited with code 0");
+    expect(flat).not.toContain("not logged in");
+  });
+
+  it("shows nothing about pre-flight on a receipt that has none", () => {
+    const plain = run({ status: "completed", nodeResults: [step({ nodeId: "triage" })] });
+    expect(text(panel({ runs: [plain], run: plain }))).not.toContain("Pre-flight");
+  });
+});

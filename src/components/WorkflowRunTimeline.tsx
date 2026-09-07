@@ -5,7 +5,7 @@
 // run state anywhere, and a frame repaints it for free. No xyflow here
 // either: the whole panel is static markup a test can render.
 import { useEffect, useRef } from "react";
-import { AlertTriangle, ExternalLink, Hourglass, Loader2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ExternalLink, Hourglass, Loader2, XCircle } from "lucide-react";
 
 import { cn } from "@/lib/cn";
 import {
@@ -215,6 +215,68 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                 {failureText(run)}
               </span>
             </p>
+          )}
+
+          {run.status === "running" && run.preflightStartedAt !== undefined && (
+            // Between the start and the first dispatch: the checks are
+            // running — or, parked with a re-check due, waiting for a busy
+            // bot — and nothing has been asked of a bot yet.
+            <p role="status" className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
+              <Loader2 size={10} className="animate-spin" aria-hidden />
+              {run.nextAttemptAt !== undefined ? (
+                <span className="min-w-0 break-words">
+                  Pre-flight waiting for a busy bot before{" "}
+                  {run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>} — next check{" "}
+                  {formatWhen(run.nextAttemptAt)}
+                </span>
+              ) : (
+                <>
+                  Pre-flight checks running before
+                  {run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>}
+                </>
+              )}
+            </p>
+          )}
+
+          {run.preflight && (
+            <section className="mt-3 shrink-0">
+              <h3 className="text-[11px] font-medium uppercase tracking-wide text-ink-secondary">
+                Pre-flight{" "}
+                <span
+                  className={cn(
+                    "normal-case",
+                    run.preflight.ok ? "text-success" : run.preflightStartedAt !== undefined ? "text-warning" : "text-danger",
+                  )}
+                >
+                  · {run.preflight.ok ? "passed" : run.preflightStartedAt !== undefined ? "waiting" : "failed"}
+                </span>
+              </h3>
+              {/* Each check on its own line, verdict first: the receipt's
+                  point is WHICH check refused the run and what it printed,
+                  the two things a person needs to fix the environment. */}
+              <ul className="mt-1 space-y-0.5" aria-label="Pre-flight checks">
+                {run.preflight.checks.map((check) => (
+                  <li key={check.name} className="flex items-start gap-1.5 text-[10.5px]">
+                    {check.ok ? (
+                      <CheckCircle2 size={11} aria-hidden className="mt-0.5 shrink-0 text-success" />
+                    ) : (
+                      <XCircle size={11} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+                    )}
+                    <span className="min-w-0 break-words">
+                      <span className="sr-only">{check.ok ? "Passed: " : "Failed: "}</span>
+                      <span className="font-medium text-ink">{check.name}</span>
+                      <span className="text-ink-secondary"> · {check.detail}</span>
+                      {!check.ok && check.stderr && (
+                        <span className="block font-mono text-[10px] text-danger">{excerpt(check.stderr, 200)}</span>
+                      )}
+                      {!check.ok && check.stdout && (
+                        <span className="block font-mono text-[10px] text-ink-secondary">{excerpt(check.stdout, 200)}</span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
           )}
 
           <h3 className="mt-3 shrink-0 text-[11px] font-medium uppercase tracking-wide text-ink-secondary">Steps</h3>

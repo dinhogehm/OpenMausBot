@@ -21,6 +21,7 @@ import {
   type WorkflowEdge,
   type WorkflowIssue,
   type WorkflowNode,
+  type WorkflowPreflight,
   type WorkflowTriggers,
 } from "../../shared/workflow";
 
@@ -115,6 +116,7 @@ export interface WorkflowPatchBody {
   stuckAfterMinutes: number | null;
   auditGroupId: string | null;
   digestAt: string | null;
+  preflight: WorkflowPreflight | null;
 }
 
 /** Where a node with no saved layout entry lands. Deterministic so two
@@ -505,5 +507,6 @@ export function workflowPatchBody(workflow: Workflow): WorkflowPatchBody {
     stuckAfterMinutes: workflow.stuckAfterMinutes ?? null,
     auditGroupId: workflow.auditGroupId ?? null,
     digestAt: workflow.digestAt ?? null,
+    preflight: workflow.preflight ?? null,
   };
 }

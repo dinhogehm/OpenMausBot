@@ -506,6 +506,7 @@ describe("workflowPatchBody", () => {
       "maxNodeExecutions",
       "name",
       "nodes",
+      "preflight",
       "stuckAfterMinutes",
       "triggers",
     ]);
@@ -522,5 +523,11 @@ describe("workflowPatchBody", () => {
     expect(body.stuckAfterMinutes).toBeNull();
     expect(body.auditGroupId).toBeNull();
     expect(body.digestAt).toBeNull();
+    expect(body.preflight).toBeNull();
+  });
+
+  it("sends the pre-flight as saved, so the panel's checks reach the server whole", () => {
+    const preflight = { checks: [{ kind: "bots-ready" as const, name: "bots" }], timeoutSeconds: 30 };
+    expect(workflowPatchBody(workflow({ preflight })).preflight).toEqual(preflight);
   });
 });

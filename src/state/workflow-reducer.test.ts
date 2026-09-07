@@ -342,3 +342,50 @@ describe("audit room, watchdog patience and digest in the slice", () => {
     expect(state.workflowRuns[0]).toMatchObject({ nodeEnteredAt: 7_000, stuckNotifiedAt: 8_000 });
   });
 });
+
+describe("pre-flight test verdicts", () => {
+  const verdict = (ok: boolean) => ({
+    at: 1,
+    ok,
+    checks: [{ name: "gh auth", kind: "command" as const, ok, durationMs: 12, detail: ok ? "exited with code 0" : "exited with code 1 (expected 0)" }],
+  });
+
+  it("starts with no verdicts", () => {
+    expect(initialState.workflowPreflightTests).toEqual({});
+  });
+
+  it("workflowPreflightTested keeps the latest verdict per workflow, replacing the previous one", () => {
+    const first = reducer(initialState, { type: "workflowPreflightTested", workflowId: "wf-1", result: verdict(false) });
+    expect(first.workflowPreflightTests["wf-1"]?.ok).toBe(false);
+    const other = reducer(first, { type: "workflowPreflightTested", workflowId: "wf-2", result: verdict(true) });
+    expect(Object.keys(other.workflowPreflightTests).sort()).toEqual(["wf-1", "wf-2"]);
+    const replaced = reducer(other, { type: "workflowPreflightTested", workflowId: "wf-1", result: verdict(true) });
+    expect(replaced.workflowPreflightTests["wf-1"]?.ok).toBe(true);
+    expect(replaced.workflowPreflightTests["wf-2"]?.ok).toBe(true);
+  });
+
+  it("workflowDeleted drops the deleted workflow's verdict and nobody else's", () => {
+    const seeded = reducer(
+      reducer(initialState, { type: "workflowPreflightTested", workflowId: "wf-1", result: verdict(true) }),
+      { type: "workflowPreflightTested", workflowId: "wf-2", result: verdict(true) },
+    );
+    const next = reducer(seeded, { type: "workflowDeleted", workflowId: "wf-1" });
+    expect(Object.keys(next.workflowPreflightTests)).toEqual(["wf-2"]);
+  });
+
+  it("a `workflow` frame carrying a pre-flight is adopted whole, and one without clears it", () => {
+    const preflight = { checks: [{ kind: "bots-ready" as const, name: "bots" }] };
+    const withChecks = reducer(initialState, { type: "workflowPatched", workflow: draft({ preflight }) });
+    expect(withChecks.workflows[0]?.preflight).toEqual(preflight);
+    const without = reducer(withChecks, { type: "workflowPatched", workflow: draft({ updatedAt: 2 }) });
+    expect(without.workflows[0]?.preflight).toBeUndefined();
+  });
+
+  it("a `workflow-run` frame carries the run's verdict for the timeline", () => {
+    const next = reducer(initialState, {
+      type: "workflowRunPatched",
+      run: run({ status: "failed", preflight: verdict(false), error: 'pre-flight check "gh auth" failed' }),
+    });
+    expect(next.workflowRuns[0]?.preflight?.checks[0]?.name).toBe("gh auth");
+  });
+});
