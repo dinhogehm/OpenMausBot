@@ -5581,7 +5581,12 @@ describe("harness HTTP API", () => {
       expect(listed.status).toBe(200);
       const found = listed.body.workflows.find((workflow: { id: string }) => workflow.id === id);
       expect(found?.name).toBe("HTTP smoke");
-      expect(found?.issues.map((issue: { code: string }) => issue.code)).toEqual(["unwired-failure"]);
+      // triage loops onto itself with no pause: an unwired failure path and
+      // a hot cycle, both warnings — the draft still lists as startable.
+      expect(found?.issues.map((issue: { code: string }) => issue.code)).toEqual([
+        "unwired-failure",
+        "cycle-without-wait",
+      ]);
       expect("retries" in found.nodes[0]).toBe(false);
       expect((await api("GET", "/api/workflow-runs")).body.runs).toEqual([]);
     } finally {
