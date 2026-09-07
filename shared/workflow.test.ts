@@ -6,6 +6,8 @@ import {
   nodeOutcomes,
   parseWorkflowOutcome,
   validateWorkflow,
+  WORKFLOW_APPROVAL_ON_EXPIRE,
+  workflowApprovalRequestId,
   WORKFLOW_CAPABILITIES,
   WORKFLOW_FAIL_OUTCOME,
   workflowOutageWaitMessage,
@@ -427,6 +429,41 @@ describe("validateWorkflow", () => {
     }
     expect(bad(gated(0.5))).toEqual([]);
     expect(bad(gated(undefined))).toEqual([]);
+  });
+
+  it("flags an approval expiry policy the sweep could not honour (bad-approval-config)", () => {
+    const gated = (extra: Record<string, unknown>): Workflow =>
+      wf({
+        entryNodeId: "gate",
+        nodes: [{ kind: "approval", id: "gate", prompt: "ok?", ...extra } as unknown as Workflow["nodes"][number]],
+        edges: [],
+      });
+    const bad = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-approval-config");
+    const error = expect.objectContaining({ severity: "error", code: "bad-approval-config", nodeId: "gate" });
+    for (const onExpire of WORKFLOW_APPROVAL_ON_EXPIRE) expect(bad(gated({ onExpire }))).toEqual([]);
+    for (const onExpire of ["approve", "", "RENOTIFY", 1, null]) expect(bad(gated({ onExpire })), String(onExpire)).toEqual([error]);
+    expect(bad(gated({ onExpire: "x" }))[0]?.message).toMatch(/approved, rejected, renotify/);
+    for (const maxRenotify of [1, 5, 30]) expect(bad(gated({ maxRenotify }))).toEqual([]);
+    for (const maxRenotify of [0, 31, 2.5, -1, Number.NaN, "5"]) {
+      expect(bad(gated({ maxRenotify })), String(maxRenotify)).toEqual([error]);
+    }
+    expect(bad(gated({ maxRenotify: 0 }))[0]?.message).toMatch(/1 to 30/);
+    expect(bad(gated({ notifyTargetGroupId: "grp-1" }))).toEqual([]);
+    for (const notifyTargetGroupId of ["", "  ", 3]) expect(bad(gated({ notifyTargetGroupId }))).toEqual([error]);
+    // Each fault is its own line, and none of them touches the window check.
+    const all = validateWorkflow(gated({ onExpire: "x", maxRenotify: 0, notifyTargetGroupId: "", expiresHours: 0 }));
+    expect(all.filter((issue) => issue.code === "bad-approval-config")).toHaveLength(3);
+    expect(all.filter((issue) => issue.code === "bad-numbers")).toHaveLength(1);
+    // The policy is not an outcome: a "renotify" edge is still unknown.
+    expect(nodeOutcomes({ kind: "approval", id: "gate", prompt: "?", onExpire: "renotify" })).toEqual(["approved", "rejected"]);
+  });
+
+  it("names a card request per opening of the gate", () => {
+    expect(workflowApprovalRequestId({ id: "r1", currentNodeId: "gate", approvalRequestedAt: 5 })).toBe("workflow-approval:r1:gate:5");
+    expect(workflowApprovalRequestId({ id: "r1", currentNodeId: "gate", approvalRequestedAt: 6 })).not.toBe(
+      workflowApprovalRequestId({ id: "r1", currentNodeId: "gate", approvalRequestedAt: 5 }),
+    );
+    expect(workflowApprovalRequestId({ id: "r1" })).toBe("workflow-approval:r1::0");
   });
 
   it("flags a schedule the scheduler could not arm", () => {
