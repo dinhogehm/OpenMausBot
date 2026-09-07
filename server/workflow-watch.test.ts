@@ -2,13 +2,14 @@
 // stuck and how that is worded, the digest's slot math and paragraph, and
 // the health document's shape. No engine, no store — the engine tests in
 // workflow-watchdog.test.ts prove the wiring.
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { Workflow, WorkflowNode, WorkflowRun } from "../shared/workflow.ts";
 import {
   buildDigest,
   describeStuck,
   digestSlotAt,
+  digestWindowStart,
   formatDuration,
   nodeSince,
   stuckAnnouncementDue,
@@ -119,11 +120,13 @@ describe("stuckVerdict and the announcement cadence", () => {
     });
   });
 
-  it("announces once, then at most once per further period", () => {
+  it("announces once, then at most once per further period, and never past the cap", () => {
     const verdict = { since: 0, forMs: 3 * HOUR, thresholdMs: 2 * HOUR };
     expect(stuckAnnouncementDue(run(), verdict, 3 * HOUR)).toBe(true);
     expect(stuckAnnouncementDue(run({ stuckNotifiedAt: 2 * HOUR }), verdict, 3 * HOUR)).toBe(false);
     expect(stuckAnnouncementDue(run({ stuckNotifiedAt: 2 * HOUR }), verdict, 4 * HOUR)).toBe(true);
+    expect(stuckAnnouncementDue(run({ stuckNotifiedAt: 2 * HOUR, stuckAnnouncements: 11 }), verdict, 40 * HOUR)).toBe(true);
+    expect(stuckAnnouncementDue(run({ stuckNotifiedAt: 2 * HOUR, stuckAnnouncements: 12 }), verdict, 40 * HOUR)).toBe(false);
   });
 });
 
@@ -172,6 +175,42 @@ describe("digestSlotAt", () => {
     expect(digestSlotAt("18:00", local(2026, 9, 7, 23, 59))).toBe(local(2026, 9, 7, 18, 0));
     expect(digestSlotAt("18:00", local(2026, 9, 7, 17, 59))).toBe(local(2026, 9, 6, 18, 0));
     expect(digestSlotAt("00:00", local(2026, 9, 7, 0, 0))).toBe(local(2026, 9, 7, 0, 0));
+    expect(digestWindowStart("18:00", local(2026, 9, 7, 18, 0))).toBe(local(2026, 9, 6, 18, 0));
+  });
+
+  describe("across a DST change (America/New_York)", () => {
+    const tz = process.env.TZ;
+    afterEach(() => {
+      if (tz === undefined) delete process.env.TZ;
+      else process.env.TZ = tz;
+    });
+
+    it("fall back: 'yesterday at 18:00' is the slot that was sent, 25 hours ago — not 19:00", () => {
+      process.env.TZ = "America/New_York";
+      // 2026-11-01 02:00 EDT → 01:00 EST. Just after midnight on the 1st,
+      // the latest slot is Oct 31 18:00 — the very instant sent yesterday.
+      const sent = local(2026, 10, 31, 18, 0);
+      const slot = digestSlotAt("18:00", local(2026, 11, 1, 0, 5));
+      expect(slot).toBe(sent);
+      // The bug: "today's slot minus 24 hours" is Oct 31 19:00, newer than
+      // what was sent, and a second digest for Oct 31 would go out.
+      expect(local(2026, 11, 1, 18, 0) - 24 * 3_600_000).toBe(local(2026, 10, 31, 19, 0));
+      expect(local(2026, 11, 1, 18, 0) - 24 * 3_600_000).toBeGreaterThan(sent);
+      // At Nov 1 18:00 the slot is 25 hours after the previous one, and the
+      // window starts exactly at the previous slot.
+      expect(digestSlotAt("18:00", local(2026, 11, 1, 18, 0)) - sent).toBe(25 * 3_600_000);
+      expect(digestWindowStart("18:00", local(2026, 11, 1, 18, 0))).toBe(sent);
+    });
+
+    it("spring forward: the day is 23 hours long and the slots still line up on the wall clock", () => {
+      process.env.TZ = "America/New_York";
+      // 2026-03-08 02:00 EST → 03:00 EDT.
+      const sent = local(2026, 3, 7, 18, 0);
+      expect(digestSlotAt("18:00", local(2026, 3, 8, 0, 5))).toBe(sent);
+      expect(digestSlotAt("18:00", local(2026, 3, 8, 17, 59))).toBe(sent);
+      expect(digestSlotAt("18:00", local(2026, 3, 8, 18, 0)) - sent).toBe(23 * 3_600_000);
+      expect(digestWindowStart("18:00", local(2026, 3, 8, 18, 0))).toBe(sent);
+    });
   });
 });
 
@@ -181,7 +220,7 @@ describe("buildDigest", () => {
   it("says so when nothing ended in the window", () => {
     const to = new Date(2026, 8, 7, 18, 0).getTime();
     expect(buildDigest([ended({ startedAt: to, endedAt: to })], to - 24 * HOUR, to)).toBe(
-      "daily digest for 2026-09-07: no run ended in the last 24h",
+      "daily digest for 2026-09-07: no run ended since the previous digest",
     );
   });
 
@@ -210,7 +249,7 @@ describe("buildDigest", () => {
       run({ id: "live" }),
     ];
     expect(buildDigest(runs, from, to)).toBe(
-      "daily digest for 2026-09-07: 4 runs ended in the last 24h — 2 completed, 1 failed, 1 cancelled; average run time 30m; nodes that failed most: plan ×1, ship ×1; denials seen most: shell gh (key shell:gh) ×2",
+      "daily digest for 2026-09-07: 4 runs ended since the previous digest — 2 completed, 1 failed, 1 cancelled; average run time 30m; nodes that failed most: plan ×1, ship ×1; denials seen most: shell gh (key shell:gh) ×2",
     );
   });
 });

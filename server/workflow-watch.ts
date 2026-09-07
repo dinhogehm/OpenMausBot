@@ -8,14 +8,13 @@ import {
   WORKFLOW_FAIL_OUTCOME,
   WORKFLOW_NODE_RETRIES_DEFAULT,
   WORKFLOW_STUCK_AFTER_DEFAULT_MIN,
+  WORKFLOW_STUCK_ANNOUNCEMENTS_MAX,
   WORKFLOW_STUCK_APPROVAL_FACTOR,
   type Workflow,
   type WorkflowNode,
   type WorkflowRun,
   type WorkflowRunStatus,
 } from "../shared/workflow.ts";
-
-const DAY_MS = 24 * 60 * 60_000;
 
 /** "3d 2h", "2h 6m", "48m", "under a minute" — what a person reads on a
  * phone, never a raw millisecond count. */
@@ -79,8 +78,10 @@ export function stuckVerdict(workflow: Workflow, run: WorkflowRun, node: Workflo
 /** Whether a stuck run is due an announcement: the first one as soon as it
  * is stuck, then at most one per further period — measured from the last
  * announcement, which is persisted, so a restart continues the cadence
- * rather than starting it over. */
+ * rather than starting it over — and none at all once the stay has had
+ * its cap of them. */
 export function stuckAnnouncementDue(run: WorkflowRun, verdict: StuckVerdict, now: number): boolean {
+  if ((run.stuckAnnouncements ?? 0) >= WORKFLOW_STUCK_ANNOUNCEMENTS_MAX) return false;
   return run.stuckNotifiedAt === undefined || now - run.stuckNotifiedAt >= verdict.thresholdMs;
 }
 
@@ -134,17 +135,35 @@ const minutesOfDay = (time: string): number => {
   return (hour ?? 0) * 60 + (minute ?? 0);
 };
 
+/** `HH:MM` on the civil day of `at`, shifted by `days` calendar days —
+ * through the Date's own calendar (setDate), never by adding 24 hours: on
+ * the day a DST clock falls back or springs forward, "yesterday at 18:00"
+ * is 25 or 23 hours away, and a 24-hour subtraction would land on 19:00
+ * or 17:00 — a different instant than the slot that was sent, which the
+ * sweep would then send again. */
+function clockOnDay(digestAt: string, at: number, days: number): number {
+  const minutes = minutesOfDay(digestAt);
+  const day = new Date(at);
+  day.setDate(day.getDate() + days);
+  day.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
+  return day.getTime();
+}
+
 /** The most recent `HH:MM` (local wall clock) at or before `now`: today's
  * slot when it has passed, otherwise yesterday's. The digest fires when
  * this instant is newer than the last one sent, so a computer that slept
  * through a slot sends ONE digest on waking, covering the day up to the
  * slot it missed — never one per day missed. */
 export function digestSlotAt(digestAt: string, now: number): number {
-  const minutes = minutesOfDay(digestAt);
-  const today = new Date(now);
-  today.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0);
-  const slot = today.getTime();
-  return slot <= now ? slot : slot - DAY_MS;
+  const slot = clockOnDay(digestAt, now, 0);
+  return slot <= now ? slot : clockOnDay(digestAt, now, -1);
+}
+
+/** The slot one civil day before `slot`: where the digest's window starts.
+ * A DST day's window is 23 or 25 hours long, so that no run ended between
+ * two digests is counted twice or not at all. */
+export function digestWindowStart(digestAt: string, slot: number): number {
+  return clockOnDay(digestAt, slot, -1);
 }
 
 const pad = (value: number) => String(value).padStart(2, "0");
@@ -166,15 +185,17 @@ function topOf(tally: Map<string, number>, max: number): string[] {
  * failed most (a `failed` edge taken, or the node a failed run stopped
  * on), and the denials seen most — the grant a person should add. A day
  * with nothing to report still says so: for a 24/7 pipeline, silence and
- * "nothing happened" are different news. */
+ * "nothing happened" are different news. The window is "since the
+ * previous digest", which the text calls a day — true to the hour except
+ * on a DST day. */
 export function buildDigest(runs: readonly WorkflowRun[], from: number, to: number): string {
   const ended = runs.filter((run) => run.endedAt !== undefined && run.endedAt >= from && run.endedAt < to);
   const day = localDate(to);
-  if (ended.length === 0) return `daily digest for ${day}: no run ended in the last 24h`;
+  if (ended.length === 0) return `daily digest for ${day}: no run ended since the previous digest`;
   const count = (status: WorkflowRunStatus) => ended.filter((run) => run.status === status).length;
   const completed = ended.filter((run) => run.status === "completed");
   const parts: string[] = [
-    `${ended.length} run${ended.length === 1 ? "" : "s"} ended in the last 24h — ${count("completed")} completed, ${count("failed")} failed, ${count("cancelled")} cancelled`,
+    `${ended.length} run${ended.length === 1 ? "" : "s"} ended since the previous digest — ${count("completed")} completed, ${count("failed")} failed, ${count("cancelled")} cancelled`,
   ];
   if (completed.length > 0) {
     const mean = completed.reduce((sum, run) => sum + ((run.endedAt ?? run.startedAt) - run.startedAt), 0) / completed.length;
