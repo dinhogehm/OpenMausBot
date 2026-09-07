@@ -9,6 +9,7 @@
 import { z } from "zod";
 
 import {
+  auditGroupIssues,
   capabilityIssues,
   validateWorkflow,
   WORKFLOW_APPROVAL_OUTCOMES,
@@ -35,6 +36,9 @@ export interface WorkflowApiDeps {
    * a bot that no longer exists. Read on every listing and every start, so
    * the canvas and the run gate see a toggle the moment a person flips it. */
   botCapabilities: (botId: string) => BotCapabilities | null;
+  /** Whether a room exists (store.group in index.ts), for the audit room
+   * check. Absent, the listing never reports `missing-audit-group`. */
+  groupExists?: (groupId: string) => boolean;
   /** Called once a definition is actually gone, so what pointed AT it can be
    * released — index.ts pauses the webhooks that targeted it, which would
    * otherwise answer 410 forever. A throw here is logged, never turned into
@@ -153,6 +157,14 @@ const workflowInputSchema = z.object({
   triggers: triggersSchema.optional(),
   maxNodeExecutions: optionalNumber,
   providerOutage: providerOutageSchema.optional(),
+  // Range is the validator's (bad-numbers), as for every numeric knob.
+  stuckAfterMinutes: optionalNumber,
+  // A foreign key like a notify node's room; whether it exists is the
+  // listing's finding (missing-audit-group).
+  auditGroupId: id.optional(),
+  // Same stance as the schedule's time: a clock the digest could never
+  // fire on is refused at the door as well as by the validator.
+  digestAt: z.string().regex(WORKFLOW_SCHEDULE_TIME_RE, "must be HH:MM (24-hour)").optional(),
 });
 
 // Compile-time drift guards. Exact<> catches value-type drift, but two object
@@ -227,7 +239,15 @@ const workflowPatchSchema = z.preprocess(stripNulls, workflowInputSchema.partial
  * store's spread overwrites and the JSON file then omits). A null on any
  * other top-level field is refused outright rather than becoming a silent
  * no-op. Single source of truth for both rules. */
-const CLEARABLE_FIELDS = ["description", "triggers", "maxNodeExecutions", "providerOutage"] as const;
+const CLEARABLE_FIELDS = [
+  "description",
+  "triggers",
+  "maxNodeExecutions",
+  "providerOutage",
+  "stuckAfterMinutes",
+  "auditGroupId",
+  "digestAt",
+] as const;
 const isClearable = (key: string) => (CLEARABLE_FIELDS as readonly string[]).includes(key);
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
@@ -276,6 +296,7 @@ export type WorkflowWithIssues = Workflow & { issues: WorkflowIssue[] };
 const issuesOf = (deps: WorkflowApiDeps, workflow: Workflow): WorkflowIssue[] => [
   ...validateWorkflow(workflow),
   ...capabilityIssues(workflow, deps.botCapabilities),
+  ...(deps.groupExists ? auditGroupIssues(workflow, deps.groupExists) : []),
 ];
 const withIssues = (deps: WorkflowApiDeps, workflow: Workflow): WorkflowWithIssues => ({
   ...workflow,
@@ -287,6 +308,13 @@ const LIVE_RUN_STATUSES = new Set<WorkflowRunStatus>(["queued", "running", "wait
 // ── handlers ──────────────────────────────────────────────────────────
 export function listWorkflows(deps: WorkflowApiDeps): WorkflowApiResponse {
   return { status: 200, body: { workflows: deps.store.list().map((workflow) => withIssues(deps, workflow)) } };
+}
+
+/** What an uptime robot polls. Always 200 with `ok` in the body — a stuck
+ * run is the monitor's alert condition, not a broken endpoint — behind the
+ * same session gate as every other workflow route. */
+export function engineHealth({ engine }: WorkflowApiDeps): WorkflowApiResponse {
+  return { status: 200, body: engine.health() };
 }
 
 export function createWorkflow(deps: WorkflowApiDeps, body: unknown): WorkflowApiResponse {
@@ -497,6 +525,10 @@ export async function handleWorkflowRequest(
   }
   if (path === "/api/workflow-runs") {
     return method === "GET" ? listAllRuns(deps, request.searchParams.get("limit")) : null;
+  }
+  // Before the `/api/workflows/:id` match: "health" is a route, never an id.
+  if (path === "/api/workflows/health") {
+    return method === "GET" ? engineHealth(deps) : null;
   }
   let match = path.match(WORKFLOW_RUNS_PATH);
   if (match) {

@@ -183,7 +183,12 @@ describe("provider outage — entering the wait", () => {
     expect(workflowOutageWaitMessage(waiting, (at) => `@${at - T0}`)).toBe(
       "Waiting for the provider: next attempt @60000 (attempt 1 of 10)",
     );
-    expect(h.notifications).toEqual([]); // waiting is not a failure
+    // Waiting is not a failure — but the first wait is announced once, so
+    // the operator knows the run is parked and for how long at most.
+    expect(h.notifications.map((n) => n.kind)).toEqual(["outage"]);
+    expect(h.notifications[0]!.message).toBe(
+      `Workflow "Release" is waiting out a provider outage at node "plan": next attempt in 1m, giving up after 6h — ${CODEX_404}`,
+    );
 
     await tick(50_000);
     expect(h.dispatches).toHaveLength(1); // not due yet
@@ -419,9 +424,12 @@ describe("provider outage — backoff progression and horizon", () => {
     expect(failed.status).toBe("failed");
     expect(failed.outage).toBeUndefined();
     expect(failed.error).toContain("the provider stayed unavailable for 0.1h (3 attempts)");
-    expect(h.notifications).toHaveLength(1);
-    expect(h.notifications[0]!.kind).toBe("failed");
-    expect(h.notifications[0]!.message).toContain('at node "plan"');
+    // The first wait was announced; the spent horizon is announced ONCE,
+    // as the run's failure (there is no failed edge for a separate
+    // "gave up" line to precede), never twice for one event.
+    expect(h.notifications.map((n) => n.kind)).toEqual(["outage", "failed"]);
+    expect(h.notifications[1]!.message).toContain('at node "plan"');
+    expect(h.notifications[1]!.message).toContain("the provider stayed unavailable for 0.1h (3 attempts)");
     h.engine.stop();
   });
 
@@ -508,7 +516,14 @@ describe("provider outage — fallback bot", () => {
     expect(handed.currentBotId).toBe("spare");
     expect(handed.nextAttemptAt).toBeUndefined();
     expect(handed.outage).toMatchObject({ attempts: 0, fallbackBotId: "spare", reason: CODEX_404 });
-    expect(h.notifications).toEqual([]);
+    // The hand-off is announced — who has the node now, and why.
+    expect(h.notifications).toEqual([
+      {
+        runId: run.id,
+        kind: "fallback",
+        message: `Workflow "Release" handed node "plan" to fallback bot "spare" because: ${CODEX_404}`,
+      },
+    ]);
 
     h.completeTurn(h.dispatches[1]!.threadId, envelope("done", "planned on claude"));
     const advanced = h.store.getRun(run.id)!;

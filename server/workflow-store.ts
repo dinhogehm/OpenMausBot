@@ -30,10 +30,10 @@ export interface WorkflowStoreOptions {
   emit?: (payload: Record<string, unknown>) => void;
 }
 
-/** What a client may send. `nextRunAt` is engine-owned timing state: it
- * is excluded here so no create/update can set it — the API's key-set guard
- * then keeps it out of the request schema as well. */
-export type WorkflowInput = Omit<Workflow, "id" | "createdAt" | "updatedAt" | "nextRunAt">;
+/** What a client may send. `nextRunAt` and `lastDigestAt` are engine-owned
+ * timing state: they are excluded here so no create/update can set them —
+ * the API's key-set guard then keeps them out of the request schema as well. */
+export type WorkflowInput = Omit<Workflow, "id" | "createdAt" | "updatedAt" | "nextRunAt" | "lastDigestAt">;
 
 interface WorkflowFile {
   version: 1;
@@ -176,6 +176,22 @@ export class WorkflowStore {
     // them together here would make a disarm unrecoverable.
     if (current.nextRunAt === value) return structuredClone(current);
     const patched: Workflow = { ...current, nextRunAt: value };
+    const next = this.workflows.slice();
+    next[at] = patched;
+    this.writeWorkflows(next);
+    this.workflows = next;
+    this.emitWorkflow(patched);
+    return structuredClone(patched);
+  }
+
+  /** Engine-owned, like setNextRunAt: the digest's double-fire guard. Same
+   * persistence, same frame, `updatedAt` untouched; null on an unknown id. */
+  setLastDigestAt(id: string, value: number): Workflow | null {
+    const at = this.workflows.findIndex((workflow) => workflow.id === id);
+    if (at === -1) return null;
+    const current = this.workflows[at]!;
+    if (current.lastDigestAt === value) return structuredClone(current);
+    const patched: Workflow = { ...current, lastDigestAt: value };
     const next = this.workflows.slice();
     next[at] = patched;
     this.writeWorkflows(next);

@@ -5595,6 +5595,50 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("answers GET /api/workflows/health with the engine's document, behind the same gate as the other workflow routes", async () => {
+    const created = await api("POST", "/api/workflows", {
+      name: "Health probe",
+      entryNodeId: "only",
+      nodes: [{ kind: "agent", id: "only", botId: "no-such-bot", instructions: "Look.", outcomes: ["done"] }],
+      edges: [],
+      layout: {},
+      digestAt: "18:00",
+      stuckAfterMinutes: 30,
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.workflow.id as string;
+    try {
+      const health = await api("GET", "/api/workflows/health");
+      expect(health.status).toBe(200);
+      // The stable top level a monitor keys on: every field a count, an
+      // instant or a short string.
+      expect(Object.keys(health.body).sort()).toEqual(["engine", "lastFailure", "now", "ok", "runs", "version", "workflows"]);
+      expect(health.body.ok).toBe(true);
+      expect(typeof health.body.version).toBe("string");
+      expect(health.body.engine.uptimeMs).toBeGreaterThanOrEqual(0);
+      expect(typeof health.body.engine.lastTickAt).toBe("number"); // the reconciler has ticked since boot
+      expect(health.body.runs).toEqual({ live: 0, queued: 0, running: 0, waitingApproval: 0, stuck: [] });
+      const row = health.body.workflows.find((workflow: { id: string }) => workflow.id === id);
+      expect(row).toEqual({
+        id,
+        name: "Health probe",
+        schedule: null,
+        nextRunAt: null,
+        liveRunId: null,
+        liveRunStatus: null,
+        lastRun: null,
+        lastFailure: null,
+        digestAt: "18:00",
+        lastDigestAt: null,
+        auditGroupId: null,
+      });
+      // "health" is never treated as a workflow id by the other verbs.
+      expect((await fetch(`${BASE}/api/workflows/health`, { method: "DELETE" })).status).toBe(404);
+    } finally {
+      expect((await fetch(`${BASE}/api/workflows/${id}`, { method: "DELETE" })).status).toBe(204);
+    }
+  });
+
   it("rejects a PATCH that nulls a required workflow field over the socket", async () => {
     const created = await api("POST", "/api/workflows", { name: "Null guard", entryNodeId: "", nodes: [], edges: [], layout: {} });
     expect(created.status).toBe(201);

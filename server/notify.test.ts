@@ -20,11 +20,18 @@ describe("buildNotification", () => {
     expect(buildNotification("routine-failed", bot, "thread-1", "boom")?.title).toBe("Scout's routine failed");
     expect(buildNotification("turn-failed", bot, "thread-1", "the Local VM is not ready")?.title)
       .toBe("Scout couldn't start");
+    // The workflow engine's events: the body already names the workflow,
+    // the node and the cause; the title says what sort of news it is.
+    expect(buildNotification("workflow-failed", bot, "thread-1", "x")?.title).toBe("Scout's workflow failed");
+    expect(buildNotification("workflow-approval", bot, "thread-1", "x")?.title).toBe("Scout's workflow needs approval");
+    expect(buildNotification("workflow-stuck", bot, "thread-1", "x")?.title).toBe("Scout's workflow is stuck");
+    expect(buildNotification("workflow-done", bot, "thread-1", "x")?.title).toBe("Scout's workflow finished");
+    expect(buildNotification("workflow-update", bot, "thread-1", "x")?.title).toBe("Scout's workflow");
   });
 
   it("stays silent for a bot whose notifications are off", () => {
     const quiet = { ...bot, notifications: false };
-    for (const kind of ["approval", "question", "done", "routine-failed", "turn-failed"] as const) {
+    for (const kind of ["approval", "question", "done", "routine-failed", "turn-failed", "workflow-stuck", "workflow-update"] as const) {
       expect(buildNotification(kind, quiet, "thread-1", "anything")).toBeNull();
     }
     // absent means "not turned off" — older bot records predate the flag

@@ -39,6 +39,20 @@ export const WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H = 24;
  * lasted longer than the horizon. Both knobs live on the workflow. */
 export const WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN = 60;
 export const WORKFLOW_OUTAGE_HORIZON_DEFAULT_H = 6;
+/** The run watchdog: a live run whose current node has not changed for this
+ * long is announced as STUCK — once, then again at most every further
+ * period — so an operator learns about a node that hung from a
+ * notification and not from staring at the sidebar. Per workflow
+ * (`stuckAfterMinutes`), bounded so a typo can neither page every ten
+ * seconds nor never page at all. A wait node has its own clock and is
+ * exempt; an approval gate is judged against its own expiry instead. */
+export const WORKFLOW_STUCK_AFTER_DEFAULT_MIN = 120;
+export const WORKFLOW_STUCK_AFTER_MIN = 10;
+export const WORKFLOW_STUCK_AFTER_MAX = 1_440;
+/** How far past an approval gate's own expiry the watchdog waits before it
+ * counts the run as stuck: the expiry sweep should have settled it long
+ * before, so a gate still open here is one the engine could not close. */
+export const WORKFLOW_STUCK_APPROVAL_FACTOR = 1.5;
 /** A scheduled run more than this late (the computer was asleep or the app
  * closed past the slot) is recorded as missed, never executed late — the
  * same 12-hour catch-up window routines use. */
@@ -162,6 +176,23 @@ export interface Workflow {
   triggers?: WorkflowTriggers;
   maxNodeExecutions?: number;
   providerOutage?: WorkflowProviderOutage;
+  /** The watchdog's patience for this workflow, in minutes (default
+   * `WORKFLOW_STUCK_AFTER_DEFAULT_MIN`): a live run parked on one node for
+   * longer than this is announced as stuck. */
+  stuckAfterMinutes?: number;
+  /** A room every run transition is ALSO posted to, prefixed with the
+   * workflow's name — the audit trail a person scrolls on the phone. The
+   * notify nodes' channel path is reused; absent, nothing is posted. */
+  auditGroupId?: string;
+  /** Local wall-clock time (`HH:MM`) for a daily digest of the day's runs —
+   * completed, failed, cancelled, average time, the nodes that failed most
+   * and the denials seen — posted to the audit room and to the person.
+   * Absent: no digest. */
+  digestAt?: string;
+  /** Engine-owned: when the last digest went out, persisted BEFORE the
+   * digest is posted so a restart never sends the same day twice. Never
+   * settable by a client — the API strips it. */
+  lastDigestAt?: number;
   /** Engine-owned timing state for `triggers.schedule`, in three states:
    * `undefined` — not armed yet, so the engine computes the first slot;
    * a number — the instant the schedule next fires;
@@ -178,12 +209,28 @@ export type WorkflowRunStatus = "queued" | "running" | "waiting-approval" | "com
 
 export type WorkflowRunTrigger = "manual" | "schedule" | "webhook";
 
-/** Why the engine is calling notifyUser: a run paused on a terminal failure,
- * an approval gate opened, that gate's single reminder, or a continuous
- * cycle that COMPLETED because its execution cap closed the valve — a run
- * that ends after hundreds of bot turns is an event to see even when it is
- * not a failure. */
-export type WorkflowNotificationKind = "failed" | "approval" | "reminder" | "cap-reached";
+/** Why the engine is calling notifyUser. Every transition a person running
+ * a workflow unattended would want to hear about has a kind of its own, so
+ * a wrapper never branches on run.status: a terminal failure (`failed`),
+ * an approval gate opening (`approval`) and its single reminder
+ * (`reminder`), a continuous cycle that COMPLETED because its execution cap
+ * closed the valve (`cap-reached` — a run that ends after hundreds of bot
+ * turns is an event to see even when it is not a failure), an ordinary
+ * completion (`completed`), a cancellation (`cancelled`), the watchdog's
+ * "this run has not moved" (`stuck`), a provider outage — first wait, and
+ * the horizon giving up (`outage`) — the hand-off of a node to its fallback
+ * bot (`fallback`), and the daily digest (`digest`). */
+export type WorkflowNotificationKind =
+  | "failed"
+  | "approval"
+  | "reminder"
+  | "cap-reached"
+  | "completed"
+  | "cancelled"
+  | "stuck"
+  | "outage"
+  | "fallback"
+  | "digest";
 
 export interface WorkflowNodeResult {
   nodeId: string;
@@ -288,6 +335,17 @@ export interface WorkflowRun {
    * sweep never sees a wait as a dispatch, and persisted rather than
    * derived from the node's minutes — which may be edited mid-pause. */
   waitStartedAt?: number;
+  /** When the run ENTERED its current node (engine bookkeeping): stamped
+   * when the run moves to a different node, when a finished node's edge is
+   * followed, and on a resume — never on a retry of the same node, so
+   * three dead attempts on one node read as one long stay. The watchdog
+   * measures from here; absent on older receipts, where the last result's
+   * end (or the run's start) stands in. */
+  nodeEnteredAt?: number;
+  /** When the watchdog last announced this run as stuck on its current
+   * node (engine bookkeeping). Persisted so a restart neither repeats the
+   * announcement nor forgets it; cleared the moment the run moves on. */
+  stuckNotifiedAt?: number;
   input: string;
   nodeResults: WorkflowNodeResult[];
   error?: string;
@@ -411,7 +469,9 @@ export interface WorkflowIssue {
     | "fallback-same-bot"
     | "fallback-missing-bot"
     | "fallback-missing-capability"
-    | "cycle-without-wait";
+    | "cycle-without-wait"
+    | "bad-digest"
+    | "missing-audit-group";
   nodeId?: string;
   message: string;
 }
@@ -602,6 +662,26 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
         badNumber("providerOutage.horizonHours must be a positive number.");
       }
     }
+  }
+  // The watchdog's patience is a whole number of minutes inside a fixed
+  // band: below it the tick would page for an ordinary slow turn, above it
+  // the announcement would come too late to matter.
+  if (
+    workflow.stuckAfterMinutes !== undefined &&
+    (!whole(workflow.stuckAfterMinutes, WORKFLOW_STUCK_AFTER_MIN) || workflow.stuckAfterMinutes > WORKFLOW_STUCK_AFTER_MAX)
+  ) {
+    badNumber(
+      `stuckAfterMinutes must be a whole number from ${WORKFLOW_STUCK_AFTER_MIN} to ${WORKFLOW_STUCK_AFTER_MAX}.`,
+    );
+  }
+  // The digest fires on a wall clock, so it has the schedule's time shape;
+  // a blank room id is a promise to post nowhere (whether the room EXISTS
+  // is the roster's business — auditGroupIssues).
+  if (workflow.digestAt !== undefined && (typeof workflow.digestAt !== "string" || !WORKFLOW_SCHEDULE_TIME_RE.test(workflow.digestAt))) {
+    issues.push({ severity: "error", code: "bad-digest", message: "digestAt must be HH:MM (24-hour)." });
+  }
+  if (workflow.auditGroupId !== undefined && (typeof workflow.auditGroupId !== "string" || !workflow.auditGroupId.trim())) {
+    issues.push({ severity: "error", code: "missing-audit-group", message: "The audit room id is blank." });
   }
   for (const node of workflow.nodes) {
     if (node.kind === "agent") {
@@ -910,4 +990,22 @@ export function capabilityIssues(
     }
   }
   return issues;
+}
+
+/** Pure: the audit room the workflow names must exist, or every transition
+ * it promised to post would go into the void — an error, like a fallback
+ * bot the roster does not have, because the whole point of an audit room is
+ * that nothing about the run is silent. Needs the room roster, so it lives
+ * beside capabilityIssues rather than in validateWorkflow (which reports a
+ * BLANK id itself). */
+export function auditGroupIssues(workflow: Workflow, groupExists: (groupId: string) => boolean): WorkflowIssue[] {
+  const groupId = workflow.auditGroupId;
+  if (typeof groupId !== "string" || !groupId.trim() || groupExists(groupId)) return [];
+  return [
+    {
+      severity: "error",
+      code: "missing-audit-group",
+      message: `The audit room "${groupId}" no longer exists; pick another room or turn the audit room off.`,
+    },
+  ];
 }

@@ -23,7 +23,10 @@ export type NotifyKind =
   | "turn-failed"
   | "takeover"
   | "workflow-failed"
-  | "workflow-approval";
+  | "workflow-approval"
+  | "workflow-stuck"
+  | "workflow-done"
+  | "workflow-update";
 
 export interface Notification {
   kind: NotifyKind;
@@ -112,7 +115,13 @@ export function buildNotification(
                 ? `${who}'s workflow failed`
                 : kind === "workflow-approval"
                   ? `${who}'s workflow needs approval`
-                  : `${who} finished`;
+                  : kind === "workflow-stuck"
+                    ? `${who}'s workflow is stuck`
+                    : kind === "workflow-done"
+                      ? `${who}'s workflow finished`
+                      : kind === "workflow-update"
+                        ? `${who}'s workflow`
+                        : `${who} finished`;
 
   // A "finished" with nothing to say is not worth a notification — the
   // badge in the sidebar already carries that much.
