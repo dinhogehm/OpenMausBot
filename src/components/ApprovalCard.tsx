@@ -52,13 +52,27 @@ function toolLabel(tool?: string): string {
   return key ? t(key) : bare;
 }
 
+/** The one card that decides in place: a workflow gate never takes over
+ * the composer (it can wait for days), so its two answers live here. The
+ * caller binds the thread — a bot's chat or a room — and the action is the
+ * same `decideRequest` the composer sends for every other card. */
+export type ApprovalCardDecision = (behavior: "allow" | "deny") => void;
+
+/** How the workflow itself signs a card it posts into a room — the same
+ * author a notify node's post carries, never a member of the room. */
+export const WORKFLOW_AUTHOR_BOT_ID = "workflow";
+
 export function ApprovalCard({
   bot,
   message,
+  onDecide,
 }: {
   /** who is asking, for the "Name wants to …" line */
   bot?: Bot;
   message: Message;
+  /** Present where a workflow gate can be decided from this card; absent,
+   * a pending gate card only says it is waiting (a transcript export). */
+  onDecide?: ApprovalCardDecision;
 }) {
   const card = message.card;
   if (!card) return null;
@@ -87,7 +101,13 @@ export function ApprovalCard({
   // target whenever it differs from the proposer.
   // A gate is not the bot wanting anything: a workflow is waiting on the
   // person, and the card's own title already names the workflow and node.
-  const workflowHeader = isWorkflowGate ? t("approval.card.workflowGate", { name: bot?.name ?? t("approval.someone") }) : undefined;
+  // In a room the card is signed by the workflow, not by any member, so
+  // the header names the workflow rather than "someone".
+  const workflowHeader = isWorkflowGate
+    ? message.from?.botId === WORKFLOW_AUTHOR_BOT_ID || !bot
+      ? t("approval.card.workflowGateUnowned")
+      : t("approval.card.workflowGate", { name: bot.name })
+    : undefined;
   const profileHeader = isProfileRequest && card.profileRequest
     ? card.profileRequest.targetBotId === card.profileRequest.botId
       ? t("approval.card.profileWantsToOwn", { name: bot?.name ?? t("approval.someone") })
@@ -139,6 +159,27 @@ export function ApprovalCard({
       {heldNote && (
         <div className="mt-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-[12.5px] text-warning">
           {heldNote}
+        </div>
+      )}
+
+      {/* A gate decides HERE, not in the composer: the card may stay open
+          for days, and the chat must keep working around it. */}
+      {isWorkflowGate && !settled && onDecide && (
+        <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => onDecide("deny")}
+            className="rounded-full border border-danger/40 px-3.5 py-1.5 text-[13.5px] text-danger transition-colors hover:bg-danger/10"
+          >
+            {t("approval.action.reject")}
+          </button>
+          <button
+            type="button"
+            onClick={() => onDecide("allow")}
+            className="rounded-full bg-accent px-3.5 py-1.5 text-[13.5px] font-medium text-white transition-colors hover:brightness-110"
+          >
+            {t("approval.action.approve")}
+          </button>
         </div>
       )}
 

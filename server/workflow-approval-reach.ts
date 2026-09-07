@@ -269,13 +269,31 @@ export function resolveWorkflowApprovalCard(
       body: { error: !current ? "this workflow run no longer exists" : "this workflow run is no longer waiting for this decision" },
     };
   }
+  let settled: WorkflowRun;
   try {
-    deps.resolve(payload.runId, decision);
+    settled = deps.resolve(payload.runId, decision);
   } catch (error) {
     // The engine's own refusal (a race with the canvas or an expiry in the
     // same instant): close the card and say so.
     deps.store.patchMessage(args.threadId, existing.id, { card: settledCard(card, "unavailable") });
     return { claimed: true, status: 409, body: { error: error instanceof Error ? error.message : String(error) } };
+  }
+  // resolveApproval returns rather than throws when the gate's node was
+  // edited away under the run: the run is FAILED and no decision was
+  // recorded. The receipt is the truth — the answer must say what it says,
+  // never "approved" for a decision that never landed. The gate's result is
+  // found by its opening instant, since the run may already have advanced
+  // through a notify node in the same call.
+  const recorded = settled.nodeResults.some(
+    (result) => result.nodeId === payload.nodeId && result.startedAt === current.approvalRequestedAt && result.outcome === decision,
+  );
+  if (settled.status === "failed" || !recorded) {
+    deps.store.patchMessage(args.threadId, existing.id, { card: settledCard(card, "unavailable") });
+    return {
+      claimed: true,
+      status: 409,
+      body: { error: settled.error ?? "this workflow run could not take the decision" },
+    };
   }
   // The engine's settle hook has marked every recorded copy; this thread
   // may not be among them (see above), so mark it here regardless.

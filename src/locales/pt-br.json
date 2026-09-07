@@ -20,6 +20,7 @@
   "approval.tool.updateProfile": "atualizar o próprio perfil",
   "approval.tool.workflowApproval": "decidir uma etapa de aprovação do workflow",
   "approval.card.workflowGate": "O workflow de {name} precisa da sua decisão",
+  "approval.card.workflowGateUnowned": "Um workflow precisa da sua decisão",
   "approval.label.workflowGate": "Decida a etapa de aprovação do workflow",
   "approval.aria.pendingWorkflow": "Decisão de workflow pendente",
   "approval.action.approve": "Aprovar",

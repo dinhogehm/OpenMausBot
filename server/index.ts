@@ -345,6 +345,7 @@ import {
   resolveRequestAuth,
   serializeSessionCookie,
   sessionCookieName,
+  type RequestAuth,
 } from "./request-auth.ts";
 import { formatPairingCode, SESSION_TTL_MS, SessionRegistry, type Scope } from "./sessions.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
@@ -5319,11 +5320,25 @@ function resolveAndSendRoutine(
  * card a human answered. */
 function resolveAndSendWorkflowApproval(
   res: ServerResponse,
+  auth: RequestAuth,
   args: { threadId: string; requestId: string; behavior: string },
 ): boolean {
   if (!workflowEngine || !workflowStore) return false;
   const engine = workflowEngine;
   const runs = workflowStore;
+  // The respond routes are client-allowed (a paired phone answers permission
+  // cards), but a gate decides what /api/workflows/* only lets an admin
+  // start, cancel or approve: the same scope applies to the card, whoever
+  // clicks it. Judged only once the card is known to be a gate's, so an
+  // ordinary card on the same thread is untouched. A default pairing holds
+  // admin; only `omb pair --client` does not.
+  const isGateCard = store
+    .messagesFor(args.threadId)
+    .some((message) => message.card?.requestId === args.requestId && message.card.workflowApproval);
+  if (isGateCard && auth.kind === "session" && !auth.scopes.includes("admin")) {
+    json(res, 403, { error: "forbidden: deciding a workflow approval needs the admin scope" });
+    return true;
+  }
   const result = resolveWorkflowApprovalCard(
     {
       store: workflowApprovalReachStore,
@@ -11765,7 +11780,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!behavior) return json(res, 400, { error: "behavior must be allow, deny, or answer" });
       // A workflow gate's card is harness-owned like a routine proposal:
       // resolved here, never handed to the provider adapter.
-      if (resolveAndSendWorkflowApproval(res, { threadId: bot.threadId, requestId: String(body.requestId), behavior })) return;
+      if (resolveAndSendWorkflowApproval(res, auth, { threadId: bot.threadId, requestId: String(body.requestId), behavior })) return;
       if (resolveAndSendRoutine(res, {
         botId: bot.id,
         botName: bot.name,
@@ -11810,7 +11825,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const requestId = String(body.requestId);
       // A room copy of a workflow gate's card: same engine call as the
       // canvas, and the bot's chat copy is marked answered by the engine.
-      if (resolveAndSendWorkflowApproval(res, { threadId, requestId, behavior })) return;
+      if (resolveAndSendWorkflowApproval(res, auth, { threadId, requestId, behavior })) return;
       const skillCard = store.messagesFor(threadId).find(
         (message) => message.card?.requestId === requestId && message.card.skillRequest,
       );

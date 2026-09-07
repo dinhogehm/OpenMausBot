@@ -230,9 +230,17 @@ describe("resolveWorkflowApprovalCard", () => {
     const reach = createWorkflowApprovalReach({ store: f.store, botFor: () => "reviewer", roomAuthor: ROOM_AUTHOR });
     const threads = reach.announce(announcement());
     const resolve = vi.fn((_runId: string, decision: "approved" | "rejected") => {
-      // What the engine does on settle: marks every recorded copy.
+      // What the engine does on settle: marks every recorded copy and
+      // records the gate's result, keyed by its opening instant.
       reach.settle(current!, threads, decision);
-      return { ...current!, status: "running" as const };
+      return {
+        ...current!,
+        status: "running" as const,
+        nodeResults: [
+          ...current!.nodeResults,
+          { nodeId: "gate", outcome: decision, summary: `${decision} by user`, startedAt: current!.approvalRequestedAt ?? 0, endedAt: 30 },
+        ],
+      };
     });
     const requestId = workflowApprovalRequestId(run());
     const deps = { store: f.store, resolve, run: () => current };
@@ -271,7 +279,11 @@ describe("resolveWorkflowApprovalCard", () => {
     const f = fakeStore();
     const reach = createWorkflowApprovalReach({ store: f.store, botFor: () => "reviewer", roomAuthor: ROOM_AUTHOR });
     reach.announce(announcement());
-    const resolve = vi.fn(() => ({ ...run(), status: "running" as const }));
+    const resolve = vi.fn(() => ({
+      ...run(),
+      status: "running" as const,
+      nodeResults: [...run().nodeResults, { nodeId: "gate", outcome: "approved", summary: "approved by user", startedAt: 20, endedAt: 30 }],
+    }));
     const requestId = workflowApprovalRequestId(run());
     resolveWorkflowApprovalCard({ store: f.store, resolve, run: () => run() }, { threadId: "chat-reviewer", requestId, behavior: "allow" });
     expect(f.cards("chat-reviewer")[0]).toMatchObject({ answered: "allow", dismissed: true });
@@ -310,6 +322,45 @@ describe("resolveWorkflowApprovalCard", () => {
     const result = resolveWorkflowApprovalCard({ store: f.store, resolve, run: () => run() }, { threadId: "chat-reviewer", requestId, behavior: "deny" });
     expect(result).toEqual({ claimed: true, status: 409, body: { error: "run is not waiting for approval (run is running)" } });
     expect(f.cards("chat-reviewer")[0]!.answered).toBe("unavailable");
+  });
+
+  it("answers 409 and closes the card when the engine returned a FAILED run instead of a decision (gate edited away)", () => {
+    const f = fakeStore();
+    const reach = createWorkflowApprovalReach({ store: f.store, botFor: () => "reviewer", roomAuthor: ROOM_AUTHOR });
+    reach.announce(announcement());
+    const resolve = vi.fn(() => ({
+      ...run(),
+      status: "failed" as const,
+      error: "the workflow was deleted or edited under this run and its approval node is gone",
+    }));
+    const requestId = workflowApprovalRequestId(run());
+    const result = resolveWorkflowApprovalCard({ store: f.store, resolve, run: () => run() }, { threadId: "chat-reviewer", requestId, behavior: "allow" });
+    expect(result).toEqual({
+      claimed: true,
+      status: 409,
+      body: { error: "the workflow was deleted or edited under this run and its approval node is gone" },
+    });
+    expect(f.cards("chat-reviewer")[0]).toMatchObject({ answered: "unavailable", dismissed: true });
+  });
+
+  it("finds the gate's own result even when the run advanced through a notify step in the same call", () => {
+    const f = fakeStore();
+    const reach = createWorkflowApprovalReach({ store: f.store, botFor: () => "reviewer", roomAuthor: ROOM_AUTHOR });
+    reach.announce(announcement());
+    const resolve = vi.fn(() => ({
+      ...run(),
+      status: "completed" as const,
+      nodeResults: [
+        ...run().nodeResults,
+        { nodeId: "gate", outcome: "approved", summary: "approved by user", startedAt: 20, endedAt: 30 },
+        { nodeId: "ping", outcome: "sent", summary: "posted", startedAt: 30, endedAt: 30 },
+      ],
+    }));
+    const requestId = workflowApprovalRequestId(run());
+    expect(resolveWorkflowApprovalCard({ store: f.store, resolve, run: () => run() }, { threadId: "chat-reviewer", requestId, behavior: "allow" })).toMatchObject({
+      status: 200,
+      body: { decision: "approved" },
+    });
   });
 
   it("refuses a free-text answer: a gate is allow or deny", () => {

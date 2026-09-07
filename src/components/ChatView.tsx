@@ -749,7 +749,20 @@ const MessagesList = memo(function MessagesList({
               // a live permission ask gets the approval box; questions keep
               // the list card. The first-run quiz drops out once they talk.
               if (m.card?.requestId && m.card.tool) {
-                return <ApprovalCard bot={bot} message={m} />;
+                return (
+                  <ApprovalCard
+                    bot={bot}
+                    message={m}
+                    onDecide={(behavior) =>
+                      dispatch({
+                        type: "decideRequest",
+                        threadId: bot.threadId,
+                        requestId: m.card!.requestId!,
+                        behavior,
+                        message: behavior === "deny" ? "Rejected by the user." : undefined,
+                      })}
+                  />
+                );
               }
               if (shouldHideOnboardingCard(m, transcript)) return null;
               return <OptionCard botId={bot.id} message={m} />;

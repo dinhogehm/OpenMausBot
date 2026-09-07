@@ -20,6 +20,7 @@
   "approval.tool.updateProfile": "update its profile",
   "approval.tool.workflowApproval": "decide a workflow gate",
   "approval.card.workflowGate": "{name}'s workflow needs your decision",
+  "approval.card.workflowGateUnowned": "A workflow needs your decision",
   "approval.label.workflowGate": "Decide the workflow gate",
   "approval.aria.pendingWorkflow": "Pending workflow decision",
   "approval.action.approve": "Approve",

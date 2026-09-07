@@ -1,9 +1,9 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ApprovalCard } from "./ApprovalCard";
-import { PendingApprovalPanel, spokenApprovalPrompt, type Pending } from "./PendingApproval";
+import { PendingApprovalPanel, pendingApprovals, spokenApprovalPrompt, type Pending } from "./PendingApproval";
 import type { Bot, Message } from "@/state/store";
 import { skillRequestBehavior } from "../../shared/skill-request";
 
@@ -391,13 +391,34 @@ describe("ApprovalCard workflow gates", () => {
     expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message("unavailable") }))).toContain("No longer waiting");
   });
 
-  it("takes over the composer as a workflow decision and is spoken by its title, not its body", () => {
-    const pending: Pending = { message: message(), requestId: gateCard().requestId!, tool: "workflow_approval", detail: gateCard().subtitle };
-    const strip = renderToStaticMarkup(createElement(PendingApprovalPanel, { pending, count: 1, index: 0 }));
-    expect(strip).toContain("Decide the workflow gate");
-    expect(strip).toContain('aria-label="Pending workflow decision"');
-    expect(spokenApprovalPrompt(pending, "Mochi")).toBe(
-      "Mochi's workflow needs your decision: Workflow \"Delivery\" needs your decision at \"merge-gate\"",
-    );
+  it("never takes over the composer: a gate is not a pending approval, and decides on the card itself", () => {
+    expect(pendingApprovals([message()])).toEqual([]);
+    // an ordinary permission card on the same thread still does
+    const permission: Message = {
+      id: "perm",
+      role: "bot",
+      kind: "options",
+      at: 2,
+      card: { title: "Approval needed", subtitle: "rm -rf build", options: ["Allow", "Deny"], requestId: "req-1", tool: "Bash" },
+    };
+    expect(pendingApprovals([message(), permission]).map((pending) => pending.requestId)).toEqual(["req-1"]);
+
+    const onDecide = vi.fn();
+    const html = renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message(), onDecide }));
+    expect(html).toContain(">Approve</button>");
+    expect(html).toContain(">Reject</button>");
+    // Buttons only while open, and only where a decision can be sent.
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message("allow"), onDecide }))).not.toContain(">Approve</button>");
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message() }))).not.toContain(">Approve</button>");
+  });
+
+  it("names the workflow, not 'someone', on the room copy the workflow signed", () => {
+    const signed: Message = { ...message(), from: { botId: "workflow", name: "Workflow", color: "purple" } };
+    const html = renderToStaticMarkup(createElement(ApprovalCard, { bot: undefined, message: signed }));
+    expect(html).toContain("A workflow needs your decision");
+    expect(html).not.toContain("Someone");
+    expect(html).not.toContain("wants to");
+    // A bot's own chat copy still names the bot.
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message() }))).toContain("Scout&#x27;s workflow needs your decision");
   });
 });

@@ -707,7 +707,9 @@ struct ChatView: View {
     }
 
     private var hasPendingApproval: Bool {
-        messages.contains { $0.card?.isPending == true }
+        // A workflow gate's card is pending but does not block: it is
+        // answered on the card and may stay open for days.
+        messages.contains { $0.card?.blocksComposer == true }
     }
 
     private func submit(_ explicitText: String? = nil) {
