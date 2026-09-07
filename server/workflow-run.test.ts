@@ -2988,6 +2988,50 @@ describe("WorkflowEngine wait node", () => {
     expect(h.store.getRun(second.id)).toMatchObject({ currentNodeId: "ship" });
   });
 
+  it("judges a pause that ended while the computer slept at the tick, not at the instant it ended", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7;
+    const workflow = h.store.create(
+      pausing(30, { triggers: { schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00" } } } }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(local(MONDAY, 17, 29));
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.store.getRun(run.id)?.waitUntil).toBe(local(MONDAY, 17, 59)); // inside the window
+    // The laptop sleeps through 17:59; the first tick lands at 22:00.
+    h.setNow(local(MONDAY, 22));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "pause", waitUntil: local(MONDAY + 1, 9) });
+    expect(h.dispatches).toHaveLength(1);
+    h.setNow(local(MONDAY + 1, 9));
+    await h.engine.tick();
+    expect(h.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+    expect(h.store.getRun(run.id)!.nodeResults[1]).toMatchObject({ startedAt: local(MONDAY, 17, 29), endedAt: local(MONDAY + 1, 9) });
+  });
+
+  it("a restart across the end of the window keeps the run parked until the window reopens", async () => {
+    const h = harness();
+    const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();
+    const MONDAY = 7;
+    const workflow = h.store.create(
+      pausing(30, { triggers: { schedule: { type: "interval", minutes: 60, activeHours: { start: "09:00", end: "18:00" } } } }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.setNow(local(MONDAY, 17, 29));
+    h.completeTurn("thread-1", envelope("done"));
+    const restarted = h.reloadEngine();
+    h.setNow(local(MONDAY + 1, 3));
+    await restarted.engine.tick();
+    await restarted.engine.tick();
+    expect(restarted.store.getRun(run.id)).toMatchObject({ status: "running", currentNodeId: "pause", waitUntil: local(MONDAY + 1, 9) });
+    expect(restarted.dispatches).toHaveLength(0);
+    h.setNow(local(MONDAY + 1, 9));
+    await restarted.engine.tick();
+    expect(restarted.store.getRun(run.id)).toMatchObject({ currentNodeId: "ship" });
+    expect(restarted.dispatches).toHaveLength(1);
+  });
+
   it("a window tightened mid-pause holds a run whose instant had already been shown as due", async () => {
     const h = harness();
     const local = (day: number, hour: number, minute = 0) => new Date(2026, 8, day, hour, minute).getTime();

@@ -505,7 +505,11 @@ export class WorkflowEngine {
       // hand-edited file could) keeps the instant it was parked with.
       const startedAt = run.waitStartedAt ?? run.waitUntil - node.minutes * 60_000;
       const due = startedAt + node.minutes * 60_000;
-      const resume = nextActiveWindowStart(this.activeHoursOf(workflow), due);
+      // Judged at NOW when the pause is already over, not at the instant it
+      // ended: a laptop that slept through 17:59 must not dispatch at 22:00
+      // because 17:59 was inside the window. `due` still wins while the
+      // pause is running, so an edit in either direction lands as before.
+      const resume = nextActiveWindowStart(this.activeHoursOf(workflow), Math.max(due, now));
       if (resume === null) {
         // A window with no allowed day — the validator refuses it, a hand
         // edit can still leave it — would hold the run forever. Say so.
