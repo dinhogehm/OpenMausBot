@@ -15,6 +15,15 @@ export const WORKFLOW_NODE_RETRIES_DEFAULT = 2;
  * miswired loop from running a workflow forever. */
 export const WORKFLOW_MAX_NODE_EXECUTIONS = 30;
 export const WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H = 24;
+/** A provider outage (5xx, a 404 from the provider's own backend, rate
+ * limiting, a dropped connection, an engine process dying before it
+ * answered) is waited out rather than retried: the run parks with a
+ * doubling backoff (1, 2, 4, 8 … minutes) that never spends one of the
+ * node's attempts, capped per wait at this many minutes by default and
+ * given up on — through the ordinary failure path — once the outage has
+ * lasted longer than the horizon. Both knobs live on the workflow. */
+export const WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN = 60;
+export const WORKFLOW_OUTAGE_HORIZON_DEFAULT_H = 6;
 /** A scheduled run more than this late (the computer was asleep or the app
  * closed past the slot) is recorded as missed, never executed late — the
  * same 12-hour catch-up window routines use. */
@@ -51,6 +60,11 @@ export type WorkflowNode =
       retries?: number;
       /** Capabilities the bot must carry for this node to be dispatched. */
       requires?: WorkflowCapability[];
+      /** A second bot the engine may hand this node to — once per provider
+       * outage, and only when that bot runs on a DIFFERENT model engine
+       * than `botId` (a fallback on the same provider would be down too),
+       * is free, and carries every capability in `requires`. */
+      fallbackBotId?: string;
     }
   | { kind: "approval"; id: string; prompt: string; expiresHours?: number; onExpire?: "approved" | "rejected" }
   | { kind: "notify"; id: string; targetGroupId: string; template: string };
@@ -72,6 +86,17 @@ export interface WorkflowTriggers {
   schedule?: WorkflowSchedule;
 }
 
+/** How long a run waits out a provider outage. Both optional; the defaults
+ * above apply to an absent field so a definition saved before this existed
+ * behaves exactly as one that never set it. */
+export interface WorkflowProviderOutage {
+  /** The longest single wait between two attempts, in minutes. */
+  maxBackoffMinutes?: number;
+  /** Give up — through the node's ordinary failure path — once the outage
+   * has lasted this long, in hours. */
+  horizonHours?: number;
+}
+
 export interface Workflow {
   id: string;
   name: string;
@@ -82,6 +107,7 @@ export interface Workflow {
   layout: Record<string, { x: number; y: number }>;
   triggers?: WorkflowTriggers;
   maxNodeExecutions?: number;
+  providerOutage?: WorkflowProviderOutage;
   /** Engine-owned timing state for `triggers.schedule`, in three states:
    * `undefined` — not armed yet, so the engine computes the first slot;
    * a number — the instant the schedule next fires;
@@ -109,6 +135,34 @@ export interface WorkflowNodeResult {
   threadId?: string;
   startedAt: number;
   endedAt: number;
+  /** Present when the node's bot was unreachable and the result came from
+   * its fallback bot instead: who ran it and the provider error that made
+   * the engine switch. A receipt that says "done" must also say by whom. */
+  fallback?: WorkflowFallbackRecord;
+}
+
+export interface WorkflowFallbackRecord {
+  botId: string;
+  because: string;
+}
+
+/** A run waiting out a provider outage on its current node. `attempts`
+ * counts the waits taken so far and `of` how many the horizon allows on
+ * the nominal (jitter-free) schedule — what the UI prints as "attempt Y of
+ * Z"; the wait itself is the run's ordinary `nextAttemptAt`, so the
+ * reconciler's due-dispatch and crash recovery need no special case. */
+export interface WorkflowOutage {
+  /** When the first outage-class failure of this node was seen. */
+  since: number;
+  /** since + the workflow's horizon: no attempt is scheduled past it. */
+  until: number;
+  attempts: number;
+  of: number;
+  /** The provider error, redacted and bounded, for the UI and the receipt. */
+  reason: string;
+  /** Set once the node was handed to its fallback bot during THIS outage,
+   * so the hand-off happens at most once per outage. */
+  fallbackBotId?: string;
 }
 
 export interface WorkflowRun {
@@ -134,6 +188,16 @@ export interface WorkflowRun {
   currentNodeId?: string;
   /** Task thread where the current node is executing (engine bookkeeping). */
   currentThreadId?: string;
+  /** The bot the current node's live dispatch is on. Normally the node's own
+   * bot, and absent on receipts written before fallbacks existed; set to
+   * the fallback bot while it holds the node, so an interrupt, a timeout or
+   * a re-prompt reaches the bot actually working and not the one that was
+   * unreachable (engine bookkeeping). */
+  currentBotId?: string;
+  /** Present while the run waits out a provider outage on its current node
+   * (engine bookkeeping; cleared when the node advances or fails for a
+   * reason that is not the outage). */
+  outage?: WorkflowOutage;
   /** When the current node's turn was dispatched (engine bookkeeping). */
   dispatchedAt?: number;
   /** Set once the engine has re-prompted the current node for a missing or
@@ -155,6 +219,18 @@ export interface WorkflowRun {
   error?: string;
   startedAt: number;
   endedAt?: number;
+}
+
+/** The line the UI prints while a run waits out a provider outage, and the
+ * receipt's wording when the wait ends in a failure. Null when the run is
+ * not waiting. Shared so the canvas and the engine say it the same way. */
+export function workflowOutageWaitMessage(
+  run: Pick<WorkflowRun, "outage" | "nextAttemptAt">,
+  formatWhen: (at: number) => string,
+): string | null {
+  const { outage, nextAttemptAt } = run;
+  if (!outage || nextAttemptAt === undefined) return null;
+  return `Waiting for the provider: next attempt ${formatWhen(nextAttemptAt)} (attempt ${outage.attempts} of ${outage.of})`;
 }
 
 /** Every outcome the engine may route on for a node — declared ones plus the
@@ -246,7 +322,10 @@ export interface WorkflowIssue {
     | "bad-numbers"
     | "bad-schedule"
     | "bad-requires"
-    | "missing-capability";
+    | "missing-capability"
+    | "fallback-same-bot"
+    | "fallback-missing-bot"
+    | "fallback-missing-capability";
   nodeId?: string;
   message: string;
 }
@@ -355,6 +434,28 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
         }
       }
     }
+    // A fallback is only a fallback if it is somebody else: the same bot
+    // would be re-dispatched on the same unreachable provider, which is
+    // what the outage backoff already does without the pretence. Whether
+    // the bot EXISTS is the roster's business (capabilityIssues); a blank
+    // id is the same shape mistake as a blank outcome name.
+    if (node.fallbackBotId !== undefined) {
+      if (typeof node.fallbackBotId !== "string" || !node.fallbackBotId.trim()) {
+        issues.push({
+          severity: "error",
+          code: "fallback-missing-bot",
+          nodeId: node.id,
+          message: `Node "${node.id}" names a blank fallback bot.`,
+        });
+      } else if (node.fallbackBotId === node.botId) {
+        issues.push({
+          severity: "error",
+          code: "fallback-same-bot",
+          nodeId: node.id,
+          message: `Node "${node.id}" names its own bot "${node.botId}" as the fallback; a fallback has to be a different bot.`,
+        });
+      }
+    }
   }
 
   // Numeric knobs feed timers and counters directly: a zero or negative
@@ -368,6 +469,22 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
   };
   if (workflow.maxNodeExecutions !== undefined && !whole(workflow.maxNodeExecutions, 1)) {
     badNumber("maxNodeExecutions must be a whole number of at least 1.");
+  }
+  // The outage knobs feed a backoff clock: a zero cap is a busy loop, a
+  // zero horizon gives up on the first hiccup — neither is "waiting".
+  const outage: unknown = workflow.providerOutage;
+  if (outage !== undefined) {
+    if (typeof outage !== "object" || outage === null || Array.isArray(outage)) {
+      badNumber("providerOutage must be an object with maxBackoffMinutes and/or horizonHours.");
+    } else {
+      const { maxBackoffMinutes, horizonHours } = outage as WorkflowProviderOutage;
+      if (maxBackoffMinutes !== undefined && !positive(maxBackoffMinutes)) {
+        badNumber("providerOutage.maxBackoffMinutes must be a positive number.");
+      }
+      if (horizonHours !== undefined && !positive(horizonHours)) {
+        badNumber("providerOutage.horizonHours must be a positive number.");
+      }
+    }
   }
   for (const node of workflow.nodes) {
     if (node.kind === "agent") {
@@ -561,8 +678,13 @@ export function missingCapabilityMessage(node: { id: string; botId: string }, ca
   return `Node "${node.id}" requires "${capability}" but its bot "${node.botId}" is not allowed to ${capability}.`;
 }
 
-/** Pure: flags nodes whose bot lacks a required capability. `lookup` returns
- * null for an unknown bot (that case is already reported elsewhere). Kept
+/** Pure: flags nodes whose bot lacks a required capability, and fallback
+ * bots the roster does not have or that could never take the node over.
+ * `lookup` returns null for an unknown bot — for the node's own bot that
+ * case is already reported elsewhere (the dispatch fails it), but a
+ * fallback that does not exist is a promise the engine can never keep, so
+ * it is an error here; a fallback short of a required flag is a warning,
+ * since the engine simply skips it and waits out the outage instead. Kept
  * apart from validateWorkflow because it needs the bot roster — the shared
  * validator judges the graph alone; this judges the graph against the bots
  * it will run on, and both sets gate a run the same way. */
@@ -572,15 +694,36 @@ export function capabilityIssues(
 ): WorkflowIssue[] {
   const issues: WorkflowIssue[] = [];
   for (const node of workflow.nodes) {
-    if (node.kind !== "agent" || !node.requires?.length) continue;
-    const capabilities = lookup(node.botId);
-    if (capabilities === null) continue;
-    for (const capability of missingCapabilities(node.requires, capabilities)) {
+    if (node.kind !== "agent") continue;
+    const capabilities = node.requires?.length ? lookup(node.botId) : null;
+    for (const capability of capabilities === null ? [] : missingCapabilities(node.requires, capabilities)) {
       issues.push({
         severity: "error",
         code: "missing-capability",
         nodeId: node.id,
         message: missingCapabilityMessage(node, capability),
+      });
+    }
+    // A blank or self-referencing fallback is validateWorkflow's finding;
+    // repeating it here would paint the same node twice.
+    const fallbackBotId = node.fallbackBotId;
+    if (typeof fallbackBotId !== "string" || !fallbackBotId.trim() || fallbackBotId === node.botId) continue;
+    const fallback = lookup(fallbackBotId);
+    if (fallback === null) {
+      issues.push({
+        severity: "error",
+        code: "fallback-missing-bot",
+        nodeId: node.id,
+        message: `Node "${node.id}" names a fallback bot "${fallbackBotId}" that does not exist.`,
+      });
+      continue;
+    }
+    for (const capability of missingCapabilities(node.requires, fallback)) {
+      issues.push({
+        severity: "warning",
+        code: "fallback-missing-capability",
+        nodeId: node.id,
+        message: `Node "${node.id}" requires "${capability}" but its fallback bot "${fallbackBotId}" is not allowed to ${capability}; it will not take over during an outage.`,
       });
     }
   }

@@ -6,6 +6,7 @@ import {
   validateWorkflow,
   WORKFLOW_CAPABILITIES,
   WORKFLOW_FAIL_OUTCOME,
+  workflowOutageWaitMessage,
   workflowRoutingFingerprint,
   type BotCapabilities,
   type Workflow,
@@ -525,5 +526,106 @@ describe("capabilities", () => {
 
   it("requires never changes the routing fingerprint — it gates a dispatch, it steers nothing", () => {
     expect(workflowRoutingFingerprint(gated(["merge"]))).toBe(workflowRoutingFingerprint(wf()));
+  });
+});
+
+describe("fallback bot and provider outage", () => {
+  const withFallback = (fallbackBotId: unknown, nodeId = "review"): Workflow =>
+    wf({
+      nodes: wf().nodes.map((node) => (node.id === nodeId ? { ...node, fallbackBotId } : node)) as unknown as Workflow["nodes"],
+    });
+  const fallbackIssues = (workflow: Workflow) =>
+    validateWorkflow(workflow).filter((issue) => issue.code.startsWith("fallback-"));
+
+  it("validateWorkflow accepts an absent fallback and one naming another bot", () => {
+    expect(fallbackIssues(wf())).toEqual([]);
+    expect(fallbackIssues(withFallback("b9"))).toEqual([]);
+  });
+
+  it("validateWorkflow refuses a fallback that is the node's own bot", () => {
+    expect(fallbackIssues(withFallback("b2"))).toEqual([
+      {
+        severity: "error",
+        code: "fallback-same-bot",
+        nodeId: "review",
+        message: 'Node "review" names its own bot "b2" as the fallback; a fallback has to be a different bot.',
+      },
+    ]);
+  });
+
+  it("validateWorkflow refuses a blank or non-string fallback as fallback-missing-bot", () => {
+    const error = expect.objectContaining({ severity: "error", code: "fallback-missing-bot", nodeId: "review" });
+    expect(fallbackIssues(withFallback(""))).toEqual([error]);
+    expect(fallbackIssues(withFallback("   "))).toEqual([error]);
+    expect(fallbackIssues(withFallback(7))).toEqual([error]);
+  });
+
+  it("capabilityIssues flags a fallback the roster does not have, and is silent for one it has", () => {
+    const roster = (botId: string): BotCapabilities | null => (botId === "b1" || botId === "b2" ? {} : null);
+    expect(capabilityIssues(withFallback("ghost"), roster)).toEqual([
+      {
+        severity: "error",
+        code: "fallback-missing-bot",
+        nodeId: "review",
+        message: 'Node "review" names a fallback bot "ghost" that does not exist.',
+      },
+    ]);
+    expect(capabilityIssues(withFallback("b1"), roster)).toEqual([]);
+  });
+
+  it("capabilityIssues leaves a self-referencing or blank fallback to the validator — one finding per mistake", () => {
+    expect(capabilityIssues(withFallback("b2"), () => null)).toEqual([]);
+    expect(capabilityIssues(withFallback(""), () => null)).toEqual([]);
+  });
+
+  it("capabilityIssues warns when the fallback lacks what the node requires, since the engine will not use it", () => {
+    const gatedWithFallback: Workflow = wf({
+      nodes: wf().nodes.map((node) =>
+        node.id === "review" ? { ...node, requires: ["merge" as const], fallbackBotId: "b9" } : node,
+      ),
+    });
+    const roster = (botId: string): BotCapabilities | null =>
+      botId === "b2" ? { canMerge: true } : botId === "b9" ? { canDeploy: true } : null;
+    expect(capabilityIssues(gatedWithFallback, roster)).toEqual([
+      {
+        severity: "warning",
+        code: "fallback-missing-capability",
+        nodeId: "review",
+        message:
+          'Node "review" requires "merge" but its fallback bot "b9" is not allowed to merge; it will not take over during an outage.',
+      },
+    ]);
+    // The primary's own shortfall is still an error, and both are reported.
+    const both = capabilityIssues(gatedWithFallback, (botId) => (botId === "b9" ? { canDeploy: true } : {}));
+    expect(both.map((issue) => `${issue.severity}:${issue.code}`)).toEqual([
+      "error:missing-capability",
+      "warning:fallback-missing-capability",
+    ]);
+  });
+
+  it("fallbackBotId never changes the routing fingerprint", () => {
+    expect(workflowRoutingFingerprint(withFallback("b9"))).toBe(workflowRoutingFingerprint(wf()));
+  });
+
+  it("validateWorkflow accepts the outage knobs and refuses non-positive or non-object ones", () => {
+    const badNumbers = (overrides: Partial<Workflow>) =>
+      validateWorkflow(wf(overrides)).filter((issue) => issue.code === "bad-numbers");
+    expect(badNumbers({})).toEqual([]);
+    expect(badNumbers({ providerOutage: {} })).toEqual([]);
+    expect(badNumbers({ providerOutage: { maxBackoffMinutes: 15, horizonHours: 0.5 } })).toEqual([]);
+    expect(badNumbers({ providerOutage: { maxBackoffMinutes: 0 } })).toHaveLength(1);
+    expect(badNumbers({ providerOutage: { horizonHours: -1 } })).toHaveLength(1);
+    expect(badNumbers({ providerOutage: { maxBackoffMinutes: Number.NaN, horizonHours: 0 } })).toHaveLength(2);
+    expect(badNumbers({ providerOutage: "6h" as unknown as Workflow["providerOutage"] })).toHaveLength(1);
+    expect(badNumbers({ providerOutage: null as unknown as Workflow["providerOutage"] })).toHaveLength(1);
+  });
+
+  it("workflowOutageWaitMessage prints the wait, and nothing when the run is not waiting", () => {
+    const outage = { since: 0, until: 100, attempts: 3, of: 10, reason: "503" };
+    expect(workflowOutageWaitMessage({ outage, nextAttemptAt: 42 }, (at) => `t${at}`)).toBe(
+      "Waiting for the provider: next attempt t42 (attempt 3 of 10)",
+    );
+    expect(workflowOutageWaitMessage({ outage }, () => "x")).toBeNull();
+    expect(workflowOutageWaitMessage({ nextAttemptAt: 42 }, () => "x")).toBeNull();
   });
 });

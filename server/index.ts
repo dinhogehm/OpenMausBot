@@ -4874,6 +4874,10 @@ workflowEngine = new WorkflowEngine({
     return !bot ? "missing" : bot.busy ? "busy" : "ready";
   },
   botCapabilities,
+  // The engine behind a bot, for the outage hand-off: a fallback bot only
+  // takes a node over when it answers to a different instance than the one
+  // that just failed. Read from the store at the moment of the hand-off.
+  botEngine: (botId) => store.bot(botId)?.modelSelection.instanceId ?? null,
   createTask: (botId, title) => {
     // Detached like a routine's task: the bot's active thread stays where the
     // user left it, and the node's transcript is auditable in its task list.
