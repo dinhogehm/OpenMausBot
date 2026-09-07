@@ -11676,7 +11676,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return json(res, 409, { error: "this bot is running a workflow node in another conversation" });
         }
         cancelDirectTurnDispatch(bot.id, workflowRun.threadId);
-        await releaseBrowserCapabilityForThread(workflowRun.threadId);
         await workflowEngine!.cancelRun(workflowRun.runId).catch(() => {});
         closeOpenApprovals(workflowRun.threadId);
         return json(res, 200, { ok: true });
