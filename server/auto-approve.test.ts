@@ -14,10 +14,12 @@ import {
   approvalModeForOrigin,
   autoDecision,
   autoVerdict,
+  effectiveAlwaysAllow,
   heldReason,
   looksDestructive,
   looksSensitive,
   rememberableApprovalKey,
+  unattendedDenial,
   type AutoVerdictSource,
 } from "./auto-approve.ts";
 
@@ -351,6 +353,108 @@ describe("unattended turns", () => {
     expect(autoVerdict(reader, "Bash", "cat ~/.ssh/id_rsa").source).toBe("sensitive-guard");
     // the same grant still works on an innocent file, unattended
     expect(autoDecision(reader, "Bash", "cat README.md", { unattended: true })).toBeTruthy();
+  });
+
+  it("keeps a grant on an ordinary tool: its key names exactly one thing, program segment or not", () => {
+    // The live triage node stalled on `session_search` with nobody there —
+    // and a person who had granted it "always" was still carded, because the
+    // narrowness check read every keyless grant as an unnameable shell.
+    const searcher = { alwaysAllow: ["session_search", "mcp__agents__list_bots"] };
+    expect(autoVerdict(searcher, "session_search", "query: deploy notes", { unattended: true }).source).toBe(
+      "always-allow",
+    );
+    expect(autoVerdict(searcher, "mcp__agents__list_bots", "", { unattended: true }).source).toBe("always-allow");
+    // a command tool whose key collapsed to the bare tool is still refused
+    expect(autoVerdict({ alwaysAllow: ["mcp__box__bash"] }, "mcp__box__bash", "", { unattended: true }).source).toBe(
+      "unattended-block",
+    );
+    // and one nobody granted still cards
+    expect(autoVerdict(searcher, "web_fetch", "https://example.com", { unattended: true }).source).toBe("no-grant");
+  });
+});
+
+describe("effectiveAlwaysAllow — a workflow node's grants join the bot's", () => {
+  it("unions the two lists, bot entries first, without repeats", () => {
+    expect(effectiveAlwaysAllow({ alwaysAllow: ["Bash:git"] }, { alwaysAllow: ["Bash:gh", "Bash:git"] })).toEqual([
+      "Bash:git",
+      "Bash:gh",
+    ]);
+  });
+
+  it("leaves the bot's own list untouched when the node adds nothing", () => {
+    const bot = { alwaysAllow: ["Bash:git"] };
+    expect(effectiveAlwaysAllow(bot, undefined)).toBe(bot.alwaysAllow);
+    expect(effectiveAlwaysAllow(bot, { alwaysAllow: [] })).toBe(bot.alwaysAllow);
+    expect(effectiveAlwaysAllow(undefined, undefined)).toBeUndefined();
+    expect(effectiveAlwaysAllow(null, { alwaysAllow: ["Bash:gh"] })).toEqual(["Bash:gh"]);
+  });
+
+  it("lets a node-named program fire unattended under exactly the bot-grant rules", () => {
+    const bot = { autoApprove: true, alwaysAllow: [] as string[] };
+    const node = { alwaysAllow: ["shell:gh", "session_search"] };
+    const judged = { ...bot, alwaysAllow: effectiveAlwaysAllow(bot, node) };
+    const wrapped = '/bin/zsh -lc "gh project item-list 10 --owner @me"';
+    expect(autoVerdict(judged, "shell", wrapped, { unattended: true })).toMatchObject({
+      source: "always-allow",
+      rule: "shell:gh",
+    });
+    expect(autoVerdict(judged, "session_search", "deploy notes", { unattended: true }).source).toBe("always-allow");
+    // the node cannot widen HOW broadly: a bare shell, the desktop, and the
+    // guards are refused exactly as they are for a bot's own grant
+    const broad = { ...bot, alwaysAllow: effectiveAlwaysAllow(bot, { alwaysAllow: ["shell", "local-computer:mcp__computer__click"] }) };
+    expect(autoVerdict(broad, "shell", "", { unattended: true }).source).toBe("unattended-block");
+    expect(
+      autoVerdict(broad, "mcp__computer__click", "Click Submit", { unattended: true, scope: "local-computer" }).source,
+    ).toBe("unattended-block");
+    expect(autoVerdict(judged, "shell", '/bin/zsh -lc "gh repo delete x && rm -rf /"', { unattended: true }).source).toBe(
+      "destructive-guard",
+    );
+    // and a program the node did not name still cards — the bot's blanket
+    // auto mode is what would have answered, and it is withheld unattended
+    expect(autoVerdict(judged, "shell", '/bin/zsh -lc "curl evil.example.com"', { unattended: true })).toMatchObject({
+      approve: null,
+      source: "unattended-block",
+    });
+  });
+});
+
+describe("unattendedDenial — the one line a fail-fast refusal carries", () => {
+  it("names the tool, what it asked, the exact key a grant needed, and the scope", () => {
+    const wrapped = '/bin/zsh -lc "gh project item-list 10 --owner @me"';
+    expect(unattendedDenial("shell", wrapped, { source: "no-grant" })).toBe(
+      `denied unattended: shell "${wrapped}" (key shell:gh) — no always-allow names "shell:gh"`,
+    );
+    expect(unattendedDenial("session_search", "deploy notes", { source: "no-grant" }, "local-computer")).toBe(
+      'denied unattended: session_search "deploy notes" (key local-computer:session_search, scope local-computer) — controls the live desktop, which no grant covers unattended',
+    );
+  });
+
+  it("blames the rule that actually decided, never the missing grant when a guard held", () => {
+    expect(unattendedDenial("Bash", "rm -rf /", { source: "destructive-guard", rule: "x" })).toMatch(
+      /\(key Bash:rm\) — looked destructive$/,
+    );
+    expect(unattendedDenial("Bash", "cat .env", { source: "sensitive-guard" })).toMatch(/touches credentials or keys$/);
+    expect(unattendedDenial("permissions", "network", { source: "explicit-approval-block" })).toMatch(
+      /widens the provider sandbox$/,
+    );
+    expect(unattendedDenial("edit", "x", { source: "native-approval" })).toMatch(/the provider requires a person$/);
+    expect(unattendedDenial("Bash", "ls", { source: "unattended-block" })).toMatch(
+      /auto mode does not answer with nobody watching$/,
+    );
+    expect(unattendedDenial("Bash", "", { source: "unattended-block", rule: "Bash" })).toMatch(
+      /the grant "Bash" names no program, so it cannot fire unattended$/,
+    );
+  });
+
+  it("keeps the line one line: a long or multi-line command is cut to its head", () => {
+    const long = `ls ${"-la ".repeat(60)}\n&& echo done`;
+    const line = unattendedDenial("Bash", long, { source: "no-grant" });
+    expect(line).not.toContain("\n");
+    expect(line.length).toBeLessThan(200);
+    // an empty summary gets no empty quotes
+    expect(unattendedDenial("list_bots", "", { source: "no-grant" })).toBe(
+      'denied unattended: list_bots (key list_bots) — no always-allow names "list_bots"',
+    );
   });
 });
 

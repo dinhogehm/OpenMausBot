@@ -112,9 +112,12 @@ function programOf(command: string, depth = 0): string {
   return programOf(inner, depth + 1) || program;
 }
 
+/** The tool name as the command-tool check sees it: past an MCP server
+ * prefix, case-folded — `mcp__box__bash` and `Bash` are both a shell. */
+const bareTool = (tool: string): string => tool.replace(/^mcp__[^_]+__/, "").toLowerCase();
+
 export function approvalKey(tool: string, summary: string, scope?: "local-computer"): string {
-  const bare = tool.replace(/^mcp__[^_]+__/, "").toLowerCase();
-  if (!COMMAND_TOOLS.has(bare)) return scope ? `${scope}:${tool}` : tool;
+  if (!COMMAND_TOOLS.has(bareTool(tool))) return scope ? `${scope}:${tool}` : tool;
   const program = programOf(summary);
   // A shell we could not see into is not a program anyone can name, so the
   // key stays the bare tool: honestly broad, and refused wherever a broad
@@ -275,8 +278,12 @@ export function autoVerdict(
     // attended), and a command-tool key with no program segment — "approve
     // the command I could not even name". A guard that would have carded
     // anyway keeps its own name; the block is only the story when it is the
-    // thing that changed the outcome.
-    const namedNarrowly = context?.scope !== "local-computer" && key !== tool;
+    // thing that changed the outcome. An ordinary tool's key IS its name
+    // (`session_search`, `edit`): that names one thing exactly, so it
+    // counts as narrow — only a COMMAND tool whose key collapsed to the
+    // bare tool is the unnameable case.
+    const namedNarrowly =
+      context?.scope !== "local-computer" && (!COMMAND_TOOLS.has(bareTool(tool)) || key !== tool);
     if (grant?.source === "always-allow" && namedNarrowly) return grant;
     if (grant) return { approve: null, source: "unattended-block", rule: grant.rule };
     if (destructive) return { approve: null, source: "destructive-guard", rule: destructive };
@@ -296,6 +303,57 @@ export function autoVerdict(
   if (sensitive) return { approve: null, source: "sensitive-guard", rule: sensitive };
   if (grant) return { approve: grant.approve, source: grant.source, rule: grant.rule };
   return { approve: null, source: "no-grant" };
+}
+
+/** The grants a workflow node's turn runs under: the bot's own list plus
+ * what the node pre-approves, de-duplicated with the bot's entries first so
+ * the decision log's `rule` reads the same whichever list carried it. A
+ * union and nothing more — every entry is still judged by autoVerdict's
+ * unattended rules, so a node can widen WHICH programs are named but never
+ * how broadly (no bare shells, no desktop, no way past the guards). */
+export function effectiveAlwaysAllow(
+  bot: Pick<AutoApprover, "alwaysAllow"> | null | undefined,
+  node: { alwaysAllow?: string[] } | null | undefined,
+): string[] | undefined {
+  const fromBot = bot?.alwaysAllow ?? [];
+  const fromNode = node?.alwaysAllow ?? [];
+  if (fromNode.length === 0) return bot?.alwaysAllow;
+  return [...new Set([...fromBot, ...fromNode])];
+}
+
+/** The one line a fail-fast denial carries — on the card, in the decision
+ * log, and in the run receipt — naming the tool, what it asked, and the
+ * exact key an "always allow" on the bot or the node would have needed.
+ * The key is the actionable half: a receipt reading "denied unattended:
+ * shell (key shell:gh)" is a one-line fix on the node panel, where "node
+ * timed out" was a guess. `why` is the verdict's own reason, so a guard
+ * that would have carded anyway is not blamed on the missing grant. */
+export function unattendedDenial(
+  tool: string,
+  summary: string,
+  verdict: Pick<AutoVerdict, "source" | "rule">,
+  scope?: "local-computer",
+): string {
+  const key = approvalKey(tool, summary, scope);
+  const what = summary.trim().replace(/\s+/g, " ").slice(0, 80);
+  const why =
+    verdict.source === "destructive-guard"
+      ? "looked destructive"
+      : verdict.source === "sensitive-guard"
+        ? "touches credentials or keys"
+        : verdict.source === "explicit-approval-block"
+          ? "widens the provider sandbox"
+          : verdict.source === "native-approval"
+            ? "the provider requires a person"
+            : scope === "local-computer"
+              ? "controls the live desktop, which no grant covers unattended"
+              : verdict.source === "unattended-block"
+                ? verdict.rule === undefined
+                  ? "auto mode does not answer with nobody watching"
+                  : `the grant "${verdict.rule}" names no program, so it cannot fire unattended`
+                : `no always-allow names "${key}"`;
+  const where = scope ? `, scope ${scope}` : "";
+  return `denied unattended: ${tool}${what ? ` "${what}"` : ""} (key ${key}${where}) — ${why}`;
 }
 
 /** Why this request may be answered without the human, or null to ask. */
