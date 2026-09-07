@@ -234,6 +234,10 @@ function TriggersPanel({
 }) {
   const schedule = workflow.triggers?.schedule;
   const [error, setError] = useState<string | null>(null);
+  // The interval field is committed on blur (or Enter), never per keystroke:
+  // typing "60" passes through "6", and each intermediate value would be a
+  // schedule change the store answers by resetting the armed clock.
+  const [minutesDraft, setMinutesDraft] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -407,14 +411,20 @@ function TriggersPanel({
               inputMode="numeric"
               min={WORKFLOW_INTERVAL_MINUTES_MIN}
               step={5}
-              value={schedule.minutes}
-              onChange={(event) => {
-                const minutes = Number(event.target.value);
+              value={minutesDraft ?? String(schedule.minutes)}
+              onChange={(event) => setMinutesDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") event.currentTarget.blur();
+              }}
+              onBlur={() => {
+                if (minutesDraft === null) return;
+                const minutes = Number(minutesDraft);
+                setMinutesDraft(null);
                 if (!Number.isInteger(minutes) || minutes < WORKFLOW_INTERVAL_MINUTES_MIN) {
                   setError(`Interval must be a whole number of at least ${WORKFLOW_INTERVAL_MINUTES_MIN} minutes.`);
                   return;
                 }
-                commit({ ...schedule, minutes });
+                if (minutes !== schedule.minutes) commit({ ...schedule, minutes });
               }}
               className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
             />
@@ -488,6 +498,11 @@ function TriggersPanel({
                     );
                   })}
                 </div>
+                <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+                  Runs — and wait nodes — resume only inside this window. A window that crosses midnight is judged by
+                  the day each instant falls on: 22:00–06:00 on Mon covers Monday night until midnight, and Monday
+                  00:00–06:00 in the small hours.
+                </p>
               </div>
             </div>
           )}
