@@ -1051,6 +1051,17 @@ describe("workflow monitoring — audit room, watchdog patience, digest and heal
     expect(store.get(created.id)?.lastDigestAt).toBe(9_000);
   });
 
+  it("strips refusalStreak from clients and shows the engine's value read-only", async () => {
+    const { call, store } = harness();
+    const created = bodyOf(await call("POST", "/api/workflows", { ...agentGraph(), refusalStreak: { count: 9, since: 1, lastReason: "x" } })).workflow as Workflow;
+    expect("refusalStreak" in created).toBe(false);
+    store.setRefusalStreak(created.id, { count: 2, since: 5_000, lastReason: "no token" });
+    const patched = await call("PATCH", `/api/workflows/${created.id}`, { name: "Renamed", refusalStreak: null });
+    expect(patched?.status).toBe(200);
+    expect(bodyOf(patched).workflow.refusalStreak).toEqual({ count: 2, since: 5_000, lastReason: "no token" });
+    expect(store.get(created.id)?.refusalStreak?.count).toBe(2);
+  });
+
   it("paints missing-audit-group against the live rooms, and only when the deps can see rooms", async () => {
     const { call, deps } = harness();
     const id = bodyOf(await call("POST", "/api/workflows", { ...agentGraph(), auditGroupId: "gone" })).workflow.id as string;

@@ -5716,6 +5716,7 @@ describe("harness HTTP API", () => {
         digestAt: "18:00",
         lastDigestAt: null,
         auditGroupId: null,
+        refusalStreak: null,
       });
       // "health" is never treated as a workflow id by the other verbs.
       expect((await fetch(`${BASE}/api/workflows/health`, { method: "DELETE" })).status).toBe(404);

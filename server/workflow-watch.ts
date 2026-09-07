@@ -326,6 +326,9 @@ export interface WorkflowHealth {
   digestAt: string | null;
   lastDigestAt: number | null;
   auditGroupId: string | null;
+  /** Consecutive starts the engine refused, or null: the reason the
+   * interval trigger is backing off, for a monitor to show. */
+  refusalStreak: { count: number; since: number; lastReason: string } | null;
 }
 
 const LIVE: ReadonlySet<WorkflowRunStatus> = new Set(["queued", "running", "waiting-approval"]);
@@ -377,6 +380,7 @@ export function workflowEngineHealth(input: {
       digestAt: workflow.digestAt ?? null,
       lastDigestAt: workflow.lastDigestAt ?? null,
       auditGroupId: workflow.auditGroupId ?? null,
+      refusalStreak: workflow.refusalStreak ?? null,
     };
   });
   return {

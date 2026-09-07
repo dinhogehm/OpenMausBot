@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { Workflow, WorkflowRun, WorkflowRunStatus, WorkflowSchedule } from "../shared/workflow.ts";
+import type { Workflow, WorkflowRefusalStreak, WorkflowRun, WorkflowRunStatus, WorkflowSchedule } from "../shared/workflow.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
 
@@ -30,10 +30,11 @@ export interface WorkflowStoreOptions {
   emit?: (payload: Record<string, unknown>) => void;
 }
 
-/** What a client may send. `nextRunAt` and `lastDigestAt` are engine-owned
- * timing state: they are excluded here so no create/update can set them —
- * the API's key-set guard then keeps them out of the request schema as well. */
-export type WorkflowInput = Omit<Workflow, "id" | "createdAt" | "updatedAt" | "nextRunAt" | "lastDigestAt">;
+/** What a client may send. `nextRunAt`, `lastDigestAt` and `refusalStreak`
+ * are engine-owned state: they are excluded here so no create/update can set
+ * them — the API's key-set guard then keeps them out of the request schema
+ * as well. */
+export type WorkflowInput = Omit<Workflow, "id" | "createdAt" | "updatedAt" | "nextRunAt" | "lastDigestAt" | "refusalStreak">;
 
 interface WorkflowFile {
   version: 1;
@@ -176,6 +177,22 @@ export class WorkflowStore {
     // them together here would make a disarm unrecoverable.
     if (current.nextRunAt === value) return structuredClone(current);
     const patched: Workflow = { ...current, nextRunAt: value };
+    const next = this.workflows.slice();
+    next[at] = patched;
+    this.writeWorkflows(next);
+    this.workflows = next;
+    this.emitWorkflow(patched);
+    return structuredClone(patched);
+  }
+
+  /** Engine-owned, like setNextRunAt: the refused-start streak. `undefined`
+   * clears it. Same persistence, same frame, `updatedAt` untouched. */
+  setRefusalStreak(id: string, value: WorkflowRefusalStreak | undefined): Workflow | null {
+    const at = this.workflows.findIndex((workflow) => workflow.id === id);
+    if (at === -1) return null;
+    const current = this.workflows[at]!;
+    if (current.refusalStreak === undefined && value === undefined) return structuredClone(current);
+    const patched: Workflow = { ...current, refusalStreak: structuredClone(value) };
     const next = this.workflows.slice();
     next[at] = patched;
     this.writeWorkflows(next);

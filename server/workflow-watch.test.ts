@@ -340,6 +340,7 @@ describe("workflowEngineHealth", () => {
           digestAt: "18:00",
           lastDigestAt: null,
           auditGroupId: null,
+          refusalStreak: null,
         },
         {
           id: "wf-2",
@@ -353,6 +354,7 @@ describe("workflowEngineHealth", () => {
           digestAt: null,
           lastDigestAt: null,
           auditGroupId: null,
+          refusalStreak: null,
         },
       ],
     });

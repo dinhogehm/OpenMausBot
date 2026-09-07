@@ -3,7 +3,7 @@
  * calendar shapes (daily, once); an interval is not a calendar at all. It
  * measures IDLENESS: the next run is armed a fixed number of minutes after
  * the last one ended, clamped into the active window when there is one. */
-import type { WorkflowActiveHours, WorkflowIntervalSchedule } from "../shared/workflow.ts";
+import { refusalBackoffMs, type WorkflowActiveHours, type WorkflowIntervalSchedule } from "../shared/workflow.ts";
 
 const DAY_MS = 24 * 60 * 60_000;
 /** How far ahead a window start is searched. One week covers every weekday
@@ -69,4 +69,18 @@ export function nextActiveWindowStart(hours: WorkflowActiveHours | undefined, at
 export function intervalFireAt(schedule: WorkflowIntervalSchedule, idleSince: number): number | null {
   const due = idleSince + schedule.minutes * 60_000;
   return Number.isFinite(due) ? nextActiveWindowStart(schedule.activeHours, due) : null;
+}
+
+/** Where an interval trigger re-arms after `count` refused starts in a
+ * row: the backed-off delay (interval × 2^count, capped) from when the
+ * workflow went idle, moved into the active window like any slot — or the
+ * next window's start when that comes first, so a workflow refused at
+ * night is tried again when its day begins rather than six hours into it. */
+export function refusalFireAt(schedule: WorkflowIntervalSchedule, idleSince: number, count: number): number | null {
+  const due = idleSince + refusalBackoffMs(schedule.minutes, count);
+  if (!Number.isFinite(due)) return null;
+  const at = nextActiveWindowStart(schedule.activeHours, due);
+  const windowStart = nextActiveWindowStart(schedule.activeHours, idleSince);
+  if (at === null) return windowStart !== null && windowStart > idleSince ? windowStart : null;
+  return windowStart !== null && windowStart > idleSince && windowStart < at ? windowStart : at;
 }

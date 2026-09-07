@@ -3833,7 +3833,9 @@ describe("WorkflowEngine interval schedule", () => {
     expect(runs[0]!.error).toMatch(/requires "merge"/);
     expect(h.notifications).toHaveLength(1);
     await h.engine.tick();
-    expect(h.store.get(workflow.id)?.nextRunAt).toBe(due + 30 * MIN);
+    // A refused start opens a streak: the re-arm is interval × 2^1.
+    expect(h.store.get(workflow.id)?.refusalStreak).toMatchObject({ count: 1, since: due });
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(due + 60 * MIN);
     expect(h.store.listRuns(workflow.id)).toHaveLength(1);
   });
 
@@ -4222,10 +4224,12 @@ describe("WorkflowEngine pre-flight", () => {
     await flush();
     expect(h.store.listRuns(workflow.id)).toHaveLength(1);
     expect(h.store.listRuns(workflow.id)[0]).toMatchObject({ status: "failed", endedAt: due });
-    // Idle again: re-armed one interval after the refusal ended.
+    // Idle again: re-armed with the refusal backoff (interval × 2) after the
+    // refusal ended, the streak on the workflow.
     h.setNow(due + 10);
     await h.engine.tick();
-    expect(h.store.get(workflow.id)?.nextRunAt).toBe(due + 30 * MIN);
+    expect(h.store.get(workflow.id)?.refusalStreak?.count).toBe(1);
+    expect(h.store.get(workflow.id)?.nextRunAt).toBe(due + 60 * MIN);
     await h.engine.tick();
     expect(h.store.listRuns(workflow.id)).toHaveLength(1);
   });

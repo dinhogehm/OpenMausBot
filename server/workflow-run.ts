@@ -33,6 +33,8 @@ import {
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
   WORKFLOW_STUCK_ANNOUNCEMENTS_MAX,
   WORKFLOW_WAIT_OUTCOME,
+  refusalAnnounced,
+  refusalBackoffMs,
   workflowRoutingFingerprint,
   type BotCapabilities,
   type Workflow,
@@ -45,6 +47,7 @@ import {
   type WorkflowOutage,
   type WorkflowPreflightCheckResult,
   type WorkflowPreflightResult,
+  type WorkflowRefusalStreak,
   type WorkflowRun,
   type WorkflowRunStatus,
   type WorkflowRunTrigger,
@@ -70,7 +73,7 @@ import {
   type WorkflowFailureClass,
   type WorkflowTurnFailure,
 } from "./workflow-failure.ts";
-import { intervalFireAt, nextActiveWindowStart } from "./workflow-interval.ts";
+import { intervalFireAt, nextActiveWindowStart, refusalFireAt } from "./workflow-interval.ts";
 import type { WorkflowStore } from "./workflow-store.ts";
 import {
   buildDigest,
@@ -624,7 +627,8 @@ export class WorkflowEngine {
       for (const run of runs) {
         if (run.endedAt !== undefined && (lastEnded === undefined || run.endedAt > lastEnded)) lastEnded = run.endedAt;
       }
-      const fire = intervalFireAt(schedule, lastEnded ?? now);
+      const streak = workflow.refusalStreak;
+      const fire = streak === undefined ? intervalFireAt(schedule, lastEnded ?? now) : refusalFireAt(schedule, lastEnded ?? now, streak.count);
       // No window in reach (cannot happen under a validated window; a
       // hand-edited file could) stays unarmed so the next sweep tries again.
       if (fire !== null) this.store.setNextRunAt(workflow.id, fire);
@@ -708,7 +712,54 @@ export class WorkflowEngine {
       startedAt: scheduledFor,
       endedAt: now,
     });
-    this.announce(run, "failed", `scheduled run was not started: ${run.error ?? reason}`);
+    const streak = this.noteRefusedStart(workflow.id, run.error ?? reason);
+    if (streak !== null && !refusalAnnounced(streak.count)) return;
+    this.announce(run, "failed", `scheduled run was not started: ${run.error ?? reason}${this.refusalSuffix(workflow, streak)}`);
+  }
+
+  /** One more start the engine refused before any node ran, on the
+   * workflow's persisted streak; null when the workflow is gone. */
+  private noteRefusedStart(workflowId: string, reason: string): WorkflowRefusalStreak | null {
+    const workflow = this.store.get(workflowId);
+    if (!workflow) return null;
+    const previous = workflow.refusalStreak;
+    const streak: WorkflowRefusalStreak = {
+      count: (previous?.count ?? 0) + 1,
+      since: previous?.since ?? this.now(),
+      lastReason: reason.slice(0, 500),
+    };
+    this.store.setRefusalStreak(workflowId, streak);
+    return streak;
+  }
+
+  /** A run got past every start gate and is dispatching a node: whatever
+   * was refusing starts is not any more. */
+  private clearRefusalStreak(workflow: Workflow): void {
+    if (workflow.refusalStreak !== undefined) this.store.setRefusalStreak(workflow.id, undefined);
+  }
+
+  /** What the announced refusals say about the streak and the next try: an
+   * interval trigger's backed-off re-arm as a duration, a calendar one as
+   * its next slot; nothing for a workflow with no schedule. */
+  private refusalSuffix(workflow: Workflow, streak: WorkflowRefusalStreak | null): string {
+    if (streak === null || streak.count < 2) return "";
+    const schedule = workflow.triggers?.schedule;
+    const next =
+      schedule?.type === "interval"
+        ? `next try in ${formatDuration(refusalBackoffMs(schedule.minutes, streak.count))}`
+        : schedule
+          ? "next try at the next scheduled slot"
+          : "";
+    return ` — ${streak.count} refused starts in a row${next ? `; ${next}` : ""}`;
+  }
+
+  /** A terminal failure of a run that never got a node going: nothing was
+   * dispatched, no bot turn started, no attempt spent. That is a refused
+   * START whatever the gate (validation is caught before the run exists;
+   * a missing bot, a revoked flag, a failed pre-flight, a task that could
+   * not be created all land here), and it feeds the streak. */
+  private isRefusedStart(run: WorkflowRun): boolean {
+    return run.nodeResults.length === 0 && run.currentThreadId === undefined && run.attempt === 0;
   }
 
   /** A human gate never holds the queue forever: past its deadline the node's
@@ -1787,14 +1838,17 @@ export class WorkflowEngine {
     }
     const entry = this.nodeEntry(run, node.id);
     if (node.kind === "approval") {
+      this.clearRefusalStreak(workflow);
       this.openApproval(runId, workflow, node, entry);
       return;
     }
     if (node.kind === "notify") {
+      this.clearRefusalStreak(workflow);
       this.executeNotify(run, workflow, node, entry);
       return;
     }
     if (node.kind === "wait") {
+      this.clearRefusalStreak(workflow);
       this.parkOnWait(runId, workflow, node, entry);
       return;
     }
@@ -1827,6 +1881,10 @@ export class WorkflowEngine {
       this.failNode(runId, missingCapabilityMessage({ id: node.id, botId: dispatchBotId }, lacking[0]!));
       return;
     }
+    // Past every start gate that can refuse: the bot exists and carries its
+    // flags. Whether it is free or busy, the environment is no longer the
+    // thing refusing starts.
+    this.clearRefusalStreak(workflow);
     if (botState === "busy") {
       // Per-bot FIFO: park the run for the reconciler, which serves waiting
       // runs oldest-first as the bot frees up. No task is created yet, and a
@@ -2327,7 +2385,16 @@ export class WorkflowEngine {
     // that can no longer be answered; say so on the card too.
     this.settleApprovalCards(run, "unavailable");
     const where = patched.currentNodeId === undefined ? "" : ` at node "${patched.currentNodeId}"`;
-    this.announce(patched, "failed", `run failed${where}: ${patched.error ?? explained}`);
+    // A refused start joins the streak, which decides whether a SCHEDULED
+    // one is said out loud (the first, the third, every tenth) and adds
+    // what the backoff will do; a start a person or a webhook asked for is
+    // always answered, and the receipt is written either way.
+    const streak = this.isRefusedStart(patched) ? this.noteRefusedStart(patched.workflowId, patched.error ?? explained) : null;
+    if (streak === null || patched.trigger !== "schedule" || refusalAnnounced(streak.count)) {
+      const workflow = this.store.get(patched.workflowId);
+      const suffix = workflow ? this.refusalSuffix(workflow, streak) : "";
+      this.announce(patched, "failed", `run failed${where}: ${patched.error ?? explained}${suffix}`);
+    }
     this.drainQueue(patched.workflowId);
   }
 

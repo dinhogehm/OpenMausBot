@@ -52,6 +52,36 @@ export const WORKFLOW_APPROVAL_RENOTIFY_MAX = 30;
  * lasted longer than the horizon. Both knobs live on the workflow. */
 export const WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN = 60;
 export const WORKFLOW_OUTAGE_HORIZON_DEFAULT_H = 6;
+/** A start the engine REFUSES (validation, a revoked capability, a missing
+ * bot, a failed pre-flight) under an interval trigger would otherwise be
+ * tried — and announced — every interval, all night. Consecutive refusals
+ * back the re-arm off instead: interval × 2^count, never past this cap,
+ * and the person hears about the first, the third and every tenth. */
+export const WORKFLOW_REFUSAL_BACKOFF_CAP_MS = 6 * 60 * 60_000;
+
+/** The re-arm delay after `count` refused starts in a row (1-based). */
+export function refusalBackoffMs(intervalMinutes: number, count: number): number {
+  const doubled = intervalMinutes * 60_000 * 2 ** Math.max(0, Math.min(count, 30));
+  return Math.min(doubled, WORKFLOW_REFUSAL_BACKOFF_CAP_MS);
+}
+
+/** Which refusals of a streak are said out loud: the first, the third, and
+ * every tenth — enough to know it started, that it did not clear itself,
+ * and that it is still going, without a buzz per interval. */
+export function refusalAnnounced(count: number): boolean {
+  return count === 1 || count === 3 || (count > 0 && count % 10 === 0);
+}
+
+/** Engine-owned: consecutive starts the engine refused before any node
+ * ran. Never settable by a client — the API strips it. Cleared by the
+ * first run that gets past its checks and dispatches a node. */
+export interface WorkflowRefusalStreak {
+  count: number;
+  /** When the first refusal of the streak happened. */
+  since: number;
+  /** The most recent refusal's reason, bounded like a run's error. */
+  lastReason: string;
+}
 /** The run watchdog: a live run whose current node has not changed for this
  * long is announced as STUCK — once, then again at most every further
  * period — so an operator learns about a node that hung from a
@@ -302,6 +332,10 @@ export interface Workflow {
    * digest is posted so a restart never sends the same day twice. Never
    * settable by a client — the API strips it. */
   lastDigestAt?: number;
+  /** Engine-owned: the refused-start streak behind the interval trigger's
+   * backoff and the quieting of its notifications. Never settable by a
+   * client — the API strips it. */
+  refusalStreak?: WorkflowRefusalStreak;
   /** Checks a run must pass before its first node is dispatched. Absent or
    * empty: nothing is checked, exactly as before this existed. */
   preflight?: WorkflowPreflight;

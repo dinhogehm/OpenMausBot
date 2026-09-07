@@ -11,6 +11,8 @@ import {
   WORKFLOW_CONTROL_CLOSE,
   WORKFLOW_CONTROL_OPEN,
   workflowRoutingFingerprint,
+  type BotCapabilities,
+  type WorkflowCalendarSchedule,
   type WorkflowNotificationKind,
   type WorkflowRun,
 } from "../shared/workflow.ts";
@@ -36,20 +38,32 @@ interface Dispatch {
   onDispatchError: (message: string) => void;
 }
 
-/** One process: an engine over the shared files. `boot()` again is a restart. */
-function process_(files: { file: string; runsFile: string }, clock: { now: number }, prefix: string, busy: Set<string>) {
+/** The world outside the engine, shared across restarts: which bots are
+ * busy, what flags they carry, and the calendar math for daily schedules. */
+interface World {
+  busy: Set<string>;
+  caps?: BotCapabilities;
+  nextOccurrence?: (schedule: WorkflowCalendarSchedule, after: number) => number | null;
+}
+
+/** One process: an engine over the shared files. Calling it again over the
+ * same files is a restart. */
+function process_(files: { file: string; runsFile: string }, clock: { now: number }, prefix: string, world: World) {
+  const { busy } = world;
   const store = new WorkflowStore({ ...files, now: () => clock.now });
   const dispatches: Dispatch[] = [];
   const notifications: Array<{ kind: WorkflowNotificationKind; message: string }> = [];
   let seq = 0;
   let events = 0;
   let commands = 0;
+  let commandExit: () => number = () => 0;
   const engine = new WorkflowEngine({
     store,
     now: () => clock.now,
     random: () => 0.5,
     botState: (botId) => (busy.has(botId) ? "busy" : "ready"),
-    botCapabilities: () => ({}),
+    botCapabilities: () => world.caps ?? {},
+    ...(world.nextOccurrence ? { nextOccurrence: world.nextOccurrence } : {}),
     createTask: () => ({ threadId: `${prefix}-${++seq}` }),
     startTurn: (botId, threadId, _prompt, onDispatchError) => {
       dispatches.push({ botId, threadId, onDispatchError });
@@ -62,7 +76,7 @@ function process_(files: { file: string; runsFile: string }, clock: { now: numbe
     preflight: {
       runCommand: async () => {
         commands++;
-        return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+        return { exitCode: commandExit(), stdout: "", stderr: "", timedOut: false };
       },
     },
   });
@@ -78,6 +92,7 @@ function process_(files: { file: string; runsFile: string }, clock: { now: numbe
     dispatches,
     notifications,
     commandsRun: () => commands,
+    setCommandExit: (fn: () => number) => (commandExit = fn),
     completeTurn: (threadId: string, text: string) => {
       engine.handleRuntimeEvent({ ...event(threadId), type: "item.completed", itemType: "assistant_text", text });
       engine.handleRuntimeEvent({ ...event(threadId), type: "turn.completed", ok: true });
@@ -112,7 +127,7 @@ describe("24/7 integration across a restart", () => {
     const f = files();
     const clock = { now: 1_000 };
     const busy = new Set<string>();
-    const p1 = process_(f, clock, "t", busy);
+    const p1 = process_(f, clock, "t", { busy });
     const workflow = p1.store.create(twoStep({ stuckAfterMinutes: 120 }));
     const run = p1.engine.startRun(workflow.id, "go", "manual");
     // The provider is down: one outage wait (1 min), announced once.
@@ -135,7 +150,7 @@ describe("24/7 integration across a restart", () => {
     expect(p1.dispatches).toHaveLength(1);
 
     // Restart while parked on the busy bot.
-    const p2 = process_(f, clock, "r", busy);
+    const p2 = process_(f, clock, "r", { busy });
     clock.now += MIN;
     await p2.engine.tick();
     // Still busy: nothing dispatched, nothing stranded-recovered, nothing said.
@@ -164,7 +179,7 @@ describe("24/7 integration across a restart", () => {
     const f = files();
     const clock = { now: 1_000 };
     const busy = new Set<string>();
-    const p1 = process_(f, clock, "t", busy);
+    const p1 = process_(f, clock, "t", { busy });
     const workflow = p1.store.create(
       twoStep({
         preflight: {
@@ -202,7 +217,7 @@ describe("24/7 integration across a restart", () => {
     expect(p1.commandsRun()).toBe(2);
 
     // Restart mid-wait; the shipper frees.
-    const p2 = process_(f, clock, "r", busy);
+    const p2 = process_(f, clock, "r", { busy });
     busy.delete("shipper");
     clock.now += MIN;
     await p2.engine.tick();
@@ -227,7 +242,7 @@ describe("24/7 integration across a restart", () => {
     const f = files();
     const clock = { now: 100 * HOUR };
     const busy = new Set<string>();
-    const p0 = process_(f, clock, "t", busy);
+    const p0 = process_(f, clock, "t", { busy });
     const workflow = p0.store.create(
       twoStep({
         nodes: [
@@ -252,7 +267,7 @@ describe("24/7 integration across a restart", () => {
       startedAt: enteredShip - HOUR,
     } satisfies Omit<WorkflowRun, "id">);
 
-    const p1 = process_(f, clock, "r", busy);
+    const p1 = process_(f, clock, "r", { busy });
     await p1.engine.tick();
     let receipt = p1.store.getRun(old.id)!;
     // The dead dispatch is past its timeout: charged one attempt, retry due
@@ -289,7 +304,7 @@ describe("24/7 integration across a restart", () => {
     const f = files();
     const clock = { now: 1_000 };
     const busy = new Set<string>();
-    const p0 = process_(f, clock, "t", busy);
+    const p0 = process_(f, clock, "t", { busy });
     const workflow = p0.store.create(
       twoStep({ preflight: { checks: [{ kind: "command", name: "auth", command: "gh auth status" }] } }),
     );
@@ -305,7 +320,7 @@ describe("24/7 integration across a restart", () => {
       startedAt: clock.now,
     } satisfies Omit<WorkflowRun, "id">);
 
-    const p1 = process_(f, clock, "r", busy);
+    const p1 = process_(f, clock, "r", { busy });
     await p1.engine.tick();
     // The checks ran and the marker was on the receipt before any dispatch.
     expect(p1.commandsRun()).toBe(1);
@@ -321,7 +336,7 @@ describe("24/7 integration across a restart", () => {
     const f = files();
     const clock = { now: 1_000 };
     const busy = new Set<string>();
-    const p1 = process_(f, clock, "t", busy);
+    const p1 = process_(f, clock, "t", { busy });
     const workflow = p1.store.create(
       twoStep({
         nodes: [
@@ -354,5 +369,148 @@ describe("24/7 integration across a restart", () => {
     receipt = p1.store.getRun(first.id)!;
     expect(receipt.status).toBe("running");
     expect(receipt.currentThreadId).toBe("t-4");
+  });
+
+});
+
+describe("refused starts under a schedule back off and go quiet", () => {
+  /** A one-node workflow whose bot must carry `merge`: with no flags on the
+   * roster every start is refused at the door (validation), synchronously. */
+  const needsMerge = (overrides: Partial<WorkflowInput> = {}): WorkflowInput => ({
+    name: "Merge",
+    entryNodeId: "merge",
+    nodes: [{ kind: "agent", id: "merge", botId: "merger", instructions: "Merge.", outcomes: ["done"], requires: ["merge"] }],
+    edges: [],
+    layout: {},
+    triggers: { schedule: { type: "interval", minutes: 60 } },
+    ...overrides,
+  });
+  /** Ticks every ten minutes for `hours`, settling any async work. */
+  const runFor = async (engine: WorkflowEngine, clock: { now: number }, hours: number) => {
+    for (let i = 0; i < hours * 6; i++) {
+      clock.now += 10 * MIN;
+      await engine.tick();
+      await flush();
+    }
+  };
+
+  it("24 hours of refusals: at most eight tries and five notifications, a receipt per try, the streak on the workflow and in the health document", async () => {
+    const f = files();
+    const clock = { now: Date.UTC(2026, 8, 7, 9, 0) };
+    const world: World = { busy: new Set(), caps: {} };
+    const p = process_(f, clock, "t", world);
+    const workflow = p.store.create(needsMerge());
+    // Arm, then fire the first slot an hour later.
+    await p.engine.tick();
+    await runFor(p.engine, clock, 24);
+    const runs = p.store.listRuns(workflow.id);
+    expect(runs.length).toBeLessThanOrEqual(8);
+    expect(runs.length).toBeGreaterThanOrEqual(5);
+    expect(runs.every((run) => run.status === "failed" && run.error?.includes('requires "merge"'))).toBe(true);
+    const failed = p.notifications.filter((n) => n.kind === "failed");
+    expect(failed.length).toBeLessThanOrEqual(5);
+    // The first refusal is announced plainly; the third names the streak and
+    // the backed-off next try (60 min × 2^3 = 8 h, capped at 6 h).
+    expect(failed[0]!.message).toMatch(/was not started: .*requires "merge"/);
+    expect(failed[0]!.message).not.toMatch(/in a row/);
+    expect(failed[1]!.message).toMatch(/3 refused starts in a row; next try in 6h/);
+    // Re-arms of 2h, 4h, then 6h (the cap) after each refusal: tries at
+    // 1h, 3h, 7h, 13h, 19h — and the next one is armed 6h after the last.
+    const starts = runs.map((run) => (run.startedAt - clock.now + 24 * HOUR) / HOUR).sort((a, b) => a - b);
+    expect(starts).toEqual([1, 3, 7, 13, 19]);
+    const streak = p.store.get(workflow.id)!.refusalStreak!;
+    expect(streak.count).toBe(5);
+    expect(streak.since).toBe(clock.now - 23 * HOUR);
+    expect(streak.lastReason).toMatch(/requires "merge"/);
+    const health = p.engine.health().workflows.find((row) => row.id === workflow.id)!;
+    expect(health.refusalStreak).toEqual(streak);
+    expect(health.nextRunAt).toBe(clock.now + HOUR);
+  });
+
+  it("the first run that gets past its checks clears the streak, and the interval is back to normal after it", async () => {
+    const f = files();
+    const clock = { now: Date.UTC(2026, 8, 7, 9, 0) };
+    const world: World = { busy: new Set(), caps: {} };
+    const p = process_(f, clock, "t", world);
+    const workflow = p.store.create(
+      needsMerge({
+        nodes: [{ kind: "agent", id: "merge", botId: "merger", instructions: "Merge.", outcomes: ["done"], requires: ["merge"], timeoutMinutes: 240 }],
+      }),
+    );
+    await p.engine.tick();
+    await runFor(p.engine, clock, 4);
+    expect(p.store.get(workflow.id)!.refusalStreak?.count).toBe(2);
+    // The flag is granted: the next backed-off try (4 h after the 2nd
+    // refusal, at 7h) starts a run and the streak is gone at its dispatch.
+    world.caps = { canMerge: true };
+    await runFor(p.engine, clock, 4);
+    const running = p.store.listRuns(workflow.id).find((run) => run.status === "running")!;
+    expect(running).toBeDefined();
+    expect(p.store.get(workflow.id)!.refusalStreak).toBeUndefined();
+    expect(p.dispatches).toHaveLength(1);
+    p.completeTurn(p.dispatches[0]!.threadId, envelope("done"));
+    // Idle again: the next slot is one plain interval after the run ended.
+    await p.engine.tick();
+    expect(p.store.get(workflow.id)!.nextRunAt).toBe(clock.now + 60 * MIN);
+  });
+
+  it("a restart in the middle of a streak continues it: the count, the quiet, and the backoff are read from disk", async () => {
+    const f = files();
+    const clock = { now: Date.UTC(2026, 8, 7, 9, 0) };
+    const world: World = { busy: new Set(), caps: {} };
+    const p1 = process_(f, clock, "t", world);
+    const workflow = p1.store.create(needsMerge());
+    await p1.engine.tick();
+    await runFor(p1.engine, clock, 4); // refusals at 1h and 3h
+    expect(p1.store.get(workflow.id)!.refusalStreak?.count).toBe(2);
+    expect(p1.notifications).toHaveLength(1);
+
+    const p2 = process_(f, clock, "r", world);
+    await runFor(p2.engine, clock, 20);
+    const streak = p2.store.get(workflow.id)!.refusalStreak!;
+    expect(streak.count).toBe(5);
+    expect(streak.since).toBe(Date.UTC(2026, 8, 7, 10, 0));
+    // Only the third refusal spoke after the restart.
+    expect(p2.notifications.map((n) => n.kind)).toEqual(["failed"]);
+    expect(p2.notifications[0]!.message).toMatch(/3 refused starts in a row/);
+  });
+
+  it("a failed pre-flight is a refused start too, and a daily schedule joins and clears the same streak", async () => {
+    const f = files();
+    const clock = { now: Date.UTC(2026, 8, 7, 9, 0) };
+    let auth = false;
+    const world: World = {
+      busy: new Set(),
+      caps: { canMerge: true },
+      nextOccurrence: (_schedule, after) => after + 24 * HOUR,
+    };
+    const p = process_(f, clock, "t", world);
+    const workflow = p.store.create(
+      needsMerge({
+        triggers: { schedule: { type: "daily", time: "09:00", weekdays: [1, 2, 3, 4, 5] } },
+        preflight: { checks: [{ kind: "command", name: "auth", command: "gh auth status" }] },
+      }),
+    );
+    p.setCommandExit(() => (auth ? 0 : 1));
+    await p.engine.tick(); // arms tomorrow's slot
+    // Three daily slots refused by the check: receipts each time, the
+    // person told on the first and the third.
+    for (let day = 0; day < 3; day++) {
+      clock.now += 24 * HOUR;
+      await p.engine.tick();
+      await flush();
+    }
+    expect(p.store.listRuns(workflow.id).filter((run) => run.status === "failed")).toHaveLength(3);
+    expect(p.store.get(workflow.id)!.refusalStreak?.count).toBe(3);
+    const failed = p.notifications.filter((n) => n.kind === "failed");
+    expect(failed).toHaveLength(2);
+    expect(failed[1]!.message).toMatch(/pre-flight check "auth" failed.*3 refused starts in a row; next try at the next scheduled slot/);
+    // The token is fixed: the next slot passes and the streak is cleared.
+    auth = true;
+    clock.now += 24 * HOUR;
+    await p.engine.tick();
+    await flush();
+    expect(p.dispatches).toHaveLength(1);
+    expect(p.store.get(workflow.id)!.refusalStreak).toBeUndefined();
   });
 });
