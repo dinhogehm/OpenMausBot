@@ -5,7 +5,7 @@
 // run state anywhere, and a frame repaints it for free. No xyflow here
 // either: the whole panel is static markup a test can render.
 import { useEffect, useRef } from "react";
-import { AlertTriangle, ExternalLink, Loader2 } from "lucide-react";
+import { AlertTriangle, ExternalLink, Hourglass, Loader2 } from "lucide-react";
 
 import { cn } from "@/lib/cn";
 import {
@@ -36,6 +36,19 @@ function triggerLabel(run: WorkflowRun): string {
 
 function formatWhen(at: number): string {
   return new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/** A wait ends within a day, so the hour is the whole story; the date only
+ * matters when the pause crosses midnight, and then it is said. */
+function formatWaitUntil(at: number, now: number): string {
+  const time = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return new Date(at).toDateString() === new Date(now).toDateString() ? time : formatWhen(at);
+}
+
+/** A completed run may still carry a reason it ENDED — the execution cap
+ * closing a continuous cycle — and that is a note, not a failure. */
+function isEndedNote(run: WorkflowRun): boolean {
+  return run.status === "completed" && run.error !== undefined;
 }
 
 function statusClass(run: WorkflowRun): string {
@@ -167,12 +180,14 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             <p
               className={cn(
                 "mt-2 flex gap-1.5 rounded-lg px-2 py-1.5 text-[11px] leading-relaxed",
-                isMissedWorkflowRun(run) ? "bg-warning/10 text-warning" : "bg-danger/10 text-danger",
+                isMissedWorkflowRun(run) || isEndedNote(run) ? "bg-warning/10 text-warning" : "bg-danger/10 text-danger",
               )}
             >
               <AlertTriangle size={11} aria-hidden className="mt-0.5 shrink-0" />
               <span className="min-w-0 break-words">
-                <span className="sr-only">{isMissedWorkflowRun(run) ? "Missed: " : "Failed: "}</span>
+                <span className="sr-only">
+                  {isMissedWorkflowRun(run) ? "Missed: " : isEndedNote(run) ? "Ended: " : "Failed: "}
+                </span>
                 {failureText(run)}
               </span>
             </p>
@@ -241,6 +256,15 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                 );
               })}
             </ol>
+          )}
+
+          {run.status === "running" && run.waitUntil !== undefined && (
+            <p className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
+              <Hourglass size={10} aria-hidden />
+              {run.waitUntil > now ? "Waiting until " : "Wait ended at "}
+              <span className="tabular-nums">{formatWaitUntil(run.waitUntil, now)}</span>
+              {run.currentNodeId && <span className="font-mono">· {run.currentNodeId}</span>}
+            </p>
           )}
 
           {isActiveWorkflowRun(run) && run.nextAttemptAt !== undefined && (

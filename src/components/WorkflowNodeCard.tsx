@@ -4,7 +4,7 @@
 // piece of visual state — selection, entry, tone, footer — is a prop rather
 // than something read out of the editor.
 import type { ReactNode } from "react";
-import { AlertTriangle, CircleUserRound, Flag, MessageSquare, ShieldQuestion } from "lucide-react";
+import { AlertTriangle, CircleUserRound, Flag, Hourglass, MessageSquare, ShieldQuestion } from "lucide-react";
 
 import { BotAvatar, type BotAvatarProps } from "./Avatar";
 import { cn } from "@/lib/cn";
@@ -45,7 +45,28 @@ const KIND_LABEL: Record<WorkflowNode["kind"], string> = {
   agent: "Agent",
   approval: "Approval",
   notify: "Notify",
+  wait: "Wait",
 };
+
+/** The glyph and tint of a card that has no bot avatar to show. */
+const KIND_ICON: Record<Exclude<WorkflowNode["kind"], "agent">, { icon: typeof Hourglass; className: string }> = {
+  approval: { icon: ShieldQuestion, className: "bg-warning/15 text-warning" },
+  notify: { icon: MessageSquare, className: "bg-accent/15 text-accent" },
+  wait: { icon: Hourglass, className: "bg-control text-ink-secondary" },
+};
+
+function KindGlyph({ kind }: { kind: keyof typeof KIND_ICON }) {
+  const Icon = KIND_ICON[kind].icon;
+  return <Icon size={16} aria-hidden />;
+}
+
+/** "30 min", "2 h", "1 h 30 min": what a wait card says about its pause. */
+export function formatWaitMinutes(minutes: number): string {
+  if (!Number.isFinite(minutes) || minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours} h` : `${hours} h ${rest} min`;
+}
 
 /** One line of body copy, cut so a long instruction cannot stretch the card.
  * Exported so the run footer cuts a node summary exactly the same way. */
@@ -112,10 +133,10 @@ export function WorkflowNodeCard({
           <span
             className={cn(
               "flex size-7 shrink-0 items-center justify-center rounded-full",
-              node.kind === "approval" ? "bg-warning/15 text-warning" : "bg-accent/15 text-accent",
+              KIND_ICON[node.kind].className,
             )}
           >
-            {node.kind === "approval" ? <ShieldQuestion size={16} aria-hidden /> : <MessageSquare size={16} aria-hidden />}
+            <KindGlyph kind={node.kind} />
           </span>
         )}
 
@@ -160,6 +181,7 @@ export function WorkflowNodeCard({
             </p>
           ))}
         {node.kind === "approval" && <p className="break-words">{excerpt(node.prompt) || "No prompt yet"}</p>}
+        {node.kind === "wait" && <p className="break-words">Pauses the run for {formatWaitMinutes(node.minutes)}</p>}
         {node.kind === "notify" && (
           <p className="break-words">
             <span className={cn("font-medium", groupName ? "text-ink" : "text-danger")}>

@@ -108,8 +108,12 @@ function formatWhen(at: number): string {
  * one-time schedule fires, with the real instant arriving on a later frame.
  * "Pending" is the honest word for that gap — "not scheduled" would be a lie. */
 export function scheduleLabel(workflow: WorkflowListItem): string {
-  if (!workflow.triggers?.schedule) return "Not scheduled";
-  if (typeof workflow.nextRunAt !== "number") return "Scheduled · next run pending";
+  const schedule = workflow.triggers?.schedule;
+  if (!schedule) return "Not scheduled";
+  // An interval holds its clock while a run is live, so "pending" is the
+  // usual state there and the cadence is the useful part of the label.
+  const what = schedule.type === "interval" ? `Every ${schedule.minutes} min` : "Scheduled";
+  if (typeof workflow.nextRunAt !== "number") return `${what} · next run pending`;
   return `Next run: ${formatWhen(workflow.nextRunAt)}`;
 }
 

@@ -142,6 +142,39 @@ describe("WorkflowRunTimeline", () => {
     expect(markup).not.toContain("title=");
   });
 
+  it("says until when a parked run is waiting, naming the wait node", () => {
+    const parked = run({
+      currentNodeId: "pause",
+      waitUntil: NOW + 25 * 60_000,
+      nodeResults: [step({ nodeId: "plan" })],
+    });
+    const flat = text(panel({ runs: [parked], run: parked }));
+    expect(flat).toContain("Waiting until");
+    expect(flat).toContain(new Date(NOW + 25 * 60_000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+    expect(flat).toContain("pause");
+    // The tick has not noticed yet: honest about the instant being past.
+    const due = run({ currentNodeId: "pause", waitUntil: NOW - 1 });
+    expect(text(panel({ runs: [due], run: due }))).toContain("Wait ended at");
+    // A finished run keeps no wait line even if a stale receipt carried the field.
+    const finished = run({ status: "completed", waitUntil: NOW + 60_000, endedAt: NOW });
+    expect(text(panel({ runs: [finished], run: finished }))).not.toContain("Waiting until");
+  });
+
+  it("reads a completed run that stopped at the execution cap as ended, not failed", () => {
+    const capped = run({
+      status: "completed",
+      currentNodeId: "update-canal",
+      error: 'execution cap of 24 bot steps reached before node "triagem"',
+      endedAt: NOW,
+      nodeResults: [step({ nodeId: "triagem" })],
+    });
+    const markup = panel({ runs: [capped], run: capped });
+    expect(text(markup)).toContain("Completed");
+    expect(text(markup)).toContain("Ended:");
+    expect(text(markup)).toContain("execution cap of 24 bot steps");
+    expect(text(markup)).not.toContain("Failed");
+  });
+
   it("marks the observed run in the picker and only offers Follow latest once a pick is stuck", () => {
     const newer = run({ id: "newer", status: "completed", startedAt: 1_700_000_050_000, endedAt: 1_700_000_051_000 });
     const older = run({ id: "older", status: "failed", startedAt: 1_700_000_000_000, endedAt: 1_700_000_001_000 });

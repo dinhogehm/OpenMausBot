@@ -107,6 +107,12 @@ describe("scheduleLabel", () => {
     expect(scheduleLabel(scheduled)).toBe("Scheduled · next run pending");
     expect(scheduleLabel({ ...scheduled, nextRunAt: 1_700_000_000_000 })).toContain("Next run:");
   });
+
+  it("names the cadence of an interval schedule while its clock is held", () => {
+    const continuous = workflow({ triggers: { schedule: { type: "interval", minutes: 60 } } });
+    expect(scheduleLabel(continuous)).toBe("Every 60 min · next run pending");
+    expect(scheduleLabel({ ...continuous, nextRunAt: 1_700_000_000_000 })).toContain("Next run:");
+  });
 });
 
 describe("WorkflowRow", () => {

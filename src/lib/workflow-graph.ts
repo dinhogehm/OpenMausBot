@@ -25,7 +25,12 @@ import {
 
 export type WorkflowNodeKind = WorkflowNode["kind"];
 
-export const WORKFLOW_NODE_KINDS: readonly WorkflowNodeKind[] = ["agent", "approval", "notify"];
+export const WORKFLOW_NODE_KINDS: readonly WorkflowNodeKind[] = ["agent", "approval", "notify", "wait"];
+
+/** What a wait node dropped from the palette pauses for: long enough to
+ * read as a real pause between laps, short enough to notice on the canvas
+ * that it should be tuned. */
+export const WORKFLOW_WAIT_DEFAULT_MINUTES = 30;
 
 /** The one custom node type the canvas registers with xyflow. */
 export const WORKFLOW_NODE_TYPE = "workflowNode";
@@ -472,6 +477,8 @@ export function createWorkflowNode(
       return { kind, id, prompt: "" };
     case "notify":
       return seed.targetGroupId ? { kind, id, targetGroupId: seed.targetGroupId, template: "" } : null;
+    case "wait":
+      return { kind, id, minutes: WORKFLOW_WAIT_DEFAULT_MINUTES };
   }
 }
 
