@@ -488,6 +488,7 @@ describe("workflowPatchBody", () => {
       "maxNodeExecutions",
       "name",
       "nodes",
+      "preflight",
       "triggers",
     ]);
     expect(body.maxNodeExecutions).toBe(12);
@@ -499,5 +500,11 @@ describe("workflowPatchBody", () => {
     expect(body.triggers).toBeNull();
     expect(body.description).toBeNull();
     expect(body.maxNodeExecutions).toBeNull();
+    expect(body.preflight).toBeNull();
+  });
+
+  it("sends the pre-flight as saved, so the panel's checks reach the server whole", () => {
+    const preflight = { checks: [{ kind: "bots-ready" as const, name: "bots" }], timeoutSeconds: 30 };
+    expect(workflowPatchBody(workflow({ preflight })).preflight).toEqual(preflight);
   });
 });

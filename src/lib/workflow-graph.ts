@@ -20,6 +20,7 @@ import {
   type WorkflowEdge,
   type WorkflowIssue,
   type WorkflowNode,
+  type WorkflowPreflight,
   type WorkflowTriggers,
 } from "../../shared/workflow";
 
@@ -111,6 +112,7 @@ export interface WorkflowPatchBody {
   layout: Record<string, XY>;
   triggers: WorkflowTriggers | null;
   maxNodeExecutions: number | null;
+  preflight: WorkflowPreflight | null;
 }
 
 /** Where a node with no saved layout entry lands. Deterministic so two
@@ -495,5 +497,6 @@ export function workflowPatchBody(workflow: Workflow): WorkflowPatchBody {
     layout: workflow.layout,
     triggers: workflow.triggers ?? null,
     maxNodeExecutions: workflow.maxNodeExecutions ?? null,
+    preflight: workflow.preflight ?? null,
   };
 }

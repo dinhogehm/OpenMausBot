@@ -54,6 +54,7 @@ import {
   CalendarClock,
   Check,
   CircleAlert,
+  ClipboardCheck,
   Eye,
   Hourglass,
   Loader2,
@@ -91,6 +92,7 @@ import {
 import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { WorkflowCanvasNode, type WorkflowObservation } from "./WorkflowCanvasNode";
 import { WorkflowRunTimeline } from "./WorkflowRunTimeline";
+import { WorkflowPreflightPanel } from "./WorkflowPreflightPanel";
 import { WorkflowNodePanel, type WorkflowPanelBot } from "./WorkflowNodePanel";
 import {
   WORKFLOW_NODE_TYPE,
@@ -128,6 +130,7 @@ import {
   type Workflow,
   type WorkflowActiveHours,
   type WorkflowNodeResult,
+  type WorkflowPreflightResult,
   type WorkflowSchedule,
   type WorkflowTriggers,
 } from "../../shared/workflow";
@@ -557,6 +560,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   const { screenToFlowPosition } = useReactFlow();
   const paneRef = useRef<HTMLDivElement>(null);
   const scheduleButtonRef = useRef<HTMLButtonElement>(null);
+  const preflightButtonRef = useRef<HTMLButtonElement>(null);
 
   const [doc, setDoc] = useState<Workflow>(() => toDocument(row));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -566,6 +570,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   const [runError, setRunError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [preflightOpen, setPreflightOpen] = useState(false);
   /** A half-typed (or momentarily empty) name the document must not adopt. */
   const [nameDraft, setNameDraft] = useState<string | null>(null);
 
@@ -966,6 +971,19 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
     }
   };
 
+  // The checks run against the SAVED definition (the endpoint never takes
+  // a body — see workflow-api.ts), so the debounced edit is flushed first
+  // and a failed save refuses the test rather than testing yesterday's list.
+  const testPreflight = async (): Promise<WorkflowPreflightResult> => {
+    cancelDebounce();
+    const flushed = await queue.flush();
+    if (!flushed.ok) throw new Error(`Not tested — the latest changes could not be saved: ${flushed.error}`);
+    const { preflight } = await api(`/api/workflows/${workflowId}/preflight`, { method: "POST", body: "{}" });
+    if (!preflight) throw new Error("The server answered without a verdict.");
+    dispatch({ type: "workflowPreflightTested", workflowId, result: preflight });
+    return preflight;
+  };
+
   const decide = (decision: "approved" | "rejected") => {
     if (observedRun) void observeMode.act(observedRun, "approval", JSON.stringify({ decision }));
   };
@@ -1232,6 +1250,33 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                       anchorRef={scheduleButtonRef}
                       onChange={(triggers) => commit((current) => ({ ...current, triggers }))}
                       onClose={() => setScheduleOpen(false)}
+                    />
+                  )}
+                </div>
+
+                <div className="relative">
+                  <button
+                    ref={preflightButtonRef}
+                    type="button"
+                    onClick={() => setPreflightOpen((open) => !open)}
+                    aria-expanded={preflightOpen}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-lg border border-hairline/50 px-2.5 py-1.5 text-[11.5px] font-medium",
+                      doc.preflight?.checks.length ? "text-accent" : "text-ink-secondary hover:bg-raised hover:text-ink",
+                    )}
+                  >
+                    <ClipboardCheck size={13} aria-hidden />
+                    Pre-flight
+                  </button>
+                  {preflightOpen && (
+                    <WorkflowPreflightPanel
+                      workflow={doc}
+                      bots={bots}
+                      anchorRef={preflightButtonRef}
+                      lastResult={state.workflowPreflightTests[workflowId] ?? null}
+                      onChange={(preflight) => commit((current) => ({ ...current, preflight }))}
+                      onTest={testPreflight}
+                      onClose={() => setPreflightOpen(false)}
                     />
                   )}
                 </div>
