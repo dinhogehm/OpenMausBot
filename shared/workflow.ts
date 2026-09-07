@@ -51,6 +51,14 @@ export type WorkflowNode =
       retries?: number;
       /** Capabilities the bot must carry for this node to be dispatched. */
       requires?: WorkflowCapability[];
+      /** Approval keys pre-granted for THIS node's turns, in the same
+       * vocabulary as a bot's `alwaysAllow` (`Bash:gh`, `shell:gh`,
+       * `session_search`). A node turn runs with nobody watching, where only
+       * a grant a person named survives; a node built around one program
+       * should not depend on the bot carrying that grant for every chat too.
+       * Unioned with the bot's list, under the same unattended rules — never
+       * a way past the guards or onto the live desktop. */
+      alwaysAllow?: string[];
     }
   | { kind: "approval"; id: string; prompt: string; expiresHours?: number; onExpire?: "approved" | "rejected" }
   | { kind: "notify"; id: string; targetGroupId: string; template: string };
@@ -109,6 +117,12 @@ export interface WorkflowNodeResult {
   threadId?: string;
   startedAt: number;
   endedAt: number;
+  /** Permission requests the harness denied on the node's behalf because
+   * nobody was there to answer (one line each, naming the tool and the
+   * grant key that would have covered it). Present only when at least one
+   * was denied — a receipt that says WHICH grant the node was missing is
+   * what turns "failed again" into a one-line fix on the node panel. */
+  denials?: string[];
 }
 
 export interface WorkflowRun {
@@ -246,6 +260,7 @@ export interface WorkflowIssue {
     | "bad-numbers"
     | "bad-schedule"
     | "bad-requires"
+    | "bad-always-allow"
     | "missing-capability";
   nodeId?: string;
   message: string;
@@ -351,6 +366,32 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
             badRequires(`Node "${node.id}" requires "${capability}" more than once.`);
           } else {
             seen.add(capability);
+          }
+        }
+      }
+    }
+    // `alwaysAllow` is matched against approval keys by exact string, so a
+    // blank or padded entry is a grant that can never fire, and a repeat is
+    // a typo the canvas should show. The vocabulary itself is open (keys are
+    // minted per tool and program), so nothing here judges the names.
+    if (node.alwaysAllow !== undefined) {
+      const badGrant = (message: string) => {
+        issues.push({ severity: "error", code: "bad-always-allow", nodeId: node.id, message });
+      };
+      const grants: unknown = node.alwaysAllow;
+      if (!Array.isArray(grants)) {
+        badGrant(`Node "${node.id}" alwaysAllow must be a list of approval keys (like "Bash:gh").`);
+      } else {
+        const seen = new Set<string>();
+        for (const grant of grants) {
+          if (typeof grant !== "string" || grant.trim() === "") {
+            badGrant(`Node "${node.id}" alwaysAllow has a blank entry; every entry must name an approval key.`);
+          } else if (grant !== grant.trim()) {
+            badGrant(`Node "${node.id}" alwaysAllow entry "${grant}" has surrounding whitespace and can never match.`);
+          } else if (seen.has(grant)) {
+            badGrant(`Node "${node.id}" alwaysAllow lists "${grant}" more than once.`);
+          } else {
+            seen.add(grant);
           }
         }
       }

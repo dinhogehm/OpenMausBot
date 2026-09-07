@@ -37,6 +37,7 @@ import {
   type WorkflowRunTrigger,
   type WorkflowSchedule,
 } from "../shared/workflow.ts";
+import { unattendedHonoredGrants } from "./auto-approve.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 import { redactSecretsInText } from "./redact.ts";
 import type { WorkflowStore } from "./workflow-store.ts";
@@ -53,6 +54,13 @@ const BUSY_DISPATCH = /already working/i;
  * only thing being waited on is somebody else's turn ending. */
 const BUSY_REPARK_MS = 30_000;
 
+/** What the harness needs from the NODE (not the run) to shape its turn:
+ * the grants the node pre-approves, read fresh at every dispatch and
+ * re-prompt so an edit on the canvas reaches the very next attempt. */
+export interface WorkflowTurnOptions {
+  alwaysAllow?: string[];
+}
+
 export interface WorkflowEngineOptions {
   store: WorkflowStore;
   now?: () => number;
@@ -68,6 +76,10 @@ export interface WorkflowEngineOptions {
    * dispatch — never cached on the run — so a permission a person revokes
    * mid-run stops the run at the next node that needs it. */
   botCapabilities: (botId: string) => BotCapabilities | null;
+  /** The bot's own always-allow keys RIGHT NOW, so the node prompt can list
+   * what the turn may use without a card (its union with the node's list).
+   * Absent or null: the bot grants nothing of its own. */
+  botGrants?: (botId: string) => string[] | null | undefined;
   /** Creates the isolated TaskRecord where a node runs (auditable transcript
    * in the bot's chat). */
   createTask: (botId: string, title: string) => { threadId: string } | null;
@@ -80,6 +92,7 @@ export interface WorkflowEngineOptions {
     threadId: string,
     prompt: string,
     onDispatchError: (message: string) => void,
+    turn: WorkflowTurnOptions,
   ) => Promise<void>;
   interruptTurn?: (botId: string, threadId: string) => Promise<void>;
   /** Where notify nodes post. MUST be synchronous: throw to fail the node,
@@ -127,7 +140,7 @@ function envelopeContract(node: AgentNode): string {
  * the node's instructions + the envelope contract. Only DECLARED outcomes are
  * offered — the reserved failure outcome belongs to the engine alone.
  * Module-private in spirit; exported for prompt-content tests. */
-export function _buildNodePrompt(workflow: Workflow, node: AgentNode, run: WorkflowRun): string {
+export function _buildNodePrompt(workflow: Workflow, node: AgentNode, run: WorkflowRun, grants: string[] = []): string {
   const lines: string[] = [
     `You are executing node "${node.id}" of the workflow "${workflow.name}".`,
     "",
@@ -142,8 +155,25 @@ export function _buildNodePrompt(workflow: Workflow, node: AgentNode, run: Workf
       lines.push(`- ${result.nodeId}: ${result.outcome} — ${result.summary}`);
     }
   }
+  // The bot is told what it may use, not what was refused: the provider
+  // answers a denied permission with a bare decline (Codex discards the
+  // harness's note), so this list is the only way the bot learns which
+  // tools it can lean on and can name the one it lacked in its summary.
+  lines.push(
+    "",
+    grants.length > 0
+      ? `Nobody is at the keyboard. Tools pre-approved for this node, by approval key: ${grants.join(", ")}. Any other permission request is denied at once with no explanation from the provider — do not retry it; use the pre-approved tools, or finish with the failure outcome and name in your summary the tool you needed.`
+      : "Nobody is at the keyboard and no tool is pre-approved for this node: every permission request is denied at once with no explanation from the provider — do not retry one; use only tools that need no approval, or finish with the failure outcome and name in your summary the tool you needed.",
+  );
   lines.push("", "Your instructions for this node:", node.instructions, "", envelopeContract(node));
   return lines.join("\n");
+}
+
+/** What the node's turn may use without a card: the bot's keys and the
+ * node's, bot first, once each, minus everything the verdict would refuse
+ * unattended anyway — the prompt promises only what will be honoured. */
+function effectiveGrants(botGrants: string[] | null | undefined, node: AgentNode): string[] {
+  return unattendedHonoredGrants(botGrants, node.alwaysAllow);
 }
 
 function buildRepromptMessage(node: AgentNode): string {
@@ -168,6 +198,11 @@ function renderNotifyTemplate(template: string, workflow: Workflow, run: Workflo
 }
 
 const errorMessage = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+/** A failure reason with the node's denials appended, so a receipt reads
+ * "node timed out — denied unattended: shell … (key shell:gh) …" and the
+ * person knows which grant to add rather than which minute it died. */
+const withDenials = (reason: string, denials: string[]): string =>
+  denials.length === 0 ? reason : `${reason} — ${denials.join("; ")}`;
 /** startRun's own refusal — the documented prefix the API maps to a 400. */
 const isInvalidWorkflow = (error: unknown): boolean => errorMessage(error).startsWith("invalid workflow:");
 
@@ -186,6 +221,14 @@ export class WorkflowEngine {
   /** Latest runtime.error per dispatched thread — the fallback reason for a
    * turn that ends not-ok without a stop reason (mirrors RoutineManager). */
   private readonly lastRuntimeError = new Map<string, string>();
+  /** Permission requests the harness denied on a dispatched thread because
+   * nobody was there to answer — one line each, naming the grant that would
+   * have covered it. Folded into the node's receipt when the thread settles. */
+  private readonly denialsByThread = new Map<string, string[]>();
+  /** Denials carried across the current node's ATTEMPTS: a retried attempt
+   * parks its lines here, so the receipt that finally records the node
+   * names every grant it was missing, not just the last attempt's. */
+  private readonly denialsByRun = new Map<string, string[]>();
   /** Re-entrancy guard for drainQueue: while a drain loop runs, nested drain
    * requests (failNode during a promotion, deleted-workflow chains) only
    * enqueue the workflow id, so stack depth never scales with queue length. */
@@ -233,6 +276,7 @@ export class WorkflowEngine {
       this.recoverStranded();
       this.drainStrandedQueues();
       this.sweepSchedules(now);
+      this.pruneDenials();
     } finally {
       this.ticking = false;
     }
@@ -443,7 +487,8 @@ export class WorkflowEngine {
       ) {
         continue;
       }
-      if (run.currentThreadId !== undefined) this.forgetThread(run.currentThreadId);
+      // attemptFailure forgets the dead thread itself — after taking what
+      // the attempt was refused, so the receipt keeps it.
       this.attemptFailure(run.id, "node timed out");
     }
   }
@@ -602,6 +647,40 @@ export class WorkflowEngine {
     return null;
   }
 
+  /** The harness denied a permission request on a node's thread because
+   * nobody was there to answer it (fail-fast, instead of holding the card
+   * open until the node times out). Recorded against the dispatch, so the
+   * receipt can say WHICH grant the node was missing; a thread the engine
+   * is not driving is ignored. Duplicates (the bot retrying the same
+   * command) collapse to one line. */
+  noteDenial(threadId: string, line: string): void {
+    if (!this.runByThread.has(threadId)) return;
+    const lines = this.denialsByThread.get(threadId) ?? [];
+    if (!lines.includes(line)) lines.push(line);
+    this.denialsByThread.set(threadId, lines);
+  }
+
+  /** Denials parked for a run the store has since pruned (the receipt cap)
+   * or settled would sit in memory for the life of the process. */
+  private pruneDenials(): void {
+    for (const runId of [...this.denialsByRun.keys()]) {
+      const run = this.store.getRun(runId);
+      if (!run || TERMINAL_RUN_STATUSES.has(run.status)) this.denialsByRun.delete(runId);
+    }
+  }
+
+  /** Every denial the current node has collected — earlier attempts' plus
+   * this thread's — consumed, so the same line is never recorded twice. */
+  private takeDenials(runId: string, threadId: string | undefined): string[] {
+    const merged = [...(this.denialsByRun.get(runId) ?? [])];
+    for (const line of threadId === undefined ? [] : (this.denialsByThread.get(threadId) ?? [])) {
+      if (!merged.includes(line)) merged.push(line);
+    }
+    this.denialsByRun.delete(runId);
+    if (threadId !== undefined) this.denialsByThread.delete(threadId);
+    return merged;
+  }
+
   /** Runs a webhook still owns — what its pending cap counts. */
   liveRunCountForWebhook(webhookId: string): number {
     return this.store.listRuns().filter((run) => run.webhookId === webhookId && LIVE_RUN_STATUSES.has(run.status)).length;
@@ -683,6 +762,7 @@ export class WorkflowEngine {
       if (!latest || TERMINAL_RUN_STATUSES.has(latest.status)) return latest ?? fresh;
     }
     if (fresh.currentThreadId !== undefined) this.forgetThread(fresh.currentThreadId);
+    this.denialsByRun.delete(runId);
     const patched = this.store.patchRun(runId, {
       status: "cancelled",
       endedAt: this.now(),
@@ -798,13 +878,18 @@ export class WorkflowEngine {
           return;
         }
         this.lastAssistantText.delete(event.threadId);
-        this.startTurnSafely(node.botId, event.threadId, buildRepromptMessage(node), runId);
+        this.startTurnSafely(node, event.threadId, buildRepromptMessage(node), runId);
         return;
       }
       this.attemptFailure(runId, "node did not produce a valid outcome envelope", event.threadId);
       return;
     }
 
+    // Taken before forgetThread drops the thread's buffers. A node that
+    // finished DESPITE a denial still records it: the bot worked around the
+    // missing grant this time, and the receipt is where the person learns
+    // which grant to add before the workaround stops working.
+    const denials = this.takeDenials(runId, event.threadId);
     const result: WorkflowNodeResult = {
       nodeId: node.id,
       outcome: parsed.outcome,
@@ -814,6 +899,7 @@ export class WorkflowEngine {
       threadId: event.threadId,
       startedAt: run.dispatchedAt ?? run.startedAt,
       endedAt: this.now(),
+      ...(denials.length === 0 ? {} : { denials }),
     };
     this.forgetThread(event.threadId);
     this.advance(run, workflow, node, result);
@@ -975,7 +1061,8 @@ export class WorkflowEngine {
     if (!patched) return; // run pruned mid-flight: stop driving it silently
     this.runByThread.set(task.threadId, runId);
     this.lastAssistantText.delete(task.threadId);
-    this.startTurnSafely(node.botId, task.threadId, _buildNodePrompt(workflow, node, patched), runId);
+    const grants = effectiveGrants(this.options.botGrants?.(node.botId), node);
+    this.startTurnSafely(node, task.threadId, _buildNodePrompt(workflow, node, patched, grants), runId);
   }
 
   /** Park the run on a human gate: no task, no turn, one notification. From
@@ -1046,10 +1133,11 @@ export class WorkflowEngine {
   /** A dispatch error is a dispatch error whether the wrapper rejects or
    * throws before it even returns its promise: both reach attemptFailure, so
    * neither can escape into an event handler or tick(). */
-  private startTurnSafely(botId: string, threadId: string, prompt: string, runId: string): void {
+  private startTurnSafely(node: AgentNode, threadId: string, prompt: string, runId: string): void {
+    const turn: WorkflowTurnOptions = node.alwaysAllow?.length ? { alwaysAllow: [...node.alwaysAllow] } : {};
     try {
       void this.options
-        .startTurn(botId, threadId, prompt, (message) => this.attemptFailure(runId, message, threadId))
+        .startTurn(node.botId, threadId, prompt, (message) => this.attemptFailure(runId, message, threadId), turn)
         .catch((error: unknown) => this.attemptFailure(runId, errorMessage(error), threadId));
     } catch (error) {
       this.attemptFailure(runId, errorMessage(error), threadId);
@@ -1074,6 +1162,9 @@ export class WorkflowEngine {
     if (threadId !== undefined && this.runByThread.get(threadId) !== runId) return;
     const run = this.store.getRun(runId);
     if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return;
+    // Before forgetThread drops the thread's buffers: what this attempt was
+    // refused travels with the failure, whichever way it lands below.
+    const denials = this.takeDenials(runId, run.currentThreadId);
     if (run.currentThreadId !== undefined) this.forgetThread(run.currentThreadId);
     const workflow = this.store.get(run.workflowId);
     const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
@@ -1085,6 +1176,7 @@ export class WorkflowEngine {
     // answer is the same one the busy check gives: park, and let the
     // reconciler serve this run when the bot frees, oldest first.
     if (node?.kind === "agent" && BUSY_DISPATCH.test(reason)) {
+      if (denials.length > 0) this.denialsByRun.set(runId, denials);
       this.store.patchRun(runId, {
         currentNodeId: node.id,
         nextAttemptAt: this.now() + BUSY_REPARK_MS,
@@ -1095,6 +1187,9 @@ export class WorkflowEngine {
     }
     const retries = node?.kind === "agent" ? (node.retries ?? WORKFLOW_NODE_RETRIES_DEFAULT) : 0;
     if (run.attempt < retries) {
+      // The next attempt runs under the same grants, so what this one was
+      // refused is still true of the node: keep it for the receipt.
+      if (denials.length > 0) this.denialsByRun.set(runId, denials);
       const attempt = run.attempt + 1;
       this.store.patchRun(runId, {
         attempt,
@@ -1105,6 +1200,7 @@ export class WorkflowEngine {
       });
       return;
     }
+    const explained = withDenials(reason, denials);
     const failedEdge = workflow?.edges.find(
       (candidate) => candidate.from === run.currentNodeId && candidate.outcome === WORKFLOW_FAIL_OUTCOME,
     );
@@ -1115,14 +1211,15 @@ export class WorkflowEngine {
       this.advance(run, workflow, node, {
         nodeId: node.id,
         outcome: WORKFLOW_FAIL_OUTCOME,
-        summary: redactSecretsInText(reason).slice(0, 500),
+        summary: redactSecretsInText(explained).slice(0, 500),
         startedAt: run.dispatchedAt ?? at,
         endedAt: at,
         ...(run.currentThreadId === undefined ? {} : { threadId: run.currentThreadId }),
+        ...(denials.length === 0 ? {} : { denials }),
       });
       return;
     }
-    this.failNode(runId, reason);
+    this.failNode(runId, explained);
   }
 
   /** The TERMINAL failure path: guards that no retry can fix (deleted
@@ -1132,10 +1229,14 @@ export class WorkflowEngine {
   private failNode(runId: string, reason: string): void {
     const run = this.store.getRun(runId);
     if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return;
+    // Whatever the node was refused before this terminal stop still belongs
+    // in the receipt; attemptFailure has already folded its own in, so this
+    // only adds lines nothing else consumed.
+    const explained = withDenials(reason, this.takeDenials(runId, run.currentThreadId));
     if (run.currentThreadId !== undefined) this.forgetThread(run.currentThreadId);
     const patched = this.store.patchRun(runId, {
       status: "failed",
-      error: redactSecretsInText(reason).slice(0, 500),
+      error: redactSecretsInText(explained).slice(0, 500),
       endedAt: this.now(),
       nextAttemptAt: undefined,
       approvalRequestedAt: undefined,
@@ -1146,7 +1247,7 @@ export class WorkflowEngine {
     const where = patched.currentNodeId === undefined ? "" : ` at node "${patched.currentNodeId}"`;
     this.safeNotify(
       patched,
-      `Workflow "${workflow?.name ?? patched.workflowId}" run failed${where}: ${patched.error ?? reason}`,
+      `Workflow "${workflow?.name ?? patched.workflowId}" run failed${where}: ${patched.error ?? explained}`,
       "failed",
     );
     this.drainQueue(patched.workflowId);
@@ -1215,5 +1316,6 @@ export class WorkflowEngine {
     this.runByThread.delete(threadId);
     this.lastAssistantText.delete(threadId);
     this.lastRuntimeError.delete(threadId);
+    this.denialsByThread.delete(threadId);
   }
 }

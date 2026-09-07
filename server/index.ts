@@ -27,7 +27,15 @@ import {
   type CredentialTargetId,
 } from "../shared/credential-request.ts";
 
-import { HELD_NOTE, approvalHeldNote, approvalHeldReason, approvalModeForOrigin, autoVerdict, rememberableApprovalKey } from "./auto-approve.ts";
+import {
+  HELD_NOTE,
+  approvalHeldNote,
+  approvalHeldReason,
+  approvalModeForOrigin,
+  autoVerdict,
+  effectiveAlwaysAllow,
+  rememberableApprovalKey,
+} from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -271,6 +279,8 @@ import * as vps from "./vps-computer.ts";
 import { nextOccurrence, RoutineManager, type RoutineRun, type RoutineRunOn, type RoutineRunTrigger } from "./routines.ts";
 import { handleWorkflowRequest, workflowNotificationBotId } from "./workflow-api.ts";
 import { WorkflowEngine } from "./workflow-run.ts";
+import { turnProvenanceFor, unattendedByEither, type TurnProvenance } from "./turn-provenance.ts";
+import { denyUnattendedWorkflowCard } from "./workflow-unattended-card.ts";
 import { WorkflowStore } from "./workflow-store.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
 import { BUILT_IN_BROWSER_SYSTEM_PROMPT } from "./browser-engine.ts";
@@ -1276,14 +1286,14 @@ async function botOverview(bot: BotRecord): Promise<BotOverview> {
  * this too, but no provider dispatch or later permission callback relies on
  * persistence having been produced exclusively by that route. And a turn
  * another bot started never runs as Full — see approvalModeForOrigin. */
-const approvalModeForTurn = (bot: BotRecord, peerInitiated = false): ApprovalMode => {
+const approvalModeForTurn = (bot: BotRecord, peerInitiated = false, threadId?: string): ApprovalMode => {
   const mode = approvalModeForOrigin(approvalModeFor(bot), { peerInitiated });
   if (!supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)) {
     return "ask";
   }
   // Native reviewers can approve before a permission reaches this process.
   // Unattended Auto must therefore downgrade before spawning the provider.
-  if (mode === "auto" && isUnattended(bot.id)) return "ask";
+  if (mode === "auto" && isUnattendedTurn(bot.id, threadId)) return "ask";
   return mode;
 };
 
@@ -2490,6 +2500,42 @@ function isUnattended(botId?: string | null): boolean {
   return true;
 }
 
+/** What startTurn was told about the turn now live on a thread — the half
+ * of the unattended story the per-bot mark cannot carry.
+ *
+ * The bot mark is a mutable flag every dispatch rewrites and a person's
+ * message clears, keyed on the assumption of one turn per bot. A workflow
+ * node's turn must not depend on that: its permission cards and its
+ * computer mount are decided from THIS record, written synchronously from
+ * the dispatch's own opts before anything can await, so no clear, TTL or
+ * re-key on the bot side can hand a node the desktop or Auto mode. The bot
+ * mark stays as the fallback — a stale one only ever means "ask a human",
+ * which fails closed. Keyed by thread because that is all a runtime event
+ * carries; a card continuation inherits the turn it resumes, which is why
+ * the record outlives turn.completed (a connector card answered later
+ * resumes the same dispatch) and is only ever replaced by the next
+ * dispatch on the thread. One small record per thread that ever ran a
+ * turn in this process — bounded by the task list, not by traffic. */
+const turnProvenanceByThread = new Map<string, TurnProvenance>();
+
+/** Unattended by either record — the thread's own dispatch, or the bot's
+ * mark. Never narrower than the bot mark alone, so nothing that asked a
+ * human before asks a bot now. */
+function isUnattendedTurn(botId: string | null | undefined, threadId: string | undefined): boolean {
+  return unattendedByEither(threadId === undefined ? undefined : turnProvenanceByThread.get(threadId), isUnattended(botId));
+}
+
+/** How long a card raised on a workflow node's thread stays open for a
+ * person before the harness denies it on their behalf. Zero by default: a
+ * node runs on a schedule nobody is sitting at, and a card left open only
+ * burns the node's timeout (15–90 min, times three attempts) before the run
+ * learns anything. A short grace is the knob for a person who does watch
+ * their runs and wants a moment to click. */
+const WORKFLOW_DENY_GRACE_MS = (() => {
+  const raw = Number(process.env.OMB_WORKFLOW_DENY_GRACE_MS ?? "0");
+  return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 10 * 60_000) : 0;
+})();
+
 // Threads whose turn in flight was started by another BOT — an ask_bot hop,
 // a drained delegation. The person asked ONE bot; the fan-out behind that
 // answer is that bot's work, not mail addressed to them, so its completion
@@ -2927,24 +2973,33 @@ bus.subscribe((event: RuntimeEvent) => {
       // even Full access never invents a person's answer. Safe Auto stops on
       // the guards in auto-approve.ts; explicitly acknowledged Full does not.
       const asker = bot ?? (speaker ? store.bot(speaker.botId) : undefined);
-      const unattended = permission && asker && event.requestId ? isUnattended(asker.id) : false;
-      const effectiveApprovalMode = asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId)) : "ask";
+      // The thread's own dispatch record first, the bot mark as fallback —
+      // a workflow node's card is judged unattended even if something
+      // cleared the bot mark under it.
+      const provenance = turnProvenanceByThread.get(event.threadId);
+      const workflowTurn = provenance?.automationSource === "workflow";
+      const unattended = permission && asker && event.requestId ? isUnattendedTurn(asker.id, event.threadId) : false;
+      const effectiveApprovalMode = asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId), event.threadId) : "ask";
       const verdict = permission && asker && event.requestId
         ? autoVerdict({
             // the same origin the dispatch used, so a peer-started turn's
             // residual asks are judged as Approve for me here too
             approvalMode: effectiveApprovalMode,
             autoApprove: false,
-            alwaysAllow: asker.alwaysAllow,
+            // a workflow node's own pre-approved keys join the bot's; the
+            // unattended rules below judge every entry the same way
+            alwaysAllow: workflowTurn ? effectiveAlwaysAllow(asker, provenance) : asker.alwaysAllow,
           }, event.tool, event.summary, {
             unattended,
             scope: event.approvalScope,
             requiresExplicitApproval: event.requiresExplicitApproval,
+            // present only on a workflow turn: what the node itself declared
+            ...(workflowTurn ? { workflowGrants: provenance.alwaysAllow ?? [] } : {}),
             // Antigravity's residual asks must use a peer-started turn's
             // effective safe Auto mode, not its durable Full grant.
             // Preserve the existing policy of every other provider.
             nativeApproval: requiresNativeApproval(event.provider, event.provider === "antigravityAgent"
-              ? effectiveApprovalMode : approvalModeForTurn(asker)),
+              ? effectiveApprovalMode : approvalModeForTurn(asker, false, event.threadId)),
           })
         : null;
       // The provider already received Ask for unattended Auto turns. Keep
@@ -3031,6 +3086,70 @@ bus.subscribe((event: RuntimeEvent) => {
             });
           }
         })();
+        break;
+      }
+      // A workflow node's turn: nobody is at the keyboard, and a card nobody
+      // will click is not a question, it is the node's timeout spent three
+      // times over — the live 24/7 pipeline never got past its first node
+      // that way. So a permission the automatic policy could not answer is
+      // DENIED now (after the configurable grace, default none), with one
+      // line that names the tool and the exact grant key that would have
+      // covered it: the bot gets the refusal and can route around it or
+      // finish with "failed", the run moves on inside the minute, and the
+      // receipt says which key to add on the node panel. Only workflow turns:
+      // a person's, a webhook's and a room's cards still wait for a human.
+      // Questions are untouched — no rule may invent a person's answer.
+      if (workflowTurn && permission && asker && event.requestId && verdict) {
+        const requestId = event.requestId;
+        const { tool, summary } = event;
+        const instance = event.providerInstanceId
+          ? registry.get(event.providerInstanceId)
+          : registry.get(asker.modelSelection.instanceId);
+        const findCard = (messageId: string) =>
+          store.messagesFor(event.threadId).find((candidate) => candidate.id === messageId)?.card;
+        const decided = denyUnattendedWorkflowCard(
+          { requestId, tool, summary, scope: event.approvalScope, verdict },
+          {
+            graceMs: WORKFLOW_DENY_GRACE_MS,
+            pushCard: (card) => {
+              const message = pushMessage({ role: "bot", kind: "options", card });
+              askMessageByRequest.set(`${event.threadId}:${requestId}`, message.id);
+              return message.id;
+            },
+            readCard: findCard,
+            patchCard: (messageId, card) => store.patchMessage(event.threadId, messageId, { card }),
+            respond: async (message) => {
+              if (!instance) throw new Error("provider unavailable");
+              return instance.adapter.respondToRequest(event.threadId, requestId, { behavior: "deny", message });
+            },
+            appendDecision: (row) =>
+              appendDecision(DATA_DIR, {
+                threadId: event.threadId,
+                requestId,
+                botId: asker.id,
+                botName: asker.name,
+                tool,
+                summary,
+                decision: row.decision,
+                source: row.source,
+                rule: verdict.rule,
+                unattended: true,
+              }),
+            noteDenial: (line) => workflowEngine?.noteDenial(event.threadId, line),
+            // the same hand-off an ordinary card makes: the bot is waiting
+            // on a person now, and the person is told
+            notifyHuman: () => {
+              const current = store.bot(asker.id);
+              if (current?.busy) store.setActivity(asker.id, "waiting-on-you");
+              notify(buildNotification("approval", asker, event.threadId, event.summary));
+            },
+            schedule: (fn, ms) => {
+              const timer = setTimeout(fn, ms);
+              timer.unref?.();
+            },
+          },
+        );
+        void decided.settled;
         break;
       }
       // A card can outlive the bot record that raised it. Without one there is
@@ -3870,6 +3989,9 @@ async function startTurn(
     automationSource?: RoutineRunTrigger | "workflow";
     /** the caller was already running unattended, so this turn is too */
     unattended?: boolean;
+    /** A workflow node's pre-approved keys for this turn (node.alwaysAllow):
+     * joined to the bot's own list when its permission cards are judged. */
+    alwaysAllow?: string[];
     /** ask_bot delivery: the bot whose words this user-role line carries,
      * recorded on the message itself (Message.peerAsk). */
     peerAsk?: Message["peerAsk"];
@@ -3906,8 +4028,19 @@ async function startTurn(
   // integrations. Completion and interrupt paths do the same; this is the
   // final backstop against a retained proxy process.
   revokeInternalCapabilitiesForThread(threadId);
-  // a webhook turn, or one inherited from a bot already running unattended
-  if (opts?.automationSource === "webhook" || opts?.unattended) markUnattended(bot.id);
+  // The thread's own record of this dispatch — the ONE place "nobody at the
+  // keyboard" is decided (turn-provenance.ts) — written before any await so
+  // the fold and the computer mount below read what THIS turn was told,
+  // not whatever the bot mark says by then. A card continuation keeps the
+  // record of the turn it resumes.
+  const provenance: TurnProvenance = turnProvenanceFor(
+    opts,
+    opts?.cardContinuation ? turnProvenanceByThread.get(threadId) : undefined,
+  );
+  turnProvenanceByThread.set(threadId, provenance);
+  // The bot mark follows the same decision: it is what a peer hop and a
+  // delegation inherit, since those know the bot but not always the thread.
+  if (provenance.unattended) markUnattended(bot.id);
   // a person typing into this bot ends the unattended window immediately
   else if (opts?.automationSource === undefined && !opts?.commsDepth && !opts?.cardContinuation) {
     clearUnattended(bot.id);
@@ -4319,6 +4452,13 @@ async function startTurn(
 
       // Auto-only host fallback. Electron owns cua-driver/TCC attribution;
       // the harness only reads its already-running connection descriptor.
+      // Unattended is the same answer the fold and the approval mode get —
+      // this dispatch's own record first, the bot mark second. The mark is
+      // a mutable per-bot flag that a person's message clears and a TTL
+      // ages out, and a scheduled run must never land on the live desktop
+      // because of what happened to that flag in the meantime — that mount
+      // would tag every card in the turn local-computer scope, which no
+      // grant may answer with nobody there.
       if (
         !integrations.computer &&
         !integrations.localComputer &&
@@ -4327,7 +4467,7 @@ async function startTurn(
           requested: undefined,
           hostPlatform: process.platform,
           providerSupportsLocal: mountsLocalComputer,
-          unattended: isUnattended(bot.id),
+          unattended: isUnattendedTurn(bot.id, threadId),
         })
       ) {
         const cua = readCuaConnection();
@@ -4478,7 +4618,7 @@ async function startTurn(
         threadId,
         text: turnText,
         images: turnImages,
-        approvalMode: approvalModeForTurn(liveBot ?? bot, commsDepth > 0),
+        approvalMode: approvalModeForTurn(liveBot ?? bot, commsDepth > 0, threadId),
         model,
         effort,
         // a rewound thread never resumes the abandoned branch's session
@@ -4874,6 +5014,9 @@ workflowEngine = new WorkflowEngine({
     return !bot ? "missing" : bot.busy ? "busy" : "ready";
   },
   botCapabilities,
+  // Read at dispatch, like the flags: a grant a person adds mid-run reaches
+  // the next node's prompt.
+  botGrants: (botId) => store.bot(botId)?.alwaysAllow,
   createTask: (botId, title) => {
     // Detached like a routine's task: the bot's active thread stays where the
     // user left it, and the node's transcript is auditable in its task list.
@@ -4890,9 +5033,14 @@ workflowEngine = new WorkflowEngine({
   // for a human and waits, or hits its timeout; nothing self-approves at 3am.
   // `automationSource: "workflow"` fences the run input as untrusted in the
   // system prompt and keeps the unattended mark from being cleared.
-  startTurn: (botId, threadId, prompt, onDispatchError) =>
-    startTurn(botId, prompt, { threadId, automationSource: "workflow", unattended: true, onDispatchError })
-      .then(() => undefined),
+  startTurn: (botId, threadId, prompt, onDispatchError, turn) =>
+    startTurn(botId, prompt, {
+      threadId,
+      automationSource: "workflow",
+      unattended: true,
+      alwaysAllow: turn.alwaysAllow,
+      onDispatchError,
+    }).then(() => undefined),
   interruptTurn: async (botId, threadId) => {
     // Local instance only: workflows have no runOn: "cloud" in the MVP.
     const bot = store.bot(botId);

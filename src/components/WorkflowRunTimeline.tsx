@@ -214,6 +214,14 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                         {excerpt(result.summary, 200)}
                       </p>
                     )}
+                    {result.denials?.map((denial) => (
+                      // What the harness refused on the node's behalf: the
+                      // one line that names the grant key to add on the
+                      // node panel, kept whole because the key is the point.
+                      <p key={denial} className="mt-0.5 break-words font-mono text-[10px] leading-snug text-danger">
+                        {denial}
+                      </p>
+                    ))}
                   </>
                 );
                 const openable = result.threadId !== undefined && onOpenStep !== undefined;

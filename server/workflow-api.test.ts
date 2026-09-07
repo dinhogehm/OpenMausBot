@@ -63,7 +63,18 @@ function harness({ onWorkflowDeleted }: { onWorkflowDeleted?: (workflowId: strin
       readBody: async () => body ?? {},
     });
   };
-  return { store, engine, deps, call, dispatches, interrupts, hooks, capabilities };
+  return {
+    store,
+    engine,
+    deps,
+    call,
+    dispatches,
+    interrupts,
+    hooks,
+    capabilities,
+    /** Fresh store over the same files: proves the bytes on disk, not the cache. */
+    reload: () => new WorkflowStore({ file: join(dir, "workflows.json"), runsFile: join(dir, "workflow-runs.json"), now }),
+  };
 }
 
 const agentGraph = (): WorkflowInput => ({
@@ -706,5 +717,44 @@ describe("workflow capabilities", () => {
     });
     expect(cleared?.status).toBe(200);
     expect(store.get(id)?.nodes[0]).not.toHaveProperty("requires");
+  });
+
+  it("persists a node's pre-approved keys through POST, PATCH and reload, refusing only the shape at the door", async () => {
+    const { call, store, reload } = harness();
+    const created = await call("POST", "/api/workflows", {
+      ...agentGraph(),
+      nodes: [{ ...agentGraph().nodes[0], alwaysAllow: ["Bash:gh", "session_search"] }],
+    });
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(bodyOf(created).workflow.nodes[0]).toMatchObject({ alwaysAllow: ["Bash:gh", "session_search"] });
+    expect(errors(bodyOf(created).workflow.issues)).toEqual([]);
+    // the bytes on disk carry it — a restart must not forget a grant
+    expect(reload().get(id)?.nodes[0]).toMatchObject({ alwaysAllow: ["Bash:gh", "session_search"] });
+
+    // a non-list is refused at the door, the stored draft untouched
+    const notAList = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], alwaysAllow: "Bash:gh" }],
+    });
+    expect(notAList?.status).toBe(400);
+    expect(bodyOf(notAList).error).toMatch(/^nodes\.0\.alwaysAllow/);
+    expect(store.get(id)?.nodes[0]).toMatchObject({ alwaysAllow: ["Bash:gh", "session_search"] });
+
+    // a blank or repeated entry is the validator's: the draft saves and is painted
+    const blank = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], alwaysAllow: ["Bash:gh", "", "Bash:gh"] }],
+    });
+    expect(blank?.status).toBe(200);
+    expect(codes(bodyOf(blank).workflow.issues)).toContain("bad-always-allow");
+    // and it gates a run, like every other error
+    const refused = await call("POST", `/api/workflows/${id}/runs`, {});
+    expect(refused?.status).toBe(400);
+    expect(bodyOf(refused).error).toMatch(/^invalid workflow: Node "\w+" alwaysAllow/);
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], alwaysAllow: null }],
+    });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.nodes[0]).not.toHaveProperty("alwaysAllow");
   });
 });

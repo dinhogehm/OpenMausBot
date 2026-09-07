@@ -166,6 +166,19 @@ describe("reconcileGraphNodes", () => {
     );
     expect(reconcileGraphNodes(requiring, toGraphNodes(needsDeploy, issues))[0]).not.toBe(requiring[0]);
     expect(reconcileGraphNodes(requiring, toGraphNodes(needsMerge, issues))[0]).toBe(requiring[0]);
+
+    // `alwaysAllow` is the third array, compared the same way: a different
+    // key of the same length is a change, an identical list is not
+    const grantsGh = updateNode(graph, "agent-1", (node) =>
+      node.kind === "agent" ? { ...node, alwaysAllow: ["Bash:gh"] } : node,
+    );
+    const granting = toGraphNodes(grantsGh, issues);
+    expect(reconcileGraphNodes(first, granting)[0]).not.toBe(first[0]);
+    const grantsGit = updateNode(grantsGh, "agent-1", (node) =>
+      node.kind === "agent" ? { ...node, alwaysAllow: ["Bash:git"] } : node,
+    );
+    expect(reconcileGraphNodes(granting, toGraphNodes(grantsGit, issues))[0]).not.toBe(granting[0]);
+    expect(reconcileGraphNodes(granting, toGraphNodes(grantsGh, issues))[0]).toBe(granting[0]);
   });
 
   it("replaces the object when position, selection, entry, issues or the node itself change", () => {

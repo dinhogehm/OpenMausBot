@@ -41,6 +41,8 @@ interface CapturedDispatch {
   threadId: string;
   prompt: string;
   onDispatchError: (message: string) => void;
+  /** the node's pre-approved keys, as the harness wrapper receives them */
+  alwaysAllow?: string[];
 }
 
 /** `channel: false` builds an engine with no `postGroupMessage` wired — the
@@ -72,6 +74,8 @@ function harness({
   let botStateFn: (botId: string) => "ready" | "busy" | "missing" = () => "ready";
   /** No flags by default: a node that requires nothing must never notice. */
   let botCapabilitiesFn: (botId: string) => BotCapabilities | null = () => ({});
+  /** No grants by default: a node prompt then says so. */
+  let botGrantsFn: (botId: string) => string[] | null | undefined = () => undefined;
   /** While set, interruptTurn stays pending until releaseInterrupts() — lets
    * tests land events in the middle of an engine `await interruptTurn`. */
   let interruptGate: Promise<void> | null = null;
@@ -81,15 +85,16 @@ function harness({
     now: () => now,
     botState: (botId) => botStateFn(botId),
     botCapabilities: (botId) => botCapabilitiesFn(botId),
+    botGrants: (botId) => botGrantsFn(botId),
     createTask: (botId, title) => {
       if (createTaskThrows !== null) throw new Error(createTaskThrows);
       if (createTaskFails) return null;
       tasks.push({ botId, title });
       return { threadId: `thread-${++taskSeq}` };
     },
-    startTurn: (botId, threadId, prompt, onDispatchError) => {
+    startTurn: (botId, threadId, prompt, onDispatchError, turn) => {
       if (startTurnThrows !== null) throw new Error(startTurnThrows);
-      dispatches.push({ botId, threadId, prompt, onDispatchError });
+      dispatches.push({ botId, threadId, prompt, onDispatchError, ...(turn.alwaysAllow ? { alwaysAllow: turn.alwaysAllow } : {}) });
       return startTurnRejects === null ? Promise.resolve() : Promise.reject(new Error(startTurnRejects));
     },
     interruptTurn: (botId, threadId) => {
@@ -152,8 +157,8 @@ function harness({
         restartedTasks.push({ botId, title });
         return { threadId: `re-thread-${++restartedSeq}` };
       },
-      startTurn: (botId, threadId, prompt, onDispatchError) => {
-        restartedDispatches.push({ botId, threadId, prompt, onDispatchError });
+      startTurn: (botId, threadId, prompt, onDispatchError, turn) => {
+        restartedDispatches.push({ botId, threadId, prompt, onDispatchError, ...(turn.alwaysAllow ? { alwaysAllow: turn.alwaysAllow } : {}) });
         return Promise.resolve();
       },
       interruptTurn: (botId, threadId) => {
@@ -193,6 +198,7 @@ function harness({
     throwStartTurn: (message: string) => (startTurnThrows = message),
     setBotState: (fn: (botId: string) => "ready" | "busy" | "missing") => (botStateFn = fn),
     setBotCapabilities: (fn: (botId: string) => BotCapabilities | null) => (botCapabilitiesFn = fn),
+    setBotGrants: (fn: (botId: string) => string[] | null | undefined) => (botGrantsFn = fn),
     holdInterrupts: () => {
       interruptGate = new Promise<void>((resolve) => (releaseInterrupt = resolve));
     },
@@ -968,6 +974,173 @@ describe("WorkflowEngine timeouts", () => {
     h.setNow(1_000 + 60_001);
     await h.engine.tick();
     expect(h.interrupts).toEqual([{ botId: "planner", threadId: "thread-1" }]);
+  });
+});
+
+describe("WorkflowEngine unattended denials", () => {
+  const DENIED_GH = 'denied unattended: shell "gh project item-list" (key shell:gh) — no always-allow names "shell:gh"';
+  const DENIED_SEARCH = 'denied unattended: session_search "notes" (key session_search) — no always-allow names "session_search"';
+  /** plan --done--> ship, plan --failed--> report (both sinks), plan with 15-minute budget and one retry. */
+  const triage = (alwaysAllow?: string[]): WorkflowInput => ({
+    name: "Triage",
+    entryNodeId: "plan",
+    nodes: [
+      {
+        kind: "agent",
+        id: "plan",
+        botId: "planner",
+        instructions: "Triage the board.",
+        outcomes: ["done"],
+        timeoutMinutes: 15,
+        retries: 1,
+        ...(alwaysAllow ? { alwaysAllow } : {}),
+      },
+      { kind: "agent", id: "ship", botId: "shipper", instructions: "Ship it.", outcomes: ["shipped"] },
+      { kind: "agent", id: "report", botId: "shipper", instructions: "Say what broke.", outcomes: ["told"] },
+    ],
+    edges: [
+      { from: "plan", outcome: "done", to: "ship" },
+      { from: "plan", outcome: "failed", to: "report" },
+    ],
+    layout: {},
+  });
+
+  it("tells the bot which keys the turn may use — the bot's and the node's, once each — or that there are none", () => {
+    const h = harness();
+    // bare `Bash` would be refused unattended, so the prompt never promises
+    // it; `edit` is kept only because the node declares it too (bot order)
+    h.setBotGrants((botId) => (botId === "planner" ? ["edit", "Bash", "shell:git", "shell:gh"] : null));
+    const workflow = h.store.create(triage(["shell:gh", "session_search", "edit"]));
+    h.engine.startRun(workflow.id, "go", "manual");
+    expect(h.dispatches[0]!.prompt).toContain(
+      "Tools pre-approved for this node, by approval key: edit, shell:git, shell:gh, session_search.",
+    );
+    expect(h.dispatches[0]!.prompt).not.toMatch(/approval key:[^.]*\bBash\b/);
+    expect(h.dispatches[0]!.prompt).toContain("denied at once with no explanation from the provider");
+    // the second node's bot grants nothing and the node declares nothing
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.dispatches[1]!.prompt).toContain("no tool is pre-approved for this node");
+    expect(h.dispatches[1]!.prompt).not.toContain("shell:gh");
+    // the list comes before the node's own instructions, so it reads as context, not as a task
+    const prompt = h.dispatches[0]!.prompt;
+    expect(prompt.indexOf("pre-approved for this node")).toBeLessThan(prompt.indexOf("Your instructions for this node:"));
+  });
+
+  it("hands the node's pre-approved keys to every dispatch and re-prompt, and none when the node has none", () => {
+    const h = harness();
+    const workflow = h.store.create(triage(["shell:gh", "session_search"]));
+    h.engine.startRun(workflow.id, "go", "manual");
+    expect(h.dispatches[0]).toMatchObject({ botId: "planner", alwaysAllow: ["shell:gh", "session_search"] });
+    // the list is a copy: an edit to the document is not an edit to what a live turn already got
+    expect(h.dispatches[0]!.alwaysAllow).not.toBe(workflow.nodes[0]!.kind === "agent" ? workflow.nodes[0]!.alwaysAllow : undefined);
+    // the re-prompt runs under the same keys
+    h.completeTurn("thread-1", "no envelope here");
+    expect(h.dispatches[1]).toMatchObject({ threadId: "thread-1", alwaysAllow: ["shell:gh", "session_search"] });
+    // and the next node, which declares none, gets none — not the previous node's
+    h.completeTurn("thread-1", envelope("done"));
+    expect(h.dispatches[2]).toMatchObject({ botId: "shipper" });
+    expect(h.dispatches[2]!.alwaysAllow).toBeUndefined();
+  });
+
+  it("records what was denied on the node's receipt, even when the node finished around it", () => {
+    const h = harness();
+    const workflow = h.store.create(triage());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.engine.noteDenial("thread-1", DENIED_GH);
+    h.engine.noteDenial("thread-1", DENIED_GH); // the bot retried the same command: one line
+    h.engine.noteDenial("thread-1", DENIED_SEARCH);
+    // a thread the engine is not driving is ignored
+    h.engine.noteDenial("someone-elses-thread", DENIED_GH);
+    h.completeTurn("thread-1", envelope("done", "used the cached board instead"));
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.nodeResults).toEqual([
+      expect.objectContaining({ nodeId: "plan", outcome: "done", denials: [DENIED_GH, DENIED_SEARCH] }),
+    ]);
+    // the receipt on disk carries it, so the panel can show it after a restart
+    expect(h.reload().getRun(run.id)!.nodeResults[0]!.denials).toEqual([DENIED_GH, DENIED_SEARCH]);
+    // a node with nothing denied carries no key at all — old receipts and new agree
+    h.completeTurn("thread-2", envelope("shipped"));
+    expect(h.store.getRun(run.id)!.nodeResults[1]).not.toHaveProperty("denials");
+  });
+
+  it("carries denials across a timeout and the re-dispatch, and names them where the run finally lands", async () => {
+    const h = harness();
+    const workflow = h.store.create(triage());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    // attempt 1: the card was denied at once; the bot never finished anyway
+    h.engine.noteDenial("thread-1", DENIED_GH);
+    h.setNow(1_001 + 15 * 60_000);
+    await h.engine.tick(); // timeout → interrupt → retry scheduled
+    expect(h.interrupts).toEqual([{ botId: "planner", threadId: "thread-1" }]);
+    expect(h.store.getRun(run.id)!.attempt).toBe(1);
+    h.setNow(1_001 + 16 * 60_000);
+    await h.engine.tick(); // the re-dispatch, on a fresh thread
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.dispatches[1]!.threadId).toBe("thread-2");
+    // attempt 2 is refused something else, then exhausts the budget
+    h.engine.noteDenial("thread-2", DENIED_SEARCH);
+    h.setNow(1_001 + 32 * 60_000);
+    await h.engine.tick(); // second timeout: retries exhausted → the drawn "failed" edge
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("running");
+    expect(persisted.currentNodeId).toBe("report");
+    expect(persisted.nodeResults).toEqual([
+      expect.objectContaining({
+        nodeId: "plan",
+        outcome: "failed",
+        summary: `node timed out — ${DENIED_GH}; ${DENIED_SEARCH}`,
+        denials: [DENIED_GH, DENIED_SEARCH],
+      }),
+    ]);
+    // the successor's prompt tells the next bot what the last one lacked
+    expect(h.dispatches[2]!.prompt).toContain(DENIED_GH);
+  });
+
+  it("names the denial in the terminal error when no failed edge is drawn, and in the notification", async () => {
+    const h = harness();
+    const workflow = h.store.create(
+      pipeline({
+        nodes: [
+          { kind: "agent", id: "plan", botId: "planner", instructions: "Draft.", outcomes: ["done"], retries: 0 },
+          { kind: "agent", id: "ship", botId: "shipper", instructions: "Ship it.", outcomes: ["shipped"] },
+        ],
+      }),
+    );
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.engine.noteDenial("thread-1", DENIED_GH);
+    h.completeTurn("thread-1", "gave up", false);
+    const persisted = h.store.getRun(run.id)!;
+    expect(persisted.status).toBe("failed");
+    expect(persisted.error).toBe(`the bot did not complete this node — ${DENIED_GH}`);
+    expect(h.notifications[0]!.message).toContain(DENIED_GH);
+  });
+
+  it("drops denials parked for a run the store pruned, on the next tick", async () => {
+    const h = harness();
+    const workflow = h.store.create(triage());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.engine.noteDenial("thread-1", DENIED_GH);
+    h.setNow(1_001 + 15 * 60_000);
+    await h.engine.tick(); // timeout: the denial is now parked on the run for the retry
+    const parked = (h.engine as unknown as { denialsByRun: Map<string, string[]> }).denialsByRun;
+    expect(parked.get(run.id)).toEqual([DENIED_GH]);
+    h.removeRun(run.id);
+    await h.engine.tick();
+    expect(parked.has(run.id)).toBe(false);
+  });
+
+  it("forgets a cancelled or superseded thread's denials instead of blaming a later node", async () => {
+    const h = harness();
+    const workflow = h.store.create(triage());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.engine.noteDenial("thread-1", DENIED_GH);
+    await h.engine.cancelRun(run.id);
+    expect(h.store.getRun(run.id)!.status).toBe("cancelled");
+    // resumed later on a fresh thread: nothing from the cancelled attempt sticks
+    const again = h.store.create(triage());
+    const fresh = h.engine.startRun(again.id, "go", "manual");
+    h.completeTurn(h.dispatches[1]!.threadId, envelope("done"));
+    expect(h.store.getRun(fresh.id)!.nodeResults[0]).not.toHaveProperty("denials");
   });
 });
 

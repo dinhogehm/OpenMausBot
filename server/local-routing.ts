@@ -23,3 +23,4 @@ export function shouldMountLocalComputer({
   // beta and can only be selected explicitly per bot.
   return requested === undefined && hostPlatform === "darwin";
 }
+

@@ -88,6 +88,23 @@ describe("WorkflowNodePanel — requires", () => {
   });
 });
 
+describe("WorkflowNodePanel — pre-approved tools", () => {
+  it("offers the node's keys one per line, only on agent nodes", () => {
+    const markup = panel(agent({ alwaysAllow: ["Bash:gh", "session_search"] }), [scout]);
+    expect(text(markup)).toContain("Pre-approved tools on this node");
+    expect(markup).toMatch(/<textarea[^>]*id="wf-agent-1-always-allow"[^>]*>Bash:gh\nsession_search<\/textarea>/);
+    // a node with none shows an empty field, and the hint names the shape of a key
+    expect(panel(agent(), [scout])).toMatch(/<textarea[^>]*id="wf-agent-1-always-allow"[^>]*><\/textarea>/);
+    expect(text(panel({ kind: "approval", id: "gate", prompt: "Ship it?" }, [scout]))).not.toContain("Pre-approved");
+  });
+
+  it("says what the keys buy and what they never buy, next to the field", () => {
+    const flat = text(panel(agent(), [scout]));
+    expect(flat).toContain("denied at once");
+    expect(flat).toContain("Never covers destructive commands, credentials, or this computer");
+  });
+});
+
 describe("WorkflowNodePanel — bot picker", () => {
   it("tags each bot with the permissions it holds, in the option text itself", () => {
     const markup = panel(agent(), [scout, rook]);
