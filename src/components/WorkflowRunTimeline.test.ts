@@ -154,3 +154,76 @@ describe("WorkflowRunTimeline", () => {
     expect(picked).toContain('aria-current="true"');
   });
 });
+
+describe("WorkflowRunTimeline — provider outage and fallback", () => {
+  const OUTAGE_404 = "unexpected status 404 Not Found: Unknown error, url: https://chatgpt.com/backend-api/codex/responses";
+  const names: Record<string, string> = { "bot-b": "Rook" };
+  const botName = (botId: string) => names[botId];
+
+  it("says the run is waiting for the provider, with the wait count, rather than 'retrying'", () => {
+    const waiting = run({
+      currentNodeId: "plan",
+      nextAttemptAt: NOW + 120_000,
+      outage: { since: NOW - 60_000, until: NOW + 6 * 3_600_000, attempts: 2, of: 10, reason: OUTAGE_404 },
+    });
+    const flat = text(panel({ runs: [waiting], run: waiting, botName }));
+    expect(flat).toContain("Waiting for the provider: next attempt");
+    expect(flat).toContain("(attempt 2 of 10)");
+    expect(flat).not.toContain("Retrying at");
+  });
+
+  it("names the fallback bot that was tried when the wait continues after it too failed", () => {
+    const waiting = run({
+      nextAttemptAt: NOW + 120_000,
+      outage: { since: NOW, until: NOW + 1, attempts: 1, of: 10, reason: OUTAGE_404, fallbackBotId: "bot-b" },
+    });
+    expect(text(panel({ runs: [waiting], run: waiting, botName }))).toContain("fallback bot Rook was tried");
+    // without a name lookup the id is still the truth
+    expect(text(panel({ runs: [waiting], run: waiting }))).toContain("fallback bot bot-b was tried");
+  });
+
+  it("says the run is parked for a busy fallback bot, not for the provider", () => {
+    const parked = run({
+      currentNodeId: "plan",
+      currentBotId: "bot-b",
+      nextAttemptAt: NOW + 30_000,
+      outage: { since: NOW - 10_000, until: NOW + 1, attempts: 0, of: 10, reason: OUTAGE_404, fallbackBotId: "bot-b" },
+    });
+    const flat = text(panel({ runs: [parked], run: parked, botName }));
+    expect(flat).toContain("Waiting for fallback bot Rook to be free");
+    expect(flat).not.toContain("Waiting for the provider");
+    expect(flat).not.toContain("was tried");
+  });
+
+  it("says the step is running on the fallback bot, and why, while it holds the node", () => {
+    const onFallback = run({
+      currentNodeId: "plan",
+      currentThreadId: "t-2",
+      currentBotId: "bot-b",
+      dispatchedAt: NOW - 5_000,
+      outage: { since: NOW - 10_000, until: NOW + 1, attempts: 0, of: 10, reason: OUTAGE_404, fallbackBotId: "bot-b" },
+    });
+    const flat = text(panel({ runs: [onFallback], run: onFallback, botName }));
+    expect(flat).toContain("Running on fallback bot Rook because: unexpected status 404 Not Found");
+    expect(flat).not.toContain("Waiting for the provider");
+  });
+
+  it("records on a finished step that the fallback bot ran it", () => {
+    const done = run({
+      status: "completed",
+      endedAt: NOW,
+      nodeResults: [step({ nodeId: "plan", summary: "planned", fallback: { botId: "bot-b", because: OUTAGE_404 } })],
+    });
+    const flat = text(panel({ runs: [done], run: done, botName }));
+    expect(flat).toContain("planned");
+    expect(flat).toContain("Ran on fallback bot Rook because: unexpected status 404 Not Found");
+  });
+
+  it("still says 'Retrying at' for an ordinary retry", () => {
+    const retrying = run({ attempt: 1, nextAttemptAt: NOW + 60_000 });
+    const flat = text(panel({ runs: [retrying], run: retrying }));
+    expect(flat).toContain("Retrying at");
+    expect(flat).toContain("attempt 2");
+    expect(flat).not.toContain("Waiting for the provider");
+  });
+});

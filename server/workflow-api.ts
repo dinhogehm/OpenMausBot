@@ -82,6 +82,9 @@ const agentNodeSchema = z.object({
   // (bad-always-allow), as the canvas must be able to show them. The cap
   // matches the bot's own alwaysAllow list.
   alwaysAllow: z.array(z.string().max(200)).max(200).optional(),
+  // A foreign key like botId; whether it names a real, different bot is
+  // the validator's finding (fallback-same-bot / fallback-missing-bot).
+  fallbackBotId: id.optional(),
 });
 const approvalNodeSchema = z.object({
   kind: z.literal("approval"),
@@ -112,6 +115,11 @@ const triggersSchema = z.object({
     .optional(),
 });
 
+const providerOutageSchema = z.object({
+  maxBackoffMinutes: optionalNumber,
+  horizonHours: optionalNumber,
+});
+
 const workflowInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   description: longText.optional(),
@@ -123,6 +131,7 @@ const workflowInputSchema = z.object({
   layout: layoutSchema,
   triggers: triggersSchema.optional(),
   maxNodeExecutions: optionalNumber,
+  providerOutage: providerOutageSchema.optional(),
 });
 
 // Compile-time drift guards. Exact<> catches value-type drift, but two object
@@ -138,6 +147,7 @@ type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
 type NotifyNode = Extract<WorkflowNode, { kind: "notify" }>;
 type Schedule = NonNullable<WorkflowTriggers["schedule"]>;
 type SchemaSchedule = NonNullable<z.infer<typeof triggersSchema>["schedule"]>;
+type ProviderOutage = NonNullable<Workflow["providerOutage"]>;
 const _schemaMatchesModel: Exact<z.infer<typeof workflowInputSchema>, WorkflowInput> = true;
 const _workflowKeys: SameKeys<z.infer<typeof workflowInputSchema>, WorkflowInput> = true;
 const _agentKeys: SameKeys<z.infer<typeof agentNodeSchema>, AgentNode> = true;
@@ -147,6 +157,7 @@ const _edgeKeys: SameKeys<z.infer<typeof edgeSchema>, WorkflowEdge> = true;
 const _triggerKeys: SameKeys<z.infer<typeof triggersSchema>, WorkflowTriggers> = true;
 const _dailyKeys: SameKeys<Extract<SchemaSchedule, { type: "daily" }>, Extract<Schedule, { type: "daily" }>> = true;
 const _onceKeys: SameKeys<Extract<SchemaSchedule, { type: "once" }>, Extract<Schedule, { type: "once" }>> = true;
+const _outageKeys: SameKeys<z.infer<typeof providerOutageSchema>, ProviderOutage> = true;
 void [
   _schemaMatchesModel,
   _workflowKeys,
@@ -157,6 +168,7 @@ void [
   _triggerKeys,
   _dailyKeys,
   _onceKeys,
+  _outageKeys,
 ];
 
 /** JSON clients say "no value" with `null`; the model and the validator
@@ -182,7 +194,7 @@ const workflowPatchSchema = z.preprocess(stripNulls, workflowInputSchema.partial
  * store's spread overwrites and the JSON file then omits). A null on any
  * other top-level field is refused outright rather than becoming a silent
  * no-op. Single source of truth for both rules. */
-const CLEARABLE_FIELDS = ["description", "triggers", "maxNodeExecutions"] as const;
+const CLEARABLE_FIELDS = ["description", "triggers", "maxNodeExecutions", "providerOutage"] as const;
 const isClearable = (key: string) => (CLEARABLE_FIELDS as readonly string[]).includes(key);
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>

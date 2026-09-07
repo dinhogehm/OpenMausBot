@@ -24,6 +24,8 @@ import {
   WORKFLOW_NODE_RETRIES_DEFAULT,
   WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN,
   WORKFLOW_NOTIFY_OUTCOME,
+  WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN,
+  WORKFLOW_OUTAGE_HORIZON_DEFAULT_H,
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
   workflowRoutingFingerprint,
   type BotCapabilities,
@@ -32,6 +34,7 @@ import {
   type WorkflowNode,
   type WorkflowNodeResult,
   type WorkflowNotificationKind,
+  type WorkflowOutage,
   type WorkflowRun,
   type WorkflowRunStatus,
   type WorkflowRunTrigger,
@@ -40,15 +43,21 @@ import {
 import { unattendedHonoredGrants } from "./auto-approve.ts";
 import type { RuntimeEvent } from "./contracts.ts";
 import { redactSecretsInText } from "./redact.ts";
+import {
+  classifyWorkflowFailure,
+  classifyWorkflowTurnFailure,
+  describeWorkflowTurnFailure,
+  ENVELOPE_MISS_REASON,
+  NODE_TIMEOUT_REASON,
+  outageDelayMs,
+  outagePlannedAttempts,
+  type WorkflowFailureClass,
+  type WorkflowTurnFailure,
+} from "./workflow-failure.ts";
 import type { WorkflowStore } from "./workflow-store.ts";
 
 export type { WorkflowRunTrigger } from "../shared/workflow.ts";
 
-/** The harness's refusal to start a turn on a bot that already has one. It
- * is a 409 with this wording, and index.ts already keys two other recoveries
- * off the same phrase — a dispatch that never began is contention, and every
- * caller that treats it as a failure is wrong in the same way. */
-const BUSY_DISPATCH = /already working/i;
 /** How long a contended dispatch waits before trying again. Short, because
  * the reconciler serves waiting runs oldest-first as bots free up and the
  * only thing being waited on is somebody else's turn ending. */
@@ -80,6 +89,16 @@ export interface WorkflowEngineOptions {
    * what the turn may use without a card (its union with the node's list).
    * Absent or null: the bot grants nothing of its own. */
   botGrants?: (botId: string) => string[] | null | undefined;
+  /** Which model engine a bot runs on (`modelSelection.instanceId` in
+   * index.ts); null for a bot that no longer exists. A fallback bot is only
+   * worth switching to when it answers to a DIFFERENT engine than the one
+   * that just failed — the same provider is down for both — so an engine
+   * built without this lookup never hands a node over. Read at the moment
+   * of the hand-off, never cached: a person may have re-pointed either bot. */
+  botEngine?: (botId: string) => string | null;
+  /** Jitter source for the outage backoff (Math.random by default); tests
+   * pin it so every wait is exact. */
+  random?: () => number;
   /** Creates the isolated TaskRecord where a node runs (auditable transcript
    * in the bot's chat). */
   createTask: (botId: string, title: string) => { threadId: string } | null;
@@ -213,14 +232,18 @@ export class WorkflowEngine {
   private readonly options: WorkflowEngineOptions;
   private readonly store: WorkflowStore;
   private readonly now: () => number;
+  private readonly random: () => number;
   /** threadId → runId for every node turn this process dispatched. */
   private readonly runByThread = new Map<string, string>();
   /** Latest full assistant text per dispatched thread — same accumulation as
    * RoutineManager: the turn's final assistant_text item wins. */
   private readonly lastAssistantText = new Map<string, string>();
-  /** Latest runtime.error per dispatched thread — the fallback reason for a
-   * turn that ends not-ok without a stop reason (mirrors RoutineManager). */
-  private readonly lastRuntimeError = new Map<string, string>();
+  /** Latest runtime.error per dispatched thread — message and the driver's
+   * `setup` verdict. The stop reason of a not-ok turn is usually a bare
+   * code (`exit_before_result`, `rpc_error`), so THIS is what says what
+   * happened, and what the failure is classified on (mirrors
+   * RoutineManager's use of the same event). */
+  private readonly lastRuntimeError = new Map<string, { message: string; setup: boolean }>();
   /** Permission requests the harness denied on a dispatched thread because
    * nobody was there to answer — one line each, naming the grant that would
    * have covered it. Folded into the node's receipt when the thread settles. */
@@ -242,6 +265,7 @@ export class WorkflowEngine {
     this.options = options;
     this.store = options.store;
     this.now = options.now ?? Date.now;
+    this.random = options.random ?? Math.random;
   }
 
   start() {
@@ -470,7 +494,7 @@ export class WorkflowEngine {
       if (now - run.dispatchedAt <= timeoutMinutes * 60_000) continue;
       if (node?.kind === "agent" && run.currentThreadId !== undefined) {
         try {
-          await this.options.interruptTurn?.(node.botId, run.currentThreadId);
+          await this.options.interruptTurn?.(run.currentBotId ?? node.botId, run.currentThreadId);
         } catch {
           // Best-effort: a dead provider must not keep the run stuck.
         }
@@ -489,7 +513,7 @@ export class WorkflowEngine {
       }
       // attemptFailure forgets the dead thread itself — after taking what
       // the attempt was refused, so the receipt keeps it.
-      this.attemptFailure(run.id, "node timed out");
+      this.attemptFailure(run.id, NODE_TIMEOUT_REASON);
     }
   }
 
@@ -515,7 +539,8 @@ export class WorkflowEngine {
       if (!run || run.status !== "running" || run.nextAttemptAt === undefined || run.nextAttemptAt > now) continue;
       const workflow = this.store.get(run.workflowId);
       const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
-      if (node?.kind === "agent" && this.options.botState(node.botId) === "busy") continue;
+      const parkedFor = this.parkedFallbackBot(run);
+      if (node?.kind === "agent" && this.options.botState(parkedFor ?? node.botId) === "busy") continue;
       const nodeId = run.currentNodeId ?? workflow?.entryNodeId;
       if (nodeId === undefined) {
         this.failNode(run.id, "run has no current node recorded and its workflow is gone");
@@ -523,7 +548,7 @@ export class WorkflowEngine {
       }
       const patched = this.store.patchRun(run.id, { nextAttemptAt: undefined });
       if (!patched) continue;
-      this.dispatchNode(run.id, nodeId);
+      this.dispatchNode(run.id, nodeId, parkedFor);
     }
   }
 
@@ -559,8 +584,17 @@ export class WorkflowEngine {
         this.follow(run, workflow, node, last.outcome);
         continue;
       }
-      this.dispatchNode(run.id, run.currentNodeId ?? workflow.entryNodeId);
+      this.dispatchNode(run.id, run.currentNodeId ?? workflow.entryNodeId, this.parkedFallbackBot(run));
     }
+  }
+
+  /** The fallback bot a parked or orphaned run still belongs to: only when
+   * the receipt says the node was handed to that bot in the current outage
+   * AND that bot is the one recorded as holding it. A stale currentBotId
+   * from any other state (a receipt written before the node's bot was
+   * re-pointed, say) must not redirect a dispatch. */
+  private parkedFallbackBot(run: WorkflowRun): string | undefined {
+    return run.currentBotId !== undefined && run.currentBotId === run.outage?.fallbackBotId ? run.currentBotId : undefined;
   }
 
   private isStranded(run: WorkflowRun): boolean {
@@ -641,7 +675,8 @@ export class WorkflowEngine {
     for (const run of this.store.listRuns()) {
       if (run.status !== "running" || !this.hasLiveDispatch(run)) continue;
       const node = this.store.get(run.workflowId)?.nodes.find((candidate) => candidate.id === run.currentNodeId);
-      if (node?.kind !== "agent" || node.botId !== botId) continue;
+      // The bot HOLDING the turn — the fallback while it has the node.
+      if (node?.kind !== "agent" || (run.currentBotId ?? node.botId) !== botId) continue;
       return { runId: run.id, threadId: run.currentThreadId! };
     }
     return null;
@@ -729,6 +764,10 @@ export class WorkflowEngine {
       error: undefined,
       endedAt: undefined,
       nextAttemptAt: undefined,
+      // A fresh budget is also a fresh outage clock: the person resuming
+      // has presumably seen the provider come back.
+      outage: undefined,
+      currentBotId: undefined,
       // It resumes against the graph as it is NOW.
       ...(workflow ? { routingFingerprint: workflowRoutingFingerprint(workflow) } : {}),
     });
@@ -767,6 +806,7 @@ export class WorkflowEngine {
       status: "cancelled",
       endedAt: this.now(),
       nextAttemptAt: undefined,
+      outage: undefined,
       approvalRequestedAt: undefined,
       approvalRemindedAt: undefined,
     });
@@ -782,7 +822,7 @@ export class WorkflowEngine {
     const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
     if (node?.kind !== "agent") return;
     try {
-      await this.options.interruptTurn?.(node.botId, run.currentThreadId);
+      await this.options.interruptTurn?.(run.currentBotId ?? node.botId, run.currentThreadId);
     } catch {
       // Best-effort: cancellation must not depend on the provider.
     }
@@ -839,7 +879,7 @@ export class WorkflowEngine {
       return;
     }
     if (event.type === "runtime.error") {
-      this.lastRuntimeError.set(event.threadId, event.message);
+      this.lastRuntimeError.set(event.threadId, { message: event.message, setup: event.setup === true });
       return;
     }
     if (event.type !== "turn.completed") return;
@@ -858,13 +898,20 @@ export class WorkflowEngine {
       return;
     }
     if (!event.ok) {
-      this.attemptFailure(
-        runId,
-        event.stopReason ?? this.lastRuntimeError.get(event.threadId) ?? "the bot did not complete this node",
-        event.threadId,
-      );
+      // Described and classified from the PAIR the driver emitted: the
+      // runtime.error carries the sentence, the stop reason the code.
+      const failure: WorkflowTurnFailure = {
+        ...(event.stopReason === undefined || event.stopReason === null ? {} : { stopReason: event.stopReason }),
+        ...this.lastRuntimeError.get(event.threadId),
+      };
+      this.attemptFailure(runId, describeWorkflowTurnFailure(failure), event.threadId, classifyWorkflowTurnFailure(failure));
       return;
     }
+    // A turn that ended ok may still have logged a runtime.error on the
+    // way (codex relays stream errors it retried internally); that message
+    // belongs to THIS turn and must not describe a later one on the same
+    // thread — the envelope re-prompt below starts a new turn there.
+    this.lastRuntimeError.delete(event.threadId);
     // The envelope stays verbatim in the node's task transcript — accepted
     // for MVP; the UI surfaces nodeResult.summary, never the raw envelope.
     const text = this.lastAssistantText.get(event.threadId) ?? "";
@@ -878,10 +925,11 @@ export class WorkflowEngine {
           return;
         }
         this.lastAssistantText.delete(event.threadId);
-        this.startTurnSafely(node, event.threadId, buildRepromptMessage(node), runId);
+        this.lastRuntimeError.delete(event.threadId);
+        this.startTurnSafely(node, run.currentBotId ?? node.botId, event.threadId, buildRepromptMessage(node), runId);
         return;
       }
-      this.attemptFailure(runId, "node did not produce a valid outcome envelope", event.threadId);
+      this.attemptFailure(runId, ENVELOPE_MISS_REASON, event.threadId);
       return;
     }
 
@@ -890,6 +938,12 @@ export class WorkflowEngine {
     // missing grant this time, and the receipt is where the person learns
     // which grant to add before the workaround stops working.
     const denials = this.takeDenials(runId, event.threadId);
+    // A node the fallback bot finished says so on its result: the receipt
+    // must name who did the work and why it was not the bot on the canvas.
+    const fallback =
+      run.outage?.fallbackBotId !== undefined && run.currentBotId === run.outage.fallbackBotId
+        ? { botId: run.outage.fallbackBotId, because: run.outage.reason }
+        : undefined;
     const result: WorkflowNodeResult = {
       nodeId: node.id,
       outcome: parsed.outcome,
@@ -900,6 +954,7 @@ export class WorkflowEngine {
       startedAt: run.dispatchedAt ?? run.startedAt,
       endedAt: this.now(),
       ...(denials.length === 0 ? {} : { denials }),
+      ...(fallback === undefined ? {} : { fallback }),
     };
     this.forgetThread(event.threadId);
     this.advance(run, workflow, node, result);
@@ -926,8 +981,10 @@ export class WorkflowEngine {
       attempt: 0,
       repromptedAt: undefined,
       currentThreadId: undefined,
+      currentBotId: undefined,
       dispatchedAt: undefined,
       nextAttemptAt: undefined,
+      outage: undefined,
     });
     if (!patched) return;
     this.follow(patched, workflow, node, result.outcome);
@@ -972,8 +1029,11 @@ export class WorkflowEngine {
 
   /** Dispatch `nodeId` as the run's current node. Bookkeeping is persisted
    * BEFORE the turn starts so a crash between the two leaves an auditable
-   * receipt for the reconciler (Task 4) to pick up. */
-  private dispatchNode(runId: string, nodeId: string): void {
+   * receipt for the reconciler (Task 4) to pick up. `botId` overrides the
+   * node's own bot for this one dispatch — the outage hand-off to the
+   * fallback; every re-dispatch the reconciler makes goes back to the
+   * node's bot, so the fallback is a detour, never a new home. */
+  private dispatchNode(runId: string, nodeId: string, botId?: string): void {
     const run = this.store.getRun(runId);
     if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return;
     const workflow = this.store.get(run.workflowId);
@@ -999,7 +1059,8 @@ export class WorkflowEngine {
       this.executeNotify(run, workflow, node);
       return;
     }
-    const botState = this.options.botState(node.botId);
+    const dispatchBotId = botId ?? node.botId;
+    const botState = this.options.botState(dispatchBotId);
     if (botState === "missing") {
       this.failNode(runId, `the bot for node "${node.id}" no longer exists`);
       return;
@@ -1011,7 +1072,7 @@ export class WorkflowEngine {
     // permission. Terminal, not retryable: no retry can grant what only a
     // person can, so this never enters attemptFailure or takes the "failed"
     // edge — the run stops here and says why.
-    const lacking = missingCapabilities(node.requires, this.options.botCapabilities(node.botId) ?? {});
+    const lacking = missingCapabilities(node.requires, this.options.botCapabilities(dispatchBotId) ?? {});
     if (lacking.length > 0) {
       // Point the receipt at THIS node first, so the failure reads "at node
       // deploy" and a resume — once the flag is back — picks up here rather
@@ -1021,26 +1082,30 @@ export class WorkflowEngine {
         dispatchedAt: undefined,
         nextAttemptAt: undefined,
         currentThreadId: undefined,
+        currentBotId: undefined,
       });
       if (!refused) return;
-      this.failNode(runId, missingCapabilityMessage(node, lacking[0]!));
+      this.failNode(runId, missingCapabilityMessage({ id: node.id, botId: dispatchBotId }, lacking[0]!));
       return;
     }
     if (botState === "busy") {
       // Per-bot FIFO: park the run for the reconciler, which serves waiting
       // runs oldest-first as the bot frees up. No task is created yet, and a
-      // parked receipt must not keep pointing at a dead thread.
+      // parked receipt must not keep pointing at a dead thread. A dispatch
+      // aimed at the fallback stays aimed at it (currentBotId = botId), so
+      // the reconciler waits for THAT bot rather than the node's own.
       this.store.patchRun(runId, {
         currentNodeId: node.id,
         nextAttemptAt: this.now(),
         dispatchedAt: undefined,
         currentThreadId: undefined,
+        currentBotId: botId,
       });
       return;
     }
     let task: { threadId: string } | null;
     try {
-      task = this.options.createTask(node.botId, `Workflow ${workflow.name} — ${node.id}`);
+      task = this.options.createTask(dispatchBotId, `Workflow ${workflow.name} — ${node.id}`);
     } catch (error) {
       // A throwing wrapper must neither leave a "running" receipt with
       // nothing behind it nor escape into tick(): it is a terminal failure.
@@ -1054,6 +1119,7 @@ export class WorkflowEngine {
     const patched = this.store.patchRun(runId, {
       currentNodeId: node.id,
       currentThreadId: task.threadId,
+      currentBotId: dispatchBotId,
       dispatchedAt: this.now(),
       repromptedAt: undefined,
       nextAttemptAt: undefined,
@@ -1061,8 +1127,12 @@ export class WorkflowEngine {
     if (!patched) return; // run pruned mid-flight: stop driving it silently
     this.runByThread.set(task.threadId, runId);
     this.lastAssistantText.delete(task.threadId);
-    const grants = effectiveGrants(this.options.botGrants?.(node.botId), node);
-    this.startTurnSafely(node, task.threadId, _buildNodePrompt(workflow, node, patched, grants), runId);
+    this.lastRuntimeError.delete(task.threadId);
+    // The grants the prompt promises are the ones the turn will run under:
+    // the bot HOLDING the turn (the fallback, during a hand-off) plus the
+    // node's own list — never the primary's keys on the fallback's turn.
+    const grants = effectiveGrants(this.options.botGrants?.(dispatchBotId), node);
+    this.startTurnSafely(node, dispatchBotId, task.threadId, _buildNodePrompt(workflow, node, patched, grants), runId);
   }
 
   /** Park the run on a human gate: no task, no turn, one notification. From
@@ -1132,12 +1202,14 @@ export class WorkflowEngine {
 
   /** A dispatch error is a dispatch error whether the wrapper rejects or
    * throws before it even returns its promise: both reach attemptFailure, so
-   * neither can escape into an event handler or tick(). */
-  private startTurnSafely(node: AgentNode, threadId: string, prompt: string, runId: string): void {
+   * neither can escape into an event handler or tick(). `botId` is the bot
+   * HOLDING the turn (the fallback during a hand-off), `node` where the
+   * turn's own grants are read from. */
+  private startTurnSafely(node: AgentNode, botId: string, threadId: string, prompt: string, runId: string): void {
     const turn: WorkflowTurnOptions = node.alwaysAllow?.length ? { alwaysAllow: [...node.alwaysAllow] } : {};
     try {
       void this.options
-        .startTurn(node.botId, threadId, prompt, (message) => this.attemptFailure(runId, message, threadId), turn)
+        .startTurn(botId, threadId, prompt, (message) => this.attemptFailure(runId, message, threadId), turn)
         .catch((error: unknown) => this.attemptFailure(runId, errorMessage(error), threadId));
     } catch (error) {
       this.attemptFailure(runId, errorMessage(error), threadId);
@@ -1145,9 +1217,15 @@ export class WorkflowEngine {
   }
 
   /** The RETRYABLE failure funnel — dispatch errors, envelope double-misses,
-   * not-ok turns, and timeouts land here. While attempts remain, schedule a
-   * linearly backed-off re-dispatch (+60s, +120s, …) for the reconciler; a
-   * vanished workflow/node can never dispatch again, so it gets no retries.
+   * not-ok turns, and timeouts land here. The reason is classified first
+   * (`classifyWorkflowFailure`): contention is re-parked and never charged;
+   * a capability refusal is terminal; a PROVIDER OUTAGE is waited out with
+   * a long doubling backoff that spends none of the node's attempts (or
+   * handed to the node's fallback bot, once), and only an outage that
+   * outlasts the workflow's horizon reaches the exhaustion path below. For
+   * everything else, while attempts remain, schedule a linearly backed-off
+   * re-dispatch (+60s, +120s, …) for the reconciler; a vanished
+   * workflow/node can never dispatch again, so it gets no retries.
    * Exhausted retries take the workflow's drawn "failed" edge like any other
    * outcome; only a run with nowhere left to go falls through to failNode.
    *
@@ -1157,8 +1235,17 @@ export class WorkflowEngine {
    * acting on it would forget the LIVE thread and re-schedule the wrong node.
    * Registration in runByThread drops the instant a dispatch stops being
    * current, so it is a precise staleness test. Callers with no thread yet
-   * (timeout sweep after its own freshness check) omit it. */
-  private attemptFailure(runId: string, reason: string, threadId?: string): void {
+   * (timeout sweep after its own freshness check) omit it. `failureClass`
+   * is passed by the one caller that knows more than the reason string
+   * (a not-ok turn, whose driver may have flagged the error as setup);
+   * everyone else — dispatch rejections, the engine's own reasons — is
+   * classified on the text. */
+  private attemptFailure(
+    runId: string,
+    reason: string,
+    threadId?: string,
+    failureClass: WorkflowFailureClass = classifyWorkflowFailure(reason),
+  ): void {
     if (threadId !== undefined && this.runByThread.get(threadId) !== runId) return;
     const run = this.store.getRun(runId);
     if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return;
@@ -1175,18 +1262,54 @@ export class WorkflowEngine {
     // own — the bot can take a turn between the check and the call — so the
     // answer is the same one the busy check gives: park, and let the
     // reconciler serve this run when the bot frees, oldest first.
-    if (node?.kind === "agent" && BUSY_DISPATCH.test(reason)) {
+    if (node?.kind === "agent" && failureClass === "contention") {
       if (denials.length > 0) this.denialsByRun.set(runId, denials);
+      // A fallback the harness found busy between the eligibility check and
+      // the call is still the bot this outage was handed to: the park keeps
+      // pointing at it (currentBotId stays), so the reconciler retries the
+      // FALLBACK when it frees rather than throwing the run straight back
+      // at the primary — which is down — with no backoff and no second
+      // hand-off. Any other contention parks for the node's own bot.
+      const keepFallback = run.currentBotId !== undefined && run.currentBotId === run.outage?.fallbackBotId;
       this.store.patchRun(runId, {
         currentNodeId: node.id,
         nextAttemptAt: this.now() + BUSY_REPARK_MS,
         dispatchedAt: undefined,
         currentThreadId: undefined,
+        ...(keepFallback ? {} : { currentBotId: undefined }),
       });
       return;
     }
+    if (failureClass === "capability") {
+      // Only a person can grant what is missing; a retry would burn a
+      // task and a dispatch to be refused again. Same stance as the
+      // dispatch-time check, reached here only through a wrapper's error.
+      this.failNode(runId, withDenials(reason, denials));
+      return;
+    }
+    let horizonSpent = false;
+    if (node?.kind === "agent" && workflow && failureClass === "provider-outage") {
+      // The wait (or the hand-off) re-dispatches the same node under the
+      // same grants, so what this attempt was refused stays true: keep it
+      // for the receipt, as the ordinary retry below does.
+      if (denials.length > 0) this.denialsByRun.set(runId, denials);
+      const outcome = this.waitOutOutage(run, workflow, node, reason);
+      if (outcome === "waiting") return;
+      this.denialsByRun.delete(runId);
+      // The horizon is spent: the wait was the retry budget, so the node
+      // goes straight to its failure path — two more one-minute retries
+      // after six hours of 404s would be theatre. The receipt says how
+      // long the engine waited, and for what.
+      horizonSpent = true;
+      const hours = Math.round(((this.now() - outcome.since) / 3_600_000) * 10) / 10;
+      reason = `the provider stayed unavailable for ${hours}h (${outcome.attempts} attempts): ${outcome.reason}`;
+    } else if (run.outage !== undefined) {
+      // A failure that is NOT the outage means the provider answered: the
+      // outage is over, and the node's ordinary budget judges what follows.
+      this.store.patchRun(runId, { outage: undefined });
+    }
     const retries = node?.kind === "agent" ? (node.retries ?? WORKFLOW_NODE_RETRIES_DEFAULT) : 0;
-    if (run.attempt < retries) {
+    if (!horizonSpent && run.attempt < retries) {
       // The next attempt runs under the same grants, so what this one was
       // refused is still true of the node: keep it for the receipt.
       if (denials.length > 0) this.denialsByRun.set(runId, denials);
@@ -1196,6 +1319,7 @@ export class WorkflowEngine {
         nextAttemptAt: this.now() + attempt * 60_000,
         dispatchedAt: undefined,
         currentThreadId: undefined,
+        currentBotId: undefined,
         repromptedAt: undefined,
       });
       return;
@@ -1222,6 +1346,81 @@ export class WorkflowEngine {
     this.failNode(runId, explained);
   }
 
+  /** A provider-outage failure of an agent node. Three ways out, in order:
+   * hand the node to its fallback bot right now (once per outage, and only
+   * when the PRIMARY bot is the one that just failed — a fallback that
+   * fails too joins the wait); park the run until the next backoff slot
+   * (1, 2, 4, 8 … minutes, capped, jittered, none of it charged to
+   * `attempt`); or, when that slot would land past the horizon, report the
+   * outage as spent so the caller fails the node. The clocks run from the
+   * persisted `outage.since`/`until`, and the wait is the run's ordinary
+   * `nextAttemptAt`: a restart mid-wait finds a run that is not stranded
+   * (it has a timer) and simply due later. */
+  private waitOutOutage(run: WorkflowRun, workflow: Workflow, node: AgentNode, reason: string): "waiting" | WorkflowOutage {
+    const now = this.now();
+    const capMs = (workflow.providerOutage?.maxBackoffMinutes ?? WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN) * 60_000;
+    const horizonMs = (workflow.providerOutage?.horizonHours ?? WORKFLOW_OUTAGE_HORIZON_DEFAULT_H) * 3_600_000;
+    const since = run.outage?.since ?? now;
+    const outage: WorkflowOutage = {
+      ...(run.outage ?? { attempts: 0 }),
+      since,
+      // Horizon and "of Z" follow the workflow's knobs as they are NOW, so
+      // an author who lengthens the horizon mid-outage is obeyed; only the
+      // outage's start is fixed.
+      until: since + horizonMs,
+      of: outagePlannedAttempts(capMs, horizonMs),
+      // The latest provider error is the one the UI and the receipt show.
+      reason: redactSecretsInText(reason).slice(0, 500),
+    };
+    const fallbackBotId = node.fallbackBotId;
+    if (
+      fallbackBotId !== undefined &&
+      outage.fallbackBotId === undefined &&
+      (run.currentBotId ?? node.botId) === node.botId &&
+      this.fallbackEligible(node, fallbackBotId)
+    ) {
+      const handed = this.store.patchRun(run.id, {
+        outage: { ...outage, fallbackBotId },
+        dispatchedAt: undefined,
+        currentThreadId: undefined,
+        currentBotId: undefined,
+        nextAttemptAt: undefined,
+        repromptedAt: undefined,
+      });
+      if (handed) this.dispatchNode(run.id, node.id, fallbackBotId);
+      return "waiting";
+    }
+    const attempts = outage.attempts + 1;
+    const nextAttemptAt = now + outageDelayMs(attempts, capMs, this.random);
+    if (nextAttemptAt > outage.until) return outage;
+    this.store.patchRun(run.id, {
+      outage: { ...outage, attempts },
+      nextAttemptAt,
+      dispatchedAt: undefined,
+      currentThreadId: undefined,
+      currentBotId: undefined,
+      repromptedAt: undefined,
+    });
+    return "waiting";
+  }
+
+  /** Whether the fallback can take the node over RIGHT NOW: a different bot
+   * on a different engine (the same provider is down for both), free, and
+   * carrying every flag the node requires — the same test the dispatch
+   * makes, so the hand-off can never be refused a moment later for a
+   * permission. An engine with no `botEngine` lookup cannot tell engines
+   * apart and never hands over. */
+  private fallbackEligible(node: AgentNode, fallbackBotId: string): boolean {
+    if (fallbackBotId === node.botId) return false;
+    const engineOf = this.options.botEngine;
+    if (!engineOf) return false;
+    const primaryEngine = engineOf(node.botId);
+    const fallbackEngine = engineOf(fallbackBotId);
+    if (!primaryEngine || !fallbackEngine || primaryEngine === fallbackEngine) return false;
+    if (this.options.botState(fallbackBotId) !== "ready") return false;
+    return missingCapabilities(node.requires, this.options.botCapabilities(fallbackBotId) ?? {}).length === 0;
+  }
+
   /** The TERMINAL failure path: guards that no retry can fix (deleted
    * workflow/bot, cap reached, validation shapes) and exhausted retries with
    * no "failed" edge. Every terminal failure notifies the user — a paused
@@ -1239,6 +1438,11 @@ export class WorkflowEngine {
       error: redactSecretsInText(explained).slice(0, 500),
       endedAt: this.now(),
       nextAttemptAt: undefined,
+      // A terminal receipt keeps its thread (the transcript is one click
+      // away) but not the outage clock or the hand-off: both describe a
+      // dispatch that no longer exists, and a resume starts them afresh.
+      outage: undefined,
+      currentBotId: undefined,
       approvalRequestedAt: undefined,
       approvalRemindedAt: undefined,
     });

@@ -31,7 +31,17 @@ import {
  * permission flags (so the picker can tag a bot and the Requires group can
  * say which requirement the chosen one falls short of), and whether the bot
  * is hidden in the sidebar — a node may still be bound to one. */
-export type WorkflowPanelBot = BotAvatarProps["bot"] & BotCapabilities & { id: string; name: string; hidden?: boolean };
+export type WorkflowPanelBot = BotAvatarProps["bot"] &
+  BotCapabilities & {
+    id: string;
+    name: string;
+    hidden?: boolean;
+    /** The model engine instance the bot runs on. The fallback picker uses it
+     * to say when a choice shares the primary's engine — the engine only
+     * switches to a fallback on a DIFFERENT engine, so that choice would
+     * never take over. Absent when the roster does not say. */
+    engine?: string;
+  };
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
 
 /** What the picker prints for a bot: its name, then the permissions it
@@ -271,6 +281,79 @@ function AlwaysAllowField({
   );
 }
 
+/** The bot the engine hands this node to when the primary's provider is
+ * down — once per outage, only when that bot runs on another engine, is
+ * free, and holds every capability the node requires. The document stores
+ * the id only when one is chosen (an absent key, never `""` or `null`).
+ * Every other bot is offered, hidden ones included while they are the
+ * chosen one; the primary itself is not — the validator refuses it, and a
+ * picker should not offer what the validator will refuse. */
+function FallbackGroup({
+  node,
+  bot,
+  bots,
+  onUpdate,
+}: {
+  node: AgentNode;
+  bot: WorkflowPanelBot | undefined;
+  bots: WorkflowPanelBot[];
+  onUpdate: (next: WorkflowNode) => void;
+}) {
+  const fallback = node.fallbackBotId === undefined ? undefined : bots.find((candidate) => candidate.id === node.fallbackBotId);
+  const known = node.fallbackBotId === undefined || fallback !== undefined;
+  const sameEngine = bot?.engine !== undefined && fallback?.engine !== undefined && bot.engine === fallback.engine;
+  const lacking = fallback ? missingCapabilities(node.requires, fallback) : [];
+  const id = `wf-${node.id}-fallback`;
+
+  return (
+    <div>
+      <label className={LABEL} htmlFor={id}>
+        Fallback bot (other engine)
+      </label>
+      <p className="mt-0.5 text-[10.5px] text-ink-secondary">
+        Takes this step over when the bot&apos;s provider is down, if it runs on a different engine. Otherwise the run
+        waits for the provider to come back. The fallback runs with its own standing permissions (always-allow) —
+        grant it what this step needs, or it will stop to ask.
+      </p>
+      <select
+        id={id}
+        value={known ? (node.fallbackBotId ?? "") : ""}
+        onChange={(event) => {
+          const { fallbackBotId: _fallbackBotId, ...rest } = node;
+          const value = event.target.value;
+          onUpdate(value === "" ? rest : { ...rest, fallbackBotId: value });
+        }}
+        className={cn(FIELD, "mt-1")}
+      >
+        <option value="">None — wait for the provider</option>
+        {!known && (
+          <option value="" disabled>
+            Missing bot {node.fallbackBotId}
+          </option>
+        )}
+        {bots
+          .filter((candidate) => candidate.id !== node.botId && (!candidate.hidden || candidate.id === node.fallbackBotId))
+          .map((candidate) => (
+            <option key={candidate.id} value={candidate.id}>
+              {botOptionLabel(candidate)}
+            </option>
+          ))}
+      </select>
+      {sameEngine && bot && fallback && (
+        <p className="mt-1.5 text-[11.5px] leading-snug text-warning">
+          {`${fallback.name} runs on the same engine as ${bot.name} — it will not take over during an outage`}
+        </p>
+      )}
+      {fallback &&
+        lacking.map((capability) => (
+          <p key={capability} className="mt-1.5 text-[11.5px] leading-snug text-warning">
+            {`${fallback.name} is not allowed to ${capability} — it will not take over this step`}
+          </p>
+        ))}
+    </div>
+  );
+}
+
 export interface WorkflowNodePanelProps {
   node: WorkflowNode;
   issues: WorkflowIssue[];
@@ -422,6 +505,7 @@ export function WorkflowNodePanel({
             <RequiresGroup node={node} bot={bot} onUpdate={onUpdate} />
 
             <AlwaysAllowField id={field("always-allow")} node={node} onUpdate={onUpdate} />
+            <FallbackGroup node={node} bot={bot} bots={bots} onUpdate={onUpdate} />
 
             <div>
               <label className={LABEL} htmlFor={field("instructions")}>

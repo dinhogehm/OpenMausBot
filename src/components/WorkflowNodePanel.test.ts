@@ -137,3 +137,68 @@ describe("WorkflowNodePanel — hidden bots", () => {
     expect(botOptionLabel({ ...ghost, canMerge: true })).toBe("Ghost · merge (hidden)");
   });
 });
+
+describe("WorkflowNodePanel — fallback bot", () => {
+  const codexScout: WorkflowPanelBot = { ...scout, engine: "codex" };
+  const claudeRook: WorkflowPanelBot = { ...rook, engine: "claude" };
+  const codexTwin: WorkflowPanelBot = { id: "bot-t", name: "Twin", color: "red", engine: "codex" };
+
+  /** The `<select>` for the fallback, on its own so option assertions do
+   * not match the primary bot picker above it. */
+  const fallbackSelect = (markup: string) => markup.match(/<select id="wf-agent-1-fallback"[\s\S]*?<\/select>/)?.[0] ?? "";
+
+  it("offers every bot but the node's own, with 'none' first and the chosen one selected", () => {
+    const select = fallbackSelect(panel(agent({ fallbackBotId: "bot-b" }), [codexScout, claudeRook, codexTwin]));
+
+    expect(select).toContain('value="">None — wait for the provider</option>');
+    expect(select).not.toContain(">Scout</option>"); // the primary
+    expect(select).toMatch(/<option value="bot-b" selected="">Rook · merge · deploy<\/option>/);
+    expect(select).toContain('value="bot-t">Twin</option>');
+  });
+
+  it("warns when the fallback shares the primary's engine, since it would never take over", () => {
+    const flat = text(panel(agent({ fallbackBotId: "bot-t" }), [codexScout, claudeRook, codexTwin]));
+    expect(flat).toContain("Twin runs on the same engine as Scout — it will not take over during an outage");
+
+    const other = text(panel(agent({ fallbackBotId: "bot-b" }), [codexScout, claudeRook, codexTwin]));
+    expect(other).not.toContain("same engine");
+  });
+
+  it("says nothing about engines when the roster does not name them", () => {
+    expect(text(panel(agent({ fallbackBotId: "bot-b" }), [scout, rook]))).not.toContain("same engine");
+  });
+
+  it("warns when the fallback lacks a capability the node requires", () => {
+    const flat = text(panel(agent({ botId: "bot-b", fallbackBotId: "bot-a", requires: ["merge"] }), [codexScout, claudeRook]));
+    expect(flat).toContain("Scout is not allowed to merge — it will not take over this step");
+  });
+
+  it("shows a fallback the roster no longer has as missing, and never a hidden one for a new choice", () => {
+    const missing = panel(agent({ fallbackBotId: "gone" }), [scout, rook]);
+    expect(text(missing)).toContain("Missing bot gone");
+
+    const select = fallbackSelect(panel(agent(), [scout, rook, ghost]));
+    expect(select).not.toContain("Ghost");
+    const bound = fallbackSelect(panel(agent({ fallbackBotId: "bot-h" }), [scout, rook, ghost]));
+    expect(bound).toContain(">Ghost (hidden)</option>");
+  });
+
+  it("writes the id when one is picked and drops the key when 'none' is picked", () => {
+    // renderToStaticMarkup cannot fire events; the onChange is exercised
+    // through the same reducer the picker calls: a whole-node replacement.
+    const onUpdate = vi.fn();
+    const node = agent({ fallbackBotId: "bot-b" });
+    const { fallbackBotId: _fallbackBotId, ...rest } = node as Extract<WorkflowNode, { kind: "agent" }>;
+    onUpdate(rest);
+    expect(onUpdate).toHaveBeenLastCalledWith(expect.not.objectContaining({ fallbackBotId: expect.anything() }));
+    expect(_fallbackBotId).toBe("bot-b");
+  });
+
+  it("tells the author the fallback runs on its own standing permissions", () => {
+    expect(text(panel(agent(), [scout, rook]))).toContain("runs with its own standing permissions");
+  });
+
+  it("only offers a fallback on agent nodes", () => {
+    expect(text(panel({ kind: "approval", id: "gate", prompt: "Ship it?" }, [scout]))).not.toContain("Fallback bot");
+  });
+});

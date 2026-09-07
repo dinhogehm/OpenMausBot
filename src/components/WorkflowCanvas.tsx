@@ -489,7 +489,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   // than call it missing. Only `offeredBots` is handed out for a NEW binding.
   const bots = useMemo<WorkflowPanelBot[]>(
     () =>
-      state.bots.map(({ id, name, color, avatarUrl, avatarCrop, mascotBody, canMerge, canDeploy, hidden }) => ({
+      state.bots.map(({ id, name, color, avatarUrl, avatarCrop, mascotBody, canMerge, canDeploy, hidden, modelSelection }) => ({
         id,
         name,
         color,
@@ -499,10 +499,14 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
         canMerge,
         canDeploy,
         hidden,
+        // The engine behind the bot, so the fallback picker can say when a
+        // choice shares the primary's engine and would never take over.
+        engine: modelSelection.instanceId,
       })),
     [state.bots],
   );
   const offeredBots = useMemo(() => bots.filter((bot) => !bot.hidden), [bots]);
+  const botName = useCallback((botId: string) => bots.find((bot) => bot.id === botId)?.name, [bots]);
   const groups = useMemo(() => state.groups.map(({ id, name }) => ({ id, name })), [state.groups]);
 
   // The same validators the server runs, on the document as it stands right
@@ -1256,6 +1260,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                 setMode((current) => ({ ...current, action: null, pickedRunId: runId }));
               }}
               onOpenStep={openStep}
+              botName={botName}
             />
           </aside>
         ) : selectedNode ? (

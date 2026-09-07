@@ -758,3 +758,83 @@ describe("workflow capabilities", () => {
     expect(store.get(id)?.nodes[0]).not.toHaveProperty("alwaysAllow");
   });
 });
+
+describe("workflow fallback bot and provider outage", () => {
+  const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);
+  /** The API harness's capability lookup answers `{}` for every bot, so a
+   * fallback exists as far as the roster is concerned unless a test says
+   * otherwise. */
+  const withFallback = (fallbackBotId: string): WorkflowInput => ({
+    ...agentGraph(),
+    nodes: [{ ...agentGraph().nodes[0]!, fallbackBotId } as WorkflowInput["nodes"][number]],
+  });
+
+  it("stores fallbackBotId, paints fallback-same-bot, and clears the field on null", async () => {
+    const { call, store } = harness();
+    const created = await call("POST", "/api/workflows", withFallback("bot-b"));
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(store.get(id)?.nodes[0]).toMatchObject({ fallbackBotId: "bot-b" });
+    expect(codes(bodyOf(created).workflow.issues)).not.toContain("fallback-same-bot");
+
+    const same = await call("PATCH", `/api/workflows/${id}`, { nodes: withFallback("bot-a").nodes });
+    expect(same?.status).toBe(200); // a draft still saves
+    expect(codes(bodyOf(same).workflow.issues)).toContain("fallback-same-bot");
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, {
+      nodes: [{ ...agentGraph().nodes[0], fallbackBotId: null }],
+    });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.nodes[0]).not.toHaveProperty("fallbackBotId");
+  });
+
+  it("refuses a blank or padded fallbackBotId at the door, like any other id", async () => {
+    const { call } = harness();
+    const blank = await call("POST", "/api/workflows", withFallback(""));
+    expect(blank?.status).toBe(400);
+    expect(bodyOf(blank).error).toMatch(/^nodes\.0\.fallbackBotId/);
+    const padded = await call("POST", "/api/workflows", withFallback(" bot-b "));
+    expect(padded?.status).toBe(400);
+  });
+
+  it("lists a fallback the roster lacks as fallback-missing-bot on every listing, like a missing capability", async () => {
+    // The API's lookup is swapped here; the engine's own refusal to START on
+    // this issue is pinned in workflow-outage.test.ts, where the engine's
+    // lookup is the one being varied.
+    const { call, deps } = harness();
+    const roster = deps.botCapabilities;
+    deps.botCapabilities = (botId) => (botId === "ghost" ? null : roster(botId));
+    await call("POST", "/api/workflows", withFallback("ghost"));
+    const listed = bodyOf(await call("GET", "/api/workflows")).workflows as Array<Workflow & { issues: WorkflowIssue[] }>;
+    expect(listed[0]!.issues).toContainEqual({
+      severity: "error",
+      code: "fallback-missing-bot",
+      nodeId: "triage",
+      message: 'Node "triage" names a fallback bot "ghost" that does not exist.',
+    });
+    expect(codes(listed[0]!.issues)).not.toContain("missing-capability");
+  });
+
+  it("stores the outage knobs, paints bad ones as issues, refuses a non-number at the door, and clears on null", async () => {
+    const { call, store } = harness();
+    const created = await call("POST", "/api/workflows", {
+      ...agentGraph(),
+      providerOutage: { maxBackoffMinutes: 15, horizonHours: 2 },
+    });
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(store.get(id)?.providerOutage).toEqual({ maxBackoffMinutes: 15, horizonHours: 2 });
+
+    const zero = await call("PATCH", `/api/workflows/${id}`, { providerOutage: { horizonHours: 0 } });
+    expect(zero?.status).toBe(200);
+    expect(codes(bodyOf(zero).workflow.issues)).toContain("bad-numbers");
+
+    const shape = await call("PATCH", `/api/workflows/${id}`, { providerOutage: { horizonHours: "6" } });
+    expect(shape?.status).toBe(400);
+    expect(bodyOf(shape).error).toMatch(/^providerOutage\.horizonHours/);
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, { providerOutage: null });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.providerOutage).toBeUndefined();
+  });
+});
