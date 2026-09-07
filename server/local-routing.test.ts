@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldMountLocalComputer } from "./local-routing.ts";
+import { shouldMountLocalComputer, turnRunsUnattended } from "./local-routing.ts";
 
 describe("local computer routing", () => {
   it("never lets Linux Auto fall back to the user's desktop", () => {
@@ -89,5 +89,49 @@ describe("local computer routing", () => {
         providerSupportsLocal: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe("turnRunsUnattended — the dispatch record outranks the bot mark", () => {
+  /** The live sequence: a workflow node dispatched, timed out and interrupted,
+   * then re-dispatched by the engine two minutes later. Between the two, the
+   * per-bot mark is whatever happened to it — a person's queued message
+   * cleared it, or the idle TTL aged it out. */
+  it("a workflow re-dispatch after a timeout never mounts the desktop, whatever the bot mark says", () => {
+    const workflowTurn = { automationSource: "workflow", unattended: true };
+    const mount = (botMarked: boolean) =>
+      shouldMountLocalComputer({
+        requested: undefined,
+        hostPlatform: "darwin",
+        providerSupportsLocal: true,
+        unattended: turnRunsUnattended(workflowTurn, botMarked),
+      });
+    // attempt 1: the mark is fresh
+    expect(mount(true)).toBe(false);
+    // attempt 3: the mark was cleared under the run — still no desktop
+    expect(mount(false)).toBe(false);
+  });
+
+  it("judges any automated source as unattended even when the opts forgot to say so", () => {
+    expect(turnRunsUnattended({ automationSource: "workflow" }, false)).toBe(true);
+    expect(turnRunsUnattended({ automationSource: "webhook" }, false)).toBe(true);
+    expect(turnRunsUnattended({ automationSource: "schedule" }, false)).toBe(true);
+    // an inherited hop (a delegated turn from an unattended bot) carries the flag alone
+    expect(turnRunsUnattended({ unattended: true }, false)).toBe(true);
+  });
+
+  it("keeps a person's own turn attended, and lets a stale bot mark only add caution", () => {
+    expect(turnRunsUnattended({}, false)).toBe(false);
+    expect(turnRunsUnattended({ unattended: false, automationSource: undefined }, false)).toBe(false);
+    // the mark fails closed: a person's turn on a bot still marked asks a human, as before
+    expect(turnRunsUnattended({}, true)).toBe(true);
+    expect(
+      shouldMountLocalComputer({
+        requested: undefined,
+        hostPlatform: "darwin",
+        providerSupportsLocal: true,
+        unattended: turnRunsUnattended({}, false),
+      }),
+    ).toBe(true);
   });
 });

@@ -307,7 +307,7 @@ import { installedPlaybookInstructions } from "./installed-playbooks.ts";
 import { createBotPackageExport } from "./package-export.ts";
 import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
 import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
-import { shouldMountLocalComputer } from "./local-routing.ts";
+import { shouldMountLocalComputer, turnRunsUnattended } from "./local-routing.ts";
 import { resolveSurface } from "./surface.ts";
 import {
   PendingTurnCancellations,
@@ -1276,14 +1276,14 @@ async function botOverview(bot: BotRecord): Promise<BotOverview> {
  * this too, but no provider dispatch or later permission callback relies on
  * persistence having been produced exclusively by that route. And a turn
  * another bot started never runs as Full — see approvalModeForOrigin. */
-const approvalModeForTurn = (bot: BotRecord, peerInitiated = false): ApprovalMode => {
+const approvalModeForTurn = (bot: BotRecord, peerInitiated = false, threadId?: string): ApprovalMode => {
   const mode = approvalModeForOrigin(approvalModeFor(bot), { peerInitiated });
   if (!supportsApprovalMode(registry.cliTarget(bot.modelSelection.instanceId)?.driverKind, mode)) {
     return "ask";
   }
   // Native reviewers can approve before a permission reaches this process.
   // Unattended Auto must therefore downgrade before spawning the provider.
-  if (mode === "auto" && isUnattended(bot.id)) return "ask";
+  if (mode === "auto" && isUnattendedTurn(bot.id, threadId)) return "ask";
   return mode;
 };
 
@@ -2490,6 +2490,36 @@ function isUnattended(botId?: string | null): boolean {
   return true;
 }
 
+/** What startTurn was told about the turn now live on a thread — the half
+ * of the unattended story the per-bot mark cannot carry.
+ *
+ * The bot mark is a mutable flag every dispatch rewrites and a person's
+ * message clears, keyed on the assumption of one turn per bot. A workflow
+ * node's turn must not depend on that: its permission cards and its
+ * computer mount are decided from THIS record, written synchronously from
+ * the dispatch's own opts before anything can await, so no clear, TTL or
+ * re-key on the bot side can hand a node the desktop or Auto mode. The bot
+ * mark stays as the fallback — a stale one only ever means "ask a human",
+ * which fails closed. Keyed by thread because that is all a runtime event
+ * carries; a card continuation inherits the turn it resumes, which is why
+ * the record outlives turn.completed (a connector card answered later
+ * resumes the same dispatch) and is only ever replaced by the next
+ * dispatch on the thread. One small record per thread that ever ran a
+ * turn in this process — bounded by the task list, not by traffic. */
+interface TurnProvenance {
+  automationSource?: RoutineRunTrigger | "workflow";
+  unattended: boolean;
+}
+const turnProvenanceByThread = new Map<string, TurnProvenance>();
+
+/** Unattended by either record — the thread's own dispatch, or the bot's
+ * mark. Never narrower than the bot mark alone, so nothing that asked a
+ * human before asks a bot now. */
+function isUnattendedTurn(botId: string | null | undefined, threadId: string | undefined): boolean {
+  const byThread = threadId === undefined ? undefined : turnProvenanceByThread.get(threadId);
+  return byThread?.unattended === true || isUnattended(botId);
+}
+
 // Threads whose turn in flight was started by another BOT — an ask_bot hop,
 // a drained delegation. The person asked ONE bot; the fan-out behind that
 // answer is that bot's work, not mail addressed to them, so its completion
@@ -2927,8 +2957,11 @@ bus.subscribe((event: RuntimeEvent) => {
       // even Full access never invents a person's answer. Safe Auto stops on
       // the guards in auto-approve.ts; explicitly acknowledged Full does not.
       const asker = bot ?? (speaker ? store.bot(speaker.botId) : undefined);
-      const unattended = permission && asker && event.requestId ? isUnattended(asker.id) : false;
-      const effectiveApprovalMode = asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId)) : "ask";
+      // The thread's own dispatch record first, the bot mark as fallback —
+      // a workflow node's card is judged unattended even if something
+      // cleared the bot mark under it.
+      const unattended = permission && asker && event.requestId ? isUnattendedTurn(asker.id, event.threadId) : false;
+      const effectiveApprovalMode = asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId), event.threadId) : "ask";
       const verdict = permission && asker && event.requestId
         ? autoVerdict({
             // the same origin the dispatch used, so a peer-started turn's
@@ -2944,7 +2977,7 @@ bus.subscribe((event: RuntimeEvent) => {
             // effective safe Auto mode, not its durable Full grant.
             // Preserve the existing policy of every other provider.
             nativeApproval: requiresNativeApproval(event.provider, event.provider === "antigravityAgent"
-              ? effectiveApprovalMode : approvalModeForTurn(asker)),
+              ? effectiveApprovalMode : approvalModeForTurn(asker, false, event.threadId)),
           })
         : null;
       // The provider already received Ask for unattended Auto turns. Keep
@@ -3913,6 +3946,18 @@ async function startTurn(
     clearUnattended(bot.id);
     delegationWakeBudget.reset(threadId);
   }
+  // The thread's own record of this dispatch, written before any await so
+  // the fold and the computer mount below read what THIS turn was told,
+  // not whatever the bot mark says by then. A card continuation resumes
+  // the turn a previous dispatch began and keeps that dispatch's record —
+  // a connector or credential card answered on a workflow node's thread
+  // resumes a workflow turn, not a person's.
+  const inherited = opts?.cardContinuation ? turnProvenanceByThread.get(threadId) : undefined;
+  const provenance: TurnProvenance = inherited ?? {
+    automationSource: opts?.automationSource,
+    unattended: opts?.automationSource === "webhook" || opts?.unattended === true,
+  };
+  turnProvenanceByThread.set(threadId, provenance);
   const task = store.taskByThread(bot.id, threadId);
   if (!task) throw Object.assign(new Error("no such task"), { status: 404 });
   const instance = opts?.runOn === "cloud"
@@ -4319,6 +4364,13 @@ async function startTurn(
 
       // Auto-only host fallback. Electron owns cua-driver/TCC attribution;
       // the harness only reads its already-running connection descriptor.
+      // Unattended is judged from this dispatch's own record first (a
+      // workflow node, a webhook, an inherited unattended hop) and the bot
+      // mark second: the mark is a mutable per-bot flag that a person's
+      // message clears and a TTL ages out, and a scheduled run must never
+      // land on the live desktop because of what happened to that flag in
+      // the meantime — that mount would tag every card in the turn
+      // local-computer scope, which no grant may answer with nobody there.
       if (
         !integrations.computer &&
         !integrations.localComputer &&
@@ -4327,7 +4379,7 @@ async function startTurn(
           requested: undefined,
           hostPlatform: process.platform,
           providerSupportsLocal: mountsLocalComputer,
-          unattended: isUnattended(bot.id),
+          unattended: turnRunsUnattended(provenance, isUnattended(bot.id)),
         })
       ) {
         const cua = readCuaConnection();
@@ -4478,7 +4530,7 @@ async function startTurn(
         threadId,
         text: turnText,
         images: turnImages,
-        approvalMode: approvalModeForTurn(liveBot ?? bot, commsDepth > 0),
+        approvalMode: approvalModeForTurn(liveBot ?? bot, commsDepth > 0, threadId),
         model,
         effort,
         // a rewound thread never resumes the abandoned branch's session
