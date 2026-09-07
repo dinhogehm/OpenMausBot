@@ -4934,10 +4934,14 @@ workflowEngine = new WorkflowEngine({
       kind === "failed" && currentThread !== undefined && store.botByThread(currentThread)?.id === bot.id
         ? currentThread
         : bot.threadId;
-    // The engine already names the workflow in a failure message.
-    const detail = kind === "failed" ? message : `${workflow?.name ?? "Workflow"}: ${message}`;
+    // The engine already names the workflow in a failure or a cap message.
+    const named = kind === "failed" || kind === "cap-reached";
+    const detail = named ? message : `${workflow?.name ?? "Workflow"}: ${message}`;
+    // A cycle that stopped at its cap finished on purpose: "finished" is
+    // the honest title, and the body says how many turns it took to get
+    // there — the event an operator running 24/7 needs to see.
     notify(buildNotification(
-      kind === "failed" ? "workflow-failed" : "workflow-approval",
+      kind === "failed" ? "workflow-failed" : kind === "cap-reached" ? "done" : "workflow-approval",
       bot,
       threadId,
       detail,

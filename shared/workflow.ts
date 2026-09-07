@@ -145,8 +145,11 @@ export type WorkflowRunStatus = "queued" | "running" | "waiting-approval" | "com
 export type WorkflowRunTrigger = "manual" | "schedule" | "webhook";
 
 /** Why the engine is calling notifyUser: a run paused on a terminal failure,
- * an approval gate opened, or that gate's single reminder. */
-export type WorkflowNotificationKind = "failed" | "approval" | "reminder";
+ * an approval gate opened, that gate's single reminder, or a continuous
+ * cycle that COMPLETED because its execution cap closed the valve — a run
+ * that ends after hundreds of bot turns is an event to see even when it is
+ * not a failure. */
+export type WorkflowNotificationKind = "failed" | "approval" | "reminder" | "cap-reached";
 
 export interface WorkflowNodeResult {
   nodeId: string;
@@ -198,8 +201,15 @@ export interface WorkflowRun {
   approvalRemindedAt?: number;
   /** When the current wait node's pause ends (engine bookkeeping). A run
    * carrying this is parked, not stranded: the tick advances it once the
-   * instant passes, and a restart changes nothing because it is persisted. */
+   * instant passes, and a restart changes nothing because it is persisted.
+   * Already moved into the interval trigger's active window when there is
+   * one, so the instant the UI shows is the one the run will move at. */
   waitUntil?: number;
+  /** When the current wait began (engine bookkeeping): the receipt's
+   * startedAt for the step, kept apart from `dispatchedAt` so the timeout
+   * sweep never sees a wait as a dispatch, and persisted rather than
+   * derived from the node's minutes — which may be edited mid-pause. */
+  waitStartedAt?: number;
   input: string;
   nodeResults: WorkflowNodeResult[];
   error?: string;
@@ -642,7 +652,8 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
     // reach itself, some lap has no pause in it.
     const waitless = new Set(workflow.nodes.filter((node) => node.kind === "wait").map((node) => node.id));
     const seen = new Set<string>();
-    const stack = [...(adjacency.get(workflow.entryNodeId) ?? [])];
+    // An entry that is itself a wait node pauses every lap by definition.
+    const stack = waitless.has(workflow.entryNodeId) ? [] : [...(adjacency.get(workflow.entryNodeId) ?? [])];
     let hotLoop = false;
     while (stack.length > 0 && !hotLoop) {
       const current = stack.pop()!;

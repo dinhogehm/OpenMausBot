@@ -553,6 +553,10 @@ describe("wait nodes and the execution cap", () => {
       ],
     });
     expect(hot(sideLoop)).toEqual([]);
+    // The entry itself is a wait: every lap pauses, so never a hot loop.
+    const pausedEntry = paced(30);
+    pausedEntry.entryNodeId = "pause";
+    expect(hot(pausedEntry)).toEqual([]);
     // No cycle at all: silent.
     expect(hot(wf({ edges: [{ from: "code", outcome: "done", to: "review" }] }))).toEqual([]);
     // A dead edge (unknown outcome) cannot carry a run, so it cannot make a hot loop.
