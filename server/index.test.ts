@@ -5595,6 +5595,91 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("posts an approval gate's card into the bot's chat and a room, and settles it from the chat over the respond route", async () => {
+    const bot = (await api("POST", "/api/bots", {
+      modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      requireAvailableModel: true,
+    })).body.bot;
+    const room = (await api("POST", "/api/groups", { name: "Deploys", memberIds: [bot.id] })).body.group;
+    // The gate is the entry, so the card lands on the first agent bot of the
+    // graph (the merge step's); a rejection parks the run on a wait node, so
+    // no turn ever reaches the fake CLI.
+    const created = await api("POST", "/api/workflows", {
+      name: "Gate over HTTP",
+      entryNodeId: "gate",
+      nodes: [
+        { kind: "approval", id: "gate", prompt: "Merge it?", onExpire: "renotify", maxRenotify: 2, notifyTargetGroupId: room.id },
+        { kind: "agent", id: "merge", botId: bot.id, instructions: "Merge.", outcomes: ["done"] },
+        { kind: "wait", id: "pause", minutes: 1440 },
+      ],
+      edges: [
+        { from: "gate", outcome: "approved", to: "merge" },
+        { from: "gate", outcome: "rejected", to: "pause" },
+      ],
+      layout: {},
+    });
+    expect(created.status).toBe(201);
+    const workflowId = created.body.workflow.id as string;
+    try {
+      const started = await api("POST", `/api/workflows/${workflowId}/runs`, { input: "PR #42" });
+      expect(started.status).toBe(201);
+      const run = started.body.run;
+      expect(run.status).toBe("waiting-approval");
+      const requestId = `workflow-approval:${run.id}:gate:${run.approvalRequestedAt}`;
+
+      const state = (await api("GET", "/api/bots")).body;
+      const chatCard = state.bots
+        .find((candidate: { id: string }) => candidate.id === bot.id)
+        ?.messages.find((message: { card?: { requestId?: string } }) => message.card?.requestId === requestId);
+      expect(chatCard?.card).toMatchObject({
+        tool: "workflow_approval",
+        options: ["Approve", "Deny"],
+        workflowApproval: { runId: run.id, workflowId, nodeId: "gate" },
+      });
+      expect(chatCard.card.subtitle).toContain("Merge it?");
+      expect(chatCard.card.held).toContain("asks again up to 2 times");
+      const roomCard = state.groups
+        .find((candidate: { id: string }) => candidate.id === room.id)
+        ?.messages.find((message: { card?: { requestId?: string } }) => message.card?.requestId === requestId);
+      expect(roomCard?.card.workflowApproval).toEqual({ runId: run.id, workflowId, nodeId: "gate" });
+      expect(roomCard.from).toMatchObject({ botId: "workflow", name: "Workflow" });
+      const runs = (await api("GET", `/api/workflows/${workflowId}/runs`)).body.runs;
+      expect(runs[0].approvalThreadIds).toEqual([bot.threadId, room.threadId]);
+
+      // Decide from the bot's chat: the same engine call the canvas makes.
+      const decided = await api("POST", `/api/bots/${bot.id}/respond`, { requestId, behavior: "deny" });
+      expect(decided).toMatchObject({ status: 200, body: { ok: true, outcome: "rejected", decision: "rejected" } });
+      const after = (await api("GET", `/api/workflows/${workflowId}/runs`)).body.runs[0];
+      expect(after).toMatchObject({ status: "running", currentNodeId: "pause" });
+      expect(after.approvalThreadIds).toBeUndefined();
+      expect(after.nodeResults).toEqual([expect.objectContaining({ nodeId: "gate", outcome: "rejected", summary: "rejected by user" })]);
+
+      // Every copy is marked, and a second answer — from the room — is a no-op.
+      const settled = (await api("GET", "/api/bots")).body;
+      const chatAfter = settled.bots
+        .find((candidate: { id: string }) => candidate.id === bot.id)
+        ?.messages.find((message: { card?: { requestId?: string } }) => message.card?.requestId === requestId);
+      expect(chatAfter.card).toMatchObject({ answered: "deny", dismissed: true });
+      const roomAfter = settled.groups
+        .find((candidate: { id: string }) => candidate.id === room.id)
+        ?.messages.find((message: { card?: { requestId?: string } }) => message.card?.requestId === requestId);
+      expect(roomAfter.card).toMatchObject({ answered: "deny", dismissed: true });
+      const again = await api("POST", `/api/threads/${room.threadId}/respond`, { requestId, behavior: "allow" });
+      expect(again).toMatchObject({ status: 200, body: { ok: true, outcome: "rejected", alreadyAnswered: true } });
+      expect((await api("GET", `/api/workflows/${workflowId}/runs`)).body.runs[0].nodeResults).toHaveLength(1);
+      await expect.poll(async () => {
+        const decisions = (await api("GET", "/api/decisions")).body.decisions;
+        return decisions
+          .filter((decision: { requestId?: string }) => decision.requestId === requestId)
+          .map((decision: { decision: string; source: string }) => `${decision.decision}:${decision.source}`);
+      }).toEqual(["user-denied:user"]);
+    } finally {
+      expect((await fetch(`${BASE}/api/workflows/${workflowId}`, { method: "DELETE" })).status).toBe(204);
+      await api("DELETE", `/api/groups/${room.id}`).catch(() => undefined);
+      await api("DELETE", `/api/bots/${bot.id}`).catch(() => undefined);
+    }
+  });
+
   it("rejects a PATCH that nulls a required workflow field over the socket", async () => {
     const created = await api("POST", "/api/workflows", { name: "Null guard", entryNodeId: "", nodes: [], edges: [], layout: {} });
     expect(created.status).toBe(201);
