@@ -24,7 +24,7 @@ Reach for a workflow when you already know the steps and the decision points, an
 
 | Kind | What it is for | What you fill in |
 |---|---|---|
-| **Agent** | A bot does real work — write the code, review the PR, run the deploy | Bot from your roster, instructions, the outcome names it may finish with, timeout (default 30 min), retries (default 2) |
+| **Agent** | A bot does real work — write the code, review the PR, run the deploy | Bot from your roster, instructions, the outcome names it may finish with, timeout (default 30 min), retries (default 2), pre-approved tools (approval keys, one per line) |
 | **Approval** | A person decides before the run continues | The prompt shown to you, expiry (default 24 h), which decision expiry takes |
 | **Notify** | Post a message into a room | Target room and a message template |
 
@@ -117,12 +117,24 @@ Send the event to the webhook's `/hooks/…` endpoint on the local receiver with
 
 Every workflow node runs unattended — started by a schedule, a webhook, or an edge, with nobody at the keyboard. Two kinds of permission exist on a bot, and a workflow treats them differently:
 
-- An **always-allow** grant names one exact program (`Bash:gh`, `Bash:git`, …). You made that decision once, deliberately, for that program. It **holds inside a workflow**: a node whose bot may always run `gh` runs `gh` without asking. Without this, a bot that needs a tool could never finish a node — it would only time out, three times, and take the failure edge.
-- **Auto mode** (approve everything not caught by the guards) is a decision you made for turns you are present for. It does **not** transfer to 3am: inside a workflow, anything covered only by auto mode still cards for a person.
+- An **always-allow** grant names one exact program (`Bash:gh`, `Bash:git`, …) or one exact tool (`session_search`). You made that decision once, deliberately, for that thing. It **holds inside a workflow**: a node whose bot may always run `gh` runs `gh` without asking. Without this, a bot that needs a tool could never finish a node.
+- **Auto mode** (approve everything not caught by the guards) is a decision you made for turns you are present for. It does **not** transfer to 3am: inside a workflow, anything covered only by auto mode is not approved.
 
-The destructive and sensitive guards outrank both, attended or not — an always-allow on `rm` never widens into `rm -rf /`.
+The destructive and sensitive guards outrank both, attended or not — an always-allow on `rm` never widens into `rm -rf /`. A file-editing grant (`edit`) is blind to the guards, because the card names no path, so it holds inside a workflow only when the node itself declares it (below), never off the bot's list alone.
 
-So design around it. Give the bots in an unattended pipeline always-allow grants for the exact tools the routine path needs, keep the operations that genuinely need a human behind an **Approval** node where the waiting is explicit and has a deadline, and set node timeouts long enough to cover how quickly you actually answer a card that does appear.
+### Pre-approved tools on a node
+
+Each agent node has a **Pre-approved tools on this node** field: one approval key per line, in the same words an approval card uses (`Bash:gh`, `shell:gh`, `session_search`). For that node's turns the bot runs under the union of its own always-allow list and the node's, so a node built around `gh` does not need the bot to carry `gh` for every chat it ever has. The node's list can name *more* tools, never broader ones: a bare shell, anything on this computer, and the guards are refused exactly as they are for the bot's own grants. The node's prompt tells the bot which keys it may use.
+
+### A card nobody will click is denied, not left waiting
+
+A permission request on a node's turn that neither list covers is **denied by the harness right away** — the run does not sit on an open card until the node's timeout. The card still appears in the node's transcript, titled *Denied unattended*, with one line naming the tool, what it asked, the exact key that would have covered it and the rule that decided. The same line lands on the run receipt (in red under the step, and in the failure reason when the node fails), so "node timed out" is replaced by "which key to add". The bot is told a denial carries no explanation from the provider, so it works around it with the pre-approved tools or finishes with the failure outcome naming what it needed.
+
+If you do watch your runs and want a moment to click, set `OMB_WORKFLOW_DENY_GRACE_MS` in the harness environment (milliseconds, up to ten minutes): the card is then titled *Approval needed*, you are notified, and the harness denies only if nobody answered within the window. If a denial cannot be delivered (the provider is gone), the card stays open with a note and waits for you, and the node's timeout is the backstop it always was.
+
+Questions from the bot are never answered by the machine, attended or not. And only workflow turns deny: a card raised in a chat, a room, or a webhook-driven routine still waits for a person.
+
+So design around it. Give the nodes of an unattended pipeline pre-approved keys for the exact tools their step needs, keep the operations that genuinely need a human behind an **Approval** node where the waiting is explicit and has a deadline, and read the first failed run's receipt: it names the key you forgot.
 
 ### Merging and deploying need a flag on the bot
 
