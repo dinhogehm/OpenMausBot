@@ -5702,7 +5702,7 @@ describe("harness HTTP API", () => {
       expect(typeof health.body.version).toBe("string");
       expect(health.body.engine.uptimeMs).toBeGreaterThanOrEqual(0);
       expect(typeof health.body.engine.lastTickAt).toBe("number"); // the reconciler has ticked since boot
-      expect(health.body.runs).toEqual({ live: 0, queued: 0, running: 0, waitingApproval: 0, stuck: [] });
+      expect(health.body.runs).toEqual({ live: 0, queued: 0, running: 0, waitingApproval: 0, stuck: [], preflight: [] });
       const row = health.body.workflows.find((workflow: { id: string }) => workflow.id === id);
       expect(row).toEqual({
         id,
