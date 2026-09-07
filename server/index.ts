@@ -132,7 +132,7 @@ import { ComputerControl } from "./computer-control.ts";
 import { MAX_REMOTE_COMMAND_LENGTH } from "./remote-computer.ts";
 import { augmentedPath, findCliCandidates, resetPathCache } from "./env-path.ts";
 import { describeSpawnFailure, execCli } from "./procs.ts";
-import { blockedTarget, buildNotification, type Notification } from "./notify.ts";
+import { blockedTarget, buildNotification, type Notification, type NotifyKind } from "./notify.ts";
 import {
   isEffortLevel,
   type ModelSelection,
@@ -250,7 +250,7 @@ import { fetchSkillFromSource } from "./skill-fetch.ts";
 import { expandLearnTurnText, learnSource } from "./skill-learn.ts";
 import { expandSetupTurnText, setupModeActive, setupSystemPrompt } from "./setup-mode.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
-import type { BotCapabilities, Workflow, WorkflowRun } from "../shared/workflow.ts";
+import type { BotCapabilities, Workflow, WorkflowNotificationKind, WorkflowRun } from "../shared/workflow.ts";
 import { checkSoulDrift, readSoulDrift, soulFile, writeSoulMirror } from "./bot-folder.ts";
 import {
   buildSystemPrompt,
@@ -334,7 +334,7 @@ import {
 import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import { acquireDataDirLeaseForProcess } from "./data-dir-lease.ts";
 import { describeEdition, editionStatus, loadEnterpriseLayer } from "./enterprise.ts";
-import { environmentDescriptor, loadEnvironmentId } from "./environment.ts";
+import { environmentDescriptor, loadEnvironmentId, serverVersion } from "./environment.ts";
 import {
   clearSessionCookie,
   clientBotPatchViolation,
@@ -5008,6 +5008,22 @@ workflowStore = new WorkflowStore({ emit: broadcast });
  * room UI labels the cluster by this name and colour, and responder
  * selection falls through to a real member. */
 const WORKFLOW_AUTHOR = Object.freeze({ botId: "workflow", name: "Workflow", color: "purple" });
+/** Which banner each engine event gets. Blocking-on-you kinds keep their
+ * own titles; the rest fall into stuck / finished / update so a phone can
+ * tell an alert from a status line. */
+const WORKFLOW_NOTIFY_KIND: Record<WorkflowNotificationKind, NotifyKind> = {
+  failed: "workflow-failed",
+  approval: "workflow-approval",
+  reminder: "workflow-approval",
+  renotify: "workflow-approval",
+  stuck: "workflow-stuck",
+  completed: "workflow-done",
+  "cap-reached": "workflow-done",
+  cancelled: "workflow-update",
+  outage: "workflow-update",
+  fallback: "workflow-update",
+  digest: "workflow-update",
+};
 /** The merge/deploy flags the engine and the workflow API gate on, read from
  * the store on every check so a toggle a person flips lands on the very
  * next one — never cached on a run. null for a bot that no longer exists. */
@@ -5121,29 +5137,23 @@ workflowEngine = new WorkflowEngine({
       console.warn(`workflow: no bot to notify for run ${run.id} (${kind}) of workflow ${run.workflowId}`);
       return;
     }
-    // A failure opens the failed node's task so its transcript is one tap
-    // away — but only when the notified bot owns that task: a fallback bot
-    // never gets a tap into another bot's (possibly deleted) thread. A gate
-    // has no thread of its own and opens the bot's chat.
+    // A failure or a stuck run opens the node's task so its transcript is
+    // one tap away — but only when the notified bot owns that task: a
+    // fallback bot never gets a tap into another bot's (possibly deleted)
+    // thread. A gate has no thread of its own and opens the bot's chat.
     const currentThread = run.currentThreadId;
     const threadId =
-      kind === "failed" && currentThread !== undefined && store.botByThread(currentThread)?.id === bot.id
+      (kind === "failed" || kind === "stuck") && currentThread !== undefined && store.botByThread(currentThread)?.id === bot.id
         ? currentThread
         : bot.threadId;
-    // The engine already names the workflow in a failure or a cap message.
-    const named = kind === "failed" || kind === "cap-reached";
-    const detail = named ? message : `${workflow?.name ?? "Workflow"}: ${message}`;
-    // A cycle that stopped at its cap finished on purpose: "finished" is
-    // the honest title, and the body says how many turns it took to get
-    // there — the event an operator running 24/7 needs to see.
-    notify(buildNotification(
-      kind === "failed" ? "workflow-failed" : kind === "cap-reached" ? "done" : "workflow-approval",
-      bot,
-      threadId,
-      detail,
-      { avatarUrl: bot.avatarUrl },
-    ));
+    // The engine names the workflow, the node and the cause in every
+    // message; the title only says what sort of news it is. A cycle that
+    // stopped at its cap finished on purpose, so it shares the completed
+    // title — the event an operator running 24/7 needs to see.
+    notify(buildNotification(WORKFLOW_NOTIFY_KIND[kind], bot, threadId, message, { avatarUrl: bot.avatarUrl }));
   },
+  groupExists: (groupId) => Boolean(store.group(groupId)),
+  version: serverVersion(),
   // The routine scheduler's occurrence math — same timezone, same weekday
   // semantics — so a workflow's "daily at 09:00" and a routine's agree.
   nextOccurrence,
@@ -9142,6 +9152,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         store: workflowStore!,
         engine: workflowEngine!,
         botCapabilities,
+        // The audit room is judged against the rooms as they are now, like
+        // the bots' flags: a deleted room paints the error on the canvas.
+        groupExists: (groupId) => Boolean(store.group(groupId)),
         // A webhook aimed at a deleted workflow is released the same way a
         // webhook aimed at a deleted MAUS is.
         onWorkflowDeleted: (workflowId) => webhooks.disableForWorkflow(workflowId),

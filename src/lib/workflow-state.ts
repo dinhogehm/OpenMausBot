@@ -8,6 +8,7 @@
 // `bot` frames, so the list is drawn from `withLiveIssues` over the current
 // roster — the same union the canvas draws — never from the stored value.
 import {
+  auditGroupIssues,
   capabilityIssues,
   validateWorkflow,
   type BotCapabilities,
@@ -40,27 +41,34 @@ function withIssues(workflow: WorkflowFrame): WorkflowListItem {
 }
 
 /** Every issue the server would report for this definition right now: the
- * structural pass plus the capability pass against the given roster. The
+ * structural pass, the capability pass against the given roster, and the
+ * audit room against the rooms as they are (a room deleted while the
+ * workflow named it is an error, exactly as the server paints it). The
  * canvas and the list both draw this union, so a flag flipped in a bot's
- * profile moves the badge and the Run gate without a save or a reload. */
+ * profile, or a room deleted, moves the badge and the Run gate without a
+ * save or a reload. */
 export function liveWorkflowIssues(
   workflow: Workflow,
   lookup: (botId: string) => BotCapabilities | null,
+  groupExists: (groupId: string) => boolean = () => true,
 ): WorkflowIssue[] {
-  return [...validateWorkflow(workflow), ...capabilityIssues(workflow, lookup)];
+  return [...validateWorkflow(workflow), ...capabilityIssues(workflow, lookup), ...auditGroupIssues(workflow, groupExists)];
 }
 
 /** The rows as they should be drawn. The stored `issues` snapshot is
  * REPLACED, never merged: it may have been judged against a roster whose
- * flags have since moved. */
+ * flags, or a room list, have since moved. */
 export function withLiveIssues(
   workflows: readonly WorkflowListItem[],
   bots: readonly CapabilityBearer[],
+  groups: ReadonlyArray<{ id: string }> = [],
 ): WorkflowListItem[] {
   const lookup = capabilityLookup(bots);
+  const rooms = new Set(groups.map((group) => group.id));
+  const groupExists = (groupId: string) => rooms.has(groupId);
   return workflows.map((workflow) => {
     const { issues: _snapshot, ...definition } = workflow;
-    return { ...definition, issues: liveWorkflowIssues(definition, lookup) };
+    return { ...definition, issues: liveWorkflowIssues(definition, lookup, groupExists) };
   });
 }
 

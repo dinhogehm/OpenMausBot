@@ -485,26 +485,42 @@ describe("issuesByNode / documentIssues", () => {
 describe("workflowPatchBody", () => {
   it("sends the whole document and never the engine-owned fields", () => {
     const body = workflowPatchBody(
-      workflow({ nextRunAt: 999, description: "d", maxNodeExecutions: 12, triggers: { schedule: { type: "once", at: 5 } } }),
+      workflow({
+        nextRunAt: 999,
+        lastDigestAt: 998,
+        description: "d",
+        maxNodeExecutions: 12,
+        triggers: { schedule: { type: "once", at: 5 } },
+        stuckAfterMinutes: 45,
+        auditGroupId: "room-1",
+        digestAt: "18:00",
+      }),
     );
     expect(Object.keys(body).sort()).toEqual([
+      "auditGroupId",
       "description",
+      "digestAt",
       "edges",
       "entryNodeId",
       "layout",
       "maxNodeExecutions",
       "name",
       "nodes",
+      "stuckAfterMinutes",
       "triggers",
     ]);
     expect(body.maxNodeExecutions).toBe(12);
     expect(body.triggers).toEqual({ schedule: { type: "once", at: 5 } });
+    expect(body).toMatchObject({ stuckAfterMinutes: 45, auditGroupId: "room-1", digestAt: "18:00" });
   });
 
-  it("nulls the clearable optionals so removing a schedule actually removes it", () => {
+  it("nulls the clearable optionals so removing a schedule — or an audit room — actually removes it", () => {
     const body = workflowPatchBody(workflow());
     expect(body.triggers).toBeNull();
     expect(body.description).toBeNull();
     expect(body.maxNodeExecutions).toBeNull();
+    expect(body.stuckAfterMinutes).toBeNull();
+    expect(body.auditGroupId).toBeNull();
+    expect(body.digestAt).toBeNull();
   });
 });

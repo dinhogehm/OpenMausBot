@@ -1001,3 +1001,91 @@ describe("workflowApprovalBotId", () => {
     expect(workflowApprovalBotId(graph, results, lookup([]))).toBeUndefined();
   });
 });
+
+describe("workflow monitoring — audit room, watchdog patience, digest and health", () => {
+  const codes = (issues: WorkflowIssue[]) => issues.map((issue) => issue.code);
+
+  it("stores the monitoring fields, refuses a bad digest time at the door, paints a bad patience, and clears on null", async () => {
+    const { call, store } = harness();
+    const created = await call("POST", "/api/workflows", {
+      ...agentGraph(),
+      stuckAfterMinutes: 45,
+      auditGroupId: "room-1",
+      digestAt: "18:30",
+    });
+    expect(created?.status).toBe(201);
+    const id = bodyOf(created).workflow.id as string;
+    expect(store.get(id)).toMatchObject({ stuckAfterMinutes: 45, auditGroupId: "room-1", digestAt: "18:30" });
+
+    const clock = await call("PATCH", `/api/workflows/${id}`, { digestAt: "25:00" });
+    expect(clock?.status).toBe(400);
+    expect(bodyOf(clock).error).toMatch(/^digestAt/);
+
+    const impatient = await call("PATCH", `/api/workflows/${id}`, { stuckAfterMinutes: 5 });
+    expect(impatient?.status).toBe(200);
+    expect(codes(bodyOf(impatient).workflow.issues)).toContain("bad-numbers");
+
+    const padded = await call("PATCH", `/api/workflows/${id}`, { auditGroupId: " room-1 " });
+    expect(padded?.status).toBe(400);
+
+    const cleared = await call("PATCH", `/api/workflows/${id}`, { stuckAfterMinutes: null, auditGroupId: null, digestAt: null });
+    expect(cleared?.status).toBe(200);
+    expect(store.get(id)?.stuckAfterMinutes).toBeUndefined();
+    expect(store.get(id)?.auditGroupId).toBeUndefined();
+    expect(store.get(id)?.digestAt).toBeUndefined();
+  });
+
+  it("strips lastDigestAt from clients and shows the engine's value read-only", async () => {
+    const { call, store } = harness();
+    const created = bodyOf(await call("POST", "/api/workflows", { ...agentGraph(), lastDigestAt: 5 })).workflow as Workflow;
+    expect("lastDigestAt" in created).toBe(false);
+    store.setLastDigestAt(created.id, 9_000);
+    const patched = await call("PATCH", `/api/workflows/${created.id}`, { name: "Renamed", lastDigestAt: 1 });
+    expect(patched?.status).toBe(200);
+    expect(bodyOf(patched).workflow.lastDigestAt).toBe(9_000);
+    expect(store.get(created.id)?.lastDigestAt).toBe(9_000);
+  });
+
+  it("paints missing-audit-group against the live rooms, and only when the deps can see rooms", async () => {
+    const { call, deps } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", { ...agentGraph(), auditGroupId: "gone" })).workflow.id as string;
+    // Without a room lookup the listing cannot judge it.
+    expect(codes(bodyOf(await call("GET", "/api/workflows")).workflows[0].issues)).not.toContain("missing-audit-group");
+    deps.groupExists = (groupId) => groupId === "room-1";
+    const listed = bodyOf(await call("GET", "/api/workflows")).workflows as Array<Workflow & { issues: WorkflowIssue[] }>;
+    expect(listed.find((workflow) => workflow.id === id)?.issues).toContainEqual({
+      severity: "warning",
+      code: "missing-audit-group",
+      message: 'The audit room "gone" no longer exists, so nothing is posted there; pick another room or turn the audit room off.',
+    });
+    // A warning: the run still starts (the room is a second copy of what
+    // the person is told anyway).
+    expect((await call("POST", `/api/workflows/${id}/runs`, {}))?.status).toBe(201);
+    const repointed = await call("PATCH", `/api/workflows/${id}`, { auditGroupId: "room-1" });
+    expect(codes(bodyOf(repointed).workflow.issues)).not.toContain("missing-audit-group");
+  });
+
+  it("answers GET /api/workflows/health with the engine's document and nothing else on that path", async () => {
+    const { call, engine, store } = harness();
+    const id = bodyOf(await call("POST", "/api/workflows", agentGraph())).workflow.id as string;
+    engine.startRun(id, "go", "manual");
+    const health = await call("GET", "/api/workflows/health");
+    expect(health?.status).toBe(200);
+    const body = bodyOf(health);
+    expect(body).toMatchObject({
+      ok: true,
+      version: "unknown",
+      engine: { lastTickAt: null },
+      runs: { live: 1, running: 1, queued: 0, waitingApproval: 0, stuck: [] },
+      lastFailure: null,
+    });
+    expect(body.workflows).toEqual([
+      expect.objectContaining({ id, name: "Triage", schedule: null, nextRunAt: null, liveRunId: store.listRuns(id)[0]!.id }),
+    ]);
+    expect(typeof body.now).toBe("number");
+    expect(typeof body.engine.uptimeMs).toBe("number");
+    // "health" is a route, never a workflow id: no PATCH/DELETE lands on it.
+    expect(await call("PATCH", "/api/workflows/health", { name: "x" })).toBeNull();
+    expect(await call("DELETE", "/api/workflows/health")).toBeNull();
+  });
+});

@@ -286,3 +286,59 @@ describe("fallback bot and the list", () => {
     expect(state.workflowRuns[0]).toMatchObject({ outage, currentBotId: "bot-b", nextAttemptAt: 9 });
   });
 });
+
+describe("audit room, watchdog patience and digest in the slice", () => {
+  const room = (id: string, name: string) => ({
+    id,
+    threadId: `thread-${id}`,
+    name,
+    memberIds: [],
+    defaultResponder: { kind: "everyone" as const },
+    bulletin: "",
+    unread: false,
+    createdAt: 0,
+  });
+  const audited = draft({
+    entryNodeId: "a",
+    nodes: [{ kind: "agent", id: "a", botId: "bot-a", instructions: "plan", outcomes: ["done"] }],
+    auditGroupId: "room-1",
+    stuckAfterMinutes: 45,
+    digestAt: "18:00",
+    lastDigestAt: 9_000,
+  });
+  const missingRoom = (workflows: ReturnType<typeof withLiveIssues>) =>
+    workflows[0]!.issues.filter((issue) => issue.code === "missing-audit-group").length;
+
+  it("a `workflow` frame keeps the monitoring fields, and the list judges the audit room against the live rooms", () => {
+    const state = reducer(initialState, { type: "workflowPatched", workflow: audited });
+    expect(state.workflows[0]).toMatchObject({ auditGroupId: "room-1", stuckAfterMinutes: 45, digestAt: "18:00", lastDigestAt: 9_000 });
+    // The frame carried no issues, so the slice computed structural ones: a
+    // room id is structurally fine…
+    expect(state.workflows[0]!.issues.map((issue) => issue.code)).not.toContain("missing-audit-group");
+    // …but against a room list without room-1 the list paints the warning
+    // (a warning: a deleted room never blocks Run, the server skips the post).
+    const judged = withLiveIssues(state.workflows, state.bots, state.groups);
+    expect(missingRoom(judged)).toBe(1);
+    expect(validationSummary(judged[0]!.issues)).toMatchObject({ errors: 0, warnings: 1 });
+
+    const joined = reducer(state, { type: "groupPatched", group: room("room-1", "Ops") });
+    expect(joined.workflows).toBe(state.workflows); // only the rooms moved
+    expect(missingRoom(withLiveIssues(joined.workflows, joined.bots, joined.groups))).toBe(0);
+
+    const gone = reducer(joined, { type: "groupDeleted", groupId: "room-1" });
+    expect(missingRoom(withLiveIssues(gone.workflows, gone.bots, gone.groups))).toBe(1);
+  });
+
+  it("a workflow with no audit room is never judged against the rooms", () => {
+    const state = reducer(initialState, { type: "workflowPatched", workflow: draft({ ...audited, auditGroupId: undefined }) });
+    expect(missingRoom(withLiveIssues(state.workflows, state.bots, state.groups))).toBe(0);
+  });
+
+  it("a `workflow-run` frame keeps the watchdog bookkeeping", () => {
+    const state = reducer(initialState, {
+      type: "workflowRunPatched",
+      run: run({ status: "running", nodeEnteredAt: 7_000, stuckNotifiedAt: 8_000 }),
+    });
+    expect(state.workflowRuns[0]).toMatchObject({ nodeEnteredAt: 7_000, stuckNotifiedAt: 8_000 });
+  });
+});

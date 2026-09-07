@@ -10,6 +10,7 @@
  * and the notify node; the real harness wiring (Task 6) plugs into the DI
  * surface declared here. */
 import {
+  auditGroupIssues,
   capabilityIssues,
   countsTowardExecutionCap,
   missingCapabilities,
@@ -29,6 +30,7 @@ import {
   WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN,
   WORKFLOW_OUTAGE_HORIZON_DEFAULT_H,
   WORKFLOW_SCHEDULE_CATCH_UP_MS,
+  WORKFLOW_STUCK_ANNOUNCEMENTS_MAX,
   WORKFLOW_WAIT_OUTCOME,
   workflowRoutingFingerprint,
   type BotCapabilities,
@@ -60,6 +62,20 @@ import {
 } from "./workflow-failure.ts";
 import { intervalFireAt, nextActiveWindowStart } from "./workflow-interval.ts";
 import type { WorkflowStore } from "./workflow-store.ts";
+import {
+  buildDigest,
+  describeStuck,
+  digestSlotAt,
+  digestWindowStart,
+  formatDuration,
+  inOutageBackoff,
+  nodeSince,
+  stuckAnnouncementDue,
+  stuckVerdict,
+  workflowEngineHealth,
+  type StuckVerdict,
+  type WorkflowEngineHealth,
+} from "./workflow-watch.ts";
 
 export type { WorkflowRunTrigger } from "../shared/workflow.ts";
 
@@ -146,11 +162,15 @@ export interface WorkflowEngineOptions {
    * gets a thenable back. Absent, a notify node fails terminally: a
    * notification the graph promised is never skipped silently. */
   postGroupMessage?: (groupId: string, text: string) => void;
-  /** Called on every terminal failure (a paused 24/7 workflow must never be
-   * silent), when an approval gate opens, and for the gate's one reminder;
-   * `kind` says which, so a wrapper never branches on run.status. A throw
-   * here is logged and swallowed — and a reminder that failed to go out is
-   * retried on the next tick. */
+  /** Called on every transition a person would want to hear about — every
+   * terminal state (a paused 24/7 workflow must never be silent, and neither
+   * must one that quietly finished), an approval gate opening and its one
+   * reminder, the watchdog's stuck verdict, a provider outage's first wait
+   * and its horizon, a fallback hand-off, the daily digest; `kind` says
+   * which, so a wrapper never branches on run.status. The message always
+   * names the workflow, the node and the cause. A throw here is logged and
+   * swallowed — and a reminder or a stuck announcement that failed to go out
+   * is retried on the next tick. */
   notifyUser?: (run: WorkflowRun, message: string, kind: WorkflowNotificationKind) => void;
   /** The gate's card: where a person can DECIDE without opening the canvas.
    * `announce` posts the card into the bot's chat (and the node's room, if
@@ -163,6 +183,12 @@ export interface WorkflowEngineOptions {
    * alive). Absent, a gate is reachable only through the canvas and
    * notifyUser, as before. */
   approvalReach?: WorkflowApprovalReach;
+  /** Whether a room exists RIGHT NOW (store.group in index.ts): a workflow
+   * whose audit room is gone is refused a start, like one whose fallback
+   * bot is gone. Absent, the audit room is never checked. */
+  groupExists?: (groupId: string) => boolean;
+  /** What the health endpoint reports as the engine's version. */
+  version?: string;
   /** Occurrence math for the CALENDAR schedules (`daily`, `once`) —
    * index.ts injects the routine scheduler's `nextOccurrence` (local
    * timezone, strictly after `after`), so a workflow's "daily at 09:00" and
@@ -176,6 +202,9 @@ type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
 type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
 type NotifyNode = Extract<WorkflowNode, { kind: "notify" }>;
 type WaitNode = Extract<WorkflowNode, { kind: "wait" }>;
+/** What a dispatch writes about the watchdog's clock: a fresh stay on a
+ * new node, or nothing on a re-dispatch of the same one. */
+type NodeEntry = Pick<WorkflowRun, "nodeEnteredAt" | "stuckNotifiedAt"> | Record<never, never>;
 export type ApprovalDecision = (typeof WORKFLOW_APPROVAL_OUTCOMES)[number];
 
 const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>(["completed", "failed", "cancelled"]);
@@ -311,12 +340,17 @@ export class WorkflowEngine {
   /** Reconciler timer — same shape as RoutineManager's. */
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
+  /** For the health endpoint: when this engine was built (its uptime) and
+   * when the reconciler last finished a pass (a wedged tick shows here). */
+  private readonly startedAt: number;
+  private lastTickAt: number | null = null;
 
   constructor(options: WorkflowEngineOptions) {
     this.options = options;
     this.store = options.store;
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
+    this.startedAt = this.now();
   }
 
   start() {
@@ -341,7 +375,9 @@ export class WorkflowEngine {
    * stranded. Schedules fire last, so a run they start joins queues that
    * are already consistent. An elapsed wait sits with the approvals: it too
    * depends on no thread, and its successor is dispatched in this same
-   * pass. */
+   * pass. The watchdog and the digest come last and only READ the runs:
+   * a run this pass just re-drove or timed out must be judged in its new
+   * state, never announced as stuck for a stay the same tick ended. */
   async tick(): Promise<void> {
     if (this.ticking) return;
     this.ticking = true;
@@ -355,9 +391,105 @@ export class WorkflowEngine {
       this.drainStrandedQueues();
       this.sweepSchedules(now);
       this.pruneDenials();
+      this.sweepStuck(now);
+      this.sweepDigests(now);
+      this.lastTickAt = now;
     } finally {
       this.ticking = false;
     }
+  }
+
+  /** The run watchdog. A live run whose current node has not changed for
+   * longer than the workflow's patience (`stuckAfterMinutes`) is announced
+   * ONCE, then again at most once per further period, with the marker
+   * persisted on the run so a restart neither repeats nor forgets the
+   * announcement; the marker goes the moment the run moves to another
+   * node. The clock is `nodeEnteredAt` — retries of the same node do not
+   * reset it, which is exactly the "48 minutes in three dead attempts" the
+   * operator never saw. A failed send leaves the marker unset, so the next
+   * tick tries again (same stance as the approval reminder). */
+  private sweepStuck(now: number): void {
+    for (const { run, node, verdict } of this.stuckRuns(now)) {
+      if (!stuckAnnouncementDue(run, verdict, now)) continue;
+      const count = (run.stuckAnnouncements ?? 0) + 1;
+      // The cap is said out loud: a person who stops hearing about a run
+      // must know it is the engine being quiet, not the run being fixed.
+      const last = count >= WORKFLOW_STUCK_ANNOUNCEMENTS_MAX ? " — last stuck announcement for this stay; quiet until the run moves" : "";
+      if (this.announce(run, "stuck", describeStuck(run, node, verdict, now) + last)) {
+        this.store.patchRun(run.id, { stuckNotifiedAt: now, stuckAnnouncements: count });
+      }
+    }
+  }
+
+  /** Every live run the watchdog would call stuck right now — what the
+   * sweep announces and what the health endpoint lists. */
+  private stuckRuns(now: number): Array<{ run: WorkflowRun; node: WorkflowNode | undefined; verdict: StuckVerdict }> {
+    const stuck: Array<{ run: WorkflowRun; node: WorkflowNode | undefined; verdict: StuckVerdict }> = [];
+    for (const run of this.store.listRuns()) {
+      if (run.status !== "running" && run.status !== "waiting-approval") continue;
+      const workflow = this.store.get(run.workflowId);
+      if (!workflow) continue;
+      const node = workflow.nodes.find((candidate) => candidate.id === run.currentNodeId);
+      const verdict = stuckVerdict(workflow, run, node, now);
+      if (verdict) stuck.push({ run, node, verdict });
+    }
+    return stuck;
+  }
+
+  /** The daily digest. `digestAt` names a local wall-clock time; the most
+   * recent such instant at or before now is the slot, and the digest fires
+   * once the slot is newer than the last one sent — `lastDigestAt` is
+   * the slot, persisted once the person's channel took the digest, so a
+   * transport hiccup retries on the next tick and a restart after a sent
+   * digest never sends the day twice (a crash in the instant between the
+   * send and the write repeats one digest: the better failure). A computer
+   * that slept through
+   * several slots sends one digest on waking, for the 24 hours up to the
+   * slot it woke into. A digest configured for the first time is anchored
+   * at the definition's own updatedAt (as a fresh daily schedule is): it
+   * fires at the NEXT slot, never at once for a day it was not asked
+   * about. The digest is tied to no run: it is announced on a synthetic
+   * receipt naming the workflow, so the same channels carry it. */
+  private sweepDigests(now: number): void {
+    for (const workflow of this.store.list()) {
+      if (workflow.digestAt === undefined) continue;
+      const slot = digestSlotAt(workflow.digestAt, now);
+      if (slot <= (workflow.lastDigestAt ?? workflow.updatedAt)) continue;
+      const runs = this.store.listRuns(workflow.id);
+      const digest = buildDigest(runs, digestWindowStart(workflow.digestAt, slot), slot);
+      // The newest receipt gives the notification a bot to land on; a
+      // workflow that never ran is told about on a receipt-less stub.
+      const carrier: WorkflowRun = runs[0] ?? {
+        id: `digest-${workflow.id}`,
+        workflowId: workflow.id,
+        status: "completed",
+        attempt: 0,
+        input: "",
+        nodeResults: [],
+        startedAt: slot,
+        endedAt: slot,
+      };
+      // The marker is written once the digest actually went out to the
+      // person (a throwing wrapper retries next tick); the slot comparison
+      // above is what keeps a day from being sent twice.
+      if (this.announce(carrier, "digest", digest)) this.store.setLastDigestAt(workflow.id, slot);
+    }
+  }
+
+  /** What an external monitor polls: live and stuck runs, the next armed
+   * slot per workflow, the last failure, uptime and version. Pure over the
+   * store; the API route wraps it. */
+  health(): WorkflowEngineHealth {
+    const now = this.now();
+    return workflowEngineHealth({
+      version: this.options.version ?? "unknown",
+      now,
+      startedAt: this.startedAt,
+      lastTickAt: this.lastTickAt,
+      workflows: this.store.list(),
+      runs: this.store.listRuns(),
+      stuck: this.stuckRuns(now),
+    });
   }
 
   /** The cron trigger. Timing state lives on the definition (`nextRunAt`),
@@ -520,7 +652,7 @@ export class WorkflowEngine {
       startedAt: scheduledFor,
       endedAt: now,
     });
-    this.safeNotify(run, `Workflow "${workflow.name}" scheduled run ${MISSED_SLOT_REASON}`, "failed");
+    this.announce(run, "failed", `scheduled run ${MISSED_SLOT_REASON}`);
   }
 
   /** A slot the engine refused to start: same shape as a missed one — a
@@ -539,7 +671,7 @@ export class WorkflowEngine {
       startedAt: scheduledFor,
       endedAt: now,
     });
-    this.safeNotify(run, `Workflow "${workflow.name}" scheduled run was not started: ${run.error ?? reason}`, "failed");
+    this.announce(run, "failed", `scheduled run was not started: ${run.error ?? reason}`);
   }
 
   /** A human gate never holds the queue forever: past its deadline the node's
@@ -753,6 +885,26 @@ export class WorkflowEngine {
       const workflow = this.store.get(run.workflowId);
       const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
       const parkedFor = this.parkedFallbackBot(run);
+      // An outage BACKOFF that has run out is over whether or not the bot
+      // is free: the hours the PROVIDER was away are not hours the run sat
+      // unexplained (the outage had its own announcement), so the
+      // watchdog's stay starts over here — and the wait's end comes off
+      // the outage record in the same write, so from now on the run is
+      // waiting on a BOT, which is exactly what the watchdog exists to
+      // notice. Only the backoff does this: a park for a busy bot keeps
+      // the outage record but never re-stamps the stay. Without the first
+      // half, the tick after a long outage would call a run that is
+      // moving again "stuck"; without the second, a bot busy for three
+      // hours after a one-minute backoff would be exempt the whole time.
+      if (run.outage !== undefined && inOutageBackoff(run)) {
+        const left = this.store.patchRun(run.id, {
+          outage: { ...run.outage, waitUntil: undefined },
+          nodeEnteredAt: now,
+          stuckNotifiedAt: undefined,
+          stuckAnnouncements: undefined,
+        });
+        if (!left) continue;
+      }
       if (node?.kind === "agent" && this.options.botState(parkedFor ?? node.botId) === "busy") continue;
       const nodeId = run.currentNodeId ?? workflow?.entryNodeId;
       if (nodeId === undefined) {
@@ -878,10 +1030,16 @@ export class WorkflowEngine {
   }
 
   /** Everything that gates EXECUTION: the structural issues plus the per-bot
-   * capability ones — the same union the API paints, so a run is refused for
-   * exactly what the canvas shows in red. */
+   * capability ones — the same union the API paints, so a run is refused
+   * for exactly what the canvas shows in red. The audit room's existence is
+   * in the union too, as a WARNING: painted, never a refusal. */
   private executionIssues(workflow: Workflow): WorkflowIssue[] {
-    return [...validateWorkflow(workflow), ...capabilityIssues(workflow, this.options.botCapabilities)];
+    const groupExists = this.options.groupExists;
+    return [
+      ...validateWorkflow(workflow),
+      ...capabilityIssues(workflow, this.options.botCapabilities),
+      ...(groupExists ? auditGroupIssues(workflow, groupExists) : []),
+    ];
   }
 
   /** The run currently holding this bot's turn, if any.
@@ -955,7 +1113,9 @@ export class WorkflowEngine {
         error: redactSecretsInText(reason).slice(0, 500),
         endedAt: this.now(),
       });
-      if (patched) cancelled++;
+      if (!patched) continue;
+      cancelled++;
+      this.announce(patched, "cancelled", `queued run cancelled: ${patched.error ?? reason}`);
     }
     return cancelled;
   }
@@ -989,6 +1149,11 @@ export class WorkflowEngine {
       // has presumably seen the provider come back.
       outage: undefined,
       currentBotId: undefined,
+      // A resume is a fresh stay on the node: the watchdog's clock and its
+      // marker start over, or a run resumed after a day away would be
+      // announced as stuck on its first tick.
+      nodeEnteredAt: this.now(),
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
       // It resumes against the graph as it is NOW.
       ...(workflow ? { routingFingerprint: workflowRoutingFingerprint(workflow) } : {}),
     });
@@ -1031,11 +1196,14 @@ export class WorkflowEngine {
       ...CLOSED_APPROVAL,
       waitUntil: undefined,
       waitStartedAt: undefined,
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
     });
     if (!patched) return fresh;
     // A cancelled gate's card must not keep offering a decision the engine
     // can no longer take.
     this.settleApprovalCards(fresh, "unavailable");
+    const where = patched.currentNodeId === undefined ? " before its first node" : ` at node "${patched.currentNodeId}"`;
+    this.announce(patched, "cancelled", `run cancelled${where}`);
     this.drainQueue(patched.workflowId);
     return patched;
   }
@@ -1156,13 +1324,16 @@ export class WorkflowEngine {
       run.approvalThreadIds === undefined || merged.length !== known.length
         ? (this.store.patchRun(run.id, { approvalThreadIds: merged }) ?? run)
         : run;
-    const message =
+    // The notification goes through the one funnel every transition uses
+    // (announce: the person's channel, then the audit room), worded as the
+    // watchdog and the outage word theirs — workflow, node, cause.
+    const body =
       kind === "approval"
-        ? node.prompt
+        ? `needs approval at node "${node.id}": ${node.prompt}`
         : kind === "reminder"
-          ? `Reminder: ${node.prompt}`
-          : `Still waiting for your decision (asked again, ${round} of ${maxRounds}): ${node.prompt}`;
-    return this.safeNotify(current, message, kind);
+          ? `still needs approval at node "${node.id}" (reminder): ${node.prompt}`
+          : `still needs approval at node "${node.id}" (asked again, ${round} of ${maxRounds}): ${node.prompt}`;
+    return this.announce(current, kind, body);
   }
 
   handleRuntimeEvent(event: RuntimeEvent): void {
@@ -1281,6 +1452,10 @@ export class WorkflowEngine {
       outage: undefined,
       waitUntil: undefined,
       waitStartedAt: undefined,
+      // The node is done: whatever the successor is (even this same node,
+      // on a self-loop), the stay the watchdog measures starts now.
+      nodeEnteredAt: this.now(),
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
     });
     if (!patched) return;
     this.follow(patched, workflow, node, result.outcome);
@@ -1315,9 +1490,16 @@ export class WorkflowEngine {
         );
         return;
       }
-      // Pure sink: the graph deliberately ends here.
-      const patched = this.store.patchRun(run.id, { status: "completed", endedAt: this.now() });
-      if (patched) this.drainQueue(patched.workflowId);
+      // Pure sink: the graph deliberately ends here. A finished run is news
+      // too — the summary of its last step is what the person would have
+      // opened the app to read.
+      const endedAt = this.now();
+      const patched = this.store.patchRun(run.id, { status: "completed", endedAt, stuckNotifiedAt: undefined, stuckAnnouncements: undefined });
+      if (!patched) return;
+      const last = patched.nodeResults[patched.nodeResults.length - 1];
+      const summary = last === undefined ? "" : ` — last step "${last.nodeId}": ${last.outcome} — ${last.summary}`;
+      this.announce(patched, "completed", `run completed after ${formatDuration(endedAt - patched.startedAt)}${summary}`);
+      this.drainQueue(patched.workflowId);
       return;
     }
     this.failNode(run.id, `no edge is wired for outcome "${outcome}" of node "${node.id}"`);
@@ -1353,16 +1535,17 @@ export class WorkflowEngine {
         return;
       }
     }
+    const entry = this.nodeEntry(run, node.id);
     if (node.kind === "approval") {
-      this.openApproval(runId, workflow, node);
+      this.openApproval(runId, workflow, node, entry);
       return;
     }
     if (node.kind === "notify") {
-      this.executeNotify(run, workflow, node);
+      this.executeNotify(run, workflow, node, entry);
       return;
     }
     if (node.kind === "wait") {
-      this.parkOnWait(runId, workflow, node);
+      this.parkOnWait(runId, workflow, node, entry);
       return;
     }
     const dispatchBotId = botId ?? node.botId;
@@ -1401,6 +1584,7 @@ export class WorkflowEngine {
       // aimed at the fallback stays aimed at it (currentBotId = botId), so
       // the reconciler waits for THAT bot rather than the node's own.
       this.store.patchRun(runId, {
+        ...entry,
         currentNodeId: node.id,
         nextAttemptAt: this.now(),
         dispatchedAt: undefined,
@@ -1423,6 +1607,7 @@ export class WorkflowEngine {
       return;
     }
     const patched = this.store.patchRun(runId, {
+      ...entry,
       currentNodeId: node.id,
       currentThreadId: task.threadId,
       currentBotId: dispatchBotId,
@@ -1439,6 +1624,20 @@ export class WorkflowEngine {
     // node's own list — never the primary's keys on the fallback's turn.
     const grants = effectiveGrants(this.options.botGrants?.(dispatchBotId), node);
     this.startTurnSafely(node, dispatchBotId, task.threadId, _buildNodePrompt(workflow, node, patched, grants), runId);
+  }
+
+  /** The watchdog's clock, folded into the dispatch's own write: entering
+   * a DIFFERENT node than the receipt names starts a fresh stay and drops
+   * any stuck marker; a re-dispatch of the same node (a retry, a park that
+   * freed, a fallback hand-off) keeps the stay running, because "three dead
+   * attempts on one node" is one long stay to the person waiting on it. */
+  private nodeEntry(run: WorkflowRun, nodeId: string): NodeEntry {
+    if (run.currentNodeId !== nodeId) return { nodeEnteredAt: this.now(), stuckNotifiedAt: undefined, stuckAnnouncements: undefined };
+    // A receipt written before the stamp existed: fix the stay at what the
+    // old fields say BEFORE this dispatch overwrites `dispatchedAt`, so an
+    // upgrade under a run that has sat for a day does not read as "just
+    // arrived".
+    return run.nodeEnteredAt === undefined ? { nodeEnteredAt: nodeSince(run) } : {};
   }
 
   /** Bot work already done in this run: agent turns and approval gates. A
@@ -1491,7 +1690,7 @@ export class WorkflowEngine {
         waitStartedAt: undefined,
       });
       if (!patched) return;
-      this.safeNotify(patched, `Workflow "${workflow.name}" run completed: ${reason}`, "cap-reached");
+      this.announce(patched, "cap-reached", `run completed: ${reason}`);
       this.drainQueue(patched.workflowId);
       return;
     }
@@ -1509,10 +1708,11 @@ export class WorkflowEngine {
    * a persisted instant the tick's sweepWaits watches. The receipt names
    * the node first so a crash leaves "waiting on this node until then",
    * which recoverStranded deliberately leaves alone. */
-  private parkOnWait(runId: string, workflow: Workflow, node: WaitNode): void {
+  private parkOnWait(runId: string, workflow: Workflow, node: WaitNode, entry: NodeEntry): void {
     const now = this.now();
     const due = now + node.minutes * 60_000;
     this.store.patchRun(runId, {
+      ...entry,
       currentNodeId: node.id,
       // Already inside the trigger's window when it has one, so the receipt
       // names the instant the run will actually move (sweepWaits re-checks
@@ -1531,9 +1731,11 @@ export class WorkflowEngine {
    * The park is persisted BEFORE the reach, so a crash between the two
    * leaves a receipt with no `approvalThreadIds`, which the sweep posts on
    * its next pass. From here the sweep in tick() owns the deadline, the
-   * reminder and the re-notifications. */
-  private openApproval(runId: string, workflow: Workflow, node: ApprovalNode): void {
+   * reminder and the re-notifications. `entry` is the watchdog's clock:
+   * a gate is a stay like any other node's. */
+  private openApproval(runId: string, workflow: Workflow, node: ApprovalNode, entry: NodeEntry): void {
     const patched = this.store.patchRun(runId, {
+      ...entry,
       status: "waiting-approval",
       currentNodeId: node.id,
       ...CLOSED_APPROVAL,
@@ -1554,9 +1756,10 @@ export class WorkflowEngine {
    * notifications are at-least-once across a crash. Recording "sent" first
    * would make them at-most-once, and a dropped alert is the worse failure
    * for a 24/7 workflow. */
-  private executeNotify(run: WorkflowRun, workflow: Workflow, node: NotifyNode): void {
+  private executeNotify(run: WorkflowRun, workflow: Workflow, node: NotifyNode, entry: NodeEntry): void {
     // The receipt names this node before anything can fail on its behalf.
     const parked = this.store.patchRun(run.id, {
+      ...entry,
       currentNodeId: node.id,
       dispatchedAt: undefined,
       nextAttemptAt: undefined,
@@ -1698,6 +1901,13 @@ export class WorkflowEngine {
       horizonSpent = true;
       const hours = Math.round(((this.now() - outcome.since) / 3_600_000) * 10) / 10;
       reason = `the provider stayed unavailable for ${hours}h (${outcome.attempts} attempts): ${outcome.reason}`;
+      // The second of the outage's two announcements — but only when the
+      // run goes ON along its failed edge: with nowhere to go, failNode
+      // below announces the same cause as the run's terminal failure, and
+      // one event is one notification.
+      if (this.failedEdgeOf(workflow, run) !== undefined) {
+        this.announce(run, "outage", `gave up waiting for the provider at node "${node.id}" after ${hours}h (${outcome.attempts} attempts): ${outcome.reason} — taking the "${WORKFLOW_FAIL_OUTCOME}" edge`);
+      }
     } else if (run.outage !== undefined) {
       // A failure that is NOT the outage means the provider answered: the
       // outage is over, and the node's ordinary budget judges what follows.
@@ -1720,9 +1930,7 @@ export class WorkflowEngine {
       return;
     }
     const explained = withDenials(reason, denials);
-    const failedEdge = workflow?.edges.find(
-      (candidate) => candidate.from === run.currentNodeId && candidate.outcome === WORKFLOW_FAIL_OUTCOME,
-    );
+    const failedEdge = this.failedEdgeOf(workflow, run);
     if (workflow && node && failedEdge) {
       // Exhaustion is an outcome like any other: it goes through the same
       // advance path, so the receipt is cleaned the same way.
@@ -1739,6 +1947,13 @@ export class WorkflowEngine {
       return;
     }
     this.failNode(runId, explained);
+  }
+
+  /** The drawn "failed" edge out of the run's current node, if any. */
+  private failedEdgeOf(workflow: Workflow | null | undefined, run: WorkflowRun) {
+    return workflow?.edges.find(
+      (candidate) => candidate.from === run.currentNodeId && candidate.outcome === WORKFLOW_FAIL_OUTCOME,
+    );
   }
 
   /** A provider-outage failure of an agent node. Three ways out, in order:
@@ -1775,27 +1990,39 @@ export class WorkflowEngine {
       this.fallbackEligible(node, fallbackBotId)
     ) {
       const handed = this.store.patchRun(run.id, {
-        outage: { ...outage, fallbackBotId },
+        outage: { ...outage, fallbackBotId, waitUntil: undefined },
         dispatchedAt: undefined,
         currentThreadId: undefined,
         currentBotId: undefined,
         nextAttemptAt: undefined,
         repromptedAt: undefined,
       });
-      if (handed) this.dispatchNode(run.id, node.id, fallbackBotId);
+      if (!handed) return "waiting";
+      this.announce(handed, "fallback", `handed node "${node.id}" to fallback bot "${fallbackBotId}" because: ${outage.reason}`);
+      this.dispatchNode(run.id, node.id, fallbackBotId);
       return "waiting";
     }
     const attempts = outage.attempts + 1;
     const nextAttemptAt = now + outageDelayMs(attempts, capMs, this.random);
     if (nextAttemptAt > outage.until) return outage;
-    this.store.patchRun(run.id, {
-      outage: { ...outage, attempts },
+    const parked = this.store.patchRun(run.id, {
+      outage: { ...outage, attempts, waitUntil: nextAttemptAt },
       nextAttemptAt,
       dispatchedAt: undefined,
       currentThreadId: undefined,
       currentBotId: undefined,
       repromptedAt: undefined,
     });
+    // The first of the outage's two announcements: the run is waiting, and
+    // for how long at most. Every later wait is the same news and stays
+    // quiet; the horizon giving up is the second announcement.
+    if (parked && attempts === 1) {
+      this.announce(
+        parked,
+        "outage",
+        `is waiting out a provider outage at node "${node.id}": next attempt in ${formatDuration(nextAttemptAt - now)}, giving up after ${formatDuration(horizonMs)} — ${outage.reason}`,
+      );
+    }
     return "waiting";
   }
 
@@ -1841,18 +2068,14 @@ export class WorkflowEngine {
       ...CLOSED_APPROVAL,
       waitUntil: undefined,
       waitStartedAt: undefined,
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
     });
     if (!patched) return;
     // A gate that died under the run (its node edited away) leaves a card
     // that can no longer be answered; say so on the card too.
     this.settleApprovalCards(run, "unavailable");
-    const workflow = this.store.get(patched.workflowId);
     const where = patched.currentNodeId === undefined ? "" : ` at node "${patched.currentNodeId}"`;
-    this.safeNotify(
-      patched,
-      `Workflow "${workflow?.name ?? patched.workflowId}" run failed${where}: ${patched.error ?? explained}`,
-      "failed",
-    );
+    this.announce(patched, "failed", `run failed${where}: ${patched.error ?? explained}`);
     this.drainQueue(patched.workflowId);
   }
 
@@ -1892,6 +2115,9 @@ export class WorkflowEngine {
     const promoted = this.store.patchRun(oldest.id, {
       status: "running",
       routingFingerprint: workflowRoutingFingerprint(workflow),
+      // Time spent queued behind another run is not time stuck on a node.
+      nodeEnteredAt: this.now(),
+      stuckNotifiedAt: undefined, stuckAnnouncements: undefined,
     });
     if (!promoted) return;
     // A freshly queued run starts at the entry; a resumed one re-queued
@@ -1899,20 +2125,50 @@ export class WorkflowEngine {
     this.dispatchNode(oldest.id, promoted.currentNodeId ?? workflow.entryNodeId);
   }
 
-  /** notifyUser is a wrapper the engine does not control. A throw there must
-   * neither escape into tick() (an unhandled rejection kills the process) nor
-   * pass for delivery: callers persist a "sent" marker only on `true`. Same
-   * stance as RoutineManager.notifyRunChanged — reporting is secondary to
-   * engine truth, and the run state is already on disk by the time this is
+  /** The one place a transition is told about. `body` is the subject-less
+   * sentence ("run failed at node …"); the person hears `Workflow "X" …`
+   * and the workflow's audit room, when it names one, gets the same line
+   * as `[X] …` through the notify nodes' channel path — a message that
+   * reads the same on the phone and in the room's history.
+   *
+   * notifyUser and postGroupMessage are wrappers the engine does not
+   * control. A throw in either must neither escape into tick() (an
+   * unhandled rejection kills the process) nor pass for delivery: callers
+   * persist a "sent" marker only on `true`, which the PERSON's channel
+   * decides — the audit room is secondary, and a room that vanished is
+   * logged, not a reason to repeat a notification. Same stance as
+   * RoutineManager.notifyRunChanged: reporting is secondary to engine
+   * truth, and the run state is already on disk by the time this is
    * called. */
-  private safeNotify(run: WorkflowRun, message: string, kind: WorkflowNotificationKind): boolean {
+  private announce(run: WorkflowRun, kind: WorkflowNotificationKind, body: string): boolean {
+    const workflow = this.store.get(run.workflowId);
+    const name = workflow?.name ?? run.workflowId;
+    let delivered = true;
     try {
-      this.options.notifyUser?.(run, message, kind);
-      return true;
+      this.options.notifyUser?.(run, `Workflow "${name}" ${body}`, kind);
     } catch (error) {
       console.error(`workflow: notifyUser (${kind}) failed for run ${run.id}`, error);
-      return false;
+      delivered = false;
     }
+    const auditGroupId = workflow?.auditGroupId;
+    const post = this.options.postGroupMessage;
+    if (!delivered) {
+      // Callers retry on the next tick when the person's channel failed;
+      // posting the room copy now would repeat it on every retry.
+    } else if (auditGroupId !== undefined && post && this.options.groupExists?.(auditGroupId) === false) {
+      // A deleted room is a warning on the canvas, not a reason to touch
+      // the run; the person was told above.
+      console.warn(`workflow: audit room "${auditGroupId}" of ${name} no longer exists; ${kind} not posted`);
+    } else if (auditGroupId !== undefined && post) {
+      try {
+        // Scrubbed as a notify node's text is: this leaves the process.
+        const returned: unknown = post(auditGroupId, redactSecretsInText(`[${name}] ${body}`));
+        if (isThenable(returned)) void returned.then(undefined, () => {});
+      } catch (error) {
+        console.warn(`workflow: audit room post (${kind}) failed for run ${run.id}: ${errorMessage(error)}`);
+      }
+    }
+    return delivered;
   }
 
   private forgetThread(threadId: string): void {

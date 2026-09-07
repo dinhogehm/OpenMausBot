@@ -100,9 +100,9 @@ export interface WorkflowGraphEdge {
 }
 
 /** What a client may PATCH. The engine-owned fields (`id`, `createdAt`,
- * `updatedAt`, `nextRunAt`) are absent by construction, not by filtering:
- * the server strips `nextRunAt`, but a canvas that sent it would still be
- * claiming to own scheduler state. */
+ * `updatedAt`, `nextRunAt`, `lastDigestAt`) are absent by construction, not
+ * by filtering: the server strips them, but a canvas that sent them would
+ * still be claiming to own scheduler state. */
 export interface WorkflowPatchBody {
   name: string;
   description: string | null;
@@ -112,6 +112,9 @@ export interface WorkflowPatchBody {
   layout: Record<string, XY>;
   triggers: WorkflowTriggers | null;
   maxNodeExecutions: number | null;
+  stuckAfterMinutes: number | null;
+  auditGroupId: string | null;
+  digestAt: string | null;
 }
 
 /** Where a node with no saved layout entry lands. Deterministic so two
@@ -486,9 +489,9 @@ export function createWorkflowNode(
   }
 }
 
-/** `null` on the three clearable fields is how the API is told to drop them;
+/** `null` on the clearable fields is how the API is told to drop them;
  * omitting a key means "leave alone", which would make removing a schedule
- * impossible. */
+ * — or turning the audit room off — impossible. */
 export function workflowPatchBody(workflow: Workflow): WorkflowPatchBody {
   return {
     name: workflow.name,
@@ -499,5 +502,8 @@ export function workflowPatchBody(workflow: Workflow): WorkflowPatchBody {
     layout: workflow.layout,
     triggers: workflow.triggers ?? null,
     maxNodeExecutions: workflow.maxNodeExecutions ?? null,
+    stuckAfterMinutes: workflow.stuckAfterMinutes ?? null,
+    auditGroupId: workflow.auditGroupId ?? null,
+    digestAt: workflow.digestAt ?? null,
   };
 }

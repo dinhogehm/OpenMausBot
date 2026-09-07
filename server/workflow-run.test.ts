@@ -531,7 +531,9 @@ describe("WorkflowEngine startRun", () => {
     expect(run.approvalRequestedAt).toBe(1_000);
     expect(h.tasks).toHaveLength(0);
     expect(h.dispatches).toHaveLength(0);
-    expect(h.notifications).toEqual([{ runId: run.id, message: "OK to proceed?", kind: "approval" }]);
+    expect(h.notifications).toEqual([
+      { runId: run.id, message: 'Workflow "Gate" needs approval at node "gate": OK to proceed?', kind: "approval" },
+    ]);
   });
 
   it("fails the run when the bot's task cannot be created", () => {
@@ -1566,7 +1568,9 @@ describe("WorkflowEngine approval gate", () => {
     expect(waiting.nextAttemptAt).toBeUndefined();
     expect(h.tasks).toHaveLength(1);
     expect(h.dispatches).toHaveLength(1);
-    expect(h.notifications).toEqual([{ runId, message: "OK to proceed?", kind: "approval" }]);
+    expect(h.notifications).toEqual([
+      { runId, message: 'Workflow "Gated" needs approval at node "gate": OK to proceed?', kind: "approval" },
+    ]);
 
     // The superseded thread routes nothing, and the reconciler leaves an open
     // gate alone: no timeout, no orphan re-dispatch.
@@ -1641,7 +1645,10 @@ describe("WorkflowEngine approval gate", () => {
     });
     expect(h.dispatches[1]!.botId).toBe("merger");
     // Expiry is not a failure: the only extra notification is the reminder.
-    expect(h.notifications.map((n) => n.message)).toEqual(["OK to proceed?", "Reminder: OK to proceed?"]);
+    expect(h.notifications.map((n) => n.message)).toEqual([
+      'Workflow "Gated" needs approval at node "gate": OK to proceed?',
+      'Workflow "Gated" still needs approval at node "gate" (reminder): OK to proceed?',
+    ]);
   });
 
   it("defaults to a 24h window and rejection", async () => {
@@ -1672,8 +1679,8 @@ describe("WorkflowEngine approval gate", () => {
     h.setNow(2_000 + HOUR);
     await h.engine.tick();
     expect(h.notifications).toEqual([
-      { runId, message: "OK to proceed?", kind: "approval" },
-      { runId, message: "Reminder: OK to proceed?", kind: "reminder" },
+      { runId, message: 'Workflow "Gated" needs approval at node "gate": OK to proceed?', kind: "approval" },
+      { runId, message: 'Workflow "Gated" still needs approval at node "gate" (reminder): OK to proceed?', kind: "reminder" },
     ]);
     expect(h.reload().getRun(runId)!.approvalRemindedAt).toBe(2_000 + HOUR);
 
@@ -1723,9 +1730,16 @@ describe("WorkflowEngine approval gate", () => {
     const promoted = h.store.getRun(second.id)!;
     expect(promoted.status).toBe("waiting-approval");
     expect(promoted.approvalRequestedAt).toBe(3_000);
+    // The decision completed the first run — news in its own right — and
+    // the promotion opened the second gate.
     expect(h.notifications).toEqual([
-      { runId: first.id, message: "OK to proceed?", kind: "approval" },
-      { runId: second.id, message: "OK to proceed?", kind: "approval" },
+      { runId: first.id, message: 'Workflow "Gate" needs approval at node "gate": OK to proceed?', kind: "approval" },
+      {
+        runId: first.id,
+        message: 'Workflow "Gate" run completed after under a minute — last step "gate": approved — approved by user',
+        kind: "completed",
+      },
+      { runId: second.id, message: 'Workflow "Gate" needs approval at node "gate": OK to proceed?', kind: "approval" },
     ]);
   });
 
@@ -1762,7 +1776,7 @@ describe("WorkflowEngine approval reach", () => {
     expect(h.announcements).toEqual([
       { runId, nodeId: "gate", kind: "approval", round: 0, maxRounds: 5, summary: "plan ready", requestedAt: 2_000 },
     ]);
-    expect(h.notifications).toEqual([{ runId, message: "OK to proceed?", kind: "approval" }]);
+    expect(h.notifications).toEqual([{ runId, message: 'Workflow "Gated" needs approval at node "gate": OK to proceed?', kind: "approval" }]);
     const waiting = h.reload().getRun(runId)!;
     expect(waiting.approvalThreadIds).toEqual(["chat-1"]);
     expect(waiting.approvalRenotified).toBeUndefined();
@@ -1827,7 +1841,7 @@ describe("WorkflowEngine approval reach", () => {
     try {
       const workflow = h.store.create(gated());
       const runId = reachGate(h, workflow.id);
-      expect(h.notifications).toEqual([{ runId, message: "OK to proceed?", kind: "approval" }]);
+      expect(h.notifications).toEqual([{ runId, message: 'Workflow "Gated" needs approval at node "gate": OK to proceed?', kind: "approval" }]);
       expect(h.store.getRun(runId)!.approvalThreadIds).toEqual([]);
       h.setNow(3_000);
       await h.engine.tick();
@@ -1854,7 +1868,7 @@ describe("WorkflowEngine approval reach", () => {
     h.setNow(3_000);
     await restarted.engine.tick();
     expect(h.announcements.map((a) => a.kind)).toEqual(["approval", "approval"]);
-    expect(restarted.notifications).toEqual([{ runId, message: "OK to proceed?", kind: "approval" }]);
+    expect(restarted.notifications).toEqual([{ runId, message: 'Workflow "Gated" needs approval at node "gate": OK to proceed?', kind: "approval" }]);
     expect(restarted.store.getRun(runId)!.approvalThreadIds).toEqual(["chat-1"]);
     // Still the same gate opening: the card's request id did not change.
     expect(h.announcements[1]!.requestedAt).toBe(2_000);
@@ -1867,7 +1881,7 @@ describe("WorkflowEngine approval reach", () => {
     h.setNow(2_000 + HOUR);
     await h.engine.tick();
     expect(h.announcements.map((a) => a.kind)).toEqual(["approval", "reminder"]);
-    expect(h.notifications[1]).toEqual({ runId, message: "Reminder: OK to proceed?", kind: "reminder" });
+    expect(h.notifications[1]).toEqual({ runId, message: 'Workflow "Gated" still needs approval at node "gate" (reminder): OK to proceed?', kind: "reminder" });
     expect(h.reload().getRun(runId)!.approvalNotices).toEqual([{ at: 2_000 + HOUR, kind: "reminder" }]);
 
     h.setNow(2_000 + HOUR + 60_000);
@@ -1898,7 +1912,7 @@ describe("WorkflowEngine approval reach", () => {
     expect(h.announcements.map((a) => [a.kind, a.round])).toEqual([["approval", 0], ["reminder", 0], ["renotify", 1]]);
     expect(h.notifications[2]).toEqual({
       runId,
-      message: "Still waiting for your decision (asked again, 1 of 2): OK to proceed?",
+      message: 'Workflow "Gated" still needs approval at node "gate" (asked again, 1 of 2): OK to proceed?',
       kind: "renotify",
     });
     expect(h.dispatches).toHaveLength(1);
@@ -2288,7 +2302,11 @@ describe("WorkflowEngine notification safety", () => {
       h.failNotifications(null);
       h.setNow(2_000 + HOUR + 20_000);
       await h.engine.tick();
-      expect(h.notifications[1]).toEqual({ runId, message: "Reminder: OK to proceed?", kind: "reminder" });
+      expect(h.notifications[1]).toEqual({
+        runId,
+        message: 'Workflow "Gated" still needs approval at node "gate" (reminder): OK to proceed?',
+        kind: "reminder",
+      });
       expect(h.reload().getRun(runId)!.approvalRemindedAt).toBe(2_000 + HOUR + 20_000);
 
       await h.engine.tick();
@@ -2422,7 +2440,9 @@ describe("WorkflowEngine definition changes under a live run", () => {
     h.completeTurn("thread-2", envelope("shipped"));
     expect(h.store.getRun(run.id)?.status).toBe("completed");
     expect(h.store.getRun(run.id)?.error).toBeUndefined();
-    expect(h.notifications).toEqual([]);
+    // No failure was announced — only the completion, under the NEW name.
+    expect(h.notifications.map((n) => n.kind)).toEqual(["completed"]);
+    expect(h.notifications[0]!.message).toMatch(/^Workflow "Renamed mid-run" run completed/);
   });
 
   it("re-stamps a promoted run and a resumed one against the graph they will traverse", () => {
@@ -2847,7 +2867,7 @@ describe("WorkflowEngine schedules", () => {
       endedAt: 10_000 + 2 * HOUR,
       error: 'invalid workflow: Node "ship" requires "deploy" but its bot "shipper" is not allowed to deploy.',
     });
-    expect(h.notifications).toEqual([
+    expect(h.notifications.filter((n) => n.kind === "failed")).toEqual([
       { runId: runs[0]!.id, message: expect.stringMatching(/Release.*not started: .*not allowed to deploy/), kind: "failed" },
     ]);
     expect(h.dispatches).toHaveLength(2);
@@ -2988,7 +3008,8 @@ describe("WorkflowEngine approval and notify edge cases", () => {
     h.setNow(4_000 + 48 * HOUR);
     await h.engine.tick(); // a cancelled gate is neither reminded nor expired
     expect(h.store.getRun(first.id)!.status).toBe("cancelled");
-    expect(h.notifications.filter((n) => n.runId === first.id)).toHaveLength(1);
+    // The gate opening and the cancellation itself — nothing after.
+    expect(h.notifications.filter((n) => n.runId === first.id).map((n) => n.kind)).toEqual(["approval", "cancelled"]);
   });
 
   it("rejects an unknown decision string without touching the gate", () => {
@@ -3029,7 +3050,7 @@ describe("WorkflowEngine approval and notify edge cases", () => {
     expect(waiting.nodeResults.map((result) => `${result.nodeId}:${result.outcome}`)).toEqual(["plan:failed", "ping:sent"]);
     expect(h.notifications[h.notifications.length - 1]).toEqual({
       runId: run.id,
-      message: "Retry manually?",
+      message: 'Workflow "Guarded" needs approval at node "gate": Retry manually?',
       kind: "approval",
     });
 
