@@ -996,6 +996,14 @@ export class WorkflowEngine {
         this.launch(run.id, run.currentNodeId ?? workflow.entryNodeId);
         continue;
       }
+      // A run that never reached its first node (the process died between
+      // the receipt's creation and launch's own write, or a receipt from a
+      // build with no pre-flight) is a START, not an orphaned dispatch: it
+      // goes through launch so the workflow's checks are not skipped.
+      if (run.currentNodeId === undefined) {
+        this.launch(run.id, workflow.entryNodeId);
+        continue;
+      }
       const last = run.nodeResults[run.nodeResults.length - 1];
       if (run.currentNodeId !== undefined && last?.nodeId === run.currentNodeId) {
         const node = workflow.nodes.find((candidate) => candidate.id === run.currentNodeId);
@@ -1006,7 +1014,7 @@ export class WorkflowEngine {
         this.follow(run, workflow, node, last.outcome);
         continue;
       }
-      this.dispatchNode(run.id, run.currentNodeId ?? workflow.entryNodeId, this.parkedFallbackBot(run));
+      this.dispatchNode(run.id, run.currentNodeId, this.parkedFallbackBot(run));
     }
   }
 
@@ -1372,6 +1380,13 @@ export class WorkflowEngine {
       // has presumably seen the provider come back.
       outage: undefined,
       currentBotId: undefined,
+      // A terminal receipt keeps its thread and dispatch time so the failed
+      // transcript is one click away; a run brought back to life must not,
+      // or a re-queued resume carries a dead thread and a stale dispatch
+      // instant through the queue until its promotion overwrites them.
+      currentThreadId: undefined,
+      dispatchedAt: undefined,
+      repromptedAt: undefined,
       // A resume is a fresh stay on the node: the watchdog's clock and its
       // marker start over, or a run resumed after a day away would be
       // announced as stuck on its first tick.
