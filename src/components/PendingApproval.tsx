@@ -44,6 +44,12 @@ export function isProfileApproval(pending: Pending): boolean {
   return Boolean(pending.message.card?.profileRequest);
 }
 
+/** A workflow gate's card: durable like a proposal (no turn to cancel), but
+ * its two answers are a decision on a run, not a permission. */
+export function isWorkflowApproval(pending: Pending): boolean {
+  return Boolean(pending.message.card?.workflowApproval);
+}
+
 /** Open approvals on a thread, oldest first — answered/dismissed drop out. */
 export function pendingApprovals(messages: Message[]): Pending[] {
   return messages
@@ -66,6 +72,10 @@ export function spokenApprovalPrompt(pending: Pending, requester: string): strin
   const isRoutineRequest = isRoutineApproval(pending);
   const isSkillRequest = isSkillApproval(pending);
   const isProfileRequest = isProfileApproval(pending);
+  if (isWorkflowApproval(pending)) {
+    const title = pending.message.card?.title.trim() || t("approval.voice.defaultWorkflowGate");
+    return t("approval.voice.workflow", { requester, title });
+  }
   if (isSkillRequest) {
     const updating = pending.message.card?.skillRequest?.action === "update";
     const title = pending.message.card?.title.trim() || t(
@@ -95,6 +105,7 @@ export function spokenApprovalPrompt(pending: Pending, requester: string): strin
 }
 
 function label(pending: Pending): string {
+  if (isWorkflowApproval(pending)) return t("approval.label.workflowGate");
   if (isSkillApproval(pending)) {
     return pending.message.card?.skillRequest?.action === "update"
       ? t("approval.label.updateSkill")
@@ -134,13 +145,15 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
     <div
       role="region"
       aria-label={
-        isSkillApproval(pending)
-          ? t("approval.aria.pendingSkill")
-          : isRoutineApproval(pending)
-            ? t("approval.aria.pendingRoutine")
-            : isProfileApproval(pending)
-              ? t("approval.aria.pendingProfile")
-              : t("approval.aria.pending")
+        isWorkflowApproval(pending)
+          ? t("approval.aria.pendingWorkflow")
+          : isSkillApproval(pending)
+            ? t("approval.aria.pendingSkill")
+            : isRoutineApproval(pending)
+              ? t("approval.aria.pendingRoutine")
+              : isProfileApproval(pending)
+                ? t("approval.aria.pendingProfile")
+                : t("approval.aria.pending")
       }
       className="rounded-t-2xl border-b border-hairline/50 bg-control/40 px-4 py-3"
     >
@@ -206,7 +219,8 @@ export function PendingApprovalActions({
   const isRoutineRequest = isRoutineApproval(pending);
   const isSkillRequest = isSkillApproval(pending);
   const isProfileRequest = isProfileApproval(pending);
-  const durableRequest = isRoutineRequest || isSkillRequest || isProfileRequest;
+  const isWorkflowGate = isWorkflowApproval(pending);
+  const durableRequest = isRoutineRequest || isSkillRequest || isProfileRequest || isWorkflowGate;
   const reviewedSha256 = pending.message.card?.skillRequest
     ? reviewedSkillSha256(pending.message.card.skillRequest)
     : undefined;
@@ -216,7 +230,7 @@ export function PendingApprovalActions({
       threadId,
       requestId: pending.requestId,
       behavior,
-      message: behavior === "deny" ? "Denied by the user." : undefined,
+      message: behavior === "deny" ? (isWorkflowGate ? "Rejected by the user." : "Denied by the user.") : undefined,
       reviewedSha256: behavior === "allow" ? reviewedSha256 : undefined,
       alwaysAllow: always && bot && pending.allowKey ? { botId: bot.id, key: pending.allowKey } : undefined,
     });
@@ -233,7 +247,11 @@ export function PendingApprovalActions({
         onClick={() => decide("deny")}
         className={cn(base, "border border-danger/40 text-danger hover:bg-danger/10")}
       >
-        {isRoutineRequest || isProfileRequest ? t("approval.action.cancel") : t("approval.action.deny")}
+        {isWorkflowGate
+          ? t("approval.action.reject")
+          : isRoutineRequest || isProfileRequest
+            ? t("approval.action.cancel")
+            : t("approval.action.deny")}
       </button>
       {!durableRequest && bot && pending.allowKey && (
         <button
@@ -252,13 +270,15 @@ export function PendingApprovalActions({
           "bg-accent font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40",
         )}
       >
-        {isSkillRequest
-          ? pending.message.card?.skillRequest?.action === "update"
-            ? t("approval.action.update")
-            : t("approval.action.enable")
-          : isRoutineRequest || isProfileRequest
-            ? t("approval.action.confirm")
-            : t("approval.action.allowOnce")}
+        {isWorkflowGate
+          ? t("approval.action.approve")
+          : isSkillRequest
+            ? pending.message.card?.skillRequest?.action === "update"
+              ? t("approval.action.update")
+              : t("approval.action.enable")
+            : isRoutineRequest || isProfileRequest
+              ? t("approval.action.confirm")
+              : t("approval.action.allowOnce")}
       </button>
     </div>
   );

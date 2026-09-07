@@ -19,6 +19,7 @@ import { isMissedWorkflowRun } from "@/lib/workflow-state";
 import { excerpt } from "./WorkflowNodeCard";
 import {
   workflowOutageWaitMessage,
+  type WorkflowApprovalNotice,
   type WorkflowNodeResult,
   type WorkflowRun,
   type WorkflowRunStatus,
@@ -48,6 +49,21 @@ function formatWhen(at: number): string {
 function formatWaitUntil(at: number, now: number): string {
   const time = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return new Date(at).toDateString() === new Date(now).toDateString() ? time : formatWhen(at);
+}
+
+/** A settled gate's nudges as one line: "reminded at …, re-notified 2× (…)"
+ * — the count is what a reader scans for, the instants are the detail. */
+export function approvalNoticesLine(notices: readonly WorkflowApprovalNotice[]): string {
+  const reminders = notices.filter((notice) => notice.kind === "reminder");
+  const renotified = notices.filter((notice) => notice.kind === "renotify");
+  const parts: string[] = [];
+  if (reminders.length > 0) {
+    parts.push(reminders.length === 1 ? `reminder sent at ${formatWhen(reminders[0]!.at)}` : `${reminders.length} reminders sent`);
+  }
+  if (renotified.length > 0) {
+    parts.push(`re-notified ${renotified.length}× (${renotified.map((notice) => formatWhen(notice.at)).join(", ")})`);
+  }
+  return parts.join(" · ");
 }
 
 /** A completed run may still carry a reason it ENDED — the execution cap
@@ -255,6 +271,14 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                         {excerpt(result.fallback.because, 120)}
                       </p>
                     )}
+                    {result.notices && result.notices.length > 0 && (
+                      // A gate's own history: how many times the person was
+                      // nudged before this decision. One line, so a gate
+                      // that asked five times reads as such at a glance.
+                      <p className="mt-0.5 break-words text-[10.5px] leading-snug text-ink-secondary">
+                        {approvalNoticesLine(result.notices)}
+                      </p>
+                    )}
                   </>
                 );
                 const openable = result.threadId !== undefined && onOpenStep !== undefined;
@@ -282,6 +306,33 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                 );
               })}
             </ol>
+          )}
+
+          {run.status === "waiting-approval" && run.approvalRequestedAt !== undefined && (
+            // The open gate, as the engine keeps it: since when, whether the
+            // halfway reminder went out, how many times it asked again. The
+            // card the person answers is in the chat; this is the receipt
+            // in the making.
+            <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-accent">
+              <Hourglass size={10} aria-hidden className="mt-0.5 shrink-0" />
+              <span className="min-w-0 break-words">
+                Waiting for a decision since <span className="tabular-nums">{formatWhen(run.approvalRequestedAt)}</span>
+                {run.currentNodeId && <span className="font-mono"> · {run.currentNodeId}</span>}
+                {run.approvalRemindedAt !== undefined && (
+                  <>
+                    {" "}
+                    · reminder sent at <span className="tabular-nums">{formatWhen(run.approvalRemindedAt)}</span>
+                  </>
+                )}
+                {(run.approvalRenotified ?? 0) > 0 && run.approvalRenotifiedAt !== undefined && (
+                  <>
+                    {" "}
+                    · re-notified {run.approvalRenotified}× (last at{" "}
+                    <span className="tabular-nums">{formatWhen(run.approvalRenotifiedAt)}</span>)
+                  </>
+                )}
+              </span>
+            </p>
           )}
 
           {run.status === "running" && run.waitUntil !== undefined && (

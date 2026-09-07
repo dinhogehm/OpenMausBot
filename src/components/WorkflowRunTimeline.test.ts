@@ -260,3 +260,64 @@ describe("WorkflowRunTimeline — provider outage and fallback", () => {
     expect(flat).not.toContain("Waiting for the provider");
   });
 });
+
+describe("WorkflowRunTimeline — approval gate", () => {
+  const when = (at: number) => new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const opened = 1_700_000_010_000;
+  const reminded = opened + 3_600_000;
+  const renotified = opened + 7_200_000;
+
+  it("says since when the gate is waiting, and nothing more while nothing more happened", () => {
+    const waiting = run({ status: "waiting-approval", currentNodeId: "gate", approvalRequestedAt: opened, nodeResults: [step({ nodeId: "plan" })] });
+    const flat = text(panel({ runs: [waiting], run: waiting }));
+    expect(flat).toContain(`Waiting for a decision since ${when(opened)}`);
+    expect(flat).toContain("· gate");
+    expect(flat).not.toContain("reminder sent");
+    expect(flat).not.toContain("re-notified");
+  });
+
+  it("adds the reminder and the re-notification count as they happen", () => {
+    const nudged = run({
+      status: "waiting-approval",
+      currentNodeId: "gate",
+      approvalRequestedAt: opened,
+      approvalRemindedAt: reminded,
+      approvalRenotified: 2,
+      approvalRenotifiedAt: renotified,
+    });
+    const flat = text(panel({ runs: [nudged], run: nudged }));
+    expect(flat).toContain(`reminder sent at ${when(reminded)}`);
+    expect(flat).toContain(`re-notified 2× (last at ${when(renotified)} )`);
+    // A settled run keeps no waiting line, even on a stale receipt.
+    const settled = run({ status: "running", approvalRequestedAt: opened });
+    expect(text(panel({ runs: [settled], run: settled }))).not.toContain("Waiting for a decision");
+  });
+
+  it("prints a settled gate's notices under its step: reminders and re-notifications", () => {
+    const decided = run({
+      status: "completed",
+      endedAt: NOW,
+      nodeResults: [
+        step({ nodeId: "plan" }),
+        step({
+          nodeId: "gate",
+          outcome: "approved",
+          summary: "approved by user",
+          notices: [
+            { at: reminded, kind: "reminder" },
+            { at: renotified, kind: "renotify" },
+            { at: renotified + 3_600_000, kind: "reminder" },
+            { at: renotified + 7_200_000, kind: "renotify" },
+          ],
+        }),
+      ],
+    });
+    const flat = text(panel({ runs: [decided], run: decided }));
+    expect(flat).toContain(`2 reminders sent · re-notified 2× (${when(renotified)}, ${when(renotified + 7_200_000)})`);
+    const once = run({ nodeResults: [step({ nodeId: "gate", outcome: "rejected", notices: [{ at: reminded, kind: "reminder" }] })] });
+    expect(text(panel({ runs: [once], run: once }))).toContain(`reminder sent at ${when(reminded)}`);
+    // A step without notices prints no empty line.
+    const plain = run({ nodeResults: [step({ nodeId: "gate", outcome: "approved" })] });
+    expect(text(panel({ runs: [plain], run: plain }))).not.toContain("reminder");
+  });
+});

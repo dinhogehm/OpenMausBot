@@ -23,9 +23,13 @@ import {
   WORKFLOW_NODE_RETRIES_DEFAULT,
   WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN,
   WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H,
+  WORKFLOW_APPROVAL_RENOTIFY_DEFAULT,
+  WORKFLOW_APPROVAL_RENOTIFY_MAX,
+  WORKFLOW_APPROVAL_RENOTIFY_MIN,
   WORKFLOW_WAIT_MINUTES_MAX,
   WORKFLOW_WAIT_MINUTES_MIN,
   type BotCapabilities,
+  type WorkflowApprovalOnExpire,
   type WorkflowIssue,
   type WorkflowNode,
 } from "../../shared/workflow";
@@ -46,6 +50,15 @@ export type WorkflowPanelBot = BotAvatarProps["bot"] &
     engine?: string;
   };
 type AgentNode = Extract<WorkflowNode, { kind: "agent" }>;
+type ApprovalNode = Extract<WorkflowNode, { kind: "approval" }>;
+
+/** A node with one optional knob removed — how "none" is written, since an
+ * `undefined` value would still be a key the JSON body carries. */
+function withoutKey<K extends keyof ApprovalNode>(node: ApprovalNode, key: K): ApprovalNode {
+  const copy = { ...node };
+  delete copy[key];
+  return copy;
+}
 
 /** What the picker prints for a bot: its name, then the permissions it
  * holds, then whether it is hidden. A native `<option>` can carry text and
@@ -635,17 +648,21 @@ export function WorkflowNodePanel({
                   value={node.onExpire ?? ""}
                   onChange={(event) => {
                     const value = event.target.value;
-                    onUpdate({
-                      ...node,
-                      onExpire: value === "" ? undefined : (value as (typeof WORKFLOW_APPROVAL_OUTCOMES)[number]),
-                    });
+                    // Leaving the renotify policy drops its round count too:
+                    // a knob that no longer applies must not linger in the
+                    // document and come back the next time it is picked.
+                    const next = value === "" ? undefined : (value as WorkflowApprovalOnExpire);
+                    const base = next === "renotify" ? node : withoutKey(node, "maxRenotify");
+                    onUpdate(next === undefined ? withoutKey(base, "onExpire") : { ...base, onExpire: next });
                   }}
                   className={cn(FIELD, "mt-1")}
                 >
                   {/* The engine falls back to `rejected` when onExpire is unset
-                      (sweepApprovals: `node.onExpire ?? "rejected"`), so the default
-                      must not promise a failure it never produces. */}
-                  <option value="">Route to rejected (default)</option>
+                      (sweepApprovals: `node.onExpire ?? "rejected"`), so the unset
+                      choice must not promise anything else. New gates from the
+                      palette start on renotify. */}
+                  <option value="">Route to rejected (unset)</option>
+                  <option value="renotify">Ask again, then route to rejected</option>
                   {WORKFLOW_APPROVAL_OUTCOMES.map((outcome) => (
                     <option key={outcome} value={outcome}>
                       Route to {outcome}
@@ -653,6 +670,63 @@ export function WorkflowNodePanel({
                   ))}
                 </select>
               </div>
+            </div>
+            {node.onExpire === "renotify" && (
+              <div>
+                <NumberField
+                  id={field("max-renotify")}
+                  label="Ask again up to (times)"
+                  hint={String(WORKFLOW_APPROVAL_RENOTIFY_DEFAULT)}
+                  value={node.maxRenotify}
+                  min={WORKFLOW_APPROVAL_RENOTIFY_MIN}
+                  step={1}
+                  onChange={(maxRenotify) => onUpdate({ ...node, maxRenotify })}
+                />
+                <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+                  Each time the window runs out with no decision, the gate re-arms it and asks again — a fresh
+                  notification on every device, the card refreshed in the chat and the room ({WORKFLOW_APPROVAL_RENOTIFY_MIN}–
+                  {WORKFLOW_APPROVAL_RENOTIFY_MAX} rounds). Only after the last round does it route to rejected.
+                </p>
+              </div>
+            )}
+            <div>
+              <label className={LABEL} htmlFor={field("approval-room")}>
+                Also ask in room
+              </label>
+              <select
+                id={field("approval-room")}
+                value={
+                  node.notifyTargetGroupId !== undefined && groups.some((group) => group.id === node.notifyTargetGroupId)
+                    ? node.notifyTargetGroupId
+                    : node.notifyTargetGroupId === undefined
+                      ? ""
+                      : "missing"
+                }
+                onChange={(event) => {
+                  const value = event.target.value;
+                  // "None" drops the key rather than writing an empty id the
+                  // validator would flag.
+                  onUpdate(value === "" ? withoutKey(node, "notifyTargetGroupId") : { ...node, notifyTargetGroupId: value });
+                }}
+                className={cn(FIELD, "mt-1")}
+              >
+                <option value="">None — the bot's chat only</option>
+                {node.notifyTargetGroupId !== undefined && !groups.some((group) => group.id === node.notifyTargetGroupId) && (
+                  <option value="missing" disabled>
+                    Missing room {node.notifyTargetGroupId}
+                  </option>
+                )}
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+                The decision card always lands in the chat of the bot that ran the previous step (it opens from the
+                notification). Pick a room to post the same card there too; a decision in either place, or here on
+                the canvas, settles the gate once.
+              </p>
             </div>
           </>
         )}

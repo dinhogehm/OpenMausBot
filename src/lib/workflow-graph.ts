@@ -14,6 +14,7 @@
 //     unwiring a branch is the one outcome nobody wants. Deleting an outcome
 //     is the explicit way to drop its edge.
 import {
+  WORKFLOW_APPROVAL_ON_EXPIRE_DEFAULT_NEW,
   WORKFLOW_FAIL_OUTCOME,
   nodeOutcomes,
   type Workflow,
@@ -474,7 +475,10 @@ export function createWorkflowNode(
     case "agent":
       return seed.botId ? { kind, id, botId: seed.botId, instructions: "", outcomes: ["done"] } : null;
     case "approval":
-      return { kind, id, prompt: "" };
+      // A NEW gate asks again on expiry instead of discarding the work;
+      // the engine's fallback for an absent policy stays `rejected`, so
+      // gates saved before the choice existed are unchanged.
+      return { kind, id, prompt: "", onExpire: WORKFLOW_APPROVAL_ON_EXPIRE_DEFAULT_NEW };
     case "notify":
       return seed.targetGroupId ? { kind, id, targetGroupId: seed.targetGroupId, template: "" } : null;
     case "wait":

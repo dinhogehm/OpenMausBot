@@ -354,3 +354,50 @@ describe("ApprovalCard learned skills", () => {
       .toContain("propose the update again");
   });
 });
+
+describe("ApprovalCard workflow gates", () => {
+  const scout: Bot = {
+    id: "bot-1",
+    name: "Scout",
+    threadId: "thread-1",
+    color: "green",
+    messages: [],
+  } as unknown as Bot;
+  const gateCard = (answered?: string): NonNullable<Message["card"]> => ({
+    title: 'Workflow "Delivery" needs your decision at "merge-gate"',
+    subtitle: "Merge PR #42?\n\nPrevious step: tests green",
+    options: ["Approve", "Deny"],
+    requestId: "workflow-approval:run-1:merge-gate:20",
+    tool: "workflow_approval",
+    held: "Waiting for a decision since 1970-01-01T00:00:00.020Z; if nobody answers, the workflow asks again up to 5 times and then rejects.",
+    workflowApproval: { runId: "run-1", workflowId: "wf-1", nodeId: "merge-gate" },
+    ...(answered ? { answered } : {}),
+  });
+  const message = (answered?: string): Message => ({ id: "gate-card", role: "bot", kind: "options", at: 1, card: gateCard(answered) });
+
+  it("reads as the workflow waiting on the person, with the prompt, the previous step and the expiry note", () => {
+    const html = renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message() }));
+    expect(html).toContain("Scout&#x27;s workflow needs your decision");
+    expect(html).not.toContain("wants to");
+    expect(html).toContain("Merge PR #42?");
+    expect(html).toContain("Previous step: tests green");
+    expect(html).toContain("asks again up to 5 times");
+    expect(html).toContain("Waiting for your decision");
+  });
+
+  it("records the decision — approved, rejected, or closed by the run moving on", () => {
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message("allow") }))).toContain("Approved — the run continues");
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message("deny") }))).toContain("Rejected — the run takes its rejected path");
+    expect(renderToStaticMarkup(createElement(ApprovalCard, { bot: scout, message: message("unavailable") }))).toContain("No longer waiting");
+  });
+
+  it("takes over the composer as a workflow decision and is spoken by its title, not its body", () => {
+    const pending: Pending = { message: message(), requestId: gateCard().requestId!, tool: "workflow_approval", detail: gateCard().subtitle };
+    const strip = renderToStaticMarkup(createElement(PendingApprovalPanel, { pending, count: 1, index: 0 }));
+    expect(strip).toContain("Decide the workflow gate");
+    expect(strip).toContain('aria-label="Pending workflow decision"');
+    expect(spokenApprovalPrompt(pending, "Mochi")).toBe(
+      "Mochi's workflow needs your decision: Workflow \"Delivery\" needs your decision at \"merge-gate\"",
+    );
+  });
+});
