@@ -125,6 +125,31 @@ Send the event to the webhook's `/hooks/…` endpoint on the local receiver with
 - **Notify nodes are at-least-once across a crash.** The engine records that it reached a notify node before it posts, so a crash in that instant re-posts the message on recovery rather than dropping it. A duplicate alert is the better failure.
 - **Editing the routing of a live workflow fails that run.** Moving nodes, renaming the workflow, editing instructions, changing a schedule — all safe while a run is in flight. Deleting an edge, deleting a node, or renaming an outcome is not: the run in flight is failed closed the moment it reaches a step whose path you removed, rather than reporting success for a pipeline it only half walked. Resume it (or start a fresh one) once you are done editing.
 
+### What you are told, and where
+
+A pipeline that runs while you sleep has to be able to wake you — and to say what happened without you opening the app. Every run announces its transitions as a notification on the desktop and on a paired phone, and each one names the workflow, the node and the cause in one sentence:
+
+| Event | What you get |
+|---|---|
+| Waiting for approval | `Workflow "Release" needs approval at node "merge": Ship it?` — and one reminder at the halfway mark |
+| Finished | `Workflow "Release" run completed after 42m — last step "announce": sent — Deployed v2.3 to prod.` |
+| Failed | `Workflow "Release" run failed at node "deploy": <the reason, including any tool the node was denied>` |
+| Cancelled | `Workflow "Release" run cancelled at node "code"` |
+| Provider outage | one notification when the run starts waiting (`next attempt in 1m, giving up after 6h`), and one if the wait runs out |
+| Fallback bot | `Workflow "Release" handed node "code" to fallback bot "Rook" because: …` |
+| Missed or refused schedule | the same failure notification a missed slot always sent |
+| **Stuck** | see below |
+
+One notification per transition — a wait of six hours is announced once, not every ten seconds.
+
+**A run that stops moving is announced.** The watchdog watches every live run: if its current node has not changed for longer than the workflow's patience (**Announce a stuck run after**, in the Schedule panel; default two hours, 10 minutes to a day), you get `Workflow "Release" run stuck at node "code" for 2h 6m (bot "Dev", attempt 2 of 3, turn live for 1h 6m) — last step review: changes-requested — …`. Retries of the same node do not reset the clock — three dead attempts on one node are one long stay — and neither does a restart of the app. It speaks once, then at most once per further period — twelve times at most for one stay, and the twelfth says it is the last — and goes quiet the moment the run moves on. Wait nodes are never "stuck" (waiting is their job); a run waiting out a provider outage has its own two notifications instead, and the hours the provider was away are not counted against it once it is moving again; an approval gate is judged against its own expiry — for a gate that asks again, against every round it allows, so a gate still reaching you is never also "stuck".
+
+**An audit room, if you want one.** Pick a room under **Audit room** in the Schedule panel and every one of those lines is also posted there, prefixed with the workflow's name: `[Release] run stuck at node "code" for 2h 6m …`. It is the same channel a notify node posts to, so the room's history is the run's history, readable from the phone. A room that no longer exists is a warning on the canvas and the posts are skipped — you are still notified, and the run still starts and runs: a deleted room must never stop a pipeline built to never stop.
+
+**A daily digest.** Turn on **Post a daily digest** and pick a time: at that time each day you get one line over the runs that ended since the previous digest (a day, by the wall clock) — how many completed, failed and were cancelled, the average run time, the nodes that failed most and the permission denials seen most. A day with nothing still says so. It goes out once per slot, never twice across a restart; a computer that slept through several days sends one on waking.
+
+**A health endpoint for a monitor.** `GET /api/workflows/health` (same session as the rest of the API) answers with a stable JSON document: `ok` (false while any run is stuck), the engine's version, uptime and last reconciler pass, how many runs are live and which are stuck, and per workflow the next scheduled slot, the live run, the last run and the last failure. Point an uptime robot at it and alert on `ok: false` or on `engine.lastTickAt` falling behind `now`.
+
 ## Permissions: what a workflow turn may approve on its own
 
 Every workflow node runs unattended — started by a schedule, a webhook, or an edge, with nobody at the keyboard. Two kinds of permission exist on a bot, and a workflow treats them differently:
