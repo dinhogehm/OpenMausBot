@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   capabilityIssues,
   countsTowardExecutionCap,
+  isValidPreflightPattern,
   missingCapabilities,
   nodeOutcomes,
   parseWorkflowOutcome,
@@ -775,5 +776,106 @@ describe("fallback bot and provider outage", () => {
     );
     expect(workflowOutageWaitMessage({ outage }, () => "x")).toBeNull();
     expect(workflowOutageWaitMessage({ nextAttemptAt: 42 }, () => "x")).toBeNull();
+  });
+});
+
+describe("pre-flight", () => {
+  const badPreflight = (preflight: unknown) =>
+    validateWorkflow(wf({ preflight: preflight as Workflow["preflight"] }))
+      .filter((issue) => issue.code === "bad-preflight")
+      .map((issue) => issue.message);
+
+  it("validateWorkflow accepts an absent pre-flight, an empty one, and every well-formed check kind", () => {
+    expect(badPreflight(undefined)).toEqual([]);
+    expect(badPreflight({ checks: [] })).toEqual([]);
+    expect(
+      badPreflight({
+        timeoutSeconds: 30,
+        checks: [
+          { kind: "command", name: "gh", command: "gh auth status" },
+          { kind: "command", name: "clean tree", command: "git status --porcelain", cwd: "/repo", expectExitCode: 0, expectStdoutMatch: "^$" },
+          { kind: "bots-ready", name: "bots" },
+          { kind: "bots-ready", name: "some bots", botIds: ["b1", "b2"] },
+          { kind: "engine-health", name: "engine", botId: "b1" },
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it("validateWorkflow flags a blank or repeated name — the receipt names the check that refused the run", () => {
+    expect(badPreflight({ checks: [{ kind: "bots-ready", name: "" }] })).toEqual(["Pre-flight check 1 needs a name."]);
+    expect(badPreflight({ checks: [{ kind: "bots-ready", name: "   " }] })).toEqual(["Pre-flight check 1 needs a name."]);
+    expect(
+      badPreflight({
+        checks: [
+          { kind: "bots-ready", name: "same" },
+          { kind: "engine-health", name: "same", botId: "b1" },
+        ],
+      }),
+    ).toEqual(['Pre-flight check 2 repeats the name "same"; every check needs its own.']);
+  });
+
+  it("validateWorkflow flags an empty command, a bad cwd, a fractional exit code and an invalid regex", () => {
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "" }] })).toEqual([
+      'Pre-flight check "gh" has no command to run.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "  " }] })).toHaveLength(1);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "gh", cwd: "" }] })).toEqual([
+      'Pre-flight check "gh" cwd must be a directory path.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "gh", expectExitCode: 1.5 }] })).toEqual([
+      'Pre-flight check "gh" expectExitCode must be a whole number.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "gh", expectStdoutMatch: "(" }] })).toEqual([
+      'Pre-flight check "gh" expectStdoutMatch is not a valid regular expression.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "command", name: "gh", command: "gh", expectStdoutMatch: 3 }] })).toHaveLength(1);
+  });
+
+  it("validateWorkflow flags an out-of-range or fractional timeout", () => {
+    const only = (timeoutSeconds: unknown) => badPreflight({ checks: [], timeoutSeconds });
+    expect(only(5)).toEqual([]);
+    expect(only(300)).toEqual([]);
+    expect(only(4)).toEqual(["preflight.timeoutSeconds must be a whole number from 5 to 300."]);
+    expect(only(301)).toHaveLength(1);
+    expect(only(10.5)).toHaveLength(1);
+    expect(only("60")).toHaveLength(1);
+  });
+
+  it("validateWorkflow flags the shapes a raw body may carry: a non-object, a non-list, an unknown kind, bad bot lists", () => {
+    expect(badPreflight("gh auth status")).toEqual(["preflight must be an object with a list of checks."]);
+    expect(badPreflight({ checks: "gh" })).toEqual(["preflight.checks must be a list."]);
+    expect(badPreflight({ checks: ["gh"] })).toEqual(["Pre-flight check 1 must be an object."]);
+    expect(badPreflight({ checks: [{ kind: "ping", name: "p" }] })).toEqual([
+      'Pre-flight check "p" kind must be command, bots-ready or engine-health.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "bots-ready", name: "b", botIds: ["b1", ""] }] })).toEqual([
+      'Pre-flight check "b" botIds must be a list of bot ids.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "bots-ready", name: "b", botIds: ["b1", "b1"] }] })).toEqual([
+      'Pre-flight check "b" lists the same bot more than once.',
+    ]);
+    expect(badPreflight({ checks: [{ kind: "engine-health", name: "e", botId: "" }] })).toEqual([
+      'Pre-flight check "e" needs the bot whose engine to check.',
+    ]);
+  });
+
+  it("a bad pre-flight is an error — it gates execution like every other shape problem", () => {
+    const issue = validateWorkflow(wf({ preflight: { checks: [{ kind: "command", name: "x", command: "" }] } })).find(
+      (candidate) => candidate.code === "bad-preflight",
+    );
+    expect(issue?.severity).toBe("error");
+    expect(issue?.nodeId).toBeUndefined();
+  });
+
+  it("the pre-flight never changes the routing fingerprint — it gates a start, it steers nothing", () => {
+    expect(workflowRoutingFingerprint(wf({ preflight: { checks: [{ kind: "bots-ready", name: "b" }] } }))).toBe(
+      workflowRoutingFingerprint(wf()),
+    );
+  });
+
+  it("isValidPreflightPattern says whether the engine could compile the regex", () => {
+    expect(isValidPreflightPattern("^$")).toBe(true);
+    expect(isValidPreflightPattern("(")).toBe(false);
   });
 });

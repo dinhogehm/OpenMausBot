@@ -39,6 +39,14 @@ export const WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H = 24;
  * lasted longer than the horizon. Both knobs live on the workflow. */
 export const WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN = 60;
 export const WORKFLOW_OUTAGE_HORIZON_DEFAULT_H = 6;
+/** Bounds for the pre-flight's global timeout: every check runs inside one
+ * deadline, short enough that a hung `gh` never holds a slot for long, long
+ * enough for a real network round trip. */
+export const WORKFLOW_PREFLIGHT_TIMEOUT_DEFAULT_S = 60;
+export const WORKFLOW_PREFLIGHT_TIMEOUT_MIN_S = 5;
+export const WORKFLOW_PREFLIGHT_TIMEOUT_MAX_S = 300;
+/** How much of a check's output the receipt keeps, per stream. */
+export const WORKFLOW_PREFLIGHT_OUTPUT_MAX = 500;
 /** A scheduled run more than this late (the computer was asleep or the app
  * closed past the slot) is recorded as missed, never executed late — the
  * same 12-hour catch-up window routines use. */
@@ -151,6 +159,62 @@ export interface WorkflowProviderOutage {
   horizonHours?: number;
 }
 
+/** One pre-flight check: a question about the ENVIRONMENT a run is about
+ * to start in, asked before any bot turn is dispatched, so a token that
+ * lost a scope, a provider that is already down or a bot that is busy is
+ * said out loud before forty-five minutes of bot time are spent finding
+ * out. Three kinds:
+ *
+ * - `command` runs a program through the server's own identity (its user,
+ *   its environment, the app's augmented PATH) under `/bin/sh -c` — no
+ *   interactive shell, no TTY — and passes when the exit code is the
+ *   expected one (0 unless said otherwise) and, when given, stdout matches
+ *   `expectStdoutMatch` (a regular expression; an EMPTY stdout is asserted
+ *   with `^$`). Nothing from a run's input is ever interpolated into it:
+ *   the command is exactly the string the workflow's author saved.
+ * - `bots-ready` asks the engine whether every bot the workflow's agent
+ *   nodes use (or only `botIds`) exists and is not busy.
+ * - `engine-health` asks the driver behind a bot's model engine for its
+ *   snapshot — CLI present, signed in — which costs no tokens. */
+export type WorkflowPreflightCheck =
+  | {
+      kind: "command";
+      name: string;
+      command: string;
+      cwd?: string;
+      expectExitCode?: number;
+      expectStdoutMatch?: string;
+    }
+  | { kind: "bots-ready"; name: string; botIds?: string[] }
+  | { kind: "engine-health"; name: string; botId: string };
+
+export interface WorkflowPreflight {
+  checks: WorkflowPreflightCheck[];
+  /** One deadline for the whole set, in seconds (bounds above). */
+  timeoutSeconds?: number;
+}
+
+/** What one check answered, as the run's receipt and the "Test pre-flight"
+ * button both show it. Output is already bounded and scrubbed of secrets
+ * by the time it is here — it is persisted and broadcast as is. */
+export interface WorkflowPreflightCheckResult {
+  name: string;
+  kind: WorkflowPreflightCheck["kind"];
+  ok: boolean;
+  durationMs: number;
+  /** Why it failed, or what it found: the exit code, the missing bot, the
+   * engine's own reason. One line. */
+  detail: string;
+  stdout?: string;
+  stderr?: string;
+}
+
+export interface WorkflowPreflightResult {
+  at: number;
+  ok: boolean;
+  checks: WorkflowPreflightCheckResult[];
+}
+
 export interface Workflow {
   id: string;
   name: string;
@@ -162,6 +226,9 @@ export interface Workflow {
   triggers?: WorkflowTriggers;
   maxNodeExecutions?: number;
   providerOutage?: WorkflowProviderOutage;
+  /** Checks a run must pass before its first node is dispatched. Absent or
+   * empty: nothing is checked, exactly as before this existed. */
+  preflight?: WorkflowPreflight;
   /** Engine-owned timing state for `triggers.schedule`, in three states:
    * `undefined` — not armed yet, so the engine computes the first slot;
    * a number — the instant the schedule next fires;
@@ -288,6 +355,18 @@ export interface WorkflowRun {
    * sweep never sees a wait as a dispatch, and persisted rather than
    * derived from the node's minutes — which may be edited mid-pause. */
   waitStartedAt?: number;
+  /** Set while the run's pre-flight checks are in flight (engine
+   * bookkeeping): the run is "running" with no thread and no timer, and
+   * this is what tells the reconciler after a restart to re-run the checks
+   * rather than dispatch the node they were guarding. Cleared in the same
+   * write that records `preflight`. */
+  preflightStartedAt?: number;
+  /** The pre-flight's verdict, check by check, once it has run — what the
+   * timeline shows above the steps. A run refused by it is `failed` with
+   * `error` naming the check; a run that passed keeps the receipt too, so
+   * "it was fine at 09:00" is on record. Absent on runs of a workflow with
+   * no checks and on receipts written before this existed. */
+  preflight?: WorkflowPreflightResult;
   input: string;
   nodeResults: WorkflowNodeResult[];
   error?: string;
@@ -411,7 +490,8 @@ export interface WorkflowIssue {
     | "fallback-same-bot"
     | "fallback-missing-bot"
     | "fallback-missing-capability"
-    | "cycle-without-wait";
+    | "cycle-without-wait"
+    | "bad-preflight";
   nodeId?: string;
   message: string;
 }
@@ -626,6 +706,8 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
     }
   }
 
+  issues.push(...preflightIssues(workflow.preflight));
+
   // A schedule the scheduler could not arm must never be persisted: a
   // malformed time never matches a wall clock, an empty weekday set never
   // fires, a day outside 0..6 is a slot that does not exist.
@@ -833,6 +915,99 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
     }
   }
 
+  return issues;
+}
+
+/** Whether a string is a regular expression the engine could run. Kept
+ * apart so the panel can judge a half-typed pattern the same way. */
+export function isValidPreflightPattern(pattern: string): boolean {
+  try {
+    new RegExp(pattern);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The pre-flight's shape rules. Every check is named — the receipt and the
+ * notification say WHICH check refused the run, so a blank or repeated name
+ * would leave that sentence pointing nowhere. A blank command is nothing to
+ * run; an invalid regex would throw at the moment of the check; a timeout
+ * outside its bounds is either a check that cannot finish or a slot held
+ * for minutes. Shapes a raw JSON body may carry (a non-list, a string in a
+ * number's place) are refused too, as every other knob's are. */
+function preflightIssues(preflight: unknown): WorkflowIssue[] {
+  const issues: WorkflowIssue[] = [];
+  if (preflight === undefined) return issues;
+  const bad = (message: string) => {
+    issues.push({ severity: "error", code: "bad-preflight", message });
+  };
+  if (typeof preflight !== "object" || preflight === null || Array.isArray(preflight)) {
+    bad("preflight must be an object with a list of checks.");
+    return issues;
+  }
+  const { checks, timeoutSeconds } = preflight as Partial<WorkflowPreflight>;
+  if (
+    timeoutSeconds !== undefined &&
+    (typeof timeoutSeconds !== "number" ||
+      !Number.isInteger(timeoutSeconds) ||
+      timeoutSeconds < WORKFLOW_PREFLIGHT_TIMEOUT_MIN_S ||
+      timeoutSeconds > WORKFLOW_PREFLIGHT_TIMEOUT_MAX_S)
+  ) {
+    bad(
+      `preflight.timeoutSeconds must be a whole number from ${WORKFLOW_PREFLIGHT_TIMEOUT_MIN_S} to ${WORKFLOW_PREFLIGHT_TIMEOUT_MAX_S}.`,
+    );
+  }
+  if (!Array.isArray(checks)) {
+    bad("preflight.checks must be a list.");
+    return issues;
+  }
+  const names = new Set<string>();
+  checks.forEach((check: unknown, index) => {
+    const label = `Pre-flight check ${index + 1}`;
+    if (typeof check !== "object" || check === null || Array.isArray(check)) {
+      bad(`${label} must be an object.`);
+      return;
+    }
+    const raw = check as Record<string, unknown>;
+    const name = raw.name;
+    if (typeof name !== "string" || name.trim() === "") {
+      bad(`${label} needs a name.`);
+    } else if (names.has(name)) {
+      bad(`${label} repeats the name "${name}"; every check needs its own.`);
+    } else {
+      names.add(name);
+    }
+    const who = typeof name === "string" && name.trim() !== "" ? `Pre-flight check "${name}"` : label;
+    const kind = raw.kind;
+    if (kind === "command") {
+      if (typeof raw.command !== "string" || raw.command.trim() === "") bad(`${who} has no command to run.`);
+      if (raw.cwd !== undefined && (typeof raw.cwd !== "string" || raw.cwd.trim() === "")) {
+        bad(`${who} cwd must be a directory path.`);
+      }
+      if (raw.expectExitCode !== undefined && !(typeof raw.expectExitCode === "number" && Number.isInteger(raw.expectExitCode))) {
+        bad(`${who} expectExitCode must be a whole number.`);
+      }
+      if (raw.expectStdoutMatch !== undefined) {
+        if (typeof raw.expectStdoutMatch !== "string" || !isValidPreflightPattern(raw.expectStdoutMatch)) {
+          bad(`${who} expectStdoutMatch is not a valid regular expression.`);
+        }
+      }
+    } else if (kind === "bots-ready") {
+      const botIds = raw.botIds;
+      if (botIds !== undefined) {
+        if (!Array.isArray(botIds) || botIds.some((id) => typeof id !== "string" || id.trim() === "")) {
+          bad(`${who} botIds must be a list of bot ids.`);
+        } else if (new Set(botIds).size !== botIds.length) {
+          bad(`${who} lists the same bot more than once.`);
+        }
+      }
+    } else if (kind === "engine-health") {
+      if (typeof raw.botId !== "string" || raw.botId.trim() === "") bad(`${who} needs the bot whose engine to check.`);
+    } else {
+      bad(`${who} kind must be command, bots-ready or engine-health.`);
+    }
+  });
   return issues;
 }
 
