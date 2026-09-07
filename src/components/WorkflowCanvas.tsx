@@ -124,6 +124,9 @@ import {
 import {
   WORKFLOW_INTERVAL_MINUTES_MIN,
   WORKFLOW_SCHEDULE_TIME_RE,
+  WORKFLOW_STUCK_AFTER_DEFAULT_MIN,
+  WORKFLOW_STUCK_AFTER_MAX,
+  WORKFLOW_STUCK_AFTER_MIN,
   validateWorkflow,
   type Workflow,
   type WorkflowActiveHours,
@@ -215,17 +218,28 @@ function toLocalInput(at: number): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-/** Writes `triggers.schedule`. Every candidate goes through the shared
- * validator's `bad-schedule` rule first: the API refuses a malformed schedule
- * at the door, so an unarmable one must never reach the debounced save. */
+/** The workflow-level monitoring knobs the panel edits beside the trigger:
+ * where every transition is mirrored, how long a run may sit on one node
+ * before the watchdog speaks, and when the daily digest goes out. */
+export type WorkflowMonitoring = Pick<Workflow, "auditGroupId" | "stuckAfterMinutes" | "digestAt">;
+
+/** Writes `triggers.schedule` and the monitoring fields. Every candidate
+ * goes through the shared validator first (`bad-schedule`, `bad-numbers`,
+ * `bad-digest`): the API refuses a malformed schedule or digest time at the
+ * door, so an unarmable one must never reach the debounced save. */
 function TriggersPanel({
   workflow,
+  groups,
   onChange,
+  onMonitoringChange,
   onClose,
   anchorRef,
 }: {
   workflow: Workflow;
+  /** Rooms the audit trail may be posted to (id and name). */
+  groups: ReadonlyArray<{ id: string; name: string }>;
   onChange: (triggers: WorkflowTriggers | undefined) => void;
+  onMonitoringChange: (patch: WorkflowMonitoring) => void;
   onClose: () => void;
   /** The toggle that opened this, so a click on it is not treated as an
    * outside click (which would close and immediately reopen), and so focus
@@ -238,6 +252,9 @@ function TriggersPanel({
   // typing "60" passes through "6", and each intermediate value would be a
   // schedule change the store answers by resetting the armed clock.
   const [minutesDraft, setMinutesDraft] = useState<string | null>(null);
+  /** Same blur-commit rule for the watchdog's patience: "120" passes
+   * through "1" and "12", both under the validator's floor. */
+  const [stuckDraft, setStuckDraft] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -293,6 +310,22 @@ function TriggersPanel({
     else if (mode === "interval") commit({ type: "interval", minutes: 60 });
     else commit({ type: "once", at: Date.now() + 60 * 60_000 });
   };
+
+  /** The monitoring fields are judged as the whole document too, so a
+   * digest time the clock could not read or a patience outside the band
+   * is a message in the panel, never a document the API would refuse. */
+  const commitMonitoring = (patch: WorkflowMonitoring) => {
+    const bad = validateWorkflow({ ...workflow, ...patch }).find(
+      (issue) => issue.code === "bad-digest" || (issue.code === "bad-numbers" && issue.nodeId === undefined && "stuckAfterMinutes" in patch),
+    );
+    if (bad) {
+      setError(bad.message);
+      return;
+    }
+    setError(null);
+    onMonitoringChange(patch);
+  };
+  const auditRoomKnown = workflow.auditGroupId === undefined || groups.some((group) => group.id === workflow.auditGroupId);
 
   const mode = schedule?.type ?? "none";
   /** The window editor writes whole objects: every field change is
@@ -531,6 +564,103 @@ function TriggersPanel({
         </div>
       )}
 
+      <div className="mt-3 space-y-2.5 border-t border-hairline/40 pt-2.5">
+        <h3 className="text-[12px] font-semibold text-ink">Monitoring</h3>
+        <div>
+          <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-audit-room">
+            Audit room
+          </label>
+          <select
+            id="wf-audit-room"
+            value={workflow.auditGroupId ?? ""}
+            onChange={(event) => commitMonitoring({ auditGroupId: event.target.value === "" ? undefined : event.target.value })}
+            className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent"
+          >
+            <option value="">Off — notify me only</option>
+            {!auditRoomKnown && (
+              <option value={workflow.auditGroupId} disabled>
+                Missing room {workflow.auditGroupId}
+              </option>
+            )}
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.name}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+            Everything a run announces — waiting for approval, stuck, a provider outage, a fallback hand-off, failed,
+            cancelled, finished, the daily digest — is also posted here, prefixed with the workflow&apos;s name.
+          </p>
+        </div>
+        <div>
+          <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-stuck-after">
+            Announce a stuck run after (minutes)
+          </label>
+          <input
+            id="wf-stuck-after"
+            type="number"
+            inputMode="numeric"
+            min={WORKFLOW_STUCK_AFTER_MIN}
+            max={WORKFLOW_STUCK_AFTER_MAX}
+            step={5}
+            placeholder={String(WORKFLOW_STUCK_AFTER_DEFAULT_MIN)}
+            value={stuckDraft ?? (workflow.stuckAfterMinutes === undefined ? "" : String(workflow.stuckAfterMinutes))}
+            onChange={(event) => setStuckDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+            onBlur={() => {
+              if (stuckDraft === null) return;
+              const raw = stuckDraft.trim();
+              setStuckDraft(null);
+              // Blank puts the default back (the key is dropped).
+              const minutes = raw === "" ? undefined : Number(raw);
+              if (minutes !== workflow.stuckAfterMinutes) commitMonitoring({ stuckAfterMinutes: minutes });
+            }}
+            className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
+          />
+          <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+            A run that has not moved to another node for this long is announced once, then at most once per further
+            period. Retries of the same node do not reset it. Wait nodes are exempt; a gate is judged on its own expiry.
+          </p>
+        </div>
+        <label className="flex items-center gap-2 text-[11.5px] text-ink">
+          <input
+            type="checkbox"
+            checked={workflow.digestAt !== undefined}
+            onChange={(event) => commitMonitoring({ digestAt: event.target.checked ? "18:00" : undefined })}
+            className="accent-accent"
+          />
+          Post a daily digest
+        </label>
+        {workflow.digestAt !== undefined && (
+          <div>
+            <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-digest-at">
+              Digest time
+            </label>
+            <input
+              id="wf-digest-at"
+              type="time"
+              value={workflow.digestAt}
+              onChange={(event) => {
+                const time = event.target.value;
+                if (!WORKFLOW_SCHEDULE_TIME_RE.test(time)) {
+                  setError("digestAt must be HH:MM (24-hour).");
+                  return;
+                }
+                commitMonitoring({ digestAt: time });
+              }}
+              className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
+            />
+            <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
+              Runs that ended in the 24 hours before this time: how many completed, failed and were cancelled, the
+              average run time, the nodes that failed most and the denials seen most.
+            </p>
+          </div>
+        )}
+      </div>
+
       {error && (
         <p role="alert" className="mt-2.5 rounded-lg bg-danger/10 px-2.5 py-1.5 text-[11.5px] text-danger">
           {error}
@@ -647,7 +777,8 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   // profile repaints the node that requires it with no save in between. The
   // list draws the same union, so the two can never disagree.
   const lookup = useMemo(() => capabilityLookup(state.bots), [state.bots]);
-  const issues = useMemo(() => liveWorkflowIssues(doc, lookup), [doc, lookup]);
+  const groupExists = useCallback((groupId: string) => groups.some((group) => group.id === groupId), [groups]);
+  const issues = useMemo(() => liveWorkflowIssues(doc, lookup, groupExists), [doc, lookup, groupExists]);
   const { errors, warnings } = validationSummary(issues);
   const headerIssues = useMemo(() => documentIssues(issues), [issues]);
   const nodeIssues = useMemo(() => issuesByNode(issues), [issues]);
@@ -1229,8 +1360,10 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                   {scheduleOpen && (
                     <TriggersPanel
                       workflow={doc}
+                      groups={groups}
                       anchorRef={scheduleButtonRef}
                       onChange={(triggers) => commit((current) => ({ ...current, triggers }))}
+                      onMonitoringChange={(patch) => commit((current) => ({ ...current, ...patch }))}
                       onClose={() => setScheduleOpen(false)}
                     />
                   )}

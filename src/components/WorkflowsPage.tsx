@@ -396,7 +396,10 @@ export function WorkflowsPage() {
   // depend on the bots' flags, which arrive on their own `bot` frames, so a
   // permission flipped in a profile has to move the badge and the Run gate
   // here without a save or a reload — the same union the canvas draws.
-  const workflows = useMemo(() => withLiveIssues(state.workflows, state.bots), [state.workflows, state.bots]);
+  const workflows = useMemo(
+    () => withLiveIssues(state.workflows, state.bots, state.groups),
+    [state.workflows, state.bots, state.groups],
+  );
 
   // One in-flight action per row. A failure lands inline on that row and
   // leaves local state untouched: the SSE fold (and the echoed response) is
