@@ -145,7 +145,7 @@ test("download reports downloading before the first progress event", async () =>
   await download;
 });
 
-test("downloaded waits for native staging to finish before becoming actionable", async () => {
+test("downloaded waits for the updater download promise before becoming actionable", async () => {
   const { updater, coordinator, getState } = harness();
   const pending = deferred();
   updater.downloadUpdate = () => pending.promise;
@@ -157,6 +157,58 @@ test("downloaded waits for native staging to finish before becoming actionable",
   pending.resolve(["update.zip"]);
   await download;
   assert.deepEqual(getState(), { status: "downloaded", version: "2.0.0" });
+});
+
+test("Mac transfer failures cannot overlap a pending download and remain retryable after it settles", async () => {
+  const h = harness({ nativeStaging: true });
+  const pending = deferred();
+  let calls = 0;
+  h.updater.downloadUpdate = () => { calls += 1; return pending.promise; };
+  h.updater.checkForUpdates = () => assert.fail("a check cannot overlap a Mac download");
+  h.updater.quitAndInstall = () => assert.fail("an incomplete transfer cannot install");
+  const first = h.coordinator.download();
+  const failure = new Error("connection lost before ZIP completed");
+  h.updater.emit("error", failure);
+  assert.equal(h.getState().status, "error");
+  assert.notEqual(h.getState().retryable, false);
+  assert.strictEqual(h.coordinator.download(), first);
+  await h.coordinator.check(true);
+  h.coordinator.install();
+  assert.equal(calls, 1);
+  pending.reject(failure);
+  await first;
+
+  h.updater.downloadUpdate = async () => {
+    calls += 1;
+    h.updater.emit("update-downloaded", { version: "2.0.0" });
+    return ["update.zip"];
+  };
+  await h.coordinator.download();
+  assert.equal(calls, 2);
+  assert.equal(h.getState().status, "downloaded");
+});
+
+test("a restart watchdog keeps Windows/AppImage installs locked against overlapping retries", async (t) => {
+  const h = harness();
+  let quits = 0;
+  let watchdog;
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    assert.equal(delay, 120_000);
+    watchdog = callback;
+    return { unref() {} };
+  });
+  h.updater.quitAndInstall = () => { quits += 1; };
+  h.updater.checkForUpdates = () => assert.fail("install still owns the updater");
+  await downloadInto(h);
+  h.coordinator.install();
+  watchdog();
+  h.updater.downloadUpdate = () => assert.fail("a retry must not overlap a slow installer");
+  await h.coordinator.download();
+  await h.coordinator.check(true);
+  h.coordinator.install();
+  assert.equal(h.getState().status, "installing");
+  assert.match(h.getState().message, /Quit and reopen/);
+  assert.equal(quits, 1);
 });
 
 test("an asynchronous native install error escapes the restarting spinner", () => {

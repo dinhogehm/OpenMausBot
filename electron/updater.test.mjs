@@ -54,7 +54,7 @@ it("sends updater progress to a reopened window without restarting the updater",
 
   expect(first.webContents.send).not.toHaveBeenCalled();
   expect(reopened.webContents.send.mock.calls.map(([, state]) => state.status))
-    .toEqual(["downloading", "downloading", "downloaded"]);
+    .toEqual(["downloading", "downloading", ...(process.platform === "darwin" ? ["preparing"] : []), "downloaded"]);
   expect(handlers.get("update:get-state")(localEvent)).toMatchObject({ status: "downloaded", version: "2.0.0" });
   expect(updater.on.mock.calls).toHaveLength(listenerCount);
   expect(vi.getTimerCount()).toBe(timerCount);

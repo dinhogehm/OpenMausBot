@@ -834,6 +834,7 @@ async function gatherDiagnostics() {
   const logPath = path.join(LOG_DIR, "server.log");
   const log = readSafeLogTail(logPath);
   const desktopLog = readSafeLogTail(DESKTOP_CRASH_LOG);
+  const updaterLog = readSafeLogTail(path.join(LOG_DIR, "updater.log"));
   return buildDiagnosticsReport({
     appInfo: {
       version: app.getVersion(),
@@ -846,6 +847,7 @@ async function gatherDiagnostics() {
     },
     configSummary: serverStatus ?? {},
     desktopLogTail: desktopLog?.tail ?? "",
+    updaterLogTail: updaterLog?.tail ?? "",
     logTail: log?.tail ?? "",
   });
 }

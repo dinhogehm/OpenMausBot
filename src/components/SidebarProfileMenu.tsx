@@ -70,10 +70,12 @@ export function updateLabel(phase: UpdatePhase, state: UpdaterState | null): str
       return `Version ${state?.version ?? ""} available — download`.replace("  ", " ");
     case "downloading":
       return state?.percent == null ? "Starting download…" : `Downloading… ${Math.round(state.percent)}%`;
+    case "preparing":
+      return "Preparing update…";
     case "downloaded":
-      return `Version ${state?.version ?? ""} ready — restart`.replace("  ", " ");
+      return `Version ${state?.version ?? ""} ready — ${state?.installMode === "handoff" ? "install" : "restart"}`.replace("  ", " ");
     case "installing":
-      return "Restarting to update…";
+      return state?.message || (state?.installMode === "handoff" ? "Opening a terminal…" : "Restarting to update…");
     case "checking":
       return "Checking for updates…";
     case "handed-off":
@@ -92,7 +94,7 @@ export function updateLabel(phase: UpdatePhase, state: UpdaterState | null): str
  * download and install round-trip through main first, and without this the
  * row would sit there looking clickable. */
 export function updateBusy(phase: UpdatePhase, pending = false): boolean {
-  return pending || phase === "checking" || phase === "downloading" || phase === "installing";
+  return pending || phase === "checking" || phase === "downloading" || phase === "preparing" || phase === "installing";
 }
 
 function UpdateIcon({ phase, pending, size = 18 }: { phase: UpdatePhase; pending: boolean; size?: number }) {
@@ -149,7 +151,7 @@ function useUpdateItem(): UpdateEntry | null {
       key: "update",
       label,
       icon: <UpdateIcon phase={phase} pending={pending} />,
-      disabled: updateBusy(phase, pending),
+      disabled: updateBusy(phase, pending) || state?.retryable === false,
       // progress is reported on the row itself, so the menu stays put
       keepOpen: true,
       attention: phase === "downloaded" || phase === "error",

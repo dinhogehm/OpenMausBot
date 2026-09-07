@@ -93,12 +93,20 @@ function UpdatesRow() {
       : s?.status === "available"
         ? `${s.version} available`
         : s?.status === "downloading"
-          ? `Downloading ${Math.round(s.percent ?? 0)}%`
-          : s?.status === "downloaded"
-            ? `${s.version} ready — restart to apply`
-            : s?.status === "error"
-              ? `Check failed: ${s.message ?? "unknown error"}`
-              : "You're on the latest version we know of.";
+          ? s.percent == null
+            ? "Starting download…"
+            : `Downloading ${Math.round(s.percent)}%`
+          : s?.status === "preparing"
+            ? "Download complete. macOS is preparing the update."
+            : s?.status === "downloaded"
+              ? `${s.version} ready — ${s.installMode === "handoff" ? "install in a terminal" : "restart to apply"}`
+              : s?.status === "installing"
+                ? s.message || (s.installMode === "handoff" ? "Opening a terminal…" : "Restarting to update…")
+                : s?.status === "handed-off"
+                  ? "Command copied — finish the update in your terminal."
+                  : s?.status === "error"
+                    ? `Update failed: ${s.message ?? "unknown error"}`
+                    : "You're on the latest version we know of.";
   return (
     <Card title="Updates" subtitle={label}>
       <button
@@ -107,14 +115,23 @@ function UpdatesRow() {
           if (s?.status === "downloaded") return void updater.install();
           void updater.check();
         }}
-        disabled={s?.status === "checking" || s?.status === "downloading"}
+        disabled={
+          s?.status === "checking" || s?.status === "downloading" || s?.status === "preparing" ||
+          s?.status === "installing" || s?.retryable === false
+        }
         className="rounded-lg border border-hairline/40 px-3 py-1.5 text-[13px] text-ink hover:bg-control disabled:opacity-40"
       >
-        {s?.status === "available"
-          ? "Download"
-          : s?.status === "downloaded"
-            ? "Restart and install"
-            : "Check for updates"}
+        {s?.retryable === false
+          ? "Quit and reopen the app"
+          : s?.status === "available"
+            ? "Download"
+            : s?.status === "downloaded"
+              ? s.installMode === "handoff" ? "Install" : "Restart and install"
+              : s?.status === "preparing"
+                ? "Preparing…"
+                : s?.status === "installing"
+                  ? s.installMode === "handoff" ? "Opening…" : "Restarting…"
+                  : "Check for updates"}
       </button>
     </Card>
   );
@@ -482,7 +499,7 @@ function DiagnosticsRow() {
   return (
     <Card
       title="Diagnostics"
-      subtitle="Versions, configuration on/off state and a redacted server log tail. Review the file before sharing it."
+      subtitle="Versions, configuration on/off state and redacted server, desktop and updater log tails. Review the file before sharing it."
     >
       <div className="flex min-w-0 flex-col items-end gap-2">
         <button

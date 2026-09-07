@@ -306,6 +306,8 @@ export interface UpdaterState {
     | "checking"
     | "available"
     | "downloading"
+    /** downloaded bytes are being staged by the native macOS updater */
+    | "preparing"
     | "downloaded"
     | "installing"
     /** the command is on the clipboard; the user finishes in a terminal */
@@ -314,6 +316,8 @@ export interface UpdaterState {
   version?: string;
   percent?: number;
   message?: string;
+  /** native work may still be running; recovery requires an app restart */
+  retryable?: boolean;
   /**
    * How the download gets applied. "restart" quits and installs in place;
    * "handoff" copies the install command and opens a terminal so the user

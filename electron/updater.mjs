@@ -24,7 +24,7 @@ const require = createRequire(import.meta.url);
 
 let autoUpdater = null;
 let win = null;
-// status: idle | checking | available | downloading | downloaded | installing | error
+// status: idle | checking | available | downloading | preparing | downloaded | installing | handed-off | error
 let state = { status: "idle" };
 let updaterCoordinator = null;
 
@@ -117,6 +117,7 @@ export function startUpdater() {
   setState({ installMode: handOff ? "handoff" : "restart" });
   updaterCoordinator = createUpdaterCoordinator(autoUpdater, setState, {
     handOffInstall: handOff ? handOffDownloadedPackage(packageType) : null,
+    nativeStaging: process.platform === "darwin",
   });
 
   // first check ~15s after launch (let the app settle), then hourly — both
