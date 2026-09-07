@@ -913,8 +913,9 @@ export class WorkflowEngine {
   }
 
   /** Everything that gates EXECUTION: the structural issues plus the per-bot
-   * capability ones and the audit room's existence — the same union the API
-   * paints, so a run is refused for exactly what the canvas shows in red. */
+   * capability ones — the same union the API paints, so a run is refused
+   * for exactly what the canvas shows in red. The audit room's existence is
+   * in the union too, as a WARNING: painted, never a refusal. */
   private executionIssues(workflow: Workflow): WorkflowIssue[] {
     const groupExists = this.options.groupExists;
     return [
@@ -1953,7 +1954,11 @@ export class WorkflowEngine {
     }
     const auditGroupId = workflow?.auditGroupId;
     const post = this.options.postGroupMessage;
-    if (auditGroupId !== undefined && post) {
+    if (auditGroupId !== undefined && post && this.options.groupExists?.(auditGroupId) === false) {
+      // A deleted room is a warning on the canvas, not a reason to touch
+      // the run; the person was told above.
+      console.warn(`workflow: audit room "${auditGroupId}" of ${name} no longer exists; ${kind} not posted`);
+    } else if (auditGroupId !== undefined && post) {
       try {
         // Scrubbed as a notify node's text is: this leaves the process.
         const returned: unknown = post(auditGroupId, redactSecretsInText(`[${name}] ${body}`));

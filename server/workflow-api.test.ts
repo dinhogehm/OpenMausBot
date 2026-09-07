@@ -950,10 +950,13 @@ describe("workflow monitoring — audit room, watchdog patience, digest and heal
     deps.groupExists = (groupId) => groupId === "room-1";
     const listed = bodyOf(await call("GET", "/api/workflows")).workflows as Array<Workflow & { issues: WorkflowIssue[] }>;
     expect(listed.find((workflow) => workflow.id === id)?.issues).toContainEqual({
-      severity: "error",
+      severity: "warning",
       code: "missing-audit-group",
-      message: 'The audit room "gone" no longer exists; pick another room or turn the audit room off.',
+      message: 'The audit room "gone" no longer exists, so nothing is posted there; pick another room or turn the audit room off.',
     });
+    // A warning: the run still starts (the room is a second copy of what
+    // the person is told anyway).
+    expect((await call("POST", `/api/workflows/${id}/runs`, {}))?.status).toBe(201);
     const repointed = await call("PATCH", `/api/workflows/${id}`, { auditGroupId: "room-1" });
     expect(codes(bodyOf(repointed).workflow.issues)).not.toContain("missing-audit-group");
   });

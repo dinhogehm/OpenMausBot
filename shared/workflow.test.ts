@@ -796,15 +796,16 @@ describe("monitoring: watchdog patience, digest time and audit room", () => {
     );
   });
 
-  it("digestAt has the schedule's HH:MM shape", () => {
+  it("digestAt has the schedule's HH:MM shape, and the message names no field", () => {
     expect(byCode({ digestAt: "18:00" }, "bad-digest")).toEqual([]);
+    expect(byCode({ digestAt: "6pm" }, "bad-digest")[0]!.message).toBe("Digest time must be HH:MM (24-hour).");
     expect(byCode({ digestAt: "00:00" }, "bad-digest")).toEqual([]);
     expect(byCode({ digestAt: "24:00" }, "bad-digest")).toHaveLength(1);
     expect(byCode({ digestAt: "6pm" }, "bad-digest")).toHaveLength(1);
     expect(byCode({ digestAt: 1800 as unknown as string }, "bad-digest")).toHaveLength(1);
   });
 
-  it("a blank audit room id is the validator's error; whether it exists is auditGroupIssues' — an error, against the rooms", () => {
+  it("a blank audit room id is the validator's error; whether it exists is auditGroupIssues' — a warning, against the rooms", () => {
     expect(byCode({ auditGroupId: "room-1" }, "missing-audit-group")).toEqual([]);
     expect(byCode({ auditGroupId: "  " }, "missing-audit-group")).toHaveLength(1);
     const exists = (groupId: string) => groupId === "room-1";
@@ -814,9 +815,9 @@ describe("monitoring: watchdog patience, digest time and audit room", () => {
     expect(auditGroupIssues(wf({ auditGroupId: " " }), exists)).toEqual([]);
     expect(auditGroupIssues(wf({ auditGroupId: "room-9" }), exists)).toEqual([
       {
-        severity: "error",
+        severity: "warning",
         code: "missing-audit-group",
-        message: 'The audit room "room-9" no longer exists; pick another room or turn the audit room off.',
+        message: 'The audit room "room-9" no longer exists, so nothing is posted there; pick another room or turn the audit room off.',
       },
     ]);
   });

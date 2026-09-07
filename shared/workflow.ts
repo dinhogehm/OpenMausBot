@@ -678,7 +678,7 @@ export function validateWorkflow(workflow: Workflow): WorkflowIssue[] {
   // a blank room id is a promise to post nowhere (whether the room EXISTS
   // is the roster's business — auditGroupIssues).
   if (workflow.digestAt !== undefined && (typeof workflow.digestAt !== "string" || !WORKFLOW_SCHEDULE_TIME_RE.test(workflow.digestAt))) {
-    issues.push({ severity: "error", code: "bad-digest", message: "digestAt must be HH:MM (24-hour)." });
+    issues.push({ severity: "error", code: "bad-digest", message: "Digest time must be HH:MM (24-hour)." });
   }
   if (workflow.auditGroupId !== undefined && (typeof workflow.auditGroupId !== "string" || !workflow.auditGroupId.trim())) {
     issues.push({ severity: "error", code: "missing-audit-group", message: "The audit room id is blank." });
@@ -992,20 +992,21 @@ export function capabilityIssues(
   return issues;
 }
 
-/** Pure: the audit room the workflow names must exist, or every transition
- * it promised to post would go into the void — an error, like a fallback
- * bot the roster does not have, because the whole point of an audit room is
- * that nothing about the run is silent. Needs the room roster, so it lives
- * beside capabilityIssues rather than in validateWorkflow (which reports a
- * BLANK id itself). */
+/** Pure: the audit room the workflow names should exist, or the audit
+ * trail goes nowhere. A WARNING, not an error: the room is a second copy of
+ * what the person is told anyway, and a room somebody deleted must not
+ * stop a pipeline built to never stop — the engine skips the post and the
+ * canvas says so. Needs the room roster, so it lives beside
+ * capabilityIssues rather than in validateWorkflow (which reports a BLANK
+ * id itself, as an error: that one is a shape mistake). */
 export function auditGroupIssues(workflow: Workflow, groupExists: (groupId: string) => boolean): WorkflowIssue[] {
   const groupId = workflow.auditGroupId;
   if (typeof groupId !== "string" || !groupId.trim() || groupExists(groupId)) return [];
   return [
     {
-      severity: "error",
+      severity: "warning",
       code: "missing-audit-group",
-      message: `The audit room "${groupId}" no longer exists; pick another room or turn the audit room off.`,
+      message: `The audit room "${groupId}" no longer exists, so nothing is posted there; pick another room or turn the audit room off.`,
     },
   ];
 }

@@ -268,11 +268,11 @@ describe("audit room, watchdog patience and digest in the slice", () => {
     // The frame carried no issues, so the slice computed structural ones: a
     // room id is structurally fine…
     expect(state.workflows[0]!.issues.map((issue) => issue.code)).not.toContain("missing-audit-group");
-    // …but against a room list without room-1 the list paints the error,
-    // and Run is refused the way the server would refuse it.
+    // …but against a room list without room-1 the list paints the warning
+    // (a warning: a deleted room never blocks Run, the server skips the post).
     const judged = withLiveIssues(state.workflows, state.bots, state.groups);
     expect(missingRoom(judged)).toBe(1);
-    expect(validationSummary(judged[0]!.issues).errors).toBe(1);
+    expect(validationSummary(judged[0]!.issues)).toMatchObject({ errors: 0, warnings: 1 });
 
     const joined = reducer(state, { type: "groupPatched", group: room("room-1", "Ops") });
     expect(joined.workflows).toBe(state.workflows); // only the rooms moved
