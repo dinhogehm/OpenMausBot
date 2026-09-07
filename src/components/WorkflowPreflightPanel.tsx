@@ -19,6 +19,8 @@ import {
   WORKFLOW_PREFLIGHT_TIMEOUT_DEFAULT_S,
   WORKFLOW_PREFLIGHT_TIMEOUT_MAX_S,
   WORKFLOW_PREFLIGHT_TIMEOUT_MIN_S,
+  WORKFLOW_PREFLIGHT_WAIT_DEFAULT_MIN,
+  WORKFLOW_PREFLIGHT_WAIT_MAX_MIN,
   type Workflow,
   type WorkflowPreflight,
   type WorkflowPreflightCheck,
@@ -76,6 +78,14 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
   const [testing, setTesting] = useState(false);
   const [testError, setTestError] = useState<string | null>(null);
   const [timeoutDraft, setTimeoutDraft] = useState<string | null>(null);
+  // Checks carry no id, and a name is not a key: two are equal while one is
+  // being typed. A parallel list of client-side keys, grown and cut with
+  // the checks, keeps each row's inputs on their own DOM node across edits
+  // — resynced by length so a frame from another window cannot desync it.
+  const keysRef = useRef<string[]>([]);
+  const keySeq = useRef(0);
+  while (keysRef.current.length < checks.length) keysRef.current.push(`check-${++keySeq.current}`);
+  if (keysRef.current.length > checks.length) keysRef.current.length = checks.length;
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -120,7 +130,10 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
     else onChange({ checks: next, ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }) });
   };
   const update = (index: number, patch: WorkflowPreflightCheck) => commit(checks.map((check, at) => (at === index ? patch : check)));
-  const remove = (index: number) => commit(checks.filter((_check, at) => at !== index));
+  const remove = (index: number) => {
+    keysRef.current.splice(index, 1);
+    commit(checks.filter((_check, at) => at !== index));
+  };
   const add = (kind: WorkflowPreflightCheck["kind"]) => commit([...checks, newCheck(kind, checks, bots[0]?.id)]);
 
   const test = async () => {
@@ -166,7 +179,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
           </p>
         )}
         {checks.map((check, index) => (
-          <div key={index} className="space-y-1.5 rounded-lg border border-hairline/40 bg-inset p-2.5">
+          <div key={keysRef.current[index]} className="space-y-1.5 rounded-lg border border-hairline/40 bg-inset p-2.5">
             <div className="flex items-center gap-1.5">
               <span className="shrink-0 rounded-full bg-control px-1.5 py-px text-[10px] font-medium text-ink-secondary">
                 {KIND_LABEL[check.kind]}
@@ -268,6 +281,27 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                     ? "Every bot an agent node uses must exist and be free."
                     : "Only the bots ticked below must exist and be free."}
                 </p>
+                <label className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-ink-secondary" htmlFor={`wf-preflight-${index}-wait`}>
+                  Wait up to
+                  <input
+                    id={`wf-preflight-${index}-wait`}
+                    type="number"
+                    inputMode="numeric"
+                    min={0}
+                    max={WORKFLOW_PREFLIGHT_WAIT_MAX_MIN}
+                    value={check.waitMinutes ?? WORKFLOW_PREFLIGHT_WAIT_DEFAULT_MIN}
+                    onChange={(event) => {
+                      const minutes = Number(event.target.value);
+                      const { waitMinutes: _dropped, ...rest } = check;
+                      update(
+                        index,
+                        Number.isNaN(minutes) || minutes === WORKFLOW_PREFLIGHT_WAIT_DEFAULT_MIN ? rest : { ...rest, waitMinutes: minutes },
+                      );
+                    }}
+                    className={cn(FIELD, "w-[64px] bg-panel py-0.5 tabular-nums")}
+                  />
+                  min for a busy bot to free up; a missing bot fails at once.
+                </label>
                 <div className="mt-1 flex flex-wrap gap-1">
                   <button
                     type="button"
@@ -462,8 +496,10 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
       <p className="mt-3 flex gap-1.5 border-t border-hairline/40 pt-2.5 text-[10.5px] leading-relaxed text-ink-secondary">
         <ShieldAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-warning" />
         <span>
-          Commands run as this app&apos;s user, with its environment and credentials, on this computer. Only the
-          workflow&apos;s owner should edit them. A run&apos;s input is never inserted into a command.
+          Commands run as this app&apos;s user, with its environment and credentials, on this computer, and again at
+          every start — keep them read-only and idempotent. Only the workflow&apos;s owner should edit them. A
+          run&apos;s input is never inserted into a command. Output is scrubbed of known token shapes, not of
+          everything: do not print URLs with credentials or passwords in them.
         </span>
       </p>
     </div>

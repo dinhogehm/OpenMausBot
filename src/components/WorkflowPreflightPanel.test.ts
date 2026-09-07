@@ -51,6 +51,8 @@ describe("WorkflowPreflightPanel", () => {
     expect(flat).toContain("Bots ready");
     expect(flat).toContain("Engine health");
     expect(flat).toContain("Only the workflow&#x27;s owner should edit them");
+    expect(flat).toContain("keep them read-only and idempotent");
+    expect(flat).toContain("not of everything");
     expect(flat).toContain("A run&#x27;s input is never inserted into a command");
     expect(markup).toContain('value="60"'); // the default timeout, shown
   });
@@ -62,7 +64,7 @@ describe("WorkflowPreflightPanel", () => {
           timeoutSeconds: 45,
           checks: [
             { kind: "command", name: "gh auth", command: "gh auth status", cwd: "/repo", expectExitCode: 2, expectStdoutMatch: "^$" },
-            { kind: "bots-ready", name: "bots", botIds: ["bot-b"] },
+            { kind: "bots-ready", name: "bots", botIds: ["bot-b"], waitMinutes: 3 },
             { kind: "engine-health", name: "engine", botId: "bot-a" },
           ],
         },
@@ -75,6 +77,8 @@ describe("WorkflowPreflightPanel", () => {
     expect(markup).toContain('value="45"');
     const flat = text(markup);
     expect(flat).toContain("Only the bots ticked below");
+    expect(markup).toContain('value="3"');
+    expect(flat).toContain("min for a busy bot to free up");
     expect(flat).toContain("Costs no tokens");
     // Rook is ticked, Scout is not, on the bots-ready row.
     expect(markup).toMatch(/aria-pressed="true"[^>]*>Rook</);

@@ -279,6 +279,26 @@ describe("WorkflowRunTimeline pre-flight", () => {
     expect(flat).toContain("No node has finished yet");
   });
 
+  it("says the run is waiting for a busy bot, with the next check, and paints the verdict as waiting rather than failed", () => {
+    const parked = run({
+      status: "running",
+      currentNodeId: "triage",
+      preflightStartedAt: 1_700_000_000_000,
+      nextAttemptAt: 1_700_000_030_000,
+      preflight: {
+        at: 1_700_000_000_000,
+        ok: false,
+        checks: [{ name: "bots", kind: "bots-ready", ok: false, transient: true, durationMs: 0, detail: 'bot "rook" is busy' }],
+      },
+    });
+    const flat = text(panel({ runs: [parked], run: parked }));
+    expect(flat).toContain("Pre-flight waiting for a busy bot before triage");
+    expect(flat).toContain("next check");
+    expect(flat).toContain("Pre-flight · waiting");
+    expect(flat).not.toContain("Pre-flight · failed");
+    expect(flat).toContain("Failed: bots · bot &quot;rook&quot; is busy");
+  });
+
   it("lists every check with its verdict and detail, and the failed one's output", () => {
     const refused = run({ status: "failed", currentNodeId: "triage", error: 'pre-flight check "gh auth" failed: exited with code 1 (expected 0)', preflight: verdict(false) });
     const markup = panel({ runs: [refused], run: refused });

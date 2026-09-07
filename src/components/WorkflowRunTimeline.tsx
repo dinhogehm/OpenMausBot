@@ -203,11 +203,22 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
 
           {run.status === "running" && run.preflightStartedAt !== undefined && (
             // Between the start and the first dispatch: the checks are
-            // running, nothing has been asked of a bot yet.
+            // running — or, parked with a re-check due, waiting for a busy
+            // bot — and nothing has been asked of a bot yet.
             <p role="status" className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
               <Loader2 size={10} className="animate-spin" aria-hidden />
-              Pre-flight checks running before
-              {run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>}
+              {run.nextAttemptAt !== undefined ? (
+                <span className="min-w-0 break-words">
+                  Pre-flight waiting for a busy bot before{" "}
+                  {run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>} — next check{" "}
+                  {formatWhen(run.nextAttemptAt)}
+                </span>
+              ) : (
+                <>
+                  Pre-flight checks running before
+                  {run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>}
+                </>
+              )}
             </p>
           )}
 
@@ -215,8 +226,13 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             <section className="mt-3 shrink-0">
               <h3 className="text-[11px] font-medium uppercase tracking-wide text-ink-secondary">
                 Pre-flight{" "}
-                <span className={cn("normal-case", run.preflight.ok ? "text-success" : "text-danger")}>
-                  · {run.preflight.ok ? "passed" : "failed"}
+                <span
+                  className={cn(
+                    "normal-case",
+                    run.preflight.ok ? "text-success" : run.preflightStartedAt !== undefined ? "text-warning" : "text-danger",
+                  )}
+                >
+                  · {run.preflight.ok ? "passed" : run.preflightStartedAt !== undefined ? "waiting" : "failed"}
                 </span>
               </h3>
               {/* Each check on its own line, verdict first: the receipt's
