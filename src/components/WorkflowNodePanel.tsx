@@ -7,7 +7,13 @@ import { Flag, Plus, Trash2, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import type { BotAvatarProps } from "./Avatar";
 import type { WorkflowOutcomeHandle } from "@/lib/workflow-graph";
-import { grantedCapabilities, missingCapabilities, toggleRequirement } from "@/lib/workflow-capabilities";
+import {
+  alwaysAllowText,
+  grantedCapabilities,
+  missingCapabilities,
+  parseAlwaysAllowLines,
+  toggleRequirement,
+} from "@/lib/workflow-capabilities";
 import { BotAvatar } from "./Avatar";
 import {
   WORKFLOW_APPROVAL_OUTCOMES,
@@ -209,6 +215,62 @@ function RequiresGroup({
   );
 }
 
+/** The keys this node's turns may use without a card — one per line, in the
+ * same vocabulary as a bot's "always allow". A node runs with nobody at the
+ * keyboard, where only a named grant survives; without this the bot would
+ * have to carry every node's programs for every chat it ever has. The draft
+ * is local: the parser drops blank lines and padding, and pushing that
+ * through the document on every keystroke would eat the newline a person
+ * just typed. Stored only when non-empty (an absent key, never `[]`). */
+function AlwaysAllowField({
+  id,
+  node,
+  onUpdate,
+}: {
+  id: string;
+  node: AgentNode;
+  onUpdate: (next: WorkflowNode) => void;
+}) {
+  const value = alwaysAllowText(node.alwaysAllow);
+  const [draft, setDraft] = useState(value);
+  // adopt a value the document changed underneath us (undo, a server echo)
+  const lastValue = useRef(value);
+  if (lastValue.current !== value) {
+    lastValue.current = value;
+    if (value !== alwaysAllowText(parseAlwaysAllowLines(draft))) setDraft(value);
+  }
+
+  return (
+    <div>
+      <label className={LABEL} htmlFor={id}>
+        Pre-approved tools on this node
+      </label>
+      <p className="mt-0.5 text-[10.5px] text-ink-secondary">
+        One key per line, as an approval card names it (<span className="font-mono">Bash:gh</span>,{" "}
+        <span className="font-mono">session_search</span>). Joined with the bot&apos;s own always-allow list for this
+        node&apos;s turns; anything else is denied at once, and the run receipt names the key it lacked. Never covers
+        destructive commands, credentials, or this computer.
+      </p>
+      <textarea
+        id={id}
+        value={draft}
+        rows={3}
+        maxLength={20_000}
+        spellCheck={false}
+        placeholder={"Bash:gh\nsession_search"}
+        onChange={(event) => {
+          const next = event.target.value;
+          setDraft(next);
+          const { alwaysAllow: _alwaysAllow, ...rest } = node;
+          const alwaysAllow = parseAlwaysAllowLines(next);
+          onUpdate(alwaysAllow ? { ...rest, alwaysAllow } : rest);
+        }}
+        className={cn(FIELD, "mt-1 resize-y font-mono text-[12px] leading-relaxed")}
+      />
+    </div>
+  );
+}
+
 export interface WorkflowNodePanelProps {
   node: WorkflowNode;
   issues: WorkflowIssue[];
@@ -358,6 +420,8 @@ export function WorkflowNodePanel({
             </div>
 
             <RequiresGroup node={node} bot={bot} onUpdate={onUpdate} />
+
+            <AlwaysAllowField id={field("always-allow")} node={node} onUpdate={onUpdate} />
 
             <div>
               <label className={LABEL} htmlFor={field("instructions")}>

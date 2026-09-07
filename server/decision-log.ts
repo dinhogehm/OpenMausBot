@@ -28,6 +28,9 @@ import { redactSecrets } from "./redact.ts";
 
 export type DecisionKind =
   | "auto-approved"
+  /** the harness answered "deny" for a turn nobody was watching (a workflow
+   * node), so the run could move on instead of waiting out its timeout */
+  | "auto-denied"
   | "card-shown"
   | "user-approved"
   | "user-denied"

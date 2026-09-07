@@ -77,6 +77,11 @@ const agentNodeSchema = z.object({
   // a list longer than the vocabulary can only be padding. Duplicates
   // within that length stay the validator's (bad-requires), as pinned.
   requires: z.array(z.enum(WORKFLOW_CAPABILITIES)).max(WORKFLOW_CAPABILITIES.length).optional(),
+  // Open vocabulary (keys are minted per tool and program), so only the
+  // shape is pinned here: blanks, padding and repeats stay the validator's
+  // (bad-always-allow), as the canvas must be able to show them. The cap
+  // matches the bot's own alwaysAllow list.
+  alwaysAllow: z.array(z.string().max(200)).max(200).optional(),
 });
 const approvalNodeSchema = z.object({
   kind: z.literal("approval"),

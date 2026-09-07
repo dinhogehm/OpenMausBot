@@ -514,6 +514,39 @@ describe("capabilities", () => {
     expect(capabilityIssues(gated(["merge", "merge", "ship"]), () => ({}))).toHaveLength(1);
   });
 
+  it("validateWorkflow accepts an absent, empty, or well-formed alwaysAllow list and flags nothing else about it", () => {
+    const granting = (alwaysAllow: unknown): Workflow =>
+      wf({
+        nodes: wf().nodes.map((node) => (node.id === "review" ? { ...node, alwaysAllow } : node)) as unknown as Workflow["nodes"],
+      });
+    const badGrants = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-always-allow");
+    expect(badGrants(wf())).toEqual([]);
+    expect(badGrants(granting([]))).toEqual([]);
+    // the vocabulary is open — keys are minted per tool and program — so
+    // nothing here judges the names, only the shape
+    expect(badGrants(granting(["Bash:gh", "session_search", "local-computer:mcp__computer__click"]))).toEqual([]);
+    // and no error of any code: the fixture's own warnings are all that remain
+    expect(validateWorkflow(granting(["Bash:gh"])).filter((issue) => issue.severity === "error")).toEqual([]);
+  });
+
+  it("validateWorkflow flags a blank, padded, or repeated alwaysAllow entry and a non-list as bad-always-allow", () => {
+    const granting = (alwaysAllow: unknown): Workflow =>
+      wf({
+        nodes: wf().nodes.map((node) => (node.id === "review" ? { ...node, alwaysAllow } : node)) as unknown as Workflow["nodes"],
+      });
+    const badGrants = (workflow: Workflow) => validateWorkflow(workflow).filter((issue) => issue.code === "bad-always-allow");
+    const error = expect.objectContaining({ severity: "error", code: "bad-always-allow", nodeId: "review" });
+    expect(badGrants(granting(["Bash:gh", ""]))).toEqual([error]);
+    expect(badGrants(granting(["Bash:gh", ""]))[0]?.message).toMatch(/blank entry/);
+    expect(badGrants(granting([" Bash:gh"]))[0]?.message).toMatch(/surrounding whitespace/);
+    expect(badGrants(granting(["Bash:gh", "Bash:gh"]))).toEqual([error]);
+    expect(badGrants(granting(["Bash:gh", "Bash:gh"]))[0]?.message).toMatch(/more than once/);
+    expect(badGrants(granting("Bash:gh"))).toEqual([error]);
+    expect(badGrants(granting([3]))).toEqual([error]);
+    // per node: a clean sibling is not blamed
+    expect(badGrants(granting([""])).map((issue) => issue.nodeId)).toEqual(["review"]);
+  });
+
   it("missingCapabilities lists what a bot lacks, in declaration order, once each", () => {
     expect(missingCapabilities(["deploy", "merge"], {})).toEqual(["deploy", "merge"]);
     expect(missingCapabilities(["deploy", "merge"], { canMerge: true })).toEqual(["deploy"]);

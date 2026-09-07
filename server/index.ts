@@ -27,7 +27,16 @@ import {
   type CredentialTargetId,
 } from "../shared/credential-request.ts";
 
-import { HELD_NOTE, approvalHeldNote, approvalHeldReason, approvalModeForOrigin, autoVerdict, rememberableApprovalKey } from "./auto-approve.ts";
+import {
+  HELD_NOTE,
+  approvalHeldNote,
+  approvalHeldReason,
+  approvalModeForOrigin,
+  autoVerdict,
+  effectiveAlwaysAllow,
+  rememberableApprovalKey,
+  unattendedDenial,
+} from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import {
@@ -2509,6 +2518,8 @@ function isUnattended(botId?: string | null): boolean {
 interface TurnProvenance {
   automationSource?: RoutineRunTrigger | "workflow";
   unattended: boolean;
+  /** grants the workflow node pre-approves for this turn, if any */
+  alwaysAllow?: string[];
 }
 const turnProvenanceByThread = new Map<string, TurnProvenance>();
 
@@ -2519,6 +2530,17 @@ function isUnattendedTurn(botId: string | null | undefined, threadId: string | u
   const byThread = threadId === undefined ? undefined : turnProvenanceByThread.get(threadId);
   return byThread?.unattended === true || isUnattended(botId);
 }
+
+/** How long a card raised on a workflow node's thread stays open for a
+ * person before the harness denies it on their behalf. Zero by default: a
+ * node runs on a schedule nobody is sitting at, and a card left open only
+ * burns the node's timeout (15–90 min, times three attempts) before the run
+ * learns anything. A short grace is the knob for a person who does watch
+ * their runs and wants a moment to click. */
+const WORKFLOW_DENY_GRACE_MS = (() => {
+  const raw = Number(process.env.OMB_WORKFLOW_DENY_GRACE_MS ?? "0");
+  return Number.isFinite(raw) && raw > 0 ? Math.min(raw, 10 * 60_000) : 0;
+})();
 
 // Threads whose turn in flight was started by another BOT — an ask_bot hop,
 // a drained delegation. The person asked ONE bot; the fan-out behind that
@@ -2960,6 +2982,8 @@ bus.subscribe((event: RuntimeEvent) => {
       // The thread's own dispatch record first, the bot mark as fallback —
       // a workflow node's card is judged unattended even if something
       // cleared the bot mark under it.
+      const provenance = turnProvenanceByThread.get(event.threadId);
+      const workflowTurn = provenance?.automationSource === "workflow";
       const unattended = permission && asker && event.requestId ? isUnattendedTurn(asker.id, event.threadId) : false;
       const effectiveApprovalMode = asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId), event.threadId) : "ask";
       const verdict = permission && asker && event.requestId
@@ -2968,7 +2992,9 @@ bus.subscribe((event: RuntimeEvent) => {
             // residual asks are judged as Approve for me here too
             approvalMode: effectiveApprovalMode,
             autoApprove: false,
-            alwaysAllow: asker.alwaysAllow,
+            // a workflow node's own pre-approved keys join the bot's; the
+            // unattended rules below judge every entry the same way
+            alwaysAllow: workflowTurn ? effectiveAlwaysAllow(asker, provenance) : asker.alwaysAllow,
           }, event.tool, event.summary, {
             unattended,
             scope: event.approvalScope,
@@ -3064,6 +3090,100 @@ bus.subscribe((event: RuntimeEvent) => {
             });
           }
         })();
+        break;
+      }
+      // A workflow node's turn: nobody is at the keyboard, and a card nobody
+      // will click is not a question, it is the node's timeout spent three
+      // times over — the live 24/7 pipeline never got past its first node
+      // that way. So a permission the automatic policy could not answer is
+      // DENIED now (after the configurable grace, default none), with one
+      // line that names the tool and the exact grant key that would have
+      // covered it: the bot gets the refusal and can route around it or
+      // finish with "failed", the run moves on inside the minute, and the
+      // receipt says which key to add on the node panel. Only workflow turns:
+      // a person's, a webhook's and a room's cards still wait for a human.
+      // Questions are untouched — no rule may invent a person's answer.
+      if (workflowTurn && permission && asker && event.requestId && verdict) {
+        const requestId = event.requestId;
+        const { tool, summary } = event;
+        const denial = unattendedDenial(tool, summary, verdict, event.approvalScope);
+        const grace = WORKFLOW_DENY_GRACE_MS;
+        const card = pushMessage({
+          role: "bot",
+          kind: "options",
+          card: {
+            title: grace > 0 ? "Approval needed" : "Denied unattended",
+            subtitle: summary,
+            options: ["Allow", "Deny"],
+            requestId,
+            tool,
+            // free text, no catalog key: the line names this request's own
+            // tool and grant, which no fixed note could
+            held: denial,
+            approvalScope: event.approvalScope,
+          },
+        });
+        askMessageByRequest.set(`${event.threadId}:${requestId}`, card.id);
+        workflowEngine?.noteDenial(event.threadId, denial);
+        const instance = event.providerInstanceId
+          ? registry.get(event.providerInstanceId)
+          : registry.get(asker.modelSelection.instanceId);
+        const deny = async () => {
+          const open = store.messagesFor(event.threadId).find((candidate) => candidate.id === card.id)?.card;
+          // a person got there within the grace, or the ask already settled
+          if (!open || open.answered) return;
+          try {
+            if (!instance) throw new Error("provider unavailable");
+            const outcome = await instance.adapter.respondToRequest(event.threadId, requestId, {
+              behavior: "deny",
+              message: denial,
+            });
+            if (outcome === "unavailable") throw new Error("the ask is no longer open");
+            // The driver's request.resolved marks the card answered; the
+            // audit row is written only once the provider took the answer.
+            appendDecision(DATA_DIR, {
+              threadId: event.threadId,
+              requestId,
+              botId: asker.id,
+              botName: asker.name,
+              tool,
+              summary,
+              decision: "auto-denied",
+              source: verdict.source,
+              rule: verdict.rule,
+              unattended: true,
+            });
+          } catch {
+            // The denial could not be delivered, so the card stays open and
+            // the node's timeout is the backstop it always was — say so on
+            // the card rather than claim a refusal nothing received.
+            store.patchMessage(event.threadId, card.id, {
+              card: { ...open, held: `${denial} — the denial could not be delivered, so this card is waiting on you` },
+            });
+            appendDecision(DATA_DIR, {
+              threadId: event.threadId,
+              requestId,
+              botId: asker.id,
+              botName: asker.name,
+              tool,
+              summary,
+              decision: "card-shown",
+              source: "auto-fallback",
+              rule: verdict.rule,
+              unattended: true,
+            });
+          }
+        };
+        if (grace > 0) {
+          // A grace is for a person who watches their runs: tell them, and
+          // give them the window before the harness answers.
+          if (asker.busy) store.setActivity(asker.id, "waiting-on-you");
+          notify(buildNotification("approval", asker, event.threadId, event.summary));
+          const timer = setTimeout(() => void deny(), grace);
+          timer.unref?.();
+        } else {
+          void deny();
+        }
         break;
       }
       // A card can outlive the bot record that raised it. Without one there is
@@ -3903,6 +4023,9 @@ async function startTurn(
     automationSource?: RoutineRunTrigger | "workflow";
     /** the caller was already running unattended, so this turn is too */
     unattended?: boolean;
+    /** A workflow node's pre-approved keys for this turn (node.alwaysAllow):
+     * joined to the bot's own list when its permission cards are judged. */
+    alwaysAllow?: string[];
     /** ask_bot delivery: the bot whose words this user-role line carries,
      * recorded on the message itself (Message.peerAsk). */
     peerAsk?: Message["peerAsk"];
@@ -3956,6 +4079,7 @@ async function startTurn(
   const provenance: TurnProvenance = inherited ?? {
     automationSource: opts?.automationSource,
     unattended: opts?.automationSource === "webhook" || opts?.unattended === true,
+    ...(opts?.alwaysAllow?.length ? { alwaysAllow: [...opts.alwaysAllow] } : {}),
   };
   turnProvenanceByThread.set(threadId, provenance);
   const task = store.taskByThread(bot.id, threadId);
@@ -4942,9 +5066,14 @@ workflowEngine = new WorkflowEngine({
   // for a human and waits, or hits its timeout; nothing self-approves at 3am.
   // `automationSource: "workflow"` fences the run input as untrusted in the
   // system prompt and keeps the unattended mark from being cleared.
-  startTurn: (botId, threadId, prompt, onDispatchError) =>
-    startTurn(botId, prompt, { threadId, automationSource: "workflow", unattended: true, onDispatchError })
-      .then(() => undefined),
+  startTurn: (botId, threadId, prompt, onDispatchError, turn) =>
+    startTurn(botId, prompt, {
+      threadId,
+      automationSource: "workflow",
+      unattended: true,
+      alwaysAllow: turn.alwaysAllow,
+      onDispatchError,
+    }).then(() => undefined),
   interruptTurn: async (botId, threadId) => {
     // Local instance only: workflows have no runOn: "cloud" in the MVP.
     const bot = store.bot(botId);

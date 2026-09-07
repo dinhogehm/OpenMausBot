@@ -87,6 +87,40 @@ describe("workflows slice", () => {
     expect(fixed.workflows[0]!.issues.map((issue) => issue.severity)).toEqual(["warning"]);
   });
 
+  it("carries a node's pre-approved keys and a step's denials through the frames untouched", () => {
+    // Optional fields the reducer knows nothing about must survive the
+    // upsert as-is: the panel edits `alwaysAllow`, the timeline paints
+    // `denials`, and a reducer that rebuilt nodes or results would drop both.
+    const granted = draft({
+      entryNodeId: "a",
+      nodes: [{ kind: "agent", id: "a", botId: "bot", instructions: "go", outcomes: ["done"], alwaysAllow: ["Bash:gh"] }],
+    });
+    const withDefinition = reducer(initialState, { type: "workflowPatched", workflow: granted });
+    expect(withDefinition.workflows[0]!.nodes[0]).toMatchObject({ alwaysAllow: ["Bash:gh"] });
+    // and the validator, run client-side on the frame, judges the field
+    const padded = reducer(withDefinition, {
+      type: "workflowPatched",
+      workflow: draft({ ...granted, nodes: [{ ...granted.nodes[0]!, alwaysAllow: [" Bash:gh"] }] as typeof granted.nodes }),
+    });
+    expect(padded.workflows[0]!.issues.map((issue) => issue.code)).toContain("bad-always-allow");
+
+    const denied = run({
+      status: "failed",
+      nodeResults: [
+        {
+          nodeId: "a",
+          outcome: "failed",
+          summary: "node timed out — denied unattended: shell (key shell:gh) — no always-allow names \"shell:gh\"",
+          startedAt: 5_000,
+          endedAt: 6_000,
+          denials: ['denied unattended: shell (key shell:gh) — no always-allow names "shell:gh"'],
+        },
+      ],
+    });
+    const withRun = reducer(withDefinition, { type: "workflowRunPatched", run: denied });
+    expect(withRun.workflowRuns[0]!.nodeResults[0]!.denials).toEqual(denied.nodeResults[0]!.denials);
+  });
+
   it("a `workflow-run` frame upserts by id and keeps the list newest-first", () => {
     let state = reducer(initialState, { type: "workflowRunPatched", run: run({ id: "r-1", startedAt: 1_000 }) });
     state = reducer(state, { type: "workflowRunPatched", run: run({ id: "r-2", startedAt: 3_000 }) });
