@@ -67,6 +67,7 @@ import {
   digestSlotAt,
   digestWindowStart,
   formatDuration,
+  inOutageBackoff,
   nodeSince,
   stuckAnnouncementDue,
   stuckVerdict,
@@ -798,20 +799,33 @@ export class WorkflowEngine {
       const workflow = this.store.get(run.workflowId);
       const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
       const parkedFor = this.parkedFallbackBot(run);
+      // An outage BACKOFF that has run out is over whether or not the bot
+      // is free: the hours the PROVIDER was away are not hours the run sat
+      // unexplained (the outage had its own announcement), so the
+      // watchdog's stay starts over here — and the wait's end comes off
+      // the outage record in the same write, so from now on the run is
+      // waiting on a BOT, which is exactly what the watchdog exists to
+      // notice. Only the backoff does this: a park for a busy bot keeps
+      // the outage record but never re-stamps the stay. Without the first
+      // half, the tick after a long outage would call a run that is
+      // moving again "stuck"; without the second, a bot busy for three
+      // hours after a one-minute backoff would be exempt the whole time.
+      if (run.outage !== undefined && inOutageBackoff(run)) {
+        const left = this.store.patchRun(run.id, {
+          outage: { ...run.outage, waitUntil: undefined },
+          nodeEnteredAt: now,
+          stuckNotifiedAt: undefined,
+          stuckAnnouncements: undefined,
+        });
+        if (!left) continue;
+      }
       if (node?.kind === "agent" && this.options.botState(parkedFor ?? node.botId) === "busy") continue;
       const nodeId = run.currentNodeId ?? workflow?.entryNodeId;
       if (nodeId === undefined) {
         this.failNode(run.id, "run has no current node recorded and its workflow is gone");
         continue;
       }
-      // Leaving an outage wait starts the watchdog's stay over: the hours
-      // the PROVIDER was away are not hours the run sat unexplained, and
-      // the outage had its own announcement. Without this, the first tick
-      // after a long outage would call a run that is moving again "stuck".
-      const patched = this.store.patchRun(run.id, {
-        nextAttemptAt: undefined,
-        ...(run.outage === undefined ? {} : { nodeEnteredAt: now, stuckNotifiedAt: undefined, stuckAnnouncements: undefined }),
-      });
+      const patched = this.store.patchRun(run.id, { nextAttemptAt: undefined });
       if (!patched) continue;
       this.dispatchNode(run.id, nodeId, parkedFor);
     }
@@ -1811,7 +1825,7 @@ export class WorkflowEngine {
       this.fallbackEligible(node, fallbackBotId)
     ) {
       const handed = this.store.patchRun(run.id, {
-        outage: { ...outage, fallbackBotId },
+        outage: { ...outage, fallbackBotId, waitUntil: undefined },
         dispatchedAt: undefined,
         currentThreadId: undefined,
         currentBotId: undefined,
@@ -1827,7 +1841,7 @@ export class WorkflowEngine {
     const nextAttemptAt = now + outageDelayMs(attempts, capMs, this.random);
     if (nextAttemptAt > outage.until) return outage;
     const parked = this.store.patchRun(run.id, {
-      outage: { ...outage, attempts },
+      outage: { ...outage, attempts, waitUntil: nextAttemptAt },
       nextAttemptAt,
       dispatchedAt: undefined,
       currentThreadId: undefined,
@@ -1971,7 +1985,10 @@ export class WorkflowEngine {
     }
     const auditGroupId = workflow?.auditGroupId;
     const post = this.options.postGroupMessage;
-    if (auditGroupId !== undefined && post && this.options.groupExists?.(auditGroupId) === false) {
+    if (!delivered) {
+      // Callers retry on the next tick when the person's channel failed;
+      // posting the room copy now would repeat it on every retry.
+    } else if (auditGroupId !== undefined && post && this.options.groupExists?.(auditGroupId) === false) {
       // A deleted room is a warning on the canvas, not a reason to touch
       // the run; the person was told above.
       console.warn(`workflow: audit room "${auditGroupId}" of ${name} no longer exists; ${kind} not posted`);

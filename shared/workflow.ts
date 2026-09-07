@@ -278,6 +278,13 @@ export interface WorkflowOutage {
   /** Set once the node was handed to its fallback bot during THIS outage,
    * so the hand-off happens at most once per outage. */
   fallbackBotId?: string;
+  /** The instant the CURRENT backoff wait ends — the `nextAttemptAt` the
+   * wait was parked with. Present only while that wait is pending: the
+   * dispatch that consumes it clears it, so a later park for a busy bot
+   * (which keeps the outage record) is not mistaken for the provider
+   * still being away. The watchdog exempts the run only while this is
+   * set, and forgets the wait's duration when it ends. */
+  waitUntil?: number;
 }
 
 export interface WorkflowRun {

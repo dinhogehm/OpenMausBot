@@ -40,9 +40,18 @@ export function nodeSince(run: WorkflowRun): number {
   return Math.max(last?.endedAt ?? 0, run.dispatchedAt ?? 0, run.startedAt);
 }
 
+/** Whether the run is sitting in an outage backoff RIGHT NOW: the wait's
+ * end is recorded on the outage and is the run's pending `nextAttemptAt`.
+ * A run parked for a busy bot after an outage still carries the outage
+ * record but not this — it is waiting on a bot, which is exactly what the
+ * watchdog exists to notice. */
+export function inOutageBackoff(run: WorkflowRun): boolean {
+  return run.outage?.waitUntil !== undefined && run.nextAttemptAt === run.outage.waitUntil;
+}
+
 /** How long a run may sit on `node` before the watchdog speaks, or null
  * when the node is exempt. A wait node's whole purpose is to sit, and its
- * timer is the tick's business; a run parked on a provider outage has a
+ * timer is the tick's business; a run in a provider outage's backoff has a
  * horizon and two announcements of its own; a human gate is judged
  * against its own expiry — the expiry sweep settles it at the deadline, so
  * a gate still open well past it is one the engine could not close. */
@@ -53,7 +62,7 @@ export function stuckThresholdMs(workflow: Workflow, run: WorkflowRun, node: Wor
   }
   if (run.status !== "running") return null;
   if (node?.kind === "wait" || run.waitUntil !== undefined) return null;
-  if (run.outage !== undefined && run.nextAttemptAt !== undefined) return null;
+  if (inOutageBackoff(run)) return null;
   return (workflow.stuckAfterMinutes ?? WORKFLOW_STUCK_AFTER_DEFAULT_MIN) * 60_000;
 }
 

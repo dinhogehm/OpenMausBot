@@ -327,6 +327,49 @@ describe("run watchdog", () => {
     expect(h.notifications.at(-1)!.message).toContain('stuck at node "plan" for 11m');
   });
 
+  it("an outage backoff followed by a busy bot: the wait on the bot IS a stay, and is announced", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({ stuckAfterMinutes: 10, providerOutage: { horizonHours: 6 } }));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError("unexpected status 503 Service Unavailable");
+    expect(h.store.getRun(run.id)).toMatchObject({ outage: { attempts: 1, waitUntil: T0 + MIN }, nextAttemptAt: T0 + MIN });
+    expect(kinds(h)).toEqual(["outage"]);
+
+    // The backoff ends, but the bot is busy: the run parks for the bot and
+    // keeps the outage record (the provider is not known to be back).
+    h.setState("planner", "busy");
+    h.setNow(T0 + MIN);
+    await h.engine.tick();
+    const parked = h.store.getRun(run.id)!;
+    expect(parked.nextAttemptAt).toBe(T0 + MIN);
+    expect(parked.outage).toMatchObject({ attempts: 1 });
+    expect(parked.outage?.waitUntil).toBeUndefined();
+    expect(parked.nodeEnteredAt).toBe(T0 + MIN); // the backoff's minute is forgotten…
+    expect(h.dispatches).toHaveLength(1);
+
+    // …but three hours waiting on a busy bot is a stay like any other.
+    h.setNow(T0 + 11 * MIN);
+    await h.engine.tick();
+    expect(kinds(h)).toEqual(["outage"]);
+    h.setNow(T0 + 11 * MIN + 10_000);
+    await h.engine.tick();
+    expect(kinds(h)).toEqual(["outage", "stuck"]);
+    expect(h.notifications[1]!.message).toContain('stuck at node "plan" for 10m (bot "planner", attempt 1 of 3, waiting for the bot to be free)');
+    expect(h.engine.health().runs.stuck.map((entry) => entry.runId)).toEqual([run.id]);
+    h.setNow(T0 + 3 * HOUR);
+    await h.engine.tick();
+    expect(h.engine.health().ok).toBe(false);
+
+    // The bot frees: the park is consumed WITHOUT restarting the stay — it
+    // was never the provider's time — so the next announcement counts the
+    // whole wait.
+    h.setState("planner", "ready");
+    h.setNow(T0 + 3 * HOUR + 10_000);
+    await h.engine.tick();
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.store.getRun(run.id)!.nodeEnteredAt).toBe(T0 + MIN);
+  });
+
   it("stops after twelve announcements for one stay, says so on the last, and starts over on the next node", async () => {
     const h = harness();
     const workflow = h.store.create(pipeline({ stuckAfterMinutes: 10 }));
@@ -368,9 +411,9 @@ describe("run watchdog", () => {
     expect(stuck[0]).toMatchObject({ runId: run.id, nodeId: "gate", status: "waiting-approval", since: T0, attempt: 0 });
   });
 
-  it("retries an announcement that failed to go out, and never persists the marker for it", async () => {
+  it("retries an announcement that failed to go out, never persists the marker for it, and does not repost it to the room meanwhile", async () => {
     const h = harness();
-    const workflow = h.store.create(pipeline({ stuckAfterMinutes: 10 }));
+    const workflow = h.store.create(pipeline({ stuckAfterMinutes: 10, auditGroupId: "audit" }));
     const run = h.engine.startRun(workflow.id, "go", "manual");
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     h.failNotifications("phone off");
@@ -379,11 +422,15 @@ describe("run watchdog", () => {
     expect(h.notifications).toEqual([]);
     expect(h.store.getRun(run.id)!.stuckNotifiedAt).toBeUndefined();
     expect(errors).toHaveBeenCalled();
-    h.failNotifications(null);
     h.setNow(T0 + 11 * MIN + 10_000);
     await h.engine.tick();
+    expect(h.posts).toEqual([]); // the room copy waits for the person's copy, or every retry would repost it
+    h.failNotifications(null);
+    h.setNow(T0 + 11 * MIN + 20_000);
+    await h.engine.tick();
     expect(kinds(h)).toEqual(["stuck"]);
-    expect(h.store.getRun(run.id)!.stuckNotifiedAt).toBe(T0 + 11 * MIN + 10_000);
+    expect(h.posts).toHaveLength(1);
+    expect(h.store.getRun(run.id)!.stuckNotifiedAt).toBe(T0 + 11 * MIN + 20_000);
   });
 
   it("does not count time spent queued behind another run, nor time before a resume", async () => {

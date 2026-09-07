@@ -179,6 +179,7 @@ describe("provider outage — entering the wait", () => {
       attempts: 1,
       of: 10,
       reason: CODEX_404,
+      waitUntil: T0 + MIN, // the pending backoff, for the watchdog's exemption
     });
     expect(workflowOutageWaitMessage(waiting, (at) => `@${at - T0}`)).toBe(
       "Waiting for the provider: next attempt @60000 (attempt 1 of 10)",

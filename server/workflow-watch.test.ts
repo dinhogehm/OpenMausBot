@@ -11,6 +11,7 @@ import {
   digestSlotAt,
   digestWindowStart,
   formatDuration,
+  inOutageBackoff,
   nodeSince,
   stuckAnnouncementDue,
   stuckThresholdMs,
@@ -90,11 +91,20 @@ describe("stuckThresholdMs", () => {
     expect(stuckThresholdMs(workflow(), run({ currentNodeId: "pause", waitUntil: 5 }), wait)).toBeNull();
     // A wait whose node was edited away still carries waitUntil.
     expect(stuckThresholdMs(workflow(), run({ waitUntil: 5 }), undefined)).toBeNull();
-    const outage = { since: 1, until: 2, attempts: 1, of: 10, reason: "503" };
+    const outage = { since: 1, until: 2, attempts: 1, of: 10, reason: "503", waitUntil: 9 };
+    expect(inOutageBackoff(run({ outage, nextAttemptAt: 9 }))).toBe(true);
     expect(stuckThresholdMs(workflow(), run({ outage, nextAttemptAt: 9 }), agent)).toBeNull();
     // An outage record without a scheduled attempt is the hand-off to the
     // fallback — a live dispatch, judged like any other.
     expect(stuckThresholdMs(workflow(), run({ outage }), agent)).toBe(120 * MIN);
+    // A park for a BUSY bot after the backoff keeps the record but not the
+    // wait: the run is waiting on a bot, which is what the watchdog is for.
+    const consumed = { ...outage, waitUntil: undefined };
+    expect(inOutageBackoff(run({ outage: consumed, nextAttemptAt: 9 }))).toBe(false);
+    expect(stuckThresholdMs(workflow(), run({ outage: consumed, nextAttemptAt: 9 }), agent)).toBe(120 * MIN);
+    // An older receipt (no waitUntil) parked on a backoff is judged too:
+    // the safe side is to speak.
+    expect(stuckThresholdMs(workflow(), run({ outage: consumed, nextAttemptAt: 99 }), agent)).toBe(120 * MIN);
     expect(stuckThresholdMs(workflow(), run({ status: "queued" }), agent)).toBeNull();
     expect(stuckThresholdMs(workflow(), run({ status: "completed" }), agent)).toBeNull();
   });
