@@ -250,7 +250,8 @@ function FallbackGroup({
       </label>
       <p className="mt-0.5 text-[10.5px] text-ink-secondary">
         Takes this step over when the bot&apos;s provider is down, if it runs on a different engine. Otherwise the run
-        waits for the provider to come back.
+        waits for the provider to come back. The fallback runs with its own standing permissions (always-allow) —
+        grant it what this step needs, or it will stop to ask.
       </p>
       <select
         id={id}

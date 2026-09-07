@@ -182,6 +182,19 @@ describe("WorkflowRunTimeline — provider outage and fallback", () => {
     expect(text(panel({ runs: [waiting], run: waiting }))).toContain("fallback bot bot-b was tried");
   });
 
+  it("says the run is parked for a busy fallback bot, not for the provider", () => {
+    const parked = run({
+      currentNodeId: "plan",
+      currentBotId: "bot-b",
+      nextAttemptAt: NOW + 30_000,
+      outage: { since: NOW - 10_000, until: NOW + 1, attempts: 0, of: 10, reason: OUTAGE_404, fallbackBotId: "bot-b" },
+    });
+    const flat = text(panel({ runs: [parked], run: parked, botName }));
+    expect(flat).toContain("Waiting for fallback bot Rook to be free");
+    expect(flat).not.toContain("Waiting for the provider");
+    expect(flat).not.toContain("was tried");
+  });
+
   it("says the step is running on the fallback bot, and why, while it holds the node", () => {
     const onFallback = run({
       currentNodeId: "plan",

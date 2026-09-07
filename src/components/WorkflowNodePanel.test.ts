@@ -177,6 +177,10 @@ describe("WorkflowNodePanel — fallback bot", () => {
     expect(_fallbackBotId).toBe("bot-b");
   });
 
+  it("tells the author the fallback runs on its own standing permissions", () => {
+    expect(text(panel(agent(), [scout, rook]))).toContain("runs with its own standing permissions");
+  });
+
   it("only offers a fallback on agent nodes", () => {
     expect(text(panel({ kind: "approval", id: "gate", prompt: "Ship it?" }, [scout]))).not.toContain("Fallback bot");
   });

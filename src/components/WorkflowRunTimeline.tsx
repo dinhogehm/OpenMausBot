@@ -261,7 +261,22 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             </ol>
           )}
 
-          {isActiveWorkflowRun(run) && run.outage && run.nextAttemptAt !== undefined ? (
+          {isActiveWorkflowRun(run) &&
+          run.outage?.fallbackBotId !== undefined &&
+          run.currentBotId === run.outage.fallbackBotId &&
+          run.nextAttemptAt !== undefined ? (
+            // Handed to the fallback but the fallback was busy: the run is
+            // parked for THAT bot (the engine keeps currentBotId aimed at
+            // it), not for the provider — say so, or the count below would
+            // read as an outage wait that never advances.
+            <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-warning">
+              <Loader2 size={10} className="mt-0.5 animate-spin" aria-hidden />
+              <span className="min-w-0 break-words">
+                Waiting for fallback bot {botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId} to be free
+                (it is busy) — next try {formatWhen(run.nextAttemptAt)}
+              </span>
+            </p>
+          ) : isActiveWorkflowRun(run) && run.outage && run.nextAttemptAt !== undefined ? (
             // A provider outage is a wait, not a retry: nothing of the
             // node's budget is being spent, so the line must not say
             // "attempt" the way the retry line below does. The count is
