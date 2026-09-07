@@ -1,8 +1,20 @@
 /** Why a workflow node attempt failed, as far as the engine can tell from
- * the one string it gets — a turn's stop reason, a runtime.error message, a
- * dispatch rejection, or one of its own reasons. Pure: the engine's retry
- * funnel (`attemptFailure`) branches on the class, so what counts as an
- * outage is decided in exactly one place and pinned by a table test.
+ * what a turn leaves behind — a `turn.completed` stop reason, the last
+ * `runtime.error` message (and its `setup` flag) on that thread, or a
+ * dispatch rejection — plus the engine's own reasons. Pure: the engine's
+ * retry funnel (`attemptFailure`) branches on the class, so what counts as
+ * an outage is decided in exactly one place and pinned by a table test.
+ *
+ * What the drivers actually hand over (read off codex.ts, claude.ts,
+ * acp/core.ts, pi.ts): the stop reason is usually a bare CODE —
+ * `exit_before_result`, `rpc_error`, `auth_required`, `failed`,
+ * `spawn_error`, `shutdown_timeout` — and the sentence that says what
+ * happened rides on a `runtime.error` emitted just before it. Only codex's
+ * `turn/completed` puts the provider's text in the stop reason itself. So
+ * a failure is described from BOTH, and a bare code never decides on its
+ * own: claude.ts settles every death of its CLI with a turn still live as
+ * `exit_before_result`, whether the cause was a dropped socket or
+ * "Invalid API key · Please run /login".
  *
  * This is deliberately NOT `server/drivers/retry.ts`. That classifier
  * answers a different question — "should the driver relaunch its CLI
@@ -47,6 +59,20 @@ export const ENVELOPE_MISS_REASON = "node did not produce a valid outcome envelo
  * (`unexpected status 404 Not Found: …, url: https://chatgpt.com/…`). */
 const PROVIDER_BACKEND = /backend-api|chatgpt\.com|openai\.com|anthropic\.com|googleapis\.com|api\.x\.ai/i;
 
+/** What must NEVER be waited out or handed to a fallback, whatever else
+ * the message says: a credential, a request the provider refuses by
+ * shape, a model that does not exist, a CLI that is not installed. These
+ * are judged before any outage pattern, because a driver's stderr tail
+ * can carry both ("exited 1 before result: Invalid API key"). */
+const TERMINAL_PATTERNS: RegExp[] = [
+  /\b(?:status|http|error)\s*:?\s*(?:400|401|403|422)\b/i,
+  /\b40[13]\s+(?:unauthorized|forbidden)\b|\b400\s+bad request\b/i,
+  /\bunauthorized\b|\bforbidden\b|\binvalid api key\b|\bmissing bearer\b|\bauthentication required\b|\bnot logged in\b|\blogged out\b|\/login\b/i,
+  /\binvalid request\b|\bmalformed\b|\bmodel not found\b|\bunknown model\b|\bunsupported model\b|\bdoes not exist for model\b/i,
+  /\bisn't installed\b|\bisn't executable\b|\bcommand not found\b|\bENOENT\b|\bEACCES\b/,
+  /\binsufficient_quota\b|\bquota\b|\bbilling\b/i,
+];
+
 const OUTAGE_PATTERNS: RegExp[] = [
   // HTTP-level refusals as codex/claude spell them ("unexpected status 503
   // Service Unavailable", "HTTP 529", "529 overloaded"). A bare three-digit
@@ -60,26 +86,75 @@ const OUTAGE_PATTERNS: RegExp[] = [
   /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|EHOSTUNREACH|ENETUNREACH)\b/,
   /\bfetch failed\b|\bsocket hang up\b|\bconnection reset\b|\bconnection refused\b|\bnetwork error\b/i,
   // The engine process died before it answered, or would not die when
-  // asked: the harness lost the provider, whatever the provider was doing.
-  /\bexit_before_result\b/,
-  /\bexited (?:-?\d+|null) before turn\/completed\b/,
+  // asked — the drivers' own close-handler wording (codex, claude, acp,
+  // pi). A death that explained itself with a credential or a missing
+  // binary was caught by TERMINAL_PATTERNS above; one that did not is the
+  // harness losing the provider, whatever the provider was doing.
+  /\bexited (?:-?\d+|null) before (?:turn\/completed|result|the prompt result)\b/,
+  /\bprocess exited before replying\b/,
   /\bdid not shut down\b/,
 ];
 
 /** Classify one attempt's failure reason. Order is precedence: contention
  * and capability are the harness's own words and never look like a
- * provider error; the engine's envelope reason is exact; an outage is
- * judged before a timeout because `ETIMEDOUT` is a dead connection, not a
- * slow model. */
+ * provider error; the engine's envelope reason is exact; a credential,
+ * request-shape or setup problem is terminal-ish (`other`: the node's
+ * ordinary budget, never a six-hour wait and never a fallback) even when
+ * a dead-process sentence sits beside it; an outage is judged before a
+ * timeout because `ETIMEDOUT` is a dead connection, not a slow model. A
+ * bare stop code on its own (`exit_before_result`, `rpc_error`, `failed`)
+ * says nothing and is `other` — see `describeWorkflowTurnFailure`. */
 export function classifyWorkflowFailure(reason: string): WorkflowFailureClass {
   const text = reason.trim();
   if (BUSY_DISPATCH.test(text)) return "contention";
   if (/\bis not allowed to (?:merge|deploy)\b/.test(text)) return "capability";
   if (text === ENVELOPE_MISS_REASON) return "envelope";
+  if (TERMINAL_PATTERNS.some((pattern) => pattern.test(text))) return "other";
   if (/\b404\b/.test(text) && PROVIDER_BACKEND.test(text)) return "provider-outage";
   if (OUTAGE_PATTERNS.some((pattern) => pattern.test(text))) return "provider-outage";
   if (text === NODE_TIMEOUT_REASON || /\btimed? out\b|\btimeout\b/i.test(text)) return "timeout";
   return "other";
+}
+
+/** What a not-ok `turn.completed` leaves the engine: its stop reason and
+ * the last `runtime.error` on the thread (message and `setup` flag), any
+ * of which may be absent. */
+export interface WorkflowTurnFailure {
+  stopReason?: string;
+  message?: string;
+  /** The driver's own verdict that this is a setup problem (credentials,
+   * a missing binary): never an outage, whatever the text says. */
+  setup?: boolean;
+}
+
+export const TURN_FAILURE_DEFAULT_REASON = "the bot did not complete this node";
+
+/** A stop reason that is a code, not a description: one snake_case token
+ * (`exit_before_result`, `rpc_error`, `auth_required`, `failed`). Codex's
+ * `turn/completed` is the one driver path that puts a sentence there. */
+const isBareStopCode = (stopReason: string): boolean => /^[a-z][a-z0-9_]*$/i.test(stopReason.trim());
+
+/** The one line the engine records — in `outage.reason`, on the failed
+ * result, in the run's error — for a turn that ended not-ok. The
+ * runtime.error MESSAGE is the substance whenever the stop reason is a
+ * bare code; the code is kept in parentheses so the receipt still says
+ * which driver path it came through. A descriptive stop reason (codex's
+ * provider text) stands on its own. */
+export function describeWorkflowTurnFailure(failure: WorkflowTurnFailure): string {
+  const stopReason = failure.stopReason?.trim() || undefined;
+  const message = failure.message?.trim() || undefined;
+  if (stopReason === undefined) return message ?? TURN_FAILURE_DEFAULT_REASON;
+  if (!isBareStopCode(stopReason)) return stopReason;
+  return message === undefined ? stopReason : `${message} (${stopReason})`;
+}
+
+/** Classify a not-ok turn from what the drivers actually emit. A driver
+ * that flagged the error as `setup` has already said it is not the
+ * provider's fault; otherwise the described line is classified as any
+ * other reason. */
+export function classifyWorkflowTurnFailure(failure: WorkflowTurnFailure): WorkflowFailureClass {
+  if (failure.setup) return "other";
+  return classifyWorkflowFailure(describeWorkflowTurnFailure(failure));
 }
 
 /** First wait of the outage backoff; every later one doubles until the cap. */

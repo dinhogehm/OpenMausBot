@@ -44,10 +44,14 @@ import type { RuntimeEvent } from "./contracts.ts";
 import { redactSecretsInText } from "./redact.ts";
 import {
   classifyWorkflowFailure,
+  classifyWorkflowTurnFailure,
+  describeWorkflowTurnFailure,
   ENVELOPE_MISS_REASON,
   NODE_TIMEOUT_REASON,
   outageDelayMs,
   outagePlannedAttempts,
+  type WorkflowFailureClass,
+  type WorkflowTurnFailure,
 } from "./workflow-failure.ts";
 import type { WorkflowStore } from "./workflow-store.ts";
 
@@ -199,9 +203,12 @@ export class WorkflowEngine {
   /** Latest full assistant text per dispatched thread — same accumulation as
    * RoutineManager: the turn's final assistant_text item wins. */
   private readonly lastAssistantText = new Map<string, string>();
-  /** Latest runtime.error per dispatched thread — the fallback reason for a
-   * turn that ends not-ok without a stop reason (mirrors RoutineManager). */
-  private readonly lastRuntimeError = new Map<string, string>();
+  /** Latest runtime.error per dispatched thread — message and the driver's
+   * `setup` verdict. The stop reason of a not-ok turn is usually a bare
+   * code (`exit_before_result`, `rpc_error`), so THIS is what says what
+   * happened, and what the failure is classified on (mirrors
+   * RoutineManager's use of the same event). */
+  private readonly lastRuntimeError = new Map<string, { message: string; setup: boolean }>();
   /** Re-entrancy guard for drainQueue: while a drain loop runs, nested drain
    * requests (failNode during a promotion, deleted-workflow chains) only
    * enqueue the workflow id, so stack depth never scales with queue length. */
@@ -487,7 +494,8 @@ export class WorkflowEngine {
       if (!run || run.status !== "running" || run.nextAttemptAt === undefined || run.nextAttemptAt > now) continue;
       const workflow = this.store.get(run.workflowId);
       const node = workflow?.nodes.find((candidate) => candidate.id === run.currentNodeId);
-      if (node?.kind === "agent" && this.options.botState(node.botId) === "busy") continue;
+      const parkedFor = this.parkedFallbackBot(run);
+      if (node?.kind === "agent" && this.options.botState(parkedFor ?? node.botId) === "busy") continue;
       const nodeId = run.currentNodeId ?? workflow?.entryNodeId;
       if (nodeId === undefined) {
         this.failNode(run.id, "run has no current node recorded and its workflow is gone");
@@ -495,7 +503,7 @@ export class WorkflowEngine {
       }
       const patched = this.store.patchRun(run.id, { nextAttemptAt: undefined });
       if (!patched) continue;
-      this.dispatchNode(run.id, nodeId);
+      this.dispatchNode(run.id, nodeId, parkedFor);
     }
   }
 
@@ -531,8 +539,17 @@ export class WorkflowEngine {
         this.follow(run, workflow, node, last.outcome);
         continue;
       }
-      this.dispatchNode(run.id, run.currentNodeId ?? workflow.entryNodeId);
+      this.dispatchNode(run.id, run.currentNodeId ?? workflow.entryNodeId, this.parkedFallbackBot(run));
     }
+  }
+
+  /** The fallback bot a parked or orphaned run still belongs to: only when
+   * the receipt says the node was handed to that bot in the current outage
+   * AND that bot is the one recorded as holding it. A stale currentBotId
+   * from any other state (a receipt written before the node's bot was
+   * re-pointed, say) must not redirect a dispatch. */
+  private parkedFallbackBot(run: WorkflowRun): string | undefined {
+    return run.currentBotId !== undefined && run.currentBotId === run.outage?.fallbackBotId ? run.currentBotId : undefined;
   }
 
   private isStranded(run: WorkflowRun): boolean {
@@ -782,7 +799,7 @@ export class WorkflowEngine {
       return;
     }
     if (event.type === "runtime.error") {
-      this.lastRuntimeError.set(event.threadId, event.message);
+      this.lastRuntimeError.set(event.threadId, { message: event.message, setup: event.setup === true });
       return;
     }
     if (event.type !== "turn.completed") return;
@@ -801,11 +818,13 @@ export class WorkflowEngine {
       return;
     }
     if (!event.ok) {
-      this.attemptFailure(
-        runId,
-        event.stopReason ?? this.lastRuntimeError.get(event.threadId) ?? "the bot did not complete this node",
-        event.threadId,
-      );
+      // Described and classified from the PAIR the driver emitted: the
+      // runtime.error carries the sentence, the stop reason the code.
+      const failure: WorkflowTurnFailure = {
+        ...(event.stopReason === undefined || event.stopReason === null ? {} : { stopReason: event.stopReason }),
+        ...this.lastRuntimeError.get(event.threadId),
+      };
+      this.attemptFailure(runId, describeWorkflowTurnFailure(failure), event.threadId, classifyWorkflowTurnFailure(failure));
       return;
     }
     // The envelope stays verbatim in the node's task transcript — accepted
@@ -980,13 +999,15 @@ export class WorkflowEngine {
     if (botState === "busy") {
       // Per-bot FIFO: park the run for the reconciler, which serves waiting
       // runs oldest-first as the bot frees up. No task is created yet, and a
-      // parked receipt must not keep pointing at a dead thread.
+      // parked receipt must not keep pointing at a dead thread. A dispatch
+      // aimed at the fallback stays aimed at it (currentBotId = botId), so
+      // the reconciler waits for THAT bot rather than the node's own.
       this.store.patchRun(runId, {
         currentNodeId: node.id,
         nextAttemptAt: this.now(),
         dispatchedAt: undefined,
         currentThreadId: undefined,
-        currentBotId: undefined,
+        currentBotId: botId,
       });
       return;
     }
@@ -1114,8 +1135,17 @@ export class WorkflowEngine {
    * acting on it would forget the LIVE thread and re-schedule the wrong node.
    * Registration in runByThread drops the instant a dispatch stops being
    * current, so it is a precise staleness test. Callers with no thread yet
-   * (timeout sweep after its own freshness check) omit it. */
-  private attemptFailure(runId: string, reason: string, threadId?: string): void {
+   * (timeout sweep after its own freshness check) omit it. `failureClass`
+   * is passed by the one caller that knows more than the reason string
+   * (a not-ok turn, whose driver may have flagged the error as setup);
+   * everyone else — dispatch rejections, the engine's own reasons — is
+   * classified on the text. */
+  private attemptFailure(
+    runId: string,
+    reason: string,
+    threadId?: string,
+    failureClass: WorkflowFailureClass = classifyWorkflowFailure(reason),
+  ): void {
     if (threadId !== undefined && this.runByThread.get(threadId) !== runId) return;
     const run = this.store.getRun(runId);
     if (!run || TERMINAL_RUN_STATUSES.has(run.status)) return;
@@ -1129,14 +1159,20 @@ export class WorkflowEngine {
     // own — the bot can take a turn between the check and the call — so the
     // answer is the same one the busy check gives: park, and let the
     // reconciler serve this run when the bot frees, oldest first.
-    const failureClass = classifyWorkflowFailure(reason);
     if (node?.kind === "agent" && failureClass === "contention") {
+      // A fallback the harness found busy between the eligibility check and
+      // the call is still the bot this outage was handed to: the park keeps
+      // pointing at it (currentBotId stays), so the reconciler retries the
+      // FALLBACK when it frees rather than throwing the run straight back
+      // at the primary — which is down — with no backoff and no second
+      // hand-off. Any other contention parks for the node's own bot.
+      const keepFallback = run.currentBotId !== undefined && run.currentBotId === run.outage?.fallbackBotId;
       this.store.patchRun(runId, {
         currentNodeId: node.id,
         nextAttemptAt: this.now() + BUSY_REPARK_MS,
         dispatchedAt: undefined,
         currentThreadId: undefined,
-        currentBotId: undefined,
+        ...(keepFallback ? {} : { currentBotId: undefined }),
       });
       return;
     }
@@ -1210,8 +1246,15 @@ export class WorkflowEngine {
     const now = this.now();
     const capMs = (workflow.providerOutage?.maxBackoffMinutes ?? WORKFLOW_OUTAGE_BACKOFF_CAP_DEFAULT_MIN) * 60_000;
     const horizonMs = (workflow.providerOutage?.horizonHours ?? WORKFLOW_OUTAGE_HORIZON_DEFAULT_H) * 3_600_000;
+    const since = run.outage?.since ?? now;
     const outage: WorkflowOutage = {
-      ...(run.outage ?? { since: now, until: now + horizonMs, attempts: 0, of: outagePlannedAttempts(capMs, horizonMs) }),
+      ...(run.outage ?? { attempts: 0 }),
+      since,
+      // Horizon and "of Z" follow the workflow's knobs as they are NOW, so
+      // an author who lengthens the horizon mid-outage is obeyed; only the
+      // outage's start is fixed.
+      until: since + horizonMs,
+      of: outagePlannedAttempts(capMs, horizonMs),
       // The latest provider error is the one the UI and the receipt show.
       reason: redactSecretsInText(reason).slice(0, 500),
     };

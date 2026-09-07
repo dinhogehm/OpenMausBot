@@ -92,8 +92,26 @@ function harness({ engineLookup = true }: { engineLookup?: boolean } = {}) {
       engine.handleRuntimeEvent({ ...base(threadId), type: "item.completed", itemType: "assistant_text", text } satisfies RuntimeEvent);
       engine.handleRuntimeEvent({ ...base(threadId), type: "turn.completed", ok: true } satisfies RuntimeEvent);
     };
-    const failTurn = (threadId: string, stopReason: string) => {
-      engine.handleRuntimeEvent({ ...base(threadId), type: "turn.completed", ok: false, stopReason } satisfies RuntimeEvent);
+    /** A not-ok turn as the drivers end one: an optional runtime.error
+     * (message, setup) followed by turn.completed with a stop reason. */
+    const failTurn = (
+      threadId: string,
+      failure: { stopReason?: string; message?: string; setup?: boolean },
+    ) => {
+      if (failure.message !== undefined) {
+        engine.handleRuntimeEvent({
+          ...base(threadId),
+          type: "runtime.error",
+          message: failure.message,
+          ...(failure.setup === undefined ? {} : { setup: failure.setup }),
+        } satisfies RuntimeEvent);
+      }
+      engine.handleRuntimeEvent({
+        ...base(threadId),
+        type: "turn.completed",
+        ok: false,
+        ...(failure.stopReason === undefined ? {} : { stopReason: failure.stopReason }),
+      } satisfies RuntimeEvent);
     };
     return { store, engine, dispatches, interrupts, completeTurn, failTurn };
   };
@@ -174,16 +192,84 @@ describe("provider outage — entering the wait", () => {
     h.engine.stop();
   });
 
-  it("treats a not-ok turn whose stop reason is exit_before_result the same way", () => {
+  it("a codex turn/completed carrying the backend 404 as its stop reason enters the wait", () => {
     const h = harness();
     const workflow = h.store.create(pipeline());
     const run = h.engine.startRun(workflow.id, "go", "manual");
-    h.failTurn(h.dispatches[0]!.threadId, "exit_before_result");
+    h.failTurn(h.dispatches[0]!.threadId, { stopReason: CODEX_404 });
     const waiting = h.store.getRun(run.id)!;
     expect(waiting.status).toBe("running");
     expect(waiting.attempt).toBe(0);
-    expect(waiting.outage?.reason).toBe("exit_before_result");
+    expect(waiting.outage?.reason).toBe(CODEX_404);
     expect(waiting.nextAttemptAt).toBe(T0 + MIN);
+  });
+
+  it("a codex launch failure — the 503 on runtime.error, rpc_error as the stop reason — enters the wait with the real message", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.failTurn(h.dispatches[0]!.threadId, {
+      stopReason: "rpc_error",
+      message: "unexpected status 503 Service Unavailable, url: https://chatgpt.com/backend-api/codex/responses",
+    });
+    const waiting = h.store.getRun(run.id)!;
+    expect(waiting.attempt).toBe(0);
+    expect(waiting.outage?.reason).toBe(
+      "unexpected status 503 Service Unavailable, url: https://chatgpt.com/backend-api/codex/responses (rpc_error)",
+    );
+  });
+
+  it("a claude CLI death with a dropped socket in stderr, settled as exit_before_result, enters the wait", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.failTurn(h.dispatches[0]!.threadId, {
+      stopReason: "exit_before_result",
+      message: "claude exited 1 before result: TypeError: fetch failed",
+    });
+    expect(h.store.getRun(run.id)!.outage?.reason).toBe("claude exited 1 before result: TypeError: fetch failed (exit_before_result)");
+    expect(h.store.getRun(run.id)!.attempt).toBe(0);
+  });
+
+  it.each([
+    [
+      "a claude CLI death over a bad API key, settled as exit_before_result",
+      { stopReason: "exit_before_result", message: "claude exited 1 before result: Invalid API key · Please run /login" },
+    ],
+    [
+      "a codex auth failure the driver flagged as setup",
+      { stopReason: "auth_required", message: "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header", setup: true },
+    ],
+    ["a bare exit_before_result with nothing said", { stopReason: "exit_before_result" }],
+    ["a bare rpc_error with nothing said", { stopReason: "rpc_error" }],
+    ["a pi close with no stop reason and no runtime.error", {}],
+    ["a model that does not exist", { stopReason: "rpc_error", message: "unexpected status 400 Bad Request: model not found" }],
+  ])("%s is charged to the node, never waited out or handed to the fallback", (_case, failure) => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({}, { fallbackBotId: "spare", retries: 1 }));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.failTurn(h.dispatches[0]!.threadId, failure);
+    const charged = h.store.getRun(run.id)!;
+    expect(charged.status).toBe("running");
+    expect(charged.attempt).toBe(1);
+    expect(charged.outage).toBeUndefined();
+    expect(charged.nextAttemptAt).toBe(T0 + MIN); // the linear retry, not the outage wait
+    expect(h.dispatches).toHaveLength(1); // no hand-off
+  });
+
+  it("records the real message, not the bare code, on the failed edge once retries are spent", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.failTurn(h.dispatches[0]!.threadId, {
+      stopReason: "exit_before_result",
+      message: "claude exited 1 before result: Invalid API key · Please run /login",
+    });
+    const failed = h.store.getRun(run.id)!;
+    expect(failed.currentNodeId).toBe("report");
+    expect(failed.nodeResults[0]!.summary).toBe(
+      "claude exited 1 before result: Invalid API key · Please run /login (exit_before_result)",
+    );
   });
 
   it("clears the outage when the provider comes back and the node completes", async () => {
@@ -210,7 +296,7 @@ describe("provider outage — entering the wait", () => {
     const run = h.engine.startRun(workflow.id, "go", "manual");
     h.dispatches[0]!.onDispatchError(CODEX_404);
     await tick(MIN);
-    h.failTurn(h.dispatches[1]!.threadId, "the bot did not complete this node");
+    h.failTurn(h.dispatches[1]!.threadId, { stopReason: "failed", message: "pi turn failed" });
 
     const charged = h.store.getRun(run.id)!;
     expect(charged.status).toBe("running");
@@ -461,7 +547,7 @@ describe("provider outage — fallback bot", () => {
     const workflow = h.store.create(pipeline({}, { fallbackBotId: "spare", retries: 1 }));
     const run = h.engine.startRun(workflow.id, "go", "manual");
     h.dispatches[0]!.onDispatchError(CODEX_404);
-    h.failTurn(h.dispatches[1]!.threadId, "the bot did not complete this node");
+    h.failTurn(h.dispatches[1]!.threadId, { stopReason: "failed", message: "pi turn failed" });
     const charged = h.store.getRun(run.id)!;
     expect(charged.attempt).toBe(1);
     expect(charged.outage).toBeUndefined();
@@ -565,5 +651,105 @@ describe("provider outage — fallback bot", () => {
     expect(cancelled.status).toBe("cancelled");
     expect(cancelled.outage).toBeUndefined();
     expect(h.interrupts).toEqual([{ botId: "spare", threadId: h.dispatches[1]!.threadId }]);
+  });
+});
+
+describe("provider outage — fallback contention race", () => {
+  it("a 409 from the fallback re-parks the run FOR the fallback, so the reconciler retries it and not the dead primary", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({}, { fallbackBotId: "spare" }));
+    h.engine.start();
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError(CODEX_404);
+    expect(h.dispatches[1]!.botId).toBe("spare");
+    // the fallback took a turn between the eligibility check and the call
+    h.dispatches[1]!.onDispatchError("the bot is already working — interrupt it first");
+
+    const parked = h.store.getRun(run.id)!;
+    expect(parked.attempt).toBe(0);
+    expect(parked.currentBotId).toBe("spare"); // still aimed at the fallback
+    expect(parked.outage).toMatchObject({ attempts: 0, fallbackBotId: "spare" });
+    expect(parked.nextAttemptAt).toBe(T0 + 30_000);
+
+    // still busy when due: skipped, not thrown at the primary
+    h.setState("spare", "busy");
+    await tick(30_000);
+    expect(h.dispatches).toHaveLength(2);
+    expect(h.store.getRun(run.id)!.currentBotId).toBe("spare");
+
+    h.setState("spare", "ready");
+    await tick(10_000);
+    expect(h.dispatches).toHaveLength(3);
+    expect(h.dispatches[2]!.botId).toBe("spare");
+    h.completeTurn(h.dispatches[2]!.threadId, envelope("done"));
+    expect(h.store.getRun(run.id)!.nodeResults[0]).toMatchObject({
+      outcome: "done",
+      fallback: { botId: "spare", because: CODEX_404 },
+    });
+    h.engine.stop();
+  });
+
+  it("a restart while parked for the fallback re-drives it on the fallback", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({}, { fallbackBotId: "spare" }));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError(CODEX_404);
+    h.dispatches[1]!.onDispatchError("the bot is already working — interrupt it first");
+    const re = h.restart();
+    re.engine.start();
+    await tick(30_000);
+    expect(re.dispatches).toHaveLength(1);
+    expect(re.dispatches[0]!.botId).toBe("spare");
+    expect(re.store.getRun(run.id)!.currentBotId).toBe("spare");
+    re.engine.stop();
+  });
+
+  it("a live fallback dispatch orphaned by a crash is re-driven on the fallback, not the primary", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({}, { fallbackBotId: "spare" }));
+    h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError(CODEX_404);
+    expect(h.dispatches[1]!.botId).toBe("spare");
+    const re = h.restart();
+    re.engine.start();
+    await tick(0);
+    expect(re.dispatches).toHaveLength(1);
+    expect(re.dispatches[0]!.botId).toBe("spare");
+    re.engine.stop();
+  });
+
+  it("the fallback busy at a re-dispatch keeps the park aimed at it", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({}, { fallbackBotId: "spare" }));
+    h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError(CODEX_404);
+    h.setState("spare", "busy");
+    // recoverStranded → dispatchNode(…, "spare") → busy branch
+    const re = h.restart();
+    re.engine.start();
+    await tick(0);
+    expect(re.dispatches).toHaveLength(0);
+    const parked = re.store.listRuns(workflow.id)[0]!;
+    expect(parked.currentBotId).toBe("spare");
+    expect(parked.nextAttemptAt).toBeDefined();
+    re.engine.stop();
+  });
+});
+
+describe("provider outage — knobs edited mid-outage", () => {
+  it("recomputes the horizon and 'of Z' from the workflow as it is now, keeping the outage's start", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline());
+    h.engine.start();
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.dispatches[0]!.onDispatchError(CODEX_404);
+    expect(h.store.getRun(run.id)!.outage).toMatchObject({ since: T0, until: T0 + 6 * HOUR, of: 10 });
+
+    h.store.update(workflow.id, { providerOutage: { maxBackoffMinutes: 5, horizonHours: 1 } });
+    await tick(MIN);
+    h.dispatches[1]!.onDispatchError(CODEX_404);
+    // 1+2+4 = 7, then 5-minute waits: 12 … 57, the next at 62 > 60 → 13
+    expect(h.store.getRun(run.id)!.outage).toMatchObject({ since: T0, until: T0 + HOUR, of: 13, attempts: 2 });
+    h.engine.stop();
   });
 });
