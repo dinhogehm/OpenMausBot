@@ -70,6 +70,11 @@ describe("classifyWorkflowFailure — reason strings", () => {
     ["`codex` isn't installed, or isn't on this app's PATH (spawn_error)", "other"],
     ["spawn failed: spawn codex ENOENT (spawn_error)", "other"],
     ["insufficient_quota: You exceeded your current quota (rpc_error)", "other"],
+    ["Billing hard limit has been reached (rpc_error)", "other"],
+    // …but an account word beside a throttle status is the provider throttling
+    ["429 RESOURCE_EXHAUSTED: Quota exceeded for quota metric (rpc_error)", "provider-outage"],
+    ["unexpected status 503 Service Unavailable: visit https://chatgpt.com/login (rpc_error)", "provider-outage"],
+
     // A bare stop code on its own says nothing
     ["exit_before_result", "other"],
     ["rpc_error", "other"],
@@ -223,6 +228,18 @@ describe("describeWorkflowTurnFailure / classifyWorkflowTurnFailure — what the
       "any driver: a user interrupt",
       { stopReason: "interrupted" },
       "interrupted",
+      "other",
+    ],
+    [
+      "an interrupt after a stream error the driver retried itself — the harness stopped it, not the provider",
+      { stopReason: "interrupted", message: "stream error: unexpected status 503 Service Unavailable, retrying 1/5" },
+      "stream error: unexpected status 503 Service Unavailable, retrying 1/5 (interrupted)",
+      "other",
+    ],
+    [
+      "a cancel with a dropped-socket message left behind",
+      { stopReason: "cancelled", message: "fetch failed" },
+      "fetch failed (cancelled)",
       "other",
     ],
     [

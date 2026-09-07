@@ -113,7 +113,12 @@ function harness({ engineLookup = true }: { engineLookup?: boolean } = {}) {
         ...(failure.stopReason === undefined ? {} : { stopReason: failure.stopReason }),
       } satisfies RuntimeEvent);
     };
-    return { store, engine, dispatches, interrupts, completeTurn, failTurn };
+    /** A runtime.error with the turn still live — what codex relays for a
+     * stream error it retries itself. */
+    const runtimeError = (threadId: string, message: string) => {
+      engine.handleRuntimeEvent({ ...base(threadId), type: "runtime.error", message } satisfies RuntimeEvent);
+    };
+    return { store, engine, dispatches, interrupts, completeTurn, failTurn, runtimeError };
   };
   const first = build("thread");
   return {
@@ -750,6 +755,68 @@ describe("provider outage — knobs edited mid-outage", () => {
     h.dispatches[1]!.onDispatchError(CODEX_404);
     // 1+2+4 = 7, then 5-minute waits: 12 … 57, the next at 62 > 60 → 13
     expect(h.store.getRun(run.id)!.outage).toMatchObject({ since: T0, until: T0 + HOUR, of: 13, attempts: 2 });
+    h.engine.stop();
+  });
+});
+
+describe("provider outage — a stale runtime.error must not describe a later turn", () => {
+  const STREAM_503 = "stream error: unexpected status 503 Service Unavailable, url: https://chatgpt.com/backend-api/codex/responses, retrying 1/5";
+
+  it("the reviewer's case: stream error retried by the driver, ok turn without envelope, re-prompt, then an interrupt — charged as the node's failure, not an outage", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({}, { retries: 1 }));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    const thread = h.dispatches[0]!.threadId;
+    // turn 1: codex relayed a stream error it retried itself, then finished ok — with no envelope
+    h.runtimeError(thread, STREAM_503); // runtime.error only…
+    h.completeTurn(thread, "here is my answer, no envelope"); // …then an ok turn.completed
+    expect(h.dispatches).toHaveLength(2); // the re-prompt, same thread
+    expect(h.dispatches[1]!.threadId).toBe(thread);
+    // turn 2: stopped by the harness
+    h.failTurn(thread, { stopReason: "interrupted" });
+
+    const charged = h.store.getRun(run.id)!;
+    expect(charged.outage).toBeUndefined();
+    expect(charged.attempt).toBe(1);
+    expect(charged.nextAttemptAt).toBe(T0 + MIN);
+  });
+
+  it("an ok turn clears the thread's runtime.error, so a later not-ok turn on it is described by its own words", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({}, { retries: 1 }));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    const thread = h.dispatches[0]!.threadId;
+    h.runtimeError(thread, STREAM_503);
+    h.completeTurn(thread, "no envelope");
+    h.failTurn(thread, { stopReason: "failed" }); // nothing said this time
+    expect(h.store.getRun(run.id)!.outage).toBeUndefined();
+    expect(h.store.getRun(run.id)!.attempt).toBe(1);
+  });
+
+  it("an interrupt never enters the wait even when a real outage message was logged on the same turn", () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({}, { retries: 1 }));
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    h.failTurn(h.dispatches[0]!.threadId, { stopReason: "interrupted", message: "fetch failed" });
+    const charged = h.store.getRun(run.id)!;
+    expect(charged.outage).toBeUndefined();
+    expect(charged.attempt).toBe(1);
+  });
+
+  it("the timeout sweep's own interrupt is a timeout, whatever the thread logged before", async () => {
+    const h = harness();
+    const workflow = h.store.create(pipeline({}, { retries: 1, timeoutMinutes: 1 }));
+    h.engine.start();
+    const run = h.engine.startRun(workflow.id, "go", "manual");
+    const thread = h.dispatches[0]!.threadId;
+    h.runtimeError(thread, STREAM_503); // the turn is still live
+    await tick(MIN + 10_000);
+    expect(h.interrupts).toHaveLength(1);
+    // the driver answers the interrupt late; the sweep already forgot the thread
+    h.failTurn(thread, { stopReason: "interrupted" });
+    const timedOut = h.store.getRun(run.id)!;
+    expect(timedOut.outage).toBeUndefined();
+    expect(timedOut.attempt).toBe(1);
     h.engine.stop();
   });
 });

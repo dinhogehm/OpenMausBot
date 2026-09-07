@@ -67,10 +67,21 @@ const PROVIDER_BACKEND = /backend-api|chatgpt\.com|openai\.com|anthropic\.com|go
 const TERMINAL_PATTERNS: RegExp[] = [
   /\b(?:status|http|error)\s*:?\s*(?:400|401|403|422)\b/i,
   /\b40[13]\s+(?:unauthorized|forbidden)\b|\b400\s+bad request\b/i,
-  /\bunauthorized\b|\bforbidden\b|\binvalid api key\b|\bmissing bearer\b|\bauthentication required\b|\bnot logged in\b|\blogged out\b|\/login\b/i,
+  /\bunauthorized\b|\bforbidden\b|\binvalid api key\b|\bmissing bearer\b|\bauthentication required\b|\bnot logged in\b|\blogged out\b/i,
   /\binvalid request\b|\bmalformed\b|\bmodel not found\b|\bunknown model\b|\bunsupported model\b|\bdoes not exist for model\b/i,
   /\bisn't installed\b|\bisn't executable\b|\bcommand not found\b|\bENOENT\b|\bEACCES\b/,
-  /\binsufficient_quota\b|\bquota\b|\bbilling\b/i,
+];
+
+/** Account-side refusals that read as terminal — unless the same line
+ * carries a 5xx/429 with status context: Gemini's
+ * `429 RESOURCE_EXHAUSTED: Quota exceeded` is the provider throttling,
+ * which passes, not a card that expired. Same for a "/login" hint riding
+ * on a 503 page. */
+const ACCOUNT_PATTERNS: RegExp[] = [/\binsufficient_quota\b|\bquota\b|\bbilling\b/i, /\/login\b/i];
+const STATUS_THROTTLE: RegExp[] = [
+  /\b(?:status|http|error)\s*:?\s*(?:5\d{2}|429)\b/i,
+  /\b(?:5\d{2}|429)\s+(?:internal server error|bad gateway|service unavailable|gateway time-?out|overloaded|too many requests)/i,
+  /\b(?:5\d{2}|429)\s+[A-Z_]{4,}\b/,
 ];
 
 const OUTAGE_PATTERNS: RegExp[] = [
@@ -81,6 +92,9 @@ const OUTAGE_PATTERNS: RegExp[] = [
   /\b5\d{2}\s+(?:internal server error|bad gateway|service unavailable|gateway time-?out|overloaded)/i,
   /\binternal server error\b|\bbad gateway\b|\bservice unavailable\b|\bgateway time-?out\b|\boverloaded\b|\bat capacity\b/i,
   /\b(?:status|http|error)\s*:?\s*429\b|\b429\s+too many requests\b|\brate.?limit/i,
+  // A status followed by an UPPER_CASE reason code, Google-style
+  // ("429 RESOURCE_EXHAUSTED"); case-sensitive on purpose, "429 tokens" is prose.
+  /\b(?:5\d{2}|429)\s+[A-Z_]{4,}\b/,
   /\btoo many requests\b/i,
   // Transport: what node's fetch and the CLIs' stderr surface.
   /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|EHOSTUNREACH|ENETUNREACH)\b/,
@@ -110,6 +124,9 @@ export function classifyWorkflowFailure(reason: string): WorkflowFailureClass {
   if (/\bis not allowed to (?:merge|deploy)\b/.test(text)) return "capability";
   if (text === ENVELOPE_MISS_REASON) return "envelope";
   if (TERMINAL_PATTERNS.some((pattern) => pattern.test(text))) return "other";
+  if (ACCOUNT_PATTERNS.some((pattern) => pattern.test(text)) && !STATUS_THROTTLE.some((pattern) => pattern.test(text))) {
+    return "other";
+  }
   if (/\b404\b/.test(text) && PROVIDER_BACKEND.test(text)) return "provider-outage";
   if (OUTAGE_PATTERNS.some((pattern) => pattern.test(text))) return "provider-outage";
   if (text === NODE_TIMEOUT_REASON || /\btimed? out\b|\btimeout\b/i.test(text)) return "timeout";
@@ -154,8 +171,16 @@ export function describeWorkflowTurnFailure(failure: WorkflowTurnFailure): strin
  * other reason. */
 export function classifyWorkflowTurnFailure(failure: WorkflowTurnFailure): WorkflowFailureClass {
   if (failure.setup) return "other";
+  // The harness's own stop — the timeout sweep's interrupt, a person's
+  // cancel — is never the provider's fault, whatever runtime.error was
+  // logged earlier on the thread. The sweep already knows it timed out
+  // (it calls attemptFailure itself); anything else is `other`.
+  if (failure.stopReason !== undefined && HARNESS_STOP.test(failure.stopReason)) return "other";
   return classifyWorkflowFailure(describeWorkflowTurnFailure(failure));
 }
+
+/** Stop reasons the drivers use for a stop the harness asked for. */
+const HARNESS_STOP = /^\s*(?:interrupted|cancelled|canceled|aborted)\s*$/i;
 
 /** First wait of the outage backoff; every later one doubles until the cap. */
 export const OUTAGE_BACKOFF_BASE_MS = 60_000;

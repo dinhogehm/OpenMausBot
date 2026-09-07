@@ -827,6 +827,11 @@ export class WorkflowEngine {
       this.attemptFailure(runId, describeWorkflowTurnFailure(failure), event.threadId, classifyWorkflowTurnFailure(failure));
       return;
     }
+    // A turn that ended ok may still have logged a runtime.error on the
+    // way (codex relays stream errors it retried internally); that message
+    // belongs to THIS turn and must not describe a later one on the same
+    // thread — the envelope re-prompt below starts a new turn there.
+    this.lastRuntimeError.delete(event.threadId);
     // The envelope stays verbatim in the node's task transcript — accepted
     // for MVP; the UI surfaces nodeResult.summary, never the raw envelope.
     const text = this.lastAssistantText.get(event.threadId) ?? "";
@@ -840,6 +845,7 @@ export class WorkflowEngine {
           return;
         }
         this.lastAssistantText.delete(event.threadId);
+        this.lastRuntimeError.delete(event.threadId);
         this.startTurnSafely(run.currentBotId ?? node.botId, event.threadId, buildRepromptMessage(node), runId);
         return;
       }
@@ -1035,6 +1041,7 @@ export class WorkflowEngine {
     if (!patched) return; // run pruned mid-flight: stop driving it silently
     this.runByThread.set(task.threadId, runId);
     this.lastAssistantText.delete(task.threadId);
+    this.lastRuntimeError.delete(task.threadId);
     this.startTurnSafely(dispatchBotId, task.threadId, _buildNodePrompt(workflow, node, patched), runId);
   }
 
