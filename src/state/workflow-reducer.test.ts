@@ -123,6 +123,53 @@ describe("workflows slice", () => {
     expect(withRun.workflowRuns[0]!.nodeResults[0]!.denials).toEqual(denied.nodeResults[0]!.denials);
   });
 
+  it("keeps an approval gate's policy on the definition and its clocks, notices and card threads on the run", () => {
+    // The timeline reads the waiting line from these fields and the node
+    // panel writes the policy; a reducer that rebuilt either would lose them.
+    const gated = draft({
+      entryNodeId: "gate",
+      nodes: [{ kind: "approval", id: "gate", prompt: "Ship?", onExpire: "renotify", maxRenotify: 3, notifyTargetGroupId: "grp-1" }],
+    });
+    const withDefinition = reducer(initialState, { type: "workflowPatched", workflow: gated });
+    expect(withDefinition.workflows[0]!.nodes[0]).toMatchObject({ onExpire: "renotify", maxRenotify: 3, notifyTargetGroupId: "grp-1" });
+    // and the validator, run client-side on the frame, judges the policy
+    const badRounds = reducer(withDefinition, {
+      type: "workflowPatched",
+      workflow: draft({ ...gated, nodes: [{ ...gated.nodes[0]!, maxRenotify: 0 }] as typeof gated.nodes }),
+    });
+    expect(badRounds.workflows[0]!.issues.map((issue) => issue.code)).toContain("bad-approval-config");
+
+    const waiting = run({
+      status: "waiting-approval",
+      currentNodeId: "gate",
+      approvalRequestedAt: 5_000,
+      approvalRemindedAt: 6_000,
+      approvalRenotified: 1,
+      approvalRenotifiedAt: 7_000,
+      approvalNotices: [
+        { at: 6_000, kind: "reminder" },
+        { at: 7_000, kind: "renotify" },
+      ],
+      approvalThreadIds: ["thread-bot", "thread-room"],
+    });
+    const withRun = reducer(withDefinition, { type: "workflowRunPatched", run: waiting });
+    expect(withRun.workflowRuns[0]).toMatchObject({
+      approvalRequestedAt: 5_000,
+      approvalRemindedAt: 6_000,
+      approvalRenotified: 1,
+      approvalRenotifiedAt: 7_000,
+      approvalNotices: waiting.approvalNotices,
+      approvalThreadIds: ["thread-bot", "thread-room"],
+    });
+    const settled = run({
+      status: "running",
+      nodeResults: [{ nodeId: "gate", outcome: "approved", summary: "approved by user", startedAt: 5_000, endedAt: 8_000, notices: waiting.approvalNotices }],
+    });
+    const afterDecision = reducer(withRun, { type: "workflowRunPatched", run: settled });
+    expect(afterDecision.workflowRuns[0]!.nodeResults[0]!.notices).toEqual(waiting.approvalNotices);
+    expect(afterDecision.workflowRuns[0]!.approvalThreadIds).toBeUndefined();
+  });
+
   it("a `workflow-run` frame upserts by id and keeps the list newest-first", () => {
     let state = reducer(initialState, { type: "workflowRunPatched", run: run({ id: "r-1", startedAt: 1_000 }) });
     state = reducer(state, { type: "workflowRunPatched", run: run({ id: "r-2", startedAt: 3_000 }) });
