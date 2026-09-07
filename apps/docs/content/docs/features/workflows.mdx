@@ -101,10 +101,10 @@ Three kinds of check:
 | Kind | What it asks | Passes when |
 |---|---|---|
 | **Command** | Runs a program as the app's own user, with its environment and PATH, through a non-interactive shell | The exit code is the expected one (0 unless you say otherwise) and, when you give a regular expression, stdout matches it — `^$` asserts an empty output |
-| **Bots ready** | Every bot an agent node uses (or only the ones you tick) | Each exists and is not busy |
+| **Bots ready** | Every bot an agent node uses (or only the ones you tick) | Each exists and is not busy. A bot that is merely busy is re-checked every 30 seconds for up to the check's wait (10 minutes unless changed) before the run is refused — a shared bot mid-turn at the trigger is a pause, not a failure. A missing bot refuses the run at once |
 | **Engine health** | The driver behind a bot's model engine | The CLI is present and signed in — a version probe and a login check, no tokens spent |
 
-All checks of a workflow run in parallel under one deadline (60 seconds unless changed, 5 to 300). **Test pre-flight** runs the saved checks right now and lists them green or red, without starting a run.
+All checks of a workflow run in parallel under one deadline (60 seconds unless changed, 5 to 300). A command still running at the deadline is killed (its whole process group, escalating to SIGKILL if it ignores TERM) and the check keeps whatever it had printed by then, so a slow `gh` still leaves its diagnosis on the receipt. **Test pre-flight** runs the saved checks right now and lists them green or red, without starting a run.
 
 The recommended set for a delivery pipeline on GitHub:
 
@@ -113,14 +113,16 @@ gh auth status                                   # signed in at all?
 gh api user -i -H "Accept: application/vnd.github+json" | grep -i x-oauth-scopes
                                                  # stdout must match: project|repo — the scopes the token carries
 git -C /path/to/repo status --porcelain          # stdout must match: ^$ — a clean tree, nothing half-done
-Bots ready                                       # nobody is mid-turn on a shared bot
+Bots ready, wait up to 10 min                    # nobody is mid-turn on a shared bot — or they finish within the wait
 Engine health for the coding bot                 # the provider answers before the run leans on it
 ```
 
 The second line is the one that would have caught the `read:project` token: `gh api user -i` prints the response headers, and `x-oauth-scopes` lists the scopes the token actually has, so a stdout regex of `project` (or `repo`, or both) fails the run when the scope is missing. `gh auth status` alone says whether you are signed in and prints the scopes too, but exits 0 either way as long as a token exists — pair it with the regex if you rely on it for scopes. The header is a classic-token feature: a fine-grained personal access token carries no `x-oauth-scopes`, so for one of those check the access itself — `gh project view <number> --owner <org>` fails when the token cannot read the project.
 
-<Callout type="warn" title="Commands run as you">
-  A command check runs with the app's own identity — your user, your environment, your credentials — on this computer. Anyone who can edit the workflow can run a command here at its next start, so only the workflow's owner should edit these. The engine never folds a run's input (a webhook payload, say) into the command: it runs exactly the string you saved. Whatever a check prints is scrubbed of tokens (`ghp_…`, `sk-…`, `Bearer …`) and cut to 500 characters before it is kept.
+<Callout type="warn" title="Commands run as you, and run again at every start">
+  A command check runs with the app's own identity — your user, your environment, your credentials — on this computer, before every run and every re-check. Keep checks **read-only and idempotent**: a check that creates, pushes, or deletes something does it on every trigger, every resume and every busy-bot re-check. Anyone who can edit the workflow can run a command here at its next start, so only the workflow's owner should edit these. The engine never folds a run's input (a webhook payload, say) into the command: it runs exactly the string you saved.
+
+  Whatever a check prints is scrubbed of the token shapes the app knows (`ghp_…`, `github_pat_…`, `sk-…`, `Bearer …`, Slack/AWS/Google keys, JWTs, PEM blocks, `token=…`/`password: …` pairs) and cut to 500 characters before it is kept — but not of everything. A credential inside a URL (`https://user:p%40ss@host/…`), a password with punctuation after `PASSWORD=`, or a secret with no recognisable shape goes onto the receipt as printed. Do not write checks that print such things; `-o /dev/null`, `-q`, and `2>/dev/null` are your friends.
 </Callout>
 
 ## Running 24/7
