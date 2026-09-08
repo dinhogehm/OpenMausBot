@@ -259,17 +259,24 @@ function Shell() {
           )}
         </main>
       )}
+      {/* Each overlay keys by its OWN slot as well as the bot: these are
+          siblings in one children list, so keying both by bot.id alone gave
+          React two children with the same key. Reconciliation then matched
+          the surviving child to the wrong element, and closing settings with
+          the computer panel open left the dialog mounted — the X, Escape and
+          the backdrop all looked dead. The key still changes with the bot, so
+          per-bot state is still discarded when the selection changes. */}
       {state.settingsOpen && bot && (
         remoteClient
           ? <RemoteAgentSettingsPanel bot={bot} />
-          : <BotSettingsDialog key={bot.id} bot={bot} />
+          : <BotSettingsDialog key={`settings:${bot.id}`} bot={bot} />
       )}
       {state.computerOpen && bot && (
         remoteClient ? (
-          <RemoteDesktopPanel key={bot.id} bot={bot} />
+          <RemoteDesktopPanel key={`remote-desktop:${bot.id}`} bot={bot} />
         ) : (
           <ComputerPanel
-            key={bot.id}
+            key={`computer:${bot.id}`}
             bot={bot}
             onOpenVmWorkspace={openLocalVmWorkspace}
           />
