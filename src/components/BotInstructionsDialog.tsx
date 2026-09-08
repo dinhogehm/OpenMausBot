@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { BookOpen, X } from "lucide-react";
 
 import { BotAvatar } from "./Avatar";
 import { normalizeState } from "@/lib/mascot";
+import { backdropDismiss } from "@/lib/modal-dismiss";
 import type { Bot } from "@/state/store";
 
 export function BotInstructionsDialog({ bot, onClose }: { bot: Bot; onClose: () => void }) {
@@ -12,6 +13,9 @@ export function BotInstructionsDialog({ bot, onClose }: { bot: Bot; onClose: () 
   onCloseRef.current = onClose;
 
   const close = useCallback(() => onCloseRef.current(), []);
+  // Click, not mousedown: this dialog opens from inside bot settings, so a
+  // mousedown dismiss drops the mouseup on that dialog underneath.
+  const backdrop = useMemo(() => backdropDismiss<ReactMouseEvent>(close), [close]);
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -53,7 +57,7 @@ export function BotInstructionsDialog({ bot, onClose }: { bot: Bot; onClose: () 
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4 backdrop-blur-[2px] sm:p-6"
-      onMouseDown={(event) => event.target === event.currentTarget && close()}
+      {...backdrop}
     >
       <div
         ref={dialogRef}

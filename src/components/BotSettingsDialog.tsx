@@ -3,10 +3,11 @@
 // aside. Every section now lives under bot-settings/; this dialog owns
 // only the fetches (overview, system-prompt, history) and the section
 // switch.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Search, X } from "lucide-react";
 
 import { api, useStore, type Bot } from "@/state/store";
+import { backdropDismiss } from "@/lib/modal-dismiss";
 import type { BotOverview } from "@/lib/bot-overview-types";
 import { cn } from "@/lib/cn";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -36,6 +37,10 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
   const section = state.botSettingsSection;
   const derived = useBotSettingsDerived(bot);
   const dialogRef = useRef<HTMLDivElement>(null);
+  // Dismiss on the backdrop's click, not its mousedown: closing while the
+  // button is down drops the mouseup on the chat header underneath, whose
+  // avatar and rename pencil open this very dialog again.
+  const backdrop = useMemo(() => backdropDismiss<ReactMouseEvent>(() => dispatch({ type: "toggleSettings", open: false })), [dispatch]);
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
   const visibleSections = BOT_SECTIONS.filter((entry) => sectionMatches(entry, q));
@@ -239,7 +244,7 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
-      onMouseDown={(e) => e.target === e.currentTarget && dispatch({ type: "toggleSettings", open: false })}
+      {...backdrop}
     >
       <div
         ref={dialogRef}

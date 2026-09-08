@@ -2,7 +2,7 @@
 // Per-bot settings (persona, model, computer) live in BotSettingsDialog — this
 // is the stuff shared by every bot: who you are, your keys, and the
 // machine your bots can borrow.
-import { useEffect, useRef, useState } from "react";
+import { useMemo, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Coins, FlaskConical, Globe, KeyRound, Monitor, Search, TabletSmartphone, Terminal, Trash2, User, X } from "lucide-react";
 import { api, useStore, type AppSettingsSection, type ConfigStatus } from "@/state/store";
 import { analyticsEnabled, setAnalyticsEnabled } from "@/lib/analytics";
@@ -22,6 +22,7 @@ import { SkinPicker } from "./SkinPicker";
 import { RoomTurnTimeoutSettings } from "./RoomTurnTimeoutSettings";
 import { TranscriptionSettings } from "./TranscriptionSettings";
 import { cn } from "@/lib/cn";
+import { backdropDismiss } from "@/lib/modal-dismiss";
 import {
   browserProfileDeletionBlockReason,
   browserProfilesForPatch,
@@ -531,6 +532,8 @@ export function SettingsModal() {
   const section: AppSettingsSection =
     remoteActive || state.appSettingsSection === "remote" ? "companion" : state.appSettingsSection;
   const dialogRef = useRef<HTMLDivElement>(null);
+  // Dismiss on the backdrop's click, not its mousedown — see modal-dismiss.
+  const backdrop = useMemo(() => backdropDismiss<ReactMouseEvent>(() => dispatch({ type: "toggleAppSettings", open: false })), [dispatch]);
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
   const visibleSections = SECTIONS.filter((entry) => (!remoteActive || entry.id === "companion") && sectionMatches(entry, q));
@@ -589,7 +592,7 @@ export function SettingsModal() {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
-      onMouseDown={(e) => e.target === e.currentTarget && dispatch({ type: "toggleAppSettings", open: false })}
+      {...backdrop}
     >
       <div
         ref={dialogRef}
