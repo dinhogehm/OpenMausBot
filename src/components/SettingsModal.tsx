@@ -14,6 +14,7 @@ import { useUpdaterState } from "@/lib/updater";
 import { EnginesSettings } from "./EnginesSettings";
 import { LocalComputerSection } from "./LocalComputerSection";
 import { CompanionSection } from "./CompanionSection";
+import { CustomDomainSettings } from "./CustomDomainSettings";
 import { RemoteComputerSection } from "./RemoteComputerSection";
 import { Card, Switch } from "./SettingsPrimitives";
 import { UsageSection } from "./UsageSection";
@@ -40,7 +41,7 @@ const SECTIONS: Array<{
   { id: "experimental", labelKey: "settings.section.experimental", icon: FlaskConical, keywords: ["early", "preview", "teach", "skill", "browser", "profiles"] },
   { id: "connections", labelKey: "settings.section.connections", icon: KeyRound, keywords: ["keys", "api", "composio", "box", "xai", "vps"] },
   { id: "engines", labelKey: "settings.section.engines", icon: Terminal, keywords: ["models", "claude", "grok", "providers", "cli"] },
-  { id: "companion", labelKey: "settings.section.companion", icon: TabletSmartphone, keywords: ["companion", "device", "phone", "desktop", "client", "host", "pair", "pairing", "mobile", "https", "secure", "tailscale", "wifi", "remote", "advanced"] },
+  { id: "companion", labelKey: "settings.section.companion", icon: TabletSmartphone, keywords: ["companion", "device", "phone", "desktop", "client", "host", "pair", "pairing", "mobile", "https", "secure", "tailscale", "wifi", "remote", "advanced", "domain", "dns", "self-hosted", "server", "caddy"] },
   { id: "computer", labelKey: "settings.section.computer", icon: Monitor, keywords: ["vm", "virtual", "desktop"] },
   { id: "usage", labelKey: "settings.section.usage", icon: Coins, keywords: ["tokens", "cost", "billing"] },
 ];
@@ -715,6 +716,7 @@ export function SettingsModal() {
             {section === "companion" && (
               <>
                 <RemoteComputerSection />
+                {!remoteActive && <CustomDomainSettings />}
                 {!remoteActive && <CompanionSection profileEmail={state.config?.profile?.email} />}
               </>
             )}

@@ -13,6 +13,7 @@ import { ProviderMark } from "./ProviderIcons";
 import { splitEngineRail } from "@/lib/engine-rail";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
+import { EngineSetup, needsCli, needsSignIn } from "./EngineSetup";
 
 interface ProbeResult {
   ok: boolean;
@@ -305,6 +306,11 @@ function EngineRow({ instance }: { instance: InstanceInfo }) {
         <div role="status" className="mt-1 text-[12px] text-success">{t("engines.claudeUpdated", { version: updatedVersion })}</div>
       )}
       {error && <div role="alert" className="mt-1 text-[12px] text-danger">{error}</div>}
+      {instance.authentication?.method === "device-code" && (
+        needsCli(instance) || needsSignIn(instance)
+          ? <EngineSetup instance={instance} className="mt-3" />
+          : instance.snapshot.authenticated && <p className="mt-2 flex items-center gap-1.5 text-[12px] text-success"><Check size={13} />{t("engineSetup.device.connectedAccount")}</p>
+      )}
       {open && (
         <CustomPicker
           instance={instance}

@@ -51,6 +51,9 @@ against an isolated server for image decoding, loading, and recovery UI checks.
 The [bot settings fixture](bot-settings.md) checks profile saves, standing
 instructions, history restore, skill/memory refresh, and stale-response isolation.
 
+The [server settings recipe](server-settings.md) checks browser provider sign-in
+with an offline CLI and custom-domain validation without touching live accounts.
+
 The [Group and Goal Local VM recipe](group-local-vm.md) checks per-speaker
 desktop routing, cancellation, and computer authority cleanup.
 

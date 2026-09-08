@@ -356,6 +356,14 @@ export interface ProviderAuthenticationStart {
   flowId: string | null;
   authorizationUrl: string | null;
   expiresAt: string | null;
+  /** A short-lived code to enter only at the provider's authorization URL. */
+  userCode?: string;
+}
+
+export interface ProviderAuthenticationStatus extends Omit<ProviderAuthenticationStart, "phase"> {
+  phase: "waiting" | "succeeded" | "failed" | "expired" | "cancelled";
+  /** Safe, actionable copy; never unfiltered CLI output or credentials. */
+  message?: string;
 }
 
 // ── driver SPI (upstream ProviderDriver — a plain record, not a service) ─
@@ -399,6 +407,7 @@ export interface ProviderInstance {
   /** Optional first-party runtime installation and account setup. */
   readonly installRuntime?: () => Promise<void>;
   readonly startAuthentication?: () => Promise<ProviderAuthenticationStart>;
+  readonly getAuthentication?: (flowId: string) => Promise<ProviderAuthenticationStatus>;
   readonly completeAuthentication?: (flowId: string, callbackUrl: string) => Promise<void>;
   readonly cancelAuthentication?: () => Promise<void>;
   readonly adapter: ProviderAdapter;

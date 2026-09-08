@@ -79,3 +79,33 @@ describe("managed engine setup errors", () => {
     expect(markup).not.toContain("Install official Antigravity");
   });
 });
+
+describe("server device-code sign-in", () => {
+  it("uses the supported browser sign-in flow instead of asking a remote user to run a command", () => {
+    vi.stubGlobal("window", { ogb: { platform: "linux" } });
+    const engine: InstanceInfo = {
+      ...instance({ state: "available", authenticated: false }),
+      instanceId: "codex",
+      driverKind: "codexAgent",
+      displayName: "Codex",
+      authentication: { method: "device-code" },
+      install: { signInCommand: "codex login" },
+    };
+    const markup = renderToStaticMarkup(createElement(StoreProvider, null, createElement(EngineSetup, { instance: engine })));
+    expect(markup).toContain("Connect ChatGPT");
+    expect(markup).toContain("no terminal or password sharing");
+    expect(markup).not.toContain("codex login");
+  });
+
+  it("does not ask to sign in when installing a CLI for local-model injection", () => {
+    vi.stubGlobal("window", { ogb: { platform: "linux" } });
+    const engine: InstanceInfo = {
+      ...instance({ state: "available", authenticated: false }),
+      authentication: { method: "device-code" },
+      install: { command: { linux: "npm install -g @openai/codex" }, signInCommand: "codex login" },
+    };
+    const markup = renderToStaticMarkup(createElement(StoreProvider, null, createElement(EngineSetup, { instance: engine, intent: "inject" })));
+    expect(markup).not.toContain("Connect ChatGPT");
+    expect(markup).toContain("npm install");
+  });
+});

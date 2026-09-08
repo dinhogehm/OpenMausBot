@@ -104,6 +104,51 @@ plain foreground process. For unattended use, follow the
 release and runs its binary directly. Restarting that service does not
 implicitly download a new release.
 
+## Connect ChatGPT from the browser
+
+An owner-paired browser can connect an installed Codex CLI without opening a
+terminal: **Settings → Engines → Codex → Connect ChatGPT**. OMB starts
+`codex login --device-auth` on the server and shows a one-time code. Choose
+**Open ChatGPT sign-in**, enter the code on OpenAI's page, and complete sign-in
+with your own account. OMB checks for completion and refreshes the model list.
+You can cancel or request a fresh code after it expires.
+
+The server still needs Codex installed and runs it as the same operating-system
+user as OMB. Your password never goes through OMB; Codex stores its credentials
+on the server. Treat server access and backups as sensitive. Device-code login
+may need enabling in ChatGPT security settings or by your workspace admin; see
+[OpenAI's headless authentication guide](https://learn.chatgpt.com/docs/auth#login-on-headless-devices).
+Subscription limits still apply. This browser flow is currently for Codex;
+other providers retain their existing sign-in methods.
+
+## Connect a custom domain in Settings
+
+For a self-hosted server, open **Settings → Remote access → Connect your
+domain** from an owner-paired browser. This is an address-setting and verification
+flow, not a DNS or hosting service:
+
+1. Point your chosen name's DNS **A** record at the server's public IPv4 address.
+   Add **AAAA** only when IPv6 routes to the same server.
+2. Configure HTTPS with a reverse proxy such as Caddy. The Settings example uses
+   your actual app and webhook ports; the [supplied Caddyfile](../deploy/Caddyfile)
+   is the reference. Keep OMB listening on loopback, forward the original Host
+   and proxy headers, and keep event streams unbuffered. Caddy needs incoming
+   ports 80/443 for its usual certificate setup. For containers, follow the
+   Docker recipe below so Caddy can reach the loopback listener.
+3. Enter `bots.yourcompany.com` (or its bare `https://` origin) and choose
+   **Verify and connect**. OMB checks HTTPS and the workspace identity at that
+   domain before saving it. An incorrect domain leaves the existing address
+   unchanged.
+
+The saved custom address takes precedence over the server's configured public
+address for **new server pairing links**. Removing it restores that fallback
+address, if any; neither action changes DNS, the proxy, bots, conversations, or
+existing sessions. A different browser origin needs its own pairing, so keep
+your original tab open until the new one works. The setting does not change
+`OMB_WEBHOOK_PUBLIC_URL`, existing webhook URLs, or the desktop companion's
+managed connection. This feature is for self-hosted servers, not the desktop
+app's managed phone endpoint.
+
 ## Docker (with HTTPS on your own domain)
 
 For a single rootless Podman engine running the server, Caddy, and per-bot

@@ -32,6 +32,11 @@ import { customMcpServers,
 } from "./config.ts";
 
 describe("configuration boundaries", () => {
+  it("persists a custom domain but excludes it from generic config patches", () => {
+    expect(parseStoredConfig({ customDomain: "https://bots.example.com" })).toEqual({ customDomain: "https://bots.example.com" });
+    expect(parseConfigPatch({ customDomain: "https://unverified.example.com", language: "en" })).toEqual({ language: "en" });
+    expect(parseStoredConfig({ customDomain: "" })).toEqual({ customDomain: "" });
+  });
   it("keeps supported stored settings and drops unrelated top-level data", () => {
     expect(
       parseStoredConfig({
@@ -635,6 +640,15 @@ describe("credential env preference", () => {
     expect(cfg.opencodeGo).toEqual({ apiKey: "env-ocg" });
     expect(cfg.tts).toEqual({ key: "env-tts", voice: "narrator" });
     expect(cfg.imageGen).toEqual({ key: "env-image" });
+  });
+
+  it("saves and removes the verified domain without replacing existing settings", () => {
+    saveConfig({ profile: { name: "Workspace owner" }, customDomain: "https://bots.example.com" });
+    expect(loadConfig().customDomain).toBe("https://bots.example.com");
+    saveConfig({ language: "en" });
+    expect(loadConfig().customDomain).toBe("https://bots.example.com");
+    saveConfig({ customDomain: "" });
+    expect(loadConfig()).toMatchObject({ customDomain: "", language: "en", profile: { name: "Workspace owner" } });
   });
 
   it("falls back to the config file when the env var is unset (dev mode)", () => {

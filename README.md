@@ -41,7 +41,7 @@ Talk to them like contacts. Watch them work. Approve what matters.
 
 <br>
 
-<a href="https://buy.polar.sh/polar_cl_EEzWmormSVBD151HkmkyId9j0GPXina0KurfS1fYYcO">
+<a href="https://buy.polar.sh/polar_cl_bbnfWFUrWONIF4HnUpZf1p0if0eUYg3HeXct73b48Yg">
   <img src="https://img.shields.io/badge/%E2%9D%A4%EF%B8%8F%20%20Support%20OpenMausBot-any%20amount%20%C2%B7%20or%20monthly-38d591?style=for-the-badge&labelColor=070707" alt="Support OpenMausBot — one-time any amount or monthly, via Polar" height="40">
 </a>
 
@@ -342,7 +342,7 @@ Users can add their own MCP tool servers with zero code via [`docs/custom-mcp-se
 ## Support the project
 
 OpenMausBot is free and open source. If it does real work for you, you can
-[buy the project a coffee or become a monthly supporter](https://buy.polar.sh/polar_cl_EEzWmormSVBD151HkmkyId9j0GPXina0KurfS1fYYcO) —
+[buy the project a coffee or become a monthly supporter](https://buy.polar.sh/polar_cl_bbnfWFUrWONIF4HnUpZf1p0if0eUYg3HeXct73b48Yg) —
 one-time any amount, or monthly. Payments are handled by [Polar](https://polar.sh/supamaus),
 which takes care of receipts and taxes; nothing about the app ever sits behind a paywall.
 

@@ -236,6 +236,8 @@ const defaultModelSelectionSchema = z.object({
   effort: z.enum(EFFORT_LEVELS).optional(),
 });
 const appConfigSchema = z.object({
+  /** Verified by the dedicated domain endpoint, never a generic config patch. */
+  customDomain: z.string().optional(),
   defaultModelSelection: defaultModelSelectionSchema.optional(),
   /** CLI-only launch preferences. Never enable remote access implicitly. */
   cliStartup: z.object({
@@ -281,10 +283,11 @@ const appConfigSchema = z.object({
 const storedAppConfigSchema = appConfigSchema.extend({
   browserProfiles: storedBrowserProfilesSchema.optional(),
 });
-const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true, cliStartup: true });
+const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true, cliStartup: true, customDomain: true });
 const jsonObjectSchema = z.record(z.string(), z.json());
 
 export interface AppConfig {
+  customDomain?: string;
   /** Preferred selection for newly created bots; existing bots keep theirs. */
   defaultModelSelection?: ModelSelection;
   cliStartup?: {
@@ -612,6 +615,7 @@ export function saveConfig(patch: Partial<AppConfig>): void {
   if (checkedPatch.vps !== undefined) disk.vps = normalizeVpsConfig(checkedPatch.vps);
   // scalar, not a section: the merge loop above only walks objects
   if (checkedPatch.language !== undefined) disk.language = checkedPatch.language;
+  if (checkedPatch.customDomain !== undefined) disk.customDomain = checkedPatch.customDomain;
   // A selection is replaced as one value, so changing engines also clears
   // an effort level omitted from the new selection.
   if (checkedPatch.defaultModelSelection !== undefined) {

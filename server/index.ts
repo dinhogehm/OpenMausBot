@@ -51,6 +51,8 @@ import { validateBotCwd } from "./bot-cwd.ts";
 import {
   ATTACHMENTS_DIR,
   attachmentExists,
+  cleanupStaleAttachmentPartials,
+  deleteAttachment,
   extensionForMime,
   FILE_MAX_BYTES,
   IMAGE_MAX_BYTES,
@@ -338,6 +340,8 @@ import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import { acquireDataDirLeaseForProcess } from "./data-dir-lease.ts";
 import { describeEdition, editionStatus, loadEnterpriseLayer } from "./enterprise.ts";
 import { environmentDescriptor, loadEnvironmentId, serverVersion } from "./environment.ts";
+import { createCustomDomainVerifier, normalizeCustomDomain } from "./custom-domain.ts";
+import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
 import {
   clearSessionCookie,
   clientBotPatchViolation,
@@ -353,6 +357,7 @@ import {
 } from "./request-auth.ts";
 import { cookieMaxAgeSeconds, formatPairingCode, SessionRegistry, type Scope } from "./sessions.ts";
 import { describeBrand, loadBrand } from "./brand.ts";
+import { deliverSseFrame } from "./sse-fanout.ts";
 import {
   PHONE_SECRET_PROTOCOL_VERSION,
   PhoneSecretBridge,
@@ -410,9 +415,24 @@ const DESKTOP_MANAGED = process.env.OMB_DESKTOP_PARENT === "1";
 let desktopMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 let companionMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 // Where remote clients reach this server (a proxy's public address); pairing URLs use it.
-const PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
+const FALLBACK_PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
 const cfg = loadConfig();
+const customDomainVerifier = createCustomDomainVerifier({ environmentId: ENVIRONMENT_ID });
+let customDomainRevision = 0;
+function savedCustomDomain(): string | null {
+  if (DESKTOP_MANAGED || !cfg.customDomain) return null;
+  try { return normalizeCustomDomain(cfg.customDomain); }
+  catch { return null; }
+}
+function publicUrl(): string | null { return savedCustomDomain() ?? FALLBACK_PUBLIC_URL; }
+function customDomainStatus() {
+  return {
+    customDomain: savedCustomDomain(), publicUrl: publicUrl(), fallbackUrl: FALLBACK_PUBLIC_URL,
+    supported: !DESKTOP_MANAGED, appPort: PORT, webhookPort: WEBHOOK_PORT,
+  };
+}
 const registry = new ProviderRegistry(BUILT_IN_DRIVERS);
+const providerAuthSessions = new ProviderAuthSessions();
 await registry.load(instanceConfigs(cfg));
 const bundledSkills = loadBundledSkills();
 const availableSkills = () => mergeSkills(bundledSkills, loadUserSkills(join(DATA_DIR, "skills")));
@@ -726,7 +746,7 @@ function purgeGeneratedImagesForThread(threadId: string): void {
     if (!key.startsWith(`${threadId}:`)) continue;
     generatedImagesByTurn.delete(key);
     for (const attachment of attachments) {
-      try { unlinkSync(attachment.path); } catch {}
+      deleteAttachment(attachment.path);
     }
   }
 }
@@ -748,7 +768,7 @@ function retireProviderTurn(turnId: string): void {
     if (!key.endsWith(`:${turnId}`)) continue;
     generatedImagesByTurn.delete(key);
     for (const attachment of attachments) {
-      try { unlinkSync(attachment.path); } catch {}
+      deleteAttachment(attachment.path);
     }
   }
 }
@@ -825,6 +845,7 @@ function browserIntegration(botId: string, profile: string | undefined) {
       session,
       encryptionKey: browserEngineEncryptionKey(),
       persistent: profile !== "guest",
+      env: { ...process.env, PATH: augmentedPath() },
     }),
   };
 }
@@ -2098,9 +2119,14 @@ interface SseClient {
   /** The paired session behind this stream, when there is one: revoking or
    * expiring it must end the stream, not just future requests. */
   sessionId?: string;
+  /** Set once this client's socket has signalled it can't keep up (write()
+   * returned false); cleared implicitly once it's disconnected. See
+   * ./sse-fanout.ts for what this does to fan-out. */
+  backpressured: boolean;
 }
 const sseClients = new Set<SseClient>();
 sessions.onSessionRevoked((sessionId) => {
+  providerAuthSessions.revokeOwner(sessionId);
   for (const client of sseClients) {
     if (client.sessionId !== sessionId) continue;
     sseClients.delete(client);
@@ -2162,9 +2188,9 @@ function broadcast(payload: Record<string, unknown>) {
   if (replayBuffer.length > REPLAY_MAX) replayBuffer.shift();
   for (const client of [...sseClients]) {
     if (!wants(client, kind)) continue;
-    try {
-      client.res.write(client.admin ? frame : clientFrame);
-    } catch {
+    // Screen frames are replaceable and durable events are not: see
+    // ./sse-fanout.ts for the backpressure/bound decision this makes.
+    if (deliverSseFrame(client, kind, client.admin ? frame : clientFrame) === "disconnected") {
       sseClients.delete(client);
     }
   }
@@ -7851,6 +7877,7 @@ function persistMcpServers(next: Record<string, unknown>): void {
 /** Rebuild the provider fleet after a config change so new keys take
  * effect without a server restart (kills any in-flight turns). */
 async function reloadProviders() {
+  providerAuthSessions.clear();
   // Every provider process is about to die. Revoke all turn capabilities in
   // one synchronous step before the first teardown await, including room/task
   // threads that are not a bot's default DM.
@@ -7997,6 +8024,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (method === "GET" && path === "/.well-known/openmausbot/environment") {
       return json(res, 200, environmentDescriptor({ environmentId: ENVIRONMENT_ID, desktopManaged: DESKTOP_MANAGED }));
     }
+    const domainCheck = /^\/\.well-known\/openmausbot\/domain-check\/([a-f0-9]{64})$/.exec(path);
+    if (method === "GET" && domainCheck) {
+      res.setHeader("cache-control", "no-store");
+      const challenge = customDomainVerifier.challenge(domainCheck[1]);
+      return json(res, challenge ? 200 : 404, challenge ?? { error: "No active domain check." });
+    }
     if (method === "POST" && path === "/api/auth/pair") {
       // JSON only: a cross-site HTML form cannot send this content type
       // without a preflight, so a stray unused code cannot be planted as a
@@ -8086,7 +8119,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const scopes = Array.isArray(requested) ? requested.filter((v): v is Scope => v === "admin" || v === "client") : undefined;
       const opened = sessions.openPairing({ label: typeof body?.label === "string" ? body.label : undefined, scopes });
       const origin = requestOrigin(req);
-      const base = PUBLIC_URL ?? (auth.kind === "session" && origin ? origin : null);
+      const base = publicUrl() ?? (auth.kind === "session" && origin ? origin : null);
       const code = formatPairingCode(opened.code);
       return json(res, 200, {
         id: opened.id,
@@ -8098,7 +8131,38 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           : "this server has no public address to put in a link: set OMB_PUBLIC_URL, or open /pair on the address you use and type the code",
       });
     }
-    if (method === "GET" && path === "/api/auth/pairing") return json(res, 200, { pairings: sessions.openPairings(), publicUrl: PUBLIC_URL });
+    if (method === "GET" && path === "/api/auth/pairing") return json(res, 200, { pairings: sessions.openPairings(), publicUrl: publicUrl() });
+    // Admin-only via request-auth's default deny. Connecting a domain only
+    // changes future pairing links; DNS, proxy setup, webhooks and all existing
+    // sessions remain untouched. The tunnel/deployment URL is kept as fallback.
+    if (path === "/api/settings/custom-domain") {
+      res.setHeader("cache-control", "no-store");
+      if (method === "GET") return json(res, 200, customDomainStatus());
+      if (method === "POST" || method === "DELETE") {
+        if (DESKTOP_MANAGED) return json(res, 409, { error: "Custom domains are configured on a self-hosted OpenMausBot server, not the desktop companion." });
+        if (!/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) {
+          return json(res, 415, { error: "content-type must be application/json" });
+        }
+        if (method === "DELETE") {
+          saveConfig({ customDomain: "" });
+          cfg.customDomain = "";
+          customDomainRevision++;
+          return json(res, 200, customDomainStatus());
+        }
+        const body = await readBody(req, 4096);
+        if (typeof body?.domain !== "string") return json(res, 400, { error: "Enter your domain name." });
+        const revision = customDomainRevision;
+        const verified = await customDomainVerifier.verify(body.domain);
+        if (auth.kind === "session" && !sessions.isLive(auth.session.id)) {
+          return json(res, 401, { error: "Your session ended. Sign in again before connecting a domain." });
+        }
+        if (revision !== customDomainRevision) return json(res, 409, { error: "Domain settings changed during verification. Try again." });
+        saveConfig({ customDomain: verified.origin });
+        cfg.customDomain = verified.origin;
+        customDomainRevision++;
+        return json(res, 200, customDomainStatus());
+      }
+    }
     m = path.match(/^\/api\/auth\/pairing\/([\w-]+)$/);
     if (m && method === "DELETE") {
       const cancelled = sessions.cancelPairing(m[1]);
@@ -9323,7 +9387,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
     // ── events stream ──
     if (method === "GET" && path === "/api/events") {
-      const client: SseClient = { res, admin: auth.scopes.includes("admin"), screens: url.searchParams.get("screens") !== "off" };
+      const client: SseClient = {
+        res,
+        admin: auth.scopes.includes("admin"),
+        screens: url.searchParams.get("screens") !== "off",
+        backpressured: false,
+      };
       if (auth.kind === "session") client.sessionId = auth.session.id;
       res.writeHead(200, {
         "content-type": "text/event-stream",
@@ -10668,7 +10737,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!bot) {
         // There are no awaits between the refreshed lookup and this patch, but
         // keep the attachment invariant explicit if the store ever changes.
-        try { unlinkSync(saved.path); } catch {}
+        deleteAttachment(saved.path);
         return json(res, 404, { error: "no such bot" });
       }
       const visible = wireBot(bot);
@@ -12401,6 +12470,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 200, { instances: await registry.describe() });
     }
 
+    const authStatus = /^\/api\/instances\/([\w.-]+)\/auth\/status$/.exec(path);
+    if (method === "GET" && authStatus) {
+      res.setHeader("cache-control", "no-store");
+      const state = await providerAuthSessions.status(authStatus[1], auth.kind === "session" ? auth.session.id : "loopback", url.searchParams.get("flowId") ?? "");
+      return json(res, 200, { auth: state });
+    }
     const instanceAction = /^\/api\/instances\/([\w.-]+)\/(refresh-models|install|auth\/start|auth\/complete|auth\/cancel)$/.exec(path);
     if (method === "POST" && instanceAction) {
       if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
@@ -12408,6 +12483,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       const instanceId = instanceAction[1];
       const action = instanceAction[2];
+      const owner = auth.kind === "session" ? auth.session.id : "loopback";
+      if (action.startsWith("auth/")) res.setHeader("cache-control", "no-store");
       try {
         if (action === "refresh-models") {
           if (!(await registry.refreshModels(instanceId))) return json(res, 404, { error: "unknown instance" });
@@ -12418,28 +12495,30 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return json(res, 200, { instances: await registry.describe() });
         }
         if (action === "auth/start") {
-          const auth = await registry.startAuthentication(instanceId);
-          if (!auth) return json(res, 404, { error: "account setup is unavailable" });
-          return json(res, 200, { auth });
+          const instance = registry.get(instanceId);
+          if (!instance) return json(res, 404, { error: "unknown instance" });
+          const started = await providerAuthSessions.start(instance, owner);
+          // Revocation can arrive while the CLI is obtaining a device code.
+          if (auth.kind === "session" && !sessions.isLive(auth.session.id)) {
+            providerAuthSessions.revokeOwner(owner);
+            return json(res, 401, { error: "Your session ended. Start a new sign-in." });
+          }
+          return json(res, 200, { auth: started });
         }
         if (action === "auth/complete") {
           const body = await readBody(req);
           const flowId = typeof body?.flowId === "string" ? body.flowId : "";
           const callbackUrl = typeof body?.callbackUrl === "string" ? body.callbackUrl : "";
           if (!flowId || !callbackUrl) return json(res, 400, { error: "flowId and callbackUrl are required" });
-          if (!(await registry.completeAuthentication(instanceId, flowId, callbackUrl))) {
-            return json(res, 404, { error: "account setup is unavailable" });
-          }
+          await providerAuthSessions.complete(instanceId, owner, flowId, callbackUrl);
           return json(res, 200, { ok: true });
         }
-        if (!(await registry.cancelAuthentication(instanceId))) {
-          return json(res, 404, { error: "account setup is unavailable" });
-        }
+        const body = await readBody(req, 4096);
+        await providerAuthSessions.cancel(instanceId, owner, typeof body?.flowId === "string" ? body.flowId : "");
         return json(res, 200, { ok: true });
       } catch (error) {
-        const status = error && typeof error === "object" && (error as { status?: unknown }).status === 409
-          ? 409
-          : 500;
+        const requestedStatus = error && typeof error === "object" ? (error as { status?: unknown }).status : undefined;
+        const status = typeof requestedStatus === "number" && [400, 401, 404, 409, 413, 415].includes(requestedStatus) ? requestedStatus : 500;
         return json(res, status, { error: error instanceof Error ? error.message : String(error) });
       }
     }
@@ -13428,6 +13507,20 @@ calendarCalls.start();
 // Resolve the edition before accepting requests so /api/edition is never a guess.
 console.log(describeEdition(await loadEnterpriseLayer()));
 console.log(describeBrand(loadBrand()));
+
+// Reclaim upload partials a previous run crashed out of, and warm the
+// attachment quota cache off the same scan. This used to happen implicitly on
+// every reservation, which is exactly what made uploads quadratic in
+// directory size; do the initial sweep before accepting requests.
+// ponytail: once per boot, not periodic. A partial orphaned while this
+// process is up survives until the next restart — add a timer only if that
+// shows up as real quota pressure.
+try {
+  const reclaimedPartials = cleanupStaleAttachmentPartials();
+  if (reclaimedPartials > 0) console.log(`reclaimed ${reclaimedPartials} abandoned upload partial(s)`);
+} catch (error) {
+  console.warn(`attachments: startup partial cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+}
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`openmausbot server on http://127.0.0.1:${PORT}`);

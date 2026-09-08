@@ -55,6 +55,26 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: pnpm exec vite build
 
+  cloudflared-linux-arm64:
+    name: cloudflared installer (Linux ARM64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Install and reuse the pinned connector in an isolated fixture
+        env:
+          OMB_ARM64_FIXTURE: ${{ runner.temp }}/omb-cloudflared-arm64
+        run: |
+          node --input-type=module -e 'import assert from "node:assert/strict"; assert.equal(process.platform, "linux"); assert.equal(process.arch, "arm64");'
+          node scripts/prepare-cloudflared.mjs --current --root "$OMB_ARM64_FIXTURE"
+          node scripts/prepare-cloudflared.mjs --current --root "$OMB_ARM64_FIXTURE"
+          "$OMB_ARM64_FIXTURE/dist-native/cloudflared/linux-arm64/cloudflared" version
+
   control-plane:
     name: control-plane check + workerd tests + dry run
     runs-on: ubuntu-latest

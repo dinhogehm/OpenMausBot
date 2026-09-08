@@ -10,6 +10,7 @@ import type {
   InstanceConfigMap,
   InstanceId,
   ProviderAuthenticationStart,
+  ProviderAuthenticationStatus,
   ProviderInstance,
   ProviderSnapshot,
 } from "../contracts.ts";
@@ -150,6 +151,11 @@ export class ProviderRegistry {
     return instance?.startAuthentication ? instance.startAuthentication() : null;
   }
 
+  async getAuthentication(instanceId: InstanceId, flowId: string): Promise<ProviderAuthenticationStatus | null> {
+    const instance = this.get(instanceId);
+    return instance?.getAuthentication ? instance.getAuthentication(flowId) : null;
+  }
+
   async completeAuthentication(instanceId: InstanceId, flowId: string, callbackUrl: string): Promise<boolean> {
     const instance = this.get(instanceId);
     if (!instance?.completeAuthentication) return false;
@@ -226,6 +232,9 @@ export class ProviderRegistry {
           },
           access: driver?.metadata.access ?? "subscription",
           install: driver?.install,
+          authentication: inst.startAuthentication
+            ? { method: inst.getAuthentication ? "device-code" as const : "browser" as const }
+            : undefined,
           cli: this.cliByInstance.get(inst.instanceId),
           cliDefault: cliDefaultOf(driver),
           // every copy of the driver's default binary on the augmented PATH —
