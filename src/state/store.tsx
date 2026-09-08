@@ -453,6 +453,7 @@ export interface InstanceInfo {
     state: "available" | "unavailable";
     reason?: string;
     authenticated?: boolean;
+    account?: { email?: string; organization?: string };
     version?: string | null;
     /** A newer provider version unlocks capabilities, but this installed
      * version and its current models remain usable. */
@@ -490,6 +491,8 @@ export interface InstanceInfo {
   cliDefault?: string;
   /** Absolute paths of every default binary found on PATH, PATH order. */
   cliCandidates?: string[];
+  /** Server-owned Claude profile; a saved directory does not prove sign-in. */
+  claudeAccount?: { configDir: string; signInCommand: string; signInShell: "powershell" | "sh"; isDefault: boolean };
 }
 
 export type AppSettingsSection =
@@ -1141,6 +1144,10 @@ export function reducer(state: AppState, action: Action): AppState {
       const patched = updateBot(next, action.bot.id, (b) => ({
         ...b,
         ...action.bot,
+        // Complete bot frames omit this optional field after switching back
+        // to Own browser (or deleting a shared profile). Do not retain the
+        // previous profile's name and selection in another window.
+        browserProfile: action.bot.browserProfile,
         // Ordinary bot patches omit messages and must preserve the current
         // transcript. A task switch is different: its full bot event carries
         // the new transcript, which must replace the previous task before the

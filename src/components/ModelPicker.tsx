@@ -169,6 +169,70 @@ function ModelSearch({
   );
 }
 
+export function ModelEngineRail({ instances, selectedInstance, claudeInstance, onSelect }: {
+  instances: InstanceInfo[];
+  selectedInstance?: InstanceInfo;
+  claudeInstance?: InstanceInfo;
+  onSelect: (instance: InstanceInfo) => void;
+}) {
+  const firstClaude = instances.find((instance) => instance.driverKind === "claudeAgent" && instance.claudeAccount?.isDefault)
+    ?? instances.find((instance) => instance.driverKind === "claudeAgent");
+  const providers = instances.filter((instance) => instance.driverKind !== "claudeAgent" || instance === firstClaude);
+  const { subscription, custom: local } = splitEngineRail(providers);
+  const railButton = (instance: InstanceInfo) => {
+    const claude = instance.driverKind === "claudeAgent";
+    const target = claude ? claudeInstance ?? instance : instance;
+    const selected = claude ? selectedInstance?.driverKind === "claudeAgent" : instance.instanceId === selectedInstance?.instanceId;
+    const label = claude ? "Claude" : instance.displayName;
+    const attention = needsCli(target) || needsSignIn(target) || Boolean(target.snapshot.update);
+    return (
+      <button
+        type="button"
+        key={instance.instanceId}
+        onClick={() => onSelect(target)}
+        aria-label={label}
+        aria-pressed={selected}
+        title={`${label} · ${engineStatus(target)}`}
+        className={cn("relative flex size-9 items-center justify-center rounded-lg", selected ? "bg-control ring-1 ring-hairline/50" : "hover:bg-control/60")}
+      >
+        <ProviderMark driverKind={instance.driverKind} size={18} />
+        {attention && <span className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full bg-warning ring-2 ring-panel" />}
+      </button>
+    );
+  };
+  return (
+    <div className="flex w-14 shrink-0 flex-col gap-1 overflow-y-auto border-r border-hairline/40 bg-panel p-2">
+      {subscription.length > 0 && <EngineGroupLabel className="px-0 pb-0.5 pt-0.5 text-center text-[9px]">Cloud</EngineGroupLabel>}
+      {subscription.map(railButton)}
+      {local.length > 0 && <EngineGroupLabel className="px-0 pb-0.5 pt-2 text-center text-[9px]">Local</EngineGroupLabel>}
+      {local.map(railButton)}
+    </div>
+  );
+}
+
+export function ClaudeAccountSelect({ accounts, selectedId, onSelect }: {
+  accounts: InstanceInfo[];
+  selectedId: string;
+  onSelect: (instance: InstanceInfo) => void;
+}) {
+  return (
+    <label className="mt-2 flex min-w-0 items-center gap-2 text-[12px] text-ink-secondary">
+      <span>{t("model.account")}:</span>
+      <select
+        aria-label={t("model.account")}
+        value={selectedId}
+        onChange={(event) => {
+          const account = accounts.find((instance) => instance.instanceId === event.target.value);
+          if (account) onSelect(account);
+        }}
+        className="min-w-0 flex-1 rounded-lg border border-hairline/40 bg-inset px-2 py-1.5 text-[12px] text-ink focus:border-accent/60 focus:outline-none"
+      >
+        {accounts.map((account) => <option key={account.instanceId} value={account.instanceId}>{account.displayName}</option>)}
+      </select>
+    </label>
+  );
+}
+
 export function ModelPicker({
   bot,
   className,
@@ -191,9 +255,15 @@ export function ModelPicker({
   const [refreshing, setRefreshing] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const refreshingRef = useRef(false);
+  const lastClaudeIdRef = useRef<string | null>(null);
 
   const selection = bot.modelSelection;
   const active = state.instances.find((instance) => instance.instanceId === selection.instanceId);
+  const claudeAccounts = state.instances.filter((instance) => instance.driverKind === "claudeAgent");
+  const multipleClaudeAccounts = claudeAccounts.length > 1;
+  const showActiveAccount = multipleClaudeAccounts && active?.driverKind === "claudeAgent";
+  const claudeRailInstance = claudeAccounts.find((instance) => instance.instanceId === lastClaudeIdRef.current)
+    ?? (active?.driverKind === "claudeAgent" ? active : claudeAccounts[0]);
   const railInstance =
     state.instances.find((instance) => instance.instanceId === (railId ?? selection.instanceId)) ?? state.instances[0];
 
@@ -270,6 +340,7 @@ export function ModelPicker({
   };
 
   const selectRail = (instance: InstanceInfo) => {
+    if (instance.driverKind === "claudeAgent") lastClaudeIdRef.current = instance.instanceId;
     setRailId(instance.instanceId);
     const official = instance.models.options.filter((option) => !option.custom);
     setPane(isCustomOnly(instance) || official.length === 0 ? "custom" : "main");
@@ -326,6 +397,7 @@ export function ModelPicker({
       disabled={Boolean(bot.busy)}
       onClick={() => {
         if (bot.busy) return;
+        if (active?.driverKind === "claudeAgent") lastClaudeIdRef.current = active.instanceId;
         setRailId(selection.instanceId);
         setOpen((wasOpen) => {
           const next = !wasOpen;
@@ -339,8 +411,9 @@ export function ModelPicker({
         "flex items-center gap-1.5 rounded-full border border-hairline/40 bg-control/60 py-1 pl-2 pr-2.5 text-[13px] text-ink hover:bg-raised-hover disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-control/60",
         // in a narrow chat header fold to a rounded square with just the
         // provider mark; the model name rides the tooltip (a bot with no
-        // resolved engine keeps its label — the mark is what would hide it)
-        !contained && active && COMPACT_SQUARE,
+        // resolved engine keeps its label — the mark is what would hide it).
+        // Multiple Claude accounts keep their name even in the compact chip.
+        !contained && active && !showActiveAccount && COMPACT_SQUARE,
       )}
       title={
         bot.busy
@@ -353,8 +426,14 @@ export function ModelPicker({
       }
     >
       {active && <ProviderMark driverKind={active.driverKind} size={14} />}
+      {!contained && showActiveAccount && (
+        <span data-model-account-compact className="hidden max-w-20 truncate @max-4xl/chathead:inline">{active.displayName}</span>
+      )}
       <span className={cn("flex min-w-0 items-center gap-1", !contained && active && "@max-4xl/chathead:hidden")}>
         <span className="max-w-[160px] truncate">
+          {showActiveAccount && (
+            <span data-model-account className="text-ink-secondary">{active.displayName} · </span>
+          )}
           {modelLabel(active, selection.model)}
           {active && modelProvider(active, selection.model) && (
             <span className="text-ink-secondary"> · {modelProvider(active, selection.model)}</span>
@@ -402,53 +481,14 @@ export function ModelPicker({
               : "absolute right-0 top-full z-30 mt-2 w-[380px] max-h-[min(480px,calc(100dvh-7rem))] shadow-2xl shadow-black/50",
           )}
         >
-          <div className="flex w-14 shrink-0 flex-col gap-1 overflow-y-auto border-r border-hairline/40 bg-panel p-2">
-            {(() => {
-              const { subscription, custom: local } = splitEngineRail(state.instances);
-              const railButton = (instance: InstanceInfo) => {
-                const selected = instance.instanceId === railInstance?.instanceId;
-                const attention = needsCli(instance) || needsSignIn(instance) || Boolean(instance.snapshot.update);
-                return (
-                  <button
-                    type="button"
-                    key={instance.instanceId}
-                    onClick={() => selectRail(instance)}
-                    aria-label={instance.displayName}
-                    aria-pressed={selected}
-                    title={`${instance.displayName} · ${engineStatus(instance)}`}
-                    className={cn(
-                      "relative flex size-9 items-center justify-center rounded-lg",
-                      selected ? "bg-control ring-1 ring-hairline/50" : "hover:bg-control/60",
-                    )}
-                  >
-                    <ProviderMark driverKind={instance.driverKind} size={18} />
-                    {attention && (
-                      <span className="absolute bottom-0.5 right-0.5 size-1.5 rounded-full bg-warning ring-2 ring-panel" />
-                    )}
-                  </button>
-                );
-              };
-              return (
-                <>
-                  {subscription.length > 0 && (
-                    <EngineGroupLabel className="px-0 pb-0.5 pt-0.5 text-center text-[9px]">Cloud</EngineGroupLabel>
-                  )}
-                  {subscription.map(railButton)}
-                  {local.length > 0 && (
-                    <EngineGroupLabel className="px-0 pb-0.5 pt-2 text-center text-[9px]">Local</EngineGroupLabel>
-                  )}
-                  {local.map(railButton)}
-                </>
-              );
-            })()}
-          </div>
+          <ModelEngineRail instances={state.instances} selectedInstance={railInstance} claudeInstance={claudeRailInstance} onSelect={selectRail} />
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             {railInstance ? (
               <>
                 <div className="shrink-0 px-4 pb-2 pt-3.5">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="truncate text-[14px] font-semibold text-ink">{railInstance.displayName}</div>
+                    <div className="truncate text-[14px] font-semibold text-ink">{railInstance.driverKind === "claudeAgent" ? "Claude" : railInstance.displayName}</div>
                     <div className="flex shrink-0 items-center gap-1">
                       <button
                         type="button"
@@ -479,6 +519,14 @@ export function ModelPicker({
                       </span>
                     </div>
                   </div>
+                  {railInstance.driverKind === "claudeAgent" && (
+                    <ClaudeAccountSelect accounts={claudeAccounts} selectedId={railInstance.instanceId} onSelect={selectRail} />
+                  )}
+                  {railInstance.snapshot.authenticated && railInstance.snapshot.account && (
+                    <p className="mt-1 break-words text-[11px] text-ink-secondary">
+                      {[railInstance.snapshot.account.email, railInstance.snapshot.account.organization].filter(Boolean).join(" · ")}
+                    </p>
+                  )}
                   <div className="mt-0.5 text-[11.5px] text-ink-secondary">
                     {pane === "custom" ? t("model.localHint") : t("model.chooseHint")}
                   </div>
@@ -500,6 +548,12 @@ export function ModelPicker({
                 {blocked ? (
                   <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-1">
                     <EngineSetup instance={railInstance} intent={pane === "custom" ? "inject" : "cloud"} />
+                    {railInstance.claudeAccount && needsSignIn(railInstance) && pane !== "custom" && (
+                      <p className="mt-2 text-[11.5px] leading-relaxed text-ink-secondary">
+                        {railInstance.claudeAccount.signInShell === "powershell" && `${t("engines.account.powershell")} `}
+                        {t("engines.account.signInHint")}
+                      </p>
+                    )}
                     <p className="mt-2 text-center text-[11.5px] text-ink-secondary/70">
                       {pane === "main" && official.length > 0
                         ? official.length === 1

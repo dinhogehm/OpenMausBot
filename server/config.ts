@@ -589,7 +589,7 @@ export const PROVIDER_CREDENTIAL_ENV = [
 
 /** Merge a partial config into ~/.openmausbot/config.json (secrets never
  * echoed back — callers report configured-or-not booleans only). */
-export function saveConfig(patch: Partial<AppConfig>): void {
+export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstances?: boolean } = {}): void {
   const p = join(DATA_DIR, "config.json");
   let disk: JsonObject = {};
   try {
@@ -649,10 +649,16 @@ export function saveConfig(patch: Partial<AppConfig>): void {
   }
   if (checkedPatch.instances) {
     const currentInstances = jsonObjectSchema.safeParse(disk.instances);
-    const diskInstances: JsonObject = currentInstances.success ? currentInstances.data : {};
+    const storedInstances: JsonObject = currentInstances.success ? currentInstances.data : {};
+    const diskInstances: JsonObject = options.replaceInstances ? {} : storedInstances;
     for (const [instanceId, entry] of Object.entries(checkedPatch.instances)) {
-      const current = jsonObjectSchema.safeParse(diskInstances[instanceId]);
+      const current = jsonObjectSchema.safeParse(storedInstances[instanceId]);
       const merged: JsonObject = current.success ? { ...current.data } : {};
+      // Replacement clears omitted known settings, but retained shadow
+      // entries keep fields understood only by a newer app or driver.
+      if (options.replaceInstances) {
+        for (const key of Object.keys(instanceConfigSchema.shape)) delete merged[key];
+      }
       Object.assign(merged, entry);
       diskInstances[instanceId] = merged;
     }
@@ -667,8 +673,8 @@ export function saveConfig(patch: Partial<AppConfig>): void {
  * entry rides driver.defaultConfig(). Returns false for unknown instances
  * when the fleet is explicitly configured. The returned map must stay
  * PERSISTABLE: instanceConfigs() injects credential env into consuming
- * drivers' entries for the live fleet, so those injected keys are stripped
- * back out before the map is returned — otherwise saving an override would
+ * drivers' entries for the live fleet, so only their originally configured
+ * environment is retained — otherwise saving an override would
  * copy xai/box/opencodeGo secrets into the instances section of
  * config.json. */
 export function withInstanceCli(
@@ -677,7 +683,7 @@ export function withInstanceCli(
   cli: string,
 ): InstanceCliUpdate {
   const next: AppConfig = structuredClone(cfg);
-  const map = instanceConfigs(next);
+  const map = persistableInstanceConfigs(next);
   // hasOwn, not truthiness: map is a plain object literal, so
   // map["__proto__"] resolves to Object.prototype — truthy — and the
   // assignment below would poison EVERY object in the process (instanceId
@@ -695,16 +701,19 @@ export function withInstanceCli(
     delete rest.cli;
     entry.config = Object.keys(rest).length ? rest : undefined;
   }
-  for (const e of Object.values(map)) {
-    if (!e.environment) continue;
-    const injected = injectedEnvironment(next, e.driver);
-    for (const [k, v] of Object.entries(e.environment)) {
-      if (injected.get(k) === v) delete e.environment[k];
-    }
-    if (!Object.keys(e.environment).length) delete e.environment;
-  }
   next.instances = map;
   return { ok: true, config: next };
+}
+
+/** Materialize defaults without copying injected workspace secrets to disk. */
+export function persistableInstanceConfigs(cfg: AppConfig): InstanceConfigMap {
+  const map = instanceConfigs(cfg);
+  for (const [id, entry] of Object.entries(map)) {
+    const environment = cfg.instances?.[id]?.environment;
+    if (environment) entry.environment = { ...environment };
+    else delete entry.environment;
+  }
+  return map;
 }
 
 interface InstanceCliUpdate {
@@ -712,8 +721,7 @@ interface InstanceCliUpdate {
   config: AppConfig;
 }
 
-/** The credential env instanceConfigs() injects for one driver — shared with
- * withInstanceCli() so the inject rule and the strip rule cannot drift apart.
+/** The credential env instanceConfigs() injects for one driver at runtime.
  * Each secret goes only to the driver that actually reads it: the API-key
  * Grok driver reads XAI_API_KEY, the Computer driver reads BOX_TOKEN, and
  * OpenCode reads OPENCODE_API_KEY. Every other engine brings its own

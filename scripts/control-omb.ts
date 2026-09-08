@@ -270,6 +270,7 @@ export async function launchVerificationServer(
   parentEnv: NodeJS.ProcessEnv = process.env,
   signal?: AbortSignal,
   localVm?: { binDir: string; host: string; sshKey: string; staticDir: string },
+  browser?: { binaryPath: string; executablePath: string },
 ): Promise<VerificationServer> {
   if (localVm) {
     const endpoint = new URL(localVm.host);
@@ -280,7 +281,9 @@ export async function launchVerificationServer(
   const port = await freePortBlock([0, 1]);
   if (signal?.aborted) throw new ControlOmbError("verification launch cancelled");
   const url = `http://127.0.0.1:${port}`;
-  const dataDir = mkdtempSync(join(tmpdir(), "openmausbot-verify-data-"));
+  // Native browser daemons use UNIX sockets; a macOS temp home can exceed
+  // their path limit. This is still an owned, randomly named fixture only.
+  const dataDir = mkdtempSync(join(browser && process.platform !== "win32" ? "/tmp" : tmpdir(), "openmausbot-verify-data-"));
   const fixtureTemp = join(dataDir, "tmp");
   const fixtureDumpPath = join(dataDir, "fake-claude-dump.json");
   mkdirSync(fixtureTemp, { recursive: true });
@@ -333,6 +336,10 @@ export async function launchVerificationServer(
     CONTAINER_HOST: localVm.host,
     CONTAINER_SSHKEY: localVm.sshKey,
     OMB_STATIC_DIR: localVm.staticDir,
+  });
+  if (browser) Object.assign(childEnv, {
+    OMB_AGENT_BROWSER_PATH: browser.binaryPath,
+    AGENT_BROWSER_EXECUTABLE_PATH: browser.executablePath,
   });
   const child = spawn(process.execPath, ["--experimental-strip-types", join(ROOT, "server", "index.ts")], {
     cwd: ROOT,

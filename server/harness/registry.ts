@@ -61,6 +61,8 @@ export class ProviderRegistry {
 
   async load(configs: InstanceConfigMap) {
     for (const [instanceId, entry] of Object.entries(configs)) {
+      // Account edits replace only their own process/session state.
+      await this.dispose(instanceId);
       const driver = this.driversByKind.get(entry.driver);
       if (!driver) {
         this.byId.set(instanceId, {
@@ -250,5 +252,12 @@ export class ProviderRegistry {
     await Promise.allSettled(this.instances().map((i) => i.dispose()));
     this.byId.clear();
     this.cliByInstance.clear();
+  }
+
+  async dispose(instanceId: InstanceId) {
+    const entry = this.byId.get(instanceId);
+    this.byId.delete(instanceId);
+    this.cliByInstance.delete(instanceId);
+    await entry?.live?.dispose();
   }
 }

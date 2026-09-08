@@ -107,4 +107,11 @@ export class ProviderAuthSessions {
     // Called when disposing the provider fleet, which owns child teardown.
     this.flows.clear();
   }
+
+  clearInstance(instanceId: string): void {
+    const flow = this.flows.get(instanceId);
+    if (flow) flow.revoked = true;
+    this.flows.delete(instanceId);
+    // The registry's per-instance disposal owns child teardown.
+  }
 }

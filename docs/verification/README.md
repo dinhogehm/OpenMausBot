@@ -48,6 +48,10 @@ map entry only after the shared control surface can really drive it.
 The [cloud preview fixture](cloud-preview.md) mounts the real Computer panel
 against an isolated server for image decoding, loading, and recovery UI checks.
 
+The [live browser fixture](browser-live.md) mounts the real Browser panel with
+an explicitly selected native engine and Chrome in a disposable home, covering
+watching, takeover, input, and profile switching.
+
 The [bot settings fixture](bot-settings.md) checks profile saves, standing
 instructions, history restore, skill/memory refresh, and stale-response isolation.
 

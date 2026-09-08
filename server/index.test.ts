@@ -803,11 +803,13 @@ beforeAll(async () => {
     import childProcess from "node:child_process";
     import { syncBuiltinESMExports } from "node:module";
     const spawn = childProcess.spawn;
+    const base = ${JSON.stringify(home)};
     childProcess.spawn = function(command, args, options) {
       if (command !== process.env.OMB_AGENT_BROWSER_PATH) return spawn(command, args, options);
       const program = 'const fs = require("node:fs"); const path = require("node:path"); '
-        + 'const base = path.dirname(process.env.OMB_AGENT_BROWSER_PATH); '
+        + 'const base = ' + JSON.stringify(base) + '; '
         + 'fs.appendFileSync(path.join(base, "browser-calls.jsonl"), JSON.stringify({args: process.argv.slice(1), session: process.env.AGENT_BROWSER_SESSION}) + "\\\\n"); '
+        + 'if (process.argv[1] === "session" && process.argv[2] === "list") fs.writeSync(1, JSON.stringify({ success: true, data: { sessions: [] } })); '
         + 'process.exit(fs.existsSync(path.join(base, "browser-clear-fails")) ? 1 : 0);';
       return spawn(process.execPath, ["-e", program, ...args], options);
     };
@@ -5854,6 +5856,49 @@ describe("harness HTTP API", () => {
     }
   });
 
+  it("releases a room bot when preparing its saved browser fails, then allows retry", async () => {
+    const bot = (await api("POST", "/api/bots")).body.bot;
+    const failureMarker = join(home, "browser-clear-fails");
+    let room: any;
+    try {
+      expect((await api("PATCH", "/api/config", {
+        features: { browser: true }, browserProfiles: [{ id: "prep-failure", name: "Preparation failure" }],
+      })).status).toBe(200);
+      expect((await api("PATCH", `/api/bots/${bot.id}`, {
+        browserProfile: "prep-failure", modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      })).status).toBe(200);
+      room = (await api("POST", "/api/groups", {
+        name: "Browser setup failure", memberIds: [bot.id],
+        setup: { bulletin: "", defaultResponder: { kind: "member", botId: bot.id } },
+      })).body.group;
+      writeFileSync(failureMarker, "fail only this fixture's browser close");
+      rmSync(fakeClaudeDump, { force: true });
+      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Check the website" })).status).toBe(202);
+      await expect.poll(() => readFileSync(join(home, "browser-calls.jsonl"), "utf8").includes('"session":"prep-failure"')).toBe(true);
+      await expect.poll(async () => {
+        const current = (await api("GET", "/api/bots?messages=20")).body;
+        const member = current.bots.find((candidate: { id: string }) => candidate.id === bot.id);
+        const group = current.groups.find((candidate: { id: string }) => candidate.id === room.id);
+        return { busy: member?.busy, working: group?.working, failed: group?.messages.some(
+          (message: { tool?: { name?: string } }) => message.tool?.name?.includes("Could not safely prepare saved browser logins"),
+        ) };
+      }, { timeout: 5_000 }).toEqual({ busy: false, working: false, failed: true });
+      expect(existsSync(fakeClaudeDump)).toBe(false);
+      rmSync(failureMarker, { force: true });
+      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Retry the website" })).status).toBe(202);
+      await expect.poll(async () => existsSync(fakeClaudeDump) ? "dispatched" : (await api("GET", "/api/bots?messages=20")).body.groups
+        .find((candidate: { id: string }) => candidate.id === room.id)?.messages
+        .filter((message: { tool?: unknown }) => message.tool).map((message: { tool: { name: string } }) => message.tool.name),
+      { timeout: 5_000 }).toBe("dispatched");
+    } finally {
+      rmSync(failureMarker, { force: true });
+      if (room) await api("POST", `/api/groups/${room.id}/interrupt`, {}).catch(() => undefined);
+      await api("PATCH", "/api/config", { features: { browser: false }, browserProfiles: [] }).catch(() => undefined);
+      if (room) await api("DELETE", `/api/groups/${room.id}`).catch(() => undefined);
+      await api("DELETE", `/api/bots/${bot.id}`).catch(() => undefined);
+    }
+  });
+
   it("mounts the browser engine's MCP server and the safety prompt in room turns", async () => {
     const bot = (await api("POST", "/api/bots")).body.bot;
     let room: any;
@@ -5885,16 +5930,14 @@ describe("harness HTTP API", () => {
         }),
       }).parse(await readJsonFileWhenReady(fakeClaudeDump));
       const browser = dump.mcpConfig.mcpServers.browser;
-      expect(browser.command).toBe(join(home, "fake-agent-browser"));
-      expect(browser.args).toEqual(["mcp", "--tools", "core", "--no-webmcp"]);
-      // the shared "work" profile is one session, isolated and restored across turns
-      expect(browser.env.AGENT_BROWSER_SESSION).toMatch(/^[A-Za-z0-9_.-]{1,96}$/);
-      expect(browser.env.AGENT_BROWSER_SESSION).not.toBe(`bot-${bot.id}`);
-      // restore is a *name*: this session's own saved state, never another bot's
-      expect(browser.env.AGENT_BROWSER_RESTORE).toBe(browser.env.AGENT_BROWSER_SESSION);
-      expect(browser.env).toMatchObject({ AGENT_BROWSER_RESTORE_SAVE: "auto", AGENT_BROWSER_HEADLESS: "1" });
-      expect(browser.env.AGENT_BROWSER_ENCRYPTION_KEY).toMatch(/^[0-9a-f]{64}$/);
-      // the engine's key never reaches the engine CLI's own environment
+      expect(browser.command).toBe(process.execPath);
+      expect(browser.args).toEqual([expect.stringMatching(/browser-proxy\.(?:ts|js|mjs)$/)]);
+      expect(browser.env.OMB_BROWSER_TOKEN).toEqual(expect.any(String));
+      expect(browser.env.OMB_HARNESS_URL).toBe(BASE);
+      // Only the server-owned proxy knows native sessions and saved-login keys.
+      expect(browser.env.AGENT_BROWSER_SESSION).toBeUndefined();
+      expect(browser.env.AGENT_BROWSER_RESTORE).toBeUndefined();
+      expect(browser.env.AGENT_BROWSER_ENCRYPTION_KEY).toBeUndefined();
       expect(dump.env.AGENT_BROWSER_ENCRYPTION_KEY).toBeUndefined();
 
       const system = dump.systemPrompt;
@@ -6026,7 +6069,9 @@ describe("harness HTTP API", () => {
       rmSync(join(home, "browser-calls.jsonl"), { force: true });
       expect((await api("PATCH", "/api/config", { browserProfiles: [] })).status).toBe(200);
       const calls = readFileSync(join(home, "browser-calls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-      expect(calls).toContainEqual({ args: ["state", "clear", "--all"], session: profile.partitionId ?? profile.id });
+      expect(calls).toContainEqual({ args: ["close"], session: profile.partitionId ?? profile.id });
+      expect(calls).toContainEqual({ args: ["session", "list", "--json"], session: profile.partitionId ?? profile.id });
+      expect(calls.some((call: { args: string[] }) => call.args.includes("--all"))).toBe(false);
       const state = (await api("GET", "/api/bots")).body;
       expect(state.bots.find((candidate: { id: string }) => candidate.id === bot.id)).not.toHaveProperty("browserProfile");
     } finally {

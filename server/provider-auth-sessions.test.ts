@@ -17,6 +17,16 @@ function fixture() {
 }
 
 describe("provider login ownership", () => {
+  it("forgets only the replaced provider's login reservation", async () => {
+    const { sessions, instance } = fixture();
+    const sibling = { ...instance, instanceId: "other" };
+    await sessions.start(instance, "owner");
+    await sessions.start(sibling, "owner");
+    sessions.clearInstance("codex");
+    await expect(sessions.status("codex", "owner", "random-flow")).rejects.toMatchObject({ status: 404 });
+    await expect(sessions.status("other", "owner", "random-flow")).resolves.toMatchObject({ phase: "waiting" });
+    await expect(sessions.start(instance, "another owner")).resolves.toMatchObject({ phase: "waiting" });
+  });
   it("does not disclose, complete, or cancel another admin's device flow", async () => {
     const { sessions, instance } = fixture();
     await sessions.start(instance, "owner");

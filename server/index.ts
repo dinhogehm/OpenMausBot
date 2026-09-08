@@ -38,6 +38,7 @@ import {
 } from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
 import { updateClaudeCli } from "./claude-update.ts";
+import { configuredAccountDirectory, assertSeparateClaudeAccount, claudeAccountInfo, createClaudeAccountSchema, instanceSettingsSchema, newClaudeAccount } from "./claude-accounts.ts";
 import {
   BrowserCleanupCoordinator,
   finalizeBrowserCleanupMutation,
@@ -124,6 +125,8 @@ import {
   browserProfilePartitionTarget,
   syncCredentialEnv,
   withInstanceCli,
+  persistableInstanceConfigs,
+  type AppConfig,
   vpsSshAlias,
   DATA_DIR,
   EVENTS_DIR,
@@ -293,10 +296,13 @@ import { denyUnattendedWorkflowCard } from "./workflow-unattended-card.ts";
 import { WorkflowStore } from "./workflow-store.ts";
 import { CalendarCallManager, type CalendarCall } from "./calendar-calls.ts";
 import { BUILT_IN_BROWSER_SYSTEM_PROMPT } from "./browser-engine.ts";
+import { BrowserRuntime } from "./browser-runtime.ts";
+import { BrowserLive } from "./browser-live.ts";
 import {
   agentBrowserFrame,
   agentBrowserIntegration,
   browserEngineEncryptionKey,
+  prepareBrowserSessionState,
   clearBrowserSessionState,
   ensureChrome,
   installAgentBrowserBinary,
@@ -340,7 +346,7 @@ import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import { acquireDataDirLeaseForProcess } from "./data-dir-lease.ts";
 import { describeEdition, editionStatus, loadEnterpriseLayer } from "./enterprise.ts";
 import { environmentDescriptor, loadEnvironmentId, serverVersion } from "./environment.ts";
-import { createCustomDomainVerifier, normalizeCustomDomain } from "./custom-domain.ts";
+import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } from "./custom-domain.ts";
 import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
 import {
   clearSessionCookie,
@@ -429,6 +435,7 @@ function customDomainStatus() {
   return {
     customDomain: savedCustomDomain(), publicUrl: publicUrl(), fallbackUrl: FALLBACK_PUBLIC_URL,
     supported: !DESKTOP_MANAGED, appPort: PORT, webhookPort: WEBHOOK_PORT,
+    serverIpv4: DESKTOP_MANAGED ? null : customDomainIpv4(),
   };
 }
 const registry = new ProviderRegistry(BUILT_IN_DRIVERS);
@@ -516,7 +523,7 @@ const browserCleanup: BrowserCleanupCoordinator = new BrowserCleanupCoordinator(
     const work = status.kind === "ready" && sessions.length
       ? Promise.all(sessions.map(async (session) => {
           const ok = await clearBrowserSessionState(status.binaryPath, session, { encryptionKey: browserEngineEncryptionKey() });
-          if (!ok) console.warn(`browser cleanup: could not clear the engine's saved state for session ${session}; clear it with \`agent-browser --session ${session} state clear --all\``);
+          if (!ok) console.warn(`browser cleanup: could not clear saved state for session ${session}; restart OpenMausBot to retry this profile's cleanup. Do not use state clear --all: it erases other profiles too.`);
           return ok;
         }))
       : Promise.resolve([true]);
@@ -559,11 +566,12 @@ type InternalCapability = {
   threadId: string;
   generation: string;
   depth: number;
-  kind: "agents" | "connectors" | "computer";
+  kind: "agents" | "connectors" | "computer" | "browser";
   skillAuthoring: boolean;
   createdBots: number;
   orphanExpiresAt: number;
   localVmTarget?: LocalVmTarget;
+  browserSession?: string;
 };
 // A capability lives for the exact provider-turn generation, including while
 // that turn is parked on a human approval. The long ceiling is only an orphan
@@ -825,7 +833,36 @@ function cancelDirectTurnDispatch(botId: string, expectedThreadId?: string): Dir
 /** The bot's browser for this turn: agent-browser, one isolated session per
  * browser profile or per bot (docs/plans/browser-engine.md). Null, with the
  * reason logged once, when the engine is not on this machine. */
-function browserIntegration(botId: string, profile: string | undefined) {
+const browserRuntime = new BrowserRuntime();
+const browserLive = new BrowserLive({ runtime: browserRuntime });
+// Temporary profiles last for this server run, but are never saved to disk.
+// The viewer and the agent must address the SAME temporary browser.
+const temporaryBrowserSessions = new Map<string, string>();
+function currentBrowserSession(botId: string, profile: string | undefined): string {
+  if (profile === "guest") {
+    let session = temporaryBrowserSessions.get(botId);
+    if (!session) {
+      session = browserSessionId(botId, "guest");
+      temporaryBrowserSessions.set(botId, session);
+    }
+    return session;
+  }
+  const target = profile ? browserProfilePartitionTarget(cfg, profile) : null;
+  return browserSessionId(botId, target?.partitionId ?? "");
+}
+async function forgetTemporaryBrowser(botId: string): Promise<void> {
+  const session = temporaryBrowserSessions.get(botId);
+  if (!session) return;
+  temporaryBrowserSessions.delete(botId);
+  const engine = browserEngineStatus();
+  if (engine.kind !== "ready") return;
+  const closed = await clearBrowserSessionState(engine.binaryPath, session, {
+    env: { PATH: augmentedPath() }, encryptionKey: browserEngineEncryptionKey(),
+  });
+  if (closed) await browserRuntime.close(session);
+  else console.warn(`temporary browser ${session}: could not close its session; run agent-browser --session ${session} close on this server`);
+}
+async function browserIntegration(botId: string, profile: string | undefined, turn?: { threadId: string; generation: string }) {
   const status = browserEngineStatus();
   if (status.kind !== "ready") {
     if (!engineUnavailableLogged) {
@@ -837,17 +874,28 @@ function browserIntegration(botId: string, profile: string | undefined) {
   // A profile that no longer exists falls back to the bot's own session.
   const profileTarget = profile && profile !== "guest" ? browserProfilePartitionTarget(cfg, profile) : null;
   const partitionId = profile === "guest" ? "guest" : (profileTarget?.partitionId ?? "");
-  const session = browserSessionId(botId, partitionId);
-  return {
-    profile: partitionId,
-    integration: agentBrowserIntegration({
+  const session = currentBrowserSession(botId, profile);
+  const spec = agentBrowserIntegration({
       binaryPath: status.binaryPath,
       session,
       encryptionKey: browserEngineEncryptionKey(),
       persistent: profile !== "guest",
       env: { ...process.env, PATH: augmentedPath() },
-    }),
-  };
+    });
+  await prepareBrowserSessionState(status.binaryPath, session, { env: spec.env, persistent: profile !== "guest", isCurrent: () => {
+    const current = store.bot(botId);
+    return !!current && current.browser !== false && builtInBrowserEnabled(cfg)
+      && currentBrowserSession(current.id, current.browserProfile) === session
+      && (!turn || activeInternalGenerationByThread.get(turn.threadId) === turn.generation);
+  } });
+  if (!turn) return { profile: partitionId, session, spec, integration: spec };
+  const token = mintInternalCapability({ botId, ...turn, browserSession: session,
+    kind: "browser", depth: 0, skillAuthoring: false, createdBots: 0 });
+  return { profile: partitionId, session, spec, integration: {
+    command: process.execPath, args: [SPAWNED_PROXIES.browser], env: {
+      ...AGENTS_NODE_FLAG, OMB_BROWSER_TOKEN: token, OMB_HARNESS_URL: `http://127.0.0.1:${PORT}`,
+    },
+  } };
 }
 let engineUnavailableLogged = false;
 
@@ -1037,6 +1085,9 @@ function checkedModelSelection(
     return { ok: false, status: 409, error: "the bot is working — stop it before changing models" };
   }
   const target = registry.get(selection.instanceId);
+  if (providerInstancesChanging.has(selection.instanceId)) {
+    return { ok: false, status: 409, error: "this provider account is being updated — try again shortly" };
+  }
   // Model IDs remain free-form at the app's general API boundary. Custom
   // engines can accept IDs that are not in their discovery catalog, and
   // several drivers only learn the final catalog when a turn starts. The
@@ -4101,6 +4152,9 @@ async function startTurn(
 
   console.error(`[omb-turn] bot=${botId} text=${JSON.stringify(resolvedImages.text.slice(0, 70))} images=${turnImages.length} depth=${commsDepth} card=${Boolean(opts?.cardContinuation)}`);
   const instanceId = instance.instanceId;
+  if (providerInstancesChanging.has(instanceId)) {
+    throw Object.assign(new Error("this provider account is being updated — try again shortly"), { status: 409 });
+  }
   const model = opts?.runOn === "cloud" ? instance.models.default : bot.modelSelection.model;
   // a cloud routine borrows the instance default model, so it borrows no
   // per-bot effort either
@@ -4584,7 +4638,7 @@ async function startTurn(
         instance.adapter.capabilities.browserMcp === true
       ) {
         const selectedProfile = liveBot.browserProfile;
-        browser = browserIntegration(bot.id, selectedProfile);
+        browser = await browserIntegration(bot.id, selectedProfile, { threadId, generation: dispatchClaimId });
         if (browser) integrations.browser = browser.integration;
         // The browser lost its frame source when the Electron surface was
         // removed: previewCapture is set by the computer branches above, and
@@ -4593,8 +4647,9 @@ async function startTurn(
         // the work was a web page, because agent-browser runs its own headless
         // Chrome on the host rather than inside that desktop.
         if (browser) {
-          const frame = { binaryPath: browser.integration.command, env: browser.integration.env };
-          browserCapture = () => agentBrowserFrame(frame);
+          const frame = { binaryPath: browser.spec.command, env: browser.spec.env };
+          const session = browser.session;
+          browserCapture = () => browserRuntime.withAgentAction(session, () => agentBrowserFrame(frame));
         }
       }
       // A cancelled adapter can be between accepting sendTurn and revealing
@@ -5641,6 +5696,10 @@ async function runGroupMemberTurn(
   const preparedComposio = bot.composio;
   const instance = registry.get(bot.modelSelection.instanceId);
   const userName = cfg.profile?.name?.trim() || "User";
+  if (providerInstancesChanging.has(bot.modelSelection.instanceId)) {
+    onDispatchError?.(`${bot.name}'s provider account is being updated — try again shortly`);
+    return true;
+  }
   if (!instance) {
     const message = `${bot.name}'s model is unavailable`;
     store.appendMessage(threadId, {
@@ -5851,6 +5910,11 @@ async function runGroupMemberTurn(
     return true;
   }
   store.setActivity(bot.id, "working");
+  // Claim cleanup ownership before browser preparation can yield or reject.
+  // The finally block must release exactly this setup, never a newer turn.
+  roomSpeaker = { botId: bot.id, name: bot.name, color: bot.color };
+  groupSpeakers.set(threadId, roomSpeaker);
+  store.patchGroup(readyGroup.id, { busyBotId: bot.id });
   orchestration?.onClaimed?.();
 
   // Connected-app discovery above can yield for a network round trip. A
@@ -5864,24 +5928,18 @@ async function runGroupMemberTurn(
     instance.adapter.capabilities.browserMcp === true
   ) {
     const selectedProfile = readyBot.browserProfile;
-    const browser = browserIntegration(readyBot.id, selectedProfile);
+    const browser = await browserIntegration(readyBot.id, selectedProfile, { threadId, generation: internalGeneration });
     if (browser) integrations.browser = browser.integration;
   }
-  // Stop/delete may land while Electron is registering the capability. The
-  // callback above prevents publication; this second check also unwinds the
-  // room's setup claim so no provider turn starts after Stop returned.
+  // Stop/delete may land while browser state is being prepared. Capability
+  // publication and this exact claim are both fenced; finally releases only
+  // this setup, so a replacement turn's busy state is never cleared here.
   const browserReadyBot = store.bot(readyBot.id);
-  if (isCancelled?.() || !browserReadyBot || !browserReadyBot.busy) {
-    if (browserReadyBot?.busy) {
-      store.setActivity(browserReadyBot.id, "idle");
-      retryDelegationsWaitingOn(browserReadyBot.id);
-    }
+  if (isCancelled?.() || !browserReadyBot?.busy ||
+      groupSpeakers.get(threadId) !== roomSpeaker ||
+      activeInternalGenerationByThread.get(threadId) !== internalGeneration) {
     return false;
   }
-
-  store.patchGroup(readyGroup.id, { busyBotId: bot.id }); // the store's change stream carries the frame
-  roomSpeaker = { botId: bot.id, name: bot.name, color: bot.color };
-  groupSpeakers.set(threadId, roomSpeaker);
 
   // Room and Goal turns use the speaker's desktop, never the coordinator's.
   // Claim the same lease as direct turns before asynchronous VM setup.
@@ -7874,6 +7932,39 @@ function persistMcpServers(next: Record<string, unknown>): void {
   cfg.mcpServers = next;
 }
 
+async function describeInstances() {
+  const configs = instanceConfigs(cfg);
+  return (await registry.describe()).map((instance) => {
+    const entry = configs[instance.instanceId];
+    if (entry?.driver !== "claudeAgent") return instance;
+    try {
+      const claudeAccount = claudeAccountInfo(instance.instanceId, entry, instance.cli ?? instance.cliDefault ?? "claude");
+      return { ...instance, claudeAccount, install: { ...instance.install, signInCommand: claudeAccount.signInCommand } };
+    } catch {
+      // A malformed saved config remains a repairable shadow, never takes
+      // the model picker down or offers a login for the wrong directory.
+      return { ...instance, install: { ...instance.install, signInCommand: undefined } };
+    }
+  });
+}
+
+async function persistProviderInstance(instanceId: string, instances: NonNullable<AppConfig["instances"]>) {
+  saveConfig({ instances }, { replaceInstances: true });
+  cfg.instances = instances;
+  providerAuthSessions.clearInstance(instanceId);
+  bus.detach(instanceId);
+  // No whole-fleet reload: other bots keep their live CLI processes, event
+  // subscriptions and approval capabilities while this one is replaced.
+  if (Object.hasOwn(instances, instanceId)) {
+    await registry.load({ [instanceId]: instanceConfigs(cfg)[instanceId] });
+    const live = registry.get(instanceId);
+    if (live) bus.attach([live]);
+  } else {
+    await registry.dispose(instanceId);
+  }
+  resetPathCache();
+}
+
 /** Rebuild the provider fleet after a config change so new keys take
  * effect without a server restart (kills any in-flight turns). */
 async function reloadProviders() {
@@ -7921,6 +8012,7 @@ async function reloadProviders() {
 // and reload sequence single-flight so two settings requests cannot drop one
 // another's changes or dispose a fleet while another reload is creating it.
 let providerConfigBusy = false;
+const providerInstancesChanging = new Set<string>();
 let mcpConfigBusy = false;
 const MAX_CONCURRENT_MCP_PROBES = 2;
 let mcpProbesInFlight = 0;
@@ -8224,7 +8316,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!internalSender) {
         return json(res, 401, { error: "unauthorized" });
       }
-      const requiredCapabilityKind = path.startsWith("/api/internal/connectors/")
+      const requiredCapabilityKind = path === "/api/internal/browser/mcp"
+        ? "browser"
+        : path.startsWith("/api/internal/connectors/")
         ? "connectors"
         : path === "/api/internal/computer-control"
           ? "computer"
@@ -8272,6 +8366,30 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           throw Object.assign(new Error("the internal turn capability has expired"), { status: 401 });
         }
       };
+      if (method === "POST" && path === "/api/internal/browser/mcp") {
+        const body = await readInternalBody();
+        const bot = store.bot(internalCapability.botId);
+        if (!bot || bot.browser === false || !builtInBrowserEnabled(cfg)) {
+          return json(res, 403, { error: "browser tools are not enabled for this bot" });
+        }
+        const browser = await browserIntegration(bot.id, bot.browserProfile);
+        if (!browser || browser.session !== internalCapability.browserSession) {
+          return json(res, 409, { error: "this browser profile changed; start a new turn" });
+        }
+        if (body?.method !== "tools/list" && body?.method !== "tools/call") {
+          return json(res, 400, { error: "unsupported browser method" });
+        }
+        const result = await browserRuntime.agentRpc(browser.session, browser.spec, body.method, body.params, () => {
+          requireActiveInternalCapability();
+          const current = store.bot(bot.id);
+          if (!current || current.browser === false || !builtInBrowserEnabled(cfg) ||
+              currentBrowserSession(current.id, current.browserProfile) !== browser.session) {
+            throw Object.assign(new Error("Browser access changed while connecting."), { status: 409 });
+          }
+        });
+        requireActiveInternalCapability();
+        return json(res, 200, { result });
+      }
       if (method === "GET" && path === "/api/internal/agents") {
         const sender = internalSender;
         // title/description included so the caller can judge the team (who
@@ -9386,6 +9504,41 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
 
     // ── events stream ──
+    // Owner-only (default-deny in request-auth). Never mix login frames into
+    // the general events feed, which is also visible to client-only devices.
+    const liveBrowserMatch = /^\/api\/bots\/([\w-]+)\/browser\/(live|action)$/.exec(path);
+    if (liveBrowserMatch) {
+      res.setHeader("cache-control", "no-store");
+      const bot = store.bot(liveBrowserMatch[1]);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      if (!builtInBrowserEnabled(cfg) || bot.browser === false) {
+        return json(res, 409, { error: "Enable this bot's browser in its profile first." });
+      }
+      const browser = await browserIntegration(bot.id, bot.browserProfile);
+      if (!browser) return json(res, 503, { error: "Install the browser engine first." });
+      const owner = auth.kind === "session" ? auth.session.id : "local-owner";
+      const isCurrent = () => {
+        const current = store.bot(bot.id);
+        return !!current && current.browser !== false && builtInBrowserEnabled(cfg)
+          && currentBrowserSession(current.id, current.browserProfile) === browser.session
+          && (auth.kind !== "session" || sessions.isLive(auth.session.id));
+      };
+      if (method === "GET" && liveBrowserMatch[2] === "live") {
+        req.socket.setTimeout(0);
+        return await browserLive.open({ botId: bot.id, session: browser.session, spec: browser.spec, owner, isCurrent, res });
+      }
+      if (method === "POST" && liveBrowserMatch[2] === "action") {
+        const body = await readBody(req, 32_768);
+        if (!isCurrent()) return json(res, 409, { error: "This browser session changed. Reopen the browser panel." });
+        if (typeof body?.viewerId !== "string") return json(res, 400, { error: "A live browser connection is required." });
+        if (body.type === "restart" && store.bots.some((candidate) => candidate.busy &&
+            currentBrowserSession(candidate.id, candidate.browserProfile) === browser.session)) {
+          return json(res, 409, { error: "Stop every bot using this profile before restarting its browser." });
+        }
+        return json(res, 200, await browserLive.action({ viewerId: body.viewerId, botId: bot.id, owner, body }));
+      }
+      return json(res, 405, { error: "method not allowed" });
+    }
     if (method === "GET" && path === "/api/events") {
       const client: SseClient = {
         res,
@@ -10842,6 +10995,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.requireAvailableModel !== undefined && typeof body.requireAvailableModel !== "boolean") {
         return json(res, 400, { error: "requireAvailableModel must be true or false" });
       }
+      const beforeBrowserProfile = existingBot?.browserProfile;
+      const beforeBrowserEnabled = existingBot?.browser;
       // Neither Codex (free-form string field) nor Grok (lazy, logs-only)
       // rejects an unknown effort level at their own boundary — this is the
       // only real gate, so it stays. But it fires only when the target
@@ -10947,6 +11102,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           : body.browserProfile;
         if (existingBot?.busy && requestedProfile !== existingBot.browserProfile) {
           return json(res, 409, { error: "stop this bot's turn before changing its browser profile" });
+        }
+        if (existingBot && requestedProfile !== existingBot.browserProfile &&
+            browserRuntime.heldBy(currentBrowserSession(existingBot.id, existingBot.browserProfile))) {
+          return json(res, 409, { error: "Release browser control before changing its profile." });
         }
         if (requestedProfile === undefined) patch.browserProfile = undefined;
         else if (
@@ -11165,6 +11324,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         section !== undefined &&
         sectionKey(existingBot?.section) !== sectionKey(section);
       let bot: BotRecord | null;
+      const freshBrowserBot = store.bot(m[1]);
+      if (freshBrowserBot && body.browserProfile !== undefined &&
+          patch.browserProfile !== freshBrowserBot.browserProfile &&
+          (freshBrowserBot.busy || browserRuntime.heldBy(currentBrowserSession(freshBrowserBot.id, freshBrowserBot.browserProfile)))) {
+        return json(res, 409, { error: "Stop the bot and release browser control before changing its profile." });
+      }
       if (profile.patch.soul !== undefined) {
         // A mixed settings request must not turn a runtime revocation into
         // a persist-first edit. Apply runtime fields with their existing
@@ -11177,6 +11342,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         bot = store.patchBot(m[1], patch);
       }
       if (!bot) return json(res, 404, { error: "no such bot" });
+      if (existingBot && (bot.browserProfile !== beforeBrowserProfile || bot.browser !== beforeBrowserEnabled)) {
+        browserLive.closeForBot(bot.id);
+        if (beforeBrowserProfile === "guest" && (bot.browserProfile !== "guest" || bot.browser === false)) {
+          void forgetTemporaryBrowser(bot.id).catch((error) => console.warn("temporary browser cleanup failed", error));
+        }
+      }
       const chiefChanges =
         body.chiefOfStaff === true || chiefMovedSections
           ? store.setChiefOfStaff(bot.id)
@@ -11375,6 +11546,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           localVmIdles.get(target.key)?.cancel();
           localVmIdles.delete(target.key);
           store.deleteBot(bot.id);
+          browserLive.closeForBot(bot.id);
+          await forgetTemporaryBrowser(bot.id);
         } catch (error) {
           if (browserCleanupRequest) browserCleanup.abort(browserCleanupRequest);
           throw error;
@@ -12467,7 +12640,22 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // Windows never pushes PATH changes into a live process, so without
       // this the answer is frozen at boot and "check again" is a no-op.
       resetPathCache();
-      return json(res, 200, { instances: await registry.describe() });
+      return json(res, 200, { instances: await describeInstances() });
+    }
+
+    if (method === "POST" && path === "/api/instances/claude-accounts") {
+      if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
+        return json(res, 415, { error: "content-type must be application/json" });
+      }
+      const parsed = createClaudeAccountSchema.safeParse(await readBody(req, 8192));
+      if (!parsed.success) return json(res, 400, { error: "Enter an account name (up to 80 characters) and an optional configuration directory." });
+      if (providerConfigBusy) return json(res, 409, { error: "provider settings are already being updated" });
+      providerConfigBusy = true;
+      try {
+        const { instanceId, instances } = newClaudeAccount(cfg, parsed.data);
+        await persistProviderInstance(instanceId, instances);
+        return json(res, 201, { instanceId, instances: await describeInstances() });
+      } finally { providerConfigBusy = false; }
     }
 
     const authStatus = /^\/api\/instances\/([\w.-]+)\/auth\/status$/.exec(path);
@@ -12488,11 +12676,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       try {
         if (action === "refresh-models") {
           if (!(await registry.refreshModels(instanceId))) return json(res, 404, { error: "unknown instance" });
-          return json(res, 200, { instances: await registry.describe() });
+          return json(res, 200, { instances: await describeInstances() });
         }
         if (action === "install") {
           if (!(await registry.installRuntime(instanceId))) return json(res, 404, { error: "managed installation is unavailable" });
-          return json(res, 200, { instances: await registry.describe() });
+          return json(res, 200, { instances: await describeInstances() });
         }
         if (action === "auth/start") {
           const instance = registry.get(instanceId);
@@ -12597,33 +12785,69 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
     // ── per-instance CLI path override (custom builds / versioned bins) ──
     // PATCH /api/instances/:id {cli: "/path/to/cli" | ""} — "" reverts to the
-    // driver default. Kills in-flight turns like any provider reload.
+    // driver default. Only this idle instance is replaced; siblings keep running.
     const instancePatch = /^\/api\/instances\/([\w.-]+)$/.exec(path);
     if (method === "PATCH" && instancePatch) {
       // same non-simple-request gate as the local-VM lifecycle routes
       if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) {
         return json(res, 415, { error: "content-type must be application/json" });
       }
-      const body = await readBody(req);
-      if (typeof body?.cli !== "string") return json(res, 400, { error: "cli must be a string" });
-      if (/[\n\r]/.test(body.cli)) return json(res, 400, { error: "cli must not contain newlines" });
+      const parsed = instanceSettingsSchema.safeParse(await readBody(req, 16384));
+      if (!parsed.success) return json(res, 400, { error: "Supply a valid CLI path, account name or configuration directory." });
+      const body = parsed.data;
+      const instanceId = instancePatch[1];
       if (providerConfigBusy) return json(res, 409, { error: "provider settings are already being updated" });
+      if (store.bots.some((bot) => bot.busy && bot.modelSelection.instanceId === instanceId)) {
+        return json(res, 409, { error: "Wait for bots using this account to finish before changing its settings." });
+      }
       providerConfigBusy = true;
+      providerInstancesChanging.add(instanceId);
       try {
-        const result = withInstanceCli(cfg, instancePatch[1], body.cli);
-        if (!result.ok) return json(res, 404, { error: `unknown instance "${instancePatch[1]}"` });
-        // persist the whole instances map this rebuild produced — a fresh
-        // saveConfig({instances}) merge would re-derive defaults identically,
-        // but writing the resolved map keeps disk and runtime in lockstep
-        saveConfig({ instances: result.config.instances });
-        Object.assign(cfg, loadConfig());
-        await reloadProviders();
-        // rescan BEFORE describe(): the response's cliCandidates are computed
-        // from the memoized PATH, so resetting after would answer this request
-        // with the pre-reset cache
-        resetPathCache();
-        return json(res, 200, { instances: await registry.describe() });
+        const result = body.cli === undefined ? { ok: true, config: cfg } : withInstanceCli(cfg, instanceId, body.cli);
+        const instances = persistableInstanceConfigs(result.config);
+        if (!result.ok || !Object.hasOwn(instances, instanceId)) return json(res, 404, { error: `unknown instance "${instanceId}"` });
+        const entry = instances[instanceId];
+        if ((body.displayName !== undefined || body.configDir !== undefined) && entry.driver !== "claudeAgent") {
+          return json(res, 400, { error: "Account settings are currently available for Claude only." });
+        }
+        if (body.displayName !== undefined) entry.displayName = body.displayName;
+        if (body.configDir !== undefined) {
+          let previousDir: string | undefined;
+          try { previousDir = configuredAccountDirectory(entry); } catch { /* Allow repairing an unused malformed account. */ }
+          entry.config = { ...entry.config as Record<string, unknown>, configDir: body.configDir };
+          if (previousDir !== configuredAccountDirectory(entry)) {
+            const used = store.bots.some((bot) => bot.modelSelection.instanceId === instanceId || store.tasks(bot.id).some((task) => task.resumeCursors[instanceId] || task.lastInstanceId === instanceId));
+            if (used) return json(res, 409, { error: "This account is used by bots or conversation history. Add another account and select it for the bot instead." });
+            assertSeparateClaudeAccount(instances, instanceId, entry);
+          }
+        }
+        await persistProviderInstance(instanceId, instances);
+        return json(res, 200, { instances: await describeInstances() });
       } finally {
+        providerInstancesChanging.delete(instanceId);
+        providerConfigBusy = false;
+      }
+    }
+
+    if (method === "DELETE" && instancePatch) {
+      const instanceId = instancePatch[1];
+      if (providerConfigBusy) return json(res, 409, { error: "provider settings are already being updated" });
+      const instances = persistableInstanceConfigs(cfg);
+      if (!Object.hasOwn(instances, instanceId)) return json(res, 404, { error: "unknown instance" });
+      if (instances[instanceId].driver !== "claudeAgent" || instanceId === "claude") {
+        return json(res, 400, { error: "Only added Claude accounts can be removed here." });
+      }
+      if (cfg.defaultModelSelection?.instanceId === instanceId || store.bots.some((bot) => bot.modelSelection.instanceId === instanceId)) {
+        return json(res, 409, { error: "Choose another account for the bots and default model using this account before removing it." });
+      }
+      providerConfigBusy = true;
+      providerInstancesChanging.add(instanceId);
+      try {
+        delete instances[instanceId];
+        await persistProviderInstance(instanceId, instances);
+        return json(res, 200, { instances: await describeInstances() });
+      } finally {
+        providerInstancesChanging.delete(instanceId);
         providerConfigBusy = false;
       }
     }
@@ -12732,12 +12956,23 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const patch = parseConfigPatch(body);
       if (!Object.keys(patch).length) return json(res, 400, { error: "nothing to save" });
       if (providerConfigBusy) return json(res, 409, { error: "provider settings are already being updated" });
+      if (patch.browserProfiles !== undefined && body.expectedBrowserProfiles !== undefined) {
+        const current = (cfg.browserProfiles ?? []).map(({ id, name }) => ({ id, name }));
+        if (JSON.stringify(body.expectedBrowserProfiles) !== JSON.stringify(current)) {
+          return json(res, 409, { error: "Browser profiles changed in another window. Review the refreshed list and try again." });
+        }
+      }
       const disablingBuiltInBrowser = patch.features?.browser === false && builtInBrowserEnabled(cfg);
       const removedBrowserProfileIds = patch.browserProfiles === undefined
         ? []
         : (cfg.browserProfiles ?? [])
             .map((profile) => profile.id)
             .filter((id) => !patch.browserProfiles!.some((profile) => profile.id === id));
+      const profileControlConflict = () => removedBrowserProfileIds.some((id) => {
+        const target = browserProfilePartitionTarget(cfg, id);
+        return target && browserRuntime.heldBy(browserSessionId("", target.partitionId));
+      });
+      if (profileControlConflict()) return json(res, 409, { error: "Release browser control before deleting its profile." });
       if (patch.browserProfiles !== undefined) {
         const currentProfiles = new Map((cfg.browserProfiles ?? []).map((profile) => [profile.id, profile]));
         const nextProfiles = patch.browserProfiles.map((profile) => {
@@ -12979,6 +13214,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (conflict) return json(res, 409, { error: conflict });
       }
       const browserCleanupRequests: BrowserCleanupRequest[] = [];
+      if (profileControlConflict()) return json(res, 409, { error: "Release browser control before deleting its profile." });
       try {
         for (const profileId of removedBrowserProfileIds) {
           const target = browserProfilePartitionTarget(cfg, profileId);
@@ -13032,6 +13268,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         throw error;
       }
       let browserReferenceCleanupError: unknown = null;
+      if (disablingBuiltInBrowser) browserLive.closeAll();
+      for (const request of browserCleanupRequests) {
+        if (request.kind === "profile") browserLive.closeForSession(browserSessionId("", request.partitionId));
+      }
       if (patch.browserProfiles !== undefined) {
         const retained = new Set(patch.browserProfiles.map((profile) => profile.id));
         try {
@@ -13548,6 +13788,7 @@ const gracefulShutdown = createGracefulShutdown({
       // asynchronous shutdown jobs drain. Invalidate their turn bearers before
       // any cleanup function reaches an await.
       revokeAllInternalCapabilities();
+      browserLive.closeAll();
       for (const idle of localVmIdles.values()) idle.cancel();
       vps.closeAllVpsDesktopTunnels();
       watchdog.stop();
@@ -13558,6 +13799,10 @@ const gracefulShutdown = createGracefulShutdown({
       tunnelListener?.close();
     },
     () => registry.disposeAll(),
+    async () => {
+      await Promise.all([...temporaryBrowserSessions.keys()].map((botId) => forgetTemporaryBrowser(botId)));
+      await browserRuntime.closeAll();
+    },
     () => flushAllProfileHistory(),
   ],
   // Cleanup jobs run concurrently. Release only after they settle (or reach

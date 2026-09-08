@@ -125,7 +125,21 @@ other providers retain their existing sign-in methods.
 
 For a self-hosted server, open **Settings → Remote access → Connect your
 domain** from an owner-paired browser. This is an address-setting and verification
-flow, not a DNS or hosting service:
+flow, not a DNS or hosting service. Enter the domain to see a compact DNS record
+with copy buttons for **Type**, **Name / Host**, and **Value / IP**. The full
+hostname is shown; providers that already append the DNS zone need only the
+relative name (or `@` at the zone root). Server/proxy instructions are under
+**Advanced server setup**.
+
+The IP comes from this server's network interfaces, never the browser, tunnel
+hostname or an IP-echo service. Only a single unambiguous public IPv4 is shown.
+For containers/NAT or hosts with multiple public addresses, an administrator can
+set `OMB_PUBLIC_IPV4` to the public IPv4 of the HTTPS proxy and restart OMB.
+This is a display hint, not proof of reachability; verification still checks
+HTTPS and the workspace identity. If the IP is missing or invalid, the UI asks
+for administrator help instead of inventing a DNS value.
+
+To configure the connection:
 
 1. Point your chosen name's DNS **A** record at the server's public IPv4 address.
    Add **AAAA** only when IPv6 routes to the same server.
@@ -136,7 +150,7 @@ flow, not a DNS or hosting service:
    ports 80/443 for its usual certificate setup. For containers, follow the
    Docker recipe below so Caddy can reach the loopback listener.
 3. Enter `bots.yourcompany.com` (or its bare `https://` origin) and choose
-   **Verify and connect**. OMB checks HTTPS and the workspace identity at that
+   **Connect domain**. OMB checks HTTPS and the workspace identity at that
    domain before saving it. An incorrect domain leaves the existing address
    unchanged.
 

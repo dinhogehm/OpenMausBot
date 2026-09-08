@@ -311,6 +311,8 @@ export interface ProviderSnapshot {
   state: "available" | "unavailable";
   reason?: string;
   authenticated?: boolean;
+  /** Vetted display identity from the provider CLI, never credentials. */
+  account?: { email?: string; organization?: string };
   version?: string | null;
   /** A non-blocking provider update that unlocks newer capabilities. The
    * engine remains usable; renderer surfaces the exact terminal command. */
