@@ -7,12 +7,14 @@
 // hits on Windows. resolveCliSpawn covers both, so these run everywhere.
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ProviderInstance } from "../contracts.ts";
 import { NATIVE_DIR } from "../config.ts";
+import { agentBrowserIntegration } from "../browser-engine.ts";
+import { augmentedPath, resetPathCacheForTests } from "../env-path.ts";
 import { recordEvents, type EventRecorder } from "../testing/events.ts";
 import {
   CodexDriver,
@@ -104,6 +106,8 @@ describe("CodexDriver turns (fake app-server)", () => {
     delete process.env.OMB_TTS_KEY;
     recorder?.stop();
     await instance?.dispose();
+    vi.unstubAllEnvs();
+    resetPathCacheForTests();
     await removeTempDir(scratch);
   });
 
@@ -462,6 +466,60 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(seen.argv.join(" ")).not.toContain("per-turn-connector-token");
     expect(seen.env.OMB_CONNECTOR_TOKEN).toBe("per-turn-connector-token");
     expect(seen.env.OMB_COMMS_TOKEN).toBe("peer-comms-secret");
+  });
+
+  it.each(["browser", "custom", "phone"] as const)("preserves the Codex launch PATH when mounting %s MCP", async (kind) => {
+    // Finder's PATH omits Homebrew/nvm. The CLI probe succeeds after
+    // augmentation, but mounting a browser must not undo that before spawn.
+    vi.stubEnv("PATH", join(scratch, "gui-bin"));
+    vi.stubEnv("OMB_EXTRA_PATH", dirname(process.execPath));
+    resetPathCacheForTests();
+    const cliPath = augmentedPath().split(delimiter);
+    await create();
+    const dump = join(scratch, "mcp-path.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+    const mcpBin = join(scratch, "mcp-bin");
+    const integration = agentBrowserIntegration({
+      binaryPath: "/fixture/agent-browser",
+      session: "path-regression",
+      encryptionKey: "fixture-browser-key",
+      env: { PATH: mcpBin },
+    });
+
+    await instance.adapter.sendTurn({
+      threadId: `t-mcp-path-${kind}`,
+      text: "hi",
+      integrations: kind === "custom" ? { custom: { notes: integration } } : { [kind]: integration },
+    });
+    expect(await recorder.until((event) => event.type === "turn.completed")).toMatchObject({ ok: true });
+    expect(recorder.events.filter((event) => event.type === "runtime.error")).toEqual([]);
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.env.PATH.split(delimiter)).toEqual([...cliPath, mcpBin]);
+    expect(seen.env.AGENT_BROWSER_SESSION).toBe("path-regression");
+    expect(seen.argv.join(" ")).not.toContain("fixture-browser-key");
+  });
+
+  it("retains each MCP's additional PATH without duplicates or empty entries", async () => {
+    await create();
+    const cliPath = augmentedPath().split(delimiter);
+    const dump = join(scratch, "multiple-mcp-paths.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+    const browserBin = join(scratch, "browser-bin");
+    const phoneBin = join(scratch, "phone-bin");
+    await instance.adapter.sendTurn({
+      threadId: "t-multiple-mcp-paths",
+      text: "hi",
+      integrations: {
+        browser: { command: "browser", args: [], env: { PATH: [browserBin, cliPath[0], ""].join(delimiter) } },
+        custom: { notes: { command: "notes", args: [], env: { PATH: "" } } },
+        phone: { command: "phone", args: [], env: { PATH: [phoneBin, browserBin].join(delimiter) } },
+      },
+    });
+    expect(await recorder.until((event) => event.type === "turn.completed")).toMatchObject({ ok: true });
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.env.PATH.split(delimiter)).toEqual([...cliPath, browserBin, phoneBin]);
+    expect(seen.argv.join(" ")).toContain("mcp_servers.openmausbot_phone.env_vars");
   });
 
   it("mounts custom MCP servers on-request while built-ins stay pre-quieted", async () => {

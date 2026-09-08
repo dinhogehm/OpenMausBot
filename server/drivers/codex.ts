@@ -11,6 +11,7 @@
 // and preserves that history or reports a failed resume.
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { delimiter } from "node:path";
 
 import { stripWorkspaceCredentialEnv } from "../config.ts";
 import { computerProxyEnv } from "../container-computer.ts";
@@ -427,7 +428,17 @@ function mountMcpServer(
   server: StdioMcpServer,
   preApproved = true,
 ): void {
+  const cliPath = env.PATH;
   Object.assign(env, server.env);
+  // MCP mounts share the CLI's environment. A browser launched from Finder
+  // carries a bare PATH; do not let it remove the Node/CLI directories we
+  // discovered during probing. Keep extra MCP tools reachable after those.
+  if (server.env.PATH !== undefined) {
+    env.PATH = [...new Set([
+      ...(cliPath ?? "").split(delimiter),
+      ...server.env.PATH.split(delimiter),
+    ].filter(Boolean))].join(delimiter);
+  }
   const prefix = `mcp_servers.${name}`;
   appServerArgs.push(
     "-c", `${prefix}.command=${JSON.stringify(server.command)}`,
@@ -565,15 +576,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           mountMcpServer(appServerArgs, env, name, server, false);
         }
         if (turn.integrations?.phone) {
-          const bridge = turn.integrations.phone;
-          Object.assign(env, bridge.env);
-          const prefix = "mcp_servers.openmausbot_phone";
-          appServerArgs.push(
-            "-c", `${prefix}.command=${JSON.stringify(bridge.command)}`,
-            "-c", `${prefix}.args=${JSON.stringify(bridge.args)}`,
-            "-c", `${prefix}.env_vars=${JSON.stringify(Object.keys(bridge.env))}`,
-            "-c", `${prefix}.default_tools_approval_mode="auto"`,
-          );
+          mountMcpServer(appServerArgs, env, "openmausbot_phone", turn.integrations.phone);
         }
 
         const child = spawnCli(config.cli, appServerArgs, {
