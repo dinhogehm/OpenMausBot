@@ -243,6 +243,19 @@ An upstream PR should contain only the portable product change. Keep local build
 names, credentials, private endpoints, machine-specific configuration, and fork-only release notes
 out of its commits and screenshots.
 
+## Sign-off and licensing
+
+- Sign off every commit: `git commit -s` adds a `Signed-off-by:` line, which is
+  the [Developer Certificate of Origin](https://developercertificate.org/): you
+  wrote the change or have the right to submit it under the project license.
+  CI checks it on pull requests; `git rebase --signoff` fixes a branch after
+  the fact.
+- Changes under `enterprise/` (source-available, see [LICENSING.md](LICENSING.md))
+  also need the [CLA](CLA.md), signed once by commenting on the pull request
+  when the bot asks. Everything else needs only the sign-off.
+- `enterprise/`, the cloud seam and the licensing files have code owners; a
+  maintainer review is required there.
+
 ## Before you open the PR
 
 - [ ] `pnpm typecheck` and `pnpm test` pass

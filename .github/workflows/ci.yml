@@ -78,6 +78,37 @@ jobs:
           node scripts/prepare-cloudflared.mjs --current --root "$OMB_ARM64_FIXTURE"
           "$OMB_ARM64_FIXTURE/dist-native/cloudflared/linux-arm64/cloudflared" version
 
+  foss:
+    # LICENSING.md promises that deleting enterprise/ leaves a working
+    # open-source edition. Prove it on every change: typecheck, the edition
+    # tests, and a boot that reports "oss" even with a key set.
+    name: open-source edition builds without enterprise/
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ff378ebe6b225b0680b81c1ad4498ae0d1d3a5e3 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Delete the enterprise folder
+        run: rm -rf enterprise
+      - run: pnpm typecheck
+      - run: pnpm exec vitest run server/enterprise.test.ts server/brand.test.ts
+      - name: The server boots and reports the open-source edition
+        run: |
+          mkdir -p /tmp/omb-foss/home
+          HOME=/tmp/omb-foss/home OMB_DATA_DIR=/tmp/omb-foss/data OMB_PORT=18797 OMB_WEBHOOK_PORT=18796 \
+            OMB_BROWSER_CONNECTION=/tmp/omb-foss/browser-connection.json OMB_LICENSE_KEY=omb1.not.real \
+            node --experimental-strip-types server/index.ts > /tmp/omb-foss/server.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:18797/api/health >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:18797/api/edition | tee /tmp/omb-foss/edition.json; echo
+          grep -q '"edition":"oss"' /tmp/omb-foss/edition.json
+          grep -q 'no enterprise layer exists' /tmp/omb-foss/edition.json
+          kill %1; wait %1 || true
+
   control-plane:
     name: control-plane check + workerd tests + dry run
     runs-on: ubuntu-latest

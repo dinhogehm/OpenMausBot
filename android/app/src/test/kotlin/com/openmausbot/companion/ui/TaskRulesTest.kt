@@ -26,7 +26,7 @@ class TaskRulesTest {
 
     @Test
     fun `an empty title reads as untitled rather than blank`() {
-        assertEquals("Untitled task", TaskRules.title(task("t1", "")))
+        assertEquals("Untitled thread", TaskRules.title(task("t1", "")))
         assertEquals("Research", TaskRules.title(task("t1", "Research")))
     }
 
@@ -51,6 +51,20 @@ class TaskRulesTest {
         assertFalse(TaskRules.canCreate(busy))
         assertFalse(TaskRules.canDelete(task("t2"), busy))
         assertFalse(TaskRules.canSwitch(task("t2"), busy))
+    }
+
+    @Test
+    fun `independent tasks allow navigation while only the running task refuses deletion`() {
+        val running = task("t1").copy(busy = true)
+        val idle = task("t2").copy(busy = false)
+        val subject = bot(listOf(running, idle), busy = true)
+        assertTrue(TaskRules.canCreate(subject))
+        assertTrue(TaskDialogRules.createEnabled(Chat.BotChat(subject)))
+        assertTrue(ChatActions.sheet(Chat.BotChat(subject), hasPendingApproval = true, canAddAttachment = true)
+            .single { it.id == ChatActionId.NEW_TASK }.enabled)
+        assertTrue(TaskRules.canSwitch(idle, subject))
+        assertTrue(TaskRules.canDelete(idle, subject))
+        assertFalse(TaskRules.canDelete(running, subject))
     }
 
     @Test
@@ -100,7 +114,7 @@ class TaskRulesTest {
         assertTrue(TaskRules.isCurrent(task("t1"), room))
         assertTrue(TaskRules.canSwitch(task("t2"), room))
         assertTrue(TaskRules.canDelete(task("t2"), room))
-        assertEquals("Channel tasks", TaskRules.subtitle(room))
+        assertEquals("Group threads", TaskRules.subtitle(room))
     }
 }
 

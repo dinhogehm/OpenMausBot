@@ -54,8 +54,8 @@ object RoutineRules {
     /** `Date().addingTimeInterval(3_600)` — the default one-time instant. */
     const val ONCE_DEFAULT_OFFSET_MILLIS: Long = 3_600_000L
 
-    const val HEADER_TASK: String = "Task = one conversation and result"
-    const val HEADER_ROUTINE: String = "Routine = a schedule that creates a fresh task"
+    const val HEADER_TASK: String = "Thread = one conversation and result"
+    const val HEADER_ROUTINE: String = "Routine = a schedule that creates a fresh thread"
 
     const val HEADER_FOOTER: String =
         "No cron syntax. Every run uses the agent's existing model, tools, permissions, " +
@@ -74,14 +74,14 @@ object RoutineRules {
 
     const val DELETE_MESSAGE: String = "Past run receipts remain available."
     const val DELETED_AGENT: String = "Deleted agent"
-    const val WAITING_ON_YOU: String = "This task is waiting for your answer."
+    const val WAITING_ON_YOU: String = "This thread is waiting for your answer."
     const val UNSUPPORTED_SCHEDULE_ERROR: String =
         "Choose a supported schedule before saving this routine."
 
     const val SCHEDULE_FOOTER: String =
-        "Each occurrence creates a fresh task. No cron syntax is used."
+        "Each occurrence creates a fresh thread. No cron syntax is used."
     const val INTERVAL_SCHEDULE_FOOTER: String =
-        "Each occurrence creates a fresh task. If the previous run is still active, " +
+        "Each occurrence creates a fresh thread. If the previous run is still active, " +
             "the next occurrence is skipped instead of queued."
     const val UNKNOWN_SCHEDULE_NOTE: String =
         "This routine uses a schedule added by a newer OpenMausBot. Choose One time, " +

@@ -15,6 +15,7 @@ import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { EngineSetup, needsCli, needsSignIn } from "./EngineSetup";
 import { AddClaudeAccount, ClaudeAccountSettings } from "./ClaudeAccountSettings";
+import { CodexAccountSettings } from "./CodexAccountSettings";
 
 interface ProbeResult {
   ok: boolean;
@@ -308,10 +309,19 @@ function EngineRow({ instance }: { instance: InstanceInfo }) {
       )}
       {error && <div role="alert" className="mt-1 text-[12px] text-danger">{error}</div>}
       {instance.claudeAccount && <ClaudeAccountSettings instance={instance} />}
-      {instance.authentication?.method === "device-code" && (
+      {(instance.authentication?.method === "device-code" || instance.authentication?.method === "paste-code") && (
         needsCli(instance) || needsSignIn(instance)
           ? <EngineSetup instance={instance} className="mt-3" />
-          : instance.snapshot.authenticated && <p className="mt-2 flex items-center gap-1.5 text-[12px] text-success"><Check size={13} />{t("engineSetup.device.connectedAccount")}</p>
+          : instance.snapshot.authenticated && (
+            instance.authentication.method === "device-code"
+              ? <CodexAccountSettings instance={instance} />
+              : (
+                <p className="mt-2 flex items-center gap-1.5 text-[12px] text-success">
+                  <Check size={13} />
+                  {t("engineSetup.claude.connectedAccount")}
+                </p>
+              )
+          )
       )}
       {open && (
         <CustomPicker

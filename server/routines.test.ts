@@ -132,6 +132,54 @@ describe("nextOccurrence", () => {
       anchorAt: 8_640_000_000_000_000,
     }, 8_640_000_000_000_000)).toBeNull();
   });
+
+  it("keeps restricted intervals on their global cadence inside local days and hours", () => {
+    const mondayAtEight = new Date(2026, 7, 17, 8, 0, 0).getTime();
+    const schedule: RoutineSchedule = {
+      type: "interval",
+      everyMinutes: 30,
+      anchorAt: mondayAtEight,
+      weekdays: [1, 3],
+      window: { start: "09:00", end: "10:30" },
+    };
+
+    expect(nextOccurrence(schedule, mondayAtEight)).toBe(new Date(2026, 7, 17, 9, 0, 0).getTime());
+    expect(nextOccurrence(schedule, new Date(2026, 7, 17, 10, 0, 0).getTime()))
+      .toBe(new Date(2026, 7, 19, 9, 0, 0).getTime());
+  });
+
+  it("treats an interval end as an inclusive cutoff", () => {
+    const anchorAt = new Date(2026, 7, 17, 8, 0, 0).getTime();
+    const endsAt = anchorAt + 10 * 60_000;
+    const schedule: RoutineSchedule = { type: "interval", everyMinutes: 5, anchorAt, endsAt };
+
+    expect(nextOccurrence(schedule, anchorAt + 5 * 60_000)).toBe(endsAt);
+    expect(nextOccurrence(schedule, endsAt)).toBeNull();
+  });
+
+  it("keeps elapsed cadence while honoring local windows across DST changes", () => {
+    const previousTimezone = process.env.TZ;
+    process.env.TZ = "America/New_York";
+    try {
+      const spring: RoutineSchedule = { type: "interval", everyMinutes: 30,
+        anchorAt: Date.parse("2026-03-08T06:00:00Z"), weekdays: [0],
+        window: { start: "01:30", end: "03:30" } };
+      expect(nextOccurrence(spring, Date.parse("2026-03-08T06:30:00Z")))
+        .toBe(Date.parse("2026-03-08T07:00:00Z"));
+      expect(nextOccurrence(spring, Date.parse("2026-03-08T07:00:00Z")))
+        .toBe(Date.parse("2026-03-15T05:30:00Z"));
+      const fall: RoutineSchedule = { type: "interval", everyMinutes: 30,
+        anchorAt: Date.parse("2026-11-01T04:00:00Z"), weekdays: [0],
+        window: { start: "01:00", end: "02:00" } };
+      expect(nextOccurrence(fall, Date.parse("2026-11-01T05:30:00Z")))
+        .toBe(Date.parse("2026-11-01T06:00:00Z"));
+      expect(nextOccurrence(fall, Date.parse("2026-11-01T06:30:00Z")))
+        .toBe(Date.parse("2026-11-08T06:00:00Z"));
+    } finally {
+      if (previousTimezone === undefined) delete process.env.TZ;
+      else process.env.TZ = previousTimezone;
+    }
+  });
 });
 
 describe("RoutineManager", () => {
@@ -193,6 +241,145 @@ describe("RoutineManager", () => {
         schedule: { type: "interval", everyMinutes: 5, anchorAt: invalidAnchor },
       })).toThrow(/valid interval start time/);
     }
+  });
+
+  it("validates and normalizes interval restrictions", () => {
+    const h = harness();
+    const anchorAt = new Date(2026, 7, 17, 8, 5).getTime();
+    const endsAt = new Date(2026, 7, 31, 23, 59).getTime();
+    const input = {
+      name: "Restricted check",
+      prompt: "Check during support hours",
+      botId: "maus-1",
+    };
+    const routine = h.manager.create({
+      ...input,
+      schedule: {
+        type: "interval",
+        everyMinutes: 30,
+        anchorAt,
+        weekdays: [5, 1, 3],
+        window: { start: "09:00", end: "17:00" },
+        endsAt,
+      },
+    });
+
+    expect(routine.schedule).toEqual({
+      type: "interval",
+      everyMinutes: 30,
+      anchorAt,
+      weekdays: [1, 3, 5],
+      window: { start: "09:00", end: "17:00" },
+      endsAt,
+    });
+    expect(h.manager.create({
+      ...input,
+      name: "Every day",
+      schedule: {
+        type: "interval",
+        everyMinutes: 30,
+        anchorAt,
+        weekdays: [6, 5, 4, 3, 2, 1, 0],
+      },
+    }).schedule).toEqual({ type: "interval", everyMinutes: 30, anchorAt });
+
+    const invalidSchedules = [
+      { type: "interval" as const, everyMinutes: 30, anchorAt, weekdays: [] },
+      { type: "interval" as const, everyMinutes: 30, anchorAt, weekdays: [1, 1] },
+      { type: "interval" as const, everyMinutes: 30, anchorAt, weekdays: [7] },
+      { type: "interval" as const, everyMinutes: 30, anchorAt, window: { start: "9:00", end: "17:00" } },
+      { type: "interval" as const, everyMinutes: 30, anchorAt, window: { start: "17:00", end: "09:00" } },
+      { type: "interval" as const, everyMinutes: 60, anchorAt, window: { start: "09:00", end: "09:30" } },
+      { type: "interval" as const, everyMinutes: 30, anchorAt, endsAt: anchorAt - 1 },
+    ];
+    for (const [index, schedule] of invalidSchedules.entries()) {
+      expect(() => h.manager.create({ ...input, name: `Invalid ${index}`, schedule })).toThrow();
+    }
+  });
+
+  it("preserves interval restrictions for legacy schedule updates and clears explicit nulls", () => {
+    const h = harness();
+    const anchorAt = new Date(2026, 7, 17, 8, 5).getTime();
+    const endsAt = new Date(2026, 7, 31, 23, 59).getTime();
+    const routine = h.manager.create({
+      name: "Restricted check",
+      prompt: "Check during support hours",
+      botId: "maus-1",
+      schedule: {
+        type: "interval",
+        everyMinutes: 30,
+        anchorAt,
+        weekdays: [1, 3, 5],
+        window: { start: "09:00", end: "17:00" },
+        endsAt,
+      },
+    });
+
+    const legacyUpdate = h.manager.update(routine.id, {
+      name: "Renamed on an older phone",
+      schedule: { type: "interval", everyMinutes: 60, anchorAt },
+    });
+    expect(legacyUpdate?.schedule).toEqual({
+      type: "interval",
+      everyMinutes: 60,
+      anchorAt,
+      weekdays: [1, 3, 5],
+      window: { start: "09:00", end: "17:00" },
+      endsAt,
+    });
+
+    const cleared = h.manager.update(routine.id, {
+      schedule: {
+        type: "interval",
+        everyMinutes: 60,
+        anchorAt,
+        weekdays: null,
+        window: null,
+        endsAt: null,
+      },
+    });
+    expect(cleared?.schedule).toEqual({ type: "interval", everyMinutes: 60, anchorAt });
+  });
+
+  it("rejects enabled intervals without a future run but allows them while disabled", () => {
+    const now = new Date(2026, 7, 17, 8, 0, 0).getTime();
+    const h = harness(now);
+    const expiredSchedule = {
+      type: "interval" as const,
+      everyMinutes: 5,
+      anchorAt: now - 60 * 60_000,
+      endsAt: now - 30 * 60_000,
+    };
+    const input = {
+      name: "Expired check",
+      prompt: "Check only before the cutoff",
+      botId: "maus-1",
+      schedule: expiredSchedule,
+    };
+
+    expect(() => h.manager.create(input)).toThrow(
+      "This interval has no future runs. Choose a later end date or turn it off.",
+    );
+    const disabled = h.manager.create({ ...input, enabled: false });
+    expect(disabled).toMatchObject({ enabled: false, nextRunAt: null, schedule: expiredSchedule });
+
+    const active = h.manager.create({
+      ...input,
+      name: "Active check",
+      schedule: {
+        type: "interval",
+        everyMinutes: 5,
+        anchorAt: now + 5 * 60_000,
+        endsAt: now + 10 * 60_000,
+      },
+    });
+    expect(() => h.manager.update(active.id, { schedule: expiredSchedule })).toThrow(
+      "This interval has no future runs. Choose a later end date or turn it off.",
+    );
+    expect(h.manager.listRoutines().find((routine) => routine.id === active.id)?.enabled).toBe(true);
+
+    const paused = h.manager.update(active.id, { enabled: false, schedule: expiredSchedule });
+    expect(paused).toMatchObject({ enabled: false, nextRunAt: null, schedule: expiredSchedule });
   });
 
   it("stores routine data with owner-only permissions", () => {
@@ -620,6 +807,63 @@ describe("RoutineManager", () => {
     expect(h.started).toHaveLength(2);
   });
 
+  it("dispatches queued manual runs in request order after a busy bot settles", async () => {
+    const h = harness();
+    h.setBot("busy");
+    const routine = h.manager.create({
+      name: "Ordered work", prompt: "Run in order", botId: "maus-1",
+      schedule: { type: "daily", time: "09:00", weekdays: [1] },
+    });
+    const first = h.manager.runNow(routine.id)!;
+    const second = h.manager.runNow(routine.id)!;
+    await h.manager.tick();
+    const start = h.options.startTurn;
+    h.options.startTurn = async (...args) => {
+      h.setBot("busy");
+      await start(...args);
+    };
+    h.setBot("ready");
+    await h.manager.tick();
+    expect(h.manager.listRuns().find((run) => run.id === first.id)?.status).toBe("running");
+    expect(h.manager.listRuns().find((run) => run.id === second.id)?.status).toBe("queued");
+  });
+
+  it("keeps an overdue occurrence when only instructions or the name change", async () => {
+    const h = harness();
+    const routine = h.manager.create({
+      name: "Daily work", prompt: "Original", botId: "maus-1",
+      schedule: { type: "daily", time: "09:00", weekdays: [1] },
+    });
+    h.setNow(routine.nextRunAt! + 60_000);
+    expect(h.manager.update(routine.id, { name: "Renamed", prompt: "Updated" })?.nextRunAt).toBe(routine.nextRunAt);
+    await h.manager.tick();
+    expect(h.manager.listRuns()[0]).toMatchObject({ scheduledFor: routine.nextRunAt, status: "running" });
+    expect(h.started[0]?.prompt).toBe("Updated");
+  });
+
+  it("keeps delegated work active through its continuation and accumulates turn costs", async () => {
+    const h = harness();
+    let pending = true;
+    h.options.hasPendingDelegations = () => pending;
+    const routine = h.manager.create({
+      name: "Team report", prompt: "Ask a teammate", botId: "maus-1",
+      schedule: { type: "daily", time: "09:00", weekdays: [1] },
+    });
+    const queued = h.manager.runNow(routine.id)!;
+    await h.manager.tick();
+    const base = { eventId: "delegating", provider: "fake", threadId: "thread-1", createdAt: new Date().toISOString() };
+    h.manager.handleRuntimeEvent({ ...base, type: "turn.completed", ok: true, cost: 0.02 });
+    expect(h.manager.runForThread("thread-1")).toMatchObject({ id: queued.id, status: "waiting", attention: "Waiting for delegated work to finish" });
+    expect(h.manager.runForThread("thread-1")?.finishedAt).toBeUndefined();
+    expect(h.manager.isActiveThread("thread-1")).toBe(true);
+    pending = false;
+    h.manager.handleRuntimeEvent({ ...base, type: "turn.started" });
+    expect(h.manager.runForThread("thread-1")).toMatchObject({ status: "running", attention: undefined });
+    h.manager.handleRuntimeEvent({ ...base, type: "item.completed", itemType: "assistant_text", text: "Reviewed the teammate's result." });
+    h.manager.handleRuntimeEvent({ ...base, type: "turn.completed", ok: true, cost: 0.03 });
+    expect(h.manager.runForThread("thread-1")).toMatchObject({ status: "completed", output: "Reviewed the teammate's result.", cost: 0.05 });
+  });
+
   it("catches up at most the latest interval occurrence without a backlog", async () => {
     const h = harness();
     const anchorAt = new Date(2026, 7, 17, 8, 5).getTime();
@@ -638,6 +882,32 @@ describe("RoutineManager", () => {
       scheduledFor: anchorAt + 10 * 60_000,
     }]);
     expect(h.manager.listRoutines()[0]?.nextRunAt).toBe(anchorAt + 15 * 60_000);
+  });
+
+  it("catches up to the latest allowed restricted interval occurrence", async () => {
+    const mondayAtEight = new Date(2026, 7, 17, 8, 0, 0).getTime();
+    const h = harness(mondayAtEight);
+    h.manager.create({
+      name: "Support-hours check",
+      prompt: "Check the support queue",
+      botId: "maus-interval",
+      schedule: {
+        type: "interval",
+        everyMinutes: 30,
+        anchorAt: mondayAtEight,
+        weekdays: [1],
+        window: { start: "09:00", end: "10:30" },
+      },
+    });
+
+    h.setNow(new Date(2026, 7, 17, 10, 20, 0).getTime());
+    await h.manager.tick();
+
+    expect(h.manager.listRuns()).toMatchObject([{
+      status: "running",
+      scheduledFor: new Date(2026, 7, 17, 10, 0, 0).getTime(),
+    }]);
+    expect(h.manager.listRoutines()[0]?.nextRunAt).toBe(new Date(2026, 7, 24, 9, 0, 0).getTime());
   });
 
   it("rebases a scheduled interval queued behind a busy bot before dispatch", async () => {
@@ -671,6 +941,127 @@ describe("RoutineManager", () => {
       threadId: "thread-1",
       prompt: "Check the latest queue",
     }]);
+  });
+
+  it("holds a queued restricted interval outside its window and dispatches in the next window", async () => {
+    const mondayAtEight = new Date(2026, 7, 17, 8, 0, 0).getTime();
+    const h = harness(mondayAtEight);
+    h.setBot("busy");
+    h.manager.create({
+      name: "Business-hours check",
+      prompt: "Check at an allowed time",
+      botId: "maus-interval",
+      schedule: {
+        type: "interval",
+        everyMinutes: 30,
+        anchorAt: mondayAtEight,
+        weekdays: [1],
+        window: { start: "09:00", end: "10:30" },
+      },
+    });
+
+    h.setNow(new Date(2026, 7, 17, 10, 0, 0).getTime());
+    await h.manager.tick();
+    expect(h.manager.listRuns()[0]).toMatchObject({ status: "queued" });
+
+    h.setNow(new Date(2026, 7, 17, 11, 0, 0).getTime());
+    h.setBot("ready");
+    await h.manager.tick();
+    expect(h.started).toHaveLength(0);
+    expect(h.manager.listRuns()[0]).toMatchObject({ status: "queued" });
+
+    const nextMondayAtNine = new Date(2026, 7, 24, 9, 0, 0).getTime();
+    h.setNow(nextMondayAtNine);
+    await h.manager.tick();
+    expect(h.started).toEqual([{
+      botId: "maus-interval",
+      threadId: "thread-1",
+      prompt: "Check at an allowed time",
+    }]);
+    expect(h.manager.listRuns()[0]).toMatchObject({
+      status: "running",
+      scheduledFor: nextMondayAtNine,
+    });
+  });
+
+  it("waits for the first aligned occurrence in a new allowed window before dispatching a carried queue", async () => {
+    const mondayAtEightOhFive = new Date(2026, 7, 17, 8, 5, 0).getTime();
+    const h = harness(mondayAtEightOhFive);
+    h.setBot("busy");
+    h.manager.create({
+      name: "Phase-aligned check",
+      prompt: "Keep the original cadence",
+      botId: "maus-interval",
+      schedule: {
+        type: "interval",
+        everyMinutes: 30,
+        anchorAt: mondayAtEightOhFive,
+        weekdays: [1],
+        window: { start: "09:00", end: "10:30" },
+      },
+    });
+
+    const firstMondayAtTenOhFive = new Date(2026, 7, 17, 10, 5, 0).getTime();
+    h.setNow(firstMondayAtTenOhFive);
+    await h.manager.tick();
+    expect(h.manager.listRuns()[0]).toMatchObject({
+      status: "queued",
+      scheduledFor: firstMondayAtTenOhFive,
+    });
+
+    h.setBot("ready");
+    h.setNow(new Date(2026, 7, 24, 9, 1, 0).getTime());
+    await h.manager.tick();
+    expect(h.started).toHaveLength(0);
+    expect(h.manager.listRuns()[0]).toMatchObject({
+      status: "queued",
+      scheduledFor: firstMondayAtTenOhFive,
+    });
+
+    const nextMondayAtNineOhFive = new Date(2026, 7, 24, 9, 5, 0).getTime();
+    h.setNow(nextMondayAtNineOhFive);
+    await h.manager.tick();
+    expect(h.started).toEqual([{
+      botId: "maus-interval",
+      threadId: "thread-1",
+      prompt: "Keep the original cadence",
+    }]);
+    expect(h.manager.listRuns()[0]).toMatchObject({
+      status: "running",
+      scheduledFor: nextMondayAtNineOhFive,
+    });
+  });
+
+  it("disables an exhausted interval and marks its still-queued final run missed", async () => {
+    const start = new Date(2026, 7, 17, 8, 0, 0).getTime();
+    const finalOccurrence = start + 5 * 60_000;
+    const h = harness(start);
+    h.setBot("busy");
+    h.manager.create({
+      name: "Short-lived check",
+      prompt: "Run before the cutoff",
+      botId: "maus-interval",
+      schedule: {
+        type: "interval",
+        everyMinutes: 5,
+        anchorAt: start,
+        endsAt: finalOccurrence,
+      },
+    });
+
+    h.setNow(finalOccurrence);
+    await h.manager.tick();
+    expect(h.manager.listRoutines()[0]).toMatchObject({ enabled: false, nextRunAt: null });
+    expect(h.manager.listRuns()[0]).toMatchObject({ status: "queued", scheduledFor: finalOccurrence });
+
+    h.setNow(finalOccurrence + 60_000);
+    h.setBot("ready");
+    await h.manager.tick();
+    expect(h.started).toHaveLength(0);
+    expect(h.manager.listRuns()[0]).toMatchObject({
+      status: "missed",
+      error: "The routine ended before this scheduled run could start",
+    });
   });
 
   it("preserves exact timestamps for manual and webhook interval work", async () => {
@@ -1388,8 +1779,58 @@ describe("RoutineManager", () => {
       expect(finished).toMatchObject({ status: "waiting", goalStatus: status, attention: `${status} detail` });
       expect(finished?.finishedAt).toBeUndefined();
       expect(h.failed).toEqual([]);
+
+      const base = {
+        eventId: "later-room-turn", provider: "fake", threadId: run.threadId!,
+        createdAt: new Date().toISOString(),
+      };
+      const before = h.manager.runForThread(run.threadId!);
+      const changes = h.changed.length;
+      expect(h.manager.handleRuntimeEvent({ ...base, type: "turn.started" })).toBeNull();
+      expect(h.manager.handleRuntimeEvent({
+        ...base, type: "request.opened", requestType: "permission", tool: "run",
+        summary: "An unrelated later room turn asks for permission",
+      })).toBeNull();
+      expect(h.manager.handleRuntimeEvent({
+        ...base, type: "request.resolved", behavior: "allow", source: "user",
+      })).toBeNull();
+      expect(h.manager.handleRuntimeEvent({ ...base, type: "runtime.error", message: "Later room failure" })).toBeNull();
+      expect(h.manager.runForThread(run.threadId!)).toEqual(before);
+      expect(h.changed).toHaveLength(changes);
+      expect(JSON.parse(readFileSync(h.options.file!, "utf8")).runs[0]).toMatchObject({
+        status: "waiting", goalStatus: status, attention: `${status} detail`,
+      });
+
+      // Authority stays with the goal lifecycle, not generic provider
+      // events; a goal-owned transition can still settle the same receipt.
+      expect(h.manager.finishGoalRun(run.id, "completed", "Goal-owned completion")).toMatchObject({
+        status: "completed", goalStatus: "completed", output: "Goal-owned completion", attention: undefined,
+      });
     },
   );
+
+  it("still resumes an in-flight room goal after a provider approval is answered", async () => {
+    const h = harness();
+    const routine = h.manager.create({
+      name: "Active room goal", prompt: "Complete the goal", target: "room-goal",
+      botId: "chief-1", groupId: "room-1", enabled: false,
+      schedule: { type: "daily", time: "09:00", weekdays: [1] },
+    });
+    h.manager.runNow(routine.id);
+    await h.manager.tick();
+    const run = h.manager.listRuns()[0]!;
+    const base = { eventId: "active-goal-approval", provider: "fake", threadId: run.threadId!, createdAt: new Date().toISOString() };
+    const waiting = h.manager.handleRuntimeEvent({
+      ...base, type: "request.opened", requestType: "permission", tool: "run", summary: "Approve the next step",
+    });
+    expect(waiting).toMatchObject({ status: "waiting", attention: "Approve the next step" });
+    expect(waiting?.goalStatus).toBeUndefined();
+    expect(h.manager.handleRuntimeEvent({
+      ...base, type: "request.resolved", behavior: "allow", source: "user",
+    })).toMatchObject({ status: "running", attention: undefined });
+    expect(h.manager.handleRuntimeEvent({ ...base, type: "turn.started" })).toMatchObject({ status: "running" });
+    expect(h.manager.finishGoalRun(run.id, "completed", "Approved work completed")).toMatchObject({ status: "completed" });
+  });
 
   it.each(["blocked", "limit-reached"] satisfies GroupGoalRunStatus[])(
     "records a %s room outcome as a failed routine run with the goal's own detail",

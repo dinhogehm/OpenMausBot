@@ -223,7 +223,7 @@ fun SettingsScreen(
                 SettingsSection("Workspace") {
                     onOpenRoutines?.let { openRoutines ->
                         SettingsButton(
-                            text = "Tasks & Routines",
+                            text = "Threads & Routines",
                             icon = R.drawable.ic_schedule,
                             onClick = openRoutines,
                         )

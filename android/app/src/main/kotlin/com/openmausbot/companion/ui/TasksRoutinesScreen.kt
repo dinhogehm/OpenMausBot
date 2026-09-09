@@ -111,7 +111,7 @@ internal fun TasksRoutinesScreen(onBack: () -> Unit, onOpenChat: (Chat) -> Unit)
         ) {
             HeaderBackButton(onBack)
             Text(
-                text = "Tasks & Routines",
+                text = "Threads & Routines",
                 fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
@@ -520,7 +520,7 @@ private fun RoutineRunRow(
                 }
                 NotificationTarget.from(run.botId, run.threadId)?.let { target ->
                     ActionRow(
-                        text = "Open task",
+                        text = "Open thread",
                         icon = Icons.AutoMirrored.Filled.ExitToApp,
                         onClick = { onOpenTask(target) },
                     )

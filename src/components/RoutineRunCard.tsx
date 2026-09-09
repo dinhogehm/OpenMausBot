@@ -4,7 +4,6 @@ import {
   CircleAlert,
   ExternalLink,
   Loader2,
-  ShieldAlert,
   XCircle,
 } from "lucide-react";
 
@@ -17,7 +16,7 @@ const DETAIL_LIMIT = 280;
 const COPY = {
   queued: { label: "Queued", tone: "text-ink-secondary", border: "border-hairline/45" },
   running: { label: "Running", tone: "text-accent", border: "border-accent/30" },
-  waiting: { label: "Needs your input", tone: "text-warning", border: "border-warning/35" },
+  waiting: { label: "Waiting", tone: "text-warning", border: "border-warning/35" },
   completed: { label: "Completed", tone: "text-success", border: "border-success/30" },
   failed: { label: "Failed", tone: "text-danger", border: "border-danger/35" },
   cancelled: { label: "Cancelled", tone: "text-ink-secondary", border: "border-hairline/45" },
@@ -71,7 +70,7 @@ function StatusIcon({ status }: { status: RoutineRunCardData["status"] }) {
     case "running":
       return <Loader2 aria-hidden="true" className={cn(className, "animate-spin text-accent")} />;
     case "waiting":
-      return <ShieldAlert aria-hidden="true" className={cn(className, "text-warning")} />;
+      return <CalendarClock aria-hidden="true" className={cn(className, "text-warning")} />;
     case "completed":
       return <CheckCircle2 aria-hidden="true" className={cn(className, "text-success")} />;
     case "failed":
@@ -112,7 +111,7 @@ export function RoutineRunCard({
       ? (run.error ?? run.summary)
       : (run.summary ?? run.error),
   );
-  const actionLabel = run.status === "waiting" ? "Review" : "Open run";
+  const actionLabel = run.goalStatus === "needs-input" ? "Review" : "Open run";
 
   return (
     <section
