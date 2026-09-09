@@ -15,6 +15,51 @@ describe("independent bot task state", () => {
   // The shared Vitest setup gives this file its own disposable home.
   beforeEach(() => rmSync(DATA_DIR, { recursive: true, force: true }));
 
+  it("persists routine execution identity without sharing context or approval settings", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({}, { seedMessages: false });
+    const first = store.createTask(bot.id, "First run", false)!;
+    const second = store.createTask(bot.id, "Second run", false)!;
+    store.patchTask(bot.id, first.threadId, { routineRunId: "run-1" });
+    store.patchTask(bot.id, second.threadId, { routineRunId: "run-2" });
+    store.setResumeCursor(bot.id, "claude", "first-session", first.threadId);
+    const reloaded = new Store(selection);
+    expect(reloaded.taskByThread(bot.id, first.threadId)).toMatchObject({ routineRunId: "run-1", resumeCursors: { claude: "first-session" } });
+    expect(reloaded.taskByThread(bot.id, second.threadId)).toMatchObject({ routineRunId: "run-2", resumeCursors: {}, approvalMode: "ask", autoApprove: false });
+    reloaded.patchTask(bot.id, first.threadId, { routineRunId: undefined });
+    expect(new Store(selection).taskByThread(bot.id, first.threadId)?.routineRunId).toBeUndefined();
+  });
+
+  it("never silently switches into an internal run when deleting a visible task", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({}, { seedMessages: false });
+    const original = bot.threadId;
+    const results = store.createTask(bot.id, "Results")!;
+    const execution = store.createTask(bot.id, "Execution", false)!;
+    store.patchTask(bot.id, execution.threadId, { routineRunId: "run-1" });
+    expect(store.deleteTask(bot.id, results.threadId)?.threadId).toBe(original);
+    expect(store.deleteTask(bot.id, original)).not.toBeNull();
+    expect(bot.threadId).not.toBe(execution.threadId);
+    expect(store.activeTask(bot.id)?.routineRunId).toBeUndefined();
+    expect(store.tasks(bot.id).filter((task) => !task.routineRunId)).toHaveLength(1);
+    expect(new Store(selection).bot(bot.id)?.threadId).toBe(bot.threadId);
+  });
+
+  it("leaves an opened internal run when a different visible task is deleted", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({}, { seedMessages: false });
+    const original = bot.threadId;
+    const results = store.createTask(bot.id, "Results", false)!;
+    const execution = store.createTask(bot.id, "Execution", false)!;
+    store.patchTask(bot.id, execution.threadId, { routineRunId: "run-1" });
+    store.switchTask(bot.id, execution.threadId);
+
+    expect(store.deleteTask(bot.id, results.threadId)?.threadId).toBe(original);
+    expect(store.activeTask(bot.id)?.routineRunId).toBeUndefined();
+    expect(store.taskByThread(bot.id, execution.threadId)?.routineRunId).toBe("run-1");
+    expect(new Store(selection).bot(bot.id)?.threadId).toBe(original);
+  });
+
   it("caps new task titles before persistence and preserves the blank-title fallback", () => {
     const store = new Store(selection);
     const bot = store.createBot({}, { seedMessages: false });

@@ -7,6 +7,7 @@ import type { SidebarDensity } from "@/lib/sidebar-preferences";
 const fixture = vi.hoisted(() => ({ showThreads: true, state: {} as Partial<AppState>, dispatch: vi.fn() }));
 vi.mock("@/lib/thread-preferences", () => ({ useShowThreads: () => fixture.showThreads }));
 vi.mock("./DesktopCapabilities", () => ({ useDesktopCapabilities: () => ({}) }));
+vi.mock("react-dom", () => ({ createPortal: (node: ReactNode) => node }));
 vi.mock("@/state/store", async (importOriginal) => {
   const original = await importOriginal<typeof import("@/state/store")>();
   return { ...original, useStore: () => ({ state: { ...original.initialState, ...fixture.state }, dispatch: fixture.dispatch }) };
@@ -30,7 +31,7 @@ const bot: Bot = {
   ],
 };
 const densities: SidebarDensity[] = ["comfortable", "compact", "icons"];
-const rowProps = (density: SidebarDensity) => ({ bot, density, onMenu: vi.fn(), onArchive: vi.fn(), archiveDisabled: false });
+const rowProps = (density: SidebarDensity) => ({ bot, density, onMenu: vi.fn() });
 
 type ElementProps = { children?: ReactNode; onClick?: (event: MouseEvent) => void; onKeyDown?: (event: KeyboardEvent) => void; [key: string]: unknown };
 function findElement(tree: ReactNode, attribute: string, value: string): ReactElement<ElementProps> | undefined {
@@ -47,6 +48,7 @@ beforeEach(() => {
   fixture.state = { bots: [bot], selectedId: "other-bot", activeView: "chat", pendingQueued: { queued: [{ queueId: "q", text: "next" }] } };
   fixture.dispatch.mockClear();
   vi.stubGlobal("window", { innerWidth: 1024, innerHeight: 768 });
+  vi.stubGlobal("document", { body: {} });
   vi.stubGlobal("HTMLInputElement", class {});
 });
 afterEach(() => { vi.unstubAllGlobals(); });

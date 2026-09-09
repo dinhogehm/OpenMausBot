@@ -22,7 +22,7 @@ struct TaskManagerView: View {
 
     private var tasks: [BotTask] {
         switch current {
-        case let .bot(bot): return bot.tasks ?? []
+        case let .bot(bot): return bot.visibleTasks
         case let .room(room): return room.tasks ?? []
         }
     }

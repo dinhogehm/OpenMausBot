@@ -32,6 +32,18 @@ final class DecodingTests: XCTestCase {
 
     // MARK: - Hydration
 
+    func testRoutineExecutionMarkerIsOptionalAndPreserved() throws {
+        let legacy = try JSONDecoder().decode(
+            BotTask.self, from: Data(#"{"threadId":"legacy","title":"Legacy","createdAt":1}"#.utf8)
+        )
+        let execution = try JSONDecoder().decode(
+            BotTask.self, from: Data(#"{"threadId":"run-thread","title":"Brief","createdAt":2,"routineRunId":"run-1"}"#.utf8)
+        )
+        XCTAssertNil(legacy.routineRunId)
+        XCTAssertEqual(execution.routineRunId, "run-1")
+        XCTAssertEqual(try JSONDecoder().decode(BotTask.self, from: JSONEncoder().encode(execution)), execution)
+    }
+
     func testDecodesThePagedFleet() throws {
         let fleet = try decode(Fleet.self, "bots-paged")
         XCTAssertFalse(fleet.bots.isEmpty)

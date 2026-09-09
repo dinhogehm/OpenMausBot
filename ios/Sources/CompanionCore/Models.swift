@@ -266,6 +266,8 @@ public struct BotTask: Codable, Hashable, Sendable {
     public var alwaysAllow: [String]?
     public var projectId: String?
     public var openedBy: ThreadOpener?
+    /// Bot-only internal execution. Keep it addressable, but out of thread pickers.
+    public var routineRunId: String?
 
     /// The thread list's quiet second line, worded as the desktop words it.
     public var openedByLabel: String? {
@@ -318,6 +320,11 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     public var activeLeafId: String?
     /// Paged responses only: there is more transcript above what you got.
     public var hasMore: Bool?
+
+    /// Routine results are ordinary tasks; only their per-run executions are hidden.
+    public var visibleTasks: [BotTask] {
+        (tasks ?? []).filter { $0.routineRunId == nil }
+    }
 
     /// Older computers only send the profile default. Newer ones snapshot
     /// each thread's model independently, including the thread open here.

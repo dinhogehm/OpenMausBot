@@ -64,8 +64,7 @@ export function SidebarThreadRow({ task, current, compact, folders, onSelect, on
     return () => window.removeEventListener("mousedown", outside);
   }, [menu]);
   return <>
-    <div className={cn("group/thread relative flex min-w-0 items-center rounded-md", current ? "bg-accent/10" : "hover:bg-raised/50")}>
-      {current && <span aria-hidden="true" data-thread-selection-mark className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-accent" />}
+    <div className={cn("group/thread relative flex min-w-0 items-center rounded-md", current ? "bg-raised" : "hover:bg-raised/50")}>
       {renaming ? <input autoFocus value={draft} maxLength={80} aria-label={t("task.renameAria")}
         onFocus={(event) => event.currentTarget.select()} onChange={(event) => setDraft(event.target.value)} onBlur={() => finishRename(true)}
         onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(true); } else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); finishRename(false); } }}
@@ -75,7 +74,7 @@ export function SidebarThreadRow({ task, current, compact, folders, onSelect, on
         onClick={onSelect} onDoubleClick={startRename}
         onContextMenu={(event) => { event.preventDefault(); openMenu(event.clientX, event.clientY); }}
         onKeyDown={(event) => { if (event.key === "ContextMenu" || event.shiftKey && event.key === "F10") { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openMenu(rect.left, rect.bottom); } }}
-        className={cn("flex min-w-0 flex-1 items-center gap-2 rounded-md pl-3 pr-1 text-left text-[12.5px] outline-none focus-visible:ring-1 focus-visible:ring-accent/60", compact ? "min-h-7 py-1" : "min-h-8 py-1.5", current ? "font-medium text-ink" : "text-ink-secondary hover:text-ink")}>
+        className={cn("flex min-w-0 flex-1 items-center gap-2 rounded-md pl-3 pr-1 text-left text-[13px] font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/60", compact ? "min-h-7 py-1" : "min-h-8 py-1.5", current ? "font-semibold text-ink" : "text-ink-secondary hover:text-ink")}>
         <span className="flex min-w-0 flex-1 flex-col">
           <span className={cn("min-w-0 truncate", task.unread && "font-semibold text-ink")}>{task.title}</span>
           {opener && <span className="min-w-0 truncate text-[10.5px] leading-tight text-ink-secondary/80">{opener}</span>}

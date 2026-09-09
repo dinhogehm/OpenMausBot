@@ -105,6 +105,235 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+describe("persistent routine results destinations", () => {
+  const input = () => ({
+    name: "Daily report", prompt: "Write a fresh report", botId: "maus-1", enabled: false,
+    schedule: { type: "interval" as const, everyMinutes: 60, anchorAt: Date.now() + 3_600_000 },
+  });
+  function resultsHarness() {
+    const h = harness();
+    const visible = new Map([["chosen", "maus-1"], ["foreign", "maus-2"]]);
+    let created = 0;
+    h.options.isResultsThread = (botId, threadId) => visible.get(threadId) === botId;
+    h.options.resolveResultsThread = (routine, forceNew) => {
+      if (!forceNew && visible.get(routine.resultsThreadId ?? "") === routine.botId) return routine.resultsThreadId;
+      if (!forceNew && !routine.resultsThreadId && routine.sourceThreadId === "trusted-source") return undefined;
+      const id = `results-${++created}`;
+      visible.set(id, routine.botId);
+      return id;
+    };
+    return { ...h, visible, created: () => created };
+  }
+  const request = <Action extends "create" | "run_now">(action: Action, threadId: string) => ({
+    action, threadId, requestId: `request-${action}`, messageId: `message-${action}`, botId: "maus-1",
+    fingerprintVersion: 1 as const, fingerprint: "a".repeat(64),
+  });
+  const complete = (h: ReturnType<typeof resultsHarness>, threadId: string) => h.manager.handleRuntimeEvent({
+    eventId: "complete", provider: "fake", threadId, createdAt: new Date().toISOString(), type: "turn.completed", ok: true,
+  });
+
+  it("lazily reuses one persisted destination across fresh isolated executions", async () => {
+    const h = resultsHarness();
+    const routine = h.manager.create(input());
+    expect(h.created()).toBe(0);
+    const first = h.manager.runNow(routine.id)!;
+    await h.manager.tick();
+    complete(h, "thread-1");
+    const second = h.manager.runNow(routine.id)!;
+    await h.manager.tick();
+    expect(first.resultsThreadId).toBe("results-1");
+    expect(second.resultsThreadId).toBe(first.resultsThreadId);
+    expect(h.created()).toBe(1);
+    expect(h.started).toEqual([
+      { botId: "maus-1", threadId: "thread-1", prompt: "Write a fresh report" },
+      { botId: "maus-1", threadId: "thread-2", prompt: "Write a fresh report" },
+    ]);
+    complete(h, "thread-2");
+    const loaded = new RoutineManager(h.options);
+    expect(loaded.listRoutines()[0]?.resultsThreadId).toBe(first.resultsThreadId);
+    expect(loaded.listRuns().every((run) => run.resultsThreadId === first.resultsThreadId)).toBe(true);
+  });
+
+  it("validates choices, preserves omitted updates, and explicitly creates a new dedicated destination", () => {
+    const h = resultsHarness();
+    for (const resultsThreadId of ["foreign", "internal", " ", 42]) {
+      expect(() => h.manager.create({ ...input(), resultsThreadId } as any)).toThrow(/visible results thread/);
+    }
+    const routine = h.manager.create({ ...input(), resultsThreadId: "chosen" });
+    const first = h.manager.runNow(routine.id)!;
+    expect(h.manager.update(routine.id, { name: "Renamed" })?.resultsThreadId).toBe("chosen");
+    expect(() => h.manager.update(routine.id, { resultsThreadId: "foreign" })).toThrow(/visible results thread/);
+    const updated = h.manager.update(routine.id, { resultsThreadId: null })!;
+    expect(updated.resultsThreadId).toBe("results-1");
+    expect(h.manager.listRuns().find((run) => run.id === first.id)?.resultsThreadId).toBe("chosen");
+    expect(h.manager.update(routine.id, { botId: "maus-2" })?.resultsThreadId).toBeUndefined();
+  });
+
+  it.each(["create", "update"])("discards only a newly allocated empty destination when %s cannot commit", (action) => {
+    const h = resultsHarness();
+    const routine = action === "update" ? h.manager.create({ ...input(), resultsThreadId: "chosen" }) : undefined;
+    const discard = vi.fn((_botId: string, threadId: string) => h.visible.delete(threadId));
+    h.options.discardResultsThread = discard;
+    rmSync(h.options.file!, { force: true });
+    mkdirSync(h.options.file!);
+    if (routine) {
+      expect(() => h.manager.update(routine.id, { name: "Not saved", resultsThreadId: "chosen" })).toThrow();
+      expect(discard).not.toHaveBeenCalled();
+      expect(() => h.manager.update(routine.id, { resultsThreadId: null })).toThrow();
+      expect(h.manager.listRoutines()[0]?.resultsThreadId).toBe("chosen");
+    } else {
+      expect(() => h.manager.create({ ...input(), resultsThreadId: null })).toThrow();
+      expect(h.manager.listRoutines()).toEqual([]);
+    }
+    expect(discard).toHaveBeenCalledExactlyOnceWith("maus-1", "results-1");
+    expect(h.visible.has("results-1")).toBe(false);
+    expect(h.visible.has("chosen")).toBe(true);
+  });
+
+  describe.each(["manual", "schedule", "missed"])("uncommitted %s runs", (trigger) => {
+    it.each(["new", "chosen", "deleted", "trusted"])("rolls back a %s destination without publishing and retries safely", async (destination) => {
+      const h = resultsHarness();
+      h.setBot("busy");
+      const due = h.options.now!() + 60_000;
+      const routine = h.manager.create({
+        ...input(), enabled: trigger !== "manual", schedule: { type: "once", at: due },
+        ...(["chosen", "deleted"].includes(destination) ? { resultsThreadId: "chosen" } : {}),
+      }, destination === "trusted" ? request("create", "trusted-source") : undefined);
+      if (destination === "deleted") h.visible.delete("chosen");
+      h.setNow(trigger === "missed" ? due + 13 * 3_600_000 : due);
+      const beforeRoutines = h.manager.listRoutines();
+      const persisted = readFileSync(h.options.file!, "utf8");
+      const discard = vi.fn((_botId: string, threadId: string) => h.visible.delete(threadId));
+      h.options.discardResultsThread = discard;
+      h.emitted.length = 0;
+      const observations: Array<{ payload: any; persisted: any }> = [];
+      const observe = (payload: Record<string, unknown>) => observations.push({
+        payload, persisted: JSON.parse(readFileSync(h.options.file!, "utf8")),
+      });
+      h.options.emit = (payload) => { h.emitted.push(payload); observe(payload); };
+      h.options.onRunChanged = (run) => { h.changed.push(run); observe({ kind: "routine.run", run }); };
+      const runRequest = request("run_now", destination === "trusted" ? "trusted-source" : "invoking-source");
+
+      // Fail the real atomic rename, after the resolver allocates a task.
+      rmSync(h.options.file!);
+      mkdirSync(h.options.file!);
+      if (trigger === "manual") expect(() => h.manager.runNow(routine.id, runRequest)).toThrow();
+      else await expect(h.manager.tick()).rejects.toThrow();
+      expect(h.manager.listRoutines()).toEqual(beforeRoutines);
+      expect(h.manager.listRuns()).toEqual([]);
+      expect(h.manager.routineRequestReceipt(runRequest.requestId)).toBeNull();
+      expect(h.emitted).toEqual([]);
+      expect(h.changed).toEqual([]);
+      expect(h.failed).toEqual([]);
+      expect(observations).toEqual([]);
+      expect(h.started).toEqual([]);
+      const allocated = destination === "new" || destination === "deleted";
+      if (allocated) expect(discard).toHaveBeenCalledExactlyOnceWith("maus-1", "results-1");
+      else expect(discard).not.toHaveBeenCalled();
+      expect(h.visible.has("results-1")).toBe(false);
+      expect(h.visible.has("chosen")).toBe(destination !== "deleted");
+
+      rmSync(h.options.file!, { recursive: true });
+      writeFileSync(h.options.file!, persisted);
+      if (trigger === "manual") h.manager.runNow(routine.id, runRequest);
+      else await h.manager.tick();
+      const [run] = h.manager.listRuns();
+      expect(h.manager.listRuns()).toHaveLength(1);
+      expect(run).toMatchObject({ status: trigger === "missed" ? "missed" : "queued" });
+      expect(run?.resultsThreadId).toBe(allocated ? "results-2" : destination === "chosen" ? "chosen" : undefined);
+      expect(h.created()).toBe(allocated ? 2 : 0);
+      expect(h.changed).toHaveLength(1);
+      expect(h.failed).toHaveLength(trigger === "missed" ? 1 : 0);
+      // Both broadcast events and transcript lifecycle callbacks must see
+      // their matching destination and receipt in the already-saved file.
+      expect(observations.length).toBeGreaterThan(0);
+      for (const { payload, persisted: saved } of observations) {
+        const value = payload.kind === "routine" ? payload.routine : payload.run;
+        const records = payload.kind === "routine" ? saved.routines : saved.runs;
+        expect(records.find((record: any) => record.id === value.id)).toEqual(JSON.parse(JSON.stringify(value)));
+      }
+    });
+  });
+
+  it("rolls back the whole scheduled batch and cleans all new destinations even if one cleanup fails", async () => {
+    const h = resultsHarness();
+    h.setBot("busy");
+    const due = h.options.now!() + 60_000;
+    for (const name of ["First", "Second"]) {
+      h.manager.create({ ...input(), name, enabled: true, schedule: { type: "once", at: due } });
+    }
+    const beforeRoutines = h.manager.listRoutines();
+    const discard = vi.fn((_botId: string, threadId: string) => {
+      if (threadId === "results-1") throw new Error("cleanup failed");
+      h.visible.delete(threadId);
+    });
+    h.options.discardResultsThread = discard;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    h.emitted.length = 0;
+    h.setNow(due);
+    rmSync(h.options.file!);
+    mkdirSync(h.options.file!);
+
+    await expect(h.manager.tick()).rejects.toThrow();
+
+    expect(h.manager.listRoutines()).toEqual(beforeRoutines);
+    expect(h.manager.listRuns()).toEqual([]);
+    expect(h.emitted).toEqual([]);
+    expect(h.changed).toEqual([]);
+    expect(discard.mock.calls).toEqual([["maus-1", "results-1"], ["maus-1", "results-2"]]);
+    expect(h.visible.has("results-1")).toBe(true);
+    expect(h.visible.has("results-2")).toBe(false);
+    expect(logged).toHaveBeenCalledExactlyOnceWith(
+      "routine: could not discard uncommitted results thread", expect.objectContaining({ message: "cleanup failed" }),
+    );
+  });
+
+  it("retains trusted legacy chat reporting, while null overrides it and runNow does not rebind a chosen thread", () => {
+    const h = resultsHarness();
+    const routine = h.manager.create(input(), request("create", "trusted-source"));
+    expect(h.manager.runNow(routine.id)?.resultsThreadId).toBeUndefined();
+    expect(h.created()).toBe(0);
+    const updated = h.manager.update(routine.id, { resultsThreadId: null })!;
+    const run = h.manager.runNow(routine.id, request("run_now", "invoking-source"))!;
+    expect(run).toMatchObject({ resultsThreadId: updated.resultsThreadId, sourceThreadId: "invoking-source" });
+    expect(h.manager.listRoutines()[0]).toMatchObject({ resultsThreadId: updated.resultsThreadId, sourceThreadId: "trusted-source" });
+  });
+
+  it("keeps a first chat-invoked run's source override separate from the future destination", () => {
+    const h = resultsHarness();
+    const routine = h.manager.create(input());
+    const first = h.manager.runNow(routine.id, request("run_now", "trusted-source"))!;
+    expect(first.sourceThreadId).toBe("trusted-source");
+    expect(first.resultsThreadId).toBeUndefined();
+    expect(h.created()).toBe(0);
+    expect(h.manager.listRoutines()[0]?.sourceThreadId).toBeUndefined();
+    expect(h.manager.runNow(routine.id)?.resultsThreadId).toBe("results-1");
+  });
+
+  it("replaces a deleted destination only for future runs without rewriting active snapshots", async () => {
+    const h = resultsHarness();
+    const routine = h.manager.create({ ...input(), resultsThreadId: "chosen" });
+    const first = h.manager.runNow(routine.id)!;
+    await h.manager.tick();
+    h.visible.delete("chosen");
+    const second = h.manager.runNow(routine.id)!;
+    expect(second.resultsThreadId).toBe("results-1");
+    expect(h.manager.listRuns().find((run) => run.id === first.id)).toMatchObject({ status: "running", resultsThreadId: "chosen" });
+    expect(h.manager.listRoutines()[0]?.resultsThreadId).toBe("results-1");
+  });
+
+  it("does not route webhook or room-goal executions through bot results tasks", async () => {
+    const h = resultsHarness();
+    h.manager.enqueueWebhook({ webhookId: "hook", webhookName: "Hook", prompt: "Incoming", botId: "maus-1", runOn: "maus", deliveryId: "delivery", receivedAt: Date.now() });
+    const goal = h.manager.create({ ...input(), target: "room-goal", groupId: "room" });
+    h.manager.runNow(goal.id);
+    await h.manager.tick();
+    expect(h.created()).toBe(0);
+    expect(h.taskActivations).toEqual([true]);
+    expect(h.startedGoals).toHaveLength(1);
+  });
+});
+
 describe("nextOccurrence", () => {
   it("finds the next selected weekday in local wall-clock time", () => {
     const monday = new Date(2026, 7, 17, 10, 0, 0).getTime();

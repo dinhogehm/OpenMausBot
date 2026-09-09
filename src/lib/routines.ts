@@ -77,6 +77,8 @@ export interface Routine {
   /** Optional wall-clock safety limit. Missing means the run is unlimited. */
   timeoutMinutes?: number;
   attachments?: RoutineContextAttachment[];
+  sourceThreadId?: string;
+  resultsThreadId?: string;
   nextRunAt: number | null;
   createdAt: number;
   updatedAt: number;
@@ -103,6 +105,8 @@ export interface RoutineRun {
   deliveryId?: string;
   /** Room task created for a team-goal run. */
   executionThreadId?: string;
+  sourceThreadId?: string;
+  resultsThreadId?: string;
   threadId?: string;
   startedAt?: number;
   finishedAt?: number;
@@ -129,4 +133,6 @@ export interface RoutineInput {
   /** `null` explicitly removes the limit; omission preserves it on updates. */
   timeoutMinutes?: number | null;
   attachments?: RoutineContextAttachment[];
+  /** Omission preserves routing; null creates a new dedicated results task. */
+  resultsThreadId?: string | null;
 }

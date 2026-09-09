@@ -2208,6 +2208,13 @@ store.onChange((change) => {
       break;
     case "thread.deleted":
       routines?.forgetRoutineRequestReceiptsForThread(change.threadId);
+      // A deleted destination must not strand an approval in an internal
+      // task. Keep each run's snapshot and expose its execution as fallback.
+      for (const run of routines?.listRuns() ?? []) {
+        if (run.resultsThreadId === change.threadId || run.sourceThreadId === change.threadId) {
+          syncRoutineRunToSource(run);
+        }
+      }
       broadcast({ kind: "bot.queued", queues: publicBotQueuedMessages() });
       break;
     case "bot": {
@@ -3625,13 +3632,12 @@ bus.subscribe((event: RuntimeEvent) => {
           costUsd: event.cost ?? null,
         });
         const routineReportThread = routineRun ? routineSourceThread(routineRun) : null;
-        const routineReportGroup = routineReportThread ? store.groupByThread(routineReportThread) : undefined;
-        // Group-origin routines belong to that channel's unread state. Their
-        // hidden execution task should not light up the bot's 1:1 sidebar too.
+        // A routine's result belongs to its reporting thread's unread state.
+        // Its internal execution should not light up the sidebar as well.
         // Neither should a peer's hop: the exchange is already recorded in the
         // pair channel and chipped into both threads, which is the whole of
         // what the person needs to be able to find it.
-        if (!routineReportGroup && !internal) store.patchTask(bot.id, event.threadId, { unread: true });
+        if (!routineReportThread && !internal) store.patchTask(bot.id, event.threadId, { unread: true });
         // A failed peer turn stays a chip too. The bot that delegated is woken
         // with the failure and answers the person in its own thread — buzzing
         // here as well would ring twice for one piece of news.
@@ -4526,6 +4532,9 @@ async function startTurn(
   if (!opts?.cardContinuation) {
     if (commsDepth === 0 && opts?.automationSource === undefined && !opts?.unattended) {
       personAskAt.set(threadId, userMessage.at);
+      // Continuing an old run as a normal conversation makes that task
+      // visible again; these new replies are not routine report updates.
+      if (task.routineRunId) store.patchTask(bot.id, threadId, { routineRunId: undefined });
     } else {
       personAskAt.delete(threadId);
     }
@@ -5182,7 +5191,14 @@ async function startTurn(
 // ── routines: persisted definitions → detached bot tasks ───────────────
 // The scheduler owns timing and receipts; the existing harness remains the
 // only owner of provider sessions, approvals, tools, computers and messages.
-function routineSourceOwner(run: RoutineRun) {
+function routineSourceOwner(run: Pick<RoutineRun, "botId" | "sourceThreadId" | "resultsThreadId">) {
+  if (run.resultsThreadId) {
+    const bot = store.bot(run.botId);
+    const task = bot && store.taskByThread(bot.id, run.resultsThreadId);
+    return bot && !bot.hidden && task && !task.routineRunId
+      ? { bot, group: undefined, threadId: task.threadId }
+      : null;
+  }
   const threadId = run.sourceThreadId?.trim();
   if (!threadId) return null;
   // Validate before messagesFor(): Store lazily opens transcript storage, so
@@ -5194,7 +5210,8 @@ function routineSourceOwner(run: RoutineRun) {
   // whose conversation held the card. Recheck their section before sharing
   // a result, since either bot may have moved since confirmation.
   const sourceBot = store.botByThread(threadId);
-  if (sourceBot && sectionKey(sourceBot.section) === sectionKey(bot.section)) {
+  if (sourceBot && !sourceBot.hidden && !store.taskByThread(sourceBot.id, threadId)?.routineRunId &&
+    sectionKey(sourceBot.section) === sectionKey(bot.section)) {
     return { bot: sourceBot, group: undefined, threadId };
   }
   const group = store.groupByThread(threadId);
@@ -5213,6 +5230,7 @@ function routineRunCard(run: RoutineRun): NonNullable<Message["routineRun"]> {
     runId: run.id,
     routineId: run.routineId,
     routineName: redactSecretsInText(run.routineName),
+    scheduledFor: run.scheduledFor,
     status: run.status,
   };
   if (run.goalStatus) card.goalStatus = run.goalStatus;
@@ -5255,7 +5273,16 @@ function routineRunFallbackText(card: NonNullable<Message["routineRun"]>): strin
  * another chat message. */
 function syncRoutineRunToSource(run: RoutineRun): string | null {
   const source = routineSourceOwner(run);
-  if (!source) return null;
+  if (!source) {
+    const execution = run.threadId ? store.taskByThread(run.botId, run.threadId) : null;
+    if (execution?.routineRunId === run.id) {
+      store.patchTask(run.botId, execution.threadId, {
+        routineRunId: undefined,
+        ...(["waiting", "completed", "failed", "missed"].includes(run.status) ? { unread: true } : {}),
+      });
+    }
+    return null;
+  }
   const sourceThreadId = source.threadId;
   const card = routineRunCard(run);
   const text = routineRunFallbackText(card);
@@ -5276,6 +5303,19 @@ function syncRoutineRunToSource(run: RoutineRun): string | null {
       message.from = { botId: source.bot.id, name: source.bot.name, color: source.bot.color };
     }
     store.appendMessage(sourceThreadId, message);
+  }
+
+  // Mark only the fresh execution, after its first running card persisted
+  // and before dispatch adds any transcript. A user can later promote it by
+  // sending a normal follow-up; replaying/marking the old receipt seen must
+  // never hide that conversation again.
+  if (run.target === "bot" && run.triggerSource !== "webhook" && run.threadId && run.threadId !== sourceThreadId) {
+    const execution = store.taskByThread(run.botId, run.threadId);
+    const freshExecution = execution && run.status === "running" && !execution.routineRunId &&
+      store.messagesFor(run.threadId).length === 0;
+    if (execution && (freshExecution || (execution.routineRunId === run.id && execution.unread))) {
+      store.patchTask(run.botId, run.threadId, { routineRunId: run.id, unread: false });
+    }
   }
 
   // Merely queueing/running is ambient progress. Attention and terminal
@@ -5380,6 +5420,24 @@ routines = new RoutineManager({
     return task;
   },
   createGoalTask: (groupId, title) => store.createGroupTask(groupId, title, false),
+  isResultsThread: (botId, threadId) => {
+    const bot = store.bot(botId);
+    const task = store.taskByThread(botId, threadId);
+    return Boolean(bot && !bot.hidden && task && !task.routineRunId);
+  },
+  resolveResultsThread: (routine, forceNew) => {
+    // A trusted chat source is already snapshotted as sourceThreadId on each
+    // run. Keep it distinct: it can belong to a teammate or room, whereas an
+    // explicit resultsThreadId must be a visible task owned by the running bot.
+    if (!forceNew && routineSourceOwner(routine)) return routine.resultsThreadId;
+    return store.createTask(routine.botId, `${routine.name} · Results`, false)?.threadId;
+  },
+  discardResultsThread: (botId, threadId) => {
+    const task = store.taskByThread(botId, threadId);
+    if (task && !task.busy && !task.routineRunId && store.messagesFor(threadId).length === 0) {
+      store.deleteTask(botId, threadId);
+    }
+  },
   startTurn: (botId, threadId, prompt, runOn, triggerSource, onDispatchError) =>
     startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, onDispatchError })
       .then(() => undefined),

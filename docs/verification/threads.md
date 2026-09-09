@@ -33,9 +33,13 @@ switching and Stop can be exercised without a real provider or account.
    Test keyboard access to row menus too.
 8. Use **New folder** beside Pepper, without opening a new thread. Give it an
    emoji icon and confirm the thread count and selected conversation do not
-   change. The new-thread dropdown's **New folder…** must also only create a
-   folder. Click a folder icon to edit it; try a custom combined emoji, an
-   invalid text value (retain the form and show an error), and the default icon.
+   change. **New thread** is one plain button that creates immediately in the
+   current folder (or unfiled when outside a folder), without a dropdown.
+   A folder's **+** creates directly inside it; **Move to folder** remains in
+   the thread's actions menu. Click a folder icon to edit it; try a custom
+   combined emoji, an invalid text value (retain the form and show an error),
+   and the default icon. Bot and folder chevrons stay before their names,
+   without a separate hover fill; keyboard navigation still shows a focus ring.
 9. Reorder folders by dragging both a folder label and its row edge. Confirm
    order after reload. Also use **Move folder up/down** from the folder menu
    with the keyboard; end-of-list actions are disabled. Dropping a folder onto

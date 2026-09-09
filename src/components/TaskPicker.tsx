@@ -424,7 +424,7 @@ export function TaskPicker({ bot }: { bot: Bot }) {
   return (
     <ConversationTaskPicker
       threadId={bot.threadId}
-      tasks={bot.tasks ?? []}
+      tasks={(bot.tasks ?? []).filter((task) => !task.routineRunId)}
       busy={false}
       bot={bot}
       onNew={() => dispatch({ type: "newTask", botId: bot.id })}

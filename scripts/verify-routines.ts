@@ -81,11 +81,18 @@ try {
   } finally { await waitForExit(proxy, { signal: "SIGTERM" }); }
   writeFileSync(gate, "finish the isolated setup turn");
   await control(["wait", "--bot", pepper.id, "--timeout", "15"]);
+  const { project: resultsFolder } = await api("POST", `/api/bots/${pepper.id}/projects`, { name: "OMB management", emoji: "🛠️" });
+  const { task: resultsTask } = await api("POST", `/api/bots/${pepper.id}/tasks`, { title: "Fleet health reports", projectId: resultsFolder.id });
+  await api("POST", `/api/bots/${pepper.id}/tasks/${pepper.threadId}`, {});
   const manual = await api("POST", "/api/routines", {
     name: "Manual inbox check", prompt: "Summarize the test inbox. No external services.", botId: pepper.id,
+    resultsThreadId: resultsTask.threadId,
     enabled: true, schedule: { type: "interval", everyMinutes: 60, anchorAt: Date.now() + 3_600_000 },
   });
-  await api("POST", `/api/routines/${manual.routine.id}/run`);
+  for (let index = 0; index < 2; index++) {
+    const { run } = await api("POST", `/api/routines/${manual.routine.id}/run`);
+    await until(async () => (await api("GET", "/api/routines")).runs.some((candidate: { id: string; status: string }) => candidate.id === run.id && candidate.status === "completed"));
+  }
   const failed = await api("POST", "/api/routines", {
     name: "Provider failure example", prompt: "Exercise the isolated failing provider.", botId: miso.id,
     enabled: false, schedule: { type: "interval", everyMinutes: 60, anchorAt: Date.now() + 3_600_000 },
@@ -106,10 +113,15 @@ try {
     } }],
   });
   await ui.listen();
-  console.log(JSON.stringify({ ...fixture.info, previewUrl: `${ui.resolvedUrls!.local[0]}__routines.html`, pepperId: pepper.id, misoId: miso.id, scheduledRoutineId: scheduled.routine.id }));
+  console.log(JSON.stringify({ ...fixture.info, previewUrl: `${ui.resolvedUrls!.local[0]}__routines.html`, pepperId: pepper.id, misoId: miso.id, scheduledRoutineId: scheduled.routine.id, manualRoutineId: manual.routine.id, resultsThreadId: resultsTask.threadId, resultsFolderId: resultsFolder.id }));
   await new Promise<void>((resolve) => { process.once("SIGINT", resolve); process.once("SIGTERM", resolve); });
 } finally {
-  writeFileSync(`${fixture.info.logPath}.json`, JSON.stringify({ evidence, final: await api("GET", "/api/routines").catch(() => null) }, null, 2));
+  const final = await api("GET", "/api/routines").catch(() => null);
+  // Ctrl-C can reach the child before this owner reads its API. Preserve the
+  // actual persisted records before fixture cleanup, without calling them an API response.
+  const routineFile = join(fixture.info.dataDir, "routines.json");
+  const persisted = !final && existsSync(routineFile) ? JSON.parse(readFileSync(routineFile, "utf8")) : undefined;
+  writeFileSync(`${fixture.info.logPath}.json`, JSON.stringify({ evidence, final, persisted }, null, 2));
   await ui?.close();
   await fixture.close();
 }

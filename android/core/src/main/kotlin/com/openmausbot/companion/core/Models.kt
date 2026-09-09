@@ -257,6 +257,8 @@ data class BotTask(
     val alwaysAllow: List<String>? = null,
     val projectId: String? = null,
     val openedBy: ThreadOpener? = null,
+    /** Bot-only internal execution. Keep it addressable, but out of thread pickers. */
+    val routineRunId: String? = null,
 )
 
 /** The thread list's quiet second line, worded as the desktop words it. */

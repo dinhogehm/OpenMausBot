@@ -238,6 +238,8 @@ export interface ModelSelection {
  * provider session. The bot's threadId points at the active one. */
 export interface Task {
   threadId: string;
+  /** Internal routine execution; reachable through its run receipt, not history menus. */
+  routineRunId?: string;
   projectId?: string;
   title: string;
   createdAt: number;

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, ChevronDown, Folder, FolderPlus, MoreHorizontal, Pencil, Plus, X } from "lucide-react";
+import { ArrowDown, ArrowUp, CheckCheck, Folder, MoreHorizontal, Pencil, Plus, X } from "lucide-react";
 import { useStore, type Bot, type BotProject } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
@@ -22,18 +22,21 @@ export function navigateThreadMenu(event: React.KeyboardEvent<HTMLDivElement>) {
   buttons[next]?.focus();
 }
 
-export function FolderActions({ project, canMoveUp, canMoveDown, saving, onEdit, onMove }: {
+export function FolderActions({ project, canMoveUp, canMoveDown, canMarkRead, saving, menu, onMenuChange, onEdit, onMove, onMarkRead }: {
   project: BotProject;
   canMoveUp: boolean;
   canMoveDown: boolean;
+  canMarkRead: boolean;
   saving: boolean;
+  menu: { left: number; top: number } | null;
+  onMenuChange: (menu: { left: number; top: number } | null) => void;
   onEdit: () => void;
   onMove: (direction: -1 | 1, onSaved: () => void) => void;
+  onMarkRead: (onSaved: () => void) => void;
 }) {
-  const [menu, setMenu] = useState<{ left: number; top: number } | null>(null);
   const actionRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const close = () => { setMenu(null); actionRef.current?.focus(); };
+  const close = () => { onMenuChange(null); actionRef.current?.focus(); };
   useEffect(() => {
     if (saving && menu) menuRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
   }, [saving, menu]);
@@ -41,21 +44,26 @@ export function FolderActions({ project, canMoveUp, canMoveDown, saving, onEdit,
     if (!menu) return;
     menuRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus();
     const outside = (event: MouseEvent) => {
-      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !actionRef.current?.contains(event.target)) setMenu(null);
+      if (event.target instanceof Node && !menuRef.current?.contains(event.target) && !actionRef.current?.contains(event.target)) onMenuChange(null);
     };
     window.addEventListener("mousedown", outside);
     return () => window.removeEventListener("mousedown", outside);
   }, [menu]);
   const move = (direction: -1 | 1) => onMove(direction, close);
+  const position = menu && {
+    left: Math.max(8, Math.min(menu.left, window.innerWidth - 228)),
+    top: Math.max(8, Math.min(menu.top, window.innerHeight - 180)),
+  };
   return <>
     <button ref={actionRef} type="button" aria-label={t("folder.actions", { name: project.name })} title={t("folder.actions", { name: project.name })} aria-haspopup="menu" aria-expanded={Boolean(menu)}
-      onClick={(event) => { if (menu) { close(); return; } const rect = event.currentTarget.getBoundingClientRect(); setMenu({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 228)), top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 160)) }); }}
+      onClick={(event) => { if (menu) { close(); return; } const rect = event.currentTarget.getBoundingClientRect(); onMenuChange({ left: rect.left, top: rect.bottom + 4 }); }}
       className="flex size-6 shrink-0 items-center justify-center rounded opacity-0 hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover/folder:opacity-100 max-md:opacity-70"><MoreHorizontal size={13} /></button>
-    {menu && createPortal(<div ref={menuRef} role="menu" aria-label={t("folder.actions", { name: project.name })} aria-busy={saving || undefined} data-thread-overlay style={menu}
+    {position && createPortal(<div ref={menuRef} role="menu" aria-label={t("folder.actions", { name: project.name })} aria-busy={saving || undefined} data-thread-overlay style={position}
       className="fixed z-50 w-[220px] rounded-lg border border-hairline/50 bg-card p-1 shadow-xl"
       onMouseDown={(event) => event.stopPropagation()}
       onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); } else navigateThreadMenu(event); }}>
       <button type="button" role="menuitem" onClick={() => { close(); onEdit(); }} className="flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-[12px] text-ink hover:bg-raised"><Pencil size={12} />{t("folder.settings")}</button>
+      <button type="button" role="menuitem" disabled={!canMarkRead || saving} onClick={() => onMarkRead(close)} className="flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-[12px] text-ink hover:bg-raised disabled:opacity-40"><CheckCheck size={12} />{t("folder.markRead")}</button>
       <button type="button" role="menuitem" disabled={!canMoveUp || saving} onClick={() => move(-1)} className="flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-[12px] text-ink hover:bg-raised disabled:opacity-40"><ArrowUp size={12} />{t("folder.moveUp")}</button>
       <button type="button" role="menuitem" disabled={!canMoveDown || saving} onClick={() => move(1)} className="flex w-full items-center gap-2 rounded px-2.5 py-2 text-left text-[12px] text-ink hover:bg-raised disabled:opacity-40"><ArrowDown size={12} />{t("folder.moveDown")}</button>
     </div>, document.body)}
@@ -167,48 +175,17 @@ export function BotProjectDialog({ bot, project, onClose, onCreated }: {
   );
 }
 
-/** One-click new thread in the current folder; the arrow chooses a folder.
- * The popover escapes the sidebar/picker. */
+/** One-click new thread in the current folder. Folder creation lives in the sidebar. */
 export function NewThreadButton({ bot, className, compact = false, onCreated }: { bot: Bot; className?: string; compact?: boolean; onCreated?: () => void }) {
   const { dispatch } = useStore();
-  const [menu, setMenu] = useState<{ left: number; top: number } | null>(null);
-  const [creatingProject, setCreatingProject] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
   const projects = bot.projects ?? [];
   const currentProject = projects.find((project) => project.id === bot.tasks?.find((task) => task.threadId === bot.threadId)?.projectId);
-  const newThread = (projectId?: string) => {
-    dispatch({ type: "newTask", botId: bot.id, ...(projectId ? { projectId } : {}) });
-    setMenu(null);
-    onCreated?.();
-  };
-  useEffect(() => {
-    if (!menu) return;
-    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    const outside = (event: MouseEvent) => {
-      if (event.target instanceof Node && !rootRef.current?.contains(event.target) && !menuRef.current?.contains(event.target)) setMenu(null);
-    };
-    window.addEventListener("mousedown", outside);
-    return () => window.removeEventListener("mousedown", outside);
-  }, [menu]);
-  return <>
-    <div ref={rootRef} className={cn("flex items-center rounded-lg text-[12px] text-ink-secondary", className)}>
-      <button type="button" onClick={() => newThread(currentProject?.id)} title={currentProject ? t("task.newIn", { name: currentProject.name }) : t("task.newShort")}
-        className={cn("flex min-w-0 flex-1 items-center gap-2 rounded-l-[inherit] px-2.5 text-left hover:bg-raised/60 hover:text-ink", compact ? "py-1 @max-4xl/chathead:h-[30px] @max-4xl/chathead:px-2" : "py-2")}><Plus size={12} /> <span className={cn("truncate", compact && "@max-4xl/chathead:hidden")}>{t("task.newShort")}</span></button>
-      <button type="button" aria-label={t("folder.choose")} aria-haspopup="menu" aria-expanded={Boolean(menu)} onClick={() => {
-        const rect = rootRef.current?.getBoundingClientRect();
-        if (menu || !rect) { setMenu(null); return; }
-        setMenu({ left: Math.max(8, Math.min(rect.left, window.innerWidth - 248)), top: Math.min(rect.bottom + 4, Math.max(8, window.innerHeight - 300)) });
-      }} className="self-stretch rounded-r-[inherit] px-2 hover:bg-raised/60 hover:text-ink"><ChevronDown size={12} /></button>
-    </div>
-    {menu && createPortal(<div ref={menuRef} data-thread-overlay role="menu" aria-label={t("folder.choose")} className="fixed z-50 max-h-[280px] w-[240px] overflow-y-auto rounded-xl border border-hairline/50 bg-card p-1 shadow-2xl" style={menu}
-      onMouseDown={(event) => event.stopPropagation()}
-      onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setMenu(null); rootRef.current?.querySelectorAll<HTMLButtonElement>("button")[1]?.focus(); } else navigateThreadMenu(event); }}>
-      <p className="px-2.5 py-1.5 text-[11px] text-ink-secondary">{t("folder.newIn")}</p>
-      {([{ id: "", name: t("folder.none") }, ...projects] as BotProject[]).map((project) => <button key={project.id} type="button" role="menuitem" onClick={() => newThread(project.id || undefined)}
-        className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] text-ink hover:bg-raised">{project.id && <FolderIcon emoji={project.emoji} />}<span className="truncate">{project.name}</span></button>)}
-      <button type="button" role="menuitem" onClick={() => { setMenu(null); rootRef.current?.querySelectorAll<HTMLButtonElement>("button")[1]?.focus(); setCreatingProject(true); }} className="mt-1 flex w-full items-center gap-2 border-t border-hairline/40 px-2.5 py-2 text-[12px] text-ink-secondary hover:bg-raised"><FolderPlus size={13} /> {t("folder.new")}…</button>
-    </div>, document.body)}
-    {creatingProject && <BotProjectDialog bot={bot} onClose={() => setCreatingProject(false)} />}
-  </>;
+  return <button type="button" aria-label={t("task.newShort")} title={currentProject ? t("task.newIn", { name: currentProject.name }) : t("task.newShort")}
+    onClick={() => {
+      dispatch({ type: "newTask", botId: bot.id, ...(currentProject ? { projectId: currentProject.id } : {}) });
+      onCreated?.();
+    }}
+    className={cn("flex min-w-0 items-center gap-2 rounded-lg px-2.5 text-left text-[12px] text-ink-secondary hover:bg-raised/60 hover:text-ink", compact ? "py-1 @max-4xl/chathead:h-[30px] @max-4xl/chathead:px-2" : "py-2", className)}>
+    <Plus aria-hidden="true" size={12} /><span className={cn("truncate", compact && "@max-4xl/chathead:hidden")}>{t("task.newShort")}</span>
+  </button>;
 }

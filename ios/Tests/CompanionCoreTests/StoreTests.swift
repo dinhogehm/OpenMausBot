@@ -228,6 +228,34 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(bot.projected(forThread: "not-owned"))
     }
 
+    func testRoutineExecutionsAreHiddenOnlyFromTheThreadPicker() throws {
+        var bot = try XCTUnwrap(try fleet().bots.first)
+        bot.threadId = "results"
+        bot.tasks = [
+            BotTask(threadId: "legacy", title: "Routine: old run", createdAt: 1),
+            BotTask(threadId: "results", title: "Brief results", createdAt: 2, busy: false),
+            BotTask(threadId: "run-thread", title: "Brief", createdAt: 3, busy: true,
+                    activity: "waiting-on-you", approvalMode: "ask", routineRunId: "run-1"),
+        ]
+        var approval = Message(id: "approval", role: .bot, kind: .options, at: 4)
+        approval.card = OptionCard(title: "Approve?", subtitle: "Read", options: ["Approve", "Deny"], requestId: "request")
+        var state = CompanionState()
+        state.apply(.bot(bot))
+        state.merge(ThreadPage(messages: [approval], activeLeafId: "approval"), intoThread: "run-thread")
+
+        XCTAssertEqual(bot.visibleTasks.map(\.threadId), ["legacy", "results"])
+        XCTAssertEqual(state.bot(bot.id)?.tasks?.count, 3)
+        let execution = try XCTUnwrap(state.bot(forThread: "run-thread"))
+        XCTAssertEqual(execution.threadId, "run-thread")
+        XCTAssertEqual(execution.currentTaskBusy, true)
+        XCTAssertEqual(execution.approvalMode, "ask")
+        XCTAssertEqual(state.visibleTranscript(forThread: "run-thread").map(\.id), ["approval"])
+        XCTAssertEqual(state.pendingApprovals.map(\.threadId), ["run-thread"])
+
+        bot.tasks = nil
+        XCTAssertTrue(bot.visibleTasks.isEmpty)
+    }
+
     func testColdBackgroundPageCarriesItsOwnBranchHead() {
         var state = CompanionState()
         var leaf = message("chosen")
