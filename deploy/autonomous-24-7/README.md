@@ -208,3 +208,31 @@ servir `~/.openmausbot` no próximo arranque). Não apaga dados.
   (`:11019-11026`).
 * **Fallback bots precisam de `cwd` no repo** — o engine não copia nada do
   primário; `apply-bots.sh --fallback-cwd` resolve.
+
+## 7. v2 (2026-09-10) — corredor local de release e Codex isolado
+
+O nuria-platform trocou o `smart-deploy --deploy` pelo corredor local
+(`release-carrier.sh` + `npm run release:local -- --environment production`,
+ver `docs/claude/deploy.md` lá). Dois scripts Python, idempotentes, com
+`DRY_RUN=1` e backup com timestamp, editam os ficheiros de dados
+directamente — **com o app fechado** — em vez de passar pela API:
+
+```sh
+pkill -x OpenMausBot
+./apply-workflow-v2.py     # deploy = carrier + verificação do recibo (LaunchAgent publica);
+                           # rollback = revert por PR; merge commit obrigatório; laços de espera
+                           # de 15 min; alwaysAllow shell:* por nó; cap 48; stuck 120 min
+./apply-codex-home.py      # ~/.codex-omb derivado de ~/.codex (sem mcp_servers/plugins/notify/hooks)
+                           # + instances.codex.environment.CODEX_HOME em ~/.openmausbot/config.json
+open release/mac-arm64/OpenMausBot.app
+```
+
+Validação: `node --experimental-strip-types` com o `validateWorkflow` real
+(0 issues) e `CODEX_HOME=~/.codex-omb codex exec "Responda OK"`.
+
+Quem publica é o LaunchAgent do próprio nuria-platform
+(`scripts/macos/install-production-release-agent.sh` com
+`NURIA_RELEASE_AUTO=1`); o plist precisa ainda de
+`NURIA_CACHE_PURGE_TOKEN_FILE` (PlistBuddy `Add :EnvironmentVariables:…`),
+que o instalador não escreve. Reaplique `apply-codex-home.py` sempre que o
+`~/.codex/config.toml` pessoal mudar (o auth.json é copiado, não ligado).
