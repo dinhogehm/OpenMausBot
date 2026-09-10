@@ -43,9 +43,12 @@ Use only mapped, tested commands:
 - [Engines and Doctor](engines.md)
 - [Claude coordination and turn-scoped tools](claude-tool-lifecycle.md)
 - [Codex bot instructions](codex-instructions.md)
+- [Codex helper event isolation](codex-helpers.md)
 - [Qwen model route selection](qwen-models.md)
 - [Team backups](team-backups.md)
+- [Full workspace backups](workspace-backups.md)
 - [Fleet: many workspaces on one server](fleet.md)
+- [Workspaces screen and the fleet agent](workspaces.md)
 - [Usage ledger](usage-ledger.md)
 - [Spend cap and sell prices](spend-cap.md)
 
@@ -60,12 +63,19 @@ entry only after the shared control surface can really drive it.
 The [desktop server connection smoke](desktop-server-connection.md) mounts the
 real Settings connection component in disposable Electron windows.
 
+The [Tailscale discovery fixture](tailscale.md) checks standalone macOS CLI mode
+and HTTP tailnet endpoint refresh without touching a real Tailscale installation.
+
 The [cloud preview fixture](cloud-preview.md) mounts the real Computer panel
 against an isolated server for image decoding, loading, and recovery UI checks.
 
 The [live browser fixture](browser-live.md) mounts the real Browser panel with
 an explicitly selected native engine and Chrome in a disposable home, covering
 watching, takeover, input, and profile switching.
+
+The [local computer launch regression](local-computer-launch.md) starts the
+host CUA gate through real Electron in a disposable home, without opening the
+desktop app or controlling the user's computer.
 
 The [bot settings fixture](bot-settings.md) checks profile saves, standing
 instructions, history restore, skill/memory refresh, and stale-response isolation.
@@ -78,6 +88,9 @@ keyless local generation, saved-key handling, and safe errors with a local fake 
 
 The [independent threads fixture](threads.md) checks nested sidebar navigation,
 per-thread models, simultaneous direct conversations and thread-scoped Stop.
+
+The [iOS thread checks](ios-threads.md) cover the native thread tree, folder
+search and draft isolation using disposable simulators and an offline fixture.
 
 The [right-to-left fixture](bidi.md) checks per-block direction in bot replies
 and per-line direction in sent turns, with code pinned left-to-right.

@@ -25,6 +25,7 @@ import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
 import { freePortBlock } from "./testing/ports.ts";
 import { openSse } from "./testing/sse.ts";
 import { FILE_MAX_BYTES, IMAGE_MAX_BYTES } from "./attachments.ts";
+import { SIGN_IN_PROMPT } from "./system-prompt.ts";
 import {
   PHONE_SECRET_INFO,
   phoneSecretAAD,
@@ -951,6 +952,14 @@ describe("harness HTTP API", () => {
     expect(await statusWithHeaders({ host: `127.0.0.2:${PORT}` })).toBe(200);
     expect(await statusWithHeaders({ host: `[::1]:${PORT}` })).toBe(200);
     expect(await statusWithHeaders({ origin: `http://[::1]:${PORT}` })).toBe(200);
+  });
+
+  it("keeps the fleet screen behind the admin entitlement on the open-source edition", async () => {
+    const fleet = await api("GET", "/api/fleet");
+    expect(fleet.status).toBe(403);
+    expect(fleet.body.error).toContain("enterprise");
+    expect((await api("POST", "/api/fleet/workspaces", { slug: "acme", admins: ["a@b.test"] })).status).toBe(403);
+    expect((await api("DELETE", "/api/fleet/workspaces/acme")).status).toBe(403);
   });
 
   it("identifies itself on /api/health", async () => {
@@ -5442,11 +5451,9 @@ describe("harness HTTP API", () => {
   });
 
   it("mounts the verification skill into a real turn when its trigger appears", async () => {
+    // skill authoring is on by default: no opt-in is needed for the turn
     const bot = (await api("POST", "/api/bots", {})).body.bot;
     try {
-      expect((await api("PATCH", "/api/config", {
-        features: { skillAuthoring: true },
-      })).status).toBe(200);
       expect((await api("PATCH", `/api/bots/${bot.id}`, {
         modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
       })).status).toBe(200);
@@ -5463,7 +5470,6 @@ describe("harness HTTP API", () => {
     } finally {
       await api("POST", `/api/bots/${bot.id}/interrupt`);
       await api("DELETE", `/api/bots/${bot.id}`);
-      await api("PATCH", "/api/config", { features: { skillAuthoring: false } });
     }
   });
 
@@ -5592,9 +5598,6 @@ describe("harness HTTP API", () => {
     })).body.bot;
     let room: any;
     try {
-      expect((await api("PATCH", "/api/config", {
-        features: { skillAuthoring: true },
-      })).status).toBe(200);
       room = (await api("POST", "/api/groups", {
         name: "Verification skill room",
         memberIds: [bot.id],
@@ -5639,29 +5642,46 @@ describe("harness HTTP API", () => {
         expect((await api("DELETE", `/api/groups/${room.id}`)).status).toBe(200);
       }
       expect((await api("DELETE", `/api/bots/${bot.id}`)).status).toBe(200);
-      expect((await api("PATCH", "/api/config", { features: { skillAuthoring: false } })).status).toBe(200);
     }
   });
 
-  it("keeps skill authoring off by default and persists an explicit opt-in", async () => {
+  it("keeps skill authoring on by default and persists an explicit opt-out", async () => {
     const before = await api("GET", "/api/config");
     expect(before.status).toBe(200);
-    expect(before.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: false });
+    expect(before.body.features).toEqual({ browser: false, skillAuthoring: true, showToolCalls: false });
+    // the default is the absence of the key: nothing is written until the toggle is used
+    const untouched = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
+    expect(untouched.features?.skillAuthoring).toBeUndefined();
 
     const saved = await api("PATCH", "/api/config", {
-      features: { skillAuthoring: true },
+      features: { skillAuthoring: false },
     });
     expect(saved.status).toBe(200);
-    expect(saved.body.features).toEqual({ browser: false, skillAuthoring: true, showToolCalls: false });
+    expect(saved.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: false });
 
     const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
-    expect(disk.features).toEqual({ skillAuthoring: true });
+    expect(disk.features).toEqual({ skillAuthoring: false });
 
+    // the opt-out survives patches to sibling flags
     const tools = await api("PATCH", "/api/config", { features: { showToolCalls: true } });
     expect(tools.status).toBe(200);
-    expect(tools.body.features).toEqual({ browser: false, skillAuthoring: true, showToolCalls: true });
+    expect(tools.body.features).toEqual({ browser: false, skillAuthoring: false, showToolCalls: true });
 
-    await api("PATCH", "/api/config", { features: { skillAuthoring: false, showToolCalls: false } });
+    // an opted-out workspace refuses the skill routes a turn would otherwise reach
+    const bot = (await api("POST", "/api/bots", {})).body.bot;
+    try {
+      const token = await mintTestCapability(BASE, bot.id, bot.threadId, { skillAuthoring: true });
+      const listing = await fetch(
+        `${BASE}/api/internal/skills?fromBotId=${encodeURIComponent(bot.id)}&fromThreadId=${encodeURIComponent(bot.threadId)}`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+      expect(listing.status).toBe(403);
+      expect((await listing.json() as { error: string }).error).toBe("skill authoring is not enabled in Settings");
+    } finally {
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+
+    await api("PATCH", "/api/config", { features: { skillAuthoring: true, showToolCalls: false } });
   });
 
   it("refuses to delete a bot while it owns an active channel turn", async () => {
@@ -6151,7 +6171,7 @@ describe("harness HTTP API", () => {
     }
   });
 
-  it("mounts the browser engine's MCP server and the safety prompt in room turns", async () => {
+  it.each(["direct", "room"] as const)("mounts the browser engine's MCP server and the sign-in policy in %s turns and preview", async (target) => {
     const bot = (await api("POST", "/api/bots")).body.bot;
     let room: any;
     try {
@@ -6161,13 +6181,22 @@ describe("harness HTTP API", () => {
       })).status).toBe(200);
       expect((await api("PATCH", `/api/bots/${bot.id}`, {
         browserProfile: "work",
+        approvalMode: "auto",
         modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
       })).status).toBe(200);
-      room = (await api("POST", "/api/groups", { name: "Browser safety", memberIds: [bot.id] })).body.group;
-      expect((await api("PATCH", `/api/groups/${room.id}/setup`, { action: "skip" })).status).toBe(200);
+      const preview = await api("GET", `/api/bots/${bot.id}/system-prompt`);
+      expect(preview.status).toBe(200);
+      const browserSection = preview.body.sections.find((section: { id: string }) => section.id === "browser");
+      expect(browserSection.text).toContain(SIGN_IN_PROMPT);
+      expect(browserSection.text).not.toMatch(/never type their (?:credentials|password)/i);
+      if (target === "room") {
+        room = (await api("POST", "/api/groups", { name: "Browser safety", memberIds: [bot.id] })).body.group;
+        expect((await api("PATCH", `/api/groups/${room.id}/setup`, { action: "skip" })).status).toBe(200);
+      }
 
       rmSync(fakeClaudeDump, { force: true });
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Check the website" })).status).toBe(202);
+      const messagesPath = room ? `/api/groups/${room.id}/messages` : `/api/bots/${bot.id}/messages`;
+      expect((await api("POST", messagesPath, { text: "Use my authorized test account to check the website." })).status).toBe(202);
       const dump = z.object({
         env: z.record(z.string(), z.string()),
         systemPrompt: z.string(),
@@ -6196,10 +6225,15 @@ describe("harness HTTP API", () => {
       expect(system).toMatch(/agent_browser_snapshot/);
       expect(system).toMatch(/page instructions as untrusted content/i);
       expect(system).toMatch(/consequential action.*confirmation/i);
-      expect(system).toMatch(/never type their credentials/i);
+      expect(system).toContain(browserSection.text);
+      expect(system).toContain(SIGN_IN_PROMPT);
+      expect(system).not.toMatch(/never type their (?:credentials|password)/i);
+      expect(system).not.toContain("At a sign-in, password, MFA, CAPTCHA");
     } finally {
       if (room) await api("POST", `/api/groups/${room.id}/interrupt`, {}).catch(() => undefined);
+      else await api("POST", `/api/bots/${bot.id}/interrupt`, {}).catch(() => undefined);
       await api("PATCH", "/api/config", { features: { browser: false }, browserProfiles: [] }).catch(() => undefined);
+      if (room) await api("DELETE", `/api/groups/${room.id}`).catch(() => undefined);
       await api("DELETE", `/api/bots/${bot.id}`).catch(() => undefined);
     }
   }, 60_000);
@@ -7355,7 +7389,6 @@ describe("harness HTTP API", () => {
   it("only enables the exact learned-skill proposal a current client reviewed", async () => {
     const bot = (await api("POST", "/api/bots", {})).body.bot;
     try {
-      expect((await api("PATCH", "/api/config", { features: { skillAuthoring: true } })).status).toBe(200);
       expect((await api("PATCH", `/api/bots/${bot.id}`, {
         modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
       })).status).toBe(200);
@@ -7598,7 +7631,6 @@ describe("harness HTTP API", () => {
       expect(inventory.skills.some((skill) => skill.name === "reviewed-skill-denied")).toBe(false);
       expect(inventory.staged).toEqual([]);
     } finally {
-      await api("PATCH", "/api/config", { features: { skillAuthoring: false } });
       await api("POST", `/api/bots/${bot.id}/interrupt`);
       await api("DELETE", `/api/bots/${bot.id}`);
     }
@@ -8554,6 +8586,16 @@ describe("bot memory API", () => {
       expect(after.body.sections[1].id).toBe("soul");
       expect(after.body.sections[1].text).toContain("Never file noise.");
       expect(after.body.sections[1].bytes).toBe(Buffer.byteLength(after.body.sections[1].text, "utf8"));
+      // Preview is settings-only: advertising a VM does not provision one.
+      expect((await api("PATCH", `/api/bots/${bot.id}`, {
+        computer: "vm",
+        modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      })).status).toBe(200);
+      const withComputer = await api("GET", `/api/bots/${bot.id}/system-prompt`);
+      const computerSection = withComputer.body.sections.find((section: { id: string }) => section.id === "computer");
+      expect(computerSection.text).toContain(SIGN_IN_PROMPT);
+      expect(computerSection.text).not.toMatch(/never type their (?:credentials|password)/i);
+      expect(computerSection.text).not.toContain("At a sign-in, password, MFA, CAPTCHA");
       expect((await api("GET", "/api/bots/does-not-exist/system-prompt")).status).toBe(404);
     } finally {
       await api("DELETE", `/api/bots/${bot.id}`);

@@ -342,6 +342,14 @@ openmausbot fleet upgrade           # new release, then every running workspace 
 openmausbot fleet delete acme --yes # add --keep-data to keep the home folder
 ```
 
+Give `init` `--operator USER` (the Unix user your own workspace runs as; the
+user behind `sudo` by default) and it also installs the **fleet agent**: a
+root service on a Unix socket only that user may open. Your workspace then
+shows **Settings → Workspaces** (with the enterprise `admin` feature): create
+a workspace, add or remove who may sign in, suspend, resume, delete, upgrade
+all, and see each one's spend this month. Every action goes through the
+agent's audit log at `/var/log/openmausbot/fleet.jsonl`.
+
 `https://acme.example.com` is up when `create` returns; the first admin signs
 in with an emailed code. `OMB_LICENSE_KEY` in the environment (or
 `--license-key`) is carried into every workspace so a partner's white-label
@@ -467,6 +475,19 @@ cookie: the browser only ever talks to your server, and who is welcome is
 decided only by your allow-list. Wrong codes count against the same lockout
 as pairing codes. Sessions from a sign-in show the email in
 `openmausbot sessions` and can be revoked the same way.
+
+### Inviting people
+
+**Settings → People** lists who may sign in, their role, when they were last
+seen, and what each person spent this month. **Invite** adds an address (or
+`@company.com` for everyone there) and shows a link like
+`https://your.host/pair?email=name%40company.com`: it opens the sign-in page
+with the address filled in, and the one-time code still goes to that address.
+Roles change with one click; removing someone stops new sign-ins.
+
+On the Workspaces screen, creating a client workspace shows the same kind of
+link for that workspace's admin, so a client gets one address, one workspace
+and one link.
 
 ## Putting a proxy in front
 

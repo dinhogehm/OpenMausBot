@@ -47,7 +47,7 @@ import {
   type BrowserCleanupWireRequest,
 } from "./browser-lifecycle-cleanup.ts";
 import * as checkpoints from "./checkpoints.ts";
-import { appendDecision, readDecisions } from "./decision-log.ts";
+import { appendDecision, readDecisions, flushDecisionLog } from "./decision-log.ts";
 import { validateBotCwd } from "./bot-cwd.ts";
 import {
   ATTACHMENTS_DIR,
@@ -139,10 +139,11 @@ import { ComputerControl } from "./computer-control.ts";
 import { MAX_REMOTE_COMMAND_LENGTH } from "./remote-computer.ts";
 import { augmentedPath, findCliCandidates, resetPathCache } from "./env-path.ts";
 import { registerEnginesBinDir } from "./engine-install.ts";
-import { appendUsage, parseUsageRange, readUsage, summarizeUsage, usageCsv, USAGE_GROUPINGS, type UsageGroupBy, type UsageTrigger } from "./usage-ledger.ts";
+import { appendUsage, parseUsageRange, readUsage, summarizeUsage, usageCsv, USAGE_GROUPINGS, flushUsageLedger, type UsageGroupBy, type UsageTrigger } from "./usage-ledger.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import { checkProviderKey, PROVIDER_KEY_KINDS, type ProviderKeyKind } from "./provider-key-check.ts";
 import { assertWithinBudget, noteSpend, spendState } from "./spend.ts";
+import { fleetAvailable, fleetRequest, fleetSocketPath } from "./fleet-client.ts";
 import { entitled } from "./enterprise.ts";
 import { describeSpawnFailure, execCli } from "./procs.ts";
 import { blockedTarget, buildNotification, type Notification, type NotifyKind } from "./notify.ts";
@@ -180,7 +181,7 @@ import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-g
 
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
-import { readMessageText, recallMessages, searchMessages } from "./message-db.ts";
+import { readMessageText, recallMessages, searchMessages, closeMessageDb } from "./message-db.ts";
 import { claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -384,6 +385,9 @@ import { createGracefulShutdown } from "./graceful-shutdown.ts";
 import { acquireDataDirLeaseForProcess } from "./data-dir-lease.ts";
 import { describeEdition, editionStatus, loadEnterpriseLayer } from "./enterprise.ts";
 import { environmentDescriptor, loadEnvironmentId, serverVersion } from "./environment.ts";
+import { WorkspaceBackupMaintenance } from "./workspace-backup-maintenance.ts";
+import { createWorkspaceBackupRoutes, isWorkspaceBackupSessionControl } from "./workspace-backup-http.ts";
+import { applyPendingWorkspaceRestore, readLastWorkspaceRestore, type WorkspaceRestoreResult } from "./workspace-backup.ts";
 import { createCustomDomainVerifier, customDomainIpv4, normalizeCustomDomain } from "./custom-domain.ts";
 import { createEmailSignIn, parseAllowList } from "./account-signin.ts";
 import { ProviderAuthSessions } from "./provider-auth-sessions.ts";
@@ -446,6 +450,16 @@ function releaseDataDirLeaseAtExit(): void {
   }
 }
 process.once("exit", releaseDataDirLeaseAtExit);
+// Restore before constructing any long-lived config, Store, session or provider
+// objects. Replacing files underneath a live Store would overwrite restored data.
+let workspaceRestore: WorkspaceRestoreResult = { restored: false };
+if (existsSync(join(DATA_DIR, ".backups"))) {
+  workspaceRestore = applyPendingWorkspaceRestore(DATA_DIR);
+  if (!workspaceRestore.restored && !workspaceRestore.rolledBack) {
+    workspaceRestore = readLastWorkspaceRestore(DATA_DIR) ?? workspaceRestore;
+  }
+}
+const workspaceMaintenance = new WorkspaceBackupMaintenance();
 // Only after ensureDirs(): it performs the one-time rename of the legacy data
 // dir, which must not find a freshly created ~/.openmausbot already there.
 // Remote clients (server/request-auth.ts, server/sessions.ts): a stable identity
@@ -3068,6 +3082,9 @@ let localVmProvisionBusy = false;
 let localVmModeChangeBusy = false;
 const activeVpsThreads = new Map<string, string>();
 const boxLifecycleBusyBots = new Set<string>();
+// A refresh is a reader, not a lifecycle change. Keep its reservation until
+// the provider settles even if the HTTP client leaves, and share it on retry.
+const vpsPreviewRequests = new Map<string, ReturnType<typeof vps.vpsComputerScreenshot>>();
 const orphanBoxLifecycleBusyIds = new Set<string>();
 const boxInventoryRequestsBusyIds = new Set<string>();
 type RemoteComputerProvider = "box" | "vps";
@@ -3122,7 +3139,7 @@ function providerOperationConflict(provider: RemoteComputerProvider): string | n
   if (managedBoxOwners().some((owner) => owner.inUse)) {
     return `stop active bot work and computer control before changing ${provider === "box" ? "the Box account" : "the VPS connection"}`;
   }
-  if (boxLifecycleBusyBots.size > 0) {
+  if (boxLifecycleBusyBots.size > 0 || vpsPreviewRequests.size > 0) {
     return "wait for cloud computer actions to finish before changing provider settings";
   }
   if (provider === "box") {
@@ -3181,12 +3198,16 @@ function claimManagedBoxMutation(instance: box.ManagedBoxInventoryInstance): () 
   return claimBotComputerLifecycle(ownerBotId);
 }
 
-/** One synchronous lane for every Box lifecycle consumer. Both Settings and
+/** One synchronous lane for cloud lifecycle consumers. Both Settings and
  * bot-scoped actions use it, so whichever operation starts first excludes the
- * other instead of relying on a stale check made before a provider await. */
-function claimBotComputerLifecycle(botId: string): () => void {
+ * other instead of relying on a stale check made before a provider await.
+ * Only opening an existing VPS viewer may coexist with its pending preview. */
+function claimBotComputerLifecycle(botId: string, allowPreview = false): () => void {
   if (boxLifecycleBusyBots.has(botId)) {
     throw Object.assign(new Error("this bot's cloud computer is being changed — wait for it to finish"), { status: 409 });
+  }
+  if (!allowPreview && vpsPreviewRequests.has(botId)) {
+    throw Object.assign(new Error("a screen preview is still refreshing — wait before changing this computer"), { status: 409 });
   }
   boxLifecycleBusyBots.add(botId);
   return () => boxLifecycleBusyBots.delete(botId);
@@ -4674,6 +4695,7 @@ async function startTurn(
     onDispatchError?: (message: string) => void;
   },
 ) {
+  workspaceMaintenance.assertAvailable();
   const profile = store.bot(botId);
   if (!profile) throw Object.assign(new Error("no such bot"), { status: 404 });
   const threadId = opts?.threadId ?? profile.threadId;
@@ -6293,7 +6315,10 @@ const webhooks = new WebhookManager({
 let webhookIngress: WebhookIngress | null = null;
 let webhookIngressError: string | null = null;
 try {
-  webhookIngress = await listenWebhookIngress(webhooks, { port: WEBHOOK_PORT, publicBaseUrl: WEBHOOK_PUBLIC_URL });
+  webhookIngress = await listenWebhookIngress(webhooks, {
+    port: WEBHOOK_PORT, publicBaseUrl: WEBHOOK_PUBLIC_URL,
+    claimRequest: () => workspaceMaintenance.request(),
+  });
   const advertised = WEBHOOK_PUBLIC_URL ? ` (advertised as ${webhookIngress.baseUrl})` : "";
   console.log(`openmausbot webhook receiver on http://${webhookIngress.host}:${webhookIngress.port}${advertised}`);
 } catch (error) {
@@ -6411,6 +6436,10 @@ async function runGroupMemberTurn(
   // fresh bot rather than mixing a stale adapter with fresh permissions.
   setupRetry = 0,
 ): Promise<boolean> {
+  if (workspaceMaintenance.active) {
+    onDispatchError?.("A workspace backup or restore is in progress.");
+    return false;
+  }
   if (isCancelled?.()) return false;
   if (providerFleetReloading) {
     onDispatchError?.("provider settings are being updated — try again shortly");
@@ -8626,6 +8655,8 @@ function configStatus() {
   return {
     xai: { configured: Boolean(cfg.xai?.key) },
     anthropic: { configured: Boolean(cfg.anthropic?.key) },
+    // a fleet agent on this server means Settings → Workspaces has something to drive
+    fleet: { available: fleetAvailable(fleetSocketPath()) },
     // what this build is entitled to, so Settings shows only what works here
     edition: (({ edition, features }) => ({ edition, features }))(editionStatus()),
     // settings, not secrets: the cap and the operator's own price list
@@ -8908,6 +8939,40 @@ function readBody(req: IncomingMessage, limit = 1_000_000): Promise<any> {
 // onto it. Reject non-loopback Hosts outright (defeats rebinding) and
 // origins outside loopback (blocks remote-web CSRF).
 
+const workspaceBackupRoutes = createWorkspaceBackupRoutes({
+  dataDir: DATA_DIR,
+  appVersion: serverVersion(),
+  readBody,
+  restored: workspaceRestore,
+  status: () => ({ busy: workspaceMaintenance.active, pendingRestore: workspaceMaintenance.pendingRestore }),
+  authorized: (req, original) => {
+    const current = resolveRequestAuth(req, {
+      sessions, cookieName: SESSION_COOKIE, streamPath: "/api/events",
+      url: new URL(req.url ?? "/", `http://localhost:${PORT}`),
+      loopbackMutationToken: desktopMutationToken, companionMutationToken,
+    }).auth;
+    return Boolean(current?.scopes.includes("admin") && current.kind === original.kind &&
+      (current.kind !== "session" || (original.kind === "session" && current.session.id === original.session.id)));
+  },
+  exclusive: (work, keepLocked) => workspaceMaintenance.run(work, {
+    idle: () => !providerFleetReloading && !providerAuthSessions.active && !browserEngineInstall &&
+      !routines?.isTicking && !calendarCalls?.isTicking &&
+      !localVmImageBusy && !localVmProvisionBusy && !localVmModeChangeBusy &&
+      !localVmLifecycleBusy.size && !boxLifecycleBusyBots.size && !vpsPreviewRequests.size && !orphanBoxLifecycleBusyIds.size &&
+      !computerProviderConfigTransitions.size && !checkpointRestoreLeases.size &&
+      store.bots.every((bot) => !botHasActiveTurn(bot.id) && !routines?.activeRunForBot(bot.id) && !computerControl.snapshot(bot.id).held) &&
+      store.groups.every((group) => !groupIsWorking(group)),
+    pause: () => { routines?.stop(); calendarCalls?.stop(); watchdog.stop(); },
+    resume: () => { routines?.start(); calendarCalls?.start(); watchdog.start(); },
+    flush: async () => {
+      await Promise.all([flushAllProfileHistory(), flushAllMemoryJournals(), flushUsageLedger(DATA_DIR), flushDecisionLog(DATA_DIR)]);
+      // With writers gated and work idle, release our WAL connection for the
+      // consistent snapshot. Store reopens it lazily after maintenance.
+      closeMessageDb();
+    },
+  }, keepLocked),
+});
+
 const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   let url: URL;
   try {
@@ -8919,6 +8984,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   const method = req.method ?? "GET";
   /** scratch for route matches, shared by every `path.match` below */
   let m: RegExpMatchArray | null = null;
+  let releaseWorkspaceRequest: (() => void) | undefined;
   try {
     // ── who is asking (server/request-auth.ts) ──────────────────────────
     // Two public routes come first: what this server is, and turning a pairing
@@ -9030,6 +9096,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if (!gate.auth) return json(res, gate.status, { error: gate.error });
     const auth = gate.auth;
+
+    if (await workspaceBackupRoutes(req, res, path, auth)) return;
+    // Count ordinary requests until their asynchronous handler returns, not
+    // merely until the browser disconnects. A cancelled upload can still write.
+    if (path.startsWith("/api/") && path !== "/api/events" && path !== "/api/health" && !isWorkspaceBackupSessionControl(method, path)) {
+      releaseWorkspaceRequest = workspaceMaintenance.request();
+    }
 
     // ── sessions: who am I, tickets, pairing and revocation ─────────────
     if (method === "GET" && path === "/api/auth/session") {
@@ -13906,6 +13979,31 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       return json(res, 202, { installing: true });
     }
+    // ── the fleet: client workspaces on this server, through the root agent ──
+    // Admin scope by default plus the `admin` entitlement; the socket's own
+    // permissions decide whether this workspace may drive the agent at all.
+    const fleetRoute = /^\/api\/fleet(?:\/(workspaces(?:\/([a-z0-9-]+)(?:\/(users|suspend|resume))?)?|upgrade))?$/.exec(path);
+    if (fleetRoute) {
+      if (!entitled("admin")) return json(res, 403, { error: "Workspaces need an enterprise licence with the admin feature." });
+      const socket = fleetSocketPath();
+      if (!fleetAvailable(socket)) return json(res, 404, { error: "No fleet agent on this server. Run `openmausbot fleet init --domain … --operator <this user>` as root." });
+      const [, resource, slug, sub] = fleetRoute;
+      let forward: { method: string; path: string; body?: unknown } | null = null;
+      if (method === "GET" && !resource) forward = { method: "GET", path: "/workspaces" };
+      else if (method === "POST" && resource === "workspaces") forward = { method: "POST", path: "/workspaces", body: await readBody(req, 256 * 1024) };
+      else if (method === "POST" && resource === "upgrade") forward = { method: "POST", path: "/upgrade" };
+      else if (slug && method === "POST" && (sub === "users" || sub === "suspend" || sub === "resume")) forward = { method: "POST", path: `/workspaces/${slug}/${sub}`, ...(sub === "users" ? { body: await readBody(req, 8192) } : {}) };
+      else if (slug && method === "DELETE" && !sub) forward = { method: "DELETE", path: `/workspaces/${slug}`, body: await readBody(req, 8192) };
+      if (!forward) return json(res, 405, { error: "no such fleet operation" });
+      res.setHeader("cache-control", "no-store");
+      try {
+        const reply = await fleetRequest(socket, forward.method, forward.path, forward.body);
+        return json(res, reply.status, reply.body ?? {});
+      } catch (error) {
+        return json(res, 502, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
     // Which edition this server runs and why (see server/enterprise.ts). Read-only.
     if (method === "GET" && path === "/api/edition") {
       return json(res, 200, editionStatus());
@@ -15090,7 +15188,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         return json(res, 409, { error: "this bot's cloud computer is being changed — wait for it to finish" });
       }
       if (bot.cloudBackend === "vps") {
-        const releaseComputerLifecycle = claimBotComputerLifecycle(botId);
+        if (m[2] === "screenshot") {
+          let preview = vpsPreviewRequests.get(botId);
+          if (!preview) {
+            preview = vps.vpsComputerScreenshot(cfg, botId).finally(() => {
+              vpsPreviewRequests.delete(botId);
+            });
+            vpsPreviewRequests.set(botId, preview);
+          }
+          return json(res, 200, await preview);
+        }
+        // Opening the existing SSH viewer can coexist with a capture. Start,
+        // stop, remove and Settings deletion still exclude pending previews.
+        const releaseComputerLifecycle = claimBotComputerLifecycle(botId, m[2] === "join");
         try {
           if (m[2] === "exec") {
             return json(res, 409, { error: "the VPS console is available to the bot through its scoped computer tools" });
@@ -15104,7 +15214,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (m[2] === "join") {
             return json(res, 200, await vps.vpsComputerJoin(cfg, botId));
           }
-          if (m[2] === "screenshot") return json(res, 200, await vps.vpsComputerScreenshot(cfg, botId));
           const action = m[2] === "provision" ? "provision" : m[2] === "remove" ? "remove" : "stop";
           return json(res, 200, await vps.vpsComputerAction(action, cfg, botId));
         } finally {
@@ -15162,6 +15271,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
   } catch (e) {
     const status = (e as any)?.status ?? 500;
     return json(res, status, { error: e instanceof Error ? e.message : String(e) });
+  } finally {
+    releaseWorkspaceRequest?.();
   }
 };
 
@@ -15245,11 +15356,14 @@ const gracefulShutdown = createGracefulShutdown({
     },
     () => flushAllProfileHistory(),
     () => flushAllMemoryJournals(),
+    () => flushUsageLedger(DATA_DIR),
+    () => flushDecisionLog(DATA_DIR),
   ],
   // Cleanup jobs run concurrently. Release only after they settle (or reach
   // the shutdown deadline), immediately before the process exits, so no new
   // server can overlap with a still-mutating old one.
   exit: (code) => {
+    closeMessageDb();
     releaseDataDirLeaseAtExit();
     process.exit(code);
   },

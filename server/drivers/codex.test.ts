@@ -200,6 +200,42 @@ describe("CodexDriver turns (fake app-server)", () => {
     expect(recorder.events.some((event) => event.type === "request.opened")).toBe(false);
   });
 
+  it("keeps the parent working after helper completion and ignores foreign output and usage", async () => {
+    await create({ mode: "helper-events" });
+    await instance.adapter.sendTurn({ threadId: "t-helper-events", text: "use a helper then continue" });
+    const permission = await recorder.until((event) => event.type === "request.opened");
+    expect(permission).toMatchObject({ summary: "echo parent continues" });
+    expect(recorder.events.some((event) => event.type === "turn.completed")).toBe(false);
+    expect(JSON.stringify(recorder.events)).not.toContain("FOREIGN");
+    expect(recorder.events.some((event) => event.type === "thread.token-usage.updated")).toBe(false);
+    await instance.adapter.respondToRequest("t-helper-events", permission.requestId!, { behavior: "allow" });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(recorder.events.filter((event) => event.type === "turn.completed")).toHaveLength(1);
+    expect(recorder.events.at(-1)).toMatchObject({ ok: true, usage: { input: 7, output: 3 } });
+    expect(recorder.events.find((event) => event.type === "item.completed" && event.itemType === "assistant_text")).toMatchObject({ text: "done from fake codex" });
+    expect(JSON.stringify(recorder.events)).not.toContain("FOREIGN");
+
+    const repeat = await instance.adapter.sendTurn({
+      threadId: "t-helper-events", resumeCursor: "codex-thread-1", text: "continue and deny the next request",
+    });
+    const denied = await recorder.until((event) => event.turnId === repeat.turnId && event.type === "request.opened");
+    await instance.adapter.respondToRequest("t-helper-events", denied.requestId!, { behavior: "deny" });
+    await recorder.until((event) => event.turnId === repeat.turnId && event.type === "turn.completed");
+    expect(recorder.events.filter((event) => event.type === "turn.completed")).toHaveLength(2);
+    expect(recorder.events.at(-1)).toMatchObject({ ok: true });
+    expect(recorder.events.find((event) => event.turnId === repeat.turnId && event.type === "request.resolved")).toMatchObject({ behavior: "deny" });
+    expect(JSON.stringify(recorder.events)).not.toContain("FOREIGN");
+  });
+
+  it("retains parent notifications delivered before the turn/start response", async () => {
+    await create({ mode: "early-turn-events" });
+    await instance.adapter.sendTurn({ threadId: "t-early-events", text: "finish quickly" });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(recorder.events.at(-1)).toMatchObject({ ok: true });
+    expect(recorder.events.filter((event) => event.type === "turn.completed")).toHaveLength(1);
+    expect(recorder.events.find((event) => event.type === "item.completed" && event.itemType === "assistant_text")).toMatchObject({ text: "done from fake codex" });
+  });
+
   it.each([
     ["ask", "on-request", "workspace-write", "workspaceWrite"],
     ["auto", "on-request", "workspace-write", "workspaceWrite"],
