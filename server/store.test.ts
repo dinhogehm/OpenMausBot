@@ -933,8 +933,14 @@ describe("Store redacts bot-authored secrets on write", () => {
     const reply = store.appendMessage(bot.threadId, { role: "bot", kind: "text", text: `Your key is ${key}` });
     expect(reply.text).not.toContain(key);
     expect(reply.text).toContain("«redacted");
-    const chip = store.appendMessage(bot.threadId, { role: "bot", kind: "activity", tool: { name: `Bash: export TOKEN=${key}`, ok: true } });
+    const chip = store.appendMessage(bot.threadId, {
+      role: "bot",
+      kind: "activity",
+      tool: { name: `Bash: export TOKEN=${key}`, ok: true, summary: `export TOKEN=${key}` },
+    });
     expect(chip.tool?.name).not.toContain(key);
+    expect(chip.tool?.summary).not.toContain(key);
+    expect(chip.tool?.summary).toContain("«redacted");
     const card = store.appendMessage(bot.threadId, {
       role: "bot",
       kind: "options",

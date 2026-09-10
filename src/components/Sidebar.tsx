@@ -25,7 +25,6 @@ import {
   PinOff,
   Plus,
   Search,
-  Sparkles,
   Puzzle,
   Trash2,
   Users,
@@ -41,7 +40,6 @@ import { t } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { WorkingDots } from "./WorkingIndicator";
-import { skillRecorderEnabled } from "@/lib/feature-flags";
 import { nextRename } from "@/lib/rename";
 import { downloadAllBots } from "@/lib/team-files";
 import { useDesktopCapabilities } from "./DesktopCapabilities";
@@ -323,7 +321,7 @@ function RoomContextMenu({
       data-room-menu
       data-sidebar
       style={{ top, left }}
-      className="fixed z-40 w-[228px] overflow-hidden rounded-xl border border-hairline/50 bg-card py-1.5 shadow-2xl shadow-black/60"
+      className="fixed z-40 w-[228px] overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60"
     >
       {!remoteClient && (renaming ? (
         <div className="flex items-center gap-1 px-2 py-1">
@@ -549,7 +547,7 @@ function SectionPicker({
     <div
       data-section-picker
       style={{ top, left }}
-      className="fixed z-40 w-[236px] overflow-hidden rounded-xl border border-hairline/50 bg-card py-2 shadow-2xl shadow-black/60"
+      className="fixed z-40 w-[236px] overflow-hidden rounded-xl border border-hairline/50 bg-menu py-2 shadow-2xl shadow-black/60"
     >
       <div className="px-3.5 pb-1 text-[10px] font-medium uppercase tracking-[0.08em] text-ink-secondary">
         {t("sidebar.section.moveToContext")}
@@ -718,7 +716,7 @@ export function BotContextMenu({
       aria-label={t("sidebar.bot.actions", { name: bot.name })}
       onKeyDown={navigateThreadMenu}
       style={{ top: menu.y, left: menu.x }}
-      className="fixed z-40 max-h-[calc(100dvh-16px)] w-[228px] max-w-[calc(100vw-16px)] overflow-y-auto overscroll-contain rounded-xl border border-hairline/50 bg-card py-1.5 shadow-2xl shadow-black/60"
+      className="fixed z-40 max-h-[calc(100dvh-16px)] w-[228px] max-w-[calc(100vw-16px)] overflow-y-auto overscroll-contain rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60"
     >
       {showThreads && <>
         {item(<Plus size={16} className="text-ink-secondary" />, t("task.newShort"), () => dispatch({ type: "newTask", botId: bot.id }))}
@@ -1019,7 +1017,7 @@ export function BotListItem({
   useEffect(() => {
     if (iconOnly) setRenaming(false);
   }, [iconOnly]);
-  const avatarSize = iconOnly ? 44 : density === "compact" ? 26 : 32;
+  const avatarSize = iconOnly ? 44 : density === "compact" ? (showThreads ? 26 : 40) : (showThreads ? 32 : 56);
   // the visible branch, so a version switch changes the row with the chat
   const visible = visibleMessages(bot);
   const last = visible.at(-1);
@@ -1032,8 +1030,8 @@ export function BotListItem({
     iconOnly
       ? "justify-center px-1 py-1.5"
       : density === "compact"
-        ? cn("gap-1.5 py-1", showThreads ? "pl-6 pr-9 group-hover:pr-16 group-focus-within:pr-16 max-md:pr-16" : "pl-2 pr-9")
-        : cn("gap-2 py-2", showThreads ? "pl-6 pr-9 group-hover:pr-16 group-focus-within:pr-16 max-md:pr-16" : "pl-2 pr-9"),
+        ? cn(showThreads ? "gap-1.5 py-1" : "gap-2 py-1.5", showThreads ? "pl-6 pr-9 group-hover:pr-16 group-focus-within:pr-16 max-md:pr-16" : "pl-2 pr-9")
+        : cn(showThreads ? "gap-2 py-2" : "gap-3 py-2.5", showThreads ? "pl-6 pr-9 group-hover:pr-16 group-focus-within:pr-16 max-md:pr-16" : "pl-2 pr-9"),
     // Chief of Staff is called out by the crown label below, not by tinting
     // the whole row — an accent border + fill read as "selected" even when
     // another bot was active.
@@ -1733,7 +1731,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
               <>
                 <div className="fixed inset-0 z-30" onMouseDown={() => setDensityOpen(false)} />
                 <div className={cn(
-                  "absolute top-full z-40 mt-1 w-40 overflow-hidden rounded-xl border border-hairline/50 bg-card py-1.5 shadow-2xl shadow-black/60",
+                  "absolute top-full z-40 mt-1 w-40 overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60",
                   density === "icons" ? "left-0" : "right-0",
                 )}>
                   {(["comfortable", "compact", "icons"] as const).map((option) => (
@@ -1771,14 +1769,13 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             <>
               <div className="fixed inset-0 z-30" onMouseDown={() => setPlusOpen(false)} />
               <div className={cn(
-                "absolute top-full z-40 mt-1 w-44 overflow-hidden rounded-xl border border-hairline/50 bg-card py-1.5 shadow-2xl shadow-black/60",
+                "absolute top-full z-40 mt-1 w-44 overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60",
                 density === "icons" ? "left-0" : "right-0",
               )}>
                 <button
                   onClick={() => {
                     setPlusOpen(false);
-                    track("bot_created");
-                    dispatch({ type: "newBot" });
+                    dispatch({ type: "toggleNewBot", open: true });
                   }}
                   className="flex w-full items-center gap-3 px-3.5 py-2 text-left text-[14px] text-ink hover:bg-raised/70"
                 >
@@ -2009,21 +2006,6 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             <WorkflowIcon size={20} className={state.activeView === "workflows" ? "text-accent" : "text-ink-secondary"} />
             <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Workflows</span>
           </button>}
-          {!remoteClient && skillRecorderEnabled(state.config) && (
-            <button
-              onClick={() => dispatch({ type: "showSkillRecorder" })}
-              aria-label={density === "icons" ? t("sidebar.nav.teachSkill") : undefined}
-              title={density === "icons" ? t("sidebar.nav.teachSkill") : undefined}
-              className={cn(
-                "flex min-h-10 w-full items-center rounded-xl py-2 text-left transition-colors",
-                density === "icons" ? "justify-center px-2" : "gap-3 px-3",
-                state.activeView === "skill-recorder" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
-              )}
-            >
-              <Sparkles size={20} className={state.activeView === "skill-recorder" ? "text-accent" : "text-ink-secondary"} />
-              <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>{t("sidebar.nav.teachSkill")}</span>
-            </button>
-          )}
           <button
             onClick={() => dispatch({ type: "showRoutines" })}
             aria-label={density === "icons" ? t("sidebar.nav.automations") : undefined}
@@ -2074,17 +2056,6 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                 active: state.activeView === "workflows",
                 onSelect: () => dispatch({ type: "showWorkflows" }),
               }] : []),
-              ...(!remoteClient && skillRecorderEnabled(state.config)
-                ? [
-                    {
-                      key: "skill-recorder",
-                      label: t("sidebar.nav.teachSkill"),
-                      icon: <Sparkles size={18} />,
-                      active: state.activeView === "skill-recorder",
-                      onSelect: () => dispatch({ type: "showSkillRecorder" }),
-                    },
-                  ]
-                : []),
               {
                 key: "routines",
                 label: t("sidebar.nav.automations"),

@@ -33,6 +33,7 @@ import { codexLocalProviderArgs } from "./local-inject.ts";
 import { augmentedPath, splitCliString } from "../env-path.ts";
 import { classifyError, computeBackoff, RETRY_MAX_ATTEMPTS } from "./retry.ts";
 import { appendNative } from "./native.ts";
+import { commandSummary } from "../tool-summary.ts";
 import { codexDeveloperInstructions, syncCodexInstructions } from "./codex-instructions.ts";
 import type { ApprovalMode } from "../../shared/approval-mode.ts";
 import { CodexDeviceAuthController } from "./codex-device-auth.ts";
@@ -504,7 +505,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     const active = new Map<string, Turn>();
 
     const emit = (event: RuntimeEvent) => {
-      for (const l of [...listeners]) l(event);
+      for (const l of Array.from(listeners)) l(event);
     };
     const base = (threadId: string, turnId: string) => ({
       eventId: newEventId(),
@@ -650,7 +651,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       const settle = async (ok: boolean, stopReason: string | null) => {
         if (state.settled) return;
         state.settled = true;
-        for (const finish of [...asks.values()]) finish("deny", "OpenMausBot: the turn ended", "system");
+        for (const finish of Array.from(asks.values())) finish("deny", "OpenMausBot: the turn ended", "system");
         for (const p of rpcPending.values()) p.reject(new Error("turn settled"));
         rpcPending.clear();
         const complete = () => {
@@ -817,7 +818,16 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
                     : item.type === "webSearch"
                       ? "web_search"
                       : null;
-            if (title) emit({ ...base(threadId, turnId), type: "item.started", itemType: "tool", itemId: item.id, title });
+            if (title) {
+              emit({
+                ...base(threadId, turnId),
+                type: "item.started",
+                itemType: "tool",
+                itemId: item.id,
+                title,
+                summary: item.type === "commandExecution" ? commandSummary({ command: item.command }) : undefined,
+              });
+            }
             break;
           }
           case "item/completed": {

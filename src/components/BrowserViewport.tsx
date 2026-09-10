@@ -30,9 +30,9 @@ export function createBrowserPressedInputs(input: BrowserInput) {
   };
 }
 
-export function BrowserViewport({ frame, width, height, driving, input: sendInput, acknowledge, onDecodeError }: {
+export function BrowserViewport({ frame, width, height, driving, input: sendInput, acknowledge, onDecodeError, onReturnToToolbar }: {
   frame: BrowserFrame; width: number; height: number; driving: boolean;
-  input: BrowserInput; acknowledge: (seq: number) => void; onDecodeError: () => void;
+  input: BrowserInput; acknowledge: (seq: number) => void; onDecodeError: () => void; onReturnToToolbar: () => void;
 }) {
   const screen = useRef<HTMLImageElement>(null);
   const pressed = useMemo(() => createBrowserPressedInputs(sendInput), [sendInput]);
@@ -73,6 +73,9 @@ export function BrowserViewport({ frame, width, height, driving, input: sendInpu
   }, [driving, input, width, height]);
   return <>
     <img ref={screen} src={`data:image/${frame.format === "png" ? "png" : "jpeg"};base64,${frame.data}`} alt="Live bot browser" draggable={false} tabIndex={driving ? 0 : -1}
+      title={driving ? "Shift+Escape returns to the browser address bar." : undefined}
+      aria-description={driving ? "Keyboard input goes to the remote page. Press Shift+Escape to return to the browser address bar." : undefined}
+      aria-keyshortcuts={driving ? "Shift+Escape" : undefined}
       className={`block h-auto w-full select-none outline-none focus:ring-2 focus:ring-inset focus:ring-accent ${driving ? "cursor-default touch-none" : "cursor-not-allowed"}`}
       onLoad={rendered} onError={onDecodeError}
       onBlur={pressed.release}
@@ -88,17 +91,20 @@ export function BrowserViewport({ frame, width, height, driving, input: sendInpu
         input({ type: "input_mouse", eventType: "mouseReleased", ...point(e.clientX, e.clientY), button: e.button === 2 ? "right" : e.button === 1 ? "middle" : "left", clickCount: e.detail || 1, modifiers: modifiers(e) });
       }}
       onPointerCancel={pressed.release}
-      onPointerMove={(e) => { if (driving) input({ type: "input_mouse", eventType: "mouseMoved", ...point(e.clientX, e.clientY), button: e.buttons ? "left" : "none", modifiers: modifiers(e) }); }}
+      onPointerMove={(e) => { if (driving) input({ type: "input_mouse", eventType: "mouseMoved", ...point(e.clientX, e.clientY), button: e.buttons & 1 ? "left" : e.buttons & 2 ? "right" : e.buttons & 4 ? "middle" : "none", modifiers: modifiers(e) }); }}
       onKeyDown={(e) => {
         if (!driving || e.nativeEvent.isComposing) return;
-        if (e.key === "Escape") { e.currentTarget.blur(); return; }
+        if (e.key === "Escape" && e.shiftKey) {
+          e.preventDefault(); e.stopPropagation(); pressed.release(); onReturnToToolbar(); return;
+        }
         // Native paste supplies actual clipboard text via onPaste below.
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v") return;
         e.preventDefault();
         input({ type: "input_keyboard", eventType: "keyDown", key: e.key, code: e.code, windowsVirtualKeyCode: e.keyCode, modifiers: modifiers(e), ...(e.key.length === 1 && !e.metaKey && !e.ctrlKey && !e.altKey ? { text: e.key } : {}) });
       }}
       onKeyUp={(e) => {
-        if (!driving || e.key === "Escape" || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v")) return;
+        if (!driving || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v")) return;
+        if (e.key === "Escape" && e.shiftKey) { e.preventDefault(); e.stopPropagation(); return; }
         e.preventDefault(); input({ type: "input_keyboard", eventType: "keyUp", key: e.key, code: e.code, windowsVirtualKeyCode: e.keyCode, modifiers: modifiers(e) });
       }}
       onPaste={(e) => { if (driving) { e.preventDefault(); input({ type: "input_keyboard", eventType: "char", text: e.clipboardData.getData("text/plain").slice(0, 4096) }); } }}

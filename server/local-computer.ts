@@ -349,7 +349,7 @@ export function readCuaConnection({
     }
   }
 
-  for (const file of [...new Set(candidates)]) {
+  for (const file of new Set(candidates)) {
     try {
       const raw = JSON.parse(readFileSync(file, "utf8"));
       if (platform === "linux") {

@@ -76,6 +76,7 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
         bot.section,
         bot.composio,
         bot.browser,
+        bot.mcpServers,
         bot.chiefOfStaff,
         bot.modelSelection,
       ]),
@@ -93,6 +94,7 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
       bot.section,
       bot.composio,
       bot.browser,
+      bot.mcpServers,
       bot.chiefOfStaff,
       bot.modelSelection,
     ],
@@ -338,6 +340,10 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
                   prompt={prompt}
                   promptError={promptError}
                   onOpen={(target) => dispatch({ type: "toggleSettings", open: true, section: target })}
+                  onSetup={derived.canCoordinate && !bot.busy ? () => {
+                    dispatch({ type: "toggleSettings", open: false });
+                    dispatch({ type: "send", botId: bot.id, text: "/setup", threadId: bot.threadId });
+                  } : undefined}
                 />
               ))}
 
@@ -355,8 +361,9 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
             {section === "skills" && <SkillsSection bot={bot} />}
 
             {/* Memory has an explicit Save button; preserve its unsaved draft
-                while the user consults another section. It fetches on expand. */}
-            <div hidden={section !== "memory"}><MemorySection bot={bot} /></div>
+                while the user consults another section. It fetches when it
+                becomes the active section. */}
+            <div hidden={section !== "memory"}><MemorySection bot={bot} active={section === "memory"} /></div>
 
             {section === "routines" && (
               <RoutinesSection bot={bot} routines={derived.botRoutines} runs={state.routineRuns} />

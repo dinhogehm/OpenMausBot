@@ -2,6 +2,7 @@ import { z } from "zod";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 import { schemaIssue, type JsonValue } from "./schema.ts";
+import { isSkillName, parseSkillMd, SKILL_FILE_MAX_BYTES } from "./skills.ts";
 import type { MausColor } from "./store.ts";
 import type { TeamManifestMember } from "./team-manifest.ts";
 import { BOT_PROFILE_LIMITS } from "../shared/bot-profile.ts";
@@ -9,6 +10,9 @@ import { BOT_PROFILE_LIMITS } from "../shared/bot-profile.ts";
 export const BOT_PACKAGE_FORMAT = "openmaus.package" as const;
 export const BOT_PACKAGE_VERSION = 1 as const;
 export const BOTMRR_MARKDOWN_VERSION = 1 as const;
+export const BOT_PACKAGE_SKILLS_VERSION = 1 as const;
+export const BOT_PACKAGE_MAX_SKILLS = 20;
+const BOT_PACKAGE_MARKDOWN_MAX_BYTES = 1_000_000;
 
 const COLORS = [
   "green",
@@ -37,6 +41,27 @@ const key = requiredText(64).regex(/^[a-z0-9][a-z0-9_-]*$/, {
   message: "may only contain lowercase letters, numbers, - and _",
 });
 const MAX_DATE_MS = 8_640_000_000_000_000;
+const skillName = requiredText(64).refine(isSkillName, {
+  message: "must be a lowercase skill name",
+});
+const portableSource = optionalText(2_000).refine(
+  (value) => value === undefined || !/^(?:[a-z]:[\\/]|[\\/]|\\\\|file:)/i.test(value),
+  { message: "must not be an absolute path" },
+);
+const skillInstructions = z
+  .string({ error: "must be text" })
+  .min(1, { message: "is required" })
+  .max(SKILL_FILE_MAX_BYTES, { message: "is too long" })
+  .refine((value) => Buffer.byteLength(value, "utf8") <= SKILL_FILE_MAX_BYTES, { message: "is too large" })
+  .refine((value) => /^---\r?\n/.test(value), { message: "must start with SKILL.md frontmatter" });
+const portableSkillSchema = z.object({
+  name: skillName,
+  description: requiredText(1_024),
+  source: portableSource,
+  license: optionalText(200),
+  compatibility: optionalText(200),
+  instructions: skillInstructions,
+});
 const CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const intervalWeekdays = z.array(z.number().int().min(0).max(6)).min(1).max(7).refine(
   (weekdays) => new Set(weekdays).size === weekdays.length,
@@ -126,6 +151,7 @@ const packageSchema = z.object({
         mascotBody: optionalText(40),
       }),
       playbooks: z.array(key).max(40).optional(),
+      skills: z.array(skillName).max(BOT_PACKAGE_MAX_SKILLS).optional(),
     })).min(1).max(200),
     chiefOfStaff: key.optional(),
     rooms: z.array(z.object({
@@ -157,6 +183,10 @@ const packageSchema = z.object({
       triggers: z.array(requiredText(100)).min(1).max(30),
       instructions: requiredText(24_000),
     })).max(80).optional(),
+    skills: z.object({
+      version: z.literal(BOT_PACKAGE_SKILLS_VERSION),
+      entries: z.array(portableSkillSchema).min(1).max(BOT_PACKAGE_MAX_SKILLS),
+    }).optional(),
     examples: z.array(z.object({
       title: requiredText(120),
       input: requiredText(4_000),
@@ -169,6 +199,7 @@ export type ParsedBotPackage = z.infer<typeof packageSchema>;
 export type BotPackageDefinition = ParsedBotPackage["package"];
 export type BotPackageAgent = BotPackageDefinition["agents"][number];
 export type BotPackagePlaybook = NonNullable<BotPackageDefinition["playbooks"]>[number];
+export type BotPackageSkill = NonNullable<BotPackageDefinition["skills"]>["entries"][number];
 
 export function isBotPackage(value: unknown): boolean {
   if (typeof value === "string") return /^---\r?\n[\s\S]*?\bbotmrr:\s*1\b/m.test(value);
@@ -177,7 +208,7 @@ export function isBotPackage(value: unknown): boolean {
 }
 
 function markdownDocument(markdown: string): ParsedBotPackage {
-  if (Buffer.byteLength(markdown) > 1_000_000) throw new Error("The bot playbook is too large");
+  if (Buffer.byteLength(markdown) > BOT_PACKAGE_MARKDOWN_MAX_BYTES) throw new Error("The bot playbook is too large");
   const frontmatter = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
   if (!frontmatter) throw new Error("This Markdown is missing YAML frontmatter");
   let metadata: unknown;
@@ -220,6 +251,7 @@ export function parseBotPackage(value: JsonValue | ParsedBotPackage): ParsedBotP
   };
   const agents = unique(pkg.agents.map((agent) => agent.key), "agent");
   const playbooks = unique((pkg.playbooks ?? []).map((playbook) => playbook.key), "playbook");
+  const skills = unique((pkg.skills?.entries ?? []).map((skill) => skill.name), "skill");
   unique((pkg.rooms ?? []).map((room) => room.key), "room");
   unique((pkg.routines ?? []).map((routine) => routine.key), "routine");
 
@@ -230,6 +262,23 @@ export function parseBotPackage(value: JsonValue | ParsedBotPackage): ParsedBotP
     for (const playbook of agent.playbooks ?? []) {
       if (!playbooks.has(playbook)) throw new Error(`Agent ${agent.key} references unknown playbook: ${playbook}`);
     }
+    const assignedSkills = unique(agent.skills ?? [], `skill in agent ${agent.key}`);
+    for (const skill of assignedSkills) {
+      if (!skills.has(skill)) throw new Error(`Agent ${agent.key} references unknown skill: ${skill}`);
+    }
+  }
+  const referencedSkills = new Set(pkg.agents.flatMap((agent) => agent.skills ?? []));
+  for (const skill of pkg.skills?.entries ?? []) {
+    const parsed = parseSkillMd(skill.instructions);
+    if ("error" in parsed) throw new Error(`Skill ${skill.name} is invalid: ${parsed.error}`);
+    if (parsed.name !== skill.name) throw new Error(`Skill ${skill.name} does not match its SKILL.md name`);
+    if (parsed.description !== skill.description) throw new Error(`Skill ${skill.name} does not match its description`);
+    for (const field of ["license", "compatibility"] as const) {
+      if (skill[field] !== undefined && skill[field] !== parsed[field]) {
+        throw new Error(`Skill ${skill.name} does not match its ${field}`);
+      }
+    }
+    if (!referencedSkills.has(skill.name)) throw new Error(`Skill ${skill.name} is not referenced by an agent`);
   }
   for (const room of pkg.rooms ?? []) {
     const members = unique(room.members, `member in room ${room.key}`);
@@ -321,7 +370,9 @@ export function renderBotPackageMarkdown(document: ParsedBotPackage): string {
     ? pkg.requirements.apps.map((app) => `- **${app.label}${app.optional ? " (optional)" : ""}:** ${app.reason}`).join("\n")
     : "- No connected apps are required.";
 
-  return `---\n${frontmatter}\n---\n\n# ${pkg.name}\n\n${pkg.tagline}\n\n> **Give this file to your Chief of Staff.** It is the complete team blueprint. Any agent system can run it; OpenMausBot can also install it directly.\n\n## Activation\n\nYou are the Chief of Staff for this blueprint. Read the whole document before acting. Confirm the user's goal and any missing inputs, then create or delegate to the specialist roles below. Preserve their names, ownership, boundaries, shared-room rules, and playbooks. If your platform cannot literally spawn agents, perform the roles one at a time and keep their outputs clearly separated.\n\nNever request pasted passwords or secret keys. Use the platform's normal connection flow. Do not send messages, publish content, spend money, delete data, or enable a schedule without the user's explicit approval. All routines start paused.\n\n## Mission\n\n${pkg.summary}\n\n## Outcomes\n\n${list(pkg.outcomes)}\n\n## Connections\n\n${connections}\n\n## Team\n\n${agents}\n\n## Chief of Staff\n\nThe Chief of Staff role is \`${pkg.chiefOfStaff ?? pkg.agents[0].key}\`. This role owns delegation, synthesis, conflict resolution, and the final answer to the user.\n${rooms ? `\n## Shared rooms\n\n${rooms}\n` : ""}${routines ? `\n## Suggested routines\n\n${routines}\n` : ""}${playbooks ? `\n## Playbooks\n\n${playbooks}\n` : ""}${examples ? `\n## Example job\n\n${examples}\n` : ""}\n## Completion rule\n\nReturn one clear result to the user, distinguish evidence from inference, cite source links when the work uses external material, and state what still needs human approval or a connected app.\n`;
+  const markdown = `---\n${frontmatter}\n---\n\n# ${pkg.name}\n\n${pkg.tagline}\n\n> **Give this file to your Chief of Staff.** It is the complete team blueprint. Any agent system can run it; OpenMausBot can also install it directly.\n\n## Activation\n\nYou are the Chief of Staff for this blueprint. Read the whole document before acting. Confirm the user's goal and any missing inputs, then create or delegate to the specialist roles below. Preserve their names, ownership, boundaries, shared-room rules, and playbooks. If your platform cannot literally spawn agents, perform the roles one at a time and keep their outputs clearly separated.\n\nNever request pasted passwords or secret keys. Use the platform's normal connection flow. Do not send messages, publish content, spend money, delete data, or enable a schedule without the user's explicit approval. All routines start paused.\n\n## Mission\n\n${pkg.summary}\n\n## Outcomes\n\n${list(pkg.outcomes)}\n\n## Connections\n\n${connections}\n\n## Team\n\n${agents}\n\n## Chief of Staff\n\nThe Chief of Staff role is \`${pkg.chiefOfStaff ?? pkg.agents[0].key}\`. This role owns delegation, synthesis, conflict resolution, and the final answer to the user.\n${rooms ? `\n## Shared rooms\n\n${rooms}\n` : ""}${routines ? `\n## Suggested routines\n\n${routines}\n` : ""}${playbooks ? `\n## Playbooks\n\n${playbooks}\n` : ""}${examples ? `\n## Example job\n\n${examples}\n` : ""}\n## Completion rule\n\nReturn one clear result to the user, distinguish evidence from inference, cite source links when the work uses external material, and state what still needs human approval or a connected app.\n`;
+  if (Buffer.byteLength(markdown) > BOT_PACKAGE_MARKDOWN_MAX_BYTES) throw new Error("The bot playbook is too large");
+  return markdown;
 }
 
 export function packageAgentAsMember(agent: BotPackageAgent): TeamManifestMember {

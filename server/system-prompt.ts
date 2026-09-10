@@ -10,11 +10,23 @@ import { soulSystemPrompt } from "./bot-folder.ts";
 export type PromptPart = { id: string; label: string; text: string };
 export type PromptSection = PromptPart & { bytes: number };
 
+/** Sections whose text legitimately differs between two turns of one live
+ * conversation: memory, because a bot writes to MEMORY.md mid-conversation,
+ * and mentions, which describe the message being sent right now.
+ *
+ * They are reported apart from the rest so a driver that keeps one CLI
+ * process per thread can key that process on the stable half. Before this
+ * split, saving a memory changed the system prompt, which changed the spawn
+ * contract, which relaunched the CLI — and the provider then re-uploaded the
+ * entire conversation at the cache-write rate. Mentions did the same on any
+ * turn that tagged a bot. */
+const VOLATILE_SECTIONS = new Set(["memory", "mentions"]);
+
 export function buildSystemPrompt(
   persona: string,
   soul: string,
   parts: PromptPart[],
-): { text: string; sections: PromptSection[] } {
+): { text: string; sections: PromptSection[]; stable: string; volatile: string } {
   const ordered: PromptPart[] = [
     { id: "persona", label: "Identity", text: persona },
     { id: "soul", label: "Standing instructions (SOUL.md)", text: soulSystemPrompt(soul) },
@@ -23,7 +35,9 @@ export function buildSystemPrompt(
   const sections = ordered
     .filter((part) => part.text.length > 0)
     .map((part) => ({ ...part, bytes: Buffer.byteLength(part.text, "utf8") }));
-  return { text: sections.map((section) => section.text).join(""), sections };
+  const halves = (volatile: boolean) =>
+    sections.filter((section) => VOLATILE_SECTIONS.has(section.id) === volatile).map((section) => section.text).join("");
+  return { text: sections.map((section) => section.text).join(""), sections, stable: halves(false), volatile: halves(true) };
 }
 
 export type ComputerPromptKind = "vm-private" | "vm-shared" | "box" | "box-agent" | "vps" | "local";
@@ -55,6 +69,13 @@ export function computerPrompt(kind: ComputerPromptKind | null): string {
 
 export const COMPOSIO_PROMPT =
   " The user's connected apps (Gmail, Calendar, Slack, Notion, and the rest) are reachable through the composio tools — find the right one with COMPOSIO_SEARCH_TOOLS, read its arguments with COMPOSIO_GET_TOOL_SCHEMAS, then run it with COMPOSIO_MULTI_EXECUTE_TOOL. Reach for them before telling the user you have no access to a service.";
+/** Names the user-added MCP servers a turn actually mounted, so the bot
+ * reaches for them instead of saying it has no such tool. Empty when none. */
+export function customMcpPrompt(names: string[]): string {
+  if (names.length === 0) return "";
+  const list = names.map((name) => `"${name}"`).join(", ");
+  return ` The user also added ${names.length === 1 ? "an MCP server" : "MCP servers"} for you: ${list}. Use their available tools under the engine's normal approval rules.`;
+}
 export const CREDENTIAL_PROMPT =
   " If a supported API key is missing, use request_credential to create a secure credential request. A freshly QR-paired mobile app or the desktop app can show the secure entry card. Never claim it opened unless the request succeeded, and never ask the user to paste credentials into chat.";
 export const THREADS_PROMPT =

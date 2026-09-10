@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { StoreProvider, type Bot, type Group } from "@/state/store";
 import { BotThreadList, GroupThreadList } from "./Sidebar";
 import { GroupTaskPicker, TaskPicker } from "./TaskPicker";
-import { workingFolderLabel } from "./ChatView";
+import { workingFolderLabel } from "./ComposerTray";
 
 vi.mock("./DesktopCapabilities", () => ({ useDesktopCapabilities: () => ({}) }));
 

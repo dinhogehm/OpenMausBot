@@ -137,8 +137,10 @@ export interface Message {
    * call mode never has to re-derive it from the raw tool name, and absent
    * for chips not worth interrupting the ear for. */
   /** `setup` marks an error the user fixes by installing or configuring
-   * something — the UI offers setup instead of a retry that cannot work. */
-  tool?: { name: string; ok?: boolean; spoken?: string; setup?: boolean };
+   * something — the UI offers setup instead of a retry that cannot work.
+   * `summary` is the call's input on one redacted line (the shell command)
+   * where the driver only names the tool in `name`. */
+  tool?: { name: string; ok?: boolean; spoken?: string; setup?: boolean; summary?: string };
   /** user messages sent INTO a running turn (capabilities.queueing): the
    * model saw it mid-turn, so the transcript marks it — a reader should
    * know the reply above it may already account for this line */
@@ -360,7 +362,8 @@ export interface TaskUsage {
 
 /** Everything the BOT authored is scrubbed of content-shaped secrets before
  * it is stored: its reply text, a tool title (an ACP engine's title can be
- * the whole command line), a permission card's summary. What the user typed
+ * the whole command line) and the command beside it, a permission card's
+ * summary. What the user typed
  * is theirs and stays as typed. Stored, not just displayed: the transcript
  * is replayed into every rebuild, and a leaked key would otherwise be
  * permanent. */
@@ -368,7 +371,10 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
   if (message.role !== "bot") return message;
   const out = { ...message };
   if (typeof out.text === "string") out.text = redactSecretsInText(out.text);
-  if (out.tool?.name) out.tool = { ...out.tool, name: redactSecretsInText(out.tool.name) };
+  if (out.tool?.name) {
+    out.tool = { ...out.tool, name: redactSecretsInText(out.tool.name) };
+    if (out.tool.summary) out.tool.summary = redactSecretsInText(out.tool.summary);
+  }
   if (out.routineRun) {
     const routineRun = { ...out.routineRun };
     routineRun.routineName = redactSecretsInText(routineRun.routineName);
@@ -646,6 +652,10 @@ export interface BotRecord {
   /** Whether this bot gets the app's built-in browser (the Browser tab of
    * the computer panel). On unless switched off. */
   browser?: boolean;
+  /** Which of the app-wide MCP servers (config.mcpServers) this bot mounts,
+   * by name. Absent = every enabled server, the pre-existing behavior; an
+   * empty list = none. Names that no longer exist are ignored. */
+  mcpServers?: string[];
   /** Id of a named browser profile from config.browserProfiles; absent = the
    * bot's own private session. */
   browserProfile?: string;
@@ -1043,7 +1053,7 @@ export class Store {
   }
 
   private emit(change: StoreChange) {
-    for (const listener of [...this.listeners]) {
+    for (const listener of Array.from(this.listeners)) {
       try {
         listener(change);
       } catch (error) {

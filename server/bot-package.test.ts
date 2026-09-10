@@ -52,6 +52,35 @@ const validPackage: any = {
 };
 
 describe("bot packages", () => {
+  const portableSkill = {
+    name: "source-check",
+    description: "Check sources before writing.",
+    source: "conversation:source-check",
+    instructions: "---\nname: source-check\ndescription: Check sources before writing.\n---\n\n# Source check\n",
+  };
+
+  it("round-trips portable skills and rejects dangling or mismatched references", () => {
+    const withSkill = {
+      ...validPackage,
+      package: {
+        ...validPackage.package,
+        agents: [{ ...validPackage.package.agents[0], skills: [portableSkill.name] }],
+        skills: { version: 1, entries: [portableSkill] },
+      },
+    };
+    const parsed = parseBotPackage(withSkill);
+    expect(parsed.package.agents[0]?.skills).toEqual(["source-check"]);
+    expect(parseBotPackage(renderBotPackageMarkdown(parsed)).package.skills?.entries).toEqual([portableSkill]);
+    expect(() => parseBotPackage({
+      ...withSkill,
+      package: { ...withSkill.package, agents: [{ ...withSkill.package.agents[0], skills: ["missing"] }] },
+    })).toThrow("unknown skill");
+    expect(() => parseBotPackage({
+      ...withSkill,
+      package: { ...withSkill.package, skills: { version: 1, entries: [{ ...portableSkill, description: "Different" }] } },
+    })).toThrow("does not match its description");
+  });
+
   it("round-trips optional soul through Markdown and the import persona, with the profile byte cap", () => {
     const input = structuredClone(validPackage);
     const soul = "  Preserve precise instructions. 🐭\n";
@@ -60,6 +89,40 @@ describe("bot packages", () => {
     expect(packageAgentAsMember(parsed.package.agents[0]).soul).toBe(soul);
     input.package.agents[0].soul = "🐭".repeat(6_001);
     expect(() => parseBotPackage(input)).toThrow("24000 bytes");
+  });
+  it.each([
+    { name: "../escape" },
+    { instructions: "not frontmatter" },
+    { source: "/private/skill" },
+    { source: "file:///private/skill" },
+    { license: "not the SKILL.md license" },
+    { compatibility: "not the SKILL.md compatibility" },
+    { instructions: "---\nname: source-check\ndescription: Check sources before writing.\n---\n" + "🐭".repeat(65_536) },
+  ])("rejects invalid portable skill data: %j", (patch) => {
+    expect(() => parseBotPackage({
+      ...validPackage,
+      package: { ...validPackage.package, agents: [{ ...validPackage.package.agents[0], skills: ["source-check"] }],
+        skills: { version: 1, entries: [{ ...portableSkill, ...patch }] } },
+    })).toThrow();
+  });
+
+  it("rejects duplicate, unassigned and excessive packaged skills", () => {
+    const document = structuredClone(validPackage);
+    document.package.skills = { version: 1, entries: [portableSkill] };
+    expect(() => parseBotPackage(document)).toThrow("not referenced");
+    document.package.agents[0].skills = ["source-check"];
+    document.package.skills.entries.push(portableSkill);
+    expect(() => parseBotPackage(document)).toThrow("Duplicate skill");
+    document.package.skills.entries = Array(21).fill(portableSkill);
+    expect(() => parseBotPackage(document)).toThrow();
+  });
+  it("refuses to render a skill bundle larger than the Markdown import limit", () => {
+    const document = structuredClone(validPackage);
+    document.package.agents[0].skills = Array.from({ length: 5 }, (_, i) => `large-${i}`);
+    document.package.skills = { version: 1, entries: document.package.agents[0].skills.map((name: string) => ({
+      name, description: "Large fixture", instructions: `---\nname: ${name}\ndescription: Large fixture\n---\n${"a".repeat(210_000)}`,
+    })) };
+    expect(() => renderBotPackageMarkdown(parseBotPackage(document))).toThrow("too large");
   });
   it("parses the complete portable structure and strips authority fields", () => {
     const parsed = parseBotPackage(validPackage);
@@ -195,6 +258,7 @@ describe("bot packages", () => {
       },
     })).toThrow(/later on the same day/);
   });
+
 
   it("rejects dangling agent, room, playbook, chief, and routine references", () => {
     expect(() => parseBotPackage({

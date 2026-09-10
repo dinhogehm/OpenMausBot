@@ -36,7 +36,7 @@ Runs fully on a server:
 
 Desktop-only for now (needs the Mac/Linux app):
 
-- the skill recorder, dictation/voice, controlling the host desktop
+- dictation/voice, controlling the host desktop
 
 ## Quickest: one command with Node
 
@@ -290,6 +290,64 @@ the copy OMB installed is the one bots run. The package name comes from the
 engine's own install descriptor, never from the browser. Engines installed
 by a `curl | bash` script still need the command on the server.
 
+## Provider keys, billed per token
+
+**Settings → Connections → Model providers** takes the keys a whole workspace
+runs on, for people who would rather pay per token than have every user sign
+in. Keys are write-only: the page shows connected-or-not and a **Test** button
+that makes one read-only request to the provider from the server.
+
+- **Anthropic API key**: while one is saved, every Claude bot runs on it and
+  Claude Code reports the real cost per turn to the usage ledger. Nobody has
+  to sign in, and Settings → Engines shows "workspace API key" instead of a
+  person. Remove the key to go back to personal logins. The server's own
+  `ANTHROPIC_API_KEY` environment variable is deliberately ignored; use the
+  page, `config.json`, or `OMB_ANTHROPIC_API_KEY`.
+- **OpenAI-compatible API key and base URL**: OpenRouter by default, or Groq,
+  Together, a gateway, or `https://api.openai.com/v1` for OpenAI itself. This
+  powers the OpenAI-compatible engine. Codex has no key path by design and
+  always uses a personal ChatGPT login.
+- **xAI API key**: the Grok API engine and xAI image generation.
+
+## Many client workspaces on one server
+
+`openmausbot fleet` runs one workspace per client on a single Linux server,
+each as its own OS user, its own `openmausbot@<name>` service on its own
+loopback ports, its own data folder, brand, sign-in list and provider key,
+reached at `<name>.<your domain>` through the system Caddy. Bots of one
+workspace cannot read another's files or reach its API: the data lives in a
+private home, the unit runs with a private `/tmp`, no new privileges and a
+read-only system, and an nftables rule keeps each workspace's ports to its
+own user, Caddy and root.
+
+Once, as root, with the package installed permanently and a wildcard DNS
+record (`*.example.com`) pointing at the server:
+
+```sh
+openmausbot fleet init --domain example.com
+```
+
+That writes the template unit, the fence and its unit, the workspace folders,
+and adds `import /etc/caddy/omb.d/*.caddy` to `/etc/caddy/Caddyfile`. Then per
+client:
+
+```sh
+openmausbot fleet create acme --admin owner@acme.test --member @acme.test \
+  --brand /root/acme-brand.json --anthropic-key-file /root/acme-anthropic.key \
+  --cap 50 --memory 1G
+openmausbot fleet users acme add bob@acme.test --chat-only
+openmausbot fleet list
+openmausbot fleet suspend acme      # 503 page, service stopped; resume undoes it
+openmausbot fleet upgrade           # new release, then every running workspace restarted in turn
+openmausbot fleet delete acme --yes # add --keep-data to keep the home folder
+```
+
+`https://acme.example.com` is up when `create` returns; the first admin signs
+in with an emailed code. `OMB_LICENSE_KEY` in the environment (or
+`--license-key`) is carried into every workspace so a partner's white-label
+key covers them all. Not root? Every command prints the exact steps to run as
+root instead, and `--dry-run` always prints.
+
 ## Signing the engines in without a terminal
 
 On a hosted server, the engine CLIs sign in from Settings → Engines:
@@ -457,6 +515,42 @@ and pair by its own QR. It advertises on your private networks
 ```sh
 node --experimental-strip-types companion/src/index.ts
 ```
+
+## Usage and costs
+
+Every settled turn is appended to `<data dir>/usage/YYYY-MM.jsonl`: which
+bot, which model and engine, tokens in and out, the cost the engine reported
+(real on a metered key, an equivalent on a subscription, absent when the
+engine reports none), and who asked: the email a person signed in with, the
+device label otherwise, a routine, another bot, or this computer. No message
+text is stored. **Settings → Usage → History** shows a period grouped by bot,
+model, person, day or engine, and **Export CSV** downloads one line per turn.
+Owners can read the same over the API:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://maus.example.com/api/usage?from=2026-09-01&to=2026-09-30&groupBy=user"
+curl -H "Authorization: Bearer $TOKEN" -o usage.csv \
+  "https://maus.example.com/api/usage.csv?from=2026-09-01&to=2026-09-30"
+```
+
+Dates are inclusive, UTC, at most a year apart; without them you get the
+current month to date.
+
+## Spend limits and sell prices (enterprise)
+
+With the `budgets` entitlement, **Settings → Usage → Monthly spend limit**
+caps the workspace: once the month's reported cost reaches it, no bot starts
+a turn, whether a person wrote, a routine fired, a peer asked or a webhook
+arrived, until an admin raises it. The figure is what engines report to the
+ledger: real on your keys, an equivalent on personal subscriptions. A warning
+shows at a configurable percentage.
+
+With the `billing` entitlement, **Sell prices** takes your own price per
+million tokens by model id, `driver/model`, or `default`, and History and the
+CSV export gain a **billable** column next to the provider's cost. Both are
+plain settings in `config.json` (`budgets`, `billing`) and through
+`PUT /api/config`.
 
 ## Updating
 

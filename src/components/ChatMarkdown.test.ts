@@ -14,6 +14,7 @@ import {
 } from "./ChatMarkdown";
 import { StoreProvider } from "@/state/store";
 import { ThreadRefsContext } from "./ThreadRefs";
+import * as AttachmentPreview from "./AttachmentPreview";
 
 vi.mock("react", async (importOriginal) => {
   const react = await importOriginal<typeof React>();
@@ -52,6 +53,60 @@ describe("mention highlighting", () => {
     }));
     expect(html).not.toContain("<img");
     expect(html).not.toContain('<script');
+  });
+});
+
+describe("repaired tables", () => {
+  it("keeps valid escaped-pipe cells and setext headings intact", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "Pros | Cons\n---\n\n| a \\| b | c |\n| --- | --- |\n| 1 | 2 |",
+    }));
+    expect(html).toContain('font-semibold">Pros | Cons</div>');
+    expect(html.match(/<table\b/g)).toHaveLength(1);
+    expect(html).toContain(">a | b</th>");
+    expect(html.match(/<th\b/g)).toHaveLength(2);
+  });
+
+  it.each([
+    "![shot][asset]\n\n[asset]: /workspace/preview.png",
+    "![asset]\n\n[asset]: /workspace/preview.png",
+    "![outer [inner]](/workspace/preview.png)",
+  ])("keeps attachment offsets intact for all image syntax: %s", (image) => {
+    const text = `| A | B | C |\n|---|---|\n| 1 | 2 | 3 |\n\n${image}`;
+    const preview = vi.spyOn(AttachmentPreview, "MarkdownImagePreview");
+    try {
+      const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+        text, message: { threadId: "thread-1", messageId: "message-1" },
+      }));
+      expect(html).not.toContain("<table");
+      expect(html).toContain("Loading ");
+      expect(preview.mock.calls[0][0].sourceOffset).toBe(text.indexOf("!["));
+    } finally {
+      preview.mockRestore();
+    }
+  });
+
+  it("renders a table whose delimiter row is a cell short of its header", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "| A | B | C |\n|---|---|\n| 1 | 2 | 3 |",
+    }));
+    expect(html).toContain("<table");
+    expect(html).toContain("<th");
+  });
+  it("renders a table that arrived welded onto one line", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "Lead-in prose\n| A | B | |---|---| | 1 | 2 |",
+    }));
+    expect(html).toContain("<table");
+    expect(html).toContain("Lead-in prose");
+  });
+  it("keeps a message holding an image byte-for-byte, offsets intact", () => {
+    // MarkdownImagePreview resolves the attachment by source offset, so the
+    // repair must not move it; the broken table stays broken by design.
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "![shot](https://example.test/a.png)\n\n| A | B | C |\n|---|---|\n| 1 | 2 | 3 |",
+    }));
+    expect(html).not.toContain("<table");
   });
 });
 
@@ -267,7 +322,9 @@ describe("ChatMarkdown code blocks", () => {
     expect(html).toContain("2 lines");
     expect(html).toContain('aria-label="Copy code to clipboard"');
     expect(html).toContain('aria-label="Wrap long lines"');
+    expect(html).toContain('aria-label="Download snippet as file"');
     expect(html).toContain('title="Copy code"');
+    expect(html).toContain('title="Download snippet as file"');
     expect(html).toContain('type="button"');
   });
 
@@ -296,6 +353,7 @@ describe("ChatMarkdown code blocks", () => {
     expect(html).toContain("4 lines");
     expect(html).toContain('aria-label="Copy code to clipboard"');
     expect(html).toContain('aria-label="Wrap long lines"');
+    expect(html).toContain('aria-label="Download snippet as file"');
     expect(html).toContain("line1\nline2\nline3");
   });
 });
@@ -399,6 +457,17 @@ describe("bidi: message content carries its own direction", () => {
       streaming: false,
     }));
     expect(fenced).toContain('<div dir="ltr"');
+  });
+
+  it("lets an inline span break, so a long path cannot leave the bubble", () => {
+    // an unbreakable token wider than the bubble has nowhere to go but
+    // outside it, and in an RTL paragraph that is off the left edge, where
+    // the line ends — the direction that reads as text escaping the message
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `${ARABIC} \`dist/{download,privacy,terms,license,support,presskit,changelogs,docs,about,feedback}\` ${ARABIC}`,
+    }));
+    const inline = /<code [^>]*class="([^"]*)"/.exec(html)?.[1] ?? "";
+    expect(inline).toContain("break-words");
   });
 
   it("gives links a base direction, not isolation alone", () => {

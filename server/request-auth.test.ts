@@ -326,6 +326,9 @@ describe("resolveRequestAuth", () => {
     ["POST", "/api/instances/codex/auth/cancel"],
     ["POST", "/api/instances/codex/auth/sign-out"],
     ["POST", "/api/instances/claude-work/auth/sign-out"],
+    ["GET", "/api/usage?from=2026-09-01&to=2026-09-30"],
+    ["GET", "/api/usage.csv?from=2026-09-01&to=2026-09-30"],
+    ["POST", "/api/keys/test"],
     ["POST", "/api/instances/antigravity/auth/complete"],
   ])("requires admin for server Settings: %s %s", (method, path) => {
     expect(requiredScope(method, path.split("?")[0]!)).toBe("admin");
