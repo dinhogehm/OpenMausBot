@@ -115,6 +115,7 @@ mac:
     NSSpeechRecognitionUsageDescription: OpenMausBot transcribes your voice on-device to type messages for you.
     NSAccessibilityUsageDescription: OpenMausBot uses Accessibility when you let a bot control this Mac.
     NSScreenCaptureUsageDescription: OpenMausBot uses Screen Recording so bots can see this Mac before acting.
+    NSAppleEventsUsageDescription: OpenMausBot sends Apple Events when a bot or the terminal launcher automates another app.
   # Notarization runs manually after the build (notarytool + staple),
   # mirroring the BlueyLite ship_release.sh flow.
   notarize: false
