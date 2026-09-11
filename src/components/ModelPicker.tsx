@@ -397,7 +397,7 @@ export function ModelPicker({
   );
 
   const trigger = (
-    <button
+    <button data-tour="model"
       type="button"
       disabled={Boolean(bot.busy)}
       onClick={() => {

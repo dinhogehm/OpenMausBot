@@ -1028,7 +1028,7 @@ export function ComputerPanel({
           <Settings size={18} />
         </button>
         {(
-          <div className="mx-2 flex min-w-0 flex-wrap overflow-hidden rounded-lg border border-hairline/40" aria-label="Bot panel view">
+          <div className="mx-2 flex min-w-0 flex-wrap overflow-hidden rounded-lg border border-hairline/40" data-tour="computer-tabs" aria-label="Bot panel view">
             <button
               onClick={() => selectPanelView("computer")}
               aria-pressed={panelView === "computer"}
@@ -1059,6 +1059,7 @@ export function ComputerPanel({
             )}
             {browserEnabled && (
             <button
+              data-tour="computer-browser"
               onClick={() => {
                 setError(null);
                 selectPanelView("browser");

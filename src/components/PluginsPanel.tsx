@@ -12,7 +12,7 @@ import { readCachedInventory, writeCachedInventory } from "@/lib/connected-apps-
 import { managedConnectorUnavailableReason } from "../../shared/connector-availability";
 import { McpServersPanel } from "./McpServersPanel";
 
-interface ToolkitCard {
+export interface ToolkitCard {
   slug: string;
   label: string;
   blurb: string;
@@ -176,7 +176,9 @@ export function onlyLatestConnectorResponses(
   );
 }
 
-function ServiceIcon({ card }: { card: ToolkitCard }) {
+/** A toolkit's mark: official logo, else favicon by domain, else monogram.
+ * Shared with the onboarding connectors scene so both show the same logos. */
+export function ServiceIcon({ card, className = "size-11" }: { card: Pick<ToolkitCard, "logo" | "domain" | "label">; className?: string }) {
   // 0 = official logo, 1 = favicon by domain, 2 = monogram
   const [stage, setStage] = useState(card.logo ? 0 : card.domain ? 1 : 2);
   // The full catalog is well over a thousand cards, so let the browser skip
@@ -187,7 +189,7 @@ function ServiceIcon({ card }: { card: ToolkitCard }) {
         src={card.logo}
         alt=""
         loading="lazy"
-        className="size-11 rounded-xl object-contain"
+        className={cn("rounded-xl object-contain", className)}
         onError={() => setStage(1)}
       />
     );
@@ -198,13 +200,13 @@ function ServiceIcon({ card }: { card: ToolkitCard }) {
         src={`https://www.google.com/s2/favicons?domain=${card.domain}&sz=64`}
         alt=""
         loading="lazy"
-        className="size-11 rounded-xl object-contain"
+        className={cn("rounded-xl object-contain", className)}
         onError={() => setStage(2)}
       />
     );
   }
   return (
-    <div className="flex size-11 items-center justify-center rounded-xl bg-raised text-[15px] font-semibold text-ink-secondary">
+    <div className={cn("flex items-center justify-center rounded-xl bg-raised text-[15px] font-semibold text-ink-secondary", className)}>
       {card.label.slice(0, 1).toUpperCase()}
     </div>
   );
@@ -500,6 +502,7 @@ export function PluginsPanel() {
     >
       <div
         ref={dialogRef}
+        data-tour="apps-panel"
         role="dialog"
         aria-modal="true"
         aria-labelledby="plugins-title"
@@ -522,7 +525,7 @@ export function PluginsPanel() {
                 <RefreshCw size={17} className={cn(refreshing && "animate-spin")} />
               </button>
             )}
-            <button
+            <button data-tour="apps-close"
               onClick={close}
               aria-label={t("connectors.closeAria")}
               className="rounded-lg p-2 text-ink-secondary hover:bg-raised hover:text-ink"

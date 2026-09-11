@@ -114,6 +114,7 @@ import {
   ensureDirs,
   instanceConfigs,
   loadConfig,
+  providerReloadKeys,
   localVmMaxInstances,
   localVmMode,
   parseConfigPatch,
@@ -181,7 +182,7 @@ import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-g
 
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
-import { readMessageText, recallMessages, searchMessages, closeMessageDb } from "./message-db.ts";
+import { readMessageText, recallMessages, searchMessages, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups } from "./message-db.ts";
 import { claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -197,12 +198,14 @@ import {
   queuedSteeredMessage,
   queuedThreadPosition,
   queueSteeredMessage,
+  restoreSteeredMessages,
 } from "./steer-queue.ts";
 import {
   cancelChannelMessage,
   drainChannelMessages,
   queuedChannelMessage,
   queueChannelMessage,
+  restoreChannelMessages,
 } from "./channel-queue.ts";
 import {
   acceptedSendMatch,
@@ -822,6 +825,18 @@ type DirectTurnDispatchClaim = {
 class DirectTurnSetupCancelled extends Error {}
 const directTurnDispatchClaims = new Map<string, DirectTurnDispatchClaim>();
 const directTurnGenerationByThread = new Map<string, string>();
+// Stop revokes credentials before completion, but the receipt must retain its
+// exact provider-turn owner until that completion or explicit failure cleanup.
+const directFollowupTurns = new ProviderTurnGenerationRegistry();
+const directFollowupSettlers = new Map<string, { threadId: string; settle: () => void }>();
+function settleDirectFollowup(generation: string | undefined): void {
+  if (!generation) return;
+  const pending = directFollowupSettlers.get(generation);
+  if (!pending) return;
+  directFollowupSettlers.delete(generation);
+  directFollowupTurns.deleteGeneration(pending.threadId, generation);
+  pending.settle();
+}
 // Keep the exact provider/profile settings that own a running conversation.
 // Selecting another thread or changing a default must not retarget its tools.
 const directTurnBots = new Map<string, BotRecord>();
@@ -1368,6 +1383,7 @@ function checkedMemberIds(value: unknown): { ok: true; memberIds: string[] } | {
 }
 let bootSelection = { instanceId: "", model: "" };
 const store = new Store(() => bootSelection);
+let followupsReady = false;
 const sendSequencer = new SendSequencer();
 bootSelection = await defaultSelection();
 store.seedIfEmpty();
@@ -2657,6 +2673,8 @@ async function answerRequest(
   behavior: "allow" | "deny" | "answer",
   message?: string,
   decidedFor?: { id: string; name: string },
+  /** "Always allow this session": the provider keeps the allow, not the app */
+  always?: boolean,
 ): Promise<RequestOutcome> {
   // Snapshot the card BEFORE delivering the answer: a delivered answer
   // resolves the request synchronously through the fold, which consumes
@@ -2674,7 +2692,7 @@ async function answerRequest(
   let outcome: RequestOutcome = "unavailable";
   if (instance) {
     try {
-      outcome = await instance.adapter.respondToRequest(threadId, requestId, { behavior, message });
+      outcome = await instance.adapter.respondToRequest(threadId, requestId, { behavior, message, always: always && behavior === "allow" });
     } catch {
       outcome = "unavailable";
     }
@@ -2744,6 +2762,16 @@ function requestBehavior(value: unknown): "allow" | "deny" | "answer" | null {
 // the last settled assistant text per thread, so a "finished" notification
 // can carry what the bot actually said
 const lastReply = new Map<string, string>();
+/** the model each thread's provider session announced in session.started,
+ * so a fallback notice can name the model Auto is unavailable for */
+const sessionModelByThread = new Map<string, string>();
+/** threads already told that the provider's reviewer never started */
+const nativeReviewNoticed = new Set<string>();
+/** a driver kind as the chat should name it: "claudeAgent" → "Claude" */
+const providerLabel = (provider: string): string => {
+  const bare = provider.replace(/Agent$/, "");
+  return bare.charAt(0).toUpperCase() + bare.slice(1);
+};
 
 /** Put a notification on the wire. Clients decide what to do with it — a
  * desktop notification now, a push to a paired phone later. */
@@ -2815,6 +2843,7 @@ const watchdog = new TurnWatchdog({
       kind: "activity",
       tool: { name: `error: no activity for ${minutes} minutes — the turn was stopped`, ok: false },
     });
+    settleDirectFollowup(stalledGeneration);
     finalizeDelegationWatch(turn.threadId, false, "", "Delegated turn stalled and was stopped");
     turnUsage.delete(turn.threadId);
     roomStallCompletions.stall(turn.threadId);
@@ -2946,6 +2975,10 @@ bus.subscribe((event: RuntimeEvent) => {
   else if (event.type === "turn.completed") {
     watchdog.settle(event.threadId);
     revokeInternalCapabilityForProviderEvent(event);
+    if (event.turnId) {
+      const owner = directFollowupTurns.complete(event.threadId, event.turnId);
+      if (owner) settleDirectFollowup(owner.generation);
+    }
   } else if (event.type !== "session.exited") watchdog.touch(event.threadId);
 });
 
@@ -3401,6 +3434,7 @@ bus.subscribe((event: RuntimeEvent) => {
       if (bot && event.sessionId && event.providerInstanceId) {
         store.setResumeCursor(bot.id, event.providerInstanceId, event.sessionId, event.threadId);
       }
+      if (typeof event.model === "string" && event.model) sessionModelByThread.set(event.threadId, event.model);
       break;
     case "item.completed":
       if (event.itemType === "assistant_text") {
@@ -3475,10 +3509,11 @@ bus.subscribe((event: RuntimeEvent) => {
       break;
     case "request.opened": {
       const permission = event.requestType === "permission";
-      // Approval modes and always-allow can answer permission requests for
-      // the bot so it keeps working. A QUESTION always reaches the human —
-      // even Full access never invents a person's answer. Safe Auto stops on
-      // the guards in auto-approve.ts; explicitly acknowledged Full does not.
+      // A permission request here is one the provider left for a person: its
+      // own mode already ran (Ask, Edits, Auto's reviewer, Custom's config).
+      // OpenMausBot decides nothing about the action itself. Only Full access
+      // answers, because that is exactly what the person granted. A QUESTION
+      // always reaches the human — even Full access never invents an answer.
       const asker = bot ?? (speaker ? store.bot(speaker.botId) : undefined);
       // The thread's own dispatch record first, the bot mark as fallback —
       // a workflow node's card is judged unattended even if something
@@ -3512,6 +3547,28 @@ bus.subscribe((event: RuntimeEvent) => {
       // restoring Auto or replacing a more specific guard/remembered grant.
       if (verdict?.source === "no-grant" && unattended && asker && approvalModeFor(asker) === "auto") {
         verdict.source = "unattended-block";
+      }
+      // Auto's reviewer is the engine's own. Claude accepts `--permission-mode
+      // auto` for any model and starts in Manual without a word when auto is
+      // unavailable (Haiku 4.5, Sonnet 4.5, an org that disabled it), so the
+      // bot asks about everything. Say once per session why, and what stops it.
+      if (
+        permission &&
+        asker &&
+        event.nativeReview === "inactive" &&
+        effectiveApprovalMode === "auto" &&
+        !nativeReviewNoticed.has(event.threadId)
+      ) {
+        nativeReviewNoticed.add(event.threadId);
+        const model = sessionModelByThread.get(event.threadId);
+        pushMessage({
+          role: "bot",
+          kind: "activity",
+          tool: {
+            name: `Approve for me: ${providerLabel(event.provider)}'s automatic reviewer is not available${model ? ` for ${model}` : ""}, so this bot asks before each action. Choose a model it supports, or Full access, to stop the prompts.`,
+            ok: true,
+          },
+        });
       }
       if (verdict?.approve && asker && event.requestId) {
         const settled = verdict.approve;
@@ -3692,6 +3749,10 @@ bus.subscribe((event: RuntimeEvent) => {
                 requiresExplicitApproval: event.requiresExplicitApproval,
               })
             : undefined,
+          // and, alongside it, the allow the PROVIDER can keep for its own
+          // session — a different promise from the app's remembered grant,
+          // so the card offers both rather than one standing for the other
+          allowSession: permission && event.allowSession && !event.requiresExplicitApproval ? true : undefined,
           // The text stays for cards saved before heldCode existed, and for
           // clients that do not know the key yet.
           held: approvalHeldReason(heldContext),
@@ -4429,6 +4490,7 @@ bus.subscribe((event: RuntimeEvent) => {
 });
 
 function drainQueuedSends() {
+  if (!followupsReady) return;
   drainSteeredMessages(store, (botId, threadId, prompt, userMessage, excludeIds, unattended) =>
     // A plain attended turn — no automationSource, no comms depth: exactly
     // what typing the same words into an idle bot would run. The one
@@ -4437,15 +4499,19 @@ function drainQueuedSends() {
     // Drain just appended the held lines; userMessage keeps startTurn
     // from duplicating the last one, and excludeIds drops every drained
     // line from the transcript-replay so they are not also in `prompt`.
-    startTurn(botId, prompt, { threadId, userMessage, excludeMessageIds: excludeIds, unattended }).then(() => undefined).catch((err) => {
-      store.appendMessage(threadId, {
-        role: "bot",
-        kind: "activity",
-        tool: {
-          name: `error: queued message could not start — ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`,
-          ok: false,
-        },
-      });
+    new Promise<void>((resolve, reject) => {
+      void startTurn(botId, prompt, {
+        threadId, userMessage, excludeMessageIds: excludeIds, unattended, onTurnSettled: resolve,
+      }).catch((err) => {
+        store.appendMessage(threadId, {
+          role: "bot", kind: "activity",
+          tool: {
+            name: `error: queued message could not start — ${(err instanceof Error ? err.message : String(err)).slice(0, 120)}`,
+            ok: false,
+          },
+        });
+        resolve();
+      }).catch(reject);
     }),
     // Provider completion can precede its dispatch promise: keep the queue
     // intact until that exact handshake releases its runtime-only claim.
@@ -4693,6 +4759,8 @@ async function startTurn(
      * dispatch the same user action twice. */
     sendId?: string;
     onDispatchError?: (message: string) => void;
+    /** Queue receipts outlive the dispatch acknowledgment until this exact turn settles. */
+    onTurnSettled?: () => void;
   },
 ) {
   workspaceMaintenance.assertAvailable();
@@ -4936,6 +5004,7 @@ async function startTurn(
   const resourceOwner = { threadId, generation: dispatchClaimId };
   turnResourceOwners.set(threadId, resourceOwner);
   directTurnGenerationByThread.set(threadId, dispatchClaimId);
+  if (opts?.onTurnSettled) directFollowupSettlers.set(dispatchClaimId, { threadId, settle: opts.onTurnSettled });
   directTurnDispatchClaims.set(threadId, { id: dispatchClaimId, botId, threadId, phase: "setup" });
   directTurnBots.set(threadId, bot);
   beginInternalCapabilityGeneration(threadId, dispatchClaimId);
@@ -5406,6 +5475,11 @@ async function startTurn(
         throw new DirectTurnSetupCancelled("turn stopped during provider setup");
       }
       bindInternalCapabilityToProviderTurn(threadId, dispatchClaimId, dispatch.value.turnId);
+      if (directFollowupSettlers.has(dispatchClaimId) && dispatch.value.turnId &&
+        !directFollowupTurns.bind(threadId, dispatchClaimId, dispatch.value.turnId)) {
+        // This exact queued turn completed before its dispatch ACK arrived.
+        settleDirectFollowup(dispatchClaimId);
+      }
       clearDirectTurnDispatch(threadId, dispatchClaimId);
       // dispatched: the rewind is spent, and the old cursors are dead
       if (rewound) store.patchTask(bot.id, threadId, { rewound: false, resumeCursors: {} });
@@ -5441,6 +5515,7 @@ async function startTurn(
         drainDelegationWakes();
       }
     } catch (e) {
+      settleDirectFollowup(dispatchClaimId);
       clearCancelledProviderHandshake(threadId, `direct:${dispatchClaimId}`);
       clearDirectTurnDispatch(threadId, dispatchClaimId);
       revokeInternalCapabilityGeneration(threadId, dispatchClaimId);
@@ -6304,6 +6379,11 @@ const webhooks = new WebhookManager({
             deliveryId: input.deliveryId,
           }).id,
         },
+  // Routine webhooks keep a delivery receipt, so a redelivery after a restart
+  // finds the run it already started instead of starting a second one. A
+  // workflow-routed delivery has no receipt of its own yet, and falls back to
+  // the pre-existing behaviour rather than to a wrong answer.
+  findRun: (webhookId, deliveryId) => routines!.webhookRunReceipt(webhookId, deliveryId),
   cancelQueued: (webhookId, message) => {
     routines!.cancelQueuedWebhook(webhookId, message);
     workflowEngine!.cancelQueuedForWebhook(webhookId, message);
@@ -6457,7 +6537,7 @@ async function runGroupMemberTurn(
   }
   revokeInternalCapabilitiesForThread(threadId);
   spoken.add(botId);
-  const preparedApprovalMode = approvalModeForTurn(bot, false, threadId);
+  const preparedApprovalMode = approvalModeForTurn(bot, false);
   const preparedSelection = { ...bot.modelSelection };
   const preparedComposio = bot.composio;
   const instance = registry.get(bot.modelSelection.instanceId);
@@ -6592,7 +6672,7 @@ async function runGroupMemberTurn(
   if (!readyGroup || !stillOwnsThread || !readyGroup.memberIds.includes(readyBot.id)) return false;
   const setupChanged =
     registry.get(preparedSelection.instanceId) !== instance ||
-    approvalModeForTurn(readyBot, false, threadId) !== preparedApprovalMode ||
+    approvalModeForTurn(readyBot, false) !== preparedApprovalMode ||
     readyBot.modelSelection.instanceId !== preparedSelection.instanceId ||
     readyBot.modelSelection.model !== preparedSelection.model ||
     readyBot.modelSelection.effort !== preparedSelection.effort ||
@@ -6916,7 +6996,7 @@ async function runGroupMemberTurn(
         threadId,
         text,
         images: turnImages,
-        approvalMode: approvalModeForTurn(readyBot, false, threadId),
+        approvalMode: approvalModeForTurn(readyBot, false),
         system: roomSystem.text,
         systemStable: roomSystem.stable,
         systemVolatile: roomSystem.volatile,
@@ -7646,6 +7726,7 @@ function startGroupTurn(
 }
 
 function drainQueuedChannelSends(): void {
+  if (!followupsReady) return;
   drainChannelMessages(
     (groupId) => {
       const group = store.group(groupId);
@@ -7658,8 +7739,11 @@ function drainQueuedChannelSends(): void {
         : Boolean(group && store.groupTaskByThread(group.id, threadId));
       if (!group || !ownsThread) return;
       try {
-        startGroupTurn(groupId, text, resolveReplyTarget(threadId, replyToId), sendId, mode, id, { via });
+        startGroupTurn(groupId, text, resolveReplyTarget(threadId, replyToId), sendId, mode, id, { via, threadId });
       } catch (error) {
+        if (!store.messagesFor(threadId).some((message) => message.queueId === id && message.role === "user")) {
+          store.appendMessage(threadId, { role: "user", kind: "text", text, replyToId, sendId, channelMode: mode, queueId: id, via });
+        }
         store.appendMessage(threadId, {
           role: "bot",
           kind: "activity",
@@ -7672,6 +7756,7 @@ function drainQueuedChannelSends(): void {
       // A message with no eligible responder creates no operation. Continue
       // draining instead of leaving later user messages behind it forever.
       queueMicrotask(drainQueuedChannelSends);
+      return groupQueues.get(groupId);
     },
   );
 }
@@ -8693,6 +8778,14 @@ function configStatus() {
       showToolCalls: showToolCallsEnabled(cfg),
       browser: builtInBrowserEnabled(cfg),
     },
+    // first-run progress — not a secret; the app decides whether to show
+    // the welcome tour from this, never from browser storage
+    onboarding: {
+      completedAt: cfg.onboarding?.completedAt ?? "",
+      version: cfg.onboarding?.version ?? 0,
+      reelSeen: cfg.onboarding?.reelSeen === true,
+      hintsSeen: cfg.onboarding?.hintsSeen ?? [],
+    },
     // Which browser this server can give bots: the desktop app's surface,
     // the agent-browser engine, or nothing yet (with the reason).
     browserEngine: browserEngineSummary(),
@@ -8808,6 +8901,7 @@ async function reloadProviders() {
         });
         store.setTaskActivity(botId, threadId, "idle");
       }
+      settleDirectFollowup(owner?.generation);
       retryDelegationsWaitingOn(botId);
     }
     for (const [threadId, speaker] of rooms) {
@@ -11800,6 +11894,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         sendFingerprint(text, replyTo?.id, channelMode),
         async () => {
           if (sendId) {
+            if (cancelledChatFollowup("channel", group.id, threadId, sendId)) {
+              throw Object.assign(new Error("this queued sendId was cancelled; send a new message to try again"), { status: 409 });
+            }
             const accepted = acceptedSendMatch(store.messagesFor(threadId), sendId, text, replyTo?.id, channelMode);
             if (accepted.kind === "conflict") {
               throw Object.assign(new Error("sendId already belongs to another message"), { status: 409 });
@@ -12731,6 +12828,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // staged provider images into a message, so dispose them here.
           for (const task of store.tasks(bot.id)) {
             purgeGeneratedImagesForThread(task.threadId);
+            settleDirectFollowup(directTurnGenerationByThread.get(task.threadId));
             directTurnGenerationByThread.delete(task.threadId);
             directTurnBots.delete(task.threadId);
           }
@@ -13223,6 +13321,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         sendFingerprint(text, replyTo?.id),
         async () => {
           if (sendId) {
+            if (cancelledChatFollowup("bot", bot.id, threadId, sendId)) {
+              throw Object.assign(new Error("this queued sendId was cancelled; send a new message to try again"), { status: 409 });
+            }
             const accepted = acceptedSendMatch(store.messagesFor(threadId), sendId, text, replyTo?.id);
             if (accepted.kind === "conflict") {
               throw Object.assign(new Error("sendId already belongs to another message"), { status: 409 });
@@ -13423,7 +13524,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         resolvePeerComms(approvalBus, String(body.requestId), behavior)) {
         return json(res, 200, { ok: true, outcome: behavior === "allow" ? "allowed-once" : "rejected" });
       }
-      const outcome = await answerRequest(bot.threadId, bot.modelSelection.instanceId, String(body.requestId), behavior, body.message, { id: bot.id, name: bot.name });
+      const outcome = await answerRequest(bot.threadId, bot.modelSelection.instanceId, String(body.requestId), behavior, body.message, { id: bot.id, name: bot.name }, body.always === true);
       return json(res, 200, { ok: true, outcome });
     }
     // Answer by THREAD, so a request raised inside a room can be answered
@@ -13509,7 +13610,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         : store.botByThread(threadId);
       if (!owner && !pending) return json(res, 404, { error: "nothing is waiting on an answer in this conversation" });
       const requestOwner = owner ? botForThread(owner.id, threadId) : null;
-      const outcome = await answerRequest(threadId, requestOwner?.modelSelection.instanceId ?? "", requestId, behavior, body.message, owner ? { id: owner.id, name: owner.name } : undefined);
+      const outcome = await answerRequest(threadId, requestOwner?.modelSelection.instanceId ?? "", requestId, behavior, body.message, owner ? { id: owner.id, name: owner.name } : undefined, body.always === true);
       return json(res, 200, { ok: true, outcome });
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/interrupt$/);
@@ -13754,6 +13855,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const stagedSkillCleanups = stagedSkillCleanupsForThread(m[2]);
       const updated = store.deleteTask(m[1], m[2]);
       if (!updated) return json(res, 400, { error: "a bot keeps at least one task" });
+      settleDirectFollowup(directTurnGenerationByThread.get(m[2]));
       rejectDeletedThreadSkillStages(stagedSkillCleanups);
       const fresh = botWithThread(updated);
       broadcast({ kind: "bot", bot: fresh });
@@ -14806,22 +14908,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           browserReferenceCleanupError = error;
         }
       }
-      // Provider keys change the fleet. Profile, language, voice, VPS, and
-      // room timeout changes do not rebuild it: no driver reads them, and they
-      // should not interrupt in-flight turns.
-      const reloadKeys = Object.keys(patch).filter(
-        (key) =>
-          key !== "profile" &&
-          key !== "language" &&
-          key !== "tts" &&
-          key !== "imageGen" &&
-          key !== "vps" &&
-          key !== "rooms" &&
-          key !== "threads" &&
-          key !== "localVm" &&
-          key !== "features" &&
-          key !== "browserProfiles",
-      );
+      // Provider keys change the fleet. Profile, language, voice, VPS, room
+      // timeout, and onboarding progress changes do not rebuild it: no driver
+      // reads them, and they should not interrupt in-flight turns.
+      const reloadKeys = providerReloadKeys(patch);
       // Config is already durable. A provider credential or runtime change
       // invalidates every old child immediately, including when browser
       // cleanup below has to await Electron before reloadProviders begins.
@@ -15298,8 +15388,42 @@ try {
   console.warn(`attachments: startup partial cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
 }
 
+// A dispatch claim is deliberately committed before transcript/provider work.
+// If we died after that point, its outcome is unknown: recover the user's words
+// and a review notice, never hand them to a model for a second execution.
+for (const row of chatFollowups()) {
+  if (row.status !== "dispatching" && row.status !== "interrupted") continue;
+  const owned = row.kind === "bot"
+    ? Boolean(store.taskByThread(row.ownerId, row.threadId))
+    : Boolean(store.groupByThread(row.threadId)?.id === row.ownerId);
+  if (!owned) { settleChatFollowups([row.id], "cancelled"); continue; }
+  settleChatFollowups([row.id], "interrupted");
+  const messages = store.messagesFor(row.threadId);
+  if (!messages.some((message) => message.queueId === row.id && message.role === "user")) {
+    store.appendMessage(row.threadId, {
+      role: "user", kind: "text", text: row.payload.text, replyToId: row.payload.replyToId,
+      sendId: row.payload.sendId, queueId: row.id,
+      ...(row.kind === "channel" ? { channelMode: row.payload.mode, via: row.payload.via } : {}),
+    });
+  }
+  if (!messages.some((message) => message.queueId === row.id && message.kind === "activity")) {
+    store.appendMessage(row.threadId, {
+      role: "bot", kind: "activity", queueId: row.id,
+      tool: { name: "Queued follow-up interrupted by restart or restore — it may have already run. Review the result before sending it again.", ok: false },
+    });
+  }
+  // The FULL-sync retirement also flushes both transcript writes. Retrying
+  // this sendId now finds the canonical message, without a permanent journal scan.
+  settleChatFollowups([row.id], null);
+}
+restoreSteeredMessages();
+restoreChannelMessages();
+
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`openmausbot server on http://127.0.0.1:${PORT}`);
+  followupsReady = true;
+  drainQueuedSends();
+  drainQueuedChannelSends();
   // Startup work uses the same turn dispatcher and local tool endpoint as
   // ordinary chat. Start only once every registry is initialized and the
   // endpoint is listening; earlier dispatch can hit uninitialized bindings.
@@ -15335,6 +15459,7 @@ if (TUNNEL_SOCKET) {
 const gracefulShutdown = createGracefulShutdown({
   cleanup: [
     () => {
+      followupsReady = false;
       // Child MCP processes and the HTTP listener can remain alive while the
       // asynchronous shutdown jobs drain. Invalidate their turn bearers before
       // any cleanup function reaches an await.

@@ -1202,6 +1202,7 @@ export function ChatView({ bot: profile }: { bot: Bot }) {
           {!remoteClient && <ModelPicker key={bot.threadId} bot={bot} threadId={bot.threadId} />}
           <CallButton bot={bot} />
           <button
+            data-tour="computer"
             onClick={() => dispatch({ type: "toggleComputer" })}
             className={cn(
               "rounded-md p-1.5 hover:bg-raised",

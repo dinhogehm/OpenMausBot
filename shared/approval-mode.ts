@@ -1,11 +1,18 @@
-/** The four approval levels exposed by the desktop app. */
-export const APPROVAL_MODES = ["ask", "auto", "full", "custom"] as const;
+/** The approval levels exposed by the app. Each one is a provider's own
+ * permission mode, passed through: OpenMausBot never decides a permission
+ * itself (Full access aside, which answers residual prompts because that is
+ * what the person granted). The order is the order the selector shows. */
+export const APPROVAL_MODES = ["ask", "edits", "auto", "full", "custom"] as const;
 
 export type ApprovalMode = (typeof APPROVAL_MODES)[number];
 
-/** Only providers with an implemented permission mapping may expose elevation. */
+/** Only providers with an implemented permission mapping may expose a level.
+ * `edits` (auto-accept edits) exists where the engine has such a mode:
+ * Claude and Grok `acceptEdits`, Antigravity `auto_edit`. Codex's Ask already
+ * runs `workspace-write`, so an edits level would change nothing there. */
 export function supportsApprovalMode(driverKind: string | undefined, mode: ApprovalMode): boolean {
   if (mode === "custom") return driverKind === "codex";
+  if (mode === "edits") return ["claudeAgent", "grokAgent", "antigravityAgent"].includes(driverKind ?? "");
   if (mode !== "full") return true;
   return ["codex", "claudeAgent", "antigravityAgent", "cursorAgent", "grokAgent", "opencodeGo"].includes(driverKind ?? "");
 }

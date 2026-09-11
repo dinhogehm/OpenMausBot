@@ -502,7 +502,7 @@ export async function createPermissionBroker(opts: {
   const timeoutMs = opts.timeoutMs ?? 15 * 60_000;
   const pending = new Map<
     string,
-    { ask: Ask; finish: (behavior: AskBehavior, message: string | undefined, source: AskResolutionSource) => void }
+    { ask: Ask; finish: (behavior: AskBehavior, message: string | undefined, source: AskResolutionSource, always?: boolean) => void }
   >();
   // server.close() only stops accepting NEW connections — it does not touch
   // a connection that's already open. A still-alive child's MCP proxy can
@@ -568,11 +568,14 @@ export async function createPermissionBroker(opts: {
           continue;
         }
         const ask: Ask = { id: askId, kind, tool: msg.tool ?? "tool", input: msg.input ?? {}, at: Date.now() };
-        const finish = (behavior: AskBehavior, message: string | undefined, source: AskResolutionSource) => {
+        const finish = (behavior: AskBehavior, message: string | undefined, source: AskResolutionSource, always?: boolean) => {
           if (!pending.delete(askId)) return;
           clearTimeout(timer);
           try {
-            conn.write(JSON.stringify({ t: "answer", id: askId, behavior, message }) + "\n");
+            // `always` rides to the proxy, which hands the CLI's own suggested
+            // permission rules back as updatedPermissions: Claude remembers
+            // the allow for the session, the harness remembers nothing.
+            conn.write(JSON.stringify({ t: "answer", id: askId, behavior, message, ...(always ? { always: true } : {}) }) + "\n");
           } catch {}
           opts.onResolve({ ...ask, behavior, source });
         };
@@ -652,11 +655,11 @@ export async function createPermissionBroker(opts: {
     }
   };
   return {
-    answer(askId: string, behavior: AskBehavior, message?: string): boolean {
+    answer(askId: string, behavior: AskBehavior, message?: string, always?: boolean): boolean {
       const p = pending.get(askId);
       if (!p) return false;
       if (p.ask.kind === "question" ? behavior !== "answer" : behavior === "answer") return false;
-      p.finish(behavior, message, "user");
+      p.finish(behavior, message, "user", always && behavior === "allow");
       return true;
     },
     pause() {
@@ -863,11 +866,19 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
        * began the turn. The acceptance boundary for --resume: before it,
        * nothing was submitted and the turn has caused nothing. */
       sawInit: boolean;
+      /** the permission mode `init` says the session actually runs in. The
+       * CLI takes `--permission-mode auto` for any model and starts in
+       * "default" without a word when auto mode is unavailable (Haiku 4.5,
+       * Sonnet 4.5, an org that disabled it), so the flag we passed is not
+       * the truth — this is. null until init, or on a CLI that omits it. */
+      nativePermissionMode: string | null;
       /** the running turn, or null between turns */
       turn: { turnId: string; settled: boolean; sawStreamDelta: boolean; authFailed?: boolean } | null;
       idleTimer: ReturnType<typeof setTimeout> | null;
       closing: boolean;
       stderr: string;
+      /** Root close can precede a failed group stop; retry its finalization. */
+      finishClose?: () => Promise<void>;
     }
     const sessions = new Map<string, Session>();
     const configuredIdleMinimum = Number(process.env.OMB_CLAUDE_SESSION_IDLE_MIN_MS);
@@ -876,6 +887,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       : 10_000;
     const SESSION_IDLE_MS = Math.max(sessionIdleMinimum, Number(process.env.OMB_CLAUDE_SESSION_IDLE_MS) || 10 * 60_000);
 
+    const stopSession = (session: Session) => {
+      void killCliTree(session.child).then((stopped) => {
+        if (stopped) void session.finishClose?.();
+      });
+    };
     const closeSession = (threadId: string, why: string) => {
       const s = sessions.get(threadId);
       if (!s || s.closing) return;
@@ -893,7 +909,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         s.child.stdin.end();
       } catch {}
       const kill = setTimeout(() => {
-        if (s.child.exitCode === null) killCliTree(s.child);
+        stopSession(s);
       }, 5_000);
       kill.unref?.();
     };
@@ -948,7 +964,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const permissionMode = turn.approvalMode === undefined
         ? config.permissionMode
         : turn.approvalMode === "full" ? "bypassPermissions"
-          : turn.approvalMode === "auto" ? "auto" : "default";
+          : turn.approvalMode === "auto" ? "auto"
+            : turn.approvalMode === "edits" ? "acceptEdits" : "default";
       const controlsHost = turn.integrations?.localComputer?.scope === "local-computer";
       if (controlsHost && permissionMode === "bypassPermissions" && turn.approvalMode !== "full") {
         throw new Error("local computer control requires the interactive approval broker");
@@ -1158,7 +1175,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         live.turn = { turnId, settled: false, sawStreamDelta: false };
         active.set(threadId, { stop: () => {
           closeSession(threadId, "interrupted");
-          killCliTree(live.child);
+          stopSession(live);
         }, turnId, broker: live.broker });
         emit({ ...base(threadId, turnId), type: "turn.started" });
         const volatile = turn.systemVolatile ?? "";
@@ -1228,6 +1245,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             onAsk: (ask) => {
               const eventTurnId = sessions.get(threadId)?.turn?.turnId ?? turnId;
               askTools.set(ask.id, typeof ask.tool === "string" ? ask.tool : undefined);
+              // Auto was requested: say whether the CLI's reviewer is actually
+              // running, from init, so the harness can tell a classifier's
+              // verdict from a Manual session asking about everything.
+              const nativeMode = sessions.get(threadId)?.nativePermissionMode ?? null;
+              const nativeReview =
+                permissionMode === "auto" && nativeMode !== null
+                  ? nativeMode === "auto" ? "active" : "inactive"
+                  : undefined;
               emit({
                 ...base(threadId, eventTurnId),
                 type: "request.opened",
@@ -1235,6 +1260,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
                 requestType: ask.kind,
                 tool: ask.tool,
                 summary: askSummary(ask),
+                nativeReview,
+                // the proxy hands Claude its own suggested rules on `always`;
+                // host control stays one action at a time
+                allowSession: ask.kind === "permission" && !(controlsHost && typeof ask.tool === "string" && ask.tool.startsWith("mcp__computer")) ? true : undefined,
                 approvalScope:
                   typeof ask.tool === "string" && controlsHost && ask.tool.startsWith("mcp__computer")
                     ? "local-computer"
@@ -1297,6 +1326,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         volatile: turn.systemVolatile ?? "",
         sessionId: sessionId ?? newSessionId,
         sawInit: false,
+        nativePermissionMode: null,
         turn: { turnId, settled: false, sawStreamDelta: false },
         idleTimer: null,
         closing: false,
@@ -1341,6 +1371,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const currentTurnId = () => session.turn?.turnId ?? turnId;
 
       const handleLine = (line: string) => {
+        if (session.closing) return;
         let o: any;
         try {
           o = JSON.parse(line);
@@ -1352,6 +1383,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           case "system":
             if (o.subtype === "init") {
               session.sawInit = true;
+              session.nativePermissionMode = typeof o.permissionMode === "string" ? o.permissionMode : null;
               if (typeof o.session_id === "string") session.sessionId = o.session_id;
               emit({ ...base(threadId, currentTurnId()), type: "session.started", sessionId: o.session_id, model: o.model });
             } else if (o.subtype === "thinking_tokens") {
@@ -1478,7 +1510,20 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         settle(false, "spawn_error");
       });
 
-      child.on("close", (code) => {
+      let closeFinalized = false;
+      const finalizeClose = async (code: number | null) => {
+        if (closeFinalized) return;
+        // The root can close while its MCP helpers are still running. Join
+        // an in-flight stop (or reap its remaining group) before releasing
+        // the turn so a replacement cannot overlap the old helpers.
+        if (!(await killCliTree(child, 0))) {
+          session.broker?.close();
+          session.broker = undefined;
+          emit({ ...base(threadId, currentTurnId()), type: "runtime.error", message: "Claude could not be confirmed stopped; its helper processes may still be running." });
+          return;
+        }
+        if (closeFinalized) return;
+        closeFinalized = true;
         // a turn still running when the process died is a failed turn; a
         // process that exited between turns (idle close, contract change)
         // is just a session ending
@@ -1638,6 +1683,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }
         removePrivateTempDir(session.systemPromptPath);
         if (sessions.get(threadId) === session) sessions.delete(threadId);
+      };
+      child.on("close", (code) => {
+        session.finishClose = () => finalizeClose(code);
+        void session.finishClose();
       });
 
       const stop = () => {
@@ -1646,7 +1695,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         closeSession(threadId, "interrupted");
         retry.cancelled = true;
         retryAbort.abort();
-        killCliTree(child);
+        stopSession(session);
       };
       active.set(threadId, { stop, turnId, broker });
       emit({ ...base(threadId, turnId), type: "turn.started" });
@@ -1791,7 +1840,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           const broker = sessions.get(threadId)?.broker ?? active.get(threadId)?.broker;
           if (!broker) return "unavailable";
           const behavior = decision.behavior === "answer" ? "answer" : decision.behavior;
-          if (!broker.answer(requestId, behavior, decision.message)) return "unavailable";
+          if (!broker.answer(requestId, behavior, decision.message, decision.always)) return "unavailable";
           return behavior === "allow" ? "allowed-once" : behavior === "answer" ? "answered" : "rejected";
         },
         hasSession: (threadId) => active.has(threadId),

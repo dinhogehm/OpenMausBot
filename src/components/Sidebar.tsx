@@ -1966,6 +1966,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>Workflows</span>
           </button>}
           <button
+            data-tour="nav-automations"
             onClick={() => dispatch({ type: "showRoutines" })}
             aria-label={density === "icons" ? t("sidebar.nav.automations") : undefined}
             title={density === "icons" ? t("sidebar.nav.automations") : undefined}
@@ -2017,6 +2018,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
               }] : []),
               {
                 key: "routines",
+                tourId: "nav-automations",
                 label: t("sidebar.nav.automations"),
                 icon: <CalendarDays size={18} />,
                 active: state.activeView === "routines",
@@ -2028,6 +2030,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
               },
               {
                 key: "plugins",
+                tourId: "nav-apps",
                 label: t("sidebar.nav.connectedApps"),
                 icon: <Puzzle size={18} />,
                 onSelect: () => dispatch({ type: "togglePlugins", open: true }),
