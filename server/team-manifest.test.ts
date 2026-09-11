@@ -282,3 +282,50 @@ describe("team manifests", () => {
     ).toThrow("at most 200 members");
   });
 });
+
+describe("model weight in a shared team", () => {
+  const bot = (id: string, model?: string) => ({
+    id,
+    name: id,
+    title: "",
+    description: "",
+    color: "blue" as const,
+    ...(model ? { modelSelection: { model } } : {}),
+  });
+
+  it("exports the weight of each role and never the model id behind it", () => {
+    const manifest = createTeamManifest({ name: "Crew", memberIds: ["thinker", "runner", "writer", "unset"] }, [
+      bot("thinker", "claude-opus-5"),
+      bot("runner", "claude-haiku-4-5"),
+      bot("writer", "claude-sonnet-5"),
+      bot("unset"),
+    ]);
+    expect(manifest.team.members.map((member) => member.weight)).toEqual([
+      "heavy",
+      "light",
+      "standard",
+      undefined,
+    ]);
+    expect(JSON.stringify(manifest)).not.toContain("claude-opus-5");
+  });
+
+  it("round-trips a weight through an untrusted file", () => {
+    const manifest = createTeamManifest({ name: "Crew", memberIds: ["thinker"] }, [bot("thinker", "claude-opus-5")]);
+    expect(parseTeamManifest(JSON.parse(JSON.stringify(manifest))).team.members[0].weight).toBe("heavy");
+  });
+
+  it("rejects a weight nobody defined", () => {
+    const manifest = createTeamManifest({ name: "Crew", memberIds: ["thinker"] }, [bot("thinker")]) as never as {
+      team: { members: Array<Record<string, unknown>> };
+    };
+    manifest.team.members[0].weight = "opus";
+    expect(() => parseTeamManifest(manifest as never)).toThrow();
+  });
+
+  it("keeps the weight out of the persona a member is allowed to become", () => {
+    const manifest = createTeamManifest({ name: "Crew", memberIds: ["thinker"] }, [bot("thinker", "claude-opus-5")]);
+    const profile = importedMemberProfile(parseTeamManifest(manifest).team.members[0], new Set());
+    expect(profile).not.toHaveProperty("weight");
+    expect(profile).not.toHaveProperty("modelSelection");
+  });
+});

@@ -215,7 +215,8 @@ import {
 } from "./send-idempotency.ts";
 import { EventBus } from "./harness/bus.ts";
 import { ProviderRegistry } from "./harness/registry.ts";
-import { selectDefaultModelSelection } from "./default-model-selection.ts";
+import { applyModelTier, selectDefaultModelSelection } from "./default-model-selection.ts";
+import { isModelTier, type ModelTier } from "../shared/model-tier.ts";
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -1229,8 +1230,10 @@ function askBotAndWait(targetBotId: string, message: string, depth: number, from
 }
 
 // New bots honor setup's saved choice; unconfigured workspaces prefer Claude.
-async function defaultSelection() {
-  return selectDefaultModelSelection(await registry.describe(), cfg.defaultModelSelection);
+// A `tier` only retunes the model inside that same engine, for callers that
+// know how heavy the new bot's work is (team import, package install).
+async function defaultSelection(tier?: ModelTier) {
+  return selectDefaultModelSelection(await registry.describe(), cfg.defaultModelSelection, tier);
 }
 
 function checkedModelSelection(
@@ -10394,12 +10397,25 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (duplicate) {
           return json(res, 409, { error: `@${duplicate.name} already exists in this section; use list_bots` });
         }
+        // A specialist stays on the Chief's engine — that account is the
+        // user's choice, and a bot creating bots must not shop for
+        // providers. Only the model within it follows the weight the Chief
+        // gave the role, so a triage bot does not run on a reasoning model
+        // and an architect does not run on a cheap one.
+        const weight = isModelTier(body.weight) ? body.weight : undefined;
+        let modelSelection: ModelSelection = { ...chief.modelSelection };
+        if (weight) {
+          const instance = (await registry.describe()).find(
+            (candidate) => candidate.instanceId === modelSelection.instanceId,
+          );
+          if (instance) modelSelection = applyModelTier(modelSelection, instance, weight);
+        }
         const created = store.createBot(
           {
             name,
             title: role,
             description: instructions,
-            modelSelection: { ...chief.modelSelection },
+            modelSelection,
             section: chief.section,
           },
           { seedMessages: false },
@@ -11520,7 +11536,20 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const memberIds = new Map<string, string>();
       let group: GroupRecord | undefined;
       try {
-        const selection = await defaultSelection();
+        // One describe() for the whole roster, then a selection per weight:
+        // an imported team should spend a heavy model on the role that
+        // reasons and a cheap one on the role that fetches, all without
+        // leaving the engine this workspace already uses.
+        const instances = await registry.describe();
+        const selectionByWeight = new Map<string, ModelSelection>();
+        const selectionFor = (weight?: ModelTier): ModelSelection => {
+          const key = weight ?? "";
+          const cached = selectionByWeight.get(key);
+          if (cached) return cached;
+          const value = selectDefaultModelSelection(instances, cfg.defaultModelSelection, weight);
+          selectionByWeight.set(key, value);
+          return value;
+        };
         const existingSections = new Set(
           [...store.bots.map((bot) => bot.section), ...store.groups.map((candidate) => candidate.section)]
             .filter((section): section is string => Boolean(section?.trim()))
@@ -11547,7 +11576,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const created = store.createBot(
             {
               ...importedMemberProfile(member, takenNames),
-              modelSelection: selection,
+              // The weight is a hint about the work, not a grant: it names
+              // no provider and no model, so it stays outside the persona
+              // allowlist above and is resolved here against this
+              // workspace's own engine.
+              modelSelection: selectionFor(member.weight),
               ...(packageSection ? { section: packageSection } : {}),
             },
             { seedMessages: false },

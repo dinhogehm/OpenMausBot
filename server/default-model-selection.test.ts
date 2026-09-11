@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ModelCatalog, ProviderSnapshot } from "./contracts.ts";
-import { selectDefaultModelSelection } from "./default-model-selection.ts";
+import { applyModelTier, selectDefaultModelSelection } from "./default-model-selection.ts";
 
 const codex = {
   instanceId: "codex",
@@ -65,5 +65,84 @@ describe("new bot default model selection", () => {
     expect(selectDefaultModelSelection([codex, claude])).toEqual({ instanceId: "claude", model: "claude-default" });
     expect(selectDefaultModelSelection([codex])).toEqual({ instanceId: "codex", model: "codex-default" });
     expect(selectDefaultModelSelection([])).toEqual({ instanceId: "", model: "" });
+  });
+});
+
+describe("weighing a new bot's work", () => {
+  const weighted = {
+    instanceId: "claude",
+    driverKind: "claudeAgent",
+    snapshot: { state: "available" as const, authenticated: true },
+    models: {
+      default: "claude-sonnet-5",
+      options: [
+        { id: "claude-opus-5", label: "Claude Opus 5" },
+        { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+        { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
+      ],
+    },
+    capabilities: { effortLevels: ["low", "medium", "high"] as const },
+  };
+
+  it.each([
+    ["light", "claude-haiku-4-5", "low"],
+    ["standard", "claude-sonnet-5", "medium"],
+    ["heavy", "claude-opus-5", "high"],
+  ] as const)("gives %s work %s", (tier, model, effort) => {
+    expect(selectDefaultModelSelection([weighted], undefined, tier))
+      .toEqual({ instanceId: "claude", model, effort });
+  });
+
+  it("moves the model but never the provider the user chose", () => {
+    const selection = selectDefaultModelSelection(
+      [
+        weighted,
+        {
+          ...codex,
+          models: {
+            default: "codex-default",
+            options: [
+              { id: "codex-default", label: "Codex" },
+              { id: "selected-model", label: "Selected" },
+              { id: "codex-max", label: "Codex Max" },
+            ],
+          },
+        },
+      ],
+      { instanceId: "codex", model: "selected-model" },
+      "heavy",
+    );
+    expect(selection).toEqual({ instanceId: "codex", model: "codex-max", effort: "high" });
+  });
+
+  it("keeps the engine's only model when it has no such weight to give", () => {
+    expect(selectDefaultModelSelection([claude], undefined, "heavy"))
+      .toEqual({ instanceId: "claude", model: "claude-default" });
+  });
+
+  it("leaves effort alone on a driver that does not take it", () => {
+    const selection = selectDefaultModelSelection([{ ...weighted, capabilities: undefined }], undefined, "heavy");
+    expect(selection).toEqual({ instanceId: "claude", model: "claude-opus-5" });
+    expect(selection).not.toHaveProperty("effort");
+  });
+
+  it("sets only the levels the driver reports", () => {
+    const selection = selectDefaultModelSelection(
+      [{ ...weighted, capabilities: { effortLevels: ["low", "high"] as const } }],
+      undefined,
+      "standard",
+    );
+    expect(selection).toEqual({ instanceId: "claude", model: "claude-sonnet-5" });
+  });
+
+  it("changes nothing without a tier", () => {
+    expect(selectDefaultModelSelection([weighted])).toEqual({ instanceId: "claude", model: "claude-sonnet-5" });
+  });
+
+  it("retunes a Chief's own selection in place, for the bots it creates", () => {
+    const chief = { instanceId: "claude", model: "claude-opus-5", effort: "high" as const };
+    expect(applyModelTier(chief, weighted, "light"))
+      .toEqual({ instanceId: "claude", model: "claude-haiku-4-5", effort: "low" });
+    expect(chief.model).toBe("claude-opus-5");
   });
 });

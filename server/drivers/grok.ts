@@ -49,6 +49,7 @@ export const GrokDriver: ProviderDriver<GrokConfig> = {
       unavailableReason: `no xAI API key — add {"xai":{"key":"xai-…"}} to ~/.openmausbot/config.json or set ${config.apiKeyEnv}`,
       timeoutMs: 120_000,
       retryScale: Number(process.env.FAKE_GROK_RETRY_SCALE ?? "1"),
+      // helper calls stay on the small model whatever the turn model is
       generateModel: () => "grok-3-mini",
       nativeLog: {
         source: "xai.chat.completions",

@@ -19,6 +19,7 @@ import { augmentedPath } from "../env-path.ts";
 import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 import { classifyResumeFailure, mayReplay, recoveryPromptFor } from "../resume-recovery.ts";
 import { ClaudeLoginController } from "./claude-login-auth.ts";
+import { selectModelForTier, type ModelTier } from "../../shared/model-tier.ts";
 
 import type {
   DriverCreateInput,
@@ -1743,15 +1744,20 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     /** One-shot Claude call with the prompt on stdin, never argv. Approval
      * summaries can contain paths, commands, or secrets, so the generic
      * `claude -p "prompt"` shape is not safe for review. No tools or MCP
-     * servers are mounted in this isolated process. */
-    const generateReview = (prompt: string, signal?: AbortSignal): Promise<string> =>
+     * servers are mounted in this isolated process.
+     *
+     * The model comes from the weight of the job rather than a fixed slug,
+     * so the catalog can move under us and a BYOK account with its own
+     * models still gets something sensible. */
+    const oneShot = (tier: ModelTier, prompt: string, signal?: AbortSignal): Promise<string> =>
       new Promise((resolve, reject) => {
+        const model = selectModelForTier(models, tier);
         const child = spawnCli(
           config.cli,
-          ["-p", "--model", "claude-haiku-4-5", "--output-format", "text"],
+          ["-p", "--model", model, "--output-format", "text"],
           {
             stdio: ["pipe", "pipe", "pipe"],
-            env: environment("claude-haiku-4-5"),
+            env: environment(model),
           },
         );
         let stdout = "";
@@ -1853,8 +1859,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           return () => listeners.delete(listener);
         },
       },
-      generateText: (prompt) => generateReview(prompt),
-      reviewPermission: generateReview,
+      // Turning something already written into shorter text is mechanical
+      // work at the cheap end of the catalog.
+      generateText: (prompt) => oneShot("light", prompt),
+      // Approval review is not: it decides whether a command, a path or a
+      // spend is safe to run without the person seeing it, and a wrong
+      // "allow" costs far more than the turn saved. It gets the everyday
+      // model, not the cheapest one.
+      reviewPermission: (prompt, signal) => oneShot("standard", prompt, signal),
       dispose: async () => {
         try {
           await login.dispose();

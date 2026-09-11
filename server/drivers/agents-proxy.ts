@@ -470,13 +470,19 @@ const TOOLS = [
   {
     name: "create_bot",
     description:
-      "Create a specialist bot in your section. Only a section's Chief of Staff may use this. The new bot inherits the Chief's engine, starts with connected apps and automatic approvals disabled, and can then receive work through delegate_bot. Create only the smallest useful team (maximum four per turn).",
+      "Create a specialist bot in your section. Only a section's Chief of Staff may use this. The new bot inherits the Chief's engine, starts with connected apps and automatic approvals disabled, and can then receive work through delegate_bot. Set weight to match the job, so the team does not pay reasoning prices for lookups. Create only the smallest useful team (maximum four per turn).",
     inputSchema: {
       type: "object",
       properties: {
         name: { type: "string", description: "Short, unique display name for the specialist." },
         role: { type: "string", description: "The specialist's job title or role." },
         instructions: { type: "string", description: "What this specialist is responsible for and how it should work." },
+        weight: {
+          type: "string",
+          enum: ["light", "standard", "heavy"],
+          description:
+            "How much model this role's work needs. \"light\" for short mechanical high-volume work (triage, extraction, lookups, summarising something already written down); \"standard\" for ordinary writing, review and code — the default if you leave it out; \"heavy\" only for long-horizon reasoning worth paying for (architecture, subtle debugging, planning the team's work). Judge the role, not your hopes for it: most specialists are standard, and a bot that only fetches and files should be light. The engine stays the same either way; only the model within it changes, and an engine with a single model ignores this.",
+        },
       },
       required: ["name", "role", "instructions"],
     },
@@ -1080,6 +1086,10 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
     if (createdThisTurn >= MAX_CREATED_PER_TURN) {
       return { text: `You can create at most ${MAX_CREATED_PER_TURN} bots in one turn. Use the team you have before adding more.`, isError: true };
     }
+    const weight = String(args.weight ?? "").trim();
+    if (weight && !["light", "standard", "heavy"].includes(weight)) {
+      return { text: 'create_bot weight must be "light", "standard" or "heavy".', isError: true };
+    }
     const r = await api(`/api/internal/create-bot`, {
       method: "POST",
       body: JSON.stringify({
@@ -1088,11 +1098,13 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
         name: botName,
         role,
         instructions,
+        ...(weight ? { weight } : {}),
       }),
     });
     createdThisTurn += 1;
+    const model = typeof r.model === "string" && r.model ? ` on ${r.model}` : "";
     return {
-      text: `Created @${r.name ?? botName} in ${r.section ?? "General"} [id: ${r.id}]. Assign work with delegate_bot.`,
+      text: `Created @${r.name ?? botName} in ${r.section ?? "General"}${model} [id: ${r.id}]. Assign work with delegate_bot.`,
     };
   }
   if (name === "create_room") {

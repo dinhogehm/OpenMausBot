@@ -9,6 +9,7 @@ import type {
 import { newEventId, newId } from "../contracts.ts";
 import { appendNative } from "./native.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
+import { selectModelForTier } from "../../shared/model-tier.ts";
 
 export interface OpenAIChatMessage {
   role: "system" | "user" | "assistant";
@@ -53,6 +54,8 @@ interface RuntimeOptions<Config> {
   timeoutMs: number;
   nativeLog: NativeLog;
   refreshModels?: () => Promise<void>;
+  /** Model for the one-shot helper calls. Defaults to the cheap end of
+   * this catalog: those calls shorten text that already exists. */
   generateModel?: () => string;
   reasoning?: boolean;
   billing?: "metered";
@@ -294,7 +297,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
       },
     },
     generateText: async (prompt) => {
-      const model = options.generateModel?.() ?? options.models().default;
+      const model = options.generateModel?.() ?? selectModelForTier(options.models(), "light");
       const { text, reasoning } = await complete([{ role: "user", content: prompt }], model, false);
       return text.trim() ? text : reasoning;
     },

@@ -5,6 +5,7 @@ import type { MausColor } from "./store.ts";
 import { botMascotBody, type MascotBodyId } from "../shared/mascot-bodies.ts";
 import { takeImportName } from "../shared/import-name.ts";
 import { BOT_PROFILE_LIMITS } from "../shared/bot-profile.ts";
+import { modelTierOf, MODEL_TIERS, type ModelTier } from "../shared/model-tier.ts";
 
 export const TEAM_MANIFEST_FORMAT = "openmaus.team" as const;
 export const TEAM_MANIFEST_VERSION = 2 as const;
@@ -50,6 +51,10 @@ const memberSchema = z.object({
   soul: z.string().refine((value) => Buffer.byteLength(value, "utf8") <= BOT_PROFILE_LIMITS.soul, {
     error: "standing instructions must be at most 24000 bytes",
   }).optional(),
+  /** How much model this role's work is worth, never which model: a shared
+   * file describes the job, and the importing workspace resolves the weight
+   * inside the engine its own user already chose. Absent means "standard". */
+  weight: z.enum(MODEL_TIERS, { error: "is not a supported weight" }).optional(),
   appearance: z.object({
     color: z.enum(COLORS, { error: "is not supported" }),
     mascotExpression: optionalText(80),
@@ -94,6 +99,9 @@ export interface TeamManifestMember {
   title: string;
   description: string;
   soul?: string;
+  /** Weight of this role's work; the importer turns it into a model within
+   * its own engine. Absent means the workspace default. */
+  weight?: ModelTier;
   appearance: {
     color: MausColor;
     mascotExpression?: string;
@@ -145,6 +153,11 @@ interface ExportableBot {
   color: MausColor;
   mascotExpression?: string | null;
   mascotBody?: string | null;
+  /** Read only to record the *weight* of each role. The model id itself
+   * never leaves the workspace: it names an engine and an account the
+   * person receiving this file may not have, and a roster's shape travels
+   * far better than its plumbing. */
+  modelSelection?: { model?: string };
 }
 
 interface ExportableTeam {
@@ -178,6 +191,7 @@ export function parseTeamManifest(value: TeamManifestInput): ParsedTeamManifest 
       title: member.title ?? "",
       description: member.description ?? "",
       ...(member.soul !== undefined ? { soul: member.soul } : {}),
+      ...(member.weight !== undefined ? { weight: member.weight } : {}),
       appearance,
     };
   });
@@ -298,12 +312,14 @@ export function createTeamManifest(team: ExportableTeam, bots: ExportableBot[]):
     const appearance: TeamManifestMember["appearance"] = { color: bot.color };
     if (bot.mascotExpression) appearance.mascotExpression = bot.mascotExpression;
     if (bot.mascotBody) appearance.mascotBody = bot.mascotBody;
+    const weight = bot.modelSelection?.model ? modelTierOf(bot.modelSelection.model) : undefined;
     return {
       key,
       name: bot.name,
       title: bot.title,
       description: bot.description,
       ...(bot.soul !== undefined ? { soul: bot.soul } : {}),
+      ...(weight ? { weight } : {}),
       appearance,
     };
   });

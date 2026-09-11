@@ -6,6 +6,7 @@ import { isSkillName, parseSkillMd, SKILL_FILE_MAX_BYTES } from "./skills.ts";
 import type { MausColor } from "./store.ts";
 import type { TeamManifestMember } from "./team-manifest.ts";
 import { BOT_PROFILE_LIMITS } from "../shared/bot-profile.ts";
+import { MODEL_TIERS } from "../shared/model-tier.ts";
 
 export const BOT_PACKAGE_FORMAT = "openmaus.package" as const;
 export const BOT_PACKAGE_VERSION = 1 as const;
@@ -145,6 +146,10 @@ const packageSchema = z.object({
       soul: z.string().refine((value) => Buffer.byteLength(value, "utf8") <= BOT_PROFILE_LIMITS.soul, {
         error: "standing instructions must be at most 24000 bytes",
       }).optional(),
+      /** How much model this role's work is worth. A blueprint says what
+       * the job needs; the installing workspace picks the model inside its
+       * own engine. Absent means "standard". */
+      weight: z.enum(MODEL_TIERS, { error: "is not a supported weight" }).optional(),
       appearance: z.object({
         color: z.enum(COLORS, { error: "is not supported" }),
         mascotExpression: optionalText(80),
@@ -321,6 +326,7 @@ export function renderBotPackageMarkdown(document: ParsedBotPackage): string {
   const agents = pkg.agents.map((agent) => [
     `### ${agent.name} — ${agent.title || "Specialist"}`,
     `**Role key:** \`${agent.key}\``,
+    agent.weight ? `**Model weight:** ${agent.weight}` : "",
     agent.playbooks?.length ? `**Use these playbooks:** ${agent.playbooks.map((key) => `\`${key}\``).join(", ")}` : "",
     "",
     agent.description,
@@ -382,6 +388,7 @@ export function packageAgentAsMember(agent: BotPackageAgent): TeamManifestMember
     title: agent.title ?? "",
     description: agent.description ?? "",
     ...(agent.soul !== undefined ? { soul: agent.soul } : {}),
+    ...(agent.weight !== undefined ? { weight: agent.weight } : {}),
     appearance: {
       color: agent.appearance.color,
       ...(agent.appearance.mascotExpression ? { mascotExpression: agent.appearance.mascotExpression } : {}),
