@@ -53,9 +53,11 @@ interface PendingDelegationItem extends DelegationItem {
   /** The bot that queued this handoff. Stored explicitly because a shared
    * channel's thread is not owned by any single bot. */
   sourceBotId: string;
-  /** Busy-target retries so far. The item stays queued (not canceled) while
-   * the target is busy, and is retried when any of the target's turns
-   * settles — up to MAX_BUSY_ATTEMPTS. */
+  /** Busy-target retries so far. The item stays queued while the target is
+   * busy and is retried when any of the target's turns settles. After
+   * MAX_BUSY_ATTEMPTS the handoff is not thrown away: it moves to a fresh
+   * thread on the target, which waits in line for a free slot instead of
+   * competing for the thread the person is looking at. */
   attempts: number;
   /** True after this item observed the target's current busy period. Other
    * queue activity must not count that same period again; the target's idle
@@ -611,7 +613,7 @@ async function processOne(
   // the harness (which knows whether the opener was unattended); the
   // classic handoff keeps the prefix it has always had.
   const prefixed = item.targetThreadId
-    ? item.message
+    ? `${item.message}${reasonLine}`
     : `[Delegated by @${sender.name}, another bot in this OpenMausBot workspace. Do the work and reply directly.]\n\n${item.message}${reasonLine}`;
   await runTarget(item.toBotId, prefixed, item.depth + 1, sourceThreadId, channel, item.id, sender.id, item.targetThreadId);
   return "dispatched";
@@ -619,11 +621,19 @@ async function processOne(
 
 /** A busy target holds the handoff. What "busy" means depends on where the
  * turn will run: a classic delegation lands in the target's active thread,
- * so it waits for the bot to go idle, with bounded retries so a stuck peer
- * cannot pin the handoff forever. A fresh-thread handoff needs only a free
- * slot, and waits in line for one without a bound — it IS the line, the
- * same one a person's message joins at that limit. Returns null when the
- * target can take the turn now. */
+ * so it waits for the bot to go idle; a fresh-thread handoff needs only a
+ * free slot, and waits in line for one without a bound — it IS the line,
+ * the same one a person's message joins at that limit. Returns null when
+ * the target can take the turn now.
+ *
+ * The two lanes meet after MAX_BUSY_ATTEMPTS. Competing for the thread the
+ * person is looking at cannot go on forever, but the work is real and a
+ * peer that holds one long job — a CI runner, a single-admission corridor —
+ * is healthy, not stuck: dropping the handoff there loses the task AND the
+ * wake that would have carried its result back, which leaves the delegating
+ * bot with nothing to do but report the same status again. So the handoff
+ * changes lanes instead of dying, into the queue that already knows how to
+ * wait. Cancelling is what is left when even that is impossible. */
 function holdWhileTargetBusy(
   bus: CommsBus,
   target: BotRecord,
@@ -660,13 +670,19 @@ function holdWhileTargetBusy(
     });
     return "requeued";
   }
+  if (moveToFreshThread(bus, target, sourceThreadId, item)) {
+    // Now a fresh-thread handoff: re-ask the same question in that lane, so
+    // a target with a slot free right now starts immediately instead of
+    // waiting for one more settle.
+    return holdWhileTargetBusy(bus, target, sourceThreadId, item);
+  }
   recordDelegationReceipt({
     id: item.id,
     sourceThreadId,
     toBotId: target.id,
     toBotName: target.name,
     status: "busy_gave_up",
-    result: `@${target.name} stayed busy through ${MAX_BUSY_ATTEMPTS} retries`,
+    result: `@${target.name} stayed busy through ${MAX_BUSY_ATTEMPTS} retries, and no thread could be opened to queue the work`,
   });
   bus.store.appendMessage(sourceThreadId, {
     role: "bot",
@@ -674,6 +690,52 @@ function holdWhileTargetBusy(
     tool: { name: `Delegation to @${target.name} canceled — still busy after ${MAX_BUSY_ATTEMPTS} retries`, ok: false },
   });
   return "settled";
+}
+
+/** One line the person can recognise in the sidebar, from the handoff the
+ * bot wrote. Titles are quoted into chips and rows, so every newline and
+ * run of space collapses. */
+function handoffTitle(message: string, senderName: string): string {
+  const line = message.replace(/\s+/g, " ").trim().slice(0, 72).trim();
+  return line || `Handoff from @${senderName}`;
+}
+
+/** Move a stalled classic delegation into a fresh thread on the target.
+ *
+ * The thread is opened exactly as start_thread opens one — same owner
+ * record, same delegation id — so everything downstream is unchanged: the
+ * drain treats it as the fresh-thread handoff it now is, the person sees a
+ * real row they can read or stop, dropIfThreadGone still releases it if
+ * they delete that row, and the source bot's task id keeps working with
+ * check_delegation. Returns false when there is nothing to move it into,
+ * and the caller cancels as before. */
+function moveToFreshThread(
+  bus: CommsBus,
+  target: BotRecord,
+  sourceThreadId: string,
+  item: PendingDelegationItem,
+): boolean {
+  const sender = bus.store.bot(item.sourceBotId);
+  if (!sender) return false;
+  const openedBy = { botId: sender.id, name: sender.name, at: Date.now() };
+  const task = bus.store.createTask(target.id, handoffTitle(item.message, sender.name), false, undefined, openedBy);
+  if (!task) return false;
+  bus.store.setTaskOpenedBy(target.id, task.threadId, { ...openedBy, delegationId: item.id });
+  item.targetThreadId = task.threadId;
+  // 1, not 0: the fresh-thread lane posts its own "waiting for a free slot"
+  // chip on its first wait, and the chip below already says more than that.
+  item.attempts = 1;
+  item.waitingOnBusy = false;
+  savePending();
+  bus.store.appendMessage(sourceThreadId, {
+    role: "bot",
+    kind: "activity",
+    tool: {
+      name: `@${target.name} stayed busy after ${MAX_BUSY_ATTEMPTS} retries — moved to thread #${task.title}, which waits in line for a free slot`,
+    },
+    threadRef: { botId: target.id, threadId: task.threadId, title: task.title },
+  });
+  return true;
 }
 
 /** The thread a fresh-thread handoff was opened in may be deleted while the

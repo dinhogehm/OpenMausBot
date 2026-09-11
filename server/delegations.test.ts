@@ -818,11 +818,18 @@ describe("busy retries and receipts", () => {
     expect(pendingDelegationInfo(taskId)).toBeNull();
   });
 
-  it("gives up after the bounded retries, with a receipt the delegator can read", async () => {
+  it("moves a handoff a busy target never took into a fresh thread, instead of dropping the work", async () => {
     store.patchBot(target.id, { busy: true });
-    const queued = queueDelegation(commsBus, from, { toBotId: target.id, message: "later", depth: 0 }, 1);
+    const queued = queueDelegation(
+      commsBus,
+      from,
+      { toBotId: target.id, message: "run the full CI for #8922", depth: 0 },
+      1,
+    );
     const taskId = queued.id!;
-    const runTarget = () => undefined;
+    const dispatched: unknown[][] = [];
+    const runTarget = (...args: unknown[]) => void dispatched.push(args);
+
     for (let round = 1; round < MAX_BUSY_ATTEMPTS; round++) {
       drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
       await waitFor(() => chipCount(`retry ${round}/`) === 1);
@@ -831,13 +838,56 @@ describe("busy retries and receipts", () => {
       expect(releaseDelegationsWaitingOn(target.id)).toEqual([from.threadId]);
     }
     drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
-    await waitFor(() => _pendingCount(from.threadId) === 0);
-    expect(chipCount("canceled — still busy after")).toBe(1);
-    expect(findDelegationReceipt(taskId)).toMatchObject({
-      status: "busy_gave_up",
-      toBotName: "Helper",
-      sourceThreadId: from.threadId,
-    });
+    await waitFor(() => chipCount("moved to thread #") === 1);
+
+    // A peer holding one long job is busy, not stuck: nothing is cancelled,
+    // no terminal receipt is written, and the handoff is still queued.
+    expect(chipCount("canceled — still busy after")).toBe(0);
+    expect(findDelegationReceipt(taskId)).toBeNull();
+    expect(_pendingCount(from.threadId)).toBe(1);
+    expect(dispatched).toHaveLength(0);
+
+    // The person gets a row they can read or stop, carrying the same claim
+    // ticket the delegating bot already holds.
+    const task = store.tasks(target.id).find((candidate) => candidate.openedBy?.delegationId === taskId);
+    expect(task?.title).toBe("run the full CI for #8922");
+    expect(task?.openedBy?.botId).toBe(from.id);
+
+    // And it starts on its own when the target frees up — the wake the old
+    // cancellation threw away.
+    store.patchBot(target.id, { busy: false });
+    expect(releaseDelegationsWaitingOn(target.id)).toEqual([from.threadId]);
+    drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
+    await waitFor(() => dispatched.length === 1);
+    expect(dispatched[0][5]).toBe(taskId);
+    expect(dispatched[0][7]).toBe(task!.threadId);
+    expect(_pendingCount(from.threadId)).toBe(0);
+  });
+
+  it("keeps waiting in the new lane instead of charging more retries", async () => {
+    store.patchBot(target.id, { busy: true });
+    const queued = queueDelegation(commsBus, from, { toBotId: target.id, message: "later", depth: 0 }, 1);
+    const taskId = queued.id!;
+    const runTarget = vi.fn();
+    for (let round = 1; round < MAX_BUSY_ATTEMPTS; round++) {
+      drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
+      await waitFor(() => chipCount(`retry ${round}/`) === 1);
+      expect(releaseDelegationsWaitingOn(target.id)).toEqual([from.threadId]);
+    }
+    drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
+    await waitFor(() => chipCount("moved to thread #") === 1);
+
+    // Settle after settle, the thread lane just waits — it is the same line
+    // a person's message joins, and it has no give-up count of its own.
+    for (let round = 0; round < MAX_BUSY_ATTEMPTS + 2; round++) {
+      expect(releaseDelegationsWaitingOn(target.id)).toEqual([from.threadId]);
+      drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(_pendingCount(from.threadId)).toBe(1);
+    expect(findDelegationReceipt(taskId)).toBeNull();
+    expect(chipCount("canceled — still busy after")).toBe(0);
+    expect(runTarget).not.toHaveBeenCalled();
   });
 
   it("does not burn busy retries when an unrelated drain is requested", async () => {
