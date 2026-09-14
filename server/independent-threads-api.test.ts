@@ -496,17 +496,21 @@ describe("independent bot tasks through the isolated control surface", () => {
     await control(["set-model", "--bot", botId, "--task", attendedTask, "--instance", "claude", "--model", models[1]]);
     await control(["send", "--bot", botId, "--task", attendedTask, "--text", "ATTENDED_ONLY"]);
     const attendedLaunch = await dump(models[1]);
-    // Approval levels are the provider's own modes, passed through: a turn a
-    // webhook started runs in the bot's level like any other, and a request
-    // Claude's reviewer leaves for a person is carded, not answered.
-    expect(unattendedLaunch.argv[unattendedLaunch.argv.indexOf("--permission-mode") + 1]).toBe("auto");
+    // This fork does not pass Auto through on an unattended turn: a native
+    // reviewer can approve before the request ever reaches this process, so
+    // a webhook-started turn is downgraded to Ask before the provider is
+    // spawned (approvalModeForTurn). The attended sibling keeps Auto, and
+    // either way a request the reviewer leaves for a person is carded.
+    expect(unattendedLaunch.argv[unattendedLaunch.argv.indexOf("--permission-mode") + 1]).toBe("default");
     expect(attendedLaunch.argv[attendedLaunch.argv.indexOf("--permission-mode") + 1]).toBe("auto");
 
     const unattendedAnswers = await permission(models[0], "unattended-permission");
     expect((await control(["wait", "--bot", botId, "--task", unattendedTask, "--timeout", "5"])).status).toBe("needs-user");
     const card = (await api("GET", `/api/threads/${unattendedTask}/messages`)).body.messages
       .find((message: any) => message.card?.requestId === "unattended-permission");
-    expect(card.card.heldCode).toBe("approval.held.native");
+    // Same reason, in this fork's words: the turn came from a webhook, so
+    // Approve for me is paused and the action asks.
+    expect(card.card.heldCode).toBe("approval.held.unattendedFullAccess");
     expect(unattendedAnswers).toEqual([]);
     expect((await botState(botId)).tasks.find((task: any) => task.taskId === attendedTask)?.activity).toBe("working");
     await control(["interrupt", "--bot", botId, "--task", attendedTask]);

@@ -18,7 +18,9 @@ async function restartFixture(fixture: VerificationServer): Promise<ChildProcess
   await waitForExit(fixture.child, { signal: "SIGTERM" });
   const dataDir = fixture.info.dataDir;
   const config = JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8"));
-  assert.equal(resolve(config.instances.claude.config.cli), join(ROOT, "server", "testing", "fake-claude-cli.ts"));
+  // The fixture names its own node instead of trusting an emptied PATH, so
+  // the configured cli is a command line, not a bare script path.
+  assert.ok(config.instances.claude.config.cli.includes(join(ROOT, "server", "testing", "fake-claude-cli.ts")));
   const env: NodeJS.ProcessEnv = {};
   for (const key of ["SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "LANG", "LC_ALL", "TZ"]) {
     if (process.env[key]) env[key] = process.env[key];
