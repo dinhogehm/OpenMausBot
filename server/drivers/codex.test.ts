@@ -177,6 +177,13 @@ describe("CodexDriver turns (fake app-server)", () => {
       { type: "item.started", itemType: "tool", title: "web_search" },
       { type: "item.completed", itemType: "tool", ok: true },
     ]);
+    expect(recorder.events.filter((event) => event.itemId === "i1")).toMatchObject([
+      { type: "item.started", input: expect.stringContaining("ls -la") },
+      { type: "item.completed", output: expect.stringContaining("README.md") },
+    ]);
+    const commandResult = recorder.events.find((event) => event.itemId === "i1" && event.type === "item.completed");
+    expect(JSON.stringify(commandResult)).toContain("exitCode");
+    expect(JSON.stringify(commandResult)).not.toContain("codex-output-secret");
     // codex reports the THREAD total; the driver turns it into this turn's
     // figure so the harness never sums a running total
     expect(recorder.events.at(-1)).toMatchObject({ type: "turn.completed", ok: true, usage: { input: 7, output: 3, cachedInput: 4 } });
@@ -1210,6 +1217,18 @@ describe("CodexDriver turns (fake app-server)", () => {
       ok: false,
       stopReason: "auth_required",
     });
+  });
+
+  it.each(["safety-rpc", "safety-completion", "safety-notification"])("surfaces %s once without retrying or asking for login", async (mode) => {
+    await create({ mode });
+    const { turnId } = await instance.adapter.sendTurn({ threadId: "t-safety", text: "Deploy my site", approvalMode: "full" });
+    const done = await recorder.until((e) => e.type === "turn.completed" && e.turnId === turnId);
+    expect(done).toMatchObject({ ok: false, stopReason: "provider_safety" });
+    const errors = recorder.events.filter((e) => e.type === "runtime.error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: expect.stringContaining("blocked by our safety systems") });
+    expect(errors[0]).not.toHaveProperty("setup");
+    expect(recorder.events.some((e) => e.type === "turn.retrying")).toBe(false);
   });
 
   it("auto-retries a transient turn/start failure, then completes with one final message", async () => {

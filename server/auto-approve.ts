@@ -12,6 +12,27 @@
 // sandbox and the bot's own computer, not a regex.
 
 import { approvalModeFor, type ApprovalMode } from "../shared/approval-mode.ts";
+import type { ProviderAdapter, RequestOutcome } from "./contracts.ts";
+
+/** A failed delivery is a runtime error, not another permission decision.
+ * An expired ask must never become a fresh Allow/Deny card. */
+export async function deliverFullAccessApproval(
+  adapter: Pick<ProviderAdapter, "respondToRequest" | "interruptTurn"> | undefined,
+  threadId: string,
+  requestId: string,
+  turnId?: string,
+  isCurrent: () => boolean = () => false,
+): Promise<RequestOutcome | "failed"> {
+  if (!adapter) return "failed";
+  try {
+    return await adapter.respondToRequest(threadId, requestId, { behavior: "allow" });
+  } catch {
+    // Some adapters ignore the optional native turn id. Recheck the
+    // server's owning generation before interrupting that thread.
+    if (turnId && isCurrent()) await adapter.interruptTurn(threadId, turnId).catch(() => {});
+    return "failed";
+  }
+}
 
 /** Full access is the person's explicit grant to this receiving bot, including
  * delegated work. It never inherits the sender's mode or elevates another bot.
@@ -22,6 +43,16 @@ export function approvalModeForOrigin(mode: ApprovalMode, origin: { peerInitiate
   if (mode === "custom" && origin.peerInitiated) return "auto";
   return mode;
 }
+
+// Tools that ask a PERSON something. A question exists so that a human
+// decides; any mode answering one on their behalf defeats the only reason
+// it was asked. They normally arrive typed as questions and never reach a
+// verdict at all — this is the backstop for the path where one arrives
+// mis-typed as a permission (a malformed AskUserQuestion call falls back to
+// the permission path in permission-proxy). Approving it there does not
+// produce an answer: the CLI runs the tool with none and the model is told
+// "The user did not answer the questions." — a question silently lost.
+const ASKS_A_PERSON = new Set(["askuserquestion", "ask_user"]);
 
 const DESTRUCTIVE = [
   /\brm\s+(-[a-z]*\s+)*-[a-z]*[rf]/i, // rm -rf, rm -fr, rm -r -f
@@ -225,6 +256,12 @@ export function autoVerdict(
   },
 ): AutoVerdict {
   const mode = approvalModeFor(bot);
+  // A question is for a person, whatever channel it arrived on — and
+  // whatever the mode: even Full has no answer to give, only an approval
+  // that would run the tool with none.
+  if (ASKS_A_PERSON.has(tool.replace(/^mcp__[^_]+__/, "").toLowerCase())) {
+    return { approve: null, source: "no-grant" };
+  }
   if (context?.nativeApproval) return { approve: null, source: "native-approval" };
   // This branch intentionally precedes every guard. Entering Full access is
   // separately consent-gated by the bot PATCH endpoint, and its promise is

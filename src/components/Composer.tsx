@@ -1,4 +1,3 @@
-import { ComposerTray } from "./ComposerTray";
 import { track } from "@/lib/analytics";
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { ArrowUp, BookOpen, Clock, Mic, Paperclip, Square, Target, Users, X } from "lucide-react";
@@ -26,6 +25,7 @@ import { BotAvatar } from "./Avatar";
 import { MentionTextarea } from "./MentionTextarea";
 import { ComposerAttachments, pathForFile } from "./ComposerAttachments";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
+import { FullAccessWarning } from "./FullAccessWarning";
 import { ApprovalModeSelector } from "./ApprovalModeSelector";
 import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode";
 import {
@@ -89,7 +89,7 @@ export function Composer({
   onClearReply,
   onConsumeReply,
   onRestoreReply,
-  locked = false,
+  locked: setupLocked = false,
 }: {
   bot?: Bot;
   group?: Group;
@@ -103,6 +103,7 @@ export function Composer({
   locked?: boolean;
 }) {
   const bot = profile ? currentTaskBot(profile) : undefined;
+  const locked = setupLocked || Boolean(bot?.awaitingThreadSnapshot);
   const { state, dispatch } = useStore();
   const { capabilities } = useDesktopCapabilities();
   const remoteClient = window.ogb?.remoteClient?.active === true;
@@ -370,7 +371,7 @@ export function Composer({
   }, [busy, pendingCount, steering]);
   const fileInput = useRef<HTMLInputElement>(null);
   const [approvalWarning, setApprovalWarning] = useState<{
-    mode: "auto";
+    mode: "auto" | "full";
     botId: string;
     threadId: string;
   } | null>(null);
@@ -380,6 +381,7 @@ export function Composer({
   const approvalEngine = modeBot
     ? state.instances.find((instance) => instance.instanceId === modeBot.modelSelection.instanceId)
     : undefined;
+  const trustedThreadAccess = Boolean(!remoteClient && window.ogb?.approvals && capabilities.host.packaged);
   const uploadImage = useCallback(async (file: File): Promise<Attachment | null> => {
     const optimistic = optimisticImageAttachment(file);
     if (!optimistic) return null;
@@ -422,7 +424,11 @@ export function Composer({
   };
   const setApprovalMode = (mode: ApprovalMode) => {
     if (!modeBot || modeBot.busy || mode === approvalModeFor(modeBot)) return;
-    if (mode === "full" || mode === "custom") return;
+    if ((mode === "full" || mode === "custom") && !trustedThreadAccess) return;
+    if (mode === "full") {
+      setApprovalWarning({ mode, botId: modeBot.id, threadId: modeBot.threadId });
+      return;
+    }
     // Safe Auto still needs its dedicated warning when it can drive the host.
     if (mode === "auto" && modeBot.computer === "local") {
       setApprovalWarning({ mode: "auto", botId: modeBot.id, threadId: modeBot.threadId });
@@ -858,8 +864,7 @@ export function Composer({
                   driverKind={approvalEngine.driverKind}
                   onSelect={setApprovalMode}
                   disabled={Boolean(modeBot.busy)}
-                  trustedModesAvailable={false}
-                  trustedModesNotice={t("approvalMode.threadTrustedNotice")}
+                  trustedModesAvailable={trustedThreadAccess}
                 />
               )}
             </div>
@@ -934,8 +939,9 @@ export function Composer({
             if (e.key === "Escape" && recording) setRecording(false);
           }}
           disabled={Boolean(approval) || locked || attachmentPending}
+          aria-busy={bot?.awaitingThreadSnapshot || undefined}
           placeholder={
-            locked
+            setupLocked
               ? t("composer.placeholder.locked")
               : approval
               ? t("composer.placeholder.approval")
@@ -1019,11 +1025,22 @@ export function Composer({
           )}
           </div>
         </div>
-        {bot && !group && !remoteClient && !locked && <ComposerTray bot={bot} />}
         </div>
         </div>
       </div>
       <div className="pointer-events-auto">
+      <FullAccessWarning
+        open={approvalWarning?.mode === "full"}
+        scope="thread"
+        onCancel={() => setApprovalWarning(null)}
+        onConfirm={() => {
+          const target = approvalWarning;
+          setApprovalWarning(null);
+          if (target?.mode !== "full" || !trustedThreadAccess) return;
+          dispatch({ type: "updateTask", botId: target.botId, threadId: target.threadId,
+            patch: { approvalMode: "full", confirmFullAccess: true } });
+        }}
+      />
       <LocalComputerAutoWarning
         open={approvalWarning?.mode === "auto"}
         onCancel={() => setApprovalWarning(null)}
