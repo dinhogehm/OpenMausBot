@@ -2,7 +2,7 @@
 // WITHOUT a human looking, so they get pinned down hard: what auto mode
 // waves through, what it refuses to wave through, and the fact that a
 // question is never answered by the machine.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import englishCatalog from "../src/locales/en.json" with { type: "json" };
 
@@ -14,6 +14,7 @@ import {
   approvalModeForOrigin,
   autoDecision,
   autoVerdict,
+  deliverFullAccessApproval,
   effectiveAlwaysAllow,
   heldReason,
   looksDestructive,
@@ -23,6 +24,26 @@ import {
   unattendedHonoredGrants,
   type AutoVerdictSource,
 } from "./auto-approve.ts";
+
+describe("Full access delivery", () => {
+  it.each(["allowed-once", "rejected", "unavailable"] as const)("preserves %s without interrupting or inventing an approval", async outcome => {
+    const adapter = { respondToRequest: vi.fn().mockResolvedValue(outcome), interruptTurn: vi.fn() };
+    expect(await deliverFullAccessApproval(adapter, "thread", "request", "turn")).toBe(outcome);
+    expect(adapter.respondToRequest).toHaveBeenCalledWith("thread", "request", { behavior: "allow" });
+    expect(adapter.interruptTurn).not.toHaveBeenCalled();
+  });
+  it("reports transport failure and interrupts only the failed turn", async () => {
+    const adapter = { respondToRequest: vi.fn().mockRejectedValue(new Error("connection lost")), interruptTurn: vi.fn().mockResolvedValue(undefined) };
+    expect(await deliverFullAccessApproval(adapter, "thread", "request", "original-turn", () => true)).toBe("failed");
+    expect(adapter.interruptTurn).toHaveBeenCalledWith("thread", "original-turn");
+    adapter.interruptTurn.mockClear();
+    expect(await deliverFullAccessApproval(adapter, "thread", "request")).toBe("failed");
+    expect(adapter.interruptTurn).not.toHaveBeenCalled();
+    expect(await deliverFullAccessApproval(adapter, "thread", "request", "old-turn", () => false)).toBe("failed");
+    expect(adapter.interruptTurn).not.toHaveBeenCalled();
+    expect(await deliverFullAccessApproval(undefined, "thread", "request")).toBe("failed");
+  });
+});
 
 describe("native permission decisions", () => {
   it.each(["auto", "full"] as const)("does not override a native %s approval request, even with a remembered grant", (approvalMode) => {
@@ -693,5 +714,31 @@ describe("held notes are translatable", () => {
     for (const [key, text] of Object.entries(HELD_NOTE)) {
       expect(englishCatalog[key as keyof typeof englishCatalog]).toBe(text);
     }
+  });
+});
+
+describe("tools that ask a person", () => {
+  // A question normally arrives typed as a question and never reaches a
+  // verdict. This is the backstop for the path where one arrives typed as a
+  // permission: no mode may answer it, because approving does not answer
+  // anything — the CLI runs the tool with no answers and the model is told
+  // "The user did not answer the questions."
+  const modes = ["ask", "edits", "auto", "custom", "full"] as const;
+
+  it("never answers AskUserQuestion for the person, even under Full access", () => {
+    for (const mode of modes) {
+      expect(autoVerdict({ approvalMode: mode }, "AskUserQuestion", "pick one"), mode).toEqual({ approve: null, source: "no-grant" });
+    }
+  });
+
+  it("never answers ask_user, bare or MCP-prefixed", () => {
+    for (const mode of modes) {
+      expect(autoVerdict({ approvalMode: mode }, "ask_user", "pick one").approve, mode).toBeNull();
+      expect(autoVerdict({ approvalMode: mode }, "mcp__ogb__ask_user", "pick one").approve, mode).toBeNull();
+    }
+  });
+
+  it("still answers an ordinary tool under Full access", () => {
+    expect(autoVerdict({ approvalMode: "full" }, "Read", "README.md").approve).toBeTruthy();
   });
 });

@@ -37,7 +37,8 @@
 //                      Sonnet 4.5: init reports the mode it actually runs in.
 //
 // Keep this file dependency-free — it runs as a bare `node` subprocess.
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { runRoomHandoffAgent } from "./room-handoff-agent.ts";
 
 const mode = process.env.FAKE_CLAUDE_MODE ?? "happy";
 const scriptedReplies = (() => {
@@ -51,7 +52,7 @@ const scriptedReplies = (() => {
     return [];
   }
 })();
-type ScriptedToolCall = { name: string; input: Record<string, unknown>; ok: boolean };
+type ScriptedToolCall = { name: string; input: Record<string, unknown>; ok: boolean; output?: unknown };
 // null = unset (or unparseable): keep the single default Bash call.
 const scriptedToolCalls: ScriptedToolCall[] | null = (() => {
   const raw = process.env.FAKE_CLAUDE_TOOL_CALLS;
@@ -60,11 +61,12 @@ const scriptedToolCalls: ScriptedToolCall[] | null = (() => {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return null;
     return parsed
-      .filter((call): call is { name: string; input?: unknown; ok?: unknown } => typeof call?.name === "string")
+      .filter((call): call is { name: string; input?: unknown; ok?: unknown; output?: unknown } => typeof call?.name === "string")
       .map((call) => ({
         name: call.name,
         input: call.input && typeof call.input === "object" && !Array.isArray(call.input) ? call.input as Record<string, unknown> : {},
         ok: call.ok !== false,
+        output: call.output,
       }));
   } catch {
     return null;
@@ -214,6 +216,9 @@ const playTurn = (prompt: JsonValue) => {
       }
     }
     const systemPromptPath = argAfter("--append-system-prompt-file");
+    const settingsPath = argAfter("--settings");
+    const settings = settingsPath ? JSON.parse(readFileSync(settingsPath, "utf8")) : null;
+    const settingsMode = settingsPath ? statSync(settingsPath).mode & 0o777 : null;
     let systemPrompt: string | null = null;
     if (systemPromptPath) {
       try {
@@ -224,7 +229,7 @@ const playTurn = (prompt: JsonValue) => {
     }
     writeFileSync(
       process.env.FAKE_CLAUDE_DUMP,
-      JSON.stringify({ pid: process.pid, argv, env: process.env, prompt, systemPrompt, mcpConfig }, null, 2),
+      JSON.stringify({ pid: process.pid, argv, env: process.env, prompt, systemPrompt, mcpConfig, settings, settingsMode }, null, 2),
     );
   }
 
@@ -273,6 +278,16 @@ const playTurn = (prompt: JsonValue) => {
   if (mode === "resume-dies-after-init" && argv.includes("--resume")) {
     process.stderr.write("fake-claude: simulated crash after accepting the resumed session\n");
     process.exit(3);
+  }
+
+  if (process.env.FAKE_CLAUDE_ROOM_PLAN) {
+    void runRoomHandoffAgent(argv, process.env.FAKE_CLAUDE_ROOM_PLAN, prompt).then(text => {
+      out({ type: "assistant", message: { content: [{ type: "text", text }] } });
+      out({ type: "result", is_error: false, stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5 } });
+    }).catch(error => {
+      out({ type: "result", is_error: true, result: String(error), stop_reason: "error" });
+    }).finally(() => { turnRunning = false; finishIfDone(); });
+    return;
   }
 
   if (mode === "hang") {
@@ -328,7 +343,7 @@ const playTurn = (prompt: JsonValue) => {
     for (const call of scriptedToolCalls) {
       const id = `tu-${++toolUseCount}`;
       out({ type: "assistant", message: { content: [{ type: "tool_use", id, name: call.name, input: call.input }], usage } });
-      out({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, is_error: !call.ok }] } });
+      out({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, is_error: !call.ok, content: call.output }] } });
     }
     for (const text of replyParts) out({ type: "assistant", message: { content: [{ type: "text", text }], usage } });
   } else {
@@ -339,7 +354,7 @@ const playTurn = (prompt: JsonValue) => {
       if (index === replyParts.length - 1) content.push({ type: "tool_use", id: "tu-1", name: "Bash", input: { command: "echo hi" } });
       out({ type: "assistant", message: { content, usage } });
     });
-    out({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu-1", is_error: false }] } });
+    out({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu-1", is_error: false, content: [{ type: "text", text: "hi" }] }] } });
   }
 
   const finish = () => {
@@ -397,8 +412,10 @@ process.stdin.on("data", (c) => {
     } catch {
       continue;
     }
-    if (turnRunning) steered.push(promptText(prompt));
-    else {
+    if (turnRunning) {
+      steered.push(promptText(prompt));
+      if (process.env.FAKE_CLAUDE_STEER_RECEIVED) writeFileSync(process.env.FAKE_CLAUDE_STEER_RECEIVED, "received");
+    } else {
       playTurn(prompt);
       armSteerGate();
     }

@@ -59,7 +59,7 @@ const dump = () => {
 };
 
 const finishTurn = () => {
-  notify("item/completed", { item: { id: "i1", type: "commandExecution", status: "completed" } });
+  notify("item/completed", { item: { id: "i1", type: "commandExecution", status: "completed", aggregatedOutput: "README.md\nAPI_KEY=codex-output-secret", exitCode: 0 } });
   notify("item/completed", { item: { id: "w1", type: "webSearch", status: "completed" } });
   if (mode === "stream") {
     // token deltas, then the whole message — the driver must not double-emit
@@ -227,6 +227,17 @@ process.stdin.on("data", (chunk) => {
         break;
       case "turn/start": {
         nativeThreadId = msg.params?.threadId ?? nativeThreadId;
+        if (mode === "safety-rpc") {
+          out({ jsonrpc: "2.0", id: msg.id, error: { code: -32603, message: "HTTP 503: This task was blocked by our safety systems." } });
+          break;
+        }
+        if (mode === "safety-completion" || mode === "safety-notification") {
+          out({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: nativeTurnId } } });
+          const message = "This task was blocked by our safety systems.";
+          if (mode === "safety-notification") notify("error", { message });
+          notify("turn/completed", { turn: { status: "failed", error: { message } } });
+          break;
+        }
         if (msg.params?.permissions && (!experimentalApi || mode === "config-profile-unsupported")) {
           out({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: "experimental API required for permissions" } });
           break;

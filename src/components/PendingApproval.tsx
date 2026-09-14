@@ -13,6 +13,7 @@ import { cn } from "@/lib/cn";
 import { t, tFromServer } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 import { SkillRequestPreview } from "@/components/SkillRequestPreview";
+import { toolLabel } from "./ApprovalCard";
 import { reviewedSkillSha256 } from "../../shared/skill-request";
 
 interface ApprovalLabels {
@@ -79,6 +80,7 @@ export function pendingApprovals(messages: Message[]): Pending[] {
  * 20,000 characters). Calls should announce the concise, visible title and
  * let the user review those details on screen instead of reading them all. */
 export function spokenApprovalPrompt(pending: Pending, requester: string): string {
+  if (pending.message.card?.teamSetupRequest) return `${requester}: ${pending.message.card.title} Review the details and choose ${pending.message.card.options[0]} or Cancel.`;
   const isRoutineRequest = isRoutineApproval(pending);
   const isSkillRequest = isSkillApproval(pending);
   const isProfileRequest = isProfileApproval(pending);
@@ -101,7 +103,10 @@ export function spokenApprovalPrompt(pending: Pending, requester: string): strin
     return t("approval.voice.profile", { requester, title });
   }
   if (!isRoutineRequest) {
-    return t("approval.voice.command", { requester, tool: pending.tool, detail: pending.detail });
+    // pending.tool can be an ACP toolCall kind rather than a tool name —
+    // speak the same verb phrase the card header shows, so voice never
+    // reads "wants to other".
+    return t("approval.voice.command", { requester, tool: toolLabel(pending.tool), detail: pending.detail });
   }
   const title = pending.message.card?.title.trim() || t("approval.voice.defaultConfirmRoutine");
   return t("approval.voice.routine", {
@@ -111,6 +116,7 @@ export function spokenApprovalPrompt(pending: Pending, requester: string): strin
 }
 
 function label(pending: Pending): string {
+  if (pending.message.card?.teamSetupRequest) return pending.message.card.title;
   if (isSkillApproval(pending)) {
     return pending.message.card?.skillRequest?.action === "update"
       ? t("approval.label.updateSkill")
@@ -174,7 +180,7 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
           </span>
         )}
         <span className="text-[13px] text-ink">{label(pending)}</span>
-        <span className="font-mono text-[11px] text-ink-secondary">
+        {!pending.message.card?.teamSetupRequest && <span className="font-mono text-[11px] text-ink-secondary">
           {isSkillApproval(pending)
             ? pending.message.card?.skillRequest?.action === "update" ? "update_skill" : "stage_skill"
             : isRoutineApproval(pending)
@@ -184,7 +190,7 @@ export const PendingApprovalPanel = memo(function PendingApprovalPanel({
             : isProfileApproval(pending)
               ? "update_profile"
               : pending.tool}
-        </span>
+        </span>}
       </div>
       {/* never truncated — long commands wrap and scroll */}
       <pre
@@ -226,7 +232,8 @@ export function PendingApprovalActions({
   const isRoutineRequest = isRoutineApproval(pending);
   const isSkillRequest = isSkillApproval(pending);
   const isProfileRequest = isProfileApproval(pending);
-  const durableRequest = isRoutineRequest || isSkillRequest || isProfileRequest;
+  const isTeamSetup = Boolean(pending.message.card?.teamSetupRequest);
+  const durableRequest = isRoutineRequest || isSkillRequest || isProfileRequest || isTeamSetup;
   const reviewedSha256 = pending.message.card?.skillRequest
     ? reviewedSkillSha256(pending.message.card.skillRequest)
     : undefined;
@@ -254,9 +261,10 @@ export function PendingApprovalActions({
       )}
       <button
         onClick={() => decide("deny")}
+        autoFocus={isTeamSetup}
         className={cn(base, "border border-danger/40 text-danger hover:bg-danger/10")}
       >
-        {isRoutineRequest || isProfileRequest ? t("approval.action.cancel") : t("approval.action.deny")}
+        {isRoutineRequest || isProfileRequest || isTeamSetup ? t("approval.action.cancel") : t("approval.action.deny")}
       </button>
       {!durableRequest && bot && pending.allowKey && (
         <button
@@ -284,7 +292,7 @@ export function PendingApprovalActions({
           "bg-accent font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40",
         )}
       >
-        {isSkillRequest
+        {isTeamSetup ? pending.message.card?.options[0] : isSkillRequest
           ? pending.message.card?.skillRequest?.action === "update"
             ? t("approval.action.update")
             : t("approval.action.enable")

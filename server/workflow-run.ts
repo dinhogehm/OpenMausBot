@@ -1359,7 +1359,9 @@ export class WorkflowEngine {
   /** Denials parked for a run the store has since pruned (the receipt cap)
    * or settled would sit in memory for the life of the process. */
   private pruneDenials(): void {
-    for (const runId of [...this.denialsByRun.keys()]) {
+    // Deleting the current key during iteration is well defined for a Map,
+    // so the snapshot copy the spread used to make is not needed.
+    for (const runId of this.denialsByRun.keys()) {
       const run = this.store.getRun(runId);
       if (!run || TERMINAL_RUN_STATUSES.has(run.status)) this.denialsByRun.delete(runId);
     }

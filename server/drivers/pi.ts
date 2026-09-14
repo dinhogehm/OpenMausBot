@@ -27,8 +27,9 @@ import { join } from "node:path";
 import { PROVIDER_CREDENTIAL_ENV, stripWorkspaceCredentialEnv } from "../config.ts";
 import { computerProxyEnv } from "../container-computer.ts";
 import { augmentedPath } from "../env-path.ts";
-import { describeSpawnFailure, killCliTree, spawnCli } from "../procs.ts";
+import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 import { SPAWNED_PROXIES } from "../proxy-paths.ts";
+import { commandSummary, toolDetailPreview } from "../tool-summary.ts";
 
 import type {
   DriverCreateInput,
@@ -54,6 +55,7 @@ import { appendNative } from "./native.ts";
 
 const DRIVER_KIND = "piAgent";
 const PI_ARGS = ["--mode", "rpc", "--no-session"];
+const PI_MODEL_UPDATE_ARGS = ["update", "--models", "--no-approve"];
 const NODE_ENV_FLAG = { ELECTRON_RUN_AS_NODE: "1" };
 
 type PiPromptImage = {
@@ -363,6 +365,23 @@ export async function fetchPiModels(
   });
 }
 
+/** Refresh pi's provider-owned catalog cache. This is deliberately called
+ * only by the explicit model-picker refresh action, never during app startup.
+ * Failure is non-fatal: the caller still probes the last usable cache. */
+export async function updatePiModelCatalog(
+  cli: string,
+  env: Record<string, string | undefined>,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    execCli(
+      cli,
+      PI_MODEL_UPDATE_ARGS,
+      { env, timeout: 60_000, maxBuffer: 1024 * 1024 },
+      (error) => resolve(!error),
+    );
+  });
+}
+
 export interface PiConfig {
   cli: string;
   /** Full-auto: never ask before an action. Host control is unavailable in
@@ -397,6 +416,8 @@ interface PiEvent {
   // tool_execution_*
   toolCallId?: string;
   toolName?: string;
+  args?: unknown;
+  result?: unknown;
   isError?: boolean;
   // turn_end / message_end
   message?: { stopReason?: string; errorMessage?: string; usage?: { input?: number; output?: number } };
@@ -440,7 +461,7 @@ export const PiDriver: ProviderDriver<PiConfig> = {
     const { instanceId, config } = input;
     const catalogEnv = piEnvironment({ ...process.env, ...input.environment });
     let models = EMPTY;
-    const refreshModels = async () => {
+    const readModels = async () => {
       let base = models;
       try {
         const resolved = await fetchPiModels(config.cli, catalogEnv);
@@ -455,7 +476,13 @@ export const PiDriver: ProviderDriver<PiConfig> = {
         if (base.options.length) models = base;
       }
     };
-    await refreshModels();
+    const refreshModels = async () => {
+      await updatePiModelCatalog(config.cli, catalogEnv);
+      await readModels();
+    };
+    // Startup stays local and fast. Only the explicit Refresh button crosses
+    // pi's model-catalog network boundary.
+    await readModels();
 
     const listeners = new Set<RuntimeEventListener>();
     // one active turn per thread
@@ -665,6 +692,8 @@ export const PiDriver: ProviderDriver<PiConfig> = {
               itemType: "tool",
               itemId: evt.toolCallId,
               title: String(evt.toolName ?? "tool").slice(0, 80),
+              summary: commandSummary(evt.args),
+              input: toolDetailPreview(evt.args),
             });
             return;
           }
@@ -675,6 +704,7 @@ export const PiDriver: ProviderDriver<PiConfig> = {
               itemType: "tool",
               itemId: evt.toolCallId,
               ok: !evt.isError,
+              output: toolDetailPreview(evt.result),
             });
             return;
           }

@@ -33,7 +33,7 @@ import { codexLocalProviderArgs } from "./local-inject.ts";
 import { augmentedPath, splitCliString } from "../env-path.ts";
 import { classifyError, computeBackoff, RETRY_MAX_ATTEMPTS } from "./retry.ts";
 import { appendNative } from "./native.ts";
-import { commandSummary } from "../tool-summary.ts";
+import { commandSummary, toolDetailPreview } from "../tool-summary.ts";
 import { codexDeveloperInstructions, syncCodexInstructions } from "./codex-instructions.ts";
 import type { ApprovalMode } from "../../shared/approval-mode.ts";
 import { CodexDeviceAuthController } from "./codex-device-auth.ts";
@@ -600,6 +600,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       const earlyNotifications: any[] = [];
       const state = {
         settled: false,
+        lastError: "",
         lastText: "",
         sawStreamDelta: false,
         // codex reports token usage as a running THREAD total; the harness
@@ -874,6 +875,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
                 itemId: item.id,
                 title,
                 summary: item.type === "commandExecution" ? commandSummary({ command: item.command }) : undefined,
+                input: toolDetailPreview(item.type === "commandExecution" ? { command: item.command, cwd: item.cwd } : item.type === "mcpToolCall" ? item.arguments : item.type === "fileChange" ? item.changes : item.query),
               });
             }
             break;
@@ -912,6 +914,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
                 itemType: "tool",
                 itemId: item.id,
                 ok: item.status !== "failed" && item.status !== "declined",
+                output: toolDetailPreview(item.type === "commandExecution" ? { output: item.aggregatedOutput, exitCode: item.exitCode } : item.type === "mcpToolCall" ? item.error ?? item.result : item.type === "fileChange" ? item.changes : item.action),
               });
             } else if (item.type === "reasoning") {
               emit({ ...base(threadId, turnId), type: "item.updated", itemType: "reasoning", tokens: null });
@@ -951,7 +954,15 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           }
           case "turn/completed": {
             const t = p.turn ?? {};
-            void settle(t.status === "completed", t.status === "completed" ? null : (t.error?.message ?? t.status ?? "failed"));
+            const message = typeof t.error?.message === "string" ? t.error.message.slice(0, 400) : "";
+            if (t.status !== "completed" && message && message !== state.lastError) {
+              state.lastError = message;
+              emit({ ...base(threadId, turnId), type: "runtime.error", message,
+                ...(classifyError({ text: message }).reason === "auth" ? { setup: true } : {}),
+              });
+            }
+            void settle(t.status === "completed", t.status === "completed" ? null :
+              (classifyError({ text: message || state.lastError }).reason === "provider_safety" ? "provider_safety" : (message || t.status || "failed")));
             break;
           }
           case "error":
@@ -959,7 +970,10 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
             // {error:{message}} — surface either (agentcal armor)
             {
               const message = p.message ?? p.error?.message;
-              if (message) emit({ ...base(threadId, turnId), type: "runtime.error", message: String(message).slice(0, 400) });
+              if (message) {
+                state.lastError = String(message).slice(0, 400);
+                emit({ ...base(threadId, turnId), type: "runtime.error", message: state.lastError });
+              }
             }
             break;
         }
@@ -1199,7 +1213,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
             message,
             ...(needsAuth ? { setup: true } : {}),
           });
-          await settle(false, needsAuth ? "auth_required" : "rpc_error");
+          await settle(false, needsAuth ? "auth_required" : verdict.reason === "provider_safety" ? "provider_safety" : "rpc_error");
         }
       }
     };

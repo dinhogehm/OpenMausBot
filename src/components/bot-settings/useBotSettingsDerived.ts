@@ -34,13 +34,14 @@ export type BotPatch = Partial<
     | "speakReplies"
     | "voice"
     | "chiefOfStaff"
+    | "managedSections"
     | "approvePeerComms"
     | "composio"
     | "browser"
     | "mcpServers"
     | "modelSelection"
   >
-> & { computer?: Bot["computer"] | null; acknowledgeLocalAuto?: boolean; confirmFullAccess?: boolean };
+> & { computer?: Bot["computer"] | null; acknowledgeLocalAuto?: boolean; confirmFullAccess?: boolean; acknowledgePeerScope?: boolean };
 
 export function useBotSettingsDerived(bot: Bot) {
   const { state, dispatch } = useStore();

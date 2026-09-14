@@ -6,13 +6,15 @@
 // same row and write through the same action.
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
-import { useStore, type Bot, type InstanceInfo, type ModelSelection } from "@/state/store";
+import { useStore, currentTaskBot, type Bot, type InstanceInfo, type ModelSelection } from "@/state/store";
 import type { EffortLevel } from "../../server/contracts.ts";
 import { filterCustomModels, partitionCustomModels, suggestedModels } from "@/lib/custom-models";
 import { isCustomOnly, splitEngineRail } from "@/lib/engine-rail";
 import { ProviderMark } from "./ProviderIcons";
 import { EngineSetup, EngineUpdateNotice, needsCli, needsSignIn } from "./EngineSetup";
 import { EngineGroupLabel } from "./EngineGroupLabel";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { approvalModeFor, modelSwitchNeedsAsk } from "../../shared/approval-mode";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { COMPACT_SQUARE } from "@/lib/compact-chip";
@@ -50,11 +52,13 @@ export function effortLabel(level: EffortLevel): string {
 export function EffortRow({
   bot,
   threadId,
+  updateBotDefault,
   className,
   label,
 }: {
   bot: Bot;
   threadId?: string;
+  updateBotDefault?: boolean;
   className?: string;
   label?: ReactNode;
 }) {
@@ -81,7 +85,7 @@ export function EffortRow({
                 ? "Send no effort level and let the engine decide"
                 : `Ask for ${effortLabel(level)} reasoning effort`
             }
-            onClick={() => dispatch({ type: "setModel", botId: bot.id, threadId, selection: { ...selection, effort: level } })}
+            onClick={() => dispatch({ type: "setModel", botId: bot.id, threadId, ...(updateBotDefault ? { updateBotDefault: true } : {}), selection: { ...selection, effort: level } })}
             className={cn(
               "rounded-full border px-2.5 py-1 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70",
               selection.effort === level
@@ -257,6 +261,9 @@ export function ModelPicker({
   const [query, setQuery] = useState("");
   const [showAll, setShowAll] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [scope, setScope] = useState<"bot" | "thread">("thread");
+  const [pendingSwitch, setPendingSwitch] = useState<{ botId: string; threadId: string;
+    selection: ModelSelection; updateBotDefault: boolean; name: string } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const refreshingRef = useRef(false);
   const lastClaudeIdRef = useRef<string | null>(null);
@@ -359,10 +366,22 @@ export function ModelPicker({
       model,
     };
     if (sameInstance && selection.effort) nextSelection.effort = selection.effort;
+    const updateBotDefault = !threadId || scope === "bot";
+    const profile = state.bots.find((candidate) => candidate.id === bot.id) ?? bot;
+    const targets = updateBotDefault ? [currentTaskBot(profile, threadId ?? bot.threadId), profile] : [bot];
+    if (targets.some((target) => modelSwitchNeedsAsk(approvalModeFor(target),
+      state.instances.find((candidate) => candidate.instanceId === target.modelSelection.instanceId)?.driverKind,
+      instance.driverKind))) {
+      setPendingSwitch({ botId: bot.id, threadId: threadId ?? bot.threadId,
+        selection: nextSelection, updateBotDefault, name: modelLabel(instance, model) });
+      setOpen(false);
+      return;
+    }
     dispatch({
       type: "setModel",
       botId: bot.id,
-      threadId,
+      threadId: threadId ?? bot.threadId,
+      updateBotDefault,
       selection: nextSelection,
     });
     setOpen(false);
@@ -489,6 +508,21 @@ export function ModelPicker({
           <ModelEngineRail instances={state.instances} selectedInstance={railInstance} claudeInstance={claudeRailInstance} onSelect={selectRail} />
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            {threadId && (
+              <div className="shrink-0 border-b border-hairline/40 px-3 py-2">
+                <div role="group" aria-label="Apply model changes to" className="flex gap-1">
+                  {(["thread", "bot"] as const).map((value) => (
+                    <button key={value} type="button" aria-pressed={scope === value} onClick={() => setScope(value)}
+                      className={cn("rounded-lg px-2 py-1 text-[12px]", scope === value ? "bg-control text-ink" : "text-ink-secondary hover:bg-control/60")}>
+                      {value === "bot" ? "Thread + bot default" : "Only this thread"}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-1 text-[11px] text-ink-secondary">
+                  {scope === "bot" ? "This thread, groups, and new threads. Other existing threads keep their model." : "Other threads and groups keep their model."}
+                </p>
+              </div>
+            )}
             {railInstance ? (
               <>
                 <div className="shrink-0 px-4 pb-2 pt-3.5">
@@ -533,7 +567,7 @@ export function ModelPicker({
                     </p>
                   )}
                   <div className="mt-0.5 text-[11.5px] text-ink-secondary">
-                    {pane === "custom" ? t("model.localHint") : t(threadId ? "model.chooseThreadHint" : "model.chooseHint")}
+                    {pane === "custom" ? t("model.localHint") : t(threadId && scope === "thread" ? "model.chooseThreadHint" : "model.chooseHint")}
                   </div>
                 </div>
 
@@ -663,6 +697,7 @@ export function ModelPicker({
                   <EffortRow
                     bot={bot}
                     threadId={threadId}
+                    updateBotDefault={Boolean(threadId && scope === "bot")}
                     className="shrink-0 border-t border-hairline/40 px-4 py-3"
                     label={<span className="text-[12.5px] font-medium text-ink">Effort</span>}
                   />
@@ -701,6 +736,25 @@ export function ModelPicker({
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={pendingSwitch !== null}
+        title={t("model.providerSwitch.title")}
+        body={t(pendingSwitch?.updateBotDefault ? "model.providerSwitch.botBody" : "model.providerSwitch.threadBody", {
+          model: pendingSwitch?.name ?? "",
+        })}
+        tone="neutral"
+        confirmLabel={t("model.providerSwitch.confirm")}
+        onCancel={() => setPendingSwitch(null)}
+        onConfirm={() => {
+          if (!pendingSwitch || bot.busy || pendingSwitch.botId !== bot.id || pendingSwitch.threadId !== (threadId ?? bot.threadId)) {
+            setPendingSwitch(null); return;
+          }
+          dispatch({ type: "setModel", botId: pendingSwitch.botId, threadId: pendingSwitch.threadId,
+            selection: pendingSwitch.selection, updateBotDefault: pendingSwitch.updateBotDefault,
+            resetApprovalToAsk: true });
+          setPendingSwitch(null);
+        }}
+      />
     </div>
   );
 }

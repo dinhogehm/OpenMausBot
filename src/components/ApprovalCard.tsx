@@ -31,8 +31,8 @@ const SKILL_SETTLED_LABEL = {
 
 /** The tool's own name is noise to a human: mcp__ogb__computer_batch is
  * "computer batch", Bash is "run a command". */
-function toolLabel(tool?: string): string {
-  if (!tool) return t("approval.tool.action");
+export function toolLabel(tool?: string): string {
+  if (!tool) return t("approval.tool.takeAction");
   const bare = tool.replace(/^mcp__[^_]+__/, "").replace(/_/g, " ");
   const nice: ToolLabels = {
     Bash: "approval.tool.runCommand",
@@ -47,6 +47,21 @@ function toolLabel(tool?: string): string {
     update_skill: "approval.tool.updateSkill",
     update_profile: "approval.tool.updateProfile",
     workflow_approval: "approval.tool.workflowApproval",
+    // An ACP driver can know the protocol's toolCall kind but not the
+    // tool's name, and sends the kind as the card's tool
+    // (server/drivers/acp/core.ts). Kinds are not verb phrases —
+    // "wants to other" reads as broken — so map every kind it can send
+    // to a real phrase. "shell" is its name for execute; "tool" is its
+    // fallback when an agent sends no kind at all — an unclassified call,
+    // so it reads differently from "other", the agent's own generic kind.
+    shell: "approval.tool.runCommand",
+    edit: "approval.tool.editFile",
+    read: "approval.tool.readFile",
+    fetch: "approval.tool.fetchWebPage",
+    delete: "approval.tool.deleteFile",
+    think: "approval.tool.think",
+    other: "approval.tool.takeAction",
+    tool: "approval.tool.useTool",
   };
   const key = nice[tool];
   return key ? t(key) : bare;
@@ -81,6 +96,7 @@ export function ApprovalCard({
   const isSkillRequest = Boolean(card.skillRequest);
   const isProfileRequest = Boolean(card.profileRequest);
   const isWorkflowGate = Boolean(card.workflowApproval);
+  const isTeamSetup = Boolean(card.teamSetupRequest);
   const routineAction = card.routineRequest?.operation.action;
   const skillAction = card.skillRequest?.action;
   const heldNote = tFromServer(card.heldCode, card.held);
@@ -127,7 +143,7 @@ export function ApprovalCard({
     >
       <div className="flex items-baseline justify-between gap-3">
         <div className="text-[15px] font-semibold text-ink">
-          {workflowHeader ?? profileHeader ?? (
+          {workflowHeader ?? (isTeamSetup ? card.title : null) ?? profileHeader ?? (
             <>
               {bot
                 ? t("approval.card.namedWantsTo", { name: bot.name, action: toolLabel(displayTool) })
@@ -135,7 +151,7 @@ export function ApprovalCard({
             </>
           )}
         </div>
-        {displayTool && <span className="shrink-0 font-mono text-[11px] text-ink-secondary">{displayTool}</span>}
+        {displayTool && !isTeamSetup && <span className="shrink-0 font-mono text-[11px] text-ink-secondary">{displayTool}</span>}
       </div>
 
       {/* what, exactly */}
@@ -190,7 +206,7 @@ export function ApprovalCard({
         {settled === "allow" ? (
           <>
             <Check size={14} className="text-success" />
-            {skillSettledLabel ??
+            {isTeamSetup ? (card.teamSetupRequest?.deletion ? "Bot deleted" : "Team setup applied") : skillSettledLabel ??
               routineSettledLabel ??
               (isWorkflowGate
                 ? t("approval.status.workflowApproved")
@@ -208,7 +224,7 @@ export function ApprovalCard({
               ? settled === "unavailable"
                 ? t("approval.status.workflowClosed")
                 : t("approval.status.workflowRejected")
-              : isRoutineRequest || isSkillRequest || isProfileRequest
+              : isRoutineRequest || isSkillRequest || isProfileRequest || isTeamSetup
                 ? t("approval.status.cancelled")
                 : t("approval.status.denied")}
           </>
@@ -217,7 +233,7 @@ export function ApprovalCard({
             <ShieldCheck size={14} className="text-accent" />
             {isWorkflowGate
               ? t("approval.status.waitingDecision")
-              : isRoutineRequest || isSkillRequest || isProfileRequest
+              : isRoutineRequest || isSkillRequest || isProfileRequest || isTeamSetup
                 ? t("approval.status.waitingConfirmation")
                 : t("approval.status.waitingAnswer")}
           </>

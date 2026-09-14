@@ -38,18 +38,26 @@ recipe from sending messages to the user's running app by accident.
 Use only mapped, tested commands:
 
 - [Chat turns](chat-turns.md)
+- [OpenAI-compatible structured tools](openai-tools.md)
+- [Bot setup, model scope, and file continuity](bot-continuity.md)
+- [Reviewed Chief team setup and scoped deletion](team-setup.md)
+- [Full Access without duplicate approvals](full-access.md)
 - [Chat UI, driven headlessly](chat-ui.md)
 - [Welcome flow and guided tour](onboarding.md)
 - [Channels](channels.md)
+- [In-chat team coordination](room-coordination.md)
+- [Chief access to additional teams](team-access.md)
 - [Engines and Doctor](engines.md)
 - [Claude coordination and turn-scoped tools](claude-tool-lifecycle.md)
 - [Codex bot instructions](codex-instructions.md)
 - [Codex helper event isolation](codex-helpers.md)
 - [Qwen model route selection](qwen-models.md)
 - [Team backups](team-backups.md)
+- [Teams and shared instructions](teams.md)
 - [Full workspace backups](workspace-backups.md)
 - [Fleet: many workspaces on one server](fleet.md)
 - [Workspaces screen and the fleet agent](workspaces.md)
+- [Hosted workspace sign-in and revocation](hosted-workspaces.md)
 - [Usage ledger](usage-ledger.md)
 - [Spend cap and sell prices](spend-cap.md)
 
@@ -85,6 +93,14 @@ desktop app or controlling the user's computer.
 The [bot settings fixture](bot-settings.md) checks profile saves, standing
 instructions, history restore, skill/memory refresh, and stale-response isolation.
 
+The [chat and settings polish fixture](chat-polish.md) exercises attachment
+galleries, opt-in video playback, persisted tool details, and responsive settings
+through the real renderer in an isolated fake-engine workspace.
+
+The [people invitation fixture](people.md) checks hosted workspace sign-in,
+roles and device revocation through the real HTTP API with a stubbed email
+service. It does not drive the People settings UI through `control-omb`.
+
 The [sidebar fixture](sidebar.md) checks archive and delete confirmations, their
 default focus, keyboard wrapping and focus return against two disposable bots.
 
@@ -96,6 +112,9 @@ per-thread models, simultaneous direct conversations and thread-scoped Stop.
 
 The [iOS thread checks](ios-threads.md) cover the native thread tree, folder
 search and draft isolation using disposable simulators and an offline fixture.
+
+The [Android thread checks](android-threads.md) cover the Compose thread tree,
+local selection, draft isolation and installable preview APK.
 
 The [right-to-left fixture](bidi.md) checks per-block direction in bot replies
 and per-line direction in sent turns, with code pinned left-to-right.
@@ -115,6 +134,14 @@ responsive layouts, theme contrast, and status refreshes without losing drafts.
 
 The [Claude account recipe](claude-account.md) checks sign-out, cancellation and
 retry against an offline Claude CLI confined to a disposable home.
+
+The [provider recovery recipe](provider-recovery.md) verifies real Grok image
+transport and Claude authentication against loopback APIs, plus scoped thread
+approvals and provider safety errors in an isolated desktop UI.
+
+The [skill approval lifecycle recipe](skill-approval-lifecycle.md) checks Deny,
+missing staged records and active-thread deletion in two isolated app windows,
+including the surviving conversation and sending again without deleting the bot.
 
 The [Codex account recipe](codex-account.md) checks account switching against an
 offline Codex CLI whose identity is synthetic and whose credential directory is empty.

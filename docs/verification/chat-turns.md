@@ -40,6 +40,54 @@ command without starting a turn.
 - A bot working inside a channel must be awaited through that channel.
 - `needs-user`, `failed`, and `stalled` are results, not successful settlement.
 
+## Surface gating: Works on = Off
+
+Off withholds both surfaces. No other path may hand that bot the built-in
+browser, and the turn must tell the model it has no screen rather than leave
+it to narrate a browser it cannot call.
+
+```sh
+node --experimental-strip-types scripts/control-omb.ts launch
+# second terminal, using the printed URL
+pnpm control:omb new-bot --name Orbit --url http://127.0.0.1:PORT
+pnpm control:omb send --bot BOT_ID --text "list my calendar events" --url http://127.0.0.1:PORT
+pnpm control:omb wait --bot BOT_ID --timeout 40 --url http://127.0.0.1:PORT
+# the fixture's own API sets the destination the Works on picker sets
+curl -s -X PATCH "http://127.0.0.1:PORT/api/bots/BOT_ID" \
+  -H 'content-type: application/json' -d '{"computer":"off"}'
+pnpm control:omb send --bot BOT_ID --text "open a browser and check my calendar" --url http://127.0.0.1:PORT
+pnpm control:omb wait --bot BOT_ID --timeout 40 --url http://127.0.0.1:PORT
+```
+
+After each settled turn read `fake-claude-dump.json` in the fixture's printed
+`dataDir`: it holds the exact `systemPrompt` and `mcpConfig` that engine run
+received. The Auto turn must carry no Works-on sentence. The Off turn's prompt
+must say the setting is Off and that no computer and no built-in browser are
+mounted. Repeat through a channel — the room path resolves its surface
+separately — and mention a second Auto bot in the same room as the control.
+
+Proving the browser server's own absence from `mcpConfig` needs a fixture with
+a real browser engine; see [Live browser and profiles](browser-live.md). The
+dump above proves what the model was told, not what a native browser would do.
+
+### Last exercised
+
+2026-09-12, isolated macOS fixture on port 21008. A bot on Auto settled with
+`mcpConfig` servers `agents` and `ogb` and no Works-on sentence. The same bot
+patched to `computer: "off"` settled with the Works-on-Off sentence in its
+system prompt. A channel send to that bot carried the same sentence in the room
+prompt; an Auto bot mentioned in the same room did not. The fixture and its
+temporary data directory were removed with Ctrl-C afterwards.
+
+Maintainer review, 2026-09-12: repeated against an isolated fixture with the
+native agent-browser 0.37.0 and Chrome for Testing explicitly installed. The
+fake model's captured MCP configuration included `browser` for Auto and
+Browser-only direct turns, and omitted it for Off direct and Off room turns.
+All four turns settled and the fixture was closed. This proves tool mounting
+with an available engine; it does not claim a browser navigation or a real
+provider response. Only server names and bounded fixture messages were retained,
+not the capability tokens in the raw MCP configuration.
+
 ## Queued follow-up recovery
 
 Accepted bot and channel follow-ups are committed to the transcript database
@@ -62,6 +110,38 @@ and a second restart without replay. It records the fixture log and a retained
 This does not prove resumption or cleanup of real provider sessions after a crash.
 
 ## Concurrent-task regression
+
+### Delegation mailbox
+
+Queued handoffs now wait through repeated busy turns rather than giving up
+after three. The delivery window is 24 hours; an hourly sweep expires a
+handoff that is still unable to run, reports the failure, and wakes its sender.
+A free target can accept an overdue handoff. At restart, already elapsed
+windows receive a fresh 24 hours **before** dispatching any recovered jobs;
+otherwise the first job can occupy the target and expire the rest of its
+backlog. Valid, unexpired windows retain their saved deadlines. This is a
+wall-clock window, not precise uptime accounting: sleep within a running
+process counts. A routine waiting on a peer skips overlapping interval fires
+until the handoff settles (potentially about 25 hours); it never duplicates
+the pending job to catch up.
+
+```sh
+pnpm exec vitest run server/delegations.test.ts server/peer-roster.test.ts server/drivers/agents-proxy.test.ts
+pnpm exec vitest run server/independent-threads-api.test.ts -t 'holds a delegation behind an approval'
+pnpm exec vitest run server/comms.test.ts
+```
+
+The mailbox API fixture uses the isolated launcher and per-model fake-engine
+gates. A peer waits on a real approval-broker card; a Chief delegates through
+its captured turn capability and finishes. The roster reports waiting on the
+user, exactly one waiting chip appears, approving releases the peer, and one
+attributed result returns to the Chief without another user prompt. Exact
+control commands, waits, transcripts and the server log path are retained in
+the fixture's `.log.json` evidence, without capability tokens. Queue-unit
+tests cover expiry, multi-job restart recovery, repeated busy periods and
+persisted deadlines. These tests do not claim real-provider performance.
+
+### Independent tasks
 
 ```sh
 pnpm exec vitest run server/independent-threads-api.test.ts
@@ -108,5 +188,13 @@ lifecycle tests retain the verification profile on the same failure.
 POSIX group escalation and the
 new server cases are skipped on Windows; its existing `taskkill /T /F` path
 remains covered by the cross-platform child-tree test when run on Windows.
+Windows event-order regressions also run on every host in
+`server/kill-tree-windows.test.ts`: successful `taskkill` alone is not proof
+that Node observed the child's exit. Both orders (exit before or after the
+command callback) must settle without waiting for inherited pipes to close;
+an unobserved exit still times out as uncertain. The native Antigravity
+`closeAndWait` test in Windows CI verifies that callers cannot rename an
+executable while its process is still running. Local mocked Windows tests
+do not substitute for that native check.
 Processes that intentionally detach into a different group are not owned by
 this POSIX group-based cancellation.
