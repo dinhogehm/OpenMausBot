@@ -6135,7 +6135,9 @@ async function startTurn(
         botId: bot.id,
         text: turnText,
         images: turnImages,
-        approvalMode: approvalModeForTurn(liveBot ?? bot, commsDepth > 0, threadId),
+        // The task's own record decides the mode: a Full bot with an Ask
+        // task must not inherit the bot-level grant (upstream #1170).
+        approvalMode: approvalModeForTurn(bot, commsDepth > 0, threadId),
         model,
         effort,
         // a rewound thread never resumes the abandoned branch's session
