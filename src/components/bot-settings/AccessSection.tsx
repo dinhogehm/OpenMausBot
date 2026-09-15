@@ -56,19 +56,19 @@ function WorkingFolder({ bot }: { bot: Bot }) {
 
   return (
     <div className="rounded-xl bg-card p-4">
-      <div className="text-[15px] font-medium text-ink">Working folder</div>
-      <div className="mt-0.5 text-[13px] text-ink-secondary">Where this bot runs its shell and file tools.</div>
+      <div className="text-[15px] font-medium text-ink">{t("botAccess.folder")}</div>
+      <div className="mt-0.5 text-[13px] text-ink-secondary">{t("botAccess.folderHint")}</div>
       {canPick ? (
         <div className="mt-3 flex items-center gap-2">
           <div className="min-w-0 flex-1 truncate rounded-lg border border-hairline/40 bg-inset px-3 py-2 font-mono text-[12.5px] text-ink" title={bot.cwd}>
-            {bot.cwd ? shortPath(bot.cwd, home) : <span className="text-ink-secondary">Private bot workspace</span>}
+            {bot.cwd ? shortPath(bot.cwd, home) : <span className="text-ink-secondary">{t("botAccess.folderPrivate")}</span>}
           </div>
           <button onClick={() => void pick()} disabled={saving} className="flex shrink-0 items-center gap-1.5 rounded-lg bg-control px-3 py-2 text-[13px] text-ink hover:bg-raised-hover disabled:opacity-50">
-            <FolderOpen size={14} /> Choose…
+            <FolderOpen size={14} /> {t("botAccess.folderChoose")}
           </button>
           {bot.cwd && (
             <button onClick={() => void save(null)} disabled={saving} className="shrink-0 rounded-lg px-2 py-2 text-[13px] text-ink-secondary hover:text-ink disabled:opacity-50">
-              Clear
+              {t("botAccess.folderClear")}
             </button>
           )}
         </div>
@@ -83,19 +83,19 @@ function WorkingFolder({ bot }: { bot: Bot }) {
         >
           <input
             className={cn(inputCls, "font-mono text-[12.5px]")}
-            placeholder="Private bot workspace — or an absolute path"
+            placeholder={t("botAccess.folderPlaceholder")}
             value={draft ?? bot.cwd ?? ""}
             onChange={(e) => setDraft(e.target.value)}
           />
           <button type="submit" disabled={saving || draft === null} className="shrink-0 rounded-lg bg-control px-3 py-2 text-[13px] text-ink hover:bg-raised-hover disabled:opacity-50">
-            Save
+            {t("botAccess.folderSave")}
           </button>
         </form>
       )}
       {error && <div className="mt-2 text-[12px] text-danger">{error}</div>}
       {pinnedElsewhere && (
         <div className="mt-2 text-[12px] text-ink-secondary">
-          New tasks start here. This task is pinned to {pinned ? <span className="font-mono">{shortPath(pinned, home)}</span> : "the home folder"} — start a new task to use the new folder.
+          {t("botAccess.folderPinned", { folder: pinned ? shortPath(pinned, home) : t("botAccess.folderPinnedHome") })}
         </div>
       )}
     </div>
@@ -225,18 +225,18 @@ export function AccessSection({
   return (
     <div className="flex flex-col gap-4">
       <div className="rounded-xl bg-card p-4">
-        <div className="text-[15px] font-medium text-ink">Works on</div>
+        <div className="text-[15px] font-medium text-ink">{t("botAccess.worksOn")}</div>
         <div className="mt-0.5 text-[13px] text-ink-secondary">
-          Where this bot works{bot.computer ? "" : " (currently: auto)"}. Browser is the built-in browser tab only; no desktop.
+          {t("botAccess.worksOnHint", { auto: bot.computer ? "" : t("botAccess.worksOnAuto") })}
         </div>
         <div className="mt-3 flex overflow-hidden rounded-lg border border-hairline/40">
           {([
-            [null, "Auto"],
-            ["cloud", "Cloud"],
-            ["vm", "Local VM"],
-            ["local", "This computer"],
-            ["browser", "Browser"],
-            ["off", "Off"],
+            [null, t("botAccess.modeAuto")],
+            ["cloud", t("botAccess.modeCloud")],
+            ["vm", t("botAccess.modeVm")],
+            ["local", t("botAccess.modeLocal")],
+            ["browser", t("botAccess.modeBrowser")],
+            ["off", t("botAccess.modeOff")],
           ] as const).map(([mode, label], i) => (
             <button
               key={mode ?? "auto"}
@@ -245,9 +245,9 @@ export function AccessSection({
                 mode === "local" && !localSelectable
                   ? localDisabledReason ?? undefined
                   : mode === "browser"
-                    ? browserSelectable ? "The built-in browser tab only; no desktop" : browserDisabledReason
+                    ? browserSelectable ? t("botAccess.browserOnlyTitle") : browserDisabledReason
                     : mode === "off"
-                      ? "No computer and no built-in browser"
+                      ? t("botAccess.offTitle")
                       : undefined
               }
               onClick={() => {
@@ -273,17 +273,16 @@ export function AccessSection({
         </div>
         {bot.computer === "off" && (
           <div className="mt-3 rounded-lg bg-inset px-3 py-2.5 text-[11.5px] leading-relaxed text-ink-secondary">
-            <span className="font-medium text-ink">Off means no screen.</span>{" "}
-            This bot gets no computer and no built-in browser, so it cannot open a web page, click, or type
-            anywhere. Its connected apps, MCP servers, files and chat all still work.
+            <span className="font-medium text-ink">{t("botAccess.offLead")}</span>{" "}
+            {t("botAccess.offBody")}
           </div>
         )}
         {(!bot.computer || bot.computer === "cloud") && (
           <>
             {!bot.computer && (
               <div className="mt-3 rounded-lg bg-inset px-3 py-2.5 text-[11.5px] leading-relaxed text-ink-secondary">
-                <span className="font-medium text-ink">Auto cloud preference.</span>{" "}
-                This chooses what Auto may reuse during a task; viewing settings does not create or wake a computer.
+                <span className="font-medium text-ink">{t("botAccess.autoCloudLead")}</span>{" "}
+                {t("botAccess.autoCloudBody")}
               </div>
             )}
             <CloudBackendPicker
@@ -294,14 +293,14 @@ export function AccessSection({
             {!bot.computer && bot.cloudBackend === "vps" && (
               <div className="mt-3 flex items-center justify-between gap-4 rounded-lg bg-inset px-3 py-2.5">
                 <div className="min-w-0">
-                  <div className="text-[13px] text-ink">Start VPS automatically</div>
+                  <div className="text-[13px] text-ink">{t("botAccess.autoStartVps")}</div>
                   <div className="mt-0.5 text-[11.5px] text-ink-secondary">
-                    Allow Auto to create or wake this bot's managed container when needed.
+                    {t("botAccess.autoStartVpsHint")}
                   </div>
                 </div>
                 <Switch
                   checked={Boolean(bot.autoStartVps)}
-                  aria-label="Start VPS automatically"
+                  aria-label={t("botAccess.autoStartVps")}
                   onClick={() => patch({ autoStartVps: !bot.autoStartVps })}
                 />
               </div>
@@ -315,29 +314,29 @@ export function AccessSection({
       <div className="rounded-xl bg-card p-4">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <div className="text-[15px] font-medium text-ink">Connected apps</div>
+            <div className="text-[15px] font-medium text-ink">{t("botAccess.connectedApps")}</div>
             <div className="mt-0.5 text-[13px] text-ink-secondary">
               {!connectedAppsConfigured
-                ? "Connect apps in App Settings before giving this bot access."
+                ? t("botAccess.appsNotConfigured")
                 : !canUseConnectedApps
-                  ? "This bot's current engine cannot use connected apps."
+                  ? t("botAccess.appsEngineUnsupported")
                   : connectedAppsEnabled
-                    ? "Let this bot use your connected Gmail, Calendar, Slack, and other apps."
-                    : "Keep your connected apps unavailable to this bot."}
+                    ? t("botAccess.appsOn")
+                    : t("botAccess.appsOff")}
             </div>
           </div>
           <Switch
             checked={connectedAppsEnabled}
-            aria-label="Allow this bot to use connected apps"
+            aria-label={t("botAccess.appsAria")}
             disabled={
               !connectedAppsEnabled && (!connectedAppsConfigured || !canUseConnectedApps)
             }
             onClick={() => patch({ composio: !connectedAppsEnabled })}
             title={
               !connectedAppsEnabled && !connectedAppsConfigured
-                ? "Connect apps in App Settings first"
+                ? t("botAccess.appsConnectFirst")
                 : !connectedAppsEnabled && !canUseConnectedApps
-                  ? "This engine cannot use connected apps"
+                  ? t("botAccess.appsEngineTitle")
                   : undefined
             }
             className="disabled:cursor-not-allowed"
@@ -346,7 +345,7 @@ export function AccessSection({
         {connectedAppsEnabled && inventory?.authoritative && (
           <div className="mt-3 flex flex-wrap gap-1.5">
             {connectedSlugs.length === 0 ? (
-              <span className="text-[11.5px] text-ink-secondary">No apps connected yet.</span>
+              <span className="text-[11.5px] text-ink-secondary">{t("botAccess.appsNoneConnected")}</span>
             ) : (
               connectedSlugs.map((slug) => (
                 <span key={slug} className="rounded-full bg-inset px-2 py-0.5 text-[11px] text-ink-secondary">
@@ -374,41 +373,41 @@ export function AccessSection({
 
       <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4">
         <div>
-          <div className="text-[15px] font-medium text-ink">Browser</div>
+          <div className="text-[15px] font-medium text-ink">{t("botAccess.browser")}</div>
           <div className="mt-0.5 text-[13px] text-ink-secondary">
             {!desktopBrowser
               ? browserBlockedOnWindows && !browserInstallable
-                ? "Not available on this Windows machine yet: install the browser engine with `openmausbot browser install`."
+                ? t("botAccess.browserWindows")
                 : browserUnavailableReason(state.config)
               : !browserFeature
-                ? "The built-in browser is switched off under App Settings → Experimental."
+                ? t("botAccess.browserFeatureOff")
                 : !canUseBrowser
-                  ? "This bot's current engine cannot use the built-in browser."
+                  ? t("botAccess.browserEngineUnsupported")
                   : bot.computer === "off"
-                    ? "Works on is set to Off, so this bot has no browser. Pick another destination above to give it one."
+                    ? t("botAccess.browserOffDestination")
                     : browserEnabled
-                      ? "This bot has its own browser with its own logins."
-                      : "Keep the built-in browser unavailable to this bot."}
+                      ? t("botAccess.browserOn")
+                      : t("botAccess.browserOff")}
           </div>
         </div>
         <Switch
           checked={browserEnabled && bot.computer !== "off"}
-          aria-label="Give this bot a built-in browser"
+          aria-label={t("botAccess.browserAria")}
           disabled={
             bot.computer === "off" ||
             (!browserEnabled && ((!desktopBrowser && !browserInstallable) || !browserFeature || !canUseBrowser))
           }
           onClick={() => patch({ browser: !browserAllowed })}
-          title={bot.computer === "off" ? "Works on is set to Off, so this bot has no browser" : undefined}
+          title={bot.computer === "off" ? t("botAccess.browserOffTitle") : undefined}
           className="disabled:cursor-not-allowed"
         />
       </div>
 
       <div className="rounded-xl bg-card p-4">
-        <div className="text-[15px] font-medium text-ink">Webhooks</div>
-        <div className="mt-0.5 text-[13px] text-ink-secondary">Inbound triggers wired to this bot.</div>
+        <div className="text-[15px] font-medium text-ink">{t("botAccess.webhooks")}</div>
+        <div className="mt-0.5 text-[13px] text-ink-secondary">{t("botAccess.webhooksHint")}</div>
         {webhooks.length === 0 ? (
-          <div className="mt-3 rounded-lg bg-inset px-3 py-2 text-[12px] text-ink-secondary">No webhooks for this bot.</div>
+          <div className="mt-3 rounded-lg bg-inset px-3 py-2 text-[12px] text-ink-secondary">{t("botAccess.webhooksEmpty")}</div>
         ) : (
           <div className="mt-3 divide-y divide-hairline/40 overflow-hidden rounded-lg border border-hairline/40">
             {webhooks.map((webhook) => (
@@ -420,10 +419,10 @@ export function AccessSection({
                     webhook.enabled ? "bg-accent/15 text-accent-text" : "bg-control text-ink-secondary",
                   )}
                 >
-                  {webhook.enabled ? "Active" : "Paused"}
+                  {webhook.enabled ? t("botAccess.webhookActive") : t("botAccess.webhookPaused")}
                 </span>
                 <span className="shrink-0 text-[11.5px] tabular-nums text-ink-secondary">
-                  {webhook.deliveryCount} deliveries
+                  {t("botAccess.webhookDeliveries", { count: webhook.deliveryCount })}
                 </span>
               </div>
             ))}
@@ -432,10 +431,10 @@ export function AccessSection({
       </div>
 
       <div className="rounded-xl bg-card p-4">
-        <div className="text-[15px] font-medium text-ink">Always allowed</div>
-        <div className="mt-0.5 text-[13px] text-ink-secondary">Tools this bot no longer asks about.</div>
+        <div className="text-[15px] font-medium text-ink">{t("botAccess.alwaysAllowed")}</div>
+        <div className="mt-0.5 text-[13px] text-ink-secondary">{t("botAccess.alwaysAllowedHint")}</div>
         {alwaysAllow.length === 0 ? (
-          <div className="mt-3 rounded-lg bg-inset px-3 py-2 text-[12px] text-ink-secondary">Nothing standing yet.</div>
+          <div className="mt-3 rounded-lg bg-inset px-3 py-2 text-[12px] text-ink-secondary">{t("botAccess.alwaysAllowedEmpty")}</div>
         ) : (
           <div className="mt-3 divide-y divide-hairline/40 overflow-hidden rounded-lg border border-hairline/40">
             {alwaysAllow.map((entry) => (
@@ -443,11 +442,11 @@ export function AccessSection({
                 <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-ink">{entry}</span>
                 <button
                   type="button"
-                  aria-label={`Remove ${entry} from always allowed`}
+                  aria-label={t("botAccess.alwaysAllowedRemoveAria", { entry })}
                   onClick={() => patch({ alwaysAllow: alwaysAllow.filter((key) => key !== entry) })}
                   className="shrink-0 rounded-md px-2 py-1 text-[12px] text-ink-secondary hover:bg-danger/10 hover:text-danger"
                 >
-                  Remove
+                  {t("botAccess.alwaysAllowedRemove")}
                 </button>
               </div>
             ))}
