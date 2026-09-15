@@ -300,6 +300,30 @@ describe("connected-apps broker boundaries", () => {
     ]);
   });
 
+  it("passes catalog pagination metadata through untouched", async () => {
+    const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
+    const { env } = testEnv(fetchCalls);
+    vi.stubGlobal("fetch", async () =>
+      Response.json({
+        items: [{ slug: "gmail" }],
+        next_cursor: "Mi01MDA=",
+        current_page: 1,
+        total_pages: 4,
+        total_items: 1540,
+      }));
+    const catalogEnv = { ...env, COMPOSIO_TOOLKIT_BASE: "https://backend.composio.dev/api/v3" } as never;
+
+    const response = await catalog(catalogEnv, new URL("https://broker.test/v1/catalog?cursor=Mi01MDA%3D"));
+
+    await expect(response.json()).resolves.toEqual({
+      items: [{ slug: "gmail" }],
+      next_cursor: "Mi01MDA=",
+      current_page: 1,
+      total_pages: 4,
+      total_items: 1540,
+    });
+  });
+
   it("validates aliases at the broker boundary", () => {
     expect(normalizeAccountAlias("  work gmail  ")).toBe("work gmail");
     expect(() => normalizeAccountAlias("bad\nalias")).toThrow(/printable/i);

@@ -351,6 +351,44 @@ class ProfileRulesTest {
     }
 
     @Test
+    fun `the engine picker lists what the desktop lists, in its order`() {
+        val choices = ProfileRules.providerChoices()
+
+        assertEquals(
+            listOf("ElevenLabs", "Built-in Mac voices", "Chatterbox (local)"),
+            choices.map { it.label },
+        )
+        assertEquals(
+            listOf("elevenlabs", "system", "chatterbox"),
+            choices.map { it.id },
+            "the ids are the wire strings, so the selection round-trips through the config write",
+        )
+        assertTrue(choices.all { it.enabled }, "the phone cannot know the host's platform, so it offers every engine")
+    }
+
+    @Test
+    fun `chatterbox is never explained as a missing key`() {
+        val noServer = ConfigStatus(tts = ConfigFlag(configured = false, provider = "chatterbox"))
+        assertEquals(
+            "The Chatterbox server is not connected",
+            ProfileRules.voiceCopy(noServer).unconfiguredNotice,
+        )
+        assertEquals(
+            "Add the address of your Chatterbox server in OpenMausBot on the computer to turn " +
+                "speech back on.",
+            ProfileRules.voiceCopy(noServer).footer,
+        )
+
+        val noDefault =
+            ConfigStatus(tts = ConfigFlag(configured = true, voice = "", provider = "chatterbox"))
+        assertEquals(
+            "No workspace default voice is selected. Choose an agent-specific voice above; " +
+                "synthesis still uses your Chatterbox server.",
+            ProfileRules.voiceCopy(noDefault).footer,
+        )
+    }
+
+    @Test
     fun `the shape selector offers the four crops in the Swift's order`() {
         assertEquals(
             listOf("Mascot", "Circle", "Rounded", "Square"),

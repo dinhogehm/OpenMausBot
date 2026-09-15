@@ -290,6 +290,22 @@ class ClientTest {
     }
 
     @Test
+    fun switchingTheVoiceEngineWritesOnlyTheProvider() = runBlocking {
+        server.enqueue(json("""{"tts":{"configured":true,"provider":"chatterbox","voice":"ex01"}}"""))
+
+        val status = client.updateVoiceProvider(VoiceProvider.CHATTERBOX)
+
+        assertEquals(VoiceProvider.CHATTERBOX, status.voiceProvider)
+        server.takeRequest().let { request ->
+            assertEquals("PUT", request.method)
+            assertEquals("/api/config", request.path)
+            // The raw body rather than stringBody: the write is nested, and
+            // the whole point is that the provider is the only field in it.
+            assertEquals("""{"tts":{"provider":"chatterbox"}}""", request.body.readUtf8())
+        }
+    }
+
+    @Test
     fun sharedUploadsAndSendUseRawBodiesAndStableIds() = runBlocking {
         server.enqueue(json("""{"path":"/Users/test/attachments/image.png","mime":"image/png","bytes":4}""", 201))
         server.enqueue(json("""{"path":"/Users/test/files/id.pdf","name":"Q3 plan.pdf","mime":"application/pdf","bytes":3}""", 201))

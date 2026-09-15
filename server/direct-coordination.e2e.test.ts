@@ -221,11 +221,24 @@ it("keeps one conversation per bot pair across separate user turns, titled for t
   for (const brief of ["Implement the CSV export", "Add the header row to that export", "Document the export you just built"]) {
     expect(transcript).toContain(brief);
   }
+  // Claude snapshots the system prompt at the session's first request. The
+  // briefs must therefore travel in their user turns so they remain current
+  // whether the CLI process is retained or the session is resumed.
+  const leadTurns = f.evidence().filter((turn: any) => turn.botId === f.lead.id);
+  expect(leadTurns).toHaveLength(3);
+  expect(leadTurns[0].prompt.message.content).toContain("Implement the CSV export");
+  expect(leadTurns[1].prompt.message.content).toContain("Add the header row to that export");
+  expect(leadTurns[2].prompt.message.content).toContain("Document the export you just built");
+  expect(leadTurns.every((turn: any) => turn.system.includes("current request and returned results arrive in the user turn"))).toBe(true);
+  expect(leadTurns.every((turn: any) => turn.snapshotMode === "off")).toBe(true);
+  for (const brief of ["Implement the CSV export", "Add the header row to that export", "Document the export you just built"]) {
+    expect(leadTurns.every((turn: any) => !turn.system.includes(brief))).toBe(true);
+  }
   // a pair conversation is the standing line between two bots: it never
   // auto-closes, and every receipt in the sender's chat points at it
   expect((await leadTasks()).find((task: any) => task.threadId === pair.threadId)).not.toHaveProperty("closedBy");
   expect((await f.messages(f.chief.activeTaskId)).filter((message: any) => message.threadRef?.threadId === pair.threadId)).toHaveLength(6);
-}), 90_000);
+}, { FAKE_CLAUDE_VERSION: "2.1.270" }), 90_000);
 
 it("gives a second simultaneous assignment its own labelled thread, which closes once its result is reported", () => fixture(async f => {
   f.plan[f.lead.id] = { turns: [{ reply: "Export implemented" }, { reply: "Benchmark finished" }] };
@@ -323,6 +336,40 @@ it("runs a message sent while a teammate works, keeps the assignment, and names 
   expect((await f.messages(f.chief.activeTaskId)).some((message: any) => message.text === "The requested CSV export is implemented and verified")).toBe(true);
 }), 60_000);
 
+// The opt-in from #1194: with parking on, the same message waits in the
+// composer queue until the outstanding assignments settle — room-style
+// parking for direct chat — and only then runs as its own follow-up turn.
+it("parks a message behind outstanding teammate work when the bot opts in, then runs it after", () => fixture(async f => {
+  f.plan[f.lead.id] = { delayMs: 4000, reply: "CSV export implemented" };
+  f.plan[f.chief.id] = { turns: [
+    { steps: structuredClone(f.plan[f.chief.id].steps), reply: "Assigned to Engineering" },
+    { reply: "The requested CSV export is implemented and verified" },
+    { reply: "Noted; the export is UTF-8 too" },
+  ] };
+  await f.api(`/api/bots/${f.chief.id}`, { parkDirectMessages: true }, "PATCH");
+  await f.start();
+  await expect.poll(() => f.nodes().find((node: any) => node.parentId)?.status, { timeout: 15_000 }).toBe("running");
+  const assignment = f.nodes().find((node: any) => node.parentId);
+
+  const receipt = await f.api(`/api/bots/${f.chief.id}/messages`, { text: "Also make sure the export is UTF-8.", threadId: f.chief.activeTaskId });
+  // It parked: not run, not even on the transcript yet.
+  expect(receipt.queued).toBe(true);
+  expect(typeof receipt.queueId).toBe("string");
+  expect((await f.messages(f.chief.activeTaskId)).some((message: any) => message.text === "Also make sure the export is UTF-8.")).toBe(false);
+  expect(f.evidence().filter((turn: any) => turn.botId === f.chief.id)).toHaveLength(1);
+  expect(f.nodes().find((node: any) => node.id === assignment.id).status).not.toBe("cancelled");
+
+  // The teammate finishes, the coordination resumes and settles, and only
+  // then the parked words run as their own turn.
+  expect((await f.wait()).status).toBe("settled");
+  await expect.poll(() => f.evidence().filter((turn: any) => turn.botId === f.chief.id).length, { timeout: 20_000 }).toBe(3);
+  const parked = f.evidence().filter((turn: any) => turn.botId === f.chief.id)[2];
+  expect(parked.resumed).toBe(false);
+  expect(parked.system).not.toContain("Assignments you already sent are still outstanding");
+  expect((await f.messages(f.chief.activeTaskId)).some((message: any) => message.text === "Also make sure the export is UTF-8.")).toBe(true);
+  expect((await f.messages(f.chief.activeTaskId)).some((message: any) => message.text === "Noted; the export is UTF-8 too")).toBe(true);
+}), 60_000);
+
 // An automation turn is not the person cancelling either: a delegated
 // (routine-driven) turn lands in the same conversation and leaves the
 // outstanding assignment alone.
@@ -398,7 +445,7 @@ it("withholds direct results when the owner's cross-team grant is revoked", () =
   expect((await f.wait()).status).toBe("settled");
   expect(f.nodes().find((node: any) => node.parentId).status).toBe("failed");
   const resumed = f.evidence().find((turn: any) => turn.botId === f.chief.id && turn.resumed);
-  expect(resumed.system).toContain("Result withheld");
+  expect(resumed.prompt.message.content).toContain("Result withheld");
   expect(JSON.stringify(resumed)).not.toContain("PRIVATE_ENGINEERING_RESULT");
 }), 45_000);
 

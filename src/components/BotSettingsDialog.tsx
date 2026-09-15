@@ -8,8 +8,9 @@ import { ChevronDown, Search, X } from "lucide-react";
 import { api, useStore, type Bot } from "@/state/store";
 import type { BotOverview } from "@/lib/bot-overview-types";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { BOT_SECTIONS } from "./bot-settings/sections";
+import { botSections, type BotSectionEntry } from "./bot-settings/sections";
 import { useBotSettingsDerived } from "./bot-settings/useBotSettingsDerived";
 import { OverviewSection } from "./bot-settings/OverviewSection";
 import { IdentitySection } from "./bot-settings/IdentitySection";
@@ -25,7 +26,7 @@ import { HistorySection, type HistoryRow } from "./bot-settings/HistorySection";
 import { UsageSection } from "./bot-settings/UsageSection";
 import type { PromptPreviewData } from "./bot-settings/PromptPreview";
 
-function sectionMatches(entry: (typeof BOT_SECTIONS)[number], query: string): boolean {
+function sectionMatches(entry: BotSectionEntry, query: string): boolean {
   if (!query) return true;
   return [entry.label, ...entry.keywords].some((part) => part.toLowerCase().includes(query));
 }
@@ -40,7 +41,8 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
   // this panel is already mounted, including after collapsing the same row.
   const collapsed = !state.botSettingsExpandAccordion;
   const q = query.trim().toLowerCase();
-  const visibleSections = BOT_SECTIONS.filter((entry) => sectionMatches(entry, q));
+  const sections = botSections();
+  const visibleSections = sections.filter((entry) => sectionMatches(entry, q));
 
   const [overview, setOverview] = useState<BotOverview | null>(null);
   const [overviewError, setOverviewError] = useState(false);
@@ -172,7 +174,7 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
         body: JSON.stringify(target),
       });
     } catch (e: unknown) {
-        dispatch({ type: "error", message: e instanceof Error ? e.message : "Couldn't undo that change." });
+        dispatch({ type: "error", message: e instanceof Error ? e.message : t("botSettings.undoError") });
     } finally {
       await loadHistory();
       setRollingBack(false);
@@ -219,11 +221,11 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
     };
   }, [dispatch]);
 
-  const renderSectionBody = (id: (typeof BOT_SECTIONS)[number]["id"]) => {
+  const renderSectionBody = (id: BotSectionEntry["id"]) => {
     switch (id) {
       case "overview":
         return overview === null && overviewError ? (
-          <div className="rounded-xl bg-card p-4 text-[13px] text-ink-secondary">Couldn’t load the overview.</div>
+          <div className="rounded-xl bg-card p-4 text-[13px] text-ink-secondary">{t("botSettings.overviewLoadError")}</div>
         ) : (
           // Data wins over a transient refetch failure: once an overview has
           // loaded once, a later failed refetch (routines/webhooks/bot-record
@@ -273,7 +275,7 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
         return <VoiceSection bot={bot} derived={derived} />;
       case "history":
         return historyRows === null && historyError ? (
-          <div className="rounded-xl bg-card p-4 text-[13px] text-ink-secondary">Couldn’t load history.</div>
+          <div className="rounded-xl bg-card p-4 text-[13px] text-ink-secondary">{t("botSettings.historyLoadError")}</div>
         ) : (
           // Same precedence as the Overview: rows already on screen
           // survive a failed reload (after an undo, say) with a quiet
@@ -311,7 +313,7 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
           <button
             type="button"
             onClick={() => dispatch({ type: "toggleSettings", open: false })}
-            aria-label="Close settings"
+            aria-label={t("botSettings.close")}
             className="rounded-md p-1 text-ink-secondary hover:bg-control hover:text-ink"
           >
             <X size={18} className="pointer-events-none" />
@@ -332,8 +334,8 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
               if (query) setQuery("");
               else dispatch({ type: "toggleSettings", open: false });
             }}
-            placeholder="Search"
-            aria-label="Search settings"
+            placeholder={t("botSettings.search")}
+            aria-label={t("botSettings.searchAria")}
             className="w-full bg-transparent text-[13px] text-ink placeholder:text-ink-secondary focus:outline-none"
           />
         </div>
@@ -341,13 +343,13 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
           {visibleSections.length === 0 && (
             <div className="px-4 py-4 text-[12.5px] leading-relaxed text-ink-secondary">
-              Nothing matches “{query.trim()}”
+              {t("botSettings.noMatch", { query: query.trim() })}
             </div>
           )}
           {/* Walk all sections so Memory keeps a stable mount (draft survival)
               even when search filters its row out of view. Other unmatched
               rows are omitted entirely. */}
-          {BOT_SECTIONS.map((entry) => {
+          {sections.map((entry) => {
             const { id, label, icon: Icon } = entry;
             const matched = sectionMatches(entry, q);
             if (!matched && id !== "memory") return null;
@@ -400,9 +402,9 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
       </aside>
       <ConfirmDialog
         open={rollbackTarget !== null}
-        title="Restore previous instructions?"
-        body="Replaces current SOUL with the version before this change. Current version stays in History."
-        confirmLabel="Restore instructions"
+        title={t("botSettings.restoreTitle")}
+        body={t("botSettings.restoreBody")}
+        confirmLabel={t("botSettings.restoreConfirm")}
         tone="neutral"
         returnFocusRef={dialogRef}
         onCancel={() => setRollbackTarget(null)}

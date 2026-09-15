@@ -1090,6 +1090,29 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("GET", "/api/tts/voices"), as: VoiceListResponse.self).voices
     }
 
+    /// Switch the voice engine. A provider is a setting, not a secret: it
+    /// rides the ordinary config write, and whichever credential the newly
+    /// selected engine needs appears beside it in settings.
+    public func setVoiceProvider(_ provider: VoiceProvider) async throws -> ConfigStatus {
+        try await send(
+            try makeRequest("PUT", "/api/config", body: ["tts": ["provider": provider.wireValue]]),
+            as: ConfigStatus.self
+        )
+    }
+
+    /// Save the Chatterbox address and model id in one write — an address
+    /// without its model (or the reverse) is half a setting, exactly as on
+    /// the desktop.
+    public func saveChatterboxServer(baseURL: String, model: String) async throws -> ConfigStatus {
+        try await send(
+            try makeRequest(
+                "PUT", "/api/config",
+                body: ["tts": ["baseUrl": baseURL, "model": model]]
+            ),
+            as: ConfigStatus.self
+        )
+    }
+
     public func routines() async throws -> (routines: [Routine], runs: [RoutineRun]) {
         let response = try await send(try makeRequest("GET", "/api/routines"), as: RoutinesResponse.self)
         return (response.routines, response.runs)

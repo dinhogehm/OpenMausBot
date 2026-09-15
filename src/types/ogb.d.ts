@@ -1,6 +1,24 @@
 // The narrow bridge the Electron preload exposes. Absent in the browser.
 
 declare global {
+  type CompanyBackupEntry = Omit<import("../../electron/company-backups.mjs").CompanyBackupMetadata, "status"> & { status: "creating" | "uploading" | "completing" | "ready" | "cleanup" };
+  interface CompanyBackupScheduleState {
+    enabled: boolean;
+    status: "off" | "waiting" | "running" | "paused" | "error";
+    nextBackupAt?: number;
+    lastAttemptAt?: number;
+    lastBackupAt?: number;
+    message?: string;
+  }
+  interface CompanyBackupState {
+    busy: boolean;
+    pendingRestore?: boolean;
+    kind?: "backup" | "restore";
+    progress?: import("../../electron/company-backups.mjs").CompanyBackupProgress;
+    message?: string;
+    lastBackupAt?: number;
+    schedule?: CompanyBackupScheduleState;
+  }
 /** The package.json version, inlined by Vite's define at build time. */
 const __APP_VERSION__: string;
 
@@ -83,6 +101,18 @@ const __APP_VERSION__: string;
   interface Window {
     ogb?: {
       platform: NodeJS.Platform;
+      organization?: import("../../electron/managed-desktop.mjs").ManagedDesktopBridge;
+      companyBackups?: {
+        state(): Promise<CompanyBackupState>;
+        list(): Promise<{ backups: CompanyBackupEntry[]; usedBytes: number; limits: { ownerQuotaBytes: number; retainedSnapshots: number } }>;
+        create(input: { password: string; clientState: import("../../shared/workspace-backup").WorkspaceBackupClientState }): Promise<CompanyBackupEntry>;
+        configureSchedule?(input: { enabled: false } | { enabled: true; password: string; confirmation: "BACK UP THIS WORKSPACE DAILY" }): Promise<CompanyBackupState>;
+        prepareRestore(input: { id: string; password: string }): Promise<{ id: string; summary: import("../../shared/workspace-backup").WorkspaceBackupSummary }>;
+        restore(input: { id: string; confirmation: "REPLACE" }): Promise<{ restoreId: string }>;
+        delete(input: { id: string; confirmation: "DELETE" }): Promise<unknown>;
+        cancel(): Promise<void>;
+        onState(callback: (state: CompanyBackupState) => void): () => void;
+      };
       workspaces?: {
         state: () => Promise<{ local: boolean; name: string; origin?: string }>;
         menu: () => Promise<void>;

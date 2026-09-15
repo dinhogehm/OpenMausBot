@@ -238,7 +238,7 @@ describe("addressed room request tree", () => {
   }));
 });
 describe("room handoff lifetime budget", () => {
-  it("fails queued work at the ceiling with a message naming the budget, status, and elapsed time", () => {
+  it("parks queued work past the tree ceiling, then fails it at the queue window naming the wait", () => {
     let nowMs = 0;
     return fixture((engine, hooks) => {
       const { node } = engine.enqueue(addr("A"), "turn", undefined, addr("B"), "work", "build");
@@ -246,11 +246,33 @@ describe("room handoff lifetime budget", () => {
       hooks.busy = () => true;
       nowMs = ROOM_HANDOFF_LIMITS.lifetimeMs + 1;
       engine.tick();
+      expect(node.status).toBe("queued");
+      expect(engine.nodes.get("turn")?.status).toBe("waiting");
+      nowMs = ROOM_HANDOFF_LIMITS.queueMs + 1;
+      engine.tick();
       expect(node.status).toBe("failed");
-      expect(node.result).toContain("Room handoff lifetime budget exhausted");
-      expect(node.result).toContain("node was queued");
-      expect(node.result).toContain("30m of the 30m tree lifetime");
+      expect(node.result).toContain("Room handoff queue budget exhausted");
+      expect(node.result).toContain("never started while waiting for a busy teammate");
+      expect(node.result).toContain("60m of the 60m queue window");
       expect(hooks.run).not.toHaveBeenCalled();
+    }, () => nowMs);
+  });
+  it("runs parked work once the teammate frees up, then resumes the waiting source", async () => {
+    let nowMs = 0;
+    await fixture(async (engine, hooks) => {
+      hooks.busy = () => nowMs <= ROOM_HANDOFF_LIMITS.lifetimeMs + 60_000;
+      const { node } = engine.enqueue(addr("A"), "turn", undefined, addr("B"), "work", "build");
+      engine.sourceSettled("turn", true);
+      nowMs = ROOM_HANDOFF_LIMITS.lifetimeMs + 60_000;
+      engine.tick(); await flush();
+      expect(node.status).toBe("queued");
+      expect(engine.nodes.get("turn")?.status).toBe("waiting");
+      nowMs = ROOM_HANDOFF_LIMITS.lifetimeMs + 61_000;
+      engine.tick(); await flush();
+      expect(node.startedAt).toBe(ROOM_HANDOFF_LIMITS.lifetimeMs + 61_000);
+      for (let i = 0; i < 3; i++) { engine.tick(); await flush(); }
+      expect(node.status).toBe("completed");
+      expect(engine.nodes.get("turn")?.status).toBe("completed");
     }, () => nowMs);
   });
   it("keeps a minimum runway for running work past the ceiling, then fails it with its status", async () => {

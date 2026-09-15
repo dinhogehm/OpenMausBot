@@ -1,6 +1,9 @@
 // The bot settings dialog's section rail — one entry per BotSettingsSection,
 // in the fixed order the rail renders them. Search filters against label
 // plus keywords, the same convention as the app SettingsModal's SECTIONS.
+// Labels and keywords come from the catalog, so the rail and its search are
+// read in the active language; botSections() is called during render rather
+// than frozen at import so a locale switch is picked up.
 import {
   BookOpen,
   Brain,
@@ -17,24 +20,45 @@ import {
   User,
 } from "lucide-react";
 
+import { t } from "@/lib/i18n";
 import type { BotSettingsSection } from "@/state/store";
 
-export const BOT_SECTIONS: Array<{
+export type BotSectionEntry = {
   id: BotSettingsSection;
   label: string;
   icon: LucideIcon;
   keywords: string[];
-}> = [
-  { id: "overview", label: "Overview", icon: LayoutDashboard, keywords: ["summary", "status", "what it does", "won't", "prompt", "what the model sees"] },
-  { id: "identity", label: "Identity", icon: User, keywords: ["name", "title", "avatar", "blurb", "instructions"] },
-  { id: "soul", label: "Soul", icon: Sparkles, keywords: ["standing instructions", "instructions", "persona", "rules", "soul.md"] },
-  { id: "skills", label: "Skills", icon: BookOpen, keywords: ["skills", "learned", "procedures", "teach"] },
-  { id: "memory", label: "Memory", icon: Brain, keywords: ["memory", "notes", "remember", "topics"] },
-  { id: "routines", label: "Routines", icon: CalendarClock, keywords: ["schedule", "routines", "cron", "tasks"] },
-  { id: "access", label: "Access", icon: Network, keywords: ["works on", "computer", "vm", "cloud", "vps", "folder", "workspace", "browser", "connected apps", "composio", "webhooks", "always allow", "grants"] },
-  { id: "model", label: "Model", icon: Cpu, keywords: ["engine", "model", "provider", "cli", "effort"] },
-  { id: "permissions", label: "Permissions", icon: ShieldCheck, keywords: ["auto mode", "approve", "auto approve", "review", "routine approvals", "peers", "contact", "coordination", "chief of staff", "section"] },
-  { id: "voice", label: "Voice & alerts", icon: Mic, keywords: ["voice", "alerts", "notifications", "speak"] },
-  { id: "history", label: "History", icon: History, keywords: ["history", "changes", "undo", "rollback", "log"] },
-  { id: "usage", label: "Usage", icon: Coins, keywords: ["tokens", "cost", "billing"] },
+};
+
+const SECTION_ICONS: Array<{ id: BotSettingsSection; icon: LucideIcon }> = [
+  { id: "overview", icon: LayoutDashboard },
+  { id: "identity", icon: User },
+  { id: "soul", icon: Sparkles },
+  { id: "skills", icon: BookOpen },
+  { id: "memory", icon: Brain },
+  { id: "routines", icon: CalendarClock },
+  { id: "access", icon: Network },
+  { id: "model", icon: Cpu },
+  { id: "permissions", icon: ShieldCheck },
+  { id: "voice", icon: Mic },
+  { id: "history", icon: History },
+  { id: "usage", icon: Coins },
 ];
+
+/** Keywords are one catalog string per section so a translator edits a
+ * single natural phrase; search splits them back apart on commas. */
+function keywords(id: BotSettingsSection): string[] {
+  return t(`botSettings.keywords.${id}` as Parameters<typeof t>[0])
+    .split(",")
+    .map((word) => word.trim())
+    .filter(Boolean);
+}
+
+export function botSections(): BotSectionEntry[] {
+  return SECTION_ICONS.map(({ id, icon }) => ({
+    id,
+    icon,
+    label: t(`botSettings.section.${id}` as Parameters<typeof t>[0]),
+    keywords: keywords(id),
+  }));
+}

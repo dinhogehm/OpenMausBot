@@ -13,6 +13,10 @@ const seen: Array<{ method: string; url: string; headers: Record<string, string>
 let refuse: { status: number; body: unknown } | null = null;
 
 const MP3 = Buffer.from([0xff, 0xfb, 0x90, 0x00, 0x11, 0x22, 0x33, 0x44]);
+const WAV = Buffer.from("RIFF....WAVEfmt ");
+/** flipped by tests that want the server to have no /v1/models route */
+let modelsFail = false;
+let stubBase = "";
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -44,12 +48,21 @@ beforeAll(async () => {
         res.writeHead(200, { "content-type": "audio/mpeg" });
         return res.end(MP3);
       }
+      if (path === "/v1/audio/speech") {
+        res.writeHead(200, { "content-type": "audio/wav" });
+        return res.end(WAV);
+      }
+      if (path === "/v1/models") {
+        if (modelsFail) return send(404, { detail: "no models route" });
+        return send(200, { data: [{ id: "alex" }, { id: "turbo-en" }] });
+      }
       send(404, { detail: "no such stub route" });
     });
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as { port: number }).port;
-  process.env.OMB_ELEVENLABS_API = `http://127.0.0.1:${port}/v1`;
+  stubBase = `http://127.0.0.1:${port}`;
+  process.env.OMB_ELEVENLABS_API = `${stubBase}/v1`;
 });
 
 afterAll(() => new Promise<void>((r) => server.close(() => r())));
@@ -74,7 +87,7 @@ describe("configuration", () => {
   it("never reports the key itself", async () => {
     const { describeVoice } = await voice();
     const described = describeVoice(cfg({ key: "sk-secret", voice: "v-1" }));
-    expect(described).toEqual({ configured: true, ready: true, voice: "v-1", provider: "elevenlabs" });
+    expect(described).toEqual({ configured: true, ready: true, voice: "v-1", provider: "elevenlabs", baseUrl: "", model: "" });
     expect(JSON.stringify(described)).not.toContain("sk-secret");
   });
 
@@ -200,6 +213,8 @@ describe("built-in macOS voices", () => {
       ready: onMac,
       voice: "Albert",
       provider: "system",
+      baseUrl: "",
+      model: "",
     });
   });
 
@@ -238,5 +253,112 @@ describe("built-in macOS voices", () => {
     expect(() => speak(cfg({ provider: "system" }), "hi", undefined, fakeSay([]))).toThrow(
       "Pick a voice in the agent profile.",
     );
+  });
+});
+
+describe("Chatterbox (local server)", () => {
+  const chatCfg = (extra: Partial<AppConfig["tts"]> = {}) => ({ provider: "chatterbox" as const, ...extra });
+
+  it("is configured by a server address, never a key", async () => {
+    const { providerConfigured, voiceConfigured, voiceReady, describeVoice } = await voice();
+    expect(providerConfigured(cfg(chatCfg()))).toBe(false);
+    expect(providerConfigured(cfg(chatCfg({ baseUrl: stubBase })))).toBe(true);
+    expect(voiceConfigured(cfg(chatCfg({ baseUrl: stubBase })))).toBe(false);
+    expect(voiceConfigured(cfg(chatCfg({ baseUrl: stubBase, voice: "alex" })))).toBe(true);
+    expect(voiceReady(cfg(chatCfg({ baseUrl: stubBase })), "alex")).toBe(true);
+    expect(voiceReady(cfg(chatCfg({ voice: "alex" })), "alex")).toBe(false);
+    const described = describeVoice(cfg(chatCfg({ baseUrl: stubBase, model: "turbo-en", voice: "alex" })));
+    expect(described).toEqual({
+      configured: true,
+      ready: true,
+      voice: "alex",
+      provider: "chatterbox",
+      baseUrl: stubBase,
+      model: "turbo-en",
+    });
+  });
+
+  it("speaks with the OpenAI audio-speech shape and no key header", async () => {
+    refuse = null;
+    seen.length = 0;
+    const { speak } = await voice();
+    const audio = await speak(cfg(chatCfg({ baseUrl: stubBase, voice: "alex" })), "hello there");
+    expect(audio.mime).toBe("audio/wav");
+    expect(Buffer.from(audio.bytes)).toEqual(WAV);
+
+    const call = seen.at(-1)!;
+    expect(call.method).toBe("POST");
+    expect(call.url).toBe("/v1/audio/speech");
+    expect(JSON.parse(call.body)).toEqual({
+      model: "chatterbox-turbo",
+      input: "hello there",
+      voice: "alex",
+      response_format: "wav",
+    });
+    expect(call.headers["xi-api-key"]).toBeUndefined();
+    expect(call.url).not.toContain("key");
+  });
+
+  it("accepts a base that already ends in /v1, and honors the model setting", async () => {
+    refuse = null;
+    seen.length = 0;
+    const { speak } = await voice();
+    await speak(cfg(chatCfg({ baseUrl: `${stubBase}/v1`, model: "chatterbox-multilingual", voice: "alex" })), "hi", "will");
+
+    const call = seen.at(-1)!;
+    expect(call.url).toBe("/v1/audio/speech");
+    expect(JSON.parse(call.body)).toMatchObject({ model: "chatterbox-multilingual", voice: "will" });
+  });
+
+  it("surfaces the server's own refusal rather than a bare status", async () => {
+    refuse = { status: 500, body: { error: "model chatterbox-turbo is not loaded" } };
+    const { speak } = await voice();
+    const message = await speak(cfg(chatCfg({ baseUrl: stubBase, voice: "alex" })), "hi").catch((e: Error) => e.message);
+    refuse = null;
+    expect(message).toContain("not loaded");
+  });
+
+  it("says when the server is unreachable, instead of hanging", async () => {
+    // a port that was just closed: nothing listens, so connect fails fast
+    const gone = createServer();
+    await new Promise<void>((r) => gone.listen(0, "127.0.0.1", () => r()));
+    const port = (gone.address() as { port: number }).port;
+    await new Promise<void>((r) => gone.close(() => r()));
+
+    const { speak } = await voice();
+    const message = await speak(cfg(chatCfg({ baseUrl: `http://127.0.0.1:${port}`, voice: "alex" })), "hi").catch(
+      (e: Error) => e.message,
+    );
+    expect(message).toMatch(/couldn't reach the Chatterbox server/i);
+  });
+
+  it("lists the server's models as voices, with a fallback when it cannot", async () => {
+    refuse = null;
+    const { listVoices } = await voice();
+    expect(await listVoices(cfg(chatCfg({ baseUrl: stubBase })))).toEqual([
+      { id: "alex", label: "alex" },
+      { id: "turbo-en", label: "turbo-en" },
+    ]);
+    modelsFail = true;
+    expect(await listVoices(cfg(chatCfg({ baseUrl: stubBase })))).toEqual([
+      { id: "default", label: "Default", description: "the server's built-in Chatterbox voice" },
+    ]);
+    modelsFail = false;
+  });
+
+  it("lists no voices without a server address, rather than calling out", async () => {
+    seen.length = 0;
+    const { listVoices } = await voice();
+    expect(await listVoices(cfg(chatCfg()))).toEqual([]);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("names the missing setup step in its own words", async () => {
+    const { speak, NoVoiceConfigured } = await voice();
+    expect(() => speak(cfg(chatCfg()), "hi")).toThrow(NoVoiceConfigured);
+    expect(() => speak(cfg(chatCfg()), "hi")).toThrow(
+      "Add the address of your Chatterbox server in Settings on the computer to turn on voice.",
+    );
+    expect(() => speak(cfg(chatCfg({ baseUrl: stubBase })), "hi")).toThrow("Pick a voice in the agent profile.");
   });
 });

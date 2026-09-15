@@ -73,7 +73,7 @@ export class ProviderRegistry {
     this.driversByKind = new Map(drivers.map((d) => [d.driverKind, d]));
   }
 
-  async load(configs: InstanceConfigMap) {
+  async load(configs: InstanceConfigMap, decorate?: (instance: ProviderInstance) => ProviderInstance) {
     for (const [instanceId, entry] of Object.entries(configs)) {
       // Account edits replace only their own process/session state.
       await this.dispose(instanceId);
@@ -106,7 +106,7 @@ export class ProviderRegistry {
           enabled: entry.enabled ?? true,
           config,
         });
-        this.byId.set(instanceId, { instanceId, live });
+        this.byId.set(instanceId, { instanceId, live: decorate ? decorate(live) : live });
       } catch (e) {
         this.byId.set(instanceId, {
           instanceId,

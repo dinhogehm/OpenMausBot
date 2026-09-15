@@ -1,6 +1,7 @@
 // Voice & alerts: this bot's spoken-reply voice and its desktop/phone
 // notifications. Moved verbatim from SettingsPanel.tsx (VoiceSettings
 // mount ~1026, Notifications ~1028-1046).
+import { t } from "@/lib/i18n";
 import { requestNotificationPermission } from "@/lib/notify";
 import type { Bot } from "@/state/store";
 import { Switch } from "../SettingsPrimitives";
@@ -22,14 +23,14 @@ export function VoiceSection({
 
       <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4">
         <div>
-          <div className="text-[15px] font-medium text-ink">Notifications</div>
+          <div className="text-[15px] font-medium text-ink">{t("botVoice.notifications")}</div>
           <div className="mt-0.5 text-[13px] text-ink-secondary">
-            Get notified when this agent finishes or needs input
+            {t("botVoice.notificationsHint")}
           </div>
         </div>
         <Switch
           checked={bot.notifications}
-          aria-label="Agent notifications"
+          aria-label={t("botVoice.notificationsAria")}
           onClick={() => {
             const enabled = !bot.notifications;
             if (enabled) void requestNotificationPermission();

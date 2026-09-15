@@ -158,6 +158,7 @@ lines.on('line', line => {
   else if (m.params.name === 'hang') return;
   else if (m.params.name === 'crash') process.exit(23);
   else if (m.params.name === 'oversized') { process.stdout.write('x'.repeat(16777217)); return; }
+  else if (m.params.name === 'bulky') result = { content:[{type:'text',text:'x'.repeat(50000)},{type:'image',data:'AAAA',mimeType:'image/png'}], structuredContent:{ huge: 'y'.repeat(200000) } };
   else if (m.params.name === 'rpc-error') { process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,error:{code:-1,message:'Expected refusal'}})+'\\n'); return; }
   else result = { content:[{type:'text',text:JSON.stringify(m.params)}],pid:process.pid };
   process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');
@@ -245,5 +246,21 @@ describe("server-owned browser MCP runtime", () => {
     expect(value.heldBy("s")).toBe("owner");
     const after = await value.agentRpc("s", spec(), "tools/list", {}) as { pid: number };
     expect(after.pid).not.toBe(before.pid);
+  });
+});
+
+describe("browser MCP shaping at the runtime boundary", () => {
+  it("strips harness-owned arguments before dispatch and bounds what a result puts into the conversation", async () => {
+    const value = new BrowserRuntime({ idleMs: 500 });
+    try {
+      const echoed = await value.agentRpc("shape", spec(), "tools/call", { name: "echo", arguments: { text: "hi", session: "other-bot", extraArgs: ["--x"] } }) as { content: Array<{ text: string }> };
+      expect(JSON.parse(echoed.content[0].text)).toEqual({ name: "echo", arguments: { text: "hi" } });
+      const bulky = await value.agentRpc("shape", spec(), "tools/call", { name: "bulky" }) as Record<string, unknown> & { content: Array<{ type: string; text?: string }> };
+      expect(bulky).not.toHaveProperty("structuredContent");
+      expect(bulky.content).toHaveLength(2);
+      expect(bulky.content[0].text!.length).toBeLessThan(33_000);
+      expect(bulky.content[0].text).toContain("trimmed this tool result");
+      expect(bulky.content[1]).toMatchObject({ type: "image" });
+    } finally { await value.closeAll(); }
   });
 });

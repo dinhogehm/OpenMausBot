@@ -55,6 +55,7 @@ it("runs room-destined work in the room's own conversation, opening no thread on
   expect(after.some((task: any) => task.openedBy)).toBe(false);
   expect((await f.messages(f.destination.activeTaskId)).some((m: any) => m.text?.includes("Please build CSV"))).toBe(true);
   expect((await f.messages(f.source.activeTaskId)).some((m: any) => m.text === "Reviewed downstream outcome")).toBe(true);
+  expect(JSON.stringify(f.provider().find((turn: any) => turn.botId === f.target.id).prompt).match(/Please build CSV/g)).toHaveLength(1);
 }), 45_000);
 
 it("lets an explicitly authorized Chief coordinate another team, which can consult its own specialist", () => withRooms(async f => {
@@ -66,11 +67,17 @@ it("lets an explicitly authorized Chief coordinate another team, which can consu
     steps: [{ arguments: { group_id: reviewRoom.id, bot_ids: [reviewer.id], request_key: "test", message: "Check the CSV output" } }],
     reply: "Sent for verification", resumeReply: "CSV implemented and checked",
   };
-  f.plan[reviewer.id] = { reply: "CSV checks passed" };
+  // Multi-line on purpose: results reach the transcript inside a JSON
+  // envelope, so a newline is escaped there. A raw substring compare would
+  // miss it and re-append the brief on top of a transcript that already has
+  // it — the duplication the dedup exists to prevent.
+  f.plan[reviewer.id] = { reply: "CSV checks passed\nrow count matches\nno nulls" };
   await f.start(); expect((await f.wait()).status).toBe("settled");
   expect(f.provider().map((turn: any) => turn.botId)).toEqual([f.sender.id, f.target.id, reviewer.id, f.target.id, f.sender.id]);
   expect(f.nodes().every((n: any) => n.status === "completed")).toBe(true);
   expect((await f.messages(f.source.activeTaskId)).some((m: any) => m.text === "Reviewed downstream outcome")).toBe(true);
+  const resumedPrompt = f.provider().filter((turn: any) => turn.botId === f.target.id).at(-1).prompt;
+  expect(JSON.stringify(resumedPrompt).match(/CSV checks passed/g)).toHaveLength(1);
   const bots = (await f.api("/api/bots")).bots;
   expect(bots.find((b: any) => b.id === f.target.id).managedSections).toBeUndefined();
   expect(bots.find((b: any) => b.id === reviewer.id).managedSections).toBeUndefined();
@@ -150,13 +157,15 @@ it("refuses same-room coordination in a mixed section room", () => withRooms(asy
 }), 45_000);
 
 it("rechecks section membership before queued work dispatch and withholds its result", () => withRooms(async f => {
-  f.plan[f.target.id].delayMs = 2000; f.savePlan();
+  const gateFile = join(f.session.info.dataDir, "recipient-section-change.gate");
+  f.plan[f.target.id].gateFile = gateFile; f.savePlan();
   await f.cli("send", "--bot", f.target.id, "--text", "Independent task");
   await f.start();
   await expect.poll(() => f.nodes().find((n: any) => n.parentId)?.status, { timeout: 10_000 }).toBe("queued");
   // Model a user changing the fixture's settings from its served UI mid-turn.
   await request(`/api/bots/${f.target.id}`, { method: "PATCH", headers: { Origin: f.session.info.url },
     body: JSON.stringify({ section: "Other company" }) }, f.session.info.url);
+  writeFileSync(gateFile, "release");
   expect((await f.wait()).status).toBe("settled");
   expect(f.nodes().find((n: any) => n.parentId).status).toBe("failed");
   expect(await f.messages(f.destination.activeTaskId)).toEqual([]);

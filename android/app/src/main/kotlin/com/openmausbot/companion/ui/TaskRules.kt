@@ -5,6 +5,7 @@ import com.openmausbot.companion.core.BotTask
 import com.openmausbot.companion.core.Chat
 import com.openmausbot.companion.core.isClosed
 import com.openmausbot.companion.core.displayTitle
+import com.openmausbot.companion.core.orderedThreads
 import com.openmausbot.companion.core.threadGroups
 
 /**
@@ -35,11 +36,15 @@ object TaskRules {
      * it — but after every open thread, in their own server order, so a pile of
      * closed helper threads never buries the person's own. A closed thread that
      * is running, unread, or the current one is treated as open.
+     *
+     * Inside each half, attention floats to the top exactly as the desktop
+     * sidebar orders threads: waiting on the person first, then work, then
+     * queued, then unread; the current thread rides above the idle tail.
      */
     fun tasks(bot: Bot): List<BotTask> {
         val navigable = bot.threadGroups(includingClosed = true).flatMap { it.tasks }
         val (open, closed) = navigable.partition { !it.isClosed || demandsAttention(it) || isCurrent(it, bot) }
-        return open + closed
+        return orderedThreads(open, bot.threadId) + orderedThreads(closed, bot.threadId)
     }
 
     /** Running, needing the person, or holding something they have not read. */

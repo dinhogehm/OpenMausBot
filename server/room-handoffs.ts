@@ -15,7 +15,7 @@ const nodeSchema = z.object({
 });
 export type RoomHandoff = z.infer<typeof nodeSchema>;
 export type RoomAddress = Pick<RoomHandoff, "groupId" | "threadId" | "botId">;
-export const ROOM_HANDOFF_LIMITS = { depth: 4, requests: 24, executions: 48, lifetimeMs: 30 * 60_000, minRunwayMs: 10 * 60_000 };
+export const ROOM_HANDOFF_LIMITS = { depth: 4, requests: 24, executions: 48, lifetimeMs: 30 * 60_000, minRunwayMs: 10 * 60_000, queueMs: 60 * 60_000 };
 /** Renders elapsed milliseconds as whole minutes, or seconds under one minute. */
 const duration = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
 const terminal = (n: RoomHandoff) => ["completed", "failed", "cancelled"].includes(n.status);
@@ -76,10 +76,14 @@ export class RoomHandoffs {
   }
 
   /** The earliest moment this node may be failed for lifetime: the tree
-   * ceiling or, for a running node, its own start plus a minimum runway. */
+   * ceiling, a running node's own start plus a minimum runway, or, for work
+   * parked in a busy teammate's queue, its own queue window (#1238). */
   private deadline(n: RoomHandoff): number {
     const anchor = n.status === "running" ? n.startedAt ?? n.createdAt : n.createdAt;
-    return Math.max(this.root(n).createdAt + ROOM_HANDOFF_LIMITS.lifetimeMs, anchor + ROOM_HANDOFF_LIMITS.minRunwayMs);
+    const ceiling = n.status === "queued" && n.executions === 0
+      ? anchor + ROOM_HANDOFF_LIMITS.queueMs
+      : this.root(n).createdAt + ROOM_HANDOFF_LIMITS.lifetimeMs;
+    return Math.max(ceiling, anchor + ROOM_HANDOFF_LIMITS.minRunwayMs);
   }
   /** An ancestor past its ceiling is not failed while a descendant is still
    * running inside its own runway; cancelling would cascade into that work. */
@@ -87,15 +91,21 @@ export class RoomHandoffs {
     return this.children(n.id).some(c => !terminal(c) && ((c.status === "running" && this.now() <= this.deadline(c)) || this.protectsRunner(c)));
   }
   /** A parent still owes the follow-up execution that decides on its
-   * children's results; the ceiling defers to that execution's own runway. */
+   * children's results; the ceiling defers to that execution's own runway.
+   * A child parked in a queue has produced nothing to decide on yet. */
   private owesFollowUp(n: RoomHandoff): boolean {
     if (n.status === "resume") return true;
     if (n.status !== "waiting") return false;
     const children = this.children(n.id);
-    return (children.length > 0 && children.every(c => terminal(c))) || children.some(c => this.owesFollowUp(c));
+    return (children.length > 0 && children.every(c => terminal(c))) ||
+      children.some(c => this.owesFollowUp(c) || (c.status === "queued" && c.executions === 0));
   }
-  /** Names the budget, the node's status, and the elapsed tree time. */
+  /** Names the budget, the node's status, and the elapsed time. Work that
+   * never started reports the queue window it waited out, not the tree's. */
   private lifetimeError(n: RoomHandoff): string {
+    if (n.status === "queued" && n.executions === 0) {
+      return `Room handoff queue budget exhausted: never started while waiting for a busy teammate after ${duration(this.now() - n.createdAt)} of the ${duration(ROOM_HANDOFF_LIMITS.queueMs)} queue window`;
+    }
     return `Room handoff lifetime budget exhausted: node was ${n.status} after ${duration(this.now() - this.root(n).createdAt)} of the ${duration(ROOM_HANDOFF_LIMITS.lifetimeMs)} tree lifetime`;
   }
 

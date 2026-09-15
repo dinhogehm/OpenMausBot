@@ -45,6 +45,13 @@ resumes it. That turn's context names what is still outstanding, so the bot
 answers the new instruction without assuming its fan-out died or sending the
 same work again.
 
+Direct-chat parking is a per-bot opt-in. When it is on, a message that arrives
+while teammates are still working waits in the composer queue — the same
+pending chip a busy thread shows — and runs as its own follow-up turn once
+every outstanding assignment has settled and the resumed coordination has
+finished. Steering stays the default; Stop keeps its conversation-scoped
+behavior either way.
+
 Stop is scoped to the conversation it was pressed in. It ends that bot's turn
 and stops the conversation awaiting its teammates, so nothing resumes into a
 stopped chat. An assignment that had not started yet is cancelled, since

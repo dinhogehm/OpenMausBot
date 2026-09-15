@@ -1904,6 +1904,21 @@ class Session(
         null
     }
 
+    /**
+     * Switch the workspace's voice engine. The sheet reloads the voice list
+     * afterwards, because every engine names its own voices.
+     */
+    suspend fun switchVoiceProvider(provider: VoiceProvider): ConfigStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.updateVoiceProvider(provider)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
     suspend fun loadConnectorCatalog(): ConnectorCatalog? {
         val activeClient = client ?: return null
         return try {

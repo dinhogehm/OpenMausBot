@@ -55,6 +55,7 @@ Use only mapped, tested commands:
 - [Team backups](team-backups.md)
 - [Teams and shared instructions](teams.md)
 - [Full workspace backups](workspace-backups.md)
+- [Optional company cloud backups](company-backups.md)
 - [Fleet: many workspaces on one server](fleet.md)
 - [Workspaces screen and the fleet agent](workspaces.md)
 - [Hosted workspace sign-in and revocation](hosted-workspaces.md)
@@ -71,6 +72,10 @@ entry only after the shared control surface can really drive it.
 
 The [desktop server connection smoke](desktop-server-connection.md) mounts the
 real Settings connection component in disposable Electron windows.
+
+The [optional organisation connection smoke](organization-settings.md) checks
+the real Settings panel and production desktop client against a synthetic
+Admin server, including cancellation, revocation and unchanged normal startup.
 
 The [embedded server recovery smoke](desktop-server-recovery.md) crashes real
 Electron-owned fixture servers, verifies bounded recovery and private access,

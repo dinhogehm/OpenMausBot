@@ -57,6 +57,13 @@ const dumpOf = (threadId: string): { systemPrompt?: string; mcpConfig?: any } | 
     return undefined;
   }
 };
+const promptsOf = (threadId: string): any[] => {
+  try {
+    return readFileSync(join(gates, `${threadId}.prompts.jsonl`), "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+  } catch {
+    return [];
+  }
+};
 /** The live per-turn token of a held turn — the only credential the
  * internal endpoints accept, and the one a real tool call would carry. */
 const liveToken = async (threadId: string): Promise<Record<string, string>> => {
@@ -189,6 +196,7 @@ beforeAll(async () => {
     '  const key = marker?.[1] ?? thread ?? "peer";',
     `  process.env.FAKE_CLAUDE_SLOW_FINISH_GATE = join(${JSON.stringify(gates)}, key + ".gate");`,
     `  process.env.FAKE_CLAUDE_DUMP = join(${JSON.stringify(gates)}, key + ".json");`,
+    `  process.env.FAKE_CLAUDE_PROMPTS = join(${JSON.stringify(gates)}, key + ".prompts.jsonl");`,
     "  decided = true;",
     "  relay.write(held);",
     '  held = "";',
@@ -394,7 +402,7 @@ describe("coordinate_bots on a teammate", () => {
         (message) => message.from?.botId === qa.id && message.roomRequest?.phase === "result",
       ).length, { timeout: 20_000 }).toBe(3);
       await expect.poll(async () => (await botState(pm.id)).busy, { timeout: 15_000 }).toBe(false);
-      expect(dumpOf(pm.threadId)?.systemPrompt).toContain("Your downstream room requests have settled");
+      expect(promptsOf(pm.threadId).at(-1)?.message.content).toContain("Your downstream room requests have settled");
       expect(stream.frames.filter((frame) => frame.kind === "notify" && frame.notification?.botId === qa.id)).toEqual([]);
       expect((await botState(qa.id)).tasks.filter((task: any) => task.unread)).toEqual([]);
       expect((await botState(qa.id)).threadId).toBe(qa.threadId);

@@ -5,7 +5,7 @@
 // own transcript and its own provider session — so sensitive work, a
 // long job and a quick question can sit side by side under one agent.
 import { Fragment, useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, FolderInput, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { BellDot, Check, ChevronDown, FolderInput, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useStore, formatTime, type Bot, type BotProject, type Group, type Task } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
@@ -14,8 +14,8 @@ import { formatTaskTokens } from "@/lib/usage";
 import { nextRename } from "@/lib/rename";
 import { FolderIcon, NewThreadButton } from "./BotProjects";
 import { useShowThreads } from "@/lib/thread-preferences";
-import { sidebarBotActivityTasks } from "./SidebarBotActivity";
-import { threadByline } from "./SidebarThreadRow";
+import { AttentionThreadRows, crossBotAttentionThreads, sidebarBotActivityTasks, type AttentionThread } from "./SidebarBotActivity";
+import { orderedSidebarThreads, threadByline } from "./SidebarThreadRow";
 
 /** Click-to-switch used to close this menu immediately, which unmounted the
  * row before a double-click (or right-click) could start a rename. Linger
@@ -68,7 +68,7 @@ function TaskUsage({ usage }: { usage: Task["usage"] }) {
   );
 }
 
-type PickerTask = Pick<Task, "threadId" | "title" | "createdAt" | "busy" | "activity" | "unread" | "projectId" | "openedBy" | "closedBy"> & { usage?: Task["usage"] };
+type PickerTask = Pick<Task, "threadId" | "title" | "createdAt" | "busy" | "activity" | "unread" | "projectId" | "openedBy" | "closedBy" | "archivedAt"> & { usage?: Task["usage"] };
 
 /** The full picker searches both thread titles and their project names.
  * Legacy/orphaned project IDs remain visible under Ungrouped. */
@@ -90,6 +90,8 @@ function ConversationTaskPicker({
   onRename,
   onDelete,
   onMove,
+  attention,
+  onAttentionJump,
 }: {
   threadId: string;
   tasks: PickerTask[];
@@ -100,6 +102,8 @@ function ConversationTaskPicker({
   onRename: (threadId: string, title: string) => void;
   onDelete: (threadId: string) => void;
   onMove?: (threadId: string, projectId: string | null) => void;
+  attention?: AttentionThread[];
+  onAttentionJump?: (entry: AttentionThread) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -211,7 +215,15 @@ function ConversationTaskPicker({
       : t("task.switch");
   const grouped = bot ? groupThreadTasks(tasks, bot.projects ?? [], query) : null;
   const visible = grouped ? grouped.flatMap((group) => group.tasks) : filterTasks(tasks, query);
+  // The attention section rides above the tree and obeys the same search:
+  // a query narrows it by thread title or bot name rather than hiding it.
+  const attentionNeedle = query.trim().toLowerCase();
+  const attentionRows = (attention ?? []).filter((entry) =>
+    !attentionNeedle || entry.task.title.toLowerCase().includes(attentionNeedle) || entry.botName.toLowerCase().includes(attentionNeedle));
   const looking = query.trim();
+  // One result list for keyboard, count, and empty state: an attention row
+  // that matches the query is a real result even when no tree thread does.
+  const results = [...attentionRows.map((entry) => ({ kind: "attention" as const, entry })), ...visible.map((task) => ({ kind: "task" as const, task }))];
 
   return (
     <div className="relative" ref={ref}>
@@ -255,9 +267,10 @@ function ConversationTaskPicker({
                   }
                   if (e.key === "Enter" && !e.nativeEvent.isComposing) {
                     e.preventDefault();
-                    const first = visible[0];
+                    const first = results[0];
                     if (!first) return;
-                    if (first.threadId !== threadId) onSwitch(first.threadId);
+                    if (first.kind === "attention") onAttentionJump?.(first.entry);
+                    else if (first.task.threadId !== threadId) onSwitch(first.task.threadId);
                     closeMenu();
                   }
                 }}
@@ -267,8 +280,12 @@ function ConversationTaskPicker({
               />
             </div>
           </div>
-          <div className="max-h-[320px] overflow-y-auto" role="group" aria-label={looking ? t("task.matching", { count: visible.length }) : t("task.list")}>
-            {visible.length === 0 ? (
+          <div className="max-h-[320px] overflow-y-auto" role="group" aria-label={looking ? t("task.matching", { count: results.length }) : t("task.list")}>
+            {attentionRows.length > 0 && <div className="pb-1">
+              <div className="flex items-center gap-1.5 px-3 pb-1 pt-1.5 text-[11px] font-medium text-ink-secondary"><BellDot size={12} />{t("attention.title")}</div>
+              <AttentionThreadRows entries={attentionRows} onJump={(entry) => { onAttentionJump?.(entry); closeMenu(); }} />
+            </div>}
+            {results.length === 0 ? (
               <div className="px-3 py-6 text-center text-[13px] text-ink-secondary">
                 {t("task.noMatch", { query: looking })}
               </div>
@@ -390,11 +407,13 @@ function ConversationTaskPicker({
   );
 }
 
+/** The sibling-activity dropdown shown only while the sidebar thread tree is
+ * hidden, ordered exactly like the sidebar so both surfaces agree. */
 export function BotActivityPicker({ bot }: { bot: Bot }) {
   const { state, dispatch } = useStore();
   const showThreads = useShowThreads();
   if (showThreads) return null;
-  const activity = sidebarBotActivityTasks(bot, state.pendingQueued).filter((task) => task.threadId !== bot.threadId);
+  const activity = orderedSidebarThreads(sidebarBotActivityTasks(bot, state.pendingQueued).filter((task) => task.threadId !== bot.threadId), bot.threadId);
   // A display preference must not strand a sibling approval or queued job,
   // including on narrow screens where the sidebar is closed. This is an
   // activity switcher only: idle histories and creation remain hidden.
@@ -418,7 +437,7 @@ export function BotActivityPicker({ bot }: { bot: Bot }) {
 }
 
 export function TaskPicker({ bot }: { bot: Bot }) {
-  const { dispatch } = useStore();
+  const { state, dispatch } = useStore();
   const showThreads = useShowThreads();
   if (!showThreads) return null;
   return (
@@ -427,11 +446,13 @@ export function TaskPicker({ bot }: { bot: Bot }) {
       tasks={(bot.tasks ?? []).filter((task) => !task.routineRunId)}
       busy={false}
       bot={bot}
+      attention={crossBotAttentionThreads(state.bots, state.pendingQueued, bot.id)}
       onNew={() => dispatch({ type: "newTask", botId: bot.id })}
       onSwitch={(threadId) => dispatch({ type: "switchTask", botId: bot.id, threadId })}
       onRename={(threadId, title) => dispatch({ type: "renameTask", botId: bot.id, threadId, title })}
       onDelete={(threadId) => dispatch({ type: "deleteTask", botId: bot.id, threadId })}
       onMove={(threadId, projectId) => dispatch({ type: "updateTask", botId: bot.id, threadId, patch: { projectId } })}
+      onAttentionJump={(entry) => dispatch({ type: "switchTask", botId: entry.botId, threadId: entry.task.threadId })}
     />
   );
 }

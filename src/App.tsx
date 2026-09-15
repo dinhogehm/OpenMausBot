@@ -357,9 +357,9 @@ function WelcomeGate() {
       remoteClient: window.ogb?.remoteClient?.active === true,
       legacyDone: emailGateDone(),
     });
-  // A fresh desktop can connect to an existing hosted workspace without
-  // completing local provider onboarding. Closing Settings resumes the tour.
-  if (state.appSettingsOpen && state.appSettingsSection === "desktopWorkspaces") return null;
+  // Explicit desktop connection Settings need no local provider onboarding.
+  // Organisation remains optional; closing Settings resumes the normal tour.
+  if (state.appSettingsOpen && ["desktopWorkspaces", "organization"].includes(state.appSettingsSection)) return null;
   if (!state.welcomeOpen && !due) return null;
   const bot = state.bots.find((b) => !b.hidden) ?? null;
   const replay = state.welcomeOpen && !due;

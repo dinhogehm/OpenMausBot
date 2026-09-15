@@ -289,6 +289,10 @@ export interface Task {
    * it out of the default list (still under "show all", never deleted) and
    * the server clears it when a new turn starts there */
   closedBy?: ThreadCloser;
+  /** when the person archived this thread: out of the default list, still
+   * under show-all and search, and back the moment it needs them again;
+   * absent = never archived. Syncs like every other task field. */
+  archivedAt?: number;
 }
 
 /** The bot that opened a thread on itself or a teammate. */
@@ -316,6 +320,10 @@ export interface TaskUsage {
    * from builds before cost existed lack the field entirely */
   costUsd: number | null;
   turns: number;
+  /** the most recent settled turn on its own */
+  lastTurn?: { input: number; output: number; cachedInput?: number; costUsd: number | null };
+  /** what filled the model's window on the last model call, and the window's size when known */
+  context?: { tokens: number; window?: number };
 }
 
 export interface Bot {
@@ -440,12 +448,14 @@ export type TaskUpdatePatch = Partial<Pick<Task, "modelSelection" | "approvalMod
   updateBotDefault?: boolean;
   resetApprovalToAsk?: boolean;
   projectId?: string | null;
+  archivedAt?: number | null;
 };
 
 function taskPatchFields(patch: TaskUpdatePatch): Partial<Task> {
-  const { confirmFullAccess: _fullConsent, acknowledgeLocalAuto: _localAck, updateBotDefault: _modelDefault, resetApprovalToAsk, projectId, ...fields } = patch;
+  const { confirmFullAccess: _fullConsent, acknowledgeLocalAuto: _localAck, updateBotDefault: _modelDefault, resetApprovalToAsk, projectId, archivedAt, ...fields } = patch;
   return { ...fields, ...(resetApprovalToAsk ? { approvalMode: "ask", autoApprove: false, alwaysAllow: [] } : {}),
-    ...(projectId === undefined ? {} : { projectId: projectId ?? undefined }) };
+    ...(projectId === undefined ? {} : { projectId: projectId ?? undefined }),
+    ...(archivedAt === undefined ? {} : { archivedAt: archivedAt ?? undefined }) };
 }
 
 /** The visible conversation: walk parentId links from the active leaf back
@@ -493,10 +503,18 @@ export interface ConfigStatus {
   threads?: { maxConcurrentPerBot: number };
   localVm: { mode: "shared" | "per-bot"; maxInstances: number };
   opencodeGo?: { configured: boolean };
-  /** Voice (ElevenLabs). `configured` = a key is saved; `ready` = a key AND
-   * a voice, which is what it takes to actually speak. The key itself is
-   * never echoed back. */
-  tts?: { configured: boolean; ready: boolean; voice: string; provider?: "elevenlabs" | "system" };
+  /** Voice. `configured` = the engine has what it needs (an ElevenLabs key,
+   * or a Chatterbox server address); `ready` = that AND a voice, which is
+   * what it takes to actually speak. The key itself is never echoed back;
+   * `baseUrl`/`model` are Chatterbox settings, not credentials. */
+  tts?: {
+    configured: boolean;
+    ready: boolean;
+    voice: string;
+    provider?: "elevenlabs" | "system" | "chatterbox";
+    baseUrl?: string;
+    model?: string;
+  };
   /** Shared write-only credential for on-demand GPT Image avatars. */
   imageGen?: {
     configured: boolean;
@@ -588,6 +606,9 @@ export interface InstanceInfo {
   instanceId: string;
   driverKind: string;
   displayName: string;
+  /** Company instances are owned by the desktop parent, never editable here. */
+  readOnly?: boolean;
+  managed?: { organizationId: string; organizationName: string };
   snapshot: {
     state: "available" | "unavailable";
     reason?: string;
@@ -638,6 +659,7 @@ export interface InstanceInfo {
 export type AppSettingsSection =
   | "general"
   | "desktopWorkspaces"
+  | "organization"
   | "appearance"
   | "experimental"
   | "connections"

@@ -25,6 +25,7 @@ import {
 } from "./container-computer.ts";
 import { DATA_DIR, isValidSshAlias, vpsSshAlias, type AppConfig } from "./config.ts";
 import { augmentedPath, resolveCliSpawn } from "./env-path.ts";
+import { prepareVpsSsh } from "./vps-ssh.ts";
 import { loadEnvironmentId } from "./environment.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 
@@ -114,6 +115,19 @@ export type VpsCommandRunner = (
 
 export type VpsLifecycleAction = "provision" | "start" | "stop" | "remove";
 
+/** Whether a turn may prepare or start the VPS container rather than only
+ * reuse a running one. Explicit Cloud always may; Auto only when the person
+ * switched on Start VPS automatically — except for unattended runs. A
+ * scheduled routine has nobody present to choose Cloud, and a container that
+ * idled out between runs would otherwise leave every scheduled job without
+ * its computer, which is exactly what people reported. Starting a self-hosted
+ * container costs nothing that needs consent. */
+export function vpsStartsForTurn(input: { wants: "cloud" | "vm" | "local" | "off" | undefined; autoStartVps?: boolean; automationSource?: string }): boolean {
+  if (input.wants === "cloud") return true;
+  if (input.wants !== undefined) return false;
+  return input.autoStartVps === true || Boolean(input.automationSource);
+}
+
 export interface VpsComputerStatus {
   configured: boolean;
   sshAlias: string | null;
@@ -181,13 +195,16 @@ export function vpsDockerArgs(alias: string, args: string[]): string[] {
  * loopback port on this computer and forwards it to noVNC on the container's
  * private bridge address. Every caller-controlled component is validated
  * before it becomes an argv value. */
-export function vpsSshTunnelArgs(alias: string, localPort: number, privateIp: string): string[] {
+export function vpsSshTunnelArgs(alias: string, localPort: number, privateIp: string, configPath: string | null = null): string[] {
   if (!isValidSshAlias(alias)) throw new Error("invalid VPS SSH config alias");
   if (!Number.isInteger(localPort) || localPort < 1024 || localPort > 65535) {
     throw new Error("invalid VPS viewer port");
   }
   if (!privateDockerIpv4(privateIp)) throw new Error("invalid VPS private container address");
   return [
+    // the app's config shares the connection every other VPS command holds,
+    // so the viewer tunnel comes up without its own handshake
+    ...(configPath ? ["-F", configPath] : []),
     "-N",
     "-o",
     "BatchMode=yes",
@@ -284,9 +301,12 @@ function tailCollector() {
 export function defaultRunner(args: string[], options: VpsCommandOptions = {}): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const command = resolveCliSpawn("docker", args);
+    // docker's SSH transport runs the first `ssh` on PATH: the app's shim,
+    // which shares one connection across every command of this VPS.
+    const ssh = prepareVpsSsh(DATA_DIR, augmentedPath());
     const child = spawn(command.command, command.args, {
       shell: false,
-      env: { ...process.env, PATH: augmentedPath() },
+      env: { ...process.env, PATH: ssh.path },
       stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout = tailCollector();
@@ -1176,9 +1196,10 @@ export async function vpsComputerJoin(
   }
 
   const localPort = await unusedLoopbackPort();
-  const child = spawn("ssh", vpsSshTunnelArgs(alias, localPort, connection.privateIp), {
+  const ssh = prepareVpsSsh(DATA_DIR, augmentedPath());
+  const child = spawn("ssh", vpsSshTunnelArgs(alias, localPort, connection.privateIp, ssh.configPath), {
     shell: false,
-    env: { ...process.env, PATH: augmentedPath() },
+    env: { ...process.env, PATH: ssh.path },
     stdio: ["ignore", "ignore", "pipe"],
     windowsHide: true,
   });

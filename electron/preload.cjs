@@ -22,6 +22,34 @@ const localOrigin = process.argv.find((arg) => arg.startsWith("--omb-local-origi
 const isLocalPage = !localOrigin || location.origin === localOrigin;
 const REMOTE_SAFE = new Set(["platform", "getCapabilities", "onCapabilitiesChanged", "applySkin", "setUnreadCount", "permStatus", "workspaces"]);
 
+// Sandboxed preload cannot import TS or sibling modules. Keep this list in
+// parity with shared/workspace-backup-client.ts (covered by the preload test).
+// Only main can request a fresh snapshot; there is no renderer-callable method.
+const COMPANY_BACKUP_CLIENT_KEYS = [
+  "omb-drafts", "omb-draft-attachments", "omb-draft-send-ids", "omb-draft-channel-modes",
+  "omb-skin", "omb-show-threads", "openmausbot.sidebarDensity",
+  "openmausbot.sidebarCollapsedSections.v1", "openmausbot.sidebarSectionOrder.v1",
+  "omb-analytics-opt-out", "openmausbot.remote-voice.v1",
+];
+if (isLocalPage && !desktopRemoteClient && process.argv.includes("--omb-company-desktop=1")) {
+  ipcRenderer.on("company-backups:collect-client-state", (_event, request) => {
+    if (!request || typeof request.requestId !== "string" || !/^[a-f0-9-]{36}$/.test(request.requestId)) return;
+    try {
+      // Check the origin again; a later navigation must not export remote data.
+      if (!localOrigin || location.origin !== localOrigin) throw new Error("Not the local workspace");
+      const clientState = {};
+      for (const key of COMPANY_BACKUP_CLIENT_KEYS) {
+        const value = localStorage.getItem(key);
+        if (value !== null) clientState[key] = value;
+      }
+      if (new TextEncoder().encode(JSON.stringify(clientState)).byteLength > 2 * 1024 ** 2) throw new Error("Browser state too large");
+      ipcRenderer.send("company-backups:client-state", { requestId: request.requestId, clientState });
+    } catch {
+      ipcRenderer.send("company-backups:client-state", { requestId: request.requestId, unavailable: true });
+    }
+  });
+}
+
 const bridge = {
   /** Host platform ("darwin" | "win32" | "linux") — for platform-aware UI. */
   platform: process.platform,
@@ -233,6 +261,33 @@ const bridge = {
       return () => ipcRenderer.removeListener("workspaces:open-settings", handler);
     },
   },
+  organization: process.argv.includes("--omb-company-desktop=1") ? {
+    state: () => ipcRenderer.invoke("organization:state"),
+    begin: input => ipcRenderer.invoke("organization:begin", input),
+    cancelEnrollment: () => ipcRenderer.invoke("organization:cancel"),
+    refresh: () => ipcRenderer.invoke("organization:refresh"),
+    disconnect: () => ipcRenderer.invoke("organization:disconnect"),
+    onState: cb => {
+      const handler = (_event, state) => cb(state);
+      ipcRenderer.on("organization:state-changed", handler);
+      return () => ipcRenderer.removeListener("organization:state-changed", handler);
+    },
+  } : undefined,
+  companyBackups: process.argv.includes("--omb-company-desktop=1") ? {
+    state: () => ipcRenderer.invoke("company-backups:state"),
+    list: () => ipcRenderer.invoke("company-backups:list"),
+    create: input => ipcRenderer.invoke("company-backups:create", input),
+    configureSchedule: input => ipcRenderer.invoke("company-backups:configure-schedule", input),
+    prepareRestore: input => ipcRenderer.invoke("company-backups:preview", input),
+    restore: input => ipcRenderer.invoke("company-backups:restore", input),
+    delete: input => ipcRenderer.invoke("company-backups:delete", input),
+    cancel: () => ipcRenderer.invoke("company-backups:cancel"),
+    onState: cb => {
+      const handler = (_event, state) => cb(state);
+      ipcRenderer.on("company-backups:state-changed", handler);
+      return () => ipcRenderer.removeListener("company-backups:state-changed", handler);
+    },
+  } : undefined,
   computerSharing: {
     state: id => ipcRenderer.invoke("sharing:state", id),
     chooseFolder: () => ipcRenderer.invoke("sharing:folder"),

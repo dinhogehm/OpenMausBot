@@ -12,7 +12,8 @@ passphrase, and never runs an agent remotely.
 - Live screen preview in the Computer panel and in transcripts, same as a Box.
 - Explicit **Cloud** with the **Self-hosted VPS** backend provisions or starts the container. **Auto** reuses
   a ready container by default; an off-by-default **Start VPS automatically** switch lets that bot prepare
-  or wake its managed container when needed.
+  or wake its managed container when needed. Scheduled and manually triggered routine runs always start it,
+  and never fall back to this computer's own desktop when the VPS cannot be reached.
 - Interactive **Take control** locally or from a paired desktop client. The host binds noVNC only to a random
   `127.0.0.1` port, closes the tunnel with the viewer, and never publishes VNC on the VPS. A paired client
   receives a short-lived, device-scoped relay through managed HTTPS or Tailscale only after **Cloud desktop
@@ -33,10 +34,12 @@ not one that also holds things you would not hand to the agent.
 ## The required SSH config alias
 
 OpenMausBot connects only through a named alias in your `~/.ssh/config` — you type the alias into
-App Settings → Connections, nothing else. The alias block is load-bearing, not a convenience: every bot
-action becomes a `docker exec` over SSH, and without multiplexing each one pays a full SSH handshake; without
-keepalives and a connect timeout, a VPS that drops off the network hangs the bot's turn instead of failing it.
-Set the block up like this:
+App Settings → Connections, nothing else. Every bot action becomes a `docker exec` over SSH, so the app
+supplies connection sharing and fail-fast timeouts itself: it runs each VPS command through its own
+`ssh_config` (under `~/.openmausbot/ssh/`) that includes your file first and fills in `ControlMaster`,
+`ControlPersist`, keepalives and a connect timeout wherever your alias leaves them unset. Anything your
+alias sets wins. The block below is still the recommended shape, and it is what your own `ssh` uses outside
+the app:
 
 ```
 Host my-vps

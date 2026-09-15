@@ -41,6 +41,7 @@ import {
   vpsDriverError,
   vpsLifecycleBusy,
   vpsSshTunnelArgs,
+  vpsStartsForTurn,
   reuseVps,
   type VpsCommandRunner,
 } from "./vps-computer.ts";
@@ -271,6 +272,9 @@ describe("VPS computer", () => {
     expect(args).toContain("127.0.0.1:45678:172.17.0.5:6901");
     expect(args.at(-1)).toBe("production-vps");
     expect(args).toContain("ExitOnForwardFailure=yes");
+    // the app's shared-connection config rides along when the platform has one
+    expect(vpsSshTunnelArgs("production-vps", 45678, "172.17.0.5", "/data/ssh/config").slice(0, 3)).toEqual(["-F", "/data/ssh/config", "-N"]);
+    expect(vpsSshTunnelArgs("production-vps", 45678, "172.17.0.5", null)[0]).toBe("-N");
     expect(() => vpsSshTunnelArgs("production-vps", 80, "172.17.0.5")).toThrow(/port/);
     expect(() => vpsSshTunnelArgs("production-vps", 45678, "203.0.113.8")).toThrow(/private/);
   });
@@ -838,5 +842,17 @@ describe("VPS computer", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("starts the VPS for explicit Cloud, for opted-in Auto, and for every unattended run", () => {
+    expect(vpsStartsForTurn({ wants: "cloud" })).toBe(true);
+    expect(vpsStartsForTurn({ wants: undefined })).toBe(false);
+    expect(vpsStartsForTurn({ wants: undefined, autoStartVps: true })).toBe(true);
+    // a scheduled routine has nobody present to choose Cloud
+    expect(vpsStartsForTurn({ wants: undefined, automationSource: "schedule" })).toBe(true);
+    expect(vpsStartsForTurn({ wants: undefined, automationSource: "manual" })).toBe(true);
+    // another explicit destination is never the VPS
+    expect(vpsStartsForTurn({ wants: "vm", automationSource: "schedule" })).toBe(false);
+    expect(vpsStartsForTurn({ wants: "off", autoStartVps: true })).toBe(false);
   });
 });
