@@ -23,12 +23,28 @@ import {
   retireDeletedBoxCreate,
   type BoxCreateRequest,
 } from "./box-create-idempotency.ts";
-import {
-  ensureRemoteCuaCommand,
-  isolatedRemoteCommand,
-  MAX_REMOTE_COMMAND_LENGTH,
-  remoteComputerBootstrapCommand,
-} from "./remote-computer.ts";
+
+const shellQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
+
+export const MAX_REMOTE_COMMAND_LENGTH = 4_000;
+
+/** Run an owner-supplied console command without inheriting provider or
+ * account credentials from the box's environment. */
+export function isolatedRemoteCommand(command: string): string {
+  return [
+    "exec env -i",
+    'HOME="$HOME"',
+    'USER="${USER:-$(id -un)}"',
+    'LOGNAME="${LOGNAME:-${USER:-$(id -un)}}"',
+    'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"',
+    'DISPLAY="${DISPLAY:-:0}"',
+    'XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"',
+    'XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"',
+    'DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}"',
+    "/bin/bash -c",
+    shellQuote(command),
+  ].join(" ");
+}
 
 // overridable so tests can point at a stub instead of the live provider
 const BOX_API = process.env.OMB_BOX_API || "https://ascii.dev/api/box/v1";
@@ -756,12 +772,44 @@ function idempotentCreateInProgress(result: Awaited<ReturnType<typeof boxJson>>)
   return result.status === 409 && code === "idempotency_in_progress";
 }
 
-async function requestBoxCreate(cfg: AppConfig, botId: string, ttlSeconds: number): Promise<BoxCreateResult> {
+/** The keys this OpenMausBot already holds, as the environment its bots'
+ * agents read on the box. The box is created with `noEnv: true`, so the
+ * ascii.dev account's own logins never land in the guest: the box has exactly
+ * these and nothing else (see "Whose keys" in the Box integrated-agents docs). */
+export function boxCredentialEnv(cfg: AppConfig, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  const put = (name: string, value: string | undefined) => {
+    if (typeof value === "string" && value.trim()) out[name] = value.trim();
+  };
+  // The workspace key only: an ANTHROPIC_API_KEY in the server's own env is
+  // never the workspace key (see loadConfig), so it is not forwarded either.
+  put("ANTHROPIC_API_KEY", cfg.anthropic?.key);
+  for (const name of BOX_FORWARDED_CREDENTIAL_ENV) put(name, env[name]);
+  return out;
+}
+
+/** Names the box's agents read (Claude Code, Codex, pi, OpenCode, Prime
+ * Agent, Kimi), forwarded verbatim from this server's environment when set. */
+const BOX_FORWARDED_CREDENTIAL_ENV = [
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "OPENAI_API_KEY",
+  "OPENROUTER_API_KEY",
+  "LLMGATEWAY_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "MOONSHOT_API_KEY",
+  "KIMI_CODE_ACCESS_TOKEN",
+  "KIMI_CODE_REFRESH_TOKEN",
+] as const;
+
+async function requestBoxCreate(cfg: AppConfig, botId: string, ttlSeconds: number, env: Record<string, string>): Promise<BoxCreateResult> {
   // The computer needs the user's desktop session, not the account owner's
-  // host credentials. Keep provider-side env injection off so API keys cannot
-  // silently appear inside the guest. The exact serialized body is also the
-  // idempotency identity: a trial-TTL retry must receive a different key.
+  // host credentials. Keep provider-side env injection off; the only keys the
+  // guest ever has are the ones this OpenMausBot forwards (`env`), which its
+  // agents need now that the turn runs on the box. The idempotency identity
+  // stays the secret-free part: a trial-TTL retry must receive a different
+  // key, and the journal on disk never carries a credential.
   const body = JSON.stringify({ ttlSeconds, noEnv: true });
+  const wireBody = JSON.stringify({ ttlSeconds, noEnv: true, ...(Object.keys(env).length ? { env } : {}) });
   let attempt = beginBoxCreate(botId, body);
   let request = attempt.request;
   let createdThisAttempt = attempt.startedNow;
@@ -793,7 +841,7 @@ async function requestBoxCreate(cfg: AppConfig, botId: string, ttlSeconds: numbe
         method: "POST",
         headers: { "Idempotency-Key": request.idempotencyKey },
         signal: AbortSignal.timeout(45_000),
-        body,
+        body: wireBody,
       });
     } catch (error) {
       // A dropped response is ambiguous: ascii.dev may already have created
@@ -823,11 +871,11 @@ async function requestBoxCreate(cfg: AppConfig, botId: string, ttlSeconds: numbe
   }
 }
 
-async function createBox(cfg: AppConfig, botId: string) {
-  const first = await requestBoxCreate(cfg, botId, DEFAULT_BOX_TTL_SECONDS);
+async function createBox(cfg: AppConfig, botId: string, env: Record<string, string>) {
+  const first = await requestBoxCreate(cfg, botId, DEFAULT_BOX_TTL_SECONDS, env);
   if (first.ok) return first;
   const trialTtl = trialBoxTtlSeconds(first.body);
-  return trialTtl === null ? first : requestBoxCreate(cfg, botId, trialTtl);
+  return trialTtl === null ? first : requestBoxCreate(cfg, botId, trialTtl, env);
 }
 
 /** Box state for the Computer panel. */
@@ -842,11 +890,11 @@ export async function boxStatus(cfg: AppConfig, botId: string) {
 }
 
 /**
- * Find-or-create the bot's persistent box, wait for ready, run the
- * idempotent bootstrap (screenshot tooling for the computer-use bridge +
- * a tmux welcome), and mint a fresh desktop URL.
+ * Find-or-create the bot's persistent box, wait for ready, and mint a fresh
+ * desktop URL. The box ships its own computer-use driver and agent runner.
  */
-export async function provisionBox(cfg: AppConfig, botId: string, botName: string) {
+export async function provisionBox(cfg: AppConfig, botId: string, _botName: string) {
+  const credentialEnv = boxCredentialEnv(cfg);
   cfg = snapshotBoxConfig(cfg);
   if (!boxConfigured(cfg)) {
     throw new Error('box provider not enabled — add {"box":{"token":"…"}} to ~/.openmausbot/config.json');
@@ -860,7 +908,7 @@ export async function provisionBox(cfg: AppConfig, botId: string, botName: strin
       // Provider-side backstop: archives itself (billing pauses, disk
       // survives) if every stop path dies. Trial accounts get one narrower
       // retry when ascii.dev reports their shorter TTL ceiling.
-      const createRes = await createBox(cfg, botId);
+      const createRes = await createBox(cfg, botId, credentialEnv);
       if (!createRes.ok || !createRes.body?.box?.id) {
         throw new Error(boxErrorMessage(createRes.status, "box create", createRes.body));
       }
@@ -877,20 +925,8 @@ export async function provisionBox(cfg: AppConfig, botId: string, botName: strin
     const ready = await waitReady(cfg, box.id);
     if (!ready) throw new Error("box did not become ready within 90s — retry in a minute");
 
-    // Install the exact Cua Driver executable in the background, keep its
-    // daemon private to the VM, and retain X11 tooling as a degraded fallback.
-    const bootstrap = remoteComputerBootstrapCommand(botName);
-    let boot;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      boot = await runCommand(cfg, box.id, bootstrap);
-      if (boot.ok || boot.exitCode !== null) break;
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-    if (!boot?.ok) {
-      const detail = boot?.stderr?.slice(0, 200) || (boot?.exitCode != null ? `exit ${boot.exitCode}` : "no response");
-      throw new Error(`box setup failed: ${detail}`);
-    }
-
+    // Nothing to install: every box ships its own computer-use driver and
+    // registers it with every harness it runs.
     const joinUrl = await mintDesktopUrl(cfg, box.id);
     if (!joinUrl) throw new Error("box desktop link could not be created");
     return { boxId: box.id, machineName: vmName, reused: !created, state: ready.state, joinUrl };
@@ -935,9 +971,8 @@ export async function joinBox(cfg: AppConfig, botId: string) {
   if (!box) throw new Error("no computer yet — provision it first");
   const ready = await waitReady(cfg, box.id);
   if (!ready) throw new Error("the box did not wake in time — try again");
-  // Provider archive/resume preserves disk but not processes. Reattach the
-  // driver daemon before handing the desktop back to the user.
-  await runCommand(cfg, box.id, ensureRemoteCuaCommand(), { timeoutMs: 15_000 }).catch(() => null);
+  // Provider archive/resume preserves disk but not processes; the box brings
+  // its own driver daemon back up, so there is nothing to reattach here.
   return { joinUrl: await mintDesktopUrl(cfg, box.id), state: ready.state ?? null };
 }
 
@@ -986,17 +1021,38 @@ export async function execOnBox(cfg: AppConfig, botId: string, command: string) 
 // Base64 over command stdout is NOT reliable for the panel's full-size
 // frames (probed 2026-08-12: an otherwise-complete payload came back with
 // a corrupted length), so the frame is always fetched over HTTP here.
+//
+// The frame is for a person: it fills the panel and opens in the chat's
+// image viewer, so it keeps the desktop's native size up to 1080p and a
+// quality where page text stays legible. (Sizing it is now the only say
+// OpenMausBot has over any frame off this box: the turn runs on the box's
+// own agent, so the model's own captures never pass through here.) Only
+// wider displays are scaled down, with -resize rather than -thumbnail so
+// the resample is not the fast-and-blurry kind meant for icons. The
+// pointer is drawn into the frame (scrot --pointer, ffmpeg -draw_mouse):
+// watching the bot work means seeing where its cursor is, and X11
+// captures leave it out by default.
 const PANEL_PATH = "/tmp/ogb-panel.jpg";
-const PANEL_WIDTH = 1024;
-const SHOT_CMD = [
-  "export DISPLAY=${DISPLAY:-:0}",
-  `f=${PANEL_PATH}`,
-  'w=$(xdotool getdisplaygeometry 2>/dev/null | cut -d" " -f1)',
-  'case "$w" in ""|*[!0-9]*) w=0;; esac',
-  'scrot -o -q 70 "$f" 2>/dev/null || import -window root -quality 70 "$f" 2>/dev/null || ffmpeg -y -f x11grab -i "$DISPLAY" -frames:v 1 -q:v 7 "$f" >/dev/null 2>&1',
-  `if [ "$w" -gt ${PANEL_WIDTH} ] 2>/dev/null && command -v convert >/dev/null 2>&1; then convert "$f" -thumbnail ${PANEL_WIDTH}x -quality 70 "$f" 2>/dev/null || true; fi`,
-  'test -s "$f" && echo captured',
-].join("; ");
+export const PANEL_FRAME_WIDTH = 1920;
+export const PANEL_FRAME_QUALITY = 85;
+// ffmpeg's -q:v runs 2 (best) to 31; 3 lands near JPEG quality 85.
+const PANEL_FRAME_FFMPEG_Q = 3;
+
+/** The shell that captures one panel frame on the box. Exported for tests. */
+export function panelShotCommand({ width = PANEL_FRAME_WIDTH, quality = PANEL_FRAME_QUALITY } = {}): string {
+  return [
+    "export DISPLAY=${DISPLAY:-:0}",
+    `f=${PANEL_PATH}`,
+    // a stale frame must not pass `test -s` when every capture tool fails
+    'rm -f "$f"',
+    'w=$(xdotool getdisplaygeometry 2>/dev/null | cut -d" " -f1)',
+    'case "$w" in ""|*[!0-9]*) w=0;; esac',
+    `scrot -o -p -q ${quality} "$f" 2>/dev/null || import -window root -quality ${quality} "$f" 2>/dev/null || ffmpeg -y -f x11grab -draw_mouse 1 -i "$DISPLAY" -frames:v 1 -q:v ${PANEL_FRAME_FFMPEG_Q} "$f" >/dev/null 2>&1`,
+    `if [ "$w" -gt ${width} ] 2>/dev/null && command -v convert >/dev/null 2>&1; then convert "$f" -resize ${width}x -quality ${quality} "$f" 2>/dev/null || true; fi`,
+    'test -s "$f" && echo captured',
+  ].join("; ");
+}
+const SHOT_CMD = panelShotCommand();
 
 /** Read a file off the box as base64 — raw artifact bytes when the API
  * supports it (33% less transfer, no JSON envelope), else the files API. */

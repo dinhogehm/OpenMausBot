@@ -372,6 +372,9 @@ beforeAll(async () => {
         // tests exercise the trusted desktop boundary, while an intentionally
         // missing CLI keeps it out of the default available-model selection.
         codex: { driver: "codex", displayName: "Fixture Codex", config: { cli: join(home, "missing-codex") } },
+        // the engine that runs a turn on the bot's cloud computer (the app
+        // registers it by default); it talks only to the Box stub
+        computer: { driver: "boxAgent", displayName: "Computer" },
       },
     }),
   );
@@ -2338,12 +2341,30 @@ describe("harness HTTP API", () => {
     const section = `Shared machine ${requestId.slice(0, 8)}`;
     const botIds: string[] = [];
     let roomId = "";
-    const idle = async (botId: string) => expect.poll(async () =>
-      (await api("GET", "/api/bots?messages=0")).body.bots.find((bot: { id: string }) => bot.id === botId)?.busy,
-    { timeout: 5_000 }).toBe(false);
-    type ComputerDump = { mcpConfig: { mcpServers: { computer?: { env: { OGB_BOX_ID: string; OMB_CONTROL_URL: string; OMB_CONTROL_TOKEN: string } } } } };
-    const gate = (computer: NonNullable<ComputerDump["mcpConfig"]["mcpServers"]["computer"]>) =>
-      fetch(computer.env.OMB_CONTROL_URL, { headers: { authorization: `Bearer ${computer.env.OMB_CONTROL_TOKEN}` } });
+    const idle = async (botId: string) => {
+      try {
+        await expect.poll(async () =>
+          (await api("GET", "/api/bots?messages=0")).body.bots.find((bot: { id: string }) => bot.id === botId)?.busy,
+        { timeout: 10_000 }).toBe(false);
+      } catch (error) {
+        const bot = (await api("GET", "/api/bots?messages=6")).body.bots.find((candidate: { id: string }) => candidate.id === botId);
+        throw new Error(`${(error as Error).message}\nbox calls: ${JSON.stringify(boxRouteCalls.slice(-6))}\nthread: ${JSON.stringify(bot?.messages ?? null).slice(0, 1500)}`);
+      }
+    };
+    type ComputerDump = { mcpConfig: { mcpServers: { computer?: unknown } } };
+    // A turn on the team computer runs ON that box: the harness server posts
+    // the prompt to the box instead of spawning a local engine.
+    const promptsOnBox = () => boxRouteCalls.filter(call => call.method === "POST" && call.path === `/boxes/${managedBoxCreateId}/prompt`).length;
+    const promptedOnBox = async (count: number, botId: string) => {
+      try {
+        await expect.poll(promptsOnBox, { timeout: 5_000 }).toBe(count);
+      } catch (error) {
+        const bot = (await api("GET", "/api/bots?messages=5")).body.bots.find((candidate: { id: string }) => candidate.id === botId);
+        const kinds = (await api("GET", "/api/instances")).body.instances
+          .map((i: { instanceId: string; driverKind: string; snapshot: { state: string } }) => `${i.instanceId}:${i.driverKind}:${i.snapshot.state}`);
+        throw new Error(`${(error as Error).message}\nbox calls: ${JSON.stringify(boxRouteCalls.slice(-8))}\nthread: ${JSON.stringify(bot?.messages ?? null)}\ninstances: ${kinds.join(" ")}\nclaude dump: ${existsSync(fakeClaudeDump)}`);
+      }
+    };
     try {
       expect((await api("PUT", "/api/config", { box: { token: "box_route" } })).status).toBe(200);
       for (const name of ["Direct shared", "Room shared", "Explicit off"]) {
@@ -2379,12 +2400,8 @@ describe("harness HTTP API", () => {
 
       rmSync(fakeClaudeDump, { force: true });
       expect((await api("POST", `/api/bots/${botIds[0]}/messages`, { text: "hold the shared desktop" })).status).toBe(202);
-      const direct = (await readJsonFileWhenReady<ComputerDump>(fakeClaudeDump)).mcpConfig.mcpServers.computer!;
-      expect(direct.env.OGB_BOX_ID).toBe(managedBoxCreateId);
-      expect((await gate(direct)).status).toBe(200);
-      expect((await fetch(direct.env.OMB_CONTROL_URL.replace(botIds[0], botIds[1]), {
-        headers: { authorization: `Bearer ${direct.env.OMB_CONTROL_TOKEN}` },
-      })).status).toBe(403);
+      await promptedOnBox(1, botIds[0]);
+      expect(existsSync(fakeClaudeDump)).toBe(false);
       for (const action of ["sleep", "provision"]) {
         expect((await api("POST", `/api/team-computers/${requestId}/${action}`, { acknowledgeCost: true })).status).toBe(409);
       }
@@ -2397,20 +2414,17 @@ describe("harness HTTP API", () => {
         (group: { id: string }) => group.id === roomId,
       )), { timeout: 5_000 }).toMatch(/another thread is using this computer/);
       await idle(botIds[1]);
-      expect((await readJsonFileWhenReady<ComputerDump>(fakeClaudeDump)).mcpConfig.mcpServers.computer).toEqual(direct);
+      expect(promptsOnBox()).toBe(1);
       expect((await api("POST", `/api/bots/${botIds[0]}/interrupt`, {})).status).toBe(200);
       await idle(botIds[0]);
-      expect((await gate(direct)).status).toBe(401);
 
       rmSync(fakeClaudeDump, { force: true });
       expect((await api("POST", `/api/groups/${roomId}/messages`, { text: "use the released shared desktop" })).status).toBe(202);
-      const roomComputer = (await readJsonFileWhenReady<ComputerDump>(fakeClaudeDump)).mcpConfig.mcpServers.computer!;
-      expect(roomComputer.env.OGB_BOX_ID).toBe(direct.env.OGB_BOX_ID);
-      expect((await gate(roomComputer)).status).toBe(200);
+      await promptedOnBox(2, botIds[1]);
+      expect(existsSync(fakeClaudeDump)).toBe(false);
       expect((await api("POST", `/api/team-computers/${requestId}/sleep`, {})).status).toBe(409);
       expect((await api("POST", `/api/groups/${roomId}/interrupt`, {})).status).toBe(200);
       await idle(botIds[1]);
-      expect((await gate(roomComputer)).status).toBe(401);
 
       // A missing paid resource must never be silently replaced by a turn.
       managedBoxRows = [];
@@ -4443,15 +4457,16 @@ describe("harness HTTP API", () => {
       const identity = ${JSON.stringify(PHONE_SECRET_TEST_IDENTITY)};
       const gate = ${JSON.stringify(isolatedGate)};
       const release = ${JSON.stringify(releaseFile)};
-      let listener;
+      const { EventEmitter } = await import("node:events");
+      const messages = new EventEmitter();
       let saves = Promise.resolve();
       const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       Object.defineProperty(process, "parentPort", {
         value: {
           on(event, callback) {
             if (event !== "message") return;
-            listener = callback;
-            queueMicrotask(() => listener?.({ data: identity }));
+            messages.on(event, callback);
+            queueMicrotask(() => callback({ data: identity }));
           },
           postMessage(message) {
             if (message?.type !== "openmausbot:phone-secret-save") return;
@@ -4473,13 +4488,13 @@ describe("harness HTTP API", () => {
                 );
                 const body = await response.json().catch(() => null);
                 if (!response.ok) throw new Error(body?.error || "credential config failed");
-                listener?.({ data: {
+                messages.emit("message", { data: {
                   type: "openmausbot:phone-secret-save-result",
                   requestId: message.requestId,
                   ok: true,
                 } });
               } catch (error) {
-                listener?.({ data: {
+                messages.emit("message", { data: {
                   type: "openmausbot:phone-secret-save-result",
                   requestId: message.requestId,
                   ok: false,
@@ -6628,13 +6643,14 @@ describe("harness HTTP API", () => {
     }]));
 
     const ackDesktopPrelude = `data:text/javascript,${encodeURIComponent(`
-      let listener;
+      const { EventEmitter } = await import("node:events");
+      const messages = new EventEmitter();
       Object.defineProperty(process, "parentPort", {
         value: {
-          on(event, callback) { if (event === "message") listener = callback; },
+          on(event, callback) { messages.on(event, callback); },
           postMessage(message) {
             if (message?.requestId && /browser-(?:bot|profile)-deleted/.test(message.type ?? "")) {
-              queueMicrotask(() => listener?.({ data: {
+              queueMicrotask(() => messages.emit("message", { data: {
                 type: "openmausbot:browser-lifecycle-result",
                 requestId: message.requestId,
                 ok: true,

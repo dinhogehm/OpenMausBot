@@ -13,6 +13,7 @@ import {
 } from "./workspace-backup.ts";
 
 const PASSWORD = "correct horse battery staple";
+const AVATAR_BYTES = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 const scratch: string[] = [];
 function directory(): string {
   const path = mkdtempSync(join(tmpdir(), "omb-workspace-backup-"));
@@ -24,10 +25,11 @@ function readJson(path: string): any { return JSON.parse(readFileSync(path, "utf
 function fixture(root: string): DatabaseSync {
   mkdirSync(join(root, "attachments"));
   writeFileSync(join(root, "attachments", "image.png"), Buffer.from([0, 1, 2, 255, 0, 128]));
+  writeFileSync(join(root, "attachments", "avatar.png"), AVATAR_BYTES);
   mkdirSync(join(root, "task-workspaces", "bot", "thread"), { recursive: true });
   writeFileSync(join(root, "task-workspaces", "bot", "thread", "binary.bin"), Buffer.alloc(2 * 1024 * 1024, 0xa5));
   json(join(root, "config.json"), { language: "ja", instances: { custom: { driver: "claudeAgent", config: { configDir: join(root, "providers", "account") } } }, apiKey: "private-key-in-config" });
-  json(join(root, "bots.json"), [{ id: "bot", threadId: "thread", cwd: join(root, "task-workspaces", "bot", "thread"), soul: `Do not rewrite this prose mentioning ${root}.`, tasks: [{ threadId: "thread", cwd: join(root, "task-workspaces", "bot", "thread") }] }]);
+  json(join(root, "bots.json"), [{ id: "bot", threadId: "thread", cwd: join(root, "task-workspaces", "bot", "thread"), soul: `Do not rewrite this prose mentioning ${root}.`, avatarUrl: "/api/attachments/avatar.png", avatarCrop: "circle", tasks: [{ threadId: "thread", cwd: join(root, "task-workspaces", "bot", "thread") }] }]);
   json(join(root, "groups.json"), [{ id: "room", memberIds: ["bot"], cwd: "/external/project" }]);
   json(join(root, "routines.json"), { version: 1, routines: [{ id: "routine", enabled: true }], runs: [{ id: "waiting", status: "queued" }, { id: "historical", status: "completed" }] });
   json(join(root, "webhooks.json"), { version: 1, webhooks: [{ id: "hook", endpointId: "endpoint", enabled: true, secretHash: "a".repeat(64) }], deliveries: [{ id: "delivery" }] });
@@ -116,7 +118,9 @@ describe("encrypted full workspace backups", () => {
       expect(readPendingWorkspaceRestoreMetadata(target)?.id).toBe(staged.id);
       const result = applyPendingWorkspaceRestore(target);
       expect(result).toMatchObject({ restored: true, id: staged.id });
-      expect(readJson(join(target, "bots.json"))[0]).toMatchObject({ id: "bot", cwd: join(target, "task-workspaces", "bot", "thread"), soul: `Do not rewrite this prose mentioning ${source}.` });
+      const restoredBot = readJson(join(target, "bots.json"))[0];
+      expect(restoredBot).toMatchObject({ id: "bot", cwd: join(target, "task-workspaces", "bot", "thread"), soul: `Do not rewrite this prose mentioning ${source}.`, avatarUrl: "/api/attachments/avatar.png", avatarCrop: "circle" });
+      expect(readFileSync(join(target, restoredBot.avatarUrl.slice("/api/".length)))).toEqual(AVATAR_BYTES);
       expect(readJson(join(target, "groups.json"))[0].cwd).toBe("/external/project");
       expect(readJson(join(target, "config.json"))).toEqual({ ...connections, language: "ja" });
       expect(readFileSync(join(target, "task-workspaces", "bot", "thread", "binary.bin"))).toEqual(Buffer.alloc(2 * 1024 * 1024, 0xa5));

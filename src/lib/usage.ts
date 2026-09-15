@@ -82,13 +82,66 @@ export function usageDetail(u: TaskUsage): string {
   return `${input} · ${t("chat.usage.out", { tokens: formatTokens(u.output) })}`;
 }
 
-/** The chip text: tokens, and cost when known. Empty string when nothing
- * has been spent — a fresh task shows no chip. */
+/** Tokens the model had not seen before, plus what it wrote: `input` minus
+ * the cached share, plus `output`. The figure a person means by "how much
+ * did this cost me", and the one every other usage tool headlines — the raw
+ * total counts the thread being re-read on every call and grows by the whole
+ * conversation per message, which reads as a bug (issue #527). */
+export function freshTokens(u: TaskUsage): number {
+  return Math.max(0, u.input - cachedInput(u)) + u.output;
+}
+
+/** Whether the engine ever told us the cached share. Without it the raw
+ * total is the only honest headline. */
+export function cachedKnown(u: TaskUsage): boolean {
+  return hasFiniteCost(u.cachedInput);
+}
+
+export type ContextTone = "quiet" | "warning" | "danger";
+
+/** The last model call's prompt against the model's window, with the same
+ * thresholds ccusage's statusline uses: green under 50%, red over 80%. */
+export function contextShare(u: TaskUsage): { tokens: number; window?: number; percent?: number; tone: ContextTone } | null {
+  const ctx = u.context;
+  if (!ctx || !hasFiniteCost(ctx.tokens) || ctx.tokens <= 0) return null;
+  const window = hasFiniteCost(ctx.window) && ctx.window > 0 ? ctx.window : undefined;
+  const percent = window ? Math.min(999, Math.round((ctx.tokens / window) * 100)) : undefined;
+  const tone: ContextTone = percent === undefined ? "quiet" : percent >= 80 ? "danger" : percent >= 50 ? "warning" : "quiet";
+  return { tokens: ctx.tokens, window, percent, tone };
+}
+
+/** "ctx 142k" or "ctx 52%": the compact form beside the headline. */
+export function contextChip(u: TaskUsage): string {
+  const share = contextShare(u);
+  if (!share) return "";
+  return t("chat.usage.contextShort", { value: share.percent === undefined ? formatTokens(share.tokens) : `${share.percent}%` });
+}
+
+/** "Context 142k (52% of 272k)" or "Context 142k". */
+export function contextDetail(u: TaskUsage): string | null {
+  const share = contextShare(u);
+  if (!share) return null;
+  return share.window && share.percent !== undefined
+    ? t("chat.usage.contextOfWindow", { tokens: formatTokens(share.tokens), percent: String(share.percent), window: formatTokens(share.window) })
+    : t("chat.usage.context", { tokens: formatTokens(share.tokens) });
+}
+
+/** "Last message: 210k read · 1.2k new". */
+export function lastTurnDetail(u: TaskUsage): string | null {
+  const last = u.lastTurn;
+  if (!last || !hasFiniteCost(last.input)) return null;
+  const cached = hasFiniteCost(last.cachedInput) ? Math.min(Math.max(0, last.cachedInput), last.input) : 0;
+  return t("chat.usage.lastTurn", { read: formatTokens(last.input + last.output), fresh: formatTokens(Math.max(0, last.input - cached) + last.output) });
+}
+
+/** The chip text: cost when the engine reports one, else new tokens when the
+ * engine reports its cached share, else every token as before. Empty string
+ * when nothing has been spent — a fresh task shows no chip. */
 export function usageChip(u: TaskUsage): string {
   if (u.turns === 0 && u.input + u.output === 0) return "";
-  const parts = [t("chat.usage.tokens", { tokens: formatTokens(u.input + u.output) })];
-  if (hasFiniteCost(u.costUsd)) parts.push(formatUsd(u.costUsd));
-  return parts.join(" · ");
+  if (hasFiniteCost(u.costUsd)) return formatUsd(u.costUsd);
+  if (cachedKnown(u)) return t("chat.usage.new", { tokens: formatTokens(freshTokens(u)) });
+  return t("chat.usage.tokens", { tokens: formatTokens(u.input + u.output) });
 }
 
 /** How to caption a cost figure given how the engine is billed. */

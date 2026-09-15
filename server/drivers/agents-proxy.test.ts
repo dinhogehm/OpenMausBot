@@ -17,6 +17,8 @@ let stub: Server;
 let stubPort = 0;
 let lastAuth: string | undefined;
 let lastAskBody: any = null;
+let lastCoordinateBody: any = null;
+let coordinateResponse: unknown = { ok: true };
 let lastRoomsQuery = "";
 let lastPostBody: any = null;
 let postCalls = 0;
@@ -178,6 +180,16 @@ beforeAll(async () => {
         lastAskBody = JSON.parse(data);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(askResponse));
+      });
+      return;
+    }
+    if (req.method === "POST" && req.url === "/api/internal/coordinate-bots") {
+      let data = "";
+      req.on("data", (c) => (data += c));
+      req.on("end", () => {
+        lastCoordinateBody = JSON.parse(data);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(coordinateResponse));
       });
       return;
     }
@@ -1684,5 +1696,92 @@ describe("with computer sharing off (the default)", () => {
       const refused = await gatedRpc("tools/call", { name, arguments: { computer_id: "x", action: "list_files" } });
       expect(refused.error?.message ?? refused.result?.content?.[0]?.text).toMatch(/unknown tool|turned off/i);
     }
+  });
+});
+
+// coordinate_bots exists only in room turns, so its argument handling needs
+// its own child with the room flag on; the stub harness records the wire body.
+describe("coordinate_bots arguments (room turn)", () => {
+  let room: ChildProcess;
+  const roomPending = new Map<number, (msg: any) => void>();
+  let roomId = 700;
+  const roomRpc = (method: string, params?: unknown): Promise<any> =>
+    new Promise((resolve, reject) => {
+      const id = roomId++;
+      roomPending.set(id, resolve);
+      room.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      setTimeout(() => {
+        if (roomPending.delete(id)) reject(new Error(`${method} timed out`));
+      }, 10_000).unref?.();
+    });
+
+  beforeAll(async () => {
+    room = spawn(process.execPath, [PROXY], {
+      env: {
+        ...process.env,
+        OMB_HARNESS_URL: `http://127.0.0.1:${stubPort}`,
+        OMB_BOT_ID: "bot-asker",
+        OMB_THREAD_ID: "thread-asker-routine",
+        OMB_COMMS_TOKEN: TOKEN,
+        OMB_TURN_DEPTH: "0",
+        OMB_ROOM_TURN: "1",
+      },
+      stdio: ["pipe", "pipe", "inherit"],
+    });
+    let buf = "";
+    room.stdout!.on("data", (c) => {
+      buf += c;
+      let nl;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+        roomPending.get(msg.id)?.(msg);
+        roomPending.delete(msg.id);
+      }
+    });
+    await roomRpc("initialize", { protocolVersion: "2024-11-05" });
+  });
+
+  afterAll(() => {
+    room?.kill();
+  });
+
+  it("maps camelCase aliases onto the canonical snake_case fields", async () => {
+    const res = await roomRpc("tools/call", { name: "coordinate_bots", arguments: {
+      botIds: ["bot-helper"], message: "please review the patch", requestKey: "review-1",
+    } });
+    expect(res.result.isError).toBeFalsy();
+    expect(lastCoordinateBody).toMatchObject({
+      botIds: ["bot-helper"], message: "please review the patch", requestKey: "review-1",
+    });
+  });
+
+  it("keeps the documented snake_case key when both spellings arrive", async () => {
+    const res = await roomRpc("tools/call", { name: "coordinate_bots", arguments: {
+      bot_ids: ["bot-helper"], botIds: ["bot-other"], group_id: "room-right", groupId: "room-wrong",
+      message: "m", request_key: "k-2", requestKey: "wrong",
+    } });
+    expect(res.result.isError).toBeFalsy();
+    expect(lastCoordinateBody).toMatchObject({
+      botIds: ["bot-helper"], groupId: "room-right", requestKey: "k-2",
+    });
+    expect(lastCoordinateBody.botIds).not.toContain("bot-other");
+  });
+
+  it("names the expected snake_case fields when arguments are unusable", async () => {
+    lastCoordinateBody = null;
+    const res = await roomRpc("tools/call", { name: "coordinate_bots", arguments: {
+      botIds: "bot-helper", message: "ids is not an array",
+    } });
+    expect(res.result.isError).toBe(true);
+    const text = res.result.content[0].text;
+    for (const field of ["bot_ids", "message", "request_key", "group_id", "rework", "label"]) {
+      expect(text).toContain(field);
+    }
+    expect(text).toContain("botIds");
+    expect(text).toContain("message");
+    expect(lastCoordinateBody).toBeNull();
   });
 });

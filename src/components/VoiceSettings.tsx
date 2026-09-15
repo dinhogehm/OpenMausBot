@@ -36,7 +36,10 @@ export function VoiceSettings({
   const tts = state.config?.tts;
 
   const [key, setKey] = useState("");
+  const [serverUrl, setServerUrl] = useState("");
+  const [model, setModel] = useState("");
   const [saving, setSaving] = useState(false);
+  const [savingServer, setSavingServer] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [voices, setVoices] = useState<Array<{ id: string; label: string; description?: string }>>([]);
@@ -57,6 +60,11 @@ export function VoiceSettings({
   useEffect(() => {
     setDeviceVoice(remoteSystemVoice(bot.id));
   }, [bot.id]);
+
+  useEffect(() => {
+    setServerUrl(tts?.baseUrl ?? "");
+    setModel(tts?.model ?? "");
+  }, [tts?.baseUrl, tts?.model]);
 
   useEffect(() => {
     if (usesLocalSystem) {
@@ -99,7 +107,7 @@ export function VoiceSettings({
     onPatch({ voice: voiceId });
   };
 
-  const setProvider = (next: "elevenlabs" | "system") => {
+  const setProvider = (next: "elevenlabs" | "system" | "chatterbox") => {
     if (next === provider || switching || (next === "system" && !systemVoicesAvailable)) return;
     setSwitching(true);
     setError(null);
@@ -128,6 +136,23 @@ export function VoiceSettings({
       .finally(() => setSaving(false));
   };
 
+  const saveServer = () => {
+    const next = serverUrl.trim();
+    if (!next || savingServer) return Promise.resolve();
+    if (!/^https?:\/\//i.test(next)) {
+      setError("The server address must start with http:// or https://");
+      return Promise.resolve();
+    }
+    setSavingServer(true);
+    setError(null);
+    // both fields commit together: an address without its model id (or the
+    // reverse) is half a setting
+    return api("/api/config", { method: "PUT", body: JSON.stringify({ tts: { baseUrl: next, model: model.trim() } }) })
+      .then((status: ConfigStatus) => dispatch({ type: "configStatus", config: status }))
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setSavingServer(false));
+  };
+
   if (!tts) return null;
 
   const selectedVoice = usesLocalSystem ? deviceVoice : (bot.voice ?? "");
@@ -146,7 +171,9 @@ export function VoiceSettings({
                 ? systemVoicesAvailable
                   ? " the voices are the ones already installed on this Mac."
                   : " built-in Mac voices are unavailable here. Switch to ElevenLabs to keep using voice."
-                : " the ElevenLabs key is shared by the workspace."}</>}
+                : provider === "chatterbox"
+                  ? " the Chatterbox server address is shared by the workspace."
+                  : " the ElevenLabs key is shared by the workspace."}</>}
       </div>
 
       {localMacClient && (
@@ -155,7 +182,7 @@ export function VoiceSettings({
           <div className="inline-flex rounded-xl bg-inset p-1" role="radiogroup" aria-label="Voice output on this Mac">
             {([
               { value: "system", label: "Built-in Mac voices", available: true },
-              { value: "host", label: provider === "elevenlabs" ? "Host · ElevenLabs" : "Host voice", available: hostConfigured },
+              { value: "host", label: provider === "elevenlabs" ? "Host · ElevenLabs" : provider === "chatterbox" ? "Host · Chatterbox" : "Host voice", available: hostConfigured },
             ] as const).map((option) => (
               <button
                 key={option.value}
@@ -177,13 +204,14 @@ export function VoiceSettings({
         </div>
       )}
 
-      {!workspaceConfigurationLocked && (systemVoicesAvailable || provider === "system") && (
+      {!workspaceConfigurationLocked && (systemVoicesAvailable || provider !== "elevenlabs") && (
         <div className="mt-4">
           <div className="mb-2 text-[13px] text-ink-secondary">Voice engine</div>
           <div className="inline-flex rounded-xl bg-inset p-1" role="radiogroup" aria-label="Voice engine">
             {([
               { value: "elevenlabs", label: "ElevenLabs", available: true },
               { value: "system", label: "Built-in Mac voices", available: systemVoicesAvailable },
+              { value: "chatterbox", label: "Chatterbox (local)", available: true },
             ] as const).map((option) => (
               <button
                 key={option.value}
@@ -241,6 +269,58 @@ export function VoiceSettings({
             Get a key from ElevenLabs
           </a>
         )}
+        </div>
+      )}
+
+      {!workspaceConfigurationLocked && provider === "chatterbox" && (
+        <div className="mt-4">
+        <div className="mb-1.5 flex items-center gap-2 text-[13px] text-ink-secondary">
+          <span className={cn("size-1.5 rounded-full", configured ? "bg-success" : "bg-raised-hover")} />
+          <span>Chatterbox server</span>
+          {configured && <span className="text-[11px] text-success">Saved</span>}
+        </div>
+        <div className="flex gap-2">
+          <input
+            type="url"
+            value={serverUrl}
+            onChange={(e) => setServerUrl(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void saveServer()}
+            placeholder="http://127.0.0.1:4123"
+            aria-label="Chatterbox server address"
+            autoComplete="off"
+            spellCheck={false}
+            className="w-full rounded-lg border border-hairline/40 bg-inset px-3 py-2 text-[13px] text-ink placeholder:text-ink-secondary focus:border-hairline focus:outline-none"
+          />
+          <button
+            onClick={() => void saveServer()}
+            disabled={savingServer || !serverUrl.trim()}
+            className="flex w-[72px] shrink-0 items-center justify-center gap-1.5 rounded-lg bg-control py-2 text-[13px] text-ink hover:bg-raised-hover disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {savingServer ? <Loader2 size={13} className="animate-spin" /> : <><Check size={13} />Save</>}
+          </button>
+        </div>
+        <input
+          type="text"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void saveServer()}
+          placeholder="Model id — default chatterbox-turbo"
+          aria-label="Chatterbox model"
+          autoComplete="off"
+          spellCheck={false}
+          className="mt-2 w-full rounded-lg border border-hairline/40 bg-inset px-3 py-2 text-[13px] text-ink placeholder:text-ink-secondary focus:border-hairline focus:outline-none"
+        />
+        <div className="mt-1.5 text-[11.5px] leading-relaxed text-ink-secondary">
+          Any OpenAI-compatible server running Chatterbox works, no key needed.{" "}
+          <a
+            href="https://github.com/resemble-ai/chatterbox"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-accent hover:underline"
+          >
+            How to run one locally
+          </a>
+        </div>
         </div>
       )}
 

@@ -296,6 +296,20 @@ describe("control-omb ui drives the real renderer", () => {
     expect(await runControlOmb(["doctor", "--url", info.url])).toMatchObject({ ok: true });
     await expect(ui("click", info.ui, "--name", "Deliberately missing QA control")).rejects.toThrow("no element is named");
 
+    // A control the app paints after its data arrives must still be
+    // clickable. Resolving --name used to take one snapshot, so a lookup
+    // that landed a tick early failed as "no element is named" — the smoke's
+    // own model row, and ~1 run in 8 red on four unrelated branches. The
+    // button below is planted with the same delay the real one has.
+    await ui("eval", info.ui, "--js", `(() => {
+      const late = document.createElement("button");
+      late.textContent = "Late QA control";
+      late.setAttribute("aria-label", "Late QA control");
+      setTimeout(() => document.body.appendChild(late), 1500);
+      return "planted";
+    })()`);
+    expect(await ui("click", info.ui, "--name", "Late QA control")).toMatchObject({ ok: true });
+
     mkdirSync(evidenceDir, { recursive: true });
     const shotPath = join(evidenceDir, "chat-ui.png");
     const shot = await ui("screenshot", info.ui, "--out", shotPath);

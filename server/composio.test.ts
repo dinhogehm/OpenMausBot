@@ -93,7 +93,8 @@ beforeAll(async () => {
     }
 
     const apiKey = String(req.headers["x-api-key"] ?? "");
-    if (!["ak_test", "ak_catalog_a", "ak_catalog_b", "ak_catalog_pages", "ak_catalog_partial", "ak_catalog_stuck"].includes(apiKey)) {
+    if (!["ak_test", "ak_catalog_a", "ak_catalog_b", "ak_catalog_pages", "ak_catalog_partial", "ak_catalog_stuck",
+        "ak_catalog_page_stuck", "ak_catalog_exhausted"].includes(apiKey)) {
       res.writeHead(401, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "invalid project key" } }));
     }
@@ -109,12 +110,48 @@ beforeAll(async () => {
     }
     if (
       req.method === "GET" && url.pathname === "/api/v3/toolkits"
-      && (apiKey === "ak_catalog_pages" || apiKey === "ak_catalog_partial" || apiKey === "ak_catalog_stuck")
+      && (
+        apiKey === "ak_catalog_pages"
+        || apiKey === "ak_catalog_partial"
+        || apiKey === "ak_catalog_stuck"
+        || apiKey === "ak_catalog_page_stuck"
+        || apiKey === "ak_catalog_exhausted"
+      )
     ) {
       if (apiKey === "ak_catalog_stuck") {
         // A broker deployed before this fix ignores the cursor and replays page one.
         res.writeHead(200, { "content-type": "application/json" });
         return res.end(JSON.stringify({ items: [{ slug: "gmail", name: "Gmail" }], next_cursor: "catalog-page-2" }));
+      }
+      if (apiKey === "ak_catalog_page_stuck") {
+        // Replays page one while minting a fresh cursor every time, so only
+        // current_page exposes the loop.
+        const pageNumber = Number((url.searchParams.get("cursor") ?? "catalog-page-1").split("-").pop());
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({
+          items: [{ slug: "gmail", name: "Gmail" }],
+          next_cursor: "catalog-page-" + (pageNumber + 1),
+          current_page: 1,
+          total_pages: 4,
+        }));
+      }
+      if (apiKey === "ak_catalog_exhausted") {
+        // The last page still offers a cursor; total_pages must end the walk.
+        res.writeHead(200, { "content-type": "application/json" });
+        if (url.searchParams.get("cursor") === "catalog-page-2") {
+          return res.end(JSON.stringify({
+            items: [{ slug: "deepgram", name: "Deepgram" }],
+            next_cursor: "catalog-page-3",
+            current_page: 2,
+            total_pages: 2,
+          }));
+        }
+        return res.end(JSON.stringify({
+          items: [{ slug: "gmail", name: "Gmail" }],
+          next_cursor: "catalog-page-2",
+          current_page: 1,
+          total_pages: 2,
+        }));
       }
       // Mirrors the real marketplace: a usage-sorted head, then an alphabetical
       // tail only a second page reaches. ak_catalog_partial loses that page.
@@ -346,6 +383,22 @@ describe.sequential("Composio Sessions", () => {
     const { cards } = await listToolkits({ composio: { apiKey: "ak_catalog_stuck" } });
 
     expect(cards).toEqual([expect.objectContaining({ slug: "gmail" })]);
+    expect(calls.slice(before).filter((call) => call.path === "/api/v3/toolkits")).toHaveLength(2);
+  });
+
+  it("stops cleanly when replayed pages hide behind rotating cursors", async () => {
+    const before = calls.length;
+    const { cards } = await listToolkits({ composio: { apiKey: "ak_catalog_page_stuck" } });
+
+    expect(cards).toEqual([expect.objectContaining({ slug: "gmail" })]);
+    expect(calls.slice(before).filter((call) => call.path === "/api/v3/toolkits")).toHaveLength(2);
+  });
+
+  it("stops at the reported last page even when a cursor is still offered", async () => {
+    const before = calls.length;
+    const { cards } = await listToolkits({ composio: { apiKey: "ak_catalog_exhausted" } });
+
+    expect(cards.map((card) => card.slug)).toEqual(["gmail", "deepgram"]);
     expect(calls.slice(before).filter((call) => call.path === "/api/v3/toolkits")).toHaveLength(2);
   });
 

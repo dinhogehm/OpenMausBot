@@ -1036,6 +1036,7 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
       const items: any[] = [];
       const seenCursors = new Set<string>();
       let cursor: string | undefined;
+      let lastReportedPage: number | undefined;
       for (let page = 0; page < MAX_CONNECTED_ACCOUNT_PAGES; page += 1) {
         const params = new URLSearchParams({ limit: "500", sort_by: "usage" });
         if (cursor) params.set("cursor", cursor);
@@ -1052,6 +1053,24 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
         const pageItems = json.items ?? json.data ?? [];
         if (!Array.isArray(pageItems)) break;
         items.push(...pageItems);
+        // Composio reports current_page and total_pages beside next_cursor.
+        // A broker that drops the cursor (or an upstream regression) can replay
+        // a page while minting fresh cursors, so trust page movement: once it
+        // stops advancing, the catalog is stuck and paging stops cleanly.
+        const reportedPage = Number(json.current_page);
+        if (Number.isFinite(reportedPage)) {
+          if (lastReportedPage !== undefined && reportedPage <= lastReportedPage) break;
+          lastReportedPage = reportedPage;
+        }
+        const reportedTotalPages = Number(json.total_pages);
+        if (
+          lastReportedPage !== undefined &&
+          Number.isFinite(reportedTotalPages) &&
+          reportedTotalPages > 0 &&
+          lastReportedPage >= reportedTotalPages
+        ) {
+          break;
+        }
         const next = typeof json.next_cursor === "string" ? json.next_cursor.trim() : "";
         if (!next || seenCursors.has(next)) break;
         seenCursors.add(next);

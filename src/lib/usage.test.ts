@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { botUsage, cachedInput, costCaption, formatTaskTokens, formatTokens, formatUsd, sumUsage, usageChip, usageDetail } from "./usage";
+import { botUsage, cachedInput, contextChip, contextDetail, contextShare, costCaption, formatTaskTokens, formatTokens, formatUsd, freshTokens, lastTurnDetail, sumUsage, usageChip, usageDetail } from "./usage";
 
 describe("usage formatting", () => {
   it("formats token counts compactly", () => {
@@ -69,7 +69,7 @@ describe("usage formatting", () => {
   it("builds the chip: tokens always, cost only when known, nothing when unused", () => {
     expect(usageChip({ input: 0, output: 0, costUsd: null, turns: 0 })).toBe("");
     expect(usageChip({ input: 10_000, output: 2_400, costUsd: null, turns: 3 })).toBe("12.4k tok");
-    expect(usageChip({ input: 10_000, output: 2_400, costUsd: 0.06, turns: 3 })).toBe("12.4k tok · $0.06");
+    expect(usageChip({ input: 10_000, output: 2_400, costUsd: 0.06, turns: 3 })).toBe("$0.06");
   });
 
   it("sums across tasks and leaves cost null until one reports it", () => {
@@ -94,5 +94,35 @@ describe("usage formatting", () => {
     expect(costCaption("subscription")).toMatch(/not billed/);
     expect(costCaption("metered")).toMatch(/API key/);
     expect(costCaption(undefined)).toMatch(/reported/);
+  });
+
+  it("headlines cost, else new tokens when the cached share is known, else every token", () => {
+    // a long thread: 1.9M read, of which 1.86M was cache; the person typed ~38k worth
+    const longThread = { input: 1_900_000, output: 12_000, cachedInput: 1_862_000, costUsd: null, turns: 12 };
+    expect(freshTokens(longThread)).toBe(50_000);
+    expect(usageChip(longThread)).toBe("50k new");
+    expect(usageChip({ ...longThread, costUsd: 4.2 })).toBe("$4.20");
+    // an engine that never reported its cached share keeps the old headline
+    expect(usageChip({ input: 1_900_000, output: 12_000, costUsd: null, turns: 12 })).toBe("1.9M tok");
+    expect(usageChip({ input: 0, output: 0, costUsd: null, turns: 0 })).toBe("");
+  });
+
+  it("reads the context figure against the window with ccusage's thresholds", () => {
+    const base = { input: 0, output: 0, costUsd: null, turns: 1 };
+    expect(contextShare(base)).toBeNull();
+    expect(contextShare({ ...base, context: { tokens: 142_000 } })).toEqual({ tokens: 142_000, window: undefined, percent: undefined, tone: "quiet" });
+    expect(contextShare({ ...base, context: { tokens: 142_000, window: 272_000 } })).toMatchObject({ percent: 52, tone: "warning" });
+    expect(contextShare({ ...base, context: { tokens: 230_000, window: 272_000 } })).toMatchObject({ percent: 85, tone: "danger" });
+    expect(contextShare({ ...base, context: { tokens: 40_000, window: 200_000 } })).toMatchObject({ percent: 20, tone: "quiet" });
+    expect(contextChip({ ...base, context: { tokens: 142_000, window: 272_000 } })).toBe("ctx 52%");
+    expect(contextChip({ ...base, context: { tokens: 142_000 } })).toBe("ctx 142k");
+    expect(contextDetail({ ...base, context: { tokens: 142_000, window: 272_000 } })).toBe("Context 142k (52% of 272k)");
+    expect(contextDetail({ ...base, context: { tokens: 142_000 } })).toBe("Context 142k");
+  });
+
+  it("says what the last message alone cost", () => {
+    expect(lastTurnDetail({ input: 0, output: 0, costUsd: null, turns: 0 })).toBeNull();
+    expect(lastTurnDetail({ input: 500_000, output: 5_000, costUsd: null, turns: 3, lastTurn: { input: 210_000, output: 1_200, cachedInput: 209_000, costUsd: null } }))
+      .toBe("Last message: 211k read · 2.2k new");
   });
 });

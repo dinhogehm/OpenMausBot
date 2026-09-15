@@ -388,7 +388,13 @@ const playTurn = (prompt: JsonValue) => {
       const poll = setInterval(() => {
         if (!existsSync(finishGate)) return;
         clearInterval(poll);
-        finishSlowTurn();
+        // The steer is already in our stdin pipe when the gate appears — the
+        // server flushes it before answering the request that lets the test
+        // drop the gate. But this is a timer, and timers run BEFORE the poll
+        // phase that reads the pipe, so finishing here can close the turn
+        // with the steer unread; it would then open a second turn. Hand off
+        // to the check phase, which runs after the read.
+        setImmediate(finishSlowTurn);
       }, 10);
     } else {
       setTimeout(finishSlowTurn, 800);

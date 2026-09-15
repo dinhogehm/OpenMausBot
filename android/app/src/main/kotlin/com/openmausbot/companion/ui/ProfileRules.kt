@@ -112,6 +112,19 @@ object ProfileRules {
         "No workspace default voice is selected. Choose an agent-specific voice above; " +
             "synthesis still uses your computer's built-in voices."
 
+    // Chatterbox's credential is a local server address, which is a setting
+    // this form deliberately leaves on the computer: the picker can choose the
+    // engine, but only the computer can point it at a server.
+    private const val CHATTERBOX_TTS_UNCONFIGURED: String = "The Chatterbox server is not connected"
+
+    private const val CHATTERBOX_VOICE_UNCONFIGURED_FOOTER: String =
+        "Add the address of your Chatterbox server in OpenMausBot on the computer to turn " +
+            "speech back on."
+
+    private const val CHATTERBOX_VOICE_NO_DEFAULT_FOOTER: String =
+        "No workspace default voice is selected. Choose an agent-specific voice above; " +
+            "synthesis still uses your Chatterbox server."
+
     // The two below name no engine and no credential. They are true word for
     // word under both providers, so they have no twin to choose between — and
     // that is exactly why they stay public: there is no wrong arm to draw.
@@ -212,16 +225,19 @@ object ProfileRules {
     private fun ttsUnconfiguredLabel(config: ConfigStatus?): String = when (provider(config)) {
         VoiceProvider.ELEVENLABS -> TTS_UNCONFIGURED
         VoiceProvider.SYSTEM -> SYSTEM_TTS_UNCONFIGURED
+        VoiceProvider.CHATTERBOX -> CHATTERBOX_TTS_UNCONFIGURED
     }
 
     private fun voiceFooter(config: ConfigStatus?): String = when {
         !voiceConfigured(config) -> when (provider(config)) {
             VoiceProvider.ELEVENLABS -> VOICE_UNCONFIGURED_FOOTER
             VoiceProvider.SYSTEM -> SYSTEM_VOICE_UNCONFIGURED_FOOTER
+            VoiceProvider.CHATTERBOX -> CHATTERBOX_VOICE_UNCONFIGURED_FOOTER
         }
         config?.hasWorkspaceDefaultVoice != true -> when (provider(config)) {
             VoiceProvider.ELEVENLABS -> VOICE_NO_DEFAULT_FOOTER
             VoiceProvider.SYSTEM -> SYSTEM_VOICE_NO_DEFAULT_FOOTER
+            VoiceProvider.CHATTERBOX -> CHATTERBOX_VOICE_NO_DEFAULT_FOOTER
         }
         else -> VOICE_READY_FOOTER
     }
@@ -286,6 +302,19 @@ object ProfileRules {
         voices.forEach { out += VoiceChoice(id = it.id, label = it.label, detail = it.description, enabled = true) }
         return out
     }
+
+    /**
+     * The engine picker's rows, in the desktop's order. All three stay
+     * selectable: whether the computer can actually speak with one is the
+     * server's answer, reported as `configured` — the phone cannot know the
+     * host's platform, so it offers every engine the API defines and lets the
+     * status explain one that cannot run there.
+     */
+    fun providerChoices(): List<VoiceChoice> = listOf(
+        VoiceChoice(VoiceProvider.ELEVENLABS.wire, "ElevenLabs", null, enabled = true),
+        VoiceChoice(VoiceProvider.SYSTEM.wire, "Built-in Mac voices", null, enabled = true),
+        VoiceChoice(VoiceProvider.CHATTERBOX.wire, "Chatterbox (local)", null, enabled = true),
+    )
 
     /**
      * What the loaded status does to the form: a stored `speakReplies` that

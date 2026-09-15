@@ -335,6 +335,28 @@ class DecodingTest {
     }
 
     @Test
+    fun decodesVoiceProvidersWithTheServersFallback() {
+        fun provider(json: String) = CompanionJson.decodeFromString<ConfigStatus>(json).voiceProvider
+
+        assertEquals(VoiceProvider.ELEVENLABS, provider("""{"tts":{"configured":true,"provider":"elevenlabs"}}"""))
+        assertEquals(VoiceProvider.SYSTEM, provider("""{"tts":{"configured":false,"provider":"system"}}"""))
+        assertEquals(
+            VoiceProvider.CHATTERBOX,
+            provider("""{"tts":{"configured":true,"provider":"chatterbox","baseUrl":"http://127.0.0.1:4123"}}"""),
+        )
+        assertEquals(
+            VoiceProvider.ELEVENLABS,
+            provider("""{"tts":{"configured":true}}"""),
+            "an older desktop predates the field entirely",
+        )
+        assertEquals(
+            VoiceProvider.ELEVENLABS,
+            provider("""{"tts":{"configured":true,"provider":"cartesia"}}"""),
+            "an engine this build has never heard of falls back the way the server does",
+        )
+    }
+
+    @Test
     fun decodesEveryCapturedFrame() {
         val frames = decodeFixture<List<StreamFrame>>("sse-frames")
         assertTrue(frames.isNotEmpty())

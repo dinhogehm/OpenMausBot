@@ -13,13 +13,35 @@ val BotTask.demandsAttention: Boolean
         "waiting-on-you", "waiting", "working", "running", "queued",
     )
 
+/**
+ * Attention outranks recency within a bot: waiting-on-you needs the person
+ * most, then working/busy, then queued, then unread. The thread being looked
+ * at rides just above the idle tail; idle threads keep stored order. Mirrors
+ * the desktop's orderedSidebarThreads so the tree, the sheet, and the pickers
+ * agree on one order.
+ */
+fun attentionRank(task: BotTask, activeThreadId: String): Int = when {
+    task.activity == "waiting-on-you" -> 0
+    task.busy == true || task.activity == "working" -> 1
+    task.activity == "queued" -> 2
+    task.unread == true -> 3
+    task.threadId == activeThreadId -> 4
+    else -> 5
+}
+
+/** Order, never filter: whatever the caller passes stays visible, only the
+ * position changes. Sorting is stable, so equal ranks keep stored order. */
+fun orderedThreads(tasks: List<BotTask>, activeThreadId: String): List<BotTask> =
+    tasks.sortedBy { attentionRank(it, activeThreadId) }
+
 /** Routine results are ordinary threads; only their internal per-run executions are hidden. */
 val Bot.visibleTasks: List<BotTask>
     get() = tasks.orEmpty().filter { it.routineRunId == null }
 
 /**
- * Preserve saved folder order and server thread order. A missing folder leaves
- * its threads unfiled. Search includes closed threads and matches folder names.
+ * Preserve saved folder order; attention floats threads within each group.
+ * A missing folder leaves its threads unfiled. Search includes closed threads
+ * and matches folder names, and keeps relevance (stored) order.
  */
 fun Bot.threadGroups(matching: String = "", includingClosed: Boolean = false): List<BotThreadGroup> {
     val search = matching.trim()
@@ -32,15 +54,16 @@ fun Bot.threadGroups(matching: String = "", includingClosed: Boolean = false): L
         includingClosed || search.isNotEmpty() -> visibleTasks
         else -> visibleTasks.filter { !it.isClosed || it.demandsAttention || it.threadId == threadId }
     }
+    val ordered = if (search.isEmpty()) orderedThreads(threads, threadId) else threads
     val projectIds = mutableSetOf<String>()
     val groups = buildList {
         projects.orEmpty().forEach { project ->
             if (projectIds.add(project.id)) {
-                val filed = threads.filter { it.projectId == project.id }
+                val filed = ordered.filter { it.projectId == project.id }
                 if (filed.isNotEmpty()) add(BotThreadGroup(project, filed))
             }
         }
-        val unfiled = threads.filter { it.projectId !in projectIds }
+        val unfiled = ordered.filter { it.projectId !in projectIds }
         if (unfiled.isNotEmpty()) add(BotThreadGroup(null, unfiled))
     }
     if (search.isEmpty()) return groups

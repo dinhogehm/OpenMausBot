@@ -672,8 +672,23 @@ data class InstanceCapabilities(
 @Serializable
 data class InstanceList(val instances: List<Instance>)
 
-/** Which engine actually speaks. `VoiceProvider` in `server/tts/index.ts`. */
-enum class VoiceProvider { ELEVENLABS, SYSTEM }
+/**
+ * Which engine actually speaks. `VoiceProvider` in `server/tts/index.ts`;
+ * [wire] is the exact string the config write carries, and [fromWire] applies
+ * the server's own fallback: a missing field — an older desktop that predates
+ * the choice — and a provider this build has never heard of both mean
+ * ElevenLabs, keeping an unrecognised engine from being explained with copy
+ * written for a different one.
+ */
+enum class VoiceProvider(val wire: String) {
+    ELEVENLABS("elevenlabs"),
+    SYSTEM("system"),
+    CHATTERBOX("chatterbox");
+
+    companion object {
+        fun fromWire(value: String?): VoiceProvider = entries.firstOrNull { it.wire == value } ?: ELEVENLABS
+    }
+}
 
 @Serializable
 data class ConfigFlag(
@@ -716,15 +731,13 @@ data class ConfigStatus(
         isTTSConfigured && (!agentVoice.isNullOrBlank() || hasWorkspaceDefaultVoice)
 
     /**
-     * `voiceProvider(cfg)` in `server/tts/index.ts`: only the exact string
-     * "system" selects the built-in engine. A missing field — an older
-     * desktop that predates the choice — and a provider this build has never
-     * heard of both fall back to ElevenLabs, which is the server's own rule
-     * and keeps an unrecognised engine from being explained with copy
-     * written for a different one.
+     * `voiceProvider(cfg)` in `server/tts/index.ts`: only the exact strings
+     * "system" and "chatterbox" select their engines. Everything else falls
+     * back to ElevenLabs through [VoiceProvider.fromWire], which is the
+     * server's own rule.
      */
     val voiceProvider: VoiceProvider
-        get() = if (tts?.provider == "system") VoiceProvider.SYSTEM else VoiceProvider.ELEVENLABS
+        get() = VoiceProvider.fromWire(tts?.provider)
 }
 
 object ConnectedAppsRules {

@@ -249,6 +249,11 @@ function EngineRow({ instance }: { instance: InstanceInfo }) {
       .finally(() => setUpdating(false));
   };
 
+  if (instance.readOnly) return <EngineCard instance={instance}>
+    <p className="text-[13px] leading-relaxed text-ink-secondary">{t("organization.managedEngine")}</p>
+    {!engineReady(instance) && <p className="mt-2 text-[12px] text-ink-secondary">{t("organization.engineUnavailable")}</p>}
+  </EngineCard>;
+
   return (
     <EngineCard instance={instance}>
       {!engineReady(instance) && <EngineSetup instance={instance} intent={instance.access === "custom" ? "inject" : "cloud"} unframed />}
@@ -334,7 +339,7 @@ export function EnginesSettings() {
   // every KNOWN-driver instance has cliDefault; unknown-driver shadows have
   // neither unless an override was set. Including them keeps a Reset-able row
   // (and a Set CLI… path) for engines the running build doesn't recognize.
-  const rows = state.instances.filter((i) => i.cli !== undefined || i.cliDefault !== undefined || i.snapshot.state === "unavailable");
+  const rows = state.instances.filter((i) => i.readOnly || i.cli !== undefined || i.cliDefault !== undefined || i.snapshot.state === "unavailable");
 
   return (
     <div className="flex min-w-0 flex-col gap-6 pb-2">

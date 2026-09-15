@@ -314,10 +314,22 @@ const appConfigSchema = z.object({
   vps: vpsConfigSchema.optional(),
   /** Optional OpenCode key; persisted write-only and passed only to its child. */
   opencodeGo: z.object({ apiKey: optionalText }).optional(),
-  /** Voice credentials and the selected voice id. `provider` picks the
-   * engine: "elevenlabs" (default; needs a key) or "system" (the Mac's
-   * built-in voices, no key). */
-  tts: z.object({ key: optionalText, voice: optionalText, provider: z.enum(["elevenlabs", "system"]).optional() }).optional(),
+  /** Voice settings and the selected voice id. `provider` picks the
+   * engine: "elevenlabs" (default; needs a key), "system" (the Mac's
+   * built-in voices, no key), or "chatterbox" (a local OpenAI-compatible
+   * Chatterbox server; `baseUrl` and `model` are settings, not secrets). */
+  tts: z.object({
+    key: optionalText,
+    voice: optionalText,
+    provider: z.enum(["elevenlabs", "system", "chatterbox"]).optional(),
+    baseUrl: z
+      .string()
+      .trim()
+      .max(2048)
+      .refine((value) => !value || /^https?:\/\//i.test(value), "the Chatterbox server address must start with http:// or https://")
+      .optional(),
+    model: optionalText,
+  }).optional(),
   /** Avatar provider credentials stay separate; choosing a router never reuses a cloud key. */
   imageGen: z.object({
     provider: z.enum(["openai", "xai", "custom"]).optional(),
@@ -381,7 +393,7 @@ export interface AppConfig {
   /** A named host from the user's SSH config. Authentication stays with SSH. */
   vps?: { sshAlias?: string };
   opencodeGo?: { apiKey?: string };
-  tts?: { key?: string; voice?: string; provider?: "elevenlabs" | "system" };
+  tts?: { key?: string; voice?: string; provider?: "elevenlabs" | "system" | "chatterbox"; baseUrl?: string; model?: string };
   imageGen?: ImageGenerationConfig;
   profile?: { name?: string; email?: string };
   rooms?: { turnTimeoutMinutes: number };

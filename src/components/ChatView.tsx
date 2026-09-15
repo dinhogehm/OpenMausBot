@@ -20,8 +20,10 @@ import {
   X,
 } from "lucide-react";
 import { WorkingDots } from "@/components/WorkingIndicator";
+import { MessageActions, messageActionClass } from "@/components/MessageActions";
+import { useSpeech } from "@/lib/tts/useSpeech";
 import { useCaptionChrome } from "@/components/DesktopCapabilities";
-import { cachedInput, costCaption, formatTokens, formatUsd, hasFiniteCost, usageChip, usageDetail } from "@/lib/usage";
+import { cachedInput, cachedKnown, contextChip, contextDetail, contextShare, costCaption, formatTokens, formatUsd, freshTokens, hasFiniteCost, lastTurnDetail, usageChip, usageDetail } from "@/lib/usage";
 import {
   api,
   currentTaskBot,
@@ -61,6 +63,7 @@ import { ConnectorCard } from "./ConnectorCard";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { hasRoutineExecutionTask, RoutineRunCard } from "./RoutineRunCard";
 import { AttachmentGallery, collectMessageFiles } from "./AttachmentGallery";
+import { ScreenFrame } from "./ScreenFrame";
 import { RenameTitle } from "./RenameTitle";
 import { BotActivityPicker, TaskPicker } from "./TaskPicker";
 import { ModelPicker } from "./ModelPicker";
@@ -296,6 +299,8 @@ function Bubble({
   const mentionPeers = useMemo(() => state.bots.filter((peer) => peer.id !== bot.id), [state.bots, bot.id]);
   const [expanded, setExpanded] = useState(false);
   const [viewRaw, setViewRaw] = useState(false);
+  const speech = useSpeech();
+  const speaking = speech.messageId === message.id && speech.status !== "idle";
   const text = peer ? peer.body : (message.text ?? "");
   const generatedPaths = useMemo(() => message.attachments?.map((attachment) => attachment.path) ?? [], [message.attachments]);
   const linkedFiles = useMemo(() => user ? [] : collectMessageFiles(text, generatedPaths), [user, text, generatedPaths]);
@@ -325,27 +330,27 @@ function Bubble({
     <div className={cn("group flex w-full flex-col", user ? "animate-msg-in items-end" : "items-start")}>
       {peer && <PeerLabel peer={peer} />}
       <div className={cn("flex w-full items-center gap-1.5", user ? "justify-end" : "justify-start")}>
-        {/* editing rewinds the thread, so it waits for the turn to end —
-            same rule as the version switcher below */}
-        {user && message.kind === "text" && !webhookView && !hasAttachments && !bot.busy && (
-          <button
-            onClick={onStartEdit}
-            aria-label={t("chat.editMessage")}
-            className="rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
-            title={t("chat.editMessage")}
-          >
-            <Pencil size={14} />
-          </button>
-        )}
-        {user && Boolean(visibleText.trim()) && <CopyButton text={visibleText} />}
         {user && (
-          <>
+          <MessageActions side="user">
+            {/* editing rewinds the thread, so it waits for the turn to end —
+                same rule as the version switcher below */}
+            {message.kind === "text" && !webhookView && !hasAttachments && !bot.busy && (
+              <button
+                onClick={onStartEdit}
+                aria-label={t("chat.editMessage")}
+                title={t("chat.editMessage")}
+                className={messageActionClass}
+              >
+                <Pencil size={14} />
+              </button>
+            )}
+            {Boolean(visibleText.trim()) && <CopyButton text={visibleText} className="opacity-100" />}
             <button
               type="button"
               onClick={onReply}
               aria-label={t("chat.replyToMessage")}
-              className="rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
               title={t("chat.reply")}
+              className={messageActionClass}
             >
               <MessageSquareReply size={14} />
             </button>
@@ -359,15 +364,12 @@ function Bubble({
                 })
               }
               aria-label={bot.pinnedMessageId === message.id ? t("chat.unpinMessage") : t("chat.pinMessage")}
-              className={cn(
-                "rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100",
-                remoteClient && "hidden",
-              )}
               title={bot.pinnedMessageId === message.id ? t("chat.unpinHint") : t("chat.pinHint")}
+              className={cn(messageActionClass, remoteClient && "hidden")}
             >
               {bot.pinnedMessageId === message.id ? <PinOff size={14} /> : <Pin size={14} />}
             </button>
-          </>
+          </MessageActions>
         )}
         <div
           className={cn(
@@ -445,30 +447,28 @@ function Bubble({
           )}
         </div>
         {!user && (
-          <>
-            <div className="flex flex-col gap-0.5 self-end pb-0.5">
-              {text && <CopyButton text={text} />}
-              {text && <RawToggleAction active={viewRaw} onToggle={() => setViewRaw((r) => !r)} />}
-              {message.kind === "text" && text && !peer && (
-                <SpeakButton text={text} botId={bot.id} messageId={message.id} voiceId={bot.voice} />
-              )}
-              {isLastBotText && !bot.busy && onRegenerate && (
-                <button
-                  onClick={onRegenerate}
-                  aria-label={t("chat.regenerate")}
-                  title={t("chat.regenerate")}
-                  className="rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
-                >
-                  <RefreshCw size={14} />
-                </button>
-              )}
-            </div>
+          <MessageActions side="bot" forceOpen={viewRaw || speaking}>
+            {text && <CopyButton text={text} className="opacity-100" />}
+            {text && <RawToggleAction active={viewRaw} onToggle={() => setViewRaw((r) => !r)} className="opacity-100" />}
+            {message.kind === "text" && text && !peer && (
+              <SpeakButton text={text} botId={bot.id} messageId={message.id} voiceId={bot.voice} className="opacity-100" />
+            )}
+            {isLastBotText && !bot.busy && onRegenerate && (
+              <button
+                onClick={onRegenerate}
+                aria-label={t("chat.regenerate")}
+                title={t("chat.regenerate")}
+                className={messageActionClass}
+              >
+                <RefreshCw size={14} />
+              </button>
+            )}
             <button
               type="button"
               onClick={onReply}
               aria-label={t("chat.replyToMessage")}
-              className="rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
               title={t("chat.reply")}
+              className={messageActionClass}
             >
               <MessageSquareReply size={14} />
             </button>
@@ -482,15 +482,12 @@ function Bubble({
                 })
               }
               aria-label={bot.pinnedMessageId === message.id ? t("chat.unpinMessage") : t("chat.pinMessage")}
-              className={cn(
-                "rounded-md p-1.5 text-ink-secondary opacity-0 transition-opacity hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100",
-                remoteClient && "hidden",
-              )}
               title={bot.pinnedMessageId === message.id ? t("chat.unpinHint") : t("chat.pinHint")}
+              className={cn(messageActionClass, remoteClient && "hidden")}
             >
               {bot.pinnedMessageId === message.id ? <PinOff size={14} /> : <Pin size={14} />}
             </button>
-          </>
+          </MessageActions>
         )}
         <span
           className={cn(
@@ -583,18 +580,6 @@ function ActivityChip({ message }: { message: Message }) {
     );
   }
   return <ToolActivity tool={tool} />;
-}
-
-function ScreenFrame({ png, mime }: { png: string; mime?: string }) {
-  return (
-    <div className="flex justify-start">
-      <img
-        src={`data:${mime ?? "image/png"};base64,${png}`}
-        alt={t("chat.botScreen")}
-        className="w-fit max-w-[min(42rem,78%)] rounded-2xl border border-hairline/40"
-      />
-    </div>
-  );
 }
 
 /** The settled transcript, memoized as one unit: during streaming every
@@ -729,31 +714,38 @@ const MessagesList = memo(function MessagesList({
               return m.secret ? <SecretRequestCard botId={bot.id} threadId={bot.threadId} message={m} /> : null;
             case "connector":
               return m.connector ? <ConnectorCard botId={bot.id} threadId={bot.threadId} message={m} /> : null;
-            case "options":
+            case "options": {
               // a live permission ask gets the approval box; a structured
               // ask gets the question box; anything else keeps the list
               // card. The first-run quiz drops out once they talk.
-              if (m.card?.requestId && m.card.questionRequest) {
-                return <QuestionCard threadId={bot.threadId} bot={bot} message={m} />;
-              }
-              if (m.card?.requestId && m.card.tool) {
-                return (
-                  <ApprovalCard
-                    bot={bot}
-                    message={m}
-                    onDecide={(behavior) =>
-                      dispatch({
-                        type: "decideRequest",
-                        threadId: bot.threadId,
-                        requestId: m.card!.requestId!,
-                        behavior,
-                        message: behavior === "deny" ? "Rejected by the user." : undefined,
-                      })}
-                  />
-                );
-              }
-              if (shouldHideOnboardingCard(m, transcript)) return null;
-              return <OptionCard botId={bot.id} threadId={bot.threadId} message={m} />;
+              // Cards are bot-authored and persisted, so one that will not
+              // draw must fall back to its text on every open, not take the
+              // whole page down every time this chat is selected.
+              const card = m.card?.requestId && m.card.questionRequest ? (
+                <QuestionCard threadId={bot.threadId} bot={bot} message={m} />
+              ) : m.card?.requestId && m.card.tool ? (
+                <ApprovalCard
+                  bot={bot}
+                  message={m}
+                  onDecide={(behavior) =>
+                    dispatch({
+                      type: "decideRequest",
+                      threadId: bot.threadId,
+                      requestId: m.card!.requestId!,
+                      behavior,
+                      message: behavior === "deny" ? "Rejected by the user." : undefined,
+                    })}
+                />
+              ) : shouldHideOnboardingCard(m, transcript) ? null : (
+                <OptionCard botId={bot.id} threadId={bot.threadId} message={m} />
+              );
+              if (!card) return null;
+              return (
+                <MessageBoundary fallbackText={m.card?.subtitle || m.card?.title || ""}>
+                  {card}
+                </MessageBoundary>
+              );
+            }
             case "routine.run": {
               const executionThreadId = m.routineRun?.executionThreadId;
               const canOpen = executionThreadId && state.bots.some((candidate) =>
@@ -1470,27 +1462,34 @@ function UsageChip({ bot }: { bot: Bot }) {
   const text = usage ? usageChip(usage) : "";
   if (!usage || !text) return null;
   const billing = state.instances.find((i) => i.instanceId === bot.modelSelection.instanceId)?.snapshot.billing;
+  const share = contextShare(usage);
   const detail = [
     usage.turns === 1 ? t("chat.usage.turnsOne") : t("chat.usage.turnsMany", { count: usage.turns }),
     usageDetail(usage),
+    lastTurnDetail(usage),
+    contextDetail(usage),
     // the whole thread rides along on every turn, so most of "in" is the
     // model re-reading what it already saw — say so, or the figure reads as
-    // a bug (issue #527)
-    cachedInput(usage) > 0 ? t("chat.usage.cachedNote") : null,
+    // a bug (issue #527); past 80% of the window the fix is a new thread
+    share?.tone === "danger" ? t("chat.usage.contextNudge") : null,
+    cachedInput(usage) > 0 ? (cachedKnown(usage) ? t("chat.usage.newNote") : t("chat.usage.cachedNote")) : null,
     hasFiniteCost(usage.costUsd) ? `${formatUsd(usage.costUsd)} ${costCaption(billing)}` : null,
   ]
     .filter(Boolean)
     .join("\n");
-  // folded: one figure — cost when the engine reports one, else tokens
-  const short = usage.costUsd !== null ? formatUsd(usage.costUsd) : formatTokens(usage.input + usage.output);
+  // folded: one figure — cost when the engine reports one, else new tokens
+  const short = hasFiniteCost(usage.costUsd) ? formatUsd(usage.costUsd) : formatTokens(cachedKnown(usage) ? freshTokens(usage) : usage.input + usage.output);
+  const ctx = contextChip(usage);
   return (
     <button
       onClick={() => dispatch({ type: "toggleSettings", open: true, section: "usage" })}
       className="whitespace-nowrap rounded-full border border-hairline/40 bg-raised/60 px-2.5 py-1 text-[12px] tabular-nums text-ink-secondary hover:bg-raised hover:text-ink @max-4xl/chathead:px-2"
       title={detail}
+      data-testid="usage-chip"
     >
       <span className="@max-4xl/chathead:hidden">{text}</span>
       <span className="hidden @max-4xl/chathead:inline">{short}</span>
+      {ctx && <span className={cn("ml-1.5 @max-4xl/chathead:hidden", share?.tone === "danger" ? "text-danger" : share?.tone === "warning" ? "text-warning" : "")} data-testid="usage-context">{ctx}</span>}
     </button>
   );
 }

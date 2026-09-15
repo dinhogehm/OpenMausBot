@@ -709,6 +709,17 @@ public struct InstanceList: Codable, Sendable {
 public enum VoiceProvider: Hashable, Sendable {
     case elevenlabs
     case system
+    case chatterbox
+
+    /// The exact string the config write carries. The server matches
+    /// spellings, not meanings, so neither does this.
+    public var wireValue: String {
+        switch self {
+        case .elevenlabs: "elevenlabs"
+        case .system: "system"
+        case .chatterbox: "chatterbox"
+        }
+    }
 }
 
 public struct ConfigFlag: Codable, Hashable, Sendable {
@@ -720,6 +731,11 @@ public struct ConfigFlag: Codable, Hashable, Sendable {
     /// it through `ConfigStatus.voiceProvider`, which applies the server's own
     /// fallback; nothing should compare this string directly.
     public var provider: String?
+    /// Chatterbox's credential is an address, not a key. `describeVoice`
+    /// sends it and the model id empty under every other engine — and an
+    /// older computer omits them — so both read as "not set".
+    public var baseUrl: String?
+    public var model: String?
 }
 
 public struct Profile: Codable, Hashable, Sendable {
@@ -756,14 +772,18 @@ public struct ConfigStatus: Codable, Sendable {
         return isTTSConfigured && (hasAgentVoice || hasWorkspaceDefaultVoice)
     }
 
-    /// `voiceProvider(cfg)` in `server/tts/index.ts`: only the exact string
-    /// `"system"` selects the built-in engine. A missing field — a computer
-    /// older than the choice — and an engine this build has never heard of
-    /// both fall back to ElevenLabs, which is the server's own rule and what
-    /// keeps an unrecognised engine from being explained to the user with
-    /// copy written for a different one.
+    /// `voiceProvider(cfg)` in `server/tts/index.ts`: only the exact
+    /// strings `"system"` and `"chatterbox"` select those engines. A missing
+    /// field — a computer older than the choice — and an engine this build
+    /// has never heard of both fall back to ElevenLabs, which is the
+    /// server's own rule and what keeps an unrecognised engine from being
+    /// explained to the user with copy written for a different one.
     public var voiceProvider: VoiceProvider {
-        tts?.provider == "system" ? .system : .elevenlabs
+        switch tts?.provider {
+        case "system": .system
+        case "chatterbox": .chatterbox
+        default: .elevenlabs
+        }
     }
 }
 
