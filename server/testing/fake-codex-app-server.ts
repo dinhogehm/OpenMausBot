@@ -42,6 +42,8 @@
 // Keep this file dependency-free — it runs as a bare `node` subprocess.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
+import { writeFileAtomic } from "../atomic.ts";
+
 const mode = process.env.FAKE_CODEX_MODE ?? "happy";
 
 // stdout and stderr are separate pipes: the writer cannot order them for
@@ -107,9 +109,13 @@ const threadReply = (response: unknown) => {
   process.stdout.write(`${JSON.stringify(response)}\n${JSON.stringify(restored)}\n`);
 };
 
+// Every call rewrites the whole dump, and it is large (it carries the entire
+// environment). A test reading it on a slow disk could catch the truncated
+// middle of that rewrite — Windows CI failed "Unexpected end of JSON input"
+// exactly there. Write it whole or not at all.
 const dump = () => {
   if (process.env.FAKE_CODEX_DUMP) {
-    writeFileSync(
+    writeFileAtomic(
       process.env.FAKE_CODEX_DUMP,
       JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), env: process.env, calls, decision }, null, 2),
     );

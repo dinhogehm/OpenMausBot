@@ -1474,9 +1474,11 @@ describe("CodexDriver turns (fake app-server)", () => {
     // the drained queue runs as its own turn: fresh child, still no mid-turn kill
     await instance.adapter.sendTurn({ threadId: "t-codex-queue-nokill", text: "queued words" });
     await recorder.until((e) => e.type === "turn.started");
-    // the fresh app-server writes its dump pid only once it serves a message
-    await expect.poll(() => JSON.parse(readFileSync(dump, "utf8")).pid, { timeout: 5_000 }).not.toBe(turnPid);
-    const drainPid = JSON.parse(readFileSync(dump, "utf8")).pid;
+    // the fresh app-server writes its dump pid only once it serves a message.
+    // Take the pid from inside the wait: a second, un-polled read here raced
+    // the fake's next rewrite of the dump and blew up on Windows.
+    let drainPid = turnPid;
+    await expect.poll(() => (drainPid = JSON.parse(readFileSync(dump, "utf8")).pid), { timeout: 5_000 }).not.toBe(turnPid);
     expect(killed(drainPid)).toBe(false);
     expect(processIsAlive(drainPid)).toBe(true);
     expect(recorder.events.some((e) => e.type === "runtime.error")).toBe(false);

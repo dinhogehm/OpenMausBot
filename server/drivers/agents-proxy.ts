@@ -405,10 +405,10 @@ const TOOLS = [
   },
   {
     name: "coordinate_bots",
-    description: "Ask existing OpenMausBot teammates for advice or assign concrete work. From normal chat every assignment you send a teammate continues your one standing conversation with that teammate, so they keep the context of what you asked before; from a room it defaults to this room. Use group_id from list_room_targets for a specific room. Name 1-4 bot_ids: they receive only your brief and use their own model, tools and permissions. Busy bots queue. They can consult their specialists; all results return here and resume you automatically. Include exact file paths, constraints and what must be verified. After sending all assignments, END your turn; do not poll or wait. On return, resolve tradeoffs, verify the requested outcome and request concrete corrections if necessary before giving one final answer. Do not send acknowledgements as new work.",
+    description: "Ask existing OpenMausBot teammates for advice or assign concrete work. From normal chat every assignment you send a teammate continues your one standing conversation with that teammate, so they keep the context of what you asked before; from a room it defaults to this room. Use group_id from list_room_targets for a specific room. Give 1-4 bot_ids — teammate ids as list_bots or your roster prints them; a unique teammate name also resolves: they receive only your brief and use their own model, tools and permissions. Busy bots queue. They can consult their specialists; all results return here and resume you automatically. Include exact file paths, constraints and what must be verified. After sending all assignments, END your turn; do not poll or wait. On return, resolve tradeoffs, verify the requested outcome and request concrete corrections if necessary before giving one final answer. Do not send acknowledgements as new work.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       group_id: { type: "string", description: "Optional destination room. Omit for this room, or your standing conversation with each teammate when chatting directly." },
-      bot_ids: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 4, uniqueItems: true },
+      bot_ids: { type: "array", items: { type: "string", description: "A teammate's id exactly as list_bots or your roster prints it ([id: …]). A teammate's unique display name also resolves; a name shared by two reachable teammates is refused." }, minItems: 1, maxItems: 4, uniqueItems: true },
       message: { type: "string", minLength: 1, maxLength: 4000, description: "Self-contained question or task for these teammates. Send separate requests when responsibilities differ." },
       request_key: { type: "string", description: "A short unique assignment key. Reuse for an identical retry." },
       rework: { type: "boolean", description: "True only for concrete additional work from someone who already completed a request." },
@@ -434,7 +434,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        bot_id: { type: "string", description: "The target bot's id (from list_bots)." },
+        bot_id: { type: "string", description: "The target bot's id (from list_bots or your roster); a unique teammate name also resolves." },
         message: { type: "string", description: "What to say / ask the bot." },
       },
       required: ["bot_id", "message"],
@@ -447,7 +447,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        bot_id: { type: "string", description: "The target bot's id (from list_bots)." },
+        bot_id: { type: "string", description: "The target bot's id (from list_bots or your roster); a unique teammate name also resolves." },
         message: { type: "string", description: "What the peer should do / answer." },
         reason: { type: "string", description: "Optional one-line reason for the delegation (shown to the user as a chip)." },
       },
