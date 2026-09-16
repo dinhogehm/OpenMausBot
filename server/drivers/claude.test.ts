@@ -1627,7 +1627,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
       const openedBefore = recorder.events.filter((e) => e.type === "request.opened").length;
       await instance.adapter.interruptTurn(threadId);
       expect(instance.adapter.hasSession(threadId)).toBe(true);
-      await expect(instance.adapter.steer!(threadId, "replacement")).resolves.toBe(false);
+      await expect(instance.adapter.steer!(threadId, "replacement")).resolves.toBe("refused");
       expect(recorder.events).toContainEqual(expect.objectContaining({
         type: "request.resolved", requestId: "before-stop", behavior: "deny", source: "system",
       }));
@@ -1699,7 +1699,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const { turnId } = await instance.adapter.sendTurn({ threadId: "t-steer", text: "first" });
     await recorder.until((e) => e.type === "item.completed" && e.itemType === "tool");
     expect(instance.adapter.capabilities.queueing).toBe(true);
-    await expect(instance.adapter.steer!("t-steer", "and also this")).resolves.toBe(true);
+    await expect(instance.adapter.steer!("t-steer", "and also this")).resolves.toBe("steered");
     // Hold the turn until the child has consumed the steer; an 800ms timer
     // can finish before a loaded CI runner resumes this test's continuation.
     await expect.poll(() => existsSync(received)).toBe(true);
@@ -1711,7 +1711,7 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     ) as { text: string };
     expect(reply.text).toContain("steered: and also this");
     expect(recorder.events.every((e) => e.turnId === turnId)).toBe(true);
-    await expect(instance.adapter.steer!("t-steer", "late")).resolves.toBe(false);
+    await expect(instance.adapter.steer!("t-steer", "late")).resolves.toBe("refused");
   });
 
   it("reuses the live process for the next compatible turn", async () => {

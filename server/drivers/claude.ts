@@ -29,6 +29,7 @@ import type {
   RuntimeEvent,
   RuntimeEventListener,
   SendTurnInput,
+  SteerOutcome,
 } from "../contracts.ts";
 import { gateServer, resultBudget } from "../mcp-gate-config.ts";
 import { newEventId, newId } from "../contracts.ts";
@@ -1880,11 +1881,12 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     };
 
     /** A user message into the running turn: the CLI delivers it before its
-     * next model call. False when nothing is running here to steer. */
-    const steer = async (threadId: string, text: string): Promise<boolean> => {
+     * next model call. "refused" when nothing is running here to steer or
+     * the stdin write provably failed; the caller queues those words. */
+    const steer = async (threadId: string, text: string): Promise<SteerOutcome> => {
       const s = sessions.get(threadId);
-      if (!s || !s.turn || s.turn.settled || s.closing || s.child.exitCode !== null) return false;
-      return writeUser(s, threadId, claudeUserMessage(text, undefined));
+      if (!s || !s.turn || s.turn.settled || s.closing || s.child.exitCode !== null) return "refused";
+      return (await writeUser(s, threadId, claudeUserMessage(text, undefined))) ? "steered" : "refused";
     };
 
     // Sign in from Settings: the unmodified CLI's own login, driven over pipes

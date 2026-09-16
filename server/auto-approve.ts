@@ -11,7 +11,7 @@
 // backstop for the obvious catastrophes. Real containment is the
 // sandbox and the bot's own computer, not a regex.
 
-import { approvalModeFor, type ApprovalMode } from "../shared/approval-mode.ts";
+import { approvalModeFor, supportsApprovalMode, type ApprovalMode } from "../shared/approval-mode.ts";
 import type { ProviderAdapter, RequestOutcome } from "./contracts.ts";
 
 /** A failed delivery is a runtime error, not another permission decision.
@@ -35,13 +35,32 @@ export async function deliverFullAccessApproval(
 }
 
 /** Full access is the person's explicit grant to this receiving bot, including
- * delegated work. It never inherits the sender's mode or elevates another bot.
+ * delegated work. It never inherits the sender's mode or elevates another bot
+ * — with the one exception below (delegationInheritsFullAccess), applied
+ * where a Chief's delegated thread is created rather than here.
  * Custom is a provider-config choice rather than an app Full-access grant, so
  * peer-started Custom turns still use Auto and its unattended downgrade.
  * Provider support and grant confirmation are checked by the caller. */
 export function approvalModeForOrigin(mode: ApprovalMode, origin: { peerInitiated: boolean }): ApprovalMode {
   if (mode === "custom" && origin.peerInitiated) return "auto";
   return mode;
+}
+
+/** Whether work a bot hands to a teammate runs with Full access. Only a Chief
+ * of Staff passes access on, and only the Full access the person gave it for
+ * the conversation it is delegating from: the Chief exists to get the team's
+ * work done without the person answering every card, and a teammate stopping
+ * that work to ask defeats the grant. The recipient's engine has to implement
+ * Full, or the work keeps the recipient's own level. A bot never elevates
+ * itself this way. */
+export function delegationInheritsFullAccess(input: {
+  senderIsChief: boolean;
+  senderHasFullAccess: boolean;
+  sameBot: boolean;
+  recipientDriverKind: string | undefined;
+}): boolean {
+  return input.senderIsChief && input.senderHasFullAccess && !input.sameBot
+    && supportsApprovalMode(input.recipientDriverKind, "full");
 }
 
 // Tools that ask a PERSON something. A question exists so that a human

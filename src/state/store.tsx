@@ -13,7 +13,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { CloudBackend, EffortLevel, ModelVariantOption, RuntimeEvent } from "../../server/contracts.ts";
+import type { CloudBackend, EffortLevel, ServerFrame } from "../../shared/wire";
+import type { ModelVariantOption, RuntimeEvent } from "../../shared/runtime-events";
 import type { MausColor, MausMotion } from "@/lib/mascot";
 import type { BotAvatarCrop } from "../../shared/bot-avatar";
 import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode";
@@ -948,7 +949,9 @@ export type Action =
   | { type: "pendingQueued"; threadId: string; queueId: string; text: string; reason?: "capacity" }
   | { type: "consumePendingQueued"; threadId: string; queueId: string }
   | { type: "cancelQueued"; botId: string; queueId: string; threadId?: string }
+  | { type: "steerQueued"; botId: string; queueId: string; threadId?: string; onError?: () => void; onSettled?: () => void }
   | { type: "cancelGroupQueued"; groupId: string; threadId: string; queueId: string }
+  | { type: "steerGroupQueued"; groupId: string; queueId: string; threadId?: string; onError?: () => void; onSettled?: () => void }
   | { type: "editMessage"; botId: string; messageId: string; text: string; threadId?: string }
   | { type: "switchBranch"; botId: string; messageId: string; threadId?: string }
   | { type: "threadActive"; threadId: string; activeLeafId: string }
@@ -1036,7 +1039,7 @@ function reconcileModelVariantSessions(state: AppState): AppState {
 
 export function pinBotThreadAction(action: Action, bots: Bot[]): Action {
   if (!("botId" in action) || ("threadId" in action && action.threadId) ||
-      !["send", "interrupt", "editMessage", "switchBranch", "answerCard", "dismissCard", "cancelQueued"].includes(action.type)) return action;
+      !["send", "interrupt", "editMessage", "switchBranch", "answerCard", "dismissCard", "cancelQueued", "steerQueued"].includes(action.type)) return action;
   const botId = action.botId;
   const threadId = bots.find((bot) => bot.id === botId)?.threadId;
   return { ...action, threadId } as Action;
@@ -1929,6 +1932,10 @@ export function reducer(state: AppState, action: Action): AppState {
       else delete pendingQueued[threadId];
       return { ...state, pendingQueued, consumedQueueIds: rememberConsumedQueueId(state.consumedQueueIds, action.queueId) };
     }
+    case "steerQueued":
+      // API-only: the effect folds in messageAdded/consumePendingQueued on
+      // success, so the chips clear exactly when the words truly landed.
+      return state;
     case "cancelGroupQueued": {
       const prev = state.pendingQueued[action.threadId] ?? [];
       const rest = prev.filter((entry) => entry.queueId !== action.queueId);
@@ -2020,6 +2027,7 @@ export function reducer(state: AppState, action: Action): AppState {
     case "createGroup":
     case "deleteGroup":
     case "interruptGroup":
+    case "steerGroupQueued":
     case "createRoutine":
     case "updateRoutine":
     case "deleteRoutine":
@@ -2129,7 +2137,7 @@ export async function createBotWithRole(role?: BotRole, request: typeof api = ap
   }
 }
 
-export async function api(path: string, init?: RequestInit): Promise<any> {
+export async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { "content-type": "application/json" },
     ...init,
@@ -2684,10 +2692,49 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             .then(() => rawDispatch(action))
             .catch(showError);
           break;
+        case "steerQueued":
+          void api(`/api/bots/${action.botId}/queue/${action.queueId}/steer`, { method: "POST", body: JSON.stringify({ threadId: action.threadId }) })
+            .then((body) => {
+              if (body?.steered === true && Array.isArray(body.messages) && typeof body.threadId === "string") {
+                for (const message of body.messages) {
+                  rawDispatch({ type: "messageAdded", threadId: body.threadId, message });
+                }
+                for (const queueId of body.queueIds ?? []) {
+                  rawDispatch({ type: "consumePendingQueued", threadId: body.threadId, queueId });
+                }
+              }
+              action.onSettled?.();
+            })
+            .catch((error) => {
+              showError(error);
+              action.onError?.();
+            });
+          break;
         case "cancelGroupQueued":
           void api(`/api/groups/${action.groupId}/queue/${action.queueId}`, { method: "DELETE" })
             .then(() => rawDispatch(action))
             .catch(showError);
+          break;
+        case "steerGroupQueued":
+          void api(`/api/groups/${action.groupId}/queue/${action.queueId}/steer`, {
+            method: "POST",
+            body: JSON.stringify({ threadId: action.threadId }),
+          })
+            .then((body) => {
+              if (body?.steered === true && Array.isArray(body.messages) && typeof body.threadId === "string") {
+                for (const message of body.messages) {
+                  rawDispatch({ type: "messageAdded", threadId: body.threadId, message });
+                }
+                for (const queueId of body.queueIds ?? []) {
+                  rawDispatch({ type: "consumePendingQueued", threadId: body.threadId, queueId });
+                }
+              }
+              action.onSettled?.();
+            })
+            .catch((error) => {
+              showError(error);
+              action.onError?.();
+            });
           break;
         case "send": {
           // persist through the existing card route so an older server that
@@ -3058,8 +3105,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const ready = action.type === "newTask"
             ? botPatchQueue.flush(action.botId)
             : Promise.resolve();
-          void ready.then(() => api(action.type === "newTask" ? `/api/bots/${action.botId}/tasks` : `/api/bots/${action.botId}/tasks/${action.threadId}`, { method: "POST", body: JSON.stringify(action.type === "newTask" ? { projectId: action.projectId } : {}) }))
-            .then((r: any) => {
+          void ready.then(() => api<{ bot: Bot }>(action.type === "newTask" ? `/api/bots/${action.botId}/tasks` : `/api/bots/${action.botId}/tasks/${action.threadId}`, { method: "POST", body: JSON.stringify(action.type === "newTask" ? { projectId: action.projectId } : {}) }))
+            .then((r) => {
               if (!r?.bot || navigation.get(action.botId) !== revision) return;
               dispatch({ type: "taskSwitched", bot: r.bot });
             })
@@ -3073,20 +3120,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }).catch(showError);
           break;
         case "deleteTask":
-          api(`/api/bots/${action.botId}/tasks/${action.threadId}`, { method: "DELETE" })
-            .then((r: any) => r?.bot && dispatch({ type: "botPatched", bot: r.bot }))
+          api<{ bot?: BotAnnouncement }>(`/api/bots/${action.botId}/tasks/${action.threadId}`, { method: "DELETE" })
+            .then((r) => r?.bot && dispatch({ type: "botPatched", bot: r.bot }))
             .catch(showError);
           break;
         // Channel tasks mirror bot tasks, but hydrate the whole channel so
         // switching atomically replaces its transcript, folder and pin.
         case "newGroupTask":
-          api(`/api/groups/${action.groupId}/tasks`, { method: "POST", body: "{}" })
-            .then((r: any) => r?.group && dispatch({ type: "groupPatched", group: r.group }))
+          api<{ group?: Partial<Group> & { id: string } }>(`/api/groups/${action.groupId}/tasks`, { method: "POST", body: "{}" })
+            .then((r) => r?.group && dispatch({ type: "groupPatched", group: r.group }))
             .catch(showError);
           break;
         case "switchGroupTask":
-          api(`/api/groups/${action.groupId}/tasks/${action.threadId}`, { method: "POST" })
-            .then((r: any) => r?.group && dispatch({ type: "groupPatched", group: r.group }))
+          api<{ group?: Partial<Group> & { id: string } }>(`/api/groups/${action.groupId}/tasks/${action.threadId}`, { method: "POST" })
+            .then((r) => r?.group && dispatch({ type: "groupPatched", group: r.group }))
             .catch(showError);
           break;
         case "renameGroupTask":
@@ -3096,8 +3143,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }).catch(showError);
           break;
         case "deleteGroupTask":
-          api(`/api/groups/${action.groupId}/tasks/${action.threadId}`, { method: "DELETE" })
-            .then((r: any) => r?.group && dispatch({ type: "groupPatched", group: r.group }))
+          api<{ group?: Partial<Group> & { id: string } }>(`/api/groups/${action.groupId}/tasks/${action.threadId}`, { method: "DELETE" })
+            .then((r) => r?.group && dispatch({ type: "groupPatched", group: r.group }))
             .catch(showError);
           break;
         case "interruptGroup":
@@ -3266,8 +3313,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     let hydrated = false;
     let hydrationPromise: Promise<boolean> | null = null;
     let rehydrateRequested = false;
-    const pendingFrames: any[] = [];
-    let handleFrame: (frame: any) => void;
+    const pendingFrames: ServerFrame[] = [];
+    let handleFrame: (frame: ServerFrame) => void;
     const hydrate = (): Promise<boolean> => {
       if (hydrationPromise) {
         // A second non-resumable hello means this snapshot may have started
@@ -3320,7 +3367,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           rawDispatch({ type: "botQueues", queues: frame.queues });
           break;
         case "message": {
-          rawDispatch({ type: "messageAdded", threadId: frame.threadId, message: frame.message });
+          rawDispatch({ type: "messageAdded", threadId: frame.threadId, message: frame.message as Message });
           if (frame.message?.role === "user" && typeof frame.message.queueId === "string") {
             rawDispatch({
               type: "consumePendingQueued",
@@ -3348,7 +3395,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         }
         case "message.patch":
-          rawDispatch({ type: "messagePatched", threadId: frame.threadId, message: frame.message });
+          rawDispatch({ type: "messagePatched", threadId: frame.threadId, message: frame.message as Message });
           break;
         case "thread":
           rawDispatch({ type: "threadActive", threadId: frame.threadId, activeLeafId: frame.activeLeafId });
@@ -3464,7 +3511,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         case "config":
           rawDispatch({
             type: "configStatus",
-            config: configStatusFromFrame(frame),
+            config: configStatusFromFrame(frame as unknown as ConfigStatusFrame),
           });
           {
             const instances = partByKey.get("instances");
@@ -3488,8 +3535,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return hydrate();
       },
       onFrame: (frame) => {
-        if (hydrated) handleFrame(frame);
-        else pendingFrames.push(frame);
+        if (hydrated) handleFrame(frame as ServerFrame);
+        else pendingFrames.push(frame as ServerFrame);
       },
     });
     return () => {

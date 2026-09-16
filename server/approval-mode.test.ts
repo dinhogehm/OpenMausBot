@@ -25,12 +25,13 @@ describe("approval modes", () => {
     expect(modelSwitchNeedsAsk("full", "codex", undefined)).toBe(true);
   });
   it("only exposes implemented provider capabilities", () => {
-    for (const driver of ["codex", "claudeAgent", "antigravityAgent", "cursorAgent", "grokAgent", "opencodeGo"]) {
+    for (const driver of ["codex", "claudeAgent", "antigravityAgent", "cursorAgent", "grokAgent", "opencodeGo", "qwenAgent", "geminiAgent"]) {
       expect(supportsApprovalMode(driver, "full")).toBe(true);
       expect(supportsApprovalMode(driver, "custom")).toBe(driver === "codex");
-      expect(hasNativeAutoReview(driver)).toBe(["codex", "claudeAgent", "cursorAgent", "grokAgent"].includes(driver));
+      // Qwen's `--approval-mode auto` is an LLM classifier; Gemini has no reviewer
+      expect(hasNativeAutoReview(driver)).toBe(["codex", "claudeAgent", "cursorAgent", "grokAgent", "qwenAgent"].includes(driver));
       // auto-accept edits exists only where the engine has such a mode
-      expect(supportsApprovalMode(driver, "edits")).toBe(["claudeAgent", "grokAgent", "antigravityAgent"].includes(driver));
+      expect(supportsApprovalMode(driver, "edits")).toBe(["claudeAgent", "grokAgent", "antigravityAgent", "qwenAgent", "geminiAgent"].includes(driver));
       expect(requiresNativeApproval(driver, "auto")).toBe(true);
     }
     expect(supportsApprovalMode(undefined, "full")).toBe(false);
@@ -45,7 +46,7 @@ describe("approval modes", () => {
   });
 
   it.each([
-    "geminiAgent", "kimiAgent", "droidAgent", "qwenAgent", "hermesAgent", "customAcp",
+    "kimiAgent", "droidAgent", "hermesAgent", "customAcp",
     "piAgent", "grok", "openai-compat", "boxAgent", "minimax", "unknown",
   ])("keeps %s on supported approval levels without claiming native Auto", (driver) => {
     expect(supportsApprovalMode(driver, "ask")).toBe(true);
