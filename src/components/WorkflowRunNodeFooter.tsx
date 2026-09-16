@@ -11,6 +11,7 @@
 import { Check, ExternalLink, Loader2, RotateCcw, X } from "lucide-react";
 
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
 import { formatRunDuration, latestNodeResult, stepDurationMs } from "@/lib/workflow-observation";
 import type { WorkflowRun } from "../../shared/workflow";
 import { excerpt } from "./WorkflowNodeCard";
@@ -75,7 +76,7 @@ export function WorkflowRunNodeFooter({
                 last.result.outcome === "failed" ? "bg-danger/15 text-danger" : "bg-success/15 text-success",
               )}
             >
-              <span className="sr-only">Outcome: </span>
+              <span className="sr-only">{t("workflow.runFooter.srOutcome")} </span>
               {last.result.outcome}
             </span>
             <span className="shrink-0 tabular-nums text-ink-secondary">
@@ -83,7 +84,7 @@ export function WorkflowRunNodeFooter({
             </span>
             {last.passes > 1 && (
               <span className="shrink-0 tabular-nums text-ink-secondary">
-                <span className="sr-only">ran </span>×{last.passes}
+                <span className="sr-only">{t("workflow.runFooter.srRan")} </span>×{last.passes}
               </span>
             )}
           </div>
@@ -100,7 +101,7 @@ export function WorkflowRunNodeFooter({
           className="inline-flex items-center gap-1 rounded-lg border border-hairline/60 px-2 py-1 text-[10.5px] font-medium text-ink-secondary hover:bg-raised hover:text-ink"
         >
           <ExternalLink size={10} aria-hidden />
-          Open transcript
+          {t("workflow.runFooter.openTranscript")}
         </button>
       )}
 
@@ -118,7 +119,7 @@ export function WorkflowRunNodeFooter({
                 className={control("accent")}
               >
                 {busy ? <Loader2 size={10} className="animate-spin" aria-hidden /> : <Check size={10} aria-hidden />}
-                Approve
+                {t("workflow.runFooter.approve")}
               </button>
               <button
                 type="button"
@@ -128,7 +129,7 @@ export function WorkflowRunNodeFooter({
                 className={control("danger")}
               >
                 <X size={10} aria-hidden />
-                Reject
+                {t("workflow.runFooter.reject")}
               </button>
             </>
           )}
@@ -141,7 +142,7 @@ export function WorkflowRunNodeFooter({
               className={control("plain")}
             >
               {busy ? <Loader2 size={10} className="animate-spin" aria-hidden /> : <RotateCcw size={10} aria-hidden />}
-              Resume here
+              {t("workflow.runFooter.resumeHere")}
             </button>
           )}
         </div>
@@ -149,7 +150,7 @@ export function WorkflowRunNodeFooter({
 
       {busy && (
         <p id={busyId} className="text-[10px] text-ink-secondary">
-          Working — waiting for the engine to answer
+          {t("workflow.runFooter.working")}
         </p>
       )}
 

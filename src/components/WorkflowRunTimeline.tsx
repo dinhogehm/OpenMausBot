@@ -4,10 +4,12 @@
 // the `workflow-run` SSE frame keeps live — so there is no second copy of
 // run state anywhere, and a frame repaints it for free. No xyflow here
 // either: the whole panel is static markup a test can render.
-import { useEffect, useRef } from "react";
+import { Fragment, useEffect, useRef, type ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, ExternalLink, Hourglass, Loader2, XCircle } from "lucide-react";
 
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import {
   formatRunDuration,
   isActiveWorkflowRun,
@@ -34,10 +36,24 @@ const STATUS_TONE: Record<WorkflowRunStatus, string> = {
   cancelled: "bg-control text-ink-secondary",
 };
 
-const TRIGGER_LABEL = { manual: "Manual", schedule: "Schedule", webhook: "Webhook" } as const;
+const TRIGGER_LABEL: Record<NonNullable<WorkflowRun["trigger"]>, LocaleKey> = {
+  manual: "workflow.timeline.triggerManual",
+  schedule: "workflow.timeline.triggerSchedule",
+  webhook: "workflow.timeline.triggerWebhook",
+};
 
 function triggerLabel(run: WorkflowRun): string {
-  return run.trigger ? TRIGGER_LABEL[run.trigger] : "Manual";
+  return t(run.trigger ? TRIGGER_LABEL[run.trigger] : "workflow.timeline.triggerManual");
+}
+
+/** A catalog sentence with markup inside it: `{name}` placeholders that t()
+ * left verbatim are swapped for the nodes given, so a translation can move
+ * the styled part without the markup being split across keys. */
+function withNodes(template: string, nodes: Record<string, ReactNode>): ReactNode[] {
+  return template.split(/(\{\w+\})/).map((part, index) => {
+    const name = /^\{(\w+)\}$/.exec(part)?.[1];
+    return name !== undefined && name in nodes ? <Fragment key={index}>{nodes[name]}</Fragment> : part;
+  });
 }
 
 function formatWhen(at: number): string {
@@ -58,10 +74,19 @@ export function approvalNoticesLine(notices: readonly WorkflowApprovalNotice[]):
   const renotified = notices.filter((notice) => notice.kind === "renotify");
   const parts: string[] = [];
   if (reminders.length > 0) {
-    parts.push(reminders.length === 1 ? `reminder sent at ${formatWhen(reminders[0]!.at)}` : `${reminders.length} reminders sent`);
+    parts.push(
+      reminders.length === 1
+        ? t("workflow.timeline.reminderSentAt", { when: formatWhen(reminders[0]!.at) })
+        : t("workflow.timeline.remindersSentMany", { count: reminders.length }),
+    );
   }
   if (renotified.length > 0) {
-    parts.push(`re-notified ${renotified.length}× (${renotified.map((notice) => formatWhen(notice.at)).join(", ")})`);
+    parts.push(
+      t("workflow.timeline.renotifiedTimes", {
+        count: renotified.length,
+        times: renotified.map((notice) => formatWhen(notice.at)).join(", "),
+      }),
+    );
   }
   return parts.join(" · ");
 }
@@ -111,10 +136,9 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
   if (runs.length === 0) {
     return (
       <div className="space-y-2">
-        <h2 className="text-[13.5px] font-semibold text-ink">No runs yet</h2>
+        <h2 className="text-[13.5px] font-semibold text-ink">{t("workflow.timeline.noRunsTitle")}</h2>
         <p className="text-[12px] leading-relaxed text-ink-secondary">
-          Nothing has run this workflow. Switch back to Edit and press Run, or wait for its schedule or webhook to
-          fire — this panel then follows the run live.
+          {t("workflow.timeline.noRunsBody")}
         </p>
       </div>
     );
@@ -125,7 +149,7 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
       <section className="min-h-0 shrink-0">
         <div className="flex items-center justify-between gap-2">
           <h2 id="wf-run-picker-heading" className="text-[13.5px] font-semibold text-ink">
-            Runs
+            {t("workflow.timeline.runsHeading")}
           </h2>
           {pickedId !== null && (
             <button
@@ -133,7 +157,7 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
               onClick={() => onPick(null)}
               className="rounded-lg border border-hairline/60 px-2 py-0.5 text-[10.5px] font-medium text-ink-secondary hover:bg-raised hover:text-ink"
             >
-              Follow latest
+              {t("workflow.timeline.followLatest")}
             </button>
           )}
         </div>
@@ -195,8 +219,9 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
               ·
             </span>
             <span className="text-[11px] tabular-nums text-ink-secondary">
-              {isActiveWorkflowRun(run) ? "Running for " : ""}
-              {formatRunDuration(runDurationMs(run, now))}
+              {isActiveWorkflowRun(run)
+                ? t("workflow.timeline.runningFor", { duration: formatRunDuration(runDurationMs(run, now)) })
+                : formatRunDuration(runDurationMs(run, now))}
             </span>
           </div>
 
@@ -210,7 +235,13 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
               <AlertTriangle size={11} aria-hidden className="mt-0.5 shrink-0" />
               <span className="min-w-0 break-words">
                 <span className="sr-only">
-                  {isMissedWorkflowRun(run) ? "Missed: " : isEndedNote(run) ? "Ended: " : "Failed: "}
+                  {t(
+                    isMissedWorkflowRun(run)
+                      ? "workflow.timeline.srMissed"
+                      : isEndedNote(run)
+                        ? "workflow.timeline.srEnded"
+                        : "workflow.timeline.srFailed",
+                  )}{" "}
                 </span>
                 {failureText(run)}
               </span>
@@ -225,15 +256,16 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
               <Loader2 size={10} className="animate-spin" aria-hidden />
               {run.nextAttemptAt !== undefined ? (
                 <span className="min-w-0 break-words">
-                  Pre-flight waiting for a busy bot before{" "}
-                  {run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>} — next check{" "}
-                  {formatWhen(run.nextAttemptAt)}
+                  {withNodes(t("workflow.timeline.preflightWaitingBusyBot", { when: formatWhen(run.nextAttemptAt) }), {
+                    node: run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>,
+                  })}
                 </span>
               ) : (
-                <>
-                  Pre-flight checks running before
-                  {run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>}
-                </>
+                <span className="min-w-0 break-words">
+                  {withNodes(t("workflow.timeline.preflightChecksRunning"), {
+                    node: run.currentNodeId && <span className="font-mono">{run.currentNodeId}</span>,
+                  })}
+                </span>
               )}
             </p>
           )}
@@ -241,20 +273,27 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
           {run.preflight && (
             <section className="mt-3 shrink-0">
               <h3 className="text-[11px] font-medium uppercase tracking-wide text-ink-secondary">
-                Pre-flight{" "}
+                {t("workflow.timeline.preflightHeading")}{" "}
                 <span
                   className={cn(
                     "normal-case",
                     run.preflight.ok ? "text-success" : run.preflightStartedAt !== undefined ? "text-warning" : "text-danger",
                   )}
                 >
-                  · {run.preflight.ok ? "passed" : run.preflightStartedAt !== undefined ? "waiting" : "failed"}
+                  ·{" "}
+                  {t(
+                    run.preflight.ok
+                      ? "workflow.timeline.verdictPassed"
+                      : run.preflightStartedAt !== undefined
+                        ? "workflow.timeline.verdictWaiting"
+                        : "workflow.timeline.verdictFailed",
+                  )}
                 </span>
               </h3>
               {/* Each check on its own line, verdict first: the receipt's
                   point is WHICH check refused the run and what it printed,
                   the two things a person needs to fix the environment. */}
-              <ul className="mt-1 space-y-0.5" aria-label="Pre-flight checks">
+              <ul className="mt-1 space-y-0.5" aria-label={t("workflow.timeline.preflightChecksLabel")}>
                 {run.preflight.checks.map((check) => (
                   <li key={check.name} className="flex items-start gap-1.5 text-[10.5px]">
                     {check.ok ? (
@@ -263,7 +302,9 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                       <XCircle size={11} aria-hidden className="mt-0.5 shrink-0 text-danger" />
                     )}
                     <span className="min-w-0 break-words">
-                      <span className="sr-only">{check.ok ? "Passed: " : "Failed: "}</span>
+                      <span className="sr-only">
+                        {t(check.ok ? "workflow.timeline.srPassed" : "workflow.timeline.srFailed")}{" "}
+                      </span>
                       <span className="font-medium text-ink">{check.name}</span>
                       <span className="text-ink-secondary"> · {check.detail}</span>
                       {!check.ok && check.stderr && (
@@ -279,12 +320,12 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             </section>
           )}
 
-          <h3 className="mt-3 shrink-0 text-[11px] font-medium uppercase tracking-wide text-ink-secondary">Steps</h3>
+          <h3 className="mt-3 shrink-0 text-[11px] font-medium uppercase tracking-wide text-ink-secondary">{t("workflow.timeline.stepsHeading")}</h3>
           {run.nodeResults.length === 0 ? (
             <p className="mt-1.5 text-[11.5px] leading-relaxed text-ink-secondary">
               {run.status === "queued"
-                ? "Queued behind another run of this workflow — no node has started yet."
-                : "No node has finished yet."}
+                ? t("workflow.timeline.queuedBehind")
+                : t("workflow.timeline.noNodeFinished")}
             </p>
           ) : (
             <ol className="mt-1.5 min-h-0 flex-1 space-y-1 overflow-y-auto pr-0.5">
@@ -329,8 +370,10 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                       // the step. The provider error is the reason, kept
                       // short — the whole of it is in the run frame.
                       <p className="mt-0.5 break-words text-[10.5px] leading-snug text-warning">
-                        Ran on fallback bot {botName?.(result.fallback.botId) ?? result.fallback.botId} because:{" "}
-                        {excerpt(result.fallback.because, 120)}
+                        {t("workflow.timeline.ranOnFallback", {
+                          bot: botName?.(result.fallback.botId) ?? result.fallback.botId,
+                          reason: excerpt(result.fallback.because, 120),
+                        })}
                       </p>
                     )}
                     {result.notices && result.notices.length > 0 && (
@@ -355,7 +398,7 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
                         {body}
                         <span className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-accent">
                           <ExternalLink size={9} aria-hidden />
-                          Open transcript
+                          {t("workflow.timeline.openTranscript")}
                         </span>
                       </button>
                     ) : (
@@ -378,19 +421,26 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-accent">
               <Hourglass size={10} aria-hidden className="mt-0.5 shrink-0" />
               <span className="min-w-0 break-words">
-                Waiting for a decision since <span className="tabular-nums">{formatWhen(run.approvalRequestedAt)}</span>
+                {withNodes(t("workflow.timeline.waitingDecisionSince"), {
+                  when: <span className="tabular-nums">{formatWhen(run.approvalRequestedAt)}</span>,
+                })}
                 {run.currentNodeId && <span className="font-mono"> · {run.currentNodeId}</span>}
                 {run.approvalRemindedAt !== undefined && (
                   <>
                     {" "}
-                    · reminder sent at <span className="tabular-nums">{formatWhen(run.approvalRemindedAt)}</span>
+                    ·{" "}
+                    {withNodes(t("workflow.timeline.reminderSentAt"), {
+                      when: <span className="tabular-nums">{formatWhen(run.approvalRemindedAt)}</span>,
+                    })}
                   </>
                 )}
                 {(run.approvalRenotified ?? 0) > 0 && run.approvalRenotifiedAt !== undefined && (
                   <>
                     {" "}
-                    · re-notified {run.approvalRenotified}× (last at{" "}
-                    <span className="tabular-nums">{formatWhen(run.approvalRenotifiedAt)}</span>)
+                    ·{" "}
+                    {withNodes(t("workflow.timeline.renotifiedLastAt", { count: run.approvalRenotified ?? 0 }), {
+                      when: <span className="tabular-nums">{formatWhen(run.approvalRenotifiedAt)}</span>,
+                    })}
                   </>
                 )}
               </span>
@@ -400,8 +450,11 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
           {run.status === "running" && run.waitUntil !== undefined && (
             <p className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
               <Hourglass size={10} aria-hidden />
-              {run.waitUntil > now ? "Waiting until " : "Wait ended at "}
-              <span className="tabular-nums">{formatWaitUntil(run.waitUntil, now)}</span>
+              <span>
+                {withNodes(t(run.waitUntil > now ? "workflow.timeline.waitingUntil" : "workflow.timeline.waitEndedAt"), {
+                  time: <span className="tabular-nums">{formatWaitUntil(run.waitUntil, now)}</span>,
+                })}
+              </span>
               {run.currentNodeId && <span className="font-mono">· {run.currentNodeId}</span>}
             </p>
           )}
@@ -417,8 +470,10 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-warning">
               <Loader2 size={10} className="mt-0.5 animate-spin" aria-hidden />
               <span className="min-w-0 break-words">
-                Waiting for fallback bot {botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId} to be free
-                (it is busy) — next try {formatWhen(run.nextAttemptAt)}
+                {t("workflow.timeline.waitingFallbackBusy", {
+                  bot: botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId,
+                  when: formatWhen(run.nextAttemptAt),
+                })}
               </span>
             </p>
           ) : isActiveWorkflowRun(run) && run.outage && run.nextAttemptAt !== undefined ? (
@@ -432,7 +487,12 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
               <span className="min-w-0 break-words">
                 {workflowOutageWaitMessage(run, formatWhen)}
                 {run.outage.fallbackBotId !== undefined && (
-                  <> · fallback bot {botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId} was tried</>
+                  <>
+                    {" "}
+                    {t("workflow.timeline.fallbackTried", {
+                      bot: botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId,
+                    })}
+                  </>
                 )}
               </span>
             </p>
@@ -440,8 +500,10 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             <p role="status" className="mt-2 flex shrink-0 items-start gap-1.5 text-[10.5px] text-warning">
               <Loader2 size={10} className="mt-0.5 animate-spin" aria-hidden />
               <span className="min-w-0 break-words">
-                Running on fallback bot {botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId} because:{" "}
-                {excerpt(run.outage.reason, 120)}
+                {t("workflow.timeline.runningOnFallback", {
+                  bot: botName?.(run.outage.fallbackBotId) ?? run.outage.fallbackBotId,
+                  reason: excerpt(run.outage.reason, 120),
+                })}
               </span>
             </p>
           ) : (
@@ -449,8 +511,10 @@ export function WorkflowRunTimeline({ runs, run, pickedId, now, onPick, onOpenSt
             run.nextAttemptAt !== undefined && (
               <p className="mt-2 flex shrink-0 items-center gap-1.5 text-[10.5px] text-ink-secondary">
                 <Loader2 size={10} className="animate-spin" aria-hidden />
-                Retrying at {formatWhen(run.nextAttemptAt)}
-                {run.attempt > 0 && <span className="tabular-nums">· attempt {run.attempt + 1}</span>}
+                {t("workflow.timeline.retryingAt", { when: formatWhen(run.nextAttemptAt) })}
+                {run.attempt > 0 && (
+                  <span className="tabular-nums">{t("workflow.timeline.attemptNumber", { number: run.attempt + 1 })}</span>
+                )}
               </p>
             )
           )}

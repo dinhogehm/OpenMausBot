@@ -24,6 +24,8 @@ import { nextRename } from "@/lib/rename";
 import { isActiveWorkflowRun } from "@/lib/workflow-observation";
 import type { WorkflowRun, WorkflowRunStatus } from "../../shared/workflow";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 
 /** The editor drags in a graph library; a list nobody has opened a workflow
  * from must not pay for it, and the static component suite must not import
@@ -49,17 +51,17 @@ class CanvasBoundary extends Component<
     return (
       <main className="flex min-w-0 flex-1 flex-col items-center justify-center gap-3 bg-app px-6 text-center">
         <p role="alert" className="max-w-[420px] text-[12.5px] text-danger">
-          The workflow editor could not be loaded: {this.state.failed}
+          {t("workflow.page.editorLoadFailed", { error: this.state.failed })}
         </p>
         <p className="max-w-[420px] text-[12px] text-ink-secondary">
-          Reloading the app usually fixes this. Your workflow is unchanged.
+          {t("workflow.page.editorReloadHint")}
         </p>
         <button
           type="button"
           onClick={this.props.onBack}
           className="rounded-lg border border-hairline/50 px-3 py-1.5 text-[12.5px] font-medium text-ink hover:bg-raised"
         >
-          Back to workflows
+          {t("workflow.page.backToWorkflows")}
         </button>
       </main>
     );
@@ -67,8 +69,9 @@ class CanvasBoundary extends Component<
 }
 
 /** "New workflow" posts an empty canvas. The server saves it as a draft and
- * reports the missing entry node as an issue until the canvas adds one. */
-const EMPTY_DRAFT = { name: "Untitled workflow", entryNodeId: "", nodes: [], edges: [], layout: {} };
+ * reports the missing entry node as an issue until the canvas adds one. The
+ * default name is read at creation, in the language active then. */
+const emptyDraft = () => ({ name: t("workflow.page.untitledWorkflow"), entryNodeId: "", nodes: [], edges: [], layout: {} });
 
 const RUN_TONE: Record<WorkflowRunStatus, string> = {
   queued: "bg-warning/15 text-warning",
@@ -79,13 +82,13 @@ const RUN_TONE: Record<WorkflowRunStatus, string> = {
   cancelled: "bg-control text-ink-secondary",
 };
 
-const RUN_LABEL: Record<WorkflowRunStatus, string> = {
-  queued: "Queued",
-  running: "Running",
-  "waiting-approval": "Waiting for approval",
-  completed: "Completed",
-  failed: "Failed",
-  cancelled: "Cancelled",
+const RUN_LABEL: Record<WorkflowRunStatus, LocaleKey> = {
+  queued: "workflow.page.statusQueued",
+  running: "workflow.page.statusRunning",
+  "waiting-approval": "workflow.page.statusWaitingApproval",
+  completed: "workflow.page.statusCompleted",
+  failed: "workflow.page.statusFailed",
+  cancelled: "workflow.page.statusCancelled",
 };
 
 type RowBusy = "rename" | "run" | "delete";
@@ -109,12 +112,15 @@ function formatWhen(at: number): string {
  * "Pending" is the honest word for that gap — "not scheduled" would be a lie. */
 export function scheduleLabel(workflow: WorkflowListItem): string {
   const schedule = workflow.triggers?.schedule;
-  if (!schedule) return "Not scheduled";
+  if (!schedule) return t("workflow.page.notScheduled");
   // An interval holds its clock while a run is live, so "pending" is the
   // usual state there and the cadence is the useful part of the label.
-  const what = schedule.type === "interval" ? `Every ${schedule.minutes} min` : "Scheduled";
-  if (typeof workflow.nextRunAt !== "number") return `${what} · next run pending`;
-  return `Next run: ${formatWhen(workflow.nextRunAt)}`;
+  const what =
+    schedule.type === "interval"
+      ? t("workflow.page.everyMinutes", { minutes: schedule.minutes })
+      : t("workflow.page.scheduled");
+  if (typeof workflow.nextRunAt !== "number") return t("workflow.page.nextRunPending", { schedule: what });
+  return t("workflow.page.nextRunAt", { when: formatWhen(workflow.nextRunAt) });
 }
 
 /** Errors and warnings are counted, never merged: only errors block a run.
@@ -124,13 +130,13 @@ export function ValidationBadge({ issues }: { issues: WorkflowListItem["issues"]
   const { errors, warnings } = validationSummary(issues);
   const label =
     errors > 0
-      ? `${errors} ${errors === 1 ? "error" : "errors"}`
-      : `${warnings} ${warnings === 1 ? "warning" : "warnings"}`;
+      ? t(errors === 1 ? "workflow.page.errorCountOne" : "workflow.page.errorCountMany", { count: errors })
+      : t(warnings === 1 ? "workflow.page.warningCountOne" : "workflow.page.warningCountMany", { count: warnings });
 
   if (issues.length === 0) {
     return (
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 text-[10.5px] font-medium text-success">
-        <CheckCircle2 size={11} aria-hidden /> Valid
+        <CheckCircle2 size={11} aria-hidden /> {t("workflow.page.valid")}
       </span>
     );
   }
@@ -145,13 +151,13 @@ export function ValidationBadge({ issues }: { issues: WorkflowListItem["issues"]
       >
         <AlertTriangle size={11} aria-hidden />
         {label}
-        <span className="sr-only">— show details</span>
+        <span className="sr-only">{t("workflow.page.showDetails")}</span>
       </summary>
       <ul className="mt-1.5 space-y-1 rounded-lg border border-hairline/40 bg-inset px-2.5 py-2 text-[11.5px] leading-relaxed">
         {issues.map((issue, index) => (
           <li key={`${issue.code}:${issue.nodeId ?? ""}:${index}`} className="flex gap-1.5">
             <span className={cn("shrink-0 font-medium", issue.severity === "error" ? "text-danger" : "text-warning")}>
-              {issue.severity === "error" ? "Error" : "Warning"}
+              {t(issue.severity === "error" ? "workflow.page.severityError" : "workflow.page.severityWarning")}
             </span>
             <span className="min-w-0 text-ink-secondary">{issue.message}</span>
           </li>
@@ -165,9 +171,9 @@ export function ValidationBadge({ issues }: { issues: WorkflowListItem["issues"]
  * dropped by every browser, so a named wrapper would be silent. The failure
  * reason rides along in an `sr-only` span rather than a mouse-only tooltip. */
 export function RunPill({ run }: { run: WorkflowRun | null }) {
-  if (!run) return <span className="text-[11px] text-ink-secondary">No runs yet</span>;
+  if (!run) return <span className="text-[11px] text-ink-secondary">{t("workflow.page.noRunsYet")}</span>;
   const missed = isMissedWorkflowRun(run);
-  const label = missed ? "Missed" : RUN_LABEL[run.status];
+  const label = t(missed ? "workflow.page.statusMissed" : RUN_LABEL[run.status]);
   const when = formatWhen(run.startedAt);
   return (
     <span
@@ -177,7 +183,7 @@ export function RunPill({ run }: { run: WorkflowRun | null }) {
       )}
     >
       {run.status === "running" && <span className="size-1.5 animate-pulse rounded-full bg-current" aria-hidden />}
-      <span className="sr-only">Last run: </span>
+      <span className="sr-only">{t("workflow.page.lastRun")} </span>
       <span>{label}</span>
       <span className="font-normal tabular-nums opacity-80">{when}</span>
       {run.error && <span className="sr-only">. {run.error}</span>}
@@ -226,11 +232,11 @@ export function WorkflowRow({
   // suppresses its tooltip, so nobody ever learns why running is refused.
   const runBlockedReason =
     errors > 0
-      ? `Fix ${errors} ${errors === 1 ? "error" : "errors"} before running`
+      ? t(errors === 1 ? "workflow.page.fixErrorsOne" : "workflow.page.fixErrorsMany", { count: errors })
       : busy !== null
-        ? "Another action is still running"
+        ? t("workflow.page.anotherActionRunning")
         : latestRun && isActiveWorkflowRun(latestRun)
-          ? "A run is already active — it finishes before another can start"
+          ? t("workflow.page.runAlreadyActive")
           : null;
 
   useEffect(() => {
@@ -282,7 +288,7 @@ export function WorkflowRow({
                 ref={inputRef}
                 value={draftName}
                 maxLength={120}
-                aria-label="Workflow name"
+                aria-label={t("workflow.page.workflowName")}
                 onChange={(event) => setDraftName(event.target.value)}
                 // clicking Delete must not also commit a half-typed rename
                 onBlur={(event) => finishEditing(event.relatedTarget !== deleteButtonRef.current)}
@@ -329,8 +335,8 @@ export function WorkflowRow({
             type="button"
             onClick={startEditing}
             disabled={busy !== null || editing}
-            aria-label={`Rename ${workflow.name}`}
-            title="Rename"
+            aria-label={t("workflow.page.renameLabel", { name: workflow.name })}
+            title={t("workflow.page.rename")}
             className="rounded-lg p-2 text-ink-secondary hover:bg-raised hover:text-ink disabled:opacity-40"
           >
             {busy === "rename" ? <Loader2 size={15} className="animate-spin" /> : <Pencil size={15} />}
@@ -342,8 +348,8 @@ export function WorkflowRow({
             }}
             aria-disabled={runBlockedReason ? true : undefined}
             aria-describedby={runBlockedReason ? `${workflow.id}-run-blocked` : undefined}
-            aria-label={`Run ${workflow.name}`}
-            title={runBlockedReason ?? "Run now"}
+            aria-label={t("workflow.page.runLabel", { name: workflow.name })}
+            title={runBlockedReason ?? t("workflow.page.runNow")}
             className={cn(
               "rounded-lg p-2 text-ink-secondary",
               runBlockedReason ? "cursor-not-allowed opacity-40" : "hover:bg-raised hover:text-success",
@@ -356,8 +362,8 @@ export function WorkflowRow({
             type="button"
             onClick={onDelete}
             disabled={busy !== null}
-            aria-label={`Delete ${workflow.name}`}
-            title="Delete"
+            aria-label={t("workflow.page.deleteLabel", { name: workflow.name })}
+            title={t("workflow.page.delete")}
             className="rounded-lg p-2 text-ink-secondary hover:bg-raised hover:text-danger disabled:opacity-40"
           >
             {busy === "delete" ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
@@ -373,7 +379,7 @@ export function WorkflowRow({
           <button
             type="button"
             onClick={onDismissError}
-            aria-label="Dismiss error"
+            aria-label={t("workflow.page.dismissError")}
             className="shrink-0 rounded p-0.5 hover:bg-danger/15"
           >
             <X size={12} />
@@ -420,7 +426,7 @@ export function WorkflowsPage() {
     setCreating(true);
     setPageError(null);
     try {
-      const { workflow } = await api("/api/workflows", { method: "POST", body: JSON.stringify(EMPTY_DRAFT) });
+      const { workflow } = await api("/api/workflows", { method: "POST", body: JSON.stringify(emptyDraft()) });
       if (workflow) {
         // the SSE frame carries the same row; upsert is idempotent
         dispatch({ type: "workflowPatched", workflow });
@@ -448,7 +454,7 @@ export function WorkflowsPage() {
     });
 
   const remove = (workflow: WorkflowListItem) => {
-    if (!window.confirm(`Delete “${workflow.name}”? Its run history stays visible until the next reload.`)) return;
+    if (!window.confirm(t("workflow.page.deleteConfirm", { name: workflow.name }))) return;
     void withRow(workflow.id, "delete", async () => {
       await api(`/api/workflows/${workflow.id}`, { method: "DELETE" });
       dispatch({ type: "workflowDeleted", workflowId: workflow.id });
@@ -468,7 +474,7 @@ export function WorkflowsPage() {
         <Suspense
           fallback={
             <main className="flex min-w-0 flex-1 items-center justify-center bg-app text-[12.5px] text-ink-secondary">
-              Loading canvas…
+              {t("workflow.page.loadingCanvas")}
             </main>
           }
         >
@@ -484,11 +490,10 @@ export function WorkflowsPage() {
         <div className="min-w-0">
           <div className="flex items-center gap-2.5">
             <WorkflowIcon size={20} className="text-accent" />
-            <h1 className="text-[18px] font-semibold">Workflows</h1>
+            <h1 className="text-[18px] font-semibold">{t("workflow.page.title")}</h1>
           </div>
           <p className="mt-1 text-[12.5px] text-ink-secondary">
-            Deterministic multi-agent pipelines: draw the graph, wire every outcome, then run it by hand, on a
-            schedule or from a webhook.
+            {t("workflow.page.subtitle")}
           </p>
         </div>
         <button
@@ -498,7 +503,7 @@ export function WorkflowsPage() {
           className="flex shrink-0 items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-accent-ink hover:brightness-110 disabled:opacity-40"
         >
           {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-          New workflow
+          {t("workflow.page.newWorkflow")}
         </button>
       </header>
 
@@ -512,7 +517,7 @@ export function WorkflowsPage() {
             <button
               type="button"
               onClick={() => setPageError(null)}
-              aria-label="Dismiss error"
+              aria-label={t("workflow.page.dismissError")}
               className="shrink-0 rounded p-0.5 hover:bg-danger/15"
             >
               <X size={12} />
@@ -521,7 +526,7 @@ export function WorkflowsPage() {
         )}
         {workflows.length === 0 ? (
           <div className="max-w-[720px] rounded-xl border border-dashed border-hairline bg-panel px-4 py-8 text-center text-[12.5px] text-ink-secondary">
-            No workflows yet. Create one to start designing a pipeline your bots run without you watching.
+            {t("workflow.page.empty")}
           </div>
         ) : (
           <ul className="max-w-[900px] space-y-2">

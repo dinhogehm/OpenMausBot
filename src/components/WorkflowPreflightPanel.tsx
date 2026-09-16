@@ -14,6 +14,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { CheckCircle2, Loader2, Plus, ShieldAlert, Trash2, X, XCircle } from "lucide-react";
 
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import {
   validateWorkflow,
   WORKFLOW_PREFLIGHT_TIMEOUT_DEFAULT_S,
@@ -49,17 +51,23 @@ export interface WorkflowPreflightPanelProps {
   anchorRef: React.RefObject<HTMLButtonElement | null>;
 }
 
-const KIND_LABEL: Record<WorkflowPreflightCheck["kind"], string> = {
-  command: "Command",
-  "bots-ready": "Bots ready",
-  "engine-health": "Engine health",
+const KIND_LABEL: Record<WorkflowPreflightCheck["kind"], LocaleKey> = {
+  command: "workflow.preflight.kindCommand",
+  "bots-ready": "workflow.preflight.kindBotsReady",
+  "engine-health": "workflow.preflight.kindEngineHealth",
 };
 
 /** A fresh check of each kind, named so the list never holds a blank the
  * validator would flag on the very first keystroke. Names are unique
  * within the list because the validator insists on it. */
 function newCheck(kind: WorkflowPreflightCheck["kind"], existing: WorkflowPreflightCheck[], firstBot: string | undefined): WorkflowPreflightCheck {
-  const base = kind === "command" ? "check" : kind === "bots-ready" ? "bots ready" : "engine health";
+  const base = t(
+    kind === "command"
+      ? "workflow.preflight.defaultNameCommand"
+      : kind === "bots-ready"
+        ? "workflow.preflight.defaultNameBotsReady"
+        : "workflow.preflight.defaultNameEngineHealth",
+  );
   let name = base;
   for (let n = 2; existing.some((check) => check.name === name); n++) name = `${base} ${n}`;
   if (kind === "command") return { kind, name, command: "" };
@@ -69,7 +77,15 @@ function newCheck(kind: WorkflowPreflightCheck["kind"], existing: WorkflowPrefli
 
 /** What a check's result line says beside its name. */
 export function preflightResultLine(check: WorkflowPreflightResult["checks"][number]): string {
-  return `${check.ok ? "Passed" : "Failed"} · ${check.detail} · ${check.durationMs} ms`;
+  return t("workflow.preflight.resultLine", {
+    verdict: t(check.ok ? "workflow.preflight.resultPassed" : "workflow.preflight.resultFailed"),
+    detail: check.detail,
+    durationMs: check.durationMs,
+  });
+}
+
+function failedCountLabel(count: number): string {
+  return t(count === 1 ? "workflow.preflight.failedCountOne" : "workflow.preflight.failedCountMany", { count });
 }
 
 export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastResult, onClose, anchorRef }: WorkflowPreflightPanelProps) {
@@ -153,39 +169,38 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
       ref={panelRef}
       tabIndex={-1}
       role="group"
-      aria-label="Pre-flight"
+      aria-label={t("workflow.preflight.title")}
       className="absolute right-0 top-full z-30 mt-2 w-[400px] rounded-2xl border border-hairline/50 bg-panel p-4 shadow-2xl outline-none"
     >
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-[13px] font-semibold text-ink">Pre-flight</h2>
+        <h2 className="text-[13px] font-semibold text-ink">{t("workflow.preflight.title")}</h2>
         <button
           type="button"
           onClick={() => close(true)}
-          aria-label="Close pre-flight editor"
+          aria-label={t("workflow.preflight.closeLabel")}
           className="rounded-lg p-1 text-ink-secondary hover:bg-raised hover:text-ink"
         >
           <X size={14} />
         </button>
       </div>
       <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-        Checks that run before the first node of every run — by hand, on a schedule or from a webhook. Any failure
-        stops the run before a bot turn is spent, with the check named on the receipt.
+        {t("workflow.preflight.intro")}
       </p>
 
       <div className="mt-3 max-h-[46vh] space-y-2 overflow-y-auto pr-0.5">
         {checks.length === 0 && (
           <p className="rounded-lg border border-dashed border-hairline/50 px-2.5 py-2 text-[11px] text-ink-secondary">
-            No checks yet. A run starts without looking around.
+            {t("workflow.preflight.empty")}
           </p>
         )}
         {checks.map((check, index) => (
           <div key={keysRef.current[index]} className="space-y-1.5 rounded-lg border border-hairline/40 bg-inset p-2.5">
             <div className="flex items-center gap-1.5">
               <span className="shrink-0 rounded-full bg-control px-1.5 py-px text-[10px] font-medium text-ink-secondary">
-                {KIND_LABEL[check.kind]}
+                {t(KIND_LABEL[check.kind])}
               </span>
               <input
-                aria-label={`Check ${index + 1} name`}
+                aria-label={t("workflow.preflight.checkNameLabel", { number: index + 1 })}
                 value={check.name}
                 maxLength={120}
                 onChange={(event) => update(index, { ...check, name: event.target.value })}
@@ -194,7 +209,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
               <button
                 type="button"
                 onClick={() => remove(index)}
-                aria-label={`Remove check ${check.name || index + 1}`}
+                aria-label={t("workflow.preflight.removeCheckLabel", { name: check.name || index + 1 })}
                 className="rounded-md p-1 text-ink-secondary hover:bg-raised hover:text-danger"
               >
                 <Trash2 size={12} />
@@ -205,7 +220,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
               <>
                 <div>
                   <label className={LABEL} htmlFor={`wf-preflight-${index}-command`}>
-                    Command
+                    {t("workflow.preflight.commandLabel")}
                   </label>
                   <input
                     id={`wf-preflight-${index}-command`}
@@ -220,14 +235,14 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                 <div className="grid grid-cols-[1fr_88px] gap-2">
                   <div>
                     <label className={LABEL} htmlFor={`wf-preflight-${index}-cwd`}>
-                      Working directory
+                      {t("workflow.preflight.workingDirectory")}
                     </label>
                     <input
                       id={`wf-preflight-${index}-cwd`}
                       value={check.cwd ?? ""}
                       maxLength={1_000}
                       spellCheck={false}
-                      placeholder="(the app's own)"
+                      placeholder={t("workflow.preflight.cwdPlaceholder")}
                       onChange={(event) => {
                         const { cwd: _dropped, ...rest } = check;
                         update(index, event.target.value === "" ? rest : { ...rest, cwd: event.target.value });
@@ -237,7 +252,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                   </div>
                   <div>
                     <label className={LABEL} htmlFor={`wf-preflight-${index}-exit`}>
-                      Exit code
+                      {t("workflow.preflight.exitCode")}
                     </label>
                     <input
                       id={`wf-preflight-${index}-exit`}
@@ -255,14 +270,14 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                 </div>
                 <div>
                   <label className={LABEL} htmlFor={`wf-preflight-${index}-match`}>
-                    Stdout must match (regex, optional)
+                    {t("workflow.preflight.stdoutMatch")}
                   </label>
                   <input
                     id={`wf-preflight-${index}-match`}
                     value={check.expectStdoutMatch ?? ""}
                     maxLength={1_000}
                     spellCheck={false}
-                    placeholder="^$ for an empty output"
+                    placeholder={t("workflow.preflight.stdoutMatchPlaceholder")}
                     onChange={(event) => {
                       const { expectStdoutMatch: _dropped, ...rest } = check;
                       update(index, event.target.value === "" ? rest : { ...rest, expectStdoutMatch: event.target.value });
@@ -275,14 +290,14 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
 
             {check.kind === "bots-ready" && (
               <div>
-                <span className={LABEL}>Bots</span>
+                <span className={LABEL}>{t("workflow.preflight.botsLabel")}</span>
                 <p className="mt-0.5 text-[10.5px] text-ink-secondary">
                   {check.botIds === undefined
-                    ? "Every bot an agent node uses must exist and be free."
-                    : "Only the bots ticked below must exist and be free."}
+                    ? t("workflow.preflight.botsEvery")
+                    : t("workflow.preflight.botsOnly")}
                 </p>
                 <label className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-ink-secondary" htmlFor={`wf-preflight-${index}-wait`}>
-                  Wait up to
+                  {t("workflow.preflight.waitUpTo")}
                   <input
                     id={`wf-preflight-${index}-wait`}
                     type="number"
@@ -300,7 +315,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                     }}
                     className={cn(FIELD, "w-[64px] bg-panel py-0.5 tabular-nums")}
                   />
-                  min for a busy bot to free up; a missing bot fails at once.
+                  {t("workflow.preflight.waitSuffix")}
                 </label>
                 <div className="mt-1 flex flex-wrap gap-1">
                   <button
@@ -315,7 +330,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                       check.botIds === undefined ? "bg-accent text-accent-ink" : "border border-hairline/50 text-ink-secondary hover:bg-raised",
                     )}
                   >
-                    All in the workflow
+                    {t("workflow.preflight.allInWorkflow")}
                   </button>
                   {bots.map((bot) => {
                     const on = check.botIds?.includes(bot.id) ?? false;
@@ -345,7 +360,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
             {check.kind === "engine-health" && (
               <div>
                 <label className={LABEL} htmlFor={`wf-preflight-${index}-bot`}>
-                  Bot whose engine to check
+                  {t("workflow.preflight.engineBotLabel")}
                 </label>
                 <select
                   id={`wf-preflight-${index}-bot`}
@@ -355,7 +370,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                 >
                   {!bots.some((bot) => bot.id === check.botId) && (
                     <option value="" disabled>
-                      {check.botId ? `Missing bot ${check.botId}` : "Pick a bot"}
+                      {check.botId ? t("workflow.preflight.missingBot", { botId: check.botId }) : t("workflow.preflight.pickBot")}
                     </option>
                   )}
                   {bots.map((bot) => (
@@ -365,7 +380,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                   ))}
                 </select>
                 <p className="mt-0.5 text-[10.5px] text-ink-secondary">
-                  Asks the engine&apos;s driver for its status — CLI present, signed in. Costs no tokens.
+                  {t("workflow.preflight.engineHelp")}
                 </p>
               </div>
             )}
@@ -374,7 +389,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-1">
-        <span className="mr-1 text-[10.5px] text-ink-secondary">Add</span>
+        <span className="mr-1 text-[10.5px] text-ink-secondary">{t("workflow.preflight.add")}</span>
         {(Object.keys(KIND_LABEL) as WorkflowPreflightCheck["kind"][]).map((kind) => (
           <button
             key={kind}
@@ -383,11 +398,11 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
             className="inline-flex items-center gap-1 rounded-lg border border-hairline/50 px-2 py-1 text-[10.5px] font-medium text-ink-secondary hover:bg-raised hover:text-ink"
           >
             <Plus size={10} aria-hidden />
-            {KIND_LABEL[kind]}
+            {t(KIND_LABEL[kind])}
           </button>
         ))}
         <label className="ml-auto flex items-center gap-1.5 text-[10.5px] text-ink-secondary" htmlFor="wf-preflight-timeout">
-          Timeout
+          {t("workflow.preflight.timeout")}
           <input
             id="wf-preflight-timeout"
             type="number"
@@ -409,7 +424,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
             }}
             className={cn(FIELD, "w-[64px] py-0.5 tabular-nums")}
           />
-          s
+          {t("workflow.preflight.secondsUnit")}
         </label>
       </div>
 
@@ -435,7 +450,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
             )}
           >
             {testing ? <Loader2 size={12} className="animate-spin" aria-hidden /> : <CheckCircle2 size={12} aria-hidden />}
-            {testing ? "Testing…" : "Test pre-flight"}
+            {testing ? t("workflow.preflight.testing") : t("workflow.preflight.test")}
           </button>
           {lastResult && !testing && (
             <span
@@ -445,7 +460,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                 lastResult.ok ? "bg-success/15 text-success" : "bg-danger/15 text-danger",
               )}
             >
-              {lastResult.ok ? "All checks passed" : `${lastResult.checks.filter((check) => !check.ok).length} failed`}
+              {lastResult.ok ? t("workflow.preflight.allPassed") : failedCountLabel(lastResult.checks.filter((check) => !check.ok).length)}
             </span>
           )}
         </div>
@@ -455,7 +470,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
           </p>
         )}
         {lastResult && (
-          <ul className="mt-2 max-h-[30vh] space-y-1 overflow-y-auto pr-0.5" aria-label="Pre-flight results">
+          <ul className="mt-2 max-h-[30vh] space-y-1 overflow-y-auto pr-0.5" aria-label={t("workflow.preflight.resultsLabel")}>
             {lastResult.checks.map((check) => (
               <li key={check.name} className="rounded-lg border border-hairline/40 px-2 py-1.5">
                 <div className="flex items-start gap-1.5">
@@ -467,7 +482,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline gap-1.5">
                       <span className="min-w-0 truncate text-[11.5px] font-medium text-ink">{check.name}</span>
-                      <span className="text-[10px] text-ink-secondary">{KIND_LABEL[check.kind]}</span>
+                      <span className="text-[10px] text-ink-secondary">{t(KIND_LABEL[check.kind])}</span>
                     </div>
                     <p className={cn("break-words text-[10.5px] leading-snug", check.ok ? "text-ink-secondary" : "text-danger")}>
                       {preflightResultLine(check)}
@@ -487,7 +502,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
               </li>
             ))}
             {lastResult.checks.length === 0 && (
-              <li className="text-[10.5px] text-ink-secondary">No checks to run — the pre-flight passes by definition.</li>
+              <li className="text-[10.5px] text-ink-secondary">{t("workflow.preflight.noChecksToRun")}</li>
             )}
           </ul>
         )}
@@ -495,12 +510,7 @@ export function WorkflowPreflightPanel({ workflow, bots, onChange, onTest, lastR
 
       <p className="mt-3 flex gap-1.5 border-t border-hairline/40 pt-2.5 text-[10.5px] leading-relaxed text-ink-secondary">
         <ShieldAlert size={12} aria-hidden className="mt-0.5 shrink-0 text-warning" />
-        <span>
-          Commands run as this app&apos;s user, with its environment and credentials, on this computer, and again at
-          every start — keep them read-only and idempotent. Only the workflow&apos;s owner should edit them. A
-          run&apos;s input is never inserted into a command. Output is scrubbed of known token shapes, not of
-          everything: do not print URLs with credentials or passwords in them.
-        </span>
+        <span>{t("workflow.preflight.securityNote")}</span>
       </p>
     </div>
   );

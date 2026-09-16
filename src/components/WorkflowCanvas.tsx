@@ -22,6 +22,7 @@
 // (the whole graph blinks). Edges have no such identity contract, so they go
 // through `decorate` exactly as designed.
 import {
+  Fragment,
   createContext,
   useCallback,
   useContext,
@@ -30,6 +31,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import {
   Background,
@@ -74,6 +76,8 @@ import "./workflow-canvas.css";
 
 import { api, openNotificationTarget, useStore } from "@/state/store";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import { liveWorkflowIssues, validationSummary, type WorkflowListItem } from "@/lib/workflow-state";
 import { capabilityLookup } from "@/lib/workflow-capabilities";
 import { createSaveQueue, type SaveStatus } from "@/lib/workflow-save-queue";
@@ -152,12 +156,23 @@ function toDocument(row: WorkflowListItem): Workflow {
   return definition;
 }
 
-const NODE_KIND_META: Record<WorkflowNodeKind, { label: string; icon: typeof UserRound }> = {
-  agent: { label: "Agent", icon: UserRound },
-  approval: { label: "Approval", icon: ShieldQuestion },
-  notify: { label: "Notify", icon: MessageSquare },
-  wait: { label: "Wait", icon: Hourglass },
+/** Catalog KEYS, not strings: t() runs at render so a language switch lands. */
+const NODE_KIND_META: Record<WorkflowNodeKind, { labelKey: LocaleKey; addKey: LocaleKey; icon: typeof UserRound }> = {
+  agent: { labelKey: "workflow.canvas.kindAgent", addKey: "workflow.canvas.addAgentNode", icon: UserRound },
+  approval: { labelKey: "workflow.canvas.kindApproval", addKey: "workflow.canvas.addApprovalNode", icon: ShieldQuestion },
+  notify: { labelKey: "workflow.canvas.kindNotify", addKey: "workflow.canvas.addNotifyNode", icon: MessageSquare },
+  wait: { labelKey: "workflow.canvas.kindWait", addKey: "workflow.canvas.addWaitNode", icon: Hourglass },
 };
+
+/** Splits a catalog template on its `{name}` placeholders so the pieces can be
+ * elements; a placeholder with no part stays verbatim, like t() does. */
+function renderRich(template: string, parts: Record<string, ReactNode>): ReactNode[] {
+  return template
+    .split(/\{(\w+)\}/g)
+    .map((piece, index) =>
+      index % 2 === 1 ? <Fragment key={index}>{piece in parts ? parts[piece] : `{${piece}}`}</Fragment> : piece,
+    );
+}
 
 // ── the custom node ───────────────────────────────────────────────────
 type WorkflowFlowNode = Node<WorkflowGraphNodeData, typeof WORKFLOW_NODE_TYPE>;
@@ -213,7 +228,23 @@ const EDGE_DEFAULTS = {
 } as const;
 
 // ── the schedule editor ───────────────────────────────────────────────
-const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+/** Indexed by `Date#getDay()`; catalog keys, translated at render. */
+const WEEKDAYS: readonly LocaleKey[] = [
+  "workflow.canvas.weekdaySun",
+  "workflow.canvas.weekdayMon",
+  "workflow.canvas.weekdayTue",
+  "workflow.canvas.weekdayWed",
+  "workflow.canvas.weekdayThu",
+  "workflow.canvas.weekdayFri",
+  "workflow.canvas.weekdaySat",
+];
+
+const SCHEDULE_MODE_LABEL: Record<"none" | "daily" | "interval" | "once", LocaleKey> = {
+  none: "workflow.canvas.modeManual",
+  daily: "workflow.canvas.modeDaily",
+  interval: "workflow.canvas.modeInterval",
+  once: "workflow.canvas.modeOnce",
+};
 
 function toLocalInput(at: number): string {
   const date = new Date(at);
@@ -349,15 +380,15 @@ function TriggersPanel({
       ref={panelRef}
       tabIndex={-1}
       role="group"
-      aria-label="Schedule"
+      aria-label={t("workflow.canvas.scheduleTitle")}
       className="absolute right-0 top-full z-30 mt-2 w-[320px] rounded-2xl border border-hairline/50 bg-panel p-4 shadow-2xl outline-none"
     >
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-[13px] font-semibold text-ink">Schedule</h2>
+        <h2 className="text-[13px] font-semibold text-ink">{t("workflow.canvas.scheduleTitle")}</h2>
         <button
           type="button"
           onClick={() => close(true)}
-          aria-label="Close schedule editor"
+          aria-label={t("workflow.canvas.closeScheduleEditor")}
           className="rounded-lg p-1 text-ink-secondary hover:bg-raised hover:text-ink"
         >
           <X size={14} />
@@ -376,7 +407,7 @@ function TriggersPanel({
               mode === option ? "bg-accent/15 text-accent" : "text-ink-secondary hover:bg-raised hover:text-ink",
             )}
           >
-            {option === "none" ? "Manual" : option}
+            {t(SCHEDULE_MODE_LABEL[option])}
           </button>
         ))}
       </div>
@@ -385,7 +416,7 @@ function TriggersPanel({
         <div className="mt-3 space-y-2.5">
           <div>
             <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-schedule-time">
-              Time
+              {t("workflow.canvas.time")}
             </label>
             <input
               id="wf-schedule-time"
@@ -394,7 +425,7 @@ function TriggersPanel({
               onChange={(event) => {
                 const time = event.target.value;
                 if (!WORKFLOW_SCHEDULE_TIME_RE.test(time)) {
-                  setError("Schedule time must be HH:MM (24-hour).");
+                  setError(t("workflow.canvas.scheduleTimeInvalid"));
                   return;
                 }
                 commit({ ...schedule, time });
@@ -403,13 +434,14 @@ function TriggersPanel({
             />
           </div>
           <div>
-            <span className="block text-[11px] font-medium text-ink-secondary">Days</span>
+            <span className="block text-[11px] font-medium text-ink-secondary">{t("workflow.canvas.days")}</span>
             <div className="mt-1 flex gap-1">
-              {WEEKDAYS.map((label, day) => {
+              {WEEKDAYS.map((labelKey, day) => {
                 const on = schedule.weekdays.includes(day);
+                const label = t(labelKey);
                 return (
                   <button
-                    key={label}
+                    key={labelKey}
                     type="button"
                     aria-pressed={on}
                     aria-label={label}
@@ -439,7 +471,7 @@ function TriggersPanel({
         <div className="mt-3 space-y-2.5">
           <div>
             <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-schedule-minutes">
-              Minutes after the last run ends
+              {t("workflow.canvas.intervalMinutes")}
             </label>
             <input
               id="wf-schedule-minutes"
@@ -457,7 +489,7 @@ function TriggersPanel({
                 const minutes = Number(minutesDraft);
                 setMinutesDraft(null);
                 if (!Number.isInteger(minutes) || minutes < WORKFLOW_INTERVAL_MINUTES_MIN) {
-                  setError(`Interval must be a whole number of at least ${WORKFLOW_INTERVAL_MINUTES_MIN} minutes.`);
+                  setError(t("workflow.canvas.intervalInvalid", { min: WORKFLOW_INTERVAL_MINUTES_MIN }));
                   return;
                 }
                 if (minutes !== schedule.minutes) commit({ ...schedule, minutes });
@@ -465,8 +497,7 @@ function TriggersPanel({
               className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
             />
             <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-              The engine is the valve: a new run starts this long after the previous one finishes, and never while
-              one is live. A run you start by hand pushes the next one out.
+              {t("workflow.canvas.intervalHelp")}
             </p>
           </div>
           <label className="flex items-center gap-2 text-[11.5px] text-ink">
@@ -476,7 +507,7 @@ function TriggersPanel({
               onChange={(event) => setActiveHours(event.target.checked ? {} : null)}
               className="accent-accent"
             />
-            Only during active hours
+            {t("workflow.canvas.activeHoursOnly")}
           </label>
           {schedule.activeHours && (
             <div className="space-y-2.5 rounded-lg border border-hairline/40 bg-inset p-2.5">
@@ -487,7 +518,7 @@ function TriggersPanel({
                       className="block text-[11px] font-medium text-ink-secondary"
                       htmlFor={`wf-schedule-hours-${bound}`}
                     >
-                      {bound === "start" ? "From" : "Until"}
+                      {bound === "start" ? t("workflow.canvas.activeHoursFrom") : t("workflow.canvas.activeHoursUntil")}
                     </label>
                     <input
                       id={`wf-schedule-hours-${bound}`}
@@ -496,7 +527,7 @@ function TriggersPanel({
                       onChange={(event) => {
                         const time = event.target.value;
                         if (!WORKFLOW_SCHEDULE_TIME_RE.test(time)) {
-                          setError("Active hours start and end must be HH:MM (24-hour).");
+                          setError(t("workflow.canvas.activeHoursInvalid"));
                           return;
                         }
                         setActiveHours({ [bound]: time });
@@ -507,18 +538,19 @@ function TriggersPanel({
                 ))}
               </div>
               <div>
-                <span className="block text-[11px] font-medium text-ink-secondary">Days</span>
+                <span className="block text-[11px] font-medium text-ink-secondary">{t("workflow.canvas.days")}</span>
                 <div className="mt-1 flex gap-1">
-                  {WEEKDAYS.map((label, day) => {
+                  {WEEKDAYS.map((labelKey, day) => {
                     // No list means every day; the toggles show that as all on.
                     const days = schedule.activeHours?.weekdays ?? [0, 1, 2, 3, 4, 5, 6];
                     const on = days.includes(day);
+                    const label = t(labelKey);
                     return (
                       <button
-                        key={label}
+                        key={labelKey}
                         type="button"
                         aria-pressed={on}
-                        aria-label={`Active on ${label}`}
+                        aria-label={t("workflow.canvas.activeOnDay", { day: label })}
                         onClick={() =>
                           setActiveHours({
                             weekdays: on ? days.filter((value) => value !== day) : [...days, day].sort((a, b) => a - b),
@@ -535,9 +567,7 @@ function TriggersPanel({
                   })}
                 </div>
                 <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-                  Runs — and wait nodes — resume only inside this window. A window that crosses midnight is judged by
-                  the day each instant falls on: 22:00–06:00 on Mon covers Monday night until midnight, and Monday
-                  00:00–06:00 in the small hours.
+                  {t("workflow.canvas.activeHoursHelp")}
                 </p>
               </div>
             </div>
@@ -548,7 +578,7 @@ function TriggersPanel({
       {schedule?.type === "once" && (
         <div className="mt-3">
           <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-schedule-at">
-            Runs at
+            {t("workflow.canvas.runsAt")}
           </label>
           <input
             id="wf-schedule-at"
@@ -557,7 +587,7 @@ function TriggersPanel({
             onChange={(event) => {
               const at = new Date(event.target.value).getTime();
               if (!Number.isFinite(at)) {
-                setError("A one-time schedule needs a finite timestamp.");
+                setError(t("workflow.canvas.onceInvalid"));
                 return;
               }
               commit({ type: "once", at });
@@ -568,10 +598,10 @@ function TriggersPanel({
       )}
 
       <div className="mt-3 space-y-2.5 border-t border-hairline/40 pt-2.5">
-        <h3 className="text-[12px] font-semibold text-ink">Monitoring</h3>
+        <h3 className="text-[12px] font-semibold text-ink">{t("workflow.canvas.monitoring")}</h3>
         <div>
           <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-audit-room">
-            Audit room
+            {t("workflow.canvas.auditRoom")}
           </label>
           <select
             id="wf-audit-room"
@@ -579,10 +609,10 @@ function TriggersPanel({
             onChange={(event) => commitMonitoring({ auditGroupId: event.target.value === "" ? undefined : event.target.value })}
             className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] text-ink outline-none focus:border-accent"
           >
-            <option value="">Off — notify me only</option>
+            <option value="">{t("workflow.canvas.auditRoomOff")}</option>
             {!auditRoomKnown && (
               <option value={workflow.auditGroupId} disabled>
-                Missing room {workflow.auditGroupId}
+                {t("workflow.canvas.auditRoomMissing", { id: workflow.auditGroupId ?? "" })}
               </option>
             )}
             {groups.map((group) => (
@@ -592,13 +622,12 @@ function TriggersPanel({
             ))}
           </select>
           <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-            Everything a run announces — waiting for approval, stuck, a provider outage, a fallback hand-off, failed,
-            cancelled, finished, the daily digest — is also posted here, prefixed with the workflow&apos;s name.
+            {t("workflow.canvas.auditRoomHelp")}
           </p>
         </div>
         <div>
           <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-stuck-after">
-            Announce a stuck run after (minutes)
+            {t("workflow.canvas.stuckAfter")}
           </label>
           <input
             id="wf-stuck-after"
@@ -624,9 +653,7 @@ function TriggersPanel({
             className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
           />
           <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-            A run that has not moved to another node for this long is announced once, then at most once per further
-            period (twelve times at most). Retries of the same node do not reset it; a provider outage does. Wait
-            nodes are exempt; a gate is judged on its own expiry.
+            {t("workflow.canvas.stuckHelp")}
           </p>
         </div>
         <label className="flex items-center gap-2 text-[11.5px] text-ink">
@@ -636,12 +663,12 @@ function TriggersPanel({
             onChange={(event) => commitMonitoring({ digestAt: event.target.checked ? "18:00" : undefined })}
             className="accent-accent"
           />
-          Post a daily digest
+          {t("workflow.canvas.digestEnable")}
         </label>
         {workflow.digestAt !== undefined && (
           <div>
             <label className="block text-[11px] font-medium text-ink-secondary" htmlFor="wf-digest-at">
-              Digest time
+              {t("workflow.canvas.digestTime")}
             </label>
             <input
               id="wf-digest-at"
@@ -650,7 +677,7 @@ function TriggersPanel({
               onChange={(event) => {
                 const time = event.target.value;
                 if (!WORKFLOW_SCHEDULE_TIME_RE.test(time)) {
-                  setError("Digest time must be HH:MM (24-hour).");
+                  setError(t("workflow.canvas.digestTimeInvalid"));
                   return;
                 }
                 commitMonitoring({ digestAt: time });
@@ -658,8 +685,7 @@ function TriggersPanel({
               className="mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-2.5 py-1.5 text-[12.5px] tabular-nums text-ink outline-none focus:border-accent"
             />
             <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-              Runs that ended since the previous digest: how many completed, failed and were cancelled, the average
-              run time, the nodes that failed most and the denials seen most.
+              {t("workflow.canvas.digestHelp")}
             </p>
           </div>
         )}
@@ -672,8 +698,7 @@ function TriggersPanel({
       )}
 
       <p className="mt-3 border-t border-hairline/40 pt-2.5 text-[11px] leading-relaxed text-ink-secondary">
-        Webhook triggers live with the webhook itself — add one under Calendar → Webhooks and point it at this
-        workflow.
+        {t("workflow.canvas.webhookNote")}
       </p>
     </div>
   );
@@ -844,12 +869,12 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
         id: node.id,
         label:
           node.kind === "agent"
-            ? `${node.id} · ${bots.find((bot) => bot.id === node.botId)?.name ?? "missing bot"}`
+            ? `${node.id} · ${bots.find((bot) => bot.id === node.botId)?.name ?? t("workflow.canvas.routeMissingBot")}`
             : node.kind === "notify"
-              ? `${node.id} · ${groups.find((group) => group.id === node.targetGroupId)?.name ?? "missing room"}`
+              ? `${node.id} · ${groups.find((group) => group.id === node.targetGroupId)?.name ?? t("workflow.canvas.routeMissingRoom")}`
               : node.kind === "wait"
-                ? `${node.id} · wait ${node.minutes} min`
-                : `${node.id} · approval`,
+                ? `${node.id} · ${t("workflow.canvas.routeWait", { minutes: node.minutes })}`
+                : `${node.id} · ${t("workflow.canvas.routeApproval")}`,
       })),
     [doc.nodes, bots, groups],
   );
@@ -951,7 +976,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
       observeMode.release();
       if (!queue.snapshot().dirty) return;
       void queue.flush().then((result) => {
-        if (!result.ok) dispatch({ type: "error", message: `Workflow not saved: ${result.error}` });
+        if (!result.ok) dispatch({ type: "error", message: t("workflow.canvas.notSavedBanner", { error: String(result.error) }) });
       });
     },
     [queue, cancelDebounce, dispatch],
@@ -1065,11 +1090,13 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   const activeRun = workflowRuns.some(isActiveWorkflowRun);
   const runBlockedReason =
     errors > 0
-      ? `Fix ${errors} ${errors === 1 ? "error" : "errors"} before running`
+      ? errors === 1
+        ? t("workflow.canvas.runBlockedErrorsOne")
+        : t("workflow.canvas.runBlockedErrorsMany", { count: errors })
       : running
-        ? "A run is already starting"
+        ? t("workflow.canvas.runStarting")
         : activeRun
-          ? "A run is already active — it finishes before another can start"
+          ? t("workflow.canvas.runActive")
           : null;
 
   // An agent node needs a bot and a notify node a room — both are foreign
@@ -1077,8 +1104,8 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   // text tied to the control with aria-describedby, never a `title` a
   // keyboard or touch user can never surface.
   const paletteBlocked: Partial<Record<WorkflowNodeKind, string>> = {
-    ...(offeredBots.length === 0 ? { agent: "Add a bot before you can add an agent node" } : {}),
-    ...(groups.length === 0 ? { notify: "Create a room before you can add a notify node" } : {}),
+    ...(offeredBots.length === 0 ? { agent: t("workflow.canvas.agentBlocked") } : {}),
+    ...(groups.length === 0 ? { notify: t("workflow.canvas.notifyBlocked") } : {}),
   };
 
   const run = async () => {
@@ -1091,7 +1118,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
       cancelDebounce();
       const flushed = await queue.flush();
       if (!flushed.ok) {
-        setRunError(`Not started — the latest changes could not be saved: ${flushed.error}`);
+        setRunError(t("workflow.canvas.runNotSaved", { error: String(flushed.error) }));
         return;
       }
       const { run: started } = await api(`/api/workflows/${workflowId}/runs`, { method: "POST", body: "{}" });
@@ -1109,9 +1136,9 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
   const testPreflight = async (): Promise<WorkflowPreflightResult> => {
     cancelDebounce();
     const flushed = await queue.flush();
-    if (!flushed.ok) throw new Error(`Not tested — the latest changes could not be saved: ${flushed.error}`);
+    if (!flushed.ok) throw new Error(t("workflow.canvas.preflightNotSaved", { error: String(flushed.error) }));
     const { preflight } = await api(`/api/workflows/${workflowId}/preflight`, { method: "POST", body: "{}" });
-    if (!preflight) throw new Error("The server answered without a verdict.");
+    if (!preflight) throw new Error(t("workflow.canvas.preflightNoVerdict"));
     dispatch({ type: "workflowPreflightTested", workflowId, result: preflight });
     return preflight;
   };
@@ -1126,7 +1153,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
 
   const cancelRun = async () => {
     if (!observedRun) return;
-    if (!window.confirm("Cancel this run? The node in flight stops where it is and the rest of the graph is skipped."))
+    if (!window.confirm(t("workflow.canvas.cancelRunConfirm")))
       return;
     setCancelling(true);
     setRunError(null);
@@ -1156,7 +1183,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
             (bot) => bot.threadId === threadId || (bot.tasks ?? []).some((task) => task.threadId === threadId),
           )?.id ?? null);
     if (!botId) {
-      setRunError("That transcript is no longer available — its bot or task was deleted.");
+      setRunError(t("workflow.canvas.transcriptGone"));
       return;
     }
     setRunError(null);
@@ -1182,12 +1209,12 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
 
   const saveLabel =
     saveState === "saving"
-      ? "Saving…"
+      ? t("workflow.canvas.saving")
       : saveState === "error"
-        ? "Save failed"
+        ? t("workflow.canvas.saveFailed")
         : saveState === "dirty"
-          ? "Unsaved changes"
-          : "Saved";
+          ? t("workflow.canvas.unsaved")
+          : t("workflow.canvas.saved");
 
   return (
     <main className="flex h-full min-w-0 flex-1 flex-col bg-app text-ink">
@@ -1199,8 +1226,8 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
           <button
             type="button"
             onClick={onBack}
-            aria-label="Back to workflows"
-            title="Back to workflows"
+            aria-label={t("workflow.canvas.back")}
+            title={t("workflow.canvas.back")}
             className="flex size-9 shrink-0 items-center justify-center rounded-lg text-ink-secondary hover:bg-raised hover:text-ink"
           >
             <ArrowLeft size={18} />
@@ -1211,7 +1238,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
           <input
             value={nameDraft ?? doc.name}
             maxLength={120}
-            aria-label="Workflow name"
+            aria-label={t("workflow.canvas.workflowName")}
             // The one editing control that is not in the palette. It locks
             // from the moment the switch STARTS, not once it lands: entering
             // Observe awaits a save, and a keystroke during that await is an
@@ -1261,14 +1288,14 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
               }}
               className="shrink-0 rounded-lg border border-danger/40 px-2 py-1 text-[11px] font-medium text-danger hover:bg-danger/10"
             >
-              Retry save
+              {t("workflow.canvas.retrySave")}
             </button>
           )}
 
           <div className="ml-auto flex shrink-0 items-center gap-1.5">
             {/* Edit ⇄ Observe. Entering Observe saves first and can refuse,
                 so it is a real action with a spinner, not a display toggle. */}
-            <div role="group" aria-label="Canvas mode" className="mr-1 flex items-center gap-0.5 rounded-lg border border-hairline/50 p-0.5">
+            <div role="group" aria-label={t("workflow.canvas.canvasMode")} className="mr-1 flex items-center gap-0.5 rounded-lg border border-hairline/50 p-0.5">
               <button
                 type="button"
                 aria-pressed={!observing}
@@ -1281,7 +1308,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                 )}
               >
                 <Pencil size={12} aria-hidden />
-                Edit
+                {t("workflow.canvas.modeEdit")}
               </button>
               <button
                 type="button"
@@ -1307,7 +1334,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                 ) : (
                   <Eye size={12} aria-hidden />
                 )}
-                Observe
+                {t("workflow.canvas.modeObserve")}
               </button>
             </div>
 
@@ -1328,7 +1355,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                 ) : (
                   <Square size={13} aria-hidden />
                 )}
-                Cancel run
+                {t("workflow.canvas.cancelRun")}
               </button>
             )}
 
@@ -1337,9 +1364,9 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                 says so in visible text. */}
             {!observing && (
               <>
-                <span className="mr-1 text-[11px] text-ink-secondary">Add</span>
+                <span className="mr-1 text-[11px] text-ink-secondary">{t("workflow.canvas.add")}</span>
                 {(Object.keys(NODE_KIND_META) as WorkflowNodeKind[]).map((kind) => {
-                  const { label, icon: Icon } = NODE_KIND_META[kind];
+                  const { labelKey, addKey, icon: Icon } = NODE_KIND_META[kind];
                   const blocked = paletteBlocked[kind] ?? null;
                   return (
                     <button
@@ -1350,14 +1377,14 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                       }}
                       aria-disabled={blocked ? true : undefined}
                       aria-describedby={blocked ? `wf-canvas-add-${kind}-reason` : undefined}
-                      aria-label={`Add ${label.toLowerCase()} node`}
+                      aria-label={t(addKey)}
                       className={cn(
                         "inline-flex items-center gap-1.5 rounded-lg border border-hairline/50 px-2.5 py-1.5 text-[11.5px] font-medium",
                         blocked ? "cursor-not-allowed text-ink-secondary opacity-40" : "text-ink-secondary hover:bg-raised hover:text-ink",
                       )}
                     >
                       <Icon size={13} aria-hidden />
-                      {label}
+                      {t(labelKey)}
                     </button>
                   );
                 })}
@@ -1374,7 +1401,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                     )}
                   >
                     <CalendarClock size={13} aria-hidden />
-                    {doc.triggers?.schedule ? "Scheduled" : "Schedule"}
+                    {doc.triggers?.schedule ? t("workflow.canvas.scheduled") : t("workflow.canvas.scheduleTitle")}
                   </button>
                   {scheduleOpen && (
                     <TriggersPanel
@@ -1400,7 +1427,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                     )}
                   >
                     <ClipboardCheck size={13} aria-hidden />
-                    Pre-flight
+                    {t("workflow.canvas.preflight")}
                   </button>
                   {preflightOpen && (
                     <WorkflowPreflightPanel
@@ -1428,7 +1455,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                   )}
                 >
                   {running ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <Play size={13} aria-hidden />}
-                  Run
+                  {t("workflow.canvas.run")}
                 </button>
               </>
             )}
@@ -1448,10 +1475,14 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
           >
             {errors > 0 || warnings > 0 ? <AlertTriangle size={11} aria-hidden /> : <Check size={11} aria-hidden />}
             {errors > 0
-              ? `${errors} ${errors === 1 ? "error" : "errors"}`
+              ? errors === 1
+                ? t("workflow.canvas.errorsOne")
+                : t("workflow.canvas.errorsMany", { count: errors })
               : warnings > 0
-                ? `${warnings} ${warnings === 1 ? "warning" : "warnings"}`
-                : "Valid"}
+                ? warnings === 1
+                  ? t("workflow.canvas.warningsOne")
+                  : t("workflow.canvas.warningsMany", { count: warnings })
+                : t("workflow.canvas.valid")}
           </span>
           {/* Both the reason and the failure are visible text, not tooltips:
               a disabled-looking button nobody can explain is the bug. */}
@@ -1470,13 +1501,14 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
               the id the read-only name field points its description at. */}
           {observing && (
             <span id="wf-canvas-mode-reason" className="text-[11px] text-ink-secondary">
-              Observing{observedRun ? ` a run that ${runStatusPhrase(observedRun)}` : ""} — the drawing is read-only.
-              Switch to Edit to change it.
+              {observedRun
+                ? t("workflow.canvas.observingRun", { status: runStatusPhrase(observedRun) })
+                : t("workflow.canvas.observingNoRun")}
             </span>
           )}
           {switching && (
             <span id="wf-canvas-mode-busy" role="status" className="text-[11px] text-ink-secondary">
-              Saving before it switches — Observe opens once the document is safely on the server.
+              {t("workflow.canvas.switchingBusy")}
             </span>
           )}
           {mode.error && (
@@ -1494,7 +1526,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
                       issue.severity === "error" ? "text-danger" : "text-warning",
                     )}
                   >
-                    {issue.severity === "error" ? "Error" : "Warning"}
+                    {issue.severity === "error" ? t("workflow.canvas.issueError") : t("workflow.canvas.issueWarning")}
                   </span>
                   <span className="min-w-0 text-ink-secondary">{issue.message}</span>
                 </li>
@@ -1557,7 +1589,7 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
 
         {observing ? (
           <aside
-            aria-label="Run observation"
+            aria-label={t("workflow.canvas.runObservation")}
             className="flex w-[320px] shrink-0 flex-col border-l border-hairline/40 bg-panel px-4 py-4"
           >
             <WorkflowRunTimeline
@@ -1608,9 +1640,18 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
               const edges = doc.edges.filter(
                 (edge) => edge.from === selectedNode.id || edge.to === selectedNode.id,
               ).length;
-              const entryWarning = doc.entryNodeId === selectedNode.id ? " It is the entry node." : "";
-              const edgeWarning = edges === 0 ? "" : ` ${edges} ${edges === 1 ? "edge" : "edges"} go with it.`;
-              if (!window.confirm(`Delete node “${selectedNode.id}”?${edgeWarning}${entryWarning}`)) return;
+              const message = [
+                t("workflow.canvas.deleteNodeConfirm", { id: selectedNode.id }),
+                edges === 0
+                  ? ""
+                  : edges === 1
+                    ? t("workflow.canvas.deleteNodeEdgesOne")
+                    : t("workflow.canvas.deleteNodeEdgesMany", { count: edges }),
+                doc.entryNodeId === selectedNode.id ? t("workflow.canvas.deleteNodeEntry") : "",
+              ]
+                .filter(Boolean)
+                .join(" ");
+              if (!window.confirm(message)) return;
               setSelectedNodeId(null);
               commit((current) => removeNodes(current, [selectedNode.id]));
             }}
@@ -1618,14 +1659,16 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
           />
         ) : selectedEdge ? (
           <aside
-            aria-label="Selected edge"
+            aria-label={t("workflow.canvas.selectedEdge")}
             className="flex w-[300px] shrink-0 flex-col gap-3 border-l border-hairline/40 bg-panel px-4 py-4"
           >
-            <h2 className="text-[13.5px] font-semibold text-ink">Edge</h2>
+            <h2 className="text-[13.5px] font-semibold text-ink">{t("workflow.canvas.edgeTitle")}</h2>
             <p className="text-[12px] leading-relaxed text-ink-secondary">
-              <span className="font-mono text-ink">{selectedEdge.from}</span> routes{" "}
-              <span className="font-mono text-ink">{selectedEdge.outcome}</span> to{" "}
-              <span className="font-mono text-ink">{selectedEdge.to}</span>.
+              {renderRich(t("workflow.canvas.edgeRoutes"), {
+                from: <span className="font-mono text-ink">{selectedEdge.from}</span>,
+                outcome: <span className="font-mono text-ink">{selectedEdge.outcome}</span>,
+                to: <span className="font-mono text-ink">{selectedEdge.to}</span>,
+              })}
             </p>
             <button
               type="button"
@@ -1636,27 +1679,32 @@ function WorkflowCanvasInner({ workflow: row, onBack }: WorkflowCanvasProps) {
               className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-danger/40 px-2.5 py-1.5 text-[11.5px] font-medium text-danger hover:bg-danger/10"
             >
               <Trash2 size={13} aria-hidden />
-              Delete edge
+              {t("workflow.canvas.deleteEdge")}
             </button>
           </aside>
         ) : (
           <aside
-            aria-label="Canvas help"
+            aria-label={t("workflow.canvas.canvasHelp")}
             className="hidden w-[300px] shrink-0 flex-col gap-2 border-l border-hairline/40 bg-panel px-4 py-4 lg:flex"
           >
-            <h2 className="text-[13.5px] font-semibold text-ink">Nothing selected</h2>
+            <h2 className="text-[13.5px] font-semibold text-ink">{t("workflow.canvas.nothingSelected")}</h2>
             <p className="text-[12px] leading-relaxed text-ink-secondary">
-              Pick a node to edit it, or drag from an outcome handle on its right edge to the left edge of the node
-              that should run next. Delete removes whatever is selected.
+              {t("workflow.canvas.helpPick")}
             </p>
             <p className="text-[12px] leading-relaxed text-ink-secondary">
-              One node has to be the entry point — select it and choose <strong className="text-ink">Make entry
-              node</strong>. The dashed red handle is the engine&apos;s own failure path; wiring it is optional.
+              {renderRich(t("workflow.canvas.helpEntry"), {
+                action: <strong className="text-ink">{t("workflow.canvas.makeEntryNode")}</strong>,
+              })}
             </p>
             <p className="flex items-center gap-1.5 text-[12px] text-ink-secondary">
               <Plus size={12} aria-hidden />
-              {doc.nodes.length} {doc.nodes.length === 1 ? "node" : "nodes"}, {doc.edges.length}{" "}
-              {doc.edges.length === 1 ? "edge" : "edges"}
+              {doc.nodes.length === 1
+                ? t("workflow.canvas.nodeCountOne")
+                : t("workflow.canvas.nodeCountMany", { count: doc.nodes.length })}
+              ,{" "}
+              {doc.edges.length === 1
+                ? t("workflow.canvas.edgeCountOne")
+                : t("workflow.canvas.edgeCountMany", { count: doc.edges.length })}
             </p>
           </aside>
         )}
