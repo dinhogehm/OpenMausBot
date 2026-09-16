@@ -8,6 +8,8 @@ import { AlertTriangle, CircleUserRound, Flag, Hourglass, MessageSquare, ShieldQ
 
 import { BotAvatar, type BotAvatarProps } from "./Avatar";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import { hasCapability } from "@/lib/workflow-capabilities";
 import type { WorkflowGraphNodeData, WorkflowOutcomeHandle } from "@/lib/workflow-graph";
 import type { WorkflowNodeTone } from "@/lib/workflow-observation";
@@ -34,18 +36,18 @@ const TONE_RING: Record<WorkflowNodeTone, string> = {
  * cancelled one was interrupted — so each is a word in the DOM. `done` needs
  * none: the footer prints the outcome the node actually produced, and `idle`
  * is the editor's own resting state. */
-const TONE_BADGE: Partial<Record<WorkflowNodeTone, { label: string; className: string; pulse: boolean }>> = {
-  current: { label: "Running", className: "bg-accent/15 text-accent", pulse: true },
-  waiting: { label: "Waiting", className: "bg-warning/15 text-warning", pulse: true },
-  failed: { label: "Stopped here", className: "bg-danger/15 text-danger", pulse: false },
-  stopped: { label: "Cancelled here", className: "bg-control text-ink-secondary", pulse: false },
+const TONE_BADGE: Partial<Record<WorkflowNodeTone, { label: LocaleKey; className: string; pulse: boolean }>> = {
+  current: { label: "workflow.card.toneRunning", className: "bg-accent/15 text-accent", pulse: true },
+  waiting: { label: "workflow.card.toneWaiting", className: "bg-warning/15 text-warning", pulse: true },
+  failed: { label: "workflow.card.toneFailed", className: "bg-danger/15 text-danger", pulse: false },
+  stopped: { label: "workflow.card.toneStopped", className: "bg-control text-ink-secondary", pulse: false },
 };
 
-const KIND_LABEL: Record<WorkflowNode["kind"], string> = {
-  agent: "Agent",
-  approval: "Approval",
-  notify: "Notify",
-  wait: "Wait",
+const KIND_LABEL: Record<WorkflowNode["kind"], LocaleKey> = {
+  agent: "workflow.card.kindAgent",
+  approval: "workflow.card.kindApproval",
+  notify: "workflow.card.kindNotify",
+  wait: "workflow.card.kindWait",
 };
 
 /** The glyph and tint of a card that has no bot avatar to show. */
@@ -143,12 +145,12 @@ export function WorkflowNodeCard({
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="min-w-0 truncate text-[12.5px] font-semibold">
-              {node.kind === "agent" ? (bot?.name ?? "Bot missing") : KIND_LABEL[node.kind]}
+              {node.kind === "agent" ? (bot?.name ?? t("workflow.card.botMissing")) : t(KIND_LABEL[node.kind])}
             </span>
             {entry && (
               <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-accent/15 px-1.5 py-px text-[9.5px] font-medium text-accent">
                 <Flag size={9} aria-hidden />
-                Entry
+                {t("workflow.card.entry")}
               </span>
             )}
             {badge && (
@@ -159,12 +161,12 @@ export function WorkflowNodeCard({
                 )}
               >
                 {badge.pulse && <span className="size-1 animate-pulse rounded-full bg-current" aria-hidden />}
-                {badge.label}
+                {t(badge.label)}
               </span>
             )}
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[10px] text-ink-secondary">
-            <span className="shrink-0 uppercase tracking-wide">{KIND_LABEL[node.kind]}</span>
+            <span className="shrink-0 uppercase tracking-wide">{t(KIND_LABEL[node.kind])}</span>
             <span aria-hidden>·</span>
             <span className="min-w-0 truncate font-mono">{node.id}</span>
           </div>
@@ -174,18 +176,21 @@ export function WorkflowNodeCard({
       <div className="mt-1.5 px-3 text-[11px] leading-snug text-ink-secondary">
         {node.kind === "agent" &&
           (bot ? (
-            <p className="break-words">{excerpt(node.instructions) || "No instructions yet"}</p>
+            <p className="break-words">{excerpt(node.instructions) || t("workflow.card.noInstructions")}</p>
           ) : (
             <p className="break-words text-danger">
-              Bot <span className="font-mono">{node.botId}</span> no longer exists — pick another in the panel.
+              {t("workflow.card.botGoneLead")} <span className="font-mono">{node.botId}</span>{" "}
+              {t("workflow.card.botGoneTail")}
             </p>
           ))}
-        {node.kind === "approval" && <p className="break-words">{excerpt(node.prompt) || "No prompt yet"}</p>}
-        {node.kind === "wait" && <p className="break-words">Pauses the run for {formatWaitMinutes(node.minutes)}</p>}
+        {node.kind === "approval" && <p className="break-words">{excerpt(node.prompt) || t("workflow.card.noPrompt")}</p>}
+        {node.kind === "wait" && <p className="break-words">
+            {t("workflow.card.waitPauses", { duration: formatWaitMinutes(node.minutes) })}
+          </p>}
         {node.kind === "notify" && (
           <p className="break-words">
             <span className={cn("font-medium", groupName ? "text-ink" : "text-danger")}>
-              {groupName ?? `Room ${node.targetGroupId} no longer exists`}
+              {groupName ?? t("workflow.card.roomGone", { roomId: node.targetGroupId })}
             </span>
             {groupName && excerpt(node.template) ? ` — ${excerpt(node.template, 60)}` : ""}
           </p>
@@ -208,8 +213,8 @@ export function WorkflowNodeCard({
                   lacking ? "bg-danger/15 text-danger" : "bg-control text-ink-secondary",
                 )}
               >
-                {`needs ${capability}`}
-                {lacking && <span className="sr-only"> (bot not allowed)</span>}
+                {t("workflow.card.needsCapability", { capability })}
+                {lacking && <span className="sr-only"> {t("workflow.card.botNotAllowed")}</span>}
               </li>
             );
           })}
@@ -226,7 +231,9 @@ export function WorkflowNodeCard({
                 className={cn("mt-0.5 shrink-0", issue.severity === "error" ? "text-danger" : "text-warning")}
               />
               <span className="min-w-0 text-ink-secondary">
-                <span className="sr-only">{issue.severity === "error" ? "Error: " : "Warning: "}</span>
+                <span className="sr-only">
+                  {issue.severity === "error" ? t("workflow.card.srError") : t("workflow.card.srWarning")}{" "}
+                </span>
                 {issue.message}
               </span>
             </li>
@@ -247,7 +254,7 @@ export function WorkflowNodeCard({
               )}
             >
               {handle.outcome}
-              {handle.implicit && <span className="sr-only"> (implicit failure path)</span>}
+              {handle.implicit && <span className="sr-only"> {t("workflow.card.implicitFailurePath")}</span>}
             </span>
             {renderSourceHandle?.(handle)}
           </li>

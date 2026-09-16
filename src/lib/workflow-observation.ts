@@ -21,6 +21,8 @@ import type {
   WorkflowRunStatus,
 } from "../../shared/workflow";
 import { isMissedWorkflowRun } from "./workflow-state";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import type { WorkflowGraphEdgeDecoration } from "./workflow-graph";
 
 /** How a run decorates a node card. Lives here rather than in the card
@@ -149,37 +151,40 @@ export function runEdgeDecorator(
   };
 }
 
-const RUN_STATUS_LABEL: Record<WorkflowRunStatus, string> = {
-  queued: "Queued",
-  running: "Running",
-  "waiting-approval": "Waiting for approval",
-  completed: "Completed",
-  failed: "Failed",
-  cancelled: "Cancelled",
+// Labels and phrases below hold catalog keys, not copy: they are translated
+// when asked for, so they follow the active language rather than the one
+// loaded at import time.
+const RUN_STATUS_LABEL: Record<WorkflowRunStatus, LocaleKey> = {
+  queued: "workflow.observe.labelQueued",
+  running: "workflow.observe.labelRunning",
+  "waiting-approval": "workflow.observe.labelWaitingApproval",
+  completed: "workflow.observe.labelCompleted",
+  failed: "workflow.observe.labelFailed",
+  cancelled: "workflow.observe.labelCancelled",
 };
 
 /** A scheduled slot the app was closed through is recorded as a failed run
  * whose error starts with "missed:". Calling that "Failed" would send the
  * author hunting for a broken graph that is not broken. */
 export function runStatusLabel(run: WorkflowRun): string {
-  return isMissedWorkflowRun(run) ? "Missed" : RUN_STATUS_LABEL[run.status];
+  return t(isMissedWorkflowRun(run) ? "workflow.observe.labelMissed" : RUN_STATUS_LABEL[run.status]);
 }
 
 /** The same six states as a PREDICATE, for prose. Lowercasing a label reads
  * "a waiting for approval run"; a phrase map is what turns that into a
  * sentence — "a run that is waiting for approval". Tense carries the rest:
  * a receipt `has`/`was`, a live run `is`. */
-const RUN_STATUS_PHRASE: Record<WorkflowRunStatus, string> = {
-  queued: "is queued",
-  running: "is running",
-  "waiting-approval": "is waiting for approval",
-  completed: "has completed",
-  failed: "has failed",
-  cancelled: "was cancelled",
+const RUN_STATUS_PHRASE: Record<WorkflowRunStatus, LocaleKey> = {
+  queued: "workflow.observe.statusQueued",
+  running: "workflow.observe.statusRunning",
+  "waiting-approval": "workflow.observe.statusWaitingApproval",
+  completed: "workflow.observe.statusCompleted",
+  failed: "workflow.observe.statusFailed",
+  cancelled: "workflow.observe.statusCancelled",
 };
 
 export function runStatusPhrase(run: WorkflowRun): string {
-  return isMissedWorkflowRun(run) ? "was missed" : RUN_STATUS_PHRASE[run.status];
+  return t(isMissedWorkflowRun(run) ? "workflow.observe.statusMissed" : RUN_STATUS_PHRASE[run.status]);
 }
 
 /** Never negative: a receipt written across a clock adjustment (or a live

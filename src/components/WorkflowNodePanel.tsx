@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import { Flag, Plus, Trash2, X } from "lucide-react";
 
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
+import type { LocaleKey } from "@/locales";
 import type { BotAvatarProps } from "./Avatar";
 import type { WorkflowOutcomeHandle } from "@/lib/workflow-graph";
 import {
@@ -66,7 +68,7 @@ function withoutKey<K extends keyof ApprovalNode>(node: ApprovalNode, key: K): A
  * gets. */
 export function botOptionLabel(bot: WorkflowPanelBot): string {
   const label = [bot.name, ...grantedCapabilities(bot)].join(" · ");
-  return bot.hidden ? `${label} (hidden)` : label;
+  return bot.hidden ? t("workflow.panel.botHidden", { label }) : label;
 }
 
 export interface WorkflowPanelGroup {
@@ -78,11 +80,11 @@ export interface WorkflowRouteTarget {
   label: string;
 }
 
-const PANEL_TITLE: Record<WorkflowNode["kind"], string> = {
-  agent: "Agent node",
-  approval: "Approval gate",
-  notify: "Notify room",
-  wait: "Wait",
+const PANEL_TITLE: Record<WorkflowNode["kind"], LocaleKey> = {
+  agent: "workflow.panel.titleAgent",
+  approval: "workflow.panel.titleApproval",
+  notify: "workflow.panel.titleNotify",
+  wait: "workflow.panel.titleWait",
 };
 
 const FIELD =
@@ -164,7 +166,7 @@ function OutcomeRow({
   return (
     <li className="flex items-center gap-1.5">
       <input
-        aria-label={`Outcome "${outcome}" on ${nodeId}`}
+        aria-label={t("workflow.panel.outcomeAriaLabel", { outcome, nodeId })}
         value={value}
         maxLength={100}
         onChange={(event) => setDraft(event.target.value)}
@@ -187,8 +189,8 @@ function OutcomeRow({
         type="button"
         onClick={() => onRemove(outcome)}
         disabled={!canRemove}
-        aria-label={`Remove outcome ${outcome}`}
-        title={canRemove ? "Remove outcome" : "An agent node needs at least one outcome"}
+        aria-label={t("workflow.panel.removeOutcomeAriaLabel", { outcome })}
+        title={canRemove ? t("workflow.panel.removeOutcome") : t("workflow.panel.removeOutcomeDisabled")}
         className="shrink-0 rounded-lg p-1.5 text-ink-secondary hover:bg-raised hover:text-danger disabled:opacity-40"
       >
         <Trash2 size={14} />
@@ -217,9 +219,9 @@ function RequiresGroup({
 
   return (
     <div>
-      <span className={LABEL}>Requires</span>
+      <span className={LABEL}>{t("workflow.panel.requires")}</span>
       <p className="mt-0.5 text-[10.5px] text-ink-secondary">
-        What the bot must be allowed to do before this step can run. Granted per bot, in its profile.
+        {t("workflow.panel.requiresHint")}
       </p>
       <div className="mt-1.5 flex items-center gap-4">
         {WORKFLOW_CAPABILITIES.map((capability) => (
@@ -241,7 +243,7 @@ function RequiresGroup({
       {bot &&
         lacking.map((capability) => (
           <p key={capability} className="mt-1.5 text-[11.5px] leading-snug text-danger">
-            {`${bot.name} is not allowed to ${capability} — enable it in the bot's settings`}
+            {t("workflow.panel.botLacksCapability", { bot: bot.name, capability })}
           </p>
         ))}
     </div>
@@ -276,13 +278,13 @@ function AlwaysAllowField({
   return (
     <div>
       <label className={LABEL} htmlFor={id}>
-        Pre-approved tools on this node
+        {t("workflow.panel.alwaysAllowLabel")}
       </label>
       <p className="mt-0.5 text-[10.5px] text-ink-secondary">
-        One key per line, as an approval card names it (<span className="font-mono">Bash:gh</span>,{" "}
-        <span className="font-mono">session_search</span>). Joined with the bot&apos;s own always-allow list for this
-        node&apos;s turns; anything else is denied at once, and the run receipt names the key it lacked. Never covers
-        destructive commands, credentials, or this computer.
+        {t("workflow.panel.alwaysAllowHintLead")}
+        <span className="font-mono">Bash:gh</span>,{" "}
+        <span className="font-mono">session_search</span>
+        {t("workflow.panel.alwaysAllowHintTail")}
       </p>
       <textarea
         id={id}
@@ -331,12 +333,10 @@ function FallbackGroup({
   return (
     <div>
       <label className={LABEL} htmlFor={id}>
-        Fallback bot (other engine)
+        {t("workflow.panel.fallbackLabel")}
       </label>
       <p className="mt-0.5 text-[10.5px] text-ink-secondary">
-        Takes this step over when the bot&apos;s provider is down, if it runs on a different engine. Otherwise the run
-        waits for the provider to come back. The fallback runs with its own standing permissions (always-allow) —
-        grant it what this step needs, or it will stop to ask.
+        {t("workflow.panel.fallbackHint")}
       </p>
       <select
         id={id}
@@ -348,10 +348,10 @@ function FallbackGroup({
         }}
         className={cn(FIELD, "mt-1")}
       >
-        <option value="">None — wait for the provider</option>
+        <option value="">{t("workflow.panel.fallbackNone")}</option>
         {!known && (
           <option value="" disabled>
-            Missing bot {node.fallbackBotId}
+            {t("workflow.panel.missingBot", { botId: node.fallbackBotId ?? "" })}
           </option>
         )}
         {bots
@@ -364,13 +364,13 @@ function FallbackGroup({
       </select>
       {sameEngine && bot && fallback && (
         <p className="mt-1.5 text-[11.5px] leading-snug text-warning">
-          {`${fallback.name} runs on the same engine as ${bot.name} — it will not take over during an outage`}
+          {t("workflow.panel.fallbackSameEngine", { fallback: fallback.name, bot: bot.name })}
         </p>
       )}
       {fallback &&
         lacking.map((capability) => (
           <p key={capability} className="mt-1.5 text-[11.5px] leading-snug text-warning">
-            {`${fallback.name} is not allowed to ${capability} — it will not take over this step`}
+            {t("workflow.panel.fallbackLacksCapability", { fallback: fallback.name, capability })}
           </p>
         ))}
     </div>
@@ -437,20 +437,20 @@ export function WorkflowNodePanel({
 
   return (
     <aside
-      aria-label={`Node ${node.id}`}
+      aria-label={t("workflow.panel.asideAriaLabel", { nodeId: node.id })}
       className="flex w-[300px] shrink-0 flex-col overflow-y-auto border-l border-hairline/40 bg-panel"
     >
       <div className="flex items-start gap-2 border-b border-hairline/40 px-4 py-3">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-[13.5px] font-semibold text-ink">
-            {PANEL_TITLE[node.kind]}
+            {t(PANEL_TITLE[node.kind])}
           </h2>
           <p className="mt-0.5 truncate font-mono text-[10.5px] text-ink-secondary">{node.id}</p>
         </div>
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close node panel"
+          aria-label={t("workflow.panel.close")}
           className="shrink-0 rounded-lg p-1.5 text-ink-secondary hover:bg-raised hover:text-ink"
         >
           <X size={15} />
@@ -462,7 +462,7 @@ export function WorkflowNodePanel({
           {entry ? (
             <span className="inline-flex items-center gap-1.5 rounded-lg bg-accent/15 px-2.5 py-1.5 text-[11.5px] font-medium text-accent">
               <Flag size={12} aria-hidden />
-              Entry node
+              {t("workflow.panel.entryNode")}
             </span>
           ) : (
             <button
@@ -471,7 +471,7 @@ export function WorkflowNodePanel({
               className="inline-flex items-center gap-1.5 rounded-lg border border-hairline/50 px-2.5 py-1.5 text-[11.5px] font-medium text-ink-secondary hover:bg-raised hover:text-ink"
             >
               <Flag size={12} aria-hidden />
-              Make entry node
+              {t("workflow.panel.makeEntry")}
             </button>
           )}
         </div>
@@ -483,7 +483,7 @@ export function WorkflowNodePanel({
                 <span
                   className={cn("shrink-0 font-medium", issue.severity === "error" ? "text-danger" : "text-warning")}
                 >
-                  {issue.severity === "error" ? "Error" : "Warning"}
+                  {issue.severity === "error" ? t("workflow.panel.issueError") : t("workflow.panel.issueWarning")}
                 </span>
                 <span className="min-w-0 text-ink-secondary">{issue.message}</span>
               </li>
@@ -495,7 +495,7 @@ export function WorkflowNodePanel({
           <>
             <div>
               <label className={LABEL} htmlFor={field("bot")}>
-                Bot
+                {t("workflow.panel.botLabel")}
               </label>
               <div className="mt-1 flex items-center gap-2">
                 {bot ? (
@@ -511,7 +511,7 @@ export function WorkflowNodePanel({
                 >
                   {!bot && (
                     <option value="" disabled>
-                      {node.botId ? `Missing bot ${node.botId}` : "Pick a bot"}
+                      {node.botId ? t("workflow.panel.missingBot", { botId: node.botId }) : t("workflow.panel.pickBot")}
                     </option>
                   )}
                   {bots
@@ -532,25 +532,24 @@ export function WorkflowNodePanel({
 
             <div>
               <label className={LABEL} htmlFor={field("instructions")}>
-                Instructions
+                {t("workflow.panel.instructions")}
               </label>
               <textarea
                 id={field("instructions")}
                 value={node.instructions}
                 rows={5}
                 maxLength={20_000}
-                placeholder="What this bot should do, and how to decide between the outcomes below."
+                placeholder={t("workflow.panel.instructionsPlaceholder")}
                 onChange={(event) => onUpdate({ ...node, instructions: event.target.value })}
                 className={cn(FIELD, "mt-1 resize-y leading-relaxed")}
               />
             </div>
 
             <div>
-              <span className={LABEL}>Outcomes</span>
+              <span className={LABEL}>{t("workflow.panel.outcomes")}</span>
               <p className="mt-0.5 text-[10.5px] text-ink-secondary">
-                One source handle each. Renaming one rewrites the edge that already routed on it;{" "}
-                <span className="font-mono">{WORKFLOW_FAIL_OUTCOME}</span> is the engine&apos;s own path and is always
-                there.
+                {t("workflow.panel.outcomesHintLead")} <span className="font-mono">{WORKFLOW_FAIL_OUTCOME}</span>{" "}
+                {t("workflow.panel.outcomesHintTail")}
               </p>
               <ul className="mt-1.5 space-y-1.5">
                 {node.outcomes.map((outcome) => (
@@ -566,10 +565,10 @@ export function WorkflowNodePanel({
               </ul>
               <div className="mt-1.5 flex items-center gap-1.5">
                 <input
-                  aria-label="New outcome name"
+                  aria-label={t("workflow.panel.newOutcomeName")}
                   value={newOutcome}
                   maxLength={100}
-                  placeholder="Add an outcome…"
+                  placeholder={t("workflow.panel.addOutcomePlaceholder")}
                   onChange={(event) => setNewOutcome(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" && !event.nativeEvent.isComposing) {
@@ -582,7 +581,7 @@ export function WorkflowNodePanel({
                 <button
                   type="button"
                   onClick={addOutcome}
-                  aria-label="Add outcome"
+                  aria-label={t("workflow.panel.addOutcome")}
                   className="shrink-0 rounded-lg p-1.5 text-ink-secondary hover:bg-raised hover:text-accent"
                 >
                   <Plus size={14} />
@@ -593,7 +592,7 @@ export function WorkflowNodePanel({
             <div className="grid grid-cols-2 gap-2">
               <NumberField
                 id={field("timeout")}
-                label="Timeout (min)"
+                label={t("workflow.panel.timeout")}
                 hint={String(WORKFLOW_NODE_TIMEOUT_DEFAULT_MIN)}
                 value={node.timeoutMinutes}
                 min={1}
@@ -602,7 +601,7 @@ export function WorkflowNodePanel({
               />
               <NumberField
                 id={field("retries")}
-                label="Retries"
+                label={t("workflow.panel.retries")}
                 hint={String(WORKFLOW_NODE_RETRIES_DEFAULT)}
                 value={node.retries}
                 min={0}
@@ -617,14 +616,14 @@ export function WorkflowNodePanel({
           <>
             <div>
               <label className={LABEL} htmlFor={field("prompt")}>
-                Prompt
+                {t("workflow.panel.prompt")}
               </label>
               <textarea
                 id={field("prompt")}
                 value={node.prompt}
                 rows={5}
                 maxLength={20_000}
-                placeholder="What you are being asked to approve."
+                placeholder={t("workflow.panel.promptPlaceholder")}
                 onChange={(event) => onUpdate({ ...node, prompt: event.target.value })}
                 className={cn(FIELD, "mt-1 resize-y leading-relaxed")}
               />
@@ -632,7 +631,7 @@ export function WorkflowNodePanel({
             <div className="grid grid-cols-2 gap-2">
               <NumberField
                 id={field("expires")}
-                label="Expires (hours)"
+                label={t("workflow.panel.expires")}
                 hint={String(WORKFLOW_APPROVAL_EXPIRES_DEFAULT_H)}
                 value={node.expiresHours}
                 min={1}
@@ -641,7 +640,7 @@ export function WorkflowNodePanel({
               />
               <div>
                 <label className={LABEL} htmlFor={field("on-expire")}>
-                  On expiry
+                  {t("workflow.panel.onExpiry")}
                 </label>
                 <select
                   id={field("on-expire")}
@@ -661,11 +660,11 @@ export function WorkflowNodePanel({
                       (sweepApprovals: `node.onExpire ?? "rejected"`), so the unset
                       choice must not promise anything else. New gates from the
                       palette start on renotify. */}
-                  <option value="">Route to rejected (unset)</option>
-                  <option value="renotify">Ask again, then route to rejected</option>
+                  <option value="">{t("workflow.panel.onExpireUnset")}</option>
+                  <option value="renotify">{t("workflow.panel.onExpireRenotify")}</option>
                   {WORKFLOW_APPROVAL_OUTCOMES.map((outcome) => (
                     <option key={outcome} value={outcome}>
-                      Route to {outcome}
+                      {t("workflow.panel.routeTo", { outcome })}
                     </option>
                   ))}
                 </select>
@@ -675,7 +674,7 @@ export function WorkflowNodePanel({
               <div>
                 <NumberField
                   id={field("max-renotify")}
-                  label="Ask again up to (times)"
+                  label={t("workflow.panel.maxRenotify")}
                   hint={String(WORKFLOW_APPROVAL_RENOTIFY_DEFAULT)}
                   value={node.maxRenotify}
                   min={WORKFLOW_APPROVAL_RENOTIFY_MIN}
@@ -683,15 +682,16 @@ export function WorkflowNodePanel({
                   onChange={(maxRenotify) => onUpdate({ ...node, maxRenotify })}
                 />
                 <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-                  Each time the window runs out with no decision, the gate re-arms it and asks again — a fresh
-                  notification on every device, the card refreshed in the chat and the room ({WORKFLOW_APPROVAL_RENOTIFY_MIN}–
-                  {WORKFLOW_APPROVAL_RENOTIFY_MAX} rounds). Only after the last round does it route to rejected.
+                  {t("workflow.panel.renotifyHint", {
+                    min: WORKFLOW_APPROVAL_RENOTIFY_MIN,
+                    max: WORKFLOW_APPROVAL_RENOTIFY_MAX,
+                  })}
                 </p>
               </div>
             )}
             <div>
               <label className={LABEL} htmlFor={field("approval-room")}>
-                Also ask in room
+                {t("workflow.panel.alsoAskInRoom")}
               </label>
               <select
                 id={field("approval-room")}
@@ -710,10 +710,10 @@ export function WorkflowNodePanel({
                 }}
                 className={cn(FIELD, "mt-1")}
               >
-                <option value="">None — the bot's chat only</option>
+                <option value="">{t("workflow.panel.approvalRoomNone")}</option>
                 {node.notifyTargetGroupId !== undefined && !groups.some((group) => group.id === node.notifyTargetGroupId) && (
                   <option value="missing" disabled>
-                    Missing room {node.notifyTargetGroupId}
+                    {t("workflow.panel.missingRoom", { roomId: node.notifyTargetGroupId })}
                   </option>
                 )}
                 {groups.map((group) => (
@@ -723,9 +723,7 @@ export function WorkflowNodePanel({
                 ))}
               </select>
               <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-                The decision card always lands in the chat of the bot that ran the previous step (it opens from the
-                notification). Pick a room to post the same card there too; a decision in either place, or here on
-                the canvas, settles the gate once.
+                {t("workflow.panel.approvalRoomHint")}
               </p>
             </div>
           </>
@@ -735,7 +733,7 @@ export function WorkflowNodePanel({
           <>
             <div>
               <label className={LABEL} htmlFor={field("room")}>
-                Room
+                {t("workflow.panel.room")}
               </label>
               <select
                 id={field("room")}
@@ -745,7 +743,7 @@ export function WorkflowNodePanel({
               >
                 {!groups.some((group) => group.id === node.targetGroupId) && (
                   <option value="" disabled>
-                    Missing room {node.targetGroupId}
+                    {t("workflow.panel.missingRoom", { roomId: node.targetGroupId })}
                   </option>
                 )}
                 {groups.map((group) => (
@@ -757,14 +755,14 @@ export function WorkflowNodePanel({
             </div>
             <div>
               <label className={LABEL} htmlFor={field("template")}>
-                Message
+                {t("workflow.panel.message")}
               </label>
               <textarea
                 id={field("template")}
                 value={node.template}
                 rows={5}
                 maxLength={20_000}
-                placeholder="What to post in the room when the run reaches this node."
+                placeholder={t("workflow.panel.messagePlaceholder")}
                 onChange={(event) => onUpdate({ ...node, template: event.target.value })}
                 className={cn(FIELD, "mt-1 resize-y leading-relaxed")}
               />
@@ -776,7 +774,7 @@ export function WorkflowNodePanel({
           <div>
             <NumberField
               id={field("minutes")}
-              label="Pause (minutes)"
+              label={t("workflow.panel.pauseMinutes")}
               hint={String(WORKFLOW_WAIT_MINUTES_MIN)}
               value={node.minutes}
               min={WORKFLOW_WAIT_MINUTES_MIN}
@@ -786,10 +784,11 @@ export function WorkflowNodePanel({
               onChange={(minutes) => onUpdate({ ...node, minutes: minutes ?? node.minutes })}
             />
             <p className="mt-1 text-[10.5px] leading-relaxed text-ink-secondary">
-              No bot runs here: the run idles for {formatWaitMinutes(node.minutes)} (
-              {WORKFLOW_WAIT_MINUTES_MIN}–{WORKFLOW_WAIT_MINUTES_MAX}), survives a restart, and does not count toward
-              the execution cap. Put one on the edge that loops back to the entry so a continuous cycle breathes
-              between laps.
+              {t("workflow.panel.waitHint", {
+                duration: formatWaitMinutes(node.minutes),
+                min: WORKFLOW_WAIT_MINUTES_MIN,
+                max: WORKFLOW_WAIT_MINUTES_MAX,
+              })}
             </p>
           </div>
         )}
@@ -798,9 +797,9 @@ export function WorkflowNodePanel({
             drag between two handles. This is the same edit for anyone who
             cannot (or would rather not) drag. */}
         <div>
-          <span className={LABEL}>Routing</span>
+          <span className={LABEL}>{t("workflow.panel.routing")}</span>
           <p className="mt-0.5 text-[10.5px] text-ink-secondary">
-            Where each outcome sends the run — the keyboard equivalent of dragging from a handle on the card.
+            {t("workflow.panel.routingHint")}
           </p>
           <ul className="mt-1.5 space-y-1.5">
             {outcomes.map((handle) => (
@@ -817,12 +816,12 @@ export function WorkflowNodePanel({
                   →
                 </span>
                 <select
-                  aria-label={`Routes to, for outcome "${handle.outcome}" on ${node.id}`}
+                  aria-label={t("workflow.panel.routeAriaLabel", { outcome: handle.outcome, nodeId: node.id })}
                   value={routes[handle.outcome] ?? ""}
                   onChange={(event) => onRoute(handle.outcome, event.target.value)}
                   className={cn(FIELD, "min-w-0 flex-1")}
                 >
-                  <option value="">Ends the run</option>
+                  <option value="">{t("workflow.panel.endsRun")}</option>
                   {targets.map((target) => (
                     <option key={target.id} value={target.id}>
                       {target.label}
@@ -840,7 +839,7 @@ export function WorkflowNodePanel({
           className="mt-1 inline-flex items-center justify-center gap-1.5 rounded-lg border border-danger/40 px-2.5 py-1.5 text-[11.5px] font-medium text-danger hover:bg-danger/10"
         >
           <Trash2 size={13} aria-hidden />
-          Delete node
+          {t("workflow.panel.deleteNode")}
         </button>
       </div>
     </aside>
