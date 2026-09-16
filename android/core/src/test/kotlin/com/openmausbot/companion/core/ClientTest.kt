@@ -201,6 +201,8 @@ class ClientTest {
             """{"joinUrl":"https://desktop.example/session/fresh"}""", // cloud desktop
             "{}", // bot read
             "{}", // room read
+            "{}", // archive task
+            "{}", // unarchive task
         ).forEach { server.enqueue(json(it)) }
 
         client.createBot()
@@ -223,8 +225,10 @@ class ClientTest {
         assertEquals("https://desktop.example/session/fresh", client.cloudDesktop("b1").url.toString())
         client.markBotRead("b1")
         client.markRoomRead("g1")
+        client.setTaskArchived("b1", "t2", 123.0)
+        client.setTaskArchived("b1", "t2", null)
 
-        val requests = List(20) { server.takeRequest() }
+        val requests = List(22) { server.takeRequest() }
         assertEquals(
             listOf(
                 "POST /api/bots",
@@ -247,6 +251,8 @@ class ClientTest {
                 "POST /api/bots/b1/computer/join",
                 "POST /api/bots/b1/read",
                 "POST /api/groups/g1/read",
+                "PATCH /api/bots/b1/tasks/t2",
+                "PATCH /api/bots/b1/tasks/t2",
             ),
             requests.map { "${it.method} ${it.path}" },
         )
@@ -264,6 +270,10 @@ class ClientTest {
         assertEquals(mapOf("title" to "Renamed"), stringBody(requests[10].body.readUtf8()))
         assertEquals(mapOf("title" to "Channel next"), stringBody(requests[12].body.readUtf8()))
         assertEquals(mapOf("title" to "Channel renamed"), stringBody(requests[14].body.readUtf8()))
+        // Unarchive is the one task PATCH that must carry an explicit null;
+        // stamps stay plain integers, never scientific notation.
+        assertEquals("""{"archivedAt":123}""", requests[20].body.readUtf8())
+        assertEquals("""{"archivedAt":null}""", requests[21].body.readUtf8())
         requests.forEach { assertEquals("Bearer device-token", it.getHeader("Authorization")) }
     }
 

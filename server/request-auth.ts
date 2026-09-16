@@ -317,7 +317,9 @@ function mutatingPublicRoute(method: string, path: string): boolean {
   // public; possession of the one-time code is its authorization.
   return !path.startsWith("/api/internal/") &&
     path !== "/api/testing/internal-capability" &&
-    path !== "/api/auth/pair";
+    path !== "/api/auth/pair" &&
+    // The same exchange under the shape the companion apps send.
+    path !== "/api/pair";
 }
 
 function secureTokenMatch(actual: string | undefined, expected: string): boolean {

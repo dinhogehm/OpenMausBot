@@ -21,6 +21,13 @@ const claude = {
 };
 
 describe("new bot default model selection", () => {
+  it("preserves an intentional variant for ACP validation, including variants absent from the preview catalog", () => {
+    const preferred = { instanceId: "codex", model: "selected-model", variant: "default" };
+    expect(selectDefaultModelSelection([{ ...codex, capabilities: { modelVariants: true } }], preferred))
+      .toEqual(preferred);
+    expect(selectDefaultModelSelection([codex], preferred)).toEqual({ instanceId: "", model: "" });
+    expect(preferred.variant).toBe("default");
+  });
   it.each(["low", "high"] as const)("honors the configured provider, model, and supported %s effort ahead of the Claude preference", (effort) => {
     const preferred = { instanceId: "codex", model: "selected-model", effort };
     const selection = selectDefaultModelSelection([claude, codex], preferred);

@@ -6,7 +6,7 @@
 
 **Your own team of AI bots, in a chat app.**
 
-<sub>An open-source version of **Grok Bot** — bring-your-own-agent, local-first, on the models you already have.</sub>
+<sub>An independent, open-source project inspired by **Grok Bot** — bring-your-own-agent, local-first, on the models you already have. Not affiliated with xAI.</sub>
 
 Every bot in the sidebar is a real agent — Claude or Codex running locally under the hood — with its own
 personality, its own model, its own cloud computer, and its own connected apps.
@@ -56,7 +56,7 @@ Talk to them like contacts. Watch them work. Approve what matters.
 
 ## Why
 
-One assistant in one box is the wrong shape for agents. OpenMausBot is an open-source take on **Grok Bot** —
+One assistant in one box is the wrong shape for agents. OpenMausBot is an independent, open-source project inspired by **Grok Bot** —
 it keeps the idea (AI as a *messaging app*: a roster of bots you chat with, each with its own personality,
 memory of its thread, model, computer, and apps) and rebuilds it open, local-first, and on the agents you
 already have:
@@ -168,7 +168,8 @@ Press the speaker on any reply, or switch a bot to read its answers out as they 
 to what ran overnight while you make breakfast. Hit **call** and it's a conversation: it hears you, tells
 you what it's doing while it works, and asks for approvals out loud.
 
-Bring your own ElevenLabs key — paste it once in App Settings, pick a voice, and every bot can talk.
+Choose ElevenLabs, Fish Audio, built-in Mac voices, or a local Chatterbox server in an agent profile. Paste a
+cloud key once when needed, pick a voice, and every bot can talk.
 Give a bot its own voice and a channel stops sounding like one person.
 
 **Also in the box:** streaming replies with tool-run activity chips · native macOS dictation from the
@@ -208,7 +209,7 @@ flowchart LR
 | Drivers | `server/drivers/` | One per provider: Claude, Codex, and Grok Build over their local CLIs (stream-JSON / JSON-RPC / ACP), plus a cloud-computer agent. Unknown drivers degrade to "unavailable", never crash the fleet. |
 | Harness | `server/harness/` | Registry (configs → live instances) and the fan-in event bus every client folds. |
 | API | `server/index.ts` | Bots, turns, approvals, model catalog, computer lifecycle, connectors, config — HTTP + SSE. |
-| Voice | `server/tts/` | ElevenLabs, bring your own key. Runs on the harness so the key never reaches the UI; markdown is rewritten into something worth hearing before it is spoken. |
+| Voice | `server/tts/` | ElevenLabs, Fish Audio, built-in Mac voices, or local Chatterbox. Cloud keys stay on the harness; markdown is rewritten into something worth hearing before it is spoken. |
 | App | `src/` | The chat shell. Server-backed store, one reducer, zero client-side transports. |
 | Desktop | `electron/` | macOS, Windows, and Ubuntu shells with an embedded harness and platform capabilities; Apple speech stays macOS-only, Ubuntu Xorg has opt-in local control, and Wayland remains fail-closed. |
 
@@ -293,6 +294,7 @@ in the sidebar footer) when you want to enable its integration:
 | Composio project key (`ak_…`) | Connect Gmail, GitHub, Slack, Notion, and other apps to your bots | [OpenMausBot Composio setup](docs/composio.md) |
 | Box API key | Give bots an isolated remote Linux computer with a desktop and terminal | [Box API key guide](https://docs.ascii.dev/box/api-keys) |
 | ElevenLabs key | Read replies aloud, and call your bots | [ElevenLabs API keys](https://elevenlabs.io/app/settings/api-keys) |
+| Fish Audio key | Read replies aloud with Fish Audio voices, and call your bots | [Fish Audio API keys](https://fish.audio/app/api-keys/) |
 
 Composio and Box are third-party services with their own accounts and terms. Box is a paid service after
 its trial, and using a cloud computer may incur charges.
@@ -330,7 +332,7 @@ Early but real — the loop works end to end: message → agent → streamed rep
 computer use. macOS, Windows, and Ubuntu 24.04 x64 have released builds; Ubuntu remains a beta with the
 capability limits above. Rough edges to expect: hosted/mobile connectivity is still being built, and webhook
 triggers currently use the local receiver rather than an always-on hosted relay.
-Voice needs an ElevenLabs key, and calls are macOS-only for now (they ride the same on-device dictation as
+Hosted voice needs an ElevenLabs or Fish Audio key; built-in Mac and local Chatterbox voices need no cloud key. Calls are macOS-only for now (they ride the same on-device dictation as
 the composer mic) — see [`docs/voice-mode.md`](docs/voice-mode.md) for the design and the known gaps.
 
 Contributions welcome — the driver SPI in [`server/contracts.ts`](server/contracts.ts) is deliberately
@@ -363,8 +365,9 @@ the server, not your saved work. Use `--no-open` to skip opening the browser.
 
 Phone access is optional and defaults to skipping. Choose an explicitly
 approved managed public HTTPS endpoint protected by pairing, an existing
-Tailscale connection, or your own HTTPS reverse proxy. Use Safari or an installed
-iOS app on iPhone/iPad; Android uses the web browser for this CLI flow. A phone
+Tailscale connection, or your own HTTPS reverse proxy. Both native apps pair from
+this flow: the QR is an app link when you are connecting an Android phone, and the
+iOS app takes either that or the web link. A browser works on either phone. A phone
 cannot use a localhost link. `--local` ignores saved remote access for one launch;
 `--no-pair` suppresses phone prompts and invitations but does not disable a saved
 remote connection.

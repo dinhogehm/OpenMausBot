@@ -490,7 +490,17 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
                             try {
                                 val updated = session.switchVoiceProvider(next)
                                 if (updated != null) {
+                                    val (resetForm, resetBaseline) = ProfileRules.afterVoiceProviderSwitch(
+                                        form = form,
+                                        baseline = baseline,
+                                        config = updated,
+                                    )
+                                    form = resetForm
+                                    baseline = resetBaseline
                                     config = updated
+                                    // Never render or preview the previous
+                                    // provider's identifiers while reloading.
+                                    voices = emptyList()
                                     voices = session.voiceOptions()
                                 }
                             } finally {

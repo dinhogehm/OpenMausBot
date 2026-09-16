@@ -19,6 +19,7 @@ import { customMcpServers,
   persistableInstanceConfigs,
   roomTurnTimeoutMinutes,
   maxConcurrentBotThreads,
+  threadEventLogMaxBytes,
   showToolCallsEnabled,
   saveConfig,
   skillAuthoringEnabled,
@@ -37,12 +38,35 @@ import { customMcpServers,
 } from "./config.ts";
 
 describe("configuration boundaries", () => {
+  it("keeps Fish Audio and ElevenLabs voice credentials separate", () => {
+    const parsed = parseConfigPatch({
+      tts: { provider: "fish", key: "eleven-key", fishKey: "fish-key", voice: "fish-voice" },
+    });
+    expect(parsed.tts).toEqual({
+      provider: "fish",
+      key: "eleven-key",
+      fishKey: "fish-key",
+      voice: "fish-voice",
+    });
+    expect(() => parseConfigPatch({ tts: { provider: "unknown" } })).toThrow("provider");
+  });
+
   it("defaults to three parallel threads and validates a configurable maximum of ten", () => {
     expect(maxConcurrentBotThreads({})).toBe(3);
     expect(parseStoredConfig({ threads: { maxConcurrentPerBot: 10 } })).toEqual({ threads: { maxConcurrentPerBot: 10 } });
     expect(maxConcurrentBotThreads(parseConfigPatch({ threads: { maxConcurrentPerBot: 1 } }))).toBe(1);
     for (const value of [0, -1, 11, 1.5, "10", null]) {
       expect(() => parseConfigPatch({ threads: { maxConcurrentPerBot: value } })).toThrow("threads.maxConcurrentPerBot");
+    }
+  });
+
+  it("caps per-thread event logs only when a size is configured", () => {
+    expect(threadEventLogMaxBytes({})).toBeNull();
+    expect(threadEventLogMaxBytes({ threads: { maxConcurrentPerBot: 3 } })).toBeNull();
+    const parsed = parseStoredConfig({ threads: { maxConcurrentPerBot: 3, eventLogMaxBytes: 50 * 1024 * 1024 } });
+    expect(threadEventLogMaxBytes(parsed)).toBe(50 * 1024 * 1024);
+    for (const value of [0, -1, 256 * 1024 - 1, 1.5, "1000", null]) {
+      expect(() => parseConfigPatch({ threads: { maxConcurrentPerBot: 3, eventLogMaxBytes: value } })).toThrow("threads.eventLogMaxBytes");
     }
   });
 
@@ -93,6 +117,14 @@ describe("configuration boundaries", () => {
     expect(parseConfigPatch(input)).toEqual(expected);
   });
 
+  it("round-trips an opaque model variant without converting omission to none", () => {
+    const defaultModelSelection = { instanceId: "opencodeGo", model: "provider/model", variant: "minimal" };
+    expect(parseConfigPatch({ defaultModelSelection })).toEqual({ defaultModelSelection });
+    expect(parseStoredConfig({ defaultModelSelection })).toEqual({ defaultModelSelection });
+    expect(parseConfigPatch({ defaultModelSelection: { instanceId: "opencodeGo", model: "provider/model" } }))
+      .toEqual({ defaultModelSelection: { instanceId: "opencodeGo", model: "provider/model" } });
+  });
+
   it.each<JsonValue>([
     null,
     "codex/model",
@@ -102,6 +134,9 @@ describe("configuration boundaries", () => {
     { instanceId: "codex", model: "   " },
     { instanceId: "codex", model: 42 },
     { instanceId: "codex", model: "model", effort: "turbo" },
+    { instanceId: "opencodeGo", model: "model", variant: "" },
+    { instanceId: "opencodeGo", model: "model", variant: " low " },
+    { instanceId: "opencodeGo", model: "model", variant: "low", effort: "high" },
   ])("rejects an invalid default model selection: %j", (defaultModelSelection) => {
     expect(() => parseStoredConfig({ defaultModelSelection })).toThrow("defaultModelSelection");
     expect(() => parseConfigPatch({ defaultModelSelection })).toThrow("defaultModelSelection");
@@ -762,6 +797,7 @@ describe("credential env preference", () => {
     "BOX_TOKEN",
     "OPENCODE_API_KEY",
     "OMB_TTS_KEY",
+    "OMB_FISH_AUDIO_API_KEY",
     "OMB_OPENAI_IMAGE_KEY",
     "COMPOSIO_API_KEY",
   ] as const;
@@ -791,7 +827,7 @@ describe("credential env preference", () => {
         xai: { key: "file-xai", url: "https://api.example.test/v1" },
         box: { token: "file-box" },
         opencodeGo: { apiKey: "file-ocg" },
-        tts: { key: "file-tts", voice: "narrator" },
+        tts: { key: "file-tts", fishKey: "file-fish", voice: "narrator" },
         imageGen: { key: "file-image" },
       }),
     );
@@ -799,12 +835,13 @@ describe("credential env preference", () => {
     process.env.BOX_TOKEN = "env-box";
     process.env.OPENCODE_API_KEY = "env-ocg";
     process.env.OMB_TTS_KEY = "env-tts";
+    process.env.OMB_FISH_AUDIO_API_KEY = "env-fish";
     process.env.OMB_OPENAI_IMAGE_KEY = "env-image";
     const cfg = loadConfig();
     expect(cfg.xai).toEqual({ key: "env-xai", url: "https://api.example.test/v1" });
     expect(cfg.box).toEqual({ token: "env-box" });
     expect(cfg.opencodeGo).toEqual({ apiKey: "env-ocg" });
-    expect(cfg.tts).toEqual({ key: "env-tts", voice: "narrator" });
+    expect(cfg.tts).toEqual({ key: "env-tts", fishKey: "env-fish", voice: "narrator" });
     expect(cfg.imageGen).toEqual({ key: "env-image" });
   });
 
@@ -967,6 +1004,15 @@ describe("credential env preference", () => {
     expect(process.env.COMPOSIO_API_KEY).toBe("ak_just_saved");
     expect(process.env.BOX_TOKEN).toBeUndefined();
     expect(process.env.OMB_TTS_KEY).toBeUndefined();
+    expect(process.env.OMB_FISH_AUDIO_API_KEY).toBeUndefined();
+  });
+
+  it("syncCredentialEnv updates Fish Audio without replacing ElevenLabs", () => {
+    process.env.OMB_TTS_KEY = "eleven-kept";
+    process.env.OMB_FISH_AUDIO_API_KEY = "fish-old";
+    syncCredentialEnv({ tts: { fishKey: "fish-new" } });
+    expect(process.env.OMB_TTS_KEY).toBe("eleven-kept");
+    expect(process.env.OMB_FISH_AUDIO_API_KEY).toBe("fish-new");
   });
 
   it("syncCredentialEnv keeps model and provider env in step with a save", () => {
@@ -1015,6 +1061,7 @@ describe("workspace credential env strip", () => {
     // consumed in-process (Computer driver / voice module), never by a CLI
     expect(WORKSPACE_CREDENTIAL_ENV).toContain("BOX_TOKEN");
     expect(WORKSPACE_CREDENTIAL_ENV).toContain("OMB_TTS_KEY");
+    expect(WORKSPACE_CREDENTIAL_ENV).toContain("OMB_FISH_AUDIO_API_KEY");
     expect(WORKSPACE_CREDENTIAL_ENV).toContain("OMB_OPENAI_IMAGE_KEY");
     expect(WORKSPACE_CREDENTIAL_ENV).toContain("OMB_BROWSER_CONNECTION");
     expect(WORKSPACE_CREDENTIAL_ENV).toContain("OMB_USER_DATA");
@@ -1080,8 +1127,8 @@ describe("customMcpServers", () => {
     expect(Object.keys(out)).toEqual(["good_name"]);
   });
 
-  it("skips url transports with a teaching message, not a crash", () => {
-    expect(customMcpServers(cfg({ api: { url: "https://x/mcp" } }))).toEqual({});
+  it("passes a url transport through as streamable HTTP", () => {
+    expect(customMcpServers(cfg({ api: { url: "https://x/mcp" } }))).toEqual({ api: { type: "http", url: "https://x/mcp", headers: {} } });
   });
 
   it("skips malformed entries without dropping the valid ones", () => {
@@ -1101,5 +1148,22 @@ describe("providerReloadKeys", () => {
     expect(providerReloadKeys({ claude: { model: "x" }, profile: { name: "me" } })).toEqual(["claude"]);
     expect(providerReloadKeys({ onboarding: { hintsSeen: ["tour.composer"] } })).toEqual([]);
     expect(providerReloadKeys({ profile: {}, language: "de", tts: {}, features: {} })).toEqual([]);
+  });
+});
+
+describe("customMcpServers with url entries", () => {
+  it("passes remote servers through in the engines' shape, next to commands", () => {
+    const cfg = {
+      mcpServers: {
+        docs: { type: "sse", url: "https://docs.example/sse", headers: { Authorization: "Bearer t" } },
+        notes: { command: "npx" },
+        // one bad address never takes the rest down
+        broken: { url: "not-an-address" },
+      },
+    } as Parameters<typeof customMcpServers>[0];
+    expect(customMcpServers(cfg)).toEqual({
+      docs: { type: "sse", url: "https://docs.example/sse", headers: { Authorization: "Bearer t" } },
+      notes: { command: "npx", args: [], env: {} },
+    });
   });
 });

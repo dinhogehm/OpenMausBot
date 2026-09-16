@@ -5,7 +5,7 @@
 // own transcript and its own provider session — so sensitive work, a
 // long job and a quick question can sit side by side under one agent.
 import { Fragment, useEffect, useRef, useState } from "react";
-import { BellDot, Check, ChevronDown, FolderInput, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Activity, Check, ChevronDown, FolderInput, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { useStore, formatTime, type Bot, type BotProject, type Group, type Task } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
@@ -282,7 +282,7 @@ function ConversationTaskPicker({
           </div>
           <div className="max-h-[320px] overflow-y-auto" role="group" aria-label={looking ? t("task.matching", { count: results.length }) : t("task.list")}>
             {attentionRows.length > 0 && <div className="pb-1">
-              <div className="flex items-center gap-1.5 px-3 pb-1 pt-1.5 text-[11px] font-medium text-ink-secondary"><BellDot size={12} />{t("attention.title")}</div>
+              <div className="flex items-center gap-1.5 px-3 pb-1 pt-1.5 text-[11px] font-medium text-ink-secondary"><Activity size={12} />{t("attention.title")}</div>
               <AttentionThreadRows entries={attentionRows} onJump={(entry) => { onAttentionJump?.(entry); closeMenu(); }} />
             </div>}
             {results.length === 0 ? (

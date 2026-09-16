@@ -2,6 +2,19 @@
 
 ## Execution status
 
+2026-09-15: Company backups now generate a random key in Electron and store it
+wrapped by Admin. Restore uses the owner-authenticated native response, without
+a renderer password. Manual file export remains password-encrypted. Legacy
+cloud archives without a stored key still request their original password.
+The passwordless fixture also exercises opt-in daily backups and exact restart
+recovery. Keys are excluded from renderer results, lists and progress events.
+Passing receipt: `omb-company-backup-ui-9VYfby/receipt.json` in the system temp
+directory. Screenshots of upload consent and narrow preview were reviewed;
+the fixture cleaned up its temporary runtime and profile. Native regressions
+passed 111 tests; the three Settings test files passed 63 tests. Cross-repo
+real-Admin enrollment/upload/preview passed separately in
+`/tmp/omb-desktop-integration-qiFHPi/receipt.json` using fake storage and inference.
+
 The final real-Electron run, including the state/list-failure UI fix, has a passing
 `receipt.json` in the printed evidence directory.
 It transferred a 96,316-byte encrypted archive, made two create requests, one
@@ -66,16 +79,15 @@ Keep the action and resulting state for each check in the receipt:
   connection and its cloud-backup capability. Merely opening the panel does not
   upload anything. Remote surfaces must not obtain the local company-backup
   controls.
-- **Back up this workspace** opens an explicit upload warning and password
-  confirmation. Short or mismatched passwords cannot start a backup. Only
-  allowlisted browser preferences accompany the real encrypted export;
-  passwords are not saved in browser storage.
+- **Back up this workspace** opens an explicit upload warning with no password
+  input. Only allowlisted browser preferences accompany the real encrypted
+  export; the automatically generated key never enters browser storage.
 - The production native transfer uploads the encrypted archive to the
   synthetic multipart endpoint. Progress is visible, and a completed snapshot
   appears with its date and storage usage. Pending uploads are not offered as
   restorable snapshots.
-- A wrong restore password produces an error without a validated preview,
-  replacement request, or change to the current workspace.
+- Passwordless restore never requests a password. Native regression tests cover
+  legacy password archives and refusal of missing service-managed keys.
 - Deletion requires exact **DELETE** for the displayed cloud snapshot. Only
   that archive is deleted; the current workspace is not a cloud-delete target.
 - Restore first downloads and checks the encrypted archive, stages it locally,

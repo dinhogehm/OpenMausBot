@@ -43,7 +43,12 @@ struct WalkieView: View {
         .preferredColorScheme(.dark)
         .animation(.snappy(duration: 0.2), value: reviewing)
         .sheet(isPresented: $showingVoice) {
-            WalkieVoiceSheet { walkie.sample(agentVoice: target?.voice) }
+            WalkieVoiceSheet {
+                Task {
+                    let voice = await session.configStatus()?.walkieAgentVoice(target?.voice)
+                    walkie.sample(agentVoice: voice)
+                }
+            }
                 .preferredColorScheme(.dark)
         }
         .onAppear {

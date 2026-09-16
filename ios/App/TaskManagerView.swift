@@ -124,32 +124,53 @@ struct TaskManagerView: View {
         case let .bot(bot):
             // The manage sheet is the "all threads" surface: closed ones
             // are listed here, dimmed, so nothing a bot tidied is lost.
+            // Threads the person put away fold into their own section at
+            // the bottom — unless they demand attention again, in which case
+            // they resurface in the rows above, exactly like the tree.
+            let searching = !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             let groups = bot.threadGroups(matching: search, includingClosed: true)
+            let archived = searching ? [] : bot.threadGroups(includingClosed: true)
+                .flatMap(\.tasks)
+                .filter { $0.isArchived && !$0.demandsAttention && $0.threadId != bot.threadId }
             if groups.isEmpty {
                 emptySearch
             } else {
                 ForEach(groups) { group in
+                    let rows = searching ? group.tasks : group.tasks.filter {
+                        !$0.isArchived || $0.demandsAttention || $0.threadId == bot.threadId
+                    }
+                    if !rows.isEmpty {
+                        Section {
+                            ForEach(rows, id: \.threadId) { task in
+                                threadButton(task)
+                            }
+                            if group.tasks.isEmpty {
+                                Text("No threads in this folder")
+                                    .foregroundStyle(.secondary)
+                            }
+                        } header: {
+                            if let project = group.project {
+                                HStack(spacing: 5) {
+                                    if let emoji = project.emoji, !emoji.isEmpty {
+                                        Text(verbatim: emoji)
+                                    } else {
+                                        Image(systemName: "folder")
+                                    }
+                                    Text(verbatim: project.name)
+                                }
+                            } else {
+                                Text(bot.projects?.isEmpty == false ? "Unfiled" : "Threads")
+                            }
+                        }
+                    }
+                }
+                if !archived.isEmpty {
                     Section {
-                        ForEach(group.tasks, id: \.threadId) { task in
+                        ForEach(archived, id: \.threadId) { task in
                             threadButton(task)
                         }
-                        if group.tasks.isEmpty {
-                            Text("No threads in this folder")
-                                .foregroundStyle(.secondary)
-                        }
                     } header: {
-                        if let project = group.project {
-                            HStack(spacing: 5) {
-                                if let emoji = project.emoji, !emoji.isEmpty {
-                                    Text(verbatim: emoji)
-                                } else {
-                                    Image(systemName: "folder")
-                                }
-                                Text(verbatim: project.name)
-                            }
-                        } else {
-                            Text(bot.projects?.isEmpty == false ? "Unfiled" : "Threads")
-                        }
+                        Text("Archived (\(archived.count))")
                     }
                 }
             }
@@ -187,6 +208,17 @@ struct TaskManagerView: View {
         .contextMenu {
             Button("Rename", systemImage: "pencil") { beginRename(task) }
                 .disabled(isMutating)
+            if current.isBot {
+                Button {
+                    toggleArchive(task)
+                } label: {
+                    Label(
+                        task.isArchived ? "Unarchive" : "Archive",
+                        systemImage: task.isArchived ? "arrow.uturn.backward" : "archivebox"
+                    )
+                }
+                .disabled(isMutating || task.isWorking)
+            }
             Button("Delete", systemImage: "trash", role: .destructive) { taskToDelete = task }
                 .disabled(!canDelete(task))
         }
@@ -195,6 +227,18 @@ struct TaskManagerView: View {
                 Label("Delete", systemImage: "trash")
             }
             .disabled(!canDelete(task))
+            if current.isBot {
+                Button {
+                    toggleArchive(task)
+                } label: {
+                    Label(
+                        task.isArchived ? "Unarchive" : "Archive",
+                        systemImage: task.isArchived ? "arrow.uturn.backward" : "archivebox"
+                    )
+                }
+                .tint(.orange)
+                .disabled(isMutating || task.isWorking)
+            }
             Button { beginRename(task) } label: {
                 Label("Rename", systemImage: "pencil")
             }
@@ -218,6 +262,25 @@ struct TaskManagerView: View {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         perform { await rename(task, title: trimmed) }
+    }
+
+    private func toggleArchive(_ task: BotTask) {
+        // The desktop sends Date.now(); the server takes any epoch number.
+        let stamp = task.isArchived ? nil : (Date().timeIntervalSince1970 * 1000).rounded()
+        perform { await setArchived(task, archivedAt: stamp) }
+    }
+
+    private func setArchived(_ task: BotTask, archivedAt: Double?) async {
+        guard case let .bot(bot) = current else { return }
+        // Recheck after the menu; an SSE update may have started work there.
+        guard let liveTask = tasks.first(where: { $0.threadId == task.threadId }), !liveTask.isWorking else {
+            showError("This thread can't be archived while it's working.")
+            return
+        }
+        guard await session.setTaskArchived(liveTask, for: bot, archivedAt: archivedAt) else {
+            showError("Couldn't update the thread. Try again.")
+            return
+        }
     }
 
     /// Lock before creating the Task so two rapid taps cannot send two writes.

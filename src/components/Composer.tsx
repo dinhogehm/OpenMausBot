@@ -25,6 +25,7 @@ import { BotAvatar } from "./Avatar";
 import { MentionTextarea } from "./MentionTextarea";
 import { ComposerAttachments, pathForFile } from "./ComposerAttachments";
 import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
+import { PlaceChip } from "./PlaceChip";
 import { FullAccessWarning } from "./FullAccessWarning";
 import { ApprovalModeSelector } from "./ApprovalModeSelector";
 import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode";
@@ -117,6 +118,8 @@ export function Composer({
     !group && Boolean(bot) && state.instances.find((i) => i.instanceId === bot!.modelSelection.instanceId)?.capabilities?.queueing === true;
   // a pending approval blocks the prompt until it is answered
   const threadId = group?.threadId ?? bot?.threadId ?? "";
+  // The conversation's own place, when pinned; the chip reads it next to the bot default.
+  const composerTask = profile?.tasks?.find((task) => task.threadId === threadId);
   // the VISIBLE branch only — an approval left on a branch you edited away
   // from must not keep blocking the composer
   const approvals = pendingApprovals(group ? group.messages : bot ? visibleMessages(bot) : []);
@@ -865,6 +868,15 @@ export function Composer({
                   onSelect={setApprovalMode}
                   disabled={Boolean(modeBot.busy)}
                   trustedModesAvailable={trustedThreadAccess}
+                />
+              )}
+              {modeBot && !remoteClient && (
+                <PlaceChip
+                  bot={modeBot}
+                  task={composerTask}
+                  live={Boolean(modeBot.busy)}
+                  disabled={Boolean(modeBot.busy)}
+                  onPin={(surface) => dispatch({ type: "updateTask", botId: modeBot.id, threadId: modeBot.threadId, patch: { surface } })}
                 />
               )}
             </div>

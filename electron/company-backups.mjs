@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { chmod, lstat, mkdir, mkdtemp, rm, statfs } from "node:fs/promises";
 import { isAbsolute, join, parse, resolve } from "node:path";
@@ -53,6 +53,7 @@ function cloudMetadata(value, expectedStatus, expected) {
     fail("invalid_response", "The backup service returned inconsistent archive metadata.");
   }
   return { id: value.id, status: value.status, sizeBytes: value.sizeBytes, sha256: value.sha256,
+    passwordRequired: value.passwordRequired !== false,
     ...(typeof value.appVersion === "string" ? { appVersion: value.appVersion.slice(0, 64) } : {}),
     ...(Number.isSafeInteger(value.createdAt) ? { createdAt: value.createdAt } : {}),
     ...(Number.isSafeInteger(value.completedAt) ? { completedAt: value.completedAt } : {}),
@@ -150,11 +151,11 @@ export function createCompanyBackups({ localRequest, portalRequest, tempRoot, fe
   return {
     backup(input, signal, onProgress) {
       return run(signal, onProgress, async (directory, operationSignal, report) => {
-        checkPassword(input?.password);
-        const clientState = input.clientState ?? {};
+        const password = randomBytes(32).toString("base64url");
+        const clientState = input?.clientState ?? {};
         if (!record(clientState) || Object.values(clientState).some(value => typeof value !== "string") || Buffer.byteLength(JSON.stringify(clientState)) > 2 * 1024 ** 2) fail("invalid_preferences", "Saved desktop preferences exceed the supported backup limit.");
         report("exporting");
-        const exported = await localJson(`${LOCAL}/export`, { password: input.password, clientState }, operationSignal);
+        const exported = await localJson(`${LOCAL}/export`, { password, clientState }, operationSignal);
         if (!identifier(exported.id) || !archiveSize(exported.bytes)) fail("invalid_archive", "The exported encrypted archive must contain no more than 10 GiB.");
         const appVersion = input.appVersion ?? exported.summary?.appVersion ?? "unknown";
         if (typeof appVersion !== "string" || !/^[a-zA-Z\d][a-zA-Z\d ._+()-]{0,63}$/.test(appVersion)) fail("invalid_response", "The desktop app version is invalid.");
@@ -166,9 +167,10 @@ export function createCompanyBackups({ localRequest, portalRequest, tempRoot, fe
         let pendingId = null;
         try {
           operationSignal.throwIfAborted();
-          const started = await portalRequest(CLOUD, { method: "POST", body: { sizeBytes: exported.bytes, sha256, appVersion }, signal: operationSignal });
+          const started = await portalRequest(CLOUD, { method: "POST", body: { sizeBytes: exported.bytes, sha256, appVersion, unlockKey: password }, signal: operationSignal });
           if (identifier(started?.id)) pendingId = started.id;
           const backup = cloudMetadata(started, "uploading");
+          if (backup.passwordRequired) fail("update_required", "Update your organisation's Admin service to enable passwordless backups.");
           if (backup.sizeBytes !== exported.bytes || backup.sha256 !== sha256 || started.partSizeBytes !== PART_BYTES || started.partCount !== Math.ceil(exported.bytes / PART_BYTES)) fail("invalid_response", "The backup service returned an invalid multipart plan.");
           const parts = [];
           report("uploading", 0, exported.bytes);
@@ -192,6 +194,7 @@ export function createCompanyBackups({ localRequest, portalRequest, tempRoot, fe
           report("completing", exported.bytes, exported.bytes);
           const completed = await portalRequest(`${CLOUD}/${backup.id}/complete`, { method: "POST", body: { parts }, signal: operationSignal });
           const result = cloudMetadata(completed, "ready", backup);
+          if (result.passwordRequired) fail("invalid_response", "The backup service did not retain the encryption key.");
           pendingId = null; report("ready", exported.bytes, exported.bytes); return result;
         } finally {
           if (pendingId) {
@@ -202,10 +205,12 @@ export function createCompanyBackups({ localRequest, portalRequest, tempRoot, fe
     },
     prepareRestore(input, signal, onProgress) {
       return run(signal, onProgress, async (directory, operationSignal, report) => {
-        checkPassword(input?.password);
-        if (!identifier(input.id)) fail("invalid_archive", "Select a valid cloud backup.");
+        if (!identifier(input?.id)) fail("invalid_archive", "Select a valid cloud backup.");
         const signed = await portalRequest(`${CLOUD}/${input.id}/download`, { method: "POST", body: {}, signal: operationSignal });
         const backup = cloudMetadata(signed, "ready");
+        // Keys stay in the native process, never in the renderer or object URL.
+        const password = backup.passwordRequired ? input.password : signed.unlockKey;
+        checkPassword(password);
         if (backup.id !== input.id) fail("invalid_response", "The backup service returned a different archive.");
         liveExpiry(signed.expiresAt);
         const url = signedUrl(signed.url, allowLoopbackForTests);
@@ -230,7 +235,7 @@ export function createCompanyBackups({ localRequest, portalRequest, tempRoot, fe
         const receipt = await readUploadReceipt(response, operationSignal);
         if (!identifier(receipt.id)) fail("invalid_response", "The local workspace returned an invalid upload receipt.");
         await checkSpace(directory, backup.sizeBytes * 2); operationSignal.throwIfAborted();
-        const preview = await localJson(`${LOCAL}/preview`, { id: receipt.id, password: input.password }, operationSignal, true);
+        const preview = await localJson(`${LOCAL}/preview`, { id: receipt.id, password }, operationSignal, true);
         if (!identifier(preview.id) || !record(preview.summary) || preview.summary.format !== "openmaus.workspace-backup" || preview.summary.version !== 1 ||
             !identifier(preview.summary.id) || !Number.isSafeInteger(preview.summary.bytes) || preview.summary.bytes < 0 || preview.summary.bytes > MAX_BYTES) fail("invalid_response", "The local workspace returned an invalid restore preview.");
         report("ready", backup.sizeBytes, backup.sizeBytes);

@@ -1,7 +1,7 @@
 import { t } from "./i18n";
 
 export interface FeatureFlagConfig {
-  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean };
+  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean };
   browserEngine?: { kind: "engine" | "unavailable"; reason?: string; installable?: boolean; installing?: boolean; installError?: string };
 }
 
@@ -44,4 +44,11 @@ export function showToolCallsEnabled(config: FeatureFlagConfig | null | undefine
  * the controls simply are not offered. */
 export function sharedComputersEnabled(config: FeatureFlagConfig | null | undefined): boolean {
   return config?.features?.sharedComputers === true;
+}
+
+/** Claude bots also see the MCP servers of this machine's own Claude Code
+ * setup (Plugins → MCP servers). Off by default — every extra tool costs
+ * tokens on each message — and mirrors the server's claudeUserMcpEnabled. */
+export function claudeUserMcpEnabled(config: FeatureFlagConfig | null | undefined): boolean {
+  return config?.features?.claudeUserMcp === true;
 }

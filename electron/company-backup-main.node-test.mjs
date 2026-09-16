@@ -136,7 +136,7 @@ test("restore consumes the exact confirmed preview before yielding and refuses d
   assert.equal(f.context.companyBackupState.pendingRestore, true);
 });
 
-const ENABLE_SCHEDULE = { enabled: true, password: "fixture scheduled password", confirmation: "BACK UP THIS WORKSPACE DAILY" };
+const ENABLE_SCHEDULE = { enabled: true, confirmation: "BACK UP THIS WORKSPACE DAILY" };
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 const snapshotRequest = f => f.sent.findLast(([channel]) => channel === "company-backups:collect-client-state")?.[1];
 
@@ -189,7 +189,7 @@ for (const [name, mutate] of [
 ]) {
   test(`a scheduled backup defers during ${name} without requesting browser state or exporting`, async () => {
     const f = fixture(); mutate(f);
-    await assert.rejects(f.scheduleOptions.run("fixture backup password", new AbortController().signal, f.context.companyBackupScope()), { code: "workspace_busy" });
+    await assert.rejects(f.scheduleOptions.run(new AbortController().signal, f.context.companyBackupScope()), { code: "workspace_busy" });
     assert.equal(snapshotRequest(f), undefined);
   });
 }

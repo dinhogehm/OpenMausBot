@@ -101,6 +101,27 @@ describe("Settings → Engines → setup cards", () => {
     expect(html).not.toContain("Install Kimi on this server");
   });
 
+  it("shows a standing warning from the snapshot without a command to run", () => {
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("navigator", { userAgent: "Linux" });
+    fixture.bots = [];
+    fixture.instances = [{
+      instanceId: "claude", displayName: "Claude", driverKind: "claudeAgent", cliDefault: "claude",
+      snapshot: {
+        state: "available", authenticated: true,
+        warning: { title: "Bots inherit this machine's Claude Code setup", message: "OMB_CLAUDE_INHERIT_USER_CONFIG=1 is set." },
+      },
+      models: { default: "model", options: [] },
+    }];
+    const html = renderToStaticMarkup(createElement(EnginesSettings));
+    expect(html).toContain("data-engine-warning-notice");
+    expect(html).toContain("Bots inherit this machine&#x27;s Claude Code setup");
+    expect(html).toContain("OMB_CLAUDE_INHERIT_USER_CONFIG=1 is set.");
+    expect(html).not.toContain("data-engine-update-notice");
+    delete fixture.instances[0].snapshot.warning;
+    expect(renderToStaticMarkup(createElement(EnginesSettings))).not.toContain("data-engine-warning-notice");
+  });
+
   it("exposes managed Antigravity setup and keeps custom engines free of cloud sign-in", () => {
     vi.stubGlobal("window", {});
     vi.stubGlobal("navigator", { userAgent: "Linux" });

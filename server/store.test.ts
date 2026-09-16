@@ -65,6 +65,27 @@ describe("Store", () => {
     expect(bot.modelSelection).toEqual(selection());
   });
 
+  it("clears provider-owned voice ids as one durable mutation", () => {
+    const store = new Store(selection);
+    const first = store.createBot();
+    const second = store.createBot();
+    store.patchBot(first.id, { voice: "provider-a-1" });
+    store.patchBot(second.id, { voice: "provider-a-2" });
+
+    const save = vi.spyOn(store as unknown as { saveBots(bots: BotRecord[]): void }, "saveBots");
+    save.mockImplementationOnce(() => { throw new Error("disk full"); });
+    expect(() => store.clearVoiceSelections()).toThrow("disk full");
+    expect(first.voice).toBe("provider-a-1");
+    expect(second.voice).toBe("provider-a-2");
+
+    expect(store.clearVoiceSelections().map((bot) => bot.id).sort()).toEqual([first.id, second.id].sort());
+    expect(first.voice).toBeUndefined();
+    expect(second.voice).toBeUndefined();
+    const reloaded = new Store(selection);
+    expect(reloaded.bot(first.id)?.voice).toBeUndefined();
+    expect(reloaded.bot(second.id)?.voice).toBeUndefined();
+  });
+
   it("restarts with legacy bot and group migrations despite an unreadable team registry, without permitting later team writes", () => {
     const original = new Store(selection);
     const bot = original.createBot({ name: "Legacy bot", section: "Research" });
@@ -589,6 +610,22 @@ describe("Store", () => {
 
     const reloaded = new Store(selection);
     expect(reloaded.bot(bot.id)?.modelSelection.effort).toBe("high");
+  });
+
+  it("stores variants independently and seeds future conversations from the bot default", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const first = bot.threadId;
+    const second = store.createTask(bot.id, "Second")!;
+    const chosen = { instanceId: "opencodeGo", model: "provider/model", variant: "low" };
+    store.switchTaskModel(bot.id, first, chosen, false, false);
+    expect(store.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual(selection());
+    store.patchBot(bot.id, { modelSelection: { ...chosen, variant: "minimal" } });
+    const future = store.createTask(bot.id, "Future")!;
+    const reloaded = new Store(selection);
+    expect(reloaded.projectBotForTask(bot.id, first)!.modelSelection).toEqual(chosen);
+    expect(reloaded.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual(selection());
+    expect(reloaded.projectBotForTask(bot.id, future.threadId)!.modelSelection).toEqual({ ...chosen, variant: "minimal" });
   });
 
   it("keeps one persisted Chief of Staff per section and supports handoff", () => {

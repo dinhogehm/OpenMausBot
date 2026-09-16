@@ -65,6 +65,7 @@ class AndroidThreadNavigationTest {
     private lateinit var scene: WiringScene
     private val requests = ConcurrentLinkedQueue<RecordedRequest>()
     private var answerAction: (RecordedRequest) -> MockResponse = { MockResponse().setResponseCode(503) }
+    private var answerHistory: () -> MockResponse = { json("""{"messages":[],"hasMore":false}""") }
     private val unavailable = "The computer answered with an error (503)."
     private val fixture = bot().copy(
         threadId = "first",
@@ -84,7 +85,7 @@ class AndroidThreadNavigationTest {
                 return when {
                     request.method != "GET" -> answerAction(request)
                     request.path == "/api/instances" -> json("""{"instances":[]}""")
-                    request.path?.startsWith("/api/threads/") == true -> json("""{"messages":[],"hasMore":false}""")
+                    request.path?.startsWith("/api/threads/") == true -> answerHistory()
                     else -> MockResponse().setResponseCode(404)
                 }
             }
@@ -137,6 +138,38 @@ class AndroidThreadNavigationTest {
     }
 
     @Test
+    fun `an open nonactive thread reloads its history after a full reconnect`() {
+        val reads = AtomicInteger()
+        answerHistory = {
+            val text = if (reads.incrementAndGet() == 1) "Before reconnect" else "Recovered after reconnect"
+            json("""{"messages":[{"id":"reply","role":"bot","kind":"text","at":1,"text":"$text"}],"hasMore":false}""")
+        }
+        val destination = Destination.Chat(ChatTarget.Bot(fixture.id, "second"))
+        mount {
+            ChatScreen(destination, onResolved = {}, onBack = {}, onOpenComputer = {}, onOpenOverview = {})
+        }
+        compose.waitUntil(5_000) {
+            compose.onAllNodesWithText("Before reconnect").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Before reconnect").assertIsDisplayed()
+        compose.runOnIdle {
+            scene.session.disconnect()
+            scene.session.connect()
+        }
+        // The new Hello cannot resume: fleet hydration only contains the
+        // desktop-active first thread. Keep the second chat on screen throughout.
+        compose.waitUntil(5_000) { scene.streamStarts.get() == 2 }
+        compose.waitUntil(5_000) {
+            compose.onAllNodesWithText("Recovered after reconnect").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Recovered after reconnect").assertIsDisplayed()
+        assertEquals(2, reads.get())
+        assertTrue(requests.filter { it.path?.startsWith("/api/threads/") == true }
+            .all { it.path?.startsWith("/api/threads/second/messages") == true })
+        assertEquals("first", scene.session.state.value.bot(fixture.id)?.threadId)
+    }
+
+    @Test
     fun `a busy bot can select another thread locally from the picker`() {
         val busy = fixture.copy(busy = true, tasks = fixture.tasks!!.map {
             if (it.threadId == "first") it.copy(busy = true, activity = "working") else it
@@ -183,6 +216,21 @@ class AndroidThreadNavigationTest {
         assertEquals("/api/bots/${fixture.id}/tasks/second", request.path)
         assertEquals("""{"title":"Keep these release notes"}""", request.body.readUtf8())
         assertEquals("Second thread", scene.session.state.value.bot(fixture.id)?.tasks?.get(1)?.title)
+    }
+
+    @Test
+    fun `archiving a thread patches a timestamp and the sheet reports failure`() {
+        mount { TaskSheet(Chat.BotChat(fixture), onDismiss = {}, onSelectTask = {}) }
+        compose.onNodeWithContentDescription("Archive First thread").performClick()
+        compose.waitUntil(5_000) {
+            requests.any { it.method == "PATCH" && it.path == "/api/bots/${fixture.id}/tasks/first" }
+        }
+        val body = requests.single {
+            it.method == "PATCH" && it.path == "/api/bots/${fixture.id}/tasks/first"
+        }.body.readUtf8()
+        assertTrue(Regex("""\{"archivedAt":\d+(\.\d+)?}""").matches(body), body)
+        waitForError()
+        compose.onNodeWithText("${fixture.name}'s threads").assertIsDisplayed()
     }
 
     @Test

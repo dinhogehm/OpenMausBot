@@ -58,7 +58,7 @@ export function createCompanyBackupSchedule({ store, scope, run, onState = () =>
         if (!current(stamp) || !sameScope(authority, scope())) return;
         abort.signal.throwIfAborted();
         publish("running");
-        await run(active.password, abort.signal, authority);
+        await run(abort.signal, authority);
         if (!current(stamp) || !sameScope(authority, scope())) return;
         abort.signal.throwIfAborted();
         const completed = { ...active, lastBackupAt: now(), nextBackupAt: now() + DAY };
@@ -90,13 +90,14 @@ export function createCompanyBackupSchedule({ store, scope, run, onState = () =>
         const saved = await store.read();
         if (!current(stamp)) return snapshot();
         if (saved !== null) {
-          if (!saved || saved.version !== 1 || typeof saved.scope !== "string" || saved.scope.length > 8192 ||
-              typeof saved.password !== "string" || saved.password.length < 12 || saved.password.length > 1024 ||
+          if (!saved || ![1, 2].includes(saved.version) || typeof saved.scope !== "string" || saved.scope.length > 8192 ||
               !validTime(saved.nextBackupAt) || (saved.lastAttemptAt !== undefined && !validTime(saved.lastAttemptAt)) ||
               (saved.lastBackupAt !== undefined && !validTime(saved.lastBackupAt))) throw new Error("Invalid schedule");
-          record = { version: 1, scope: saved.scope, password: saved.password, nextBackupAt: Math.min(saved.nextBackupAt, now() + DAY),
+          record = { version: 2, scope: saved.scope, nextBackupAt: Math.min(saved.nextBackupAt, now() + DAY),
             ...(saved.lastAttemptAt === undefined ? {} : { lastAttemptAt: saved.lastAttemptAt }),
             ...(saved.lastBackupAt === undefined ? {} : { lastBackupAt: saved.lastBackupAt }) };
+          if (saved.version === 1) await store.write({ ...record });
+          if (!current(stamp)) return snapshot();
         }
         publish(record ? "waiting" : "off");
         await tick();
@@ -110,13 +111,12 @@ export function createCompanyBackupSchedule({ store, scope, run, onState = () =>
       if (input?.enabled === false && Object.keys(input).length === 1) return forget();
       if (needsClear) throw new Error("Finish turning daily backups off before enabling them again.");
       if (input?.enabled !== true || input.confirmation !== "BACK UP THIS WORKSPACE DAILY" ||
-          typeof input.password !== "string" || input.password.length < 12 || input.password.length > 1024 ||
-          Object.keys(input).some(key => !["enabled", "password", "confirmation"].includes(key))) throw new Error("Confirm daily backup of this entire workspace and use a password of 12 to 1,024 characters.");
+          Object.keys(input).some(key => !["enabled", "confirmation"].includes(key))) throw new Error("Confirm daily backup of this entire workspace.");
       const currentScope = scope(), authority = currentScope ? { ...currentScope } : null;
       if (!authority) throw new Error("Connect your organisation in the local desktop before enabling daily backups.");
       const stamp = ++revision;
       stopTimer(); controller?.abort();
-      record = { version: 1, scope: authority.key, password: input.password, nextBackupAt: now() + DAY };
+      record = { version: 2, scope: authority.key, nextBackupAt: now() + DAY };
       try {
         await store.write({ ...record });
         if (!current(stamp)) return snapshot();

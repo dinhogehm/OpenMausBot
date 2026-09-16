@@ -1721,6 +1721,19 @@ class Session(
         }
     }
 
+    suspend fun archiveTask(task: BotTask, forBot: Bot, archivedAt: Double?): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.setTaskArchived(forBot.id, task.threadId, archivedAt)
+            refresh()
+            true
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
     suspend fun deleteTask(task: BotTask, forBot: Bot): Bot? {
         val activeClient = client ?: return null
         return try {

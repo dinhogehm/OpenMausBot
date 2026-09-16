@@ -14,6 +14,7 @@ import {
   reducer,
   requestConfirmedBotDeletion,
   visibleNotificationThread,
+  type AppState,
   type Bot,
   type BotAnnouncement,
   type ConfigStatusFrame,
@@ -22,7 +23,17 @@ import {
   type Action,
 } from "./store";
 import { openLiveEvents, type LiveEventSourceLike, type LiveEventsPlatform } from "../lib/live-events";
+import type { RuntimeEvent, ModelVariantState } from "../../server/contracts.ts";
 import type { RoutineRun } from "../lib/routines";
+
+describe("screen frame ownership", () => {
+  it("retains the source thread so a sibling's frame cannot masquerade as the selected screen", () => {
+    const first = reducer(initialState, { type: "screenFrame", botId: "bot", threadId: "vm-thread", png: "vm", mime: "image/png" });
+    const second = reducer(first, { type: "screenFrame", botId: "bot", threadId: "browser-thread", png: "browser", mime: "image/jpeg" });
+    expect(first.screens.bot).toMatchObject({ threadId: "vm-thread", png: "vm" });
+    expect(second.screens.bot).toMatchObject({ threadId: "browser-thread", png: "browser" });
+  });
+});
 
 describe("composer thread approval persistence", () => {
   it.each(["ask", "edits", "auto", "full", "custom"] as const)("saves %s through the scoped bridge and returns its committed state", async mode => {
@@ -1229,6 +1240,24 @@ describe("canonical message races", () => {
   });
 });
 
+describe("computer destination announcements", () => {
+  it.each(["botPatched", "taskSwitched", "botPatchedSwitch"] as const)("clears the old target on Auto via %s", (kind) => {
+    const bot: Bot = {
+      id: "computer-bot", threadId: "computer-thread", name: "Ziggy", title: "", description: "",
+      notifications: true, color: "green", unread: false,
+      modelSelection: { instanceId: "codex", model: "default" }, computer: "browser",
+      messages: [{ id: "message", role: "user", kind: "text", at: 1, text: "Keep this conversation" }],
+    };
+    const { computer: _oldComputer, ...announcement } = bot;
+    const next = reducer({ ...initialState, bots: [bot] }, {
+      type: kind === "taskSwitched" ? "taskSwitched" : "botPatched",
+      bot: { ...announcement, threadId: kind === "botPatchedSwitch" ? "replacement-thread" : bot.threadId },
+    });
+    expect(next.bots[0]?.computer).toBeUndefined();
+    expect(next.bots[0]?.messages).toEqual(bot.messages);
+  });
+});
+
 describe("browser profile announcements", () => {
   it.each([undefined, null, "guest", "another-profile"])("replaces an old shared profile with %s without losing chat", (profile) => {
     const bot: Bot = {
@@ -1888,5 +1917,86 @@ describe("live config frames", () => {
       budgets: { monthlyUsd: 10, warnAtPercent: 80 },
       billing: { currency: "USD" },
     });
+  });
+});
+
+
+describe("conversation model variant discoveries", () => {
+  const selection = { instanceId: "opencode", model: "provider/model", variant: "minimal" };
+  const owner: Bot = { id: "owner", threadId: "first", name: "Owner", title: "", description: "", notifications: true,
+    color: "green", unread: false, modelSelection: selection, messages: [],
+    tasks: ["first", "second"].map((threadId) => ({ threadId, title: threadId, createdAt: 1, modelSelection: selection })) };
+  const start = () => ({ ...initialState, bots: [owner], instances: [{ instanceId: "opencode", driverKind: "opencodeGo", displayName: "OpenCode",
+    snapshot: { state: "available" as const }, capabilities: { modelVariants: true }, models: { default: selection.model, options: [] } }] });
+  const base = (threadId = "first", turnId = "turn-1") => ({ eventId: `${threadId}-${turnId}`, provider: "opencodeGo" as const,
+    providerInstanceId: "opencode", threadId, turnId, createdAt: "2026-09-15T12:00:00Z" });
+  const run = (state: AppState, event: RuntimeEvent) => reducer(state, { type: "modelVariantRuntime", event });
+  const discovery = (variants: ModelVariantState = { options: [{ id: "minimal", label: "Minimal" }], currentValue: "minimal" }, threadId = "first", turnId = "turn-1"): RuntimeEvent =>
+    ({ ...base(threadId, turnId), type: "session.model-variants", model: selection.model, variants });
+
+  it("keeps capabilities on their thread, separate from catalog and persisted choices", () => {
+    let state = run(start(), { ...base(), type: "turn.started" });
+    state = run(state, discovery());
+    const first = state.modelVariantSessions.first;
+    state = run(state, { ...base("second"), type: "turn.started" });
+    state = run(state, discovery({ options: [], currentValue: "default" }, "second"));
+    expect(state.modelVariantSessions.first).toEqual(first);
+    expect(state.modelVariantSessions.second.variants).toEqual({ options: [], currentValue: "default" });
+    expect(state.instances[0].models.options).toEqual([]);
+    expect(state.bots).toEqual([owner]);
+  });
+
+  it("requires the current turn, account, and model, rejecting stale discoveries and start events", () => {
+    expect(run(start(), discovery()).modelVariantSessions).toEqual({});
+    let state = run(start(), { ...base(), type: "turn.started" });
+    state = run(state, { ...base("first", "turn-2"), createdAt: "2026-09-15T12:00:01Z", type: "turn.started" });
+    expect(run(state, { ...base(), type: "turn.started" })).toBe(state);
+    expect(run(state, discovery())).toBe(state);
+    const valid = discovery(undefined, "first", "turn-2");
+    expect(run(state, { ...valid, providerInstanceId: "other" })).toBe(state);
+    expect(run(state, { ...valid, type: "session.model-variants", model: "other-model", variants: { options: [] } })).toBe(state);
+    expect(run(state, { ...valid, threadId: "missing" })).toBe(state);
+    expect(run(state, { ...valid, turnId: undefined })).toBe(state);
+    state = run(state, valid);
+    expect(state.modelVariantSessions.first.variants?.currentValue).toBe("minimal");
+  });
+
+  it("retains the last session choices on completion but refuses late updates", () => {
+    let state = run(start(), { ...base(), type: "turn.started" });
+    state = run(state, discovery());
+    state = run(state, { ...base(), type: "turn.completed", ok: true });
+    expect(state.modelVariantSessions.first.variants?.options).toEqual([{ id: "minimal", label: "Minimal" }]);
+    expect(run(state, discovery({ options: [] }))).toBe(state);
+    state = run(state, { ...base("first", "turn-2"), type: "turn.started", createdAt: "2026-09-15T12:00:01Z" });
+    expect(state.modelVariantSessions.first.variants).toBeUndefined();
+  });
+
+  it("drops discoveries when a thread changes model, but preserves sibling choices", () => {
+    let state = run(start(), { ...base(), type: "turn.started" });
+    state = run(state, discovery());
+    state = run(state, { ...base("second"), type: "turn.started" });
+    state = run(state, discovery(undefined, "second"));
+    state = reducer(state, { type: "setModel", botId: owner.id, threadId: "first", selection: { ...selection, model: "other-model", variant: undefined } });
+    expect(state.modelVariantSessions.first).toBeUndefined();
+    expect(state.modelVariantSessions.second.variants?.currentValue).toBe("minimal");
+    expect(state.bots[0].tasks![1].modelSelection).toEqual(selection);
+    expect(run(state, discovery())).toBe(state);
+  });
+
+  it("accepts capabilities for a background thread while keeping them out of another selected conversation", () => {
+    let state = run(start(), { ...base(), type: "turn.started" });
+    state = reducer(state, { type: "taskSwitched", bot: { ...owner, threadId: "second" } });
+    state = run(state, discovery());
+    expect(state.bots[0].threadId).toBe("second");
+    expect(state.modelVariantSessions.first.variants?.currentValue).toBe("minimal");
+    expect(state.modelVariantSessions.second).toBeUndefined();
+  });
+
+  it("clears runtime capabilities on reload while preserving the saved variant", () => {
+    let state = run(start(), { ...base(), type: "turn.started" });
+    state = run(state, discovery());
+    state = reducer(state, { type: "hydrate", bots: [owner], groups: [], computerControl: {} });
+    expect(state.modelVariantSessions).toEqual({});
+    expect(state.bots[0].tasks![0].modelSelection?.variant).toBe("minimal");
   });
 });

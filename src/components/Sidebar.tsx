@@ -1,9 +1,10 @@
 import { track } from "@/lib/analytics";
+import { OrganizationIdentity } from "./OrganizationIdentity";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  Activity,
   Archive,
-  Bell,
   BellDot,
   Bot as BotIcon,
   CalendarDays,
@@ -55,9 +56,11 @@ import { isArchived, orderedSidebarThreads, SidebarThreadRow, visibleSidebarThre
 import {
   loadCollapsedSections,
   loadSectionOrder,
+  loadSidebarAttentionPinned,
   loadSidebarDensity,
   saveCollapsedSections,
   saveSectionOrder,
+  saveSidebarAttentionPinned,
   saveSidebarDensity,
   toggleCollapsedSection,
   type SidebarDensity,
@@ -91,6 +94,7 @@ import { profileInitials, SidebarProfileMenu } from "./SidebarProfileMenu";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { useShowThreads } from "@/lib/thread-preferences";
 import { AttentionThreadRows, crossBotAttentionThreads, SidebarBotActivity, sidebarBotActivityTasks } from "./SidebarBotActivity";
+import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { ShortcutHint } from "./ShortcutHint";
 
 const SECTION_LABEL_KEYS: Record<string, LocaleKey> = {
@@ -810,8 +814,9 @@ export function currentArchivableBot(bots: readonly Bot[], id: string): Bot | un
 
 /** Copy for the archive / delete confirmation dialogs. Archiving keeps
  * everything and is reversible from Archived bots; deleting is not — the
- * server drops every task transcript, the workspace (files + memory), and
- * staged skill state with the bot. */
+ * server drops every task transcript, the workspace (files + memory), staged
+ * skill state, and any private computer the bot owns. Shared team computers
+ * remain. */
 export function botConfirmCopy(kind: BotConfirmKind, name: string) {
   return kind === "archive"
     ? {
@@ -1493,6 +1498,11 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
   const [roomSectionPicker, setRoomSectionPicker] = useState<{ groupId: string; x: number; y: number } | null>(null);
   const [plusOpen, setPlusOpen] = useState(false);
   const [attentionOpen, setAttentionOpen] = useState(false);
+  const [attentionPinned, setAttentionPinnedState] = useState(() => loadSidebarAttentionPinned());
+  const setAttentionPinned = (pinned: boolean) => {
+    setAttentionPinnedState(pinned);
+    saveSidebarAttentionPinned(pinned);
+  };
   const [newRoom, setNewRoom] = useState(false);
   const [newFolderBotId, setNewFolderBotId] = useState<string | null>(null);
   const [teamLibraryOpen, setTeamLibraryOpen] = useState(false);
@@ -1864,7 +1874,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
             title={t("attention.title")}
             className="relative flex size-10 items-center justify-center rounded-md text-ink-secondary hover:bg-raised hover:text-ink"
           >
-            {attention.length ? <BellDot size={20} strokeWidth={2} /> : <Bell size={20} strokeWidth={2} />}
+            <Activity size={20} strokeWidth={2} />
             {attention.length > 0 && (
               <span className="absolute right-1 top-1 flex min-w-4 items-center justify-center rounded-full bg-accent px-0.5 text-[9.5px] font-semibold leading-4 text-ink">{attention.length > 9 ? "9+" : attention.length}</span>
             )}
@@ -1876,7 +1886,18 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                 "absolute top-full z-40 mt-1 w-72 overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/60",
                 density === "icons" ? "left-0" : "right-0",
               )}>
-                <div className="px-3.5 pb-1 pt-1.5 text-[13px] font-medium text-ink">{t("attention.title")}</div>
+                <div className="flex items-center gap-1 pb-1 pl-3.5 pr-2 pt-1.5">
+                  <span className="flex-1 text-[13px] font-medium text-ink">{t("attention.title")}</span>
+                  <button
+                    type="button"
+                    onClick={() => setAttentionPinned(!attentionPinned)}
+                    aria-label={t(attentionPinned ? "attention.unpin" : "attention.pin")}
+                    title={t(attentionPinned ? "attention.unpin" : "attention.pin")}
+                    className="flex size-6 items-center justify-center rounded text-ink-secondary hover:bg-raised hover:text-ink"
+                  >
+                    {attentionPinned ? <PinOff size={14} /> : <Pin size={14} />}
+                  </button>
+                </div>
                 {attention.length === 0 ? (
                   <div className="px-3.5 py-2.5 text-[13px] text-ink-secondary">{t("attention.empty")}</div>
                 ) : (
@@ -1960,6 +1981,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
       </div>
 
       <DesktopWorkspaceSwitcher compact={density === "icons"} />
+      <OrganizationIdentity compact={density === "icons"} />
       {/* Search */}
       <div className={cn("pt-1 pb-3", density === "icons" ? "hidden" : "px-3")}>
         <div className="flex items-center gap-2 rounded-md border border-hairline/40 bg-inset/40 px-2.5 py-1.5 focus-within:border-accent/50">
@@ -1974,6 +1996,15 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           />
         </div>
       </div>
+
+      {attentionPinned && density !== "icons" && (
+        <SidebarAttentionPanel
+          entries={attention}
+          density={density}
+          onUnpin={() => setAttentionPinned(false)}
+          onJump={(entry) => dispatch({ type: "switchTask", botId: entry.botId, threadId: entry.task.threadId })}
+        />
+      )}
 
       {/* Bot list */}
       <div className="flex-1 overflow-y-auto px-2">

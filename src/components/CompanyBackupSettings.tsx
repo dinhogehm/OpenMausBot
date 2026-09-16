@@ -10,7 +10,6 @@ type BackupBridge = NonNullable<NonNullable<Window["ogb"]>["companyBackups"]>;
 type BackupList = Awaited<ReturnType<BackupBridge["list"]>>;
 type Dialog = { kind: "create" | "schedule" } | { kind: "restore" | "delete"; entry: CompanyBackupEntry };
 const inputClass = "mt-1 w-full rounded-lg border border-hairline/50 bg-inset px-3 py-2 text-[14px] text-ink disabled:opacity-50";
-const validPassword = (value: string) => value.length >= 12 && value.length <= 1024;
 const bytes = (value: number) => {
   const power = value >= 1024 ** 3 ? 3 : value >= 1024 ** 2 ? 2 : 1;
   return `${new Intl.NumberFormat(activeLocale(), { maximumFractionDigits: 2 }).format(value / 1024 ** power)} ${["", "KiB", "MiB", "GiB"][power]}`;
@@ -57,7 +56,6 @@ export function ConnectedCompanyBackupSettings({ connection, bridge }: { connect
   const [error, setError] = useState("");
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [password, setPassword] = useState("");
-  const [repeat, setRepeat] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [preview, setPreview] = useState<{ id: string; summary: WorkspaceBackupSummary } | null>(null);
   const [restartRequired, setRestartRequired] = useState(false);
@@ -118,11 +116,11 @@ export function ConnectedCompanyBackupSettings({ connection, bridge }: { connect
   const needsRestart = restartRequired || state?.pendingRestore === true;
   const disabled = action !== null || !state || state.busy || needsRestart;
   const closeDialog = () => {
-    setDialog(null); setPassword(""); setRepeat(""); setConfirmation(""); setPreview(null);
+    setDialog(null); setPassword(""); setConfirmation(""); setPreview(null);
   };
   const openDialog = (next: Dialog) => {
     if (disabled || lock.current) return;
-    setError(""); setPassword(""); setRepeat(""); setConfirmation(""); setPreview(null); setDialog(next);
+    setError(""); setPassword(""); setConfirmation(""); setPreview(null); setDialog(next);
   };
   const perform = async (kind: NonNullable<typeof action>, work: (isCurrent: () => boolean) => Promise<void>) => {
     if (disabled || lock.current) return;
@@ -133,25 +131,23 @@ export function ConnectedCompanyBackupSettings({ connection, bridge }: { connect
     finally { lock.current = false; if (current === generation.current) setAction(null); }
   };
   const create = () => {
-    if (dialog?.kind !== "create" || !validPassword(password) || password !== repeat) return;
+    if (dialog?.kind !== "create") return;
     void perform("create", async (isCurrent) => {
-      const secret = password;
-      setPassword(""); setRepeat("");
-      await bridge.create({ password: secret, clientState: collectWorkspaceClientState() });
+      await bridge.create({ clientState: collectWorkspaceClientState() });
       if (isCurrent()) { closeDialog(); await refresh(); }
     });
   };
   const configureSchedule = async (enabled: boolean) => {
     if (!bridge.configureSchedule || lock.current || !state ||
-        (enabled && (disabled || dialog?.kind !== "schedule" || !validPassword(password) || password !== repeat || confirmation !== "BACK UP THIS WORKSPACE DAILY"))) return;
+        (enabled && (disabled || dialog?.kind !== "schedule" || confirmation !== "BACK UP THIS WORKSPACE DAILY"))) return;
     // Turning off must stay possible while the native scheduler is uploading.
     // Main cancels only that scheduled operation, never an unrelated manual one.
     lock.current = true; setAction("schedule"); setError("");
-    const current = generation.current, initialRevision = revision.current, secret = password;
-    setPassword(""); setRepeat(""); setConfirmation("");
+    const current = generation.current, initialRevision = revision.current;
+    setConfirmation("");
     try {
       const next = await bridge.configureSchedule(enabled
-        ? { enabled: true, password: secret, confirmation: "BACK UP THIS WORKSPACE DAILY" }
+        ? { enabled: true, confirmation: "BACK UP THIS WORKSPACE DAILY" }
         : { enabled: false });
       if (current === generation.current) {
         if (revision.current === initialRevision) setState(next);
@@ -165,11 +161,11 @@ export function ConnectedCompanyBackupSettings({ connection, bridge }: { connect
     }
   };
   const prepare = () => {
-    if (dialog?.kind !== "restore" || !password || password.length > 1024) return;
+    if (dialog?.kind !== "restore" || (dialog.entry.passwordRequired !== false && (password.length < 12 || password.length > 1024))) return;
     void perform("prepare", async (isCurrent) => {
       const secret = password;
       setPassword(""); setPreview(null); setConfirmation("");
-      const result = await bridge.prepareRestore({ id: dialog.entry.id, password: secret });
+      const result = await bridge.prepareRestore({ id: dialog.entry.id, ...(dialog.entry.passwordRequired !== false ? { password: secret } : {}) });
       if (isCurrent()) setPreview(result);
     });
   };
@@ -213,7 +209,7 @@ export function ConnectedCompanyBackupSettings({ connection, bridge }: { connect
 
   return <Card title={t("companyBackup.title")} subtitle={t("companyBackup.account", { organization: connection.organization?.name ?? "", email: connection.email ?? "" })}>
     <div className="flex flex-col gap-3">
-      <p className="text-[13px] text-ink-secondary">{t("companyBackup.scope")}</p>
+      <p className="text-[13px] text-ink-secondary">{t("companyBackup.managedScope")}</p>
       {bridge.configureSchedule && schedule && <div className="rounded-lg border border-hairline/40 p-3">
         <div className="flex items-center justify-between gap-3">
           <div><div className="text-[14px] font-medium">{t("companyBackup.daily")}</div><p className="mt-1 text-[12px] text-ink-secondary">{t("companyBackup.scheduleHelp")}</p></div>
@@ -250,19 +246,16 @@ export function ConnectedCompanyBackupSettings({ connection, bridge }: { connect
         {needsRestart && <p role="status" className="text-[13px] text-warning">{t("backup.restart")}</p>}
         {(dialog.kind === "restore" || dialog.kind === "delete") && <div className="text-[13px] text-ink-secondary"><p>{dateLabel(dialog.entry)} · {bytes(dialog.entry.sizeBytes)}</p><code className="break-all text-[11px]">{dialog.entry.id}</code></div>}
         {(dialog.kind === "create" || dialog.kind === "schedule") && <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (dialog.kind === "schedule") void configureSchedule(true); else create(); }}>
-          <p className="text-[13px] text-ink">{t(dialog.kind === "schedule" ? "companyBackup.scheduleWarning" : "companyBackup.uploadWarning", { organization: connection.organization?.name ?? "", email: connection.email ?? "" })}</p>
-          {dialog.kind === "schedule" ? <details className="text-[13px] text-ink-secondary"><summary className="cursor-pointer text-ink">{t("companyBackup.included")}</summary><p className="mt-2">{t("backup.excluded")}</p><p className="mt-2">{t("backup.privacy")}</p></details> : <><p className="text-[13px] text-ink-secondary">{t("backup.excluded")}</p><p className="text-[13px] text-ink-secondary">{t("backup.privacy")}</p></>}
-          <p className="text-[13px] text-ink-secondary">{t("backup.passwordHint")}</p>
-          {dialog.kind === "schedule" && <p className="text-[13px] text-ink-secondary">{t("companyBackup.schedulePassword")}</p>}
-          <label className="text-[13px]">{t("backup.exportPassword")}<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} disabled={disabled} value={password} onChange={(event) => setPassword(event.target.value)} className={inputClass} /></label>
-          <label className="text-[13px]">{t("backup.confirmPassword")}<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} disabled={disabled} value={repeat} onChange={(event) => setRepeat(event.target.value)} className={inputClass} /></label>
+          <p className="text-[13px] text-ink">{t(dialog.kind === "schedule" ? "companyBackup.scheduleWarning" : "companyBackup.managedUploadWarning", { organization: connection.organization?.name ?? "", email: connection.email ?? "" })}</p>
+          {dialog.kind === "schedule" ? <details className="text-[13px] text-ink-secondary"><summary className="cursor-pointer text-ink">{t("companyBackup.included")}</summary><p className="mt-2">{t("backup.excluded")}</p><p className="mt-2">{t("companyBackup.managedPrivacy")}</p></details> : <><p className="text-[13px] text-ink-secondary">{t("backup.excluded")}</p><p className="text-[13px] text-ink-secondary">{t("companyBackup.managedPrivacy")}</p></>}
+          <p className="text-[13px] text-ink-secondary">{t("companyBackup.managedEncryption")}</p>
           {dialog.kind === "schedule" && <label className="flex items-start gap-2 text-[13px]"><input className="mt-1 accent-accent" type="checkbox" required disabled={disabled} checked={confirmation === "BACK UP THIS WORKSPACE DAILY"} onChange={event => setConfirmation(event.target.checked ? "BACK UP THIS WORKSPACE DAILY" : "")} /><span>{t("companyBackup.scheduleConsent")}</span></label>}
-          <button type="submit" className="ui-button" disabled={disabled || !validPassword(password) || password !== repeat || (dialog.kind === "schedule" && confirmation !== "BACK UP THIS WORKSPACE DAILY")}>{t(dialog.kind === "schedule" ? "companyBackup.enableSchedule" : "companyBackup.create")}</button>
+          <button type="submit" className="ui-button" disabled={disabled || (dialog.kind === "schedule" && confirmation !== "BACK UP THIS WORKSPACE DAILY")}>{t(dialog.kind === "schedule" ? "companyBackup.enableSchedule" : "companyBackup.create")}</button>
         </form>}
         {dialog.kind === "restore" && (!preview ? <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); prepare(); }}>
           <p className="text-[13px] text-ink-secondary">{t("companyBackup.previewHelp")}</p>
-          <label className="text-[13px]">{t("backup.importPassword")}<input type="password" autoComplete="off" required maxLength={1024} disabled={disabled} value={password} onChange={(event) => setPassword(event.target.value)} className={inputClass} /></label>
-          <button type="submit" className="ui-button" disabled={disabled || !password}>{t("backup.validate")}</button>
+          {dialog.entry.passwordRequired !== false && <label className="text-[13px]">{t("backup.importPassword")}<input type="password" autoComplete="off" required minLength={12} maxLength={1024} disabled={disabled} value={password} onChange={(event) => setPassword(event.target.value)} className={inputClass} /></label>}
+          <button type="submit" className="ui-button" disabled={disabled || (dialog.entry.passwordRequired !== false && (password.length < 12 || password.length > 1024))}>{t("backup.validate")}</button>
         </form> : <>
           <WorkspaceBackupSummaryView summary={preview.summary} />
           <p className="text-[13px] text-danger">{t("backup.replaceWarning")}</p><p className="text-[13px] text-danger">{t("backup.trustWarning")}</p>

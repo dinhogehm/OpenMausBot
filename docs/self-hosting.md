@@ -546,9 +546,21 @@ apps and cloud desktops — those stay with the owner. A server reinstalled at
 the same address has a new identity; the app then asks to pair again rather
 than present the old session to it.
 
-Older way, still supported: run the companion sidecar next to the harness
-and pair by its own QR. It advertises on your private networks
-(Tailscale-aware) and issues per-device credentials on pairing.
+Both native apps pair this way. `openmausbot pair --phone android` prints the
+app-scheme QR that Android's scanner needs, and the iOS app accepts either
+that QR or the web link. Pass `--phone` whenever nothing is watching the
+terminal, such as `docker compose exec omb node dist-server/openmausbot.js
+pair --phone android --public-url https://your-domain`, since a scripted run
+never reaches the question the interactive command asks. Nothing extra to install, and the phone becomes a
+session like any other.
+
+Older way, still supported, and only useful on a LAN or a tailnet: run the
+companion sidecar next to the harness and pair by its own QR. It advertises
+on your private networks (Tailscale-aware) and issues its own per-device
+credentials, which are **not** `openmausbot sessions` and are revoked from
+its own page on `127.0.0.1:8811`. It also serves phones over cleartext HTTP
+on port 8810, so do not expose it from a public server. It ships only in a
+git checkout: neither the npm package nor the Docker image contains it.
 
 ```sh
 node --experimental-strip-types companion/src/index.ts

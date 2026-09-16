@@ -1591,6 +1591,16 @@ final class Session: ObservableObject {
     }
 
     @discardableResult
+    func setTaskArchived(_ task: BotTask, for bot: Bot, archivedAt: Double?) async -> Bool {
+        guard let client else { return false }
+        do {
+            try await client.archiveTask(botId: bot.id, threadId: task.threadId, archivedAt: archivedAt)
+            await refresh()
+            return true
+        } catch { actionError = error.localizedDescription; return false }
+    }
+
+    @discardableResult
     func deleteTask(_ task: BotTask, for bot: Bot) async -> Bot? {
         guard let client else { return nil }
         do {

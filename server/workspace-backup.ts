@@ -681,6 +681,14 @@ function prepareRestore(dataDir: string, id: string, manifest: Manifest): string
   for (const name of ["bots.json", "groups.json", "config.json", "routines.json", "calendar-calls.json"]) {
     changeJson(name, (value) => rebaseFields(value, manifest.sourceDataDir, resolve(dataDir)));
   }
+  // Voice provider configuration and credentials deliberately stay with the
+  // destination installation. Imported per-agent ids belong to the source
+  // provider's catalog, so retaining them could send an incompatible id to
+  // the destination provider.
+  changeJson("bots.json", (value) => {
+    if (!Array.isArray(value)) throw new Error("Invalid bot definitions in workspace backup.");
+    for (const bot of value) if (record(bot)) delete bot.voice;
+  });
   // Never install source connection settings. Destination keys, endpoints,
   // driver environments and MCP configuration remain paired and unchanged.
   const oldConfig = join(dataDir, "config.json");

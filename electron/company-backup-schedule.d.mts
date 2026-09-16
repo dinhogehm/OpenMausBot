@@ -10,7 +10,7 @@ export interface CompanyBackupScheduleScope { key: string; generation: number; }
 export function createCompanyBackupSchedule(options: {
   store: { read(): Promise<unknown>; write(value: unknown): Promise<void> };
   scope(): CompanyBackupScheduleScope | null;
-  run(password: string, signal: AbortSignal, scope: CompanyBackupScheduleScope): Promise<unknown>;
+  run(signal: AbortSignal, scope: CompanyBackupScheduleScope): Promise<unknown>;
   onState?(state: CompanyBackupScheduleState): void;
   now?(): number;
   setTimer?: typeof setTimeout;
@@ -18,7 +18,7 @@ export function createCompanyBackupSchedule(options: {
 }): {
   state(): CompanyBackupScheduleState;
   start(): Promise<CompanyBackupScheduleState>;
-  configure(input: { enabled: false } | { enabled: true; password: string; confirmation: "BACK UP THIS WORKSPACE DAILY" }): Promise<CompanyBackupScheduleState>;
+  configure(input: { enabled: false } | { enabled: true; confirmation: "BACK UP THIS WORKSPACE DAILY" }): Promise<CompanyBackupScheduleState>;
   forget(): Promise<CompanyBackupScheduleState>;
   reconcile(): void;
   close(): void;

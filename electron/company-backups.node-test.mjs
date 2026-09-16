@@ -80,7 +80,7 @@ async function fixture(t, overrides = {}) {
   const sha256 = archiveHash(size);
   const localCalls = [], portalCalls = [], storageCalls = [], uploaded = [], progress = [];
   let created;
-  const ready = () => ({ id: BACKUP_ID, status: "ready", sizeBytes: size, sha256 });
+  const ready = () => ({ id: BACKUP_ID, status: "ready", sizeBytes: size, sha256, passwordRequired: false });
   const f = {
     root, size, sha256, localCalls, portalCalls, storageCalls, uploaded, progress, ready,
     archiveResponse: (bytes = size, options = {}) => new Response(archiveStream(bytes, options), {
@@ -125,7 +125,7 @@ async function fixture(t, overrides = {}) {
       }
       if (route === `/api/desktop/backups/${BACKUP_ID}/complete`) return { ...ready(), ...created, status: "ready" };
       if (route === `/api/desktop/backups/${BACKUP_ID}/abort`) return { ok: true };
-      if (route === `/api/desktop/backups/${BACKUP_ID}/download`) return { ...ready(), url: `${R2_ORIGIN}/fixture/object?signature=fixture`, expiresAt: Date.now() + 300_000 };
+      if (route === `/api/desktop/backups/${BACKUP_ID}/download`) return { ...ready(), unlockKey: PASSWORD, url: `${R2_ORIGIN}/fixture/object?signature=fixture`, expiresAt: Date.now() + 300_000 };
       throw new Error(`Unexpected portal fixture request: ${route}`);
     },
     async fetchImpl(input, options = {}) {
@@ -143,8 +143,8 @@ async function fixture(t, overrides = {}) {
       return f.archiveResponse();
     },
   });
-  f.backup = (signal, input = {}) => f.client.backup({ password: PASSWORD, ...input }, signal, value => progress.push(value));
-  f.restore = signal => f.client.prepareRestore({ id: BACKUP_ID, password: PASSWORD }, signal, value => progress.push(value));
+  f.backup = (signal, input = {}) => f.client.backup(input, signal, value => progress.push(value));
+  f.restore = signal => f.client.prepareRestore({ id: BACKUP_ID }, signal, value => progress.push(value));
   return f;
 }
 
@@ -158,15 +158,20 @@ function assertStorageIsolation(calls) {
   }
 }
 
-test("backup transfers only opaque container bytes and exact checksums; passwords and client state stay local", async t => {
+test("backup generates a native key, sends it only to Admin, and never exposes it in returned metadata or progress", async t => {
   const f = await fixture(t);
   const clientState = { fixtureDraft: "private local draft" };
   const ready = await f.backup(undefined, { clientState, appVersion: "0.0.0-fixture" });
   assert.equal(ready.id, BACKUP_ID);
   assert.equal(ready.status, "ready");
-  assert.deepEqual(jsonBody(f.localCalls[0].options), { password: PASSWORD, clientState });
+  const password = jsonBody(f.localCalls[0].options).password;
+  assert.match(password, /^[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual(jsonBody(f.localCalls[0].options), { password, clientState });
   const create = f.portalCalls.find(call => call.route === "/api/desktop/backups");
-  assert.deepEqual(jsonBody(create.options), { sizeBytes: f.size, sha256: f.sha256, appVersion: "0.0.0-fixture" });
+  assert.deepEqual(jsonBody(create.options), { sizeBytes: f.size, sha256: f.sha256, appVersion: "0.0.0-fixture", unlockKey: password });
+  assert(!JSON.stringify(ready).includes(password));
+  assert(!JSON.stringify(f.progress).includes(password));
+  assert(!JSON.stringify(f.storageCalls).includes(password));
   assert.equal(f.uploaded.length, 1);
   assert.equal(f.uploaded[0].size, f.size);
   assert.equal(f.uploaded[0].sha256, f.sha256);
@@ -195,6 +200,29 @@ test("multipart backup streams exact 64 MiB boundaries without collecting the ar
   ]);
   assertStorageIsolation(f.storageCalls);
   await f.clean();
+});
+
+test("older Admin cannot silently accept an archive without retaining its automatic key", async t => {
+  const f = await fixture(t, { portal: route => route === "/api/desktop/backups" ? {
+    id: BACKUP_ID, status: "uploading", sizeBytes: 4096, sha256: archiveHash(4096), partSizeBytes: PART_BYTES, partCount: 1,
+  } : undefined });
+  await assert.rejects(f.backup(), { code: "update_required" });
+  assert.equal(f.storageCalls.length, 0);
+  assert(f.portalCalls.some(call => call.route.endsWith("/abort")));
+});
+
+test("legacy password archives still restore, while managed archives require the service key", async t => {
+  const f = await fixture(t, { portal: (route, _options, state) => route.endsWith("/download") ? {
+    ...state.ready(), passwordRequired: true, url: `${R2_ORIGIN}/fixture/object`, expiresAt: Date.now() + 300_000,
+  } : undefined });
+  await assert.rejects(f.restore(), { code: "invalid_password" });
+  await f.client.prepareRestore({ id: BACKUP_ID, password: PASSWORD });
+  assert.equal(jsonBody(f.localCalls.at(-1).options).password, PASSWORD);
+  const missing = await fixture(t, { portal: (route, _options, state) => route.endsWith("/download") ? {
+    ...state.ready(), url: `${R2_ORIGIN}/fixture/object`, expiresAt: Date.now() + 300_000,
+  } : undefined });
+  await assert.rejects(missing.client.prepareRestore({ id: BACKUP_ID, password: PASSWORD }), { code: "invalid_password" });
+  assert.equal(missing.storageCalls.length, 0);
 });
 
 test("restore verifies the downloaded archive and prepares only a local preview, never replacement", async t => {

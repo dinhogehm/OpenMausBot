@@ -115,6 +115,7 @@ struct AgentProfileView: View {
     /// and the copy that shipped.
     private var usesSystemVoices: Bool { config?.voiceProvider == .system }
     private var usesChatterbox: Bool { config?.voiceProvider == .chatterbox }
+    private var usesFishAudio: Bool { config?.voiceProvider == .fish }
 
     var body: some View {
         NavigationStack {
@@ -253,6 +254,7 @@ struct AgentProfileView: View {
                 Section {
                     Picker("Voice engine", selection: $engine) {
                         Text("ElevenLabs").tag(VoiceProvider.elevenlabs)
+                        Text("Fish Audio").tag(VoiceProvider.fish)
                         Text("Built-in Mac voices")
                             .tag(VoiceProvider.system)
                             .disabled(!hostIsMac)
@@ -325,7 +327,10 @@ struct AgentProfileView: View {
                         Label("Built-in Mac voices are unavailable", systemImage: "speaker.slash")
                             .foregroundStyle(.secondary)
                     } else if !usesChatterbox {
-                        Label("ElevenLabs is not configured", systemImage: "speaker.slash")
+                        Label(
+                            usesFishAudio ? "Fish Audio is not configured" : "ElevenLabs is not configured",
+                            systemImage: "speaker.slash"
+                        )
                             .foregroundStyle(.secondary)
                     }
                 } header: {
@@ -341,6 +346,8 @@ struct AgentProfileView: View {
                             Text("Built-in Mac voices need no key, and this computer has none available. Switch the voice engine above to ElevenLabs to keep using voice.")
                         } else if usesChatterbox {
                             Text("Any OpenAI-compatible server running Chatterbox works, no key needed. Save its address and model id above.")
+                        } else if usesFishAudio {
+                            Text("Add the shared Fish Audio key in OpenMausBot on your computer. The key is never returned to iOS.")
                         } else {
                             Text("Add the shared ElevenLabs key in this agent's profile on the computer. The key is never returned to iOS.")
                         }
@@ -349,6 +356,8 @@ struct AgentProfileView: View {
                             Text("No workspace default voice is selected. Choose an agent-specific voice above; synthesis still uses the built-in Mac voices on your computer.")
                         } else if usesChatterbox {
                             Text("No workspace default voice is selected. Choose an agent-specific voice above; synthesis still uses the Chatterbox server on your computer.")
+                        } else if usesFishAudio {
+                            Text("No workspace default voice is selected. Choose an agent-specific voice above; synthesis still uses the shared Fish Audio key on your computer.")
                         } else {
                             Text("No workspace default voice is selected. Choose an agent-specific voice above; synthesis still uses the shared ElevenLabs key on your computer.")
                         }
@@ -405,8 +414,19 @@ struct AgentProfileView: View {
         switchingEngine = true
         defer { switchingEngine = false }
         if let status = await session.setVoiceProvider(selected) {
+            let reset = AgentProfileVoiceState(
+                voice: voice,
+                speakReplies: speakReplies,
+                baselineVoice: baseline.voice
+            ).afterProviderSwitch(to: status)
+            voice = reset.voice
+            speakReplies = reset.speakReplies
+            baseline.voice = reset.baselineVoice
             config = status
             engine = status.voiceProvider
+            // Do not render the previous provider's catalog while the new
+            // one loads. Its identifiers are invalid under this provider.
+            voices = []
             voices = await session.voiceOptions()
         } else {
             engine = config?.voiceProvider ?? .elevenlabs

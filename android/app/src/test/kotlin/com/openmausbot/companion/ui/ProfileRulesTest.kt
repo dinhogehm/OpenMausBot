@@ -109,6 +109,30 @@ class ProfileRulesTest {
     }
 
     @Test
+    fun `provider switch clears stale voice from form and baseline`() {
+        val stale = ProfileForm.of(
+            bot().copy(voice = "elevenlabs-voice", speakReplies = true),
+        )
+        val fishWithoutDefault = ConfigStatus(
+            tts = ConfigFlag(configured = true, ready = false, voice = "", provider = "fish"),
+        )
+
+        val (form, baseline) = ProfileRules.afterVoiceProviderSwitch(
+            form = stale,
+            baseline = stale,
+            config = fishWithoutDefault,
+        )
+
+        assertEquals("", form.voice)
+        assertEquals("", baseline.voice)
+        assertFalse(form.speakReplies, "speech cannot stay enabled with no valid voice")
+        assertTrue(
+            baseline.speakReplies,
+            "the unchanged server value remains the save baseline so Save persists the correction",
+        )
+    }
+
+    @Test
     fun `saving needs a name that is more than whitespace`() {
         val form = ProfileForm.of(bot())
 
@@ -355,15 +379,36 @@ class ProfileRulesTest {
         val choices = ProfileRules.providerChoices()
 
         assertEquals(
-            listOf("ElevenLabs", "Built-in Mac voices", "Chatterbox (local)"),
+            listOf("ElevenLabs", "Fish Audio", "Built-in Mac voices", "Chatterbox (local)"),
             choices.map { it.label },
         )
         assertEquals(
-            listOf("elevenlabs", "system", "chatterbox"),
+            listOf("elevenlabs", "fish", "system", "chatterbox"),
             choices.map { it.id },
             "the ids are the wire strings, so the selection round-trips through the config write",
         )
         assertTrue(choices.all { it.enabled }, "the phone cannot know the host's platform, so it offers every engine")
+    }
+
+    @Test
+    fun `fish audio setup stays on the computer`() {
+        val unconfigured = ConfigStatus(tts = ConfigFlag(configured = false, provider = "fish"))
+        assertEquals(
+            "Fish Audio is not configured",
+            ProfileRules.voiceCopy(unconfigured).unconfiguredNotice,
+        )
+        assertEquals(
+            "Add the shared Fish Audio API key in OpenMausBot on the computer. " +
+                "The key is never returned to this phone.",
+            ProfileRules.voiceCopy(unconfigured).footer,
+        )
+
+        val noDefault = ConfigStatus(tts = ConfigFlag(configured = true, voice = "", provider = "fish"))
+        assertEquals(
+            "No workspace default voice is selected. Choose an agent-specific voice above; " +
+                "synthesis still uses Fish Audio on your computer.",
+            ProfileRules.voiceCopy(noDefault).footer,
+        )
     }
 
     @Test

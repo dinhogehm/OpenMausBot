@@ -560,20 +560,41 @@ export function readMessageText(
  * bm25 rank from FTS5; the snippet is FTS5's own, windowed around the
  * matched terms. Scoping happens in SQL before LIMIT, so a busy thread
  * cannot crowd out a quieter one. */
-export function recallMessages(query: string, threadIds: readonly string[], limit = 12): RecallHit[] {
+/** An optional time window on a recall: milliseconds since the epoch. */
+export interface RecallRange {
+  since?: number;
+  until?: number;
+}
+
+function rangeClause(range: RecallRange | undefined, column: string): { sql: string; params: number[] } {
+  const parts: string[] = [];
+  const params: number[] = [];
+  if (range?.since !== undefined) {
+    parts.push(`${column} >= ?`);
+    params.push(range.since);
+  }
+  if (range?.until !== undefined) {
+    parts.push(`${column} <= ?`);
+    params.push(range.until);
+  }
+  return { sql: parts.map((part) => ` AND ${part}`).join(""), params };
+}
+
+export function recallMessages(query: string, threadIds: readonly string[], limit = 12, range?: RecallRange): RecallHit[] {
   const match = ftsQuery(query);
   if (!match || !threadIds.length) return [];
   const placeholders = threadIds.map(() => "?").join(", ");
+  const window = rangeClause(range, "m.at");
   const rows = db()
     .prepare(
       "SELECT m.thread_id, m.id, m.at, m.role, json_extract(m.json, '$.from.name') AS from_name, " +
         `json_extract(m.json, '$.peerAsk.name') AS peer_name, substr(m.text, 1, ${PEER_NOTE_HEAD_CHARS}) AS head, ` +
         `snippet(messages_fts, 0, '[', ']', '…', ${SNIPPET_TOKENS}) AS snippet ` +
         "FROM messages_fts JOIN messages m ON m.rowid = messages_fts.rowid " +
-        `WHERE messages_fts MATCH ? AND m.kind = 'text' AND m.thread_id IN (${placeholders}) ` +
+        `WHERE messages_fts MATCH ? AND m.kind = 'text' AND m.thread_id IN (${placeholders})${window.sql} ` +
         "ORDER BY bm25(messages_fts), m.at DESC LIMIT ?",
     )
-    .all(match, ...threadIds, limit) as Array<{
+    .all(match, ...threadIds, ...window.params, limit) as Array<{
     thread_id: string;
     id: string;
     at: number;
@@ -595,6 +616,85 @@ export function recallMessages(query: string, threadIds: readonly string[], limi
       ...(peer ? { peer } : {}),
     };
   });
+}
+
+/** Characters of a message shown when a recall is by time, not by words:
+ * enough to know what was said, never the whole message. */
+const RECENT_HEAD_CHARS = 240;
+
+/** The text messages of the given threads inside a time window, newest
+ * first — "what happened since yesterday" needs no words to match. Same
+ * shape as a ranked hit, with the head of the message standing in for the
+ * FTS snippet. */
+export function recentMessages(threadIds: readonly string[], range: RecallRange, limit = 12): RecallHit[] {
+  if (!threadIds.length) return [];
+  const placeholders = threadIds.map(() => "?").join(", ");
+  const window = rangeClause(range, "m.at");
+  const rows = db()
+    .prepare(
+      "SELECT m.thread_id, m.id, m.at, m.role, json_extract(m.json, '$.from.name') AS from_name, " +
+        `json_extract(m.json, '$.peerAsk.name') AS peer_name, substr(m.text, 1, ${Math.max(PEER_NOTE_HEAD_CHARS, RECENT_HEAD_CHARS)}) AS head ` +
+        `FROM messages m WHERE m.kind = 'text' AND m.text IS NOT NULL AND m.thread_id IN (${placeholders})${window.sql} ` +
+        "ORDER BY m.at DESC LIMIT ?",
+    )
+    .all(...threadIds, ...window.params, limit) as Array<{
+    thread_id: string;
+    id: string;
+    at: number;
+    role: string;
+    from_name: string | null;
+    peer_name: string | null;
+    head: string;
+  }>;
+  return rows.map((row) => {
+    const peer = peerAuthor(row.peer_name, row.head);
+    const folded = row.head.replace(/\s+/g, " ").trim();
+    return {
+      threadId: row.thread_id,
+      messageId: row.id,
+      at: row.at,
+      role: row.role,
+      snippet: folded.length > RECENT_HEAD_CHARS ? `${folded.slice(0, RECENT_HEAD_CHARS)}…` : folded,
+      ...(row.from_name ? { from: row.from_name } : {}),
+      ...(peer ? { peer } : {}),
+    };
+  });
+}
+
+/** The newest thing one bot said in a thread. */
+export interface ThreadLatest {
+  threadId: string;
+  messageId: string;
+  at: number;
+  /** the head of that message, whitespace folded */
+  head: string;
+}
+
+/** For each of the given threads, the newest text message the bot itself
+ * said there since `since` — one row per thread, newest thread first. A
+ * room line carries from.botId; a 1:1 line carries none and is the bot's
+ * by construction. What a bot last said in a conversation is the shortest
+ * honest answer to "what have you been doing there". */
+export function latestSaidByBot(threadIds: readonly string[], botId: string, since: number, limit = 20): ThreadLatest[] {
+  if (!threadIds.length) return [];
+  const placeholders = threadIds.map(() => "?").join(", ");
+  const rows = db()
+    .prepare(
+      "SELECT thread_id, id, at, head FROM (" +
+        "SELECT m.thread_id, m.id, m.at, substr(m.text, 1, 400) AS head, " +
+        "ROW_NUMBER() OVER (PARTITION BY m.thread_id ORDER BY m.at DESC) AS rn " +
+        "FROM messages m " +
+        `WHERE m.kind = 'text' AND m.role = 'bot' AND m.text IS NOT NULL AND m.at >= ? AND m.thread_id IN (${placeholders}) ` +
+        "AND (json_extract(m.json, '$.from.botId') IS NULL OR json_extract(m.json, '$.from.botId') = ?)" +
+        ") WHERE rn = 1 ORDER BY at DESC LIMIT ?",
+    )
+    .all(since, ...threadIds, botId, limit) as Array<{ thread_id: string; id: string; at: number; head: string }>;
+  return rows.map((row) => ({
+    threadId: row.thread_id,
+    messageId: row.id,
+    at: row.at,
+    head: row.head.replace(/\s+/g, " ").trim(),
+  }));
 }
 
 export interface MemoryFileStat {

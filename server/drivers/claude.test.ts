@@ -928,6 +928,25 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(seen.prompt.message.content).toContain("Add the new header row.");
   });
 
+  it("replaces the previous computer prompt when a normal conversation changes its place", async () => {
+    const dump = join(scratch, "surface-snapshot.json");
+    await create(undefined, { FAKE_CLAUDE_DUMP: dump, FAKE_CLAUDE_VERSION: "2.1.267" });
+    await instance.adapter.sendTurn({
+      threadId: "t-surface-resume", text: "Open the test page.",
+      resumeCursor: "previous-host-computer-session",
+      system: "Everything you do on screen happens in the built-in browser tab; no host computer tools are mounted.",
+      refreshSystemPrompt: true,
+      integrations: { browser: { command: process.execPath, args: ["fixture-browser"], env: {} } },
+    });
+    await recorder.until((event) => event.type === "turn.completed");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.argv[seen.argv.indexOf("--system-prompt-snapshot") + 1]).toBe("off");
+    expect(seen.argv[seen.argv.indexOf("--resume") + 1]).toBe("previous-host-computer-session");
+    expect(seen.systemPrompt).toContain("no host computer tools are mounted");
+    expect(seen.mcpConfig.mcpServers.browser).toBeTruthy();
+    expect(seen.mcpConfig.mcpServers.computer).toBeUndefined();
+  });
+
   it.each([["2.1.232", false], ["2.1.267", true]] as const)(
     "probes Claude %s before the first coordinated turn without an Engines snapshot",
     async (version, supportsSnapshot) => {
@@ -1006,6 +1025,39 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     expect(seen.argv).not.toContain("--strict-mcp-config");
     expect(seen.argv).not.toContain("--setting-sources");
+  });
+
+  it("loads the machine's own MCP servers when the turn asks, keeping the rest isolated", async () => {
+    await create();
+    const dump = join(scratch, "user-mcp.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+
+    await instance.adapter.sendTurn({ threadId: "t-user-mcp", text: "hi", mcpFromUserConfig: true });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    // the Plugins → MCP servers switch: only the MCP half of the isolation
+    // goes; skills, hooks and the personal CLAUDE.md stay out
+    expect(seen.argv).not.toContain("--strict-mcp-config");
+    expect(seen.argv[seen.argv.indexOf("--setting-sources") + 1]).toBe("project");
+  });
+
+  it("mounts a url server in the CLI's own shape, header values in the private file", async () => {
+    await create();
+    const dump = join(scratch, "remote-mcp.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+
+    await instance.adapter.sendTurn({
+      threadId: "t-remote-mcp",
+      text: "hi",
+      integrations: { custom: { docs: { type: "http", url: "https://docs.example/mcp", headers: { Authorization: "Bearer tok-docs" } } } },
+    });
+    await recorder.until((e) => e.type === "turn.completed");
+
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    // the CLI connects itself; there is no process for the gate to stand between
+    expect(seen.mcpConfig.mcpServers.docs).toEqual({ type: "http", url: "https://docs.example/mcp", headers: { Authorization: "Bearer tok-docs" } });
+    expect(JSON.stringify(seen.argv)).not.toContain("tok-docs");
   });
 
   it("preserves only the selected account's auth settings in a private file", async () => {
@@ -1106,7 +1158,28 @@ describe("ClaudeDriver turns (fake CLI)", () => {
 
   it("passes every flag to a current CLI and raises no update notice", async () => {
     await create(undefined, { FAKE_CLAUDE_VERSION: "2.1.267" });
-    expect((await instance.snapshot()).update).toBeUndefined();
+    const snapshot = await instance.snapshot();
+    expect(snapshot.update).toBeUndefined();
+    expect(snapshot.warning).toBeUndefined();
+  });
+
+  it("warns on the Engines page while the escape hatch is set", async () => {
+    // The flag is a footgun: every Claude bot silently re-mounts this
+    // machine's own MCP servers, skills, hooks and CLAUDE.md on every turn.
+    // The snapshot is what the Engines page shows, so the warning lives there.
+    await create(undefined, { FAKE_CLAUDE_VERSION: "2.1.267", OMB_CLAUDE_INHERIT_USER_CONFIG: "1" });
+    expect(await instance.snapshot()).toMatchObject({
+      state: "available",
+      warning: {
+        title: "Bots inherit this machine's Claude Code setup",
+        message: expect.stringContaining("OMB_CLAUDE_INHERIT_USER_CONFIG"),
+      },
+    });
+  });
+
+  it("does not warn when the escape hatch is set to anything but 1", async () => {
+    await create(undefined, { FAKE_CLAUDE_VERSION: "2.1.267", OMB_CLAUDE_INHERIT_USER_CONFIG: "true" });
+    expect((await instance.snapshot()).warning).toBeUndefined();
   });
 
   it("assumes a current CLI on a turn that runs before any snapshot", async () => {

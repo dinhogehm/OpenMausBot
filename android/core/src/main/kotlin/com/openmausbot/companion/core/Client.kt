@@ -600,6 +600,17 @@ class CompanionClient(
         ))
     }
 
+    /** The unarchive PATCH carries an explicit null, so jsonBody's skip-nulls
+     * rule cannot be used here. Stamps are whole milliseconds: a Double would
+     * serialize large ones in scientific notation. */
+    suspend fun setTaskArchived(botId: String, threadId: String, archivedAt: Double?) {
+        sendUnit(makeRequest(
+            "PATCH",
+            "/api/bots/${segment(botId)}/tasks/${segment(threadId)}",
+            body = buildJsonObject { put("archivedAt", JsonPrimitive(archivedAt?.toLong())) },
+        ))
+    }
+
     suspend fun deleteTask(botId: String, threadId: String): Bot = send<BotResponse>(
         makeRequest("DELETE", "/api/bots/${segment(botId)}/tasks/${segment(threadId)}"),
     ).bot

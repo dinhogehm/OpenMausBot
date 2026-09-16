@@ -91,6 +91,18 @@ const __APP_VERSION__: string;
     code?: "load-failed" | "renderer-gone";
   }
 
+  /** Whether the desktop is holding this computer awake for routines. */
+  interface DesktopRoutineWake {
+    /** the toggle */
+    keepAwake: boolean;
+    /** a power assertion is held right now */
+    hold: boolean;
+    /** "due" | "running" while held; "off" | "battery" | "idle" | "stopped" otherwise */
+    reason: string;
+    /** the due routine's time, when the hold is for a due routine */
+    at: number | null;
+    onBattery: boolean;
+  }
   interface DesktopRemoteClientState {
     active: boolean;
     endpoint?: string;
@@ -105,9 +117,9 @@ const __APP_VERSION__: string;
       companyBackups?: {
         state(): Promise<CompanyBackupState>;
         list(): Promise<{ backups: CompanyBackupEntry[]; usedBytes: number; limits: { ownerQuotaBytes: number; retainedSnapshots: number } }>;
-        create(input: { password: string; clientState: import("../../shared/workspace-backup").WorkspaceBackupClientState }): Promise<CompanyBackupEntry>;
-        configureSchedule?(input: { enabled: false } | { enabled: true; password: string; confirmation: "BACK UP THIS WORKSPACE DAILY" }): Promise<CompanyBackupState>;
-        prepareRestore(input: { id: string; password: string }): Promise<{ id: string; summary: import("../../shared/workspace-backup").WorkspaceBackupSummary }>;
+        create(input: { clientState: import("../../shared/workspace-backup").WorkspaceBackupClientState }): Promise<CompanyBackupEntry>;
+        configureSchedule?(input: { enabled: false } | { enabled: true; confirmation: "BACK UP THIS WORKSPACE DAILY" }): Promise<CompanyBackupState>;
+        prepareRestore(input: { id: string; password?: string }): Promise<{ id: string; summary: import("../../shared/workspace-backup").WorkspaceBackupSummary }>;
         restore(input: { id: string; confirmation: "REPLACE" }): Promise<{ restoreId: string }>;
         delete(input: { id: string; confirmation: "DELETE" }): Promise<unknown>;
         cancel(): Promise<void>;
@@ -145,6 +157,12 @@ const __APP_VERSION__: string;
         state(): Promise<DesktopRemoteClientState>;
         pair(endpoint: string, code: string): Promise<DesktopRemoteClientState>;
         disconnect(): Promise<DesktopRemoteClientState>;
+      };
+      /** Keep this computer awake for scheduled routines; absent on remote
+       * server pages and in older desktop builds. */
+      routines?: {
+        wakeState(): Promise<DesktopRoutineWake>;
+        keepAwake(enabled: boolean): Promise<DesktopRoutineWake>;
       };
       companionAccount?: {
         state(): Promise<CompanionAccountState>;
@@ -260,7 +278,7 @@ const __APP_VERSION__: string;
       saveFile?(filePath: string): Promise<string | null>;
       /** Save a provider credential through Electron's OS-backed store. */
       setCredential?(
-        name: "composioApiKey" | "xaiApiKey" | "boxToken" | "opencodeGoApiKey" | "ttsKey" | "openaiImageApiKey" | "customImageApiKey",
+        name: "composioApiKey" | "xaiApiKey" | "boxToken" | "opencodeGoApiKey" | "ttsKey" | "fishAudioKey" | "openaiImageApiKey" | "customImageApiKey",
         value: string,
       ): Promise<ConfigStatus>;
       /** In-app auto-update (packaged app only; dormant in dev). onState

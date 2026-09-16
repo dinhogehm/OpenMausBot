@@ -107,6 +107,16 @@ object ProfileRules {
         "No workspace default voice is selected. Choose an agent-specific voice above; " +
             "synthesis still uses the shared ElevenLabs key on your computer."
 
+    private const val FISH_TTS_UNCONFIGURED: String = "Fish Audio is not configured"
+
+    private const val FISH_VOICE_UNCONFIGURED_FOOTER: String =
+        "Add the shared Fish Audio API key in OpenMausBot on the computer. The key is " +
+            "never returned to this phone."
+
+    private const val FISH_VOICE_NO_DEFAULT_FOOTER: String =
+        "No workspace default voice is selected. Choose an agent-specific voice above; " +
+            "synthesis still uses Fish Audio on your computer."
+
     /** The same sentence with the clause that would be a lie replaced. */
     private const val SYSTEM_VOICE_NO_DEFAULT_FOOTER: String =
         "No workspace default voice is selected. Choose an agent-specific voice above; " +
@@ -224,6 +234,7 @@ object ProfileRules {
 
     private fun ttsUnconfiguredLabel(config: ConfigStatus?): String = when (provider(config)) {
         VoiceProvider.ELEVENLABS -> TTS_UNCONFIGURED
+        VoiceProvider.FISH -> FISH_TTS_UNCONFIGURED
         VoiceProvider.SYSTEM -> SYSTEM_TTS_UNCONFIGURED
         VoiceProvider.CHATTERBOX -> CHATTERBOX_TTS_UNCONFIGURED
     }
@@ -231,11 +242,13 @@ object ProfileRules {
     private fun voiceFooter(config: ConfigStatus?): String = when {
         !voiceConfigured(config) -> when (provider(config)) {
             VoiceProvider.ELEVENLABS -> VOICE_UNCONFIGURED_FOOTER
+            VoiceProvider.FISH -> FISH_VOICE_UNCONFIGURED_FOOTER
             VoiceProvider.SYSTEM -> SYSTEM_VOICE_UNCONFIGURED_FOOTER
             VoiceProvider.CHATTERBOX -> CHATTERBOX_VOICE_UNCONFIGURED_FOOTER
         }
         config?.hasWorkspaceDefaultVoice != true -> when (provider(config)) {
             VoiceProvider.ELEVENLABS -> VOICE_NO_DEFAULT_FOOTER
+            VoiceProvider.FISH -> FISH_VOICE_NO_DEFAULT_FOOTER
             VoiceProvider.SYSTEM -> SYSTEM_VOICE_NO_DEFAULT_FOOTER
             VoiceProvider.CHATTERBOX -> CHATTERBOX_VOICE_NO_DEFAULT_FOOTER
         }
@@ -304,7 +317,7 @@ object ProfileRules {
     }
 
     /**
-     * The engine picker's rows, in the desktop's order. All three stay
+     * The engine picker's rows, in the desktop's order. Every engine stays
      * selectable: whether the computer can actually speak with one is the
      * server's answer, reported as `configured` — the phone cannot know the
      * host's platform, so it offers every engine the API defines and lets the
@@ -312,6 +325,7 @@ object ProfileRules {
      */
     fun providerChoices(): List<VoiceChoice> = listOf(
         VoiceChoice(VoiceProvider.ELEVENLABS.wire, "ElevenLabs", null, enabled = true),
+        VoiceChoice(VoiceProvider.FISH.wire, "Fish Audio", null, enabled = true),
         VoiceChoice(VoiceProvider.SYSTEM.wire, "Built-in Mac voices", null, enabled = true),
         VoiceChoice(VoiceProvider.CHATTERBOX.wire, "Chatterbox (local)", null, enabled = true),
     )
@@ -322,6 +336,20 @@ object ProfileRules {
      */
     fun applyLoadedConfig(form: ProfileForm, config: ConfigStatus?): ProfileForm =
         if (config != null && !config.canSpeak(form.voice)) form.copy(speakReplies = false) else form
+
+    /**
+     * Voice ids belong to one provider. The server clears every bot voice on
+     * a successful switch, so an open sheet must clear both its draft and its
+     * dirty-comparison baseline before the new catalog is rendered.
+     */
+    fun afterVoiceProviderSwitch(
+        form: ProfileForm,
+        baseline: ProfileForm,
+        config: ConfigStatus,
+    ): Pair<ProfileForm, ProfileForm> {
+        val cleared = applyLoadedConfig(form.copy(voice = ""), config)
+        return cleared to baseline.copy(voice = "")
+    }
 
     fun cropLabel(crop: AvatarCrop): String = when (crop) {
         AvatarCrop.MASCOT -> "Mascot"

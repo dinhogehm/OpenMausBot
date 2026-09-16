@@ -34,6 +34,7 @@ if (process.versions.electron && process.argv.includes(flag)) {
   let cloudRequests = 0, createCalls = 0, restoreCalls = 0, deleteCalls = 0, objectRequests = 0;
   let scheduler, scheduleRecord = null, scheduleTimer = null, scheduleClock = Date.now(), scheduledRuns = 0, snapshotRequest = null;
   const metadata = entry => ({ id: entry.id, status: entry.status, sizeBytes: entry.sizeBytes, sha256: entry.sha256,
+    passwordRequired: false,
     appVersion: entry.appVersion, createdAt: entry.createdAt, ...(entry.completedAt ? { completedAt: entry.completedAt } : {}) });
   const body = async req => {
     const chunks = []; let bytes = 0;
@@ -76,7 +77,8 @@ if (process.versions.electron && process.argv.includes(flag)) {
       if (path === "/api/desktop/backups" && req.method === "POST") {
         assert.ok(input.sizeBytes > 60 && input.sizeBytes < 8 * 1024 ** 2);
         assert.match(input.sha256, /^[a-f0-9]{64}$/);
-        assert.deepEqual(Object.keys(input).sort(), ["appVersion", "sha256", "sizeBytes"]);
+        assert.deepEqual(Object.keys(input).sort(), ["appVersion", "sha256", "sizeBytes", "unlockKey"]);
+        assert.match(input.unlockKey, /^[A-Za-z0-9_-]{43}$/);
         const entry = { ...input, id: randomUUID(), status: "uploading", createdAt: Date.now() };
         entries.set(entry.id, entry);
         return reply(201, { ...metadata(entry), partSizeBytes: 64 * 1024 ** 2, partCount: 1 });
@@ -94,7 +96,7 @@ if (process.versions.electron && process.argv.includes(flag)) {
       }
       if (route[2] === "download") {
         assert.equal(entry.status, "ready");
-        return reply(200, { ...metadata(entry), url: `${origin}/objects/${entry.id}/1?signature=synthetic-only`, expiresAt: Date.now() + 300_000 });
+        return reply(200, { ...metadata(entry), unlockKey: entry.unlockKey, url: `${origin}/objects/${entry.id}/1?signature=synthetic-only`, expiresAt: Date.now() + 300_000 });
       }
       if (route[2] === "abort" || req.method === "DELETE") {
         entries.delete(entry.id); objects.delete(entry.id); uploadedParts.delete(entry.id); return reply(200, { deleted: true });
@@ -160,12 +162,12 @@ if (process.versions.electron && process.argv.includes(flag)) {
     now: () => scheduleClock,
     setTimer: callback => { scheduleTimer = callback; return callback; },
     clearTimer: callback => { if (scheduleTimer === callback) scheduleTimer = null; },
-    run: async (password, signal) => {
+    run: async (signal) => {
       signal.throwIfAborted();
       const clientState = await snapshot(); signal.throwIfAborted();
       assert.equal(Object.hasOwn(clientState, "fixture-auth-token"), false);
       const abort = () => transferController?.abort(); signal.addEventListener("abort", abort, { once: true });
-      try { await transfer("backup", { password, clientState }); scheduledRuns++; }
+      try { await transfer("backup", { clientState }); scheduledRuns++; }
       finally { signal.removeEventListener("abort", abort); }
     },
     onState: () => publish(state),
@@ -241,11 +243,8 @@ if (process.versions.electron && process.argv.includes(flag)) {
       await click("Back up this workspace");
       await until(() => evaluate("Boolean(document.querySelector('dialog[open]'))"), "native upload dialog");
       assert.equal(await evaluate("document.querySelector('dialog[open]').textContent.includes('THIS current workspace')"), true);
-      await fill("dialog input[type=password]", "short", 0); await fill("dialog input[type=password]", "short", 1);
-      assert.equal(await evaluate("document.querySelector('dialog button[type=submit]').disabled"), true);
-      await fill("dialog input[type=password]", PASSWORD, 0); await fill("dialog input[type=password]", `${PASSWORD}-mismatch`, 1);
-      assert.equal(await evaluate("document.querySelector('dialog button[type=submit]').disabled"), true);
-      await fill("dialog input[type=password]", PASSWORD, 1);
+      assert.equal(await evaluate("document.querySelectorAll('dialog input[type=password]').length"), 0);
+      assert.equal(await evaluate("document.querySelector('dialog button[type=submit]').disabled"), false);
       if (capture) await screenshot("company-backup-upload-confirmation.png");
       const previous = entries.size;
       await click("Back up this workspace");
@@ -264,7 +263,7 @@ if (process.versions.electron && process.argv.includes(flag)) {
     assert.equal(await evaluate(`Object.values({...localStorage}).some(value => value.includes(${JSON.stringify(PASSWORD)}))`), false, "backup password never persisted in browser storage");
     assert.equal(await evaluate("document.body.textContent.includes('30 GiB') && document.body.textContent.includes('snapshots kept')"), true);
     await screenshot("company-backup-ready-list.png");
-    checks.push("real local encryption, SHA256, multipart upload/completion, progress, dates and quota; mismatched and short passwords blocked");
+    checks.push("passwordless native encryption, SHA256, multipart upload/completion, progress, dates and quota");
 
     await rowClick(second, "Delete cloud backup");
     await fill("dialog input", "delete");
@@ -286,11 +285,9 @@ if (process.versions.electron && process.argv.includes(flag)) {
     assert.equal(extraResponse.status, 201); const extra = await extraResponse.json();
     const botIds = async () => (await (await fetch(`${runtimeUrl}/api/bots`)).json()).bots.map(bot => bot.id);
     assert.ok((await botIds()).includes(extra.bot.id));
-    await rowClick(first, "Restore this backup"); await fill("dialog input[type=password]", "wrong-fixture-password"); await click("Validate backup");
-    await until(() => evaluate("Boolean(document.querySelector('dialog [role=alert]')) && !document.querySelector('dialog input').disabled"), "wrong-password safe failure");
-    assert.equal(restoreCalls, 0); assert.equal(await evaluate("document.body.textContent.includes('Validated backup')"), false);
-    assert.ok((await botIds()).includes(extra.bot.id));
-    await fill("dialog input[type=password]", PASSWORD); await click("Validate backup");
+    await rowClick(first, "Restore this backup");
+    assert.equal(await evaluate("document.querySelectorAll('dialog input[type=password]').length"), 0);
+    await click("Validate backup");
     await until(() => evaluate("document.body.textContent.includes('Validated backup')"), "actual decrypted archive preview");
     assert.equal(restoreCalls, 0); assert.ok((await botIds()).includes(extra.bot.id));
     assert.equal(await evaluate(`localStorage.getItem(${JSON.stringify(MARKER)})`), null);
@@ -308,7 +305,7 @@ if (process.versions.electron && process.argv.includes(flag)) {
     assert.equal((await localJson("/api/workspace-backup/status")).pendingRestore, true);
     assert.equal((await fetch(`${runtimeUrl}/api/bots`)).status, 503, "workspace locked until restart");
     await screenshot("company-backup-pending-restart.png");
-    checks.push("wrong password does not replace; real preview preserves live data; narrow layout fits; typed REPLACE stages without live replacement");
+    checks.push("passwordless real preview preserves live data; narrow layout fits; typed REPLACE stages without live replacement");
 
     // A new renderer instance, not the component's transient restart state.
     win.destroy(); win = await open(true); await win.loadURL(url);
@@ -339,8 +336,8 @@ if (process.versions.electron && process.argv.includes(flag)) {
     await until(() => evaluate(`Boolean(${switchSelector})`), "daily backup switch");
     await evaluate(`${switchSelector}.click()`);
     await until(() => evaluate("Boolean(document.querySelector('dialog[open]'))"), "daily backup consent dialog");
-    await fill("dialog input[type=password]", PASSWORD, 0); await fill("dialog input[type=password]", PASSWORD, 1);
-    assert.equal(await evaluate(`${button("Enable daily backups")}.disabled`), true, "password alone is not schedule consent");
+    assert.equal(await evaluate("document.querySelectorAll('dialog input[type=password]').length"), 0);
+    assert.equal(await evaluate(`${button("Enable daily backups")}.disabled`), true, "explicit schedule consent is still needed");
     await evaluate("document.querySelector('dialog input[type=checkbox]').click()");
     assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth && document.querySelector('dialog').scrollWidth <= document.querySelector('dialog').clientWidth + 1"), true);
     await screenshot("company-backup-schedule-consent-narrow.png");
@@ -362,7 +359,7 @@ if (process.versions.electron && process.argv.includes(flag)) {
       const latest = [...entries.values()].at(-1);
       await until(() => evaluate(`document.body.textContent.includes(${JSON.stringify(latest.id)})`), "scheduled archive appears without refresh");
       const native = createCompanyBackups({ localRequest, portalRequest, tempRoot: join(output, "transfer-cache"), allowLoopbackForTests: true });
-      const preview = await native.prepareRestore({ id: latest.id, password: PASSWORD });
+      const preview = await native.prepareRestore({ id: latest.id });
       assert.equal(preview.summary.format, "openmaus.workspace-backup");
       // Check the real staged manifest rather than trusting captured IPC input.
       assert.match(preview.id, /^[a-f0-9-]{36}$/);
@@ -375,7 +372,7 @@ if (process.versions.electron && process.argv.includes(flag)) {
     await evaluate(`${switchSelector}.click()`);
     await until(() => scheduler.state().enabled === false && scheduleRecord === null, "disable forgets saved schedule");
     assert.equal(scheduleTimer, null);
-    checks.push("daily backups require explicit scope/password consent; start after 24h; production scheduler takes two encrypted snapshots with fresh private preload drafts; a week missed produces one catch-up; disable forgets the schedule");
+    checks.push("passwordless daily backups require explicit scope consent; start after 24h; production scheduler takes two encrypted snapshots with fresh private preload drafts; a week missed produces one catch-up; disable forgets the schedule");
     const remote = await open(false); await remote.loadURL(url);
     assert.equal(await remote.webContents.executeJavaScript("typeof window.ogb.companyBackups"), "undefined"); remote.destroy();
     checks.push("production preload omits company backup bridge from remote-origin windows");

@@ -536,7 +536,10 @@ private fun LoadedChat(
     LaunchedEffect(threadId, chat.unread) {
         if (chat.unread) session.markRead(chat)
     }
-    LaunchedEffect(threadId) {
+    // A non-resumable reconnect replaces the fleet snapshot and invalidates
+    // history for nonactive threads. The open chat's ID has not changed, but
+    // it must fetch its page again instead of waiting for the user to reopen it.
+    LaunchedEffect(threadId, state.hasLoadedPage(threadId)) {
         session.loadThreadIfNeeded(threadId)
     }
 

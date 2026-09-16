@@ -23,6 +23,16 @@ desktop selection, switching drafts from the header, status updates, and
 failed create/rename/delete actions. Deletion requires confirmation; errors
 keep the form and its entered text available for retry.
 
+The reconnect regression keeps a nonactive thread open while a second,
+non-resumable `Hello` hydrates the desktop-active thread. Its history must be
+fetched again and rendered without navigation or changing the desktop's active
+thread. This uses real Compose, Session, and HTTP history reads against a
+loopback server; the SSE frames are scripted, not a real-device network test.
+
+```sh
+./gradlew :app:testDebugUnitTest --tests '*AndroidThreadNavigationTest*'
+```
+
 `ChatDraftHolderTest` covers separate text/attachment state, late upload
 completion after switching away and back, and clearing an owner's drafts
 when leaving the chat. Dictated text and attachments remain memory-only.

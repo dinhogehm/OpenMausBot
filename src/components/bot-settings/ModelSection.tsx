@@ -6,9 +6,11 @@
 // Effort card down instead and is fully visible where it opens.
 import { t } from "@/lib/i18n";
 import { EffortRow, ModelPicker } from "../ModelPicker";
-import type { Bot } from "@/state/store";
+import { useStore, type Bot } from "@/state/store";
 
 export function ModelSection({ bot }: { bot: Bot }) {
+  const { state } = useStore();
+  const modelVariants = state.instances.find((instance) => instance.instanceId === bot.modelSelection.instanceId)?.capabilities?.modelVariants;
   return (
     <div className="flex flex-col gap-4">
       <div className="rounded-xl bg-card p-4">
@@ -30,14 +32,14 @@ export function ModelSection({ bot }: { bot: Bot }) {
         className="rounded-xl bg-card p-4"
         label={
           <div>
-            <div className="text-[15px] font-medium text-ink">{t("botModel.effort")}</div>
+            <div className="text-[15px] font-medium text-ink">{modelVariants ? t("botModel.reasoning") : t("botModel.effort")}</div>
             {/* Says what the app does, not what the engine ends up at:
                 Codex applies a level to the whole thread and has no way to
                 take one back, so "currently: engine default" was a promise
                 we could not keep for a thread that had already been sent
                 one. Sending nothing is true on every engine. */}
             <div className="mt-0.5 text-[13px] text-ink-secondary">
-              {t("botModel.effortHint")}{bot.modelSelection.effort ? "" : t("botModel.effortDefault")}
+              {modelVariants ? t("botModel.reasoningHint") : `${t("botModel.effortHint")}${bot.modelSelection.effort ? "" : t("botModel.effortDefault")}`}
             </div>
           </div>
         }

@@ -12,7 +12,8 @@
 // unless the agent explicitly offered an `allow`-kind option — option ORDER
 // is never a security contract). session/load REPLAYS history as ordinary
 // session/update notifications, so updates are double-gated: nothing emits
-// before the prompt is sent, and `_meta.isReplay` updates are dropped.
+// before the prompt is sent, and `_meta.isReplay` updates are dropped. Session
+// configuration is the exception: its live updates apply before prompting too.
 import { homedir } from "node:os";
 import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
@@ -37,6 +38,7 @@ import type {
   ProviderInstance,
   ProviderSnapshot,
   ModelCatalog,
+  ModelVariantOption,
   RuntimeEvent,
   RuntimeEventListener,
   SendTurnInput,
@@ -70,6 +72,8 @@ export interface AcpSupport {
    * describe() runs before any session exists, so there is no _meta to read
    * — eventually both should come from initialize's _meta.modelState. */
   effortLevels?: readonly EffortLevel[];
+  /** Discover and select opaque model variants through ACP config options. */
+  modelVariants?: boolean;
   /** Default CLI binary name if the instance config doesn't override it. */
   defaultCli: string;
   /** Optional live model catalog. A failed lookup keeps the last usable catalog.
@@ -131,7 +135,7 @@ export interface AcpSupport {
    *  snapshot share `transformEnv` and must not see a per-turn overlay. */
   applyTurnEnv?(
     env: Record<string, string | undefined>,
-    ctx: { model?: string; requestedModel?: string },
+    ctx: { model?: string; requestedModel?: string; fullAuto: boolean },
   ): void;
   /** Pick the ACP authenticate methodId from initialize's advertised
    * authMethods; return null to skip the authenticate step. */
@@ -184,6 +188,31 @@ const SESSION_CONFIG_TIMEOUT = envOr("OPENMAUS_ACP_SESSION_CONFIG_TIMEOUT_MS", 3
 const NEW_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_NEW_SESSION_TIMEOUT_MS", 300_000);
 const LOAD_SESSION_TIMEOUT = envOr("OPENMAUS_ACP_LOAD_SESSION_TIMEOUT_MS", 120_000); // history replay on a long thread is slow
 const CLIENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
+
+function acpVariantOption(result: any): { configId: string; options: ModelVariantOption[]; currentValue?: string } | undefined {
+  const option = (Array.isArray(result?.configOptions) ? result.configOptions : []).find(
+    (entry: any) => entry?.type === "select" && typeof entry.id === "string"
+      && (entry.id === "effort" || entry.category === "thought_level"),
+  );
+  if (!option) return;
+  const options: ModelVariantOption[] = [];
+  const seen = new Set<string>();
+  const collect = (entries: unknown) => {
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries) {
+      if (typeof entry?.value === "string" && !seen.has(entry.value)) {
+        seen.add(entry.value);
+        options.push({ id: entry.value, label: typeof entry.name === "string" ? entry.name : entry.value });
+      } else if (Array.isArray(entry?.options)) collect(entry.options);
+    }
+  };
+  collect(option.options);
+  return {
+    configId: option.id,
+    options,
+    ...(typeof option.currentValue === "string" ? { currentValue: option.currentValue } : {}),
+  };
+}
 const TOOL_LOG_TEXT_LIMIT = 64_000;
 
 async function readAcpImageBlocks(images: readonly TurnImageInput[]) {
@@ -384,9 +413,14 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
       // ACP session mcpServers: stdio is the baseline every ACP agent
       // supports (mcpCapabilities.http/.sse only add EXTRA transports), so
       // an injected stdio proxy — e.g. the peer-agent comms tool — attaches
-      // fine here. env is the ACP {name,value}[] shape.
+      // fine here. A url server is listed in ACP's http/sse shape and kept
+      // for the session only when the agent advertised that transport.
+      // env and headers are the ACP {name,value}[] shape.
+      type AcpMcpServer =
+        | { name: string; command: string; args: string[]; env: Array<{ name: string; value: string }> }
+        | { type: "http" | "sse"; name: string; url: string; headers: Array<{ name: string; value: string }> };
       const acpMcpServers = (turn: SendTurnInput) => {
-        const servers: Array<{ name: string; command: string; args: string[]; env: Array<{ name: string; value: string }> }> = [];
+        const servers: AcpMcpServer[] = [];
         const acpEnv = (env: Record<string, string>) =>
           Object.entries(env).map(([name, value]) => ({ name, value: String(value) }));
         const agents = turn.integrations?.agents;
@@ -423,6 +457,10 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         // config boundary; this is defense in depth).
         for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
           if (servers.some((existing) => existing.name === name)) continue;
+          if ("url" in server) {
+            servers.push({ type: server.type, name, url: server.url, headers: acpEnv(server.headers) });
+            continue;
+          }
           servers.push({ name, command: server.command, args: server.args, env: acpEnv(server.env) });
         }
         return servers;
@@ -459,7 +497,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           return { turnId };
         }
         const resolvedModel = support.resolveTurnModel?.(turn.model, env);
-        support.applyTurnEnv?.(env, { model: resolvedModel, requestedModel: turn.model });
+        support.applyTurnEnv?.(env, { model: resolvedModel, requestedModel: turn.model, fullAuto: turnConfig.fullAuto === true });
         const cliTurn =
           resolvedModel !== undefined && resolvedModel !== turn.model
             ? { ...turn, model: resolvedModel }
@@ -492,6 +530,37 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
         const asks = new Map<string, (behavior: string, source?: "user" | "timeout" | "system", message?: string, always?: boolean) => void>();
         let nextId = 1;
         let sessionId: string | null = null;
+        let sessionConfigResult: any = null;
+        const modelOf = (result: any): string | null => {
+          const option = (Array.isArray(result?.configOptions) ? result.configOptions : []).find(
+            (entry: any) => entry?.id === (support.selectModel?.configId ?? "model"),
+          );
+          return typeof option?.currentValue === "string" ? option.currentValue : null;
+        };
+        const receiveModelVariants = (result: any) => {
+          sessionConfigResult = result;
+          if (!support.modelVariants) return;
+          const nativeModel = modelOf(result) ?? cliTurn.model;
+          if (!nativeModel) return;
+          const option = acpVariantOption(result);
+          emit({
+            ...base(threadId, turnId),
+            type: "session.model-variants",
+            model: nativeModel === cliTurn.model ? (turn.model ?? nativeModel) : nativeModel,
+            variants: {
+              options: option?.options ?? [],
+              ...(option?.currentValue !== undefined ? { currentValue: option.currentValue } : {}),
+            },
+          });
+        };
+        const requestedVariantOption = () => {
+          if (!support.modelVariants) throw new Error(`${support.displayName} does not support model variants`);
+          const option = acpVariantOption(sessionConfigResult);
+          if (!option || !option.options.some((entry) => entry.id === turn.variant)) {
+            throw new Error(`${support.displayName} does not advertise variant ${turn.variant} for this model`);
+          }
+          return option;
+        };
         let interruptTimer: ReturnType<typeof setTimeout> | null = null;
         const rpcPending = new Map<
           number,
@@ -504,7 +573,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           } catch {}
           appendNative(threadId, { dir: "out", source: SOURCE, msg: nativeLogMessage(obj) });
         };
-        const request = (method: string, params: unknown, timeoutMs?: number) =>
+        const request = (method: string, params: unknown, timeoutMs?: number, receive?: (result: any) => void) =>
           new Promise<any>((resolve, reject) => {
             const id = nextId++;
             let timer: ReturnType<typeof setTimeout> | null = null;
@@ -515,7 +584,13 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               }, timeoutMs);
               timer.unref?.();
             }
-            rpcPending.set(id, { resolve, reject, timer });
+            rpcPending.set(id, {
+              // Consume configuration in wire order: an update following this
+              // response may arrive before the awaiting continuation resumes.
+              resolve: (result) => { receive?.(result); resolve(result); },
+              reject,
+              timer,
+            });
             send({ jsonrpc: "2.0", id, method, params });
           });
 
@@ -733,7 +808,12 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           // native log but never normalized: the prompt result is the settle.
           if (msg.method !== "session/update") return;
           const p = msg.params ?? {};
-          if (!state.promptSent || p._meta?.isReplay === true) return;
+          if (p._meta?.isReplay === true) return;
+          if (support.modelVariants && p.update?.sessionUpdate === "config_option_update") {
+            if (!state.settled && sessionId && p.sessionId === sessionId) receiveModelVariants(p.update);
+            return;
+          }
+          if (!state.promptSent) return;
           const u = p.update ?? {};
           switch (u.sessionUpdate) {
             case "agent_message_chunk": {
@@ -900,6 +980,11 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               );
             }
 
+            // stdio is every agent's baseline; a url server rides only with
+            // an agent that advertised its transport, so an agent without
+            // http/sse never sees an entry it would refuse the session over
+            const sessionServers = mcpServers.filter((server) =>
+              !("type" in server) || init?.agentCapabilities?.mcpCapabilities?.[server.type] === true);
             const cursor = typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
             // a fresh native session forgets what the previous one allowed
             if (!cursor) sessionAllows.delete(threadId);
@@ -908,17 +993,24 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               try {
                 sessionResult = await request(
                   support.resumeMethod === "resume" ? "session/resume" : "session/load",
-                  { sessionId: cursor, cwd, mcpServers },
+                  { sessionId: cursor, cwd, mcpServers: sessionServers },
                   LOAD_SESSION_TIMEOUT,
+                  (result) => {
+                    if (result) {
+                      sessionId = cursor;
+                      receiveModelVariants(result);
+                    }
+                  },
                 );
-                if (sessionResult) sessionId = cursor;
               } catch {
                 /* session gone, load unsupported, or too slow — start fresh */
               }
             }
             if (!sessionId) {
-              sessionResult = await request("session/new", { cwd, mcpServers }, NEW_SESSION_TIMEOUT);
-              sessionId = typeof sessionResult?.sessionId === "string" ? sessionResult.sessionId : null;
+              sessionResult = await request("session/new", { cwd, mcpServers: sessionServers }, NEW_SESSION_TIMEOUT, (result) => {
+                sessionId = typeof result?.sessionId === "string" ? result.sessionId : null;
+                receiveModelVariants(result);
+              });
               if (!sessionId) throw new Error("session/new returned no sessionId");
             }
             let selectedModel: string | null = null;
@@ -937,18 +1029,15 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             try {
               if (support.selectModel) {
                 const { configId } = support.selectModel;
-                const currentOf = (r: any) =>
-                  (Array.isArray(r?.configOptions) ? r.configOptions : []).find((o: any) => o?.id === configId)
-                    ?.currentValue ?? null;
-                selectedModel = currentOf(sessionResult);
+                selectedModel = modelOf(sessionConfigResult);
                 if (cliTurn.model && cliTurn.model !== selectedModel) {
-                  selectedModel = currentOf(
-                    await request(
-                      "session/set_config_option",
-                      { sessionId, configId, value: cliTurn.model },
-                      INIT_TIMEOUT,
-                    ),
+                  sessionResult = await request(
+                    "session/set_config_option",
+                    { sessionId, configId, value: cliTurn.model },
+                    INIT_TIMEOUT,
+                    receiveModelVariants,
                   );
+                  selectedModel = modelOf(sessionConfigResult);
                   // an agent that answers OK but keeps its old model is worse than
                   // one that errors: it burns a paid turn on the wrong thing
                   if (selectedModel !== cliTurn.model) {
@@ -975,6 +1064,18 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
                 // report the slug we set so the UI does not claim otherwise.
                 if (!selectedModel && cliTurn.model) selectedModel = cliTurn.model;
               }
+              if (turn.variant !== undefined) {
+                const option = requestedVariantOption();
+                await request(
+                  "session/set_config_option",
+                  { sessionId, configId: option.configId, value: turn.variant },
+                  SESSION_CONFIG_TIMEOUT,
+                  receiveModelVariants,
+                );
+                if (requestedVariantOption().currentValue !== turn.variant) {
+                  throw new Error(`${support.displayName} did not apply variant ${turn.variant}`);
+                }
+              }
             } catch (error) {
               // session.started is the only place the resume cursor is recorded,
               // so a rejected setting must not orphan a session we just created.
@@ -982,7 +1083,6 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               throw error;
             }
             emitSessionStarted();
-            state.promptSent = true;
             const text = support.buildPromptText
               ? support.buildPromptText(turn)
               : turn.system
@@ -991,6 +1091,13 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             const imageBlocks = support.images === true && runtimeAcceptsImages
               ? await readAcpImageBlocks(images)
               : [];
+            if (support.modelVariants && cliTurn.model && modelOf(sessionConfigResult) !== cliTurn.model) {
+              throw new Error(`${support.displayName} changed model before the prompt`);
+            }
+            if (turn.variant !== undefined && requestedVariantOption().currentValue !== turn.variant) {
+              throw new Error(`${support.displayName} changed variant before the prompt`);
+            }
+            state.promptSent = true;
             const result = await request("session/prompt", {
               sessionId,
               prompt: [{ type: "text", text }, ...imageBlocks],
@@ -1079,6 +1186,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             images: support.images !== false,
             nativeImageInput: support.images === true,
             effortLevels: support.effortLevels,
+            modelVariants: support.modelVariants === true,
             // OpenMausBot supplies a per-bot approvalMode on every harness
             // turn, which safely overrides a legacy instance fullAuto value.
             // Direct adapter calls that omit it still fail closed in sendTurn.

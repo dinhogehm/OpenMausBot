@@ -61,3 +61,36 @@ stale list/stream events, native key routing, bounded input/backpressure,
 revoked capabilities, and exact saved-state cleanup. Native workflow testing
 is still required: a green mocked
 frame test alone does not prove browser input or restoration works.
+
+## Real Codex chat-to-action acceptance (opt-in)
+
+This uses real model quota. Supply the installed CLI, sign-in file and model
+explicitly; the recipe copies only that sign-in into a disposable home. It
+does not import personal chats, provider settings, skills or browser profiles.
+Never point its requests at the user's running app.
+
+```sh
+OMB_VERIFY_CODEX_CLI=/absolute/path/to/codex \
+OMB_VERIFY_CODEX_AUTH=/absolute/path/to/auth.json \
+OMB_VERIFY_CODEX_MODEL=your-supported-model \
+node --experimental-strip-types scripts/verify-codex-surface-live.ts
+```
+
+Open the printed preview, select Ziggy, and send ordinary requests without tool
+names: open the printed test page, fill the name, click Say hello and verify
+the greeting. Confirm the actual screenshot, not just the model's answer.
+Use the composer to select **Approve for me**, then ask it to change the name
+and open/read the dialog. Routine tool actions should not produce repeated
+approval cards; provider review may still ask about other actions.
+
+Ask for Chrome on an unconfigured cloud computer. It must inspect real choices
+and report the blocker, not act on a host and claim that it is a VM. The
+composer and panel must keep the real destination highlighted during sends.
+
+Ctrl-C closes the exact fixture and removes the copied sign-in and browser
+data. VM/cloud transport and turn-bound switching are separately covered by
+`server/group-local-vm.e2e.test.ts`, `server/vps-routing.test.ts` and
+`server/index.test.ts` with
+isolated providers. These are not evidence of real cloud provisioning. Native
+Box currently does not expose the agents selector tool, so switching away
+from an active native Box destination still requires the composer selector.

@@ -27,7 +27,9 @@ extension Bot {
     /// sidebar folds them: a PM bot that opened ten helper threads and closed
     /// them must not leave ten rows behind. They are never gone — a search
     /// or `includingClosed` (the manage sheet) lists them, and a closed
-    /// thread that is running, unread, or open here stays in the list.
+    /// thread that is working, unread, or open here stays in the list. A
+    /// thread the person archived folds away the same way, with the same
+    /// attention override: a working or waiting archived thread resurfaces.
     public func threadGroups(matching query: String = "", includingClosed: Bool = false) -> [BotThreadGroup] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let threads: [BotTask]
@@ -42,7 +44,9 @@ extension Bot {
         } else if includingClosed || !search.isEmpty {
             threads = visibleTasks
         } else {
-            threads = visibleTasks.filter { !$0.isClosed || $0.demandsAttention || $0.threadId == threadId }
+            threads = visibleTasks.filter { task in
+                !(task.isClosed || task.isArchived) || task.demandsAttention || task.threadId == threadId
+            }
         }
         let ordered = search.isEmpty ? threadsInAttentionOrder(threads) : threads
 

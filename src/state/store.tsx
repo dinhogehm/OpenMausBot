@@ -13,7 +13,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { CloudBackend, EffortLevel } from "../../server/contracts.ts";
+import type { CloudBackend, EffortLevel, ModelVariantOption, RuntimeEvent } from "../../server/contracts.ts";
 import type { MausColor, MausMotion } from "@/lib/mascot";
 import type { BotAvatarCrop } from "../../shared/bot-avatar";
 import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode";
@@ -258,6 +258,7 @@ export interface ModelSelection {
   instanceId: string;
   model: string;
   effort?: EffortLevel;
+  variant?: string;
 }
 
 /** One of a bot's separate contexts: its own thread, transcript and
@@ -282,6 +283,10 @@ export interface Task {
   busy?: boolean;
   unread?: boolean;
   pinnedMessageId?: string;
+  /** where this conversation works, when pinned: by the person from the
+   * composer, or by its first Auto turn to the place it reached. Wins over
+   * the bot's Works on (except Off); absent = follows the bot. */
+  surface?: "cloud" | "vm" | "local" | "browser";
   /** set when a bot (not the person) started this thread — its own or a
    * teammate's; the sidebar shows a quiet "opened by <name>" under the title */
   openedBy?: ThreadOpener;
@@ -449,13 +454,16 @@ export type TaskUpdatePatch = Partial<Pick<Task, "modelSelection" | "approvalMod
   resetApprovalToAsk?: boolean;
   projectId?: string | null;
   archivedAt?: number | null;
+  /** null = follow the bot's Works on again */
+  surface?: Task["surface"] | null;
 };
 
 function taskPatchFields(patch: TaskUpdatePatch): Partial<Task> {
-  const { confirmFullAccess: _fullConsent, acknowledgeLocalAuto: _localAck, updateBotDefault: _modelDefault, resetApprovalToAsk, projectId, archivedAt, ...fields } = patch;
+  const { confirmFullAccess: _fullConsent, acknowledgeLocalAuto: _localAck, updateBotDefault: _modelDefault, resetApprovalToAsk, projectId, archivedAt, surface, ...fields } = patch;
   return { ...fields, ...(resetApprovalToAsk ? { approvalMode: "ask", autoApprove: false, alwaysAllow: [] } : {}),
     ...(projectId === undefined ? {} : { projectId: projectId ?? undefined }),
-    ...(archivedAt === undefined ? {} : { archivedAt: archivedAt ?? undefined }) };
+    ...(archivedAt === undefined ? {} : { archivedAt: archivedAt ?? undefined }),
+    ...(surface === undefined ? {} : { surface: surface ?? undefined }) };
 }
 
 /** The visible conversation: walk parentId links from the active leaf back
@@ -503,15 +511,15 @@ export interface ConfigStatus {
   threads?: { maxConcurrentPerBot: number };
   localVm: { mode: "shared" | "per-bot"; maxInstances: number };
   opencodeGo?: { configured: boolean };
-  /** Voice. `configured` = the engine has what it needs (an ElevenLabs key,
-   * or a Chatterbox server address); `ready` = that AND a voice, which is
+  /** Voice. `configured` = the engine has what it needs (an ElevenLabs or
+   * Fish Audio key, or a Chatterbox server address); `ready` = that AND a voice, which is
    * what it takes to actually speak. The key itself is never echoed back;
    * `baseUrl`/`model` are Chatterbox settings, not credentials. */
   tts?: {
     configured: boolean;
     ready: boolean;
     voice: string;
-    provider?: "elevenlabs" | "system" | "chatterbox";
+    provider?: "elevenlabs" | "fish" | "system" | "chatterbox";
     baseUrl?: string;
     model?: string;
   };
@@ -531,7 +539,7 @@ export interface ConfigStatus {
   /** UI language override; "" (or absent) follows the system language. */
   language?: string;
   /** Opt-in flags. Absent means off. */
-  features?: { skillAuthoring: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean };
+  features?: { skillAuthoring: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean };
   /** First-run progress: whether the welcome tour was finished and which
    * one-time hints were dismissed. Server-owned so it follows the workspace. */
   onboarding?: OnboardingStatus;
@@ -624,8 +632,13 @@ export interface InstanceInfo {
     };
     /** a reported cost on a subscription is notional; the UI says so */
     billing?: "metered" | "subscription";
+    /** a standing condition worth a look, with nothing to run */
+    warning?: {
+      title: string;
+      message: string;
+    };
   };
-  models: { default: string; options: Array<{ id: string; label: string; custom?: boolean; loaded?: boolean; provider?: string }> };
+  models: { default: string; options: Array<{ id: string; label: string; custom?: boolean; loaded?: boolean; provider?: string; variants?: ModelVariantOption[] }> };
   capabilities?: {
     computerMcp?: boolean;
     agentsMcp?: boolean;
@@ -633,6 +646,7 @@ export interface InstanceInfo {
     browserMcp?: boolean;
     images?: boolean;
     effortLevels?: readonly EffortLevel[];
+    modelVariants?: boolean;
     /** the engine keeps a live session and takes a message mid-turn */
     queueing?: boolean;
     localComputerMcp?: boolean;
@@ -686,12 +700,23 @@ export type BotSettingsSection =
   | "history"
   | "usage";
 
+export interface ModelVariantSession {
+  instanceId: string;
+  model: string;
+  turnId: string;
+  startedAt: string;
+  acceptingUpdates: boolean;
+  variants?: { options: ModelVariantOption[]; currentValue?: string };
+}
+
 export interface AppState {
   bots: Bot[];
   groups: Group[];
   /** Persisted named teams; older servers omit this, so clients also derive labels. */
   sections?: string[];
   instances: InstanceInfo[];
+  /** Session discoveries stay with their conversation and never enter persisted settings. */
+  modelVariantSessions: Record<string, ModelVariantSession>;
   config: ConfigStatus | null;
   /** selected chat — a bot id OR a group id */
   selectedId: string;
@@ -738,7 +763,7 @@ export interface AppState {
   /** True only when the open action named a section — accordion expands that row. */
   botSettingsExpandAccordion: boolean;
   /** latest live frame of a bot's computer, per botId */
-  screens: Record<string, { png: string; mime: string }>;
+  screens: Record<string, { png: string; mime: string; threadId?: string }>;
   /** bots whose cloud computer is being provisioned */
   provisioning: Record<string, boolean>;
   /** Bot removals waiting for the server to verify that no persistent
@@ -881,7 +906,7 @@ export type Action =
   | { type: "createRoutine"; input: RoutineInput }
   | { type: "updateRoutine"; routineId: string; patch: Partial<RoutineInput> }
   | { type: "deleteRoutine"; routineId: string }
-  | { type: "runRoutine"; routineId: string; onSettled?: () => void }
+  | { type: "runRoutine"; routineId: string; onStarted?: (run: RoutineRun) => void; onError?: (error: unknown) => void; onSettled?: () => void }
   | { type: "cancelRoutineRun"; runId: string }
   | { type: "markRoutineRunSeen"; runId: string }
   | { type: "groupPatched"; group: Partial<Group> & { id: string } }
@@ -970,9 +995,10 @@ export type Action =
   | { type: "messageAdded"; threadId: string; message: Message }
   | { type: "messagePatched"; threadId: string; message: Message }
   | { type: "optimisticMessageRemoved"; threadId: string; sendId: string }
-  | { type: "screenFrame"; botId: string; png: string; mime: string }
+  | { type: "screenFrame"; botId: string; threadId?: string; png: string; mime: string }
   | { type: "provisioning"; botId: string; on: boolean }
   | { type: "computerControl"; botId: string; held: boolean; helpReason: string | null }
+  | { type: "modelVariantRuntime"; event: RuntimeEvent }
   | { type: "setModel"; botId: string; selection: ModelSelection; threadId?: string; updateBotDefault?: boolean; resetApprovalToAsk?: boolean }
   | { type: "interrupt"; botId: string; threadId?: string; onError?: () => void }
   | { type: "connected"; value: boolean }
@@ -995,6 +1021,18 @@ export type Action =
       botId: string;
       patch: BotUpdatePatch;
     };
+
+/** Discard discoveries when their model/account is replaced or their thread disappears. */
+function reconcileModelVariantSessions(state: AppState): AppState {
+  const sessions = Object.entries(state.modelVariantSessions);
+  const kept = sessions.filter(([threadId, session]) => {
+    const owner = state.bots.find((bot) => bot.threadId === threadId || bot.tasks?.some((task) => task.threadId === threadId));
+    if (!owner) return false;
+    const selection = currentTaskBot(owner, threadId).modelSelection;
+    return selection.instanceId === session.instanceId && selection.model === session.model;
+  });
+  return kept.length === sessions.length ? state : { ...state, modelVariantSessions: Object.fromEntries(kept) };
+}
 
 export function pinBotThreadAction(action: Action, bots: Bot[]): Action {
   if (!("botId" in action) || ("threadId" in action && action.threadId) ||
@@ -1189,6 +1227,7 @@ export function reducer(state: AppState, action: Action): AppState {
         computerControl: action.computerControl,
         selectedId,
         backgroundThreadEvents: {},
+        modelVariantSessions: {},
       };
       return reconcileSnapshotQueues(
         action.botQueuedMessages ? replaceBotQueues(hydrated, action.botQueuedMessages) : hydrated,
@@ -1393,7 +1432,7 @@ export function reducer(state: AppState, action: Action): AppState {
       const selectedId =
         state.selectedId === action.botId ? (bots.find((b) => !b.hidden)?.id ?? bots[0]?.id ?? "") : state.selectedId;
       const { [action.botId]: _deleted, ...deletingBots } = state.deletingBots;
-      return { ...state, bots, selectedId, deletingBots };
+      return reconcileModelVariantSessions({ ...state, bots, selectedId, deletingBots });
     }
     case "botDeletionPending": {
       if (action.on) {
@@ -1454,7 +1493,7 @@ export function reducer(state: AppState, action: Action): AppState {
         // The slim deletion broadcast can arrive before the full snapshot.
         // Finish that switch once, replaying any events received in between.
         // Later duplicate HTTP snapshots must not overwrite newer messages.
-        return reducer(switching, { type: "taskSwitched", bot: { ...before, ...action.bot, section: action.bot.section, messages: action.bot.messages, browserProfile: action.bot.browserProfile } });
+        return reducer(switching, { type: "taskSwitched", bot: { ...before, ...action.bot, computer: action.bot.computer, section: action.bot.section, messages: action.bot.messages, browserProfile: action.bot.browserProfile } });
       }
       const patched = updateBot(switching, action.bot.id, (b) => ({
         ...b,
@@ -1466,6 +1505,9 @@ export function reducer(state: AppState, action: Action): AppState {
         // to Own browser (or deleting a shared profile). Do not retain the
         // previous profile's name and selection in another window.
         browserProfile: action.bot.browserProfile,
+        // Resetting Works on to Auto removes the field from the complete
+        // server frame; merging alone would keep the old target highlighted.
+        computer: action.bot.computer,
         // A complete frame omits section after another client moves the bot
         // into General. Retaining the old label strands an empty team in UI.
         section: action.bot.section,
@@ -1473,7 +1515,7 @@ export function reducer(state: AppState, action: Action): AppState {
         // to the replacement thread while waiting for its transcript.
         messages: switchedThread ? [] : b.messages,
       }));
-      return patched;
+      return reconcileModelVariantSessions(patched);
     }
     case "messageAdded": {
       const bot = state.bots.find((b) => b.threadId === action.threadId);
@@ -1616,7 +1658,7 @@ export function reducer(state: AppState, action: Action): AppState {
     case "screenFrame":
       return {
         ...withMascotMotion(state, action.botId, "success"),
-        screens: { ...state.screens, [action.botId]: { png: action.png, mime: action.mime } },
+        screens: { ...state.screens, [action.botId]: { png: action.png, mime: action.mime, threadId: action.threadId } },
         provisioning: { ...state.provisioning, [action.botId]: false },
       };
     case "provisioning":
@@ -1632,17 +1674,41 @@ export function reducer(state: AppState, action: Action): AppState {
           [action.botId]: { held: action.held, helpReason: action.helpReason },
         },
       };
+    case "modelVariantRuntime": {
+      const event = action.event;
+      if (!event.turnId) return state;
+      const owner = state.bots.find((bot) => bot.threadId === event.threadId || bot.tasks?.some((task) => task.threadId === event.threadId));
+      if (!owner) return state;
+      const selection = currentTaskBot(owner, event.threadId).modelSelection;
+      if (selection.instanceId !== event.providerInstanceId ||
+          !state.instances.find((instance) => instance.instanceId === selection.instanceId)?.capabilities?.modelVariants) return state;
+      const previous = state.modelVariantSessions[event.threadId];
+      if (event.type === "turn.started") {
+        if (previous && (previous.turnId === event.turnId || Date.parse(previous.startedAt) > Date.parse(event.createdAt))) return state;
+        return { ...state, modelVariantSessions: { ...state.modelVariantSessions, [event.threadId]: {
+          instanceId: selection.instanceId, model: selection.model, turnId: event.turnId, startedAt: event.createdAt, acceptingUpdates: true,
+        } } };
+      }
+      if (!previous?.acceptingUpdates || previous.turnId !== event.turnId || previous.instanceId !== selection.instanceId || previous.model !== selection.model) return state;
+      if (event.type === "session.model-variants" && event.model === selection.model) {
+        return { ...state, modelVariantSessions: { ...state.modelVariantSessions, [event.threadId]: { ...previous, variants: event.variants } } };
+      }
+      if (event.type === "turn.completed") {
+        return { ...state, modelVariantSessions: { ...state.modelVariantSessions, [event.threadId]: { ...previous, acceptingUpdates: false } } };
+      }
+      return state;
+    }
     case "setModel":
       if (action.threadId) return reducer(state, { type: "updateTask", botId: action.botId, threadId: action.threadId,
         patch: { modelSelection: action.selection, resetApprovalToAsk: action.resetApprovalToAsk } });
-      return updateBot(state, action.botId, (b) => ({ ...b, modelSelection: action.selection }));
+      return reconcileModelVariantSessions(updateBot(state, action.botId, (b) => ({ ...b, modelSelection: action.selection })));
     case "updateTask": {
       const patch = taskPatchFields(action.patch);
-      return updateBot(state, action.botId, (bot) => ({
+      return reconcileModelVariantSessions(updateBot(state, action.botId, (bot) => ({
         ...bot,
         tasks: (bot.tasks ?? [{ threadId: bot.threadId, title: "New thread", createdAt: Date.now() }]).map((task) =>
           task.threadId === action.threadId ? { ...task, ...patch } : task),
-      }));
+      })));
     }
     case "connected":
       return { ...state, connected: action.value };
@@ -1935,13 +2001,14 @@ export function reducer(state: AppState, action: Action): AppState {
       let switched = updateBot(state, action.bot.id, (bot) => ({
         ...bot,
         ...action.bot,
+        computer: action.bot.computer,
         messages: action.bot.messages ?? [],
         awaitingThreadSnapshot: false,
       }));
       for (const frame of state.backgroundThreadEvents[action.bot.threadId] ?? []) switched = reducer(switched, frame);
       const { [action.bot.threadId]: _settled, ...backgroundThreadEvents } = switched.backgroundThreadEvents;
       switched = { ...switched, backgroundThreadEvents };
-      return reconcileSnapshotQueues(switched, [action.bot]);
+      return reconcileModelVariantSessions(reconcileSnapshotQueues(switched, [action.bot]));
     }
     case "newBot":
     case "duplicateBot":
@@ -1987,6 +2054,7 @@ export function reducer(state: AppState, action: Action): AppState {
 const MAX_KEPT_SCREEN_FRAMES = 8;
 
 export const initialState: AppState = {
+  modelVariantSessions: {},
   backgroundThreadEvents: {},
   bots: [],
   groups: [],
@@ -2199,9 +2267,9 @@ export async function persistBotUpdate(
   return modeBot;
 }
 
-/** Bot removal is intentionally non-optimistic. The server may require the
- * person to clean up a persistent computer first, so local state changes only
- * after the delete boundary accepts the request. */
+/** Bot removal is intentionally non-optimistic. The server first removes any
+ * computer owned only by this bot, so local state changes only after that
+ * durable cleanup and the bot deletion both succeed. */
 const pendingBotDeletions = new Map<string, Promise<void>>();
 
 export async function requestConfirmedBotDeletion(
@@ -2440,7 +2508,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           approvalModeFor(persisted) !== approvalModeFor(expected) ||
           persisted.modelSelection.instanceId !== expectedSelection.instanceId ||
           persisted.modelSelection.model !== expectedSelection.model ||
-          persisted.modelSelection.effort !== expectedSelection.effort
+          persisted.modelSelection.effort !== expectedSelection.effort ||
+          persisted.modelSelection.variant !== expectedSelection.variant
         ) {
           throw new Error("The approval level or model could not be saved, so this work was not started");
         }
@@ -2597,7 +2666,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         case "runRoutine":
           void waitForExecutionSettings(executionBotsBeforeAction)
             .then(() => api(`/api/routines/${action.routineId}/run`, { method: "POST" }))
-            .catch(showError)
+            .then(({ run }) => action.onStarted?.(run))
+            .catch((error) => {
+              if (action.onError) action.onError(error);
+              else showError(error);
+            })
             .finally(() => action.onSettled?.());
           break;
         case "cancelRoutineRun":
@@ -3356,6 +3429,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "runtime": {
           const event = frame.event;
+          if (event.type === "turn.started" || event.type === "session.model-variants" || event.type === "turn.completed") {
+            rawDispatch({ type: "modelVariantRuntime", event });
+          }
           if (event.type === "content.delta") {
             deltaBuffer.push(event.threadId, event.streamKind, event.delta);
           } else if (event.type === "turn.completed") {
@@ -3366,7 +3442,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         }
         case "screen":
-          rawDispatch({ type: "screenFrame", botId: frame.botId, png: frame.png, mime: frame.mime ?? "image/png" });
+          rawDispatch({ type: "screenFrame", botId: frame.botId, threadId: frame.threadId, png: frame.png, mime: frame.mime ?? "image/png" });
           break;
         case "computer":
           rawDispatch({ type: "provisioning", botId: frame.botId, on: frame.state === "provisioning" });

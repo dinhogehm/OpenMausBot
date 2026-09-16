@@ -6,8 +6,8 @@
 // calls stop().
 //
 // Audio comes from the harness (POST /api/tts/speak), which holds the
-// ElevenLabs key. The renderer never sees it, and never talks to
-// ElevenLabs directly.
+// cloud voice keys. The renderer never sees them, and never talks to a
+// hosted voice provider directly.
 //
 // Text is split into utterances by the harness too, next to the transform
 // that produced it — it is the piece most likely to be tuned against real
@@ -235,7 +235,7 @@ export class Speaker {
     const body: TtsPrepareBody = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error ?? `the voice service returned ${res.status}`);
     if (!body.ready) {
-      throw new Error("Add the shared ElevenLabs key in an agent profile on this computer, then pick a voice for the agent.");
+      throw new Error("Set up a voice provider in an agent profile on this computer, then pick a voice for the agent.");
     }
     return body.utterances ?? [];
   }

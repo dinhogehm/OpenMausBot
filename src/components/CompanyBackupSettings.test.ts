@@ -73,6 +73,7 @@ const connected: ManagedDesktopState = {
   email: "employee@example.test", deviceId: "fixture-device", providers: [],
 };
 const readyEntry: CompanyBackupEntry = {
+  passwordRequired: true,
   id: READY_ID, status: "ready", sizeBytes: 4096, sha256: "a".repeat(64), appVersion: "0.0.0-fixture",
   createdAt: Date.parse("2026-09-12T10:00:00Z"), completedAt: Date.parse("2026-09-12T10:01:00Z"),
 };
@@ -280,27 +281,38 @@ describe("optional Company cloud backup settings", () => {
     expect(render().html).toContain(OTHER_ID); expect(render().html).not.toContain(READY_ID);
   });
 
-  it("requires an explicit backup dialog and matching passwords, then exports only allowlisted local preferences", async () => {
+  it("previews a managed backup without asking for or forwarding a password", async () => {
+    vi.mocked(bridge.list).mockResolvedValueOnce({ backups: [{ ...readyEntry, passwordRequired: false }], usedBytes: 4096, limits: { ownerQuotaBytes: 1024 ** 3, retainedSnapshots: 7 } });
+    await ready(); button("Restore this backup").props.onClick!();
+    expect(passwords()).toHaveLength(0);
+    expect(button("Validate backup").props.disabled).toBe(false);
+    submit(form()); await flush();
+    expect(bridge.prepareRestore).toHaveBeenCalledExactlyOnceWith({ id: READY_ID });
+    expect(bridge.restore).not.toHaveBeenCalled();
+  });
+
+  it("rejects a short legacy password before calling the native preview", async () => {
+    await ready(); button("Restore this backup").props.onClick!();
+    change(passwords()[0], "short");
+    expect(button("Validate backup").props.disabled).toBe(true);
+    submit(form()); await flush();
+    expect(bridge.prepareRestore).not.toHaveBeenCalled();
+  });
+
+  it("requires an explicit backup dialog without passwords, then exports only allowlisted local preferences", async () => {
     await ready();
     storage.set("omb-drafts", "private fixture draft"); storage.set("omb-skin", "fixture-theme");
     storage.set("auth-token", "fixture auth secret"); storage.set("omb-webhook-credentials", "fixture connection secret");
     button("Back up this workspace").props.onClick!();
-    expect(bridge.create).not.toHaveBeenCalled(); expect(passwords()).toHaveLength(2);
+    expect(bridge.create).not.toHaveBeenCalled(); expect(passwords()).toHaveLength(0);
     expect(render().nodes.some(node => node.type === "dialog")).toBe(true);
     expect(render().html).toContain("THIS current workspace");
     expect(render().html).toContain("personal conversations and files");
     expect(render().html).toContain("Saved account credentials and connections are not included");
     const submitButton = () => render().nodes.find(node => node.type === "button" && node.props.type === "submit")!;
-    change(passwords()[0], "short"); change(passwords()[1], "short");
-    expect(submitButton().props.disabled).toBe(true); submit(form()); await flush();
-    expect(bridge.create).not.toHaveBeenCalled();
-    change(passwords()[0], PASSWORD); change(passwords()[1], `${PASSWORD} different`);
-    expect(submitButton().props.disabled).toBe(true); submit(form()); await flush();
-    expect(bridge.create).not.toHaveBeenCalled();
-    change(passwords()[1], PASSWORD);
     expect(submitButton().props.disabled).toBe(false);
     const createForm = form(); submit(createForm); submit(createForm); await flush();
-    expect(bridge.create).toHaveBeenCalledExactlyOnceWith({ password: PASSWORD, clientState: { "omb-drafts": "private fixture draft", "omb-skin": "fixture-theme" } });
+    expect(bridge.create).toHaveBeenCalledExactlyOnceWith({ clientState: { "omb-drafts": "private fixture draft", "omb-skin": "fixture-theme" } });
     expect([...storage.values()]).not.toContain(PASSWORD);
     expect(render().html).not.toContain(PASSWORD);
     expect(fetch).not.toHaveBeenCalled();
@@ -308,11 +320,11 @@ describe("optional Company cloud backup settings", () => {
 
   it("clears a cancelled backup dialog without retaining passwords or uploading", async () => {
     await ready(); button("Back up this workspace").props.onClick!();
-    change(passwords()[0], PASSWORD); change(passwords()[1], PASSWORD);
+    expect(passwords()).toHaveLength(0);
     button("Cancel").props.onClick!();
     expect(passwords()).toHaveLength(0); expect(bridge.create).not.toHaveBeenCalled();
     button("Back up this workspace").props.onClick!();
-    expect(passwords().map(node => node.props.value)).toEqual(["", ""]);
+    expect(passwords()).toHaveLength(0);
     expect([...storage.values()]).not.toContain(PASSWORD);
   });
 
@@ -328,21 +340,21 @@ describe("optional Company cloud backup settings", () => {
     expect(bridge.create).not.toHaveBeenCalled();
   });
 
-  it("requires fresh password confirmation and explicit future-workspace consent for daily backups", async () => {
+  it("requires explicit future-workspace consent without a password for daily backups", async () => {
     vi.mocked(bridge.state).mockResolvedValueOnce(scheduleOff);
     vi.mocked(bridge.configureSchedule!).mockResolvedValueOnce({ busy: false, schedule: { enabled: true, status: "waiting", nextBackupAt: Date.parse("2026-09-16T10:00:00Z") } });
     await ready(); scheduleSwitch().props.onClick!();
     expect(render().html).toContain("personal conversations and files");
     expect(render().html).toContain("starting in 24 hours");
     expect(render().html).toContain("does not create a separate Work workspace");
-    expect(render().html).toContain("password manager");
-    change(passwords()[0], PASSWORD); change(passwords()[1], PASSWORD);
+    expect(render().html).toContain("No backup password needed");
+    expect(passwords()).toHaveLength(0);
     expect(button("Enable daily backups").props.disabled).toBe(true);
     submit(form()); await flush(); expect(bridge.configureSchedule).not.toHaveBeenCalled();
     const checkbox = render().nodes.find(node => node.type === "input" && node.props.type === "checkbox")!;
     checkbox.props.onChange!({ target: { checked: true } });
     const submitForm = form(); submit(submitForm); submit(submitForm); await flush();
-    expect(bridge.configureSchedule).toHaveBeenCalledExactlyOnceWith({ enabled: true, password: PASSWORD, confirmation: "BACK UP THIS WORKSPACE DAILY" });
+    expect(bridge.configureSchedule).toHaveBeenCalledExactlyOnceWith({ enabled: true, confirmation: "BACK UP THIS WORKSPACE DAILY" });
     expect(render().html).toContain('aria-checked="true"');
     expect(render().html).toContain("Next attempt:");
     expect(render().html).not.toContain(PASSWORD);
@@ -363,9 +375,9 @@ describe("optional Company cloud backup settings", () => {
   it("does not enable while a restore is pending and clears cancelled schedule passwords", async () => {
     vi.mocked(bridge.state).mockResolvedValueOnce(scheduleOff);
     await ready(); scheduleSwitch().props.onClick!();
-    change(passwords()[0], PASSWORD); change(passwords()[1], PASSWORD);
+    expect(passwords()).toHaveLength(0);
     button("Cancel").props.onClick!();
-    scheduleSwitch().props.onClick!(); expect(passwords().map(node => node.props.value)).toEqual(["", ""]);
+    scheduleSwitch().props.onClick!(); expect(passwords()).toHaveLength(0);
     button("Cancel").props.onClick!();
     pushBackup({ ...scheduleOff, pendingRestore: true });
     expect(scheduleSwitch().props.disabled).toBe(true);
@@ -410,7 +422,7 @@ describe("optional Company cloud backup settings", () => {
     let finishCreate!: (entry: CompanyBackupEntry) => void;
     vi.mocked(bridge.create).mockImplementation(() => new Promise(resolve => { finishCreate = resolve; }));
     button("Back up this workspace").props.onClick!();
-    change(passwords()[0], PASSWORD); change(passwords()[1], PASSWORD); submit(form());
+    expect(passwords()).toHaveLength(0); submit(form());
     dialog().props.onCancel!({ preventDefault });
     expect(dialog()).toBeDefined();
     expect(bridge.cancel).not.toHaveBeenCalled();
@@ -524,7 +536,7 @@ describe("optional Company cloud backup settings", () => {
     let resolveCreate!: (value: CompanyBackupEntry) => void;
     vi.mocked(bridge.create).mockImplementation(() => new Promise(resolve => { resolveCreate = resolve; }));
     button("Back up this workspace").props.onClick!();
-    change(passwords()[0], PASSWORD); change(passwords()[1], PASSWORD); submit(form());
+    expect(passwords()).toHaveLength(0); submit(form());
     cleanup(); resolveCreate(readyEntry); await flush();
     expect(bridge.list).toHaveBeenCalledOnce();
     expect(unsubscribeBackup).toHaveBeenCalledOnce();

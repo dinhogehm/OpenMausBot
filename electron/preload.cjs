@@ -87,6 +87,12 @@ const bridge = {
     cloudDesktop: (deviceId, allowed) => ipcRenderer.invoke("companion:cloud-desktop", deviceId, allowed),
     revoke: (deviceId) => ipcRenderer.invoke("companion:revoke", deviceId),
   },
+  /** Keep this computer awake for scheduled routines. The hold itself lives
+   * in the main process; the page reads its state and flips the toggle. */
+  routines: {
+    wakeState: () => ipcRenderer.invoke("routines:wake-state"),
+    keepAwake: (enabled) => ipcRenderer.invoke("routines:keep-awake", enabled),
+  },
   /** Optional account-backed HTTPS access for Companion. Secrets stay in the
    * main process; the renderer sees only status and narrow user actions. */
   companionAccount: {

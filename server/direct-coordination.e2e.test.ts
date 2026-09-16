@@ -476,3 +476,34 @@ it("retains returned direct reports for follow-up turns but rechecks access befo
   expect(final.prompt.message.content).toContain("Teammate result withheld");
   expect(JSON.stringify({ system: final.system, prompt: final.prompt })).not.toContain("PRIVATE_ENGINEERING_FACT_8347");
 }), 45_000);
+
+it("runs the owed direct follow-up while the same bot works in another thread", () => fixture(async f => {
+  const gate = join(f.session.info.dataDir, "hold-gate");
+  f.plan[f.chief.id] = { turns: [
+    { steps: [
+      { tool: "coordinate_bots", arguments: { bot_ids: [f.specialist.id], request_key: "check", message: "Independently verify the CSV export" } },
+      { tool: "start_thread", arguments: { title: "Independent hold", message: "Run the long independent check." } },
+    ], reply: "Assigned the check and opened the hold" },
+    { gateFile: gate, reply: "The follow-up ran while the hold worked" },
+    // The hold's completion and the resume's plan read race: the resume
+    // lands on slot 1 while the hold still waits, or slot 2 once the hold
+    // has finished. Both must settle the same reply in this conversation.
+    { reply: "The follow-up ran while the hold worked" },
+  ] };
+  f.save();
+  await f.cli("send", "--bot", f.chief.id, "--task", f.chief.activeTaskId, "--text", "Assign the check, then open an independent job that runs long.");
+  const chiefTasks = async () => (await f.api("/api/bots")).bots.find((bot: any) => bot.id === f.chief.id).tasks;
+  // The self-opened job stays mid-turn at its gate: the whole-bot busy flag
+  // is held up by a thread that has nothing to do with this coordination.
+  await expect.poll(async () => (await chiefTasks()).find((task: any) => task.title === "Independent hold")?.busy, { timeout: 20_000 }).toBe(true);
+  // The owed follow-up belongs to this conversation alone: it must dispatch
+  // even while the bot stays busy in its sibling thread.
+  const root = () => f.nodes().find((node: any) => node.key === "root");
+  await expect.poll(() => root()?.status, { timeout: 10_000 }).toBe("running");
+  writeFileSync(gate, "");
+  await expect.poll(() => root()?.status, { timeout: 10_000 }).toBe("completed");
+  const tasks = await chiefTasks();
+  expect(tasks.find((task: any) => task.threadId === f.chief.activeTaskId).busy).toBe(false);
+  await expect.poll(async () => (await chiefTasks()).find((task: any) => task.title === "Independent hold")?.busy, { timeout: 10_000 }).toBe(false);
+  expect((await f.messages(f.chief.activeTaskId)).some((message: any) => message.text === "The follow-up ran while the hold worked")).toBe(true);
+}), 45_000);

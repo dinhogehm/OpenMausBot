@@ -117,6 +117,8 @@ if [ -f "$FAKE_DOCKER_DIR/hold" ]; then
   while [ -f "$FAKE_DOCKER_DIR/hold" ]; do sleep 0.05; done
 fi
 case "$*" in
+  *" run "*) rm -f "$FAKE_DOCKER_DIR/container-missing" ;;
+  *" start "*) sed 's/"Running":false/"Running":true/' "$FAKE_DOCKER_DIR/container.json.tpl" > "$FAKE_DOCKER_DIR/container.next"; mv "$FAKE_DOCKER_DIR/container.next" "$FAKE_DOCKER_DIR/container.json.tpl" ;;
   *" container ls "*) if [ ! -f "$FAKE_DOCKER_DIR/inventory-empty" ]; then echo "${CONTAINER_ID}"; fi ;;
   *" container inspect "*) name=$(cat "$FAKE_DOCKER_DIR/container.name"); sed "s|__NAME__|$name|g" "$FAKE_DOCKER_DIR/container.json.tpl" ;;
   *" image inspect "*) cat "$FAKE_DOCKER_DIR/image.json" ;;
@@ -131,7 +133,7 @@ case "$*" in
   *" exec "*"base64"*) cat "$FAKE_DOCKER_DIR/screenshot.b64" ;;
   *" exec "*"status"*) echo "running" ;;
   *" exec "*"rm -f"*) : ;;
-  *" inspect "*) for arg in "$@"; do name="$arg"; done; printf '%s' "$name" > "$FAKE_DOCKER_DIR/container.name"; sed "s|__NAME__|$name|g" "$FAKE_DOCKER_DIR/container.json.tpl" ;;
+  *" inspect "*) if [ -f "$FAKE_DOCKER_DIR/container-missing" ]; then echo "No such container" >&2; exit 1; fi; for arg in "$@"; do name="$arg"; done; printf '%s' "$name" > "$FAKE_DOCKER_DIR/container.name"; sed "s|__NAME__|$name|g" "$FAKE_DOCKER_DIR/container.json.tpl" ;;
   *) echo "unexpected docker invocation: $*" >&2; exit 64 ;;
 esac
 `;
@@ -309,9 +311,63 @@ createServer(socket => socket.end()).listen(port, '127.0.0.1');
     }
   }, 30_000);
 
+  it.each(["stopped", "missing", "stopped-during-turn"])(
+    "lets Auto discover a %s VPS and start or create it through its chat tool",
+    async state => {
+      await api("PUT", "/api/config", { vps: { sshAlias: "production-vps" } });
+      const bot = (await api("POST", "/api/bots")).body.bot;
+      const template = join(dirname(dockerLog), "container.json.tpl");
+      const missing = join(dirname(dockerLog), "container-missing");
+      const original = readFileSync(template, "utf8");
+      try {
+        if (state === "stopped") writeFileSync(template, original.replace('"Running":true', '"Running":false'));
+        else if (state === "missing") writeFileSync(missing, "missing");
+        writeFileSync(join(dirname(dockerLog), "container.name"), vpsContainerName(bot.id));
+        rmSync(gateFile, { force: true }); rmSync(`${acpDump}.mcp.json`, { force: true });
+        await api("PATCH", `/api/bots/${bot.id}`, { browser: false, cloudBackend: "vps", computer: null,
+          modelSelection: { instanceId: "vps", model: "fake-model" } });
+        expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "Open Chrome on the available remote VM" })).status).toBe(202);
+        await until(async () => existsSync(`${acpDump}.mcp.json`), "the discovery turn");
+        const first = JSON.parse(readFileSync(`${acpDump}.mcp.json`, "utf8"));
+        if (state === "stopped-during-turn") {
+          expect(first.find((tool: { name: string }) => tool.name === "computer")).toBeTruthy();
+          writeFileSync(template, original.replace('"Running":true', '"Running":false'));
+        } else expect(first.find((tool: { name: string }) => tool.name === "computer")).toBeUndefined();
+        const agents = first.find((tool: { name: string }) => tool.name === "agents");
+        const token = agents.env.find((entry: { name: string }) => entry.name === "OMB_COMMS_TOKEN").value;
+        const availability = await (await fetch(`${BASE}/api/internal/computer/select`, { headers: { authorization: `Bearer ${token}` } })).json() as any;
+        expect(availability.options.find((option: any) => option.surface === "cloud")).toMatchObject({ available: true, ready: false,
+          canStart: state !== "missing", canCreate: state === "missing" });
+        const selected = await fetch(`${BASE}/api/internal/computer/select`, { method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ surface: "auto" }) });
+        expect(await selected.json()).toMatchObject({ status: "pending", surface: "cloud" });
+        rmSync(`${acpDump}.mcp.json`, { force: true });
+        const before = readFileSync(dockerLog, "utf8").length;
+        writeFileSync(gateFile, "open");
+        await until(async () => existsSync(`${acpDump}.mcp.json`) && !(await botById(bot.id))?.busy, "the switched VPS turn");
+        const next = JSON.parse(readFileSync(`${acpDump}.mcp.json`, "utf8"));
+        expect(next.find((tool: { name: string }) => tool.name === "computer")?.args).toContain("production-vps");
+        const commands = readFileSync(dockerLog, "utf8").slice(before);
+        expect(commands).toContain(state === "missing" ? " run " : " start ");
+        expect(commands).not.toMatch(/ssh:\/\/production-vps (?:pull|build) /);
+        if (state !== "missing") expect(commands).not.toContain(" run ");
+        const saved = await botById(bot.id);
+        expect(saved.messages.filter((message: { role: string; kind: string }) => message.role === "user" && message.kind === "text")).toHaveLength(1);
+      } finally {
+        writeFileSync(gateFile, "open");
+        await api("POST", `/api/bots/${bot.id}/interrupt`, {});
+        rmSync(missing, { force: true });
+        writeFileSync(template, original);
+      }
+    },
+    45_000,
+  );
+
   it(
     "mounts the VPS computer on the turn, tells the model, reuses without provisioning, and clears the claim",
     async () => {
+      writeFileSync(dockerLog, "");
+      rmSync(gateFile, { force: true });
       expect((await api("PUT", "/api/config", { vps: { sshAlias: "production-vps" } })).status).toBe(200);
 
       const bot = (await api("POST", "/api/bots")).body.bot;
@@ -404,6 +460,19 @@ createServer(socket => socket.end()).listen(port, '127.0.0.1');
       const status = await api("GET", `/api/bots/${bot.id}/computer`);
       expect(status.status).toBe(200);
       expect(status.body).toMatchObject({ backend: "vps", ready: true, container: "running" });
+
+      // Explicit Cloud with the VPS backend is still the selected local ACP
+      // engine with a VPS tool mount, not the unrelated native Box runner.
+      expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "cloud" })).status).toBe(200);
+      const explicitThread = (await api("POST", `/api/bots/${bot.id}/tasks`, {})).body.task.threadId;
+      rmSync(`${acpDump}.mcp.json`, { force: true });
+      const cloudTurn = await api("POST", `/api/bots/${bot.id}/messages`, { threadId: explicitThread, text: "Open Chrome on the VPS and inspect the page" });
+      expect(cloudTurn.status, JSON.stringify(cloudTurn.body)).toBe(202);
+      await until(async () => existsSync(`${acpDump}.mcp.json`) && (await botById(bot.id))?.busy === false, "the explicit VPS turn");
+      const explicitTools = JSON.parse(readFileSync(`${acpDump}.mcp.json`, "utf8"));
+      expect(explicitTools.find((tool: { name: string }) => tool.name === "computer")?.args).toContain("production-vps");
+      const threadPreview = await api("GET", `/api/bots/${bot.id}/computer?threadId=${explicitThread}`);
+      expect(threadPreview.body).toMatchObject({ surface: "cloud", backend: "vps", ready: true });
 
       // The turn claim is gone, but its durable container remains on the old
       // host. Keep that resource visible until the user removes it.

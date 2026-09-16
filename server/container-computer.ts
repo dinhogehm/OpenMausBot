@@ -364,6 +364,14 @@ export function localVmRecreatableOnDemand(
     && status.create_supported;
 }
 
+/** Whether Auto may attach this Local VM without a person choosing it: the
+ * desktop is ready, or its image is prepared and the container can simply be
+ * recreated after idling away. Anything else — no runtime, daemon down, image
+ * never prepared, an unmanaged or unsafe container — stays the person's call. */
+export function autoLocalVmAttachable(status: ContainerComputerStatus): boolean {
+  return status.ready === true || localVmRecreatableOnDemand(status);
+}
+
 function statusProblem(status: ContainerComputerStatus): string | null {
   if (!status.runtime) return "Install a supported container runtime first";
   if (!status.daemonUp) return `Start ${status.runtime} first`;

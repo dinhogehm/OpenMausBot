@@ -33,6 +33,7 @@ import {
   setupCommands,
   type CommandRunner,
   type LocalVmTarget,
+  autoLocalVmAttachable,
 } from "./container-computer.ts";
 
 function runner(responses: Record<string, string | Error>) {
@@ -982,5 +983,19 @@ describe("localVmRecreatableOnDemand", () => {
 
     expect(status.image).toBe(false);
     expect(localVmRecreatableOnDemand(status)).toBe(false);
+  });
+});
+
+describe("Auto's Local VM eligibility", () => {
+  const base = { runtime: "podman", daemonUp: true, image: true, container: "missing", create_supported: true, ready: false } as unknown as Parameters<typeof autoLocalVmAttachable>[0];
+  it("attaches a ready desktop or one whose prepared image can be recreated, and nothing else", () => {
+    expect(autoLocalVmAttachable({ ...base, ready: true, container: "running" })).toBe(true);
+    expect(autoLocalVmAttachable(base)).toBe(true);
+    // never a first-time setup, a stopped image that cannot resume, or a dead daemon
+    expect(autoLocalVmAttachable({ ...base, image: false })).toBe(false);
+    expect(autoLocalVmAttachable({ ...base, daemonUp: false })).toBe(false);
+    expect(autoLocalVmAttachable({ ...base, container: "stopped" })).toBe(false);
+    expect(autoLocalVmAttachable({ ...base, runtime: null })).toBe(false);
+    expect(autoLocalVmAttachable({ ...base, create_supported: false })).toBe(false);
   });
 });

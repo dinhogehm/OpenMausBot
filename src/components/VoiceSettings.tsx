@@ -1,8 +1,8 @@
 // Per-agent voice profile. The key is shared; the voice and autoplay choice
 // belong to the selected bot.
 //
-// The voice list comes from the harness, which holds the key — the
-// renderer never talks to ElevenLabs itself.
+// The voice list comes from the harness, which holds cloud provider keys —
+// the renderer never talks to ElevenLabs or Fish Audio itself.
 import { useEffect, useState } from "react";
 import { Check, Loader2, Volume2 } from "lucide-react";
 
@@ -19,6 +19,7 @@ import {
   type RemoteVoiceProvider,
 } from "@/lib/local-voice";
 import { cn } from "@/lib/cn";
+import { voiceKeyDraftValue, type VoiceKeyDraft } from "@/lib/voice-key-draft";
 import { Switch } from "./SettingsPrimitives";
 
 const SAMPLE = "Morning. Overnight the tests went green, and I left two notes for you in the thread.";
@@ -35,7 +36,7 @@ export function VoiceSettings({
   const { state, dispatch } = useStore();
   const tts = state.config?.tts;
 
-  const [key, setKey] = useState("");
+  const [keyDraft, setKeyDraft] = useState<VoiceKeyDraft>({ provider: null, value: "" });
   const [serverUrl, setServerUrl] = useState("");
   const [model, setModel] = useState("");
   const [saving, setSaving] = useState(false);
@@ -50,9 +51,36 @@ export function VoiceSettings({
   const [deviceProvider, setDeviceProvider] = useState<RemoteVoiceProvider>(() => remoteVoiceProvider());
   const [deviceVoice, setDeviceVoice] = useState(() => remoteSystemVoice(bot.id));
   const usesLocalSystem = localMacClient && deviceProvider === "system";
-  // Host configuration still controls host-rendered ElevenLabs audio. A
+  // Host configuration still controls host-rendered cloud audio. A
   // paired Mac owns its installed-voice choice locally.
   const provider = tts?.provider ?? "elevenlabs";
+  const cloudProvider = provider === "fish"
+    ? {
+        id: "fish" as const,
+        name: "Fish Audio",
+        credential: "fishAudioKey" as const,
+        configField: "fishKey" as const,
+        placeholder: "Paste your Fish Audio API key",
+        keyUrl: "https://fish.audio/app/api-keys/",
+      }
+    : provider === "elevenlabs"
+      ? {
+          id: "elevenlabs" as const,
+          name: "ElevenLabs",
+          credential: "ttsKey" as const,
+          configField: "key" as const,
+          placeholder: "Paste your ElevenLabs API key",
+          keyUrl: "https://elevenlabs.io/app/settings/api-keys",
+        }
+      : null;
+  const key = cloudProvider ? voiceKeyDraftValue(keyDraft, cloudProvider.id) : "";
+  const hostProviderLabel = provider === "fish"
+    ? "Host · Fish Audio"
+    : provider === "elevenlabs"
+      ? "Host · ElevenLabs"
+      : provider === "chatterbox"
+        ? "Host · Chatterbox"
+        : "Host voice";
   const systemVoicesAvailable = capabilities.host.platform === "darwin";
   const hostConfigured = Boolean(tts?.configured);
   const configured = usesLocalSystem || hostConfigured;
@@ -65,6 +93,14 @@ export function VoiceSettings({
     setServerUrl(tts?.baseUrl ?? "");
     setModel(tts?.model ?? "");
   }, [tts?.baseUrl, tts?.model]);
+
+  // Provider selection can also change from a paired phone or another open
+  // client. Discard an unsaved draft on every transition, and keep the draft
+  // tagged below so a render that lands before this effect still cannot send
+  // one provider's credential to another service.
+  useEffect(() => {
+    setKeyDraft({ provider: null, value: "" });
+  }, [provider]);
 
   useEffect(() => {
     if (usesLocalSystem) {
@@ -107,9 +143,10 @@ export function VoiceSettings({
     onPatch({ voice: voiceId });
   };
 
-  const setProvider = (next: "elevenlabs" | "system" | "chatterbox") => {
+  const setProvider = (next: "elevenlabs" | "fish" | "system" | "chatterbox") => {
     if (next === provider || switching || (next === "system" && !systemVoicesAvailable)) return;
     setSwitching(true);
+    setKeyDraft({ provider: null, value: "" });
     setError(null);
     // the provider is a setting, not a secret — it rides the ordinary
     // config write, and the key row reappears or disappears with it
@@ -121,16 +158,19 @@ export function VoiceSettings({
 
   const saveKey = () => {
     const nextKey = key.trim();
-    if (!nextKey) return Promise.resolve();
+    if (!nextKey || !cloudProvider || keyDraft.provider !== cloudProvider.id) return Promise.resolve();
     setSaving(true);
     setError(null);
     const request = window.ogb?.setCredential
-      ? window.ogb.setCredential("ttsKey", nextKey)
-      : api("/api/config", { method: "PUT", body: JSON.stringify({ tts: { key: nextKey } }) });
+      ? window.ogb.setCredential(cloudProvider.credential, nextKey)
+      : api("/api/config", {
+          method: "PUT",
+          body: JSON.stringify({ tts: { [cloudProvider.configField]: nextKey } }),
+        });
     return request
       .then((status: ConfigStatus) => {
         dispatch({ type: "configStatus", config: status });
-        setKey("");
+        setKeyDraft({ provider: null, value: "" });
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setSaving(false));
@@ -170,10 +210,10 @@ export function VoiceSettings({
               {provider === "system"
                 ? systemVoicesAvailable
                   ? " the voices are the ones already installed on this Mac."
-                  : " built-in Mac voices are unavailable here. Switch to ElevenLabs to keep using voice."
+                  : " built-in Mac voices are unavailable here. Switch to a hosted voice provider to keep using voice."
                 : provider === "chatterbox"
                   ? " the Chatterbox server address is shared by the workspace."
-                  : " the ElevenLabs key is shared by the workspace."}</>}
+                  : ` the ${cloudProvider?.name ?? "voice provider"} key is shared by the workspace.`}</>}
       </div>
 
       {localMacClient && (
@@ -182,7 +222,7 @@ export function VoiceSettings({
           <div className="inline-flex rounded-xl bg-inset p-1" role="radiogroup" aria-label="Voice output on this Mac">
             {([
               { value: "system", label: "Built-in Mac voices", available: true },
-              { value: "host", label: provider === "elevenlabs" ? "Host · ElevenLabs" : provider === "chatterbox" ? "Host · Chatterbox" : "Host voice", available: hostConfigured },
+              { value: "host", label: hostProviderLabel, available: hostConfigured },
             ] as const).map((option) => (
               <button
                 key={option.value}
@@ -204,12 +244,13 @@ export function VoiceSettings({
         </div>
       )}
 
-      {!workspaceConfigurationLocked && (systemVoicesAvailable || provider !== "elevenlabs") && (
+      {!workspaceConfigurationLocked && (
         <div className="mt-4">
           <div className="mb-2 text-[13px] text-ink-secondary">Voice engine</div>
-          <div className="inline-flex rounded-xl bg-inset p-1" role="radiogroup" aria-label="Voice engine">
+          <div className="grid grid-cols-2 gap-1 rounded-xl bg-inset p-1" role="radiogroup" aria-label="Voice engine">
             {([
               { value: "elevenlabs", label: "ElevenLabs", available: true },
+              { value: "fish", label: "Fish Audio", available: true },
               { value: "system", label: "Built-in Mac voices", available: systemVoicesAvailable },
               { value: "chatterbox", label: "Chatterbox (local)", available: true },
             ] as const).map((option) => (
@@ -233,21 +274,21 @@ export function VoiceSettings({
         </div>
       )}
 
-      {!workspaceConfigurationLocked && provider === "elevenlabs" && (
+      {!workspaceConfigurationLocked && cloudProvider && (
         <div className="mt-4">
         <div className="mb-1.5 flex items-center gap-2 text-[13px] text-ink-secondary">
           <span className={cn("size-1.5 rounded-full", configured ? "bg-success" : "bg-raised-hover")} />
-          <span>ElevenLabs key</span>
+          <span>{cloudProvider.name} key</span>
           {configured && <span className="text-[11px] text-success">Connected</span>}
         </div>
         <div className="flex gap-2">
           <input
             type="password"
             value={key}
-            onChange={(e) => setKey(e.target.value)}
+            onChange={(e) => setKeyDraft({ provider: cloudProvider.id, value: e.target.value })}
             onKeyDown={(e) => e.key === "Enter" && key.trim() && void saveKey()}
-            placeholder={configured ? "••••••••  (paste to replace)" : "Paste your ElevenLabs API key"}
-            aria-label="ElevenLabs key"
+            placeholder={configured ? "••••••••  (paste to replace)" : cloudProvider.placeholder}
+            aria-label={`${cloudProvider.name} key`}
             autoComplete="off"
             className="w-full rounded-lg border border-hairline/40 bg-inset px-3 py-2 text-[13px] text-ink placeholder:text-ink-secondary focus:border-hairline focus:outline-none"
           />
@@ -261,12 +302,12 @@ export function VoiceSettings({
         </div>
         {!configured && (
           <a
-            href="https://elevenlabs.io/app/settings/api-keys"
+            href={cloudProvider.keyUrl}
             target="_blank"
             rel="noopener noreferrer"
             className="mt-1.5 inline-block text-[12px] font-medium text-accent hover:underline"
           >
-            Get a key from ElevenLabs
+            Get a key from {cloudProvider.name}
           </a>
         )}
         </div>

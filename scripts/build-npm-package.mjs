@@ -89,11 +89,12 @@ the public endpoint and possible connector download. The pairing page and
 basic server identity are public; chat and settings require pairing.
 Tailscale must already be installed and signed in on both devices.
 
-After the HTTPS connection is checked, scan the QR with your phone's
-Camera: use Safari on iPhone/iPad or a web browser on Android. An installed
-OpenMausBot iOS app can also scan or accept the full link. This CLI link
-does not work with the current Android native pairing scanner. Choose
-Connect on the phone; scanning alone is not a completed pairing. Codes
+After the HTTPS connection is checked, scan the QR with your phone. When
+you pair an Android phone the QR is an app link, so scan it inside the
+OpenMausBot app; the web address is printed beside it if you would rather
+use a browser. On iPhone or iPad, scan with Camera for Safari, or use the
+app's own scanner. Choose Connect on the phone; scanning alone is not a
+completed pairing. Codes
 are private, single-use, and expire after five minutes. Guided phone
 access permits chat and approvals, not settings or pairing administration.
 Localhost and a bare LAN address cannot connect your phone to this server.

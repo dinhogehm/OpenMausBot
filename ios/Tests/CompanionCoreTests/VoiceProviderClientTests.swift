@@ -85,6 +85,29 @@ final class VoiceProviderClientTests: XCTestCase {
         XCTAssertEqual(tts["provider"] as? String, "chatterbox")
     }
 
+    func testSetFishVoiceProviderUsesItsExactWireValue() async throws {
+        VoiceProviderRequestStub.responseBody = Self.fishStatus
+
+        let status = try await client.setVoiceProvider(.fish)
+
+        XCTAssertEqual(status.voiceProvider, .fish)
+        let body = try XCTUnwrap(Self.jsonBody())
+        let tts = try XCTUnwrap(body["tts"] as? [String: Any])
+        XCTAssertEqual(tts.keys.sorted(), ["provider"])
+        XCTAssertEqual(tts["provider"] as? String, "fish")
+    }
+
+    func testWalkieNeverSendsAnotherProvidersVoiceIdToElevenLabs() throws {
+        let fish = try JSONDecoder().decode(ConfigStatus.self, from: Self.fishStatus)
+        let eleven = try JSONDecoder().decode(
+            ConfigStatus.self,
+            from: Data(#"{"tts":{"configured":true,"provider":"elevenlabs"}}"#.utf8)
+        )
+
+        XCTAssertNil(fish.walkieAgentVoice("fish-voice"))
+        XCTAssertEqual(eleven.walkieAgentVoice("eleven-voice"), "eleven-voice")
+    }
+
     func testSaveChatterboxServerCommitsAddressAndModelTogether() async throws {
         VoiceProviderRequestStub.responseBody = Self.chatterboxStatus
 
@@ -112,5 +135,8 @@ final class VoiceProviderClientTests: XCTestCase {
 
     private static let chatterboxStatus = Data(
         #"{"tts":{"configured":true,"ready":true,"provider":"chatterbox","baseUrl":"http://127.0.0.1:4123","model":"chatterbox-turbo"}}"#.utf8
+    )
+    private static let fishStatus = Data(
+        #"{"tts":{"configured":true,"ready":true,"provider":"fish","voice":"fish-voice"}}"#.utf8
     )
 }

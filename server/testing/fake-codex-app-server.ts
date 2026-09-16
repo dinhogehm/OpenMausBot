@@ -5,7 +5,8 @@
 // real app-server, it never exits on its own — the driver kills it.
 //
 //   FAKE_CODEX_MODE   happy (default) | approval | resume | stream | windows-command |
-//                     mcp-elicitation | mcp-app-approval | mcp-form | permissions-approval | config-profile |
+//                     mcp-elicitation | mcp-app-approval | mcp-form | permissions-approval | question |
+//                     multi-question | empty-question | malformed-question | config-profile |
 //                     config-profile-unsupported | config-read-error | image |
 //                     logged-in-stdout | logged-out | unauthorized | late-request
 //   FAKE_CODEX_LAUNCH_CRASHES  die at turn/start (before ack) with transient stderr,
@@ -23,6 +24,8 @@
 //                              test confirms the stale websocket-426 stderr was read
 //   FAKE_CODEX_EXIT_MID_TURN_KILL  gate file path: hold the SIGKILL until the test
 //                              confirms the reasoning delta was parsed
+//   FAKE_CODEX_ASK_HOLD        question modes: record the ask reply and hold the turn open, for
+//                              timeout tests that advance the clock
 //   FAKE_CODEX_DUMP   path to write {pid, argv, env, calls, decision} as JSON
 //   FAKE_CODEX_ACCOUNT_EMAIL  synthetic ChatGPT identity (default ada@example.test)
 //   FAKE_CODEX_ACCOUNT_MODE   chatgpt (default) | api-key | none | unsupported | error | hang
@@ -165,7 +168,13 @@ process.stdin.on("data", (chunk) => {
     // response to our own server->client request (approval decision)
     if ((msg.id === 100 || msg.id === 101) && (msg.result !== undefined || msg.error !== undefined)) {
       decision = msg.result ?? { error: msg.error };
-      finishTurn();
+      if ((mode === "question" || mode === "multi-question" || mode === "empty-question") && process.env.FAKE_CODEX_ASK_HOLD === "1") {
+        // Hold: completing the turn would start the driver's child-reap
+        // timers, which freeze on a test's fake clock.
+        dump();
+      } else {
+        finishTurn();
+      }
       continue;
     }
 
@@ -534,6 +543,29 @@ process.stdin.on("data", (chunk) => {
                 network: { enabled: true },
                 fileSystem: null,
               },
+            },
+          });
+        } else if (mode === "question" || mode === "multi-question" || mode === "empty-question" || mode === "malformed-question") {
+          // one card per ask: a single question vs a bundled pair vs none vs a malformed shape
+          out({
+            jsonrpc: "2.0",
+            id: 101,
+            method: "item/tool/requestUserInput",
+            params: {
+              questions: mode === "malformed-question"
+                ? "please"
+                : mode === "question"
+                ? [{
+                    id: "q-ship",
+                    question: "Ship today?",
+                    options: ["Yes", "No", "Maybe", "Later", "Soon", "Never"].map((label) => ({ label })),
+                  }]
+                : mode === "empty-question"
+                ? []
+                : [
+                    { id: "q-ship", question: "Ship today?", options: [{ label: "Yes" }, { label: "No" }] },
+                    { id: "q-review", question: "Who reviews?", options: [{ label: "Ada" }, { label: "Lin" }] },
+                  ],
             },
           });
         } else if (mode === "approval" || mode === "windows-command") {

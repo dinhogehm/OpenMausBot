@@ -71,6 +71,7 @@ import { ExportTranscriptMenu } from "./ExportTranscriptMenu";
 
 import { SpeakButton } from "./SpeakButton";
 import { CallButton, CallOverlay } from "./CallView";
+import { effectivePlace, toolPlace, type EffectivePlace } from "@/lib/place";
 import { cn } from "@/lib/cn";
 import { activeLocale, t } from "@/lib/i18n";
 import { COMPACT_BUBBLE } from "@/lib/compact-chip";
@@ -556,7 +557,7 @@ function PeerLabel({ peer }: { peer: PeerLine }) {
 }
 
 /** A tool run: spinner while live, check/cross once settled. */
-function ActivityChip({ message }: { message: Message }) {
+function ActivityChip({ message, place = "auto" }: { message: Message; place?: EffectivePlace }) {
   const { state, dispatch } = useStore();
   const tool = message.tool;
   if (!tool) return null;
@@ -579,7 +580,7 @@ function ActivityChip({ message }: { message: Message }) {
       </div>
     );
   }
-  return <ToolActivity tool={tool} />;
+  return <ToolActivity tool={tool} place={toolPlace(tool.name, place)} />;
 }
 
 /** The settled transcript, memoized as one unit: during streaming every
@@ -628,6 +629,8 @@ const MessagesList = memo(function MessagesList({
   // Finished tool chips become compact runs; settled assistant narration
   // becomes one reversible turn row while the terminal answer stays visible.
   const items = useMemo(() => groupTranscript(messages), [messages, locale]);
+  // Where this conversation works, for the place icon on screen and page tools.
+  const place = effectivePlace(bot, bot.tasks?.find((task) => task.threadId === bot.threadId));
   const newestMessageId = messages.at(-1)?.id;
   const newestUserMessageId = [...messages].reverse().find((message) => message.role === "user")?.id;
   // A search hit inside a folded run has to open it: the fold keeps the
@@ -700,7 +703,7 @@ const MessagesList = memo(function MessagesList({
               <ActivityRun messages={item.messages} forceOpen={item.messages.some((step) => step.id === focusedId)}>
                 {item.messages.map((step) => (
                   <div key={step.id} className="contents" data-mid={step.id}>
-                    <ActivityChip message={step} />
+                    <ActivityChip message={step} place={place} />
                   </div>
                 ))}
               </ActivityRun>
@@ -779,7 +782,7 @@ const MessagesList = memo(function MessagesList({
                 );
               }
               if (!showToolCalls && !m.comm && !m.threadRef) return null;
-              return <ActivityChip message={m} />;
+              return <ActivityChip message={m} place={place} />;
             }
             case "screen":
               return m.png ? <ScreenFrame png={m.png} mime={m.mime} /> : null;

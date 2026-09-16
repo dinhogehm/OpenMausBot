@@ -339,6 +339,7 @@ class DecodingTest {
         fun provider(json: String) = CompanionJson.decodeFromString<ConfigStatus>(json).voiceProvider
 
         assertEquals(VoiceProvider.ELEVENLABS, provider("""{"tts":{"configured":true,"provider":"elevenlabs"}}"""))
+        assertEquals(VoiceProvider.FISH, provider("""{"tts":{"configured":true,"provider":"fish"}}"""))
         assertEquals(VoiceProvider.SYSTEM, provider("""{"tts":{"configured":false,"provider":"system"}}"""))
         assertEquals(
             VoiceProvider.CHATTERBOX,
@@ -514,6 +515,28 @@ class DecodingTest {
         decodeFixture<Fleet>("bots-paged").bots.flatMap { it.tasks.orEmpty() }.forEach { task ->
             assertFalse(task.isClosed, task.threadId)
         }
+    }
+
+    @Test
+    fun archivedMeansTheStampIsPresentEvenAtZero() {
+        // The task API accepts any epoch number, so archivedAt 0 is archived —
+        // the same presence rule the desktop's isArchived uses.
+        val atZero = CompanionJson.decodeFromString<BotTask>(
+            """{"threadId":"t1","title":"","createdAt":1,"archivedAt":0}""",
+        )
+        assertTrue(atZero.isArchived)
+        assertEquals("Archived", atZero.bylineLabel)
+
+        val never = CompanionJson.decodeFromString<BotTask>("""{"threadId":"t1","title":"","createdAt":1}""")
+        assertFalse(never.isArchived)
+        assertNull(never.bylineLabel)
+
+        val closedToo = CompanionJson.decodeFromString<BotTask>(
+            """{"threadId":"t1","title":"","createdAt":1,"archivedAt":5,
+               "closedBy":{"botId":"pm","name":"Parker","at":9}}""",
+        )
+        assertTrue(closedToo.isArchived)
+        assertEquals("closed by Parker", closedToo.bylineLabel)
     }
 
     @Test

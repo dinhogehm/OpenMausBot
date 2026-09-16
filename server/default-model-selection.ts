@@ -5,7 +5,7 @@ interface SelectableInstance {
   driverKind: string;
   snapshot: ProviderSnapshot;
   models: ModelCatalog;
-  capabilities?: { effortLevels?: readonly EffortLevel[] };
+  capabilities?: { effortLevels?: readonly EffortLevel[]; modelVariants?: boolean };
 }
 
 /** A saved choice is intentional: an unavailable provider or removed model
@@ -19,6 +19,7 @@ export function selectDefaultModelSelection(
     if (
       instance?.snapshot.state !== "available" ||
       instance.snapshot.authenticated === false ||
+      (preferred.variant !== undefined && !instance.capabilities?.modelVariants) ||
       !(instance.models.default === preferred.model || instance.models.options.some((model) => model.id === preferred.model))
     ) {
       return { instanceId: "", model: "" };

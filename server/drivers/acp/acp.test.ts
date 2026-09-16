@@ -628,6 +628,44 @@ describe("ACP turns (fake CLI)", () => {
     expect(instance.adapter.capabilities.customMcp).toBe(true);
   });
 
+  const remoteServers = {
+    docs: { type: "http" as const, url: "https://docs.example/mcp", headers: { Authorization: "Bearer tok-docs" } },
+    legacy: { type: "sse" as const, url: "https://old.example/sse", headers: {} },
+    notes: { command: "npx", args: [], env: {} },
+  };
+
+  it("keeps url servers out of a session with an agent that advertises no remote transport", async () => {
+    await create();
+    const dump = join(scratch, "remote-plain.json");
+    process.env.FAKE_ACP_DUMP = dump;
+    await instance.adapter.sendTurn({ threadId: "t-remote-plain", text: "go", integrations: { custom: remoteServers } });
+    await recorder.until((event) => event.type === "turn.completed");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.mcpServers.map((server: { name: string }) => server.name)).toEqual(["notes"]);
+  });
+
+  it("lists a url server in ACP's shape for an agent that advertises its transport", async () => {
+    process.env.FAKE_ACP_MCP_TRANSPORTS = "http";
+    try {
+      await create();
+      const dump = join(scratch, "remote-http.json");
+      process.env.FAKE_ACP_DUMP = dump;
+      await instance.adapter.sendTurn({ threadId: "t-remote-http", text: "go", integrations: { custom: remoteServers } });
+      await recorder.until((event) => event.type === "turn.completed");
+      const seen = JSON.parse(readFileSync(dump, "utf8"));
+      expect(seen.mcpServers).toContainEqual({
+        type: "http",
+        name: "docs",
+        url: "https://docs.example/mcp",
+        headers: [{ name: "Authorization", value: "Bearer tok-docs" }],
+      });
+      // the agent said http only, so the SSE entry stays out
+      expect(seen.mcpServers.map((server: { name: string }) => server.name)).toEqual(["docs", "notes"]);
+    } finally {
+      delete process.env.FAKE_ACP_MCP_TRANSPORTS;
+    }
+  });
+
   it("surfaces a permission ask as request.opened and completes once allowed", async () => {
     await create(GrokAgentDriver, "permission");
     await instance.adapter.sendTurn({

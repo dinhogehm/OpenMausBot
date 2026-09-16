@@ -1503,6 +1503,15 @@ public struct CompanionClient: Sendable {
         try await send(try makeRequest("PATCH", "/api/bots/\(botId)/tasks/\(threadId)", body: ["title": title]))
     }
 
+    /// Archive puts a thread away without deleting it; `nil` brings it
+    /// back. The server accepts any epoch timestamp to archive and JSON null
+    /// to unarchive, matching the desktop's thread row action.
+    public func archiveTask(botId: String, threadId: String, archivedAt: Double?) async throws {
+        try await send(try makeRequest("PATCH", "/api/bots/\(botId)/tasks/\(threadId)", body: [
+            "archivedAt": archivedAt ?? NSNull(),
+        ]))
+    }
+
     public func deleteTask(botId: String, threadId: String) async throws -> Bot {
         try await send(try makeRequest("DELETE", "/api/bots/\(botId)/tasks/\(threadId)"), as: BotResponse.self).bot
     }

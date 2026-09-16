@@ -233,6 +233,31 @@ export function EngineUpdateNotice({
   );
 }
 
+/** Like the update notice, minus the command: there is nothing to run, only
+ * something to know — the message says what and where to change it. */
+export function EngineWarningNotice({
+  warning,
+  className,
+}: {
+  warning: NonNullable<InstanceInfo["snapshot"]["warning"]>;
+  className?: string;
+}) {
+  return (
+    <div
+      data-engine-warning-notice
+      className={cn("rounded-xl border border-warning/25 bg-warning/5 p-2.5", className)}
+    >
+      <div className="flex items-start gap-2">
+        <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warning" aria-hidden="true" />
+        <div className="min-w-0">
+          <div className="text-[12.5px] font-semibold text-ink">{warning.title}</div>
+          <p className="mt-0.5 text-[11.5px] leading-relaxed text-ink-secondary">{warning.message}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ManagedEngineSetup({ instance, signInOnly }: { instance: InstanceInfo; signInOnly: boolean }) {
   const { refreshInstances, refreshModels } = useStore();
   const [busy, setBusy] = useState<"install" | "signin" | "complete" | "check" | null>(null);

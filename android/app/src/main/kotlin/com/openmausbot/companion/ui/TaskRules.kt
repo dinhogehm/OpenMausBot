@@ -4,6 +4,7 @@ import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.BotTask
 import com.openmausbot.companion.core.Chat
 import com.openmausbot.companion.core.isClosed
+import com.openmausbot.companion.core.isArchived
 import com.openmausbot.companion.core.displayTitle
 import com.openmausbot.companion.core.orderedThreads
 import com.openmausbot.companion.core.threadGroups
@@ -34,17 +35,23 @@ object TaskRules {
      * Filter navigation only; full task state still resolves run logs and approvals.
      * The sheet is the phone's only thread list, so threads a bot closed stay in
      * it — but after every open thread, in their own server order, so a pile of
-     * closed helper threads never buries the person's own. A closed thread that
-     * is running, unread, or the current one is treated as open.
+     * closed helper threads never buries the person's own, and archived
+     * threads fold to the very tail. A folded thread that is running, unread,
+     * or the current one is treated as open.
      *
-     * Inside each half, attention floats to the top exactly as the desktop
+     * Inside each group, attention floats to the top exactly as the desktop
      * sidebar orders threads: waiting on the person first, then work, then
      * queued, then unread; the current thread rides above the idle tail.
      */
     fun tasks(bot: Bot): List<BotTask> {
         val navigable = bot.threadGroups(includingClosed = true).flatMap { it.tasks }
-        val (open, closed) = navigable.partition { !it.isClosed || demandsAttention(it) || isCurrent(it, bot) }
-        return orderedThreads(open, bot.threadId) + orderedThreads(closed, bot.threadId)
+        val (surfaced, folded) = navigable.partition {
+            (!it.isClosed && !it.isArchived) || demandsAttention(it) || isCurrent(it, bot)
+        }
+        val (closed, archived) = folded.partition { !it.isArchived }
+        return orderedThreads(surfaced, bot.threadId) +
+            orderedThreads(closed, bot.threadId) +
+            orderedThreads(archived, bot.threadId)
     }
 
     /** Running, needing the person, or holding something they have not read. */
@@ -96,6 +103,16 @@ object TaskRules {
     fun canRename(bot: Bot): Boolean = true
 
     fun canRename(chat: Chat): Boolean = true
+
+    /** Archiving mid-turn would race the work, as with delete: wait for it. */
+    fun canArchive(task: BotTask, bot: Bot): Boolean =
+        task.activity !in setOf("working", "running") &&
+            if (independent(bot)) task.busy != true else bot.busy != true
+
+    fun canArchive(task: BotTask, chat: Chat): Boolean = when (chat) {
+        is Chat.BotChat -> canArchive(task, chat.bot)
+        is Chat.RoomChat -> task.activity !in setOf("working", "running") && task.busy != true
+    }
 }
 
 /**

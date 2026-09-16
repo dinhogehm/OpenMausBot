@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, RefreshCw, Search } from "lucide-react";
 import { useStore, currentTaskBot, type Bot, type InstanceInfo, type ModelSelection } from "@/state/store";
-import type { EffortLevel } from "../../server/contracts.ts";
+import type { EffortLevel, ModelVariantOption } from "../../server/contracts.ts";
 import { filterCustomModels, partitionCustomModels, suggestedModels } from "@/lib/custom-models";
 import { isCustomOnly, splitEngineRail } from "@/lib/engine-rail";
 import { ProviderMark } from "./ProviderIcons";
@@ -64,8 +64,11 @@ export function EffortRow({
 }) {
   const { state, dispatch } = useStore();
   const selection = bot.modelSelection;
-  const levels = state.instances.find((instance) => instance.instanceId === selection.instanceId)?.capabilities
-    ?.effortLevels;
+  const instance = state.instances.find((candidate) => candidate.instanceId === selection.instanceId);
+  if (instance?.capabilities?.modelVariants) {
+    return <ModelVariantRow bot={bot} threadId={threadId} updateBotDefault={updateBotDefault} className={className} label={label} />;
+  }
+  const levels = instance?.capabilities?.effortLevels;
   // An engine with no levels gets no control at all, not an empty one.
   if (!levels?.length) return null;
 
@@ -99,6 +102,86 @@ export function EffortRow({
       </div>
     </div>
   );
+}
+
+function variantLabel(option: ModelVariantOption): string {
+  return option.id === "default" ? "OpenCode default" : option.label;
+}
+
+/** ACP variant ids are opaque; their model/session declares the available choices. */
+export function ModelVariantRow({ bot, threadId, updateBotDefault, className, label }: {
+  bot: Bot;
+  threadId?: string;
+  updateBotDefault?: boolean;
+  className?: string;
+  label?: ReactNode;
+}) {
+  const { state, dispatch } = useStore();
+  const selection = bot.modelSelection;
+  const instance = state.instances.find((candidate) => candidate.instanceId === selection.instanceId);
+  if (!instance?.capabilities?.modelVariants) return null;
+  const session = state.modelVariantSessions[threadId ?? bot.threadId];
+  const reported = session?.instanceId === selection.instanceId && session.model === selection.model ? session.variants : undefined;
+  const options = reported?.options ?? instance.models.options.find((option) => option.id === selection.model)?.variants ?? [];
+  if (!options.length && selection.variant === undefined) return null;
+  const missing = selection.variant !== undefined && !options.some((option) => option.id === selection.variant);
+  const unavailable = missing && reported !== undefined;
+  const current = reported?.currentValue;
+  const choose = (variant?: string) => {
+    const { effort: _effort, variant: _variant, ...model } = selection;
+    dispatch({ type: "setModel", botId: bot.id, threadId, ...(updateBotDefault ? { updateBotDefault: true } : {}),
+      selection: { ...model, ...(variant !== undefined ? { variant } : {}) } });
+  };
+  return (
+    <div className={className}>
+      {label}
+      {(selection.variant === undefined || missing) && (
+        <p className="mt-2 text-[12px] text-ink-secondary">
+          {unavailable ? `Saved variant “${selection.variant}” is unavailable. Choose an available variant.`
+            : missing ? `Saved variant “${selection.variant}” has not been checked in this session.` : "No variant selected."}
+          {current !== undefined && ` Session: ${variantLabel(options.find((option) => option.id === current) ?? { id: current, label: current })}.`}
+        </p>
+      )}
+      {selection.variant !== undefined && (
+        <button type="button" disabled={bot.busy} onClick={() => choose()}
+          title="Send no variant selection; OpenCode keeps its session or configured setting"
+          className="mt-2 block text-[12px] text-ink-secondary underline underline-offset-2 hover:text-ink disabled:opacity-50">
+          Clear variant selection
+        </button>
+      )}
+      {options.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1" role="group" aria-label="Reasoning variant">
+          {options.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              disabled={bot.busy}
+              aria-pressed={selection.variant === option.id}
+              title={`Use ${variantLabel(option)} for this model`}
+              onClick={() => choose(option.id)}
+              className={cn(
+                "rounded-full border px-2.5 py-1 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 disabled:opacity-50",
+                selection.variant === option.id ? "border-accent/60 bg-control text-ink" : "border-hairline/40 text-ink-secondary hover:bg-control/60 hover:text-ink",
+              )}
+            >
+              {variantLabel(option)}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Switching models must not carry an opaque variant from the previous model. */
+export function modelSelectionForPick(selection: ModelSelection, instance: InstanceInfo, model: string): ModelSelection {
+  const next: ModelSelection = { instanceId: instance.instanceId, model };
+  if (instance.instanceId === selection.instanceId) {
+    if (instance.capabilities?.modelVariants) {
+      if (model === selection.model && selection.variant !== undefined) next.variant = selection.variant;
+    } else if (selection.effort) next.effort = selection.effort;
+  }
+  return next;
 }
 
 function ModelRow({
@@ -270,6 +353,10 @@ export function ModelPicker({
 
   const selection = bot.modelSelection;
   const active = state.instances.find((instance) => instance.instanceId === selection.instanceId);
+  const selectedVariantLabel = selection.variant === undefined ? undefined : variantLabel(
+    active?.models.options.find((option) => option.id === selection.model)?.variants?.find((option) => option.id === selection.variant)
+      ?? { id: selection.variant, label: selection.variant },
+  );
   const claudeAccounts = state.instances.filter((instance) => instance.driverKind === "claudeAgent");
   const multipleClaudeAccounts = claudeAccounts.length > 1;
   const showActiveAccount = multipleClaudeAccounts && active?.driverKind === "claudeAgent";
@@ -360,12 +447,7 @@ export function ModelPicker({
 
   const pick = (instance: InstanceInfo, model: string) => {
     if (bot.busy) return;
-    const sameInstance = instance.instanceId === selection.instanceId;
-    const nextSelection: ModelSelection = {
-      instanceId: instance.instanceId,
-      model,
-    };
-    if (sameInstance && selection.effort) nextSelection.effort = selection.effort;
+    const nextSelection = modelSelectionForPick(selection, instance, model);
     const updateBotDefault = !threadId || scope === "bot";
     const profile = state.bots.find((candidate) => candidate.id === bot.id) ?? bot;
     const targets = updateBotDefault ? [currentTaskBot(profile, threadId ?? bot.threadId), profile] : [bot];
@@ -445,7 +527,7 @@ export function ModelPicker({
           : active
           ? `${active.displayName} · ${modelLabel(active, selection.model)}${
               modelProvider(active, selection.model) ? ` · ${modelProvider(active, selection.model)}` : ""
-            }${selection.effort ? ` · ${effortLabel(selection.effort)} effort` : ""}`
+            }${selectedVariantLabel ? ` · ${selectedVariantLabel}` : selection.effort ? ` · ${effortLabel(selection.effort)} effort` : ""}`
           : selection.model
       }
     >
@@ -465,7 +547,9 @@ export function ModelPicker({
         </span>
         {/* outside the truncating span: a long model name must not be what
             hides the effort the header exists to surface */}
-        {selection.effort && (
+        {selectedVariantLabel !== undefined ? (
+          <span data-model-variant className="max-w-[120px] truncate text-ink-secondary">· {selectedVariantLabel}</span>
+        ) : selection.effort && (
           <span data-model-effort className="shrink-0 text-ink-secondary">
             · {effortLabel(selection.effort)}
           </span>
@@ -699,7 +783,7 @@ export function ModelPicker({
                     threadId={threadId}
                     updateBotDefault={Boolean(threadId && scope === "bot")}
                     className="shrink-0 border-t border-hairline/40 px-4 py-3"
-                    label={<span className="text-[12.5px] font-medium text-ink">Effort</span>}
+                    label={<span className="text-[12.5px] font-medium text-ink">{active?.capabilities?.modelVariants ? "Reasoning" : "Effort"}</span>}
                   />
                 )}
 

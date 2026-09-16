@@ -48,6 +48,42 @@ beforeAll(async () => {
         res.writeHead(200, { "content-type": "audio/mpeg" });
         return res.end(MP3);
       }
+      if (path === "/model") {
+        const query = new URL(req.url ?? "/", "http://stub").searchParams;
+        if (query.get("self") === "true" && req.headers.authorization !== "Bearer fish-key") {
+          return send(401, { message: "unauthorized" });
+        }
+        if (query.get("self") === "true" && query.get("page_number") === "1") {
+          return send(200, {
+            total: 3,
+            has_more: true,
+            items: [
+              { _id: "fish-1", type: "tts", state: "trained", title: "Narrator", description: "Warm and measured" },
+              { _id: "svc-1", type: "svc", state: "trained", title: "Not a TTS voice" },
+              { _id: "fish-training", type: "tts", state: "training", title: "Not ready" },
+            ],
+          });
+        }
+        if (query.get("self") === "true" && query.get("page_number") === "2") {
+          return send(200, {
+            total: 3,
+            has_more: false,
+            items: [{ _id: "fish-2", type: "tts", state: "trained", title: "Studio Voice", description: "" }],
+          });
+        }
+        return send(200, {
+          total: 1,
+          has_more: false,
+          items: [
+            { _id: "fish-1", type: "tts", state: "trained", title: "Narrator", description: "Warm and measured" },
+            { _id: "fish-failed", type: "tts", state: "failed", title: "Failed" },
+          ],
+        });
+      }
+      if (path === "/v1/tts") {
+        res.writeHead(200, { "content-type": "audio/mpeg" });
+        return res.end(MP3);
+      }
       if (path === "/v1/audio/speech") {
         res.writeHead(200, { "content-type": "audio/wav" });
         return res.end(WAV);
@@ -63,6 +99,7 @@ beforeAll(async () => {
   const port = (server.address() as { port: number }).port;
   stubBase = `http://127.0.0.1:${port}`;
   process.env.OMB_ELEVENLABS_API = `${stubBase}/v1`;
+  process.env.OMB_FISH_AUDIO_API = stubBase;
 });
 
 afterAll(() => new Promise<void>((r) => server.close(() => r())));
@@ -70,6 +107,7 @@ afterAll(() => new Promise<void>((r) => server.close(() => r())));
 /** The module reads its base URL at import time, so tests import after the
  * stub is listening. */
 const voice = () => import("./index.ts");
+const fish = () => import("./fish.ts");
 
 const cfg = (tts: AppConfig["tts"]): AppConfig => ({ tts });
 
@@ -121,14 +159,14 @@ describe("ElevenLabs", () => {
     refuse = null;
     seen.length = 0;
     const { verifyKey } = await voice();
-    expect(await verifyKey("el-key")).toEqual({ ok: true });
+    expect(await verifyKey("elevenlabs", "el-key")).toEqual({ ok: true });
     expect(seen.map((r) => r.url.split("?")[0])).not.toContain("/v1/user");
   });
 
   it("says what to do when the key is genuinely refused", async () => {
     refuse = { status: 401, body: { detail: "invalid api key" } };
     const { verifyKey } = await voice();
-    const result = await verifyKey("nope");
+    const result = await verifyKey("elevenlabs", "nope");
     refuse = null;
     expect(result.ok).toBe(false);
     // names scopes, because "get a fresh key" is the wrong advice when the
@@ -172,6 +210,104 @@ describe("ElevenLabs", () => {
     const message = await speak(cfg(ready), "hi").catch((e: Error) => e.message);
     refuse = null;
     expect(message).toContain("exceeded your quota");
+  });
+});
+
+describe("Fish Audio", () => {
+  const ready = { provider: "fish" as const, fishKey: "fish-key", voice: "fish-1" };
+
+  it("keeps its setup and key separate from ElevenLabs", async () => {
+    const { describeVoice, providerConfigured, voiceConfigured, voiceReady } = await voice();
+    expect(providerConfigured(cfg({ provider: "fish", key: "eleven-key" }))).toBe(false);
+    expect(providerConfigured(cfg({ provider: "fish", fishKey: "fish-key" }))).toBe(true);
+    expect(voiceConfigured(cfg({ provider: "fish", fishKey: "fish-key" }))).toBe(false);
+    expect(voiceConfigured(cfg(ready))).toBe(true);
+    expect(voiceReady(cfg({ provider: "fish", fishKey: "fish-key" }), "fish-per-agent")).toBe(true);
+    const described = describeVoice(cfg(ready));
+    expect(described).toEqual({
+      configured: true,
+      ready: true,
+      voice: "fish-1",
+      provider: "fish",
+      baseUrl: "",
+      model: "",
+    });
+    expect(JSON.stringify(described)).not.toContain("fish-key");
+  });
+
+  it("verifies the key against accessible voice models", async () => {
+    refuse = null;
+    seen.length = 0;
+    const { verifyKey } = await voice();
+    expect(await verifyKey("fish", "fish-key")).toEqual({ ok: true });
+    const call = seen.at(-1)!;
+    expect(call.method).toBe("GET");
+    expect(call.url).toBe("/model?page_size=1&self=true");
+    expect(call.headers.authorization).toBe("Bearer fish-key");
+    expect(call.url).not.toContain("fish-key");
+  });
+
+  it("lists only trained TTS voices using Fish model ids", async () => {
+    seen.length = 0;
+    const { listVoices } = await voice();
+    expect(await listVoices(cfg(ready))).toEqual([
+      { id: "fish-1", label: "Narrator", description: "Warm and measured" },
+      { id: "fish-2", label: "Studio Voice", description: undefined },
+    ]);
+    // The public page and the owned-page walk run concurrently (fish.ts:102,
+    // Promise.all), so how they interleave is not deterministic — asserting a
+    // fixed order made this fail on loaded runners. What IS ordered is the
+    // owned walk itself: page 2 is only fetched after page 1 reports hasMore.
+    const urls = seen.slice(-3).map((call) => call.url);
+    expect([...urls].sort()).toEqual([
+      "/model?page_size=100&self=true&sort_by=created_at&page_number=1",
+      "/model?page_size=100&self=true&sort_by=created_at&page_number=2",
+      "/model?page_size=100&sort_by=task_count",
+    ]);
+    expect(urls.indexOf("/model?page_size=100&self=true&sort_by=created_at&page_number=1"))
+      .toBeLessThan(urls.indexOf("/model?page_size=100&self=true&sort_by=created_at&page_number=2"));
+  });
+
+  it("requests s2.1-pro mp3 speech and returns its raw audio", async () => {
+    seen.length = 0;
+    const { speak } = await voice();
+    const audio = await speak(cfg(ready), "hello there");
+    expect(audio.mime).toBe("audio/mpeg");
+    expect(Buffer.from(audio.bytes)).toEqual(MP3);
+
+    const call = seen.at(-1)!;
+    expect(call.method).toBe("POST");
+    expect(call.url).toBe("/v1/tts");
+    expect(call.headers.authorization).toBe("Bearer fish-key");
+    expect(call.headers.model).toBe("s2.1-pro");
+    expect(JSON.parse(call.body)).toEqual({
+      text: "hello there",
+      reference_id: "fish-1",
+      format: "mp3",
+      sample_rate: 44_100,
+      mp3_bitrate: 64,
+      latency: "normal",
+    });
+  });
+
+  it("returns a useful bounded error without echoing arbitrary response bodies", async () => {
+    refuse = { status: 422, body: { detail: "x".repeat(500) } };
+    const { synthesize } = await fish();
+    const message = await synthesize("hello", "fish-1", "fish-key").catch((error: Error) => error.message);
+    refuse = null;
+    if (typeof message !== "string") throw new Error("Fish Audio unexpectedly accepted the stubbed refusal");
+    expect(message).toMatch(/^speaking failed: x+$/);
+    expect(message.length).toBeLessThan(270);
+  });
+
+  it("explains rejected keys without exposing them", async () => {
+    const { verifyKey } = await fish();
+    const result = await verifyKey("not-a-real-key");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toMatch(/rejected|access/i);
+      expect(result.message).not.toContain("not-a-real-key");
+    }
   });
 });
 

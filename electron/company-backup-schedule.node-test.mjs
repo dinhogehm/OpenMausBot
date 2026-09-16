@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { createCompanyBackupSchedule } from "./company-backup-schedule.mjs";
 
 const DAY = 24 * 60 * 60_000, HOUR = DAY / 24;
-const ENABLE = { enabled: true, password: "synthetic backup password", confirmation: "BACK UP THIS WORKSPACE DAILY" };
+const ENABLE = { enabled: true, confirmation: "BACK UP THIS WORKSPACE DAILY" };
 const deferred = () => { let resolve; const promise = new Promise(yes => { resolve = yes; }); return { promise, resolve }; };
 const turn = () => new Promise(resolve => setImmediate(resolve));
 function fixture(saved = null) {
@@ -49,7 +49,7 @@ test("exact consent is required and first backup waits a full day", async () => 
   }
   const state = await f.scheduler.configure(ENABLE);
   assert.equal(state.nextBackupAt, f.now + DAY); assert.equal(f.calls.length, 0);
-  assert(!JSON.stringify(state).includes(ENABLE.password));
+  assert.equal(Object.hasOwn(f.saved, "password"), false);
   await f.fire(DAY - 1); assert.equal(f.calls.length, 0);
   await f.fire(1); assert.equal(f.calls.length, 1);
   assert.equal(f.scheduler.state().lastBackupAt, f.now);
@@ -95,7 +95,7 @@ test("missing connection pauses and account/workspace changes forget the encrypt
 
 test("disable cancels its in-flight transfer and late completion cannot restore secret or success", async () => {
   const f = fixture(), completion = deferred(), started = deferred();
-  f.run = (_password, signal) => { started.resolve(signal); return completion.promise; };
+  f.run = (signal) => { started.resolve(signal); return completion.promise; };
   await f.scheduler.configure(ENABLE); const operation = f.fire(DAY); const signal = await started.promise;
   await f.scheduler.configure({ enabled: false }); assert.equal(signal.aborted, true);
   completion.resolve(); await operation;
@@ -132,12 +132,22 @@ test("late startup read cannot resurrect a disabled record", async () => {
 });
 
 test("locked or malformed storage is fail-closed and secret-free", async () => {
-  for (const saved of [{ version: 1 }, { version: 1, scope: "scope", password: ENABLE.password, nextBackupAt: -1 }]) {
+  for (const saved of [{ version: 1 }, { version: 1, scope: "scope", password: "synthetic old password", nextBackupAt: -1 }]) {
     const f = fixture(saved); await f.scheduler.start(); assert.equal(f.scheduler.state().status, "error"); assert.equal(f.calls.length, 0);
   }
   const f = fixture(); f.failWrite = true;
   await assert.rejects(f.scheduler.configure(ENABLE));
   assert.equal(f.scheduler.state().enabled, false); assert.equal(f.timers.size, 0);
+});
+
+test("existing daily consent migrates without retaining the old archive password", async () => {
+  const f = fixture(); await f.scheduler.configure(ENABLE);
+  const next = fixture({ ...f.saved, version: 1, password: "old synthetic secret" });
+  await next.scheduler.start();
+  assert.equal(next.scheduler.state().enabled, true);
+  assert.equal(next.saved.version, 2);
+  assert.equal(Object.hasOwn(next.saved, "password"), false);
+  assert.equal(next.calls.length, 0);
 });
 
 test("failed disable reports failure instead of claiming the persisted secret was forgotten", async () => {
@@ -149,7 +159,7 @@ test("failed disable reports failure instead of claiming the persisted secret wa
 
 test("shutdown cancels transfer/timers and prevents late writes", async () => {
   const f = fixture(), completion = deferred(), started = deferred();
-  f.run = (_password, signal) => { started.resolve(signal); return completion.promise; };
+  f.run = (signal) => { started.resolve(signal); return completion.promise; };
   await f.scheduler.configure(ENABLE); const firing = f.fire(DAY); const signal = await started.promise;
   const writes = f.writes.length; f.scheduler.close(); completion.resolve(); await firing;
   assert.equal(signal.aborted, true); assert.equal(f.writes.length, writes); assert.equal(f.timers.size, 0);

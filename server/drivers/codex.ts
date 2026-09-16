@@ -18,6 +18,7 @@ import { isHarnessOwnedMcpEnvName } from "../mcp-registry.ts";
 
 import type {
   DriverCreateInput,
+  McpServerSpec,
   ProviderDriver,
   ProviderInstance,
   ProviderSnapshot,
@@ -135,7 +136,10 @@ function decodeManagedCodex(raw: object): NonNullable<CodexConfig["managed"]> {
     throw new Error("Invalid Company Codex configuration.");
   }
   const url = new URL(value.url);
-  if (url.username || url.password || url.search || url.hash || !["https:", "http:"].includes(url.protocol)) throw new Error("Invalid Company Codex endpoint.");
+  // Plain HTTP leaks the Company API key; allow it only on loopback hosts,
+  // where a local proxy terminates TLS on the trusted machine instead.
+  const loopback = url.hostname === "localhost" || url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+  if (url.username || url.password || url.search || url.hash || (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))) throw new Error("Invalid Company Codex endpoint.");
   return { url: url.href.replace(/\/$/, ""), models: value.models as string[] };
 }
 
@@ -158,7 +162,18 @@ const QUESTION_TIMEOUT_NOTE = "No answer was given — use your best judgment.";
 const DENY_TIMEOUT_NOTE =
   "OpenMausBot: nobody answered this permission request in time. Skip this action and finish what you can without it.";
 
-type StdioMcpServer = { command: string; args: string[]; env: Record<string, string> };
+const skippedSseServers = new Set<string>();
+function noteSkippedSseServer(name: string): void {
+  if (skippedSseServers.has(name)) return;
+  skippedSseServers.add(name);
+  console.error(`codex: MCP server ${JSON.stringify(name)} uses the SSE transport, which codex does not speak — it is available to Claude bots only`);
+}
+
+/** A TOML inline table for a `-c key=value` override; JSON string quoting
+ * is valid TOML basic-string quoting. */
+function tomlInlineTable(entries: Record<string, string>): string {
+  return `{ ${Object.entries(entries).map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`).join(", ")} }`;
+}
 
 interface CodexApprovalParams {
   thread: Record<string, unknown>;
@@ -474,18 +489,44 @@ function mountMcpServer(
   appServerArgs: string[],
   env: Record<string, string | undefined>,
   name: string,
-  server: StdioMcpServer,
+  server: McpServerSpec,
   preApproved = true,
 ): void {
-  Object.assign(env, server.env);
   const prefix = `mcp_servers.${name}`;
-  appServerArgs.push(
-    "-c", `${prefix}.command=${JSON.stringify(server.command)}`,
-    "-c", `${prefix}.args=${JSON.stringify(server.args)}`,
-    // Values stay in the child environment; argv contains names only so
-    // credentials never appear in process listings or diagnostics.
-    "-c", `${prefix}.env_vars=${JSON.stringify(Object.keys(server.env))}`,
-  );
+  if ("url" in server) {
+    // A remote server: codex connects itself. Header values are credentials
+    // (Authorization: Bearer …) and travel like env values — the child env
+    // holds them under harness-generated names, argv names only the variables.
+    // A bearer token goes through codex's own bearer setting, the path its
+    // remote servers are documented and exercised with; any other header
+    // rides env_http_headers.
+    appServerArgs.push("-c", `${prefix}.url=${JSON.stringify(server.url)}`);
+    const stem = `OMB_MCP_HEADER_${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+    const variables: Record<string, string> = {};
+    Object.entries(server.headers).forEach(([header, value], index) => {
+      const bearer = header.toLowerCase() === "authorization" ? /^Bearer\s+(\S+)$/i.exec(value) : null;
+      if (bearer) {
+        env[`${stem}_BEARER`] = bearer[1];
+        appServerArgs.push("-c", `${prefix}.bearer_token_env_var=${JSON.stringify(`${stem}_BEARER`)}`);
+        return;
+      }
+      const variable = `${stem}_${index}`;
+      env[variable] = value;
+      variables[header] = variable;
+    });
+    if (Object.keys(variables).length) {
+      appServerArgs.push("-c", `${prefix}.env_http_headers=${tomlInlineTable(variables)}`);
+    }
+  } else {
+    Object.assign(env, server.env);
+    appServerArgs.push(
+      "-c", `${prefix}.command=${JSON.stringify(server.command)}`,
+      "-c", `${prefix}.args=${JSON.stringify(server.args)}`,
+      // Values stay in the child environment; argv contains names only so
+      // credentials never appear in process listings or diagnostics.
+      "-c", `${prefix}.env_vars=${JSON.stringify(Object.keys(server.env))}`,
+    );
+  }
   // Harness-owned servers are pre-quieted; a user-configured server keeps
   // codex's on-request policy so its tool calls become approval cards.
   if (preApproved) {
@@ -564,8 +605,21 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     });
 
     const sendTurn = async (turn: SendTurnInput) => {
-      if (config.managed && (!turn.model || !config.managed.models.includes(turn.model) || !input.environment.OPENMAUSBOT_COMPANY_API_KEY || !input.environment.CODEX_HOME)) {
-        throw new Error("Company model access is unavailable. Reconnect your organization; personal billing will not be used.");
+      if (config.managed) {
+        // One blanket refusal hides which prerequisite broke; name it so the
+        // person can fix the actual gap instead of reconnecting blind.
+        if (!turn.model) {
+          throw new Error("Company model access is unavailable: no model is selected. Reconnect your organization; personal billing will not be used.");
+        }
+        if (!config.managed.models.includes(turn.model)) {
+          throw new Error("Company model access is unavailable: " + turn.model + " is not approved for your organization. Reconnect your organization; personal billing will not be used.");
+        }
+        if (!input.environment.OPENMAUSBOT_COMPANY_API_KEY) {
+          throw new Error("Company model access is unavailable: OPENMAUSBOT_COMPANY_API_KEY is missing. Reconnect your organization; personal billing will not be used.");
+        }
+        if (!input.environment.CODEX_HOME) {
+          throw new Error("Company model access is unavailable: CODEX_HOME is missing. Reconnect your organization; personal billing will not be used.");
+        }
       }
       // One driver instance serves many threads. Interrupt state belongs to
       // this turn so activity elsewhere cannot cancel or revive its retry.
@@ -581,6 +635,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       // explicit mode, which takes precedence.
       const approvalMode: ApprovalMode = turn.approvalMode ?? (config.fullAuto ? "full" : "ask");
       for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
+        if ("url" in server) continue;
         const reserved = Object.keys(server.env).find(isHarnessOwnedMcpEnvName);
         if (reserved) {
           throw new Error(`Custom MCP server “${name}” cannot set reserved environment variable “${reserved}”`);
@@ -611,6 +666,13 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           mountMcpServer(appServerArgs, env, "browser", turn.integrations.browser);
         }
         for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
+          // codex speaks streamable HTTP to a remote server, not the older
+          // SSE transport: such an entry still reaches Claude bots, and is
+          // left out here rather than mounted as something it is not
+          if ("url" in server && server.type === "sse") {
+            noteSkippedSseServer(name);
+            continue;
+          }
           mountMcpServer(appServerArgs, env, name, server, false);
         }
         if (turn.integrations?.phone) {
@@ -779,6 +841,27 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
               error: { code: -32601, message: `Unsupported server request: ${method}` },
             });
           }
+          return;
+        }
+        // One ask card carries one question honestly: its choices would come
+        // from the first question alone and its one reply (including the
+        // timeout note) would be copied into every question id (#1237).
+        // Refuse the bundled call with a teaching error instead of
+        // fabricating per-question answers.
+        if (isQuestion && (!Array.isArray(params.questions) || params.questions.length !== 1)) {
+          const bundled = Array.isArray(params.questions) && params.questions.length > 1;
+          send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: {
+              code: -32602,
+              message: bundled
+                ? `ask supports one question per call; this request bundled ${params.questions.length}. Split it into separate asks, one question each.`
+                : Array.isArray(params.questions)
+                ? "ask supports one question per call; this request sent none."
+                : "ask supports one question per call; params.questions must be an array with exactly one question.",
+            },
+          });
           return;
         }
         const mcpTool = isLegacyMcpPermission

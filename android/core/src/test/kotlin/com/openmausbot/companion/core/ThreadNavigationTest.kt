@@ -104,6 +104,25 @@ class ThreadNavigationTest {
     }
 
     @Test
+    fun archivedThreadsFoldAwayUnlessTheyDemandAttentionOrAreCurrent() {
+        val archived = listOf("quiet", "current", "unread", "busy", "waiting", "open").map {
+            task(it).copy(
+                archivedAt = if (it == "open") null else 0.0,
+                unread = it == "unread", busy = it == "busy",
+                activity = if (it == "waiting") "waiting-on-you" else "idle",
+            )
+        }
+        val grouped = bot.copy(tasks = archived)
+        // Folding and attention ordering compose: "quiet" folds away, and the
+        // rest come back in attention order (waiting 0, busy 1, unread 3,
+        // current 4, idle 5) rather than in stored order.
+        assertEquals(listOf("waiting", "busy", "unread", "current", "open"),
+            grouped.threadGroups().single().tasks.map { it.threadId })
+        assertEquals(6, grouped.threadGroups(includingClosed = true).single().tasks.size)
+        assertEquals(listOf("quiet"), grouped.threadGroups("quiet").single().tasks.map { it.threadId })
+    }
+
+    @Test
     fun missingTaskMetadataHasALegacyConversationButAnExplicitEmptyListDoesNot() {
         val legacy = bot.copy(unread = true, busy = true)
         val thread = legacy.threadGroups().single().tasks.single()

@@ -150,6 +150,14 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
       }
       else if (arg === "--tunnel") options.tunnel = true;
       else if (arg === "--client") options.client = true;
+      // Which phone is about to scan, for a run with nobody at the keyboard.
+      // `docker compose exec … pair` and any scripted pairing never reach the
+      // interactive chooser, and only an Android phone needs a different QR.
+      else if (arg === "--phone") {
+        const kind = value().toLowerCase();
+        if (kind !== "ios" && kind !== "android") return { error: "--phone takes ios or android" };
+        options.phone = kind;
+      }
       else if (arg === "--no-pair") options.pair = false;
       else if (arg === "--no-open") options.open = false;
       else if (arg === "--local") options.local = true;
@@ -210,7 +218,8 @@ export const USAGE = `openmausbot — your team of AI bots, ready in a few steps
   openmausbot start [the same options as serve]
   openmausbot serve [--port 8799] [--data-dir DIR] [--label NAME]
                     [--public-url https://host] [--tailscale | --tunnel | --domain HOST] [--no-pair]
-  openmausbot pair  [--label NAME] [--client] [--public-url https://host]
+  openmausbot pair  [--label NAME] [--client] [--phone ios|android]
+                    [--public-url https://host]
   openmausbot sessions [revoke ID]
   openmausbot status
   openmausbot login [--email you@example.com]
@@ -398,23 +407,75 @@ async function showPhonePairing(options: CliOptions, origin: string | undefined,
     return false;
   }
   for (const line of phonePairingInstructions(options.phone ?? "ios", { origin: origin!, ready })) log(line);
-  log(await mintPairing(options.port, { client: true, label: options.label ?? (options.phone === "android" ? "Android" : "iPhone / iPad"), publicUrl: origin }));
+  log(await mintPairing(options.port, { client: true, label: options.label ?? (options.phone === "android" ? "Android" : "iPhone / iPad"), publicUrl: origin, phone: options.phone }));
   log("Waiting for you to connect on the phone. Keep this terminal and the code private.");
   return true;
 }
 
-/** The pairing link a device opens, rendered as text and a QR code. */
-export function pairingBlock(input: { code: string; url: string | null; expiresAt: number; hint?: string | null }): string {
+/** The pairing link a device opens, rendered as text and a QR code.
+ *
+ * One window has two links. `url` opens the web app and is what a browser and
+ * the iOS app read. `inviteUrl` is the openmausbot:// scheme the native
+ * companion scanners accept, and it is the ONLY thing an Android app can
+ * scan — its parser rejects any https QR outright. Which one becomes the QR
+ * therefore depends on which app is about to scan it; the other is still
+ * printed as text so neither route is hidden. */
+export function pairingBlock(input: {
+  code: string;
+  url: string | null;
+  inviteUrl?: string | null;
+  expiresAt: number;
+  hint?: string | null;
+  phone?: "ios" | "android";
+}): string {
   const lines = [`pairing code:  ${input.code}`, `expires:       ${new Date(input.expiresAt).toLocaleTimeString()} (single use)`];
-  if (input.url) {
-    lines.push(`open or scan:  ${input.url}`);
-    lines.push("");
-    lines.push(qrToString(input.url));
-  } else {
+  if (!input.url && !input.inviteUrl) {
     lines.push(`open:          /pair on the address you use for this server, and type the code`);
     if (input.hint) lines.push(`               (${input.hint})`);
+    return lines.join("\n");
+  }
+  // One QR, and it belongs to whichever app is about to scan it. Android's
+  // scanner rejects an https payload outright, so an Android phone gets the
+  // app-scheme invite; everyone else gets the web link, which Camera opens
+  // and which the iOS app also accepts.
+  const scanInvite = input.phone === "android" && !!input.inviteUrl;
+  // Print every link this window has, and label them by what the QR below
+  // actually encodes: "scan" belongs only to the link it is a picture of. A
+  // link that is named but never shown is worse than one that is absent —
+  // the iOS app takes a pasted invite, so the text form is the fallback when
+  // a QR cannot be scanned off a terminal.
+  if (input.url) lines.push(scanInvite ? `web browser:   ${input.url}` : `open or scan:  ${input.url}`);
+  if (input.inviteUrl) lines.push(`phone app:     ${input.inviteUrl}`);
+  const target = scanInvite ? input.inviteUrl! : input.url;
+  if (target) {
+    lines.push("");
+    lines.push(qrToString(target));
+    lines.push("");
+    if (scanInvite) {
+      lines.push(`Scan that in the OpenMausBot app. For a browser instead, open the web`);
+      lines.push(`address above and type the code.`);
+    } else if (input.phone === "android") {
+      // Android asked for an app invite this server cannot build. Say so,
+      // rather than leave a QR its scanner will reject under instructions
+      // telling someone to scan it.
+      lines.push(`That QR opens the web app. The Android app needs the phone-app link,`);
+      lines.push(`which this server cannot build without a public address: set`);
+      lines.push(`OMB_PUBLIC_URL, or open the web address above and type the code.`);
+    } else if (input.inviteUrl) {
+      lines.push(`Scan that with Camera for the browser, or paste the phone-app link`);
+      lines.push(`above into the OpenMausBot app.`);
+    }
   }
   return lines.join("\n");
+}
+
+/** The scheme and host of a link, or null if it is not one we can dial. */
+function originOf(link: string): string | null {
+  try {
+    return new URL(link).origin;
+  } catch {
+    return null;
+  }
 }
 
 export function qrToString(text: string): string {
@@ -425,14 +486,28 @@ export function qrToString(text: string): string {
   return out;
 }
 
-async function mintPairing(port: number, options: { label?: string; client?: boolean; publicUrl?: string }): Promise<string> {
+async function mintPairing(port: number, options: { label?: string; client?: boolean; publicUrl?: string; phone?: "ios" | "android" }): Promise<string> {
   const request: { label?: string; scopes?: string[] } = {};
   if (options.label) request.label = options.label;
   if (options.client) request.scopes = ["client"];
   const { status, body } = await api(port, "/api/auth/pairing", { method: "POST", body: JSON.stringify(request) });
   if (status !== 200) throw new Error(`server refused to mint a pairing code: ${typeof body?.error === "string" ? body.error : status}`);
   const url = options.publicUrl ? `${options.publicUrl}/pair#code=${body.code}` : typeof body.url === "string" ? body.url : null;
-  return pairingBlock({ code: body.code, url, expiresAt: body.expiresAt, hint: typeof body.hint === "string" ? body.hint : null });
+  // A server too old to mint a credential simply has no invite: the web link
+  // still works, so an upgrade is never required to pair a browser.
+  // The address the phone will dial. `--public-url` wins, exactly as it does
+  // for the web link above: a server behind someone else's proxy often does
+  // not know its own public name, which is what that flag is for. Gate on the
+  // credential, never on the server's own invite — a server started without
+  // OMB_PUBLIC_URL returns a credential and no invite, and gating on the
+  // invite would throw away a secret the CLI has every part it needs to use.
+  const address = options.publicUrl ?? (typeof body.url === "string" ? originOf(body.url) : null);
+  // A server too old to mint a credential simply has no invite: the web link
+  // still works, so an upgrade is never required to pair a browser.
+  const invite = typeof body.credential === "string" && address
+    ? `openmausbot://pair?address=${encodeURIComponent(address)}&token=${encodeURIComponent(body.credential)}${typeof body.serverName === "string" ? `&name=${encodeURIComponent(body.serverName)}` : ""}`
+    : typeof body.inviteUrl === "string" ? body.inviteUrl : null;
+  return pairingBlock({ code: body.code, url, inviteUrl: invite, expiresAt: body.expiresAt, hint: typeof body.hint === "string" ? body.hint : null, phone: options.phone });
 }
 
 // ── commands ───────────────────────────────────────────────────────────
@@ -464,7 +539,7 @@ export async function runPair(options: CliOptions): Promise<number> {
     }
     const ui = defaultSetupIo();
     try {
-      const selected = await ui.choose("Which phone are you connecting?", ["iPhone / iPad — app or Safari", "Android — web browser", "Cancel"], 0);
+      const selected = await ui.choose("Which phone are you connecting?", ["iPhone / iPad — app or Safari", "Android — app or browser", "Cancel"], 0);
       if (selected === 2) return 0;
       launch = { ...launch, phone: selected === 0 ? "ios" : "android" };
       return await showPhonePairing(launch, origin, ui.log) ? 0 : 1;
@@ -474,7 +549,7 @@ export async function runPair(options: CliOptions): Promise<number> {
       return 130;
     }
   }
-  console.log(await mintPairing(options.port, { label: options.label, client: options.client, publicUrl: options.publicUrl }));
+  console.log(await mintPairing(options.port, { label: options.label, client: options.client, publicUrl: options.publicUrl, phone: options.phone }));
   if (options.client) console.log("(client scope: chat and approvals only; cannot change settings or pair others)");
   return 0;
 }

@@ -42,6 +42,22 @@ export function isEffortLevel(value: unknown): value is EffortLevel {
   return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
 }
 
+/** Variants are opaque provider IDs, not the cross-engine effort enum. */
+export function isModelVariant(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 &&
+    value.trim() === value && !/\p{Cc}/u.test(value);
+}
+
+export interface ModelVariantOption {
+  id: string;
+  label: string;
+}
+
+export interface ModelVariantState {
+  options: ModelVariantOption[];
+  currentValue?: string;
+}
+
 // ── model selection ────────────────────────────────────────────────────
 // "Which model" is a data value carried on the request, never a service
 // binding (upstream ModelSelectionWire). instanceId is the routing key.
@@ -50,6 +66,8 @@ export interface ModelSelection {
   model: string;
   /** Optional: no effort means no flag, and the CLI keeps its own default. */
   effort?: EffortLevel;
+  /** Explicit model-specific variant. Omitted leaves the native session alone. */
+  variant?: string;
 }
 
 /** An image already admitted to OpenMausBot's private attachment store.
@@ -96,6 +114,7 @@ export interface RuntimeEventBase {
 export type RuntimeEvent = RuntimeEventBase &
   (
     | { type: "session.started"; sessionId: string | null; model?: string | null }
+    | { type: "session.model-variants"; model: string; variants: ModelVariantState }
     | { type: "session.exited"; reason?: string }
     | { type: "turn.started" }
     | {
@@ -220,6 +239,7 @@ export interface SendTurnInput {
   images?: TurnImageInput[];
   model?: string;
   effort?: EffortLevel;
+  variant?: string;
   resumeCursor?: unknown;
   /** The turn with the conversation so far replayed inline, attached only
    * alongside resumeCursor. A cursor-resuming driver sends it once, on a
@@ -251,10 +271,9 @@ export interface SendTurnInput {
      * bridge harness-controlled lets it turn connection requests into trusted
      * chat cards consistently across provider CLIs. */
     composio?: { command: string; args: string[]; env: Record<string, string> };
-    /** Cloud computer, reached through OpenMausBot's REST-to-MCP adapter.
-     * `control` is the harness's loopback who-is-driving endpoint: the
-     * adapter consults it so a person who takes the wheel in the panel
-     * pauses the bot's hands mid-turn instead of typing over them. */
+    /** Box's native agent runner input. Only the Box driver consumes this;
+     * CLI engines cannot use it as an MCP server. Other computers use the
+     * stdio descriptor below. */
     computer?: {
       kind?: "box";
       boxId: string;
@@ -288,11 +307,38 @@ export interface SendTurnInput {
     dweb?: { url: string };
     /** User-configured MCP servers (config.json `mcpServers`), already
      * validated and normalized by customMcpServers(). Mounted WITHOUT any
-     * pre-allow: their tools ride each driver's normal permission flow. */
-    custom?: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+     * pre-allow: their tools ride each driver's normal permission flow.
+     * A server is either a command this machine runs (stdio) or a server
+     * reached at a URL; a driver that cannot speak to one kind skips it. */
+    custom?: Record<string, McpServerSpec>;
   };
   cwd?: string;
+  /** Let the engine also load the MCP servers from the person's own CLI
+   * setup (Claude Code's user-scope servers and claude.ai connectors). Off
+   * by default: a bot gets the servers its owner gave it, and each extra
+   * tool costs tokens on every model call. Codex already reads its own
+   * config.toml and ignores this; the Claude driver drops
+   * --strict-mcp-config for the turn. */
+  mcpFromUserConfig?: boolean;
 }
+
+/** An MCP server this machine starts and talks to over stdio. */
+export interface StdioMcpSpec {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+/** An MCP server reached over HTTP: streamable HTTP (`http`, the current
+ * transport) or the older SSE transport. Header values are credentials
+ * (`Authorization: Bearer …`) and travel like env values: never on argv. */
+export interface RemoteMcpSpec {
+  type: "http" | "sse";
+  url: string;
+  headers: Record<string, string>;
+}
+
+export type McpServerSpec = StdioMcpSpec | RemoteMcpSpec;
 
 export interface TurnStartResult {
   turnId: TurnId;
@@ -306,7 +352,7 @@ export interface ProviderAdapter {
      * the harness only offers agents tooling (and prompts about it) to
      * drivers that can actually hand it to the agent. */
     agentsMcp?: boolean;
-    /** True when the driver mounts turn.integrations.computer (the box's
+    /** True when the driver mounts isolated computer MCP descriptors (the
      * screenshot/click tools). Same rule as agentsMcp: a bot must never be
      * told it has a computer whose tools its driver cannot mount — it
      * burns turns hunting for tools that aren't there. */
@@ -333,6 +379,8 @@ export interface ProviderAdapter {
      * the driver cannot set effort, so the app never offers the control —
      * same rule as computerMcp: never show a knob the driver cannot turn. */
     effortLevels?: readonly EffortLevel[];
+    /** The driver validates and applies model-specific variant IDs per session. */
+    modelVariants?: boolean;
     /** True when the driver keeps a live session across turns and can take
      * a user message MID-TURN (delivered before the model's next call —
      * "steer"). The composer stays open during a turn on such an engine;
@@ -396,6 +444,13 @@ export interface ProviderSnapshot {
   /** How this instance is paid for, when the driver can tell: a reported
    * cost on a subscription is notional and the UI labels it as such. */
   billing?: "metered" | "subscription";
+  /** A standing condition worth a look but with nothing to run: the engine
+   * works, and something about how it is set up is costing the person
+   * without their asking. Shown beside the update notice on Engines. */
+  warning?: {
+    title: string;
+    message: string;
+  };
 }
 
 // ── engine install descriptor ───────────────────────────────────────────
@@ -464,6 +519,8 @@ export interface ModelCatalog {
      * the model-facing rebuild (server/context-rebuild.ts). Unknown falls
      * back to a pattern table over the model id, then a conservative default. */
     contextWindow?: number;
+    /** Discovery hints; the native session revalidates these before each turn. */
+    variants?: ModelVariantOption[];
   }>;
 }
 

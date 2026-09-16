@@ -9,6 +9,16 @@ afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: tru
 const scratch = () => { const dir = mkdtempSync(join(tmpdir(), "omb-vps-ssh-")); dirs.push(dir); return dir; };
 
 describe("VPS SSH connection sharing supplied by the app", () => {
+  it("does nothing on Windows, where OpenSSH has no connection sharing", () => {
+    const data = scratch();
+    expect(prepareVpsSsh(data, "C:\\Windows\\System32", "win32")).toEqual({ configPath: null, path: "C:\\Windows\\System32" });
+    expect(existsSync(join(data, "ssh"))).toBe(false);
+  });
+});
+
+// The sharing itself is POSIX: forward-slash control paths, colon-separated
+// PATH, file modes. Windows never installs it, so these do not run there.
+describe.skipIf(process.platform === "win32")("VPS SSH connection sharing on POSIX", () => {
   it("writes a config that includes the person's own file first and fills in sharing and timeouts", () => {
     const home = scratch();
     const userConfig = join(home, "config"); writeFileSync(userConfig, "Host my-vps\n  ControlMaster no\n");
@@ -51,9 +61,4 @@ describe("VPS SSH connection sharing supplied by the app", () => {
     expect(existsSync(setup.configPath!)).toBe(true);
   });
 
-  it("does nothing on Windows, where OpenSSH has no connection sharing", () => {
-    const data = scratch();
-    expect(prepareVpsSsh(data, "C:\\Windows\\System32", "win32")).toEqual({ configPath: null, path: "C:\\Windows\\System32" });
-    expect(existsSync(join(data, "ssh"))).toBe(false);
-  });
 });

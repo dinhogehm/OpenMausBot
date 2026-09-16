@@ -52,7 +52,11 @@ fun Bot.threadGroups(matching: String = "", includingClosed: Boolean = false): L
             approvalMode = approvalMode, autoApprove = autoApprove, alwaysAllow = alwaysAllow,
         ))
         includingClosed || search.isNotEmpty() -> visibleTasks
-        else -> visibleTasks.filter { !it.isClosed || it.demandsAttention || it.threadId == threadId }
+        // Closed and archived threads fold away with the same override: one
+        // that starts working, waits on the person, or turns unread is back.
+        else -> visibleTasks.filter {
+            (!it.isClosed && !it.isArchived) || it.demandsAttention || it.threadId == threadId
+        }
     }
     val ordered = if (search.isEmpty()) orderedThreads(threads, threadId) else threads
     val projectIds = mutableSetOf<String>()

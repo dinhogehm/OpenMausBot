@@ -57,16 +57,34 @@ final class ProfileRoutinePolicyTests: XCTestCase {
         XCTAssertTrue(withDefault.canSpeak(agentVoice: nil))
     }
 
+    func testProviderSwitchClearsTheOpenProfilesProviderSpecificVoice() throws {
+        let fishWithoutDefault = try decodeConfig(
+            #"{"tts":{"configured":true,"ready":false,"provider":"fish","voice":""}}"#
+        )
+        let stale = AgentProfileVoiceState(
+            voice: "elevenlabs-voice",
+            speakReplies: true,
+            baselineVoice: "elevenlabs-voice"
+        )
+
+        let reset = stale.afterProviderSwitch(to: fishWithoutDefault)
+
+        XCTAssertEqual(reset.voice, "")
+        XCTAssertEqual(reset.baselineVoice, "")
+        XCTAssertFalse(reset.speakReplies, "speech cannot stay enabled with no valid voice")
+    }
+
     func testOnlyTheEngineTheServerNamesGetsItsOwnExplanation() throws {
         // The built-in engine is the reason "configured" stopped meaning "a
         // key is on file" — so the copy that explains a false has to know
         // which engine it is talking about.
         XCTAssertEqual(try decodeConfig(#"{"tts":{"configured":false,"provider":"system"}}"#).voiceProvider, .system)
         XCTAssertEqual(try decodeConfig(#"{"tts":{"configured":true,"provider":"chatterbox"}}"#).voiceProvider, .chatterbox)
+        XCTAssertEqual(try decodeConfig(#"{"tts":{"configured":true,"provider":"fish"}}"#).voiceProvider, .fish)
 
-        // Everything else is ElevenLabs: `voiceProvider(cfg)` in
-        // `server/tts/index.ts` matches that one exact string and falls back
-        // for the rest. Each case is asserted on its own, because a rule that
+        // Every known engine uses an exact wire value; everything else falls
+        // back to ElevenLabs, matching `voiceProvider(cfg)` in
+        // `server/tts/index.ts`. Each case is asserted on its own, because a rule that
         // merely matched "system" loosely would still pass the assertion
         // above while explaining someone's ElevenLabs setup as a Mac voice.
         XCTAssertEqual(

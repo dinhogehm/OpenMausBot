@@ -219,7 +219,11 @@ export async function mountChatTools(integrations: SendTurnInput["integrations"]
   const servers: Array<[string, Server]> = [];
   if (integrations?.agents) servers.push(["agents", integrations.agents]);
   if (integrations?.composio) servers.push(["composio", integrations.composio]);
-  servers.push(...Object.entries(integrations?.custom ?? {}));
+  // this client starts its servers and talks over stdio; a remote (url)
+  // entry is skipped here and reaches Claude and Codex bots
+  for (const [name, server] of Object.entries(integrations?.custom ?? {})) {
+    if ("command" in server) servers.push([name, server]);
+  }
   if (servers.length > 32) throw new Error("MCP server count exceeds the 32-server limit");
   const clients: ChatMcpClient[] = [];
   let closed = false;

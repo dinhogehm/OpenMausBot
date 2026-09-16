@@ -40,6 +40,39 @@ command without starting a turn.
 - A bot working inside a channel must be awaited through that channel.
 - `needs-user`, `failed`, and `stalled` are results, not successful settlement.
 
+## Surface gating: one place per turn
+
+A turn mounts one place. An explicit Works on mounts only that computer, and
+web work happens in its own browser; Browser mounts only the built-in browser;
+Auto pins the conversation to whatever its first turn reached. A conversation
+pinned from the composer chip wins over the bot's Works on, except Off.
+
+```sh
+node --experimental-strip-types scripts/control-omb.ts launch
+pnpm control:omb new-bot --name Orbit --url http://127.0.0.1:PORT
+curl -s -X PATCH "http://127.0.0.1:PORT/api/bots/BOT_ID" \
+  -H 'content-type: application/json' -d '{"computer":"cloud"}'
+pnpm control:omb send --bot BOT_ID --text "compare shipping prices on two sites" --url http://127.0.0.1:PORT
+pnpm control:omb wait --bot BOT_ID --timeout 40 --url http://127.0.0.1:PORT
+# pin this conversation to the browser, the way the composer chip does
+curl -s -X PATCH "http://127.0.0.1:PORT/api/bots/BOT_ID/tasks/THREAD_ID" \
+  -H 'content-type: application/json' -d '{"surface":"browser"}'
+pnpm control:omb send --bot BOT_ID --text "compare shipping prices on two sites" --url http://127.0.0.1:PORT
+pnpm control:omb wait --bot BOT_ID --timeout 40 --url http://127.0.0.1:PORT
+```
+
+In `fake-claude-dump.json` the Cloud turn's `systemPrompt` must say everything
+on screen happens on the cloud computer, web pages included, carry the
+restate-first sentence, and hold no agent_browser paragraph; the pinned turn's
+prompt must name the built-in browser tab and no computer, and its `mcpConfig`
+must hold no computer server. The task in `GET /api/bots?messages=0` carries
+`surface: "browser"` after the pin and loses it after `{"surface": null}`.
+
+### Last exercised
+
+Not yet exercised against a live fixture. Covered by `server/surface.test.ts`
+and the `pins where a conversation works` case in `server/index.test.ts`.
+
 ## Surface gating: Works on = Off
 
 Off withholds both surfaces. No other path may hand that bot the built-in

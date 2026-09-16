@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import type { Surface } from "./surface.ts";
 
 import { writeFileAtomic } from "./atomic.ts";
 import { ensureSections, readSections, changeEmptySection } from "./section-context.ts";
@@ -376,6 +377,11 @@ export interface TaskRecord {
   lastInstanceId?: string;
   /** what this task has spent: banked once per turn from turn.completed */
   usage?: TaskUsage;
+  /** Where this conversation works: pinned by the person from the composer,
+   * or by its first Auto turn to the place that turn reached. Wins over the
+   * bot's "Works on" default (except Off) so a thread never changes place
+   * under someone. Absent = follow the bot; persisted like cwd. */
+  surface?: Surface;
   /** the folder this task's turns run in, pinned on its first turn from
    * the bot's `cwd` at that moment. Pinned, not read live: Claude keeps
    * sessions per project directory and Codex threads carry their cwd, so
@@ -387,7 +393,7 @@ export interface TaskRecord {
 const TASK_PATCH_FIELDS = [
   "title", "projectId", "modelSelection", "approvalMode", "autoApprove", "alwaysAllow",
   "unread", "rewound", "archivedAt", "pinnedMessageId", "resumeCursors", "lastInstanceId", "cwd",
-  "routineRunId",
+  "routineRunId", "surface",
 ] as const satisfies readonly (keyof TaskRecord)[];
 export type TaskPatch = Partial<Pick<TaskRecord, typeof TASK_PATCH_FIELDS[number]>>;
 
@@ -1893,6 +1899,22 @@ export class Store {
     this.saveBots();
     this.emit({ type: "bot", botId: id });
     return bot;
+  }
+
+  /** Voice ids belong to one provider's catalog. Changing the workspace
+   * provider invalidates every per-agent selection as one durable mutation,
+   * before clients are told to pick replacement voices. */
+  clearVoiceSelections(): BotRecord[] {
+    const changed = this.bots.filter((bot) => bot.voice !== undefined && bot.voice !== "");
+    if (!changed.length) return [];
+    const next = this.bots.map((bot) =>
+      bot.voice === undefined || bot.voice === "" ? bot : { ...bot, voice: undefined });
+    this.saveBots(next);
+    for (const bot of changed) {
+      delete bot.voice;
+      this.emit({ type: "bot", botId: bot.id });
+    }
+    return changed;
   }
 
   /** Commit a validated profile change before publishing its fields. Unlike

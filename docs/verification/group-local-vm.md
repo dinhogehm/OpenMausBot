@@ -57,10 +57,34 @@ streaming. Firefox sandbox compatibility and Japanese guest fonts are separate
 changes. Full repository coverage is provided by PR CI; this local recipe is
 targeted.
 
+Direct-turn regressions additionally send two different requests through a
+Local VM-pinned conversation while the bot default is Cloud, checking the
+actual MCP descriptor, prompt, matching preview surface, and capability expiry.
+Explicit Cloud/VPS and host-computer destinations are not yet supported for
+ordinary channel members; these now report that limitation rather than
+dispatching a turn without the promised computer. Team computers and Local VM
+channel work remain supported.
+
+The same isolated server now covers chat-driven computer selection: the agents
+tool discovers ready, startable, and provisionable destinations without mutating
+them. Selecting one ends the old turn, immediately blocks its previous computer
+and browser capabilities, and resumes the original request with fresh tools and
+one user-history entry. Auto prefers a ready destination over creating a cloud
+computer. The fake Box boundary verifies wake, create, reuse, and a computer
+disappearing between discovery and dispatch; no real paid computer is created.
+Stop, provider failure, Off, a new queued request, and rejected in-flight manual
+surface changes have regression coverage. The VPS fixture separately proves
+starting a stopped container and creating a missing one only after selection.
+
+Two limits remain explicit: a stopped Local VM is not destructively rebuilt to
+make selection succeed, and the native Box runner does not expose the local
+agents MCP. Switching back from an already Cloud-pinned native Box conversation
+therefore uses the composer destination selector for now.
+
 Run the regression coverage without a container engine:
 
 ```sh
-node node_modules/vitest/vitest.mjs run server/group-local-vm.e2e.test.ts server/local-vm-lease.test.ts server/group-goal-run.test.ts server/group-goal-run.e2e.test.ts server/group-goal-wait-cap.e2e.test.ts server/control-omb.test.ts
+node node_modules/vitest/vitest.mjs run server/group-local-vm.e2e.test.ts server/vps-routing.test.ts server/local-vm-lease.test.ts server/group-goal-run.test.ts server/group-goal-run.e2e.test.ts server/group-goal-wait-cap.e2e.test.ts server/control-omb.test.ts
 ```
 
 The test-only Node loader in `server/testing/group-local-vm-hooks.mjs` replaces

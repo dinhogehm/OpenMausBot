@@ -1,4 +1,4 @@
-import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, WebContentsView, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences, utilityProcess } from "electron";
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, WebContentsView, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences, utilityProcess } from "electron";
 import { createRequire } from "node:module";
 import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -288,6 +288,7 @@ const serverSupervisor = createServerSupervisor({
     // while the replacement child's health probe was pending.
     syncManagedComposioCredentials();
     if (managedDesktop) void managedDesktop.refresh().catch(() => {});
+    routineWake.start();
     // Existing chat windows reconnect in place, preserving unsent drafts.
     // A window opened during the outage is still on our error page instead.
     for (const win of BrowserWindow.getAllWindows()) {
@@ -303,6 +304,8 @@ const serverSupervisor = createServerSupervisor({
     serverReady = false;
     serverProc = null;
     companyBackupSchedule?.reconcile();
+    // nothing to hold for while the scheduler is down; polling resumes on ready
+    routineWake.stop();
   },
   onExhausted() {
     slog("server recovery paused after repeated failures; quit and reopen to retry");
@@ -484,6 +487,7 @@ import {
   startCompanion,
   stopCompanion,
 } from "./companion.mjs";
+import { createRoutineWakeHold, rememberRoutineWake, routineWakeSettings } from "./routine-wake.mjs";
 
 /** IPC that controls this computer, its files, its logins or its updater is
  * answered only for the local server's UI (electron/local-origin.cjs). A
@@ -505,6 +509,27 @@ function syncCompanionKeepAwake(companionEnabled, keepAwake) {
     companionPowerBlocker = null;
   }
 }
+
+// Keep this computer awake for scheduled routines (electron/routine-wake.mjs):
+// the scheduler lives in the local server, which cannot run while the Mac
+// sleeps. One power assertion, held for the hour before a due routine and
+// while a run is in flight, plugged in only; the server says when.
+const routineWake = createRoutineWakeHold({
+  fetchStatus: () => (serverReady
+    ? fetch(`http://127.0.0.1:${SERVER_PORT}/api/routines/wake`, { signal: AbortSignal.timeout(5_000), redirect: "error", credentials: "omit" })
+      .then((response) => (response.ok ? response.json() : null))
+    : Promise.resolve(null)),
+  isOnBattery: () => {
+    try {
+      return powerMonitor.isOnBatteryPower();
+    } catch {
+      return false;
+    }
+  },
+  blocker: powerSaveBlocker,
+  settings: () => routineWakeSettings(app.getPath("userData")),
+  log: (line) => slog(line),
+});
 
 function slog(line) {
   try {
@@ -972,7 +997,7 @@ function ensureManagedDesktop() {
       },
     }),
     scope: companyBackupScope,
-    run: async (password, signal, scope) => {
+    run: async (signal, scope) => {
       if (companyBackupController || preparedCompanyRestore || companyRestoreCommitting || desktopShutdownStarted) throw companyBackupDeferred();
       const proc = serverProc;
       const status = await localBackupStatus(proc);
@@ -981,7 +1006,7 @@ function ensureManagedDesktop() {
       signal.throwIfAborted();
       const current = companyBackupScope();
       if (!current || current.key !== scope.key || current.generation !== scope.generation || proc !== serverProc || preparedCompanyRestore || companyRestoreCommitting) throw companyBackupDeferred();
-      return runCompanyBackup("backup", { password, clientState }, { signal, scope });
+      return runCompanyBackup("backup", { clientState }, { signal, scope });
     },
     onState: schedule => publishCompanyBackupState({ ...companyBackupState, schedule }),
   });
@@ -2328,6 +2353,14 @@ ipcMain.handle("companion:keep-awake", localOnly("companion:keep-awake", async (
   rememberCompanionKeepAwake(Boolean(enabled));
   return desktopCompanionState();
 }));
+// ── keep awake for routines ────────────────────────────────────────────
+// The Automations page shows the hold and owns the toggle; the decision
+// itself stays in the main process with the power assertion.
+ipcMain.handle("routines:wake-state", localOnly("routines:wake-state", () => routineWake.poll()));
+ipcMain.handle("routines:keep-awake", localOnly("routines:keep-awake", async (_event, enabled) => {
+  rememberRoutineWake(app.getPath("userData"), Boolean(enabled));
+  return routineWake.poll();
+}));
 ipcMain.handle("companion:refresh-tailscale", localOnly("companion:refresh-tailscale", () => refreshDesktopCompanionTailscale()));
 ipcMain.handle("companion:pairing", localOnly("companion:pairing", (_event, open, expectedToken) =>
   companionPairing(Boolean(open), expectedToken).then(decorateDesktopCompanionState),
@@ -2545,6 +2578,7 @@ const CREDENTIAL_PATCH = {
   boxToken: (value) => ({ box: { token: value } }),
   opencodeGoApiKey: (value) => ({ opencodeGo: { apiKey: value } }),
   ttsKey: (value) => ({ tts: { key: value } }),
+  fishAudioKey: (value) => ({ tts: { fishKey: value } }),
   openaiImageApiKey: (value) => ({ imageGen: { key: value } }),
   customImageApiKey: (value) => ({ imageGen: { customApiKey: value } }),
 };
@@ -2865,6 +2899,7 @@ app.on("before-quit", (e) => {
   const stoppingServer = serverSupervisor.shutdown();
   // Release the sleep blocker synchronously; child shutdown is awaited below.
   syncCompanionKeepAwake(false, false);
+  routineWake.stop();
   try {
     desktopCompanionRelay?.close?.();
   } catch {}
