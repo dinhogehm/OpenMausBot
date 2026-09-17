@@ -2428,6 +2428,15 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     await expect(instance.reviewPermission?.("review this request")).resolves.toBe("fake generated text");
   });
 
+  it("stops the one-shot text call when its caller aborts mid-flight", async () => {
+    await create();
+    process.env.FAKE_CLAUDE_TEXT_HANG = "1";
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+    await expect(instance.generateText?.("summarize safely", { signal: controller.signal }))
+      .rejects.toThrow(/aborted/);
+  });
+
   it("stops permission review when its caller gives up", async () => {
     await create();
     const controller = new AbortController();
@@ -2472,6 +2481,7 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
   afterEach(async () => {
     delete process.env.FAKE_CLAUDE_MODE;
     delete process.env.FAKE_CLAUDE_DUMP;
+    delete process.env.FAKE_CLAUDE_TEXT_HANG;
     recorder?.stop();
     await instance?.dispose();
     await removeTempDir(scratch);
@@ -2498,12 +2508,34 @@ describe("ClaudeDriver resume recovery (fake CLI)", () => {
     const started = recorder.events.filter((e) => e.type === "session.started");
     expect(started.length).toBeGreaterThan(0);
     expect(started.at(-1)).not.toMatchObject({ sessionId: "a-session-claude-no-longer-has" });
+    expect(started.at(-1)).toMatchObject({ rebuilt: true });
     // and the new session is not blank: the prompt is the rebuild, once
     const seen = JSON.parse(readFileSync(dump, "utf8"));
     expect(seen.argv).not.toContain("--resume");
     const content = seen.prompt.message.content;
     const text = typeof content === "string" ? content : content.map((c: any) => c.text ?? "").join("");
     expect(text).toBe(REBUILD);
+  });
+
+  it("does not announce a replacement as rebuilt when there was nothing to replay", async () => {
+    // recoveryPromptFor falls back to the turn text when the harness attached
+    // no rebuild: that session holds the turn, not the conversation, and the
+    // harness must not credit it with a replay it never saw.
+    const dump = join(scratch, "no-replay.json");
+    process.env.FAKE_CLAUDE_DUMP = dump;
+    await instance.adapter.sendTurn({
+      threadId: "t-no-replay",
+      text: "what now?",
+      resumeCursor: "a-session-claude-no-longer-has",
+    });
+    await recorder.until((e) => e.type === "turn.completed");
+    const started = recorder.events.filter((e) => e.type === "session.started");
+    expect(started.length).toBeGreaterThan(0);
+    expect(started.at(-1)).not.toMatchObject({ rebuilt: true });
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.argv).not.toContain("--resume");
+    const content = seen.prompt.message.content;
+    expect(typeof content === "string" ? content : content.map((c: any) => c.text ?? "").join("")).toBe("what now?");
   });
 
   it("recovers only once, then fails visibly", async () => {

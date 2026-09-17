@@ -207,11 +207,56 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      const consumeDataLine = (line: string, atEof = false): boolean => {
+        if (!line.startsWith("data:")) return false;
+        const data = line.slice(5).trim();
+        if (data === "[DONE]") return true;
+        let chunk: CompletionJson;
+        try {
+          chunk = JSON.parse(data) as CompletionJson;
+        } catch {
+          // A tail left in the buffer when the socket closed is an INCOMPLETE
+          // frame, not a bad one: a stop, an abort or a dropped connection all
+          // end mid-frame. Only a properly newline-terminated frame that will
+          // not parse means the provider actually sent something malformed.
+          // Counting the tail here turned a stopped turn into a hard,
+          // non-retryable failure (`calls.finish(finishReason, malformedFrame)`).
+          if (!atEof) malformedFrame = true;
+          return false;
+        }
+        const chunkError = providerError(chunk);
+        if (chunkError) throw new ChatProtocolError(`provider returned a streaming completion error: ${chunkError.slice(0, 200)}`);
+        const choice = chunk.choices?.find((row) => row.index === undefined || row.index === 0);
+        const delta = choice?.delta;
+        if (object(delta)) sawChoice = true;
+        if (delta?.function_call) throw new ChatProtocolError("legacy function_call is unsupported; use structured tool_calls");
+        calls.add(delta?.tool_calls, true);
+        details.add(delta?.reasoning_details);
+        if (choice?.finish_reason) finishReason = choice.finish_reason;
+        const reasoningPart = delta?.reasoning_content ?? delta?.reasoning;
+        if (typeof reasoningPart === "string") protocolReasoning += reasoningPart;
+        const reasoningDelta = options.reasoning && typeof reasoningPart === "string"
+          ? reasoningPart
+          : "";
+        const contentDelta = typeof delta?.content === "string" ? delta.content : "";
+        if (reasoningDelta) {
+          reasoning += reasoningDelta;
+          onDelta?.(reasoningDelta, "reasoning_text");
+        }
+        if (contentDelta) {
+          text += contentDelta;
+          onDelta?.(contentDelta, "assistant_text");
+        }
+        if (chunk.usage) usage = usageFrom(chunk.usage);
+        return false;
+      };
       try {
         readLoop: for (;;) {
           const { done, value } = await reader.read();
           if (done) {
             buffer += decoder.decode();
+            const line = buffer.trim();
+            if (line && line !== "data: [DONE]") consumeDataLine(line, true);
             // MiniMax's api.minimax.io/v1 closes the connection after the
             // finish_reason chunk and never sends `[DONE]`.
             if (buffer.trim() === "data: [DONE]" || finishReason) break;
@@ -230,40 +275,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
           while ((newline = buffer.indexOf("\n")) !== -1) {
             const line = buffer.slice(0, newline).trim();
             buffer = buffer.slice(newline + 1);
-            if (!line.startsWith("data:")) continue;
-            const data = line.slice(5).trim();
-            if (data === "[DONE]") break readLoop;
-            let chunk: CompletionJson;
-            try {
-              chunk = JSON.parse(data) as CompletionJson;
-            } catch {
-              malformedFrame = true;
-              continue;
-            }
-            const chunkError = providerError(chunk);
-            if (chunkError) throw new ChatProtocolError(`provider returned a streaming completion error: ${chunkError.slice(0, 200)}`);
-            const choice = chunk.choices?.find((row) => row.index === undefined || row.index === 0);
-            const delta = choice?.delta;
-            if (object(delta)) sawChoice = true;
-            if (delta?.function_call) throw new ChatProtocolError("legacy function_call is unsupported; use structured tool_calls");
-            calls.add(delta?.tool_calls, true);
-            details.add(delta?.reasoning_details);
-            if (choice?.finish_reason) finishReason = choice.finish_reason;
-            const reasoningPart = delta?.reasoning_content ?? delta?.reasoning;
-            if (typeof reasoningPart === "string") protocolReasoning += reasoningPart;
-            const reasoningDelta = options.reasoning && typeof reasoningPart === "string"
-              ? reasoningPart
-              : "";
-            const contentDelta = typeof delta?.content === "string" ? delta.content : "";
-            if (reasoningDelta) {
-              reasoning += reasoningDelta;
-              onDelta?.(reasoningDelta, "reasoning_text");
-            }
-            if (contentDelta) {
-              text += contentDelta;
-              onDelta?.(contentDelta, "assistant_text");
-            }
-            if (chunk.usage) usage = usageFrom(chunk.usage);
+            if (consumeDataLine(line)) break readLoop;
           }
         }
       } finally {
@@ -435,7 +447,13 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
               if (!object(args)) throw new ChatProtocolError("tool arguments must be a JSON object");
               tools.validate(call.function.name, args);
               const inputPreview = preview(args);
-              const allowed = await approval.ask(call.function.name, inputPreview ?? "This tool has no arguments.");
+              // Full access is the person's explicit grant to answer every
+              // prompt. This runtime has no provider reviewer to hand it to,
+              // so it is honoured here: without it every single tool call on
+              // an OpenAI-compatible engine stops for a card, and a Chief's
+              // delegated Full access cannot help either.
+              const allowed = turn.approvalMode === "full"
+                || await approval.ask(call.function.name, inputPreview ?? "This tool has no arguments.");
               abort.signal.throwIfAborted();
               emit({ ...base(turn.threadId, turnId), type: "item.started", itemType: "tool", itemId: call.id,
                 title: call.function.name, ...(inputPreview ? { input: inputPreview } : {}),
@@ -527,9 +545,9 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
         return () => listeners.delete(listener);
       },
     },
-    generateText: async (prompt) => {
+    generateText: async (prompt, { signal } = {}) => {
       const model = options.generateModel?.() ?? options.models().default;
-      const { text, reasoning, toolCalls } = await complete([{ role: "user", content: prompt }], model, false);
+      const { text, reasoning, toolCalls } = await complete([{ role: "user", content: prompt }], model, false, signal);
       if (toolCalls.length) throw new ChatProtocolError("provider returned tool calls to a text-only helper");
       return text.trim() ? text : reasoning;
     },

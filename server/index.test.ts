@@ -149,6 +149,8 @@ let managedBoxDeleteRemovesRow = true;
 let home: string;
 let staticDir: string;
 let fakeClaudeDump: string;
+let oneShotTextFile: string;
+let oneShotTextDump: string;
 let fakeDockerFixture: string;
 let fakeVpsFixture: string;
 let fakeDockerLog: string;
@@ -337,6 +339,8 @@ beforeAll(async () => {
   writeFileSync(join(home, "fake-agent-browser"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   staticDir = join(home, "static");
   fakeClaudeDump = join(home, "fake-claude-dump.json");
+  oneShotTextFile = join(home, "fake-claude-one-shot.txt");
+  oneShotTextDump = join(home, "fake-claude-one-shot-dump.json");
   const fakeDockerDir = join(home, "fake-docker-bin");
   const fakeDockerProgram = join(fakeDockerDir, "docker-empty.mjs");
   fakeDockerFixture = join(home, ".openmausbot", "fake-unmanaged-container");
@@ -399,6 +403,9 @@ beforeAll(async () => {
   writeFileSync(
     join(home, ".openmausbot", "config.json"),
     JSON.stringify({
+      // generated titles are opt-in; this suite turns them on because it
+      // owns the one-shot's reply file (FAKE_CLAUDE_TEXT_FILE below)
+      features: { llmThreadTitles: true },
       instances: {
         ghost: { driver: "not-a-real-driver", displayName: "Ghost" },
         claude: { driver: "claudeAgent", displayName: "Fixture Claude", config: { cli: FAKE_CLAUDE_CLI } },
@@ -957,6 +964,13 @@ beforeAll(async () => {
       OMB_SSE_HEARTBEAT_MS: "50",
       FAKE_CLAUDE_MODE: "hang",
       FAKE_CLAUDE_DUMP: fakeClaudeDump,
+      // the one-shot text helper fails by default (its reply file is
+      // missing), so first-message generated titles stay off until a test
+      // writes that file — and its dump never overwrites a turn's dump
+      FAKE_CLAUDE_TEXT_FILE: oneShotTextFile,
+      FAKE_CLAUDE_TEXT_DUMP: oneShotTextDump,
+      // the real CLI runs Manual for these even when asked for auto
+      FAKE_CLAUDE_AUTO_UNAVAILABLE_MODELS: "claude-haiku-4-5",
       OMB_TEST_INTERNAL_CAPABILITY_KEY: TEST_CAPABILITY_KEY,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -1537,6 +1551,150 @@ describe("harness HTTP API", () => {
     } finally {
       await api("POST", `/api/bots/${bot.id}/interrupt`, {}).catch(() => undefined);
       await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("replaces a first-message snippet title with a generated one once the one-shot answers", async () => {
+    writeFileSync(oneShotTextFile, "Fix login timeout\n");
+    const created = await api("POST", "/api/bots", {
+      modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      requireAvailableModel: true,
+    });
+    expect(created.status).toBe(201);
+    const bot = created.body.bot;
+    try {
+      const sent = await api("POST", `/api/bots/${bot.id}/messages`, {
+        text: "every login hangs after the session expires",
+      });
+      expect(sent.status).toBe(202);
+      // the snippet (the first message itself, under 48 chars) names the
+      // row immediately; the generated title replaces it when it answers
+      await expect.poll(async () => {
+        const state = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+          (candidate: { id: string }) => candidate.id === bot.id,
+        );
+        return state?.tasks?.find((task: { threadId: string }) => task.threadId === sent.body.threadId)?.title;
+      }, { timeout: 5_000 }).toBe("Fix login timeout");
+    } finally {
+      await api("POST", `/api/bots/${bot.id}/interrupt`).catch(() => undefined);
+      await api("DELETE", `/api/bots/${bot.id}`);
+      rmSync(oneShotTextFile, { force: true });
+    }
+  });
+
+  it("keeps the snippet title when the one-shot fails", async () => {
+    rmSync(oneShotTextFile, { force: true });
+    const created = await api("POST", "/api/bots", {
+      modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      requireAvailableModel: true,
+    });
+    expect(created.status).toBe(201);
+    const bot = created.body.bot;
+    try {
+      const firstMessage = "summarize the deploy notes";
+      rmSync(oneShotTextDump, { force: true });
+      const sent = await api("POST", `/api/bots/${bot.id}/messages`, { text: firstMessage });
+      expect(sent.status).toBe(202);
+      // the one-shot ran (its dump lands before the fake exits) and failed:
+      // its reply file is missing, exactly a CLI that cannot run
+      await expect.poll(() => existsSync(oneShotTextDump), { timeout: 5_000 }).toBe(true);
+      const seen = JSON.parse(readFileSync(oneShotTextDump, "utf8"));
+      const outputAt = seen.argv.indexOf("--output-format");
+      expect(outputAt).toBeGreaterThan(-1);
+      expect(seen.argv[outputAt + 1]).toBe("text");
+      expect(seen.prompt).toContain("Name the conversation");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const state = (await api("GET", "/api/bots?messages=0")).body.bots.find(
+        (candidate: { id: string }) => candidate.id === bot.id,
+      );
+      expect(state.tasks.find((task: { threadId: string }) => task.threadId === sent.body.threadId).title)
+        .toBe(firstMessage);
+    } finally {
+      await api("POST", `/api/bots/${bot.id}/interrupt`).catch(() => undefined);
+      await api("DELETE", `/api/bots/${bot.id}`);
+    }
+  });
+
+  it("replaces a channel task's first-message snippet with a generated title", async () => {
+    writeFileSync(oneShotTextFile, "Fix login timeout\n");
+    const created = await api("POST", "/api/bots", {
+      modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      requireAvailableModel: true,
+    });
+    expect(created.status).toBe(201);
+    const member = created.body.bot;
+    const room = (await api("POST", "/api/groups", {
+      name: "Titled channel",
+      memberIds: [member.id],
+      setup: { bulletin: "", defaultResponder: { kind: "member", botId: member.id } },
+    })).body.group;
+    try {
+      const sent = await api("POST", `/api/groups/${room.id}/messages`, {
+        text: "every login hangs after the session expires",
+      });
+      expect(sent.status).toBe(202);
+      // the snippet names the channel task immediately; the generated
+      // title replaces it when the member's one-shot answers
+      await expect.poll(async () => {
+        const state = (await api("GET", "/api/bots?messages=0")).body.groups.find(
+          (candidate: { id: string }) => candidate.id === room.id,
+        );
+        return state?.tasks?.find((task: { threadId: string }) => task.threadId === room.threadId)?.title;
+      }, { timeout: 5_000 }).toBe("Fix login timeout");
+    } finally {
+      await api("POST", `/api/groups/${room.id}/interrupt`, {}).catch(() => undefined);
+      await api("DELETE", `/api/groups/${room.id}`);
+      await api("DELETE", `/api/bots/${member.id}`);
+      rmSync(oneShotTextFile, { force: true });
+    }
+  });
+
+  it("keeps a channel task's snippet title when the one-shot fails", async () => {
+    rmSync(oneShotTextFile, { force: true });
+    const created = await api("POST", "/api/bots", {
+      modelSelection: { instanceId: "claude", model: "claude-sonnet-5" },
+      requireAvailableModel: true,
+    });
+    expect(created.status).toBe(201);
+    const member = created.body.bot;
+    const room = (await api("POST", "/api/groups", {
+      name: "Failing one-shot channel",
+      memberIds: [member.id],
+      setup: { bulletin: "", defaultResponder: { kind: "member", botId: member.id } },
+    })).body.group;
+    try {
+      const firstMessage = "summarize the deploy notes";
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      const uploaded = await fetch(`${BASE}/api/attachments`, {
+        method: "POST",
+        headers: { "content-type": "image/png" },
+        body: new Uint8Array(png),
+      });
+      expect(uploaded.status).toBe(201);
+      const { path: imagePath } = await uploaded.json() as { path: string };
+      const text = `${firstMessage}\n\n<attached-image path="${imagePath}" name="tiny.png" />`;
+      rmSync(oneShotTextDump, { force: true });
+      const sent = await api("POST", `/api/groups/${room.id}/messages`, { text });
+      expect(sent.status).toBe(202);
+      // the member's one-shot ran and failed; the snippet stays
+      await expect.poll(() => existsSync(oneShotTextDump), { timeout: 5_000 }).toBe(true);
+      const seen = JSON.parse(readFileSync(oneShotTextDump, "utf8"));
+      // the title prompt carries the message, never the attachment tag
+      expect(seen.prompt).toContain(firstMessage);
+      expect(seen.prompt).not.toContain("attached-image");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const state = (await api("GET", "/api/bots?messages=0")).body.groups.find(
+        (candidate: { id: string }) => candidate.id === room.id,
+      );
+      expect(state.tasks.find((task: { threadId: string }) => task.threadId === room.threadId).title)
+        .toBe(firstMessage);
+    } finally {
+      await api("POST", `/api/groups/${room.id}/interrupt`, {}).catch(() => undefined);
+      await api("DELETE", `/api/groups/${room.id}`);
+      await api("DELETE", `/api/bots/${member.id}`);
     }
   });
 
@@ -2503,10 +2661,10 @@ describe("harness HTTP API", () => {
       const sibling = (await api("POST", `/api/bots/${botIds[0]}/tasks`, { title: "Waiting sibling" })).body.task;
       expect((await api("POST", `/api/bots/${botIds[0]}/messages`, { text: "wait then cancel", threadId: sibling.threadId })).status).toBe(202);
       await expect.poll(async () => JSON.stringify((await api("GET", `/api/threads/${sibling.threadId}/messages`)).body),
-        { timeout: 5_000 }).toMatch(/Waiting for computer/);
+        { timeout: 5_000 }).toMatch(/Waiting for its turn on this computer/);
       expect((await api("POST", `/api/bots/${botIds[0]}/interrupt`, { threadId: sibling.threadId })).status).toBe(200);
       await expect.poll(async () => JSON.stringify((await api("GET", `/api/threads/${sibling.threadId}/messages`)).body),
-        { timeout: 5_000 }).toMatch(/Computer wait ended/);
+        { timeout: 5_000 }).toMatch(/Stopped waiting for the computer/);
       expect(promptsOnBox()).toBe(1);
       expect((await api("POST", `/api/bots/${botIds[0]}/tasks/${firstThread}`, {})).status).toBe(200);
       for (const action of ["sleep", "provision"]) {
@@ -2519,7 +2677,7 @@ describe("harness HTTP API", () => {
       expect((await api("POST", `/api/groups/${roomId}/messages`, { text: "use the occupied shared desktop" })).status).toBe(202);
       await expect.poll(async () => JSON.stringify((await api("GET", "/api/bots?messages=30")).body.groups.find(
         (group: { id: string }) => group.id === roomId,
-      )), { timeout: 5_000 }).toMatch(/Waiting for computer/);
+      )), { timeout: 5_000 }).toMatch(/Waiting for its turn on this computer/);
       expect(promptsOnBox()).toBe(1);
       expect((await api("POST", `/api/bots/${botIds[0]}/interrupt`, {})).status).toBe(200);
       await idle(botIds[0]);
@@ -10056,6 +10214,33 @@ describe("resumable event stream", () => {
 });
 
 describe("instance CLI override API", () => {
+  it("round-trips bounded per-instance icons without changing the driver", async () => {
+    const before = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
+    const preset = await api("PATCH", "/api/instances/ghost/icon", { icon: { kind: "preset", preset: "deepseek" } });
+    expect(preset.status).toBe(200);
+    expect(preset.body.instances.find((i: any) => i.instanceId === "ghost")).toMatchObject({
+      driverKind: "not-a-real-driver", icon: { kind: "preset", preset: "deepseek" },
+    });
+    const savedPreset = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
+    expect(savedPreset.instances.ghost.icon).toEqual({ kind: "preset", preset: "deepseek" });
+    expect(savedPreset.instances.claude).toEqual(before.instances.claude);
+
+    const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const custom = await api("PATCH", "/api/instances/ghost/icon", { icon: { kind: "custom", dataUrl: png } });
+    expect(custom.status).toBe(200);
+    expect(custom.body.instances.find((i: any) => i.instanceId === "ghost").icon).toEqual({ kind: "custom", dataUrl: png });
+    expect((await api("GET", "/api/instances")).body.instances.find((i: any) => i.instanceId === "ghost").icon).toEqual({ kind: "custom", dataUrl: png });
+
+    expect((await api("PATCH", "/api/instances/ghost/icon", { icon: { kind: "custom", dataUrl: "https://example.test/icon.png" } })).status).toBe(400);
+    expect((await api("PATCH", "/api/instances/ghost/icon", { icon: { kind: "preset", preset: "unknown" } })).status).toBe(400);
+    expect((await api("PATCH", "/api/instances/nope/icon", { icon: null })).status).toBe(404);
+
+    const reset = await api("PATCH", "/api/instances/ghost/icon", { icon: null });
+    expect(reset.status).toBe(200);
+    expect(reset.body.instances.find((i: any) => i.instanceId === "ghost").icon).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8")).instances.ghost.icon).toBeUndefined();
+  });
+
   it("round-trips a set, clear, and rejects bad input", async () => {
     // ghost is the fixture's one shadow instance (unknown driver)
     const set = await api("PATCH", "/api/instances/ghost", { cli: "/opt/ghost/wrapper sub" });

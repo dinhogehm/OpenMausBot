@@ -93,7 +93,9 @@ export function buildNotification(
               ? `${who}'s routine is waiting`
             : kind === "turn-failed"
               ? `${who} couldn't start`
-              : kind === "workflow-failed"
+              : kind === "incident"
+                ? `${who} hit a problem`
+                : kind === "workflow-failed"
                 ? `${who}'s workflow failed`
                 : kind === "workflow-approval"
                   ? `${who}'s workflow needs approval`

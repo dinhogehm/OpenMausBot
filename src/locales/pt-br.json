@@ -2748,5 +2748,18 @@
   "workflow.observe.labelCompleted": "Concluída",
   "workflow.observe.labelFailed": "Falhou",
   "workflow.observe.labelCancelled": "Cancelada",
-  "workflow.observe.labelMissed": "Perdida"
+  "workflow.observe.labelMissed": "Perdida",
+  "engines.icon.label": "Ícone do provedor",
+  "engines.icon.selectAria": "Ícone do provedor para {name}",
+  "engines.icon.default": "Ícone padrão",
+  "engines.icon.custom": "Imagem personalizada",
+  "engines.icon.saving": "Salvando o ícone do provedor",
+  "engines.icon.reset": "Redefinir",
+  "engines.icon.help": "Escolha um provedor ou envie uma imagem quadrada PNG, JPEG ou WebP de até 128 KB. Isso altera apenas esta instância do mecanismo.",
+  "engines.icon.uploadAria": "Enviar um ícone de provedor personalizado para {name}",
+  "engines.icon.decodeError": "O OpenMausBot não conseguiu decodificar essa imagem.",
+  "engines.icon.formatError": "Envie uma imagem PNG, JPEG ou WebP.",
+  "engines.icon.sizeError": "Os ícones de provedor devem ter no máximo 128 KB.",
+  "engines.icon.invalidError": "Envie uma imagem PNG, JPEG ou WebP completa de até 128 KB e {dimension} × {dimension} pixels.",
+  "engines.icon.dimensionError": "Os ícones de provedor devem ter no máximo {dimension} × {dimension} pixels."
 }

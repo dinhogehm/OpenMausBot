@@ -852,10 +852,21 @@ describe("Store", () => {
     const bot = store.createBot();
     const original = store.appendMessage(bot.threadId, { role: "user", kind: "text", text: "v1" });
     const reply = store.appendMessage(bot.threadId, { role: "bot", kind: "text", text: "answer to v1" });
+    const events: Array<Record<string, unknown>> = [];
+    store.onChange((e) => events.push(e as unknown as Record<string, unknown>));
 
     const edited = store.branchMessage(bot.threadId, original.id, "v2")!;
     expect(edited.parentId).toBe(original.parentId); // sibling, not child
     expect(store.activeLeaf(bot.threadId)).toBe(edited.id);
+    // Clients learn the new leaf from a thread frame, right after the
+    // message: a branched message does not chain onto their current leaf,
+    // so without this frame the edit stays hidden until the reply's
+    // snapshot lands. The order matters — the leaf must name a message
+    // the client already has.
+    expect(events.filter((e) => e.type === "message" || e.type === "thread")).toEqual([
+      { type: "message", threadId: bot.threadId, message: edited },
+      { type: "thread", threadId: bot.threadId, activeLeafId: edited.id },
+    ]);
 
     const path = store.activePath(bot.threadId);
     expect(path.map((m) => m.text)).toContain("v2");
@@ -1023,8 +1034,11 @@ describe("Store change stream", () => {
     store.branchMessage(bot.threadId, first.id, "b");
     store.setActiveLeaf(bot.threadId, first.id);
     store.toggleReaction(bot.threadId, first.id, "👍", "user");
-    expect(events.map((e) => e.type)).toEqual(["message.patch", "message", "thread", "message.patch"]);
-    expect(events[2]).toMatchObject({ type: "thread", threadId: bot.threadId, activeLeafId: expect.any(String) });
+    // branchMessage emits message THEN thread (the fork moves the leaf);
+    // setActiveLeaf emits thread; a reaction is a patch
+    expect(events.map((e) => e.type)).toEqual(["message.patch", "message", "thread", "thread", "message.patch"]);
+    expect(events[2]).toMatchObject({ type: "thread", threadId: bot.threadId, activeLeafId: (events[1] as any).message.id });
+    expect(events[3]).toMatchObject({ type: "thread", threadId: bot.threadId, activeLeafId: expect.any(String) });
   });
 
   it("announces screen frames whose pixels are pruned", () => {
@@ -1157,6 +1171,52 @@ describe("Store change stream", () => {
     expect(store.resolvePairConversation(sender, recipient.id, idle)!.task.threadId).toBe(row.threadId);
     expect(store.taskByThread(recipient.id, row.threadId)!.title).toBe("Reporting exports");
     expect(store.tasks(recipient.id)).toHaveLength(2);
+  });
+
+  it("first-message titling reports the peer provenance adoption relies on, and a late retitle cannot undo an adoption rename", () => {
+    const store = new Store(selection);
+    const recipient = store.createBot({ name: "Scout" });
+    const sender = store.createBot({ name: "Clive" });
+    const idle = { working: () => false };
+    const brief = "Verify the export";
+    // a peer-opened row that was still untitled when its assignment landed:
+    // the first message names it, and the record it gets back carries the
+    // provenance that must keep any generated title away from the row
+    const row = store.createTask(recipient.id, undefined, false, undefined, { botId: sender.id, name: "Clive", at: 10 })!;
+    store.appendMessage(row.threadId, { role: "bot", kind: "text", text: `@Scout ${brief}`, at: 1_000 });
+    const titled = store.titleTaskFromFirstMessage(recipient.id, `@Scout ${brief}`, row.threadId);
+    expect(titled?.title).toBe(`@Scout ${brief}`);
+    expect(titled?.openedBy?.botId).toBe(sender.id);
+    // the row a person's assignment named: adoption renames it to the
+    // sender, and a generated title arriving later finds nothing to replace
+    const named = store.createTask(recipient.id, brief, false, undefined, { botId: sender.id, name: "Clive", at: 20 })!;
+    store.appendMessage(named.threadId, { role: "bot", kind: "text", text: `@Scout ${brief}`, at: 2_000 });
+    const adopted = store.resolvePairConversation(sender, recipient.id, idle)!;
+    expect(adopted.created).toBe(false);
+    expect(adopted.task.title).toBe("@Clive");
+    expect(store.retitleTask(recipient.id, named.threadId, `@Scout ${brief}`, "Export verification")).toBeNull();
+    expect(store.taskByThread(recipient.id, named.threadId)!.title).toBe("@Clive");
+  });
+
+  it("channel first-message titling reports the row it named, and a late retitle cannot undo a rename", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({ name: "Scout" });
+    const group = store.createGroup("Ops", [bot.id])!;
+    const task = store.activeGroupTask(group.id)!;
+    const titled = store.titleGroupTaskFromFirstMessage(group.id, "Audit the payroll", task.threadId);
+    expect(titled?.threadId).toBe(task.threadId);
+    expect(titled?.title).toBe("Audit the payroll");
+    // a person's rename wins over anything generated later
+    store.renameGroupTask(group.id, task.threadId, "Payroll audit");
+    expect(store.retitleGroupTask(group.id, task.threadId, "Audit the payroll", "Payroll checks")).toBeNull();
+    expect(store.activeGroupTask(group.id)!.title).toBe("Payroll audit");
+    // and where nothing intervened, the generated title lands once — a
+    // second answer aimed at the same snippet finds nothing to replace
+    const fresh = store.createGroupTask(group.id)!.threadId;
+    const freshSnippet = store.titleGroupTaskFromFirstMessage(group.id, "Draft the announcement", fresh)!.title;
+    expect(store.retitleGroupTask(group.id, fresh, freshSnippet, "Draft announcement")).toMatchObject({ threadId: fresh });
+    expect(store.retitleGroupTask(group.id, fresh, freshSnippet, "A second opinion")).toBeNull();
+    expect(store.groupTaskByThread(group.id, fresh)!.title).toBe("Draft announcement");
   });
 
   it("resolvePairConversation reopens a closed pair conversation and gives concurrent work its own thread", () => {

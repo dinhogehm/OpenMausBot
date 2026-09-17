@@ -47,7 +47,7 @@ describe("approval modes", () => {
 
   it.each([
     "kimiAgent", "droidAgent", "hermesAgent", "customAcp",
-    "piAgent", "grok", "openai-compat", "boxAgent", "minimax", "unknown",
+    "piAgent", "boxAgent", "unknown",
   ])("keeps %s on supported approval levels without claiming native Auto", (driver) => {
     expect(supportsApprovalMode(driver, "ask")).toBe(true);
     expect(supportsApprovalMode(driver, "auto")).toBe(true);
@@ -59,6 +59,20 @@ describe("approval modes", () => {
     // has no native reviewer; the app must not substitute a broad allowance.
     expect(requiresNativeApproval(driver, "auto")).toBe(true);
     expect(requiresNativeApproval(driver, "ask")).toBe(false);
+  });
+
+  // The chat-completions family has no provider reviewer, so Auto still
+  // behaves like Ask — but Full is implemented in the harness itself
+  // (createOpenAIChatRuntime answers its own gate), so it IS offered. Without
+  // it these engines had no level that ever stops asking, and a Chief's
+  // delegated Full access could not reach them either.
+  it.each(["grok", "openai-compat", "minimax"])("offers harness-implemented Full on %s, but never native Auto", (driver) => {
+    expect(supportsApprovalMode(driver, "ask")).toBe(true);
+    expect(supportsApprovalMode(driver, "auto")).toBe(true);
+    expect(supportsApprovalMode(driver, "full")).toBe(true);
+    expect(supportsApprovalMode(driver, "edits")).toBe(false);
+    expect(supportsApprovalMode(driver, "custom")).toBe(false);
+    expect(hasNativeAutoReview(driver)).toBe(false);
   });
   it("recognizes only the five durable values", () => {
     expect(APPROVAL_MODES).toEqual(["ask", "edits", "auto", "full", "custom"]);

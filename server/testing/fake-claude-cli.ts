@@ -12,6 +12,8 @@
 //                        whole-message frame, plus subagent noise to drop)
 //                      | not-logged-in (the frames a signed-out CLI really
 //                        sends, captured from 2.1.263)
+//                      | api-error (the CLI reports a non-auth API error as
+//                        assistant text, then an error result; no model output)
 //   FAKE_CLAUDE_DUMP   path to write {argv, env, prompt, systemPrompt,
 //                      mcpConfig} as JSON,
 //                      so the test can assert on argv shape and env hygiene.
@@ -19,6 +21,16 @@
 //                      way the real CLI reads it — the driver writes it to a
 //                      private temp file and deletes it when the turn settles,
 //                      so a test cannot open it after the fact.
+//   FAKE_CLAUDE_TEXT_FILE path whose contents are the one-shot text mode's
+//                      reply, read fresh each run so a suite sharing one
+//                      server can vary it per test. A missing file, or a body
+//                      of exactly __FAIL__, makes the call fail outright —
+//                      the shape a caller's fallback path has to survive.
+//   FAKE_CLAUDE_TEXT_DUMP like FAKE_CLAUDE_DUMP, but for one-shot text runs,
+//                      so they never overwrite a turn's dump mid-test.
+//   FAKE_CLAUDE_TEXT_HANG when set, the one-shot text mode never replies —
+//                      the caller's abort signal is the only way it ends,
+//                      which is exactly what its tests need to prove.
 //   FAKE_CLAUDE_REPLIES JSON array of strings (or string arrays for multiple
 //                      assistant items) used in order across turns. This makes
 //                      bounded multi-turn orchestration deterministic.
@@ -141,11 +153,27 @@ if (argAfter("--output-format") === "text") {
     process.stdin.on("data", (chunk) => { input += chunk; });
     process.stdin.on("end", () => resolve(input));
   });
-  if (process.env.FAKE_CLAUDE_DUMP) {
+  const oneShotDump = process.env.FAKE_CLAUDE_TEXT_DUMP ?? process.env.FAKE_CLAUDE_DUMP;
+  if (oneShotDump) {
     writeFileSync(
-      process.env.FAKE_CLAUDE_DUMP,
+      oneShotDump,
       JSON.stringify({ pid: process.pid, argv, env: process.env, prompt, mcpConfig: null }, null, 2),
     );
+  }
+  if (process.env.FAKE_CLAUDE_TEXT_HANG) {
+    // a repeating timer keeps the loop alive without settling the
+    // top-level await, which Node would otherwise treat as fatal
+    await new Promise(() => setInterval(() => {}, 1 << 30));
+  }
+  if (process.env.FAKE_CLAUDE_TEXT_FILE) {
+    const file = process.env.FAKE_CLAUDE_TEXT_FILE;
+    const reply = existsSync(file) ? readFileSync(file, "utf8") : "__FAIL__";
+    if (reply.trim() === "__FAIL__") {
+      process.stderr.write("fake one-shot text failed\n");
+      process.exit(1);
+    }
+    process.stdout.write(reply);
+    process.exit(0);
   }
   process.stdout.write("fake generated text\n");
   process.exit(0);
@@ -280,8 +308,18 @@ const playTurn = (prompt: JsonValue) => {
     process.exit(3);
   }
 
+  if (mode === "api-error") {
+    const text = "API Error: 529 Overloaded. This is a server-side issue, usually temporary.";
+    out({ type: "assistant", message: { model: "<synthetic>", content: [{ type: "text", text }] }, error: "unknown", is_api_error_message: true });
+    out({ type: "result", is_error: true, stop_reason: "stop_sequence", terminal_reason: "api_error", result: text });
+    turnRunning = false;
+    finishIfDone();
+    return;
+  }
+
   if (process.env.FAKE_CLAUDE_ROOM_PLAN) {
-    void runRoomHandoffAgent(argv, process.env.FAKE_CLAUDE_ROOM_PLAN, prompt).then(text => {
+    const progress = (text: string) => out({ type: "assistant", message: { content: [{ type: "text", text }] } });
+    void runRoomHandoffAgent(argv, process.env.FAKE_CLAUDE_ROOM_PLAN, prompt, undefined, progress).then(text => {
       out({ type: "assistant", message: { content: [{ type: "text", text }] } });
       out({ type: "result", is_error: false, stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5 } });
     }).catch(error => {
