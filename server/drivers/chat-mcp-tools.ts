@@ -18,6 +18,10 @@ export interface ChatToolSession {
   definitions: ChatToolDefinition[];
   validate(name: string, args: unknown): void;
   execute(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<ChatToolResult>;
+  /** True for a tool the harness already authorized by mounting it: the
+   * bot's own built-in browser, in its own profile, behind a turn-scoped
+   * capability — the same server the Claude driver pre-allows. */
+  preAllowed(name: string): boolean;
   close(): Promise<void>;
 }
 
@@ -216,13 +220,19 @@ function boundedText(value: string): string {
 }
 
 export async function mountChatTools(integrations: SendTurnInput["integrations"], signal: AbortSignal): Promise<ChatToolSession> {
-  const servers: Array<[string, Server]> = [];
-  if (integrations?.agents) servers.push(["agents", integrations.agents]);
-  if (integrations?.composio) servers.push(["composio", integrations.composio]);
+  // The third field marks a harness-owned server whose tools the mount
+  // itself authorizes. It rides the entry, not the name: a user's custom MCP
+  // may well be called "browser" and must still ask for every call.
+  const servers: Array<[string, Server, boolean]> = [];
+  if (integrations?.agents) servers.push(["agents", integrations.agents, false]);
+  if (integrations?.composio) servers.push(["composio", integrations.composio, false]);
+  // The bot's own built-in browser (its profile, a turn-scoped capability),
+  // pre-allowed exactly as the Claude driver pre-allows `mcp__browser`.
+  if (integrations?.browser) servers.push(["browser", integrations.browser, true]);
   // this client starts its servers and talks over stdio; a remote (url)
   // entry is skipped here and reaches Claude and Codex bots
   for (const [name, server] of Object.entries(integrations?.custom ?? {})) {
-    if ("command" in server) servers.push([name, server]);
+    if ("command" in server) servers.push([name, server, false]);
   }
   if (servers.length > 32) throw new Error("MCP server count exceeds the 32-server limit");
   const clients: ChatMcpClient[] = [];
@@ -240,20 +250,20 @@ export async function mountChatTools(integrations: SendTurnInput["integrations"]
   const cancel = () => { void close().catch(() => {}); };
   signal.addEventListener("abort", cancel, { once: true });
   const definitions: ChatToolDefinition[] = [];
-  const registered = new Map<string, { client: ChatMcpClient; name: string; schema: ValidateFunction }>();
+  const registered = new Map<string, { client: ChatMcpClient; name: string; schema: ValidateFunction; preAllowed: boolean }>();
   try {
     if (signal.aborted) throw aborted();
     // Start independent servers concurrently; consume results in config order
     // so names and collision suffixes remain stable across startup timings.
-    const mounts = await Promise.allSettled(servers.map(async ([name, descriptor]) => {
+    const mounts = await Promise.allSettled(servers.map(async ([name, descriptor, preAllowed]) => {
       if (signal.aborted || closed) throw aborted();
       const client = new ChatMcpClient(descriptor);
       clients.push(client);
-      return { name, client, tools: await client.tools(signal) };
+      return { name, client, preAllowed, tools: await client.tools(signal) };
     }));
     for (const mount of mounts) {
       if (mount.status === "rejected") throw mount.reason;
-      const { name: server, client, tools } = mount.value;
+      const { name: server, client, preAllowed, tools } = mount.value;
       const originalNames = new Set<string>();
       for (const tool of tools) {
         if (!object(tool) || typeof tool.name !== "string" || !tool.name.trim() || originalNames.has(tool.name)) throw new Error("MCP server advertised an invalid or duplicate tool name");
@@ -265,7 +275,7 @@ export async function mountChatTools(integrations: SendTurnInput["integrations"]
         const base = `${server}_${tool.name}`.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 64) || "mcp_tool";
         let name = base;
         for (let index = 2; registered.has(name); index += 1) { const suffix = `_${index}`; name = base.slice(0, 64 - suffix.length) + suffix; }
-        registered.set(name, { client, name: tool.name, schema });
+        registered.set(name, { client, name: tool.name, schema, preAllowed });
         definitions.push({ type: "function", function: { name, description: typeof tool.description === "string" ? tool.description : "Configured MCP tool", parameters: tool.inputSchema } });
         if (Buffer.byteLength(JSON.stringify(definitions)) > CATALOG_BYTES) throw new Error("MCP tool catalog exceeds the 1MB limit");
       }
@@ -280,6 +290,7 @@ export async function mountChatTools(integrations: SendTurnInput["integrations"]
   };
   return {
     definitions, validate, close,
+    preAllowed: (name) => registered.get(name)?.preAllowed === true,
     async execute(name, args, callSignal) {
       validate(name, args);
       if (callSignal.aborted) { await close(); throw aborted(); }
