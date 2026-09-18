@@ -65,7 +65,8 @@ describe("remaining ACP approval mappings", () => {
         FAKE_ACP_DUMP: dump,
         FAKE_ACP_RPC_DUMP: rpcDump,
         OPENCODE_API_KEY: "fixture-only",
-        OPENCODE_PERMISSION: '{"external_directory":"ask"}',
+        // an inherited looser rule must not survive below Full
+        OPENCODE_PERMISSION: '{"external_directory":"ask","bash":"allow"}',
       },
       config: { cli: FAKE_CLI, fullAuto: true },
     });
@@ -92,7 +93,9 @@ describe("remaining ACP approval mappings", () => {
           const native = JSON.parse(JSON.parse(readFileSync(dump, "utf8")).env.OPENCODE_PERMISSION);
           expect(native).toMatchObject({ external_directory: approvalMode === "full" ? "allow" : "ask" });
           if (approvalMode === "full") expect(native).toMatchObject({ "*": "allow", read: "allow", bash: "allow", edit: "allow" });
-          else expect(native).toEqual({ external_directory: "ask" });
+          // OpenCode's own default is "*": "allow"; below Full the mutating
+          // tools must reach the harness, whatever was inherited.
+          else expect(native).toEqual({ external_directory: "ask", bash: "ask", edit: "ask", webfetch: "ask", websearch: "ask" });
         }
         expect(JSON.parse(readFileSync(rpcDump, "utf8")))
           .toContain(approvalMode === "full" ? "session/new" : "session/load");
