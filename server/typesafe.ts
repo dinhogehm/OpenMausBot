@@ -134,6 +134,9 @@ export interface TypeSafeCredentials {
   model: string;
   /** Which front door `apiKey` opens. Absent means TypeSafe's own API. */
   gateway?: TypeSafeGateway;
+  /** TypeSafe base URL override (`typesafe.url`): a proxy or a test double.
+   * Only meaningful for the TypeSafe gateway. */
+  apiUrl?: string;
 }
 
 const GATEWAY_LABEL: Record<TypeSafeGateway, string> = { typesafe: "TypeSafe", openrouter: "OpenRouter" };
@@ -157,7 +160,8 @@ export function openRouterJevModel(model: string): string {
 export function typesafeCredentials(cfg: Pick<AppConfig, "typesafe" | "openrouter">): TypeSafeCredentials | null {
   const model = cfg.typesafe?.model?.trim() || TYPESAFE_DEFAULT_MODEL;
   const apiKey = cfg.typesafe?.key?.trim();
-  if (apiKey) return { apiKey, model, gateway: "typesafe" };
+  const apiUrl = cfg.typesafe?.url?.trim();
+  if (apiKey) return { apiKey, model, gateway: "typesafe", ...(apiUrl ? { apiUrl } : {}) };
   const openRouterKey = cfg.openrouter?.key?.trim();
   if (openRouterKey) return { apiKey: openRouterKey, model, gateway: "openrouter" };
   return null;
@@ -191,7 +195,7 @@ export async function evaluateSystemOne(input: EvaluateInput): Promise<TypeSafeR
   const requested = input.model || input.credentials.model;
   const endpoint = gateway === "openrouter"
     ? input.apiUrl ?? OPENROUTER_DECISIONS_URL
-    : `${(input.apiUrl ?? TYPESAFE_API_URL).replace(/\/+$/, "")}/systemone`;
+    : `${(input.apiUrl ?? input.credentials.apiUrl ?? TYPESAFE_API_URL).replace(/\/+$/, "")}/systemone`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const onOuterAbort = () => controller.abort();
@@ -242,7 +246,7 @@ export async function evaluateSystemOne(input: EvaluateInput): Promise<TypeSafeR
 /** `GET /v1/models`: the names this account may send in `model`. Used by the
  * key check and the engine's catalog refresh; aliases only, per the docs. */
 export async function listTypeSafeModels(
-  credentials: Pick<TypeSafeCredentials, "apiKey" | "gateway">,
+  credentials: Pick<TypeSafeCredentials, "apiKey" | "gateway" | "apiUrl">,
   options: { fetchImpl?: typeof fetch; timeoutMs?: number; apiUrl?: string } = {},
 ): Promise<Array<{ name: string; description: string; release_date: string }>> {
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -268,7 +272,7 @@ export async function listTypeSafeModels(
         .filter((model) => /(^|~)typesafe\//.test(model.id))
         .map((model) => ({ name: model.id, description: model.name, release_date: "" }));
     }
-    const response = await fetchImpl(`${(options.apiUrl ?? TYPESAFE_API_URL).replace(/\/+$/, "")}/models`, {
+    const response = await fetchImpl(`${(options.apiUrl ?? credentials.apiUrl ?? TYPESAFE_API_URL).replace(/\/+$/, "")}/models`, {
       headers: { authorization: `Bearer ${credentials.apiKey}` },
       signal: controller.signal,
       redirect: "manual",

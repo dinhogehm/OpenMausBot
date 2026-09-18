@@ -380,6 +380,8 @@ const appConfigSchema = z.object({
    * `model` overrides the `jev-latest` alias (e.g. to pin `jev-1.13.0`). */
   typesafe: z.object({
     key: optionalText,
+    /** Base URL of TypeSafe's API; only for a proxy or a test double. */
+    url: optionalText,
     model: optionalText,
     permissionReview: z.boolean().optional(),
     /** Second opt-in: Jev may also answer permission cards raised while
@@ -486,7 +488,7 @@ export interface AppConfig {
   billing?: { currency?: string; prices?: Record<string, { inputPerMillion: number; outputPerMillion: number; cachedInputPerMillion?: number }> };
   openaiCompat?: { key?: string; url?: string; model?: string; provider?: string };
   openrouter?: { key?: string; model?: string; provider?: string };
-  typesafe?: { key?: string; model?: string; permissionReview?: boolean; reviewUnattended?: boolean; reviewGuarded?: boolean };
+  typesafe?: { key?: string; url?: string; model?: string; permissionReview?: boolean; reviewUnattended?: boolean; reviewGuarded?: boolean };
   composio?: { apiKey?: string; userId?: string; sessionId?: string };
   box?: { token?: string };
   /** A named host from the user's SSH config. Authentication stays with SSH. */
