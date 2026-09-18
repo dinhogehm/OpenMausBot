@@ -22,7 +22,10 @@ export const TASK_WORKSPACES_DIR = join(DATA_DIR, "task-workspaces");
 
 /** MCP support does not imply native filesystem tools or a local working directory. */
 export function supportsWorkspaceFiles(driverKind: string): boolean {
-  return !["grok", "openai-compat", "minimax", "boxAgent"].includes(driverKind);
+  // API engines have no local filesystem: a folder pinned to one of their
+  // threads would only hold the project's one-writer lock and starve the CLI
+  // teammates it delegates to (an OpenRouter chief blocking its Claude team).
+  return !["grok", "openai-compat", "openrouter", "jev", "minimax", "boxAgent"].includes(driverKind);
 }
 
 /** Default task files are private to the thread, outside the bot's shared
