@@ -378,7 +378,28 @@ const support = (loadCatalog: OpenCodeCatalogLoader): AcpSupport => ({
     : model,
   transformEnv: stripForeignProviderKeys,
   applyTurnEnv: (env, { fullAuto }) => {
-    if (!fullAuto) return;
+    if (!fullAuto) {
+      // OpenCode's built-in default is `"*": "allow"`: without this, a bot on
+      // Ask or Auto ran shell commands and edited files without a single
+      // permission request, so none of OMB's guards, remembered grants or
+      // reviewer ever saw them. Every level below Full must route the
+      // mutating tools through the harness. Reads, search and the tools OMB
+      // mounts itself keep OpenCode's own rules (its `read` rule still asks
+      // for .env files); an inherited value for these keys is overridden only
+      // toward "ask", never loosened.
+      let inherited: Record<string, unknown> = {};
+      try {
+        const parsed: unknown = env.OPENCODE_PERMISSION ? JSON.parse(env.OPENCODE_PERMISSION) : {};
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) inherited = parsed as Record<string, unknown>;
+      } catch {
+        // An unreadable inherited value is replaced, not trusted.
+      }
+      env.OPENCODE_PERMISSION = JSON.stringify({
+        ...inherited,
+        ...Object.fromEntries(["bash", "edit", "webfetch", "websearch", "external_directory"].map((permission) => [permission, "ask"])),
+      });
+      return;
+    }
     // Scope native permissions to this child, not the user's OpenCode config.
     // A wildcard alone leaves OpenCode's more-specific external-directory and
     // read rules in place. Replace the built-in rules as well, including path
