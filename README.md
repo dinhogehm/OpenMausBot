@@ -368,8 +368,11 @@ the composer mic) — see [`docs/voice-mode.md`](docs/voice-mode.md) for the des
 Contributions welcome — the driver SPI in [`server/contracts.ts`](server/contracts.ts) is deliberately
 small; adding a provider is one file in [`server/drivers/`](server/drivers/) plus a one-line registration.
 No code needed at all for your own engines: any ACP-speaking CLI or OpenAI-compatible endpoint
-plugs in through config — see [`docs/custom-engines.md`](docs/custom-engines.md).
+plugs in through config — see [`docs/custom-engines.md`](docs/custom-engines.md); OpenRouter has its own
+engine with a live catalog of every model it routes.
 Users can add their own MCP tool servers with zero code via [`docs/custom-mcp-servers.md`](docs/custom-mcp-servers.md).
+Fast structured decisions — permission review, room routing, classifier bots — can ride TypeSafe's Jev,
+see [`docs/jev-typesafe.md`](docs/jev-typesafe.md).
 
 ## Support the project
 

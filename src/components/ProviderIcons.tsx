@@ -127,8 +127,32 @@ export function PiMark({ size = 16, className }: IconProps) {
   );
 }
 
+/** Jev (TypeSafe) mark: one path in, a fork, and the branch Jev picked lit
+ * up — the decision the router makes on every untagged message. Not an
+ * official logo; TypeSafe has no published brand mark yet. */
+export function JevMark({ size = 16, className }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" className={className} aria-hidden="true">
+      <path
+        d="M12 21v-6M12 15c0-3.6 2.4-6 6-6M12 15c0-3.6-2.4-6-6-6"
+        fill="none"
+        stroke="var(--color-ink)"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      <circle cx="12" cy="21" r="2" fill="var(--color-ink)" />
+      <circle cx="6" cy="8" r="2.25" fill="none" stroke="var(--color-ink)" strokeWidth="1.5" opacity=".45" />
+      <circle cx="18" cy="8" r="3.25" fill="#14B8A6" />
+    </svg>
+  );
+}
+
 export function ProviderMark({ driverKind, size, className }: IconProps & { driverKind: string }) {
   switch (driverKind) {
+    case "openrouter":
+      return <PresetProviderMark preset="openrouter" size={size} className={className} />;
+    case "jev":
+      return <JevMark size={size} className={className} />;
     case "grok":
     case "grokAgent":
       return <GrokMark size={size} className={className} />;
@@ -174,6 +198,7 @@ export function PresetProviderMark({ preset, size = 16, className }: IconProps &
     case "xai": return <GrokMark size={size} className={className} />;
     case "qwen": return <QwenMark size={size} className={className} />;
     case "moonshot": return <KimiMark size={size} className={className} />;
+    case "typesafe": return <JevMark size={size} className={className} />;
     case "google":
       return <svg width={size} height={size} viewBox="0 0 24 24" className={className} aria-hidden="true">
         <path fill="#8E75B2" d="M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81" />

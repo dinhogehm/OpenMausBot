@@ -399,7 +399,10 @@ export interface SecretRequestCardData {
 export type GroupDefaultResponder =
   | { kind: "member"; botId: string }
   | { kind: "everyone" }
-  | { kind: "mentions" };
+  | { kind: "mentions" }
+  /** Jev (TypeSafe) picks the member whose persona best fits an untagged
+   * message; a low-confidence pick falls back to the first active member. */
+  | { kind: "smart" };
 
 /** One independent conversation inside a user-created channel. */
 export interface GroupTask {

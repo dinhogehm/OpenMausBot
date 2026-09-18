@@ -4,6 +4,7 @@ import { PROVIDER_ICON_MAX_BYTES, providerIconError } from "./provider-icon";
 describe("provider icon validation", () => {
   it("accepts known presets and bounded raster data", () => {
     expect(providerIconError({ kind: "preset", preset: "openai" })).toBeNull();
+    expect(providerIconError({ kind: "preset", preset: "typesafe" })).toBeNull();
     expect(providerIconError({ kind: "custom", dataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" })).toBeNull();
     expect(providerIconError({ kind: "custom", dataUrl: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/2wBDAQMDAwQDBAgEBAgQCwkLEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBD/wAARCAADAAIDAREAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAABv/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAVAQEBAAAAAAAAAAAAAAAAAAAECP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AD60CH//2Q==" })).toBeNull();
     expect(providerIconError({ kind: "custom", dataUrl: "data:image/webp;base64,UklGRjQAAABXRUJQVlA4ICgAAABQAQCdASoDAAIAAgA0JaAABDOAAP7fgD//7B3//nAf/84D+l4HAAAA" })).toBeNull();

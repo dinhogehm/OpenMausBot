@@ -49,6 +49,38 @@ describe("provider key check", () => {
     expect(providerModelsUrl("openaiCompat")).toBe("https://openrouter.ai/api/v1/models");
     expect(providerModelsUrl("openaiCompat", "https://api.openai.com/v1")).toBe("https://api.openai.com/v1/models");
     expect(providerModelsUrl("xai", "")).toBe("https://api.x.ai/v1/models");
+    expect(providerModelsUrl("openrouter")).toBe("https://openrouter.ai/api/v1/models");
+    expect(providerModelsUrl("typesafe")).toBe("https://api.typesafe.ai/v1/models");
+  });
+
+  it("authenticates the dedicated OpenRouter engine at /key and TypeSafe at its account-scoped models list", async () => {
+    const paths: string[] = [];
+    const gateway: typeof fetch = async (input, init) => {
+      const url = String(input);
+      paths.push(url);
+      const authorized = new Headers(init?.headers).get("authorization") === "Bearer valid-fixture-key";
+      if (url === "https://openrouter.ai/api/v1/key") {
+        return authorized
+          ? Response.json({ data: { is_free_tier: true } })
+          : Response.json({ error: "no" }, { status: 401 });
+      }
+      expect(url).toBe("https://api.typesafe.ai/v1/models");
+      return authorized
+        ? Response.json({ models: [{ name: "jev-latest", description: "flagship", release_date: "2026-01-01" }] })
+        : Response.json({ error: "no" }, { status: 401 });
+    };
+    expect(await checkProviderKey({ provider: "openrouter", key: "valid-fixture-key" }, gateway))
+      .toEqual({ ok: true, check: "authentication", models: [] });
+    expect(await checkProviderKey({ provider: "openrouter", key: "bad" }, gateway)).toMatchObject({ ok: false, reason: "rejected" });
+    expect(await checkProviderKey({ provider: "typesafe", key: "valid-fixture-key" }, gateway))
+      .toEqual({ ok: true, check: "models", models: ["jev-latest"] });
+    expect(await checkProviderKey({ provider: "typesafe", key: "bad" }, gateway)).toMatchObject({ ok: false, reason: "rejected" });
+    expect(paths).toEqual([
+      "https://openrouter.ai/api/v1/key",
+      "https://openrouter.ai/api/v1/key",
+      "https://api.typesafe.ai/v1/models",
+      "https://api.typesafe.ai/v1/models",
+    ]);
   });
 
   it("sends the provider's own header shape and returns a few model ids on success", async () => {

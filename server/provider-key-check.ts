@@ -5,17 +5,20 @@
 // The answer is a verdict and, on success, a few model ids; never the key,
 // never the raw response. Keys travel only over TLS, except to a loopback
 // test double.
-export type ProviderKeyKind = "anthropic" | "openaiCompat" | "xai";
+export type ProviderKeyKind = "anthropic" | "openaiCompat" | "openrouter" | "typesafe" | "xai";
 
 export type ProviderKeyVerdict =
   | { ok: true; check: "authentication" | "models"; models: string[] }
   | { ok: false; reason: "rejected" | "unreachable" | "unexpected"; status?: number };
 
-export const PROVIDER_KEY_KINDS: readonly ProviderKeyKind[] = ["anthropic", "openaiCompat", "xai"];
+export const PROVIDER_KEY_KINDS: readonly ProviderKeyKind[] = ["anthropic", "openaiCompat", "openrouter", "typesafe", "xai"];
 
 const DEFAULT_URLS: Record<ProviderKeyKind, string> = {
   anthropic: "https://api.anthropic.com",
   openaiCompat: "https://openrouter.ai/api/v1",
+  openrouter: "https://openrouter.ai/api/v1",
+  // TypeSafe's /v1/models is account-scoped, so a 200 there proves the key.
+  typesafe: "https://api.typesafe.ai/v1",
   xai: "https://api.x.ai/v1",
 };
 
@@ -61,7 +64,7 @@ export async function checkProviderKey(
   if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url.hostname))) {
     return { ok: false, reason: "unexpected" };
   }
-  const authenticate = input.provider === "openaiCompat"
+  const authenticate = (input.provider === "openaiCompat" || input.provider === "openrouter")
     && url.origin === "https://openrouter.ai" && url.pathname === "/api/v1/models";
   if (authenticate) url.pathname = "/api/v1/key";
   const headers: Record<string, string> =

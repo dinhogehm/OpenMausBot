@@ -18,6 +18,7 @@ import {
   approvalModeFor,
   supportsApprovalMode,
   requiresNativeApproval,
+  hasNativeAutoReview,
   modelSwitchNeedsAsk,
   isEmergencyApprovalDowngrade,
   isApprovalMode,
@@ -45,6 +46,9 @@ import {
   rememberableApprovalKey,
 } from "./auto-approve.ts";
 import { requestReview, resolveAutoReviewMode, shouldReview } from "./auto-review.ts";
+import { jevReviewer, requestJevReview } from "./jev-review.ts";
+import { pickSmartResponder } from "./room-routing.ts";
+import { typesafeCredentials } from "./typesafe.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import { configuredAccountDirectory, assertSeparateClaudeAccount, claudeAccountInfo, createClaudeAccountSchema, instanceSettingsSchema, newClaudeAccount } from "./claude-accounts.ts";
 import { providerIconPatchSchema, withInstanceIcon } from "./provider-icon.ts";
@@ -1623,6 +1627,7 @@ function checkedGroupResponder(value: unknown, memberIds: string[]): GroupDefaul
   const responder = value as { kind?: unknown; botId?: unknown };
   if (responder.kind === "everyone") return { kind: "everyone" };
   if (responder.kind === "mentions") return { kind: "mentions" };
+  if (responder.kind === "smart") return { kind: "smart" };
   if (
     responder.kind === "member" &&
     typeof responder.botId === "string" &&
@@ -3596,18 +3601,31 @@ async function reviewPermissionCard(args: {
   };
   threadId: string;
   requestId: string;
-  messageId: string;
+  /** The card already shown, or null on a workflow node's turn where the
+   * harness would otherwise deny at once and no card exists yet. */
+  messageId: string | null;
   tool: string;
   summary: string;
+  /** Nobody is watching this turn: only Jev under its second opt-in may
+   * review, with the stricter thresholds; the provider reviewer never does. */
+  unattended?: boolean;
+  /** A pattern guard's match, when the card reached review only through
+   * Jev's `guarded` opt-in. Only Jev ever sees such a card. */
+  flagged?: string;
 }): Promise<boolean> {
   const mode = resolveAutoReviewMode(args.asker.autoReview);
-  if (mode === "off" || !args.instance.reviewPermission) return false;
+  // Jev, when the owner opted in, reviews for every engine — including the
+  // ones with no `reviewPermission` one-shot. Otherwise the provider that
+  // opened the request is the only reviewer (see requestReview).
+  const jev = jevReviewer(cfg);
+  if (mode === "off" || !(jev || args.instance.reviewPermission)) return false;
+  if (args.unattended && !jev?.unattended) return false;
+  if (args.flagged && !jev?.guarded) return false;
   const persona = [args.asker.name, args.asker.title, args.asker.description].filter(Boolean).join(" — ");
-  const reviewed = await requestReview(args.instance.reviewPermission.bind(args.instance), {
-    tool: args.tool,
-    summary: args.summary,
-    persona,
-  });
+  const request = { tool: args.tool, summary: args.summary, persona };
+  const reviewed = jev
+    ? await requestJevReview(jev, request, { unattended: args.unattended, flagged: args.flagged })
+    : await requestReview(args.instance.reviewPermission?.bind(args.instance), request);
   if (!reviewed) return false;
 
   if (mode === "shadow") {
@@ -3628,8 +3646,11 @@ async function reviewPermissionCard(args: {
 
   // The human can answer while review is running. Their click wins before
   // the provider receives anything and before the audit log claims approval.
-  const card = store.messagesFor(args.threadId).find((message) => message.id === args.messageId)?.card;
-  if (!card || card.answered) return false;
+  // (A workflow node's card does not exist yet — nobody could have clicked.)
+  if (args.messageId !== null) {
+    const card = store.messagesFor(args.threadId).find((message) => message.id === args.messageId)?.card;
+    if (!card || card.answered) return false;
+  }
   let outcome: RequestOutcome = "unavailable";
   try {
     outcome = await args.instance.adapter.respondToRequest(args.threadId, args.requestId, { behavior: "allow" });
@@ -3653,6 +3674,9 @@ async function reviewPermissionCard(args: {
     decision: "auto-approved",
     source: "auto-review",
     rule: reviewed.reason,
+    // the log must tell a Jev approval nobody was present for from one a
+    // person could have overruled
+    unattended: args.unattended || undefined,
   });
   return true;
 }
@@ -4697,7 +4721,31 @@ bus.subscribe((event: RuntimeEvent) => {
           : registry.get(asker.modelSelection.instanceId);
         const findCard = (messageId: string) =>
           store.messagesFor(event.threadId).find((candidate) => candidate.id === messageId)?.card;
-        const decided = denyUnattendedWorkflowCard(
+        // Under the owner's second opt-in, Jev stands in for the absent
+        // person before the node is denied: one call, stricter thresholds,
+        // and only where the blocking rule was "nobody is watching" — a
+        // guard, a sandbox widening, or a desktop request still deny at once
+        // (shouldReview). A denial from Jev falls through to the same
+        // fail-fast path, so the run still moves on inside the minute.
+        const jev = jevReviewer(cfg);
+        const reviewFirst =
+          jev?.unattended === true &&
+          instance !== undefined &&
+          !event.requiresExplicitApproval &&
+          shouldReview({
+            source: verdict.source,
+            mode: resolveAutoReviewMode(asker.autoReview),
+            approvalMode: approvalModeFor(asker),
+            unattended: true,
+            approvalScope: event.approvalScope,
+            reviewUnattended: true,
+            reviewGuarded: jev.guarded,
+            standInReviewer: !hasNativeAutoReview(event.provider),
+          });
+        const flagged = verdict.source === "destructive-guard" || verdict.source === "sensitive-guard"
+          ? `${verdict.source === "destructive-guard" ? "destructive" : "sensitive"}: ${verdict.rule ?? ""}`
+          : undefined;
+        const denyNow = () => denyUnattendedWorkflowCard(
           { requestId, tool, summary, scope: event.approvalScope, verdict },
           {
             graceMs: WORKFLOW_DENY_GRACE_MS,
@@ -4739,7 +4787,28 @@ bus.subscribe((event: RuntimeEvent) => {
             },
           },
         );
-        void decided.settled;
+        if (reviewFirst && instance) {
+          void reviewPermissionCard({
+            instance,
+            asker,
+            threadId: event.threadId,
+            requestId,
+            messageId: null,
+            tool,
+            summary,
+            unattended: true,
+            flagged,
+          })
+            .catch(() => false)
+            .then((approved) => {
+              if (approved) return;
+              // The ask may have ended while Jev was thinking (turn stopped,
+              // provider gone); denyNow tolerates an answerer that is gone.
+              void denyNow().settled;
+            });
+          break;
+        }
+        void denyNow().settled;
         break;
       }
       // A card can outlive the bot record that raised it. Without one there is
@@ -4795,6 +4864,7 @@ bus.subscribe((event: RuntimeEvent) => {
       });
       if (event.requestId) askMessageByRequest.set(`${event.threadId}:${event.requestId}`, message.id);
       const reviewMode = resolveAutoReviewMode(asker?.autoReview);
+      const jevForCard = jevReviewer(cfg);
       let reviewTask: Promise<boolean> | undefined;
       if (
         permission &&
@@ -4807,13 +4877,24 @@ bus.subscribe((event: RuntimeEvent) => {
           approvalMode: approvalModeFor(asker),
           unattended: Boolean(unattended),
           approvalScope: event.approvalScope,
+          // a webhook's or routine's card still waits for a person, but Jev
+          // may answer it first under the owner's second opt-in
+          reviewUnattended: jevForCard?.unattended === true,
+          reviewGuarded: jevForCard?.guarded === true,
+          // On an engine with no Auto reviewer of its own, every Auto-mode
+          // card is `native-approval` for want of a reviewer, not because one
+          // declined — Jev is that reviewer. Engines with a native reviewer
+          // (Claude, Codex, …) keep their declines for a person.
+          standInReviewer: jevForCard !== null && !hasNativeAutoReview(event.provider),
         })
       ) {
         // Review stays on the provider boundary that opened the request.
         // Falling back to an arbitrary sibling could disclose action details
-        // to a provider the user did not choose for this bot.
+        // to a provider the user did not choose for this bot. The one
+        // exception is Jev: `typesafe.permissionReview` is the owner's
+        // explicit consent to send the summary to TypeSafe, for any engine.
         const instance = registry.get(event.providerInstanceId ?? asker.modelSelection.instanceId);
-        if (instance?.reviewPermission) {
+        if (instance && (jevForCard || instance.reviewPermission)) {
           reviewTask = reviewPermissionCard({
             instance,
             asker,
@@ -4822,6 +4903,10 @@ bus.subscribe((event: RuntimeEvent) => {
             messageId: message.id,
             tool: event.tool,
             summary: event.summary,
+            unattended: Boolean(unattended),
+            flagged: verdict?.source === "destructive-guard" || verdict?.source === "sensitive-guard"
+              ? `${verdict.source === "destructive-guard" ? "destructive" : "sensitive"}: ${verdict.rule ?? ""}`
+              : undefined,
           });
         }
       }
@@ -9671,6 +9756,13 @@ function startGroupTurn(
     const last = availableMembers.find((b) => b.id === lastSpeakerId) ?? availableMembers[0];
     responders = last ? [last] : [];
   }
+  // A smart room with no tag asks Jev who should answer. This function is
+  // synchronous (the message must be acknowledged before any network call),
+  // so the ask happens inside the queued dispatch below; until then the
+  // first active member stands in as the provisional lead — also the answer
+  // when there is no TypeSafe key or Jev has no confident pick.
+  const smartRouting = group.defaultResponder.kind === "smart" && !responders.length && !goalCoordinator && !group.dm;
+  if (smartRouting && availableMembers[0]) responders = [availableMembers[0]];
   if (!responders.length && !goalCoordinator) {
     const defaultArchivedId = group.defaultResponder.kind === "member" ? group.defaultResponder.botId : undefined;
     const defaultArchived = archived.find((member) => member.id === defaultArchivedId);
@@ -9761,6 +9853,22 @@ function startGroupTurn(
     if (goalCoordinator) {
       await runGroupGoalOperation({ groupId, threadId, coordinator: goalCoordinator, members, operation });
     } else {
+      if (smartRouting) {
+        const credentials = typesafeCredentials(cfg);
+        const pick = credentials ? await pickSmartResponder(text, availableMembers, credentials) : null;
+        if (pick && !operation.cancelled) {
+          // The provisional lead was registered when the operation began;
+          // swap the membership so Stop reaches the member actually answering.
+          for (const responder of responders) operation.botIds.delete(responder.id);
+          responders = [pick.member];
+          operation.botIds.add(pick.member.id);
+          store.appendMessage(threadId, {
+            role: "bot",
+            kind: "activity",
+            tool: { name: `Jev routed this to ${pick.member.name} (${Math.round(pick.confidence * 100)}% confidence)`, ok: true },
+          });
+        }
+      }
       const spoken = new Set<string>();
       const skillAuthoringClaim = { claimed: false };
       for (const responder of responders) {
@@ -10833,6 +10941,19 @@ function configStatus() {
     billing: { currency: cfg.billing?.currency ?? "USD", prices: cfg.billing?.prices ?? {} },
     // the base URL is a setting, not a secret; the key stays write-only
     openaiCompat: { configured: Boolean(cfg.openaiCompat?.key), url: cfg.openaiCompat?.url ?? "" },
+    openrouter: { configured: Boolean(cfg.openrouter?.key), model: cfg.openrouter?.model ?? "", provider: cfg.openrouter?.provider ?? "" },
+    // `configured` is the TypeSafe key itself (the key row); `available` says
+    // whether Jev can be reached at all — also true through the OpenRouter
+    // key — and gates the review toggle and smart room routing in the UI.
+    typesafe: {
+      configured: Boolean(cfg.typesafe?.key),
+      available: Boolean(typesafeCredentials(cfg)),
+      gateway: typesafeCredentials(cfg)?.gateway ?? null,
+      model: cfg.typesafe?.model ?? "",
+      permissionReview: Boolean(cfg.typesafe?.permissionReview),
+      reviewUnattended: Boolean(cfg.typesafe?.reviewUnattended),
+      reviewGuarded: Boolean(cfg.typesafe?.reviewGuarded),
+    },
     composio: {
       configured: composio.configured(cfg),
       mode: composio.connectionMode(cfg),
@@ -14389,13 +14510,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (!checked.ok) return json(res, 400, { error: checked.error });
         if (typeof body.bulletin !== "string") return json(res, 400, { error: "bulletin must be a string" });
         if (body.bulletin.length > 12_000) return json(res, 400, { error: "bulletin must be at most 12000 characters" });
-        const value = body.defaultResponder as { kind?: unknown; botId?: unknown } | null;
-        let responder: GroupDefaultResponder | null = null;
-        if (value?.kind === "everyone") responder = { kind: "everyone" };
-        else if (value?.kind === "mentions") responder = { kind: "mentions" };
-        else if (value?.kind === "member" && typeof value.botId === "string" && group.memberIds.includes(value.botId)) {
-          responder = { kind: "member", botId: value.botId };
-        }
+        const responder = checkedGroupResponder(body.defaultResponder, group.memberIds);
         if (!responder) return json(res, 400, { error: "invalid default responder" });
         patch.cwd = checked.cwd ?? undefined;
         patch.defaultResponder = responder;
@@ -17111,7 +17226,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         return json(res, 400, { error: `provider must be one of ${PROVIDER_KEY_KINDS.join(", ")}` });
       }
       const kind = provider as ProviderKeyKind;
-      const saved = kind === "anthropic" ? cfg.anthropic : kind === "openaiCompat" ? cfg.openaiCompat : cfg.xai;
+      const saved: { key?: string; url?: string } | undefined =
+        kind === "anthropic" ? cfg.anthropic
+        : kind === "openaiCompat" ? cfg.openaiCompat
+        : kind === "openrouter" ? cfg.openrouter
+        : kind === "typesafe" ? cfg.typesafe
+        : cfg.xai;
       if (body?.key !== undefined && typeof body.key !== "string") {
         return json(res, 400, { error: "key must be a string" });
       }

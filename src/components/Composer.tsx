@@ -45,7 +45,7 @@ import {
   type PasteAttachment,
 } from "@/lib/composer-attachments";
 import { normalizeState } from "@/lib/mascot";
-import { goalCoordinatorForComposer, groupComposerHint, roomRespondersForComposer } from "@/lib/group-routing";
+import { effectiveDefaultResponder, goalCoordinatorForComposer, groupComposerHint, roomRespondersForComposer } from "@/lib/group-routing";
 import { PendingApprovalActions, PendingApprovalPanel, pendingApprovals } from "./PendingApproval";
 import { useDesktopCapabilities } from "./DesktopCapabilities";
 import { ReplyQuote } from "./ReplyQuote";
@@ -234,7 +234,12 @@ export function Composer({
       return botSupportsImages(goalCoordinatorForComposer(message, members ?? [], group) ?? undefined);
     }
     const responders = roomRespondersForComposer(message, members ?? [], group);
-    return responders.length > 0 && responders.every(botSupportsImages);
+    if (responders.length > 0) return responders.every(botSupportsImages);
+    // Smart routing: Jev may hand the message to any member, so an image is
+    // only safe when every candidate can see it.
+    if (effectiveDefaultResponder(group, members ?? []).kind !== "smart") return false;
+    const candidates = (members ?? []).filter((member) => !member.hidden);
+    return candidates.length > 0 && candidates.every(botSupportsImages);
   };
   const typedGoalText = group && !group.dm ? goalTextFromComposer(text) : null;
   const effectiveText = typedGoalText ?? text;

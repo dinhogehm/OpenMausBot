@@ -15,6 +15,7 @@ const providers: Record<string, string> = {
   kimiAgent: "Moonshot AI", droidAgent: "Factory", cursorAgent: "Cursor",
   antigravityAgent: "Google", opencodeGo: "OpenCode", qwenAgent: "Qwen",
   hermesAgent: "Nous Research", piAgent: "pi.dev",
+  openrouter: "OpenRouter", jev: "TypeSafe",
 };
 
 /** One disclosure, not a second settings dialog. Keep its children mounted so
