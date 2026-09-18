@@ -17470,8 +17470,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return json(res, 400, { error: "Account settings are currently available for Claude only." });
         }
         if (body.tools !== undefined) {
-          if (!["openai-compat", "grok", "minimax"].includes(entry.driver)) {
-            return json(res, 400, { error: "The tools setting is available for OpenAI-compatible, Grok API and MiniMax API instances only." });
+          if (!["openai-compat", "openrouter", "grok", "minimax"].includes(entry.driver)) {
+            return json(res, 400, { error: "The tools setting is available for OpenAI-compatible, OpenRouter, Grok API and MiniMax API instances only." });
           }
           entry.config = { ...entry.config as Record<string, unknown>, tools: body.tools };
         }
