@@ -417,6 +417,9 @@ export function normalizeGroupDefaultResponder(
     const candidate = value as { kind?: unknown; botId?: unknown };
     if (candidate.kind === "everyone") return { kind: "everyone" };
     if (candidate.kind === "mentions") return { kind: "mentions" };
+    // Kept even without a TypeSafe key: the send path falls back to the
+    // first active member, so the choice survives a key added later.
+    if (candidate.kind === "smart") return { kind: "smart" };
     if (
       candidate.kind === "member" &&
       typeof candidate.botId === "string" &&
@@ -430,7 +433,9 @@ export function normalizeGroupDefaultResponder(
 }
 
 /** Resolve the bots invoked by a human room message. Explicit targets win;
- * otherwise the room policy chooses one member, everyone, or nobody. */
+ * otherwise the room policy chooses one member, everyone, or nobody. This
+ * stays synchronous: a `smart` room with no tag also yields nobody here,
+ * and the send path asks Jev (room-routing.ts) before falling back. */
 export function roomResponders<T extends { id: string; name: string; hidden?: boolean }>(
   text: string,
   members: T[],
@@ -445,6 +450,7 @@ export function roomResponders<T extends { id: string; name: string; hidden?: bo
     const lead = available.find((member) => member.id === defaultResponder.botId);
     return lead ? [lead] : [];
   }
+  // "mentions" and "smart": nobody was addressed.
   return [];
 }
 

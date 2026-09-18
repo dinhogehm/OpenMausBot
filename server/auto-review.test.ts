@@ -43,6 +43,42 @@ describe("shouldReview", () => {
     expect(shouldReview(context({ approvalScope: "local-computer" }))).toBe(false);
   });
 
+  it("reviews an unattended request only under the opt-in, and only past a nobody-watching block", () => {
+    for (const source of sources) {
+      expect(shouldReview(context({ source, unattended: true, reviewUnattended: true })))
+        .toBe(source === "no-grant" || source === "unattended-block");
+    }
+    // the opt-in never reaches past the desktop, Custom mode, or an off switch
+    expect(shouldReview(context({ unattended: true, reviewUnattended: true, approvalScope: "local-computer" }))).toBe(false);
+    expect(shouldReview(context({ unattended: true, reviewUnattended: true, approvalMode: "custom" }))).toBe(false);
+    expect(shouldReview(context({ unattended: true, reviewUnattended: true, mode: "off" }))).toBe(false);
+    // and an attended card is unchanged by it: a withheld auto mode is not a reason to review a person's turn
+    expect(shouldReview(context({ source: "unattended-block", reviewUnattended: true }))).toBe(false);
+  });
+
+  it("lets a stand-in reviewer take native-approval cards only on engines with no reviewer of their own", () => {
+    // no Auto reviewer on the engine: `native-approval` means nobody reviewed
+    expect(shouldReview(context({ source: "native-approval", standInReviewer: true }))).toBe(true);
+    // an engine whose own reviewer declined keeps that decline for a person
+    expect(shouldReview(context({ source: "native-approval", standInReviewer: false }))).toBe(false);
+    expect(shouldReview(context({ source: "native-approval" }))).toBe(false);
+    // unattended, the stand-in still needs the unattended opt-in
+    expect(shouldReview(context({ source: "native-approval", standInReviewer: true, unattended: true }))).toBe(false);
+    expect(shouldReview(context({ source: "native-approval", standInReviewer: true, unattended: true, reviewUnattended: true }))).toBe(true);
+  });
+
+  it("reviews guard-blocked cards only under the guarded opt-in, never desktop or sandbox blocks", () => {
+    for (const source of ["destructive-guard", "sensitive-guard"] as const) {
+      expect(shouldReview(context({ source }))).toBe(false);
+      expect(shouldReview(context({ source, reviewGuarded: true }))).toBe(true);
+      expect(shouldReview(context({ source, reviewGuarded: true, unattended: true }))).toBe(false);
+      expect(shouldReview(context({ source, reviewGuarded: true, unattended: true, reviewUnattended: true }))).toBe(true);
+    }
+    for (const source of ["local-computer-block", "explicit-approval-block", "always-allow", "auto-mode", "full-access"] as const) {
+      expect(shouldReview(context({ source, reviewGuarded: true, standInReviewer: true, unattended: true, reviewUnattended: true }))).toBe(false);
+    }
+  });
+
   it("supports watch mode but stays off by default", () => {
     expect(shouldReview(context({ mode: "shadow" }))).toBe(true);
     expect(shouldReview(context({ mode: "off" }))).toBe(false);

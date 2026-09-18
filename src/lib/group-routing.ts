@@ -8,7 +8,7 @@ export function effectiveDefaultResponder(
   members: Array<{ id: string }>,
 ): GroupDefaultResponder {
   const value = group.defaultResponder;
-  if (value?.kind === "everyone" || value?.kind === "mentions") return value;
+  if (value?.kind === "everyone" || value?.kind === "mentions" || value?.kind === "smart") return value;
   if (value?.kind === "member" && members.some((member) => member.id === value.botId)) return value;
   return members[0] ? { kind: "member", botId: members[0].id } : { kind: "mentions" };
 }
@@ -24,6 +24,7 @@ export function groupResponseHint(group: Group, members: Bot[]): string {
   const value = effectiveDefaultResponder(group, members);
   if (value.kind === "everyone") return t("room.hint.everyone");
   if (value.kind === "mentions") return t("room.hint.mentions");
+  if (value.kind === "smart") return t("room.hint.smart");
   const name = defaultResponderName(group, members) ?? t("room.hint.leadFallback");
   return t("room.hint.lead", { name });
 }
@@ -33,6 +34,7 @@ export function groupComposerHint(group: Group, members: Bot[]): string {
   const value = effectiveDefaultResponder(group, members);
   if (value.kind === "everyone") return t("composer.hint.everyone");
   if (value.kind === "mentions") return t("composer.hint.mentions");
+  if (value.kind === "smart") return t("composer.hint.smart");
   return t("composer.hint.responder", {
     name: defaultResponderName(group, members) ?? t("composer.hint.lead"),
   });
@@ -40,7 +42,9 @@ export function groupComposerHint(group: Group, members: Bot[]): string {
 
 /** Same routing sendGroup uses: explicit @mentions win, otherwise the
  * room's default responder. Keep this aligned with server/store.ts
- * `roomResponders` / `mentionedBots`. */
+ * `roomResponders` / `mentionedBots`. A `smart` room without mentions
+ * returns [] on purpose: the server asks Jev who answers, and the client
+ * cannot predict that pick. */
 export function roomRespondersForComposer<T extends { id: string; name: string; hidden?: boolean }>(
   text: string,
   members: T[],

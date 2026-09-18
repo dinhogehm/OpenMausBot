@@ -209,7 +209,11 @@ export interface Message {
 export type GroupDefaultResponder =
   | { kind: "member"; botId: string }
   | { kind: "everyone" }
-  | { kind: "mentions" };
+  | { kind: "mentions" }
+  /** Jev (TypeSafe) picks the member whose persona best fits an untagged
+   * message; a low-confidence pick falls back to the first active member.
+   * Mirrors shared/wire.ts. */
+  | { kind: "smart" };
 
 /** A room: several bots + you in one shared thread. */
 export interface Group {
@@ -509,6 +513,14 @@ export interface ConfigStatus {
   xai?: { configured: boolean };
   anthropic?: { configured: boolean };
   openaiCompat?: { configured: boolean; url?: string };
+  /** `model` is the default OpenRouter model id; `provider` pins routing to
+   * one upstream provider. Both are plain settings, never the key. */
+  openrouter?: { configured: boolean; model?: string; provider?: string };
+  /** `permissionReview` sends each permission request summary to Jev for an
+   * allow/deny verdict instead of the bot's own provider. */
+  /** `configured` = a TypeSafe key is saved; `available` = Jev is reachable
+   * at all, also through the OpenRouter key (`gateway` says which). */
+  typesafe?: { configured: boolean; available?: boolean; gateway?: "typesafe" | "openrouter" | null; model?: string; permissionReview?: boolean; reviewUnattended?: boolean; reviewGuarded?: boolean };
   /** what this server is entitled to; Settings shows only what works here */
   edition?: { edition: "oss" | "enterprise"; features: string[] };
   /** a fleet agent exists on this server (Settings → Workspaces) */

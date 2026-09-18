@@ -26,6 +26,19 @@ export interface ReviewContext {
   approvalMode: ApprovalMode;
   unattended: boolean;
   approvalScope: "local-computer" | undefined;
+  /** The owner opted into a reviewer that may answer with nobody watching
+   * (Jev, `typesafe.reviewUnattended`). Off, unattended cards are never
+   * reviewed — the rule below stands exactly as before. */
+  reviewUnattended?: boolean;
+  /** The owner lets the reviewer judge cards a destructive/sensitive pattern
+   * guard stopped (Jev, `typesafe.reviewGuarded`); the guard's match rides
+   * along as evidence. Off, those cards go straight to a person as before. */
+  reviewGuarded?: boolean;
+  /** A reviewer stands in for an engine that has no Auto reviewer of its
+   * own (the chat-completions family): there, `native-approval` does not
+   * mean "the provider's reviewer declined", it means "nobody reviewed", and
+   * the stand-in may. An engine with a native reviewer keeps its declines. */
+  standInReviewer?: boolean;
 }
 
 export function resolveAutoReviewMode(stored: string | undefined): AutoReviewMode {
@@ -33,16 +46,20 @@ export function resolveAutoReviewMode(stored: string | undefined): AutoReviewMod
 }
 
 /** Review is a last resort for an ordinary attended permission card.
- * Existing decisions, unattended turns, host-computer access, and questions
- * remain exclusively human/rule controlled. */
+ * Existing decisions, host-computer access, and questions remain
+ * exclusively human/rule controlled. An unattended turn is reviewed only
+ * under the explicit opt-in, and then only where the rule that stopped it
+ * was "nobody is watching" (auto mode withheld, or no grant at all) — never
+ * past a destructive/sensitive guard, a sandbox widening, or a provider
+ * that demands a person. */
 export function shouldReview(context: ReviewContext): boolean {
-  return (
-    context.mode !== "off" &&
-    context.approvalMode !== "custom" &&
-    context.source === "no-grant" &&
-    !context.unattended &&
-    context.approvalScope === undefined
-  );
+  if (context.mode === "off" || context.approvalMode === "custom" || context.approvalScope !== undefined) return false;
+  const reviewable =
+    context.source === "no-grant" ||
+    (context.source === "native-approval" && context.standInReviewer === true) ||
+    ((context.source === "destructive-guard" || context.source === "sensitive-guard") && context.reviewGuarded === true);
+  if (!context.unattended) return reviewable;
+  return context.reviewUnattended === true && (reviewable || context.source === "unattended-block");
 }
 
 const MAX_REVIEW_FIELD_CHARS = 2_000;

@@ -7,10 +7,12 @@ import { api, useStore, type ConfigStatus } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
+import { Switch } from "./SettingsPrimitives";
 
-export type ConfigSection = "composio" | "box" | "opencodeGo" | "anthropic" | "openaiCompat" | "xai";
+export type ConfigSection =
+  | "composio" | "box" | "opencodeGo" | "anthropic" | "openaiCompat" | "xai" | "openrouter" | "typesafe";
 /** Sections whose key can be tried against the provider from the server. */
-export type TestableProvider = "anthropic" | "openaiCompat" | "xai";
+export type TestableProvider = "anthropic" | "openaiCompat" | "xai" | "openrouter" | "typesafe";
 
 const SECTIONS: Record<
   ConfigSection,
@@ -25,6 +27,8 @@ const SECTIONS: Record<
   anthropic: { body: (v) => ({ anthropic: { key: v } }), flag: (c) => c.anthropic?.configured ?? false },
   openaiCompat: { body: (v) => ({ openaiCompat: { key: v } }), flag: (c) => c.openaiCompat?.configured ?? false },
   xai: { body: (v) => ({ xai: { key: v } }), flag: (c) => c.xai?.configured ?? false },
+  openrouter: { body: (v) => ({ openrouter: { key: v } }), flag: (c) => c.openrouter?.configured ?? false },
+  typesafe: { body: (v) => ({ typesafe: { key: v } }), flag: (c) => c.typesafe?.configured ?? false },
 };
 
 // Provider keys have no desktop-shell slot yet and go through the server's
@@ -96,6 +100,22 @@ const CREDENTIALS: Record<
     descriptionKey: "keys.xai.desc",
     href: "https://console.x.ai",
     linkLabelKey: "keys.xai.link",
+    optional: true,
+  },
+  openrouter: {
+    labelKey: "keys.openrouter.label",
+    placeholder: "sk-or-v1-…",
+    descriptionKey: "keys.openrouter.desc",
+    href: "https://openrouter.ai/keys",
+    linkLabelKey: "keys.openrouter.link",
+    optional: true,
+  },
+  typesafe: {
+    labelKey: "keys.typesafe.label",
+    placeholderKey: "keys.typesafe.placeholder",
+    descriptionKey: "keys.typesafe.desc",
+    href: "https://console.typesafe.ai/settings/keys",
+    linkLabelKey: "keys.typesafe.link",
     optional: true,
   },
 };
@@ -444,5 +464,192 @@ export function OpenAiCompatUrl() {
       <p className="mt-1 text-[11.5px] leading-relaxed text-ink-secondary">{t("keys.openaiCompat.urlHint")}</p>
       {error && <div className="mt-1 text-[12px] text-danger">{error}</div>}
     </div>
+  );
+}
+
+/** One non-secret text setting saved through PUT /api/config, the same
+ * shape as the base URL above: an empty save clears the value. */
+function ConfigTextSetting({
+  labelKey,
+  hintKey,
+  placeholder,
+  saved,
+  body,
+}: {
+  labelKey: LocaleKey;
+  hintKey: LocaleKey;
+  placeholder: string;
+  saved: string;
+  body: (value: string) => unknown;
+}) {
+  const { dispatch } = useStore();
+  const [value, setValue] = useState(saved);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { setValue(saved); }, [saved]);
+  const dirty = value.trim() !== saved;
+
+  const save = () => {
+    if (saving || !dirty) return;
+    setSaving(true);
+    setError(null);
+    api("/api/config", { method: "PUT", body: JSON.stringify(body(value.trim())) })
+      .then((status: ConfigStatus) => dispatch({ type: "configStatus", config: status }))
+      .catch((e) => setError(e.message))
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <div>
+      <div className="mb-1.5 text-[13px] text-ink-secondary">{t(labelKey)}</div>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && save()}
+          placeholder={placeholder}
+          aria-label={t(labelKey)}
+          spellCheck={false}
+          autoComplete="off"
+          className="w-full rounded-lg border border-hairline/40 bg-inset px-3 py-2 font-mono text-[12px] text-ink placeholder:text-ink-secondary focus:border-hairline focus:outline-none"
+        />
+        <button
+          onClick={save}
+          disabled={saving || !dirty}
+          className="flex w-[72px] shrink-0 items-center justify-center gap-1.5 rounded-lg bg-control py-2 text-[13px] text-ink hover:bg-raised-hover disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saving ? <Loader2 size={13} className="animate-spin" /> : <><Check size={13} />{t("common.save")}</>}
+        </button>
+      </div>
+      <p className="mt-1 text-[11.5px] leading-relaxed text-ink-secondary">{t(hintKey)}</p>
+      {error && <div className="mt-1 text-[12px] text-danger">{error}</div>}
+    </div>
+  );
+}
+
+/** OpenRouter's non-secret settings: the model every OpenRouter bot starts
+ * on and an optional upstream provider pin. Both live next to the key. */
+export function OpenRouterSettings() {
+  const { state } = useStore();
+  return (
+    <>
+      <ConfigTextSetting
+        labelKey="keys.openrouter.model"
+        hintKey="keys.openrouter.modelHint"
+        placeholder="anthropic/claude-sonnet-4.5"
+        saved={state.config?.openrouter?.model ?? ""}
+        body={(model) => ({ openrouter: { model } })}
+      />
+      <ConfigTextSetting
+        labelKey="keys.openrouter.provider"
+        hintKey="keys.openrouter.providerHint"
+        placeholder="anthropic"
+        saved={state.config?.openrouter?.provider ?? ""}
+        body={(provider) => ({ openrouter: { provider } })}
+      />
+    </>
+  );
+}
+
+/** TypeSafe's non-secret settings: the Jev model plus the switch that lets
+ * Jev, not the bot's own provider, answer permission requests. */
+export function TypeSafeSettings() {
+  const { state, dispatch } = useStore();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // The toggle needs Jev reachable, not this row's own key: an OpenRouter
+  // key reaches the same model through OpenRouter's Decisions endpoint.
+  const typesafe = state.config?.typesafe;
+  const configured = typesafe?.available ?? typesafe?.configured ?? false;
+  const permissionReview = typesafe?.permissionReview ?? false;
+  const reviewUnattended = typesafe?.reviewUnattended ?? false;
+  const reviewGuarded = typesafe?.reviewGuarded ?? false;
+  const switchId = useId();
+  const hintId = useId();
+  const unattendedSwitchId = useId();
+  const unattendedHintId = useId();
+  const guardedSwitchId = useId();
+  const guardedHintId = useId();
+
+  const saveTypesafe = (patch: { permissionReview?: boolean; reviewUnattended?: boolean; reviewGuarded?: boolean }) => {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    api("/api/config", { method: "PUT", body: JSON.stringify({ typesafe: patch }) })
+      .then((status: ConfigStatus) => dispatch({ type: "configStatus", config: status }))
+      .catch((e) => setError(e.message))
+      .finally(() => setSaving(false));
+  };
+  const togglePermissionReview = () => saveTypesafe({ permissionReview: !permissionReview });
+  // The second opt-in rides on the first; switching the first off leaves
+  // the second stored but inert, so the person sees it exactly as they left it.
+  const toggleReviewUnattended = () => saveTypesafe({ reviewUnattended: !reviewUnattended });
+  const toggleReviewGuarded = () => saveTypesafe({ reviewGuarded: !reviewGuarded });
+
+  return (
+    <>
+      <ConfigTextSetting
+        labelKey="keys.typesafe.model"
+        hintKey="keys.typesafe.modelHint"
+        placeholder="jev-latest"
+        saved={state.config?.typesafe?.model ?? ""}
+        body={(model) => ({ typesafe: { model } })}
+      />
+      <div>
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <label htmlFor={switchId} className="block text-[13px] text-ink-secondary">{t("keys.typesafe.permissionReview")}</label>
+            <p id={hintId} className="mt-1 text-[11.5px] leading-relaxed text-ink-secondary">
+              {t("keys.typesafe.permissionReviewHint")}
+              {!configured && <> {t("keys.typesafe.permissionReviewNeedsKey")}</>}
+            </p>
+          </div>
+          <Switch
+            id={switchId}
+            checked={permissionReview}
+            aria-describedby={hintId}
+            disabled={saving || (!configured && !permissionReview)}
+            onClick={togglePermissionReview}
+            className="mt-0.5"
+          />
+        </div>
+        <div className="mt-3 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <label htmlFor={unattendedSwitchId} className="block text-[13px] text-ink-secondary">{t("keys.typesafe.reviewUnattended")}</label>
+            <p id={unattendedHintId} className="mt-1 text-[11.5px] leading-relaxed text-ink-secondary">
+              {t("keys.typesafe.reviewUnattendedHint")}
+              {!permissionReview && <> {t("keys.typesafe.reviewUnattendedNeedsReview")}</>}
+            </p>
+          </div>
+          <Switch
+            id={unattendedSwitchId}
+            checked={reviewUnattended}
+            aria-describedby={unattendedHintId}
+            disabled={saving || ((!configured || !permissionReview) && !reviewUnattended)}
+            onClick={toggleReviewUnattended}
+            className="mt-0.5"
+          />
+        </div>
+        <div className="mt-3 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <label htmlFor={guardedSwitchId} className="block text-[13px] text-ink-secondary">{t("keys.typesafe.reviewGuarded")}</label>
+            <p id={guardedHintId} className="mt-1 text-[11.5px] leading-relaxed text-ink-secondary">
+              {t("keys.typesafe.reviewGuardedHint")}
+              {!permissionReview && <> {t("keys.typesafe.reviewUnattendedNeedsReview")}</>}
+            </p>
+          </div>
+          <Switch
+            id={guardedSwitchId}
+            checked={reviewGuarded}
+            aria-describedby={guardedHintId}
+            disabled={saving || ((!configured || !permissionReview) && !reviewGuarded)}
+            onClick={toggleReviewGuarded}
+            className="mt-0.5"
+          />
+        </div>
+        {error && <div className="mt-1 text-[12px] text-danger">{error}</div>}
+      </div>
+    </>
   );
 }

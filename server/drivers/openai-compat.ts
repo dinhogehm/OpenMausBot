@@ -1,5 +1,6 @@
-// Transcript-replay driver for OpenRouter, Groq, Together, llama.cpp, and
-// other endpoints that speak the OpenAI chat-completions contract.
+// Transcript-replay driver for Groq, Together, llama.cpp, and other endpoints
+// that speak the OpenAI chat-completions contract. OpenRouter still works
+// here by URL, but has its own dedicated driver (openrouter.ts).
 import type { ModelCatalog, ProviderDriver } from "../contracts.ts";
 import { createOpenAIChatRuntime } from "./openai-chat.ts";
 

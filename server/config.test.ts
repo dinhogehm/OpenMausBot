@@ -556,6 +556,36 @@ describe("default fleet", () => {
     });
   });
 
+  it("hands the OpenRouter key and defaults only to openrouter instances", () => {
+    const map = instanceConfigs({
+      openrouter: { key: "sk-or-fixture", model: "anthropic/claude-sonnet-4.5", provider: "anthropic" },
+    });
+    expect(map.openrouter).toEqual({
+      driver: "openrouter",
+      environment: {
+        OPENROUTER_API_KEY: "sk-or-fixture",
+        OPENROUTER_MODEL: "anthropic/claude-sonnet-4.5",
+        OPENROUTER_PROVIDER: "anthropic",
+      },
+    });
+    expect(map.openaiCompat.environment).toEqual({});
+    // Jev is reachable through OpenRouter's Decisions endpoint, so without a
+    // TypeSafe key the jev instance gets the OpenRouter key and nothing else.
+    expect(map.jev.environment).toEqual({ OPENROUTER_API_KEY: "sk-or-fixture" });
+    expect(instanceConfigs({ openrouter: { key: "sk-or-fixture" }, typesafe: { key: "ts" } }).jev.environment)
+      .toEqual({ TYPESAFE_API_KEY: "ts" });
+    expect(instanceConfigs({}).openrouter.environment).toEqual({});
+  });
+
+  it("hands the TypeSafe key only to jev instances and keeps the review toggle a setting", () => {
+    const map = instanceConfigs({ typesafe: { key: "ts-fixture", model: "jev-1.13.0", permissionReview: true } });
+    expect(map.jev).toEqual({ driver: "jev", environment: { TYPESAFE_API_KEY: "ts-fixture", TYPESAFE_MODEL: "jev-1.13.0" } });
+    expect(map.openrouter.environment).toEqual({});
+    expect(map.claude.environment).toEqual({});
+    expect(parseConfigPatch({ typesafe: { permissionReview: true } })).toEqual({ typesafe: { permissionReview: true } });
+    expect(() => parseConfigPatch({ typesafe: { permissionReview: "yes" } })).toThrow();
+  });
+
   it("hands a saved Anthropic key only to Claude instances, as the variable the CLI reads", () => {
     const map = instanceConfigs({ anthropic: { key: "sk-ant-fixture", url: "https://anthropic-proxy.example.test" } });
     expect(map.claude.environment).toEqual({ ANTHROPIC_API_KEY: "sk-ant-fixture", ANTHROPIC_BASE_URL: "https://anthropic-proxy.example.test" });
@@ -623,6 +653,8 @@ describe("default fleet", () => {
     expect(map.hermes?.driver).toBe("hermesAgent");
     expect(map.cursor?.driver).toBe("cursorAgent");
     expect(map.openaiCompat?.driver).toBe("openai-compat");
+    expect(map.openrouter?.driver).toBe("openrouter");
+    expect(map.jev?.driver).toBe("jev");
   });
 
   it("does not expand a one-off shadow fleet", () => {

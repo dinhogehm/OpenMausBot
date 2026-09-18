@@ -382,21 +382,27 @@ const Transcript = memo(function Transcript({
 });
 
 function DefaultResponderSelect({ group, members }: { group: Group; members: Bot[] }) {
-  const { dispatch } = useStore();
+  const { state, dispatch } = useStore();
   const responder = effectiveDefaultResponder(group, members);
   const value = responder.kind === "member" ? `member:${responder.botId}` : responder.kind;
   const lead = responder.kind === "member" ? members.find((member) => member.id === responder.botId) : undefined;
+  // A room already on smart routing keeps the option while the key is gone,
+  // so the select never shows a value it has no option for.
+  const smartAvailable = Boolean(state.config?.typesafe?.available ?? state.config?.typesafe?.configured) || responder.kind === "smart";
   const title =
     responder.kind === "everyone"
       ? t("room.responder.everyone")
       : responder.kind === "mentions"
         ? t("room.responder.mentions")
-        : t("room.responder.lead", { name: lead?.name ?? t("room.responder.leadFallback") });
+        : responder.kind === "smart"
+          ? t("room.responder.smart")
+          : t("room.responder.lead", { name: lead?.name ?? t("room.responder.leadFallback") });
 
   const change = (nextValue: string) => {
     let next: GroupDefaultResponder;
     if (nextValue === "everyone") next = { kind: "everyone" };
     else if (nextValue === "mentions") next = { kind: "mentions" };
+    else if (nextValue === "smart") next = { kind: "smart" };
     else next = { kind: "member", botId: nextValue.slice("member:".length) };
     dispatch({ type: "patchGroup", groupId: group.id, patch: { defaultResponder: next } });
   };
@@ -419,6 +425,9 @@ function DefaultResponderSelect({ group, members }: { group: Group; members: Bot
         <optgroup label={t("room.responder.groupBehavior")}>
           <option value="everyone">{t("room.responder.everyoneOption")}</option>
           <option value="mentions">{t("room.responder.mentionsOption")}</option>
+          <option value="smart" disabled={!smartAvailable} title={smartAvailable ? undefined : t("room.responder.smartNeedsKey")}>
+            {smartAvailable ? t("room.responder.smartOption") : t("room.responder.smartOptionLocked")}
+          </option>
         </optgroup>
       </select>
       <ChevronDown
@@ -555,7 +564,7 @@ type RoomSetupFields = {
   setupSkippedAt?: number | string | null;
 };
 
-type RoomResponderMode = "lead" | "everyone" | "mentions";
+type RoomResponderMode = "lead" | "everyone" | "mentions" | "smart";
 
 function setupResponderMode(responder: GroupDefaultResponder): RoomResponderMode {
   return responder.kind === "member" ? "lead" : responder.kind;
@@ -584,7 +593,8 @@ function roomNeedsSetup(group: Group): boolean {
 }
 
 function RoomSetup({ group, members }: { group: Group; members: Bot[] }) {
-  const { dispatch } = useStore();
+  const { state, dispatch } = useStore();
+  const smartAvailable = Boolean(state.config?.typesafe?.available ?? state.config?.typesafe?.configured);
   const [folder, setFolder] = useState(group.cwd ?? "");
   const [behavior, setBehavior] = useState<RoomResponderMode>(setupResponderMode(group.defaultResponder));
   const [leadId, setLeadId] = useState(
@@ -616,6 +626,7 @@ function RoomSetup({ group, members }: { group: Group; members: Bot[] }) {
   const responder = (): GroupDefaultResponder => {
     if (behavior === "everyone") return { kind: "everyone" };
     if (behavior === "mentions") return { kind: "mentions" };
+    if (behavior === "smart") return { kind: "smart" };
     return members.some((member) => member.id === leadId)
       ? { kind: "member", botId: leadId }
       : group.defaultResponder;
@@ -709,7 +720,7 @@ function RoomSetup({ group, members }: { group: Group; members: Bot[] }) {
         <fieldset className="block">
           <legend className="text-[13px] font-semibold text-ink">{t("room.responder.aria")}</legend>
           <p className="mt-1 text-[12px] text-ink-secondary">{t("room.setup.responderDetail")}</p>
-          <div role="radiogroup" aria-label={t("room.responder.aria")} className="mt-2 grid gap-2 sm:grid-cols-3">
+          <div role="radiogroup" aria-label={t("room.responder.aria")} className="mt-2 grid gap-2 sm:grid-cols-2">
             <div ref={leadPickerRef} className="relative min-w-0">
               <button
                 type="button"
@@ -856,6 +867,43 @@ function RoomSetup({ group, members }: { group: Group; members: Bot[] }) {
                 {t("room.responder.mentionsOption")}
               </span>
               <span className="ml-6 mt-2 text-[11.5px] text-ink-secondary">{t("room.setup.onlyMentioned")}</span>
+            </button>
+
+            <button
+              type="button"
+              role="radio"
+              aria-checked={behavior === "smart"}
+              aria-disabled={!smartAvailable && behavior !== "smart"}
+              onClick={() => {
+                if (!smartAvailable) return;
+                setBehavior("smart");
+                setLeadPickerOpen(false);
+              }}
+              disabled={saving}
+              title={smartAvailable ? undefined : t("room.responder.smartNeedsKey")}
+              className={cn(
+                "flex min-h-[72px] w-full flex-col items-start justify-between rounded-2xl border px-3 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+                behavior === "smart"
+                  ? "border-accent bg-accent/10 text-ink ring-1 ring-accent/30"
+                  : smartAvailable
+                    ? "border-hairline/50 bg-inset text-ink-secondary hover:border-hairline hover:bg-raised"
+                    : "cursor-not-allowed border-dashed border-hairline/50 bg-inset text-ink-secondary opacity-70",
+              )}
+            >
+              <span className="flex items-center gap-2 text-[13px] font-semibold">
+                <span
+                  className={cn(
+                    "flex size-4 shrink-0 items-center justify-center rounded-full border",
+                    behavior === "smart" ? "border-accent bg-accent" : "border-ink-secondary/60",
+                  )}
+                >
+                  {behavior === "smart" && <span className="size-1.5 rounded-full bg-white" />}
+                </span>
+                {t("room.responder.smartOption")}
+              </span>
+              <span className="ml-6 mt-2 text-[11.5px] text-ink-secondary">
+                {smartAvailable ? t("room.setup.smartDetail") : t("room.responder.smartNeedsKey")}
+              </span>
             </button>
           </div>
         </fieldset>

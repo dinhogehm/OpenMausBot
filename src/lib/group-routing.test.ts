@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import { setLocale } from "./i18n";
-import { goalCoordinatorForComposer, groupComposerHint, roomRespondersForComposer } from "./group-routing";
+import {
+  effectiveDefaultResponder,
+  goalCoordinatorForComposer,
+  groupComposerHint,
+  groupResponseHint,
+  roomRespondersForComposer,
+} from "./group-routing";
 import type { GroupDefaultResponder } from "@/state/store";
 
 describe("roomRespondersForComposer", () => {
@@ -28,6 +34,14 @@ describe("roomRespondersForComposer", () => {
     expect(roomRespondersForComposer("@everyone hello", members, { defaultResponder: { kind: "mentions" } })).toEqual(
       members,
     );
+  });
+
+  it("leaves smart routing to the server unless someone is mentioned", () => {
+    const smart = { defaultResponder: { kind: "smart" as const } };
+    expect(effectiveDefaultResponder(smart, members)).toEqual({ kind: "smart" });
+    expect(roomRespondersForComposer("hello", members, smart)).toEqual([]);
+    expect(roomRespondersForComposer("@Milind take this", members, smart)).toEqual([members[1]]);
+    expect(roomRespondersForComposer("@everyone hello", members, smart)).toEqual(members);
   });
 });
 
@@ -71,6 +85,10 @@ describe("composer hint, in the reader's language", () => {
     setLocale("pt-br");
     expect(groupComposerHint(room({ kind: "everyone" }), members)).toBe("todos respondem");
     expect(groupComposerHint(room({ kind: "mentions" }), members)).toBe("@ para chamar um bot");
+    expect(groupComposerHint(room({ kind: "smart" }), members)).toBe("Jev escolhe quem responde");
+    expect(groupResponseHint(room({ kind: "smart" }), members)).toBe(
+      "Jev escolhe o membro que melhor se encaixa em cada mensagem — @mencione alguém para escolher você mesmo.",
+    );
     // Select the non-first member so fallback routing cannot satisfy the assertion.
     expect(groupComposerHint(room({ kind: "member", botId: "lead" }), members)).toBe("Atlas responde");
     expect(groupComposerHint({ dm: true } as Parameters<typeof groupComposerHint>[0], members)).toBe(

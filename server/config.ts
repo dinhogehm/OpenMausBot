@@ -369,6 +369,28 @@ const appConfigSchema = z.object({
   openaiCompat: z
     .object({ key: optionalText, url: optionalText, model: optionalText, provider: optionalText })
     .optional(),
+  /** OpenRouter key for the dedicated `openrouter` engine (openai-compat
+   * stays free for Groq, local servers, …). `model` seeds the default
+   * selection; `provider` pins an upstream (e.g. "fireworks"). */
+  openrouter: z.object({ key: optionalText, model: optionalText, provider: optionalText }).optional(),
+  /** TypeSafe (Jev) key. Jev answers typed questions only, so besides the
+   * `jev` decision engine it powers two harness features the user opts into:
+   * `permissionReview` routes auto-review verdicts through Jev instead of the
+   * bot's own provider, and rooms set to `smart` routing ask it who answers.
+   * `model` overrides the `jev-latest` alias (e.g. to pin `jev-1.13.0`). */
+  typesafe: z.object({
+    key: optionalText,
+    model: optionalText,
+    permissionReview: z.boolean().optional(),
+    /** Second opt-in: Jev may also answer permission cards raised while
+     * nobody is watching (workflow nodes, webhooks, routines), under stricter
+     * thresholds. Needs `permissionReview` too. */
+    reviewUnattended: z.boolean().optional(),
+    /** Third opt-in: Jev also judges cards the destructive/sensitive pattern
+     * guards would send straight to a person; the guard's match goes to Jev
+     * as evidence. Needs `permissionReview` too. */
+    reviewGuarded: z.boolean().optional(),
+  }).optional(),
   /** Project key used for Sessions, catalog and agent tools. userId/sessionId
    * are non-secret local identifiers used to reuse one Composio Session. */
   composio: z.object({ apiKey: optionalText, userId: optionalText, sessionId: optionalText }).optional(),
@@ -463,6 +485,8 @@ export interface AppConfig {
   budgets?: { monthlyUsd?: number; warnAtPercent?: number };
   billing?: { currency?: string; prices?: Record<string, { inputPerMillion: number; outputPerMillion: number; cachedInputPerMillion?: number }> };
   openaiCompat?: { key?: string; url?: string; model?: string; provider?: string };
+  openrouter?: { key?: string; model?: string; provider?: string };
+  typesafe?: { key?: string; model?: string; permissionReview?: boolean; reviewUnattended?: boolean; reviewGuarded?: boolean };
   composio?: { apiKey?: string; userId?: string; sessionId?: string };
   box?: { token?: string };
   /** A named host from the user's SSH config. Authentication stays with SSH. */
@@ -797,6 +821,13 @@ export function loadConfig(): AppConfig {
   if (process.env.OPENAI_COMPAT_URL !== undefined) cfg.openaiCompat.url = process.env.OPENAI_COMPAT_URL;
   if (process.env.OPENAI_COMPAT_MODEL !== undefined) cfg.openaiCompat.model = process.env.OPENAI_COMPAT_MODEL;
   if (process.env.OPENAI_COMPAT_PROVIDER !== undefined) cfg.openaiCompat.provider = process.env.OPENAI_COMPAT_PROVIDER;
+  cfg.openrouter = { ...cfg.openrouter };
+  if (process.env.OPENROUTER_API_KEY !== undefined) cfg.openrouter.key = process.env.OPENROUTER_API_KEY;
+  if (process.env.OPENROUTER_MODEL !== undefined) cfg.openrouter.model = process.env.OPENROUTER_MODEL;
+  if (process.env.OPENROUTER_PROVIDER !== undefined) cfg.openrouter.provider = process.env.OPENROUTER_PROVIDER;
+  cfg.typesafe = { ...cfg.typesafe };
+  if (process.env.TYPESAFE_API_KEY !== undefined) cfg.typesafe.key = process.env.TYPESAFE_API_KEY;
+  if (process.env.TYPESAFE_MODEL !== undefined) cfg.typesafe.model = process.env.TYPESAFE_MODEL;
   cfg.composio = { ...cfg.composio };
   if (process.env.COMPOSIO_API_KEY !== undefined) cfg.composio.apiKey = process.env.COMPOSIO_API_KEY;
   cfg.box = { ...cfg.box };
@@ -832,6 +863,8 @@ export function syncCredentialEnv(patch: Partial<AppConfig>): void {
     [patch.xai?.key, "XAI_API_KEY"],
     [patch.anthropic?.key, "OMB_ANTHROPIC_API_KEY"],
     [patch.openaiCompat?.key, "OPENAI_COMPAT_API_KEY"],
+    [patch.openrouter?.key, "OPENROUTER_API_KEY"],
+    [patch.typesafe?.key, "TYPESAFE_API_KEY"],
     [patch.composio?.apiKey, "COMPOSIO_API_KEY"],
     [patch.box?.token, "BOX_TOKEN"],
     [patch.opencodeGo?.apiKey, "OPENCODE_API_KEY"],
@@ -852,6 +885,9 @@ export function syncCredentialEnv(patch: Partial<AppConfig>): void {
     [patch.anthropic?.url, "OMB_ANTHROPIC_API_URL"],
     [patch.openaiCompat?.model, "OPENAI_COMPAT_MODEL"],
     [patch.openaiCompat?.provider, "OPENAI_COMPAT_PROVIDER"],
+    [patch.openrouter?.model, "OPENROUTER_MODEL"],
+    [patch.openrouter?.provider, "OPENROUTER_PROVIDER"],
+    [patch.typesafe?.model, "TYPESAFE_MODEL"],
   ];
   for (const [value, name] of settings) {
     if (value === undefined) continue;
@@ -871,6 +907,8 @@ export const WORKSPACE_CREDENTIAL_ENV = [
   "OMB_ANTHROPIC_API_URL",
   "OPENAI_COMPAT_API_KEY",
   "OPENAI_COMPAT_URL",
+  "OPENROUTER_API_KEY",
+  "TYPESAFE_API_KEY",
   "BOX_TOKEN",
   "OPENCODE_API_KEY",
   "OMB_TTS_KEY",
@@ -905,6 +943,7 @@ export const PROVIDER_CREDENTIAL_ENV = [
   "MINIMAX_API_KEY",
   "OPENAI_API_KEY",
   "OPENCODE_API_KEY",
+  "OPENROUTER_API_KEY",
   "XAI_API_KEY",
   "CURSOR_API_KEY",
   "CURSOR_AUTH_TOKEN",
@@ -927,7 +966,7 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
   // back after we have successfully recognized the legacy list.
   const storedProfiles = storedBrowserProfilesSchema.safeParse(disk.browserProfiles);
   if (storedProfiles.success) disk.browserProfiles = storedProfiles.data;
-  for (const key of ["xai", "anthropic", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "localVm", "features", "budgets", "billing", "onboarding", "browserEngine"] as const) {
+  for (const key of ["xai", "anthropic", "openaiCompat", "openrouter", "typesafe", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "localVm", "features", "budgets", "billing", "onboarding", "browserEngine"] as const) {
     const section = checkedPatch[key];
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);
@@ -1085,6 +1124,14 @@ function injectedEnvironment(cfg: AppConfig, driver: string): Map<string, string
     environment.set("OPENAI_COMPAT_API_KEY", cfg.openaiCompat.key);
   if (driver === "openai-compat" && cfg.openaiCompat?.url)
     environment.set("OPENAI_COMPAT_URL", cfg.openaiCompat.url);
+  if (driver === "openrouter" && cfg.openrouter?.key) environment.set("OPENROUTER_API_KEY", cfg.openrouter.key);
+  if (driver === "openrouter" && cfg.openrouter?.model) environment.set("OPENROUTER_MODEL", cfg.openrouter.model);
+  if (driver === "openrouter" && cfg.openrouter?.provider) environment.set("OPENROUTER_PROVIDER", cfg.openrouter.provider);
+  if (driver === "jev" && cfg.typesafe?.key) environment.set("TYPESAFE_API_KEY", cfg.typesafe.key);
+  // Without a TypeSafe key, Jev is reached through OpenRouter's Decisions
+  // endpoint with the workspace's OpenRouter key (same model, same price).
+  if (driver === "jev" && !cfg.typesafe?.key && cfg.openrouter?.key) environment.set("OPENROUTER_API_KEY", cfg.openrouter.key);
+  if (driver === "jev" && cfg.typesafe?.model) environment.set("TYPESAFE_MODEL", cfg.typesafe.model);
   if (driver === "boxAgent" && cfg.box?.token) environment.set("BOX_TOKEN", cfg.box.token);
   if (driver === "opencodeGo" && cfg.opencodeGo?.apiKey) environment.set("OPENCODE_API_KEY", cfg.opencodeGo.apiKey);
   return environment;
@@ -1121,6 +1168,8 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
     opencodeGo: { driver: "opencodeGo" },
     computer: { driver: "boxAgent" },
     openaiCompat: { driver: "openai-compat" },
+    openrouter: { driver: "openrouter" },
+    jev: { driver: "jev" },
     qwen: { driver: "qwenAgent" },
     hermes: { driver: "hermesAgent" },
     pi: { driver: "piAgent" },
@@ -1136,6 +1185,8 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
   const PRODUCT_FLEET_ADDITIONS = {
     cursor: { driver: "cursorAgent" },
     openaiCompat: { driver: "openai-compat" },
+    openrouter: { driver: "openrouter" },
+    jev: { driver: "jev" },
     ...CUSTOM_ONLY,
   } as const;
   const configured = cfg.instances && Object.keys(cfg.instances).length ? cfg.instances : null;

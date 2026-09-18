@@ -92,6 +92,9 @@ interface RuntimeOptions<Config> {
   retryScale?: number;
   /** Explicit text-only mode for endpoints/models that cannot accept tools. */
   tools?: boolean;
+  /** Non-secret attribution headers a gateway asks for (OpenRouter's
+   * HTTP-Referer / X-Title). Authorization always wins over these. */
+  extraHeaders?: Record<string, string>;
 }
 
 const usageFrom = (usage: CompletionJson["usage"]): Usage | null =>
@@ -151,7 +154,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
 
       const response = await fetch(`${options.apiUrl}/chat/completions`, {
         method: "POST",
-        headers: { authorization: `Bearer ${options.apiKey}`, "content-type": "application/json" },
+        headers: { ...options.extraHeaders, authorization: `Bearer ${options.apiKey}`, "content-type": "application/json" },
         body: JSON.stringify({
           ...options.requestBody(model, messages, stream),
           ...(tools.length ? { tools } : {}),

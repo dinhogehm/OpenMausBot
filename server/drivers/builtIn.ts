@@ -16,6 +16,8 @@ import { QwenAgentDriver } from "./acp/qwen.ts";
 import { CustomAcpDriver } from "./acp/custom.ts";
 import { HermesAgentDriver } from "./acp/hermes.ts";
 import { OpenAICompatDriver } from "./openai-compat.ts";
+import { OpenRouterDriver } from "./openrouter.ts";
+import { JevDriver } from "./jev.ts";
 import { PiDriver } from "./pi.ts";
 import { MinimaxDriver } from "./minimax.ts";
 
@@ -32,6 +34,8 @@ export const BUILT_IN_DRIVERS: readonly AnyProviderDriver[] = [
   CustomAcpDriver,
   PiDriver,
   OpenAICompatDriver,
+  OpenRouterDriver,
+  JevDriver,
   ClaudeDriver,
   CodexDriver,
   AntigravityDriver,

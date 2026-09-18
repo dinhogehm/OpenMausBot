@@ -52,6 +52,32 @@ instance at it:
   asks, the request becomes a normal approval card in chat.
 - Multiple instances are fine — one per agent.
 
+## OpenRouter (dedicated engine)
+
+OpenRouter ships as its own `openrouter` engine, so a key is all it takes —
+paste it in **Settings → API keys**, or set it in `~/.openmausbot/config.json`
+(or export `OPENROUTER_API_KEY`):
+
+```json
+{
+  "openrouter": {
+    "key": "sk-or-v1-…",
+    "model": "anthropic/claude-sonnet-4.5",
+    "provider": "fireworks"
+  }
+}
+```
+
+- `model` (optional) seeds the picker's default; the engine pulls
+  OpenRouter's public catalog at boot and on refresh, so every model it
+  routes is selectable, with the vendor shown as a badge.
+- `provider` (optional) pins one upstream with fallbacks disabled — useful
+  when you want a specific host's quantization or region. Leave it out to let
+  OpenRouter route.
+- The URL is fixed to `https://openrouter.ai/api/v1`. For any other host
+  (Groq, vLLM, LM Studio, Ollama's OpenAI endpoint, …) use `openai-compat`
+  below, which stays exactly as it was.
+
 ## Any OpenAI-compatible endpoint (no process at all)
 
 The built-in `openai-compat` driver supports multiple instances, so a local
@@ -79,9 +105,11 @@ entry:
   instances can hold different keys without colliding.
 - The driver lists the endpoint's `/models` when it can and keeps your
   `model` as a custom option either way.
-- Honest limits: chat text + reasoning streams only — **no tool calls**, so
-  bots on these instances answer and write, but don't operate computers or
-  connected apps.
+- Tool calls work through the standard OpenAI `tools` field, so bots on these
+  instances can use connected apps and custom MCP servers when the model
+  behind the endpoint supports function calling. Set `"tools": false` in
+  `config` for a model or server that rejects the field — the instance then
+  runs text-only (chat text + reasoning streams).
 
 ## Notes
 

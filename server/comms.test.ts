@@ -81,6 +81,19 @@ describe("roomResponders", () => {
       kind: "mentions",
     });
   });
+
+  it("leaves an untagged smart-room message for Jev to route", () => {
+    expect(roomResponders("hello", members, { kind: "smart" })).toEqual([]);
+    expect(roomResponders("@Milind take this", members, { kind: "smart" })).toEqual([members[1]]);
+    expect(roomResponders("@everyone hello", members, { kind: "smart" })).toEqual(members);
+  });
+
+  it("normalizes smart routing for rooms but not for bot-to-bot channels", () => {
+    const ids = members.map((member) => member.id);
+    expect(normalizeGroupDefaultResponder({ kind: "smart" }, ids)).toEqual({ kind: "smart" });
+    expect(normalizeGroupDefaultResponder({ kind: "smart" }, [])).toEqual({ kind: "smart" });
+    expect(normalizeGroupDefaultResponder({ kind: "smart" }, ids, true)).toEqual({ kind: "mentions" });
+  });
 });
 
 describe("legacy routine comms e2e (fake ACP fleet)", () => {
