@@ -33,7 +33,8 @@ Two front doors reach the same model, at the same price:
 ```
 
 `TYPESAFE_API_KEY` / `TYPESAFE_MODEL` in the server's environment win over the
-file, like every other credential. `model` is optional — `jev-latest` follows
+file, like every other credential. `typesafe.url` overrides the API base URL
+for a proxy or a test double only (`server/jev-review.e2e.test.ts` uses it). `model` is optional — `jev-latest` follows
 the newest stable release; pin `jev-1.13.0` if you tuned thresholds against it
 (through OpenRouter that resolves to `typesafe/jev-1.13`).
 
