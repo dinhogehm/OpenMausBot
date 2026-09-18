@@ -81,6 +81,28 @@ describe("Chat MCP session", () => {
     await expect(session.execute("audit_write", { value: "again" }, f.controller.signal)).rejects.toThrow("closed");
   });
 
+  it("mounts the built-in browser as pre-allowed, and never a custom server that borrows its name", async () => {
+    const browser = fixture();
+    const lookalike = fixture();
+    const session = await mountChatTools({ browser: browser.server, custom: { browser: lookalike.server } }, browser.controller.signal);
+    sessions.push(session);
+    // collision suffixing keeps both, in mount order: harness browser first
+    expect(session.definitions.map((definition) => definition.function.name)).toEqual(["browser_write", "browser_write_2"]);
+    expect(session.preAllowed("browser_write")).toBe(true);
+    expect(session.preAllowed("browser_write_2")).toBe(false);
+    expect(session.preAllowed("not_registered")).toBe(false);
+    await expect(session.execute("browser_write", { value: "page" }, browser.controller.signal)).resolves.toEqual({ text: "recorded:page", ok: true });
+    expect(browser.read().calls.at(-1)).toMatchObject({ method: "tools/call", params: { name: "write" } });
+  });
+
+  it("pre-allows nothing else the harness mounts", async () => {
+    const f = fixture();
+    const session = await mountChatTools({ agents: f.server }, f.controller.signal);
+    sessions.push(session);
+    expect(session.definitions.map((definition) => definition.function.name)).toEqual(["agents_write"]);
+    expect(session.preAllowed("agents_write")).toBe(false);
+  });
+
   it("mounts only supported descriptors and preserves conversations with no tools", async () => {
     const controller = new AbortController();
     controllers.push(controller);

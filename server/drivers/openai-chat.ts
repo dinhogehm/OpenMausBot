@@ -455,7 +455,10 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
               // so it is honoured here: without it every single tool call on
               // an OpenAI-compatible engine stops for a card, and a Chief's
               // delegated Full access cannot help either.
+              // The bot's own built-in browser was authorized by mounting it
+              // (turn-scoped capability, its own profile), as Claude does.
               const allowed = turn.approvalMode === "full"
+                || tools.preAllowed(call.function.name)
                 || await approval.ask(call.function.name, inputPreview ?? "This tool has no arguments.");
               abort.signal.throwIfAborted();
               emit({ ...base(turn.threadId, turnId), type: "item.started", itemType: "tool", itemId: call.id,
@@ -527,7 +530,15 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
       : { state: "unavailable", reason: options.unavailableReason },
     adapter: {
       provider: options.driverKind,
-      capabilities: { sessionModelSwitch: "in-session", customMcp: options.tools !== false, agentsMcp: options.tools !== false, composioMcp: options.tools !== false },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        customMcp: options.tools !== false,
+        agentsMcp: options.tools !== false,
+        composioMcp: options.tools !== false,
+        // mountChatTools starts the built-in browser's stdio proxy like any
+        // other MCP server; its results are text snapshots this runtime reads
+        browserMcp: options.tools !== false,
+      },
       sendTurn,
       interruptTurn: async (threadId, turnId) => {
         const turn = active.get(threadId);
