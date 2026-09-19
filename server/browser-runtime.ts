@@ -133,12 +133,32 @@ class BrowserClient {
     if (!this.stopped && this.pending.size === 0) {
       // Only the stateless MCP transport expires; saved browser state and the
       // browser daemon itself belong to the profile, not this client.
-      this.idleTimer = setTimeout(() => { void this.stop(); }, this.idleMs);
+      this.idleTimer = setTimeout(() => { void this.stop(undefined, "transport"); }, this.idleMs);
       this.idleTimer.unref();
     }
   }
 
-  stop(error = new TransportError("Browser connection closed.")): Promise<void> {
+  /** Upstream's MCP loop exits on stdin EOF without closing the daemon.
+   * In particular, Windows taskkill /T would also kill that profile's Chrome,
+   * even when the daemon created a new process group. Idle is not shutdown. */
+  private retireTransport(): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        this.child.off("exit", finish);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        try { this.child.kill("SIGKILL"); } catch { /* transport already exited */ }
+        finish();
+      }, 1_000);
+      this.child.once("exit", finish);
+      if (this.child.exitCode !== null || this.child.signalCode !== null) finish();
+      else this.child.stdin.end();
+    });
+  }
+
+  stop(error = new TransportError("Browser connection closed."), scope: "transport" | "tree" = "tree"): Promise<void> {
     if (this.stoppedPromise) return this.stoppedPromise;
     this.stopped = true;
     if (this.idleTimer) clearTimeout(this.idleTimer);
@@ -149,7 +169,7 @@ class BrowserClient {
     }
     this.pending.clear();
     this.onClose();
-    this.stoppedPromise = killCliTree(this.child, 1_000).then((stopped) => {
+    this.stoppedPromise = scope === "transport" ? this.retireTransport() : killCliTree(this.child, 1_000).then((stopped) => {
       if (stopped) return;
       try {
         if (process.platform !== "win32" && this.child.pid) process.kill(-this.child.pid, "SIGKILL");
@@ -245,7 +265,10 @@ export class BrowserRuntime {
       catch (error) {
         // An MCP timeout cannot prove the independent daemon stopped an
         // accepted action. Recovery must close the browser, not just its pipe.
-        if (method === "tools/call" && error instanceof TransportError) this.gate(session).uncertain = true;
+        if (method === "tools/call" && error instanceof TransportError) {
+          const gate = this.gate(session);
+          gate.uncertain = true;
+        }
         throw error;
       }
     };
