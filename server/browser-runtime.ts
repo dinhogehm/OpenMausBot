@@ -238,6 +238,9 @@ export class BrowserRuntime {
 
   async agentRpc(session: string, spec: BrowserSpawnSpec, method: "tools/list" | "tools/call", params: unknown, beforeDispatch?: () => void): Promise<unknown> {
     if (method !== "tools/list" && method !== "tools/call") throw new Error("Unsupported browser method.");
+    // tools/list bypasses withAgentAction (a human may hold control), so it
+    // must refuse the closing window itself or its client outlives restart().
+    if (method !== "tools/call" && this.gate(session).closing) throw new Error("The browser is closing. Try again shortly.");
     const invoke = async () => {
       const key = JSON.stringify([spec.command, spec.args, Object.entries(spec.env).sort(([a], [b]) => a.localeCompare(b))]);
       let entry = this.clients.get(session);
@@ -265,7 +268,8 @@ export class BrowserRuntime {
       catch (error) {
         // An MCP timeout cannot prove the independent daemon stopped an
         // accepted action. Recovery must close the browser, not just its pipe.
-        if (method === "tools/call" && error instanceof TransportError) {
+        // A stop from close()/restart() is intentional, not uncertainty.
+        if (method === "tools/call" && error instanceof TransportError && !this.gate(session).closing) {
           const gate = this.gate(session);
           gate.uncertain = true;
         }
@@ -355,6 +359,10 @@ export class BrowserRuntime {
     try {
       await closeBrowser();
       await this.clients.get(session)?.client.stop();
+      // A tools/list admitted before closing set in can register a client
+      // while that stop awaits; registration is synchronous, so one re-check
+      // is deterministic and no stray transport survives to idle expiry.
+      await this.clients.get(session)?.client.stop();
       gate.uncertain = false;
       gate.owner = null;
       gate.releasing = false;
@@ -374,10 +382,11 @@ export class BrowserRuntime {
     const gate = this.gate(session);
     gate.closing = true;
     gate.ready = false;
+    // Clear before the awaited stop: any uncertain latch after this point must win.
+    gate.uncertain = false;
     this.changed(gate);
     await this.clients.get(session)?.client.stop();
     gate.closing = false;
-    gate.uncertain = false;
     this.changed(gate);
     if (!gate.owner && !gate.agents && !gate.humans) this.gates.delete(session);
   }

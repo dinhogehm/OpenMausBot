@@ -2162,10 +2162,18 @@ export async function createBotWithRole(role?: BotRole, request: typeof api = ap
   }
 }
 
-export async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
+export async function api<T = any>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  // timeoutMs races the fetch against AbortSignal.timeout, combined with any
+  // caller signal so either can cancel. Omitted means no behavior change.
+  const { timeoutMs, signal, ...rest } = init ?? {};
   const res = await fetch(path, {
     headers: { "content-type": "application/json" },
-    ...init,
+    ...rest,
+    signal: timeoutMs === undefined
+      ? signal
+      : signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs),
   });
   // 204 carries no body by contract (DELETE /api/workflows/:id); parsing it
   // is not an error worth surfacing, and neither is any other empty reply
