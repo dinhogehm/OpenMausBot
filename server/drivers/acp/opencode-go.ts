@@ -400,8 +400,13 @@ const support = (loadCatalog: OpenCodeCatalogLoader): AcpSupport => ({
       // card carrying nothing but a path — which a reviewer cannot judge and
       // an unattended run cannot get past. Those two folders are the
       // harness's own, scoped to this bot, so allow exactly them.
+      // Both spellings: OpenCode matches a bash command against the folder
+      // itself (no trailing segment), and a file read against a path inside it.
       const ownFolders = botId && /^[A-Za-z0-9_-]{1,128}$/.test(botId)
-        ? { [`${join(WORKSPACES_DIR, botId)}/*`]: "allow", [`${join(TASK_WORKSPACES_DIR, botId)}/*`]: "allow" }
+        ? Object.fromEntries([WORKSPACES_DIR, TASK_WORKSPACES_DIR].flatMap((root) => {
+          const dir = join(root, botId);
+          return [[dir, "allow"], [`${dir}/*`, "allow"]];
+        }))
         : {};
       env.OPENCODE_PERMISSION = JSON.stringify({
         ...inherited,

@@ -103,7 +103,9 @@ describe("remaining ACP approval mappings", () => {
             expect(native).toEqual({
               bash: "ask", edit: "ask", webfetch: "ask", websearch: "ask",
               external_directory: {
+                [join(WORKSPACES_DIR, "fixture-bot")]: "allow",
                 [`${join(WORKSPACES_DIR, "fixture-bot")}/*`]: "allow",
+                [join(TASK_WORKSPACES_DIR, "fixture-bot")]: "allow",
                 [`${join(TASK_WORKSPACES_DIR, "fixture-bot")}/*`]: "allow",
                 "*": "ask",
               },
