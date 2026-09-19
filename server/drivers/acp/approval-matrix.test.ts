@@ -102,12 +102,13 @@ describe("remaining ACP approval mappings", () => {
             // that carries nothing but a path.
             expect(native).toEqual({
               bash: "ask", edit: "ask", webfetch: "ask", websearch: "ask",
+              // catch-all first: OpenCode's last matching rule wins
               external_directory: {
+                "*": "ask",
                 [join(WORKSPACES_DIR, "fixture-bot")]: "allow",
                 [`${join(WORKSPACES_DIR, "fixture-bot")}/*`]: "allow",
                 [join(TASK_WORKSPACES_DIR, "fixture-bot")]: "allow",
                 [`${join(TASK_WORKSPACES_DIR, "fixture-bot")}/*`]: "allow",
-                "*": "ask",
               },
             });
           }
