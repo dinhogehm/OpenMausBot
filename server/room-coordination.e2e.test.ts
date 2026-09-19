@@ -352,9 +352,7 @@ it.each([
   expect(await f.messages(f.destination.activeTaskId)).toEqual([]);
   const refused = f.provider().find((turn: any) => turn.botId === f.sender.id)
     .evidence.find((entry: any) => entry.step).response.result.content[0].text;
-  // Upstream 9c3691df appended PEER_ACCESS_HELP to the unknown-name refusal
-  // without updating this expectation. Anchor on the exported text so the
-  // two cannot drift again.
+  // Anchored on the exported help text: a copy of the sentence drifted once.
   expect(refused).toBe(hidden
     ? `The bot with id "${botId}" is no longer available — call list_bots for the ones you can reach`
     : `No bot with id or name "${botId}" — call list_bots and copy the exact id from the result. ${PEER_ACCESS_HELP}`);
