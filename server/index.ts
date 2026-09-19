@@ -12650,9 +12650,27 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         requireActiveInternalCapability();
         const unattended = isUnattended(from.id, fromThreadId);
         const text = `[Retry requested by ${from.name}, your Chief of Staff, after this thread's last run stopped.${note ? ` Note from ${from.name}: ${note}` : ""} Continue the request above from where it stopped and finish it. If the same problem comes back, say exactly what is blocking and stop.]`;
+        // Watch the retried thread the way a delegation is watched, so its
+        // result reaches the Chief and wakes it. Without this a retry was a
+        // dead end: the teammate finished real work (a recon, a validation)
+        // and nobody was resumed, so the deliverable sat in that thread until
+        // a person happened to look. An existing watch is left alone — the
+        // original requester is still the one waiting for that answer.
+        const alreadyWatched = delegationWatch.has(threadId);
+        if (!alreadyWatched) {
+          delegationWatch.set(threadId, {
+            toBotId: target.id,
+            toBotName: target.name,
+            sourceThreadId: fromThreadId,
+            sourceBotId: from.id,
+            routineRunId: activeRoutineRunForThread(fromThreadId)?.id,
+            startedAtMs: Date.now(),
+          });
+        }
         try {
           await startTurn(target.id, text, { threadId, unattended, peerAsk: { botId: from.id, name: from.name, ...(unattended ? { unattended: true } : {}) } });
         } catch (error) {
+          if (!alreadyWatched) delegationWatch.delete(threadId);
           return json(res, 409, { error: error instanceof Error ? error.message : String(error) });
         }
         store.appendMessage(fromThreadId, {
@@ -12661,7 +12679,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           tool: { name: `Retried ${target.name}'s thread #${task.title}`, ok: true },
           threadRef: { botId: target.id, threadId, title: task.title },
         });
-        return json(res, 200, { started: true, message: `${target.name}'s thread #${task.title} is running again. Its result stays in that thread; you are not woken for it — check later with list_threads or session_search if you need to.` });
+        return json(res, 200, { started: true, message: alreadyWatched
+          ? `${target.name}'s thread #${task.title} is running again. Its result goes to whoever is already waiting on that thread — check it later with list_threads or session_search.`
+          : `${target.name}'s thread #${task.title} is running again. Its result comes back to you here when it finishes, and you are resumed then: end your turn now instead of polling.` });
       }
       if (method === "POST" && path === "/api/internal/delegate-bot") {
         const body = await readInternalBody();
