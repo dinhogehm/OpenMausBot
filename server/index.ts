@@ -6623,6 +6623,15 @@ async function startTurn(
           dropLease();
           throw new Error(`${localVm.problem ?? "the Local VM is not ready"} (App Settings → Computers)`);
         }
+        // The readiness walk can wait minutes for the desktop, and the group
+        // path re-validates its lease afterwards; the direct path needs the
+        // same guard so a turn never attaches MCP to a desktop another turn
+        // now owns.
+        const owner = localVmLeaseFor(localVmTarget).current(localVmOwnerBusy);
+        if (owner?.threadId !== claimThreadId || owner.botId !== bot.id) {
+          dropLease();
+          throw new Error("the Local VM lease expired while preparing the turn");
+        }
         // Same contract as the Box and VPS branches below: without this the
         // poller never starts, so the Local VM publishes no `screen` events
         // and every client that only has the stream (the phone) waits
@@ -7028,7 +7037,14 @@ async function startTurn(
         if (browser) {
           const frame = { binaryPath: browser.spec.command, env: browser.spec.env };
           const session = browser.session;
-          browserCapture = () => browserRuntime.withAgentAction(session, () => agentBrowserFrame(frame));
+          // The preview shares the profile with tool calls: claim the same
+          // exclusive browser:<session> resource the tools/call path claims,
+          // and skip the frame while another thread holds it.
+          browserCapture = async () => {
+            const owner = turnResourceOwners.get(threadId);
+            if (!owner || !claimTurnResource(owner, `browser:${session}`)) throw new Error("another thread is using this browser");
+            return browserRuntime.withAgentAction(session, () => agentBrowserFrame(frame));
+          };
         }
       }
       // An Auto conversation remembers where its first turn landed, so later
@@ -10889,27 +10905,45 @@ async function localVmPayload(target: LocalVmTarget) {
  * refuses.
  */
 async function readyLocalVmForTurn(botId: string, target: LocalVmTarget, isCurrent = () => true) {
-  let status = await containerComputerStatus(undefined, undefined, target);
-  noteLocalVmSeen(target, status);
-  if (!isCurrent()) return status;
-  if (status.ready || !localVmRecreatableOnDemand(status)) return status;
-
-  if (target.key !== SHARED_LOCAL_VM_TARGET.key) {
-    const count = await existingPerBotLocalVmCount(status.runtime);
-    if (!isCurrent() || count >= localVmMaxInstances(cfg)) return status;
-  }
-
-  broadcast({ kind: "computer", botId, state: "provisioning" });
   localVmLifecycleBusy.add(target.key);
-  localVmProvisionBusy = true;
+  // Fence this target, and the cross-target capacity decision for creates,
+  // before the first await — the same synchronous-fence-then-count shape
+  // the panel route uses — so two concurrent turns cannot both pass the
+  // per-bot limit between count and create.
+  const ownsProvision = !localVmProvisionBusy;
+  if (ownsProvision) localVmProvisionBusy = true;
+  let status: ContainerComputerStatus;
   try {
-    status = await containerComputerAction("run", undefined, undefined, target);
-  } catch {
-    // Keep the inspected status: its `problem` names the real obstacle, which
-    // is more use to the person than "podman run exited non-zero".
-    return status;
+    status = await containerComputerStatus(undefined, undefined, target);
+    noteLocalVmSeen(target, status);
+    if (!isCurrent()) return status;
+    if (status.ready || !localVmRecreatableOnDemand(status)) return status;
+    // Another creation is already mid-flight and its container is not yet
+    // visible to a count, so the safe answer is the inspected status —
+    // exactly what the over-cap path below returns.
+    if (!ownsProvision) return status;
+
+    if (target.key !== SHARED_LOCAL_VM_TARGET.key) {
+      const count = await existingPerBotLocalVmCount(status.runtime);
+      if (!isCurrent() || count >= localVmMaxInstances(cfg)) return status;
+    }
+
+    broadcast({ kind: "computer", botId, state: "provisioning" });
+    try {
+      status = await containerComputerAction("run", undefined, undefined, target);
+    } catch {
+      // Keep the inspected status: its `problem` names the real obstacle,
+      // which is more use to the person than "podman run exited non-zero".
+      // `run` can throw after the container exists, so arm the idle
+      // backstop anyway — expiry defers while the target is busy and its
+      // remove step no-ops unless a fresh probe sees a running container.
+      // The problem text stays as inspected: cheaply telling a half-created
+      // container from none here would need another container probe.
+      localVmIdleFor(target).touch();
+      return status;
+    }
   } finally {
-    localVmProvisionBusy = false;
+    if (ownsProvision) localVmProvisionBusy = false;
     localVmLifecycleBusy.delete(target.key);
   }
   localVmIdleFor(target).touch();
@@ -11686,8 +11720,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (auth.kind !== "loopback") return json(res, 403, { error: "Local desktop only" });
       const body = await readBody(req, 1024);
       if (!sharedComputersEnabled(cfg)) return json(res, 404, { error: `no route: ${method} ${path}` });
-      if (!z.string().uuid().safeParse(body?.id).success || !["acquire", "release"].includes(body?.action)) return json(res, 400, { error: "Invalid computer lease" });
+      if (!z.string().uuid().safeParse(body?.id).success || !["acquire", "release", "renew"].includes(body?.action)) return json(res, 400, { error: "Invalid computer lease" });
       if (body.action === "release") sharedComputerControl.release(body.id);
+      else if (body.action === "renew") sharedComputerControl.renew(body.id);
       else sharedComputerControl.acquire(body.id);
       return json(res, 200, { ok: true });
     }
@@ -16857,6 +16892,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (method === "GET" && action === "control" && found) {
         return json(res, 200, computerControl.snapshot(teamComputerOwner(found.id)));
       }
+      // A GET carries no body, so the content-type gate below can only
+      // mislead: the control snapshot is the sole GET on this subtree.
+      if (method === "GET" && action !== "control") {
+        return json(res, 404, { error: "unknown team computer action" });
+      }
       if (!String(req.headers["content-type"] ?? "").toLowerCase().startsWith("application/json")) return json(res, 415, { error: "content-type must be application/json" });
       const body = await readBody(req);
       found = computerId ? teamComputers.get(computerId) : undefined;
@@ -17036,6 +17076,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (vmOwner && (action === "stop" || action === "remove" || action === "run")) {
         return json(res, 409, { error: "the Local VM is being used by a bot — stop that turn first" });
       }
+      // A lease can lapse under a long, quiet turn whose thread still holds
+      // the desktop, so stop/remove must also refuse while the thread
+      // registry or a setup action pins it — the same guard bot deletion uses.
+      if ((action === "stop" || action === "remove") && (localVmActiveThreads.has(SHARED_LOCAL_VM_TARGET.key) || localVmLifecycleBusy.has(SHARED_LOCAL_VM_TARGET.key))) {
+        return json(res, 409, { error: localVmActiveThreads.has(SHARED_LOCAL_VM_TARGET.key) ? "the Local VM is being used by a bot — stop that turn first" : "another Local VM setup action is still running" });
+      }
       if (action === "pull") localVmImageBusy = true;
       else localVmLifecycleBusy.add(SHARED_LOCAL_VM_TARGET.key);
       try {
@@ -17056,6 +17102,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     }
     if (method === "POST" && path === "/api/local-computer/screenshot") {
       localVmIdleFor(SHARED_LOCAL_VM_TARGET).touch();
+      res.setHeader("cache-control", "private, no-store");
       return json(res, 200, {
         image: await containerComputerScreenshot(undefined, undefined, SHARED_LOCAL_VM_TARGET),
       });
@@ -17090,6 +17137,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       const vmOwner = localVmLeaseFor(target).current(localVmOwnerBusy);
       if (vmOwner) return json(res, 409, { error: "this bot is using its Local VM — stop the turn first" });
+      // Mirrors the shared-target guard above: the lease alone can miss a
+      // long, quiet turn, and a setup action must not be torn down mid-call.
+      if ((action === "stop" || action === "remove") && (localVmActiveThreads.has(target.key) || localVmLifecycleBusy.has(target.key))) {
+        return json(res, 409, { error: localVmActiveThreads.has(target.key) ? "this bot is using its Local VM — stop the turn first" : "this bot's Local VM setup action is still running" });
+      }
       // Fence this target, and the cross-target capacity decision for creates,
       // before the first await so two requests cannot both pass the limit.
       localVmLifecycleBusy.add(target.key);
@@ -17131,6 +17183,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       const target = localVmTargetForBot(bot.id);
       localVmIdleFor(target).touch();
+      res.setHeader("cache-control", "private, no-store");
       return json(res, 200, {
         image: await containerComputerScreenshot(undefined, undefined, target),
       });
@@ -18485,7 +18538,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const release = m[2] === "sleep" ? claimTeamComputerLifecycle(teamComputer) : claimBotComputerLifecycle(key);
         try {
           if (m[2] === "join") return json(res, 200, await box.joinReadyBox(cfg, key));
-          if (m[2] === "screenshot") return json(res, 200, await box.screenshotBox(cfg, key));
+          if (m[2] === "screenshot") {
+            res.setHeader("cache-control", "private, no-store");
+            return json(res, 200, await box.screenshotBox(cfg, key));
+          }
           return json(res, 200, await box.sleepBox(cfg, key));
         } finally { release(); }
       }
@@ -18498,6 +18554,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             });
             vpsPreviewRequests.set(botId, preview);
           }
+          res.setHeader("cache-control", "private, no-store");
           return json(res, 200, await preview);
         }
         // Opening the existing SSH viewer can coexist with a capture. Start,
@@ -18562,6 +18619,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           case "exec":
             return json(res, 200, await box.execOnBox(cfg, botId, boxCommand ?? ""));
           case "screenshot":
+            res.setHeader("cache-control", "private, no-store");
             return json(res, 200, await box.screenshotBox(cfg, botId));
         }
       } finally {
