@@ -676,7 +676,7 @@ const TOOLS = [
   {
     name: "retry_thread",
     description:
-      "Chief of Staff only. Resume a teammate's thread whose last run failed, stalled or could not start — the one an incident report named — exactly where it stopped, keeping its conversation and files. The teammate gets a line saying you asked for the retry and why. Use it when the cause looks transient (a crash, a timeout, a busy service). Use delegate_bot with a corrected brief instead when the request itself needs to change, and tell the person instead when only they can fix the cause (a sign-in, a missing credential, an unanswered question). Never retry the same thread more than twice.",
+      "Chief of Staff only. Resume a teammate's thread whose last run failed, stalled or could not start — the one an incident report named — exactly where it stopped, keeping its conversation and files. The teammate gets a line saying you asked for the retry and why, and its result comes back to you when the run finishes — end your turn after retrying instead of polling. Use it when the cause looks transient (a crash, a timeout, a busy service). Use delegate_bot with a corrected brief instead when the request itself needs to change, and tell the person instead when only they can fix the cause (a sign-in, a missing credential, an unanswered question). Never retry the same thread more than twice.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -1546,7 +1546,7 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
       body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, toBotId: botId, toThreadId: threadId, ...(note ? { note } : {}) }),
     });
     if (r.error) return { text: `Couldn't retry that thread: ${String(r.error)}`, isError: true };
-    return { text: typeof r.message === "string" ? r.message : "The thread is running again. Its result stays in that thread; you are not woken for it — check it later with session_search or list_threads if you need to." };
+    return { text: typeof r.message === "string" ? r.message : "The thread is running again. Its result comes back to you when it finishes, and you are resumed then: end your turn instead of polling." };
   }
   if (name === "memory_log") {
     if (typeof args.text !== "string" || !args.text.trim()) {

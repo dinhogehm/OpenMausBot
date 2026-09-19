@@ -98,6 +98,20 @@ it("reports a crashed run to the Chief, who retries it from the incidents thread
     expect(adaMessages.filter((m) => m.role === "bot" && m.kind === "text" && m.text).length).toBeGreaterThan(0);
     expect((await messages(incidents.threadId)).some((m) => m.kind === "activity" && (m.tool?.name ?? "").startsWith("Retried Ada's thread #") && m.threadRef?.threadId === ada.activeTaskId)).toBe(true);
 
+    // A retry is watched like a delegation: the teammate's result returns to
+    // the Chief's thread and resumes it. Without this the retried run was a
+    // dead end — real work finished in Ada's thread and nobody was woken.
+    await expect.poll(
+      async () => (await messages(incidents.threadId)).some((m) => m.role === "bot" && /@Ada replied to the delegated task/.test(m.text ?? "")),
+      { timeout: 30_000 },
+    ).toBe(true);
+    // …and the Chief is resumed with the revival prompt (a card continuation,
+    // so it reaches the provider without a visible user line).
+    await expect.poll(
+      async () => JSON.stringify((await dump(incidents.threadId)).prompt).includes("A delegated task just completed"),
+      { timeout: 30_000 },
+    ).toBe(true);
+
     // Only a Chief may retry: Ada's own token is refused.
     const adaRun = JSON.parse(readFileSync(file(ada.activeTaskId, "json"), "utf8"));
     const adaToken = adaRun.mcpConfig.mcpServers.agents.env.OMB_COMMS_TOKEN;
