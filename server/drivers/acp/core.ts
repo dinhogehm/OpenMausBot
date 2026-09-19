@@ -135,7 +135,7 @@ export interface AcpSupport {
    *  snapshot share `transformEnv` and must not see a per-turn overlay. */
   applyTurnEnv?(
     env: Record<string, string | undefined>,
-    ctx: { model?: string; requestedModel?: string; fullAuto: boolean },
+    ctx: { model?: string; requestedModel?: string; fullAuto: boolean; botId?: string },
   ): void;
   /** Pick the ACP authenticate methodId from initialize's advertised
    * authMethods; return null to skip the authenticate step. */
@@ -497,7 +497,7 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
           return { turnId };
         }
         const resolvedModel = support.resolveTurnModel?.(turn.model, env);
-        support.applyTurnEnv?.(env, { model: resolvedModel, requestedModel: turn.model, fullAuto: turnConfig.fullAuto === true });
+        support.applyTurnEnv?.(env, { model: resolvedModel, requestedModel: turn.model, fullAuto: turnConfig.fullAuto === true, botId: turn.botId });
         const cliTurn =
           resolvedModel !== undefined && resolvedModel !== turn.model
             ? { ...turn, model: resolvedModel }

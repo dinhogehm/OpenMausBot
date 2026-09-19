@@ -9,6 +9,7 @@ import { decodeInjectId, hostApiKey, localHost, mergeLocalInject } from "../loca
 import { createAcpDriver, type AcpSupport } from "./core.ts";
 import type { ModelCatalog, ProviderErrorCode } from "../../contracts.ts";
 import { execCli } from "../../procs.ts";
+import { TASK_WORKSPACES_DIR, WORKSPACES_DIR } from "../../workspace.ts";
 
 const STATIC_MODELS: ModelCatalog = {
   default: "opencode/x-preview-f-free",
@@ -377,7 +378,7 @@ const support = (loadCatalog: OpenCodeCatalogLoader): AcpSupport => ({
     ? ensureOpenCodeInjectModel(normalizeLegacyOpenCodeModel(model, env), env)
     : model,
   transformEnv: stripForeignProviderKeys,
-  applyTurnEnv: (env, { fullAuto }) => {
+  applyTurnEnv: (env, { fullAuto, botId }) => {
     if (!fullAuto) {
       // OpenCode's built-in default is `"*": "allow"`: without this, a bot on
       // Ask or Auto ran shell commands and edited files without a single
@@ -394,9 +395,18 @@ const support = (loadCatalog: OpenCodeCatalogLoader): AcpSupport => ({
       } catch {
         // An unreadable inherited value is replaced, not trusted.
       }
+      // The bot's own memory and task files live outside the project folder,
+      // so every look at them would otherwise raise an external-directory
+      // card carrying nothing but a path — which a reviewer cannot judge and
+      // an unattended run cannot get past. Those two folders are the
+      // harness's own, scoped to this bot, so allow exactly them.
+      const ownFolders = botId && /^[A-Za-z0-9_-]{1,128}$/.test(botId)
+        ? { [`${join(WORKSPACES_DIR, botId)}/*`]: "allow", [`${join(TASK_WORKSPACES_DIR, botId)}/*`]: "allow" }
+        : {};
       env.OPENCODE_PERMISSION = JSON.stringify({
         ...inherited,
-        ...Object.fromEntries(["bash", "edit", "webfetch", "websearch", "external_directory"].map((permission) => [permission, "ask"])),
+        ...Object.fromEntries(["bash", "edit", "webfetch", "websearch"].map((permission) => [permission, "ask"])),
+        external_directory: { ...ownFolders, "*": "ask" },
       });
       return;
     }

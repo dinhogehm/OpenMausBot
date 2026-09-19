@@ -12,6 +12,7 @@ import { ensureDirs } from "../../config.ts";
 import type { ProviderDriver } from "../../contracts.ts";
 import { removeTempDir } from "../../testing/cleanup.ts";
 import { recordEvents } from "../../testing/events.ts";
+import { TASK_WORKSPACES_DIR, WORKSPACES_DIR } from "../../workspace.ts";
 import type { AcpConfig } from "./core.ts";
 import { CustomAcpDriver } from "./custom.ts";
 import { DroidAgentDriver } from "./droid.ts";
@@ -80,6 +81,7 @@ describe("remaining ACP approval mappings", () => {
       for (const approvalMode of ["full", "auto", "ask"] as const) {
         const { turnId } = await instance.adapter.sendTurn({
           threadId: "approval-matrix-thread",
+          botId: "fixture-bot",
           text: "Exercise one provider permission request.",
           cwd: scratch,
           approvalMode,
@@ -91,11 +93,22 @@ describe("remaining ACP approval mappings", () => {
         expect(JSON.parse(readFileSync(dump, "utf8")).argv).toEqual([...argv, ...(native?.[approvalMode] ?? [])]);
         if (driver === OpenCodeDriver) {
           const native = JSON.parse(JSON.parse(readFileSync(dump, "utf8")).env.OPENCODE_PERMISSION);
-          expect(native).toMatchObject({ external_directory: approvalMode === "full" ? "allow" : "ask" });
-          if (approvalMode === "full") expect(native).toMatchObject({ "*": "allow", read: "allow", bash: "allow", edit: "allow" });
-          // OpenCode's own default is "*": "allow"; below Full the mutating
-          // tools must reach the harness, whatever was inherited.
-          else expect(native).toEqual({ external_directory: "ask", bash: "ask", edit: "ask", webfetch: "ask", websearch: "ask" });
+          if (approvalMode === "full") {
+            expect(native).toMatchObject({ "*": "allow", read: "allow", bash: "allow", edit: "allow", external_directory: "allow" });
+          } else {
+            // OpenCode's own default is "*": "allow"; below Full the mutating
+            // tools must reach the harness, whatever was inherited — while the
+            // bot's own harness folders stay reachable without raising a card
+            // that carries nothing but a path.
+            expect(native).toEqual({
+              bash: "ask", edit: "ask", webfetch: "ask", websearch: "ask",
+              external_directory: {
+                [`${join(WORKSPACES_DIR, "fixture-bot")}/*`]: "allow",
+                [`${join(TASK_WORKSPACES_DIR, "fixture-bot")}/*`]: "allow",
+                "*": "ask",
+              },
+            });
+          }
         }
         expect(JSON.parse(readFileSync(rpcDump, "utf8")))
           .toContain(approvalMode === "full" ? "session/new" : "session/load");
