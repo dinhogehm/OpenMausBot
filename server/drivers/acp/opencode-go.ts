@@ -411,7 +411,9 @@ const support = (loadCatalog: OpenCodeCatalogLoader): AcpSupport => ({
       env.OPENCODE_PERMISSION = JSON.stringify({
         ...inherited,
         ...Object.fromEntries(["bash", "edit", "webfetch", "websearch"].map((permission) => [permission, "ask"])),
-        external_directory: { ...ownFolders, "*": "ask" },
+        // Order matters: OpenCode resolves rules in order and the last match
+        // wins, so the catch-all comes first and the bot's own folders after.
+        external_directory: { "*": "ask", ...ownFolders },
       });
       return;
     }
