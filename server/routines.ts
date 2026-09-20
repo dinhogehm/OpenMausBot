@@ -739,6 +739,8 @@ export class RoutineManager {
   private routines: Routine[] = [];
   private runs: RoutineRun[] = [];
   private routineRequestReceipts: RoutineRequestReceipt[] = [];
+  /** Runs a restart interrupted, held until start() so the owner is ready. */
+  private recoveredAtBoot: RoutineRun[] = [];
   private webhookRunReceipts: WebhookRunReceipt[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
@@ -834,11 +836,14 @@ export class RoutineManager {
       }
     }
     if (recovered.length > 0) {
+      // The state is corrected now, but the owner is still wiring itself up:
+      // this constructor runs from index.ts's own module body, so an incident
+      // raised here reaches a harness whose later state does not exist yet
+      // (a restart that interrupted a run crashed with "Cannot read
+      // properties of undefined" and the Chief was never told). Hold the
+      // notifications for start(), which the owner calls once it is ready.
       this.save();
-      for (const run of recovered) {
-        this.notifyRunChanged(run);
-        this.options.onRunFailed?.(run);
-      }
+      this.recoveredAtBoot = recovered;
     }
   }
 
@@ -1325,6 +1330,12 @@ export class RoutineManager {
 
   start() {
     if (this.timer) return;
+    const recovered = this.recoveredAtBoot;
+    this.recoveredAtBoot = [];
+    for (const run of recovered) {
+      this.notifyRunChanged(run);
+      this.options.onRunFailed?.(run);
+    }
     void this.tick();
     this.timer = setInterval(() => void this.tick(), 10_000);
     this.timer.unref?.();
