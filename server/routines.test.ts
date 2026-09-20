@@ -826,6 +826,12 @@ describe("RoutineManager", () => {
     ]);
     // Reload recovery truthfully marks an in-process run as interrupted.
     expect(reloaded.listRuns()[0]!.error).toContain("restarted");
+    // The owner is still wiring itself up while this constructor runs, so the
+    // recovery notification waits for start() — raising it here reached a
+    // half-initialized harness and the incident was lost (TypeError).
+    expect(h.failed).toEqual([]);
+    reloaded.start();
+    reloaded.stop();
     expect(failureWasPersistedBeforeCallback).toBe(true);
     expect(h.failed).toMatchObject([
       {
