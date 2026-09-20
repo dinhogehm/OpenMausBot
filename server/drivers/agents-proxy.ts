@@ -40,6 +40,7 @@ import { normalizeCronSchedule } from "../../shared/routine-schedule.ts";
 import { agentToolAnnotations } from "../agent-tool-policy.ts";
 
 import { peerName } from "../peer-roster.ts";
+import { boundedAgentResult } from "./agents-result.ts";
 
 const HARNESS = process.env.OMB_HARNESS_URL ?? "http://127.0.0.1:8799";
 const BOT_ID = process.env.OMB_BOT_ID ?? "";
@@ -379,11 +380,28 @@ const ROUTINE_FIELDS_SCHEMA = {
     type: "boolean",
     description: "Opt in to using the latest completed run's bounded report as historical context. Defaults to false; set false in an update to start fresh again. Included in the applied result or pending confirmation.",
   },
+  overlap: {
+    type: "string",
+    enum: ["skip", "queue"],
+    description: "While this routine is still working, skip scheduled occurrences (default) or queue at most one run. Queue skips further occurrences until the pending run starts; it never builds an unlimited backlog. Manual and webhook requests are separate.",
+  },
 } as const;
 
 const PROPOSAL_OUTCOME = " Read the result: granted Full Access may apply the change immediately. If applied, continue the requested work without another confirmation. Only a pending result requires ending the turn and waiting for the in-app decision. Never claim success from the permission mode alone; report failed or cancelled results honestly. This does not elevate another bot's execution permissions.";
 
 const TOOLS = [
+  {
+    name: "tool_result_read",
+    description: "Read a missing portion of an oversized agents-tool result using the saved id and next offset from its notice. Returns at most 16,000 characters, only from this bot in this conversation. Use only when the preview is insufficient; do not load every page by default. Results expire after one hour, on app restart, or under cache pressure. This never reruns the original action.",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        id: { type: "string", description: "Saved result id copied from the truncation notice." },
+        offset: { type: "integer", minimum: 0, description: "Character offset copied from the previous result's notice. Defaults to 0." },
+      },
+      required: ["id"],
+    },
+  },
   {
     name: "list_shared_computers",
     description: "List online desktop computers explicitly shared with this workspace, and their allowed folders/capabilities. These are the user's computers, not this server. An offline or unshared computer cannot be accessed. Folder paths use opaque folder IDs and relative paths.",
@@ -430,7 +448,7 @@ const TOOLS = [
   {
     name: "ask_bot",
     description:
-      "SYNCHRONOUS consultation: send a short question to another bot and stay blocked until its reply is returned inline. Use only when that reply is required to write your current response. Do not use for assigning work, background tasks, or potentially long work; use delegate_bot for those. Returns promptly with a note if that bot is busy.",
+      "Brief synchronous consultation: send a short question to another bot. Quick replies return inline; slow replies become asynchronous delegations and return automatically after you finish your turn. Use only when that reply is required to write your current response. Do not use for assigning work, background tasks, or potentially long work; use delegate_bot for those. Returns promptly with a note if that bot is busy.",
     inputSchema: {
       type: "object",
       properties: {
@@ -904,6 +922,10 @@ async function api(path: string, init?: RequestInit): Promise<Json> {
   return body;
 }
 
+const capResult = (text: string) => boundedAgentResult(text, (retained, truncated) =>
+  api("/api/internal/tool-result", { method: "POST", signal: AbortSignal.timeout(3_000),
+    body: JSON.stringify({ text: retained, truncated }) }));
+
 /** Like api, but a refusal comes back as its body instead of an Error —
  * for the tools whose refusals carry more than a sentence. */
 async function apiResponse(path: string, init?: RequestInit): Promise<{ ok: boolean; status: number; body: Json }> {
@@ -957,6 +979,9 @@ function routineFields(args: Json): { fields: Json; error?: string } {
   if (args.continuity != null && typeof args.continuity !== "boolean") {
     return { fields, error: "continuity must be true or false." };
   }
+  if (args.overlap !== undefined && args.overlap !== "skip" && args.overlap !== "queue") {
+    return { fields, error: "overlap must be skip or queue." };
+  }
   if (args.clear_timeout != null && typeof args.clear_timeout !== "boolean") {
     return { fields, error: "clear_timeout must be true or false." };
   }
@@ -974,6 +999,7 @@ function routineFields(args: Json): { fields: Json; error?: string } {
   if (args.clear_timeout === true) fields.timeoutMinutes = null;
   else if (timeoutMinutes != null) fields.timeoutMinutes = timeoutMinutes;
   if (typeof args.continuity === "boolean") fields.continuity = args.continuity;
+  if (args.overlap !== undefined) fields.overlap = args.overlap;
   return { fields };
 }
 
@@ -1014,6 +1040,17 @@ function recallSpeaker(hit: Json): string {
 }
 
 async function callTool(name: string, args: Json): Promise<{ text: string; isError?: boolean }> {
+  if (name === "tool_result_read") {
+    if (typeof args.id !== "string" || !/^r-[0-9a-f-]{36}$/.test(args.id) ||
+      (args.offset !== undefined && (!Number.isSafeInteger(args.offset) || Number(args.offset) < 0))) {
+      return { text: "Use the saved result id and a non-negative integer offset from its notice.", isError: true };
+    }
+    const r = await api(`/api/internal/tool-result?id=${encodeURIComponent(args.id)}&offset=${args.offset ?? 0}`, { signal: AbortSignal.timeout(3_000) });
+    const text = String(r.text ?? "");
+    return { text: `${text}\n\n[${Number(r.nextOffset) < Number(r.length)
+      ? `Read more with tool_result_read id "${args.id}" and offset ${r.nextOffset}.`
+      : `End of retained result.${r.truncated ? " The original tail exceeded the storage limit and was omitted." : ""}`}]` };
+  }
   if (name === "list_room_targets") {
     const r = await api("/api/internal/room-targets");
     return { text: JSON.stringify(r), ...(r.error ? { isError: true } : {}) };
@@ -1125,9 +1162,11 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
       // converted the ask into a delegation — the reply is not lost.
       const taskId = String(r.taskId ?? "").trim();
       if (taskId) delegationTaskIdsThisTurn.add(taskId);
-      const waitedMinutes = Math.max(1, Math.round((Number(r.waitedMs) || 0) / 60_000));
+      const waitedSeconds = Math.max(1, Math.round((Number(r.waitedMs) || 0) / 1000));
+      const amount = waitedSeconds < 60 ? waitedSeconds : Math.round(waitedSeconds / 60);
+      const unit = waitedSeconds < 60 ? "second" : "minute";
       return {
-        text: `${r.toBotName ?? "That bot"} is still working after ${waitedMinutes} minute${waitedMinutes === 1 ? "" : "s"} — the ask was converted to a delegation so the reply is not lost. Task id: ${taskId}. Finish your turn now; the result will be delivered to this conversation automatically. Use check_delegation in a later turn only if the user asks for status.`,
+        text: `${r.toBotName ?? "That bot"} is still working after ${amount} ${unit}${amount === 1 ? "" : "s"} — the ask was converted to a delegation so the reply is not lost. Task id: ${taskId}. Finish your turn now; the result will be delivered to this conversation automatically. Use check_delegation in a later turn only if the user asks for status.`,
       };
     }
     if (r.busy) {
@@ -1742,20 +1781,20 @@ async function handle(msg: Json) {
           return;
         }
         if (name === "list_shared_computers") {
-          textResult(id, JSON.stringify(await api("/api/internal/shared-computers")));
+          textResult(id, await capResult(JSON.stringify(await api("/api/internal/shared-computers"))));
           return;
         }
         if (name === "shared_computer") {
           const response = await api("/api/internal/shared-computers", { method: "POST", body: JSON.stringify(params.arguments ?? {}) });
           const result = response.result as Json;
           if (Array.isArray(result?.content)) ok(id, result);
-          else textResult(id, JSON.stringify(result));
+          else textResult(id, await capResult(JSON.stringify(result)));
           return;
         }
         const { text, isError } = await callTool(name, (params.arguments ?? {}) as Json);
-        textResult(id, text, isError);
+        textResult(id, name === "tool_result_read" ? text : await capResult(text), isError);
       } catch (e) {
-        textResult(id, (e as Error).message, true);
+        textResult(id, await capResult((e as Error).message), true);
       }
       return;
     }

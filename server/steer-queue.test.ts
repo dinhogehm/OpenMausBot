@@ -20,6 +20,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   cancelSteeredMessage,
   drainSteeredMessages,
+  hasQueuedSteeredMessages,
   holdSteeredQueue,
   onSteeredQueueChange,
   queuedSteerSnapshot,
@@ -77,6 +78,18 @@ function fakeStore(bots: BotRecord[]): SteerStore & { messages: Message[] } {
 }
 
 describe("steer-queue module", () => {
+  it.each([undefined, "capacity"] as const)("detects an exact owner's queued correction with reason %s", (reason) => {
+    const botId = `correction-${reason ?? "busy"}`;
+    const threadId = `${botId}-thread`;
+    expect(hasQueuedSteeredMessages(botId, threadId)).toBe(false);
+    const queued = queueSteeredMessage(botId, threadId, "Use this new request", { reason });
+    expect(hasQueuedSteeredMessages(botId, threadId)).toBe(true);
+    expect(hasQueuedSteeredMessages("other-bot", threadId)).toBe(false);
+    expect(hasQueuedSteeredMessages(botId, "other-thread")).toBe(false);
+    expect(cancelSteeredMessage(botId, queued.id, threadId)).toBe(true);
+    expect(hasQueuedSteeredMessages(botId, threadId)).toBe(false);
+  });
+
   it("preserves self-opened request provenance through persistence and a capacity wait", () => {
     const bot = fakeBot("bot-self-provenance", "thread-self-provenance", true);
     const store = fakeStore([bot]);

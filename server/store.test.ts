@@ -2,6 +2,7 @@
 // the durable record — everything here must survive a process restart
 // except `busy`, which never does (no turn survives one either).
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,7 +14,7 @@ import type { ModelSelection } from "./contracts.ts";
 import * as mdb from "./message-db.ts";
 import { peerAllowKey } from "./peer-approval-key.ts";
 import { canAccessTeam } from "./peer-roster.ts";
-import { Store, type BotRecord } from "./store.ts";
+import { Store, toWireTask, type BotRecord } from "./store.ts";
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { SECTION_CONTEXTS_FILE } from "./section-context.ts";
 
@@ -22,6 +23,61 @@ const selection = (): ModelSelection => ({ instanceId: "claude", model: "claude-
 describe("Store", () => {
   beforeEach(() => {
     rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  it("persists compaction records but keeps session bookkeeping off the wire", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({}, { seedMessages: false });
+    const user = store.appendMessage(bot.threadId, { role: "user", kind: "text", text: "Original history" });
+    const key = "sk-ant-" + "a".repeat(90);
+    const record = store.appendMessage(bot.threadId, { role: "bot", kind: "compaction", compaction: {
+      summary: `Historical data -5 != 5; ${key}`, firstKeptId: "", foldedThroughId: user.id, tokensBefore: 100, by: "person",
+    } });
+    const patch = { appliedCompactionId: record.id, contextFloor: 500, lastContextModel: "claude:fixture" };
+    store.patchTask(bot.id, bot.threadId, patch);
+    const reloaded = new Store(selection);
+    expect(reloaded.taskByThread(bot.id, bot.threadId)).toMatchObject(patch);
+    expect(reloaded.messagesFor(bot.threadId)).toHaveLength(2);
+    expect(reloaded.messagesFor(bot.threadId)[1].compaction?.summary).toContain("-5 != 5");
+    expect(JSON.stringify(reloaded.messagesFor(bot.threadId))).not.toContain(key);
+    const wire = toWireTask(reloaded.taskByThread(bot.id, bot.threadId)!);
+    for (const field of Object.keys(patch)) expect(wire).not.toHaveProperty(field);
+  });
+
+  it("commits receipt-backed transcript changes before publishing and replays without duplicates", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const threadId = bot.threadId;
+    const before = structuredClone(store.messagesFor(threadId));
+    const changes = vi.fn();
+    store.onChange(changes);
+    const database = new DatabaseSync(join(DATA_DIR, "messages.db"));
+    const failReceipts = () => database.exec("CREATE TRIGGER reject_test_receipt BEFORE INSERT ON command_receipts BEGIN SELECT RAISE(ABORT, 'fixture receipt failure'); END");
+    const allowReceipts = () => database.exec("DROP TRIGGER reject_test_receipt");
+    const append = () => store.appendMessage(threadId, { role: "bot", kind: "text", text: "Recorded work" }, { kind: "test.append", key: threadId });
+    try {
+      failReceipts();
+      expect(append).toThrow("fixture receipt failure");
+      expect(store.messagesFor(threadId)).toEqual(before);
+      expect(mdb.readThread(threadId, "/nonexistent").messages).toEqual(before);
+      expect(changes).not.toHaveBeenCalled();
+      allowReceipts();
+      const message = append();
+      expect(append()).toEqual(message);
+      expect(store.messagesFor(threadId)).toHaveLength(before.length + 1);
+      expect(changes).toHaveBeenCalledTimes(1);
+      changes.mockClear();
+      const patch = () => store.patchMessage(threadId, message.id, { text: "Updated evidence" }, { kind: "test.patch", key: message.id });
+      failReceipts();
+      expect(patch).toThrow("fixture receipt failure");
+      expect(store.messagesFor(threadId).at(-1)?.text).toBe("Recorded work");
+      expect(mdb.readThread(threadId, "/nonexistent").messages.at(-1)?.text).toBe("Recorded work");
+      expect(changes).not.toHaveBeenCalled();
+      allowReceipts();
+      expect(patch()?.text).toBe("Updated evidence");
+      expect(patch()?.text).toBe("Updated evidence");
+      expect(changes).toHaveBeenCalledTimes(1);
+    } finally { database.close(); }
   });
 
   it("commits a confirmed model switch once, preserving siblings and rolling back failed writes", () => {

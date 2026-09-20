@@ -266,9 +266,8 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
       HOME: home,
       USERPROFILE: home,
       OMB_PORT: String(PORT),
-      // e2e-friendly ask ceiling: the timeout-conversion test needs the
-      // synchronous wait to end while the gated peer turn is still open
-      OMB_ASK_BOT_TIMEOUT_MS: "8000",
+      // Keep the production ask budget: the gated-peer test verifies the
+      // caller is released promptly without a test-only timeout override.
     };
     if (process.env.PATH) env.PATH = process.env.PATH;
     // Without SystemRoot, winsock fails to initialize in the child.
@@ -969,7 +968,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
       });
 
       // the ask starts the peer's gated turn, which stays open well past
-      // the 8s ceiling — the asker must get a claim ticket, not a drop
+      // the production inline budget — the asker must get a claim ticket, not a drop
       expect((await startRoutine(asker.id, "ask @SlowHelper for the numbers")).status).toBe(201);
       let askerBot: any;
       await waitUntil(async () => {
@@ -979,6 +978,8 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
       }, 30_000, "asker never got the timeout-conversion reply");
       const conversionReply = askerBot.messages.findLast((m: any) => m.kind === "text" && m.role === "bot");
       expect(conversionReply.text).toContain("Task id:");
+      expect(conversionReply.text).toContain("after 15 seconds");
+      expect((await api("GET", "/api/bots?messages=0")).body.bots.find((b: any) => b.id === helper.id).busy).toBe(true);
       expect(conversionReply.text).toContain("delivered to this conversation automatically");
       expect(conversionReply.text).not.toContain("wait_delegation");
       expect(askerBot.messages.some(

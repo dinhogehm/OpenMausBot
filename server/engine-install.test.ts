@@ -12,11 +12,11 @@ import * as procs from "./procs.ts";
 const FAKE_NPM = `#!/usr/bin/env node
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+if (process.env.FAKE_NPM_MODE === 'stubborn') process.on('SIGTERM', () => {});
 const args = process.argv.slice(2);
 const mode = process.env.FAKE_NPM_MODE || 'ok';
 appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify({ args, cwd: process.cwd(), secret: process.env.XAI_API_KEY ?? null }) + '\\n');
 if (mode === 'fail') { console.error('npm ERR! code E404\\nnpm ERR! 404 Not Found - registry-token-fixture'); process.exit(1); }
-if (mode === 'stubborn') process.on('SIGTERM', () => {});
 if (mode === 'hang' || mode === 'stubborn') { setInterval(() => {}, 1000); }
 else {
   const prefix = args[args.indexOf('--prefix') + 1];
@@ -111,12 +111,15 @@ describe.skipIf(process.platform === "win32")("installing with npm", () => {
     process.env.FAKE_NPM_MODE = "stubborn";
     const stopped = vi.spyOn(procs, "killCliTree");
     try {
-      await expect(installNpmEngine("fake-engine", { baseDir: base, timeoutMs: 300 })).rejects.toThrow("took too long and was stopped");
+      // Node's own boot can outlast a 300ms watchdog on a loaded machine,
+      // which kills the stub before its ignore-handler registers and turns
+      // the SIGKILL escalation under test into a SIGTERM death.
+      await expect(installNpmEngine("fake-engine", { baseDir: base, timeoutMs: 1_500 })).rejects.toThrow("took too long and was stopped");
       expect(stopped.mock.calls[0]![0].signalCode).toBe("SIGKILL");
     } finally {
       stopped.mockRestore();
     }
-  }, 10_000);
+  }, 15_000);
 
   it("reports an uncertain stop without waiting forever for npm close", async () => {
     process.env.FAKE_NPM_MODE = "hang";

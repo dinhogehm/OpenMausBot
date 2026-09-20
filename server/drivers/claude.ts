@@ -9,12 +9,13 @@
 //   - the bot's cloud computer (box.ascii.dev) via server/computer-proxy.ts
 //     — screenshot/exec/open_url, the CUA-on-the-box bridge
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname, isAbsolute, normalize } from "node:path";
 
 import { DATA_DIR, stripWorkspaceCredentialEnv } from "../config.ts";
+import { writeFileAtomic } from "../atomic.ts";
 import { augmentedPath } from "../env-path.ts";
 import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 import { classifyResumeFailure, mayReplay, recoveryPromptFor } from "../resume-recovery.ts";
@@ -44,6 +45,7 @@ import {
 } from "./local-inject.ts";
 import { appendNative } from "./native.ts";
 import { SPAWNED_PROXIES } from "../proxy-paths.ts";
+import { extractMcpImages } from "../mcp-tool-images.ts";
 import {
   ASK_USER_QUESTION_TOOL,
   askQuestionSummary,
@@ -463,6 +465,7 @@ export function readClaudeModelCatalog(env: Record<string, string | undefined> =
 // far. See server/proxy-paths.ts.
 const PERM_PROXY_PATH = SPAWNED_PROXIES.permission;
 const DWEB_PROXY_PATH = SPAWNED_PROXIES.dweb;
+const HOOK_HELPER_PATH = SPAWNED_PROXIES.hook;
 // in the packaged app process.execPath is the Electron binary — this env
 // makes it behave as plain node for the spawned MCP proxies (harmless in dev)
 const NODE_ENV_FLAG = { ELECTRON_RUN_AS_NODE: "1" };
@@ -522,6 +525,28 @@ function askSummary(ask: Ask): string {
   return askInputSummary(ask.input) ?? ask.tool ?? "tool";
 }
 
+
+/** Where the hook helper reads this thread's current turn token. Stable per
+ * thread (so the CLI's environment can name it once) and private. */
+export function hookTokenFile(threadId: string, botId?: string): string {
+  const digest = createHash("sha256").update(`${botId ?? ""}\0${threadId}`).digest("hex").slice(0, 24);
+  return join(DATA_DIR, "hook-tokens", `${digest}.token`);
+}
+
+/** The `hooks` block for the private --settings file: one command for each
+ * event the harness observes. Claude Code runs it with the event JSON on
+ * stdin and applies any hookSpecificOutput it prints. The command string is
+ * a shell line, so both paths are quoted (this repo's own path has a space). */
+export function claudeHookSettings(helperPath: string): Record<string, unknown> {
+  // JSON quoting is not shell quoting: $(), backticks and $names still
+  // expand inside double quotes on POSIX. Windows paths come through env
+  // variables so their backslashes are not JSON-escaped into the command.
+  const command = process.platform === "win32"
+    ? '"%OMB_HOOK_NODE%" "%OMB_HOOK_HELPER%"'
+    : [process.execPath, helperPath].map(path => `'${path.replace(/'/g, "'\\''")}'`).join(" ");
+  const entry = [{ matcher: "", hooks: [{ type: "command", command, timeout: 5 }] }];
+  return { PostToolUse: entry, PreCompact: entry, SessionStart: entry, Stop: entry };
+}
 
 export function permissionSocketPath(threadId: string, botId?: string) {
   // A readable prefix alone is not unique: ids that agree on their first
@@ -1094,7 +1119,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // a retry relaunches the whole CLI; the backoff is scaled down in tests
       // so a fake's transient failures don't stall real seconds
       const retryScale = Number(process.env.FAKE_CLAUDE_RETRY_SCALE ?? "1");
-      const sessionId = typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
+      const sessionId = !turn.sessionReset && typeof turn.resumeCursor === "string" ? turn.resumeCursor : null;
       const newSessionId = sessionId ? null : newId();
 
       const args = [
@@ -1276,7 +1301,26 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const env = environment(turnModel);
       const authSettings = isolated && !injected.injected
         ? readClaudeAuthSettings(env, input.environment) : {};
-      const authSettingsPath = mcpConfigPath && Object.keys(authSettings).length
+      // Harness hooks (item 0.2): one helper command for the events the
+      // harness observes. The helper reads its bearer from a per-thread file
+      // the harness rewrites every turn, so a long-lived CLI process never
+      // presents a stale token. Registered through the same private
+      // --settings file as the auth override; both are 0600 and per launch.
+      const hooks = turn.integrations?.hooks;
+      const hookTokenPath = hooks ? hookTokenFile(threadId, botId) : null;
+      if (hooks && hookTokenPath) {
+        mkdirSync(dirname(hookTokenPath), { recursive: true, mode: 0o700 });
+        writeFileAtomic(hookTokenPath, hooks.token, { mode: 0o600 });
+        env.OMB_HOOK_URL = hooks.url;
+        env.OMB_HOOK_TOKEN_FILE = hookTokenPath;
+        env.OMB_HOOK_NODE = process.execPath;
+        env.OMB_HOOK_HELPER = HOOK_HELPER_PATH;
+        // in the packaged app process.execPath is Electron — run the helper as node
+        if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = "1";
+      }
+      const settings: Record<string, unknown> = { ...authSettings };
+      if (hooks) settings.hooks = claudeHookSettings(HOOK_HELPER_PATH);
+      const authSettingsPath = mcpConfigPath && Object.keys(settings).length
         ? join(dirname(mcpConfigPath), "auth-settings.json") : null;
       if (authSettingsPath) args.push("--settings", authSettingsPath);
       // Our approvals and browser credentials expire at the user-turn
@@ -1298,6 +1342,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         model: injected.model ?? null,
         base: env.ANTHROPIC_BASE_URL ?? null,
         configDir: env.CLAUDE_CONFIG_DIR ?? null,
+        // hooks on/off changes the settings file the process was launched with
+        hooks: Boolean(hooks),
         // Rotating an account's key/helper must not reuse the old process.
         auth: createHash("sha256").update(JSON.stringify({
           settings: authSettings,
@@ -1306,10 +1352,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       });
 
       // Reuse the live process when it is idle, unchanged, and is the session
-      // the harness wants resumed. Anything else: close it and spawn fresh
-      // (with --resume, so the conversation continues in the new process).
+      // the harness wants resumed. Clearing a cursor alone does not opt out
+      // of legacy reuse: an explicit rebuild must discard the idle context.
       const live = sessions.get(threadId);
-      if (live && !live.turn && !live.closing && live.child.exitCode === null && live.argsKey === argsKey && (!sessionId || sessionId === live.sessionId)) {
+      if (!turn.sessionReset && live && !live.turn && !live.closing && live.child.exitCode === null && live.argsKey === argsKey && (!sessionId || sessionId === live.sessionId)) {
         if (live.idleTimer) clearTimeout(live.idleTimer);
         live.turn = { turnId, input: turn, retryAbort, settled: false, sawStreamDelta: false };
         active.set(threadId, { stop: () => {
@@ -1345,7 +1391,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }
         return { turnId };
       }
-      if (live) closeSession(threadId, "spawn contract changed");
+      if (live) closeSession(threadId, turn.sessionReset ? "context reset" : "spawn contract changed");
 
       // Until sessions.set() below, this turn owns every launch resource.
       // Any bind, private-config or synchronous spawn failure must release
@@ -1445,7 +1491,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }), { mode: 0o600 });
         }
         if (authSettingsPath) {
-          writeFileSync(authSettingsPath, JSON.stringify(authSettings), { mode: 0o600 });
+          writeFileSync(authSettingsPath, JSON.stringify(settings), { mode: 0o600 });
         }
         if (sessionId) args.push("--resume", sessionId);
         else args.push("--session-id", newSessionId!);
@@ -1620,6 +1666,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             for (const b of Array.isArray(o.message?.content) ? o.message.content : []) {
               if (b.type === "tool_result") {
                 emit({ ...base(threadId, currentTurnId()), type: "item.completed", itemType: "tool", itemId: b.tool_use_id, ok: !b.is_error, output: toolDetailPreview(b.content) });
+                for (const img of extractMcpImages(b.content)) {
+                  emit({ ...base(threadId, currentTurnId()), type: "item.completed", itemType: "assistant_image", data: img.data });
+                }
               }
             }
             break;
@@ -1759,7 +1808,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
               active.set(threadId, { stop: () => { retry.cancelled = true; retryAbort.abort(); }, turnId });
               try {
                 const cursor = session.sessionId ?? sessionId ?? undefined;
-                await sendTurn({ ...turn, resumeCursor: cursor }, turnId);
+                // The reset was consumed by the initial launch. Retry the
+                // new session, never the context that launch replaced.
+                await sendTurn({ ...turn, sessionReset: false, resumeCursor: cursor }, turnId);
               } catch (e) {
                 if (active.get(threadId)?.turnId === turnId) active.delete(threadId);
                 retryState.delete(threadId);
@@ -2016,6 +2067,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           // Harness turns reassert a per-bot mode and restore the broker even
           // when an old instance was configured with bypassPermissions.
           localComputerMcp: true,
+          hooks: true,
         },
         sendTurn,
         steer,

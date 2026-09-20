@@ -211,6 +211,12 @@ interface BrowserLookupOptions {
   platform?: NodeJS.Platform;
   arch?: string;
   exists?: (p: string) => boolean;
+  /** Count only the runtimes OpenMausBot itself configured (the explicit
+   * override, the desktop bundle) or downloaded (the pinned asset). The
+   * ambient PATH is skipped: whatever it turns up — a repo's
+   * node_modules/.bin, a dev machine's global wrapper — is not the engine
+   * whose saved sessions this process manages. */
+  managedOnly?: boolean;
 }
 
 function packagedBrowser(options: BrowserLookupOptions) {
@@ -239,6 +245,7 @@ export function resolveAgentBrowserBinary(options: BrowserLookupOptions = {}): s
   if (bundle && exists(bundle.directory)) return completePackage(bundle, exists) ? bundle.engine : null;
   const pinned = pinnedBinaryPath(options.dataDir, platform, options.arch);
   if (exists(pinned)) return pinned;
+  if (options.managedOnly) return null;
   return onPath(env, platform, exists);
 }
 

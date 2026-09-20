@@ -240,6 +240,8 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     /// Screen messages in the full shape: base64 pixels, inline.
     public var png: String?
     public var mime: String?
+    /// Agent-generated images carried on a text reply, including late message patches.
+    public var attachments: [MessageImageAttachment]?
 
     public var date: Date { Date(timeIntervalSince1970: at / 1000) }
 }
@@ -1308,4 +1310,11 @@ public struct ServerEnvironment: Codable, Hashable, Sendable {
     public var label: String
     public var platform: String?
     public var version: String?
+}
+
+/// Keep future attachment kinds decodable; only image entries are displayed.
+public struct MessageImageAttachment: Codable, Hashable, Sendable {
+    public var kind: String
+    public var path: String?
+    public var mime: String?
 }

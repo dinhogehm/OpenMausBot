@@ -189,6 +189,8 @@ data class Message(
     val hasImage: Boolean? = null,
     val png: String? = null,
     val mime: String? = null,
+    /** Agent-generated images on text replies, including late message patches. */
+    val attachments: List<MessageImageAttachment>? = null,
     /**
      * A user line the engine took INTO the turn that was already running,
      * rather than one that started a turn of its own.
@@ -1192,4 +1194,12 @@ data class BotOverview(
     val reaches: List<String> = emptyList(),
     val wont: List<String> = emptyList(),
     val recent: List<BotOverviewRecent> = emptyList(),
+)
+
+/** Unknown attachment kinds remain decodable and are not rendered. */
+@Serializable
+data class MessageImageAttachment(
+    val kind: String,
+    val path: String? = null,
+    val mime: String? = null,
 )

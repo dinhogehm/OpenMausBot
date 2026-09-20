@@ -288,7 +288,28 @@ it("deduplicates a repeated direct request without creating extra recipient task
   expect((await f.messages(f.chief.activeTaskId)).filter((message: any) => message.tool?.name === "Sent to Engineering lead")).toHaveLength(1);
 }), 45_000);
 
-it("queues a busy recipient, preserving its existing task and resuming only the pinned parent", () => fixture(async f => {
+it("dispatches to a spare recipient thread without waiting for unrelated work", () => fixture(async f => {
+  await f.api("/api/config", { threads: { maxConcurrentPerBot: 2 } }, "PUT");
+  const gate = join(f.session.info.dataDir, "unrelated-work.gate");
+  f.plan[f.lead.id] = { gateFile: gate, progress: "Unrelated work started", reply: "Unrelated work completed" };
+  f.save();
+  await f.cli("send", "--bot", f.lead.id, "--task", f.lead.activeTaskId, "--text", "My unrelated task");
+  try {
+    await expect.poll(async () => (await f.messages(f.lead.activeTaskId)).some((m: any) => m.text === "Unrelated work started"), { timeout: 10_000 }).toBe(true);
+    f.plan[f.lead.id] = { reply: "Coordinated work completed" };
+    await f.start();
+    await expect.poll(() => f.nodes().find((n: any) => n.parentId)?.status, { timeout: 8_000 }).toBe("completed");
+    expect((await f.wait()).status).toBe("settled");
+    const lead = (await f.api("/api/bots")).bots.find((b: any) => b.id === f.lead.id);
+    expect(lead.tasks.find((t: any) => t.threadId === f.lead.activeTaskId).busy).toBe(true);
+    expect((await f.messages(f.chief.activeTaskId)).some((m: any) => m.text === "The requested CSV export is implemented and verified")).toBe(true);
+  } finally {
+    writeFileSync(gate, "go");
+  }
+}), 45_000);
+
+it("queues a recipient at capacity, preserving its existing task and resuming only the pinned parent", () => fixture(async f => {
+  await f.api("/api/config", { threads: { maxConcurrentPerBot: 1 } }, "PUT");
   f.plan[f.lead.id] = { turns: [{ delayMs: 2500, reply: "Unrelated work completed" }, { reply: "Coordinated work completed" }] };
   f.save();
   await f.cli("send", "--bot", f.lead.id, "--task", f.lead.activeTaskId, "--text", "My unrelated task");
