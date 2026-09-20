@@ -38,6 +38,8 @@ recipe from sending messages to the user's running app by accident.
 Use only mapped, tested commands:
 
 - [Chat turns](chat-turns.md)
+- [Conversation context compaction](context-compaction.md)
+- [Work summaries and engine hooks](digests.md)
 - [OpenAI-compatible structured tools](openai-tools.md)
 - [OpenCode model variants through ACP](opencode-variants.md)
 - [Bot setup, model scope, and file continuity](bot-continuity.md)
@@ -62,6 +64,7 @@ Use only mapped, tested commands:
 - [Workspaces screen and the fleet agent](workspaces.md)
 - [Hosted workspace sign-in and revocation](hosted-workspaces.md)
 - [Usage ledger](usage-ledger.md)
+- [Bounded built-in tool results](tool-results.md)
 - [Spend cap and sell prices](spend-cap.md)
 
 `control-omb ui` ([Chat UI, driven headlessly](chat-ui.md)) drives the real
@@ -117,8 +120,18 @@ keyless local generation, saved-key handling, and safe errors with a local fake 
 The [independent threads fixture](threads.md) checks nested sidebar navigation,
 per-thread models, simultaneous direct conversations and thread-scoped Stop.
 
+The [mobile generated-image checks](mobile-generated-images.md) cover native image
+attachments and message-scoped download authorization using isolated fixtures.
+
+The [guarded external messages fixture](guarded-messages.md) checks atomic
+branch and approval preconditions, retry receipts, and refusal to queue or
+steer messages from external interfaces.
+
 The [iOS thread checks](ios-threads.md) cover the native thread tree, folder
 search and draft isolation using disposable simulators and an offline fixture.
+
+The [Android stream recovery checks](android-stream-recovery.md) exercise early
+stream closure and fallback through disposable HTTP endpoints.
 
 The [Android thread checks](android-threads.md) cover the Compose thread tree,
 local selection, draft isolation and installable preview APK.

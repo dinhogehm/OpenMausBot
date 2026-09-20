@@ -89,7 +89,8 @@ The direct-chat suite exercises Clive → lead → specialist → lead → Clive
 the real MCP proxy, no room, and no changes to unrelated conversations. It also
 checks one conversation per bot pair across separate user turns, its title,
 labelled concurrent work that closes itself, recipient model/permission
-defaults, idempotency without extra tasks, busy queues, pinned parent
+defaults, idempotency without extra tasks, capacity-bound queues, dispatch to a
+spare recipient thread while unrelated work remains active, pinned parent
 selection, steering a live coordination (including an automation turn
 landing in the same conversation), conversation-scoped Stop, source
 deletion, access revocation, and fresh transcript replay after
@@ -97,6 +98,11 @@ revocation. The UI test sends from the real
 composer and clicks the existing handoff receipt into the exact recipient task,
 with ordinary tool chips hidden. Screenshots and JSON are retained beside the
 fixture's printed server log; all fixture processes and temporary data are closed.
+The legacy routine `ask_bot` path is covered by `server/comms.test.ts`: a
+gated peer outlives the production 15-second inline budget, the caller finishes
+with an asynchronous receipt, and releasing the peer delivers its late reply
+to the original conversation. This budget releases the caller, not the peer;
+it does not impose a 15-second limit on delegated work.
 Follow-up checks cover retained report context and withholding after peer access
 is revoked, without mirroring a second visible transcript.
 Addressing checks cover what a bot may put in a `bot_ids` slot: an id is always

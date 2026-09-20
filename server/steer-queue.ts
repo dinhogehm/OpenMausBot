@@ -137,6 +137,13 @@ export function queuedThreadPosition(botId: string, threadId: string): number | 
   return null;
 }
 
+/** Any queued correction supersedes a tool-planned continuation, whether it
+ * waits for this thread's turn or for the bot's shared capacity. */
+export function hasQueuedSteeredMessages(botId: string, threadId: string): boolean {
+  const entry = queues.get(threadId);
+  return entry?.botId === botId && entry.items.length > 0;
+}
+
 /** Drain every queue whose task is idle: append the held lines (leaf is now
  * the finished turn's last item), then one run per thread whose prompt is
  * the texts separated by a blank line. `userMessage` is the last appended line

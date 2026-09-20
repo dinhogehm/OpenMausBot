@@ -13,6 +13,7 @@ import type { BotProfilePatch } from "./bot-profile.ts";
 import { peerAllowKey, type PeerAction } from "./peer-approval-key.ts";
 import { DATA_DIR, EVENTS_DIR, NATIVE_DIR, loadBrowserProfileIdAliases } from "./config.ts";
 import * as mdb from "./message-db.ts";
+import { runCommand, type Command } from "./commands.ts";
 import { workspaceDir } from "./workspace.ts";
 import { newId, type ModelSelection } from "./contracts.ts";
 import { pickBotName } from "./names.ts";
@@ -49,7 +50,6 @@ export type GroupWireProjection = GroupRecord & { working: boolean };
 export type GroupWireProjectionIsExact = AssertExact<WireGroup, GroupWireProjection> & AssertSameKeys<WireGroup, GroupWireProjection>;
 export const groupWireProjectionIsExact: GroupWireProjectionIsExact = true;
 
-
 // Unicode's complete emoji sequences include flags, skin tones and ZWJ
 // combinations. Also allow unqualified single symbols (e.g. ♥), but not
 // standalone components such as a digit, skin tone or regional indicator.
@@ -71,12 +71,16 @@ export interface TaskRecord extends WireTask {
   /** per instance: the stored messages that instance's current native
    * session has been handed on this task (server/delta-context.ts) */
   handedMessages?: Record<string, HandedState>;
+  /** Last compaction represented by a dispatched session on this task. */
+  appliedCompactionId?: string;
+  contextFloor?: number;
+  lastContextModel?: string;
 }
 
 /** TaskRecord fields no client may see. Everything else must be on WireTask:
  * the exactness assertion below fails to compile when either side drifts,
  * so a new server field forces a decision — wire-visible or private here. */
-export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId" | "handedMessages";
+export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId" | "handedMessages" | "appliedCompactionId" | "contextFloor" | "lastContextModel";
 export type TaskWireProjection = Pick<TaskRecord, Exclude<keyof TaskRecord, TaskWirePrivateKeys>>;
 type AssertExact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
 type AssertSameKeys<A, B> = [keyof A] extends [keyof B] ? ([keyof B] extends [keyof A] ? true : never) : never;
@@ -88,14 +92,15 @@ export const taskWireProjectionIsExact: TaskWireProjectionIsExact = true;
 /** The typed wire projection for one task. Pairs with the assertion above:
  * returning WireTask means an undeclared server field cannot ride silently. */
 export function toWireTask(task: TaskRecord): WireTask {
-  const { resumeCursors: _resumeCursors, lastInstanceId: _lastInstanceId, handedMessages: _handedMessages, ...wire } = task;
+  const { resumeCursors: _resumeCursors, lastInstanceId: _lastInstanceId, handedMessages: _handedMessages,
+    appliedCompactionId: _appliedCompactionId, contextFloor: _contextFloor, lastContextModel: _lastContextModel, ...wire } = task;
   return wire;
 }
 
 const TASK_PATCH_FIELDS = [
   "title", "projectId", "modelSelection", "approvalMode", "autoApprove", "alwaysAllow",
   "unread", "rewound", "archivedAt", "pinnedMessageId", "resumeCursors", "lastInstanceId", "cwd",
-  "routineRunId", "surface",
+  "routineRunId", "surface", "appliedCompactionId", "contextFloor", "lastContextModel",
 ] as const satisfies readonly (keyof TaskRecord)[];
 export type TaskPatch = Partial<Pick<TaskRecord, typeof TASK_PATCH_FIELDS[number]>>;
 
@@ -110,6 +115,7 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
   if (message.role !== "bot") return message;
   const out = { ...message };
   if (typeof out.text === "string") out.text = redactSecretsInText(out.text);
+  if (out.compaction) out.compaction = { ...out.compaction, summary: redactSecretsInText(out.compaction.summary) };
   if (out.tool?.name) {
     out.tool = { ...out.tool, name: redactSecretsInText(out.tool.name) };
     if (out.tool.summary) out.tool.summary = redactSecretsInText(out.tool.summary);
@@ -1171,12 +1177,16 @@ export class Store {
     return null;
   }
 
-  appendMessage(threadId: string, message: Omit<Message, "id" | "at"> & { at?: number }): Message {
+  appendMessage(threadId: string, message: Omit<Message, "id" | "at"> & { at?: number }, command?: Command): Message {
     const t = this.thread(threadId);
     const full: Message = { id: newId(), at: Date.now(), parentId: t.activeLeafId, ...redactBotAuthored(message) };
+    const persist = () => { mdb.appendMessage(threadId, full); return full; };
+    const committed = command ? runCommand(command, persist) : persist();
+    if (committed.id !== full.id) return committed;
+    // Only publish the committed write. A failed receipt must leave both
+    // the in-memory branch and subscribers unchanged, just like SQLite.
     t.messages.push(full);
     t.activeLeafId = full.id;
-    mdb.appendMessage(threadId, full);
     if (full.kind === "screen") {
       for (const pruned of this.pruneScreenFrames(t)) {
         mdb.updateMessage(threadId, pruned);
@@ -1296,7 +1306,7 @@ export class Store {
     return cur;
   }
 
-  patchMessage(threadId: string, messageId: string, patch: Partial<Message>): Message | null {
+  patchMessage(threadId: string, messageId: string, patch: Partial<Message>, command?: Command): Message | null {
     const t = this.thread(threadId);
     const idx = t.messages.findIndex((m) => m.id === messageId);
     if (idx === -1) return null;
@@ -1304,7 +1314,10 @@ export class Store {
     // SQLite is the durable source of truth. Persist before changing memory so
     // a failed write cannot make this process believe a card was answered
     // while a restart would still show it as pending.
-    mdb.updateMessage(threadId, next);
+    let applied = false;
+    const persist = () => { mdb.updateMessage(threadId, next); applied = true; return next; };
+    const committed = command ? runCommand(command, persist) : persist();
+    if (!applied) return committed;
     t.messages[idx] = next;
     this.emit({ type: "message.patch", threadId, message: next });
     return next;
