@@ -5,7 +5,7 @@
 // dialog's own z-50, plus: an Import from GitHub row, a static "when it's
 // used" line on every row (learned skills have no triggers to show), and a
 // read-only click-through view of a skill's full text.
-import { BookOpen, Store, Trash2 } from "lucide-react";
+import { BookOpen, FolderGit2, Store, Trash2 } from "lucide-react";
 import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState } from "react";
 
@@ -19,6 +19,9 @@ interface ManagedSkill {
   description: string;
   enabled: boolean;
   source: string;
+  /** Folder globs from the skill's frontmatter. Empty = offered everywhere;
+   * otherwise the index only lists it when the turn runs inside one. */
+  paths?: string[];
   warnings: string[];
 }
 
@@ -26,6 +29,18 @@ interface StagedSkillSummary {
   id: string;
   name: string;
   gist: string;
+}
+
+/** A skill the bot's current folder carries in .openmausbot/skills. Not
+ * installed anywhere: the repo owns the file, the person owns the approval. */
+interface ProjectSkill {
+  name: string;
+  description: string;
+  paths: string[];
+  sha256: string;
+  state: "approved" | "pending" | "changed";
+  warnings: string[];
+  file: string;
 }
 
 /** One row of a configured catalog, as the server already resolved it
@@ -58,8 +73,11 @@ export function SkillsSection({ bot }: { bot: Bot }) {
   const [catalog, setCatalog] = useState<CatalogEntry[] | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState("");
+  const [projectSkills, setProjectSkills] = useState<ProjectSkill[]>([]);
+  const [projectFolder, setProjectFolder] = useState("");
+  const [projectReviewing, setProjectReviewing] = useState<{ skill: ProjectSkill; text: string } | null>(null);
   const skillDialogRef = useRef<HTMLDivElement>(null);
-  const skillDialogOpen = Boolean(viewing || reviewing);
+  const skillDialogOpen = Boolean(viewing || reviewing || projectReviewing);
 
   useEffect(() => {
     if (!skillDialogOpen) return;
@@ -73,6 +91,7 @@ export function SkillsSection({ bot }: { bot: Bot }) {
         if (!working) {
           setViewing(null);
           setReviewing(null);
+          setProjectReviewing(null);
         }
       }
       if (event.key !== "Tab" || !dialog) return;
@@ -106,6 +125,13 @@ export function SkillsSection({ bot }: { bot: Bot }) {
       setSkills(result.skills ?? []);
       setStaged(result.staged ?? []);
       setError("");
+      const project = (await api(`/api/bots/${bot.id}/project-skills`)) as {
+        folder?: string;
+        skills?: ProjectSkill[];
+      };
+      if (cancelled?.()) return;
+      setProjectFolder(project.folder ?? "");
+      setProjectSkills(project.skills ?? []);
     } catch (cause) {
       if (!cancelled?.()) setError(cause instanceof Error ? cause.message : t("botSkills.loadError"));
     } finally {
@@ -118,6 +144,7 @@ export function SkillsSection({ bot }: { bot: Bot }) {
     setLoading(true);
     setReviewing(null);
     setViewing(null);
+    setProjectReviewing(null);
     void refresh(() => cancelled);
     return () => {
       cancelled = true;
@@ -257,6 +284,54 @@ export function SkillsSection({ bot }: { bot: Bot }) {
     }
   };
 
+  /** Read the repo's SKILL.md before deciding anything about it. The hash
+   * that comes back is the one the approval will name, so approving cannot
+   * silently bless a file that changed while the dialog was open. */
+  const reviewProjectSkill = async (skill: ProjectSkill) => {
+    setError("");
+    try {
+      const result = (await api(
+        `/api/bots/${bot.id}/project-skills/${encodeURIComponent(skill.name)}`,
+      )) as { text?: string };
+      if (!result.text) throw new Error(t("botSkills.contentsUnavailable"));
+      setProjectReviewing({ skill, text: result.text });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t("botSkills.viewError"));
+    }
+  };
+
+  const approveProjectSkill = async () => {
+    if (!projectReviewing) return;
+    const { skill } = projectReviewing;
+    setWorking(`project:${skill.name}`);
+    setError("");
+    try {
+      await api(`/api/bots/${bot.id}/project-skills/${encodeURIComponent(skill.name)}`, {
+        method: "POST",
+        body: JSON.stringify({ sha256: skill.sha256 }),
+      });
+      setProjectReviewing(null);
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t("botSkills.projectApproveError"));
+    } finally {
+      setWorking("");
+    }
+  };
+
+  const revokeProjectSkill = async (skill: ProjectSkill) => {
+    setWorking(`project:${skill.name}`);
+    setError("");
+    try {
+      await api(`/api/bots/${bot.id}/project-skills/${encodeURIComponent(skill.name)}`, { method: "DELETE" });
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t("botSkills.projectRevokeError"));
+    } finally {
+      setWorking("");
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <div className="rounded-xl bg-card p-4">
@@ -355,6 +430,59 @@ export function SkillsSection({ bot }: { bot: Bot }) {
           </div>
         )}
 
+        {projectSkills.length > 0 && (
+          <div className="mt-3 rounded-lg border border-hairline/40 p-3">
+            <div className="flex items-center gap-2">
+              <FolderGit2 size={14} className="text-ink-secondary" />
+              <div className="text-[12.5px] font-medium text-ink">{t("botSkills.projectTitle")}</div>
+            </div>
+            <div className="mt-1 break-all text-[11px] text-ink-secondary">
+              {t("botSkills.projectHint", { folder: projectFolder })}
+            </div>
+            <div className="mt-2 divide-y divide-hairline/40 overflow-hidden rounded-lg border border-hairline/40">
+              {projectSkills.map((skill) => (
+                <div key={skill.name} className="px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-mono text-[12px] text-ink">{skill.name}</div>
+                      <div className="mt-0.5 line-clamp-2 text-[11px] text-ink-secondary">{skill.description}</div>
+                      <div className="mt-0.5 text-[10.5px] text-ink-secondary">
+                        {skill.state === "approved"
+                          ? t("botSkills.projectApproved")
+                          : skill.state === "changed"
+                            ? t("botSkills.projectChanged")
+                            : t("botSkills.projectPending")}
+                      </div>
+                    </div>
+                    {skill.state === "approved" ? (
+                      <button
+                        type="button"
+                        disabled={working === `project:${skill.name}`}
+                        onClick={() => void revokeProjectSkill(skill)}
+                        className="shrink-0 rounded-lg px-2.5 py-1.5 text-[12px] text-ink-secondary hover:bg-raised disabled:opacity-50"
+                      >
+                        {t("botSkills.projectRevoke")}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={working === `project:${skill.name}`}
+                        onClick={() => void reviewProjectSkill(skill)}
+                        className="shrink-0 rounded-lg bg-control px-2.5 py-1.5 text-[12px] text-ink hover:bg-raised-hover disabled:opacity-50"
+                      >
+                        {t("botSkills.projectReview")}
+                      </button>
+                    )}
+                  </div>
+                  {skill.warnings.length > 0 && (
+                    <div className="mt-1 text-[10.5px] text-warning">{skill.warnings.join(" · ")}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {loading ? (
           <div className="mt-3 text-[12px] text-ink-secondary">{t("botSkills.loading")}</div>
         ) : skills.length === 0 ? (
@@ -390,6 +518,11 @@ export function SkillsSection({ bot }: { bot: Bot }) {
                   </button>
                 </div>
                 <div className="mt-1 truncate text-[10.5px] text-ink-secondary" title={skill.source}>{t("botSkills.source", { source: skill.source })}</div>
+                {skill.paths && skill.paths.length > 0 && (
+                  <div className="mt-0.5 truncate text-[10.5px] text-ink-secondary">
+                    {t("botSkills.scope", { paths: skill.paths.join(", ") })}
+                  </div>
+                )}
                 {skill.warnings.length > 0 && (
                   <div className="mt-1 text-[10.5px] text-warning">{skill.warnings.join(" · ")}</div>
                 )}
@@ -450,6 +583,57 @@ export function SkillsSection({ bot }: { bot: Bot }) {
                 className="rounded-lg bg-accent px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-40"
               >
                 {t("botSkills.enableReviewed")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {projectReviewing && (
+        <div
+          ref={skillDialogRef}
+          tabIndex={-1}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="project-skill-review-title"
+          className="fixed inset-0 z-[90] flex items-center justify-center bg-black/45 p-6"
+        >
+          <div className="flex max-h-[min(760px,90vh)] w-full max-w-2xl flex-col rounded-2xl bg-card p-5 shadow-2xl">
+            <div id="project-skill-review-title" className="text-[16px] font-semibold text-ink">
+              {t("botSkills.reviewTitle", { name: projectReviewing.skill.name })}
+            </div>
+            <div className="mt-1 break-all text-[11.5px] text-ink-secondary">
+              {t("botSkills.source", { source: projectReviewing.skill.file })}
+            </div>
+            {projectReviewing.skill.warnings.length > 0 && (
+              <div className="mt-2 rounded-lg bg-warning/10 px-3 py-2 text-[11.5px] text-warning">
+                {projectReviewing.skill.warnings.join(" · ")}
+              </div>
+            )}
+            <pre
+              tabIndex={0}
+              aria-label={t("botSkills.fullSkillAria", { name: projectReviewing.skill.name })}
+              className="mt-3 min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-inset p-3 font-mono text-[12px] leading-relaxed text-ink"
+            >
+              {projectReviewing.text}
+            </pre>
+            {error && <div role="alert" className="mt-2 text-[12px] text-danger">{error}</div>}
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={working === `project:${projectReviewing.skill.name}`}
+                onClick={() => setProjectReviewing(null)}
+                className="rounded-lg px-4 py-2 text-[13px] font-medium text-ink-secondary hover:bg-raised disabled:opacity-40"
+              >
+                {t("botSkills.cancel")}
+              </button>
+              <button
+                type="button"
+                disabled={working === `project:${projectReviewing.skill.name}`}
+                onClick={() => void approveProjectSkill()}
+                className="rounded-lg bg-accent px-4 py-2 text-[13px] font-semibold text-white disabled:opacity-40"
+              >
+                {t("botSkills.projectApprove")}
               </button>
             </div>
           </div>

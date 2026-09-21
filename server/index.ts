@@ -346,6 +346,13 @@ import {
   stageSkillWrite,
 } from "./skills.ts";
 import { fetchSkillFromSource } from "./skill-fetch.ts";
+import {
+  approveProjectSkill,
+  projectSkills,
+  projectSkillsSystemPrompt,
+  readProjectSkill,
+  revokeProjectSkill,
+} from "./project-skills.ts";
 import { catalogView, fetchCatalog, installCatalogEntry, updateCatalogSkill } from "./skill-marketplace.ts";
 import { expandLearnTurnText, learnSource } from "./skill-learn.ts";
 import { expandSetupTurnText, setupModeActive, setupSystemPrompt } from "./setup-mode.ts";
@@ -1857,7 +1864,8 @@ function previewSystemPrompt(bot: BotRecord) {
     { id: "profile", label: "Profile changes", text: agentsMounted ? PROFILE_PROMPT : "" },
     { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
     { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: agentsMounted, fileTools: Boolean(privateWorkspace) }) },
-    { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
+    { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id, { cwd: bot.cwd ?? "" }) : "" },
+    { id: "project-skills", label: "Project skills", text: privateWorkspace ? projectSkillsSystemPrompt(bot.cwd ?? "") : "" },
   ]);
   const totalBytes = built.sections.reduce((n, s) => n + s.bytes, 0);
   return {
@@ -7486,7 +7494,8 @@ async function startTurn(
         // never redoes — or forgets — what another one already did
         { id: "recent", label: "Recent work", text: recentWorkPrompt(recentWork(store, bot, { userName: cfg.profile?.name?.trim() || "User", currentThreadId: threadId })) },
         { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: Boolean(integrations.agents), fileTools: worksInWorkspace }) },
-        { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
+        { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id, { cwd }) : "" },
+        { id: "project-skills", label: "Project skills", text: privateWorkspace ? projectSkillsSystemPrompt(cwd ?? "") : "" },
         { id: "skill-instructions", label: "Skill instructions", text: skillInstructions },
         { id: "playbooks", label: "Playbooks", text: packagePlaybooks },
         { id: "webhook", label: "Webhook provenance", text: opts?.automationSource === "webhook" ? WEBHOOK_PROMPT : "" },
@@ -9492,7 +9501,8 @@ async function runGroupMemberTurn(
     // mounted, exactly as the 1:1 path decides it: memory_update is on the
     // agents server, so a room turn with it must be told to use it too.
     { id: "memory", label: "Memory", text: roomMemory ? `\n${roomMemory.trim()}` : "" },
-    { id: "skills", label: "Skills index", text: workspace ? skillsSystemPrompt(bot.id) : "" },
+    { id: "skills", label: "Skills index", text: workspace ? skillsSystemPrompt(bot.id, { cwd }) : "" },
+    { id: "project-skills", label: "Project skills", text: workspace ? projectSkillsSystemPrompt(cwd ?? "") : "" },
     { id: "skill-instructions", label: "Skill instructions", text: renderSkillInstructions(selectedSkills, { includeRoot: Boolean(workspace) }) },
     { id: "playbooks", label: "Playbooks", text: installedPlaybookInstructions(text, bot.playbooks) },
   ]);
@@ -16349,6 +16359,46 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         : await installCatalogEntry(botId, source.id, entry);
       if ("error" in result) return json(res, 422, { error: result.error });
       return json(res, 201, result);
+    }
+    // ── project skills: what the bot's current folder carries ─────────
+    // The repo's own .openmausbot/skills. Nothing here reaches a prompt
+    // until someone read that exact SKILL.md and approved its hash, and an
+    // edit to the file drops it back out until it is read again.
+    m = path.match(/^\/api\/bots\/([\w-]+)\/project-skills$/);
+    if (m && method === "GET") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const folder = url.searchParams.get("folder") ?? bot.cwd ?? "";
+      return json(res, 200, { folder, skills: projectSkills(folder) });
+    }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/project-skills\/([a-z0-9-]+)$/);
+    if (m && (method === "GET" || method === "POST" || method === "DELETE")) {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const name = m[2]!;
+      if (method === "GET") {
+        const folder = url.searchParams.get("folder") ?? bot.cwd ?? "";
+        const text = readProjectSkill(folder, name);
+        if (text === null) return json(res, 404, { error: "no such project skill" });
+        return json(res, 200, { text });
+      }
+      const parsed = z.object({
+        folder: z.string().optional(),
+        /** The hash of the text that was shown. An approval names the bytes
+         * it approves; without that it would approve whatever is there now. */
+        sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+      }).safeParse(await readBody(req));
+      if (!parsed.success) return json(res, 400, { error: "sha256 must be the hash of the reviewed SKILL.md" });
+      const folder = parsed.data.folder ?? bot.cwd ?? "";
+      if (method === "DELETE") {
+        const revoked = revokeProjectSkill(folder, name);
+        if ("error" in revoked) return json(res, 404, { error: revoked.error });
+        return json(res, 200, revoked);
+      }
+      if (!parsed.data.sha256) return json(res, 400, { error: "sha256 of the reviewed SKILL.md is required" });
+      const approved = approveProjectSkill(folder, name, parsed.data.sha256);
+      if ("error" in approved) return json(res, 409, { error: approved.error });
+      return json(res, 200, { skill: approved });
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/skills\/([a-z0-9-]+)$/);
     if (m && method === "GET") {
