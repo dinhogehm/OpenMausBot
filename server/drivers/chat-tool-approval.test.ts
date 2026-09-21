@@ -21,6 +21,24 @@ describe("chat tool approval lifecycle", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("says WHO settled each ask, so an unanswered card is never reported as a refusal", async () => {
+    vi.useFakeTimers();
+    const open = vi.fn();
+    const gate = createChatToolApproval({ signal: new AbortController().signal, open, resolved: vi.fn(), timeoutMs: 100 });
+
+    const unanswered = gate.decide("composio_composio_remote_workbench", "Query the deploys");
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(unanswered).resolves.toEqual({ allowed: false, source: "timeout" });
+
+    const refused = gate.decide("composio_composio_multi_execute_tool", "Post a comment");
+    gate.answer(open.mock.calls[1][0].id, "deny");
+    await expect(refused).resolves.toEqual({ allowed: false, source: "user" });
+
+    const approved = gate.decide("composio_composio_search_tools", "Find a tool");
+    gate.answer(open.mock.calls[2][0].id, "allow");
+    await expect(approved).resolves.toEqual({ allowed: true, source: "user" });
+  });
+
   it("denies a cancelled ask and never opens another one for the cancelled turn", async () => {
     const abort = new AbortController();
     const open = vi.fn();

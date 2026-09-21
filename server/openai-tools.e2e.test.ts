@@ -152,8 +152,7 @@ it("runs structured MCP calls through real harness approval and continuation, pr
           expect(result?.content).toMatch(/denied/i);
           expect(existsSync(artifact)).toBe(false);
           expect(messages.messages.some((message: any) =>
-            message.tool?.ok === false && /failed or was denied this turn/.test(message.tool?.name ?? "")
-            && /not as a receipt/.test(message.tool?.name ?? ""),
+            message.tool?.ok === false && /not a receipt — 1 call was denied\./.test(message.tool?.name ?? ""),
           )).toBe(true);
         }
       } else {

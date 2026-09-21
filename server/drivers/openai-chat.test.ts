@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeEvent } from "../contracts.ts";
 import { MinimaxDriver } from "./minimax.ts";
 import { OpenAICompatDriver } from "./openai-compat.ts";
-import { toolFailureNotice } from "./openai-chat.ts";
+import { TOOL_NOTICE_MAX_CHARS, toolFailureNotice, type ToolProblem } from "./openai-chat.ts";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -246,20 +246,48 @@ describe("createOpenAIChatRuntime stream termination", () => {
 });
 
 describe("the note that replaces a failed turn when a tool did not execute", () => {
-  it("names the tools and tells the person how to read the reply", () => {
-    expect(toolFailureNotice(["audit_write"])).toBe(
-      "A tool failed or was denied this turn (audit_write). Read the reply as a report, not as a receipt.",
-    );
-    expect(toolFailureNotice(["audit_write", "composio_search"])).toBe(
-      "2 tools failed or were denied this turn (audit_write, composio_search). Read the reply as a report, not as a receipt.",
-    );
+  const WARNING = "Read the reply as a report, not a receipt";
+  // the real names a chat bot sees: harness MCP servers prefix every tool
+  const MULTI = "composio_composio_multi_execute_tool";
+  const WORKBENCH = "composio_composio_remote_workbench";
+  const SEARCH = "composio_composio_search_tools";
+  const SCHEMAS = "composio_composio_get_tool_schemas";
+
+  it("tells an unanswered approval apart from a refusal, a failure and a malformed call", () => {
+    expect(toolFailureNotice([{ name: "audit_write", kind: "denied" }])).toBe(`${WARNING} — 1 call was denied.`);
+    expect(toolFailureNotice([{ name: "audit_write", kind: "unanswered" }])).toBe(`${WARNING} — 1 approval went unanswered.`);
+    expect(toolFailureNotice([{ name: "audit_write", kind: "rejected" }])).toBe(`${WARNING} — 1 call was rejected before running.`);
+    // only a failure is named: it is the one case where something ran and broke
+    expect(toolFailureNotice([{ name: MULTI, kind: "failed" }])).toBe(`${WARNING} — 1 tool failed while running (composio:multi_execute_tool).`);
   });
 
-  it("stays short enough for the chip that carries it", () => {
-    const many = ["one", "two", "three", "four", "five", "six", "seven"];
-    expect(toolFailureNotice(many)).toContain("one, two, three, four and 3 more");
-    // the chip truncates at 160 characters; the warning must survive intact
-    expect(toolFailureNotice(many).length).toBeLessThanOrEqual(160);
-    expect(toolFailureNotice(many)).toContain("not as a receipt");
+  it("reads the Produto turn of 21/09 as what it was: nobody at the card, one malformed call", () => {
+    const turn: ToolProblem[] = [
+      { name: WORKBENCH, kind: "unanswered" },
+      { name: MULTI, kind: "rejected" },
+      { name: SEARCH, kind: "unanswered" },
+      { name: WORKBENCH, kind: "unanswered" },
+      { name: SCHEMAS, kind: "unanswered" },
+      { name: MULTI, kind: "unanswered" },
+    ];
+    expect(toolFailureNotice(turn)).toBe(`${WARNING} — 5 approvals went unanswered; 1 call was rejected before running.`);
+  });
+
+  it("never loses the warning to the chip's 160-character cut, whatever the names", () => {
+    const worst: ToolProblem[] = [
+      ...[MULTI, WORKBENCH, SEARCH, SCHEMAS, "composio_composio_manage_connections", "agents_memory_log"].map((name) => ({ name, kind: "failed" as const })),
+      { name: MULTI, kind: "denied" }, { name: SEARCH, kind: "unanswered" }, { name: SCHEMAS, kind: "rejected" },
+    ];
+    const text = toolFailureNotice(worst);
+    expect(text.length).toBeLessThanOrEqual(TOOL_NOTICE_MAX_CHARS);
+    expect(text.startsWith(WARNING)).toBe(true);
+    // too long to name them all: the counts still say what happened
+    expect(text).toContain("6 tools failed while running");
+    expect(text).toContain("1 approval went unanswered");
+  });
+
+  it("names a failed tool once however often it failed", () => {
+    expect(toolFailureNotice([{ name: MULTI, kind: "failed" }, { name: MULTI, kind: "failed" }]))
+      .toBe(`${WARNING} — 2 tools failed while running (composio:multi_execute_tool).`);
   });
 });
