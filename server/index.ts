@@ -444,7 +444,7 @@ import { shouldMountLocalComputer } from "./local-routing.ts";
 import { autoLocalVmAttachable, type ContainerComputerStatus } from "./container-computer.ts";
 import { startAutoVmClaim, type AutoVmClaimTable } from "./auto-vm-claims.ts";
 import { computerFreeText, computerStillBusyText, computerWaitEndedText, computerWaitingText, type ComputerHolder } from "./computer-wait.ts";
-import { folderFreeText, folderStillBusyText, folderWaitEndedText, folderWaitingText, type FolderHolder } from "./workspace-wait.ts";
+import { folderFreeText, folderStillBusyText, folderWaitEndedText, folderWaitingText, folderWaitWouldDeadlock, type FolderHolder } from "./workspace-wait.ts";
 import { modelContextWindow } from "./model-context-window.ts";
 import { parseSurface, resolveSurface, surfaceLabel, surfaceOfComputerKind, surfacePrompt, type Surface } from "./surface.ts";
 import {
@@ -1042,6 +1042,18 @@ const turnComputerResources = new Map<string, { owner: TurnOwner; resource: stri
 const teamComputerTurns = new Map<string, { owner: TurnOwner; computerId: string; botId: string; remoteAgent: boolean }>();
 const settlingResourceOwners = new Map<string, string>();
 
+/** Who is parked on whose reply right now: the waiting thread -> the thread
+ * it is waiting for. Written only for the duration of a synchronous ask
+ * (askBotAndWait), which is the one case where a turn stays open while
+ * another turn must run.
+ *
+ * The project-folder queue reads it. Without this, two bots that share a
+ * folder deadlock the moment one asks the other synchronously: the asker
+ * holds the folder until its turn ends, the answerer waits for the folder,
+ * and neither moves until a timeout fires. Waiting cannot help there, so
+ * the folder claim refuses instead of queueing. */
+const syncAskWaits = new Map<string, string>();
+
 function claimTurnResource(owner: TurnOwner, resource: string): boolean {
   if (!turnResources.claim(resource, owner)) return false;
   turnResourceOwners.set(owner.threadId, owner);
@@ -1124,8 +1136,17 @@ async function bindTurnWorkspace(owner: TurnOwner, resource: string): Promise<vo
     while (true) {
       if (!active()) throw new DirectTurnSetupCancelled("Project folder wait cancelled");
       if (claimTurnResource(owner, resource)) break;
+      const holding = turnResources.blocker(resource, owner);
+      if (holding && folderWaitWouldDeadlock(holding.threadId, owner.threadId, syncAskWaits)) {
+        // Queueing here would wait on a turn that is waiting on this one.
+        // Fail now, with the way out, instead of two timeouts from now.
+        throw Object.assign(
+          new Error("another thread is working in this project folder and is waiting for this one to answer — give one of them a separate folder"),
+          { status: 409, code: "workspace_busy" },
+        );
+      }
       if (!waitingMessage) {
-        const blocker = turnResources.blocker(resource, owner);
+        const blocker = holding;
         const holderBot = blocker && store.botByThread(blocker.threadId);
         const holderTask = holderBot && blocker && store.taskByThread(holderBot.id, blocker.threadId);
         const holderRoom = !holderBot && blocker ? store.groupByThread(blocker.threadId) : null;
@@ -1524,9 +1545,14 @@ function askBotAndWait(targetBotId: string, message: string, depth: number, from
   return new Promise((resolve) => {
     let text = "";
     let done = false;
+    // The asker's turn stays open for this wait, so record the edge: the
+    // folder queue must not park the answerer behind a thread that is
+    // parked on the answerer.
+    if (fromThreadId) syncAskWaits.set(fromThreadId, threadId);
     const finish = (out: AskBotOutcome) => {
       if (done) return;
       done = true;
+      if (fromThreadId && syncAskWaits.get(fromThreadId) === threadId) syncAskWaits.delete(fromThreadId);
       clearTimeout(timer);
       unsub();
       resolve(out);

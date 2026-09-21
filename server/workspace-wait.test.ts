@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { folderFreeText, folderStillBusyText, folderWaitEndedText, folderWaitingText } from "./workspace-wait.ts";
+import { folderFreeText, folderStillBusyText, folderWaitEndedText, folderWaitingText, folderWaitWouldDeadlock } from "./workspace-wait.ts";
 
 describe("project folder wait wording", () => {
   it("reads as a queue position behind a named turn, never as an error", () => {
@@ -32,5 +32,24 @@ describe("project folder wait wording", () => {
     expect(folderStillBusyText(undefined, 45_000)).toBe(
       "Another thread is still working in this project folder after 45 seconds. Stop that turn, or choose a separate folder.",
     );
+  });
+});
+
+describe("refusing to queue when queueing cannot help", () => {
+  it("catches a direct and an indirect wait back onto this turn", () => {
+    // A is parked on B's reply, so B must not queue behind A's folder
+    expect(folderWaitWouldDeadlock("A", "B", new Map([["A", "B"]]))).toBe(true);
+    // A waits on B, B waits on C: C must not queue behind A either
+    expect(folderWaitWouldDeadlock("A", "C", new Map([["A", "B"], ["B", "C"]]))).toBe(true);
+  });
+
+  it("lets an ordinary holder be queued behind", () => {
+    expect(folderWaitWouldDeadlock("A", "B", new Map())).toBe(false);
+    // A is waiting on someone else entirely
+    expect(folderWaitWouldDeadlock("A", "B", new Map([["A", "Z"]]))).toBe(false);
+  });
+
+  it("terminates on a cycle that does not include this turn", () => {
+    expect(folderWaitWouldDeadlock("A", "me", new Map([["A", "B"], ["B", "A"]]))).toBe(false);
   });
 });

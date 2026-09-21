@@ -45,3 +45,27 @@ export function folderStillBusyText(holder: FolderHolder | null | undefined, cei
   const who = holder ? ` — ${holderPhrase(holder).replace(" is running ", " is still running ").replace(" is working there", " is still working there")}` : "";
   return `Another thread is still working in this project folder after ${minutes(ceilingMs)}${who}. Stop that turn, or choose a separate folder.`;
 }
+
+/** Would queueing behind `blockerThreadId` wait on a turn that is itself
+ * waiting on `ownThreadId`?
+ *
+ * Two bots sharing a folder deadlock the moment one asks the other
+ * synchronously: the asker holds the folder until its turn ends, the
+ * answerer waits for the folder, and neither moves until a timeout fires.
+ * `waitingOn` maps a parked thread to the thread it is parked on, and this
+ * walks the chain — A→B→C is caught as well as A→B — so the folder claim
+ * can refuse immediately instead of queueing into a stall. */
+export function folderWaitWouldDeadlock(
+  blockerThreadId: string,
+  ownThreadId: string,
+  waitingOn: ReadonlyMap<string, string>,
+): boolean {
+  const seen = new Set<string>();
+  let at: string | undefined = blockerThreadId;
+  while (at && !seen.has(at)) {
+    if (at === ownThreadId) return true;
+    seen.add(at);
+    at = waitingOn.get(at);
+  }
+  return false;
+}
