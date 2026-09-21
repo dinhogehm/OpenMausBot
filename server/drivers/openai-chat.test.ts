@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeEvent } from "../contracts.ts";
 import { MinimaxDriver } from "./minimax.ts";
 import { OpenAICompatDriver } from "./openai-compat.ts";
+import { toolFailureNotice } from "./openai-chat.ts";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -241,5 +242,24 @@ describe("createOpenAIChatRuntime stream termination", () => {
       .toEqual(["reasoning_text", "assistant_text"]);
     expect(events.find((event) => event.type === "item.completed")).toMatchObject({ text: "Hello!" });
     expect(events.at(-1)).toMatchObject({ type: "turn.completed", ok: true, usage: { input: 5, output: 9 } });
+  });
+});
+
+describe("the note that replaces a failed turn when a tool did not execute", () => {
+  it("names the tools and tells the person how to read the reply", () => {
+    expect(toolFailureNotice(["audit_write"])).toBe(
+      "A tool failed or was denied this turn (audit_write). Read the reply as a report, not as a receipt.",
+    );
+    expect(toolFailureNotice(["audit_write", "composio_search"])).toBe(
+      "2 tools failed or were denied this turn (audit_write, composio_search). Read the reply as a report, not as a receipt.",
+    );
+  });
+
+  it("stays short enough for the chip that carries it", () => {
+    const many = ["one", "two", "three", "four", "five", "six", "seven"];
+    expect(toolFailureNotice(many)).toContain("one, two, three, four and 3 more");
+    // the chip truncates at 160 characters; the warning must survive intact
+    expect(toolFailureNotice(many).length).toBeLessThanOrEqual(160);
+    expect(toolFailureNotice(many)).toContain("not as a receipt");
   });
 });

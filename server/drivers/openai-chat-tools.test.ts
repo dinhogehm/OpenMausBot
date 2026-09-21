@@ -418,18 +418,26 @@ describe("structured tool execution boundaries", () => {
     expect(await f.completed()).toMatchObject({ ok: true, usage: { input: 30, output: 6 } });
   });
 
-  it("returns denial to the model without treating a convincing final answer as successful execution", async () => {
+  it("returns denial to the model and contradicts a convincing final answer without failing the run", async () => {
     const f = await fixture((_body, response, round) => {
       if (round === 1) sse(response, [chunk({ tool_calls: [toolCall()] }, "tool_calls")]);
       else answer(response, "I successfully wrote the receipt.");
     });
     await f.start();
     expect(await f.decide("deny")).toBe("rejected");
-    expect(await f.completed()).toMatchObject({ ok: false });
+    // A denial is the system working, not a broken run: the turn completes,
+    // and what the model claimed is contradicted next to it by name.
+    expect(await f.completed()).toMatchObject({ ok: true, stopReason: "tool_error" });
     expect(f.effects()).toEqual([]);
     expect(f.requests).toHaveLength(2);
     expect(f.requests[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "call_write", content: expect.stringMatching(/denied|declined|not allowed/i) });
     expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "item.completed", itemType: "tool", ok: false }));
+    // the reply still reaches the person — with the harness's correction
+    expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "item.completed", itemType: "assistant_text", text: "I successfully wrote the receipt." }));
+    expect(f.recorder.events).toContainEqual(expect.objectContaining({
+      type: "runtime.error", terminal: false,
+      message: "A tool failed or was denied this turn (audit_write). Read the reply as a report, not as a receipt.",
+    }));
   });
 
   it("keeps approvals bound to the pending request and thread", async () => {
@@ -456,10 +464,15 @@ describe("structured tool execution boundaries", () => {
     const f = await fixture((_body, response, round) => round === 1
       ? sse(response, [chunk({ tool_calls: [toolCall(name, args)] }, "tool_calls")]) : answer(response));
     await f.start();
-    expect(await f.completed()).toMatchObject({ ok: false });
+    // the bad call is reported back and never executed; the run itself is
+    // not declared broken, it is marked — tool_error, with the name
+    expect(await f.completed()).toMatchObject({ ok: true, stopReason: "tool_error" });
     expect(f.effects()).toEqual([]);
     expect(f.recorder.events.some((event) => event.type === "request.opened")).toBe(false);
     expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "item.completed", itemType: "tool", ok: false }));
+    expect(f.recorder.events).toContainEqual(expect.objectContaining({
+      type: "runtime.error", terminal: false, message: expect.stringContaining(`(${name})`),
+    }));
     expect(f.requests[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "call_write", content: expect.any(String) });
   });
 
@@ -484,7 +497,12 @@ describe("structured tool execution boundaries", () => {
       ? sse(response, [chunk({ tool_calls: [toolCall("audit_fail")] }, "tool_calls")]) : answer(response));
     await f.start();
     await f.decide();
-    expect(await f.completed()).toMatchObject({ ok: false });
+    // the failed OPERATION keeps its status; the run is not declared broken
+    expect(await f.completed()).toMatchObject({ ok: true, stopReason: "tool_error" });
+    expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "item.completed", itemType: "tool", ok: false }));
+    expect(f.recorder.events).toContainEqual(expect.objectContaining({
+      type: "runtime.error", terminal: false, message: expect.stringContaining("(audit_fail)"),
+    }));
     expect(f.effects()).toEqual([]);
     expect(f.requests[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "call_write", content: expect.stringContaining("Synthetic tool failed") });
   });

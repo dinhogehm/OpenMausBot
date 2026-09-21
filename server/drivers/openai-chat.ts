@@ -106,6 +106,33 @@ const asError = (value: unknown): Error =>
   value instanceof Error ? value : new Error(String(value));
 
 /** Shared runtime for the three providers that speak OpenAI chat completions. */
+/** How many failed tool names the turn's closing note lists before it
+ * stops naming them; the chip that carries it is short. */
+const FAILED_TOOL_NAMES_IN_NOTICE = 4;
+
+/** The harness's own line when a turn ends in a reply after a tool failed
+ * or was denied.
+ *
+ * The danger this guards is real: a chat model that was denied a write will
+ * happily close with "done, I pushed it". But the guard used to answer that
+ * by FAILING the whole turn, which is the wrong instrument. The reply is
+ * delivered either way (it is emitted before this point), so failing the
+ * turn added a red run and an incident to the Chief — for one denied
+ * permission anywhere in a long turn, including when the model had done
+ * exactly the right thing and said what it could not do. A denial is the
+ * system working, not a broken run.
+ *
+ * What a tool failure actually invalidates is reading the reply as a
+ * receipt. So the harness says that, in its own voice, beside the reply,
+ * and names the tools — a sharper signal than a failed turn, and one the
+ * person can act on. */
+export function toolFailureNotice(names: readonly string[]): string {
+  const shown = names.slice(0, FAILED_TOOL_NAMES_IN_NOTICE).join(", ");
+  const rest = names.length - FAILED_TOOL_NAMES_IN_NOTICE;
+  const list = rest > 0 ? `${shown} and ${rest} more` : shown;
+  return `${names.length === 1 ? "A tool" : `${names.length} tools`} failed or ${names.length === 1 ? "was" : "were"} denied this turn (${list}). Read the reply as a report, not as a receipt.`;
+}
+
 export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>): ProviderInstance {
   const { input } = options;
   const listeners = new Set<RuntimeEventListener>();
@@ -354,7 +381,8 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
       let ok = false;
       let stopReason: string | null = null;
       let failure: string | undefined;
-      let toolFailed = false;
+      /** Distinct tools that failed or were denied, in the order they did. */
+      const failedTools: string[] = [];
       const denials: string[] = [];
       const seenCalls = new Set<string>();
       try {
@@ -420,9 +448,12 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             if (completion.finishReason && completion.finishReason !== "stop") {
               throw new ChatProtocolError(`provider did not finish the response (${completion.finishReason})`);
             }
-            if (toolFailed) {
+            // A failed or denied tool does not make this a broken run.
+            // Mark it instead of failing it: the note is not terminal, so
+            // the reply stands beside a chip naming what did not execute.
+            if (failedTools.length) {
               stopReason = "tool_error";
-              throw new ChatProtocolError("One or more tool operations failed or were denied. See the tool results; the final response is not an execution receipt.");
+              emit({ ...base(turn.threadId, turnId), type: "runtime.error", message: toolFailureNotice(failedTools), terminal: false });
             }
             ok = true;
             break;
@@ -481,7 +512,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             const text = safeText(result.text);
             const output = preview({ ok: result.ok, result: text });
             emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "tool", itemId: call.id, ok: result.ok, output });
-            if (!result.ok) toolFailed = true;
+            if (!result.ok && !failedTools.includes(call.function.name)) failedTools.push(call.function.name);
             messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, result: text }) });
             abort.signal.throwIfAborted();
             if (fatal) throw fatal;
