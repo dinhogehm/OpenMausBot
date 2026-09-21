@@ -334,6 +334,7 @@ import {
   applySkillWriteWithReceipt,
   getStagedSkillWrite,
   installSkill,
+  installedCatalogSkills,
   listSkills,
   listStagedSkillWrites,
   isSkillName,
@@ -345,6 +346,14 @@ import {
   stageSkillWrite,
 } from "./skills.ts";
 import { fetchSkillFromSource } from "./skill-fetch.ts";
+import {
+  approveProjectSkill,
+  projectSkills,
+  projectSkillsSystemPrompt,
+  readProjectSkill,
+  revokeProjectSkill,
+} from "./project-skills.ts";
+import { catalogView, fetchCatalog, installCatalogEntry, updateCatalogSkill } from "./skill-marketplace.ts";
 import { expandLearnTurnText, learnSource } from "./skill-learn.ts";
 import { expandSetupTurnText, setupModeActive, setupSystemPrompt } from "./setup-mode.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
@@ -428,7 +437,7 @@ import { WebhookManager } from "./webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills, renderSkillInstructions, selectBundledSkills } from "./skill-library.ts";
 import { installedPlaybookInstructions } from "./installed-playbooks.ts";
-import { createBotPackageExport, type ExportablePackageSkill } from "./package-export.ts";
+import { createBotPackageExport, portableMcpServers, type ExportablePackageSkill } from "./package-export.ts";
 import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
 import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
 import { shouldMountLocalComputer } from "./local-routing.ts";
@@ -1855,7 +1864,8 @@ function previewSystemPrompt(bot: BotRecord) {
     { id: "profile", label: "Profile changes", text: agentsMounted ? PROFILE_PROMPT : "" },
     { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
     { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: agentsMounted, fileTools: Boolean(privateWorkspace) }) },
-    { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
+    { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id, { cwd: bot.cwd ?? "" }) : "" },
+    { id: "project-skills", label: "Project skills", text: privateWorkspace ? projectSkillsSystemPrompt(bot.cwd ?? "") : "" },
   ]);
   const totalBytes = built.sections.reduce((n, s) => n + s.bytes, 0);
   return {
@@ -7484,7 +7494,8 @@ async function startTurn(
         // never redoes — or forgets — what another one already did
         { id: "recent", label: "Recent work", text: recentWorkPrompt(recentWork(store, bot, { userName: cfg.profile?.name?.trim() || "User", currentThreadId: threadId })) },
         { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: Boolean(integrations.agents), fileTools: worksInWorkspace }) },
-        { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
+        { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id, { cwd }) : "" },
+        { id: "project-skills", label: "Project skills", text: privateWorkspace ? projectSkillsSystemPrompt(cwd ?? "") : "" },
         { id: "skill-instructions", label: "Skill instructions", text: skillInstructions },
         { id: "playbooks", label: "Playbooks", text: packagePlaybooks },
         { id: "webhook", label: "Webhook provenance", text: opts?.automationSource === "webhook" ? WEBHOOK_PROMPT : "" },
@@ -9490,7 +9501,8 @@ async function runGroupMemberTurn(
     // mounted, exactly as the 1:1 path decides it: memory_update is on the
     // agents server, so a room turn with it must be told to use it too.
     { id: "memory", label: "Memory", text: roomMemory ? `\n${roomMemory.trim()}` : "" },
-    { id: "skills", label: "Skills index", text: workspace ? skillsSystemPrompt(bot.id) : "" },
+    { id: "skills", label: "Skills index", text: workspace ? skillsSystemPrompt(bot.id, { cwd }) : "" },
+    { id: "project-skills", label: "Project skills", text: workspace ? projectSkillsSystemPrompt(cwd ?? "") : "" },
     { id: "skill-instructions", label: "Skill instructions", text: renderSkillInstructions(selectedSkills, { includeRoot: Boolean(workspace) }) },
     { id: "playbooks", label: "Playbooks", text: installedPlaybookInstructions(text, bot.playbooks) },
   ]);
@@ -11456,6 +11468,8 @@ function configStatus() {
     // the base URL is a setting, not a secret; the key stays write-only
     openaiCompat: { configured: Boolean(cfg.openaiCompat?.key), url: cfg.openaiCompat?.url ?? "" },
     openrouter: { configured: Boolean(cfg.openrouter?.key), model: cfg.openrouter?.model ?? "", provider: cfg.openrouter?.provider ?? "" },
+    // catalogs are pointers the person configured; nothing secret in them
+    marketplaces: cfg.marketplaces ?? [],
     // `configured` is the TypeSafe key itself (the key row); `available` says
     // whether Jev can be reached at all — also true through the OpenRouter
     // key — and gates the review toggle and smart room routing in the UI.
@@ -14773,6 +14787,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             groups: store.groups,
             routines: routines!.listRoutines(),
             skillsByBot: collectExportSkills(selectedBots, skillNames.names),
+            // Definitions only: portableMcpServers keeps the names of the
+            // variables a server reads and drops every value.
+            mcpServers: portableMcpServers(cfg.mcpServers),
+            catalogs: cfg.marketplaces ?? [],
           });
           return json(res, 200, {
             name: document.package.name,
@@ -14913,6 +14931,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const importedBots: ReturnType<typeof store.createBot>[] = [];
       const createdGroups: GroupRecord[] = [];
       const createdRoutineIds: string[] = [];
+      /** What the package added to the workspace itself, so the install
+       * screen can say what is now waiting for the user's values. */
+      const installedCapabilities = { mcpServers: [] as string[], catalogs: [] as string[], skipped: [] as string[] };
       // Names already in use, hidden bots included: an archived bot can be
       // un-archived later, and a revived duplicate would be just as
       // ambiguous then.
@@ -15013,6 +15034,58 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           createdRoutineIds.push(created.id);
         }
 
+        // Workspace capabilities the package declares: the tool servers and
+        // skill sources its bots need to do what the package claims. Both
+        // are definitions — a package never carries a secret — and an MCP
+        // server lands OFF, so the person supplies the values and switches
+        // it on. A name already configured is left exactly as it is: a
+        // package must never replace a server someone set up.
+        if (pkg?.mcpServers?.length || pkg?.catalogs?.length) {
+          const patch: Parameters<typeof saveConfig>[0] = {};
+          if (pkg.mcpServers?.length) {
+            const servers: Record<string, unknown> = { ...cfg.mcpServers };
+            for (const server of pkg.mcpServers) {
+              // Never replace a server someone configured — they hold its
+              // secrets — and never push the workspace past its own cap.
+              if (servers[server.name] !== undefined || Object.keys(servers).length >= MAX_MCP_SERVERS) {
+                installedCapabilities.skipped.push(server.name);
+                continue;
+              }
+              servers[server.name] = server.transport === "stdio"
+                ? {
+                    command: server.command,
+                    ...(server.args?.length ? { args: server.args } : {}),
+                    env: Object.fromEntries((server.envKeys ?? []).map((key) => [key, ""])),
+                    enabled: false,
+                  }
+                : {
+                    type: server.type,
+                    url: server.url,
+                    headers: Object.fromEntries((server.headerKeys ?? []).map((key) => [key, ""])),
+                    enabled: false,
+                  };
+              installedCapabilities.mcpServers.push(server.name);
+            }
+            if (installedCapabilities.mcpServers.length) patch.mcpServers = servers;
+          }
+          if (pkg.catalogs?.length) {
+            const marketplaces = [...(cfg.marketplaces ?? [])];
+            for (const catalog of pkg.catalogs) {
+              if (marketplaces.some((entry) => entry.id === catalog.id)) continue;
+              marketplaces.push({ id: catalog.id, ...(catalog.name ? { name: catalog.name } : {}), url: catalog.url });
+              installedCapabilities.catalogs.push(catalog.id);
+            }
+            if (installedCapabilities.catalogs.length) patch.marketplaces = marketplaces;
+          }
+          if (patch.mcpServers || patch.marketplaces) {
+            saveConfig(patch);
+            // The module-level cfg is what every later request reads, and
+            // integrations are assembled from it at the next turn boundary.
+            if (patch.mcpServers) cfg.mcpServers = patch.mcpServers;
+            if (patch.marketplaces) cfg.marketplaces = patch.marketplaces;
+          }
+        }
+
         if (pkg?.chiefOfStaff) {
           store.setChiefOfStaff(memberIds.get(pkg.chiefOfStaff)!);
         }
@@ -15042,6 +15115,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           group,
           groups: createdGroups.map((created) => ({ ...created, messages: [] })),
           routines: createdRoutineIds.flatMap((id) => routines!.listRoutines().filter((routine) => routine.id === id)),
+          capabilities: installedCapabilities,
         });
       } catch (error) {
         // A room of deleted members must not survive either — patchGroup can
@@ -16298,6 +16372,93 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const errors = results.flatMap((entry) => ("error" in entry ? [entry.error] : []));
       if (!installed.length) return json(res, 422, { error: errors.join("; ") || "nothing importable found" });
       return json(res, 201, { installed, errors });
+    }
+    // ── skill catalogs: the sources this workspace lists ───────────────
+    // A catalog only points at skills. Installing one refetches from that
+    // pointer and lands DISABLED through the same reviewed path as a pasted
+    // URL, so adding a source grants nothing on its own.
+    if (method === "GET" && path === "/api/marketplaces") {
+      return json(res, 200, { marketplaces: cfg.marketplaces ?? [] });
+    }
+    m = path.match(/^\/api\/marketplaces\/([a-z0-9][a-z0-9-]{0,63})\/catalog$/);
+    if (m && method === "GET") {
+      const source = (cfg.marketplaces ?? []).find((entry) => entry.id === m![1]);
+      if (!source) return json(res, 404, { error: "no such marketplace" });
+      const botId = url.searchParams.get("bot") ?? "";
+      if (botId && !store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const catalog = await fetchCatalog(source);
+      if (!catalog.ok) return json(res, 502, { error: catalog.error });
+      const installed = botId ? installedCatalogSkills(botId) : {};
+      return json(res, 200, {
+        id: source.id,
+        name: catalog.name,
+        description: catalog.description,
+        entries: catalogView(source.id, catalog.entries, installed),
+      });
+    }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/skills\/catalog$/);
+    if (m && method === "POST") {
+      const botId = m[1]!;
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const parsed = z.object({
+        marketplaceId: z.string().min(1).max(64),
+        entryId: z.string().min(1).max(120),
+        /** Present to replace an installed skill with the catalog's current
+         * release; absent to install for the first time. */
+        updateSkill: z.string().min(1).max(64).optional(),
+      }).safeParse(await readBody(req));
+      if (!parsed.success) return json(res, 400, { error: "marketplaceId and entryId are required" });
+      const source = (cfg.marketplaces ?? []).find((entry) => entry.id === parsed.data.marketplaceId);
+      if (!source) return json(res, 404, { error: "no such marketplace" });
+      const catalog = await fetchCatalog(source);
+      if (!catalog.ok) return json(res, 502, { error: catalog.error });
+      const entry = catalog.entries.find((candidate) => candidate.id === parsed.data.entryId);
+      if (!entry) return json(res, 404, { error: "that catalog no longer lists this skill" });
+      const result = parsed.data.updateSkill
+        ? await updateCatalogSkill(botId, source.id, entry, parsed.data.updateSkill)
+        : await installCatalogEntry(botId, source.id, entry);
+      if ("error" in result) return json(res, 422, { error: result.error });
+      return json(res, 201, result);
+    }
+    // ── project skills: what the bot's current folder carries ─────────
+    // The repo's own .openmausbot/skills. Nothing here reaches a prompt
+    // until someone read that exact SKILL.md and approved its hash, and an
+    // edit to the file drops it back out until it is read again.
+    m = path.match(/^\/api\/bots\/([\w-]+)\/project-skills$/);
+    if (m && method === "GET") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const folder = url.searchParams.get("folder") ?? bot.cwd ?? "";
+      return json(res, 200, { folder, skills: projectSkills(folder) });
+    }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/project-skills\/([a-z0-9-]+)$/);
+    if (m && (method === "GET" || method === "POST" || method === "DELETE")) {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const name = m[2]!;
+      if (method === "GET") {
+        const folder = url.searchParams.get("folder") ?? bot.cwd ?? "";
+        const text = readProjectSkill(folder, name);
+        if (text === null) return json(res, 404, { error: "no such project skill" });
+        return json(res, 200, { text });
+      }
+      const parsed = z.object({
+        folder: z.string().optional(),
+        /** The hash of the text that was shown. An approval names the bytes
+         * it approves; without that it would approve whatever is there now. */
+        sha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+      }).safeParse(await readBody(req));
+      if (!parsed.success) return json(res, 400, { error: "sha256 must be the hash of the reviewed SKILL.md" });
+      const folder = parsed.data.folder ?? bot.cwd ?? "";
+      if (method === "DELETE") {
+        const revoked = revokeProjectSkill(folder, name);
+        if ("error" in revoked) return json(res, 404, { error: revoked.error });
+        return json(res, 200, revoked);
+      }
+      if (!parsed.data.sha256) return json(res, 400, { error: "sha256 of the reviewed SKILL.md is required" });
+      const approved = approveProjectSkill(folder, name, parsed.data.sha256);
+      if ("error" in approved) return json(res, 409, { error: approved.error });
+      return json(res, 200, { skill: approved });
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/skills\/([a-z0-9-]+)$/);
     if (m && method === "GET") {

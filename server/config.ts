@@ -463,6 +463,14 @@ const appConfigSchema = z.object({
   /** CDP attach target for a bot's browser; see browserEngineConfigSchema. */
   browserEngine: browserEngineConfigSchema.optional(),
   browserProfiles: browserProfilesSchema.optional(),
+  /** Skill catalogs this workspace lists. Sources only: a catalog says a
+   * skill exists and where it lives, and every install still goes through
+   * the reviewed, lands-disabled path in skills.ts. */
+  marketplaces: z.array(z.object({
+    id: z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,63}$/),
+    name: optionalText,
+    url: z.string().trim().url().refine((value) => value.startsWith("https://"), "the index URL must be https"),
+  })).max(20).optional(),
   instances: instanceConfigMapSchema.optional(),
   /** User-configured MCP servers, mounted into every capable engine. Kept
    * loosely typed HERE on purpose: parseStoredConfig throws away the whole
@@ -519,6 +527,7 @@ export interface AppConfig {
    * e.g. "9333", or an http(s)/ws(s) URL). When set, a bot's browser
    * attaches to it instead of agent-browser spawning its own (#1396). */
   browserEngine?: { attachCdpUrl?: string };
+  marketplaces?: Array<{ id: string; name?: string; url: string }>;
   instances?: InstanceConfigMap;
 }
 export type BrowserProfile = z.output<typeof browserProfileSchema> & {
@@ -995,6 +1004,9 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
     disk.defaultModelSelection = checkedPatch.defaultModelSelection;
   }
   if (checkedPatch.cliStartup !== undefined) disk.cliStartup = checkedPatch.cliStartup;
+  // the whole list is the unit of change: adding or removing a catalog
+  // arrives as the new list, never as a per-entry merge
+  if (checkedPatch.marketplaces !== undefined) disk.marketplaces = checkedPatch.marketplaces;
   // Custom MCP mutations go through their own dedicated local API, but
   // saveConfig remains the single atomic persistence boundary.
   if (checkedPatch.mcpServers !== undefined) {

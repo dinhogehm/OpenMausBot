@@ -44,6 +44,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { z } from "zod";
 
@@ -59,6 +60,10 @@ import { workspaceDir } from "./workspace.ts";
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const SKILL_NAME_MAX = 64;
 export const DESCRIPTION_MAX = 1024;
+/** How many folder globs one skill may declare, and how long each may be.
+ * A scope is a short list of places, never a program. */
+export const SKILL_PATHS_MAX = 10;
+export const SKILL_PATH_MAX = 240;
 /** One SKILL.md may be at most this large; the spec recommends <5k tokens. */
 export const SKILL_FILE_MAX_BYTES = 256 * 1024;
 /** Index budget: name+description lines only, ~100 tokens per skill. */
@@ -80,6 +85,8 @@ export interface ParsedSkill {
   description: string;
   license?: string;
   compatibility?: string;
+  /** Folder globs this skill belongs to. Empty means everywhere. */
+  paths: string[];
   body: string;
 }
 
@@ -109,8 +116,22 @@ export function parseSkillMd(raw: string): ParsedSkill | { error: string } {
     description,
     license: fields.license || undefined,
     compatibility: fields.compatibility || undefined,
+    paths: parseSkillPaths(fields.paths ?? ""),
     body: match[2] ?? "",
   };
+}
+
+/** `paths: api-service, ~/Projetos/**` — a comma-separated list, kept on one
+ * line like every other frontmatter value this reader accepts. Over-long or
+ * surplus entries are dropped rather than failing the import: a scope hint
+ * that cannot be read should narrow nothing, never block the skill. */
+export function parseSkillPaths(raw: string): string[] {
+  return raw
+    .replace(/^\[|\]$/g, "")
+    .split(",")
+    .map((value) => value.trim().replace(/^["']|["']$/g, "").trim())
+    .filter((value) => value.length > 0 && value.length <= SKILL_PATH_MAX)
+    .slice(0, SKILL_PATHS_MAX);
 }
 
 /** Static red flags before a human review. Presence is a warning shown in
@@ -132,6 +153,54 @@ export function scanSkillText(raw: string): string[] {
   return warnings;
 }
 
+/** A tiny folder glob: `*` inside one segment, `**` across segments, `?`
+ * for one character. Deliberately not a glob library — a skill declares
+ * where it belongs, and a pattern that cannot express alternation or
+ * negation cannot surprise the person reading it. */
+function folderGlobToRegExp(pattern: string): RegExp {
+  let out = "";
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index]!;
+    if (char === "*") {
+      if (pattern[index + 1] === "*") {
+        out += ".*";
+        index++;
+      } else {
+        out += "[^/]*";
+      }
+    } else if (char === "?") {
+      out += "[^/]";
+    } else {
+      out += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  // macOS and Windows both compare paths case-insensitively; a scope that
+  // matched on one machine and not the other would be a puzzle, not a rule.
+  return new RegExp(`^${out}$`, "i");
+}
+
+/** Does this folder fall inside one of a skill's declared scopes?
+ *
+ * A pattern with no leading `/` or `~` matches anywhere in the path, so
+ * `api-service` means "any folder called that". `~` is the home directory.
+ * `dir/**` includes `dir` itself, which is what someone writing it means.
+ *
+ * This is a RELEVANCE filter, not a boundary: it decides what the prompt
+ * index offers, and an enabled skill's files stay readable either way. */
+export function skillScopeMatches(paths: string[], folder: string): boolean {
+  if (!paths.length) return true;
+  if (!folder.trim()) return true;
+  const target = resolve(folder).replace(/\/+$/, "");
+  return paths.some((pattern) => {
+    const expanded = pattern === "~" || pattern.startsWith("~/")
+      ? join(homedir(), pattern.slice(1))
+      : pattern;
+    const absolute = expanded.startsWith("/") || /^[A-Za-z]:[\\/]/.test(expanded) ? expanded : `**/${expanded}`;
+    const regex = folderGlobToRegExp(absolute.replace(/\/+$/, "").replace(/\\/g, "/"));
+    return regex.test(target) || regex.test(`${target}/`);
+  });
+}
+
 interface SkillManifestEntry {
   description: string;
   enabled: boolean;
@@ -148,6 +217,11 @@ interface SkillManifestEntry {
   /** Immutable workspace revision selected by the protected manifest. Older
    * skills omit this and continue to use skills/<name>. */
   storageRevision?: string;
+  /** Where a catalog install came from, so an update can tell "the same skill,
+   * a newer release" from "a different skill with the same name". */
+  catalog?: { marketplaceId: string; entryId: string; version: string };
+  /** Folder globs from the skill's frontmatter; empty means everywhere. */
+  paths?: string[];
 }
 
 interface SkillManifest {
@@ -166,6 +240,12 @@ const skillManifestEntrySchema = z.object({
   skippedFiles: z.array(z.string()),
   appliedStageId: z.string().optional(),
   storageRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  catalog: z.object({
+    marketplaceId: z.string().min(1).max(64),
+    entryId: z.string().min(1).max(120),
+    version: z.string().min(1).max(64),
+  }).optional(),
+  paths: z.array(z.string().min(1).max(SKILL_PATH_MAX)).max(SKILL_PATHS_MAX).optional(),
 });
 const skillManifestSchema = z.record(z.string(), skillManifestEntrySchema);
 const managedLinksSchema = z.array(z.string());
@@ -585,6 +665,9 @@ export interface SkillListing {
   importedAt: string;
   license?: string;
   compatibility?: string;
+  /** Folder globs this skill declared; empty means it offers itself
+   * everywhere. Shown in settings so a hidden skill is never a mystery. */
+  paths: string[];
   warnings: string[];
   skippedFiles: string[];
 }
@@ -609,6 +692,7 @@ function skillListing(botId: string, name: string, entry: SkillManifestEntry): S
     ...visible,
     enabled: entry.enabled && intact,
     editable: entry.source.startsWith(LEARN_SOURCE_PREFIX) && Boolean(appliedStageId),
+    paths: entry.paths ?? [],
     warnings: intact
       ? visible.warnings
       : [...visible.warnings, "stored SKILL.md changed after review — enablement is blocked"],
@@ -662,10 +746,24 @@ export function installSkill(
   botId: string,
   source: string,
   files: Array<{ path: string; content: string }>,
+  options: { catalog?: SkillCatalogProvenance } = {},
 ): SkillListing | { error: string } {
   const prepared = preparedSkillFiles(files);
   if ("error" in prepared) return prepared;
-  return installPreparedSkill(botId, source, prepared, { enabled: false });
+  return installPreparedSkill(botId, source, prepared, { enabled: false, catalog: options.catalog });
+}
+
+/** The catalog release a skill came from, carried on its manifest entry. */
+export type SkillCatalogProvenance = { marketplaceId: string; entryId: string; version: string };
+
+/** What a catalog install recorded for this bot, keyed by skill name — the
+ * marketplace view reads it to tell installed, outdated and missing apart. */
+export function installedCatalogSkills(botId: string): Record<string, SkillCatalogProvenance> {
+  const installed: Record<string, SkillCatalogProvenance> = {};
+  for (const [name, entry] of Object.entries(readManifest(botId))) {
+    if (entry.catalog) installed[name] = entry.catalog;
+  }
+  return installed;
 }
 
 export function setSkillEnabled(botId: string, name: string, enabled: boolean): SkillListing | { error: string } {
@@ -1050,7 +1148,7 @@ function installPreparedSkill(
   botId: string,
   source: string,
   prepared: PreparedSkillFiles,
-  options: { enabled: boolean; appliedStageId?: string },
+  options: { enabled: boolean; appliedStageId?: string; catalog?: SkillManifestEntry["catalog"] },
 ): SkillListing | { error: string } {
   const name = prepared.parsed.name;
   const manifest = readManifest(botId);
@@ -1078,6 +1176,8 @@ function installPreparedSkill(
     warnings: prepared.warnings,
     skippedFiles: prepared.skippedFiles,
     appliedStageId: options.appliedStageId,
+    catalog: options.catalog,
+    paths: prepared.parsed.paths.length ? prepared.parsed.paths : undefined,
   };
   const root = ensureSkillsRoot(botId);
   if (!root) return { error: "the workspace skills path must be a real directory, not a symlink or file" };
@@ -1165,6 +1265,9 @@ function updatePreparedSkill(
       skippedFiles: prepared.skippedFiles,
       appliedStageId: options.appliedStageId,
       storageRevision,
+      // the reviewed text owns the scope: an update that drops `paths`
+      // widens the skill back to everywhere, as its author just wrote
+      paths: prepared.parsed.paths.length ? prepared.parsed.paths : undefined,
     };
     latestManifest[name] = entry;
     writeManifest(botId, latestManifest);
@@ -1382,11 +1485,16 @@ export function applySkillWriteWithReceipt(
  * index lines only — the same progressive-disclosure shape the spec asks
  * agents for. Bodies never ride the prompt; the bot reads the file when a
  * task matches. */
-export function skillsSystemPrompt(botId: string): string {
+export function skillsSystemPrompt(botId: string, options: { cwd?: string } = {}): string {
   // Reconcile links on every turn. If the workspace copy changed since its
   // review, integrity filtering below removes it from native discovery too.
   syncSkillLinks(botId);
-  const enabled = listSkills(botId).filter((skill) => skill.enabled);
+  // A skill that declared `paths` only offers itself where it belongs. The
+  // filter is on the index, not on the files: scoping is about what the bot
+  // is told to consider, and an enabled skill stays readable either way.
+  const enabled = listSkills(botId)
+    .filter((skill) => skill.enabled)
+    .filter((skill) => skillScopeMatches(skill.paths, options.cwd ?? ""));
   if (!enabled.length) return "";
   const root = workspaceDir(botId);
   const manifest = readManifest(botId);

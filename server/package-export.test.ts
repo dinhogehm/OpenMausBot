@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createBotPackageExport } from "./package-export.ts";
+import { createBotPackageExport, portableMcpServers } from "./package-export.ts";
 import { parseBotPackage, renderBotPackageMarkdown } from "./bot-package.ts";
 import type { BotRecord } from "./store.ts";
 
@@ -232,4 +232,86 @@ describe("package export", () => {
     ]);
   });
 
+});
+
+describe("workspace capabilities in a package", () => {
+  const bots = [{ id: "b1", threadId: "t1", name: "Lead", color: "green", createdAt: 1 } as BotRecord];
+
+  it("carries tool servers and catalogs as definitions, never as secrets", () => {
+    const exported = createBotPackageExport({
+      name: "Tooling team",
+      bots,
+      groups: [],
+      routines: [],
+      mcpServers: portableMcpServers({
+        notes: { command: "npx", args: ["-y", "@x/notes-mcp"], env: { NOTES_TOKEN: "s3cret-value" } },
+        docs: { type: "http", url: "https://docs.test/mcp", headers: { Authorization: "Bearer s3cret-value" } },
+        off: { command: "node", args: ["server.js"], enabled: false },
+      }),
+      catalogs: [{ id: "acme", name: "Acme skills", url: "https://acme.test/skills.json" }],
+    });
+
+    expect(exported.package.mcpServers).toEqual([
+      {
+        transport: "stdio",
+        name: "notes",
+        reason: "Tool server this team uses (notes).",
+        command: "npx",
+        args: ["-y", "@x/notes-mcp"],
+        envKeys: ["NOTES_TOKEN"],
+      },
+      {
+        transport: "http",
+        name: "docs",
+        reason: "Tool server this team uses (docs).",
+        type: "http",
+        url: "https://docs.test/mcp",
+        headerKeys: ["Authorization"],
+      },
+      // a server switched off is still a definition the recipient may want
+      { transport: "stdio", name: "off", reason: "Tool server this team uses (off).", command: "node", args: ["server.js"] },
+    ]);
+    expect(exported.package.catalogs).toEqual([{ id: "acme", name: "Acme skills", url: "https://acme.test/skills.json" }]);
+
+    // the round trip through the shareable markdown carries neither value
+    const markdown = renderBotPackageMarkdown(exported);
+    expect(markdown).not.toContain("s3cret-value");
+    expect(markdown).toContain("## Tool servers (MCP)");
+    expect(markdown).toContain("NOTES_TOKEN");
+    expect(markdown).toContain("## Skill catalogs");
+    const reparsed = parseBotPackage(markdown).package;
+    expect(reparsed.mcpServers).toEqual(exported.package.mcpServers);
+    expect(reparsed.catalogs).toEqual(exported.package.catalogs);
+  });
+
+  it("leaves both out when the workspace has neither", () => {
+    const exported = createBotPackageExport({ name: "Plain", bots, groups: [], routines: [] });
+    expect(exported.package.mcpServers).toBeUndefined();
+    expect(exported.package.catalogs).toBeUndefined();
+  });
+
+  it("refuses a package that tries to ship a value instead of a name", () => {
+    const withSecret = {
+      format: "openmaus.package",
+      version: 1,
+      package: {
+        ...createBotPackageExport({ name: "Plain", bots, groups: [], routines: [] }).package,
+        mcpServers: [{
+          transport: "stdio",
+          name: "notes",
+          reason: "Notes.",
+          command: "npx",
+          // an env VALUE dressed as a key name
+          envKeys: ["NOTES_TOKEN=s3cret-value"],
+        }],
+      },
+    };
+    expect(() => parseBotPackage(withSecret as never)).toThrow(/environment variable name/);
+
+    const httpServer = { transport: "http", name: "docs", reason: "Docs.", type: "http", url: "http://docs.test/mcp" };
+    expect(() => parseBotPackage({
+      ...withSecret,
+      package: { ...withSecret.package, mcpServers: [httpServer] },
+    } as never)).toThrow(/https/);
+  });
 });

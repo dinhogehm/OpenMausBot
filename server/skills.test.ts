@@ -12,7 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 import { removeTempDir } from "./testing/cleanup.ts";
@@ -1067,5 +1067,58 @@ describe("parseSkillSource", () => {
   it("refuses non-GitHub input loudly", () => {
     expect("error" in parseSkillSource("https://evil.example/skill.md")).toBe(true);
     expect("error" in parseSkillSource("")).toBe(true);
+  });
+});
+
+describe("folder scope (`paths` frontmatter)", () => {
+  const SCOPED = (name: string, paths: string) =>
+    `---\nname: ${name}\ndescription: Only relevant inside one project.\npaths: ${paths}\n---\n\n# ${name}\n\nDo the thing.\n`;
+
+  it("reads the scope, drops junk, and keeps it on the listing", () => {
+    const parsed = parseSkillMd(SCOPED("release-carrier", " api-service , ~/Projetos/** , "));
+    expect(parsed).toMatchObject({ paths: ["api-service", "~/Projetos/**"] });
+    // no `paths` at all is the common case and means everywhere
+    expect(parseSkillMd(SKILL("plain"))).toMatchObject({ paths: [] });
+    // a scope longer than the cap is dropped rather than failing the import
+    const tooMany = parseSkillMd(SCOPED("wide", Array.from({ length: 14 }, (_, i) => `dir-${i}`).join(",")));
+    expect("error" in tooMany).toBe(false);
+    if ("error" in tooMany) return;
+    expect(tooMany.paths).toHaveLength(10);
+
+    installSkill(bot, "src", [{ path: "SKILL.md", content: SCOPED("release-carrier", "api-service") }]);
+    expect(listSkills(bot).find((skill) => skill.name === "release-carrier")).toMatchObject({
+      paths: ["api-service"],
+    });
+  });
+
+  it("offers a scoped skill only where it belongs, and an unscoped one everywhere", () => {
+    installSkill(bot, "src", [{ path: "SKILL.md", content: SCOPED("release-carrier", "api-service, ~/work/**") }]);
+    installSkill(bot, "src", [{ path: "SKILL.md", content: SKILL("code-review") }]);
+    setSkillEnabled(bot, "release-carrier", true);
+    setSkillEnabled(bot, "code-review", true);
+
+    const inside = skillsSystemPrompt(bot, { cwd: "/Users/someone/src/api-service" });
+    expect(inside).toContain("- release-carrier:");
+    expect(inside).toContain("- code-review:");
+
+    const elsewhere = skillsSystemPrompt(bot, { cwd: "/Users/someone/src/web-app" });
+    expect(elsewhere).not.toContain("- release-carrier:");
+    expect(elsewhere).toContain("- code-review:");
+
+    // `dir/**` includes dir itself: that is what someone writing it means
+    expect(skillsSystemPrompt(bot, { cwd: join(homedir(), "work") })).toContain("- release-carrier:");
+    expect(skillsSystemPrompt(bot, { cwd: join(homedir(), "work", "thing") })).toContain("- release-carrier:");
+
+    // an unknown folder never hides a reviewed skill — scope is relevance,
+    // not a boundary, so the fallback is to offer it
+    expect(skillsSystemPrompt(bot, {})).toContain("- release-carrier:");
+  });
+
+  it("matches on segments, not on substrings", () => {
+    installSkill(bot, "src", [{ path: "SKILL.md", content: SCOPED("release-carrier", "api") }]);
+    setSkillEnabled(bot, "release-carrier", true);
+    expect(skillsSystemPrompt(bot, { cwd: "/srv/api" })).toContain("- release-carrier:");
+    expect(skillsSystemPrompt(bot, { cwd: "/srv/api-service" })).not.toContain("- release-carrier:");
+    expect(skillsSystemPrompt(bot, { cwd: "/srv/api/nested" })).not.toContain("- release-carrier:");
   });
 });
