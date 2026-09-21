@@ -1,7 +1,7 @@
 // Who hears about a broken run, how often, and in what words.
 import { describe, expect, it } from "vitest";
 
-import { chiefForBot, INCIDENT_HARD_LIMIT, INCIDENT_RETRY_LIMIT, IncidentLedger, incidentChip, incidentText, type Incident } from "./incidents.ts";
+import { INCIDENTS_THREAD_MAX_MESSAGES, INCIDENT_HARD_LIMIT, INCIDENT_RETRY_LIMIT, IncidentLedger, chiefForBot, incidentChip, incidentText, incidentsThreadIsFull, type Incident } from "./incidents.ts";
 
 const bots = [
   { id: "clive", name: "Clive", section: "Ops", chiefOfStaff: true },
@@ -79,5 +79,15 @@ describe("incident wording", () => {
     expect(incidentChip({ ...incident, kind: "could-not-start", title: null })).toContain("Ada's run in its main conversation could not start");
     expect(incidentChip({ ...incident, kind: "routine-failed", title: "Inbox digest" })).toContain("Ada's scheduled routine in its thread #Inbox digest failed");
     expect(incidentChip({ ...incident, room: "Standup" })).toContain('Ada\'s run in the room "Standup" failed');
+  });
+});
+
+describe("the incidents thread does not grow forever", () => {
+  it("rotates once it is full, so a report never re-sends an unbounded transcript", () => {
+    expect(incidentsThreadIsFull(0)).toBe(false);
+    expect(incidentsThreadIsFull(INCIDENTS_THREAD_MAX_MESSAGES - 1)).toBe(false);
+    expect(incidentsThreadIsFull(INCIDENTS_THREAD_MAX_MESSAGES)).toBe(true);
+    // a thread that grew past the limit while the app was closed still rotates
+    expect(incidentsThreadIsFull(INCIDENTS_THREAD_MAX_MESSAGES * 3)).toBe(true);
   });
 });

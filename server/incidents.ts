@@ -62,6 +62,24 @@ export const INCIDENT_RETRY_LIMIT = 2;
 export const INCIDENT_HARD_LIMIT = 5;
 export const INCIDENT_WINDOW_MS = 60 * 60_000;
 
+/** How long the Chief's incident thread may grow before it is retired and
+ * a fresh one opened.
+ *
+ * The thread is found by title and reused forever, so every incident used
+ * to re-send the whole history to the provider: one workspace reached
+ * millions of input tokens on a thread nobody had read in days, and the
+ * cost grew with every failure. Incidents are also independent — report
+ * number 300 needs report 299's thread no more than an email needs last
+ * month's inbox — so rotating loses nothing and the archived thread stays
+ * readable. The env override exists so a test can reach the rotation in
+ * two incidents instead of two hundred. */
+export const INCIDENTS_THREAD_MAX_MESSAGES = Math.max(2, Number(process.env.OMB_INCIDENTS_THREAD_MAX) || 200);
+
+/** Should this incident open a fresh thread instead of appending? */
+export function incidentsThreadIsFull(messageCount: number): boolean {
+  return messageCount >= INCIDENTS_THREAD_MAX_MESSAGES;
+}
+
 export interface IncidentCount {
   /** incidents on this thread inside the window, this one included */
   count: number;
