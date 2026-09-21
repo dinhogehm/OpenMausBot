@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
+import { mcpServerNameError } from "./mcp-registry.ts";
 import { schemaIssue, type JsonValue } from "./schema.ts";
 import { isSkillName, parseSkillMd, SKILL_FILE_MAX_BYTES } from "./skills.ts";
 import type { MausColor } from "./store.ts";
@@ -64,6 +65,19 @@ const portableSkillSchema = z.object({
   compatibility: optionalText(200),
   instructions: skillInstructions,
 });
+/** The config key an MCP server is stored under, and the shape of an
+ * environment variable name. Both are names, never values: a package that
+ * could carry a token would be a package that leaks one.
+ *
+ * The key rule is the registry's own (mcpServerNameError), so a package
+ * cannot declare a server the workspace would then refuse to store. */
+const mcpServerName = requiredText(32).refine((value) => mcpServerNameError(value) === null, {
+  message: "must be 1-32 lowercase letters, numbers, underscores or hyphens, starting with a letter",
+});
+const envKeyName = requiredText(80).regex(/^[A-Za-z_][A-Za-z0-9_]*$/, {
+  message: "must be an environment variable name",
+});
+
 const CLOCK_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
 const intervalWeekdays = z.array(z.number().int().min(0).max(6)).min(1).max(7).refine(
   (weekdays) => new Set(weekdays).size === weekdays.length,
@@ -196,6 +210,44 @@ const packageSchema = z.object({
       version: z.literal(BOT_PACKAGE_SKILLS_VERSION),
       entries: z.array(portableSkillSchema).min(1).max(BOT_PACKAGE_MAX_SKILLS),
     }).optional(),
+    /** Workspace capabilities, not per-bot settings: the tools and skill
+     * sources a package's bots need in order to do what they claim.
+     *
+     * Definitions ONLY. An MCP entry carries the command or URL and the
+     * NAMES of the variables it reads — never a value, a token, or a
+     * header. Installing writes it disabled, so the person fills in the
+     * secrets through the normal settings flow and switches it on. */
+    mcpServers: z.array(z.discriminatedUnion("transport", [
+      z.object({
+        transport: z.literal("stdio"),
+        name: mcpServerName,
+        reason: requiredText(240),
+        command: requiredText(200),
+        args: z.array(requiredText(400)).max(40).optional(),
+        /** Variable names the server reads, e.g. ["NOTES_TOKEN"]. */
+        envKeys: z.array(envKeyName).max(20).optional(),
+      }),
+      z.object({
+        transport: z.literal("http"),
+        name: mcpServerName,
+        reason: requiredText(240),
+        type: z.enum(["http", "sse"]),
+        url: requiredText(2_000).refine((value) => value.startsWith("https://"), {
+          message: "must be an https URL",
+        }),
+        /** Header names the server expects, e.g. ["Authorization"]. */
+        headerKeys: z.array(requiredText(80)).max(20).optional(),
+      }),
+    ])).max(20).optional(),
+    /** Skill catalogs the package's skills come from, so a workspace that
+     * installs it can also keep them up to date. Pointers only. */
+    catalogs: z.array(z.object({
+      id: requiredText(64).regex(/^[a-z0-9][a-z0-9-]*$/, { message: "must be a lowercase slug" }),
+      name: optionalText(80),
+      url: requiredText(2_000).refine((value) => value.startsWith("https://"), {
+        message: "must be an https URL",
+      }),
+    })).max(10).optional(),
     examples: z.array(z.object({
       title: requiredText(120),
       input: requiredText(4_000),
@@ -209,6 +261,8 @@ export type BotPackageDefinition = ParsedBotPackage["package"];
 export type BotPackageAgent = BotPackageDefinition["agents"][number];
 export type BotPackagePlaybook = NonNullable<BotPackageDefinition["playbooks"]>[number];
 export type BotPackageSkill = NonNullable<BotPackageDefinition["skills"]>["entries"][number];
+export type BotPackageMcpServer = NonNullable<BotPackageDefinition["mcpServers"]>[number];
+export type BotPackageCatalog = NonNullable<BotPackageDefinition["catalogs"]>[number];
 
 export function isBotPackage(value: unknown): boolean {
   if (typeof value === "string") return /^---\r?\n[\s\S]*?\bbotmrr:\s*1\b/m.test(value);
@@ -378,11 +432,28 @@ export function renderBotPackageMarkdown(document: ParsedBotPackage): string {
     "",
     example.output,
   ].join("\n")).join("\n\n");
+  const mcpServers = (pkg.mcpServers ?? []).map((server) => [
+    `### ${server.name}`,
+    server.transport === "stdio"
+      ? `**Runs:** \`${[server.command, ...(server.args ?? [])].join(" ")}\`  `
+      : `**Endpoint:** ${server.type.toUpperCase()} \`${server.url}\`  `,
+    `**Needs:** ${
+      server.transport === "stdio"
+        ? server.envKeys?.length ? server.envKeys.map((k) => `\`${k}\``).join(", ") : "nothing"
+        : server.headerKeys?.length ? server.headerKeys.map((k) => `\`${k}\``).join(", ") : "nothing"
+    } — names only; this file never carries a value  `,
+    "**Initial state:** off — the user fills in the values and enables it",
+    "",
+    server.reason,
+  ].join("\n")).join("\n\n");
+  const catalogs = (pkg.catalogs ?? [])
+    .map((catalog) => `- **${catalog.name || catalog.id}:** ${catalog.url}`)
+    .join("\n");
   const connections = pkg.requirements.apps.length
     ? pkg.requirements.apps.map((app) => `- **${app.label}${app.optional ? " (optional)" : ""}:** ${app.reason}`).join("\n")
     : "- No connected apps are required.";
 
-  const markdown = `---\n${frontmatter}\n---\n\n# ${pkg.name}\n\n${pkg.tagline}\n\n> **Give this file to your Chief of Staff.** It is the complete team blueprint. Any agent system can run it; OpenMausBot can also install it directly.\n\n## Activation\n\nYou are the Chief of Staff for this blueprint. Read the whole document before acting. Confirm the user's goal and any missing inputs, then create or delegate to the specialist roles below. Preserve their names, ownership, boundaries, shared-room rules, and playbooks. If your platform cannot literally spawn agents, perform the roles one at a time and keep their outputs clearly separated.\n\nNever request pasted passwords or secret keys. Use the platform's normal connection flow. Do not send messages, publish content, spend money, delete data, or enable a schedule without the user's explicit approval. All routines start paused.\n\n## Mission\n\n${pkg.summary}\n\n## Outcomes\n\n${list(pkg.outcomes)}\n\n## Connections\n\n${connections}\n\n## Team\n\n${agents}\n\n## Chief of Staff\n\nThe Chief of Staff role is \`${pkg.chiefOfStaff ?? pkg.agents[0].key}\`. This role owns delegation, synthesis, conflict resolution, and the final answer to the user.\n${rooms ? `\n## Shared rooms\n\n${rooms}\n` : ""}${routines ? `\n## Suggested routines\n\n${routines}\n` : ""}${playbooks ? `\n## Playbooks\n\n${playbooks}\n` : ""}${examples ? `\n## Example job\n\n${examples}\n` : ""}\n## Completion rule\n\nReturn one clear result to the user, distinguish evidence from inference, cite source links when the work uses external material, and state what still needs human approval or a connected app.\n`;
+  const markdown = `---\n${frontmatter}\n---\n\n# ${pkg.name}\n\n${pkg.tagline}\n\n> **Give this file to your Chief of Staff.** It is the complete team blueprint. Any agent system can run it; OpenMausBot can also install it directly.\n\n## Activation\n\nYou are the Chief of Staff for this blueprint. Read the whole document before acting. Confirm the user's goal and any missing inputs, then create or delegate to the specialist roles below. Preserve their names, ownership, boundaries, shared-room rules, and playbooks. If your platform cannot literally spawn agents, perform the roles one at a time and keep their outputs clearly separated.\n\nNever request pasted passwords or secret keys. Use the platform's normal connection flow. Do not send messages, publish content, spend money, delete data, or enable a schedule without the user's explicit approval. All routines start paused.\n\n## Mission\n\n${pkg.summary}\n\n## Outcomes\n\n${list(pkg.outcomes)}\n\n## Connections\n\n${connections}\n\n## Team\n\n${agents}\n\n## Chief of Staff\n\nThe Chief of Staff role is \`${pkg.chiefOfStaff ?? pkg.agents[0].key}\`. This role owns delegation, synthesis, conflict resolution, and the final answer to the user.\n${rooms ? `\n## Shared rooms\n\n${rooms}\n` : ""}${routines ? `\n## Suggested routines\n\n${routines}\n` : ""}${playbooks ? `\n## Playbooks\n\n${playbooks}\n` : ""}${mcpServers ? `\n## Tool servers (MCP)\n\n${mcpServers}\n` : ""}${catalogs ? `\n## Skill catalogs\n\n${catalogs}\n` : ""}${examples ? `\n## Example job\n\n${examples}\n` : ""}\n## Completion rule\n\nReturn one clear result to the user, distinguish evidence from inference, cite source links when the work uses external material, and state what still needs human approval or a connected app.\n`;
   if (Buffer.byteLength(markdown) > BOT_PACKAGE_MARKDOWN_MAX_BYTES) throw new Error("The bot playbook is too large");
   return markdown;
 }

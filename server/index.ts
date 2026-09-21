@@ -437,7 +437,7 @@ import { WebhookManager } from "./webhooks.ts";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { loadBundledSkills, loadUserSkills, mergeSkills, renderSkillInstructions, selectBundledSkills } from "./skill-library.ts";
 import { installedPlaybookInstructions } from "./installed-playbooks.ts";
-import { createBotPackageExport, type ExportablePackageSkill } from "./package-export.ts";
+import { createBotPackageExport, portableMcpServers, type ExportablePackageSkill } from "./package-export.ts";
 import { createTeamBackup, importTeamBackup } from "./team-backup.ts";
 import { MAX_TEAM_BACKUP_BYTES } from "../shared/team-backup.ts";
 import { shouldMountLocalComputer } from "./local-routing.ts";
@@ -14787,6 +14787,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             groups: store.groups,
             routines: routines!.listRoutines(),
             skillsByBot: collectExportSkills(selectedBots, skillNames.names),
+            // Definitions only: portableMcpServers keeps the names of the
+            // variables a server reads and drops every value.
+            mcpServers: portableMcpServers(cfg.mcpServers),
+            catalogs: cfg.marketplaces ?? [],
           });
           return json(res, 200, {
             name: document.package.name,
@@ -14927,6 +14931,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const importedBots: ReturnType<typeof store.createBot>[] = [];
       const createdGroups: GroupRecord[] = [];
       const createdRoutineIds: string[] = [];
+      /** What the package added to the workspace itself, so the install
+       * screen can say what is now waiting for the user's values. */
+      const installedCapabilities = { mcpServers: [] as string[], catalogs: [] as string[], skipped: [] as string[] };
       // Names already in use, hidden bots included: an archived bot can be
       // un-archived later, and a revived duplicate would be just as
       // ambiguous then.
@@ -15027,6 +15034,58 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           createdRoutineIds.push(created.id);
         }
 
+        // Workspace capabilities the package declares: the tool servers and
+        // skill sources its bots need to do what the package claims. Both
+        // are definitions — a package never carries a secret — and an MCP
+        // server lands OFF, so the person supplies the values and switches
+        // it on. A name already configured is left exactly as it is: a
+        // package must never replace a server someone set up.
+        if (pkg?.mcpServers?.length || pkg?.catalogs?.length) {
+          const patch: Parameters<typeof saveConfig>[0] = {};
+          if (pkg.mcpServers?.length) {
+            const servers: Record<string, unknown> = { ...cfg.mcpServers };
+            for (const server of pkg.mcpServers) {
+              // Never replace a server someone configured — they hold its
+              // secrets — and never push the workspace past its own cap.
+              if (servers[server.name] !== undefined || Object.keys(servers).length >= MAX_MCP_SERVERS) {
+                installedCapabilities.skipped.push(server.name);
+                continue;
+              }
+              servers[server.name] = server.transport === "stdio"
+                ? {
+                    command: server.command,
+                    ...(server.args?.length ? { args: server.args } : {}),
+                    env: Object.fromEntries((server.envKeys ?? []).map((key) => [key, ""])),
+                    enabled: false,
+                  }
+                : {
+                    type: server.type,
+                    url: server.url,
+                    headers: Object.fromEntries((server.headerKeys ?? []).map((key) => [key, ""])),
+                    enabled: false,
+                  };
+              installedCapabilities.mcpServers.push(server.name);
+            }
+            if (installedCapabilities.mcpServers.length) patch.mcpServers = servers;
+          }
+          if (pkg.catalogs?.length) {
+            const marketplaces = [...(cfg.marketplaces ?? [])];
+            for (const catalog of pkg.catalogs) {
+              if (marketplaces.some((entry) => entry.id === catalog.id)) continue;
+              marketplaces.push({ id: catalog.id, ...(catalog.name ? { name: catalog.name } : {}), url: catalog.url });
+              installedCapabilities.catalogs.push(catalog.id);
+            }
+            if (installedCapabilities.catalogs.length) patch.marketplaces = marketplaces;
+          }
+          if (patch.mcpServers || patch.marketplaces) {
+            saveConfig(patch);
+            // The module-level cfg is what every later request reads, and
+            // integrations are assembled from it at the next turn boundary.
+            if (patch.mcpServers) cfg.mcpServers = patch.mcpServers;
+            if (patch.marketplaces) cfg.marketplaces = patch.marketplaces;
+          }
+        }
+
         if (pkg?.chiefOfStaff) {
           store.setChiefOfStaff(memberIds.get(pkg.chiefOfStaff)!);
         }
@@ -15056,6 +15115,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           group,
           groups: createdGroups.map((created) => ({ ...created, messages: [] })),
           routines: createdRoutineIds.flatMap((id) => routines!.listRoutines().filter((routine) => routine.id === id)),
+          capabilities: installedCapabilities,
         });
       } catch (error) {
         // A room of deleted members must not survive either — patchGroup can

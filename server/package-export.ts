@@ -1,4 +1,13 @@
-import { parseBotPackage, type BotPackageDefinition, type BotPackagePlaybook, type BotPackageSkill, type ParsedBotPackage } from "./bot-package.ts";
+import {
+  parseBotPackage,
+  type BotPackageCatalog,
+  type BotPackageDefinition,
+  type BotPackageMcpServer,
+  type BotPackagePlaybook,
+  type BotPackageSkill,
+  type ParsedBotPackage,
+} from "./bot-package.ts";
+import { listMcpServers } from "./mcp-registry.ts";
 import type { Routine } from "./routines.ts";
 import type { BotRecord, GroupRecord, InstalledPlaybook } from "./store.ts";
 
@@ -21,6 +30,31 @@ function samePlaybook(a: InstalledPlaybook, b: BotPackagePlaybook): boolean {
     a.triggers.join("\n") === b.triggers.join("\n");
 }
 
+/** The workspace's MCP servers as a package may carry them: the command or
+ * URL, and the NAMES of the variables and headers each one reads. Values
+ * never leave the machine — the recipient supplies their own. */
+export function portableMcpServers(stored: Record<string, unknown> | undefined): BotPackageMcpServer[] {
+  return listMcpServers(stored).map((server) =>
+    "url" in server
+      ? {
+          transport: "http" as const,
+          name: server.name,
+          reason: `Tool server this team uses (${server.name}).`,
+          type: server.type,
+          url: server.url,
+          ...(server.headerKeys.length ? { headerKeys: server.headerKeys } : {}),
+        }
+      : {
+          transport: "stdio" as const,
+          name: server.name,
+          reason: `Tool server this team uses (${server.name}).`,
+          command: server.command,
+          ...(server.args.length ? { args: server.args } : {}),
+          ...(server.envKeys.length ? { envKeys: server.envKeys } : {}),
+        },
+  );
+}
+
 export interface ExportablePackageSkill extends Omit<BotPackageSkill, "name" | "description"> {
   name: string;
   description: string;
@@ -36,6 +70,10 @@ export function createBotPackageExport(input: {
   groups: GroupRecord[];
   routines: Routine[];
   skillsByBot?: ReadonlyMap<string, readonly ExportablePackageSkill[]>;
+  /** Workspace capabilities, as definitions. The caller strips values: this
+   * function receives variable and header NAMES, never their contents. */
+  mcpServers?: readonly BotPackageMcpServer[];
+  catalogs?: readonly BotPackageCatalog[];
 }): ParsedBotPackage {
   const bots = input.bots.filter((bot) => !bot.hidden);
   if (!bots.length) throw new Error("Create a bot before exporting your package");
@@ -186,6 +224,8 @@ export function createBotPackageExport(input: {
   if (rooms.length) definition.rooms = rooms;
   if (routines.length) definition.routines = routines;
   if (playbooks.length) definition.playbooks = playbooks;
+  if (input.mcpServers?.length) definition.mcpServers = input.mcpServers.map((server) => ({ ...server }));
+  if (input.catalogs?.length) definition.catalogs = input.catalogs.map((catalog) => ({ ...catalog }));
   if (packageSkills.size) {
     definition.skills = {
       version: 1,

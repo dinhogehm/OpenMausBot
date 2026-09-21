@@ -103,5 +103,8 @@ working skill in place.
 `GET /api/config` also echoes `marketplaces`, so the UI can show the picker
 without a second round trip.
 
+A package can also carry the catalogs its skills come from; see
+[what a package brings with it](./package-capabilities.md).
+
 Implementation: `server/skill-marketplace.ts`, provenance in
 `server/skills.ts`, UI in `src/components/bot-settings/SkillsSection.tsx`.
