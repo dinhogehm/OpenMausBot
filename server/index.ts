@@ -334,6 +334,7 @@ import {
   applySkillWriteWithReceipt,
   getStagedSkillWrite,
   installSkill,
+  installedCatalogSkills,
   listSkills,
   listStagedSkillWrites,
   isSkillName,
@@ -345,6 +346,7 @@ import {
   stageSkillWrite,
 } from "./skills.ts";
 import { fetchSkillFromSource } from "./skill-fetch.ts";
+import { catalogView, fetchCatalog, installCatalogEntry, updateCatalogSkill } from "./skill-marketplace.ts";
 import { expandLearnTurnText, learnSource } from "./skill-learn.ts";
 import { expandSetupTurnText, setupModeActive, setupSystemPrompt } from "./setup-mode.ts";
 import type { SkillRequestCardData } from "../shared/skill-request.ts";
@@ -11456,6 +11458,8 @@ function configStatus() {
     // the base URL is a setting, not a secret; the key stays write-only
     openaiCompat: { configured: Boolean(cfg.openaiCompat?.key), url: cfg.openaiCompat?.url ?? "" },
     openrouter: { configured: Boolean(cfg.openrouter?.key), model: cfg.openrouter?.model ?? "", provider: cfg.openrouter?.provider ?? "" },
+    // catalogs are pointers the person configured; nothing secret in them
+    marketplaces: cfg.marketplaces ?? [],
     // `configured` is the TypeSafe key itself (the key row); `available` says
     // whether Jev can be reached at all — also true through the OpenRouter
     // key — and gates the review toggle and smart room routing in the UI.
@@ -16298,6 +16302,53 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const errors = results.flatMap((entry) => ("error" in entry ? [entry.error] : []));
       if (!installed.length) return json(res, 422, { error: errors.join("; ") || "nothing importable found" });
       return json(res, 201, { installed, errors });
+    }
+    // ── skill catalogs: the sources this workspace lists ───────────────
+    // A catalog only points at skills. Installing one refetches from that
+    // pointer and lands DISABLED through the same reviewed path as a pasted
+    // URL, so adding a source grants nothing on its own.
+    if (method === "GET" && path === "/api/marketplaces") {
+      return json(res, 200, { marketplaces: cfg.marketplaces ?? [] });
+    }
+    m = path.match(/^\/api\/marketplaces\/([a-z0-9][a-z0-9-]{0,63})\/catalog$/);
+    if (m && method === "GET") {
+      const source = (cfg.marketplaces ?? []).find((entry) => entry.id === m![1]);
+      if (!source) return json(res, 404, { error: "no such marketplace" });
+      const botId = url.searchParams.get("bot") ?? "";
+      if (botId && !store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const catalog = await fetchCatalog(source);
+      if (!catalog.ok) return json(res, 502, { error: catalog.error });
+      const installed = botId ? installedCatalogSkills(botId) : {};
+      return json(res, 200, {
+        id: source.id,
+        name: catalog.name,
+        description: catalog.description,
+        entries: catalogView(source.id, catalog.entries, installed),
+      });
+    }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/skills\/catalog$/);
+    if (m && method === "POST") {
+      const botId = m[1]!;
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const parsed = z.object({
+        marketplaceId: z.string().min(1).max(64),
+        entryId: z.string().min(1).max(120),
+        /** Present to replace an installed skill with the catalog's current
+         * release; absent to install for the first time. */
+        updateSkill: z.string().min(1).max(64).optional(),
+      }).safeParse(await readBody(req));
+      if (!parsed.success) return json(res, 400, { error: "marketplaceId and entryId are required" });
+      const source = (cfg.marketplaces ?? []).find((entry) => entry.id === parsed.data.marketplaceId);
+      if (!source) return json(res, 404, { error: "no such marketplace" });
+      const catalog = await fetchCatalog(source);
+      if (!catalog.ok) return json(res, 502, { error: catalog.error });
+      const entry = catalog.entries.find((candidate) => candidate.id === parsed.data.entryId);
+      if (!entry) return json(res, 404, { error: "that catalog no longer lists this skill" });
+      const result = parsed.data.updateSkill
+        ? await updateCatalogSkill(botId, source.id, entry, parsed.data.updateSkill)
+        : await installCatalogEntry(botId, source.id, entry);
+      if ("error" in result) return json(res, 422, { error: result.error });
+      return json(res, 201, result);
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/skills\/([a-z0-9-]+)$/);
     if (m && method === "GET") {

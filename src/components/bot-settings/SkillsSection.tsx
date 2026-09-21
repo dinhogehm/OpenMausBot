@@ -5,7 +5,7 @@
 // dialog's own z-50, plus: an Import from GitHub row, a static "when it's
 // used" line on every row (learned skills have no triggers to show), and a
 // read-only click-through view of a skill's full text.
-import { BookOpen, Trash2 } from "lucide-react";
+import { BookOpen, Store, Trash2 } from "lucide-react";
 import { t } from "@/lib/i18n";
 import { useEffect, useRef, useState } from "react";
 
@@ -28,6 +28,18 @@ interface StagedSkillSummary {
   gist: string;
 }
 
+/** One row of a configured catalog, as the server already resolved it
+ * against what this bot has installed. */
+interface CatalogEntry {
+  id: string;
+  name?: string;
+  description: string;
+  version: string;
+  state: "available" | "installed" | "outdated";
+  installedAs?: string;
+  installedVersion?: string;
+}
+
 export function SkillsSection({ bot }: { bot: Bot }) {
   const { state } = useStore();
   const featureEnabled = skillAuthoringEnabled(state.config);
@@ -41,6 +53,11 @@ export function SkillsSection({ bot }: { bot: Bot }) {
   const [source, setSource] = useState("");
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState("");
+  const marketplaces = state.config?.marketplaces ?? [];
+  const [catalogId, setCatalogId] = useState(marketplaces[0]?.id ?? "");
+  const [catalog, setCatalog] = useState<CatalogEntry[] | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
   const skillDialogRef = useRef<HTMLDivElement>(null);
   const skillDialogOpen = Boolean(viewing || reviewing);
 
@@ -197,6 +214,49 @@ export function SkillsSection({ bot }: { bot: Bot }) {
     }
   };
 
+  const browseCatalog = async (id: string) => {
+    setCatalogId(id);
+    setCatalog(null);
+    setCatalogError("");
+    if (!id) return;
+    setCatalogLoading(true);
+    try {
+      const result = (await api(`/api/marketplaces/${encodeURIComponent(id)}/catalog?bot=${bot.id}`)) as {
+        entries?: CatalogEntry[];
+      };
+      setCatalog(result.entries ?? []);
+    } catch (cause) {
+      setCatalogError(cause instanceof Error ? cause.message : t("botSkills.catalogError"));
+    } finally {
+      setCatalogLoading(false);
+    }
+  };
+
+  /** Install, or replace an installed copy with the catalog's current
+   * release. Either way the skill lands disabled: the review step below is
+   * the only thing that turns one on. */
+  const installFromCatalog = async (entry: CatalogEntry) => {
+    setWorking(`catalog:${entry.id}`);
+    setCatalogError("");
+    setImportMessage("");
+    try {
+      await api(`/api/bots/${bot.id}/skills/catalog`, {
+        method: "POST",
+        body: JSON.stringify({
+          marketplaceId: catalogId,
+          entryId: entry.id,
+          ...(entry.state === "outdated" && entry.installedAs ? { updateSkill: entry.installedAs } : {}),
+        }),
+      });
+      setImportMessage(t("botSkills.catalogInstalled"));
+      await Promise.all([refresh(), browseCatalog(catalogId)]);
+    } catch (cause) {
+      setCatalogError(cause instanceof Error ? cause.message : t("botSkills.catalogInstallError"));
+    } finally {
+      setWorking("");
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <div className="rounded-xl bg-card p-4">
@@ -231,6 +291,69 @@ export function SkillsSection({ bot }: { bot: Bot }) {
           </button>
         </form>
         {importMessage && <div className="mt-1 text-[12px] text-ink-secondary">{importMessage}</div>}
+
+        {marketplaces.length > 0 && (
+          <div className="mt-3 rounded-lg border border-hairline/40 p-3">
+            <div className="flex items-center gap-2">
+              <Store size={14} className="text-ink-secondary" />
+              <div className="text-[12.5px] font-medium text-ink">{t("botSkills.catalogTitle")}</div>
+            </div>
+            <div className="mt-1 text-[11.5px] text-ink-secondary">{t("botSkills.catalogHint")}</div>
+            <div className="mt-2 flex items-center gap-2">
+              <select
+                className={inputCls}
+                aria-label={t("botSkills.catalogPickAria")}
+                value={catalogId}
+                onChange={(e) => setCatalogId(e.target.value)}
+              >
+                {marketplaces.map((entry) => (
+                  <option key={entry.id} value={entry.id}>{entry.name || entry.id}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                disabled={catalogLoading || !catalogId}
+                onClick={() => void browseCatalog(catalogId)}
+                className="shrink-0 rounded-lg bg-control px-3 py-2 text-[13px] text-ink hover:bg-raised-hover disabled:opacity-50"
+              >
+                {catalogLoading ? t("botSkills.catalogLoading") : t("botSkills.catalogBrowse")}
+              </button>
+            </div>
+            {catalogError && <div role="alert" className="mt-2 text-[11.5px] text-danger">{catalogError}</div>}
+            {catalog?.length === 0 && (
+              <div className="mt-2 text-[11.5px] text-ink-secondary">{t("botSkills.catalogEmpty")}</div>
+            )}
+            {catalog && catalog.length > 0 && (
+              <div className="mt-2 divide-y divide-hairline/40 overflow-hidden rounded-lg border border-hairline/40">
+                {catalog.map((entry) => (
+                  <div key={entry.id} className="flex items-center gap-2 px-3 py-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-mono text-[12px] text-ink">{entry.name || entry.id}</div>
+                      <div className="mt-0.5 line-clamp-2 text-[11px] text-ink-secondary">{entry.description}</div>
+                      <div className="mt-0.5 text-[10.5px] text-ink-secondary">
+                        {entry.state === "outdated"
+                          ? t("botSkills.catalogOutdated", { installed: entry.installedVersion ?? "", available: entry.version })
+                          : t("botSkills.catalogVersion", { version: entry.version })}
+                      </div>
+                    </div>
+                    {entry.state === "installed" ? (
+                      <span className="shrink-0 text-[11px] text-ink-secondary">{t("botSkills.catalogInstalledTag")}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={working === `catalog:${entry.id}`}
+                        onClick={() => void installFromCatalog(entry)}
+                        className="shrink-0 rounded-lg bg-control px-2.5 py-1.5 text-[12px] text-ink hover:bg-raised-hover disabled:opacity-50"
+                      >
+                        {entry.state === "outdated" ? t("botSkills.catalogUpdate") : t("botSkills.catalogInstall")}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {loading ? (
           <div className="mt-3 text-[12px] text-ink-secondary">{t("botSkills.loading")}</div>

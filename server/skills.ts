@@ -148,6 +148,9 @@ interface SkillManifestEntry {
   /** Immutable workspace revision selected by the protected manifest. Older
    * skills omit this and continue to use skills/<name>. */
   storageRevision?: string;
+  /** Where a catalog install came from, so an update can tell "the same skill,
+   * a newer release" from "a different skill with the same name". */
+  catalog?: { marketplaceId: string; entryId: string; version: string };
 }
 
 interface SkillManifest {
@@ -166,6 +169,11 @@ const skillManifestEntrySchema = z.object({
   skippedFiles: z.array(z.string()),
   appliedStageId: z.string().optional(),
   storageRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  catalog: z.object({
+    marketplaceId: z.string().min(1).max(64),
+    entryId: z.string().min(1).max(120),
+    version: z.string().min(1).max(64),
+  }).optional(),
 });
 const skillManifestSchema = z.record(z.string(), skillManifestEntrySchema);
 const managedLinksSchema = z.array(z.string());
@@ -662,10 +670,24 @@ export function installSkill(
   botId: string,
   source: string,
   files: Array<{ path: string; content: string }>,
+  options: { catalog?: SkillCatalogProvenance } = {},
 ): SkillListing | { error: string } {
   const prepared = preparedSkillFiles(files);
   if ("error" in prepared) return prepared;
-  return installPreparedSkill(botId, source, prepared, { enabled: false });
+  return installPreparedSkill(botId, source, prepared, { enabled: false, catalog: options.catalog });
+}
+
+/** The catalog release a skill came from, carried on its manifest entry. */
+export type SkillCatalogProvenance = { marketplaceId: string; entryId: string; version: string };
+
+/** What a catalog install recorded for this bot, keyed by skill name — the
+ * marketplace view reads it to tell installed, outdated and missing apart. */
+export function installedCatalogSkills(botId: string): Record<string, SkillCatalogProvenance> {
+  const installed: Record<string, SkillCatalogProvenance> = {};
+  for (const [name, entry] of Object.entries(readManifest(botId))) {
+    if (entry.catalog) installed[name] = entry.catalog;
+  }
+  return installed;
 }
 
 export function setSkillEnabled(botId: string, name: string, enabled: boolean): SkillListing | { error: string } {
@@ -1050,7 +1072,7 @@ function installPreparedSkill(
   botId: string,
   source: string,
   prepared: PreparedSkillFiles,
-  options: { enabled: boolean; appliedStageId?: string },
+  options: { enabled: boolean; appliedStageId?: string; catalog?: SkillManifestEntry["catalog"] },
 ): SkillListing | { error: string } {
   const name = prepared.parsed.name;
   const manifest = readManifest(botId);
@@ -1078,6 +1100,7 @@ function installPreparedSkill(
     warnings: prepared.warnings,
     skippedFiles: prepared.skippedFiles,
     appliedStageId: options.appliedStageId,
+    catalog: options.catalog,
   };
   const root = ensureSkillsRoot(botId);
   if (!root) return { error: "the workspace skills path must be a real directory, not a symlink or file" };

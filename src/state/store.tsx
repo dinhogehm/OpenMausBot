@@ -526,6 +526,9 @@ export interface ConfigStatus {
   /** `model` is the default OpenRouter model id; `provider` pins routing to
    * one upstream provider. Both are plain settings, never the key. */
   openrouter?: { configured: boolean; model?: string; provider?: string };
+  /** Skill catalogs this workspace lists. Pointers only: browsing one grants
+   * nothing, and installing from it still lands disabled pending review. */
+  marketplaces?: Array<{ id: string; name?: string; url: string }>;
   /** `permissionReview` sends each permission request summary to Jev for an
    * allow/deny verdict instead of the bot's own provider. */
   /** `configured` = a TypeSafe key is saved; `available` = Jev is reachable
