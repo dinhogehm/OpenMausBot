@@ -106,31 +106,53 @@ const asError = (value: unknown): Error =>
   value instanceof Error ? value : new Error(String(value));
 
 /** Shared runtime for the three providers that speak OpenAI chat completions. */
-/** How many failed tool names the turn's closing note lists before it
- * stops naming them; the chip that carries it is short. */
-const FAILED_TOOL_NAMES_IN_NOTICE = 4;
+/** What went wrong with one tool call, as the person needs to hear it. An
+ * approval nobody answered is not a refusal, and neither is a call the
+ * model malformed — only "failed" means something actually ran and broke. */
+export type ToolProblemKind = "failed" | "denied" | "unanswered" | "rejected";
+export interface ToolProblem { name: string; kind: ToolProblemKind }
 
-/** The harness's own line when a turn ends in a reply after a tool failed
- * or was denied.
+/** The chip that carries the note shows at most this much of it. */
+export const TOOL_NOTICE_MAX_CHARS = 160;
+const RECEIPT_WARNING = "Read the reply as a report, not a receipt";
+
+/** Harness-owned MCP servers prefix every tool; the prefix says nothing. */
+const shortToolName = (name: string): string => name.replace(/^composio_composio_/, "composio:");
+
+/** The harness's own line when a turn ends in a reply after a tool call did
+ * not do what the model may say it did.
  *
- * The danger this guards is real: a chat model that was denied a write will
- * happily close with "done, I pushed it". But the guard used to answer that
- * by FAILING the whole turn, which is the wrong instrument. The reply is
- * delivered either way (it is emitted before this point), so failing the
- * turn added a red run and an incident to the Chief — for one denied
- * permission anywhere in a long turn, including when the model had done
- * exactly the right thing and said what it could not do. A denial is the
- * system working, not a broken run.
- *
- * What a tool failure actually invalidates is reading the reply as a
- * receipt. So the harness says that, in its own voice, beside the reply,
- * and names the tools — a sharper signal than a failed turn, and one the
- * person can act on. */
-export function toolFailureNotice(names: readonly string[]): string {
-  const shown = names.slice(0, FAILED_TOOL_NAMES_IN_NOTICE).join(", ");
-  const rest = names.length - FAILED_TOOL_NAMES_IN_NOTICE;
-  const list = rest > 0 ? `${shown} and ${rest} more` : shown;
-  return `${names.length === 1 ? "A tool" : `${names.length} tools`} failed or ${names.length === 1 ? "was" : "were"} denied this turn (${list}). Read the reply as a report, not as a receipt.`;
+ * A chat model that was denied a write will happily close with "done, I
+ * pushed it", so the reply must never read as a receipt. That sentence
+ * leads, so no truncation can cut it. What follows says what actually
+ * happened, because the cases need different responses from the person:
+ * a tool that FAILED while running is a problem to look at; an approval
+ * that went UNANSWERED is fifteen minutes nobody was at the card; a call
+ * REJECTED before running is the model's own malformed request, harmless.
+ * Only failures are named — the rest are counted — so the line fits the
+ * chip even with the long names harness MCP servers give their tools. */
+export function toolFailureNotice(problems: readonly ToolProblem[]): string {
+  const count = (kind: ToolProblemKind) => problems.filter((problem) => problem.kind === kind);
+  const failed = count("failed");
+  const denied = count("denied").length;
+  const unanswered = count("unanswered").length;
+  const rejected = count("rejected").length;
+  const plural = (n: number, one: string, many: string) => (n === 1 ? one : many.replace("#", String(n)));
+  const build = (withNames: boolean): string => {
+    const parts: string[] = [];
+    if (failed.length) {
+      const names = withNames ? ` (${[...new Set(failed.map((problem) => shortToolName(problem.name)))].join(", ")})` : "";
+      parts.push(`${plural(failed.length, "1 tool failed", "# tools failed")} while running${names}`);
+    }
+    if (denied) parts.push(plural(denied, "1 call was denied", "# calls were denied"));
+    if (unanswered) parts.push(plural(unanswered, "1 approval went unanswered", "# approvals went unanswered"));
+    if (rejected) parts.push(plural(rejected, "1 call was rejected before running", "# calls were rejected before running"));
+    return `${RECEIPT_WARNING} — ${parts.join("; ")}.`;
+  };
+  const full = build(true);
+  if (full.length <= TOOL_NOTICE_MAX_CHARS) return full;
+  const counted = build(false);
+  return counted.length <= TOOL_NOTICE_MAX_CHARS ? counted : `${counted.slice(0, TOOL_NOTICE_MAX_CHARS - 1)}…`;
 }
 
 export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>): ProviderInstance {
@@ -381,8 +403,8 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
       let ok = false;
       let stopReason: string | null = null;
       let failure: string | undefined;
-      /** Distinct tools that failed or were denied, in the order they did. */
-      const failedTools: string[] = [];
+      /** Every call that did not do what the model may claim, and why. */
+      const toolProblems: ToolProblem[] = [];
       const denials: string[] = [];
       const seenCalls = new Set<string>();
       try {
@@ -451,9 +473,9 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             // A failed or denied tool does not make this a broken run.
             // Mark it instead of failing it: the note is not terminal, so
             // the reply stands beside a chip naming what did not execute.
-            if (failedTools.length) {
+            if (toolProblems.length) {
               stopReason = "tool_error";
-              emit({ ...base(turn.threadId, turnId), type: "runtime.error", message: toolFailureNotice(failedTools), terminal: false });
+              emit({ ...base(turn.threadId, turnId), type: "runtime.error", message: toolFailureNotice(toolProblems), terminal: false });
             }
             ok = true;
             break;
@@ -474,6 +496,8 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             let result: { text: string; ok: boolean };
             let started = false;
             let fatal: Error | undefined;
+            // Where a call stopped decides what the closing note says about it.
+            let problem: ToolProblemKind = "rejected";
             try {
               let args: unknown;
               try { args = JSON.parse(call.function.arguments); }
@@ -488,15 +512,18 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
               // delegated Full access cannot help either.
               // The bot's own built-in browser was authorized by mounting it
               // (turn-scoped capability, its own profile), as Claude does.
-              const allowed = turn.approvalMode === "full"
-                || tools.preAllowed(call.function.name)
-                || await approval.ask(call.function.name, inputPreview ?? "This tool has no arguments.");
+              const decision = turn.approvalMode === "full" || tools.preAllowed(call.function.name)
+                ? { allowed: true, source: "system" as const }
+                : await approval.decide(call.function.name, inputPreview ?? "This tool has no arguments.");
+              const allowed = decision.allowed;
+              if (!allowed) problem = decision.source === "timeout" ? "unanswered" : "denied";
               abort.signal.throwIfAborted();
               emit({ ...base(turn.threadId, turnId), type: "item.started", itemType: "tool", itemId: call.id,
                 title: call.function.name, ...(inputPreview ? { input: inputPreview } : {}),
               });
               started = true;
               if (allowed) {
+                problem = "failed";
                 result = await tools.execute(call.function.name, args as Record<string, unknown>, abort.signal);
               } else {
                 denials.push(call.function.name);
@@ -512,7 +539,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             const text = safeText(result.text);
             const output = preview({ ok: result.ok, result: text });
             emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "tool", itemId: call.id, ok: result.ok, output });
-            if (!result.ok && !failedTools.includes(call.function.name)) failedTools.push(call.function.name);
+            if (!result.ok) toolProblems.push({ name: call.function.name, kind: problem });
             messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, result: text }) });
             abort.signal.throwIfAborted();
             if (fatal) throw fatal;

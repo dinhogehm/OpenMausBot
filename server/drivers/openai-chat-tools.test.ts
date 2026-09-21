@@ -436,7 +436,7 @@ describe("structured tool execution boundaries", () => {
     expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "item.completed", itemType: "assistant_text", text: "I successfully wrote the receipt." }));
     expect(f.recorder.events).toContainEqual(expect.objectContaining({
       type: "runtime.error", terminal: false,
-      message: "A tool failed or was denied this turn (audit_write). Read the reply as a report, not as a receipt.",
+      message: "Read the reply as a report, not a receipt — 1 call was denied.",
     }));
   });
 
@@ -471,7 +471,8 @@ describe("structured tool execution boundaries", () => {
     expect(f.recorder.events.some((event) => event.type === "request.opened")).toBe(false);
     expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "item.completed", itemType: "tool", ok: false }));
     expect(f.recorder.events).toContainEqual(expect.objectContaining({
-      type: "runtime.error", terminal: false, message: expect.stringContaining(`(${name})`),
+      // malformed or unknown: the model's own mistake, and nothing ran
+      type: "runtime.error", terminal: false, message: "Read the reply as a report, not a receipt — 1 call was rejected before running.",
     }));
     expect(f.requests[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "call_write", content: expect.any(String) });
   });
@@ -501,7 +502,7 @@ describe("structured tool execution boundaries", () => {
     expect(await f.completed()).toMatchObject({ ok: true, stopReason: "tool_error" });
     expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "item.completed", itemType: "tool", ok: false }));
     expect(f.recorder.events).toContainEqual(expect.objectContaining({
-      type: "runtime.error", terminal: false, message: expect.stringContaining("(audit_fail)"),
+      type: "runtime.error", terminal: false, message: "Read the reply as a report, not a receipt — 1 tool failed while running (audit_fail).",
     }));
     expect(f.effects()).toEqual([]);
     expect(f.requests[1].messages.at(-1)).toMatchObject({ role: "tool", tool_call_id: "call_write", content: expect.stringContaining("Synthetic tool failed") });
