@@ -220,7 +220,7 @@ import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type C
 import { readMessageText, recallMessages, recentMessages, searchMessages, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups } from "./message-db.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
-import { chiefForBot, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, type Incident, type IncidentKind } from "./incidents.ts";
+import { chiefForBot, INCIDENTS_THREAD_MAX_MESSAGES, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, incidentsThreadIsFull, type Incident, type IncidentKind } from "./incidents.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -444,6 +444,7 @@ import { shouldMountLocalComputer } from "./local-routing.ts";
 import { autoLocalVmAttachable, type ContainerComputerStatus } from "./container-computer.ts";
 import { startAutoVmClaim, type AutoVmClaimTable } from "./auto-vm-claims.ts";
 import { computerFreeText, computerStillBusyText, computerWaitEndedText, computerWaitingText, type ComputerHolder } from "./computer-wait.ts";
+import { folderFreeText, folderStillBusyText, folderWaitEndedText, folderWaitingText, folderWaitWouldDeadlock, type FolderHolder } from "./workspace-wait.ts";
 import { modelContextWindow } from "./model-context-window.ts";
 import { parseSurface, resolveSurface, surfaceLabel, surfaceOfComputerKind, surfacePrompt, type Surface } from "./surface.ts";
 import {
@@ -1041,6 +1042,18 @@ const turnComputerResources = new Map<string, { owner: TurnOwner; resource: stri
 const teamComputerTurns = new Map<string, { owner: TurnOwner; computerId: string; botId: string; remoteAgent: boolean }>();
 const settlingResourceOwners = new Map<string, string>();
 
+/** Who is parked on whose reply right now: the waiting thread -> the thread
+ * it is waiting for. Written only for the duration of a synchronous ask
+ * (askBotAndWait), which is the one case where a turn stays open while
+ * another turn must run.
+ *
+ * The project-folder queue reads it. Without this, two bots that share a
+ * folder deadlock the moment one asks the other synchronously: the asker
+ * holds the folder until its turn ends, the answerer waits for the folder,
+ * and neither moves until a timeout fires. Waiting cannot help there, so
+ * the folder claim refuses instead of queueing. */
+const syncAskWaits = new Map<string, string>();
+
 function claimTurnResource(owner: TurnOwner, resource: string): boolean {
   if (!turnResources.claim(resource, owner)) return false;
   turnResourceOwners.set(owner.threadId, owner);
@@ -1097,6 +1110,65 @@ async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = 
   }
   turnResourceOwners.set(owner.threadId, owner);
   turnComputerResources.set(owner.threadId, { owner, resource });
+}
+
+/** Wait for the project folder rather than failing on it.
+ *
+ * A folder is claimed for the whole turn because two engines editing one
+ * checkout at once overwrite each other. Refusing the second turn outright
+ * made that correct rule read as a fault: a routine that fired while a chat
+ * was working simply died. This queues instead — same shape as
+ * bindTurnComputer, including the stop check on every tick and a ceiling
+ * that hands the person something to do — and the turn starts on its own
+ * when the folder frees.
+ *
+ * Unlike the computer, nothing is recorded in turnComputerResources: the
+ * folder is an ordinary turn claim, released with the rest at settle. */
+async function bindTurnWorkspace(owner: TurnOwner, resource: string): Promise<void> {
+  // Deliberately NOT bindTurnComputer's check: that one also requires an
+  // existing claim for this generation, and a turn reaches its folder
+  // before it has claimed anything at all.
+  const active = () => activeInternalGenerationByThread.get(owner.threadId) === owner.generation;
+  let waitingMessage: Message | undefined;
+  let holder: FolderHolder | undefined;
+  const deadline = Date.now() + GROUP_GOAL_WAIT_MAX_MS;
+  try {
+    while (true) {
+      if (!active()) throw new DirectTurnSetupCancelled("Project folder wait cancelled");
+      if (claimTurnResource(owner, resource)) break;
+      const holding = turnResources.blocker(resource, owner);
+      if (holding && folderWaitWouldDeadlock(holding.threadId, owner.threadId, syncAskWaits)) {
+        // Queueing here would wait on a turn that is waiting on this one.
+        // Fail now, with the way out, instead of two timeouts from now.
+        throw Object.assign(
+          new Error("another thread is working in this project folder and is waiting for this one to answer — give one of them a separate folder"),
+          { status: 409, code: "workspace_busy" },
+        );
+      }
+      if (!waitingMessage) {
+        const blocker = holding;
+        const holderBot = blocker && store.botByThread(blocker.threadId);
+        const holderTask = holderBot && blocker && store.taskByThread(holderBot.id, blocker.threadId);
+        const holderRoom = !holderBot && blocker ? store.groupByThread(blocker.threadId) : null;
+        holder = holderBot
+          ? { name: holderBot.name, ...(holderTask?.title ? { task: holderTask.title } : {}) }
+          : holderRoom ? { name: holderRoom.name } : undefined;
+        waitingMessage = store.appendMessage(owner.threadId, {
+          role: "bot", kind: "activity",
+          tool: { name: folderWaitingText(holder) },
+          ...(holderBot && holderTask ? { threadRef: { botId: holderBot.id, threadId: holderTask.threadId, title: holderTask.title } } : {}),
+        });
+      }
+      if (Date.now() >= deadline) {
+        throw Object.assign(new Error(folderStillBusyText(holder, GROUP_GOAL_WAIT_MAX_MS)), { status: 409, code: "workspace_busy" });
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, 100));
+    }
+  } finally {
+    if (waitingMessage) store.patchMessage(owner.threadId, waitingMessage.id, {
+      tool: { name: active() && turnResources.owns(resource, owner) ? folderFreeText() : folderWaitEndedText(), ok: true },
+    });
+  }
 }
 
 function botForThread(botId: string, threadId: string): BotRecord | null {
@@ -1473,9 +1545,14 @@ function askBotAndWait(targetBotId: string, message: string, depth: number, from
   return new Promise((resolve) => {
     let text = "";
     let done = false;
+    // The asker's turn stays open for this wait, so record the edge: the
+    // folder queue must not park the answerer behind a thread that is
+    // parked on the answerer.
+    if (fromThreadId) syncAskWaits.set(fromThreadId, threadId);
     const finish = (out: AskBotOutcome) => {
       if (done) return;
       done = true;
+      if (fromThreadId && syncAskWaits.get(fromThreadId) === threadId) syncAskWaits.delete(fromThreadId);
       clearTimeout(timer);
       unsub();
       resolve(out);
@@ -5683,6 +5760,33 @@ function incidentContext(threadId: string): { lastRequest: string | null; lastRe
   };
 }
 
+/** The Chief's open incidents thread, rotated when it is full.
+ *
+ * The thread is found by title and reused forever, so without this every
+ * incident re-sends a transcript that only ever grows — a thread nobody
+ * reads becomes the most expensive one in the workspace. Incidents do not
+ * depend on each other, so a full thread is archived (still readable, and
+ * the lookup skips archived ones) and the next report opens a fresh one
+ * carrying a link back. */
+function incidentsThread(chief: BotRecord): TaskRecord | null {
+  const open = store.tasks(chief.id).find((candidate) => candidate.title === INCIDENTS_THREAD_TITLE && !candidate.archivedAt);
+  const start = () => store.createTask(chief.id, INCIDENTS_THREAD_TITLE, false, undefined, { botId: chief.id, name: chief.name, at: Date.now() });
+  if (!open) return start();
+  if (!incidentsThreadIsFull(store.messagesFor(open.threadId).length)) return open;
+  store.patchTask(chief.id, open.threadId, { archivedAt: Date.now() });
+  const fresh = start();
+  // A person reading the new thread should be one click from the old one.
+  if (fresh) {
+    store.appendMessage(fresh.threadId, {
+      role: "bot",
+      kind: "activity",
+      tool: { name: `Earlier incidents moved to an archived thread after ${INCIDENTS_THREAD_MAX_MESSAGES} messages`, ok: true },
+      threadRef: { botId: chief.id, threadId: open.threadId, title: INCIDENTS_THREAD_TITLE },
+    });
+  }
+  return fresh;
+}
+
 function reportIncident(input: { kind: IncidentKind; bot: BotRecord; threadId: string; detail: string }): void {
   const { bot, threadId } = input;
   const task = store.taskByThread(bot.id, threadId);
@@ -5719,8 +5823,7 @@ function reportIncident(input: { kind: IncidentKind; bot: BotRecord; threadId: s
     tellThePerson();
     return;
   }
-  const incidents = store.tasks(chief.id).find((candidate) => candidate.title === INCIDENTS_THREAD_TITLE && !candidate.archivedAt)
-    ?? store.createTask(chief.id, INCIDENTS_THREAD_TITLE, false, undefined, { botId: chief.id, name: chief.name, at: Date.now() });
+  const incidents = incidentsThread(chief);
   if (!incidents || incidents.threadId === threadId) {
     tellThePerson();
     return;
@@ -6969,9 +7072,8 @@ async function startTurn(
           ? store.pinTaskCwd(bot.id, threadId, privateWorkspace)
           : null;
       const cwd = pinnedCwd ?? undefined;
-      if (cwd && !claimTurnResource(resourceOwner, workspaceResource(cwd))) {
-        throw Object.assign(new Error("another thread is working in this project folder — wait for it to finish or choose a separate folder"), { status: 409, code: "workspace_busy" });
-      }
+      // Queue behind whoever is in this folder instead of failing on them.
+      if (cwd) await bindTurnWorkspace(resourceOwner, workspaceResource(cwd));
       // Checkpoint explicit project folders, where a bot can overwrite the
       // user's work. Its private OpenMaus workspace is app-owned and changes
       // on nearly every ordinary chat; snapshotting it would add hidden disk

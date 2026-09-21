@@ -408,7 +408,7 @@ describe("independent bot tasks through the isolated control surface", () => {
     evidence.push({ groupDefaultPreservedUntilStop: true, groupId: group.id, selectedTaskId: threadId });
   }, 30_000);
 
-  it("refuses a second engine in the same selected project folder until its owner stops", async () => {
+  it("holds a second engine out of the same selected project folder, then starts it when the owner stops", async () => {
     const created = await tool("create_bot", { name: "Shared project fixture", instance_id: "claude", model: models[0] });
     const botId = created.bot.id;
     const taskA = created.bot.activeTaskId;
@@ -421,15 +421,18 @@ describe("independent bot tasks through the isolated control surface", () => {
     const taskB = second.task.taskId;
     await control(["set-model", "--bot", botId, "--task", taskB, "--instance", "claude", "--model", models[1]]);
     await control(["send", "--bot", botId, "--task", taskB, "--text", "PROJECT_B_CONFLICT"]);
-    const blocked = await control(["wait", "--bot", botId, "--task", taskB, "--timeout", "10"]);
-    expect(blocked.status).toBe("failed");
-    expect(JSON.stringify(blocked.messages)).toContain("project folder");
+    // Queued, not refused: it is still waiting when the wait gives up, the
+    // second engine has NOT started, and the chip says what it is waiting for.
+    const queued = await control(["wait", "--bot", botId, "--task", taskB, "--timeout", "10"]);
+    expect(queued.status).toBe("timed-out");
+    expect(JSON.stringify(queued.messages)).toContain("project folder");
     expect(existsSync(modelFile(models[1], "json"))).toBe(false);
     expect((await botState(botId)).tasks.find((task: any) => task.taskId === taskA)?.busy).toBe(true);
 
+    // Freeing the folder starts the queued turn on its own — no second send.
     await control(["interrupt", "--bot", botId, "--task", taskA]);
     await control(["wait", "--bot", botId, "--task", taskA, "--timeout", "10"]);
-    await control(["send", "--bot", botId, "--task", taskB, "--text", "PROJECT_B_NOW_OWNS_FOLDER"]);
+    await expect.poll(() => existsSync(modelFile(models[1], "json")), { timeout: 20_000 }).toBe(true);
     expect((await dump(models[1])).env.OMB_FIXTURE_CWD).toBe(realpathSync(cwd));
     await control(["interrupt", "--bot", botId, "--task", taskB]);
   }, 45_000);
