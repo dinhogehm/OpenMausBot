@@ -111,8 +111,8 @@ describe("Codex server-owned device authentication", () => {
     const start = await controller.start();
     expect(start).toMatchObject({ phase: "waiting", userCode: "0CSG-0IXIM", authorizationUrl: "https://auth.openai.com/codex/device" });
     expect(start.flowId).toMatch(/^[0-9a-f-]{36}$/);
-    await expect.poll(async () => (await controller.get(start.flowId!)).phase).toBe("succeeded");
-    expect(await controller.get(start.flowId!)).toEqual({ phase: "succeeded", flowId: start.flowId, authorizationUrl: null, expiresAt: null });
+    await expect.poll(() => controller.get(start.flowId!), { timeout: 5_000 })
+      .toEqual({ phase: "succeeded", flowId: start.flowId, authorizationUrl: null, expiresAt: null });
     expect(refreshed).toBe(1);
     expect(calls().map((call) => call.args)).toEqual([["login", "status"], ["login", "--device-auth"], ["login", "status"]]);
     expect(calls().every((call) => call.home === home && call.codexHome === join(home, ".codex") && call.marker === "own-instance")).toBe(true);
@@ -259,7 +259,7 @@ describe("Codex server-owned device authentication", () => {
   });
 
   it("can cancel while the initial account check is still starting", async () => {
-    const controller = create("status-hang");
+    const controller = create("status-hang", { startupTimeoutMs: 1000 });
     const starting = controller.start();
     const rejection = expect(starting).rejects.toThrow("cancelled");
     // Wait out a slow first spawn exactly as long as the controller's own

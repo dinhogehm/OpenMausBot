@@ -4,12 +4,14 @@ import { ArrowUp, BookOpen, Clock, Mic, Paperclip, Square, Target, Users, X } fr
 import { useStore, visibleMessages, currentTaskBot, type Bot, type Group, type Message } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { activeLocale, t } from "@/lib/i18n";
+import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
 import {
   draftRevision,
   appendDraftAttachments,
   changeDraftAttachmentPending,
   forgetFailedComposerSend,
   markDraftEdited,
+  prependComposerDraft,
   recoverFailedComposerSend,
   rememberFailedComposerSend,
   replaceDraftAttachment,
@@ -28,6 +30,7 @@ import { LocalComputerAutoWarning } from "./LocalComputerAutoWarning";
 import { PlaceChip } from "./PlaceChip";
 import { FullAccessWarning } from "./FullAccessWarning";
 import { ApprovalModeSelector } from "./ApprovalModeSelector";
+import { CommandAllowlistDialog } from "./CommandAllowlistDialog";
 import { approvalModeFor, type ApprovalMode } from "../../shared/approval-mode";
 import {
   appendPastedText,
@@ -36,7 +39,9 @@ import {
   clipboardImageFiles,
   composeMessage,
   composerShouldRefocus,
+  composerTakesFocusOnOpen,
   imageAttachmentFromFile,
+  replyTargetTakesFocus,
   intakeFiles,
   isLongPaste,
   optimisticImageAttachment,
@@ -111,6 +116,7 @@ export function Composer({
   const bot = profile ? currentTaskBot(profile) : undefined;
   const locked = setupLocked || Boolean(bot?.awaitingThreadSnapshot);
   const { state, dispatch } = useStore();
+  const ownerOrAdmin = useOwnerOrAdmin();
   const { threads, currentBotId } = useThreadRefs();
   const { capabilities } = useDesktopCapabilities();
   const remoteClient = window.ogb?.remoteClient?.active === true;
@@ -217,6 +223,8 @@ export function Composer({
   const [dismissedAt, setDismissedAt] = useState<number | null>(null); // Esc'd this @
   const [dismissedSlashAt, setDismissedSlashAt] = useState<number | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const draftIdRef = useRef(draftId);
+  draftIdRef.current = draftId;
   // the latest caret, readable from callbacks without re-creating them
   const caretRef = useRef(0);
   caretRef.current = caret;
@@ -230,6 +238,39 @@ export function Composer({
       input.setSelectionRange(at, at);
     });
   }, []);
+  // The composer is keyed by thread, so mounting means a thread was just
+  // opened: put the caret at the end of its draft so the person can type
+  // without clicking the box first. Touch screens are skipped — focusing
+  // there pops the on-screen keyboard over the conversation.
+  useEffect(() => {
+    if (window.matchMedia?.("(hover: none) and (pointer: coarse)").matches) return;
+    const frame = requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (!input || input.disabled || !composerTakesFocusOnOpen(document.activeElement, input)) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
+  // Choosing a message to reply to means typing the reply comes next, so the
+  // caret follows the new target the same way it does when a thread opens.
+  // A reply restored with the thread is the open effect's; the ref starts on
+  // it so the two never both run.
+  const replyToId = replyTo?.id ?? null;
+  const focusedReplyRef = useRef(replyToId);
+  useEffect(() => {
+    const previous = focusedReplyRef.current;
+    focusedReplyRef.current = replyToId;
+    if (!replyTargetTakesFocus(previous, replyToId)) return;
+    if (window.matchMedia?.("(hover: none) and (pointer: coarse)").matches) return;
+    const frame = requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (!input || input.disabled || !composerTakesFocusOnOpen(document.activeElement, input)) return;
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [replyToId]);
   const mentionListRef = useRef<HTMLDivElement>(null);
   // what was typed before the mic went on — partials append after it
   const baseText = useRef("");
@@ -403,6 +444,26 @@ export function Composer({
     }
   };
   useEffect(() => setSteering(false), [threadId, queueHeadId]);
+  // Edit pulls a queued message back into the composer. The server removes it
+  // from the queue first; only a confirmed removal hands the words back, so a
+  // message that already drained into a turn can never also be resent.
+  const editQueued = (queueId: string) => {
+    const queued = queuedMessages.find((item) => item.queueId === queueId);
+    if (!queued) return;
+    const targetDraftId = draftId;
+    const onCancelled = () => {
+      prependComposerDraft(targetDraftId, queued.text);
+      if (targetDraftId !== draftIdRef.current) return;
+      requestAnimationFrame(() => {
+        const input = inputRef.current;
+        if (!input) return;
+        input.focus();
+        input.setSelectionRange(queued.text.length, queued.text.length);
+      });
+    };
+    if (group) dispatch({ type: "cancelGroupQueued", groupId: group.id, threadId, queueId, onCancelled });
+    else if (bot) dispatch({ type: "cancelQueued", botId: bot.id, threadId, queueId, onCancelled });
+  };
   // Double-Enter gesture: when a send lands as a queued chip on a busy
   // steer-capable thread (live steer lost its race, an attachment, an
   // older CLI), a second Enter within a short window pulls that queue into
@@ -439,6 +500,7 @@ export function Composer({
     threadId: string;
   } | null>(null);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
+  const [commandAllowlistTarget, setCommandAllowlistTarget] = useState<{ botId: string; botName: string; threadId: string } | null>(null);
   // Approval mode belongs to one bot; a room has several, each with its own.
   const modeBot = group ? undefined : bot;
   const approvalEngine = modeBot
@@ -878,6 +940,7 @@ export function Composer({
             if (group) dispatch({ type: "cancelGroupQueued", groupId: group.id, threadId, queueId });
             else if (bot) dispatch({ type: "cancelQueued", botId: bot.id, threadId, queueId });
           }}
+          onEdit={locked ? undefined : editQueued}
         />
         <div className="relative">
           {/* App-ground from the pill midline down, full-bleed. Bubbles may
@@ -955,6 +1018,7 @@ export function Composer({
                   onSelect={setApprovalMode}
                   disabled={Boolean(modeBot.busy)}
                   trustedModesAvailable={trustedThreadAccess}
+                  onManageCommandAllowlist={ownerOrAdmin === true ? () => setCommandAllowlistTarget({ botId: modeBot.id, botName: modeBot.name, threadId: modeBot.threadId }) : undefined}
                 />
               )}
               {modeBot && !remoteClient && (
@@ -1145,6 +1209,11 @@ export function Composer({
         </div>
       </div>
       <div className="pointer-events-auto">
+      {commandAllowlistTarget && <CommandAllowlistDialog
+        key={`${commandAllowlistTarget.botId}:${commandAllowlistTarget.threadId}`}
+        {...commandAllowlistTarget}
+        onClose={() => setCommandAllowlistTarget(null)}
+      />}
       <FullAccessWarning
         open={approvalWarning?.mode === "full"}
         scope="thread"

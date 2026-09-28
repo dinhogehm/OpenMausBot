@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   BASE_IMAGE,
@@ -26,6 +29,7 @@ import {
   containerRunArgs,
   dockerSecurityIsHardened,
   localVmRecreatableOnDemand,
+  localVmWorkspaceExists,
   managedImageDockerfile,
   perBotLocalVmTarget,
   podmanSecurityIsHardened,
@@ -49,6 +53,24 @@ function runner(responses: Record<string, string | Error>) {
   };
   return { calls, run };
 }
+
+it("recognizes only a durable VM workspace directory as prior provisioning evidence", () => {
+  const root = mkdtempSync(join(tmpdir(), "omb-vm-workspace-"));
+  const target = { ...perBotLocalVmTarget("workspace-fixture"), workspaceDir: join(root, "workspace") };
+  try {
+    expect(localVmWorkspaceExists(target)).toBe(false);
+    writeFileSync(target.workspaceDir, "not a directory");
+    expect(localVmWorkspaceExists(target)).toBe(false);
+    rmSync(target.workspaceDir);
+    mkdirSync(target.workspaceDir);
+    expect(localVmWorkspaceExists(target)).toBe(true);
+    const link = join(root, "linked-workspace");
+    symlinkSync(target.workspaceDir, link, "junction");
+    expect(localVmWorkspaceExists({ ...target, workspaceDir: link })).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const driverExec =
   `docker exec -u cua -e HOME=/home/cua -e DISPLAY=:1 -e CUA_DRIVER_INSTALL_CHANNEL=python_package ` +
@@ -454,7 +476,7 @@ describe("containerComputerStatus", () => {
 
     expect(status.persistence).toBe("unsafe");
     expect(status.ready).toBe(false);
-    expect(status.problem).toContain("durable workspace");
+    expect(status.problem).toBe("The existing Local VM is missing its durable folder; recreate it");
   });
 
   it("does not mistake an unrelated container executable for Apple container off macOS", async () => {

@@ -1,14 +1,19 @@
 const DAY = 24 * 60 * 60_000;
 const RETRY = 60 * 60_000;
+// After the company connection returns, an overdue backup waits this long so
+// the person can see (and turn off) the schedule before anything uploads.
+const RESUME_DELAY = 15 * 60_000;
 const validTime = value => Number.isSafeInteger(value) && value >= 0;
 const sameScope = (left, right) => Boolean(left && right && left.key === right.key && left.generation === right.generation);
+/** A schedule saved under an older key form for this same authority. */
+const legacyScope = (record, authority) => Boolean(record && authority && record.scope !== authority.key && authority.adopts?.(record.scope));
 
 /** One opt-in schedule for this desktop workspace. The encrypted store and
  * transfer are injected so this never owns a second credential or upload path. */
 export function createCompanyBackupSchedule({ store, scope, run, onState = () => {}, now = Date.now,
   setTimer = setTimeout, clearTimer = clearTimeout }) {
   let record = null, revision = 0, timer = null, closed = false, started = false;
-  let controller = null, operation = null, status = "off", message, needsClear = false;
+  let controller = null, operation = null, status = "off", message, needsClear = false, awaitingAuthority = false;
   const snapshot = () => ({ enabled: Boolean(record) || needsClear, status, ...(record ? {
     nextBackupAt: record.nextBackupAt,
     ...(record.lastAttemptAt === undefined ? {} : { lastAttemptAt: record.lastAttemptAt }),
@@ -21,7 +26,10 @@ export function createCompanyBackupSchedule({ store, scope, run, onState = () =>
     stopTimer();
     if (!closed && started && record && !operation) {
       // ponytail: one hourly retry, no missed-day queue or background OS job.
-      const delay = scope() ? Math.max(1000, Math.min(DAY, record.nextBackupAt - now())) : RETRY;
+      const authority = scope();
+      let delay = authority ? Math.max(1000, Math.min(DAY, record.nextBackupAt - now())) : RETRY;
+      if (authority && awaitingAuthority) { awaitingAuthority = false; delay = Math.max(delay, RESUME_DELAY); }
+      else if (!authority) awaitingAuthority = true;
       timer = setTimer(() => { timer = null; return tick().catch(() => {}); }, delay);
       timer?.unref?.();
     }
@@ -40,11 +48,18 @@ export function createCompanyBackupSchedule({ store, scope, run, onState = () =>
     }
     return snapshot();
   }
+  /** Rewrites a legacy key in place; never turns the schedule off. */
+  async function adopt(authority) {
+    const stamp = revision, adopted = { ...record, scope: authority.key };
+    await store.write(adopted);
+    if (current(stamp) && record && legacyScope(record, authority)) record = adopted;
+  }
   async function tick() {
     if (closed || !started || !record || operation) return;
     const currentScope = scope(), authority = currentScope ? { ...currentScope } : null;
+    if (legacyScope(record, authority)) { try { await adopt(authority); } catch { publish("error", "Daily backups could not be updated. Unlock your system keychain; they will retry in an hour."); arm(); return; } }
     if (authority && authority.key !== record.scope) { await forget(); return; }
-    if (!authority) { publish("paused", "Daily backups will resume when this local workspace and company connection are available."); arm(); return; }
+    if (!authority) { awaitingAuthority = true; publish("paused", "Daily backups will resume when this installation and the company connection are available."); arm(); return; }
     if (record.nextBackupAt > now()) { publish("waiting"); arm(); return; }
     const stamp = revision, abort = new AbortController();
     controller = abort;
@@ -68,7 +83,7 @@ export function createCompanyBackupSchedule({ store, scope, run, onState = () =>
         if (!current(stamp)) return;
         publish(abort.signal.aborted || error?.code === "workspace_busy" ? "paused" : "error",
           abort.signal.aborted || error?.code === "workspace_busy"
-            ? "Daily backup postponed. It will retry when the workspace is available."
+            ? "Daily backup postponed. It will retry when this installation is available."
             : "The daily backup did not complete. Check your connection, system keychain and free disk space; it will retry in an hour.");
       }
     })();
@@ -111,16 +126,16 @@ export function createCompanyBackupSchedule({ store, scope, run, onState = () =>
       if (input?.enabled === false && Object.keys(input).length === 1) return forget();
       if (needsClear) throw new Error("Finish turning daily backups off before enabling them again.");
       if (input?.enabled !== true || input.confirmation !== "BACK UP THIS WORKSPACE DAILY" ||
-          Object.keys(input).some(key => !["enabled", "confirmation"].includes(key))) throw new Error("Confirm daily backup of this entire workspace.");
+          Object.keys(input).some(key => !["enabled", "confirmation"].includes(key))) throw new Error("Confirm daily backup of this entire installation.");
       const currentScope = scope(), authority = currentScope ? { ...currentScope } : null;
-      if (!authority) throw new Error("Connect your organisation in the local desktop before enabling daily backups.");
+      if (!authority) throw new Error("Connect your organization in the local desktop before enabling daily backups.");
       const stamp = ++revision;
       stopTimer(); controller?.abort();
       record = { version: 2, scope: authority.key, nextBackupAt: now() + DAY };
       try {
         await store.write({ ...record });
         if (!current(stamp)) return snapshot();
-        if (!sameScope(authority, scope())) { await forget(); throw new Error("The workspace connection changed."); }
+        if (!sameScope(authority, scope())) { await forget(); throw new Error("Your organization connection changed."); }
         started = true; publish("waiting"); arm(); return snapshot();
       } catch (error) {
         if (current(stamp)) { record = null; publish("error", "Daily backups were not enabled. Unlock your system keychain and try again."); }
@@ -130,7 +145,8 @@ export function createCompanyBackupSchedule({ store, scope, run, onState = () =>
     forget,
     reconcile() {
       const authority = scope();
-      if (!authority) controller?.abort();
+      if (!authority) { controller?.abort(); if (record) awaitingAuthority = true; }
+      if (legacyScope(record, authority)) { void adopt(authority).then(() => arm(), () => arm()); return; }
       if (record && authority && record.scope !== authority.key) { void forget().catch(() => {}); return; }
       // Repeated connection refreshes cannot bring a persisted retry forward.
       arm();

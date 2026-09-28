@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb, type VerificationServer } from "../scripts/control-omb.ts";
 
 type Bot = { id: string; activeTaskId: string };
-type Message = { id: string; role: string; kind: string; text?: string; sendId?: string; steered?: boolean; turnTerminal?: boolean };
+type Message = { id: string; role: string; kind: string; text?: string; sendId?: string; steered?: boolean; turnTerminal?: boolean; tool?: { name: string; ok?: boolean } };
 type Page = { messages: Message[]; activeLeafId: string | null };
 
 describe("guarded external messages through an isolated runtime", () => {
@@ -44,6 +44,14 @@ describe("guarded external messages through an isolated runtime", () => {
       try { return Boolean(JSON.parse(readFileSync(file(threadId, "launch.json"), "utf8")).pid); }
       catch (error) { if (error instanceof SyntaxError || (error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
     }, { timeout: 15_000 }).toBe(true);
+  };
+  const initialOutputProcessed = async (threadId: string) => {
+    // The launch dump precedes stdout. Wait for the initial tool result to
+    // reach the runtime before snapshotting the leaf; slow mode then emits
+    // no more messages until this thread's finish gate is released.
+    await expect.poll(async () => (await page(threadId)).messages.some(message =>
+      message.kind === "activity" && message.tool?.name === "Bash" && message.tool.ok === true,
+    ), { timeout: 15_000 }).toBe(true);
   };
   const finish = async (bot: Bot, threadId = bot.activeTaskId) => {
     await launched(threadId);
@@ -149,6 +157,7 @@ describe("guarded external messages through an isolated runtime", () => {
     expect(sibling.status).toBe(201);
     await control(["send", "--bot", bot.id, "--task", bot.activeTaskId, "--text", "NORMAL_TURN_OWNS_THE_THREAD"]);
     await launched(bot.activeTaskId);
+    await initialOutputProcessed(bot.activeTaskId);
     const current = await page(bot.activeTaskId);
     const busy = await guarded(bot, payload(bot, "GUARDED_MUST_NOT_STEER", current.activeLeafId));
     expect(busy.status).toBe(409); expect(busy.body.code).toBe("guarded_busy");
@@ -180,6 +189,53 @@ describe("guarded external messages through an isolated runtime", () => {
     expect((await page(bot.activeTaskId)).messages.filter(message => message.role === "user")).toHaveLength(1);
     await noQueuedWork(bot.activeTaskId);
     await finish(bot);
+  }, 30_000);
+
+  it("reports an exact request and stops only its snapshotted execution", async () => {
+    expect((await api("GET", "/api/health")).body.capabilities.guardedRequests).toBe(1);
+    const bot = await newBot(), input = payload(bot, "EXACT_REQUEST_TO_STOP");
+    const accepted = await guarded(bot, input);
+    expect(accepted.status).toBe(202);
+    await launched(bot.activeTaskId);
+    await initialOutputProcessed(bot.activeTaskId);
+    const route = `/api/bots/${bot.id}/requests/${input.sendId}`;
+    const snapshot = (await api("GET", `${route}?threadId=${bot.activeTaskId}`)).body;
+    expect(snapshot).toMatchObject({ messageId: accepted.body.message.id, phase: "working" });
+    expect(typeof snapshot.activeTurnId).toBe("string");
+    expect(typeof snapshot.executionId).toBe("string");
+    const target = { threadId: bot.activeTaskId, messageId: snapshot.messageId, expectedActiveLeafId: snapshot.activeLeafId,
+      expectedTurnId: snapshot.activeTurnId, expectedExecutionId: snapshot.executionId };
+    // A null/old setup lease must never match a newer generation, even if a
+    // provider has not assigned its own turn id yet.
+    expect((await api("POST", `${route}/interrupt`, { ...target, expectedExecutionId: null })).status).toBe(409);
+    expect((await api("POST", `${route}/interrupt`, { ...target, expectedTurnId: "foreign-turn" })).status).toBe(409);
+    expect((await api("POST", `${route}/interrupt`, { ...target, extra: true })).status).toBe(400);
+    expect((await api("POST", `${route}/interrupt`, target, { origin: "https://untrusted.example.test" })).status).toBe(403);
+    const stopped = await api("POST", `${route}/interrupt`, target);
+    expect(stopped).toMatchObject({ status: 200, body: { ok: true, outcome: "stopped" } });
+    await expect.poll(async () => (await api("GET", "/api/bots?messages=0")).body.bots.find((entry: any) => entry.id === bot.id).busy).toBe(false);
+    expect((await api("POST", `${route}/interrupt`, target)).status).toBe(409);
+    expect(existsSync(file(bot.activeTaskId, "gate"))).toBe(false);
+  }, 30_000);
+
+  it("keeps old stop receipts from reaching a later human turn and rejects foreign threads", async () => {
+    const bot = await newBot(), input = payload(bot, "FIRST_REQUEST_COMPLETE");
+    expect((await guarded(bot, input)).status).toBe(202);
+    await finish(bot);
+    const route = `/api/bots/${bot.id}/requests/${input.sendId}`;
+    const settled = (await api("GET", `${route}?threadId=${bot.activeTaskId}`)).body;
+    expect(settled.phase).toBe("settled");
+    const final = settled.messages.find((message: any) => message.turnTerminal);
+    expect(final.requestMessageId).toBe(settled.messageId);
+    const target = { threadId: bot.activeTaskId, messageId: settled.messageId, expectedActiveLeafId: settled.activeLeafId,
+      expectedTurnId: settled.activeTurnId, expectedExecutionId: settled.executionId };
+    expect((await api("POST", `${route}/interrupt`, target)).status).toBe(409);
+    const other = await newBot();
+    expect((await api("GET", `${route}?threadId=${other.activeTaskId}`)).status).toBe(409);
+    await control(["send", "--bot", bot.id, "--task", bot.activeTaskId, "--text", "A_LATER_HUMAN_REQUEST"]);
+    expect((await api("GET", `${route}?threadId=${bot.activeTaskId}`))).toMatchObject({ status: 409, body: { code: "guarded_request_changed" } });
+    expect((await api("POST", `${route}/interrupt`, target)).status).toBe(409);
+    expect((await control(["wait", "--bot", bot.id, "--task", bot.activeTaskId, "--timeout", "15"])).status).toBe("settled");
   }, 30_000);
 });
 

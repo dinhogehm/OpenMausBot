@@ -41,8 +41,8 @@ Talk to them like contacts. Watch them work. Approve what matters.
 
 <br>
 
-<a href="https://buy.polar.sh/polar_cl_bbnfWFUrWONIF4HnUpZf1p0if0eUYg3HeXct73b48Yg">
-  <img src="https://img.shields.io/badge/%E2%9D%A4%EF%B8%8F%20%20Support%20OpenMausBot-any%20amount%20%C2%B7%20or%20monthly-38d591?style=for-the-badge&labelColor=070707" alt="Support OpenMausBot — one-time any amount or monthly, via Polar" height="40">
+<a href="https://github.com/sponsors/milind-soni">
+  <img src="https://img.shields.io/badge/%E2%9D%A4%EF%B8%8F%20%20Support%20OpenMausBot-GitHub%20Sponsors-38d591?style=for-the-badge&labelColor=070707" alt="Support OpenMausBot via GitHub Sponsors" height="40">
 </a>
 
 <br>
@@ -162,6 +162,19 @@ conversations, permissions, memory, or computer access. Browse the
 [open-source playbook repository](https://github.com/milind-soni/openmausbot-teams) or read its
 [portable format](https://github.com/milind-soni/openmausbot-teams/blob/main/FORMAT.md).
 
+### 🤝 Share a whole team
+
+Right-click a team and choose **Share team…** (or use **Templates → Share**) to save the whole team as one
+file: its bots with their instructions, pictures and skills, group chats, routines, shared instructions,
+Chief of Staff, connection slots and each bot's starter notes (untick them to leave them out). The dialog
+shows exactly what the file holds before you save it. Chat history, keys and passwords, model choices and
+computers never go in, and anything that looks like a secret is removed from the text. Whoever imports it
+gets new bots on Ask, skills switched off and routines paused. See [docs/team-sharing.md](docs/team-sharing.md).
+Desktops connected to an organization also get **Templates → From {Organization}**: the packages its Admin shares,
+added with one click, skills switched on. See [docs/org-library.md](docs/org-library.md).
+Your New bot defaults can travel too, as a **preset bot** that appears in New bot (in a team file, or on
+their own with **Share as preset…**). See [docs/presets.md](docs/presets.md).
+
 ### 🎧 Bots that talk back
 
 Press the speaker on any reply, or switch a bot to read its answers out as they land — so you can listen
@@ -197,7 +210,7 @@ expressions · screenshots of the bot's work folded into the transcript.
 ![Cua](https://img.shields.io/badge/Cua%20Driver-1f2937)
 ![ElevenLabs](https://img.shields.io/badge/ElevenLabs-000000?logo=elevenlabs&logoColor=white)
 ![Fish Audio](https://img.shields.io/badge/Fish%20Audio-2563eb)
-![Polar](https://img.shields.io/badge/Polar-0062ff)
+![GitHub Sponsors](https://img.shields.io/badge/GitHub%20Sponsors-ea4aaa)
 
 </div>
 
@@ -206,11 +219,11 @@ expressions · screenshots of the bot's work folded into the transcript.
 | **Claude · Codex · Grok** | The agents behind every bot, run through their local CLIs |
 | **Electron** | Desktop shells for macOS, Windows, and Ubuntu |
 | **React + Vite + Tailwind CSS** | The chat app UI and its build |
-| **Box** ([box.ascii.dev](https://box.ascii.dev)) | Each bot's cloud computer |
+| **Boat** ([boat.dev](https://boat.dev)) | Each bot's cloud computer |
 | **Composio** | Connected apps — Gmail, Slack, GitHub, and more |
 | **Cua Driver** | Native computer use on your own machine |
 | **ElevenLabs · Fish Audio** | Hosted voices for bots that talk back |
-| **Polar** | One-time and monthly project support |
+| **GitHub Sponsors** | One-time and monthly project support |
 
 ## How it works
 
@@ -236,7 +249,7 @@ flowchart LR
     BUS -- "one SSE stream" --> UI
     REG --> CL & CX & GR
     CL & CX & GR -- "permission requests" --> BROKER
-    server -- "Box API" --> BOX[("Cloud computer<br/>box.ascii.dev")]
+    server -- "Boat API" --> BOAT[("Cloud computer<br/>boat.dev")]
     server -- "Composio Session" --> APPS[("Gmail · Slack · GitHub · …")]
 ```
 
@@ -303,7 +316,7 @@ pnpm package:linux    # Ubuntu x64: .deb + AppImage + verified CUA runtime
 | Capability | macOS | Ubuntu 24.04 Xorg | Ubuntu 24.04 Wayland |
 |---|---|---|---|
 | Packaged app, embedded harness, local agent CLIs | Supported | Beta | Beta |
-| Composio and Box/cloud computers | Supported | Beta | Beta |
+| Composio and Boat/cloud computers | Supported | Beta | Beta |
 | Explicit preview-only local screen capture | Supported | Beta | Beta |
 | Bot control of this computer | Supported | Beta, explicit opt-in | Disabled: Wayland safety gate |
 | Native on-device dictation | Supported | Planned | Planned |
@@ -328,11 +341,11 @@ in the sidebar footer) when you want to enable its integration:
 | Credential | What it enables | Where to get it |
 |---|---|---|
 | Composio project key (`ak_…`) | Connect Gmail, GitHub, Slack, Notion, and other apps to your bots | [OpenMausBot Composio setup](docs/composio.md) |
-| Box API key | Give bots an isolated remote Linux computer with a desktop and terminal | [Box API key guide](https://docs.ascii.dev/box/api-keys) |
+| Boat API key | Give bots an isolated remote Linux computer with a desktop and terminal | [Boat API key guide](https://docs.boat.dev/api-keys) |
 | ElevenLabs key | Read replies aloud, and call your bots | [ElevenLabs API keys](https://elevenlabs.io/app/settings/api-keys) |
 | Fish Audio key | Read replies aloud with Fish Audio voices, and call your bots | [Fish Audio API keys](https://fish.audio/app/api-keys/) |
 
-Composio and Box are third-party services with their own accounts and terms. Box is a paid service after
+Composio and Boat are third-party services with their own accounts and terms. Boat is a paid service after
 its trial, and using a cloud computer may incur charges.
 
 ```sh
@@ -383,9 +396,9 @@ see [`docs/jev-typesafe.md`](docs/jev-typesafe.md).
 ## Support the project
 
 OpenMausBot is free and open source. If it does real work for you, you can
-[buy the project a coffee or become a monthly supporter](https://buy.polar.sh/polar_cl_bbnfWFUrWONIF4HnUpZf1p0if0eUYg3HeXct73b48Yg) —
-one-time any amount, or monthly. Payments are handled by [Polar](https://polar.sh/supamaus),
-which takes care of receipts and taxes; nothing about the app ever sits behind a paywall.
+[support its development through GitHub Sponsors](https://github.com/sponsors/milind-soni)
+with a one-time contribution or a monthly sponsorship. Your support helps fund ongoing development
+and maintenance; OpenMausBot remains free and open source.
 
 ## Run from a terminal or on a server
 
@@ -399,7 +412,7 @@ openmausbot
 Or use `npx openmausbot` without a global install. First launch guides you with
 arrow-key choices: choose AI access, sign in or paste a hidden API key, choose
 a model, and optionally connect a phone. Next time, the same command reuses your
-saved setup and opens the local workspace. Keep the terminal open; Ctrl-C stops
+saved setup and opens OpenMausBot on this computer. Keep the terminal open; Ctrl-C stops
 the server, not your saved work. Use `--no-open` to skip opening the browser.
 
 Phone access is optional and defaults to skipping. Choose an explicitly

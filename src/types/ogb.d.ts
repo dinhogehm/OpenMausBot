@@ -114,6 +114,7 @@ const __APP_VERSION__: string;
     ogb?: {
       platform: NodeJS.Platform;
       organization?: import("../../electron/managed-desktop.mjs").ManagedDesktopBridge;
+      cloudAccount?: import("../../electron/cloud-account.mjs").CloudAccountBridge;
       companyBackups?: {
         state(): Promise<CompanyBackupState>;
         list(): Promise<{ backups: CompanyBackupEntry[]; usedBytes: number; limits: { ownerQuotaBytes: number; retainedSnapshots: number } }>;
@@ -150,6 +151,7 @@ const __APP_VERSION__: string;
         save(id: string, grant: Pick<DesktopComputerSharing, "folders" | "terminal" | "computer">): Promise<DesktopComputerSharing | null>;
         revoke(id: string): Promise<DesktopComputerSharing>;
       };
+      confirm(message: string): Promise<boolean>;
       getCapabilities(): Promise<DesktopCapabilities>;
       onCapabilitiesChanged(cb: (capabilities: DesktopCapabilities) => void): () => void;
       remoteClient?: {
@@ -177,7 +179,7 @@ const __APP_VERSION__: string;
         setMode(
           botId: string,
           mode: import("../../shared/approval-mode").ApprovalMode,
-          options?: { acknowledgeLocalAuto?: boolean; threadId?: string; threadOnly?: boolean;
+          options?: { acknowledgeLocalAuto?: boolean; threadId?: string; threadOnly?: boolean; allThreads?: boolean;
             modelSelection?: import("../state/store").ModelSelection; updateBotDefault?: boolean },
         ): Promise<import("../state/store").Bot>;
       };
@@ -216,6 +218,8 @@ const __APP_VERSION__: string;
       permRequestMic(): Promise<boolean>;
       /** Opens System Settings on a privacy pane: mic|screen|speech|accessibility. */
       permOpenSettings(pane: "mic" | "screen" | "speech" | "accessibility"): Promise<void>;
+      /** Relaunch the local macOS app after a permission grant. */
+      relaunch?(): Promise<boolean>;
       /** Copies an engine install command and opens a blank terminal. False
        * when no terminal could be launched; the clipboard still has it. */
       openInstallTerminal?(command: string): Promise<boolean>;

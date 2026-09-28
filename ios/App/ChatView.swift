@@ -27,6 +27,7 @@ struct ChatView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @State private var draft = ""
+    @State private var revealedMessageId: String?
     @State private var showingTasks = false
     @State private var showingComputer = false
     @State private var showingPlus = false
@@ -198,6 +199,12 @@ struct ChatView: View {
                                     )
                                 case let .activityRun(items):
                                     ActivityRunChip(items: items, openThread: openThread)
+                                case let .assistantTurn(turn):
+                                    AssistantTurnChip(
+                                        turn: turn, chat: current, openLink: openLink, openThread: openThread,
+                                        revealedMessageId: revealedMessageId,
+                                        scrollToMessage: { proxy.scrollTo($0, anchor: .center) }
+                                    )
                                 }
                             }
                             .id(row.id)
@@ -211,7 +218,8 @@ struct ChatView: View {
                         if let live = session.state.streaming[threadId], !live.isEmpty {
                             StreamingBubble(text: live, reasoning: nil, color: current.color)
                                 .id(Self.liveBubbleId)
-                        } else if let thinking = session.state.reasoning[threadId], !thinking.isEmpty {
+                        } else if activityDetail != ActivityDetail.hidden.rawValue,
+                                  let thinking = session.state.reasoning[threadId], !thinking.isEmpty {
                             // Only while there is no answer yet. Once tokens
                             // of the reply exist, the reasoning is behind us
                             // and showing both is just noise.
@@ -243,7 +251,6 @@ struct ChatView: View {
                     // edge: it sits in the island while that is open and
                     // glides into its header slot when the island lets go.
                     let topInset = IslandGeometry.topInset
-                    let hasIsland = IslandGeometry.hasIsland(topInset: topInset)
                     let islandSide: CGFloat = 220
                     // centred in the part of the square the hardware island does not cover
                     let islandFaceCentre = IslandGeometry.top + IslandGeometry.size.height + (islandSide - IslandGeometry.size.height) / 2
@@ -252,7 +259,7 @@ struct ChatView: View {
                     let faceCentre = headerFaceCentre + (islandFaceCentre - headerFaceCentre) * facePhase
                     ZStack(alignment: .top) {
                         if islandVisible {
-                            IslandShell(expanded: islandExpanded, hasIsland: hasIsland, expandedSize: CGSize(width: islandSide, height: islandSide)) {
+                            IslandShell(expanded: islandExpanded, expandedSize: CGSize(width: islandSide, height: islandSide)) {
                                 Color.clear
                             }
                         }
@@ -290,7 +297,7 @@ struct ChatView: View {
                 // A conversation grows from the bottom: a transcript shorter
                 // than the screen rests at the bottom, and opening a chat
                 // starts on the newest message rather than the oldest.
-                .defaultScrollAnchor(.bottom)
+                .scrollAnchorCompat(.bottom)
                 // Tapping the transcript puts the keyboard away. The composer
                 // is a sibling of this scroll view rather than inside it, so
                 // nothing else here drops its focus — until this, the only way
@@ -304,7 +311,10 @@ struct ChatView: View {
                 // And a drag down over the transcript pushes it away, the way
                 // it does in Mail and Messages.
                 .scrollDismissesKeyboard(.interactively)
-                .onChange(of: transcript.last?.id) { _, _ in
+                // `initial: true` is what opens the chat on the newest
+                // message where `scrollAnchorCompat` cannot (iOS 16). On 17 the
+                // anchor has already put us there and this is a no-op.
+                .onValueChange(of: transcript.last?.id, initial: true) { _ in
                     guard let last = transcript.last else { return }
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
@@ -312,22 +322,24 @@ struct ChatView: View {
                 // the string so this fires once per delta batch, and without
                 // animation — animating every token turns a smooth stream
                 // into a stutter, because each scroll interrupts the last.
-                .onChange(of: session.state.streaming[threadId]?.count ?? 0) { _, length in
+                .onValueChange(of: session.state.streaming[threadId]?.count ?? 0) { length in
                     guard length > 0 else { return }
                     proxy.scrollTo(Self.liveBubbleId, anchor: .bottom)
                 }
-                .onChange(of: session.focusedMessageId) { _, messageId in
-                    guard let messageId,
-                          messages.contains(where: { $0.id == messageId })
-                    else { return }
-                    withAnimation { proxy.scrollTo(messageId, anchor: .center) }
-                    session.consumeFocus(messageId)
-                }
-                .task {
+                .task(id: session.focusedMessageId) {
                     guard let messageId = session.focusedMessageId,
                           messages.contains(where: { $0.id == messageId })
                     else { return }
-                    proxy.scrollTo(messageId, anchor: .center)
+                    revealedMessageId = messageId
+                    // Materialize the lazy folded row first. Its target bubble
+                    // scrolls itself into view once expansion has laid it out.
+                    let folded = transcript.first { row in
+                        if case let .assistantTurn(turn) = row {
+                            return turn.messages.contains { $0.id == messageId }
+                        }
+                        return false
+                    }
+                    proxy.scrollTo(folded?.id ?? messageId, anchor: .center)
                     session.consumeFocus(messageId)
                 }
             }
@@ -340,12 +352,18 @@ struct ChatView: View {
         .overlay(alignment: .bottom) { plusSheet }
         .toolbar(.hidden, for: .navigationBar)
         .navigationBarBackButtonHidden(true)
+        // Hiding the bar above also disarms the system edge-swipe back
+        // gesture, which is wired to the bar's navigation controller.
+        // Re-arm it so a rightward swipe from the left edge pops back to
+        // Home, the way the rest of iOS behaves.
+        .background(SwipeBackBridge())
         .navigationDestination(isPresented: $showingComputer) {
             if case let .bot(bot) = current { ComputerView(bot: bot) }
         }
         .task(id: threadId) {
             if selectedThreadWasRemoved { dismiss(); return }
             let openedChat = current
+            session.threadSelection.rememberThread(openedChat, connectionID: session.connection?.id)
             await session.loadThreadIfNeeded(openedChat.threadId)
             // opening a chat is what marks it read, exactly as on the desktop
             if openedChat.unread { await session.markRead(openedChat) }
@@ -357,21 +375,21 @@ struct ChatView: View {
             if ProcessInfo.processInfo.arguments.contains("-open-profile") { showingProfile = true }
 #endif
         }
-        .onChange(of: selectedThreadWasRemoved) { _, removed in
+        .onValueChange(of: selectedThreadWasRemoved) { removed in
             if removed { dismiss() }
         }
-        .onChange(of: session.state.hasLoadedPage(forThread: threadId)) { _, loaded in
+        .onValueChange(of: session.state.hasLoadedPage(forThread: threadId)) { loaded in
             let requestedThread = threadId
             if !loaded { Task { await session.loadThreadIfNeeded(requestedThread) } }
         }
-        .onChange(of: current.unread) { _, unread in
+        .onValueChange(of: current.unread) { unread in
             // A message can arrive while this chat is already on screen. The
             // initial task above will not run again, so clear that new unread
             // bit here rather than leaving a badge on an open conversation.
             let readChat = current
             if unread { Task { await session.markRead(readChat) } }
         }
-        .onChange(of: threadId) { previous, next in
+        .onValueChangePair(of: threadId) { previous, next in
             dictation.stop()
             threadDrafts[previous] = ComposerSnapshot(text: draft, attachments: attachments, error: attachmentError)
             let restored = threadDrafts.removeValue(forKey: next) ?? ComposerSnapshot()
@@ -387,7 +405,7 @@ struct ChatView: View {
             resetFilePreview()
             cancelThreadOpen()
         }
-        .onChange(of: session.connection?.id) { _, _ in
+        .onValueChange(of: session.connection?.id) { _ in
             cancelThreadOpen()
         }
         .onDisappear {
@@ -395,19 +413,19 @@ struct ChatView: View {
             resetFilePreview()
             cancelThreadOpen()
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onValueChange(of: scenePhase) { phase in
             if phase != .active { dictation.stop() }
         }
-        .onChange(of: showingComputer) { _, shown in
+        .onValueChange(of: showingComputer) { shown in
             if shown { dictation.stop() }
         }
-        .onChange(of: showingTasks) { _, shown in
+        .onValueChange(of: showingTasks) { shown in
             if shown { dictation.stop() }
         }
-        .onChange(of: showingProfile) { _, shown in
+        .onValueChange(of: showingProfile) { shown in
             if shown { dictation.stop() }
         }
-        .onChange(of: showingPlus) { _, shown in
+        .onValueChange(of: showingPlus) { shown in
             if shown { dictation.stop() }
         }
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { note in
@@ -417,12 +435,12 @@ struct ChatView: View {
                 dictation.stop()
             }
         }
-        .onChange(of: dictation.transcript) { _, spoken in
+        .onValueChange(of: dictation.transcript) { spoken in
             // Always join against the text frozen at capture start. A newer
             // partial then replaces the older partial instead of duplicating it.
             draft = Dictation.draft(base: dictation.base, transcript: spoken)
         }
-        .onChange(of: dictation.isListening) { _, listening in
+        .onValueChange(of: dictation.isListening) { listening in
             if listening { composerFocused = false }
         }
         .sheet(isPresented: $showingTasks) {
@@ -443,7 +461,7 @@ struct ChatView: View {
             matching: .images,
             preferredItemEncoding: .current
         )
-        .onChange(of: selectedPhotos) { _, items in
+        .onValueChange(of: selectedPhotos) { items in
             guard !items.isEmpty else { return }
             Task { await importPhotos(items) }
         }
@@ -1063,11 +1081,31 @@ struct ChatView: View {
 
     // MARK: - Composer
 
+    /// Pull a held send back into the composer to tweak or extend it. The
+    /// computer drops it from the queue first; only a confirmed removal hands
+    /// the words back, so a send that already joined the turn is never resent.
+    private func editQueued(_ send: QueuedSend) {
+        let targetThread = threadId
+        let chat = current
+        Task {
+            guard await session.cancelQueued(send, threadId: targetThread, in: chat) else { return }
+            if threadId == targetThread {
+                draft = send.editDraft(keeping: draft)
+                composerFocused = true
+            } else {
+                // The person switched tasks while the cancel was in flight.
+                var snapshot = threadDrafts[targetThread] ?? ComposerSnapshot()
+                snapshot.text = send.editDraft(keeping: snapshot.text)
+                threadDrafts[targetThread] = snapshot
+            }
+        }
+    }
+
     /// A round + and a glass pill with dictation and send inside it.
     private var composer: some View {
         VStack(spacing: 6) {
             if !heldSends.isEmpty {
-                QueuedSendList(sends: heldSends) { send in
+                QueuedSendList(sends: heldSends, edit: editQueued) { send in
                     Task { await session.cancelQueued(send, threadId: threadId, in: current) }
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1172,7 +1210,7 @@ struct ChatView: View {
                     }
                     .padding(.horizontal, 2)
                 }
-                .scrollClipDisabled()
+                .scrollClipDisabledCompat()
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
@@ -1231,7 +1269,7 @@ struct ChatView: View {
                                 !dictation.isListening && !dictation.isStarting
                                     && !preparingAttachments && !sendingMessage
                             )
-                            .onChange(of: draft) { _, value in
+                            .onValueChange(of: draft) { value in
                                 withAnimation(.easeInOut(duration: 0.15)) {
                                     showCommandHUD = value.hasPrefix("/")
                                 }
@@ -1241,11 +1279,7 @@ struct ChatView: View {
                             // hardware Return still sends, Shift-Return breaks
                             // the line. onKeyPress never sees the software
                             // keyboard, so this cannot turn its Return into a send.
-                            .onKeyPress(.return, phases: .down) { press in
-                                if press.modifiers.contains(.shift) { return .ignored }
-                                submit()
-                                return .handled
-                            }
+                            .onHardwareReturn { submit() }
 
                         Button {
                             composerFocused = false
@@ -1262,7 +1296,7 @@ struct ChatView: View {
                                             : Color.secondary.opacity(0.12)
                                     )
                                 )
-                                .symbolEffect(.pulse, isActive: dictation.isListening)
+                                .pulseCompat(isActive: dictation.isListening)
                         }
                         .buttonStyle(.plain)
                         .disabled(preparingAttachments || sendingMessage)
@@ -1321,6 +1355,12 @@ struct MessageRow: View {
         session.state.versions(of: message, inThread: chat.threadId)
     }
 
+    /// The stand-in for an edit the computer has not answered yet. It has no
+    /// server identity, so nothing may react to it or edit it again.
+    private var isPendingEdit: Bool {
+        session.state.pendingEdits[chat.threadId]?.placeholderId == message.id
+    }
+
     /// Transport tags contain paths on the paired computer. They belong in
     /// attachment cards, never on the clipboard or in the text-selection UI.
     private var attachedContent: AttachedMessageContent {
@@ -1372,13 +1412,15 @@ struct MessageRow: View {
             }
         }
         .contextMenu {
-            ForEach(Self.reactionChoices, id: \.self) { emoji in
-                Button(emoji) {
-                    Haptics.selection()
-                    Task { await session.react(to: message, in: chat.threadId, emoji: emoji) }
+            if !isPendingEdit {
+                ForEach(Self.reactionChoices, id: \.self) { emoji in
+                    Button(emoji) {
+                        Haptics.selection()
+                        Task { await session.react(to: message, in: chat.threadId, emoji: emoji) }
+                    }
                 }
             }
-            let visibleText = attachedContent.text
+            let visibleText = message.webhookContent?.task ?? attachedContent.text
             if !visibleText.isEmpty {
                 Divider()
                 Button("Copy", systemImage: "doc.on.doc") {
@@ -1397,14 +1439,16 @@ struct MessageRow: View {
             // sending its computer-local transport path back as prose.
             if message.role == .user,
                message.kind == .text,
+               message.webhookContent == nil,
                attachedContent.attachments.isEmpty,
+               !isPendingEdit,
                case let .bot(bot) = chat {
                 Divider()
                 Button("Edit and retry", systemImage: "pencil") {
                     editingText = message.text ?? ""
                     showingEdit = true
                 }
-                .disabled(bot.busy == true)
+                .disabled(bot.busy == true || session.state.pendingEdits[chat.threadId] != nil)
             }
         }
         .alert("Edit and retry", isPresented: $showingEdit) {
@@ -1421,6 +1465,8 @@ struct MessageRow: View {
             Text("This creates a new version and continues from there.")
         }
         .sheet(item: $selecting) { SelectableTextSheet(text: $0.text) }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("message-\(message.id)")
     }
 
     @ViewBuilder
@@ -1444,8 +1490,23 @@ struct MessageRow: View {
             }
         case .activity:
             ActivityChip(tool: message.tool, threadRef: message.threadRef, openThread: openThread)
+            // A turn that failed because Claude Code is too old for the
+            // model: offer to run the updater for the engine this thread uses.
+            if message.tool?.claudeUpdate == true, case let .bot(bot) = chat {
+                ClaudeUpdateCard(
+                    instanceId: bot.currentTaskModelSelection.instanceId,
+                    tint: MausPalette.color(chat.color)
+                )
+            }
+        case .compaction:
+            ReceiptChip(icon: "square.3.layers.3d", label: message.compaction?.chipText ?? message.text ?? "") {
+                selecting = SelectableText(text: message.compaction?.summary ?? message.text ?? "")
+            }
         case .screen:
             ScreenShot(threadId: chat.threadId, message: message)
+        case .digest:
+            // Filtered out of the transcript rows; never drawn.
+            EmptyView()
         case .unknown:
             // A message kind from a newer computer. Almost everything the
             // harness sends carries `text`, so showing it is usually the
@@ -1514,63 +1575,9 @@ struct TextBubble: View {
         return (filename, diff)
     }
 
-    private var parsedTable: (headers: [String], rows: [[String]])? {
-        guard message.role != .user, let source = message.text else { return nil }
-        let lines = source.components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        guard lines.count >= 3, lines.allSatisfy({ $0.hasPrefix("|") && $0.hasSuffix("|") }) else {
-            return nil
-        }
-        let headers = Self.tableCells(lines[0])
-        let separators = Self.tableCells(lines[1])
-        guard !headers.isEmpty, separators.count == headers.count,
-              separators.allSatisfy(Self.isTableSeparator) else { return nil }
-        let rows = lines.dropFirst(2).map(Self.tableCells)
-        guard rows.allSatisfy({ $0.count == headers.count }) else { return nil }
-        return (headers, rows)
-    }
-
-    private static func tableCells(_ line: String) -> [String] {
-        var body = line
-        if body.first == "|" { body.removeFirst() }
-        if body.last == "|" { body.removeLast() }
-
-        var cells: [String] = []
-        var cell = ""
-        var escaped = false
-        for character in body {
-            if escaped {
-                if character == "|" {
-                    cell.append(character)
-                } else {
-                    cell.append("\\")
-                    cell.append(character)
-                }
-                escaped = false
-            } else if character == "\\" {
-                escaped = true
-            } else if character == "|" {
-                cells.append(cell.trimmingCharacters(in: .whitespaces))
-                cell = ""
-            } else {
-                cell.append(character)
-            }
-        }
-        if escaped { cell.append("\\") }
-        cells.append(cell.trimmingCharacters(in: .whitespaces))
-        return cells
-    }
-
-    private static func isTableSeparator(_ cell: String) -> Bool {
-        let compact = cell.replacingOccurrences(of: " ", with: "")
-        let core = compact.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
-        return core.count >= 3 && core.allSatisfy { $0 == "-" }
-    }
-
     var body: some View {
         let mine = message.role == .user
-        let customCard = parsedDiff != nil || parsedTable != nil
+        let customCard = parsedDiff != nil
         // rooms attribute each line to the member who said it
         let speaker = message.from
         // No face beside the bubble: the bot's face is in the header, and in
@@ -1584,6 +1591,9 @@ struct TextBubble: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(MausPalette.color(speaker.color))
                 }
+                ForEach(message.voiceNotes) { note in
+                    VoiceNoteBubble(note: note, tint: MausPalette.color(chat.color))
+                }
                 ForEach(message.generatedImages, id: \.path) { attachment in
                     TranscriptAttachmentView(
                         attachment: attachment, threadId: chat.threadId,
@@ -1595,8 +1605,8 @@ struct TextBubble: View {
                 // you did: a message about `**` should show the asterisks.
                 if let diff = parsedDiff {
                     GitPRDiffCardView(filename: diff.filename, diffText: diff.diff)
-                } else if let table = parsedTable {
-                    SQLResultTableView(columns: table.headers, rows: table.rows)
+                } else if let webhook = message.webhookContent {
+                    WebhookMessageBody(content: webhook)
                 } else if mine {
                     let shared = attachedContent
                     ForEach(Array(shared.attachments.enumerated()), id: \.offset) { _, attachment in
@@ -1614,7 +1624,10 @@ struct TextBubble: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } else {
-                    MarkdownText(source: message.text ?? "") { url in
+                    MarkdownText(
+                        source: message.text ?? "",
+                        scrollIdentifier: "message-\(message.id)-scroll"
+                    ) { url in
                         openLink(url, message)
                     }
                         .foregroundStyle(Color.primary)
@@ -1671,6 +1684,39 @@ struct ActivityChip: View {
             } else {
                 receipt
             }
+        }
+    }
+}
+
+/// A quiet capsule under a reply for the harness's receipts (the work
+/// digest, a compaction record): one line, and the full text on tap.
+struct ReceiptChip: View {
+    let icon: String
+    let label: String
+    var open: (() -> Void)? = nil
+
+    var body: some View {
+        if !label.isEmpty {
+            Button {
+                Haptics.selection()
+                open?()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .medium))
+                    Text(label)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().strokeBorder(.quaternary))
+                .padding(.leading, 2)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(label)
+            .accessibilityHint("Shows the full text")
         }
     }
 }
@@ -1964,7 +2010,7 @@ struct CredentialRequestCardView: View {
                 secret: secret
             )
         }
-        .onChange(of: requestIdentity) { _, _ in
+        .onValueChange(of: requestIdentity) { _ in
             resetSensitiveState(clearPrepared: true)
             preparedSubmission = session.preparedCredential(
                 chat: chat,
@@ -1973,13 +2019,13 @@ struct CredentialRequestCardView: View {
             )
             submitted = false
         }
-        .onChange(of: session.credentialEntryResetGeneration) { _, _ in
+        .onValueChange(of: session.credentialEntryResetGeneration) { _ in
             suspendSensitiveEntry()
         }
-        .onChange(of: session.status) { _, status in
+        .onValueChange(of: session.status) { status in
             if status != .live { suspendSensitiveEntry() }
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onValueChange(of: scenePhase) { phase in
             // Password AutoFill and its Face ID sheet temporarily make the
             // scene inactive. Removing the SecureField at that point breaks
             // the very fill operation the user requested. A true background
@@ -2313,7 +2359,7 @@ struct StreamingBubble: View {
             VStack(alignment: .leading, spacing: 4) {
                 if let reasoning, !reasoning.isEmpty, text?.isEmpty != false {
                     AgentThoughtChamberView(
-                        reasoning: String(reasoning.suffix(2_000)),
+                        reasoning: reasoning,
                         botName: "Bot",
                         mascotColor: MausPalette.color(color),
                         isStreaming: true
@@ -2344,10 +2390,11 @@ struct StreamingBubble: View {
 }
 
 /// The held sends for one thread, as the desktop's composer shows them: one
-/// line each, deletable, with a note when the harness held them for thread
-/// capacity rather than because a turn is running.
+/// line each, editable and deletable, with a note when the harness held them
+/// for thread capacity rather than because a turn is running.
 private struct QueuedSendList: View {
     let sends: [QueuedSend]
+    let edit: (QueuedSend) -> Void
     let cancel: (QueuedSend) -> Void
 
     private var showsCapacityNote: Bool {
@@ -2372,6 +2419,17 @@ private struct QueuedSendList: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    Button {
+                        edit(send)
+                    } label: {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Color.secondary)
+                            .frame(width: 30, height: 30)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Edit queued message \(index + 1) of \(sends.count)")
                     Button {
                         cancel(send)
                     } label: {

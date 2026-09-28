@@ -84,7 +84,7 @@ struct ChatListView: View {
                 .refreshable { await session.refresh() }
                 .overlay {
                     if rosterIsEmpty {
-                        ContentUnavailableView(
+                        EmptyStateView(
                             query.isEmpty ? "No bots yet" : "Nothing matches",
                             systemImage: query.isEmpty ? "bubble.left.and.bubble.right" : "magnifyingglass",
                             description: Text(
@@ -106,23 +106,31 @@ struct ChatListView: View {
             .overlay(alignment: .top) {
                 if CompanionLayout.supportsIslandPresentation {
                     NeedsYouIsland(
-                        update: session.state.updates.first { $0.kind == .needsYou },
-                        hasIsland: IslandGeometry.hasIsland(topInset: geo.safeAreaInsets.top)
+                        update: session.state.updates.first { $0.kind == .needsYou }
                     ) { chat in path.append(chat) }
                 }
             }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: Chat.self) { ChatView(chat: $0) }
-            .onChange(of: session.notificationChat) { _, chat in
+            .onValueChange(of: session.notificationChat) { chat in
                 guard let chat else { return }
                 path.append(chat)
                 session.consumeNotificationChat()
+            }
+            .onValueChange(of: session.pendingChat) { chat in
+                guard let chat else { return }
+                path.append(chat)
+                session.consumePendingChat()
             }
             .task {
                 if let chat = session.notificationChat {
                     path.append(chat)
                     session.consumeNotificationChat()
+                }
+                if let chat = session.pendingChat {
+                    path.append(chat)
+                    session.consumePendingChat()
                 }
             }
 #if DEBUG
@@ -354,7 +362,9 @@ struct ChatListView: View {
     private func botRows(_ rows: [ChatSummary]) -> some View {
         ForEach(Array(rows.enumerated()), id: \.element.id) { index, summary in
             VStack(spacing: 0) {
-                NavigationLink(value: summary.chat) {
+                Button {
+                    path.append(session.threadSelection.restoringThread(summary.chat, connectionID: session.connection?.id))
+                } label: {
                     ChatRow(
                         chat: summary.chat,
                         preview: summary.preview,

@@ -49,5 +49,7 @@ for kind in iphone ipad; do
     -resultBundlePath "${RUNNER_TEMP}/omb-ios-threads-${kind}.xcresult" \
     -parallel-testing-enabled NO \
     -only-testing:OpenMausCompanionUITests/ThreadNavigationUITests \
+    -only-testing:OpenMausCompanionUITests/TranscriptPresentationUITests \
+    -only-testing:OpenMausCompanionUITests/SwipeBackUITests \
     CODE_SIGNING_ALLOWED=NO test
 done

@@ -14,6 +14,8 @@ import { botSections, type BotSectionEntry } from "./bot-settings/sections";
 import { useBotSettingsDerived } from "./bot-settings/useBotSettingsDerived";
 import { OverviewSection } from "./bot-settings/OverviewSection";
 import { IdentitySection } from "./bot-settings/IdentitySection";
+import { SlackSection } from "./bot-settings/SlackSection";
+import { useSlackManagementUrl } from "./bot-settings/useSlackManagement";
 import { SoulSection } from "./bot-settings/SoulSection";
 import { SkillsSection } from "./bot-settings/SkillsSection";
 import { MemorySection } from "./bot-settings/MemorySection";
@@ -24,6 +26,8 @@ import { PermissionsSection } from "./bot-settings/PermissionsSection";
 import { VoiceSection } from "./bot-settings/VoiceSection";
 import { HistorySection, type HistoryRow } from "./bot-settings/HistorySection";
 import { UsageSection } from "./bot-settings/UsageSection";
+import { VisibilitySection } from "./bot-settings/VisibilitySection";
+import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
 import type { PromptPreviewData } from "./bot-settings/PromptPreview";
 
 function sectionMatches(entry: BotSectionEntry, query: string): boolean {
@@ -41,7 +45,15 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
   // this panel is already mounted, including after collapsing the same row.
   const collapsed = !state.botSettingsExpandAccordion;
   const q = query.trim().toLowerCase();
-  const sections = botSections();
+  // Slack is offered only where the server has an Admin page to link to
+  // (a hosted organisation workspace); otherwise its row does not exist.
+  const slackUrl = useSlackManagementUrl(bot.id);
+  // Who can see a bot matters only where several people sign in: a browser
+  // on a served workspace, and there only to an admin.
+  const ownerOrAdmin = useOwnerOrAdmin();
+  const sections = botSections()
+    .filter((entry) => entry.id !== "slack" || slackUrl !== null)
+    .filter((entry) => entry.id !== "visibility" || (!window.ogb && ownerOrAdmin === true));
   const visibleSections = sections.filter((entry) => sectionMatches(entry, q));
 
   const [overview, setOverview] = useState<BotOverview | null>(null);
@@ -255,6 +267,8 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
         );
       case "soul":
         return <SoulSection bot={bot} patch={derived.patch} />;
+      case "slack":
+        return slackUrl ? <SlackSection managementUrl={slackUrl} /> : null;
       case "skills":
         return <SkillsSection bot={bot} />;
       case "memory":
@@ -273,6 +287,8 @@ export function BotSettingsDialog({ bot }: { bot: Bot }) {
         return <PermissionsSection bot={bot} derived={derived} />;
       case "voice":
         return <VoiceSection bot={bot} derived={derived} />;
+      case "visibility":
+        return <VisibilitySection bot={bot} />;
       case "history":
         return historyRows === null && historyError ? (
           <div className="rounded-xl bg-card p-4 text-[13px] text-ink-secondary">{t("botSettings.historyLoadError")}</div>

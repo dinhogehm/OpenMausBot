@@ -7,6 +7,7 @@ import type { Bot } from "@/state/store";
 import { Switch } from "../SettingsPrimitives";
 import { VoiceSettings } from "../VoiceSettings";
 import type { useBotSettingsDerived } from "./useBotSettingsDerived";
+import { useBotEditor } from "./BotEditorContext";
 
 export function VoiceSection({
   bot,
@@ -16,6 +17,7 @@ export function VoiceSection({
   derived: ReturnType<typeof useBotSettingsDerived>;
 }) {
   const { patch } = derived;
+  const { draft } = useBotEditor();
 
   return (
     <div className="flex flex-col gap-4">
@@ -33,7 +35,7 @@ export function VoiceSection({
           aria-label={t("botVoice.notificationsAria")}
           onClick={() => {
             const enabled = !bot.notifications;
-            if (enabled) void requestNotificationPermission();
+            if (enabled && !draft) void requestNotificationPermission();
             patch({ notifications: enabled });
           }}
         />

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { applyStartupPreferences, formatSessions, pairingBlock, parseArgs, qrToString, runAccess, runLogin, runOnboardingCommand, serverEntry, type CliOptions, verifyPhoneEndpoint } from "./cli.ts";
+import { readAdminActivityRange } from "./admin-activity.ts";
 import { SetupCancelled } from "./cli-prompts.ts";
 import { removeTempDir, waitForExit } from "./testing/cleanup.ts";
 import { startControlPlaneStub } from "./testing/control-plane-stub.ts";
@@ -580,6 +581,15 @@ describe("openmausbot access", () => {
       expect(await runAccess({ ...base, accessAction: "remove", email: "her@example.test" }, io)).toBe(0);
       expect(await runAccess({ ...base, accessAction: "remove", email: "her@example.test" }, io)).toBe(1);
       expect(JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")).signIn).toEqual({ admins: [], members: ["@agentada.test"] });
+      // Each change once more than one person signs in is in the admin
+      // activity log, named for the command line; the first, a lone admin, is not.
+      const rows = readAdminActivityRange(dataDir, { from: new Date(Date.now() - 600_000), to: new Date(Date.now() + 600_000) });
+      expect(rows.map((row) => [row.action, row.actor.kind, row.changed])).toEqual([
+        ["people.update", "cli", ["signIn.members"]],
+        ["people.update", "cli", ["signIn.admins", "signIn.members"]],
+        ["people.update", "cli", ["signIn.members"]],
+      ]);
+      expect(rows[0]!.after).toEqual({ "signIn.members": ["@agentada.test"] });
     } finally {
       await removeTempDir(home);
     }
@@ -615,7 +625,10 @@ describe.skipIf(process.platform === "win32")("serve --domain", () => {
       expect(caddyfile).toContain(`reverse_proxy 127.0.0.1:${port}`);
       expect(caddyfile).toContain(`reverse_proxy 127.0.0.1:${port + 1}`);
     } finally {
-      const caddyPid = Number(readFileSync(join(home, "caddy.pid"), "utf8").trim() || "0");
+      // Cleanup must not mask the real failure: a server that never reached
+      // the Caddy step has no pid file, and the assertions above already
+      // named what actually went wrong.
+      const caddyPid = existsSync(join(home, "caddy.pid")) ? Number(readFileSync(join(home, "caddy.pid"), "utf8").trim() || "0") : 0;
       child.kill("SIGTERM");
       await exited(child);
       await new Promise((r) => setTimeout(r, 300));

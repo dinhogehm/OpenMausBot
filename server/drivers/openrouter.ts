@@ -176,6 +176,9 @@ export const OpenRouterDriver: ProviderDriver<OpenRouterConfig> = {
       apiKey,
       apiUrl: API_URL,
       tools: config.tools,
+      // Same surface as openai-compat: the harness mounts the built-in
+      // browser (and computer tools) and hands screenshots back to vision models.
+      computerUse: true,
       models: () => catalog,
       refreshModels: fetchModels,
       requestBody: (requestModel, messages, stream) => ({

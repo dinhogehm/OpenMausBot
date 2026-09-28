@@ -9,10 +9,13 @@ import * as procs from "./procs.ts";
 
 // A stand-in npm: records its arguments, honours --prefix, and behaves per
 // FAKE_NPM_MODE. Nothing reaches a registry or the network.
+// CommonJS on purpose: an extensionless shebang script parses as CJS, which
+// skips the ESM-detection reparse and lets the stubborn-mode trap below arm
+// itself before anything slower (requires, log writes) can delay boot.
 const FAKE_NPM = `#!/usr/bin/env node
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 if (process.env.FAKE_NPM_MODE === 'stubborn') process.on('SIGTERM', () => {});
+const { appendFileSync, mkdirSync, writeFileSync } = require('node:fs');
+const { join } = require('node:path');
 const args = process.argv.slice(2);
 const mode = process.env.FAKE_NPM_MODE || 'ok';
 appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify({ args, cwd: process.cwd(), secret: process.env.XAI_API_KEY ?? null }) + '\\n');
@@ -111,15 +114,14 @@ describe.skipIf(process.platform === "win32")("installing with npm", () => {
     process.env.FAKE_NPM_MODE = "stubborn";
     const stopped = vi.spyOn(procs, "killCliTree");
     try {
-      // Node's own boot can outlast a 300ms watchdog on a loaded machine,
-      // which kills the stub before its ignore-handler registers and turns
-      // the SIGKILL escalation under test into a SIGTERM death.
-      await expect(installNpmEngine("fake-engine", { baseDir: base, timeoutMs: 1_500 })).rejects.toThrow("took too long and was stopped");
+      // Enough headroom for the fixture's Node boot under load, so TERM
+      // arrives after the trap above is armed and only KILL can finish it.
+      await expect(installNpmEngine("fake-engine", { baseDir: base, timeoutMs: 5000 })).rejects.toThrow("took too long and was stopped");
       expect(stopped.mock.calls[0]![0].signalCode).toBe("SIGKILL");
     } finally {
       stopped.mockRestore();
     }
-  }, 15_000);
+  }, 20_000);
 
   it("reports an uncertain stop without waiting forever for npm close", async () => {
     process.env.FAKE_NPM_MODE = "hang";

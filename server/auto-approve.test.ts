@@ -47,6 +47,17 @@ describe("Full access delivery", () => {
 });
 
 describe("native permission decisions", () => {
+  it("applies an explicit exact command grant without changing Full or answering questions/elevations", () => {
+    for (const approvalMode of ["ask", "edits", "auto", "custom"] as const) {
+      const bot = { approvalMode };
+      expect(autoVerdict(bot, "Bash", "npm test", { commandAllowed: true }).source).toBe("command-allowlist");
+      expect(autoVerdict(bot, "Bash", "npm test", { commandAllowed: true, nativeApproval: true }).approve).toBeTruthy();
+      expect(autoVerdict(bot, "Bash", "npm test", { commandAllowed: true, requiresExplicitApproval: true }).approve).toBeNull();
+      expect(autoVerdict(bot, "AskUserQuestion", "pick", { commandAllowed: true }).approve).toBeNull();
+    }
+    expect(autoVerdict({ approvalMode: "full" }, "Bash", "npm test", { commandAllowed: true, requiresExplicitApproval: true }).source)
+      .toBe("full-access");
+  });
   it.each(["auto", "full"] as const)("does not override a native %s approval request, even with a remembered grant", (approvalMode) => {
     expect(autoVerdict({ approvalMode, alwaysAllow: ["Read"] }, "Read", "README.md", { nativeApproval: true }))
       .toEqual({ approve: null, source: "native-approval" });
@@ -736,6 +747,7 @@ describe("tools that ask a person", () => {
     for (const mode of modes) {
       expect(autoVerdict({ approvalMode: mode }, "ask_user", "pick one").approve, mode).toBeNull();
       expect(autoVerdict({ approvalMode: mode }, "mcp__ogb__ask_user", "pick one").approve, mode).toBeNull();
+      expect(autoVerdict({ approvalMode: mode }, "omb-ask", "pick one").approve, mode).toBeNull();
     }
   });
 

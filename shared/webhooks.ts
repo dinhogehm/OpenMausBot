@@ -24,6 +24,9 @@ export interface WebhookTrigger {
   verifiedAt?: number;
   verificationSample?: WebhookVerificationSample;
   eventTypes?: string[];
+  /** Unfinished runs this webhook may hold before new deliveries get 429.
+   * Absent means the default (3). */
+  maxPendingRuns?: number;
 }
 
 export interface WebhookTriggerInput {
@@ -37,6 +40,8 @@ export interface WebhookTriggerInput {
   enabled?: boolean;
   verificationPending?: boolean;
   eventTypes?: string[];
+  /** 1–50; `null` goes back to the default. */
+  maxPendingRuns?: number | null;
 }
 
 export interface WebhookVerificationSample {

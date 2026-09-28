@@ -22,21 +22,27 @@ final class ThreadNavigationTests: XCTestCase {
         XCTAssertNil(decoded.projects?.last?.emoji)
     }
 
-    func testFoldersFollowSavedOrderAndThreadsKeepServerOrder() {
+    func testFoldersRiseWithTheirNewestThreadAndUnfiledStaysLast() {
         var bot = makeBot(tasks: [
             task("b-2", project: "b"), task("loose"), task("a-2", project: "a"),
             task("a-1", project: "a"), task("b-1", project: "b"),
         ])
         bot.projects = [project("a"), project("b")]
 
-        let groups = bot.threadGroups()
-        XCTAssertEqual(groups.map(\.id), ["project:a", "project:b", "unfiled"])
-        XCTAssertEqual(groups.map { $0.tasks.map(\.threadId) }, [["a-2", "a-1"], ["b-2", "b-1"], ["loose"]])
-        XCTAssertEqual(groups.first?.project, bot.projects?.first)
+        // Equal stamps keep stored order, so b's first thread outranks a's.
+        // Unfiled still follows every folder, as on the desktop.
+        var groups = bot.threadGroups()
+        XCTAssertEqual(groups.map(\.id), ["project:b", "project:a", "unfiled"])
+        XCTAssertEqual(groups.map { $0.tasks.map(\.threadId) }, [["b-2", "b-1"], ["a-2", "a-1"], ["loose"]])
         XCTAssertNil(groups.last?.project)
+
+        bot.tasks?[2].updatedAt = 50
+        groups = bot.threadGroups()
+        XCTAssertEqual(groups.map(\.id), ["project:a", "project:b", "unfiled"])
+        XCTAssertEqual(groups[0].tasks.map(\.threadId), ["a-2", "a-1"])
     }
 
-    func testAttentionFloatsAboveIdleThreadsAndIdleThreadsKeepStoredOrder() {
+    func testThreadListKeepsStoredOrderWhenStampsMatchAndAttentionOrderStaysSeparate() {
         var unread = task("unread")
         unread.unread = true
         var working = task("working")
@@ -45,11 +51,15 @@ final class ThreadNavigationTests: XCTestCase {
 
         XCTAssertEqual(
             bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["idle-a", "unread", "idle-b", "working", "idle-c"]
+        )
+        XCTAssertEqual(
+            bot.attentionOrderedTasks().map(\.threadId),
             ["working", "unread", "idle-a", "idle-b", "idle-c"]
         )
     }
 
-    func testAttentionRanksWaitingOnYouAboveWorkingAndQueuedAboveUnread() {
+    func testAttentionOrderStillRanksWaitingAboveWorkingForUpdates() {
         var unread = task("unread")
         unread.unread = true
         var queued = task("queued")
@@ -63,17 +73,25 @@ final class ThreadNavigationTests: XCTestCase {
 
         XCTAssertEqual(
             bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["unread", "queued", "working", "waiting"]
+        )
+        XCTAssertEqual(
+            bot.attentionOrderedTasks().map(\.threadId),
             ["waiting", "working", "queued", "unread"]
         )
     }
 
-    func testTheThreadOpenHereRidesAboveIdleButBelowAttentionTiers() {
+    func testTheOpenThreadDoesNotJumpTheUpdateOrderedList() {
         var waiting = task("waiting")
         waiting.activity = "waiting-on-you"
         let bot = makeBot(tasks: [task("idle"), task("current"), waiting])
 
         XCTAssertEqual(
             bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["idle", "current", "waiting"]
+        )
+        XCTAssertEqual(
+            bot.attentionOrderedTasks().map(\.threadId),
             ["waiting", "current", "idle"]
         )
     }
@@ -93,7 +111,31 @@ final class ThreadNavigationTests: XCTestCase {
         )
         XCTAssertEqual(
             bot.threadGroups(queuedThreadIds: ["helper", "plan"]).flatMap(\.tasks).map(\.threadId),
+            ["helper", "current", "plan"]
+        )
+        XCTAssertEqual(
+            bot.attentionOrderedTasks(queuedThreadIds: ["helper", "plan"]).map(\.threadId),
             ["helper", "plan", "current"]
+        )
+    }
+
+    func testPinsLeadAndNewerUpdatesRise() {
+        var pinnedOld = task("pinned-old")
+        pinnedOld.pinned = true
+        pinnedOld.updatedAt = 5
+        var pinnedNew = task("pinned-new")
+        pinnedNew.pinned = true
+        pinnedNew.updatedAt = 20
+        var fresh = task("fresh")
+        fresh.updatedAt = 30
+        var stale = task("stale")
+        stale.updatedAt = 10
+        stale.activity = "waiting-on-you"
+        let bot = makeBot(tasks: [stale, pinnedOld, fresh, pinnedNew])
+
+        XCTAssertEqual(
+            bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["pinned-new", "pinned-old", "fresh", "stale"]
         )
     }
 
@@ -118,7 +160,7 @@ final class ThreadNavigationTests: XCTestCase {
 
         XCTAssertEqual(
             bot.threadGroups().first { $0.id == "unfiled" }?.tasks.map(\.threadId),
-            ["busy", "current", "idle-b", "idle-a"]
+            ["idle-b", "busy", "idle-a", "current"]
         )
         XCTAssertEqual(bot.threadGroups(matching: "idle").map(\.id), ["unfiled"])
         XCTAssertEqual(
@@ -148,6 +190,98 @@ final class ThreadNavigationTests: XCTestCase {
         XCTAssertTrue(bot.threadGroups(matching: "Hidden").isEmpty)
         bot.tasks = [execution]
         XCTAssertTrue(bot.threadGroups().isEmpty)
+    }
+
+    func testSnoozedThreadsFoldUntilTheyWakeOrNeedAttention() {
+        let nowMs = Date().timeIntervalSince1970 * 1_000
+        var sentinel = task("sentinel")
+        sentinel.snoozedUntil = 0
+        var timed = task("timed")
+        timed.snoozedUntil = nowMs + 3_600_000
+        var expired = task("expired")
+        expired.snoozedUntil = nowMs - 1
+        var unreadSleep = task("unread-sleep")
+        unreadSleep.snoozedUntil = 0
+        unreadSleep.unread = true
+        var openHere = task("current")
+        openHere.snoozedUntil = 0
+        var bot = makeBot(tasks: [sentinel, timed, expired, unreadSleep, openHere])
+
+        // The sentinel and a still-running clock fold away; an expired
+        // timestamp, something unread, and the thread open here do not, and
+        // equal update stamps retain stored order. Attention controls
+        // visibility here, not position in the thread list.
+        XCTAssertEqual(
+            bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+            ["expired", "unread-sleep", "current"]
+        )
+        // Nothing is gone: the manage sheet and search still list sleepers.
+        XCTAssertEqual(
+            Set(bot.threadGroups(includingClosed: true).flatMap(\.tasks).map(\.threadId)),
+            ["sentinel", "timed", "expired", "unread-sleep", "current"]
+        )
+        XCTAssertEqual(bot.threadGroups(matching: "timed").first?.tasks.map(\.threadId), ["timed"])
+
+        // Snoozing must not undo the main list's pin-then-newest order.
+        bot.tasks?[0].pinned = true
+        bot.tasks?[3].updatedAt = 100
+        XCTAssertEqual(bot.threadGroups().flatMap(\.tasks).map(\.threadId),
+                       ["sentinel", "unread-sleep", "expired", "current"])
+    }
+
+    func testSnoozedThreadsSaySoInTheBylineOnlyWhileAsleep() {
+        var sentinel = task("sentinel")
+        sentinel.snoozedUntil = 0
+        XCTAssertEqual(sentinel.bylineLabel, "Snoozed")
+
+        var timed = task("timed")
+        timed.snoozedUntil = Date().timeIntervalSince1970 * 1_000 + 3_600_000
+        XCTAssertEqual(timed.bylineLabel, "Snoozed")
+
+        // The server heals expired snoozes on read, but a live snapshot may
+        // still carry one; the byline must not call it snoozed.
+        var expired = task("expired")
+        expired.snoozedUntil = 1
+        XCTAssertNil(expired.bylineLabel)
+
+        var closed = task("closed")
+        closed.snoozedUntil = 0
+        closed.closedBy = ThreadCloser(botId: "bot", name: "Scout", at: 1)
+        XCTAssertEqual(closed.bylineLabel, "closed by Scout")
+    }
+
+    func testNextSnoozeExpiryIgnoresSentinelsAndThePast() {
+        let now = Date()
+        let nowMs = now.timeIntervalSince1970 * 1_000
+        func asleep(_ id: String, _ until: Double?) -> BotTask {
+            var sleeping = task(id)
+            sleeping.snoozedUntil = until
+            return sleeping
+        }
+
+        let mixed = [
+            asleep("sentinel", 0), asleep("past", nowMs - 1),
+            asleep("soon", nowMs + 60_000), asleep("later", nowMs + 3_600_000),
+            asleep("awake", nil),
+        ]
+        XCTAssertEqual(mixed.nextSnoozeExpiry(now: now), nowMs + 60_000)
+        XCTAssertNil([asleep("sentinel", 0), asleep("past", nowMs - 1)].nextSnoozeExpiry(now: now))
+    }
+
+    func testSnoozePresetsFollowThePersonsLocalClock() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Toronto")!
+        func at(_ year: Int, _ month: Int, _ day: Int, _ hour: Int) -> Date {
+            calendar.date(from: DateComponents(year: year, month: month, day: day, hour: hour))!
+        }
+        func ms(_ date: Date) -> Double { date.timeIntervalSince1970 * 1_000 }
+
+        // 5 PM today → "tonight" is 6 PM today; 7 PM rolls to tomorrow evening.
+        XCTAssertEqual(ThreadSnoozePreset.tonight(now: at(2026, 9, 14, 17), calendar: calendar), ms(at(2026, 9, 14, 18)))
+        XCTAssertEqual(ThreadSnoozePreset.tonight(now: at(2026, 9, 14, 19), calendar: calendar), ms(at(2026, 9, 15, 18)))
+        // Tomorrow morning is 9 AM the next day whenever "now" is.
+        XCTAssertEqual(ThreadSnoozePreset.tomorrowMorning(now: at(2026, 9, 14, 17), calendar: calendar), ms(at(2026, 9, 15, 9)))
+        XCTAssertEqual(ThreadSnoozePreset.tomorrowMorning(now: at(2026, 9, 14, 23), calendar: calendar), ms(at(2026, 9, 15, 9)))
     }
 
     func testLegacyFallbackKeepsCurrentConversationAndRuntimeSettings() throws {
@@ -298,7 +432,7 @@ final class ThreadNavigationTests: XCTestCase {
 
         XCTAssertEqual(
             bot.threadGroups().flatMap(\.tasks).map(\.threadId),
-            ["waiting", "current", "running", "held", "plan"]
+            ["waiting", "running", "held", "current", "plan"]
         )
         XCTAssertEqual(bot.threadGroups(includingClosed: true).flatMap(\.tasks).count, 7)
         XCTAssertEqual(bot.threadGroups(matching: "put away").flatMap(\.tasks).map(\.threadId), ["put-away"])

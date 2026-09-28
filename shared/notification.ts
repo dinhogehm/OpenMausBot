@@ -17,7 +17,15 @@ export type NotifyKind =
   | "workflow-approval"
   | "workflow-stuck"
   | "workflow-done"
-  | "workflow-update";
+  | "workflow-update"
+  /** A delegated room request settled and the coordinator auto-resumed with
+   * the results. The delegated turn and the resume are both internal, so
+   * without this frame the parent conversation can sit in silence for the
+   * minutes a huge context takes to reach its first token. */
+  | "delegation-settled"
+  /** The workspace crossed its monthly spend warning or reached its cap.
+   * Sent to admins only, at most once per month for each. */
+  | "spend";
 
 export interface Notification {
   kind: NotifyKind;

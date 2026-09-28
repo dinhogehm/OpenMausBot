@@ -147,6 +147,12 @@ it("queues a second turn behind the folder instead of failing it", async () => {
     return JSON.stringify(bot?.messages ?? []).includes("Got the folder, work done.");
   }, { timeout: 30_000 }).toBe(true);
   expect(await chips(waiter.id)).toContainEqual(expect.stringContaining("Project folder free — continuing"));
+  // Let the waiter settle and release the folder, so the next case starts
+  // from a free folder instead of queueing behind this one.
+  await expect.poll(async () => {
+    const state = (await api("GET", "/api/bots?messages=0")).body;
+    return state.bots.find((candidate: { id: string }) => candidate.id === waiter.id)?.busy;
+  }, { timeout: 30_000 }).toBe(false);
 }, 120_000);
 
 it("gives up with a folder message, and a way out, when the holder never finishes", async () => {

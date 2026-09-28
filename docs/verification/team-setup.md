@@ -48,13 +48,15 @@ current permission level cancels the entire proposal; setup never silently
 downgrades or elevates execution permissions. New specialists use Ask and
 start with connected apps disabled. Existing peer allowlists remain in force.
 
+Leadership setup accepts `fields.chiefOfStaff` for new or existing bots. Test promotion in an authorized team, explicit replacement in one batch, denial, a conflicting or newly elected Chief, peer restrictions and loss of scope while the card is open. A demotion removes additional managed-team grants; a promotion does not copy the requesting Chief's grants. Verify reload and a failed `bots.json` write leave roles, grants, and the receipt consistent. `list_team_setup` includes current Chief assignments.
+
 For deletion, ask separately:
 
 > Delete Patch. Show me the deletion confirmation first.
 
 `propose_bot_deletion` produces a separate destructive review naming the exact
 bot. Lifecycle guards reject active work. Before removing the bot, the server
-discovers and deletes its exact managed Box, VPS container, and per-bot Local
+discovers and deletes its exact managed Boat, VPS container, and per-bot Local
 VM (including that VM's private workspace). Shared team computers are left
 alone. A provider outage, unresolved ownership, unmanaged name collision, or
 unconfirmed provider deletion keeps the bot so deletion can be retried. Bot

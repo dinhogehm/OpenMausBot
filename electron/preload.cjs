@@ -178,6 +178,8 @@ const bridge = {
   permRequestMic: () => ipcRenderer.invoke("perm:request-mic"),
   /** Opens System Settings on the given privacy pane: mic|screen|speech. */
   permOpenSettings: (pane) => ipcRenderer.invoke("perm:open-settings", pane),
+  /** Relaunch the local macOS app after a permission grant. */
+  relaunch: () => ipcRenderer.invoke("desktop:relaunch"),
 
   /** Copies an engine install command and opens a blank terminal. Resolves
    * false if no terminal could be launched; the clipboard still has it. */
@@ -283,10 +285,26 @@ const bridge = {
       return () => ipcRenderer.removeListener("workspaces:open-settings", handler);
     },
   },
+  cloudAccount: process.argv.includes("--omb-company-desktop=1") ? {
+    state: () => ipcRenderer.invoke("cloud-account:state"),
+    begin: () => ipcRenderer.invoke("cloud-account:begin"),
+    reopen: () => ipcRenderer.invoke("cloud-account:reopen"),
+    cancel: () => ipcRenderer.invoke("cloud-account:cancel"),
+    refresh: () => ipcRenderer.invoke("cloud-account:refresh"),
+    signOut: () => ipcRenderer.invoke("cloud-account:signOut"),
+    openDashboard: () => ipcRenderer.invoke("cloud-account:openDashboard"),
+    connectHome: () => ipcRenderer.invoke("cloud-account:connectHome"),
+    onState: cb => {
+      const handler = (_event, state) => cb(state);
+      ipcRenderer.on("cloud-account:state-changed", handler);
+      return () => ipcRenderer.removeListener("cloud-account:state-changed", handler);
+    },
+  } : undefined,
   organization: process.argv.includes("--omb-company-desktop=1") ? {
     settingsOpened: () => ipcRenderer.invoke("organization:settings-opened"),
     state: () => ipcRenderer.invoke("organization:state"),
     begin: input => ipcRenderer.invoke("organization:begin", input),
+    reopen: () => ipcRenderer.invoke("organization:reopen"),
     cancelEnrollment: () => ipcRenderer.invoke("organization:cancel"),
     refresh: () => ipcRenderer.invoke("organization:refresh"),
     disconnect: () => ipcRenderer.invoke("organization:disconnect"),
@@ -317,6 +335,7 @@ const bridge = {
     save: (id, grant) => ipcRenderer.invoke("sharing:save", id, grant),
     revoke: id => ipcRenderer.invoke("sharing:revoke", id),
   },
+  confirm: message => ipcRenderer.invoke("dialog:confirm", message),
 };
 
 contextBridge.exposeInMainWorld(
