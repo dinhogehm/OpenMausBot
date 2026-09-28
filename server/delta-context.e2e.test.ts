@@ -49,8 +49,12 @@ async function fixture(test: (f: any) => Promise<void>, options: { env?: NodeJS.
         `if (mode) process.env[${JSON.stringify(name === "codex" ? "FAKE_CODEX_MODE" : "FAKE_CLAUDE_MODE")}] = mode;`,
         "let botId = null;",
         'try { for (const s of Object.values(JSON.parse(readFileSync(after("--mcp-config"), "utf8")).mcpServers ?? {})) botId = s?.env?.OMB_BOT_ID ?? botId; } catch {}',
-        `if (after("--resume") || after("--session-id")) appendFileSync(${JSON.stringify(launchesPath)}, JSON.stringify({ botId, resume: after("--resume"), sessionId: after("--session-id"), mode: process.env.FAKE_CLAUDE_MODE ?? "happy" }) + "\\n");`,
+        `if (after("--resume") || after("--session-id")) appendFileSync(${JSON.stringify(launchesPath)}, JSON.stringify({ botId, pid: process.pid, resume: after("--resume"), sessionId: after("--session-id"), mode: process.env.FAKE_CLAUDE_MODE ?? "happy" }) + "\\n");`,
         `else if (argv[0] === "app-server") appendFileSync(${JSON.stringify(codexLaunchesPath)}, JSON.stringify({ botId: process.env.OMB_BOT_ID ?? null }) + "\\n");`,
+        `if (botId) process.env.FAKE_CLAUDE_PROMPTS = ${JSON.stringify(join(dataDir, "consumed-"))} + botId + ".jsonl";`,
+        // A crashed fixture server must not leave a gated fake provider (or
+        // its stdio MCP child) alive after its temporary home is removed.
+        'process.stdin.on("end", () => process.exit(0));',
         `if (after("--resume") && modes.holdresume) { while (!existsSync(${JSON.stringify(join(dataDir, "resume-hold.gate"))})) await new Promise((r) => setTimeout(r, 20)); }`,
         `await import(${JSON.stringify(pathToFileURL(join(process.cwd(), "server", "testing", fake)).href)});`,
       ].join("\n"), { mode: 0o700 });
@@ -87,6 +91,10 @@ async function fixture(test: (f: any) => Promise<void>, options: { env?: NodeJS.
     const idle = (threadId = thread) => expect.poll(async () => (await api("/api/bots")).bots.find((b: any) => b.id === chief.id)
       .tasks.find((stored: any) => stored.threadId === threadId).busy, { timeout: 30_000 }).toBe(false);
     const launches = (botId = chief.id) => jsonl(launchesPath).filter((launch: any) => launch.botId === botId);
+    // Prompts a bot's engine has actually consumed: a launch record is
+    // written before its engine reads the prompt, so launch counts alone
+    // cannot prove the prompt arrived.
+    const consumed = (botId = chief.id) => jsonl(join(dataDir, `consumed-${botId}.jsonl`)).length;
     const codexLaunches = (botId = chief.id) => jsonl(codexLaunchesPath).filter((launch: any) => launch.botId === botId);
     // The app-server calls of the last Codex launch: thread/resume keeps the
     // native thread's model and effort, thread/start is where they are set.
@@ -98,6 +106,10 @@ async function fixture(test: (f: any) => Promise<void>, options: { env?: NodeJS.
     const delegate = (key: string, to: any[], message: string, extra: Record<string, unknown> = {}) =>
       ({ steps: [{ arguments: { bot_ids: to.map((b) => b.id), request_key: key, message } }], reply: "Assigned", resumeReply: "Done", ...extra });
     const gate = (name: string) => join(dataDir, `${name}.gate`);
+    // Hold a depth-capped delegated turn's reply — identified by its task
+    // text — until `gateFile` exists: server/testing/room-handoff-agent.ts.
+    const holdDelegation = (promptIncludes: string, gateFile: string) =>
+      writeFileSync(`${planPath}.gates.json`, JSON.stringify([{ promptIncludes, gateFile }]));
     const useModel = async (instanceId: string) => {
       const model = (await cli("models")).instances.find((item: any) => item.instanceId === instanceId).models.options[0].id;
       await cli("set-model", "--bot", chief.id, "--instance", instanceId, "--model", model, "--task", thread);
@@ -120,7 +132,7 @@ async function fixture(test: (f: any) => Promise<void>, options: { env?: NodeJS.
       }, { timeout: 20_000 }).toBe(true);
     };
     await test({ session, dataDir, cli, api, chief, lead, qa, ops, plan, save, send, wait, idle, turns, prompt, messages, nodes, task, handed,
-      launches, codexLaunches, codexCalls, codexModels, selectModel, setMode, delegate, gate, open, thread, useModel, restart });
+      launches, consumed, codexLaunches, codexCalls, codexModels, selectModel, setMode, delegate, gate, holdDelegation, open, thread, useModel, restart });
   } finally {
     if (restarted) await waitForExit(restarted, { signal: "SIGTERM" });
     await session.close();
@@ -248,17 +260,28 @@ it("offers the results again when the return turn fails before the provider acts
 it("offers the results again when the person stops the return turn before the provider acts on it", () => fixture(async (f) => {
   await warmUp(f);
   f.plan[f.lead.id] = { reply: "STOPPED_RETURN_RESULT" };
-  f.plan[f.chief.id] = { turns: [{}, f.delegate("build", [f.lead], "Build the export"), { reply: "never sent", gateFile: f.gate("return") }, { reply: "Recovered" }] };
+  // The return turn holds on a gate that never opens: only the person's Stop
+  // ends it, so it can never answer.
+  f.plan[f.chief.id] = { turns: [{}, f.delegate("build", [f.lead], "Build the export"), { reply: "never sent", gateFile: f.gate("return") }] };
   await f.send("Please have Engineering build the export.");
   await expect.poll(() => f.nodes().find((node: any) => node.botId === f.lead.id)?.status, { timeout: 20_000 }).toBe("completed");
   await expect.poll(() => f.nodes().find((node: any) => !node.parentId)?.status, { timeout: 20_000 }).toBe("running");
   await f.api(`/api/bots/${f.chief.id}/interrupt`, { threadId: f.thread });
   await f.wait();
-  f.open(f.gate("return"));
 
+  // Whether the stopped fixture records a turn of its own depends on the
+  // order the platform tears its process tree down in: when its MCP child
+  // dies first, the fixture fails and records that turn before it is killed.
+  // Indexing the next reply past it made the following turn race that
+  // teardown, so name the next reply explicitly (like the restart test below).
+  f.plan[f.chief.id] = { reply: "Recovered", resumeReply: "Recovered" };
   await f.send("What did Engineering find?");
   await f.wait();
-  expect(count(f.prompt(f.turns().at(-1)), "STOPPED_RETURN_RESULT")).toBe(1);
+  const next = f.turns().filter((turn: any) => f.prompt(turn).includes("What did Engineering find?")).at(-1);
+  expect(count(f.prompt(next), "STOPPED_RETURN_RESULT")).toBe(1);
+  const replies = (await f.messages()).map((message: any) => message.text);
+  expect(replies).toContain("Recovered");
+  expect(replies).not.toContain("never sent");
 }), 60_000);
 
 it("rebuilds a rejected resume with each result exactly once", () => fixture(async (f) => {
@@ -368,6 +391,10 @@ it("replays a delegated result once after a rewind, and keeps resuming afterward
 }), 90_000);
 
 it("wakes a busy delegate_bot source with the reply that landed during its turn, once and labelled", () => fixture(async (f) => {
+  // The second delegation's reply is held until the revived turn has
+  // launched, so it lands while that turn holds its gate — never folded
+  // into the turn the first reply woke.
+  f.holdDelegation("OPS_FACT_TOKEN", f.gate("ops"));
   f.plan[f.chief.id] = { turns: [
     { steps: [
       { tool: "delegate_bot", arguments: { bot_id: f.qa.id, message: "Check the quality: QA_FACT_TOKEN" } },
@@ -387,6 +414,8 @@ it("wakes a busy delegate_bot source with the reply that landed during its turn,
   // The first reply wakes the source, whose turn holds until both replies
   // are in: the second one lands while that turn is running.
   const replies = async () => (await f.messages(threadId)).filter((m: any) => /^@(QA|Ops) replied to the delegated task/.test(m.text ?? "")).length;
+  await expect.poll(() => f.launches().length, { timeout: 30_000 }).toBe(2);
+  f.open(f.gate("ops"));
   await expect.poll(replies, { timeout: 30_000 }).toBe(2);
   expect((await f.api("/api/bots")).bots.find((b: any) => b.id === f.chief.id).tasks.find((t: any) => t.threadId === threadId).busy).toBe(true);
   f.open(f.gate("revival"));
@@ -538,19 +567,30 @@ it("gives a replacement session an earlier round's result that its rebuild could
   await f.send("Please have Engineering build and then test it.");
   await expect.poll(() => f.nodes().filter((node: any) => node.botId === f.lead.id).map((node: any) => node.status).join(","), { timeout: 30_000 }).toBe("completed,running");
   await expect.poll(() => f.turns().length, { timeout: 10_000 }).toBe(3);
-  expect(count(f.prompt(f.turns()[2]), "ROUND_ONE_RESULT_TOKEN")).toBe(1);
+  await expect.poll(() => count(f.prompt(f.turns()[2]), "ROUND_ONE_RESULT_TOKEN"), { timeout: 10_000 }).toBe(1);
   await expect.poll(() => f.launches(f.lead.id).length, { timeout: 15_000 }).toBe(2);
+  // A terminal message is published before the driver releases its turn.
+  // Wait for the source to yield to its outstanding teammate before each
+  // new message; otherwise a loaded runner can steer into the previous turn.
+  const sourceWaiting = () => expect.poll(async () => (await f.api("/api/bots")).bots
+    .find((bot: any) => bot.id === f.chief.id).tasks
+    .find((task: any) => task.threadId === f.thread).waitingForTeammates,
+  { timeout: 15_000 }).toBe(true);
   for (let i = 0; i < chat; i++) {
-    // Teammate work stays outstanding, so wait for this turn's own reply.
+    // Teammate work stays outstanding, so wait for this turn's own reply —
+    // and for the turn to end, or the next send steers into it.
+    await sourceWaiting();
     expect((await f.send(`chat ${i}`)).steered).toBeUndefined();
     await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(4 + i);
-    await expect.poll(async () => (await f.messages()).some((m: any) => m.text === `chat reply ${i}`), { timeout: 10_000 }).toBe(true);
+    await expect.poll(async () => (await f.messages()).some((m: any) => m.text === `chat reply ${i}` && m.turnTerminal), { timeout: 10_000 }).toBe(true);
   }
   const history = async () => (await f.api(`/api/threads/${f.thread}/messages?limit=200`)).messages.map((m: any) => m.id);
   // round one's result: the first result on the branch
   const resultMessage = (await f.api(`/api/threads/${f.thread}/messages?limit=200`)).messages.find((m: any) => m.roomRequest?.phase === "result");
   const original = cursor(f);
   f.setMode("resume=dead-session");
+  await expect.poll(async () => (await f.messages()).some((m: any) => m.text === `chat reply ${chat - 1}` && m.turnTerminal), { timeout: 10_000 }).toBe(true);
+  await sourceWaiting();
   expect((await f.send("One more question.")).steered).toBeUndefined();
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(4 + chat);
   await expect.poll(async () => (await f.messages()).some((m: any) => m.text === "recovered reply"), { timeout: 10_000 }).toBe(true);
@@ -570,7 +610,10 @@ it("gives a replacement session an earlier round's result that its rebuild could
   // older than the rebuild's replay window: left out, not received
   expect(order.indexOf(records[0].omitted)).toBeGreaterThanOrEqual(order.indexOf(resultMessage.id));
 
+  await sourceWaiting();
   f.open(f.gate("r2"));
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(5 + chat);
+  await expect.poll(async () => (await f.messages()).some((m: any) => m.text === "Final" && m.turnTerminal), { timeout: 15_000 }).toBe(true);
   await f.wait();
   const returned = f.prompt(f.turns().at(-1));
   expect(count(returned, "ROUND_TWO_RESULT")).toBe(1);
@@ -648,7 +691,7 @@ it("does not offer a message or steer the person stopped before any reply again"
   await f.send("Warm up.");
   await f.wait();
   await f.send("STOPPED_ASK please drop the staging database");
-  await expect.poll(() => f.launches().length, { timeout: 15_000 }).toBe(2);
+  await expect.poll(() => f.consumed(), { timeout: 15_000 }).toBe(2);
   expect((await f.send("STOPPED_STEER and the backups")).steered).toBe(true);
   await f.api(`/api/bots/${f.chief.id}/interrupt`, { threadId: f.thread });
   await f.idle();
@@ -759,22 +802,29 @@ it("offers the results again when the provider reports an API error instead of a
 it("does not hand the model a queued follow-up that a restart recovered with an unknown outcome", () => fixture(async (f) => {
   await f.api("/api/config", { threads: { maxConcurrentPerBot: 1 } }, "PATCH");
   const other = (await f.api(`/api/bots/${f.chief.id}/tasks`, { title: "Second conversation" })).task.threadId;
-  const answered = { reply: "Answered" };
-  f.plan[f.chief.id] = { turns: [{ reply: "Noted." }, { reply: "Held", gateFile: f.gate("hold") }, { reply: "never", gateFile: f.gate("never") }, answered, answered] };
+  f.plan[f.chief.id] = { turns: [{ reply: "Noted." }, { reply: "Held", gateFile: f.gate("hold") }, { reply: "never", gateFile: f.gate("never") }] };
   await f.send("Warm up.", other);
   await f.wait(other);
   await f.send("Hold the only slot.");
   await expect.poll(() => f.launches().length, { timeout: 15_000 }).toBe(2);
   expect((await f.send("RECOVERED_FOLLOWUP deploy it", other)).queued).toBe(true);
   f.open(f.gate("hold"));
-  await expect.poll(() => f.launches().length, { timeout: 15_000 }).toBe(3);
+  await expect.poll(() => f.consumed(), { timeout: 15_000 }).toBe(3);
+  const interruptedPid = f.launches().at(-1).pid;
   await f.restart(() => {}, "SIGKILL");
+  await expect.poll(() => {
+    try { process.kill(interruptedPid, 0); return true; } catch { return false; }
+  }, { timeout: 5_000 }).toBe(false);
   await expect.poll(async () => (await f.messages(other)).some((m: any) => m.kind === "activity" && m.tool?.name?.includes("Review the result")), { timeout: 20_000 }).toBe(true);
   expect((await f.messages(other)).filter((m: any) => m.role === "user" && m.text?.includes("RECOVERED_FOLLOWUP"))).toHaveLength(1);
 
+  // The crashed turn never completes its evidence record. Select the next
+  // reply explicitly instead of indexing back into that turn's closed gate.
+  f.plan[f.chief.id] = { reply: "Answered" };
   await f.send("Anything new?", other);
   await f.wait(other);
   const next = f.turns().filter((turn: any) => f.prompt(turn).includes("Anything new?")).at(-1);
+  expect(next).toBeDefined();
   expect(f.launches().at(-1).resume).not.toBeNull();
   expect(f.prompt(next)).not.toContain("RECOVERED_FOLLOWUP");
 }), 90_000);
@@ -967,6 +1017,11 @@ it.skipIf(process.platform === "win32")("gives a delegated return today's fresh 
 }), 90_000);
 
 it("gives a delegate_bot source today's fresh session and replay when its soul changed since the session started", () => fixture(async (f) => {
+  // Ops's reply is held until the revived turn has launched: under load the
+  // wake dispatch can lag past both replies and the soul edit, which would
+  // hand the new soul to the revival turn's own session and leave the third
+  // turn nothing to be stale about.
+  f.holdDelegation("OPS_SOUL_TOKEN", f.gate("ops"));
   f.plan[f.chief.id] = { turns: [
     { steps: [
       { tool: "delegate_bot", arguments: { bot_id: f.qa.id, message: "Check the quality: QA_SOUL_TOKEN" } },
@@ -983,21 +1038,29 @@ it("gives a delegate_bot source today's fresh session and replay when its soul c
   const run = (await f.api(`/api/routines/${created.routine.id}/run`, {})).run;
   let threadId = "";
   await expect.poll(async () => (threadId = (await f.api("/api/routines")).runs.find((r: any) => r.id === run.id)?.threadId ?? ""), { timeout: 15_000 }).not.toBe("");
-  // The first reply wakes the source; the second lands while that turn holds.
+  // The first reply wakes the source, whose launch proves its prompt and
+  // record snapshot the old soul; the second reply then lands while that
+  // turn holds its gate, and the soul edit below is what the third turn
+  // must find stale.
   const replies = async () => (await f.messages(threadId)).filter((m: any) => /^@(QA|Ops) replied to the delegated task/.test(m.text ?? "")).length;
-  await expect.poll(replies, { timeout: 30_000 }).toBe(2);
-  // Replies can both be recorded before the first resume process starts.
-  // Change the soul only once that gated launch has received the old prompt;
+  await expect.poll(() => f.launches().length, { timeout: 30_000 }).toBe(2);
+  // Replies can both be recorded before the first resume process starts, and
+  // a launch record is written before its engine reads the prompt. Change
+  // the soul only once that gated launch has consumed the old prompt;
   // otherwise a later resume legitimately reuses the already refreshed session.
-  await expect.poll(() => f.launches().length, { timeout: 15_000 }).toBe(2);
+  await expect.poll(() => f.consumed(), { timeout: 15_000 }).toBe(2);
   await f.api(`/api/bots/${f.chief.id}`, { soul: "PEER_SOUL_MARK Always answer in German." }, "PATCH");
+  f.open(f.gate("ops"));
+  await expect.poll(replies, { timeout: 30_000 }).toBe(2);
   f.open(f.gate("revival"));
   await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
 
   const [, first, third] = f.turns();
   const late = count(f.prompt(first), "QA_SOUL_TOKEN") ? "OPS_SOUL_TOKEN" : "QA_SOUL_TOKEN";
   expect(third.system).toContain("PEER_SOUL_MARK");
-  expect(f.launches().at(-1).resume).toBeNull();
+  // The fresh launch is recorded asynchronously once the third turn starts;
+  // poll for it so a slow launch is not mistaken for a wrong resume.
+  await expect.poll(() => f.launches().at(-1)?.resume, { timeout: 10_000 }).toBe(null);
   expect(f.prompt(third)).toContain("received an update outside your provider session");
   expect(count(f.prompt(third), late)).toBe(1);
 }), 120_000);
@@ -1037,6 +1100,8 @@ it("gives a Codex return today's fresh thread when explicit effort is cleared wh
   await leadRunning(f);
   await expect.poll(async () => (await f.messages()).some((m: any) => m.role === "bot" && m.text === "Assigned"), { timeout: 15_000 }).toBe(true);
   // An effort the driver does not send leaves the native thread's last value.
+  await expect.poll(async () => (await f.api("/api/bots")).bots.find((bot: any) => bot.id === f.chief.id)
+    .tasks.find((task: any) => task.threadId === f.thread).waitingForTeammates, { timeout: 15_000 }).toBe(true);
   await f.selectModel(model);
   f.open(f.gate("lead"));
   await f.wait();

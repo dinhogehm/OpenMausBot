@@ -1,4 +1,4 @@
-import { createElement } from "react";
+import { Children, createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Routine, RoutineRun } from "@/lib/routines";
@@ -16,7 +16,7 @@ function list(props: Partial<Parameters<typeof RoutineList>[0]> = {}) {
   return renderToStaticMarkup(createElement(RoutineList, { routines: [routine], runs: [run], onOpen: vi.fn(), onLogs: vi.fn(), ...props }));
 }
 function logs(props: Partial<Parameters<typeof RoutineLogs>[0]> = {}) {
-  return renderToStaticMarkup(createElement(RoutineLogs, { runs: [run], bots: [], onClearRoutine: vi.fn(), onOpen: vi.fn(), ...props }));
+  return renderToStaticMarkup(createElement(RoutineLogs, { runs: [run], bots: [], status: "all", onStatusChange: vi.fn(), onClearRoutine: vi.fn(), onOpen: vi.fn(), ...props }));
 }
 
 afterEach(() => vi.useRealTimers());
@@ -77,6 +77,48 @@ describe("central routine logs", () => {
     for (const status of statuses) expect(markup).toContain(`Open Routine ${status} run:`);
     expect(markup).toContain("Bot unavailable");
     expect(markup).toContain("Recent saved runs");
+  });
+
+  it("filters failed and missed runs together through the shared Problems view", () => {
+    const fine = { ...run, id: "fine", routineName: "Fine brief" };
+    const broken = { ...run, id: "broken", routineName: "Broken report", status: "failed" as const, error: "Provider crashed" };
+    const stale = { ...run, id: "stale", routineName: "Stale digest", status: "missed" as const };
+    const problems = logs({ runs: [fine, broken, stale], status: "problems" });
+    expect(problems).toContain("Broken report");
+    expect(problems).toContain("Stale digest");
+    expect(problems).not.toContain("Fine brief");
+    expect(problems).toContain('<option value="problems" selected="">Problems</option>');
+    const everything = logs({ runs: [fine, broken, stale] });
+    for (const name of ["Fine brief", "Broken report", "Stale digest"]) expect(everything).toContain(name);
+  });
+
+  it("marks unseen problem runs with a dot that clears once they are read", () => {
+    const unseen = { ...run, id: "unseen", routineName: "Unseen crash", status: "failed" as const, error: "Provider crashed" };
+    const seen = { ...unseen, id: "seen", routineName: "Seen crash", seenAt: 500 };
+    const markup = logs({ runs: [unseen, seen] });
+    expect(markup.match(/title="Unseen failure"/g)).toHaveLength(1);
+    expect(logs({ runs: [unseen, seen], status: "problems" }).match(/title="Unseen failure"/g)).toHaveLength(1);
+    expect(markup).toContain('aria-label="Open Unseen crash run: Failed · Unseen failure"');
+    expect(markup).toContain('aria-label="Open Seen crash run: Failed"');
+  });
+
+  it("reports status changes to its parent instead of keeping private filter state", () => {
+    const onStatusChange = vi.fn();
+    let select: { onChange?: (event: { target: { value: string } }) => void } | undefined;
+    function visit(node: ReactNode) {
+      Children.forEach(node, (child) => {
+        if (!isValidElement<{ onChange?: (event: { target: { value: string } }) => void; children?: ReactNode }>(child)) return;
+        if (child.type === "select") select = child.props;
+        visit(child.props.children);
+      });
+    }
+    function Capture() {
+      visit(RoutineLogs({ runs: [], bots: [], status: "all", onStatusChange, onClearRoutine: vi.fn(), onOpen: vi.fn() }));
+      return null;
+    }
+    renderToStaticMarkup(createElement(Capture));
+    select!.onChange!({ target: { value: "problems" } });
+    expect(onStatusChange).toHaveBeenCalledExactlyOnceWith("problems");
   });
 
   it("lands on only the requested routine's history", () => {

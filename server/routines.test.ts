@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GroupGoalRunStatus } from "../shared/group-goal-run.ts";
+import { ensureDirs } from "./config.ts";
+import { BoatAgentDriver } from "./drivers/boatagent.ts";
 import {
   nextOccurrence,
   RoutineManager,
@@ -627,6 +629,17 @@ describe("persistent routine results destinations", () => {
     expect(second.resultsThreadId).toBe("results-1");
     expect(h.manager.listRuns().find((run) => run.id === first.id)).toMatchObject({ status: "running", resultsThreadId: "chosen" });
     expect(h.manager.listRoutines()[0]?.resultsThreadId).toBe("results-1");
+  });
+
+  it("runs a bot routine inside the conversation it reports to when asked", async () => {
+    const h = resultsHarness();
+    h.options.joinConversation = (run) => run.resultsThreadId === "chosen" ? "chosen" : null;
+    const routine = h.manager.create({ ...input(), resultsThreadId: "chosen" });
+    h.manager.runNow(routine.id);
+    await h.manager.tick();
+    expect(h.taskActivations).toEqual([]);
+    expect(h.started).toEqual([expect.objectContaining({ botId: "maus-1", threadId: "chosen" })]);
+    expect(h.manager.listRuns()[0]).toMatchObject({ status: "running", threadId: "chosen" });
   });
 
   it("does not route webhook or room-goal executions through bot results tasks", async () => {
@@ -2514,6 +2527,107 @@ describe("RoutineManager", () => {
     expect(h.failed).toHaveLength(1);
   });
 
+  it("marks every unseen failed or missed run seen in one sweep", async () => {
+    const h = harness();
+    const broken = h.manager.create({
+      name: "Broken report",
+      prompt: "Write the report",
+      botId: "maus-1",
+      schedule: { type: "once", at: new Date(2026, 7, 17, 8, 1).getTime() },
+    });
+    h.manager.create({
+      name: "Stale check",
+      prompt: "Do the stale thing",
+      botId: "maus-2",
+      schedule: { type: "once", at: new Date(2026, 7, 16, 6, 0).getTime() },
+    });
+    const fine = h.manager.create({
+      name: "Fine brief",
+      prompt: "Write the brief",
+      botId: "maus-3",
+      schedule: { type: "once", at: new Date(2026, 7, 17, 8, 3).getTime() },
+    });
+    const acknowledged = h.manager.create({
+      name: "Old failure",
+      prompt: "Try the work",
+      botId: "maus-4",
+      schedule: { type: "once", at: new Date(2026, 7, 17, 8, 4).getTime() },
+    });
+
+    await h.manager.tick(); // the long-past once routine is recorded as missed
+    h.setNow(broken.nextRunAt!);
+    await h.manager.tick();
+    h.manager.handleRuntimeEvent({
+      eventId: "broken", provider: "fake", threadId: "thread-1",
+      createdAt: new Date().toISOString(), type: "turn.completed", ok: false, stopReason: "provider crashed",
+    });
+    h.setNow(fine.nextRunAt!);
+    await h.manager.tick();
+    h.manager.handleRuntimeEvent({
+      eventId: "fine", provider: "fake", threadId: "thread-2",
+      createdAt: new Date().toISOString(), type: "turn.completed", ok: true,
+    });
+    h.setNow(acknowledged.nextRunAt!);
+    await h.manager.tick();
+    h.manager.handleRuntimeEvent({
+      eventId: "acknowledged", provider: "fake", threadId: "thread-3",
+      createdAt: new Date().toISOString(), type: "turn.completed", ok: false, stopReason: "crashed earlier",
+    });
+    const runsByName = () => new Map(h.manager.listRuns().map((run) => [run.routineName, run]));
+    h.manager.markSeen(runsByName().get("Old failure")!.id);
+
+    h.emitted.length = 0;
+    const stampAt = new Date(2026, 7, 18, 8, 0).getTime();
+    h.setNow(stampAt);
+    const stamped = h.manager.markAllSeen();
+    expect([...stamped].sort((a, b) => a.routineName.localeCompare(b.routineName))).toMatchObject([
+      { routineName: "Broken report", seenAt: stampAt },
+      { routineName: "Stale check", seenAt: stampAt },
+    ]);
+    const after = runsByName();
+    expect(after.get("Fine brief")).toMatchObject({ status: "completed" });
+    expect(after.get("Fine brief")!.seenAt).toBeUndefined();
+    expect(after.get("Old failure")!.seenAt).toBeLessThan(stampAt);
+    const frames = h.emitted.filter((frame) => frame.kind === "routine.run");
+    expect(frames).toHaveLength(2);
+    expect(frames.map((frame) => frame.run.seenAt)).toEqual([stampAt, stampAt]);
+
+    expect(h.manager.markAllSeen()).toEqual([]);
+    const reloadedByName = new Map(new RoutineManager(h.options).listRuns().map((run) => [run.routineName, run]));
+    expect(reloadedByName.get("Broken report")!.seenAt).toBe(stampAt);
+    expect(reloadedByName.get("Stale check")!.seenAt).toBe(stampAt);
+  });
+
+  it("rolls the mark-all sweep back when its save fails", async () => {
+    const h = harness();
+    const routine = h.manager.create({
+      name: "Broken report",
+      prompt: "Write the report",
+      botId: "maus-1",
+      schedule: { type: "once", at: new Date(2026, 7, 17, 8, 1).getTime() },
+    });
+    h.setNow(routine.nextRunAt!);
+    await h.manager.tick();
+    h.manager.handleRuntimeEvent({
+      eventId: "broken", provider: "fake", threadId: "thread-1",
+      createdAt: new Date().toISOString(), type: "turn.completed", ok: false, stopReason: "provider crashed",
+    });
+    expect(h.manager.listRuns()[0]).toMatchObject({ status: "failed" });
+
+    h.emitted.length = 0;
+    const save = vi.spyOn(h.manager as unknown as { save(): void }, "save").mockImplementationOnce(() => { throw new Error("fixture disk full"); });
+    expect(() => h.manager.markAllSeen()).toThrow("fixture disk full");
+    expect(h.manager.listRuns()[0].seenAt).toBeUndefined();
+    expect(h.emitted).toHaveLength(0);
+    const persisted = new RoutineManager(h.options).listRuns().find((run) => run.routineName === routine.name);
+    expect(persisted!.seenAt).toBeUndefined();
+
+    save.mockRestore();
+    const stampAt = new Date(2026, 7, 18, 8, 0).getTime();
+    h.setNow(stampAt);
+    expect(h.manager.markAllSeen()).toMatchObject([{ routineName: routine.name, seenAt: stampAt }]);
+  });
+
   it("keeps recurring history while advancing the definition", async () => {
     const h = harness();
     const routine = h.manager.create({
@@ -2790,5 +2904,94 @@ describe("routine continuity", () => {
       schedule: { type: "once", at: new Date(2026, 7, 17, 9, 0, 0).getTime() },
       continuity: true,
     })).toThrow(/continuity/i);
+  });
+});
+
+describe("routine runs × turn-held BoatAgent asks", () => {
+  const start = Date.parse("2026-09-13T08:00:00Z");
+
+  /** The slice of the Boat HTTP fake this integration needs (the full one
+   * lives in server/drivers/boatagent.test.ts). */
+  function installFakeBoat(script: Array<{ events: unknown[]; status?: { promptRun: { status: string; result?: string } } }>, prompts: string[]) {
+    let i = 0;
+    const previous = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? "GET").toUpperCase();
+      if (method === "POST" && /\/boxes\/[^/]+\/prompt$/.test(url)) {
+        prompts.push(String((JSON.parse(String(init?.body ?? "{}")) as { prompt?: string }).prompt ?? ""));
+        return new Response(JSON.stringify({ promptRun: { id: "p1" } }), { headers: { "content-type": "application/json" } });
+      }
+      if (url.includes("/events")) {
+        const step = script[Math.min(i, script.length - 1)]!;
+        i += 1;
+        return new Response(JSON.stringify({ events: step.events }), { headers: { "content-type": "application/json" } });
+      }
+      if (url.includes("/prompts/")) {
+        const step = script[Math.min(Math.max(i - 1, 0), script.length - 1)]!;
+        return new Response(JSON.stringify(step.status ?? { promptRun: { status: "running" } }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ error: "unexpected" }), { status: 404 });
+    }) as typeof fetch;
+    return () => {
+      globalThis.fetch = previous;
+    };
+  }
+
+  // The exact case both plan reviews flagged: a BoatAgent ask arrives at the
+  // run's settle. Holding the OMB turn open is what keeps the routine run in
+  // waiting until the answer instead of completing out from under the card.
+  it("holds the run in waiting until the person answers, then completes it", async () => {
+    const h = harness(start);
+    const prompts: string[] = [];
+    const askText = "```omb-ask\n" + JSON.stringify({
+      questions: [{ question: "Ship the release?", options: [{ label: "Ship now" }, { label: "Wait" }] }],
+    }) + "\n```";
+    const restoreFetch = installFakeBoat([
+      { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "running" } } },
+      { events: [{ id: "e1", type: "response", text: askText }], status: { promptRun: { status: "finished", result: askText } } },
+      { events: [{ id: "c1", type: "response", text: "Shipped." }], status: { promptRun: { status: "finished", result: "Shipped." } } },
+    ], prompts);
+    ensureDirs();
+    const instance = await BoatAgentDriver.create({
+      instanceId: "box-routines",
+      displayName: "Boat Routines",
+      environment: { BOX_TOKEN: "boat-test-token" },
+      enabled: true,
+      config: { pollMs: 0 },
+    });
+    let requestId = "";
+    try {
+      instance.adapter.onEvent((event) => {
+        if (event.type === "request.opened") requestId = event.requestId ?? "";
+        h.manager.handleRuntimeEvent(event);
+      });
+      h.options.startTurn = async (_botId, threadId) => {
+        await instance.adapter.sendTurn({ threadId, text: "sweep", integrations: { computer: { boxId: "boat-1", token: "boat-test-token" } } });
+      };
+      const routine = h.manager.create({
+        name: "Boat sweep",
+        prompt: "Sweep the box",
+        botId: "maus-1",
+        schedule: { type: "interval", everyMinutes: 5, anchorAt: start },
+      });
+      h.setNow(routine.nextRunAt!);
+      await h.manager.tick();
+      const run = () => h.manager.listRuns().find((r) => r.threadId === "thread-1");
+      await expect.poll(() => run()?.status).toBe("waiting");
+      expect(run()?.attention).toBe("Ship the release?");
+      expect(requestId).toBeTruthy();
+      expect(
+        await instance.adapter.respondToRequest("thread-1", requestId, {
+          behavior: "answer",
+          message: "The user answered your questions.\n\nQ: Ship the release?\nA: ship it",
+        }),
+      ).toBe("answered");
+      await expect.poll(() => run()?.status).toBe("completed");
+      expect(prompts[1]).toContain("A: ship it");
+    } finally {
+      await instance.dispose();
+      restoreFetch();
+    }
   });
 });

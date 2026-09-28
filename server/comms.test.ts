@@ -50,9 +50,15 @@ describe("mentionedBots", () => {
     expect(mentionedBots("mail milind@milind.dev please", peers)).toEqual([]);
     expect(mentionedBots("@Ghost around?", peers)).toEqual([]);
   });
+  it("routes Markdown- and punctuation-wrapped mentions", () => {
+    expect(mentionedBots("**@Milind** (@New Bot 2) 【@New Bot】", peers).map((bot) => bot.id))
+      .toEqual(["3", "2", "1"]);
+    expect(mentionedBots("user@Milind /@Milind", peers)).toEqual([]);
+  });
   it("requires a word boundary at the end of the name", () => {
     expect(mentionedBots("ask @New Bottle about it", peers)).toEqual([]);
     expect(mentionedBots("@Milindo is someone else", peers)).toEqual([]);
+    expect(mentionedBots("@Milind𐐀 is someone else", peers)).toEqual([]);
   });
 });
 
@@ -74,6 +80,15 @@ describe("roomResponders", () => {
     expect(roomResponders("hello", members, { kind: "everyone" })).toEqual(members);
     expect(roomResponders("hello", members, { kind: "mentions" })).toEqual([]);
     expect(roomResponders("@everyone hello", members, { kind: "mentions" })).toEqual(members);
+  });
+
+  it("applies the shared mention boundaries to everyone", () => {
+    const mentionsOnly = { kind: "mentions" } as const;
+    expect(roomResponders("**@EVERYONE** hello", members, mentionsOnly)).toEqual(members);
+    expect(roomResponders("【@everyone】 hello", members, mentionsOnly)).toEqual(members);
+    expect(roomResponders("@everyone調査 hello", members, mentionsOnly)).toEqual([]);
+    expect(roomResponders("@everyone𐐀 hello", members, mentionsOnly)).toEqual([]);
+    expect(roomResponders("user@everyone /@everyone", members, mentionsOnly)).toEqual([]);
   });
 
   it("keeps bot-to-bot channels on their last-speaker routing", () => {
@@ -237,11 +252,12 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
             environment: { FAKE_ACP_MODE: "exit-early" },
             config: { cli: FAKE_CLI, fullAuto: true },
           },
-          // a successful peer turn that deliberately emits no assistant
-          // text — the channel still needs a positive terminal record.
-          helperEmpty: {
+          // a successful peer turn that deliberately emits no assistant text,
+          // only an image — the channel still needs a positive terminal
+          // record for output a person can see but not read.
+          helperImage: {
             driver: "grokAgent",
-            environment: { FAKE_ACP_MODE: "empty-reply" },
+            environment: { FAKE_ACP_MODE: "image" },
             config: { cli: FAKE_CLI, fullAuto: true },
           },
           // a turn that remains busy until provider reload disposes it.
@@ -483,6 +499,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
     "lets a section Chief create a safe operator and delegate work to it",
     async () => {
       const chief = (await api("POST", "/api/bots")).body.bot;
+      const defaultSelection = chief.modelSelection;
       await api("PATCH", `/api/bots/${chief.id}`, {
         name: "Atlas",
         section: "Launch",
@@ -515,7 +532,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
         composio: false,
         autoApprove: false,
         approvePeerComms: false,
-        modelSelection: { instanceId: "chiefCreator", model: "fake-model" },
+        modelSelection: defaultSelection,
       });
       expect(operator.chiefOfStaff).toBeFalsy();
       expect(operator.messages.some((message: any) => message.text?.includes("Review the new onboarding flow."))).toBe(true);
@@ -1006,17 +1023,17 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
   // ── delegation terminal-state mirroring ─────────────────────────────
   // A delegated turn is fire-and-forget. Its result is returned to the
   // initiating chat and mirrored into the A⇄B channel. These tests pin a
-  // successful empty reply plus both non-happy terminal states: the
+  // successful reply without text plus both non-happy terminal states: the
   // delegated turn crashed, and the delegated turn never started.
   it(
-    "mirrors a successful delegated turn with no reply as a completed terminal chip",
+    "mirrors a successful delegated turn with no text reply as a completed terminal chip",
     async () => {
       const seeded = (await api("GET", "/api/bots")).body.bots[0];
       await api("PATCH", `/api/bots/${seeded.id}`, { hidden: true });
       const helper = (await api("POST", "/api/bots")).body.bot;
       await api("PATCH", `/api/bots/${helper.id}`, {
         name: "Helper",
-        modelSelection: { instanceId: "helperEmpty", model: "fake-model" },
+        modelSelection: { instanceId: "helperImage", model: "fake-model" },
       });
       const asker = (await api("POST", "/api/bots")).body.bot;
       await api("PATCH", `/api/bots/${asker.id}`, {

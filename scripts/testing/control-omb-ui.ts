@@ -276,7 +276,8 @@ function parseFlagPatch(raw: unknown): { features: Record<string, boolean | numb
 }
 
 const summarizeBots = (bots: Array<Record<string, unknown>>) =>
-  bots.map((bot) => ({ id: bot.id, name: bot.name, busy: bot.busy === true, activity: bot.activity ?? null }));
+  bots.map((bot) => ({ id: bot.id, name: bot.name, busy: bot.busy === true,
+    waitingForTeammates: bot.waitingForTeammates === true, activity: bot.activity ?? null }));
 
 /** Settled means three things at once: the seeded bot's turn ended (the shared
  * wait tool decides how), no bot in the fixture is still busy, and the page
@@ -294,7 +295,7 @@ async function waitSettle(handle: UiHandle, timeoutSeconds: number): Promise<Rec
     wait = await runControlOmb(["wait", "--bot", handle.botId, "--timeout", String(Math.min(120, remaining())), "--url", handle.url]) as Record<string, unknown>;
     if (wait.status !== "settled") return { ok: false, ...state(), status: wait.status };
     bots = summarizeBots(((await api("GET", "/api/bots?messages=0")) as { bots: Array<Record<string, unknown>> }).bots);
-    if (!bots.some((bot) => bot.busy)) break;
+    if (!bots.some((bot) => bot.busy || bot.waitingForTeammates)) break;
     if (Date.now() >= deadline) return { ok: false, ...state() };
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
@@ -428,7 +429,7 @@ export async function launchUi(
   args: string[],
   parentEnv: NodeJS.ProcessEnv = process.env,
   io: { stdout: NodeJS.WritableStream; stderr: NodeJS.WritableStream } = process,
-  fixtureOptions: { boxFixtureApi?: string } = {},
+  fixtureOptions: { boatFixtureApi?: string } = {},
 ): Promise<void> {
   const values = parse("ui launch", args, { entry: { type: "string" }, "tool-calls": { type: "string" }, mode: { type: "string" } });
   const entryName = typeof values.entry === "string" ? values.entry : "threads";
@@ -467,7 +468,7 @@ export async function launchUi(
     const { binary, chrome } = await ensureUiBrowser(parentEnv, note);
     checkpoint();
     fixture = await launchVerificationServer({ ...parentEnv, ...fakeEnv }, startup.signal, undefined,
-      { binaryPath: binary, executablePath: chrome ?? "" }, undefined, undefined, [], fixtureOptions.boxFixtureApi);
+      { binaryPath: binary, executablePath: chrome ?? "" }, undefined, undefined, [], fixtureOptions.boatFixtureApi);
     checkpoint();
     const api = fixtureApi(fixture.info.url);
     await api("PATCH", "/api/config", { language: "en" });

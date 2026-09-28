@@ -7,9 +7,12 @@
 import { t } from "@/lib/i18n";
 import { EffortRow, ModelPicker } from "../ModelPicker";
 import { useStore, type Bot } from "@/state/store";
+import { useBotEditor } from "./BotEditorContext";
+import { ProposalStatus } from "./ProposalStatus";
 
 export function ModelSection({ bot }: { bot: Bot }) {
   const { state } = useStore();
+  const { draft } = useBotEditor();
   const modelVariants = state.instances.find((instance) => instance.instanceId === bot.modelSelection.instanceId)?.capabilities?.modelVariants;
   return (
     <div className="flex flex-col gap-4">
@@ -20,7 +23,8 @@ export function ModelSection({ bot }: { bot: Bot }) {
           label={
             <div>
               <div className="text-[15px] font-medium text-ink">{t("botModel.default")}</div>
-              <div className="mt-0.5 text-[13px] text-ink-secondary">{t("botModel.defaultHint")}</div>
+              <div className="mt-0.5 text-[13px] text-ink-secondary">{t(draft ? "botModel.defaultHintDraft" : "botModel.defaultHint")}</div>
+              <ProposalStatus bot={bot} kind="chief" />
             </div>
           }
         />
@@ -39,8 +43,9 @@ export function ModelSection({ bot }: { bot: Bot }) {
                 we could not keep for a thread that had already been sent
                 one. Sending nothing is true on every engine. */}
             <div className="mt-0.5 text-[13px] text-ink-secondary">
-              {modelVariants ? t("botModel.reasoningHint") : `${t("botModel.effortHint")}${bot.modelSelection.effort ? "" : t("botModel.effortDefault")}`}
+              {modelVariants ? t(draft ? "botModel.reasoningHintDraft" : "botModel.reasoningHint") : `${t("botModel.effortHint")}${bot.modelSelection.effort ? "" : t("botModel.effortDefault")}`}
             </div>
+            <ProposalStatus bot={bot} kind="chief" />
           </div>
         }
       />

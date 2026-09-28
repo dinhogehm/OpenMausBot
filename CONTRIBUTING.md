@@ -158,6 +158,10 @@ how chat routine proposals failed in the field hours after 0.1.38 shipped (#544)
   fixes the next call.
 - A schema test should assert the tool surface stays flat
   (see `server/drivers/agents-proxy.test.ts` — it regexp-guards the serialized schema).
+- The agents tools live in `server/drivers/agents-catalog.ts`, and their serialized `tools/list`
+  is pinned byte for byte and size-budgeted by `server/drivers/agents-catalog-wire.test.ts`.
+  After changing one on purpose, run that file once with `UPDATE_AGENTS_CATALOG_GOLDENS=1`,
+  review the golden diff, and move its `BUDGET_BASELINE` by hand.
 
 ## Adding a language
 

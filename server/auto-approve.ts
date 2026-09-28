@@ -71,7 +71,7 @@ export function delegationInheritsFullAccess(input: {
 // the permission path in permission-proxy). Approving it there does not
 // produce an answer: the CLI runs the tool with none and the model is told
 // "The user did not answer the questions." — a question silently lost.
-const ASKS_A_PERSON = new Set(["askuserquestion", "ask_user"]);
+const ASKS_A_PERSON = new Set(["askuserquestion", "ask_user", "omb-ask"]);
 
 const DESTRUCTIVE = [
   /\brm\s+(-[a-z]*\s+)*-[a-z]*[rf]/i, // rm -rf, rm -fr, rm -r -f
@@ -180,6 +180,7 @@ export type AutoVerdictSource =
   | "always-allow"
   | "auto-mode"
   | "full-access"
+  | "command-allowlist"
   | "native-approval"
   | "explicit-approval-block"
   | "unattended-block"
@@ -268,6 +269,8 @@ export function autoVerdict(
     /** The provider is asking to widen its configured sandbox rather than
      * perform one ordinary action. Only explicit Full may synthesize this. */
     requiresExplicitApproval?: boolean;
+    /** Exact bot/provider/folder/command match against the person's saved rules. */
+    commandAllowed?: boolean;
     /** Present only on a WORKFLOW node's turn: the keys the node itself
      * declared (possibly none). Its presence is what lets a grant on an
      * ordinary tool fire unattended — see namedNarrowly. */
@@ -280,6 +283,12 @@ export function autoVerdict(
   // that would run the tool with none.
   if (ASKS_A_PERSON.has(tool.replace(/^mcp__[^_]+__/, "").toLowerCase())) {
     return { approve: null, source: "no-grant" };
+  }
+  // A saved command is the person's exact, named grant for this bot, provider,
+  // folder and command line, so it answers even a native reviewer's card —
+  // but never a sandbox widening, which only explicit Full may approve.
+  if (context?.commandAllowed && !context.requiresExplicitApproval && mode !== "full") {
+    return { approve: `approved ${tool} (saved command)`, source: "command-allowlist" };
   }
   if (context?.nativeApproval) return { approve: null, source: "native-approval" };
   // This branch intentionally precedes every guard. Entering Full access is

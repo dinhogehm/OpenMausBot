@@ -133,6 +133,26 @@ public struct ToolActivity: Codable, Hashable, Sendable {
     public var spoken: String?
     /// Marks an error fixed by installing something, not by retrying.
     public var setup: Bool?
+    /// Marks an error caused by a Claude Code CLI too old for the chosen
+    /// model; the phone offers to run Claude's updater. Absent on older
+    /// computers, so it stays optional.
+    public var claudeUpdate: Bool?
+}
+
+/// A compaction record: from this message on, rebuilds of the thread's
+/// context carry `summary` instead of the earlier messages.
+public struct Compaction: Codable, Hashable, Sendable {
+    public var summary: String
+    public var tokensBefore: Int
+    public init(summary: String, tokensBefore: Int) {
+        self.summary = summary
+        self.tokensBefore = tokensBefore
+    }
+
+    public var chipText: String {
+        let tokens = NumberFormatter.localizedString(from: NSNumber(value: tokensBefore), number: .decimal)
+        return "Context compacted · \(tokens) tokens summarised"
+    }
 }
 
 /// The thread an activity chip opened — "Opened thread #Title on Scout" —
@@ -184,6 +204,13 @@ public struct CommChip: Codable, Hashable, Sendable {
 public struct Message: Codable, Hashable, Identifiable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case text, options, activity, screen, secret
+        /// The harness's receipt of a settled turn: "[digest] · tools: … ·
+        /// reply: …". Desktop shows it only behind "show tool calls"; it is
+        /// a log line, not something anyone said, so the phone never draws,
+        /// previews, or speaks it. Named so it cannot fall into `unknown`,
+        /// which draws whatever text a message carries.
+        case digest
+        case compaction
         /// A kind this build has never heard of.
         ///
         /// Not decorative. `kind` is not optional, so without this a single
@@ -219,10 +246,16 @@ public struct Message: Codable, Hashable, Identifiable, Sendable {
     public var kind: Kind
     public var at: Double
     public var text: String?
+    /// Provider turn markers let clients fold settled narration while keeping
+    /// the final answer visible. Older servers may omit both fields.
+    public var turnId: String?
+    public var turnTerminal: Bool?
     public var card: OptionCard?
     public var secret: SecretRequestCardData?
     public var tool: ToolActivity?
     public var threadRef: ThreadRef?
+    /// `kind == .compaction`: the record itself.
+    public var compaction: Compaction?
     /// The message this one follows; nil at the thread root. Two messages
     /// sharing a parent are a fork.
     public var parentId: String?
@@ -308,6 +341,13 @@ public struct BotTask: Codable, Hashable, Sendable {
     public var projectId: String?
     public var openedBy: ThreadOpener?
     public var closedBy: ThreadCloser?
+    /// Asleep until: 0 is the "until new activity" sentinel and sleeps until
+    /// the thread does anything again, a timestamp sleeps until that moment,
+    /// and nil means awake. Expired time snoozes heal server-side on read,
+    /// so snapshots are authoritative; the sentinel wakes server-side on the
+    /// first activity too.
+    public var snoozedUntil: Double?
+
     /// When the person put this thread away, in epoch milliseconds. The
     /// field's presence — not its value — marks the thread archived: the
     /// task API accepts any epoch number, so a thread persisted with
@@ -315,6 +355,13 @@ public struct BotTask: Codable, Hashable, Sendable {
     public var archivedAt: Double?
     /// Bot-only internal execution. Keep it addressable, but out of thread pickers.
     public var routineRunId: String?
+    /// The person pinned this thread above the update-ordered list.
+    public var pinned: Bool? = nil
+    /// Newest message time. Absent on older computers; the list uses createdAt.
+    public var updatedAt: Double? = nil
+
+    /// The time the thread list sorts and stamps by.
+    public var listStamp: Double { updatedAt ?? createdAt }
 
     /// The thread list's quiet second line, worded as the desktop words it.
     public var openedByLabel: String? {
@@ -336,12 +383,24 @@ public struct BotTask: Codable, Hashable, Sendable {
     public var isWorking: Bool { activity == "working" || activity == "running" || busy == true }
 
     /// The one line under a title: who closed it once a bot has, "Archived"
-    /// once the person put it away, otherwise who opened it, otherwise
-    /// nothing. Closed wins because it is the newer fact; archived wins over
-    /// the opener because it explains why the row sits where it does.
+    /// once the person put it away, "Snoozed" while it sleeps, otherwise who
+    /// opened it, otherwise nothing. Closed wins because it is the newer
+    /// fact; archived and snoozed win over the opener because they explain
+    /// why the row sits where it does.
     public var bylineLabel: String? {
         if let closedBy { return "closed by \(closedBy.name)" }
-        return isArchived ? "Archived" : openedByLabel
+        if isArchived { return "Archived" }
+        if isSnoozed() { return "Snoozed" }
+        return openedByLabel
+    }
+
+    /// Snoozed means asleep right now: 0 is the "until new activity"
+    /// sentinel and sleeps until woken, while a timestamp sleeps only until
+    /// it passes. The server drops expired snoozes from snapshots, but a
+    /// live event never refreshes one, so the clock is checked too.
+    public func isSnoozed(now: Date = Date()) -> Bool {
+        guard let until = snoozedUntil else { return false }
+        return until == 0 || until > now.timeIntervalSince1970 * 1_000
     }
 
     /// Waiting on a dispatched teammate: the thread's own turn is done and
@@ -366,6 +425,26 @@ public struct BotTask: Codable, Hashable, Sendable {
     }
 }
 
+/// The snooze presets the desktop offers, computed in the person's local
+/// time on purpose: it is their evening and their morning; the server
+/// stores the absolute moment either way.
+public enum ThreadSnoozePreset {
+    /// The next local 6 PM — "later today", rolling to tomorrow evening
+    /// once tonight's is already past.
+    public static func tonight(now: Date = Date(), calendar: Calendar = .current) -> Double {
+        var when = calendar.date(bySettingHour: 18, minute: 0, second: 0, of: now) ?? now
+        if when <= now { when = calendar.date(byAdding: .day, value: 1, to: when) ?? when }
+        return when.timeIntervalSince1970 * 1_000
+    }
+
+    /// Tomorrow morning at 9 local: a clean overnight break.
+    public static func tomorrowMorning(now: Date = Date(), calendar: Calendar = .current) -> Double {
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now
+        let when = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
+        return when.timeIntervalSince1970 * 1_000
+    }
+}
+
 /// A message the harness is holding until the running turn settles. The
 /// phone's copy of a server-owned queue entry, identified by the harness's
 /// queueId and never by its text.
@@ -382,6 +461,14 @@ public struct QueuedSend: Codable, Hashable, Identifiable, Sendable {
         self.queueId = queueId
         self.text = text
         self.reason = reason
+    }
+
+    /// The composer text after this held send is pulled back for editing.
+    /// Its words lead — they were written first — and anything already typed
+    /// stays below them after a blank line, so an edit never drops a draft.
+    public func editDraft(keeping draft: String) -> String {
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return text }
+        return "\(text)\n\n\(draft)"
     }
 }
 
@@ -420,7 +507,7 @@ public struct Bot: Codable, Hashable, Identifiable, Sendable {
     public var alwaysAllow: [String]?
     public var computer: String?
     /// Which cloud computer backs `computer == "cloud"`. Absent (older
-    /// harnesses included) means the hosted Box; "vps" means the user's own
+    /// harnesses included) means the hosted Boat; "vps" means the user's own
     /// server, which has no interactive desktop to offer a phone.
     public var cloudBackend: String?
     public var speakReplies: Bool?
@@ -505,6 +592,41 @@ public struct BotOverviewRecent: Codable, Hashable, Sendable {
     public var summary: String
 }
 
+/// One service's connector tool grants, summarized for read-only display.
+/// Levels mirror the web grant editor: all tools, an exact list of
+/// `toolCount` tools, or no tools.
+public struct BotOverviewGrant: Codable, Hashable, Sendable {
+    public enum Level: String, Codable, Hashable, Sendable {
+        case all
+        case partial
+        case none
+
+        /// The server may add levels before this app updates. Falling back
+        /// to partial keeps the row honest ("some tools") without costing
+        /// the reader the whole overview.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Self(rawValue: raw) ?? .partial
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
+    }
+
+    public var slug: String
+    public var level: Level
+    /// Granted tool count; 0 unless level is partial.
+    public var toolCount: Int
+
+    public init(slug: String, level: Level, toolCount: Int) {
+        self.slug = slug
+        self.level = level
+        self.toolCount = toolCount
+    }
+}
+
 /// A read-only summary of one bot: who it is, what it does, what it can
 /// reach, what it won't do, and its recent activity. No settings and no
 /// transcript — this is the shape a phone is allowed to poll for.
@@ -514,6 +636,49 @@ public struct BotOverview: Codable, Hashable, Sendable {
     public var reaches: [String]
     public var wont: [String]
     public var recent: [BotOverviewRecent]
+    /// Per-service connector tool grants, when the bot carries a grants
+    /// record. Older computers omit the key entirely (legacy all-tools
+    /// behavior); an empty list is an explicit no-tools record.
+    public var grants: [BotOverviewGrant]?
+
+    private enum CodingKeys: String, CodingKey {
+        case who, does, reaches, wont, recent, grants
+    }
+
+    public init(
+        who: BotOverviewWho,
+        does: [String],
+        reaches: [String],
+        wont: [String],
+        recent: [BotOverviewRecent],
+        grants: [BotOverviewGrant]? = nil
+    ) {
+        self.who = who
+        self.does = does
+        self.reaches = reaches
+        self.wont = wont
+        self.recent = recent
+        self.grants = grants
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        who = try container.decode(BotOverviewWho.self, forKey: .who)
+        does = try container.decode([String].self, forKey: .does)
+        reaches = try container.decode([String].self, forKey: .reaches)
+        wont = try container.decode([String].self, forKey: .wont)
+        recent = try container.decode([BotOverviewRecent].self, forKey: .recent)
+        // One malformed entry must not cost the whole overview; a shape
+        // this build cannot read is dropped, like elsewhere in the fleet.
+        // If every entry is unreadable, though, the grants field stays
+        // absent rather than claiming the bot deliberately grants nothing.
+        if let list = try? container.decodeIfPresent([Lossy<BotOverviewGrant>].self, forKey: .grants) {
+            let readable = list.compactMap(\.value)
+            grants = readable.isEmpty && !list.isEmpty ? nil : readable
+        } else {
+            grants = nil
+        }
+    }
 }
 
 public struct GroupResponder: Codable, Hashable, Sendable {
@@ -1080,7 +1245,7 @@ public enum RoutineRunLocation: String, CaseIterable, Codable, Hashable, Sendabl
 
 /// Desktop-equivalent run-location availability, derived only from paired-safe
 /// status endpoints. Selecting Cloud VM requires both the host credential and
-/// an available Box agent. An existing cloud routine remains editable without
+/// an available Boat agent. An existing cloud routine remains editable without
 /// silently changing where it runs if that VM is temporarily unavailable.
 public struct RoutineRunAvailability: Equatable, Sendable {
     public var cloudConfigured: Bool
@@ -1243,6 +1408,10 @@ struct MessageResponse: Codable, Sendable {
     var message: Message
 }
 
+struct EditResponse: Decodable, Sendable {
+    var message: Message?
+}
+
 struct ActiveBranchResponse: Codable, Sendable {
     var activeLeafId: String
 }
@@ -1312,9 +1481,40 @@ public struct ServerEnvironment: Codable, Hashable, Sendable {
     public var version: String?
 }
 
-/// Keep future attachment kinds decodable; only image entries are displayed.
+/// Keep future attachment kinds decodable; image entries display inline and
+/// audio entries render as voice notes (Message.voiceNotes). Unknown kinds
+/// decode without breaking, so a newer computer never gaps the transcript.
 public struct MessageImageAttachment: Codable, Hashable, Sendable {
     public var kind: String
     public var path: String?
     public var mime: String?
+    /// The server's duration estimate for an audio attachment, in
+    /// milliseconds; shown until the player loads real metadata.
+    public var durationMs: Double?
+}
+
+/// One voice note in Message.attachments: the parked clip's bare generated
+/// filename plus the server's duration estimate. Mirrors the web bubble's
+/// VoiceNoteAttachment (PR #1801), the contract this rendering matches.
+public struct MessageVoiceNote: Hashable, Sendable, Identifiable {
+    public var path: String
+    public var mime: String?
+    public var durationMs: Double?
+
+    public var id: String { path }
+}
+
+extension Message {
+    /// Audio attachments that can render, in wire order: kind == "audio"
+    /// with a usable path, deduplicated the way generatedImages deduplicates
+    /// so a clip replayed by a late message patch renders once.
+    public var voiceNotes: [MessageVoiceNote] {
+        var seen = Set<String>()
+        return (attachments ?? []).compactMap { attachment in
+            guard attachment.kind == "audio", let path = attachment.path,
+                  !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  seen.insert(path).inserted else { return nil }
+            return MessageVoiceNote(path: path, mime: attachment.mime, durationMs: attachment.durationMs)
+        }
+    }
 }

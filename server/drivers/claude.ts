@@ -6,8 +6,8 @@
 //
 // Integrations become MCP servers on the CLI:
 //   - Composio Sessions (connected apps → tools) over streamable HTTP
-//   - the bot's cloud computer (box.ascii.dev) via server/computer-proxy.ts
-//     — screenshot/exec/open_url, the CUA-on-the-box bridge
+//   - the bot's cloud computer (boat.dev) via server/computer-proxy.ts
+//     — screenshot/exec/open_url, the CUA-on-the-boat bridge
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
@@ -31,11 +31,14 @@ import type {
   RuntimeEventListener,
   SendTurnInput,
   SteerOutcome,
+  TextGenerationOptions,
 } from "../contracts.ts";
 import { gateServer, resultBudget } from "../mcp-gate-config.ts";
 import { newEventId, newId } from "../contracts.ts";
 import { askInputSummary, commandSummary, toolDetailPreview } from "../tool-summary.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
+import { sessionIdlePolicy } from "./session-idle.ts";
+import { parseVersionTriple, versionAtLeast } from "./acp/core.ts";
 import {
   applyClaudeInject,
   decodeInjectId,
@@ -44,6 +47,7 @@ import {
   resolveInjectId,
 } from "./local-inject.ts";
 import { appendNative } from "./native.ts";
+import { permissionCommand, permissionLaunchCwd } from "./permission-command.ts";
 import { SPAWNED_PROXIES } from "../proxy-paths.ts";
 import { extractMcpImages } from "../mcp-tool-images.ts";
 import {
@@ -148,6 +152,20 @@ export function claudeAuthFailure(
 ): boolean {
   if (frame.is_api_error_message !== true && typeof frame.error !== "string") return false;
   return frame.error === "authentication_failed" || classifyError({ text }).reason === "auth";
+}
+
+/** A model newer than the installed Claude Code: the API refuses it and the
+ * CLI relays that as an api-error frame ("Claude Code 2.1.268 does not
+ * support this model; version 2.1.280 or newer is required. Run 'claude
+ * update'…"). It names no model, so it covers every model it happens for.
+ * Like a signed-out turn, it is fixed by changing the install, not by a
+ * retry, so the UI offers to run the update. */
+export function claudeVersionTooOld(
+  frame: { error?: unknown; is_api_error_message?: unknown },
+  text: string,
+): boolean {
+  if (frame.is_api_error_message !== true && typeof frame.error !== "string") return false;
+  return /\bClaude Code v?\d+(?:\.\d+)+ does not support this model\b/i.test(text);
 }
 
 /** The CLI environment shared by auth probes and real turns.
@@ -325,16 +343,7 @@ export const CLAUDE_CONTEXT_CONTROL_MIN_VERSION: ClaudeCliVersion = CLAUDE_FLAG_
  * is the version. Null when nothing parses, e.g. a wrapper that prints its
  * own banner first — see claudeCliSupports for how that is treated. */
 export function parseClaudeCliVersion(stdout: string | null | undefined): ClaudeCliVersion | null {
-  const match = /(\d+)\.(\d+)\.(\d+)/.exec(stdout ?? "");
-  if (!match) return null;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-function versionAtLeast(installed: ClaudeCliVersion, floor: ClaudeCliVersion): boolean {
-  for (let i = 0; i < 3; i += 1) {
-    if (installed[i] !== floor[i]) return installed[i] > floor[i];
-  }
-  return true;
+  return parseVersionTriple(stdout ?? "");
 }
 
 /** Whether a CLI reporting `version` accepts `flag`. A version that could
@@ -376,6 +385,8 @@ export interface ClaudeConfig {
   configDir?: string;
   /** Company routing is supplied by the private desktop parent, never local discovery. */
   managed?: boolean;
+  /** Operator-provided hosted catalog; absent for ordinary desktop accounts. */
+  managedModels?: string[];
   permissionMode: "acceptEdits" | "auto" | "bypassPermissions";
   /** Available Claude built-ins. An empty list passes `--tools ""`. */
   tools?: string[];
@@ -389,6 +400,7 @@ export const STATIC_CLAUDE_MODELS: ModelCatalog = {
   options: [
     { id: "claude-fable-5-1", label: "Claude Fable 5.1" },
     { id: "claude-fable-5", label: "Claude Fable 5" },
+    { id: "claude-opus-5-5", label: "Claude Opus 5.5", contextWindow: 1_000_000 },
     { id: "claude-opus-5", label: "Claude Opus 5" },
     { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
@@ -521,7 +533,7 @@ function askQuestions(ask: Ask): AskQuestion[] | null {
 /** One human-readable line for an ask — what the card subtitle shows. */
 function askSummary(ask: Ask): string {
   const questions = askQuestions(ask);
-  if (questions) return askQuestionSummary(questions).slice(0, 300);
+  if (questions) return askQuestionSummary(questions);
   return askInputSummary(ask.input) ?? ask.tool ?? "tool";
 }
 
@@ -817,10 +829,12 @@ function decodeConfig(raw: unknown): ClaudeConfig {
   if (o.configDir !== undefined && typeof o.configDir !== "string") throw new Error("claude: configDir must be a string");
   const configDir = typeof o.configDir === "string" ? o.configDir.trim() : undefined;
   if (configDir) resolveClaudeConfigDir(configDir);
+  if (o.managedModels !== undefined && (o.managed !== true || !Array.isArray(o.managedModels) || !o.managedModels.length || o.managedModels.some(model => typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(model)))) throw new Error("Invalid hosted Claude models.");
   return {
     cli: typeof o.cli === "string" ? o.cli : "claude",
     ...(configDir ? { configDir } : {}),
     ...(o.managed === true ? { managed: true } : {}),
+    ...(o.managedModels ? { managedModels: o.managedModels as string[] } : {}),
     permissionMode: (mode as ClaudeConfig["permissionMode"]) ?? "acceptEdits",
     ...(tools !== undefined ? { tools } : {}),
     ...(disallowedTools !== undefined ? { disallowedTools } : {}),
@@ -836,6 +850,119 @@ function firstText(content: unknown): string {
       .join("");
   }
   return "";
+}
+
+/** A turn's own cost from the CLI's total_cost_usd, which is not a per-turn
+ * figure: it is "cumulative across turns in streaming-input sessions — each
+ * result carries the running total so far" (2.1.282), and a retained process
+ * runs turn after turn. So a turn costs the growth since the total its
+ * process reported for the turn before — or, for a process's first turn,
+ * since the total the CLI restored on --resume (see restoredCostBase). With
+ * no known start (null) the turn keeps its whole figure. A total that went
+ * down is not the same count, so it is taken whole too rather than booked as
+ * a negative cost. Rounding to 1e-10 USD removes only the float noise of the
+ * subtraction. */
+export function turnCostFromRunningTotal(total: number | null, previous: number | null): number | null {
+  if (total === null) return null;
+  if (previous === null || total < previous) return total;
+  return Number((total - previous).toFixed(10));
+}
+
+/** One running cost state, read from a `result`: total_cost_usd and, per
+ * model, the [input, cache read, cache write, output] tokens of modelUsage.
+ * Both count the whole session so far, including anything --resume restored. */
+export interface ClaudeCostSnapshot {
+  total: number;
+  models: Record<string, [number, number, number, number]>;
+}
+
+export function claudeCostSnapshot(total: unknown, modelUsage: unknown): ClaudeCostSnapshot | null {
+  if (typeof total !== "number" || !Number.isFinite(total)) return null;
+  const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const models: ClaudeCostSnapshot["models"] = {};
+  if (modelUsage && typeof modelUsage === "object" && !Array.isArray(modelUsage)) {
+    for (const [model, raw] of Object.entries(modelUsage as Record<string, unknown>)) {
+      if (!raw || typeof raw !== "object") continue;
+      const u = raw as Record<string, unknown>;
+      models[model] = [count(u.inputTokens), count(u.cacheReadInputTokens), count(u.cacheCreationInputTokens), count(u.outputTokens)];
+    }
+  }
+  return { total, models };
+}
+
+/** The running total a resumed session already carried before this
+ * process's first turn. On --resume the CLI (2.1.282) restores the session's
+ * cost from an earlier state — not always the latest one this driver saw —
+ * so that turn's total_cost_usd and modelUsage include the earlier turns.
+ * The restored state is the earlier state that sits inside the new counts
+ * and leaves exactly this turn's own usage: in one model (usage leaves out
+ * side calls such as a Haiku title) or summed over all models (a turn split
+ * between two); nothing restored is 0. When no state fits exactly — the CLI
+ * saved work that never reported a result, like an interrupted turn — the
+ * latest state inside the new counts stands, so that work is booked once,
+ * with this turn. Either way the latest state wins, not the highest total:
+ * a resume that went back to an older state leaves later, lower totals. */
+export function restoredCostBase(
+  earlier: readonly ClaudeCostSnapshot[],
+  current: ClaudeCostSnapshot,
+  usage: { input: number; cacheRead: number; cacheWrite: number; output: number },
+): number {
+  const turn = [usage.input, usage.cacheRead, usage.cacheWrite, usage.output];
+  const nothing: ClaudeCostSnapshot = { total: 0, models: {} };
+  let exact: number | null = null;
+  let inside = 0;
+  // oldest first: the session's states in the order they were recorded
+  for (const state of [nothing, ...earlier]) {
+    const within = Object.entries(state.models).every(([model, counts]) =>
+      counts.every((n, i) => n <= (current.models[model]?.[i] ?? 0)));
+    if (!within) continue;
+    inside = state.total;
+    const growth = Object.entries(current.models).map(([model, counts]) =>
+      counts.map((n, i) => n - (state.models[model]?.[i] ?? 0)));
+    const isTurn = (counts: number[]) => counts.every((n, i) => n === turn[i]);
+    const summed = turn.map((_, i) => growth.reduce((sum, counts) => sum + counts[i]!, 0));
+    if (growth.some(isTurn) || isTurn(summed)) exact = state.total;
+  }
+  return exact ?? inside;
+}
+
+/** Each Claude session's latest cost states, so the first turn after a
+ * --resume can tell what the CLI restored — after an app restart too. Small
+ * by design: a few states for the most recent sessions. */
+const COST_HISTORY_FILE = join(DATA_DIR, "claude-cost-history.json");
+const COST_HISTORY_SESSIONS = 100;
+const COST_HISTORY_STATES = 8;
+
+function isCostSnapshot(value: unknown): value is ClaudeCostSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const { total, models } = value as { total?: unknown; models?: unknown };
+  return typeof total === "number" && !!models && typeof models === "object" &&
+    Object.values(models).every((counts) => Array.isArray(counts) && counts.length === 4 && counts.every((n) => typeof n === "number"));
+}
+
+function readCostHistory(): Record<string, ClaudeCostSnapshot[]> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(COST_HISTORY_FILE, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).map(([id, states]) => [id, Array.isArray(states) ? states.filter(isCostSnapshot) : []]));
+  } catch {
+    return {};
+  }
+}
+
+function recordCostState(sessionId: string, state: ClaudeCostSnapshot): void {
+  const history = readCostHistory();
+  const states = [...(history[sessionId] ?? []), state].slice(-COST_HISTORY_STATES);
+  // most recent session last, so the oldest ones are dropped first
+  delete history[sessionId];
+  history[sessionId] = states;
+  const ids = Object.keys(history);
+  for (const id of ids.slice(0, Math.max(0, ids.length - COST_HISTORY_SESSIONS))) delete history[id];
+  try {
+    writeFileAtomic(COST_HISTORY_FILE, JSON.stringify(history), { mode: 0o600 });
+  } catch {
+    // a lost state only means a later resume keeps its whole figure
+  }
 }
 
 type ClaudeImage = NonNullable<SendTurnInput["images"]>[number];
@@ -931,7 +1058,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     if (inheritsUserConfig(catalogEnv)) {
       console.error(`claude (${instanceId}): OMB_CLAUDE_INHERIT_USER_CONFIG=1 — bots inherit this machine's Claude Code MCP servers, skills, hooks and CLAUDE.md on every turn; remove it unless a bot needs a user-scope server`);
     }
-    let models = STATIC_CLAUDE_MODELS;
+    let models = config.managedModels ? { default: config.managedModels[0], options: config.managedModels.map(id => ({ id, label: id })) } : STATIC_CLAUDE_MODELS;
     const refreshModels = async () => {
       if (config.managed) return;
       try {
@@ -995,19 +1122,20 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
        * the truth — this is. null until init, or on a CLI that omits it. */
       nativePermissionMode: string | null;
       /** the running turn, or null between turns */
-      turn: { turnId: string; input: SendTurnInput; retryAbort: AbortController; settled: boolean; sawStreamDelta: boolean; authFailed?: boolean } | null;
+      turn: { turnId: string; input: SendTurnInput; retryAbort: AbortController; settled: boolean; sawStreamDelta: boolean; authFailed?: boolean; updateRequired?: boolean; stopRequested?: boolean } | null;
       idleTimer: ReturnType<typeof setTimeout> | null;
       closing: boolean;
       stderr: string;
+      /** The CLI's running total that the next turn's cost is measured from
+       * (see turnCostFromRunningTotal): what --resume restored until the
+       * first turn settles, then the last settled turn's total_cost_usd.
+       * undefined until the first result; null when the start is unknown. */
+      costTotal: number | null | undefined;
       /** Root close can precede a failed group stop; retry its finalization. */
       finishClose?: () => Promise<void>;
     }
     const sessions = new Map<string, Session>();
-    const configuredIdleMinimum = Number(process.env.OMB_CLAUDE_SESSION_IDLE_MIN_MS);
-    const sessionIdleMinimum = Number.isFinite(configuredIdleMinimum) && configuredIdleMinimum > 0
-      ? configuredIdleMinimum
-      : 10_000;
-    const SESSION_IDLE_MS = Math.max(sessionIdleMinimum, Number(process.env.OMB_CLAUDE_SESSION_IDLE_MS) || 10 * 60_000);
+    const { idleMs: SESSION_IDLE_MS } = sessionIdlePolicy("CLAUDE");
 
     const stopSession = (session: Session) => {
       void killCliTree(session.child).then((stopped) => {
@@ -1076,6 +1204,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     const retryState = new Map<string, { attempt: number; cancelled: boolean; rebuilt?: boolean }>();
 
     const sendTurn = async (turn: SendTurnInput, logicalTurnId?: string) => {
+      if (config.managedModels && (!turn.model || !config.managedModels.includes(turn.model))) throw new Error("This model is not assigned to this workspace.");
       if (config.managed && (!turn.model || turn.model.includes("::") || !config.configDir ||
           !input.environment.ANTHROPIC_API_KEY || !input.environment.ANTHROPIC_BASE_URL)) {
         throw new Error("Company model access is unavailable. Reconnect your organization; personal billing will not be used.");
@@ -1286,7 +1415,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       mcpServers.ogb = { command: process.execPath, args: [PERM_PROXY_PATH, socketPath], env: { ...NODE_ENV_FLAG }, alwaysLoad: true };
       allowed.push("mcp__ogb");
       // The MCP config carries credentials — a Composio consumer key in a
-      // header, the box token in the computer proxy's env, the comms token in
+      // header, the boat token in the computer proxy's env, the comms token in
       // the agents proxy's env. On argv every one of those is world-readable
       // through `ps` for the life of the turn, to any local process. The CLI
       // accepts a FILE for this flag, so the secrets go in a 0600 file that
@@ -1328,6 +1457,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // parallel bot work must use the harness's durable delegate_bot path.
       env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
       const cwd = turn.cwd ?? homedir();
+      const commandCwd = permissionLaunchCwd(cwd);
       // Everything that shapes the process, minus session/turn-specific temp
       // paths. Their contents are represented directly in the key instead.
       const privateFileFlags = new Set(["--mcp-config", "--settings"]);
@@ -1359,6 +1489,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         if (live.idleTimer) clearTimeout(live.idleTimer);
         live.turn = { turnId, input: turn, retryAbort, settled: false, sawStreamDelta: false };
         active.set(threadId, { stop: () => {
+          if (live.turn) live.turn.stopRequested = true;
           closeSession(threadId, "interrupted");
           retry.cancelled = true;
           retryAbort.abort();
@@ -1366,12 +1497,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         }, turnId, broker: live.broker });
         emit({ ...base(threadId, turnId), type: "turn.started" });
         const volatile = turn.systemVolatile ?? "";
-        const message = volatile === live.volatile
+        const message = volatile === live.volatile && !turn.mentionTurn
           ? promptMsg
           : claudeUserMessage(withVolatileNote(turn.text, volatile), turn.images);
         live.volatile = volatile;
+        const running = live.turn;
         const written = await writeUser(live, threadId, message);
-        if (!written) {
+        if (!written && !running?.stopRequested) {
           active.delete(threadId);
           live.turn = null;
           closeSession(threadId, "stdin write failed");
@@ -1448,6 +1580,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
                 requestType: ask.kind,
                 tool: ask.tool,
                 summary: askSummary(ask),
+                command: ask.kind === "permission" && ask.tool === "Bash"
+                  ? permissionCommand(ask.input.command, commandCwd) : undefined,
+                requiresExplicitApproval: ask.kind === "permission" && ask.tool === "Bash" && ask.input.dangerouslyDisableSandbox === true || undefined,
                 nativeReview,
                 // the proxy hands Claude its own suggested rules on `always`;
                 // host control stays one action at a time
@@ -1535,6 +1670,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         idleTimer: null,
         closing: false,
         stderr: "",
+        costTotal: undefined,
       };
       sessions.set(threadId, session);
 
@@ -1543,7 +1679,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const settle = (
         ok: boolean,
         stopReason: string | null,
-        cost: number | null = null,
+        total: number | null = null,
         usage?: { input: number; output: number; cachedInput?: number },
       ) => {
         const t = session.turn;
@@ -1569,10 +1705,31 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         // A settled turn owns no retry budget. Retained CLI sessions may run
         // many later turns on this thread, and each must start fresh.
         retryState.delete(threadId);
+        // Updating the executable cannot update code already loaded by this
+        // pooled child. Retire it before announcing completion so an explicit
+        // retry resumes on a fresh process; healthy sibling sessions stay warm.
+        if (stopReason === "update_required") closeSession(threadId, "update required");
+        // `total` is the CLI's running total for this process; the harness
+        // books turn.completed.cost as this turn's own spend
+        const cost = turnCostFromRunningTotal(total, session.costTotal ?? null);
+        if (total !== null) session.costTotal = total;
         emit({ ...base(threadId, t.turnId), type: "turn.completed", ok, stopReason, cost, ...(usage ? { usage } : {}) });
         if (session.child.exitCode === null && !session.closing) armIdle(threadId);
       };
       const currentTurnId = () => session.turn?.turnId ?? turnId;
+      // The process's first result with a cost says what --resume restored,
+      // which its turns are measured from; every result is kept for a later
+      // resume. A result without one (an API error) decides nothing yet.
+      const noteCostState = (total: unknown, modelUsage: unknown, usage: Parameters<typeof restoredCostBase>[2]) => {
+        const state = claudeCostSnapshot(total, modelUsage);
+        if (!state) return;
+        if (session.costTotal === undefined) {
+          session.costTotal = session.sessionId
+            ? restoredCostBase(readCostHistory()[session.sessionId] ?? [], state, usage)
+            : null;
+        }
+        if (session.sessionId) recordCostState(session.sessionId, state);
+      };
 
       const handleLine = (line: string) => {
         if (session.closing) return;
@@ -1620,6 +1777,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             if (claudeAuthFailure(o, text)) {
               if (session.turn) session.turn.authFailed = true;
               emit({ ...base(threadId, currentTurnId()), type: "runtime.error", message: text, setup: true });
+              break;
+            }
+            if (claudeVersionTooOld(o, text)) {
+              if (session.turn) session.turn.updateRequired = true;
+              emit({ ...base(threadId, currentTurnId()), type: "runtime.error", message: text, setup: true, claudeUpdate: true });
               break;
             }
             if (text.trim()) {
@@ -1677,14 +1839,26 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             // submitted user turn. Settling it would revoke browser access
             // and deny approvals while that user turn is still running.
             if (o.origin?.kind === "task-notification") break;
-            // result.usage is this invocation's total — one process per turn,
-            // so it is the turn's figure. cache reads count as input: they
-            // are billed (at the cache rate) and they fill the window — but
-            // they are reported separately too, so the UI can show how much
-            // of the figure was context re-read rather than new text.
+            // result.usage is this turn's own figure, "per-turn in
+            // streaming-input sessions" (2.1.282) even on a retained process.
+            // cache reads count as input: they are billed (at the cache rate)
+            // and they fill the window — but they are reported separately
+            // too, so the UI can show how much of the figure was context
+            // re-read rather than new text. total_cost_usd is instead the
+            // process's running total; settle() books this turn's share.
+            noteCostState(o.total_cost_usd, o.modelUsage, {
+              input: o.usage?.input_tokens || 0,
+              cacheRead: o.usage?.cache_read_input_tokens || 0,
+              cacheWrite: o.usage?.cache_creation_input_tokens || 0,
+              output: o.usage?.output_tokens || 0,
+            });
             settle(
               o.is_error !== true,
-              session.turn?.authFailed ? "auth_required" : o.stop_reason ?? o.terminal_reason ?? null,
+              session.turn?.authFailed
+                ? "auth_required"
+                : session.turn?.updateRequired
+                  ? "update_required"
+                  : o.stop_reason ?? o.terminal_reason ?? null,
               o.total_cost_usd ?? null,
               o.usage
                 ? {
@@ -1741,7 +1915,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         // a turn still running when the process died is a failed turn; a
         // process that exited between turns (idle close, contract change)
         // is just a session ending
-        if (session.turn && !session.turn.settled) {
+        if (session.turn?.stopRequested && !session.turn.settled) {
+          settle(false, "interrupted");
+        } else if (session.turn && !session.turn.settled) {
           // A retained process may be running a later user turn. Its close
           // handler must retry that request, not the process's first prompt.
           const { turnId, input: turn, retryAbort } = session.turn;
@@ -1919,6 +2095,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       });
 
       const stop = () => {
+        if (session.turn) session.turn.stopRequested = true;
         // taskkill is asynchronous on Windows. Retire steering and approvals
         // now, before a still-connected child can submit more work.
         closeSession(threadId, "interrupted");
@@ -1933,7 +2110,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // stdin stays OPEN: that is what keeps the session alive for a
       // mid-turn steer or the next turn; closeSession() ends it.
       if (!(await writeUser(session, threadId, promptMsg))) {
-        settle(false, "stdin_write_failed");
+        if (!session.turn?.stopRequested) settle(false, "stdin_write_failed");
         closeSession(threadId, "stdin write failed");
       }
 
@@ -1972,14 +2149,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
      * summaries can contain paths, commands, or secrets, so the generic
      * `claude -p "prompt"` shape is not safe for review. No tools or MCP
      * servers are mounted in this isolated process. */
-    const generateReview = (prompt: string, signal?: AbortSignal): Promise<string> =>
+    const generateReview = (prompt: string, signal?: AbortSignal, onUsage?: TextGenerationOptions["onUsage"]): Promise<string> =>
       new Promise((resolve, reject) => {
+        const model = config.managedModels?.[0] ?? "claude-haiku-4-5";
         const child = spawnCli(
           config.cli,
-          ["-p", "--model", "claude-haiku-4-5", "--output-format", "text"],
+          ["-p", "--model", model, "--output-format", onUsage ? "json" : "text"],
           {
             stdio: ["pipe", "pipe", "pipe"],
-            env: environment("claude-haiku-4-5"),
+            env: environment(model),
           },
         );
         let stdout = "";
@@ -2016,6 +2194,32 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         });
         child.on("error", (error) => finish(error));
         child.on("close", (code) => {
+          if (settled) return;
+          if (onUsage) {
+            try {
+              const result = JSON.parse(stdout);
+              if (!result || result.type !== "result") throw new Error("Claude text generation returned no result");
+              const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+              const cachedInput = count(result.usage?.cache_read_input_tokens);
+              const inputs = [count(result.usage?.input_tokens), cachedInput, count(result.usage?.cache_creation_input_tokens)]
+                .filter((value): value is number => value !== undefined);
+              const models = result.modelUsage && typeof result.modelUsage === "object" && !Array.isArray(result.modelUsage)
+                ? Object.keys(result.modelUsage) : [];
+              onUsage({
+                model: models.length === 1 ? models[0]! : models.find(candidate => candidate === model || candidate.startsWith(`${model}-`)) ?? model,
+                input: inputs.length ? inputs.reduce((sum, value) => sum + value, 0) : undefined,
+                output: count(result.usage?.output_tokens),
+                cachedInput,
+                costUsd: count(result.total_cost_usd),
+              });
+              if (result.is_error === true) throw new Error(typeof result.result === "string" && result.result.trim() ? result.result : stderr.trim() || "Claude text generation failed");
+              if (typeof result.result !== "string") throw new Error("Claude text generation returned no text");
+              stdout = result.result;
+            } catch (error) {
+              finish(error instanceof Error ? error : new Error(String(error)));
+              return;
+            }
+          }
           if (code === 0) finish();
           else finish(new Error(stderr.trim() || `Claude review exited ${code}`));
         });
@@ -2091,7 +2295,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           return () => listeners.delete(listener);
         },
       },
-      generateText: (prompt, options) => generateReview(prompt, options?.signal),
+      generateText: (prompt, options) => generateReview(prompt, options?.signal, options?.onUsage),
       reviewPermission: generateReview,
       dispose: async () => {
         try {

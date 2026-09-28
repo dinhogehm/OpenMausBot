@@ -4,18 +4,23 @@
 // Labels and keywords come from the catalog, so the rail and its search are
 // read in the active language; botSections() is called during render rather
 // than frozen at import so a locale switch is picked up.
+// "slack" is listed here but shown only when the server offers a link to the
+// organisation's Admin (BotSettingsDialog filters it out otherwise), and
+// "visibility" only to an admin in a browser (never in the desktop app).
 import {
   BookOpen,
   Brain,
   CalendarClock,
   Coins,
   Cpu,
+  Eye,
   History,
   LayoutDashboard,
   type LucideIcon,
   Mic,
   Network,
   ShieldCheck,
+  Slack,
   Sparkles,
   User,
 } from "lucide-react";
@@ -33,6 +38,7 @@ export type BotSectionEntry = {
 const SECTION_ICONS: Array<{ id: BotSettingsSection; icon: LucideIcon }> = [
   { id: "overview", icon: LayoutDashboard },
   { id: "identity", icon: User },
+  { id: "slack", icon: Slack },
   { id: "soul", icon: Sparkles },
   { id: "skills", icon: BookOpen },
   { id: "memory", icon: Brain },
@@ -41,6 +47,7 @@ const SECTION_ICONS: Array<{ id: BotSettingsSection; icon: LucideIcon }> = [
   { id: "model", icon: Cpu },
   { id: "permissions", icon: ShieldCheck },
   { id: "voice", icon: Mic },
+  { id: "visibility", icon: Eye },
   { id: "history", icon: History },
   { id: "usage", icon: Coins },
 ];

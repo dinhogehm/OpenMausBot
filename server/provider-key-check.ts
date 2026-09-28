@@ -5,13 +5,13 @@
 // The answer is a verdict and, on success, a few model ids; never the key,
 // never the raw response. Keys travel only over TLS, except to a loopback
 // test double.
-export type ProviderKeyKind = "anthropic" | "openaiCompat" | "openrouter" | "typesafe" | "xai";
+export type ProviderKeyKind = "anthropic" | "openaiCompat" | "openrouter" | "typesafe" | "xai" | "mistral";
 
 export type ProviderKeyVerdict =
   | { ok: true; check: "authentication" | "models"; models: string[] }
   | { ok: false; reason: "rejected" | "unreachable" | "unexpected"; status?: number };
 
-export const PROVIDER_KEY_KINDS: readonly ProviderKeyKind[] = ["anthropic", "openaiCompat", "openrouter", "typesafe", "xai"];
+export const PROVIDER_KEY_KINDS: readonly ProviderKeyKind[] = ["anthropic", "openaiCompat", "openrouter", "typesafe", "xai", "mistral"];
 
 const DEFAULT_URLS: Record<ProviderKeyKind, string> = {
   anthropic: "https://api.anthropic.com",
@@ -20,6 +20,7 @@ const DEFAULT_URLS: Record<ProviderKeyKind, string> = {
   // TypeSafe's /v1/models is account-scoped, so a 200 there proves the key.
   typesafe: "https://api.typesafe.ai/v1",
   xai: "https://api.x.ai/v1",
+  mistral: "https://api.mistral.ai/v1",
 };
 
 const MAX_MODELS = 5;
@@ -38,7 +39,7 @@ export function providerModelsUrl(provider: ProviderKeyKind, base?: string | nul
 
 function modelIds(body: unknown): string[] {
   const record = body && typeof body === "object" ? (body as { data?: unknown; models?: unknown }) : null;
-  const list = Array.isArray(record?.data) ? record.data : Array.isArray(record?.models) ? record.models : [];
+  const list = Array.isArray(body) ? body : Array.isArray(record?.data) ? record.data : Array.isArray(record?.models) ? record.models : [];
   const ids: string[] = [];
   for (const entry of list) {
     const item = entry && typeof entry === "object" ? (entry as { id?: unknown; name?: unknown }) : null;

@@ -105,11 +105,15 @@ entry:
   instances can hold different keys without colliding.
 - The driver lists the endpoint's `/models` when it can and keeps your
   `model` as a custom option either way.
-- Tool calls work through the standard OpenAI `tools` field, so bots on these
-  instances can use connected apps and custom MCP servers when the model
-  behind the endpoint supports function calling. Set `"tools": false` in
-  `config` for a model or server that rejects the field — the instance then
-  runs text-only (chat text + reasoning streams).
+- OpenAI-compatible instances support structured tools and image input. With a
+  model that accepts both, the harness can mount the approved host, Local VM,
+  VPS, Boat cloud or built-in browser tools and return their screenshots to the model.
+  The existing platform, computer-selection and approval checks still apply.
+  Boat turns retain the selected API model in direct chats, rooms and cloud
+  routines. Other drivers continue to use the native Boat runner.
+- Set `config.tools` to `false` for a model without tool support. Image support
+  also depends on the chosen model; the driver cannot add vision to a text-only
+  model. See [tool verification](verification/openai-tools.md) for scope and tests.
 
 ## Notes
 

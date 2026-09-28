@@ -373,12 +373,15 @@ describe("coordinate_bots on a teammate", () => {
       }
       const before = await botState(qa.id);
       expect(before.threadId).toBe(qa.threadId);
-      for (const thread of opened) {
-        expect(thread.status).toBe("queued");
+      for (const [index, thread] of opened.entries()) {
+        expect(index < capacity ? ["queued", "running"] : ["queued"]).toContain(thread.status);
         expect(before.tasks.find((task: any) => task.threadId === thread.threadId)).toMatchObject({
           openedBy: { botId: pm.id, name: "Pam" },
         });
-        expect(dumpOf(thread.threadId)).toBeUndefined();
+        // A thread within capacity can be dispatched at any moment after its
+        // handoff is accepted; only threads beyond it are guaranteed to stay
+        // queued — and so without a dump — while the source turn is held.
+        if (index >= capacity) expect(dumpOf(thread.threadId)).toBeUndefined();
       }
       const chips = (await messages(pm.threadId)).filter((message) => message.threadRef);
       expect(chips.map((chip) => [chip.tool.name, chip.threadRef.botId, chip.threadRef.threadId])).toEqual(
@@ -404,7 +407,12 @@ describe("coordinate_bots on a teammate", () => {
       await expect.poll(async () => (await messages(pm.threadId)).filter(
         (message) => message.from?.botId === qa.id && message.roomRequest?.phase === "result",
       ).length, { timeout: 20_000 }).toBe(3);
-      await expect.poll(async () => (await botState(pm.id)).busy, { timeout: 15_000 }).toBe(false);
+      // A source waiting on teammates is idle, not busy (#1610). Settled
+      // means the resumed review turn itself has ended.
+      await expect.poll(async () => {
+        const state = await botState(pm.id);
+        return state?.busy === false && state.waitingForTeammates !== true;
+      }, { timeout: 15_000 }).toBe(true);
       expect(promptsOf(pm.threadId).at(-1)?.message.content).toContain("Your downstream room requests have settled");
       expect(stream.frames.filter((frame) => frame.kind === "notify" && frame.notification?.botId === qa.id)).toEqual([]);
       expect((await botState(qa.id)).tasks.filter((task: any) => task.unread)).toEqual([]);
@@ -475,16 +483,31 @@ describe("coordinate_bots on a teammate", () => {
     const qa = await createBot("Quinn", "gated");
     try {
       const originalConversation = await messages(qa.threadId);
+      // An accepted handoff dispatches at once. Hold Quinn's only thread
+      // slot so the destination is still queued when it is deleted.
+      expect((await api("PUT", "/api/config", { threads: { maxConcurrentPerBot: 1 } })).status).toBe(200);
+      const hold = (await api("POST", `/api/bots/${qa.id}/tasks`, { title: "Hold the slot" })).body.task;
+      rmSync(join(gates, `${hold.threadId}.gate`), { force: true });
+      rmSync(join(gates, `${hold.threadId}.json`), { force: true });
+      expect((await api("POST", `/api/bots/${qa.id}/messages`, { text: "Hold the slot.", threadId: hold.threadId })).status).toBe(202);
+      await expect.poll(async () => (await taskOf(qa.id, hold.threadId))?.busy, { timeout: 15_000 }).toBe(true);
       const token = await heldTurn(pm, "Hand it to QA.");
       const opened = await coordinated(token, qa.id, "Test it.", "deleted");
       expect((await api("DELETE", `/api/bots/${qa.id}/tasks/${opened.threadId}`)).status).toBe(200);
       release(pm.threadId);
       await expect.poll(() => handoffs().find(node => node.id === opened.id)?.status, { timeout: 15_000 }).toBe("cancelled");
-      await expect.poll(async () => (await botState(pm.id)).busy, { timeout: 15_000 }).toBe(false);
+      // The cancelled report resumes Pam; wait for that review turn too.
+      await expect.poll(async () => {
+        const state = await botState(pm.id);
+        return state?.busy === false && state.waitingForTeammates !== true;
+      }, { timeout: 15_000 }).toBe(true);
       expect((await messages(pm.threadId)).some(message => message.roomRequest?.id === opened.id && message.roomRequest.phase === "result" && message.tool?.ok === false)).toBe(true);
+      release(hold.threadId);
+      await expect.poll(async () => (await taskOf(qa.id, hold.threadId))?.busy, { timeout: 15_000 }).toBe(false);
       expect(await messages(qa.threadId)).toEqual(originalConversation);
     } finally {
       await cleanup([pm.id, qa.id]);
+      expect((await api("PUT", "/api/config", { threads: { maxConcurrentPerBot: 2 } })).status).toBe(200);
     }
   }, 60_000);
 

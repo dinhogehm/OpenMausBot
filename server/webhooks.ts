@@ -107,7 +107,12 @@ const MAX_ATTEMPTS = 2_000;
 const MAX_EVENT_CHARS = 48_000;
 const RATE_WINDOW_MS = 60_000;
 const RATE_LIMIT = 10;
-const MAX_PENDING_RUNS = 3;
+/** Unfinished (queued, running or waiting) runs one webhook may hold before
+ * new deliveries are refused with 429. A webhook can set its own limit; one
+ * fanning out a project manager's events needs more than a CI hook does. */
+export const DEFAULT_MAX_PENDING_RUNS = 3;
+export const MAX_PENDING_RUNS_LIMIT = 50;
+const maxPendingRunsSchema = z.number().int().min(1).max(MAX_PENDING_RUNS_LIMIT);
 
 const runOnSchema = z.enum(["maus", "cloud"]);
 const deliverySchema = z.enum(["run", "post"]);
@@ -136,6 +141,8 @@ const triggerFieldsSchema = z.object({
   enabled: z.boolean().optional(),
   verificationPending: z.boolean().optional(),
   eventTypes: eventTypesSchema,
+  /** `null` goes back to the default. */
+  maxPendingRuns: maxPendingRunsSchema.nullable().optional(),
 });
 const triggerInputSchema = triggerFieldsSchema.superRefine((value, ctx) => {
   const named = namedTargets(value);
@@ -172,6 +179,9 @@ const storedWebhookSchema = z.object({
   verifiedAt: z.number().finite().nonnegative().optional(),
   verificationSample: verificationSampleSchema.optional(),
   eventTypes: eventTypesSchema,
+  // A hand-edited value out of range falls back to the default instead of
+  // making the whole webhooks file unreadable.
+  maxPendingRuns: maxPendingRunsSchema.optional().catch(undefined),
   secretHash: z.string().regex(/^[a-f0-9]{64}$/),
 }).refine(
   (value) => (value.botId === undefined) !== (value.workflowId === undefined),
@@ -283,6 +293,7 @@ function cleanInput(input: WebhookTriggerInput): CleanWebhookInput {
   else clean.botId = botId;
   if (eventTypes.length) clean.eventTypes = eventTypes;
   if (input.delivery) clean.delivery = input.delivery;
+  if (typeof input.maxPendingRuns === "number") clean.maxPendingRuns = input.maxPendingRuns;
   return clean;
 }
 
@@ -450,6 +461,7 @@ export class WebhookManager {
       enabled: patch.enabled ?? trigger.enabled,
       verificationPending: patch.verificationPending ?? trigger.verificationPending,
       eventTypes: patch.eventTypes ?? trigger.eventTypes,
+      maxPendingRuns: patch.maxPendingRuns === undefined ? trigger.maxPendingRuns : patch.maxPendingRuns,
     });
     // Only a patch that names a target re-checks it: pausing or renaming a
     // webhook whose MAUS or workflow was deleted must stay possible. Turning
@@ -460,6 +472,7 @@ export class WebhookManager {
     if (clean.botId === undefined) delete trigger.botId;
     if (clean.workflowId === undefined) delete trigger.workflowId;
     if (!clean.eventTypes?.length) delete trigger.eventTypes;
+    if (clean.maxPendingRuns === undefined) delete trigger.maxPendingRuns;
     if (patch.enabled === false) {
       this.options.cancelQueued?.(trigger.id, "The webhook was paused before this delivery started");
     }
@@ -617,8 +630,11 @@ export class WebhookManager {
 
     // A sender retrying an already-accepted delivery must remain idempotent
     // even while this webhook's queue is full. Only new work consumes a slot.
-    if ((this.options.pendingRuns?.(trigger.id) ?? 0) >= MAX_PENDING_RUNS) {
-      fail(429, "This webhook already has too many unfinished tasks");
+    const maxPendingRuns = trigger.maxPendingRuns ?? DEFAULT_MAX_PENDING_RUNS;
+    const pendingRuns = this.options.pendingRuns?.(trigger.id) ?? 0;
+    if (pendingRuns >= maxPendingRuns) {
+      fail(429, `This webhook already has ${pendingRuns} unfinished ${pendingRuns === 1 ? "task" : "tasks"} (its limit is ${maxPendingRuns}). `
+        + "Retry after one finishes, or raise \"Unfinished tasks at once\" in the webhook's settings.");
     }
 
     const recent = (this.rate.get(trigger.endpointId) ?? []).filter((at) => now - at < RATE_WINDOW_MS);

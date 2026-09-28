@@ -74,6 +74,8 @@ it("compacts durably, keeps corrections and starts a fresh native session withou
   await f.send("OLDER_REQUEST use port 9000");
   await f.send("CORRECTION use port 9001 instead; cancel the earlier request");
   const before = await f.messages();
+  const previousRequest = before.findLast(message => message.role === "user");
+  expect(previousRequest.requestPending).toBe(false);
   const oldSession = f.task().resumeCursors.claude;
   const turnsBefore = f.turns().length;
   const sibling = (await f.cli("new-bot", "--name", "Separate context")).bot;
@@ -82,7 +84,10 @@ it("compacts durably, keeps corrections and starts a fresh native session withou
   await f.idle();
   const after = await f.messages();
   const record = after.at(-1);
-  expect(after.slice(0, before.length)).toEqual(before);
+  // The unbound maintenance turn invalidates the previous completion fence;
+  // every saved message otherwise remains byte-for-byte equivalent on the wire.
+  expect(after.slice(0, before.length)).toEqual(before.map(message =>
+    message.id === previousRequest.id ? { ...message, requestPending: true } : message));
   expect(record.kind).toBe("compaction");
   expect(record.compaction.summary).toContain("CORRECTION");
   expect(Buffer.byteLength(record.compaction.summary)).toBeLessThanOrEqual(6_000);
@@ -132,6 +137,8 @@ it("automatically folds old exchanges while keeping the two latest and the incom
 it("Stop cancels a stalled summary without writing a late record or starting an agent", () => fixture(async f => {
   await f.send("Keep this original chat intact");
   const before = await f.messages();
+  const previousRequest = before.findLast(message => message.role === "user");
+  expect(previousRequest.requestPending).toBe(false);
   const count = f.turns().length;
   await f.compact();
   await expect.poll(() => {
@@ -142,7 +149,10 @@ it("Stop cancels a stalled summary without writing a late record or starting an 
   await f.cli("interrupt", "--bot", f.bot.id, "--task", f.thread);
   await f.idle();
   expect((await f.messages()).filter(m => m.kind === "compaction")).toHaveLength(0);
-  expect((await f.messages()).slice(0, before.length)).toEqual(before);
+  // Stopping the summary must not restore an earlier completion fence or
+  // change the conversation beyond the maintenance turn's pending marker.
+  expect((await f.messages()).slice(0, before.length)).toEqual(before.map(message =>
+    message.id === previousRequest.id ? { ...message, requestPending: true } : message));
   expect(f.turns()).toHaveLength(count);
   await f.send("Continue without a summary");
   expect(f.turns()).toHaveLength(count + 1);

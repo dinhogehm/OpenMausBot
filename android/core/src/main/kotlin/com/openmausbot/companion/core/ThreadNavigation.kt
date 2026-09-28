@@ -29,13 +29,22 @@ fun BotTask.demandsAttention(queued: Boolean = false): Boolean =
     isWaitingOnTeammate || isWorking || busy == true || unread == true || queued ||
         activity in setOf("waiting-on-you", "waiting", "queued")
 
+/** The soonest still-future timed snooze in a list, or null when nothing is
+ * scheduled to wake: the 0 sentinel sleeps until activity and never ticks,
+ * and a timestamp already in the past has nothing left to wait for
+ * (`nextSnoozeExpiry` in `SidebarThreadRow.tsx`). */
+fun nextSnoozeExpiry(tasks: List<BotTask>, now: Long = System.currentTimeMillis()): Long? =
+    tasks.asSequence()
+        .mapNotNull { it.snoozedUntil }
+        .filter { it > 0 && it > now }
+        .minOrNull()
+        ?.toLong()
+
 /**
- * Attention outranks recency within a bot: waiting-on-you needs the person
- * most, then working/busy, then queued, then unread. A held send is client
- * state, so it ranks in the queued tier the way the wire value does. The
- * thread being looked at rides just above the idle tail; idle threads keep
- * stored order. Mirrors the desktop's orderedSidebarThreads so the tree, the
- * sheet, and the pickers agree on one order.
+ * Attention rank for [orderedThreads]. The thread list does not use it:
+ * the tree, the sheet, and the pickers use [listedThreads]. The inbox ranks
+ * its own entries. waiting-on-you, then working/busy, then queued, then
+ * unread, then the open thread, then idle. Equal ranks keep stored order.
  */
 fun attentionRank(task: BotTask, activeThreadId: String, queued: Boolean = false): Int = when {
     task.activity == "waiting-on-you" -> 0
@@ -45,6 +54,16 @@ fun attentionRank(task: BotTask, activeThreadId: String, queued: Boolean = false
     task.threadId == activeThreadId -> 4
     else -> 5
 }
+
+/** Pin, then newest update. Equal stamps keep the caller's order. Attention
+ * does not move a row. [orderedThreads] still ranks by attention, and no
+ * screen calls it. */
+fun listedThreads(tasks: List<BotTask>): List<BotTask> =
+    tasks.withIndex().sortedWith(
+        compareByDescending<IndexedValue<BotTask>> { it.value.pinned == true }
+            .thenByDescending { it.value.listStamp }
+            .thenBy { it.index },
+    ).map { it.value }
 
 /** Order, never filter: whatever the caller passes stays visible, only the
  * position changes. Sorting is stable, so equal ranks keep stored order. */
@@ -60,13 +79,16 @@ val Bot.visibleTasks: List<BotTask>
     get() = tasks.orEmpty().filter { it.routineRunId == null }
 
 /**
- * Preserve saved folder order; attention floats threads within each group.
+ * Preserve saved folder order. Threads inside a folder follow pin, then
+ * newest update ([listedThreads]); attention does not reorder this list.
  * A missing folder leaves its threads unfiled. Search includes closed threads
- * and matches folder names, and keeps relevance (stored) order.
+ * and matches folder names. Those rows use the same pin-then-update order;
+ * they are not the default list's row set.
  */
 fun Bot.threadGroups(
     matching: String = "",
     includingClosed: Boolean = false,
+    now: Long = System.currentTimeMillis(),
     /** Threads holding a queued send. A closed thread with a held send stays
      * in the list the way a running one does (Sidebar.tsx 865). */
     queuedThreadIds: Set<String> = emptySet(),
@@ -80,16 +102,19 @@ fun Bot.threadGroups(
             approvalMode = approvalMode, autoApprove = autoApprove, alwaysAllow = alwaysAllow,
         ))
         includingClosed || search.isNotEmpty() -> visibleTasks
-        // Closed and archived threads fold away with the same override: one
-        // that starts working, waits on the person, turns unread, or is
-        // holding a queued send is back.
+        // Closed, archived, and snoozed threads fold away with the same
+        // override: one that starts working, waits on the person, or turns
+        // unread is back; a snooze's sentinel sleeps only until activity and
+        // its clock only while it still runs (`visibleSidebarThreads` in
+        // `SidebarThreadRow.tsx`). A held queued send also brings it back.
         else -> visibleTasks.filter {
-            (!it.isClosed && !it.isArchived) ||
+            it.pinned == true ||
+                (!it.isClosed && !it.isArchived && !it.isSnoozed(now)) ||
                 it.demandsAttention(queued = queuedThreadIds.contains(it.threadId)) ||
                 it.threadId == threadId
         }
     }
-    val ordered = if (search.isEmpty()) orderedThreads(threads, threadId, queuedThreadIds) else threads
+    val ordered = listedThreads(threads)
     val projectIds = mutableSetOf<String>()
     val groups = buildList {
         projects.orEmpty().forEach { project ->

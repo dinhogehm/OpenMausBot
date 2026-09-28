@@ -16,15 +16,19 @@ import { Crown } from "lucide-react";
 
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
+import { useOwnerOrAdmin } from "@/lib/use-owner-or-admin";
 import { useStore, type Bot } from "@/state/store";
 import type { ApprovalMode } from "../../../shared/approval-mode";
 import { ApprovalModeSelector } from "../ApprovalModeSelector";
+import { CommandAllowlistDialog } from "../CommandAllowlistDialog";
 import { BotCapabilitiesCard } from "../BotCapabilitiesCard";
 import { FullAccessWarning } from "../FullAccessWarning";
 import { LocalComputerAutoWarning } from "../LocalComputerAutoWarning";
 import { Switch } from "../SettingsPrimitives";
 import { ManagedTeamsSettings } from "./ManagedTeamsSettings";
+import { ProposalStatus } from "./ProposalStatus";
 import type { useBotSettingsDerived } from "./useBotSettingsDerived";
+import { useBotEditor } from "./BotEditorContext";
 
 export function PermissionsSection({
   bot,
@@ -35,11 +39,16 @@ export function PermissionsSection({
 }) {
   const { patch, engine, canCoordinate, canAutoReview, approvalMode, trustedModesAvailable, sectionName, currentChief } = derived;
   const { state, dispatch } = useStore();
+  const ownerOrAdmin = useOwnerOrAdmin();
+  const { draft } = useBotEditor();
   const [localAutoWarning, setLocalAutoWarning] = useState<string | null>(null);
   const [fullAccessTarget, setFullAccessTarget] = useState<string | null>(null);
+  const [allThreads, setAllThreads] = useState(true);
+  const [commandAllowlistTarget, setCommandAllowlistTarget] = useState<{ botId: string; botName: string } | null>(null);
   const setApprovalMode = (mode: ApprovalMode) => {
     if (bot.busy || mode === approvalMode) return;
     if (mode === "full") {
+      setAllThreads(true);
       setFullAccessTarget(bot.id);
       return;
     }
@@ -91,6 +100,7 @@ export function PermissionsSection({
                   ? t("botPerms.chiefHandover", { team: sectionName, current: currentChief.name })
                   : t("botPerms.chiefMake", { team: sectionName })}
         </div>
+        <ProposalStatus bot={bot} kind="chief" />
         {bot.chiefOfStaff && <ManagedTeamsSettings
           key={bot.id + JSON.stringify(bot.managedSections ?? [])}
           name={bot.name} ownTeam={bot.section?.trim() || ""}
@@ -98,6 +108,7 @@ export function PermissionsSection({
           allowed={bot.managedSections ?? []}
           onSave={managedSections => patch({ managedSections, acknowledgePeerScope: true })}
         />}
+        {bot.chiefOfStaff && <ProposalStatus bot={bot} kind="owner" />}
       </div>
 
       <div className="flex items-center justify-between gap-4 rounded-xl bg-card p-4">
@@ -108,6 +119,7 @@ export function PermissionsSection({
               ? t("botPerms.askPeersOn")
               : t("botPerms.askPeersOff")}
           </div>
+          <ProposalStatus bot={bot} kind="owner" />
         </div>
         <Switch
           checked={Boolean(bot.approvePeerComms)}
@@ -124,8 +136,9 @@ export function PermissionsSection({
       <div className="rounded-xl bg-card p-4">
         <div className="text-[15px] font-medium text-ink">{t("botPerms.approvalLevel")}</div>
         <div className="mt-0.5 text-[13px] text-ink-secondary">
-          {t("botPerms.approvalLevelHint")}
+          {t(draft ? "botPerms.approvalLevelHintDraft" : "botPerms.approvalLevelHint")}
         </div>
+        <ProposalStatus bot={bot} kind="owner" />
         <div className="mt-3">
           <ApprovalModeSelector
             approvalMode={bot.approvalMode}
@@ -137,8 +150,19 @@ export function PermissionsSection({
             wide
             disabled={Boolean(bot.busy)}
             trustedModesAvailable={trustedModesAvailable}
+            onManageCommandAllowlist={!draft && ownerOrAdmin === true ? () => setCommandAllowlistTarget({ botId: bot.id, botName: bot.name }) : undefined}
           />
         </div>
+        {!draft && approvalMode === "full" && trustedModesAvailable && <button
+          type="button" disabled={Boolean(bot.busy)}
+          className="mt-3 text-[13px] text-accent hover:underline disabled:opacity-40"
+          onClick={() => { setAllThreads(true); setFullAccessTarget(bot.id); }}
+        >Apply Full access to all threads</button>}
+        {!draft && ownerOrAdmin === true && <button
+          type="button"
+          className="mt-3 block text-[13px] text-accent hover:underline"
+          onClick={() => setCommandAllowlistTarget({ botId: bot.id, botName: bot.name })}
+        >{t("commandAllowlist.manage")}</button>}
       </div>
 
       {!(engine?.driverKind === "antigravityAgent" && approvalMode === "full") && <div className="rounded-xl bg-card p-4">
@@ -186,6 +210,11 @@ export function PermissionsSection({
         </div>
       </div>}
 
+      {commandAllowlistTarget && <CommandAllowlistDialog
+        key={commandAllowlistTarget.botId}
+        {...commandAllowlistTarget}
+        onClose={() => setCommandAllowlistTarget(null)}
+      />}
       <LocalComputerAutoWarning
         open={localAutoWarning !== null}
         onCancel={() => setLocalAutoWarning(null)}
@@ -198,12 +227,14 @@ export function PermissionsSection({
       />
       <FullAccessWarning
         open={fullAccessTarget !== null}
+        allThreads={allThreads}
+        onAllThreadsChange={draft ? undefined : setAllThreads}
         onCancel={() => setFullAccessTarget(null)}
         onConfirm={() => {
           const target = fullAccessTarget;
           setFullAccessTarget(null);
           if (!target) return;
-          dispatch({ type: "updateBot", botId: target, patch: { approvalMode: "full", confirmFullAccess: true } });
+          dispatch({ type: "updateBot", botId: target, patch: { approvalMode: "full", confirmFullAccess: true, applyToAllThreads: allThreads } });
         }}
       />
     </div>

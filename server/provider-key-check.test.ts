@@ -51,6 +51,7 @@ describe("provider key check", () => {
     expect(providerModelsUrl("xai", "")).toBe("https://api.x.ai/v1/models");
     expect(providerModelsUrl("openrouter")).toBe("https://openrouter.ai/api/v1/models");
     expect(providerModelsUrl("typesafe")).toBe("https://api.typesafe.ai/v1/models");
+    expect(providerModelsUrl("mistral")).toBe("https://api.mistral.ai/v1/models");
   });
 
   it("authenticates the dedicated OpenRouter engine at /key and TypeSafe at its account-scoped models list", async () => {
@@ -93,6 +94,14 @@ describe("provider key check", () => {
     expect(openai.ok).toBe(true);
     expect(seen[1]).toMatchObject({ path: "/v1/models", headers: { authorization: "Bearer good-key" } });
     expect(seen[1]!.headers["x-api-key"]).toBeUndefined();
+  });
+
+  it.each(["array", "data", "models"])("accepts %s model catalogs with the same bounded id filtering", async shape => {
+    const models = [{ id: "large" }, null, { name: "small" }, { id: 7 }, { id: "x".repeat(121) },
+      { id: "three" }, { id: "four" }, { id: "five" }, { id: "six" }];
+    const provider: typeof fetch = async () => Response.json(shape === "array" ? models : { [shape]: models });
+    expect(await checkProviderKey({ provider: "mistral", key: "fixture" }, provider))
+      .toEqual({ ok: true, check: "models", models: ["large", "small", "three", "four", "five"] });
   });
 
   it("tells a rejected key from a broken provider and from an unreachable one", async () => {

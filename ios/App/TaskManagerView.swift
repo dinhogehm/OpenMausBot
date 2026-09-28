@@ -33,7 +33,7 @@ struct TaskManagerView: View {
         switch current {
         case let .bot(bot):
             return bot.threadGroups(includingClosed: true, queuedThreadIds: session.state.queuedThreadIds).flatMap(\.tasks)
-        case let .room(room): return room.tasks ?? []
+        case let .room(room): return threadsInListOrder(room.tasks ?? [])
         }
     }
 
@@ -134,7 +134,7 @@ struct TaskManagerView: View {
                 }
             }
         }
-        .onChange(of: tasks.map(\.threadId)) { _, liveIDs in
+        .onValueChange(of: tasks.map(\.threadId)) { liveIDs in
             selectedThreadIDs.formIntersection(liveIDs)
         }
         .interactiveDismissDisabled(isMutating)
@@ -209,13 +209,13 @@ struct TaskManagerView: View {
             let groups = bot.threadGroups(matching: search, includingClosed: true)
             let archived = searching ? [] : bot.threadGroups(includingClosed: true)
                 .flatMap(\.tasks)
-                .filter { $0.isArchived && !$0.demandsAttention() && $0.threadId != bot.threadId }
+                .filter { $0.isArchived && $0.pinned != true && !$0.demandsAttention() && $0.threadId != bot.threadId }
             if groups.isEmpty {
                 emptySearch
             } else {
                 ForEach(groups) { group in
                     let rows = searching ? group.tasks : group.tasks.filter {
-                        !$0.isArchived || $0.demandsAttention() || $0.threadId == bot.threadId
+                        $0.pinned == true || !$0.isArchived || $0.demandsAttention() || $0.threadId == bot.threadId
                     }
                     if !rows.isEmpty {
                         Section {
@@ -272,7 +272,7 @@ struct TaskManagerView: View {
     }
 
     private var emptySearch: some View {
-        ContentUnavailableView.search(text: search)
+        EmptyStateView<EmptyView>.search(text: search)
     }
 
     @ViewBuilder private func threadButton(_ task: BotTask) -> some View {
@@ -311,7 +311,34 @@ struct TaskManagerView: View {
             .contextMenu {
                 Button("Rename", systemImage: "pencil") { beginRename(task) }
                     .disabled(isMutating)
+                Button {
+                    togglePin(task)
+                } label: {
+                    Label(task.pinned == true ? "Unpin" : "Pin", systemImage: task.pinned == true ? "pin.slash" : "pin")
+                }
+                .disabled(isMutating)
                 if current.isBot {
+                    Menu {
+                        Button("Until new activity") { perform { await snooze(task, until: 0) } }
+                            .disabled(taskIsWorking(task))
+                        Button("Until 6 PM") {
+                            perform { await snooze(task, until: ThreadSnoozePreset.tonight()) }
+                        }
+                        .disabled(taskIsWorking(task))
+                        Button("Until 9 AM tomorrow") {
+                            perform { await snooze(task, until: ThreadSnoozePreset.tomorrowMorning()) }
+                        }
+                        .disabled(taskIsWorking(task))
+                    } label: {
+                        Label("Snooze", systemImage: "moon.zzz")
+                    }
+                    .disabled(isMutating || taskIsWorking(task))
+                    if task.isSnoozed() {
+                        Button("Stop snoozing", systemImage: "bell") {
+                            perform { await snooze(task, until: nil) }
+                        }
+                        .disabled(isMutating)
+                    }
                     Button {
                         toggleArchive(task)
                     } label: {
@@ -330,6 +357,13 @@ struct TaskManagerView: View {
                     Label("Delete", systemImage: "trash")
                 }
                 .disabled(!canDelete(task))
+                Button {
+                    togglePin(task)
+                } label: {
+                    Label(task.pinned == true ? "Unpin" : "Pin", systemImage: task.pinned == true ? "pin.slash" : "pin")
+                }
+                .tint(.indigo)
+                .disabled(isMutating)
                 if current.isBot {
                     Button {
                         toggleArchive(task)
@@ -359,6 +393,13 @@ struct TaskManagerView: View {
         !isMutating && tasks.count > 1 && (current.isBot ? !task.isWorking : !current.busy)
     }
 
+    /// The desktop disables thread actions while a reply is in flight; the
+    /// wire can carry the flag or the activity alone. Stop-snoozing stays
+    /// available, exactly as there.
+    private func taskIsWorking(_ task: BotTask) -> Bool {
+        task.busy == true || task.activity == "working"
+    }
+
     private func beginRename(_ task: BotTask) {
         title = task.title
         taskToRename = task
@@ -370,6 +411,17 @@ struct TaskManagerView: View {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         perform { await rename(task, title: trimmed) }
+    }
+
+    private func togglePin(_ task: BotTask) {
+        perform { await setPinned(task, pinned: task.pinned != true) }
+    }
+
+    private func setPinned(_ task: BotTask, pinned: Bool) async {
+        guard await session.setTaskPinned(task, pinned: pinned, in: current) else {
+            showError("Couldn't update the thread. Try again.")
+            return
+        }
     }
 
     private func toggleArchive(_ task: BotTask) {
@@ -456,6 +508,14 @@ struct TaskManagerView: View {
         }
         taskToRename = nil
         renameFocused = false
+    }
+
+    private func snooze(_ task: BotTask, until snoozedUntil: Double?) async {
+        guard case let .bot(bot) = current else { return }
+        guard await session.snoozeTask(task, for: bot, snoozedUntil: snoozedUntil) else {
+            showError("Couldn't change the snooze. Try again.")
+            return
+        }
     }
 
     private func delete(_ task: BotTask) async {

@@ -1,5 +1,26 @@
 # In-chat team coordination
 
+Independent bot conversations now dispatch as soon as a handoff is accepted;
+speakers in the same group chat still serialize. A Chief waiting for returned
+results exposes `waitingForTeammates: true`, not a fake active `busy` turn.
+The chat header shows **Teammates working**, leaves the composer usable and
+retains Stop. Explicit command-line `wait` still waits for the whole result.
+Accepted handoffs survive a failed source provider turn; explicit Stop,
+deleted conversations and revoked routes keep their existing cancellation
+behavior. This does not add restart replay or remove task capacity limits.
+
+Regression checks (all use disposable fixtures):
+
+```sh
+pnpm exec vitest run server/room-handoffs.test.ts server/direct-coordination.e2e.test.ts server/room-coordination.e2e.test.ts
+OMB_UI_E2E=1 pnpm exec vitest run scripts/testing/direct-coordination-ui.e2e.test.ts
+```
+
+Gated fake-model turns prove a teammate starts before the Chief settles,
+the Chief becomes available while results are pending, failure of the source
+does not discard accepted work, and exactly one final answer returns to the
+original thread. These tests verify orchestration, not live-model planning.
+
 In an ordinary bot chat or group conversation, ask the lead to consult named
 teammates or have them build and review a concrete artifact. No new dashboard,
 incoming-route panel or mandatory discussion. The existing **Finish together** goal loop
@@ -11,6 +32,11 @@ reachable bots as well as rooms. The latter addresses 1–4 existing bots in thi
 room (default), or — in ordinary direct chat without a room — the sender's one
 standing conversation with each recipient. A Chief can reach additional teams only
 after the owner grants that access in [team settings](team-access.md).
+A multi-recipient room request posts its brief once, addressed to all accepted
+recipients. Each recipient still has a separate execution and result. An
+identical retry does not post again; different briefs remain separate. Requests
+in direct conversations keep their individual messages.
+
 Recipients run sequentially per room, with their own models, permissions and
 working environments. Busy recipients queue. Once all requested results arrive,
 the sender resumes in the original conversation. A lead can consult its own
@@ -68,6 +94,31 @@ waiting does not hold a provider session or block another independent
 conversation.
 
 ## Repeatable checks
+
+### Rooms containing a supervising Chief
+
+A section bot can list and post to its room when an out-of-section Chief in
+that room has an owner-reviewed `managedSections` grant for the bot's section.
+This includes a Chief in General (no section). In that same conversation,
+`list_room_targets` advertises the Chief and section peers, and `coordinate_bots`
+can address them by ID. The exception does not grant direct-chat access or
+access to the Chief in another room. Other cross-section members, unmanaged
+Chiefs, and peer restrictions still block work. Revoking supervision before
+queued work starts prevents dispatch.
+
+```sh
+pnpm exec vitest run server/peer-roster.test.ts server/post-to-room.test.ts server/room-coordination.e2e.test.ts server/direct-coordination.e2e.test.ts server/room-handoffs.test.ts server/peer-allowlist.e2e.test.ts
+```
+
+The coordination suites use `launchVerificationServer`, `control-omb`, and the
+actual agents MCP proxy with a scripted provider and disposable HOME/data.
+They assert discovered targets, accepted or refused tool calls, durable
+handoff state, the destination conversation, and absence of dispatch after
+revocation. They cover both named-section and sectionless Chiefs; the posting
+suite independently checks room listing and transcript writes. These are
+server workflow checks, not UI or live-model verification.
+
+### Broader coordination checks
 
 ```sh
 pnpm exec vitest run server/room-handoffs.test.ts server/room-coordination.e2e.test.ts src/components/GroupView.test.ts src/lib/room-activity.test.ts --maxWorkers=2

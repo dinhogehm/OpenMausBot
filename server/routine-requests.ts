@@ -105,11 +105,11 @@ const targetBotSchema = z.object({
 }).strict();
 const routineProposalSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("create"), routine: routineToolDefinitionSchema, forBot: targetBotSchema.optional() }).strict(),
-  z.object({ action: z.literal("update"), routineId: z.string().max(128), changes: routineToolChangesSchema }).strict(),
-  z.object({ action: z.literal("pause"), routineId: z.string().max(128) }).strict(),
-  z.object({ action: z.literal("resume"), routineId: z.string().max(128) }).strict(),
-  z.object({ action: z.literal("run_now"), routineId: z.string().max(128) }).strict(),
-  z.object({ action: z.literal("delete"), routineId: z.string().max(128) }).strict(),
+  z.object({ action: z.literal("update"), routineId: z.string().max(128), changes: routineToolChangesSchema, forBot: targetBotSchema.optional() }).strict(),
+  z.object({ action: z.literal("pause"), routineId: z.string().max(128), forBot: targetBotSchema.optional() }).strict(),
+  z.object({ action: z.literal("resume"), routineId: z.string().max(128), forBot: targetBotSchema.optional() }).strict(),
+  z.object({ action: z.literal("run_now"), routineId: z.string().max(128), forBot: targetBotSchema.optional() }).strict(),
+  z.object({ action: z.literal("delete"), routineId: z.string().max(128), forBot: targetBotSchema.optional() }).strict(),
 ]);
 
 const storedWeekdaysSchema = z.array(z.number().int().min(0).max(6)).min(1).max(7).refine(
@@ -228,6 +228,7 @@ const storedChangesSchema = storedDefinitionSchema
 const storedManageBase = {
   routineId: z.string().regex(ROUTINE_ID),
   expectedUpdatedAt: z.number().int().nonnegative(),
+  forBot: targetBotSchema.optional(),
 };
 const storedOperationSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("create"), routine: storedDefinitionSchema, forBot: targetBotSchema.optional() }).strict(),
@@ -260,6 +261,7 @@ export interface RoutineRequestOptionCard {
   options: string[];
   answered?: string;
   dismissed?: boolean;
+  expired?: boolean;
   requestId?: string;
   tool?: string;
   held?: string;
@@ -298,7 +300,7 @@ export interface RoutineRequestServiceOptions {
   /** Server-owned effective mode of the source conversation, never request input. */
   autoApply?: (botId: string, threadId: string) => boolean;
   /** Harness-owned readiness check for proposals that would execute in cloud. */
-  cloudReady?: () => Promise<{ ready: boolean; reason?: string }>;
+  cloudReady?: (botId: string) => Promise<{ ready: boolean; reason?: string }>;
   /** Revalidates conversation ownership and capacity synchronously, directly
    * before the card append. This closes races across an async cloud probe. */
   canPersist?: (
@@ -359,11 +361,16 @@ export type ResolveRoutineRequestResult =
 
 export class RoutineRequestError extends Error {
   readonly status: number;
+  /** True when no retry of this card can ever succeed — the routine moved
+   * under the proposal — so the card must settle as expired rather than
+   * staying actionable. */
+  readonly terminal: boolean;
 
-  constructor(message: string, status = 400) {
+  constructor(message: string, status = 400, options?: { terminal?: boolean }) {
     super(message);
     this.name = "RoutineRequestError";
     this.status = status;
+    this.terminal = options?.terminal === true;
   }
 }
 
@@ -604,7 +611,11 @@ function normalizedOperation(
     return operation;
   }
   const id = routineId(validated.routineId);
-  const current = ownedRoutine(manager, id, botId);
+  // A targeted action manages the named bot's routine: ownership and every
+  // run's permissions stay with that bot, exactly as a routine created
+  // through the for_bot_id path keeps them.
+  const ownerBotId = validated.forBot?.botId ?? botId;
+  const current = ownedRoutine(manager, id, ownerBotId);
   if (!current) throw new RoutineRequestError("That routine does not exist", 404);
   if (validated.action === "update") {
     return {
@@ -612,12 +623,18 @@ function normalizedOperation(
       routineId: id,
       expectedUpdatedAt: current.updatedAt,
       changes: normalizeChanges(validated.changes, now),
+      ...(validated.forBot ? { forBot: validated.forBot } : {}),
     };
   }
   if (validated.action === "resume" && nextOccurrence(current.schedule, now) === null) {
     throw new RoutineRequestError(noFutureResumeMessage(current.schedule), 409);
   }
-  return { action: validated.action, routineId: id, expectedUpdatedAt: current.updatedAt };
+  return {
+    action: validated.action,
+    routineId: id,
+    expectedUpdatedAt: current.updatedAt,
+    ...(validated.forBot ? { forBot: validated.forBot } : {}),
+  };
 }
 
 function asSchedule(schedule: RoutineRequestSchedule, now: number): RoutineSchedule {
@@ -811,7 +828,7 @@ function cardCopy(
   const actionCopy = ACTION_COPY[operation.action];
   const actionLabel = actionCopy.title;
   const name = redactSecretsInText(definition?.name ?? "routine");
-  const forBot = operation.action === "create" ? operation.forBot : undefined;
+  const forBot = operation.forBot;
   const forSuffix = forBot ? ` for @${redactSecretsInText(forBot.name)}` : "";
   const title = `${actionLabel} “${name}”${forSuffix}?`;
   if (!definition) {
@@ -826,7 +843,7 @@ function cardCopy(
   const nextRunAt = nextForOperation(operation, manager, now);
   const scheduleTimeZone = definition.schedule.type === "cron" ? definition.schedule.timeZone : timeZone;
   const when = operation.action === "run_now" ? "Now" : scheduleText(definition.schedule, timeZone);
-  const destination = definition.runOn === "cloud" ? "Box-hosted agent" : "Bot’s current model and configured computer";
+  const destination = definition.runOn === "cloud" ? "Boat-hosted agent" : "Bot’s current model and configured computer";
   const current = operation.action === "create"
     ? null
     : manager.listRoutines().find((routine) => routine.id === operation.routineId) ?? null;
@@ -955,11 +972,12 @@ function verifyManageSnapshot(
   botId: string,
 ): Routine {
   const current = ownedRoutine(manager, operation.routineId, botId);
-  if (!current) throw new RoutineRequestError("That routine no longer exists", 404);
+  if (!current) throw new RoutineRequestError("That routine no longer exists", 404, { terminal: true });
   if (current.updatedAt !== operation.expectedUpdatedAt) {
     throw new RoutineRequestError(
       "That routine changed after this confirmation card was prepared. Ask the bot to review it and propose the action again.",
       409,
+      { terminal: true },
     );
   }
   return current;
@@ -1004,12 +1022,13 @@ function revalidateOperation(operation: RoutineRequestOperation, manager: Routin
       throw new RoutineRequestError(
         `An enabled routine with the same instructions and execution settings already exists (${duplicate.id}). Use list_routines to review it, then update or run that routine instead.`,
         409,
+        { terminal: true },
       );
     }
   }
   const current = operation.action === "create"
     ? null
-    : verifyManageSnapshot(operation, manager, botId);
+    : verifyManageSnapshot(operation, manager, operation.forBot?.botId ?? botId);
   const schedule = operation.action === "create"
     ? operation.routine.schedule
     : operation.action === "update"
@@ -1023,7 +1042,7 @@ function revalidateOperation(operation: RoutineRequestOperation, manager: Routin
     }
   }
   if (schedule?.type === "once" && schedule.at <= now) {
-    throw new RoutineRequestError("That one-time schedule is now in the past. Ask the bot to propose a new time.", 409);
+    throw new RoutineRequestError("That one-time schedule is now in the past. Ask the bot to propose a new time.", 409, { terminal: true });
   }
   if (schedule?.type === "interval") {
     const base = operation.action === "create"
@@ -1069,7 +1088,7 @@ export class RoutineRequestService {
   private readonly routines: RoutineManager;
   private readonly now: () => number;
   private readonly timeZone: () => string;
-  private readonly cloudReady?: () => Promise<{ ready: boolean; reason?: string }>;
+  private readonly cloudReady?: (botId: string) => Promise<{ ready: boolean; reason?: string }>;
   private readonly canPersist?: RoutineRequestServiceOptions["canPersist"];
   private readonly validateTarget?: RoutineRequestServiceOptions["validateTarget"];
   private readonly autoApply?: RoutineRequestServiceOptions["autoApply"];
@@ -1105,11 +1124,11 @@ export class RoutineRequestService {
       throw new RoutineRequestError(schemaIssue(parsedProposal.error, "Invalid routine proposal"));
     }
     const operation = normalizedOperation(this.routines, botId, parsedProposal.data, at);
-    if (operation.action === "create" && operation.forBot && this.validateTarget) {
+    if (operation.forBot && this.validateTarget) {
       const refusal = this.validateTarget(botId, operation.forBot);
       if (refusal) throw new RoutineRequestError(refusal, 403);
     }
-    await this.requireCloudReadiness(operation);
+    await this.requireCloudReadiness(operation, botId);
     // The readiness probe is asynchronous. Another request can edit or
     // delete the routine while it is in flight, so re-check the captured
     // revision before rendering and persisting the confirmation snapshot.
@@ -1189,13 +1208,16 @@ export class RoutineRequestService {
     throw new RoutineRequestError(result.state === "invalid" ? result.error : "The routine change could not be applied", result.state === "invalid" ? result.status : 409);
   }
 
-  private async requireCloudReadiness(operation: RoutineRequestOperation): Promise<void> {
+  private async requireCloudReadiness(operation: RoutineRequestOperation, proposerBotId: string): Promise<void> {
     if (!this.cloudReady || operation.action === "pause" || operation.action === "delete") return;
     const definition = effectiveDefinition(operation, this.routines);
     if (definition?.runOn !== "cloud") return;
     let readiness: { ready: boolean; reason?: string };
     try {
-      readiness = await this.cloudReady();
+      const targetBotId = operation.action === "create"
+        ? operation.forBot?.botId ?? proposerBotId
+        : this.routines.listRoutines().find(routine => routine.id === operation.routineId)?.botId ?? proposerBotId;
+      readiness = await this.cloudReady(targetBotId);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new RoutineRequestError(`Could not verify cloud readiness: ${detail}`, 503);
@@ -1297,22 +1319,39 @@ export class RoutineRequestService {
           receipt.appliedAt,
         );
       }
+      // An expired card is settled terminal state, not a decision waiting on
+      // a slower click: the proposal it carried can never be confirmed as
+      // prepared, even when the routine moves back under it. The committed
+      // receipt above still recovers a write that already happened; nothing
+      // past this point can.
+      if (card.expired) {
+        return {
+          claimed: true,
+          state: "invalid",
+          error: "This routine request expired before it was confirmed. Ask for a fresh proposal.",
+          status: 409,
+        };
+      }
       if (args.behavior === "deny") {
         this.store.patchMessage(args.threadId, message.id, { card: { ...card, answered: "deny", held: undefined } });
         return { claimed: true, state: "denied" };
       }
       revalidateOperation(payload.operation, this.routines, payload.botId, this.now());
-      if (payload.operation.action === "create" && payload.operation.forBot && this.validateTarget) {
+      if (payload.operation.forBot && this.validateTarget) {
         const refusal = this.validateTarget(payload.botId, payload.operation.forBot);
-        if (refusal) throw new RoutineRequestError(refusal, 404);
+        if (refusal) throw new RoutineRequestError(refusal, 404, { terminal: true });
       }
       const resultId = this.apply(payload, message.id, fingerprint);
       return this.settleApplied(args.threadId, message.id, card, payload, resultId);
     } catch (error) {
       const status = error instanceof RoutineRequestError ? error.status : 400;
       const detail = error instanceof Error ? error.message : String(error);
+      // A terminal failure (the routine moved under the proposal) can never
+      // be confirmed as prepared: settle the card as expired with its
+      // options removed so it stops looking actionable.
+      const expired = error instanceof RoutineRequestError && error.terminal;
       this.store.patchMessage(args.threadId, message.id, {
-        card: { ...card, held: redactSecretsInText(detail).slice(0, 500) },
+        card: { ...card, ...(expired ? { expired: true, options: [] } : {}), held: redactSecretsInText(detail).slice(0, 500) },
       });
       return {
         claimed: true,
@@ -1412,7 +1451,7 @@ export class RoutineRequestService {
           fingerprint,
         }).id;
       case "update": {
-        const current = verifyManageSnapshot(operation, this.routines, payload.botId);
+        const current = verifyManageSnapshot(operation, this.routines, operation.forBot?.botId ?? payload.botId);
         const updated = this.routines.update(
           operation.routineId,
           updateFromChanges(operation.changes, confirmationAt, current.schedule),
@@ -1431,7 +1470,7 @@ export class RoutineRequestService {
       }
       case "pause":
       case "resume": {
-        verifyManageSnapshot(operation, this.routines, payload.botId);
+        verifyManageSnapshot(operation, this.routines, operation.forBot?.botId ?? payload.botId);
         const updated = this.routines.update(operation.routineId, { enabled: operation.action === "resume" }, {
           requestId: payload.requestId,
           messageId,
@@ -1445,7 +1484,7 @@ export class RoutineRequestService {
         return updated.id;
       }
       case "run_now": {
-        verifyManageSnapshot(operation, this.routines, payload.botId);
+        verifyManageSnapshot(operation, this.routines, operation.forBot?.botId ?? payload.botId);
         const run = this.routines.runNow(operation.routineId, {
           requestId: payload.requestId,
           messageId,
@@ -1459,7 +1498,7 @@ export class RoutineRequestService {
         return run.id;
       }
       case "delete":
-        verifyManageSnapshot(operation, this.routines, payload.botId);
+        verifyManageSnapshot(operation, this.routines, operation.forBot?.botId ?? payload.botId);
         if (!this.routines.remove(operation.routineId, {
           requestId: payload.requestId,
           messageId,

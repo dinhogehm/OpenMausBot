@@ -10,9 +10,9 @@ import type { LocaleKey } from "@/locales";
 import { Switch } from "./SettingsPrimitives";
 
 export type ConfigSection =
-  | "composio" | "box" | "opencodeGo" | "anthropic" | "openaiCompat" | "xai" | "openrouter" | "typesafe";
+  | "composio" | "box" | "opencodeGo" | "anthropic" | "openaiCompat" | "xai" | "mistral" | "openrouter" | "typesafe";
 /** Sections whose key can be tried against the provider from the server. */
-export type TestableProvider = "anthropic" | "openaiCompat" | "xai" | "openrouter" | "typesafe";
+export type TestableProvider = "anthropic" | "openaiCompat" | "xai" | "mistral" | "openrouter" | "typesafe";
 
 const SECTIONS: Record<
   ConfigSection,
@@ -26,6 +26,7 @@ const SECTIONS: Record<
   opencodeGo: { body: (v) => ({ opencodeGo: { apiKey: v } }), flag: (c) => c.opencodeGo?.configured ?? false },
   anthropic: { body: (v) => ({ anthropic: { key: v } }), flag: (c) => c.anthropic?.configured ?? false },
   openaiCompat: { body: (v) => ({ openaiCompat: { key: v } }), flag: (c) => c.openaiCompat?.configured ?? false },
+  mistral: { body: (v) => ({ mistral: { key: v } }), flag: (c) => c.mistral?.configured ?? false },
   xai: { body: (v) => ({ xai: { key: v } }), flag: (c) => c.xai?.configured ?? false },
   openrouter: { body: (v) => ({ openrouter: { key: v } }), flag: (c) => c.openrouter?.configured ?? false },
   typesafe: { body: (v) => ({ typesafe: { key: v } }), flag: (c) => c.typesafe?.configured ?? false },
@@ -62,13 +63,13 @@ const CREDENTIALS: Record<
     optional: true,
   },
   box: {
-    labelKey: "keys.box.label",
-    placeholderKey: "keys.box.placeholder",
-    descriptionKey: "keys.box.desc",
-    href: "https://docs.ascii.dev/box/api-keys",
-    linkLabelKey: "keys.box.link",
+    labelKey: "keys.boat.label",
+    placeholderKey: "keys.boat.placeholder",
+    descriptionKey: "keys.boat.desc",
+    href: "https://docs.boat.dev/api-keys",
+    linkLabelKey: "keys.boat.link",
     optional: true,
-    warningKey: "keys.box.warning",
+    warningKey: "keys.boat.warning",
   },
   opencodeGo: {
     labelKey: "keys.opencode.label",
@@ -92,6 +93,14 @@ const CREDENTIALS: Record<
     descriptionKey: "keys.openaiCompat.desc",
     href: "https://openrouter.ai/keys",
     linkLabelKey: "keys.openaiCompat.link",
+    optional: true,
+  },
+  mistral: {
+    labelKey: "keys.mistral.label",
+    placeholderKey: "keys.mistral.placeholder",
+    descriptionKey: "keys.mistral.desc",
+    href: "https://console.mistral.ai/api-keys",
+    linkLabelKey: "keys.mistral.link",
     optional: true,
   },
   xai: {
