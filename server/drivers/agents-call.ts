@@ -1148,6 +1148,28 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
     if (r.error) return { text: `Couldn't start the watch: ${String(r.error)}`, isError: true };
     return { text: String(r.message ?? "Watching. End your turn now.") };
   }
+  if (name.startsWith("cc_session_")) {
+    const action = name.slice("cc_session_".length);
+    const sessionId = typeof args.session_id === "string" ? args.session_id.trim() : undefined;
+    if (action !== "start" && action !== "list" && !sessionId) {
+      return { text: `${name} needs session_id — call cc_session_list to see yours.`, isError: true };
+    }
+    const r = await api("/api/internal/cc-session", {
+      method: "POST",
+      body: JSON.stringify({
+        fromBotId: BOT_ID,
+        fromThreadId: THREAD_ID,
+        action,
+        ...(sessionId ? { sessionId } : {}),
+        ...(action === "start" ? { title: args.title, brief: args.brief, repo: args.repo, ...(args.permission_mode !== undefined ? { permissionMode: args.permission_mode } : {}), ...(args.model !== undefined ? { model: args.model } : {}) } : {}),
+        ...(action === "send" ? { message: args.message } : {}),
+        ...(action === "list" && args.include_archived === true ? { includeArchived: true } : {}),
+        ...(action === "archive" && args.remove_worktree === true ? { removeWorktree: true } : {}),
+      }),
+    });
+    if (r.error) return { text: `${name} failed: ${String(r.error)}`, isError: true };
+    return { text: String(r.message ?? "Done.") };
+  }
   if (name === "goal_start") {
     if (typeof args.goal !== "string" || !args.goal.trim()) {
       return { text: "goal_start needs goal: the concrete deliverable and how you will verify it.", isError: true };

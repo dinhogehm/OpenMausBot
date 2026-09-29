@@ -88,9 +88,19 @@ export interface BotGoal {
   finishedAt?: number;
 }
 
+/** Reports waiting to be handed to a conversation (Claude Code sessions the
+ * bot manages finished a turn). Kept apart from wakes so a report never
+ * replaces a pending wake or watch, and several reports arrive together. */
+export interface PendingReports {
+  botId: string;
+  threadId: string;
+  items: string[];
+}
+
 interface Ledger {
   wakes: BotWake[];
   goals: BotGoal[];
+  reports?: PendingReports[];
 }
 
 const clip = (value: unknown, max: number): string =>
@@ -158,6 +168,7 @@ export function parseGoalEndInput(body: { status?: unknown; detail?: unknown }):
 export class BotAutonomy {
   private wakes = new Map<string, BotWake>();
   private goals = new Map<string, BotGoal>();
+  private reports = new Map<string, PendingReports>();
   private readonly path: string | null;
   private readonly now: () => number;
   private readonly minuteMs: number;
@@ -183,6 +194,11 @@ export class BotAutonomy {
           this.wakes.set(wake.threadId, wake);
         }
       }
+      for (const pending of raw.reports ?? []) {
+        if (pending && typeof pending.threadId === "string" && Array.isArray(pending.items) && pending.items.length) {
+          this.reports.set(pending.threadId, pending);
+        }
+      }
       for (const goal of raw.goals ?? []) {
         if (goal && typeof goal.threadId === "string" && typeof goal.botId === "string" && typeof goal.goal === "string") {
           this.goals.set(goal.threadId, goal);
@@ -195,7 +211,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { wakes: [...this.wakes.values()], goals: [...this.goals.values()] };
+    const ledger: Ledger = { wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()] };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -298,6 +314,38 @@ export class BotAutonomy {
     return [...this.wakes.values()].filter((wake) => wake.dueAt <= at).sort((a, b) => a.dueAt - b.dueAt);
   }
 
+  // ── reports ────────────────────────────────────────────────────────────
+
+  addReport(botId: string, threadId: string, text: string): void {
+    const pending = this.reports.get(threadId) ?? { botId, threadId, items: [] };
+    pending.items.push(text);
+    this.reports.set(threadId, pending);
+    this.save();
+  }
+
+  hasReports(threadId: string): boolean {
+    return (this.reports.get(threadId)?.items.length ?? 0) > 0;
+  }
+
+  reportThreads(): PendingReports[] {
+    return [...this.reports.values()].filter((pending) => pending.items.length > 0);
+  }
+
+  takeReports(threadId: string): PendingReports | null {
+    const pending = this.reports.get(threadId) ?? null;
+    if (!pending) return null;
+    this.reports.delete(threadId);
+    this.save();
+    return pending;
+  }
+
+  /** Put reports back when their turn could not start. */
+  restoreReports(pending: PendingReports): void {
+    const current = this.reports.get(pending.threadId);
+    this.reports.set(pending.threadId, current ? { ...pending, items: [...pending.items, ...current.items] } : pending);
+    this.save();
+  }
+
   // ── goals ──────────────────────────────────────────────────────────────
 
   startGoal(botId: string, threadId: string, input: { goal: string; maxTurns: number; maxHours: number }): BotGoal {
@@ -395,7 +443,8 @@ export class BotAutonomy {
   forgetThread(threadId: string): void {
     const hadWake = this.wakes.delete(threadId);
     const hadGoal = this.goals.delete(threadId);
-    if (hadWake || hadGoal) this.save();
+    const hadReports = this.reports.delete(threadId);
+    if (hadWake || hadGoal || hadReports) this.save();
   }
 }
 
@@ -480,4 +529,12 @@ export function goalEndChip(goal: BotGoal): string {
     limit: "Goal paused at its limit",
   }[goal.status as Exclude<GoalStatus, "active">];
   return `${label} after ${goal.turnCount} turn${goal.turnCount === 1 ? "" : "s"}${goal.detail ? ` — ${goal.detail.slice(0, 160)}` : ""}`;
+}
+
+export function reportsPrompt(pending: PendingReports, goal: BotGoal | null): string {
+  return [
+    `[${pending.items.length === 1 ? "A Claude Code session you manage reported" : `${pending.items.length} Claude Code sessions you manage reported`}. Nobody typed this.]`,
+    ...pending.items,
+    ...(goal && goal.status === "active" ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`] : []),
+  ].join("\n\n---\n\n");
 }

@@ -5,12 +5,13 @@ import { launchVerificationServer, runControlOmb } from "../scripts/control-omb.
 import { request } from "../scripts/mcp-server.ts";
 
 /** One scripted bot on an isolated server, with minutes shrunk to 200 ms. */
-async function fixture(test: (f: any) => Promise<void>) {
+async function fixture(test: (f: any) => Promise<void>, extraEnv: Record<string, string> = {}) {
   const session = await launchVerificationServer({
     ...process.env,
     OMB_AUTONOMY_MINUTE_MS: "200",
     OMB_AUTONOMY_TICK_MS: "100",
     OMB_AUTONOMY_TURN_GAP_MS: "50",
+    ...extraEnv,
   }, undefined, undefined, undefined, undefined, { scripted: true });
   const cli = (...args: string[]) => runControlOmb(args, { env: { OPENMAUSBOT_URL: session.info.url } }) as Promise<any>;
   const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, session.info.url) as Promise<any>;
@@ -169,3 +170,58 @@ it("watches a command without waking the bot until its output changes", () => fi
   await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Watch fired (changed)")), { timeout: 10_000 }).toBe(true);
   expect(f.ledger().wakes).toEqual([]);
 }), 60_000);
+
+it("manages a Claude Code session: start, get its report, answer it, archive it", async () => {
+  const { chmodSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  // A stand-in for `claude`: records each call and answers in stream-json.
+  const tools = mkdtempSync(join(tmpdir(), "omb-fake-claude-"));
+  const fake = join(tools, "fake-claude.mjs");
+  const calls = join(tools, "calls.jsonl");
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+const argv = process.argv.slice(2);
+const prompt = argv[argv.length - 1];
+let cwd = process.cwd();
+const w = argv.indexOf("-w");
+if (w >= 0) { cwd = join(cwd, ".claude", "worktrees", argv[w + 1]); mkdirSync(cwd, { recursive: true }); }
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv, cwd: process.cwd() }) + "\\n");
+const hold = /HOLD:(\\d+)/.exec(prompt);
+if (hold) await new Promise(r => setTimeout(r, Number(hold[1])));
+console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "did: " + prompt.split("\\n")[0].slice(0, 60), total_cost_usd: 0.01 }));
+`);
+  chmodSync(fake, 0o755);
+  await fixture(async f => {
+    const { execFileSync } = await import("node:child_process");
+    const data = f.session.info.dataDir;
+    const repo = join(data, "repo");
+    execFileSync("git", ["init", "-q", repo]);
+    const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
+    const callLog = () => readFileSync(calls, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const startTurn = { steps: [{ tool: "cc_session_start", arguments: { title: "#9999 teste", brief: "BRIEF_ONE HOLD:2500", repo } }], reply: "Session started" };
+    f.save({ turns: [startTurn] });
+    await f.send("Open a Claude Code session for #9999.");
+    await expect.poll(() => (existsSync(join(data, "cc-sessions.json")) ? ccLedger().length : 0), { timeout: 20_000 }).toBe(1);
+    const id = ccLedger()[0].id;
+    // Its report wakes the bot; it answers, then archives after the second report.
+    f.save({ turns: [
+      startTurn,
+      { expectContextIncludes: ["finished its turn 1", "did: BRIEF_ONE"], steps: [{ tool: "cc_session_send", arguments: { session_id: id, message: "FOLLOWUP_TWO" } }], reply: "Answered it" },
+      { expectContextIncludes: ["finished its turn 2", "did: FOLLOWUP_TWO"], steps: [{ tool: "cc_session_archive", arguments: { session_id: id } }], reply: "Archived it" },
+    ] });
+    await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
+    await expect.poll(() => ccLedger()[0].status, { timeout: 10_000 }).toBe("archived");
+    const [first, second] = callLog();
+    expect(first.argv.slice(0, 5)).toEqual(["-p", "--session-id", id, "-w", ccLedger()[0].worktree]);
+    const { realpathSync } = await import("node:fs");
+    expect(realpathSync(first.cwd)).toBe(realpathSync(repo));
+    expect(second.argv.slice(0, 3)).toEqual(["-p", "--resume", id]);
+    expect(realpathSync(second.cwd)).toBe(realpathSync(join(repo, ".claude", "worktrees", ccLedger()[0].worktree)));
+    expect(ccLedger()[0]).toMatchObject({ turns: 2, costUsd: 0.02 });
+    const chips = await f.chips();
+    expect(chips.some((chip: string) => chip.includes("finished turn 1"))).toBe(true);
+    expect(chips.some((chip: string) => chip.includes("archived"))).toBe(true);
+  }, { OMB_CC_BIN: fake });
+}, 90_000);

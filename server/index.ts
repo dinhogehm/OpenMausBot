@@ -245,10 +245,23 @@ import {
   parseGoalInput,
   parseWakeInput,
   parseWatchInput,
+  reportsPrompt,
   wakeChip,
   wakePrompt,
 } from "./bot-autonomy.ts";
 import { parseWatchCommand, runWatchCommand, watchMatches } from "./wake-watch.ts";
+import {
+  CC_MAX_RUNNING,
+  CC_TURN_TIMEOUT_MS,
+  CcSessionLedger,
+  ccReportForOwner,
+  ccSessionLine,
+  ccTurnArgs,
+  parseCcStartInput,
+  parseCcStream,
+  type CcSession,
+} from "./cc-sessions.ts";
+import { spawn as spawnCcProcess, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -7172,6 +7185,8 @@ const AUTONOMY_TICK_MS = autonomyTestMs("OMB_AUTONOMY_TICK_MS") ?? 10_000;
 function threadWaitingOnOthers(botId: string, threadId: string): boolean {
   if (roomHandoffs.activeDirect(threadId) || pendingDelegationWakes.has(threadId)) return true;
   for (const watch of delegationWatch.values()) if (watch.sourceThreadId === threadId) return true;
+  // A Claude Code session this conversation manages is working: its report wakes it.
+  if (autonomy.hasReports(threadId) || ccLedger.owned(botId).some((session) => session.ownerThreadId === threadId && session.status === "running")) return true;
   return store.taskByThread(botId, threadId)?.activity === "waiting-on-you";
 }
 
@@ -7246,6 +7261,18 @@ async function autonomyTick(): Promise<void> {
     // Put a wake that lost a race back where it was; the next tick retries.
     if (outcome === "busy") autonomy.restoreWake(wake);
   }
+  for (const pending of autonomy.reportThreads()) {
+    if (!store.taskByThread(pending.botId, pending.threadId)) {
+      autonomy.takeReports(pending.threadId);
+      continue;
+    }
+    if (autonomyTurnBlocked(pending.botId, pending.threadId)) continue;
+    const taken = autonomy.takeReports(pending.threadId);
+    if (!taken) continue;
+    const chip = `${taken.items.length === 1 ? "A Claude Code session reported" : `${taken.items.length} Claude Code sessions reported`}`;
+    const outcome = await dispatchAutonomyTurn(taken.botId, taken.threadId, chip, reportsPrompt(taken, autonomy.goalFor(taken.threadId)));
+    if (outcome === "busy") autonomy.restoreReports(taken);
+  }
   for (const goal of autonomy.activeGoals()) {
     if (!store.taskByThread(goal.botId, goal.threadId)) {
       autonomy.forgetThread(goal.threadId);
@@ -7271,6 +7298,98 @@ async function autonomyTick(): Promise<void> {
       finishGoalWithChip(goal.threadId, "blocked", "The last turns could not start.");
     }
   }
+}
+
+// ── Claude Code sessions a bot manages (server/cc-sessions.ts) ─────────
+const ccLedger = new CcSessionLedger({ path: join(DATA_DIR, "cc-sessions.json") });
+const ccProcesses = new Map<string, CcChildProcess>();
+// OMB_CC_BIN points end-to-end tests at a scripted stand-in for `claude`.
+const ccBin = (): string => process.env.OMB_CC_BIN || "claude";
+const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases.";
+
+function ccIsGitRepo(path: string): boolean {
+  if (!path.startsWith(homedir()) || !existsSync(path)) return false;
+  try {
+    return execFileSyncCc("git", ["-C", path, "rev-parse", "--is-inside-work-tree"], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } }).toString().trim() === "true";
+  } catch {
+    return false;
+  }
+}
+
+function ccChip(session: CcSession, text: string, ok = true): void {
+  if (!store.taskByThread(session.ownerBotId, session.ownerThreadId)) return;
+  store.appendMessage(session.ownerThreadId, { role: "bot", kind: "activity", tool: { name: `Claude Code "${session.title.slice(0, 60)}": ${text}`, ok } });
+}
+
+/** One headless turn. Its exit hands the report to the owning conversation,
+ * unless a reply was queued meanwhile, which then runs as the next turn. */
+function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
+  const expectedCwd = join(session.repo, ".claude", "worktrees", session.worktree);
+  const cwd = first ? session.repo : session.cwd ?? (existsSync(expectedCwd) ? expectedCwd : session.repo);
+  ccLedger.markRunning(session);
+  const lines: string[] = [];
+  let buffer = "";
+  let timedOut = false;
+  let settled = false;
+  const keep = (line: string) => {
+    // Tool output can be huge; only the init and result events matter here.
+    if (line.includes('"subtype":"init"') || line.includes('"type":"result"') || !line.startsWith("{")) {
+      lines.push(line);
+      if (lines.length > 50) lines.splice(0, lines.length - 50);
+    }
+  };
+  let child: CcChildProcess;
+  try {
+    child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${CC_TURN_FOOTER}` : prompt, first), {
+      cwd,
+      env: { ...process.env, PATH: augmentedPath() },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    ccLedger.finishTurn(session, { ok: false, report: "", costUsd: 0, error: `could not start claude: ${error instanceof Error ? error.message : String(error)}` });
+    autonomy.addReport(session.ownerBotId, session.ownerThreadId, ccReportForOwner(session));
+    return;
+  }
+  ccProcesses.set(session.id, child);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGTERM");
+    setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+  }, CC_TURN_TIMEOUT_MS);
+  timer.unref();
+  child.stdout?.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8");
+    let newline = buffer.indexOf("\n");
+    while (newline >= 0) {
+      keep(buffer.slice(0, newline));
+      buffer = buffer.slice(newline + 1);
+      newline = buffer.indexOf("\n");
+    }
+  });
+  let stderr = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr = `${stderr}${chunk.toString("utf8")}`.slice(-4_000);
+  });
+  const finish = (code: number | null, signal: string | null, spawnError?: string) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    ccProcesses.delete(session.id);
+    if (buffer) keep(buffer);
+    const outcome = parseCcStream([...lines, ...(spawnError ? [spawnError] : []), ...stderr.split("\n").slice(-5)], { code, signal, timedOut });
+    ccLedger.finishTurn(session, outcome);
+    if (session.status === "stopped" || session.status === "archived") return;
+    const next = session.status === "idle" ? ccLedger.takeQueued(session) : null;
+    if (next !== null) {
+      ccChip(session, "your queued message is running now");
+      runCcTurn(session, next, false);
+      return;
+    }
+    ccChip(session, session.status === "failed" ? `stopped with a problem — ${String(session.lastError).slice(0, 100)}` : `finished turn ${session.turns}`, session.status !== "failed");
+    autonomy.addReport(session.ownerBotId, session.ownerThreadId, ccReportForOwner(session));
+  };
+  child.on("error", (error) => finish(null, null, `could not run ${ccBin()}: ${error.message}`));
+  child.on("close", (code, signal) => finish(code, signal));
 }
 
 let autonomyTicking = false;
@@ -15481,6 +15600,75 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           });
         }
         return json(res, 400, { error: "action must be start or end" });
+      }
+      if (method === "POST" && path === "/api/internal/cc-session") {
+        const body = await readInternalBody();
+        const bot = internalSender;
+        const threadId = internalCapability.threadId;
+        if (store.groupByThread(threadId)) return json(res, 400, { error: "manage Claude Code sessions from a direct conversation, not a room" });
+        requireActiveInternalCapability();
+        const action = String(body.action ?? "");
+        if (action === "list") {
+          const sessions = ccLedger.owned(bot.id, body.includeArchived === true);
+          const detail = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
+          if (detail && detail.ownerBotId !== bot.id) return json(res, 404, { error: "no such session of yours" });
+          return json(res, 200, {
+            message: [
+              sessions.length ? sessions.map(ccSessionLine).join("\n") : "You manage no Claude Code sessions.",
+              ...(detail ? [`\nLatest report of ${detail.id}:\n${detail.lastReport ?? "(none yet)"}${detail.lastError ? `\nLast problem: ${detail.lastError}` : ""}`] : []),
+            ].join("\n"),
+          });
+        }
+        if (action === "start") {
+          const input = parseCcStartInput(body, ccIsGitRepo);
+          if (!input.ok) return json(res, 400, { error: input.error });
+          if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
+            return json(res, 409, { error: `${CC_MAX_RUNNING} Claude Code sessions are already running on this computer; wait for one to report, or stop one` });
+          }
+          const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, ...(input.model ? { model: input.model } : {}) });
+          runCcTurn(session, input.brief, true);
+          ccChip(session, `started in ${input.repo}/.claude/worktrees/${session.worktree}`);
+          return json(res, 200, { message: `Started Claude Code session ${session.id} ("${session.title}") in its own worktree. It works on its own; when it stops you get its report here as a new turn. End your turn now — do not poll it.` });
+        }
+        const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
+        if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "no such session of yours — call cc_session_list" });
+        if (action === "send") {
+          const message = typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "";
+          if (!message) return json(res, 400, { error: "message is required" });
+          if (session.status === "archived") return json(res, 409, { error: "that session is archived; start a new one" });
+          if (session.status === "running") {
+            const position = ccLedger.enqueue(session, message);
+            return json(res, 200, { message: `The session is mid-turn; your message is queued (#${position}) and runs as soon as this turn ends. End your turn now.` });
+          }
+          if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
+            return json(res, 409, { error: `${CC_MAX_RUNNING} Claude Code sessions are already running; try again after one reports` });
+          }
+          runCcTurn(session, message, session.turns === 0);
+          ccChip(session, "sent a message");
+          return json(res, 200, { message: "Sent. The session is working; its report comes back here as a new turn. End your turn now." });
+        }
+        if (action === "stop" || action === "archive") {
+          const child = ccProcesses.get(session.id);
+          if (child) {
+            child.kill("SIGTERM");
+            setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+          }
+          ccLedger.setStatus(session, action === "stop" ? "stopped" : "archived");
+          let worktreeNote = "";
+          if (action === "archive" && body.removeWorktree === true && session.cwd && session.cwd.includes("/.claude/worktrees/")) {
+            try {
+              const git = (...args: string[]) => execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } });
+              try { git("worktree", "unlock", session.cwd); } catch { /* not locked */ }
+              git("worktree", "remove", session.cwd);
+              worktreeNote = ` Worktree ${session.cwd} removed.`;
+            } catch (error) {
+              worktreeNote = ` The worktree was kept: ${error instanceof Error ? error.message.split("\n").slice(-2).join(" ") : String(error)}`;
+            }
+          }
+          ccChip(session, action === "stop" ? "stopped" : `archived${worktreeNote ? " (worktree handled)" : ""}`);
+          return json(res, 200, { message: `${action === "stop" ? "Stopped; cc_session_send resumes it later." : "Archived."}${worktreeNote}` });
+        }
+        return json(res, 400, { error: "action must be start, send, list, stop or archive" });
       }
       if (method === "POST" && path === "/api/internal/retry-thread") {
         const body = await readInternalBody();
