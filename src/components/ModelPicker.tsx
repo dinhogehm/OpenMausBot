@@ -658,12 +658,12 @@ export function ModelPicker({
             "flex overflow-hidden rounded-2xl border border-hairline/50 bg-card",
             contained
               ? "relative mt-3 w-full max-h-[min(420px,50dvh)]"
-              : "absolute right-0 top-full z-30 mt-2 w-[380px] max-w-[calc(100vw-2rem)] max-h-[min(480px,calc(100dvh-7rem))] shadow-2xl shadow-black/50",
+              : "absolute right-0 top-full z-30 mt-2 w-[380px] max-w-[calc(100vw-2rem)] max-h-[min(640px,calc(100dvh-7rem))] shadow-2xl shadow-black/50",
           )}
         >
           {pickerInstances.length > 0 && <ModelEngineRail instances={pickerInstances} selectedInstance={railInstance} claudeInstance={claudeRailInstance} onSelect={selectRail} />}
 
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
             {threadId && (
               <div className="shrink-0 border-b border-hairline/40 px-3 py-2">
                 <div role="group" aria-label="Apply model changes to" className="flex gap-1">
@@ -781,7 +781,7 @@ export function ModelPicker({
                       />
                     )}
 
-                    <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+                    <div className="min-h-[9rem] flex-1 overflow-y-auto px-2 pb-2">
                       {pane === "main" ? (
                         <>
                           {railInstance.snapshot.update && (
