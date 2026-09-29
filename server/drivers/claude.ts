@@ -408,6 +408,8 @@ export const STATIC_CLAUDE_MODELS: ModelCatalog = {
 };
 
 const CLAUDE_MODEL_ID = /^[a-z0-9][a-z0-9._:/-]*$/i;
+/** Official Anthropic model ids, e.g. claude-sonnet-5-5 (no host:: inject prefix). */
+const OFFICIAL_CLAUDE_ID = /^claude-[a-z0-9.-]+$/;
 
 /** Rewrite a leftover API slug (`orcarouter/Qwen…`) to `host::model` when a
  *  local host is serving it, so the turn injects instead of asking for /login.
@@ -467,7 +469,9 @@ export function readClaudeModelCatalog(env: Record<string, string | undefined> =
   for (const extra of extras) {
     if (seen.has(extra.id)) continue;
     seen.add(extra.id);
-    options.push({ id: extra.id, label: extra.label, custom: true });
+    // An Anthropic model id (claude-*) runs on the signed-in account like the
+    // static rows; only other ids are local/custom models for the Local pane.
+    options.push(OFFICIAL_CLAUDE_ID.test(extra.id) ? { id: extra.id, label: extra.label } : { id: extra.id, label: extra.label, custom: true });
   }
   return { default: STATIC_CLAUDE_MODELS.default, options };
 }
