@@ -262,6 +262,7 @@ import {
   type CcSession,
 } from "./cc-sessions.ts";
 import {
+  archiveDesktopSession,
   createDesktopSession,
   ensureHelper,
   findDesktopSession,
@@ -7505,7 +7506,7 @@ async function runDesktopWork(): Promise<void> {
   const desktop = next.desktop!;
   const pending = desktop.pending!;
   if (now - pending.since > DESKTOP_PENDING_MAX_MS) {
-    failDesktopSession(next, `the Mac was never idle for long enough in 12 hours to ${pending.kind === "create" ? "open the session" : "send the message"} (${pending.lastReason ?? "busy"})`);
+    failDesktopSession(next, `the Mac was never idle for long enough in 12 hours to ${pending.kind === "create" ? "open the session" : pending.kind === "archive" ? "archive the session" : "send the message"} (${pending.lastReason ?? "busy"})`);
     return;
   }
   desktopBusy = true;
@@ -7519,9 +7520,17 @@ async function runDesktopWork(): Promise<void> {
     }
     const step = pending.kind === "create"
       ? await createDesktopSession(driver, { repoName: basename(next.repo), text: pending.text })
-      : desktop.localId
-        ? await sendToDesktopSession(driver, { localId: desktop.localId, text: pending.text })
-        : { ok: false as const, reason: "the session is not open in the app yet", retry: true };
+      : !desktop.localId
+        ? { ok: false as const, reason: "the session is not open in the app yet", retry: true }
+        : pending.kind === "archive"
+          ? await archiveDesktopSession(driver, { localId: desktop.localId, title: readDesktopRecord(desktop.localId)?.title ?? next.title })
+          : await sendToDesktopSession(driver, { localId: desktop.localId, text: pending.text });
+    if (step.ok && pending.kind === "archive") {
+      // The app's record confirms it; followDesktopSessions marks it archived here.
+      delete desktop.pending;
+      ccLedger.save();
+      return;
+    }
     if (step.ok) {
       delete desktop.pending;
       if (pending.kind === "create") desktop.sentAt = Date.now();
@@ -15825,9 +15834,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return json(res, 409, { error: "this session runs in the Claude app; ask the person to stop it there (Esc in the session)" });
         }
         if (session.surface === "app" && action === "archive") {
-          ccLedger.setStatus(session, "archived");
-          ccChip(session, "archived");
-          return json(res, 200, { message: "Archived here. The Claude app keeps it in its list until the person archives it (it also tidies sessions whose PR merged)." });
+          if (!session.desktop?.localId) {
+            ccLedger.setStatus(session, "archived");
+            ccChip(session, "archived (it never opened in the app)");
+            return json(res, 200, { message: "Archived; it had not opened in the Claude app yet." });
+          }
+          session.desktop.pending = { kind: "archive", text: "", since: Date.now(), attempts: 0 };
+          ccLedger.save();
+          ccChip(session, "queued to be archived in the Claude app");
+          return json(res, 200, { message: "Queued: it is archived in the Claude app as soon as the Mac is idle; the app then removes it from its list." });
         }
         if (action === "stop" || action === "archive") {
           const child = ccProcesses.get(session.id);

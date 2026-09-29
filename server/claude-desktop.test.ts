@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  archiveDesktopSession,
   createDesktopSession,
   findDesktopSession,
   lastAssistantText,
@@ -10,6 +11,7 @@ import {
   parseOcr,
   readDesktopRecord,
   sendToDesktopSession,
+  sidebarMatch,
   type DesktopDriver,
   type OcrLine,
 } from "./claude-desktop.ts";
@@ -24,6 +26,7 @@ function fakeApp(opts: { idle?: number; fronts?: string[]; screen?: string[] } =
     frontmost: async () => (fronts.length > 1 ? fronts.shift()! : fronts[0] ?? "Claude"),
     ocr: async () => screen,
     click: async (x, y) => { actions.push(`click ${x},${y}`); },
+    rightClick: async (x, y) => { actions.push(`rclick ${x},${y}`); },
     key: async (code, command) => { actions.push(`key ${code}${command ? "+cmd" : ""}`); },
     paste: async (text, selectAll) => { actions.push(`paste${selectAll ? "(all)" : ""} ${text}`); },
     menuNewSession: async () => { actions.push("menu new session"); },
@@ -44,7 +47,7 @@ describe("createDesktopSession", () => {
   });
 
   it("waits while the person is using the Mac", async () => {
-    const app = fakeApp({ idle: 12, screen: REPO_SCREEN });
+    const app = fakeApp({ idle: 2, screen: REPO_SCREEN });
     const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x" });
     expect(step).toMatchObject({ ok: false, retry: true });
     expect(app.actions).toEqual([]);
@@ -130,5 +133,27 @@ describe("helpers", () => {
   it("parses the helper's OCR lines and makes OCR-safe markers", () => {
     expect(parseOcr("996 794 457 38 | Confiar neste workspace?\nlixo\n")).toEqual([{ x: 996, y: 794, w: 457, h: 38, text: "Confiar neste workspace?" }]);
     expect(newMarker()).toMatch(/^OMB[A-HJ-NP-Z2-9]{7}$/);
+  });
+});
+
+describe("archiveDesktopSession", () => {
+  const localId = "local_cdf10d09-8c6a-493d-9ceb-5f50fc2e2e5b";
+  it("opens the session, right-clicks its sidebar entry and picks Arquivar", async () => {
+    const app = fakeApp({ screen: ["Automação inatividade não disp…", "Fixar", "Arquivar"] });
+    expect(await archiveDesktopSession(app.driver, { localId, title: "Automação inatividade não dispara" })).toEqual({ ok: true });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "rclick 130,808", "click 200,848"]);
+  });
+
+  it("closes the menu instead of clicking blind when Arquivar is missing", async () => {
+    const app = fakeApp({ screen: ["Teste modo app", "Fixar"] });
+    expect(await archiveDesktopSession(app.driver, { localId, title: "Teste modo app" })).toMatchObject({ ok: false, retry: true });
+    expect(app.actions.at(-1)).toBe("key 53");
+  });
+
+  it("matches truncated sidebar titles, not unrelated ones", () => {
+    expect(sidebarMatch("Automação inatividade não disp…", "Automação inatividade não dispara")).toBe(true);
+    expect(sidebarMatch("Teste modo app", "Teste modo app")).toBe(true);
+    expect(sidebarMatch("Teste", "Teste modo app")).toBe(false);
+    expect(sidebarMatch("Transfer N2 sem agente", "Teste modo app")).toBe(false);
   });
 });

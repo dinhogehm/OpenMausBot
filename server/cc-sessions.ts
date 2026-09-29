@@ -69,7 +69,7 @@ export interface CcDesktopState {
   /** When the brief was sent; the app's record must appear after this. */
   sentAt?: number;
   /** A screen action waiting for the Mac to be idle. */
-  pending?: { kind: "create" | "send"; text: string; since: number; attempts: number; lastReason?: string };
+  pending?: { kind: "create" | "send" | "archive"; text: string; since: number; attempts: number; lastReason?: string };
 }
 
 export function slugify(text: string): string {
@@ -293,7 +293,7 @@ export function ccSessionLine(session: CcSession): string {
     `${session.id} · "${session.title}" · ${session.status}${session.surface === "app" ? " · in the Claude app" : ""}`,
     `turns ${session.turns}, US$ ${session.costUsd.toFixed(2)}`,
     session.cwd ? `worktree ${session.cwd}` : session.surface === "app" ? "worktree chosen by the app (pending)" : `worktree ${session.repo}/.claude/worktrees/${session.worktree} (pending)`,
-    ...(session.desktop?.pending ? [`waiting for an idle Mac to ${session.desktop.pending.kind === "create" ? "open it" : "send a message"}${session.desktop.pending.lastReason ? ` (${session.desktop.pending.lastReason})` : ""}`] : []),
+    ...(session.desktop?.pending ? [`waiting for an idle Mac to ${session.desktop.pending.kind === "create" ? "open it" : session.desktop.pending.kind === "archive" ? "archive it" : "send a message"}${session.desktop.pending.lastReason ? ` (${session.desktop.pending.lastReason})` : ""}`] : []),
     ...(session.queued.length ? [`${session.queued.length} message(s) queued`] : []),
   ];
   return bits.join(" · ");

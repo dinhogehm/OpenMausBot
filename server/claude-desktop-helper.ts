@@ -9,7 +9,7 @@ export const DESKTOP_HELPER_SOURCE = String.raw`// omb-desktop: the few native a
 //   omb-desktop front                name of the frontmost application
 //   omb-desktop ocr                  "x y w h | text" lines for the main display,
 //                                    in screen points, origin top-left
-//   omb-desktop click X Y            left click at screen point
+//   omb-desktop click|rclick X Y     left or right click at screen point
 //   omb-desktop key CODE [cmd]       press a key (virtual key code), optionally with ⌘
 //   omb-desktop paste FILE [all]     put FILE's text on the clipboard, optionally ⌘A,
 //                                    then ⌘V, then restore the previous clipboard
@@ -42,11 +42,11 @@ func post(_ event: CGEvent?) {
   usleep(60_000)
 }
 
-func click(_ x: Double, _ y: Double) {
+func click(_ x: Double, _ y: Double, right: Bool = false) {
   let point = CGPoint(x: x, y: y)
   post(CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left))
-  post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left))
-  post(CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left))
+  post(CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseDown : .leftMouseDown, mouseCursorPosition: point, mouseButton: right ? .right : .left))
+  post(CGEvent(mouseEventSource: nil, mouseType: right ? .rightMouseUp : .leftMouseUp, mouseCursorPosition: point, mouseButton: right ? .right : .left))
 }
 
 func key(_ code: CGKeyCode, command: Bool) {
@@ -92,9 +92,9 @@ case "front":
   print(NSWorkspace.shared.frontmostApplication?.localizedName ?? "")
 case "ocr":
   ocr()
-case "click":
+case "click", "rclick":
   guard args.count >= 4, let x = Double(args[2]), let y = Double(args[3]) else { fail("click X Y") }
-  click(x, y)
+  click(x, y, right: args[1] == "rclick")
 case "key":
   guard args.count >= 3, let code = UInt16(args[2]) else { fail("key CODE [cmd]") }
   key(code, command: args.count >= 4 && args[3] == "cmd")

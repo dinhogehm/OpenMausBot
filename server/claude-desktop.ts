@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
-export const DESKTOP_IDLE_SECONDS = 60;
+export const DESKTOP_IDLE_SECONDS = 5;
 export const DESKTOP_SESSIONS_DIR = join(homedir(), "Library", "Application Support", "Claude", "claude-code-sessions");
 export const CLAUDE_PROJECTS_DIR = join(homedir(), ".claude", "projects");
 
@@ -28,6 +28,7 @@ export interface DesktopDriver {
   frontmost(): Promise<string>;
   ocr(): Promise<OcrLine[]>;
   click(x: number, y: number): Promise<void>;
+  rightClick(x: number, y: number): Promise<void>;
   key(code: number, command?: boolean): Promise<void>;
   /** Clipboard paste of `text`; `selectAll` first replaces what is in the field. */
   paste(text: string, selectAll: boolean): Promise<void>;
@@ -131,6 +132,44 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
   stop = await guard(driver, "send");
   if (stop) return stop;
   await driver.key(RETURN);
+  return { ok: true };
+}
+
+const ESCAPE = 53;
+/** The sidebar sits on the left; menus open next to the click. */
+const SIDEBAR_MAX_X = 450;
+
+/** Normalised title prefix the sidebar shows (it truncates long titles). */
+export function sidebarMatch(lineText: string, title: string): boolean {
+  const norm = (text: string) => text.toLowerCase().replace(/[…\s]+/g, " ").trim();
+  const shown = norm(lineText);
+  const wanted = norm(title);
+  if (shown.length < 6 || wanted.length < 6) return false;
+  const prefix = wanted.slice(0, Math.min(24, wanted.length));
+  return shown.startsWith(prefix) || (shown.length >= 12 && wanted.startsWith(shown));
+}
+
+/** Archive a session in the app: its sidebar entry → right click → "Arquivar". */
+export async function archiveDesktopSession(driver: DesktopDriver, input: { localId: string; title: string }): Promise<DesktopStep> {
+  if (!/^local_[0-9a-f-]{36}$/.test(input.localId)) return { ok: false, reason: "invalid desktop session id", retry: false };
+  const ready = await readyForScreen(driver);
+  if (!ready.ok) return ready;
+  await driver.openUrl(`claude://code/continue?session=${input.localId}`);
+  await driver.sleep(2_500);
+  let stop = await guard(driver, "open session");
+  if (stop) return stop;
+  const entry = (await driver.ocr()).find((line) => line.x < SIDEBAR_MAX_X && sidebarMatch(line.text, input.title));
+  if (!entry) return { ok: false, reason: `"${input.title}" is not visible in the app's sidebar`, retry: true };
+  await driver.rightClick(entry.x + 30, entry.y + entry.h / 2);
+  await driver.sleep(800);
+  const item = (await driver.ocr()).find((line) => (line.text.trim() === "Arquivar" || line.text.trim() === "Archive") && Math.abs(line.y - entry.y) < 400);
+  stop = await guard(driver, "archive menu");
+  if (stop || !item) {
+    await driver.key(ESCAPE);
+    return stop ?? { ok: false, reason: "the session menu showed no Archive item", retry: true };
+  }
+  await driver.click(item.x + item.w / 2, item.y + item.h / 2);
+  await driver.sleep(1_000);
   return { ok: true };
 }
 
@@ -260,6 +299,9 @@ export function macDesktopDriver(helper: string, env: NodeJS.ProcessEnv): Deskto
     },
     async click(x, y) {
       await run(helper, ["click", String(Math.round(x)), String(Math.round(y))], env);
+    },
+    async rightClick(x, y) {
+      await run(helper, ["rclick", String(Math.round(x)), String(Math.round(y))], env);
     },
     async key(code, command) {
       await run(helper, ["key", String(code), ...(command ? ["cmd"] : [])], env);
