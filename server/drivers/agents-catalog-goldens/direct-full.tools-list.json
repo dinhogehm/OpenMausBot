@@ -861,6 +861,14 @@
             "type": "string",
             "description": "Absolute path of the git repository, e.g. /Users/osvaldo/Projetos/nuria-platform."
           },
+          "surface": {
+            "type": "string",
+            "enum": [
+              "app",
+              "cli"
+            ],
+            "description": "Default app: the session opens in the Claude desktop app, where the person follows it (it waits for an idle Mac to open). cli: headless, nobody sees it — only for internal chores."
+          },
           "permission_mode": {
             "type": "string",
             "enum": [
@@ -869,7 +877,7 @@
               "default",
               "plan"
             ],
-            "description": "Default auto."
+            "description": "cli only. Default auto."
           },
           "model": {
             "type": "string",

@@ -200,7 +200,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     execFileSync("git", ["init", "-q", repo]);
     const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
     const callLog = () => readFileSync(calls, "utf8").trim().split("\n").map(line => JSON.parse(line));
-    const startTurn = { steps: [{ tool: "cc_session_start", arguments: { title: "#9999 teste", brief: "BRIEF_ONE HOLD:2500", repo } }], reply: "Session started" };
+    const startTurn = { steps: [{ tool: "cc_session_start", arguments: { title: "#9999 teste", brief: "BRIEF_ONE HOLD:2500", repo, surface: "cli" } }], reply: "Session started" };
     f.save({ turns: [startTurn] });
     await f.send("Open a Claude Code session for #9999.");
     await expect.poll(() => (existsSync(join(data, "cc-sessions.json")) ? ccLedger().length : 0), { timeout: 20_000 }).toBe(1);

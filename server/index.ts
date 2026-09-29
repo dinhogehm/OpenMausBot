@@ -8,7 +8,7 @@ import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { ToolResults, TOOL_RESULT_MAX_CHARS } from "./tool-results.ts";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { homedir } from "node:os";
 import { authorizeExternalRuntime, externalRuntimeIsActive, type ExternalRuntimeGrant } from "./external-runtime.ts";
 
@@ -261,6 +261,19 @@ import {
   parseCcStream,
   type CcSession,
 } from "./cc-sessions.ts";
+import {
+  createDesktopSession,
+  ensureHelper,
+  findDesktopSession,
+  lastAssistantText,
+  macDesktopDriver,
+  newMarker,
+  readDesktopRecord,
+  sendToDesktopSession,
+  transcriptPath,
+  type DesktopDriver,
+} from "./claude-desktop.ts";
+import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { spawn as spawnCcProcess, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 
 /** A session_read answer competes with the transcript for the context
@@ -7243,6 +7256,7 @@ async function runDueWatches(): Promise<void> {
 }
 
 async function autonomyTick(): Promise<void> {
+  void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
   await runDueWatches();
   for (const wake of autonomy.dueWakes()) {
     if (!store.taskByThread(wake.botId, wake.threadId)) {
@@ -7395,6 +7409,142 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   };
   child.on("error", (error) => finish(null, null, `could not run ${ccBin()}: ${error.message}`));
   child.on("close", (code, signal) => finish(code, signal));
+}
+
+// ── Claude Code sessions in the Claude desktop app (server/claude-desktop.ts)
+// The person follows these in the app. Screen actions (open, send) wait for
+// an idle Mac and run one at a time; following them only reads files.
+let desktopDriver: DesktopDriver | null = null;
+let desktopBusy = false;
+const DESKTOP_PENDING_MAX_MS = 12 * 3_600_000;
+const DESKTOP_RECORD_WAIT_MS = 5 * 60_000;
+
+async function getDesktopDriver(): Promise<DesktopDriver> {
+  if (!desktopDriver) {
+    const env = { ...process.env, PATH: augmentedPath() };
+    desktopDriver = macDesktopDriver(await ensureHelper(DATA_DIR, DESKTOP_HELPER_SOURCE, env), env);
+  }
+  return desktopDriver;
+}
+
+function desktopBrief(session: CcSession, brief: string): string {
+  return `[${session.desktop!.marker}] ${session.title}\n\n${brief}${CC_TURN_FOOTER}`;
+}
+
+function failDesktopSession(session: CcSession, reason: string): void {
+  if (session.desktop) delete session.desktop.pending;
+  session.status = "failed";
+  session.lastError = reason;
+  ccLedger.save();
+  ccChip(session, `stopped with a problem — ${reason.slice(0, 100)}`, false);
+  autonomy.addReport(session.ownerBotId, session.ownerThreadId, ccReportForOwner(session));
+}
+
+/** Read the app's records: find new sessions, notice finished turns. */
+function followDesktopSessions(): void {
+  const now = Date.now();
+  for (const session of ccLedger.all()) {
+    const desktop = session.desktop;
+    if (session.surface !== "app" || !desktop || session.status === "archived" || session.status === "stopped") continue;
+    if (!desktop.localId && desktop.sentAt) {
+      const record = findDesktopSession(desktop.marker, desktop.sentAt - 60_000);
+      if (record) {
+        desktop.localId = record.sessionId;
+        desktop.cliSessionId = record.cliSessionId;
+        if (record.cwd) session.cwd = record.cwd;
+        ccLedger.save();
+        ccChip(session, "opened in the Claude app");
+      } else if (now - desktop.sentAt > DESKTOP_RECORD_WAIT_MS) {
+        delete desktop.sentAt;
+        failDesktopSession(session, "the brief was sent, but no matching session appeared in the Claude app within 5 minutes");
+      }
+      continue;
+    }
+    if (!desktop.localId) continue;
+    const record = readDesktopRecord(desktop.localId);
+    if (!record) continue;
+    if (record.isArchived) {
+      ccLedger.setStatus(session, "archived");
+      ccChip(session, "archived in the Claude app");
+      continue;
+    }
+    const turns = record.completedTurns ?? 0;
+    if (turns <= desktop.turnsSeen) continue;
+    desktop.turnsSeen = turns;
+    session.turns = turns;
+    if (record.cwd) session.cwd = record.cwd;
+    const transcript = transcriptPath(record);
+    const said = transcript ? lastAssistantText(transcript) : "";
+    session.lastReport = [said, record.prUrl ? `PR: ${record.prUrl}` : ""].filter(Boolean).join("\n\n") || "(no text in its last reply)";
+    session.status = "idle";
+    delete session.lastError;
+    session.lastActivityAt = now;
+    const next = ccLedger.takeQueued(session);
+    if (next !== null) {
+      desktop.pending = { kind: "send", text: next, since: now, attempts: 0 };
+      session.status = "running";
+      ccLedger.save();
+      ccChip(session, "your queued message goes in next");
+      continue;
+    }
+    ccLedger.save();
+    ccChip(session, `finished turn ${turns}`);
+    autonomy.addReport(session.ownerBotId, session.ownerThreadId, ccReportForOwner(session));
+  }
+}
+
+async function runDesktopWork(): Promise<void> {
+  if (process.platform !== "darwin") return;
+  followDesktopSessions();
+  if (desktopBusy) return;
+  const now = Date.now();
+  const next = ccLedger.all()
+    .filter((session) => session.surface === "app" && session.desktop?.pending && session.status !== "archived" && session.status !== "stopped")
+    .sort((a, b) => a.desktop!.pending!.since - b.desktop!.pending!.since)[0];
+  if (!next) return;
+  const desktop = next.desktop!;
+  const pending = desktop.pending!;
+  if (now - pending.since > DESKTOP_PENDING_MAX_MS) {
+    failDesktopSession(next, `the Mac was never idle for long enough in 12 hours to ${pending.kind === "create" ? "open the session" : "send the message"} (${pending.lastReason ?? "busy"})`);
+    return;
+  }
+  desktopBusy = true;
+  try {
+    let driver: DesktopDriver;
+    try {
+      driver = await getDesktopDriver();
+    } catch (error) {
+      failDesktopSession(next, `could not prepare the screen helper: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const step = pending.kind === "create"
+      ? await createDesktopSession(driver, { repoName: basename(next.repo), text: pending.text })
+      : desktop.localId
+        ? await sendToDesktopSession(driver, { localId: desktop.localId, text: pending.text })
+        : { ok: false as const, reason: "the session is not open in the app yet", retry: true };
+    if (step.ok) {
+      delete desktop.pending;
+      if (pending.kind === "create") desktop.sentAt = Date.now();
+      next.status = "running";
+      next.lastActivityAt = Date.now();
+      ccLedger.save();
+      ccChip(next, pending.kind === "create" ? "brief sent in the Claude app" : "message sent in the Claude app");
+      return;
+    }
+    if (!step.retry) {
+      failDesktopSession(next, step.reason);
+      return;
+    }
+    pending.attempts += 1;
+    pending.lastReason = step.reason;
+    ccLedger.save();
+  } catch (error) {
+    pending.attempts += 1;
+    pending.lastReason = error instanceof Error ? error.message.slice(0, 200) : String(error);
+    ccLedger.save();
+  } finally {
+    desktopBusy = false;
+  }
 }
 
 let autonomyTicking = false;
@@ -15630,7 +15780,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
             return json(res, 409, { error: `${CC_MAX_RUNNING} Claude Code sessions are already running on this computer; wait for one to report, or stop one` });
           }
-          const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, ...(input.model ? { model: input.model } : {}) });
+          if (body.surface !== "cli" && process.platform === "darwin") {
+            const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
+            session.desktop!.pending = { kind: "create", text: desktopBrief(session, input.brief), since: Date.now(), attempts: 0 };
+            session.status = "running";
+            ccLedger.save();
+            ccChip(session, "queued to open in the Claude app when the Mac is idle");
+            return json(res, 200, { message: `Queued Claude Code session ${session.id} ("${session.title}") to open in the Claude app, in ${basename(input.repo)} with its own worktree, as soon as the Mac has been idle for a minute — the person follows it there. When it finishes a turn you get its report here as a new turn. End your turn now — do not poll it.` });
+          }
+          const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
           runCcTurn(session, input.brief, true);
           ccChip(session, `started in ${input.repo}/.claude/worktrees/${session.worktree}`);
           return json(res, 200, { message: `Started Claude Code session ${session.id} ("${session.title}") in its own worktree. It works on its own; when it stops you get its report here as a new turn. End your turn now — do not poll it.` });
@@ -15641,6 +15799,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const message = typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "";
           if (!message) return json(res, 400, { error: "message is required" });
           if (session.status === "archived") return json(res, 409, { error: "that session is archived; start a new one" });
+          if (session.surface === "app") {
+            if (session.status === "running" || session.desktop?.pending) {
+              const position = ccLedger.enqueue(session, message);
+              return json(res, 200, { message: `The session is busy; your message is queued (#${position}) and goes into the Claude app after this turn. End your turn now.` });
+            }
+            session.desktop!.pending = { kind: "send", text: message, since: Date.now(), attempts: 0 };
+            session.status = "running";
+            ccLedger.save();
+            ccChip(session, "message queued for the Claude app");
+            return json(res, 200, { message: "Queued: it goes into the session in the Claude app as soon as the Mac is idle; the next report comes back here. End your turn now." });
+          }
           if (session.status === "running") {
             const position = ccLedger.enqueue(session, message);
             return json(res, 200, { message: `The session is mid-turn; your message is queued (#${position}) and runs as soon as this turn ends. End your turn now.` });
@@ -15651,6 +15820,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           runCcTurn(session, message, session.turns === 0);
           ccChip(session, "sent a message");
           return json(res, 200, { message: "Sent. The session is working; its report comes back here as a new turn. End your turn now." });
+        }
+        if (session.surface === "app" && action === "stop") {
+          return json(res, 409, { error: "this session runs in the Claude app; ask the person to stop it there (Esc in the session)" });
+        }
+        if (session.surface === "app" && action === "archive") {
+          ccLedger.setStatus(session, "archived");
+          ccChip(session, "archived");
+          return json(res, 200, { message: "Archived here. The Claude app keeps it in its list until the person archives it (it also tidies sessions whose PR merged)." });
         }
         if (action === "stop" || action === "archive") {
           const child = ccProcesses.get(session.id);

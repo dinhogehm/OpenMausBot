@@ -1161,7 +1161,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
         fromThreadId: THREAD_ID,
         action,
         ...(sessionId ? { sessionId } : {}),
-        ...(action === "start" ? { title: args.title, brief: args.brief, repo: args.repo, ...(args.permission_mode !== undefined ? { permissionMode: args.permission_mode } : {}), ...(args.model !== undefined ? { model: args.model } : {}) } : {}),
+        ...(action === "start" ? { title: args.title, brief: args.brief, repo: args.repo, ...(args.surface !== undefined ? { surface: args.surface } : {}), ...(args.permission_mode !== undefined ? { permissionMode: args.permission_mode } : {}), ...(args.model !== undefined ? { model: args.model } : {}) } : {}),
         ...(action === "send" ? { message: args.message } : {}),
         ...(action === "list" && args.include_archived === true ? { includeArchived: true } : {}),
         ...(action === "archive" && args.remove_worktree === true ? { removeWorktree: true } : {}),

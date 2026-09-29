@@ -49,6 +49,27 @@ export interface CcSession {
   /** Messages sent while a turn was running; each becomes the next turn. */
   queued: string[];
   archivedAt?: number;
+  /** "app": the session lives in the Claude desktop app, driven through its
+   * screen (server/claude-desktop.ts); "cli" (default for older records):
+   * headless `claude -p` turns. */
+  surface?: CcSurface;
+  desktop?: CcDesktopState;
+}
+
+export type CcSurface = "app" | "cli";
+
+export interface CcDesktopState {
+  /** Written at the top of the brief; finds the session among the app's records. */
+  marker: string;
+  /** The app's session id (local_…) and the Claude Code session it points to. */
+  localId?: string;
+  cliSessionId?: string;
+  /** completedTurns already reported to the owner. */
+  turnsSeen: number;
+  /** When the brief was sent; the app's record must appear after this. */
+  sentAt?: number;
+  /** A screen action waiting for the Mac to be idle. */
+  pending?: { kind: "create" | "send"; text: string; since: number; attempts: number; lastReason?: string };
 }
 
 export function slugify(text: string): string {
@@ -169,7 +190,7 @@ export class CcSessionLedger {
       for (const session of raw.sessions ?? []) {
         if (!session || typeof session.id !== "string") continue;
         // A run cannot survive a server restart: it was lost mid-turn.
-        if (session.status === "running") {
+        if (session.status === "running" && session.surface !== "app") {
           session.status = "failed";
           session.lastError = "the server restarted (the computer was shut down or the app quit) while this turn was running; resume it with cc_session_send";
           this.interruptedOnLoad.push(session);
@@ -187,7 +208,7 @@ export class CcSessionLedger {
     writeFileAtomic(this.path, `${JSON.stringify({ sessions: [...this.sessions.values()] }, null, 2)}\n`, { mode: 0o600 });
   }
 
-  create(input: { id: string; ownerBotId: string; ownerThreadId: string; title: string; repo: string; permissionMode: CcPermissionMode; model?: string }): CcSession {
+  create(input: { id: string; ownerBotId: string; ownerThreadId: string; title: string; repo: string; permissionMode: CcPermissionMode; model?: string; surface?: CcSurface; desktop?: CcDesktopState }): CcSession {
     const at = this.now();
     const session: CcSession = {
       ...input,
@@ -213,6 +234,10 @@ export class CcSessionLedger {
     return [...this.sessions.values()]
       .filter((session) => session.ownerBotId === botId && (includeArchived || session.status !== "archived"))
       .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+  }
+
+  all(): CcSession[] {
+    return [...this.sessions.values()];
   }
 
   runningCount(): number {
@@ -265,9 +290,10 @@ export class CcSessionLedger {
 
 export function ccSessionLine(session: CcSession): string {
   const bits = [
-    `${session.id} · "${session.title}" · ${session.status}`,
+    `${session.id} · "${session.title}" · ${session.status}${session.surface === "app" ? " · in the Claude app" : ""}`,
     `turns ${session.turns}, US$ ${session.costUsd.toFixed(2)}`,
-    session.cwd ? `worktree ${session.cwd}` : `worktree ${session.repo}/.claude/worktrees/${session.worktree} (pending)`,
+    session.cwd ? `worktree ${session.cwd}` : session.surface === "app" ? "worktree chosen by the app (pending)" : `worktree ${session.repo}/.claude/worktrees/${session.worktree} (pending)`,
+    ...(session.desktop?.pending ? [`waiting for an idle Mac to ${session.desktop.pending.kind === "create" ? "open it" : "send a message"}${session.desktop.pending.lastReason ? ` (${session.desktop.pending.lastReason})` : ""}`] : []),
     ...(session.queued.length ? [`${session.queued.length} message(s) queued`] : []),
   ];
   return bits.join(" · ");
