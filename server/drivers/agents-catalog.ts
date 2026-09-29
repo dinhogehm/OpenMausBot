@@ -608,6 +608,23 @@ const toolDefinitions = (externalRuntime: boolean) => [
     },
   },
   {
+    name: "wake_when",
+    description:
+      "Wait for something outside this conversation without spending turns: the server re-runs a read-only command every few minutes, with no model involved, and gives you a new turn HERE only when its output changes (or matches until), after max_minutes regardless, or if it keeps failing. Use it instead of wake_me for CI, PR checks and reviews, workflow runs, deploy health. Allowed: gh pr view|checks|list|status, gh run|workflow|release view|list, gh issue view|list, gh api (GET), git ls-remote|log|rev-parse|status, curl GET. No shell: no pipes or $vars; quote --jq filters. Pick stable fields (--json state,statusCheckRollup), not timestamps. Shares the one pending wake per conversation. End your turn after calling it.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        command: { type: "string", maxLength: 500, description: "e.g. gh pr view 9286 -R owner/repo --json state,statusCheckRollup,reviewDecision" },
+        until: { type: "string", maxLength: 200, description: "Optional: wake only when the output matches this (case-insensitive regex or text), e.g. MERGED|FAILURE. Omit to wake on any change." },
+        every_minutes: { type: "integer", minimum: 1, maximum: 60, description: "How often to re-run, default 2." },
+        max_minutes: { type: "integer", minimum: 5, maximum: 1_440, description: "Wake anyway after this long, default 120." },
+        reason: { type: "string", maxLength: 500, description: "Note to your future self: what to do when it fires." },
+      },
+      required: ["command", "reason"],
+    },
+  },
+  {
     name: "goal_start",
     description:
       "Turn on goal mode in THIS conversation: after each turn ends the harness gives you the next one, until you call goal_end, a limit runs out, or the person presses Stop. Use it when the person wants you to keep working until something is delivered (\"don't stop\", \"24/7\", \"until it is in production\"). Between turns, use wake_me to wait on something external; delegated teammates wake you with their results. Replaces an earlier goal here. Not for rooms.",

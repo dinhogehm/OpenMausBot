@@ -11,6 +11,7 @@ import {
   parseGoalEndInput,
   parseGoalInput,
   parseWakeInput,
+  parseWatchInput,
   wakePrompt,
 } from "./bot-autonomy.ts";
 
@@ -164,5 +165,60 @@ describe("prompts", () => {
     autonomy.startGoal("bot", "t1", { goal: "ship", maxTurns: 5, maxHours: 1 });
     autonomy.noteGoalDispatch("t1");
     expect(goalEndChip(autonomy.finishGoal("t1", "completed", "deployed")!)).toBe("Goal completed after 1 turn — deployed");
+  });
+});
+
+describe("watches", () => {
+  const watchInput = { command: "gh pr view 1", argv: ["gh", "pr", "view", "1"], everyMinutes: 2, maxMinutes: 60, reason: "check PR 1", baseline: "OPEN" };
+
+  it("runs on its cadence and fires on a change, not before", () => {
+    const autonomy = make();
+    const wake = autonomy.setWatch("bot", "t1", watchInput);
+    expect(autonomy.watchesToRun()).toEqual([]);
+    now += 2 * 60_000;
+    expect(autonomy.watchesToRun()).toEqual([wake]);
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "OPEN", matched: false })).toBeNull();
+    expect(autonomy.dueWakes()).toEqual([]);
+    now += 2 * 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "MERGED", matched: false })).toBe("changed");
+    expect(autonomy.dueWakes()).toEqual([wake]);
+    expect(autonomy.watchesToRun()).toEqual([]);
+    const prompt = wakePrompt(wake, null, now);
+    expect(prompt).toContain("its output changed");
+    expect(prompt).toContain("MERGED");
+  });
+
+  it("with until, ignores other changes and fires on a match", () => {
+    const autonomy = make();
+    const wake = autonomy.setWatch("bot", "t1", { ...watchInput, until: "MERGED" });
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "CLOSED", matched: false })).toBeNull();
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "MERGED", matched: true })).toBe("matched");
+  });
+
+  it("wakes the bot after three failed runs in a row", () => {
+    const autonomy = make();
+    const wake = autonomy.setWatch("bot", "t1", watchInput);
+    autonomy.recordWatchRun(wake, { ok: false, output: "boom", matched: false });
+    autonomy.recordWatchRun(wake, { ok: true, output: "OPEN", matched: false });
+    autonomy.recordWatchRun(wake, { ok: false, output: "boom", matched: false });
+    autonomy.recordWatchRun(wake, { ok: false, output: "boom", matched: false });
+    expect(autonomy.recordWatchRun(wake, { ok: false, output: "boom", matched: false })).toBe("failing");
+  });
+
+  it("still wakes at max_minutes and survives a restart", () => {
+    make().setWatch("bot", "t1", watchInput);
+    const reloaded = make();
+    expect(reloaded.wakeFor("t1")?.watch?.baseline).toBe("OPEN");
+    now += 60 * 60_000;
+    expect(reloaded.dueWakes()).toHaveLength(1);
+    expect(reloaded.watchesToRun()).toEqual([]);
+    expect(wakePrompt(reloaded.wakeFor("t1")!, null, now)).toContain("time limit ran out");
+  });
+
+  it("validates cadence and limits", () => {
+    expect(parseWatchInput({ reason: "x" })).toEqual({ ok: true, everyMinutes: 2, maxMinutes: 120, reason: "x" });
+    expect(parseWatchInput({ reason: "x", everyMinutes: 0 }).ok).toBe(false);
+    expect(parseWatchInput({ reason: "x", everyMinutes: 30, maxMinutes: 10 }).ok).toBe(false);
+    expect(parseWatchInput({ everyMinutes: 2 }).ok).toBe(false);
   });
 });

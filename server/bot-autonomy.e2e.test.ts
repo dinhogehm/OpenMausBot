@@ -30,7 +30,7 @@ async function fixture(test: (f: any) => Promise<void>) {
 }
 
 const toolResult = (turn: any, tool: string) =>
-  turn.evidence.find((entry: any) => entry.step?.tool === tool)?.response?.result?.content?.[0]?.text as string;
+  turn.evidence.findLast((entry: any) => entry.step?.tool === tool)?.response?.result?.content?.[0]?.text as string;
 
 it("wakes the bot in the same conversation with its own note", () => fixture(async f => {
   f.save({ turns: [
@@ -140,5 +140,32 @@ it("retries a failing goal turn after a pause and blocks it after three failures
   await expect.poll(() => f.ledger().goals?.[0]?.status, { timeout: 30_000 }).toBe("blocked");
   expect(f.turns()).toHaveLength(4);
   expect(f.ledger().goals[0].detail).toMatch(/3 turns in a row failed/);
+  expect(f.ledger().wakes).toEqual([]);
+}), 60_000);
+
+it("watches a command without waking the bot until its output changes", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const repo = join(f.session.info.dataDir, "watched-repo");
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { stdio: "pipe" });
+  execFileSync("git", ["init", "-q", repo]);
+  git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first");
+  const command = `git -C ${repo} log --format=%s -1`;
+  f.save({ turns: [
+    { steps: [
+      { tool: "wake_when", arguments: { command: "rm -rf /", reason: "x" }, expectError: true },
+      { tool: "wake_when", arguments: { command, reason: "WATCH_NOTE see what landed", every_minutes: 1, max_minutes: 60 } },
+    ], reply: "Watching the repo" },
+    { expectContextIncludes: ["its output changed", "second DONE", "WATCH_NOTE see what landed"], reply: "Saw the new commit" },
+  ] });
+  await f.send("Tell me when a new commit lands.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  expect(toolResult(f.turns()[0], "wake_when")).toContain("Watching. The server re-runs it");
+  // Many cadences pass with no change: the command runs, the bot does not.
+  await new Promise(resolve => setTimeout(resolve, 1_500));
+  expect(f.turns()).toHaveLength(1);
+  expect(f.ledger().wakes[0].watch.runs).toBeGreaterThan(2);
+  git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "second DONE");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Watch fired (changed)")), { timeout: 10_000 }).toBe(true);
   expect(f.ledger().wakes).toEqual([]);
 }), 60_000);

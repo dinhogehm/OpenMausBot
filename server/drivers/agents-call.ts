@@ -1129,6 +1129,25 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
     if (r.error) return { text: `Couldn't ${cancel ? "cancel the wake-up" : "schedule the wake-up"}: ${String(r.error)}`, isError: true };
     return { text: String(r.message ?? (cancel ? "Wake-up cancelled." : "Wake-up scheduled. End your turn now.")) };
   }
+  if (name === "wake_when") {
+    if (typeof args.command !== "string" || !args.command.trim() || typeof args.reason !== "string" || !args.reason.trim()) {
+      return { text: "wake_when needs command (a read-only gh, git or curl command) and reason (what to do when it fires).", isError: true };
+    }
+    const r = await api("/api/internal/wake", {
+      method: "POST",
+      body: JSON.stringify({
+        fromBotId: BOT_ID,
+        fromThreadId: THREAD_ID,
+        command: args.command,
+        reason: args.reason,
+        ...(typeof args.until === "string" && args.until.trim() ? { until: args.until } : {}),
+        ...(args.every_minutes !== undefined ? { everyMinutes: args.every_minutes } : {}),
+        ...(args.max_minutes !== undefined ? { maxMinutes: args.max_minutes } : {}),
+      }),
+    });
+    if (r.error) return { text: `Couldn't start the watch: ${String(r.error)}`, isError: true };
+    return { text: String(r.message ?? "Watching. End your turn now.") };
+  }
   if (name === "goal_start") {
     if (typeof args.goal !== "string" || !args.goal.trim()) {
       return { text: "goal_start needs goal: the concrete deliverable and how you will verify it.", isError: true };

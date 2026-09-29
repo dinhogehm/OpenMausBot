@@ -5,6 +5,10 @@
 //     conversation after N minutes — to check a CI run, a deploy, another
 //     agent's session, or to follow a "check every 2 minutes" rule. One
 //     pending wake per conversation; a new one replaces it.
+//   - A watch (wake_when) is a wake with a read-only command attached: the
+//     server runs it every few minutes, with no model involved, and moves
+//     the wake up to "now" once the output changes, matches what the bot
+//     waits for, or keeps failing. The time limit still wakes it regardless.
 //   - A goal: the bot was told to keep working until something is delivered
 //     (goal_start). The harness keeps handing it continuation turns until it
 //     calls goal_end, a limit runs out, or the person presses Stop.
@@ -32,12 +36,38 @@ export const GOAL_MAX_CONSECUTIVE_FAILURES = 3;
  * and the busy flag must get a chance to settle before the next check. */
 export const GOAL_MIN_TURN_GAP_MS = 15_000;
 
+export const WATCH_MIN_EVERY_MINUTES = 1;
+export const WATCH_MAX_EVERY_MINUTES = 60;
+export const WATCH_DEFAULT_EVERY_MINUTES = 2;
+export const WATCH_MIN_MAX_MINUTES = 5;
+export const WATCH_DEFAULT_MAX_MINUTES = 120;
+export const WATCH_UNTIL_MAX = 200;
+/** Consecutive failed runs before the bot is woken to fix its command. */
+export const WATCH_MAX_FAILURES = 3;
+const WATCH_PROMPT_OUTPUT_MAX = 1_500;
+
+export type WatchTrigger = "changed" | "matched" | "failing";
+
+export interface WakeWatch {
+  command: string;
+  argv: string[];
+  everyMs: number;
+  until?: string;
+  baseline: string;
+  lastOutput?: string;
+  lastRunAt: number;
+  runs: number;
+  failures: number;
+  trigger?: WatchTrigger;
+}
+
 export interface BotWake {
   botId: string;
   threadId: string;
   dueAt: number;
   reason: string;
   createdAt: number;
+  watch?: WakeWatch;
 }
 
 export type GoalEndStatus = "completed" | "blocked" | "needs-input";
@@ -77,6 +107,26 @@ export function parseWakeInput(body: { minutes?: unknown; reason?: unknown }): W
   const reason = clip(body.reason, WAKE_REASON_MAX);
   if (!reason) return { ok: false, error: "reason is required: what to check or do when you wake up" };
   return { ok: true, minutes, reason };
+}
+
+export type WatchInput =
+  | { ok: true; everyMinutes: number; maxMinutes: number; until?: string; reason: string }
+  | { ok: false; error: string };
+
+export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unknown; until?: unknown; reason?: unknown }): WatchInput {
+  const everyMinutes = body.everyMinutes === undefined
+    ? WATCH_DEFAULT_EVERY_MINUTES
+    : intIn(body.everyMinutes, WATCH_MIN_EVERY_MINUTES, WATCH_MAX_EVERY_MINUTES);
+  if (everyMinutes === null) return { ok: false, error: `every_minutes must be a whole number from ${WATCH_MIN_EVERY_MINUTES} to ${WATCH_MAX_EVERY_MINUTES}` };
+  const maxMinutes = body.maxMinutes === undefined
+    ? WATCH_DEFAULT_MAX_MINUTES
+    : intIn(body.maxMinutes, WATCH_MIN_MAX_MINUTES, WAKE_MAX_MINUTES);
+  if (maxMinutes === null) return { ok: false, error: `max_minutes must be a whole number from ${WATCH_MIN_MAX_MINUTES} to ${WAKE_MAX_MINUTES}` };
+  if (maxMinutes < everyMinutes) return { ok: false, error: "max_minutes must be at least every_minutes" };
+  const until = clip(body.until, WATCH_UNTIL_MAX) || undefined;
+  const reason = clip(body.reason, WAKE_REASON_MAX);
+  if (!reason) return { ok: false, error: "reason is required: what to do when the watch fires" };
+  return { ok: true, everyMinutes, maxMinutes, ...(until ? { until } : {}), reason };
 }
 
 export type GoalInput =
@@ -157,6 +207,69 @@ export class BotAutonomy {
     this.wakes.set(threadId, wake);
     this.save();
     return wake;
+  }
+
+  /** A wake that fires early when a watched command's output moves. The
+   * first run already happened (its output is the baseline). */
+  setWatch(
+    botId: string,
+    threadId: string,
+    input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string },
+  ): BotWake {
+    const at = this.now();
+    const wake: BotWake = {
+      botId,
+      threadId,
+      dueAt: at + input.maxMinutes * this.minuteMs,
+      reason: input.reason,
+      createdAt: at,
+      watch: {
+        command: input.command,
+        argv: input.argv,
+        everyMs: input.everyMinutes * this.minuteMs,
+        ...(input.until ? { until: input.until } : {}),
+        baseline: input.baseline,
+        lastRunAt: at,
+        runs: 1,
+        failures: 0,
+      },
+    };
+    this.wakes.set(threadId, wake);
+    this.save();
+    return wake;
+  }
+
+  /** Watches whose command is due to run again (not yet triggered). */
+  watchesToRun(): BotWake[] {
+    const at = this.now();
+    return [...this.wakes.values()].filter((wake) =>
+      wake.watch && !wake.watch.trigger && wake.dueAt > at && at - wake.watch.lastRunAt >= wake.watch.everyMs,
+    );
+  }
+
+  /** Record one run; the wake becomes due now if the watch triggered. The
+   * caller decides changed/matched (it owns the matching rule). */
+  recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean }): WatchTrigger | null {
+    const watch = wake.watch;
+    if (!watch || this.wakes.get(wake.threadId) !== wake || watch.trigger) return null;
+    watch.lastRunAt = this.now();
+    watch.runs += 1;
+    watch.lastOutput = result.output;
+    let trigger: WatchTrigger | null = null;
+    if (!result.ok) {
+      watch.failures += 1;
+      if (watch.failures >= WATCH_MAX_FAILURES) trigger = "failing";
+    } else {
+      watch.failures = 0;
+      if (result.matched) trigger = "matched";
+      else if (!watch.until && result.output !== watch.baseline) trigger = "changed";
+    }
+    if (trigger) {
+      watch.trigger = trigger;
+      wake.dueAt = this.now();
+    }
+    this.save();
+    return trigger;
   }
 
   /** Put back a wake that was taken but could not start (the thread got
@@ -296,7 +409,7 @@ const minutesLabel = (ms: number): string => {
 
 const GOAL_RULES = [
   "Keep going without waiting for the person. Do the next concrete step now: run the command, open the PR, check the deploy, fix what failed.",
-  "When you are waiting on something outside this conversation (CI, a deploy, another agent's session, a review), call wake_me with a short interval and end the turn instead of polling in a loop.",
+  "When you are waiting on something outside this conversation (CI, a deploy, a review), call wake_when with a read-only command that shows its state — it costs nothing until that state changes — or wake_me for a plain timer, and end the turn instead of polling in a loop.",
   "When teammates you delegated to are still working, just end the turn: their results wake you here.",
   "Call goal_end with status completed only when the deliverable is verifiably done, blocked when you cannot proceed, or needs_input when only the person can decide. Never claim completion you have not checked.",
 ];
@@ -314,19 +427,47 @@ export function goalContinuationPrompt(goal: BotGoal, now: number): string {
   ].join("\n");
 }
 
+const clipOutput = (text: string | undefined): string => {
+  const value = (text ?? "").trim();
+  if (!value) return "(empty)";
+  return value.length > WATCH_PROMPT_OUTPUT_MAX ? `${value.slice(0, WATCH_PROMPT_OUTPUT_MAX)}\n… (truncated)` : value;
+};
+
+function watchLines(wake: BotWake): string[] {
+  const watch = wake.watch;
+  if (!watch) return [];
+  const why = watch.trigger === "matched"
+    ? `its output now matches "${watch.until}"`
+    : watch.trigger === "changed"
+      ? "its output changed"
+      : watch.trigger === "failing"
+        ? `the command failed ${watch.failures} times in a row — fix or replace it`
+        : "the time limit ran out before anything changed";
+  return [
+    `Your watch \`${watch.command}\` ran ${watch.runs} time(s); you are woken because ${why}.`,
+    `Output when you set it:\n${clipOutput(watch.baseline)}`,
+    ...(watch.lastOutput !== undefined && watch.lastOutput !== watch.baseline ? [`Latest output:\n${clipOutput(watch.lastOutput)}`] : []),
+  ];
+}
+
 export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number): string {
   return [
-    `[Wake-up you scheduled ${minutesLabel(now - wake.createdAt)} ago. Nobody typed this.]`,
+    `[${wake.watch ? "Watch" : "Wake-up"} you scheduled ${minutesLabel(now - wake.createdAt)} ago. Nobody typed this.]`,
+    ...watchLines(wake),
     `Your note for this moment: ${wake.reason}`,
     ...(goal && goal.status === "active"
       ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`, ...GOAL_RULES]
-      : ["Do what the note says. If it still is not ready, call wake_me again; if it is, report the result here."]),
+      : ["Do what the note says. If it still is not ready, call wake_when or wake_me again; if it is, report the result here."]),
   ].join("\n");
 }
 
 export function wakeChip(wake: BotWake): string {
   const at = new Date(wake.dueAt);
   const hhmm = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+  if (wake.watch) {
+    const every = Math.round(wake.watch.everyMs / 60_000) || 1;
+    return `Watching \`${wake.watch.command.slice(0, 80)}\` every ${every} min, until ${hhmm} — ${wake.reason.slice(0, 100)}`;
+  }
   return `Wake-up set for ${hhmm} — ${wake.reason.slice(0, 120)}`;
 }
 

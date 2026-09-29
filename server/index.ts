@@ -9,6 +9,7 @@ import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { ToolResults, TOOL_RESULT_MAX_CHARS } from "./tool-results.ts";
 import { extname, join } from "node:path";
+import { homedir } from "node:os";
 import { authorizeExternalRuntime, externalRuntimeIsActive, type ExternalRuntimeGrant } from "./external-runtime.ts";
 
 import { z } from "zod";
@@ -243,9 +244,11 @@ import {
   parseGoalEndInput,
   parseGoalInput,
   parseWakeInput,
+  parseWatchInput,
   wakeChip,
   wakePrompt,
 } from "./bot-autonomy.ts";
+import { parseWatchCommand, runWatchCommand, watchMatches } from "./wake-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -7207,7 +7210,25 @@ function finishGoalWithChip(threadId: string, status: "stopped" | "limit" | "blo
   if (goal) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: goalEndChip(goal), ok: false } });
 }
 
+/** Where a watch command runs: the conversation's project folder, else the
+ * bot's, else home — the same folder the bot's own commands start in. */
+function watchCwd(botId: string, threadId: string): string {
+  const cwd = store.taskByThread(botId, threadId)?.cwd ?? store.bot(botId)?.cwd;
+  return cwd && existsSync(cwd) ? cwd : homedir();
+}
+
+async function runDueWatches(): Promise<void> {
+  const watches = autonomy.watchesToRun();
+  await Promise.all(watches.map(async (wake) => {
+    if (!store.taskByThread(wake.botId, wake.threadId)) return;
+    const watch = wake.watch!;
+    const result = await runWatchCommand(watch.argv, { cwd: watchCwd(wake.botId, wake.threadId), path: augmentedPath() });
+    autonomy.recordWatchRun(wake, { ...result, matched: result.ok && watchMatches(result.output, watch.until) });
+  }));
+}
+
 async function autonomyTick(): Promise<void> {
+  await runDueWatches();
   for (const wake of autonomy.dueWakes()) {
     if (!store.taskByThread(wake.botId, wake.threadId)) {
       autonomy.forgetThread(wake.threadId);
@@ -7220,7 +7241,8 @@ async function autonomyTick(): Promise<void> {
     autonomy.cancelWake(wake.threadId);
     const goal = autonomy.goalFor(wake.threadId);
     const prompt = wakePrompt(wake, goal, Date.now());
-    const outcome = await dispatchAutonomyTurn(wake.botId, wake.threadId, `Woke up — ${wake.reason.slice(0, 140)}`, prompt);
+    const chip = wake.watch ? `Watch fired (${wake.watch.trigger ?? "time limit"}) — ${wake.reason.slice(0, 130)}` : `Woke up — ${wake.reason.slice(0, 140)}`;
+    const outcome = await dispatchAutonomyTurn(wake.botId, wake.threadId, chip, prompt);
     // Put a wake that lost a race back where it was; the next tick retries.
     if (outcome === "busy") autonomy.restoreWake(wake);
   }
@@ -15412,6 +15434,24 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (body.cancel === true) {
             const cancelled = autonomy.cancelWake(threadId);
             return json(res, 200, { message: cancelled ? "Wake-up cancelled." : "There was no pending wake-up here." });
+          }
+          if (body.command !== undefined) {
+            const command = parseWatchCommand(body.command);
+            if (!command.ok) return json(res, 400, { error: command.error });
+            const input = parseWatchInput(body);
+            if (!input.ok) return json(res, 400, { error: input.error });
+            // The first run proves the command works and becomes the baseline.
+            const first = await runWatchCommand(command.argv, { cwd: watchCwd(bot.id, threadId), path: augmentedPath() });
+            requireActiveInternalCapability();
+            if (!first.ok) return json(res, 400, { error: `the command failed on its first run — fix it before watching:\n${first.output.slice(0, 1_500)}` });
+            if (watchMatches(first.output, input.until)) {
+              return json(res, 200, { message: `Already true — the output matches "${input.until}" now, so nothing to wait for. Output:\n${first.output.slice(0, 1_500)}` });
+            }
+            const wake = autonomy.setWatch(bot.id, threadId, { ...input, command: String(body.command).trim(), argv: command.argv, baseline: first.output });
+            store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: wakeChip(wake), ok: true } });
+            return json(res, 200, {
+              message: `Watching. The server re-runs it every ${input.everyMinutes} min with no model involved and wakes you here when ${input.until ? `the output matches "${input.until}"` : "the output changes"}, or after ${input.maxMinutes} min regardless. End your turn now. Current output:\n${first.output.slice(0, 1_500)}`,
+            });
           }
           const input = parseWakeInput(body);
           if (!input.ok) return json(res, 400, { error: input.error });

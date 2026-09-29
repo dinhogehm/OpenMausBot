@@ -634,6 +634,7 @@ describe("agents-proxy MCP surface", () => {
       "memory_update",
       "retry_thread",
       "wake_me",
+      "wake_when",
       "goal_start",
       "goal_end",
       "memory_log",
