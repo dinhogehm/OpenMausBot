@@ -234,6 +234,18 @@ import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, c
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, parseUntil, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
 import { chiefForBot, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, type Incident, type IncidentKind } from "./incidents.ts";
+import {
+  BotAutonomy,
+  GOAL_MAX_CONSECUTIVE_FAILURES,
+  goalContinuationPrompt,
+  goalEndChip,
+  goalStartedAck,
+  parseGoalEndInput,
+  parseGoalInput,
+  parseWakeInput,
+  wakeChip,
+  wakePrompt,
+} from "./bot-autonomy.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -7133,6 +7145,136 @@ function drainDelegationWakes(): void {
   }
 }
 
+// ── self-paced work: wake_me and goal mode ──────────────────────────────
+// A bot's turn ends when its model answers, and before this nothing but a
+// person, a delegated reply or a routine could start the next one — so "keep
+// working until it ships" and "check every 2 minutes" died with the turn.
+// A wake gives the bot one more turn later; a goal gives it the next turn as
+// soon as the thread is free. Policy and persistence: server/bot-autonomy.ts.
+// The OMB_AUTONOMY_* knobs only shrink time for end-to-end tests.
+const autonomyTestMs = (name: string): number | undefined => {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+};
+const autonomy = new BotAutonomy({
+  path: join(DATA_DIR, "bot-autonomy.json"),
+  minuteMs: autonomyTestMs("OMB_AUTONOMY_MINUTE_MS"),
+  turnGapMs: autonomyTestMs("OMB_AUTONOMY_TURN_GAP_MS"),
+});
+const autonomyDispatching = new Set<string>();
+const AUTONOMY_TICK_MS = autonomyTestMs("OMB_AUTONOMY_TICK_MS") ?? 10_000;
+
+/** Somebody else owes this thread an answer, and delivering it will resume
+ * the bot on its own: a teammate, a pending delegation wake, or a card. */
+function threadWaitingOnOthers(botId: string, threadId: string): boolean {
+  if (roomHandoffs.activeDirect(threadId) || pendingDelegationWakes.has(threadId)) return true;
+  for (const watch of delegationWatch.values()) if (watch.sourceThreadId === threadId) return true;
+  return store.taskByThread(botId, threadId)?.activity === "waiting-on-you";
+}
+
+function autonomyTurnBlocked(botId: string, threadId: string): boolean {
+  return autonomyDispatching.has(threadId) || threadBusy(botId, threadId) || botAtThreadCapacity(botId) || Boolean(activeGroupTurnForBot(botId));
+}
+
+/** true = the turn started; false = not now (busy, or it failed and said so). */
+async function dispatchAutonomyTurn(botId: string, threadId: string, chip: string, prompt: string): Promise<"started" | "busy" | "failed"> {
+  autonomyDispatching.add(threadId);
+  try {
+    await startTurn(botId, prompt, { threadId, cardContinuation: true, unattended: true });
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chip, ok: true } });
+    return "started";
+  } catch (error) {
+    if (isTurnAdmissionBlocked(error)) return "busy";
+    const message = error instanceof Error ? error.message : String(error);
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `error: could not resume on its own — ${message.slice(0, 120)}`, ok: false } });
+    return "failed";
+  } finally {
+    autonomyDispatching.delete(threadId);
+  }
+}
+
+/** Stop means stop: the person's Stop ends goal mode and drops a pending
+ * wake-up, before the interrupt settles the turn as failed. */
+function stopAutonomyByPerson(threadId: string): void {
+  if (autonomy.cancelWake(threadId)) {
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: "Wake-up cancelled — stopped by you", ok: true } });
+  }
+  finishGoalWithChip(threadId, "stopped", "stopped by you");
+}
+
+function finishGoalWithChip(threadId: string, status: "stopped" | "limit" | "blocked", detail: string): void {
+  const goal = autonomy.finishGoal(threadId, status, detail);
+  if (goal) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: goalEndChip(goal), ok: false } });
+}
+
+async function autonomyTick(): Promise<void> {
+  for (const wake of autonomy.dueWakes()) {
+    if (!store.taskByThread(wake.botId, wake.threadId)) {
+      autonomy.forgetThread(wake.threadId);
+      continue;
+    }
+    // A due wake waits for the thread to be free; it is never dropped for it.
+    if (autonomyTurnBlocked(wake.botId, wake.threadId)) continue;
+    const current = autonomy.wakeFor(wake.threadId);
+    if (current !== wake) continue;
+    autonomy.cancelWake(wake.threadId);
+    const goal = autonomy.goalFor(wake.threadId);
+    const prompt = wakePrompt(wake, goal, Date.now());
+    const outcome = await dispatchAutonomyTurn(wake.botId, wake.threadId, `Woke up — ${wake.reason.slice(0, 140)}`, prompt);
+    // Put a wake that lost a race back where it was; the next tick retries.
+    if (outcome === "busy") autonomy.restoreWake(wake);
+  }
+  for (const goal of autonomy.activeGoals()) {
+    if (!store.taskByThread(goal.botId, goal.threadId)) {
+      autonomy.forgetThread(goal.threadId);
+      continue;
+    }
+    // A pending wake owns the next turn; results from others resume the bot.
+    if (autonomy.wakeFor(goal.threadId) || threadWaitingOnOthers(goal.botId, goal.threadId)) continue;
+    if (!autonomy.goalReadyForTurn(goal) || autonomyTurnBlocked(goal.botId, goal.threadId)) continue;
+    const limit = autonomy.goalLimitReached(goal);
+    if (limit) {
+      finishGoalWithChip(goal.threadId, "limit", `Goal ${limit} without goal_end. Tell the bot to continue if it should.`);
+      continue;
+    }
+    autonomy.noteGoalDispatch(goal.threadId);
+    const outcome = await dispatchAutonomyTurn(
+      goal.botId,
+      goal.threadId,
+      `Goal continues — turn ${goal.turnCount} of ${goal.maxTurns}`,
+      goalContinuationPrompt(goal, Date.now()),
+    );
+    if (outcome === "busy") autonomy.undoGoalDispatch(goal.threadId);
+    else if (outcome === "failed" && autonomy.noteGoalTurnOutcome(goal.threadId, false) >= GOAL_MAX_CONSECUTIVE_FAILURES) {
+      finishGoalWithChip(goal.threadId, "blocked", "The last turns could not start.");
+    }
+  }
+}
+
+let autonomyTicking = false;
+setInterval(() => {
+  if (autonomyTicking) return;
+  autonomyTicking = true;
+  void autonomyTick()
+    .catch((error) => console.error(`[autonomy] tick failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`))
+    .finally(() => { autonomyTicking = false; });
+}, AUTONOMY_TICK_MS).unref();
+
+// A goal turn that fails is retried after a pause; three in a row stop it.
+bus.subscribe((event: RuntimeEvent) => {
+  if (shouldIgnoreProviderEvent(event)) return;
+  if (event.type !== "turn.completed") return;
+  const goal = autonomy.goalFor(event.threadId);
+  if (!goal || goal.status !== "active") return;
+  const failures = autonomy.noteGoalTurnOutcome(event.threadId, event.ok);
+  if (event.ok) return;
+  if (failures >= GOAL_MAX_CONSECUTIVE_FAILURES) {
+    finishGoalWithChip(event.threadId, "blocked", `${failures} turns in a row failed${event.stopReason ? ` — ${event.stopReason.slice(0, 120)}` : ""}.`);
+  } else if (!autonomy.wakeFor(event.threadId)) {
+    autonomy.setWake(goal.botId, event.threadId, 2 * failures, "The previous goal turn failed. Check what went wrong, then continue the goal or call goal_end with blocked.");
+  }
+});
+
 function wakeUndispatchedDelegation(receipt: DelegationReceipt, routineRunId?: string): void {
   const source = store.botByThread(receipt.sourceThreadId);
   if (!source) return;
@@ -8050,6 +8192,8 @@ async function startTurn(
   else if (opts?.automationSource === undefined && !opts?.commsDepth && !opts?.cardContinuation) {
     clearUnattended(threadId);
     delegationWakeBudget.reset(threadId);
+    // The person answered a goal that stopped to ask them: it continues.
+    autonomy.resumeGoalAfterInput(threadId);
   }
   const task = store.taskByThread(bot.id, threadId);
   if (!task) throw Object.assign(new Error("no such task"), { status: 404 });
@@ -15255,6 +15399,49 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // same thread, its conversation and files, one more turn, with a line
       // saying who asked and why. Chief-only, for a teammate it can reach,
       // never a room (coordinate there) and never a thread still running.
+      if (method === "POST" && (path === "/api/internal/wake" || path === "/api/internal/goal")) {
+        const body = await readInternalBody();
+        const bot = internalSender;
+        const threadId = internalCapability.threadId;
+        if (store.groupByThread(threadId)) {
+          return json(res, 400, { error: "not available in rooms — rooms have their own /goal runs" });
+        }
+        if (!store.taskByThread(bot.id, threadId)) return json(res, 404, { error: "this conversation no longer exists" });
+        requireActiveInternalCapability();
+        if (path === "/api/internal/wake") {
+          if (body.cancel === true) {
+            const cancelled = autonomy.cancelWake(threadId);
+            return json(res, 200, { message: cancelled ? "Wake-up cancelled." : "There was no pending wake-up here." });
+          }
+          const input = parseWakeInput(body);
+          if (!input.ok) return json(res, 400, { error: input.error });
+          const wake = autonomy.setWake(bot.id, threadId, input.minutes, input.reason);
+          store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: wakeChip(wake), ok: true } });
+          return json(res, 200, {
+            message: `You will get a new turn here in ${input.minutes} min with your note. End your turn now; do not poll in the meantime.`,
+          });
+        }
+        if (body.action === "start") {
+          const input = parseGoalInput(body);
+          if (!input.ok) return json(res, 400, { error: input.error });
+          const goal = autonomy.startGoal(bot.id, threadId, input);
+          store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Goal mode on — ${goal.goal.slice(0, 140)}`, ok: true } });
+          return json(res, 200, { message: goalStartedAck(goal) });
+        }
+        if (body.action === "end") {
+          const input = parseGoalEndInput(body);
+          if (!input.ok) return json(res, 400, { error: input.error });
+          const goal = autonomy.finishGoal(threadId, input.status, input.detail);
+          if (!goal) return json(res, 409, { error: "goal mode is not on in this conversation" });
+          store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: goalEndChip(goal), ok: goal.status === "completed" } });
+          return json(res, 200, {
+            message: goal.status === "needs-input"
+              ? "Goal paused until the person answers; their next message resumes it. Ask your question in the reply."
+              : "Goal mode ended. Report the outcome in your reply.",
+          });
+        }
+        return json(res, 400, { error: "action must be start or end" });
+      }
       if (method === "POST" && path === "/api/internal/retry-thread") {
         const body = await readInternalBody();
         const from = internalSender;
@@ -19341,6 +19528,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // this body cannot bind to a later setup claim with a null provider id.
       owner.stopped = true;
       handoffs.stoppedByPerson(threadId);
+      stopAutonomyByPerson(threadId);
       await interruptDirectThread(m[1], threadId);
       return json(res, 200, { ok: true, outcome: "stopped" });
     }
@@ -19925,6 +20113,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (routine?.threadId === expectedThreadId) await routines!.cancelRun(routine.id);
         else {
           handoffs.stoppedByPerson(expectedThreadId);
+          stopAutonomyByPerson(expectedThreadId);
           await interruptDirectThread(bot.id, expectedThreadId);
         }
         return json(res, 200, { ok: true });
@@ -19965,6 +20154,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         return json(res, 409, { error: "the bot switched tasks before it could be interrupted" });
       }
       handoffs.stoppedByPerson(expectedThreadId ?? bot.threadId);
+      stopAutonomyByPerson(expectedThreadId ?? bot.threadId);
       await interruptDirectThread(bot.id, expectedThreadId ?? bot.threadId);
       return json(res, 200, { ok: true });
     }

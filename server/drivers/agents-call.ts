@@ -1117,6 +1117,44 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
     if (r.error) return { text: `Couldn't retry that thread: ${String(r.error)}`, isError: true };
     return { text: typeof r.message === "string" ? r.message : "The thread is running again. Its result stays in that thread; you are not woken for it — check it later with session_search or list_threads if you need to." };
   }
+  if (name === "wake_me") {
+    const cancel = args.cancel === true;
+    if (!cancel && (typeof args.minutes !== "number" || typeof args.reason !== "string" || !args.reason.trim())) {
+      return { text: "wake_me needs minutes (1-1440) and reason (what to check on waking), or cancel: true.", isError: true };
+    }
+    const r = await api("/api/internal/wake", {
+      method: "POST",
+      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, ...(cancel ? { cancel: true } : { minutes: args.minutes, reason: args.reason }) }),
+    });
+    if (r.error) return { text: `Couldn't ${cancel ? "cancel the wake-up" : "schedule the wake-up"}: ${String(r.error)}`, isError: true };
+    return { text: String(r.message ?? (cancel ? "Wake-up cancelled." : "Wake-up scheduled. End your turn now.")) };
+  }
+  if (name === "goal_start") {
+    if (typeof args.goal !== "string" || !args.goal.trim()) {
+      return { text: "goal_start needs goal: the concrete deliverable and how you will verify it.", isError: true };
+    }
+    const r = await api("/api/internal/goal", {
+      method: "POST",
+      body: JSON.stringify({
+        fromBotId: BOT_ID,
+        fromThreadId: THREAD_ID,
+        action: "start",
+        goal: args.goal,
+        ...(args.max_turns !== undefined ? { maxTurns: args.max_turns } : {}),
+        ...(args.max_hours !== undefined ? { maxHours: args.max_hours } : {}),
+      }),
+    });
+    if (r.error) return { text: `Couldn't start goal mode: ${String(r.error)}`, isError: true };
+    return { text: String(r.message ?? "Goal mode is on.") };
+  }
+  if (name === "goal_end") {
+    const r = await api("/api/internal/goal", {
+      method: "POST",
+      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: "end", status: args.status, detail: args.detail }),
+    });
+    if (r.error) return { text: `Couldn't end goal mode: ${String(r.error)}`, isError: true };
+    return { text: String(r.message ?? "Goal mode ended.") };
+  }
   if (name === "memory_log") {
     if (typeof args.text !== "string" || !args.text.trim()) {
       return { text: "memory_log needs text: one line about what happened.", isError: true };

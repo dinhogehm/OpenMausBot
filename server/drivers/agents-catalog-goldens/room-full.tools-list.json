@@ -740,6 +740,90 @@
       }
     },
     {
+      "name": "wake_me",
+      "description": "Get a new turn in THIS conversation after some minutes, without anyone typing. Use it to check back on work that runs elsewhere (CI, a deploy, a PR review, another agent's session) or to follow a rule like \"check every 2 minutes\" — call it again on each wake to keep the cadence. When it fires you receive your reason as a note. One pending wake per conversation: a new call replaces the earlier one, cancel removes it. After calling it, end your turn. Not for rooms.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1440,
+            "description": "Whole minutes from now, 1 to 1440."
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "Note to your future self: exactly what to check or do on waking."
+          },
+          "cancel": {
+            "type": "boolean",
+            "description": "true removes the pending wake instead of setting one; omit minutes and reason."
+          }
+        }
+      }
+    },
+    {
+      "name": "goal_start",
+      "description": "Turn on goal mode in THIS conversation: after each turn ends the harness gives you the next one, until you call goal_end, a limit runs out, or the person presses Stop. Use it when the person wants you to keep working until something is delivered (\"don't stop\", \"24/7\", \"until it is in production\"). Between turns, use wake_me to wait on something external; delegated teammates wake you with their results. Replaces an earlier goal here. Not for rooms.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "goal": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "The concrete deliverable and how you will verify it is done."
+          },
+          "max_turns": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "description": "Optional turn limit, default 60."
+          },
+          "max_hours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 72,
+            "description": "Optional time limit in hours, default 12."
+          }
+        },
+        "required": [
+          "goal"
+        ]
+      }
+    },
+    {
+      "name": "goal_end",
+      "description": "End goal mode in this conversation. completed only when the deliverable is verified; blocked when you cannot proceed; needs_input when only the person can decide (their next message resumes the goal). Also say the outcome in your reply.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "blocked",
+              "needs_input"
+            ]
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "What was delivered, or exactly what blocks it."
+          }
+        },
+        "required": [
+          "status",
+          "detail"
+        ]
+      }
+    },
+    {
       "name": "memory_log",
       "description": "Write one line to today's log file, memory/log/YYYY-MM-DD.md, stamped with the time and this conversation: what happened, not what is true. Use it for events worth a trace — a deploy went out, a person decided something, a check failed — that should not shape future sessions. Logs are never loaded into your prompt; the person can read them, and session_search finds them later. A fact that should hold in every session goes to memory_update instead.",
       "inputSchema": {

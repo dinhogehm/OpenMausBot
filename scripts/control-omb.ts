@@ -381,6 +381,10 @@ export function verificationServerEnvironment(parentEnv: NodeJS.ProcessEnv, data
   if (parentEnv.OMB_TEST_FAIL_AUDIO_APPEND_ONCE) {
     childEnv.OMB_TEST_FAIL_AUDIO_APPEND_ONCE = parentEnv.OMB_TEST_FAIL_AUDIO_APPEND_ONCE;
   }
+  // Wake-up and goal-mode e2e: shrink minutes, the tick and the turn gap.
+  for (const key of ["OMB_AUTONOMY_MINUTE_MS", "OMB_AUTONOMY_TICK_MS", "OMB_AUTONOMY_TURN_GAP_MS"]) {
+    if (parentEnv[key]) childEnv[key] = parentEnv[key];
+  }
   return childEnv;
 }
 
