@@ -149,6 +149,8 @@ export function parseCcStartInput(
 
 export class CcSessionLedger {
   private sessions = new Map<string, CcSession>();
+  /** Sessions whose turn was cut off by a restart; their owners must hear it. */
+  readonly interruptedOnLoad: CcSession[] = [];
   private readonly path: string | null;
   private readonly now: () => number;
 
@@ -169,7 +171,8 @@ export class CcSessionLedger {
         // A run cannot survive a server restart: it was lost mid-turn.
         if (session.status === "running") {
           session.status = "failed";
-          session.lastError = "the server restarted while this turn was running";
+          session.lastError = "the server restarted (the computer was shut down or the app quit) while this turn was running; resume it with cc_session_send";
+          this.interruptedOnLoad.push(session);
         }
         session.queued = Array.isArray(session.queued) ? session.queued : [];
         this.sessions.set(session.id, session);

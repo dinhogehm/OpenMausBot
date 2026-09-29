@@ -64,6 +64,10 @@ describe("ledger", () => {
     first.markRunning(session);
     const reloaded = ledger();
     expect(reloaded.get(base.id)).toMatchObject({ status: "failed", lastError: expect.stringContaining("restarted") });
+    expect(reloaded.interruptedOnLoad.map((session) => session.id)).toEqual([base.id]);
+    // The server saves right after telling the owners, so it is reported once.
+    reloaded.save();
+    expect(ledger().interruptedOnLoad).toEqual([]);
   });
 
   it("keeps a stopped session stopped when its run exits late", () => {

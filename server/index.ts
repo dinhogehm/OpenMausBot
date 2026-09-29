@@ -7302,6 +7302,11 @@ async function autonomyTick(): Promise<void> {
 
 // ── Claude Code sessions a bot manages (server/cc-sessions.ts) ─────────
 const ccLedger = new CcSessionLedger({ path: join(DATA_DIR, "cc-sessions.json") });
+// A restart cut these turns off: tell each owner, or nobody would ever resume them.
+if (ccLedger.interruptedOnLoad.length) {
+  for (const session of ccLedger.interruptedOnLoad) autonomy.addReport(session.ownerBotId, session.ownerThreadId, ccReportForOwner(session));
+  ccLedger.save();
+}
 const ccProcesses = new Map<string, CcChildProcess>();
 // OMB_CC_BIN points end-to-end tests at a scripted stand-in for `claude`.
 const ccBin = (): string => process.env.OMB_CC_BIN || "claude";
