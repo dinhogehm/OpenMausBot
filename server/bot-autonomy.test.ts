@@ -222,3 +222,12 @@ describe("watches", () => {
     expect(parseWatchInput({ everyMinutes: 2 }).ok).toBe(false);
   });
 });
+
+describe("watch fingerprints", () => {
+  it("fires on a change past the kept excerpt", () => {
+    const autonomy = make();
+    const wake = autonomy.setWatch("bot", "t1", { command: "curl https://x", argv: ["curl", "https://x"], everyMinutes: 2, maxMinutes: 60, reason: "sheet", baseline: "same start", baselineFingerprint: "aaa" });
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "same start", fingerprint: "aaa", matched: false })).toBeNull();
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "same start", fingerprint: "bbb", matched: false })).toBe("changed");
+  });
+});

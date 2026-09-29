@@ -54,6 +54,8 @@ export interface WakeWatch {
   everyMs: number;
   until?: string;
   baseline: string;
+  /** sha256 of the whole baseline output; absent on watches set before it existed. */
+  baselineFingerprint?: string;
   lastOutput?: string;
   lastRunAt: number;
   runs: number;
@@ -230,7 +232,7 @@ export class BotAutonomy {
   setWatch(
     botId: string,
     threadId: string,
-    input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string },
+    input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string; baselineFingerprint?: string },
   ): BotWake {
     const at = this.now();
     const wake: BotWake = {
@@ -245,6 +247,7 @@ export class BotAutonomy {
         everyMs: input.everyMinutes * this.minuteMs,
         ...(input.until ? { until: input.until } : {}),
         baseline: input.baseline,
+        ...(input.baselineFingerprint ? { baselineFingerprint: input.baselineFingerprint } : {}),
         lastRunAt: at,
         runs: 1,
         failures: 0,
@@ -265,7 +268,7 @@ export class BotAutonomy {
 
   /** Record one run; the wake becomes due now if the watch triggered. The
    * caller decides changed/matched (it owns the matching rule). */
-  recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean }): WatchTrigger | null {
+  recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean; fingerprint?: string }): WatchTrigger | null {
     const watch = wake.watch;
     if (!watch || this.wakes.get(wake.threadId) !== wake || watch.trigger) return null;
     watch.lastRunAt = this.now();
@@ -278,7 +281,7 @@ export class BotAutonomy {
     } else {
       watch.failures = 0;
       if (result.matched) trigger = "matched";
-      else if (!watch.until && result.output !== watch.baseline) trigger = "changed";
+      else if (!watch.until && (watch.baselineFingerprint && result.fingerprint ? result.fingerprint !== watch.baselineFingerprint : result.output !== watch.baseline)) trigger = "changed";
     }
     if (trigger) {
       watch.trigger = trigger;

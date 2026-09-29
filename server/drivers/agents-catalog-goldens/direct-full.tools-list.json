@@ -801,7 +801,7 @@
     },
     {
       "name": "wake_when",
-      "description": "Wait for something outside this conversation without spending turns: the server re-runs a read-only command every few minutes, with no model involved, and gives you a new turn HERE only when its output changes (or matches until), after max_minutes regardless, or if it keeps failing. Use it instead of wake_me for CI, PR checks and reviews, workflow runs, deploy health. Allowed: gh pr view|checks|list|status, gh run|workflow|release view|list, gh issue view|list, gh api (GET), git ls-remote|log|rev-parse|status, curl GET. No shell: no pipes or $vars; quote --jq filters. Pick stable fields (--json state,statusCheckRollup), not timestamps. Shares the one pending wake per conversation. End your turn after calling it.",
+      "description": "Wait for something outside this conversation without spending turns: the server re-runs a read-only command every few minutes, with no model involved, and gives you a new turn HERE only when its whole output changes (or matches until), after max_minutes regardless, or if it keeps failing. Use it instead of wake_me for CI, PR checks and reviews, workflow runs, deploy health. Allowed: gh pr view|checks|list|status, gh run|workflow|release view|list, gh issue view|list, gh api (GET), gog chat messages list / spaces|threads list|get, gog sheets get|metadata, git ls-remote|log|rev-parse|status, curl GET. No shell: no pipes or $vars; quote --jq filters. Pick stable fields (--json state,statusCheckRollup), not timestamps. Shares the one pending wake per conversation. End your turn after calling it.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

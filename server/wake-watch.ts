@@ -11,9 +11,13 @@
 // (a --jq filter may contain "|"); unquoted shell syntax is refused so
 // nobody mistakes this for a shell.
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 
 export const WATCH_COMMAND_MAX = 500;
+/** What is kept and shown of an output; changes are detected on the whole. */
 export const WATCH_OUTPUT_MAX = 20_000;
+/** Largest output a watch may produce (a 70 KB sheet export fits easily). */
+export const WATCH_BUFFER_MAX = 4 * 1024 * 1024;
 export const WATCH_TIMEOUT_MS = 30_000;
 
 export type ParsedWatch = { ok: true; argv: string[] } | { ok: false; error: string };
@@ -63,6 +67,12 @@ const GH_READS: Record<string, Set<string>> = {
 };
 const GH_API_WRITE_FLAGS = new Set(["-X", "--method", "-f", "--raw-field", "-F", "--field", "--input"]);
 const GH_BLOCKED_FLAGS = new Set(["--web", "-w"]);
+const GOG_READS: Record<string, Set<string>> = {
+  "chat messages": new Set(["list"]),
+  "chat spaces": new Set(["list", "get"]),
+  "chat threads": new Set(["list", "get"]),
+  sheets: new Set(["get", "metadata"]),
+};
 const GIT_READS = new Set(["ls-remote", "log", "rev-parse", "status", "show-ref"]);
 const CURL_BLOCKED_FLAGS = new Set([
   "-X", "--request", "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode", "--json",
@@ -90,6 +100,16 @@ export function parseWatchCommand(command: unknown): ParsedWatch {
     if (group && action && GH_READS[group]?.has(action)) return { ok: true, argv: split };
     return { ok: false, error: "gh is limited to reads: pr view|checks|list|status, run view|list, issue view|list|status, release view|list, workflow view|list, or api GET" };
   }
+  if (program === "gog") {
+    // Global flags may come first and take values (--account a@b.c), so read
+    // the command from the first "chat" or "sheets" word on.
+    const at = args.findIndex((arg) => arg === "chat" || arg === "sheets");
+    const words = at < 0 ? [] : args.slice(at).filter((arg) => !arg.startsWith("-"));
+    const [group, sub, action] = words;
+    if (group === "chat" && sub && action && GOG_READS[`chat ${sub}`]?.has(action)) return { ok: true, argv: split };
+    if (group === "sheets" && sub && GOG_READS.sheets!.has(sub)) return { ok: true, argv: split };
+    return { ok: false, error: "gog is limited to reads: chat messages list, chat spaces list|get, chat threads list|get, sheets get|metadata" };
+  }
   if (program === "git") {
     const sub = args.find((arg) => !arg.startsWith("-"));
     if (args[0] === "-C" && args[1]) {
@@ -106,12 +126,19 @@ export function parseWatchCommand(command: unknown): ParsedWatch {
     if (urls.length !== 1) return { ok: false, error: "curl needs exactly one http(s) URL" };
     return { ok: true, argv: split };
   }
-  return { ok: false, error: "wake_when runs only read-only gh, git or curl commands" };
+  return { ok: false, error: "wake_when runs only read-only gh, gog, git or curl commands" };
 }
 
 export interface WatchRunResult {
   ok: boolean;
+  /** The first WATCH_OUTPUT_MAX characters, for the bot to read. */
   output: string;
+  /** sha256 of the whole output: what "changed" is decided on. */
+  fingerprint: string;
+}
+
+export function fingerprintOf(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
 }
 
 /** Run once, bounded in time and size. Never throws. */
@@ -124,17 +151,19 @@ export function runWatchCommand(argv: string[], opts: { cwd: string; path: strin
         cwd: opts.cwd,
         env: { ...process.env, PATH: opts.path, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1", NO_COLOR: "1" },
         timeout: opts.timeoutMs ?? WATCH_TIMEOUT_MS,
-        maxBuffer: WATCH_OUTPUT_MAX * 4,
+        maxBuffer: WATCH_BUFFER_MAX,
         windowsHide: true,
       },
       (error, stdout, stderr) => {
-        const text = `${String(stdout ?? "")}${stderr ? `\n${String(stderr)}` : ""}`.trim().slice(0, WATCH_OUTPUT_MAX);
+        const full = `${String(stdout ?? "")}${stderr ? `\n${String(stderr)}` : ""}`.trim();
+        const text = full.slice(0, WATCH_OUTPUT_MAX);
         if (error) {
           const why = (error as NodeJS.ErrnoException).code === "ENOENT" ? `${argv[0]} was not found on this computer` : error.message.split("\n")[0];
-          resolve({ ok: false, output: text ? `${why}\n${text}` : why });
+          const output = text ? `${why}\n${text}` : why;
+          resolve({ ok: false, output, fingerprint: fingerprintOf(output) });
           return;
         }
-        resolve({ ok: true, output: text });
+        resolve({ ok: true, output: text, fingerprint: fingerprintOf(full) });
       },
     );
   });

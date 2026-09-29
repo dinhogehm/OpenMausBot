@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseWatchCommand, runWatchCommand, splitWords, watchMatches } from "./wake-watch.ts";
+import { fingerprintOf, parseWatchCommand, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
 
 describe("parseWatchCommand", () => {
   it.each([
@@ -10,6 +10,9 @@ describe("parseWatchCommand", () => {
     "git ls-remote origin refs/heads/main",
     "git -C /tmp/repo log --oneline -1",
     "curl -sS -f https://app.nuria.run/health",
+    "gog chat messages list spaces/AAQA4TXnzJ4 --json --no-input",
+    "gog --account osvaldo@x.com chat spaces get spaces/AAQA4TXnzJ4 --json",
+    "gog sheets get 163U0o9RWFKqikUNsJu6T3tG1rP_3Mn3STZ1W6uYMDPQ Atendimento!A1:I400 --json",
   ])("accepts the read %s", (command) => {
     expect(parseWatchCommand(command).ok).toBe(true);
   });
@@ -25,11 +28,14 @@ describe("parseWatchCommand", () => {
     ["curl -d a=1 https://x.dev", /may only GET/],
     ["curl -o /etc/x https://x.dev", /may only GET/],
     ["curl file:///etc/passwd", /exactly one http/],
-    ["rm -rf /", /only read-only gh, git or curl/],
+    ["rm -rf /", /only read-only gh, gog, git or curl/],
     ["gh pr view 1 | sh", /not a shell/],
     ["gh pr view $(whoami)", /not a shell/],
     ["gh pr view 1; rm x", /not a shell/],
     ["gh pr view 'unclosed", /unclosed quote/],
+    ["gog chat messages send spaces/X --text oi", /gog is limited to reads/],
+    ["gog sheets update ID A1 x", /gog is limited to reads/],
+    ["gog gmail search is:unread", /gog is limited to reads/],
   ])("refuses %s", (command, error) => {
     const parsed = parseWatchCommand(command);
     expect(parsed.ok).toBe(false);
@@ -54,5 +60,18 @@ describe("watchMatches", () => {
     expect(watchMatches('{"state":"MERGED"}', "merged|closed")).toBe(true);
     expect(watchMatches("x (y", "(y")).toBe(true);
     expect(watchMatches("pending", undefined)).toBe(false);
+  });
+});
+
+describe("change detection on the whole output", () => {
+  it("fingerprints everything even though only the start is kept", async () => {
+    const big = "x".repeat(WATCH_OUTPUT_MAX + 5_000);
+    const script = `process.stdout.write(${JSON.stringify(big)} + process.argv[1])`;
+    const run = (tail: string) => runWatchCommand([process.execPath, "-e", script, tail], { cwd: process.cwd(), path: process.env.PATH ?? "" });
+    const [a, b] = await Promise.all([run("A"), run("B")]);
+    expect(a.output).toHaveLength(WATCH_OUTPUT_MAX);
+    expect(a.output).toBe(b.output);
+    expect(a.fingerprint).not.toBe(b.fingerprint);
+    expect(a.fingerprint).toBe(fingerprintOf(big + "A"));
   });
 });

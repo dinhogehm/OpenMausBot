@@ -15571,7 +15571,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             if (watchMatches(first.output, input.until)) {
               return json(res, 200, { message: `Already true — the output matches "${input.until}" now, so nothing to wait for. Output:\n${first.output.slice(0, 1_500)}` });
             }
-            const wake = autonomy.setWatch(bot.id, threadId, { ...input, command: String(body.command).trim(), argv: command.argv, baseline: first.output });
+            const wake = autonomy.setWatch(bot.id, threadId, { ...input, command: String(body.command).trim(), argv: command.argv, baseline: first.output, baselineFingerprint: first.fingerprint });
             store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: wakeChip(wake), ok: true } });
             return json(res, 200, {
               message: `Watching. The server re-runs it every ${input.everyMinutes} min with no model involved and wakes you here when ${input.until ? `the output matches "${input.until}"` : "the output changes"}, or after ${input.maxMinutes} min regardless. End your turn now. Current output:\n${first.output.slice(0, 1_500)}`,
