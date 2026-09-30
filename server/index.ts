@@ -315,11 +315,12 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
-import { BG_JOB_MAX_MS, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
+import { BG_JOB_MAX_MS, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, newDeliveryCache, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
+import { ciGroupToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
 import { readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -7976,6 +7977,105 @@ function retireThreadWork(botId: string, threadId: string, why: string): void {
   refreshBotRow(botId);
 }
 
+/** Send a message to a session the way cc_session_send would, from the
+ * server: now if it is idle, else after its current turn. */
+function sendToSessionFromServer(session: CcSession, text: string): void {
+  if (session.surface === "app" && session.desktop) {
+    if (session.status === "idle" && !session.desktop.pending && !session.desktop.sent) {
+      session.desktop.pending = { kind: "send", text, since: Date.now(), attempts: 0 };
+      session.status = "running";
+      ccLedger.save();
+    } else ccLedger.enqueue(session, text);
+    return;
+  }
+  if (session.status !== "running" && !ccProcesses.has(session.id) && ccLedger.runningCount() < CC_MAX_RUNNING) runCcTurn(session, text, false);
+  else ccLedger.enqueue(session, text);
+}
+
+// ── the production release first (server/release-priority.ts) ──────────
+// A release waiting over 2 min behind the full local CI of a session this
+// server manages: that CI's process group is stopped, the session is told,
+// and it is resumed when the production tag moves. Only on the server the
+// desktop app runs (it reads this Mac's release log and processes).
+const releasePriority = { running: false, lastAt: 0, handled: new Set<number>(), tagCheckAt: 0 };
+async function preemptCiForRelease(): Promise<void> {
+  if (!DESKTOP_MANAGED || process.env.VITEST || releasePriority.running || Date.now() - releasePriority.lastAt < 20_000) return;
+  releasePriority.running = true;
+  releasePriority.lastAt = Date.now();
+  try {
+    await resumeSessionsAfterTag();
+    const blocked = releaseBlockedBy(readTail(RELEASE_OUT_LOG, 64 * 1024));
+    if (!blocked || blocked.waitedS < RELEASE_WAIT_BEFORE_PREEMPT_S || releasePriority.handled.has(blocked.pid)) return;
+    releasePriority.handled.add(blocked.pid);
+    const rows = await psTable();
+    let cwd: string | null = null;
+    try {
+      cwd = parseLsofCwd(await execCc("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn", "-p", String(blocked.pid)]))[0]?.cwd ?? null;
+    } catch { /* gone, or not ours to read */ }
+    const live = ccLedger.all().filter((session) => session.status !== "archived");
+    const ownerId = ownerSession(blocked.pid, rows, (pid) => (pid === blocked.pid ? cwd : null), live.map((session) => ({
+      sessionId: session.id,
+      ...(ccProcesses.get(session.id)?.pid ? { claudePid: ccProcesses.get(session.id)!.pid } : {}),
+      ...(session.bgJob ? { jobPids: session.bgJob.pids } : {}),
+      ...(session.surface === "app" && session.cwd ? { worktree: session.cwd } : {}),
+    })));
+    const session = ownerId ? ccLedger.get(ownerId) : null;
+    if (!session) {
+      console.log(`[release-priority] the release waits on ci-full:${blocked.pid}, which is not a managed session's — left alone`);
+      return;
+    }
+    const ownPgid = rows.find((row) => row.pid === process.pid)?.pgid ?? process.pid;
+    const pgid = ciGroupToStop(blocked.pid, rows, ownPgid);
+    if (!pgid) {
+      console.log(`[release-priority] ci-full:${blocked.pid} of session ${session.id} is not a local CI group it may stop — left alone`);
+      return;
+    }
+    try {
+      process.kill(-pgid, "SIGTERM");
+    } catch (error) {
+      console.warn(`[release-priority] could not stop group ${pgid}: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    let tagSha: string | null = null;
+    try {
+      tagSha = parseLsRemoteTag(await execCc("git", ["-C", session.repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
+    } catch { /* resumed on the first tag read that works */ }
+    const note = "ci:local interrompido para liberar o release de produção; relançar quando a tag nuria-production-deployed andar";
+    session.resumeAfterTag = { fromSha: tagSha, at: Date.now(), message: `A tag ${PRODUCTION_TAG} andou: o release de produção que esperava passou. O seu ci:local (processo ${blocked.pid}) foi interrompido pelo servidor para liberar esse release — relance-o agora (npm run ci:local) e siga de onde parou.` };
+    ccLedger.save();
+    ccChip(session, note, false);
+    ccReport(session, `[Claude Code session "${session.title}" (${session.id})] ${note}. The server stopped process group ${pgid} (ci-full:${blocked.pid}) because ${blocked.label} had waited ${blocked.waitedS}s for it; it resumes the session with a message when the tag moves.`);
+    const owner = store.bot(session.ownerBotId);
+    if (owner) alertAutomationTrouble(owner, session.ownerThreadId, `ci:local da sessão "${session.title}" interrompido para liberar o release de produção (${blocked.label}), que esperava havia ${Math.round(blocked.waitedS / 60)} min; a sessão é retomada quando a tag de produção andar`);
+  } finally {
+    releasePriority.running = false;
+  }
+}
+
+/** Sessions whose CI gave way to a release: resumed when the tag moves. */
+async function resumeSessionsAfterTag(): Promise<void> {
+  if (Date.now() - releasePriority.tagCheckAt < 2 * 60_000) return;
+  releasePriority.tagCheckAt = Date.now();
+  for (const session of ccLedger.all()) {
+    const wait = session.resumeAfterTag;
+    if (!wait) continue;
+    if (session.status === "archived" || session.status === "stopped") {
+      delete session.resumeAfterTag;
+      ccLedger.save();
+      continue;
+    }
+    let sha: string | null = null;
+    try {
+      sha = parseLsRemoteTag(await execCc("git", ["-C", session.repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
+    } catch { continue; }
+    if (!sha || sha === wait.fromSha) continue;
+    delete session.resumeAfterTag;
+    ccLedger.save();
+    ccChip(session, `a tag de produção andou (${sha.slice(0, 8)}) — sessão retomada para relançar o ci:local`);
+    sendToSessionFromServer(session, wait.message);
+  }
+}
+
 /** A P1/hotfix issue whose sessions all ended while the issue is still open:
  * nobody is on it. Checked once per ended session (gh issue view), then the
  * Chief and the session's owner hear about it. */
@@ -8030,6 +8130,7 @@ async function runDesktopWork(): Promise<void> {
   ageFailedSessions(desktopWork);
   await watchBackgroundJobs();
   watchDelivery();
+  void preemptCiForRelease().catch((error) => console.error(`[release-priority] ${error instanceof Error ? error.message : String(error)}`));
   void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
   if (process.platform !== "darwin") return;
   await runDesktopWorkFlow(desktopWork, desktopState);
