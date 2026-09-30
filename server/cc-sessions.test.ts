@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccHeldQueueReport, repoCorridor, repoPackageManager, useRepoScripts, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -176,16 +176,18 @@ describe("the repository's own scripts", () => {
     const repo = join(dir, "npm-repo");
     mkdirSync(repo);
     writeFileSync(join(repo, "package-lock.json"), "{}");
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ scripts: { "ci:local": "x", "pr:merge": "y", test: "z" } }));
     expect(repoPackageManager(repo)).toBe("npm");
-    const brief = "rode `pnpm ci:local`, depois merge por `pnpm pr:merge -- --pr 9286 --merge`; pnpm install antes; pnpm run test";
-    expect(useRepoScripts(brief, repoPackageManager(repo))).toEqual({
-      text: "rode `npm run ci:local`, depois merge por `npm run pr:merge -- --pr 9286 --merge`; pnpm install antes; npm run test",
+    const brief = "rode `pnpm ci:local`, depois merge por `pnpm pr:merge -- --pr 9286 --merge`; pnpm install antes; pnpm run test; pnpm vitest run a.test.ts";
+    expect(useRepoScripts(brief, repoPackageManager(repo), repoScripts(repo))).toEqual({
+      text: "rode `npm run ci:local`, depois merge por `npm run pr:merge -- --pr 9286 --merge`; pnpm install antes; npm run test; pnpm vitest run a.test.ts",
       changed: true,
     });
     const pnpmRepo = join(dir, "pnpm-repo");
     mkdirSync(pnpmRepo);
     writeFileSync(join(pnpmRepo, "pnpm-lock.yaml"), "");
-    expect(useRepoScripts(brief, repoPackageManager(pnpmRepo)).changed).toBe(false);
+    expect(useRepoScripts(brief, repoPackageManager(pnpmRepo), repoScripts(pnpmRepo)).changed).toBe(false);
+    expect(repoScripts(join(dir, "nothing")).size).toBe(0);
     const declared = join(dir, "declared");
     mkdirSync(declared);
     writeFileSync(join(declared, "package.json"), JSON.stringify({ packageManager: "npm@10.0.0" }));
@@ -215,5 +217,18 @@ describe("a repository's corridor", () => {
     writeFileSync(join(plain, "package.json"), JSON.stringify({ scripts: { test: "vitest" } }));
     expect(repoCorridor(plain)).toBe("");
     expect(repoCorridor(join(dir, "missing"))).toBe("");
+  });
+});
+
+describe("archiving", () => {
+  it("clears an old error and a background job when a session is archived", () => {
+    const ledger = new CcSessionLedger({ path: null, now: () => 5 });
+    const session = ledger.create({ id: "s", ownerBotId: "b", ownerThreadId: "t", title: "#1", repo: "/r", permissionMode: "auto" });
+    session.lastError = "could not archive it in the Claude app";
+    session.bgJob = { pids: [1], commands: ["x"], since: 0 };
+    ledger.setStatus(session, "archived");
+    expect(session.lastError).toBeUndefined();
+    expect(session.bgJob).toBeUndefined();
+    expect(session.archivedAt).toBe(5);
   });
 });

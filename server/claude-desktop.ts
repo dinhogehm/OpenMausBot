@@ -293,11 +293,11 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (stop) return stop;
     const size = await driver.screenSize();
     const lines = mainArea(await driver.ocr());
-    if (input.title && !lines.some((line) => sidebarMatch(line.text, input.title!))) {
-      return { ok: false, reason: `the session "${input.title}" is not the one on screen`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 120)) };
+    if (input.title && !lines.some((line) => sidebarMatch(line.text, input.title!)) && !headerNames(lines.filter((line) => line.y < 140), input.title)) {
+      return { ok: false, reason: `the session "${input.title}" is not the one on screen`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 140)) };
     }
     const field = lines.find((line) => line.y > size.h / 2 && COMPOSER_PLACEHOLDER.test(line.text.trim()));
-    if (!field) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true };
+    if (!field) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y > size.h / 2).slice(-8)) };
     // What is near the field (it grows upwards as text goes in).
     const nearField = (all: OcrLine[]) => mainArea(all).filter((line) => line.y > Math.max(size.h / 2, field.y - 200));
     stop = await guard(screen, "click field");
@@ -338,6 +338,23 @@ export function sidebarMatch(lineText: string, title: string): boolean {
   if (wanted.length < 6) return false;
   const prefix = wanted.slice(0, Math.min(24, wanted.length));
   return titleForms(lineText).some((shown) => shown.length >= 6 && (shown.startsWith(prefix) || (shown.length >= 12 && wanted.startsWith(shown))));
+}
+
+const words = (text: string) => normalize(text).split(/[^\p{L}\p{N}#]+/u).filter((word) => word.length >= 3);
+
+/** The session's header, as the app really draws it: the title cut short
+ * ("Chat ticket agent/cli…"), a status dot or icon before it, the dropdown
+ * and "(repo)" after it. Enough of the title's leading words must be there,
+ * in a header line, for it to count. */
+export function headerNames(header: OcrLine[], title: string): boolean {
+  const wanted = words(title).slice(0, 6);
+  if (wanted.length < 2) return false;
+  return header.some((line) => {
+    const shown = words(line.text);
+    // the last word shown may be cut ("labe…"): a prefix of the wanted one counts
+    const hits = wanted.filter((word) => shown.some((seen) => seen === word || (seen.length >= 3 && word.startsWith(seen))));
+    return hits.length >= Math.min(wanted.length, Math.max(2, Math.ceil(wanted.length * 0.6))) && shown.slice(0, 2).some((seen) => wanted[0]!.startsWith(seen) || seen === wanted[0]);
+  });
 }
 
 /** The same title, dot and icon aside (for telling duplicates apart). */
@@ -588,12 +605,12 @@ export function lastAppRepo(dir = DESKTOP_SESSIONS_DIR): string | undefined {
   return newest ? repoOf(newest) : undefined;
 }
 
-/** App sessions, not archived, working in `folder` (the app reuses worktrees). */
-export function recordsUsingFolder(folder: string, exceptLocalId?: string, dir = DESKTOP_SESSIONS_DIR): DesktopRecord[] {
+/** App sessions, not archived (or archived too), working in `folder` (the app reuses worktrees). */
+export function recordsUsingFolder(folder: string, exceptLocalId?: string, dir = DESKTOP_SESSIONS_DIR, includeArchived = false): DesktopRecord[] {
   const found: DesktopRecord[] = [];
   for (const file of recordFiles(dir)) {
     const record = readRecord(file);
-    if (!record || record.isArchived || record.sessionId === exceptLocalId) continue;
+    if (!record || (record.isArchived && !includeArchived) || record.sessionId === exceptLocalId) continue;
     if (record.cwd === folder || record.worktreePath === folder) found.push(record);
   }
   return found;

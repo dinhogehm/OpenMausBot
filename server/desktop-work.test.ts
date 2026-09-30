@@ -52,6 +52,7 @@ function harness() {
     writtenAt: (cli) => transcripts.get(cli)?.writtenAt ?? null,
     repoName: () => "nuria-platform",
     pathExists: () => true,
+    folderBornAt: () => null,
     openQuestion: (cli) => transcripts.get(cli)?.question ?? null,
     chip: (session, text, ok = true) => { chips.push({ id: session.id, text, ok }); },
     report: (session, text) => { reports.push({ id: session.id, text }); },
@@ -171,11 +172,31 @@ describe("opening a session", () => {
     expect(h.reports[0]!.text).toContain("outside a git worktree");
   });
 
+  it("refuses a new session that landed in a worktree another session worked in, or one the app did not name", () => {
+    for (const [record, other, why] of [
+      [{ worktreeName: "helpdesk-f30521" }, "ledger", "the worktree of \"#b\""],
+      [{ worktreeName: "helpdesk-f30521" }, "app", "\"Teste de pasta\" (app)"],
+      [{}, "", "gave it no worktree name"],
+      [{ worktreeName: "helpdesk-f30521" }, "old", "created before the brief was sent"],
+    ] as const) {
+      const h = harness();
+      const session = h.appSession("a", { sentAt: h.now });
+      if (other === "ledger") h.appSession("b").cwd = WORKTREE;
+      if (other === "app") h.deps.folderUsers = () => ["Teste de pasta"];
+      if (other === "old") h.deps.folderBornAt = () => h.now - 3_600_000;
+      h.byMarker.set("OMBA", { sessionId: LOCAL, cliSessionId: "cli-a", cwd: WORKTREE, ...record });
+      followDesktopSessions(h.deps);
+      expect(session.status).toBe("failed");
+      expect(session.lastError).toContain(why);
+      expect(session.lastError).toContain("stop it in the Claude app");
+    }
+  });
+
   it("looks for the session a crashed try may have opened before opening another", async () => {
     const h = harness();
     const session = h.appSession("a");
     session.desktop!.pending = { kind: "create", text: "brief", since: h.now, attempts: 0, triedAt: h.now };
-    h.byMarker.set("OMBA", { sessionId: LOCAL, cliSessionId: "cli-a", cwd: WORKTREE });
+    h.byMarker.set("OMBA", { sessionId: LOCAL, cliSessionId: "cli-a", cwd: WORKTREE, worktreeName: "helpdesk-f30521" });
     await h.tick();
     expect(h.steps.create).not.toHaveBeenCalled();
     expect(session.desktop).toMatchObject({ localId: LOCAL, sentAt: h.now });
@@ -199,7 +220,7 @@ describe("opening a session", () => {
   it("archives a session asked to be archived while it was opening, once it opens", () => {
     const h = harness();
     const session = h.appSession("a", { sentAt: h.now, archiveWhenResolved: true });
-    h.byMarker.set("OMBA", { sessionId: LOCAL, cliSessionId: "cli-a", cwd: WORKTREE });
+    h.byMarker.set("OMBA", { sessionId: LOCAL, cliSessionId: "cli-a", cwd: WORKTREE, worktreeName: "helpdesk-f30521" });
     h.records.set(LOCAL, h.byMarker.get("OMBA")!);
     followDesktopSessions(h.deps);
     expect(session.desktop!.pending).toMatchObject({ kind: "archive" });

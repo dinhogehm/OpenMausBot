@@ -389,7 +389,12 @@ export class CcSessionLedger {
     session.status = status;
     session.queued = [];
     session.lastActivityAt = this.now();
-    if (status === "archived") session.archivedAt = this.now();
+    if (status === "archived") {
+      session.archivedAt = this.now();
+      // an archived session has nothing left to fix: an old error only misleads
+      delete session.lastError;
+      delete session.bgJob;
+    }
     this.save();
   }
 }
@@ -562,15 +567,24 @@ export function repoPackageManager(repo: string): "npm" | "pnpm" | "yarn" | null
   return null;
 }
 
+/** The scripts a repository's package.json declares. */
+export function repoScripts(repo: string): Set<string> {
+  try {
+    return new Set(Object.keys((JSON.parse(readFileSync(`${repo}/package.json`, "utf8")) as { scripts?: Record<string, unknown> }).scripts ?? {}));
+  } catch {
+    return new Set();
+  }
+}
+
 /** "pnpm pr:merge" / "pnpm run ci:local" in an order to a session of an
  * npm repository becomes "npm run …": the repository's gates and the review
- * hook only know its own commands, and a session told "pnpm" goes off-road. */
-export function useRepoScripts(text: string, manager: ReturnType<typeof repoPackageManager>): { text: string; changed: boolean } {
+ * hook only know its own commands, and a session told "pnpm" goes off-road.
+ * Only scripts the repository declares: "pnpm vitest" is not "npm run vitest". */
+export function useRepoScripts(text: string, manager: ReturnType<typeof repoPackageManager>, scripts: ReadonlySet<string>): { text: string; changed: boolean } {
   if (manager !== "npm") return { text, changed: false };
-  const NOT_SCRIPTS = new Set(["install", "i", "add", "remove", "rm", "exec", "dlx", "x", "why", "list", "ls", "store", "update", "up", "outdated", "audit", "init", "create", "link", "unlink", "env", "config", "-v", "--version"]);
   let changed = false;
   const out = text.replace(/\bpnpm(?:\s+run)?\s+([a-z][\w:.-]*)/gi, (match, script: string) => {
-    if (NOT_SCRIPTS.has(script.toLowerCase())) return match;
+    if (!scripts.has(script)) return match;
     changed = true;
     return `npm run ${script}`;
   });

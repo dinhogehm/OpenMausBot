@@ -271,6 +271,7 @@ import {
   parseCcStartInput,
   repoCorridor,
   repoPackageManager,
+  repoScripts,
   useRepoScripts,
   parseCcStream,
   type CcSession,
@@ -7674,6 +7675,8 @@ const desktopWork: DesktopWorkDeps = {
   report: ccReport,
   hookDecision: (sessionId) => lastHookDecision(DUAL_DECISIONS_LOG, sessionId),
   hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
+  folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
+  log: (line) => console.log(`[claude-desktop] ${line}`),
   onArchived: (session) => {
     if (!session.desktop?.removeWorktree) return;
     const note = removeSessionWorktree(session);
@@ -16112,7 +16115,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             return json(res, 409, { error: `já existe uma sessão viva para a issue #${issueNumber(input.title, input.brief)} em ${basename(input.repo)}: ${duplicate.id} ("${duplicate.title}", ${duplicate.status})${mine ? "" : `, de outro bot (${store.bot(duplicate.ownerBotId)?.name ?? duplicate.ownerBotId})`}. Não abri outra. ${mine ? `Mande a nova instrução para ela com cc_session_send (session_id ${duplicate.id})` : "Peça ao dono dela para mandar a instrução"}; se ela não serve mais, arquive com cc_session_archive e comece de novo.` });
           }
           // The repository's own commands (npm run …), never a guessed pnpm.
-          const scripts = useRepoScripts(input.brief, repoPackageManager(input.repo));
+          const scripts = useRepoScripts(input.brief, repoPackageManager(input.repo), repoScripts(input.repo));
           input.brief = scripts.text;
           if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
             return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando neste computador; espere uma relatar, ou pare uma` });
@@ -16148,7 +16151,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
         if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão — chame cc_session_list" });
         if (action === "send") {
-          const scripts = useRepoScripts(typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "", repoPackageManager(session.repo));
+          const scripts = useRepoScripts(typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "", repoPackageManager(session.repo), repoScripts(session.repo));
           const message = scripts.text;
           if (!message) return json(res, 400, { error: "message é obrigatório" });
           if (session.status === "archived") return json(res, 409, { error: "essa sessão está arquivada; comece outra" });

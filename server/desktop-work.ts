@@ -11,7 +11,7 @@
 //
 // Everything outside the ledger comes in through DesktopWorkDeps, so the
 // whole flow is testable with a fake app and fake records.
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import type { CcDesktopPending, CcSession, CcSessionLedger } from "./cc-sessions.ts";
 import { ccHeldQueueReport, ccReportForOwner, ccStallReport, type CcStallFacts } from "./cc-sessions.ts";
 export { CC_ACTIVE_MS, ccSessionActive } from "./cc-sessions.ts";
@@ -85,6 +85,12 @@ export interface DesktopWorkDeps {
   hookBlock?: (sessionId: string) => HookBlock | null;
   /** Does this folder exist (default: the real filesystem)? */
   pathExists?: (path: string) => boolean;
+  /** Titles of the app's other sessions (archived too) that worked in `folder`. */
+  folderUsers?: (folder: string, exceptLocalId: string) => string[];
+  /** When a folder was created, or null (default: the real filesystem). */
+  folderBornAt?: (path: string) => number | null;
+  /** One line per screen action (server.log). */
+  log?: (line: string) => void;
   /** The app confirmed the session archived (remove its worktree if asked). */
   onArchived?: (session: CcSession) => void;
   steps?: {
@@ -178,6 +184,8 @@ export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason:
     return;
   }
   delete desktop.pending;
+  // kept on the session: cc_session_list shows it as its last problem
+  session.lastError = `could not ${actionLabel(pending.kind)} in the Claude app: ${reason}`.slice(0, 1_000);
   const link = desktop.localId ? ` (claude://code/continue?session=${desktop.localId})` : "";
   if (pending.kind === "send") {
     if (session.status === "running" && !desktop.sent) session.status = "idle";
@@ -233,9 +241,40 @@ function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopR
     failDesktopSession(deps, session, `the session opened outside a git worktree (in ${record.cwd ?? "an unknown folder"}), so it works on the main checkout — check it in the Claude app now and stop it there if needed`);
     return false;
   }
+  const reused = reusedWorktree(deps, session, record);
+  if (reused) {
+    failDesktopSession(deps, session, `the session opened in ${reused} instead of a new worktree of its own (${record.cwd}), so it would edit the same folder — stop it in the Claude app now and start the work again`);
+    return false;
+  }
   deps.chip(session, "opened in the Claude app");
   return true;
 }
+
+/** A new session must get a worktree of its own: one the app named for it,
+ * no other session (ours or the app's, archived ones too) ever worked in,
+ * created after the brief went in. What it reused, or null. */
+function reusedWorktree(deps: DesktopWorkDeps, session: CcSession, record: DesktopRecord): string | null {
+  const folder = record.worktreePath ?? record.cwd;
+  if (!folder || !folder.includes("/.claude/worktrees/")) return null;
+  const others = [
+    ...deps.ledger.all().filter((other) => other.id !== session.id && other.cwd === folder).map((other) => `"${other.title}"`),
+    ...(deps.folderUsers?.(folder, record.sessionId) ?? []).map((title) => `"${title}" (app)`),
+  ];
+  if (others.length) return `the worktree of ${[...new Set(others)].join(", ")}`;
+  if (!record.worktreeName) return "an existing worktree (the app gave it no worktree name)";
+  const born = (deps.folderBornAt ?? bornAt)(folder);
+  const sentAt = session.desktop?.sentAt ?? session.desktop?.pending?.triedAt;
+  if (born !== null && sentAt !== undefined && born < sentAt - 60_000) return "a worktree created before the brief was sent";
+  return null;
+}
+
+const bornAt = (path: string): number | null => {
+  try {
+    return statSync(path).birthtimeMs || null;
+  } catch {
+    return null;
+  }
+};
 
 /** Read the app's records: find new sessions, confirm messages arrived, notice finished turns. */
 export function followDesktopSessions(deps: DesktopWorkDeps): void {
@@ -485,6 +524,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     const steps = deps.steps ?? {};
     let userFrameAt = 0;
     let step: DesktopStep;
+    deps.log?.(`${pending.kind} start: session ${next.id} "${next.title.slice(0, 60)}" (try ${pending.attempts + 1}${pending.misses ? `, misses ${pending.misses}` : ""})`);
     if (pending.kind === "create") {
       pending.triedAt = deps.now();
       deps.ledger.save();
@@ -500,6 +540,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
           : await (steps.send ?? sendToDesktopSession)(driver, { ...target, text: pending.text });
     }
     const at = deps.now();
+    deps.log?.(`${pending.kind} ${step.ok ? "ok" : step.retry ? "stopped" : "gave up"}: session ${next.id}${step.ok ? "" : ` — ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}${step.touched ? " (touched the screen)" : ""}`}`);
     if (step.ok) {
       if (pending.kind === "archive") {
         // Only the app's record says it worked; followDesktopSessions checks it.
@@ -538,8 +579,10 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
         return;
       }
     }
-    const changed = pending.lastReason !== step.reason;
-    pending.lastReason = step.reason;
+    // what the screen showed goes with the reason: a live miss is diagnosed from it
+    const reason = `${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`;
+    const changed = pending.lastReason !== reason;
+    pending.lastReason = reason;
     if (step.touched) {
       pending.attempts += 1;
       pending.nextAttemptAt = at + desktopBackoffMs(pending.attempts);
@@ -550,6 +593,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     pending.attempts += 1;
     pending.nextAttemptAt = deps.now() + desktopBackoffMs(pending.attempts);
     pending.lastReason = error instanceof Error ? error.message.slice(0, 200) : String(error);
+    deps.log?.(`${pending.kind} error: session ${next.id} — ${pending.lastReason}`);
     deps.ledger.save();
   } finally {
     state.busy = false;

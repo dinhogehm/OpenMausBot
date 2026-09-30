@@ -13,6 +13,7 @@ import {
   DESKTOP_BRIEF_NOTE,
   DESKTOP_MESSAGE_NOTE,
   findDesktopSession,
+  headerNames,
   lastAssistantText,
   newMarker,
   parseOcr,
@@ -375,6 +376,22 @@ describe("the app's real screen (OCR fixture)", () => {
     expect(showsFolder(at("OpenMausBot main"), "nuria-platform")).toBe(false);
   });
 
+  it("knows the session from the header the app really draws: cut short, behind a dot or icon, with its repo after it", () => {
+    const at = (text: string) => [{ x: 500, y: 57, w: 400, h: 16, text }];
+    expect(headerNames(at("• Chat ticket agent/cli… v (nuria-platform"), "Chat ticket agent/client labels bug")).toBe(true);
+    expect(headerNames(at("oG 9311 Chat no ticket mostra Agente e… v (nuria-platform"), "9311 Chat no ticket mostra Agente e Cliente trocados")).toBe(true);
+    expect(headerNames(at("• Fila errada ao criar ticket v (nuria-platform"), "Chat ticket agent/client labels bug")).toBe(false);
+    expect(headerNames(at("• Atendimento reaberto bugs"), "Automação inatividade não dispara")).toBe(false);
+  });
+
+  it("says what the header showed when the session on screen is another one", async () => {
+    const other = { text: "• Fila errada ao criar ticket v (nuria-platform", x: 500, y: 57 };
+    const app = fakeApp({ screens: [[other, chip, field]] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "x", title: "Chat ticket agent/client labels bug" })).toMatchObject({ ok: false, miss: true, seen: expect.stringContaining("Fila errada") });
+    const noField = fakeApp({ screens: [[header, chip]] });
+    expect(await sendToDesktopSession(noField.driver, { localId, text: "x", title: "Chat ticket agent/client labels bug" })).toMatchObject({ ok: false, seen: expect.stringContaining("fix/9311") });
+  });
+
   it("sends into the session whose header carries a status dot (8378b26a)", async () => {
     const typed = { ...field, text: "Siga com o PR" };
     const app = fakeApp({ screens: [[...sidebar, header, chip, field], [...sidebar, header, chip, typed], [...sidebar, header, chip, field]] });
@@ -471,5 +488,6 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     expect(lastAppRepo(root)).toBe("/Users/o/Projetos/nuria-platform");
     expect(recordsUsingFolder("/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", "local_c", root).map((record) => record.sessionId)).toEqual(["local_b"]);
     expect(recordsUsingFolder("/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", "local_b", root)).toEqual([]);
+    expect(recordsUsingFolder("/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", "local_b", root, true).map((record) => record.sessionId)).toEqual(["local_c"]);
   });
 });
