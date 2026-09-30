@@ -16,7 +16,7 @@ export function DesktopWorkspaceSwitcher({ compact = false }: { compact?: boolea
     return () => { alive = false; };
   }, [bridge]);
   if (!bridge) return null;
-  // the local workspace is "This computer" in the person's language
+  // this computer reads "This computer" in the person's language
   const name = current ? (current.local ? t("place.local") : current.name) : t("workspaceSwitcher.servers");
   const Icon = current?.local === false ? Cloud : Laptop;
   return <div className={cn("py-1.5", compact ? "px-2" : "px-3")}>
