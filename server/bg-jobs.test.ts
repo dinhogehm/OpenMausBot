@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bgJobOverdueReport, bgJobResumePrompt, isInteractiveShell, jobAliveIn, leftoversIn, newTurnTree, noteDescendants, parseLsofCwd, parsePsTable, pidAlive, sessionLeftovers } from "./bg-jobs.ts";
+import { bgJobOverdueReport, bgJobResumePrompt, isInteractiveShell, isToolProcess, jobAliveIn, leftoversIn, newTurnTree, noteDescendants, parseLsofCwd, parsePsTable, pidAlive, sessionLeftovers } from "./bg-jobs.ts";
 
 describe("background jobs of a headless session", () => {
   it("reads lsof's cwd listing and keeps the processes inside the session's worktree", () => {
@@ -48,6 +48,21 @@ describe("background jobs of a headless session", () => {
     // a reused pid (same number, another start) is not the job
     const reused = parsePsTable("  520     1   777 Tue Sep 30 12:00:00 2026 node something-else.mjs");
     expect(sessionLeftovers("/repo/.claude/worktrees/fix-1", tree, reused, [{ pid: 520, cwd: "/repo/.claude/worktrees/fix-1" }])).toEqual([]);
+  });
+
+  it("never takes a hook's graft sync, a hook runner or a sleep for the session's job", () => {
+    expect(isToolProcess("node /Users/o/.npm-global/lib/node_modules/@nanonets/graft/dist/claude/sync-run.js")).toBe(true);
+    expect(isToolProcess("node /opt/homebrew/bin/graft build")).toBe(true);
+    expect(isToolProcess("node /Users/o/.laya/hooks/dual-review.cjs")).toBe(true);
+    expect(isToolProcess("sleep 30")).toBe(true);
+    expect(isToolProcess("node scripts/local-ci.mjs")).toBe(false);
+    const tree = newTurnTree(500);
+    const rows = parsePsTable([
+      "  510   500   510 Tue Sep 30 10:01:00 2026 node /x/graft/dist/claude/sync-run.js",
+      "  520   500   520 Tue Sep 30 10:01:01 2026 bash ./scripts/local-ci.sh --profile full",
+    ].join("\n"));
+    const cwds = [510, 520].map((pid) => ({ pid, cwd: "/w" }));
+    expect(sessionLeftovers("/w", tree, rows, cwds).map((proc) => proc.pid)).toEqual([520]);
   });
 
   it("checks a job by pid and start time, and reports one that outlives its deadline", () => {

@@ -60,6 +60,16 @@ export function isInteractiveShell(command: string): boolean {
   return /^-\S*(sh|fish)$/.test(command.trim()) || /^(\S*\/)?(zsh|bash|sh|fish|tcsh|ksh)(\s+-[il]+)*$/.test(command.trim());
 }
 
+/** Hooks and tools that run beside a session, not work it waits on: the
+ * graft index sync/build a hook starts, Claude Code's own hook runners, a
+ * bare `sleep`. A job made only of these would wake the session for nothing. */
+export function isToolProcess(command: string): boolean {
+  const cmd = command.trim();
+  return /graft\/dist\/claude\/sync-run\.js|(?:^|[\s/])graft(?:\.js)?\s+(?:build|sync)\b/.test(cmd)
+    || /\/\.claude\/hooks\/|\/\.laya\/hooks\//.test(cmd)
+    || /^(?:\S*\/)?sleep\s+[\d.]+[smhd]?$/.test(cmd);
+}
+
 /** What the server saw under a turn's `claude` process: pid → start, and their process groups. */
 export interface TurnTree { rootPid: number; seen: Map<number, string>; groups: Set<number> }
 
@@ -88,7 +98,7 @@ export function sessionLeftovers(folder: string, tree: TurnTree, rows: readonly 
   noteDescendants(tree, rows);
   const inFolder = new Map(leftoversIn(folder, [...cwds], exclude).map((proc) => [proc.pid, proc.cwd]));
   return rows
-    .filter((row) => inFolder.has(row.pid) && row.pid !== tree.rootPid && !isInteractiveShell(row.command))
+    .filter((row) => inFolder.has(row.pid) && row.pid !== tree.rootPid && !isInteractiveShell(row.command) && !isToolProcess(row.command))
     .filter((row) => tree.seen.get(row.pid) === row.start || (!tree.seen.has(row.pid) && tree.groups.has(row.pgid)))
     .map((row) => ({ pid: row.pid, cwd: inFolder.get(row.pid)!, command: row.command.slice(0, 200), start: row.start }));
 }
