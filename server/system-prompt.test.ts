@@ -9,6 +9,7 @@ import { BUILT_IN_BROWSER_SYSTEM_PROMPT } from "./browser-engine.ts";
 import {
   buildSystemPrompt,
   userProfileSystemPrompt,
+  LANGUAGE_PROMPT,
   computerPrompt,
   resolveComputerPromptKind,
   mentionPrompt,
@@ -273,5 +274,14 @@ describe("composioSystemPrompt", () => {
     const prompt = composioSystemPrompt({ gmail: { tools: "*" } });
     expect(prompt.startsWith(" ")).toBe(true);
     expect(prompt.startsWith("  ")).toBe(false);
+  });
+});
+
+describe("language", () => {
+  it("tells every bot to answer in the user's language, pt-BR by default, reports included", () => {
+    expect(LANGUAGE_PROMPT).toContain("language they write in");
+    expect(LANGUAGE_PROMPT).toContain("Brazilian Portuguese (pt-BR)");
+    expect(LANGUAGE_PROMPT).toMatch(/reports.*approval or a GO/);
+    expect(LANGUAGE_PROMPT).toContain("even when tool results");
   });
 });
