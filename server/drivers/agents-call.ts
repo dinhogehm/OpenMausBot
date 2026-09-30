@@ -1180,6 +1180,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
         ...(action === "send" ? { message: args.message } : {}),
         ...(action === "list" && args.include_archived === true ? { includeArchived: true } : {}),
         ...(action === "archive" && args.remove_worktree === true ? { removeWorktree: true } : {}),
+        ...(action === "archive" && args.force === true ? { force: true, ...(typeof args.reason === "string" ? { reason: args.reason } : {}) } : {}),
       }),
     });
     if (r.error) return { text: `${name} failed: ${String(r.error)}`, isError: true };

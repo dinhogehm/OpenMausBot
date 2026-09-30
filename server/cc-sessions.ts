@@ -77,6 +77,8 @@ export interface CcSession {
   /** CLI: processes its last turn left running in its worktree; the server
    * resumes it when they are gone. */
   bgJob?: BgJob;
+  /** Its issue was checked for being a P1 left with no live session. */
+  orphanCheckedAt?: number;
   /** When it failed, and when the owner was told it stayed failed a day. */
   failedAt?: number;
   failedAgingReportedAt?: number;

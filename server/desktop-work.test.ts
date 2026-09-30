@@ -17,6 +17,7 @@ import {
   issueNumber,
   followDesktopSessions,
   liveSessionForIssue,
+  orphanedIssues,
   reviveScreenFailures,
   ageFailedSessions,
   uniqueSessionTitle,
@@ -660,5 +661,23 @@ describe("failed sessions left alone, and titles alike", () => {
     h.appSession("a").title = "Automação inatividade não dispara";
     expect(uniqueSessionTitle(h.ledger.all(), "automação  inatividade não dispara", "1819df34-x")).toBe("automação  inatividade não dispara · 1819");
     expect(uniqueSessionTitle(h.ledger.all(), "Outra", "1819df34")).toBe("Outra");
+  });
+});
+
+describe("an issue left without a live session", () => {
+  it("lists issues whose sessions all ended lately, once each, and never one with a live session", () => {
+    const h = harness();
+    const ended = h.appSession("a", { issue: "8891" });
+    ended.status = "archived";
+    const failed = h.appSession("b", { issue: "9311" });
+    failed.status = "failed";
+    const alive = h.appSession("c", { issue: "9311" });
+    alive.status = "idle";
+    const old = h.appSession("d", { issue: "9000" });
+    old.status = "stopped";
+    old.lastActivityAt = h.now - 8 * 24 * 3_600_000;
+    expect(orphanedIssues(h.ledger.all(), h.now).map((session) => session.id)).toEqual(["a"]);
+    ended.orphanCheckedAt = h.now;
+    expect(orphanedIssues(h.ledger.all(), h.now)).toEqual([]);
   });
 });

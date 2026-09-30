@@ -206,3 +206,55 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     deps.report(session, deliveryReport(session, delivered, tag.sha));
   }
 }
+
+/** Why a session should not be archived yet: a PR of it still open, or
+ * merged but not yet in the production tag. [] when nothing holds it, or
+ * when GitHub cannot be asked (then `unknown` says so). */
+export async function archiveBlockers(session: DeliverySession, deps: Pick<DeliveryDeps, "gh" | "git">): Promise<{ blockers: string[]; unknown: string[] }> {
+  const blockers: string[] = [];
+  const unknown: string[] = [];
+  let slug = session.delivery?.slug;
+  if (!slug) {
+    try {
+      slug = githubSlug(await deps.git(session.repo, ["remote", "get-url", "origin"])) ?? undefined;
+    } catch { /* not a repository any more */ }
+  }
+  if (!slug) return { blockers, unknown };
+  const numbers = new Map<number, DeliveryPr | undefined>();
+  for (const pr of Object.values(session.delivery?.prs ?? {})) numbers.set(pr.number, pr);
+  for (const link of prLinks(session.lastReport ?? "", slug)) if (!numbers.has(link.number)) numbers.set(link.number, undefined);
+  let tagSha: string | null | undefined;
+  for (const [number, known] of [...numbers].slice(0, 6)) {
+    if (known?.reportedAt !== undefined || known?.state === "closed") continue;
+    let state = known?.state === "merged" ? "MERGED" : "";
+    let mergeSha = known?.mergeSha;
+    if (!state) {
+      try {
+        const view = JSON.parse(await deps.gh(["pr", "view", String(number), "--repo", slug, "--json", "state,mergeCommit"])) as { state?: string; mergeCommit?: { oid?: string } | null };
+        state = view.state ?? "";
+        mergeSha = view.mergeCommit?.oid ?? undefined;
+      } catch {
+        unknown.push(`PR #${number}`);
+        continue;
+      }
+    }
+    if (state === "OPEN") {
+      blockers.push(`a PR #${number} ainda está aberta`);
+      continue;
+    }
+    if (state !== "MERGED" || !mergeSha) continue;
+    if (tagSha === undefined) {
+      try {
+        tagSha = parseLsRemoteTag(await deps.git(session.repo, ["ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
+      } catch { tagSha = null; }
+    }
+    if (!tagSha) continue; // a repository without the production tag
+    try {
+      const status = (await deps.gh(["api", `repos/${slug}/compare/${mergeSha}...${tagSha}`, "--jq", ".status"])).trim();
+      if (status !== "ahead" && status !== "identical") blockers.push(`a PR #${number} foi mergeada mas ainda não está em ${PRODUCTION_TAG}`);
+    } catch {
+      unknown.push(`PR #${number} (produção)`);
+    }
+  }
+  return { blockers, unknown };
+}

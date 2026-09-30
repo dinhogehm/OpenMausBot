@@ -733,3 +733,26 @@ export function uniqueSessionTitle(sessions: readonly CcSession[], title: string
   const taken = sessions.some((session) => session.status !== "archived" && norm(session.title) === norm(title));
   return taken ? `${title} · ${id.slice(0, 4)}` : title;
 }
+
+const liveStatus = (session: CcSession) => session.status === "running" || session.status === "stalled" || session.status === "idle";
+
+/** Issues whose sessions all ended (archived, stopped, failed) in the last
+ * week, with none alive and not yet looked at: candidates for "a P1 left
+ * without anyone on it". The latest session of each stands for it. */
+export function orphanedIssues(sessions: readonly CcSession[], now: number, withinMs = 7 * 24 * 3_600_000): CcSession[] {
+  const byIssue = new Map<string, CcSession[]>();
+  for (const session of sessions) {
+    const issue = session.desktop?.issue ?? issueNumber(session.title);
+    if (!issue) continue;
+    const key = `${session.repo}#${issue}`;
+    byIssue.set(key, [...(byIssue.get(key) ?? []), session]);
+  }
+  const orphans: CcSession[] = [];
+  for (const group of byIssue.values()) {
+    if (group.some(liveStatus)) continue;
+    const latest = group.reduce((a, b) => (b.lastActivityAt > a.lastActivityAt ? b : a));
+    if (latest.orphanCheckedAt !== undefined || now - latest.lastActivityAt > withinMs) continue;
+    orphans.push(latest);
+  }
+  return orphans;
+}

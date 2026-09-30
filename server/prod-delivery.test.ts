@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DELIVERY_CHECK_MS, deliveryReport, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
+import { archiveBlockers, DELIVERY_CHECK_MS, deliveryReport, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
 
 const SLUG = "dinhogehm/nuria-platform";
 const TAG = "c".repeat(40);
@@ -90,5 +90,23 @@ describe("delivery in production", () => {
     await watchProductionDelivery([{ ...session(), status: "archived" }], archived.deps, newDeliveryCache());
     expect(archived.calls).toEqual([]);
     expect(deliveryReport({ id: "s", title: "t" }, [{ url: "u", number: 1, mergeSha: MERGE, productionSince: "30/09 16:40" }], TAG)).toContain("PR #1 (u)");
+  });
+});
+
+describe("archiving before delivery", () => {
+  it("holds a session whose PR is open or whose merge is not in production, and says why", async () => {
+    const open = fakeDeps({ state: "OPEN" });
+    expect((await archiveBlockers(session(), open.deps)).blockers).toEqual(["a PR #9400 ainda está aberta"]);
+    const behind = fakeDeps({ compare: "diverged" });
+    expect((await archiveBlockers(session(), behind.deps)).blockers).toEqual(["a PR #9400 foi mergeada mas ainda não está em nuria-production-deployed"]);
+    const shipped = fakeDeps({ compare: "ahead" });
+    expect(await archiveBlockers(session(), shipped.deps)).toEqual({ blockers: [], unknown: [] });
+    const closed = fakeDeps({ state: "CLOSED" });
+    expect((await archiveBlockers(session(), closed.deps)).blockers).toEqual([]);
+    const noTag = fakeDeps({ tag: null });
+    expect((await archiveBlockers(session(), noTag.deps)).blockers).toEqual([]);
+    const offline = fakeDeps();
+    offline.deps.gh = async () => { throw new Error("gh: not logged in"); };
+    expect(await archiveBlockers(session(), offline.deps)).toEqual({ blockers: [], unknown: ["PR #9400"] });
   });
 });

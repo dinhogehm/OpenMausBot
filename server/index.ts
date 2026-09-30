@@ -302,6 +302,7 @@ import {
   desktopBriefText,
   issueNumber,
   liveSessionForIssue,
+  orphanedIssues,
   ageFailedSessions,
   uniqueSessionTitle,
   reviveScreenFailures,
@@ -315,7 +316,7 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { newDeliveryCache, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, newDeliveryCache, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState } from "./release-watch.ts";
@@ -7948,6 +7949,36 @@ const execCc = (file: string, args: string[], cwd?: string) => new Promise<strin
   execFileCc(file, args, { cwd, timeout: 30_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => error ? reject(error) : resolve(String(stdout)));
 });
 
+/** A P1/hotfix issue whose sessions all ended while the issue is still open:
+ * nobody is on it. Checked once per ended session (gh issue view), then the
+ * Chief and the session's owner hear about it. */
+const orphanWatch = { running: false, lastAt: 0 };
+async function watchOrphanedIssues(): Promise<void> {
+  if (orphanWatch.running || Date.now() - orphanWatch.lastAt < 5 * 60_000) return;
+  orphanWatch.running = true;
+  orphanWatch.lastAt = Date.now();
+  try {
+    for (const session of orphanedIssues(ccLedger.all(), Date.now()).slice(0, 5)) {
+      const issue = session.desktop?.issue ?? issueNumber(session.title)!;
+      let view: { state?: string; title?: string; labels?: Array<{ name?: string }> };
+      try {
+        view = JSON.parse(await execCc("gh", ["issue", "view", issue, "--json", "state,title,labels"], session.repo));
+      } catch { continue; } // offline or not a GitHub repository: next pass
+      session.orphanCheckedAt = Date.now();
+      ccLedger.save();
+      const labels = (view.labels ?? []).map((label) => label.name ?? "").join(" ");
+      if (view.state !== "OPEN" || !/\b(P0|P1|hotfix|urgent|urgente|critical|cr[ií]tic)/i.test(`${labels} ${view.title ?? ""}`)) continue;
+      const owner = store.bot(session.ownerBotId);
+      const text = `A issue #${issue} (${chipText(view.title ?? "", 80)}), marcada como P1/hotfix, está aberta e sem nenhuma sessão do Claude Code viva — a última, "${session.title}" (${session.status}), era de ${owner?.name ?? session.ownerBotId}. Alguém precisa assumir: abra uma sessão nova para ela ou diga ao dono por que parou.`;
+      ccChip(session, `issue #${issue} (P1) ficou sem sessão viva`, false);
+      ccReport(session, text);
+      if (owner) alertAutomationTrouble(owner, session.ownerThreadId, text);
+    }
+  } finally {
+    orphanWatch.running = false;
+  }
+}
+
 // Merged PRs of Claude Code sessions reaching production (server/prod-delivery.ts).
 const deliveryCache = newDeliveryCache();
 const delivery = { running: false, lastAt: 0 };
@@ -7972,6 +8003,7 @@ async function runDesktopWork(): Promise<void> {
   ageFailedSessions(desktopWork);
   await watchBackgroundJobs();
   watchDelivery();
+  void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
   if (process.platform !== "darwin") return;
   await runDesktopWorkFlow(desktopWork, desktopState);
 }
@@ -16434,6 +16466,24 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           ccChip(session, `parada aqui${dropped ? ` — ${dropped} mensagem(ns) da fila descartada(s)` : ""}`, false);
           return json(res, 200, { message: `Marcada como parada aqui; a sessão no app Claude não foi tocada (se ela estiver no meio de um turno, só a pessoa a interrompe, com Esc na sessão).${dropped ? ` ${dropped} mensagem(ns) que ainda iam para ela foram descartadas.` : ""} Para retomar, use cc_session_send.` });
         }
+        // Work that has not shipped is not archived by accident: an open PR,
+        // or a merge not yet in the production tag, holds it unless the bot
+        // says force with a reason.
+        let archiveNote = "";
+        if (action === "archive") {
+          const forced = body.force === true;
+          const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 300) : "";
+          if (forced && !reason) return json(res, 400, { error: "force precisa de reason: por que arquivar sem a entrega em produção" });
+          if (!forced) {
+            const held = await archiveBlockers(session, { gh: (args) => execCc("gh", args), git: (repo, args) => execCc("git", ["-C", repo, ...args]) });
+            if (held.blockers.length) {
+              return json(res, 409, { error: `não arquivei: ${held.blockers.join("; ")}. Arquive quando a entrega estiver em produção, ou chame de novo com force: true e reason (ex.: trabalho abandonado, PR fechada em outra sessão).` });
+            }
+            if (held.unknown.length) archiveNote = ` (Não consegui conferir no GitHub: ${held.unknown.join(", ")}.)`;
+          } else {
+            ccChip(session, `arquivamento forçado: ${chipText(reason, 120)}`, false);
+          }
+        }
         if (session.surface === "app" && action === "archive") {
           const desktop = session.desktop!;
           if (desktop.pending?.kind === "archive" || desktop.archiveWhenResolved) {
@@ -16484,7 +16534,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           ccLedger.setStatus(session, action === "stop" ? "stopped" : "archived");
           const worktreeNote = action === "archive" && body.removeWorktree === true ? removeSessionWorktree(session) : "";
           ccChip(session, action === "stop" ? "parada" : `arquivada${worktreeNote ? " (worktree tratada)" : ""}`);
-          return json(res, 200, { message: `${action === "stop" ? "Parada; cc_session_send a retoma depois." : "Arquivada."}${worktreeNote ? ` ${worktreeNote}` : ""}` });
+          return json(res, 200, { message: `${action === "stop" ? "Parada; cc_session_send a retoma depois." : "Arquivada."}${worktreeNote ? ` ${worktreeNote}` : ""}${archiveNote}` });
         }
         return json(res, 400, { error: "action deve ser start, send, list, stop ou archive" });
       }

@@ -689,13 +689,15 @@ const toolDefinitions = (externalRuntime: boolean) => [
   },
   {
     name: "cc_session_archive",
-    description: "Archive a Claude Code session once its work has shipped (merged and published) or was abandoned. remove_worktree deletes its worktree only if it has no uncommitted changes.",
+    description: "Archive a Claude Code session once its work has shipped (merged and in production) or was abandoned. Refused while a PR of it is open or its merge is not yet in production, unless force with a reason. remove_worktree deletes its worktree only if it has no uncommitted changes.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
         session_id: { type: "string" },
         remove_worktree: { type: "boolean" },
+        force: { type: "boolean", description: "Archive although its PR is open or not in production yet; needs reason." },
+        reason: { type: "string", maxLength: 300, description: "With force: why (abandoned, superseded by another session…)." },
       },
       required: ["session_id"],
     },
