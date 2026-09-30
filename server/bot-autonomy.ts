@@ -13,6 +13,10 @@
 //     it re-arms on the output it fired on, whether or not the turn could
 //     start. It lives beside the conversation's one ordinary wake, so a
 //     wake_me there never replaces it.
+//   - A promise (wake_me promise): the bot owes someone an answer by a
+//     time ("responder ao cliente até 16h"). It is not a wake: nothing
+//     happens while it is kept in time. Past its time and not marked kept
+//     (wake_me promise_kept), it is reported to the bot and to its Chief.
 //   - A goal: the bot was told to keep working until something is delivered
 //     (goal_start). The harness keeps handing it continuation turns until it
 //     calls goal_end, a limit runs out, or the person presses Stop.
@@ -134,7 +138,23 @@ export interface InFlight {
 export const IN_FLIGHT_MAX_AGE_MS = 24 * 3_600_000;
 export const INTERRUPTED_PREFIX = "[A execução anterior foi interrompida por um restart do servidor antes de terminar; retome daqui.]";
 
+/** Something the bot owes by a time; see the header. */
+export interface BotPromise {
+  id: string;
+  botId: string;
+  threadId: string;
+  text: string;
+  dueAt: number;
+  createdAt: number;
+  /** Reported as overdue (once). */
+  overdueAt?: number;
+}
+export const PROMISE_TEXT_MAX = 300;
+export const PROMISE_MAX_MINUTES = 7 * 1_440;
+export const PROMISES_MAX_PER_THREAD = 10;
+
 interface Ledger {
+  promises?: BotPromise[];
   wakes: BotWake[];
   goals: BotGoal[];
   reports?: PendingReports[];
@@ -161,6 +181,16 @@ export function parseWakeInput(body: { minutes?: unknown; reason?: unknown }): W
   const reason = clip(body.reason, WAKE_REASON_MAX);
   if (!reason) return { ok: false, error: "reason is required: what to check or do when you wake up" };
   return { ok: true, minutes, reason };
+}
+
+export type PromiseInput = { ok: true; text: string; minutes: number } | { ok: false; error: string };
+
+export function parsePromiseInput(body: { promise?: unknown; promiseMinutes?: unknown }): PromiseInput {
+  const text = clip(body.promise, PROMISE_TEXT_MAX);
+  if (!text) return { ok: false, error: "promise precisa dizer o que você deve e a quem (ex.: \"resposta ao cliente X no space Y sobre Z\")" };
+  const minutes = intIn(body.promiseMinutes, 1, PROMISE_MAX_MINUTES);
+  if (minutes === null) return { ok: false, error: `promise_minutes precisa ser um número inteiro de 1 a ${PROMISE_MAX_MINUTES}: o prazo, em minutos a partir de agora` };
+  return { ok: true, text, minutes };
 }
 
 export type WatchInput =
@@ -235,6 +265,7 @@ export class BotAutonomy {
   private reports = new Map<string, PendingReports>();
   private inFlight: InFlight[] = [];
   private standingLost = new Map<string, StandingLost>();
+  private promises: BotPromise[] = [];
   private readonly path: string | null;
   private readonly now: () => number;
   private readonly minuteMs: number;
@@ -270,6 +301,9 @@ export class BotAutonomy {
           this.goals.set(goal.threadId, goal);
         }
       }
+      for (const promise of raw.promises ?? []) {
+        if (promise && typeof promise.id === "string" && typeof promise.threadId === "string" && typeof promise.botId === "string" && Number.isFinite(promise.dueAt)) this.promises.push(promise);
+      }
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
       }
@@ -297,7 +331,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()] };
+    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()] };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -438,10 +472,18 @@ export class BotAutonomy {
     return wake;
   }
 
-  /** Conversations left without any standing watch for `afterMs`, not yet alerted. */
+  /** Conversations that had a standing watch and have had no watch at all
+   * (standing or one-shot) for `afterMs`, not yet alerted. A one-shot watch
+   * keeps it watched while it lasts; the clock restarts when it is gone. */
   standingLostDue(afterMs = STANDING_LOST_ALERT_MS): StandingLost[] {
     const at = this.now();
-    return [...this.standingLost.values()].filter((lost) => !lost.alerted && at - lost.at >= afterMs);
+    return [...this.standingLost.values()].filter((lost) => {
+      if (this.watchesFor(lost.threadId).length) {
+        lost.at = at;
+        return false;
+      }
+      return !lost.alerted && at - lost.at >= afterMs;
+    });
   }
 
   markStandingLostAlerted(threadId: string): void {
@@ -454,7 +496,48 @@ export class BotAutonomy {
   /** It had a standing watch, has none now, and that has lasted. */
   isStandingLost(threadId: string, afterMs = STANDING_LOST_ALERT_MS): boolean {
     const lost = this.standingLost.get(threadId);
-    return Boolean(lost && this.now() - lost.at >= afterMs);
+    return Boolean(lost && !this.watchesFor(threadId).length && this.now() - lost.at >= afterMs);
+  }
+
+  // ── promises ───────────────────────────────────────────────────────────
+
+  addPromise(botId: string, threadId: string, text: string, minutes: number): BotPromise {
+    const at = this.now();
+    const used = new Set(this.promises.map((promise) => promise.id));
+    let n = this.promises.length + 1;
+    while (used.has(`p${n}`)) n += 1;
+    const promise: BotPromise = { id: `p${n}`, botId, threadId, text, dueAt: at + minutes * this.minuteMs, createdAt: at };
+    this.promises = [...this.promises.filter((open) => open.threadId !== threadId || open.text !== text), promise];
+    const mine = this.promises.filter((open) => open.threadId === threadId);
+    if (mine.length > PROMISES_MAX_PER_THREAD) this.promises = this.promises.filter((open) => open !== mine[0]);
+    this.save();
+    return promise;
+  }
+
+  /** Marks kept (removes) one promise of this conversation by id, or all with "all". */
+  keepPromise(threadId: string, id: string): BotPromise[] {
+    const kept = this.promises.filter((promise) => promise.threadId === threadId && (id === "all" || promise.id === id));
+    if (!kept.length) return [];
+    this.promises = this.promises.filter((promise) => !kept.includes(promise));
+    this.save();
+    return kept;
+  }
+
+  promisesFor(threadId: string): BotPromise[] {
+    return this.promises.filter((promise) => promise.threadId === threadId);
+  }
+
+  /** Past their time, not kept, not yet reported. */
+  overduePromises(): BotPromise[] {
+    const at = this.now();
+    return this.promises.filter((promise) => promise.overdueAt === undefined && promise.dueAt <= at);
+  }
+
+  markPromiseOverdue(id: string): void {
+    const promise = this.promises.find((open) => open.id === id);
+    if (!promise) return;
+    promise.overdueAt = this.now();
+    this.save();
   }
 
 
@@ -646,7 +729,10 @@ export class BotAutonomy {
   wakeHold(horizonMs: number): { hold: boolean; reason?: "running" | "due"; at?: number } {
     if (this.activeGoals().length || this.reportThreads().length || this.inFlight.length) return { hold: true, reason: "running" };
     const at = this.now();
-    const due = [...this.wakes.values()].map((wake) => wake.watch && !wake.watch.trigger ? Math.min(wake.dueAt, wake.watch.lastRunAt + wake.watch.everyMs) : wake.dueAt)
+    const due = [
+      ...[...this.wakes.values()].map((wake) => wake.watch && !wake.watch.trigger ? Math.min(wake.dueAt, wake.watch.lastRunAt + wake.watch.everyMs) : wake.dueAt),
+      ...this.promises.filter((promise) => promise.overdueAt === undefined).map((promise) => promise.dueAt),
+    ]
       .filter((when) => when <= at + horizonMs)
       .sort((a, b) => a - b)[0];
     return due === undefined ? { hold: false } : { hold: true, reason: "due", at: due };
@@ -659,8 +745,10 @@ export class BotAutonomy {
     const hadWake = this.wakes.delete(threadId) || hadStanding;
     const hadGoal = this.goals.delete(threadId);
     const hadReports = this.reports.delete(threadId);
+    const hadPromises = this.promises.some((promise) => promise.threadId === threadId);
+    this.promises = this.promises.filter((promise) => promise.threadId !== threadId);
     this.inFlight = this.inFlight.filter((lease) => lease.threadId !== threadId);
-    if (hadWake || hadGoal || hadReports) this.save();
+    if (hadWake || hadGoal || hadReports || hadPromises) this.save();
   }
 }
 
@@ -820,4 +908,12 @@ export function reportsPrompt(pending: PendingReports, goal: BotGoal | null, rem
     ...(goal && goal.status === "active" ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`] : []),
     reminder,
   ].join("\n\n---\n\n");
+}
+
+/** For the bot (and its Chief) when a promise passed its time unkept. */
+export function promiseOverdueReport(promise: BotPromise, botName: string, now: number): string {
+  return [
+    `[Promise overdue by ${minutesLabel(now - promise.dueAt)}: ${botName} promised "${promise.text}" (${promise.id}), due ${minutesLabel(now - promise.createdAt)} after it was made, and it was not marked kept.]`,
+    "Send what was promised now, or tell the person when it will come and why — then mark it kept with wake_me promise_kept. If it was already sent, mark it kept.",
+  ].join("\n");
 }

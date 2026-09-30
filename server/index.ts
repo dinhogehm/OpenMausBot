@@ -244,7 +244,9 @@ import {
   goalStartedAck,
   parseGoalEndInput,
   parseGoalInput,
+  parsePromiseInput,
   parseWakeInput,
+  promiseOverdueReport,
   parseWatchInput,
   reportsPrompt,
   wakeChip,
@@ -7347,6 +7349,32 @@ function alertLostStandingWatches(): void {
   }
 }
 
+/** A promise past its time and not marked kept: told once to the bot, in
+ * its conversation, and to its Chief of Staff. */
+function alertOverduePromises(): void {
+  const now = Date.now();
+  for (const promise of autonomy.overduePromises()) {
+    autonomy.markPromiseOverdue(promise.id);
+    const bot = store.bot(promise.botId);
+    if (!bot || !store.taskByThread(bot.id, promise.threadId)) continue;
+    const text = promiseOverdueReport(promise, bot.name, now);
+    store.appendMessage(promise.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Promessa ${promise.id} passou do prazo — ${promise.text}`, 240), ok: false } });
+    autonomy.addReport(bot.id, promise.threadId, text);
+    const chief = chiefForBot(store.bots, bot);
+    const desk = chief && chief.id !== bot.id ? chiefDeskThread(chief) : null;
+    if (chief && desk && store.taskByThread(chief.id, desk)) {
+      store.appendMessage(desk, {
+        role: "bot",
+        kind: "activity",
+        tool: { name: chipText(`${bot.name}: promessa passou do prazo — ${promise.text}`, 240), ok: false },
+        threadRef: { botId: bot.id, threadId: promise.threadId, title: store.taskByThread(bot.id, promise.threadId)?.title ?? `${bot.name}'s conversation` },
+      });
+      autonomy.addReport(chief.id, desk, `${text}\n(${bot.name}'s conversation ${promise.threadId}: make sure the person gets an answer.)`);
+    }
+    refreshBotRow(bot.id);
+  }
+}
+
 /** Low disk where the work happens: told once per band to the Chief of Staff. */
 // Only the server the desktop app runs watches this Mac's disk. Test and
 // verification servers share the same real disk and must not wake their
@@ -7379,6 +7407,7 @@ async function autonomyTick(): Promise<void> {
   }
   await runDueWatches();
   alertLostStandingWatches();
+  alertOverduePromises();
   for (const wake of autonomy.dueWakes()) {
     if (!store.taskByThread(wake.botId, wake.threadId)) {
       autonomy.forgetThread(wake.threadId);
@@ -15976,12 +16005,30 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
                 : `Vigiando. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui quando ${input.until ? `a saída casar com "${input.until}"` : "a saída mudar"}, ou depois de ${input.maxMinutes} min de qualquer forma. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`,
             });
           }
+          // Promises with a deadline ride on wake_me, alone or beside a wake.
+          const promiseNotes: string[] = [];
+          if (typeof body.promiseKept === "string") {
+            const kept = autonomy.keepPromise(threadId, body.promiseKept.trim());
+            if (!kept.length) return json(res, 404, { error: `não há promessa "${body.promiseKept}" aberta nesta conversa${autonomy.promisesFor(threadId).length ? ` (abertas: ${autonomy.promisesFor(threadId).map((open) => `${open.id} "${chipText(open.text, 60)}"`).join(", ")})` : ""}` });
+            for (const promise of kept) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Promessa cumprida — ${chipText(promise.text, 140)}`, ok: true } });
+            promiseNotes.push(`Promessa${kept.length > 1 ? "s" : ""} ${kept.map((promise) => promise.id).join(", ")} marcada${kept.length > 1 ? "s" : ""} como cumprida${kept.length > 1 ? "s" : ""}.`);
+          }
+          if (body.promise !== undefined) {
+            const promiseInput = parsePromiseInput(body);
+            if (!promiseInput.ok) return json(res, 400, { error: promiseInput.error });
+            const promise = autonomy.addPromise(bot.id, threadId, promiseInput.text, promiseInput.minutes);
+            store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Promessa ${promise.id} — ${chipText(promise.text, 120)} · prazo em ${promiseInput.minutes} min`, ok: true } });
+            promiseNotes.push(`Promessa ${promise.id} registrada: prazo em ${promiseInput.minutes} min. Se passar sem você marcar promise_kept "${promise.id}", você e o Chief são avisados.`);
+          }
+          if (body.minutes === undefined && body.reason === undefined && promiseNotes.length) {
+            return json(res, 200, { message: promiseNotes.join(" ") });
+          }
           const input = parseWakeInput(body);
           if (!input.ok) return json(res, 400, { error: input.error });
           const wake = autonomy.setWake(bot.id, threadId, input.minutes, input.reason);
           store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: wakeChip(wake), ok: true } });
           return json(res, 200, {
-            message: `Você recebe um novo turno aqui em ${input.minutes} min, com a sua nota. Encerre o turno agora; não fique consultando enquanto isso.`,
+            message: `${promiseNotes.length ? `${promiseNotes.join(" ")} ` : ""}Você recebe um novo turno aqui em ${input.minutes} min, com a sua nota. Encerre o turno agora; não fique consultando enquanto isso.`,
           });
         }
         if (body.action === "start") {

@@ -10,7 +10,9 @@ import {
   goalEndChip,
   parseGoalEndInput,
   parseGoalInput,
+  parsePromiseInput,
   parseWakeInput,
+  promiseOverdueReport,
   parseWatchInput,
   chipText,
   parseStandingLabel,
@@ -448,6 +450,56 @@ describe("a watcher left without its standing watch", () => {
     expect(autonomy.standingLostDue()).toEqual([]);
     autonomy.setWatch("bot", "t1", { ...base, label: "chat" });
     expect(autonomy.isStandingLost("t1")).toBe(false);
+  });
+  it("counts a one-shot watch as watched: the 10 min run from when no watch at all is left", () => {
+    const autonomy = make();
+    const base = { argv: ["gog"], everyMinutes: 3, maxMinutes: 30, reason: "x", baseline: "b", command: "gog chat" };
+    autonomy.setWatch("bot", "t1", { ...base, standing: true, label: "chat" });
+    autonomy.cancelStanding("t1", "chat");
+    autonomy.setWatch("bot", "t1", base); // a one-shot watch, the conversation's ordinary wake
+    now += 20 * 60_000;
+    expect(autonomy.standingLostDue()).toEqual([]);
+    expect(autonomy.isStandingLost("t1")).toBe(false);
+    autonomy.cancelWake("t1");
+    now += 5 * 60_000;
+    expect(autonomy.standingLostDue()).toEqual([]);
+    now += 6 * 60_000;
+    expect(autonomy.standingLostDue().map((lost) => lost.threadId)).toEqual(["t1"]);
+    expect(autonomy.isStandingLost("t1")).toBe(true);
+  });
+});
+
+describe("promises with a deadline", () => {
+  it("parses what is owed and the deadline", () => {
+    expect(parsePromiseInput({ promise: " resposta ao cliente X ", promiseMinutes: 60 })).toEqual({ ok: true, text: "resposta ao cliente X", minutes: 60 });
+    expect(parsePromiseInput({ promise: "", promiseMinutes: 60 }).ok).toBe(false);
+    expect(parsePromiseInput({ promise: "x", promiseMinutes: 0 }).ok).toBe(false);
+    expect(parsePromiseInput({ promise: "x", promiseMinutes: 7 * 1_440 + 1 }).ok).toBe(false);
+  });
+
+  it("is overdue once, past its time and unkept; kept ones never are; survives a restart", () => {
+    const autonomy = make();
+    const answer = autonomy.addPromise("bot", "t1", "resposta ao cliente X sobre o login", 60);
+    const other = autonomy.addPromise("bot", "t1", "planilha atualizada", 30);
+    expect([answer.id, other.id]).toEqual(["p1", "p2"]);
+    expect(autonomy.wakeHold(2 * 3_600_000)).toEqual({ hold: true, reason: "due", at: other.dueAt });
+    expect(autonomy.keepPromise("t1", "p2").map((promise) => promise.id)).toEqual(["p2"]);
+    expect(autonomy.keepPromise("t2", "p1")).toEqual([]);
+    now += 59 * 60_000;
+    expect(autonomy.overduePromises()).toEqual([]);
+    now += 2 * 60_000;
+    const reloaded = make();
+    expect(reloaded.overduePromises().map((promise) => promise.id)).toEqual(["p1"]);
+    reloaded.markPromiseOverdue("p1");
+    expect(reloaded.overduePromises()).toEqual([]);
+    expect(make().promisesFor("t1")).toHaveLength(1);
+    const report = promiseOverdueReport(answer, "Monitor", now);
+    expect(report).toContain('promised "resposta ao cliente X sobre o login" (p1)');
+    expect(report).toContain("promise_kept");
+    expect(reloaded.keepPromise("t1", "all")).toHaveLength(1);
+    reloaded.addPromise("bot", "t1", "x", 5);
+    reloaded.forgetThread("t1");
+    expect(make().promisesFor("t1")).toEqual([]);
   });
 });
 

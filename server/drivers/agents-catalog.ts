@@ -596,7 +596,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
   {
     name: "wake_me",
     description:
-      "Get a new turn in THIS conversation after some minutes, without anyone typing. Use it to check back on work that runs elsewhere (CI, a deploy, a PR review, another agent's session) or to follow a rule like \"check every 2 minutes\" — call it again on each wake to keep the cadence. When it fires you receive your reason as a note. One pending wake per conversation: a new call replaces the earlier one, cancel removes it. After calling it, end your turn. Not for rooms.",
+      "Get a new turn in THIS conversation after some minutes, without anyone typing. Use it to check back on work that runs elsewhere (CI, a deploy, a PR review, another agent's session) or to follow a rule like \"check every 2 minutes\" — call it again on each wake to keep the cadence. When it fires you receive your reason as a note. One pending wake per conversation: a new call replaces the earlier one, cancel removes it. After calling it, end your turn. Whenever you tell someone they will get an answer by a time, also record it with promise + promise_minutes, and mark it with promise_kept once sent. Not for rooms.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -604,6 +604,9 @@ const toolDefinitions = (externalRuntime: boolean) => [
         minutes: { type: "integer", minimum: 1, maximum: 1_440, description: "Whole minutes from now, 1 to 1440." },
         reason: { type: "string", maxLength: 500, description: "Note to your future self: exactly what to check or do on waking." },
         cancel: { type: "boolean", description: "true removes the pending wake instead of setting one; omit minutes and reason." },
+        promise: { type: "string", maxLength: 300, description: "Something you owe by a deadline, and to whom (\"resposta ao cliente X no space Y sobre Z\"), with promise_minutes. Not a wake: if the deadline passes and you have not marked it kept, you and your Chief are told. Can go alone or with minutes and reason." },
+        promise_minutes: { type: "integer", minimum: 1, maximum: 10_080, description: "The promise's deadline, in minutes from now (up to 7 days)." },
+        promise_kept: { type: "string", maxLength: 20, description: "Mark a promise of this conversation kept once it was sent: its id (p1, p2…) or \"all\". Can go alone." },
       },
     },
   },

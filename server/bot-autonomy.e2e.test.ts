@@ -52,6 +52,25 @@ it("wakes the bot in the same conversation with its own note", () => fixture(asy
   expect(f.ledger().wakes).toEqual([]);
 }), 60_000);
 
+it("tells the bot when a promise passes its deadline unkept, and never for a kept one", () => fixture(async f => {
+  f.save({ turns: [
+    { steps: [
+      { tool: "wake_me", arguments: { promise: "resposta ao cliente ACME sobre o login", promise_minutes: 1 } },
+      { tool: "wake_me", arguments: { promise: "planilha da ACME atualizada", promise_minutes: 2 } },
+      { tool: "wake_me", arguments: { promise_kept: "p2" } },
+    ], reply: "Prometido" },
+    { expectContextIncludes: ["Promise overdue", "resposta ao cliente ACME sobre o login", "(p1)", "promise_kept"], reply: "Enviando agora" },
+  ] });
+  await f.send("Diga à ACME que respondemos em 1 minuto.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  expect(toolResult(f.turns()[0], "wake_me")).toContain("marcada como cumprida");
+  const chips = await f.chips();
+  expect(chips.some((chip: string) => chip.startsWith("Promessa p1 —"))).toBe(true);
+  expect(chips.some((chip: string) => chip.startsWith("Promessa cumprida — planilha"))).toBe(true);
+  expect(chips.some((chip: string) => chip.startsWith("Promessa p1 passou do prazo"))).toBe(true);
+  expect(chips.some((chip: string) => chip.includes("p2 passou do prazo"))).toBe(false);
+}), 60_000);
+
 it("keeps giving a goal turns until the bot ends it, then goes quiet", () => fixture(async f => {
   f.save({ turns: [
     { steps: [{ tool: "goal_start", arguments: { goal: "SHIP_9195 to production", max_turns: 5 } }], reply: "Goal accepted" },

@@ -1119,12 +1119,17 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
   }
   if (name === "wake_me") {
     const cancel = args.cancel === true;
-    if (!cancel && (typeof args.minutes !== "number" || typeof args.reason !== "string" || !args.reason.trim())) {
-      return { text: "wake_me needs minutes (1-1440) and reason (what to check on waking), or cancel: true.", isError: true };
+    const promise = {
+      ...(typeof args.promise === "string" && args.promise.trim() ? { promise: args.promise, promiseMinutes: args.promise_minutes } : {}),
+      ...(typeof args.promise_kept === "string" && args.promise_kept.trim() ? { promiseKept: args.promise_kept.trim() } : {}),
+    };
+    const wake = typeof args.minutes === "number" || typeof args.reason === "string";
+    if (!cancel && (wake || !Object.keys(promise).length) && (typeof args.minutes !== "number" || typeof args.reason !== "string" || !args.reason.trim())) {
+      return { text: "wake_me needs minutes (1-1440) and reason (what to check on waking), or cancel: true — or only promise + promise_minutes, or promise_kept.", isError: true };
     }
     const r = await api("/api/internal/wake", {
       method: "POST",
-      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, ...(cancel ? { cancel: true } : { minutes: args.minutes, reason: args.reason }) }),
+      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, ...(cancel ? { cancel: true } : { ...(wake ? { minutes: args.minutes, reason: args.reason } : {}), ...promise }) }),
     });
     if (r.error) return { text: `Couldn't ${cancel ? "cancel the wake-up" : "schedule the wake-up"}: ${String(r.error)}`, isError: true };
     return { text: String(r.message ?? (cancel ? "Wake-up cancelled." : "Wake-up scheduled. End your turn now.")) };
