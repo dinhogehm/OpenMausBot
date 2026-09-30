@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -230,5 +230,30 @@ describe("archiving", () => {
     expect(session.lastError).toBeUndefined();
     expect(session.bgJob).toBeUndefined();
     expect(session.archivedAt).toBe(5);
+  });
+});
+
+describe("the corridor form of what the hook stopped", () => {
+  it("names the equivalent corridor command", () => {
+    expect(corridorHint("git push -u origin claude/chat-ticket-labels-bug-8c6c68")).toBe("push by the corridor form: `git push -u origin HEAD:claude/chat-ticket-labels-bug-8c6c68`");
+    expect(corridorHint("git push origin fix-9298")).toContain("HEAD:fix/fix-9298");
+    expect(corridorHint("git push -u origin main")).toBeNull();
+    expect(corridorHint("git push -u origin HEAD:fix/x")).toBeNull();
+    expect(corridorHint("GH_TOKEN=x gh pr create --fill")).toBe("no environment-variable prefixes: run `gh pr create --fill` as it is");
+    expect(corridorHint("npm run ci:local | tail -5")).toContain("no pipes");
+    expect(corridorHint("pnpm pr:merge -- --pr 9 --merge")).toContain("npm run pr:merge -- --pr 9 --merge");
+    expect(corridorHint("npm run pr:merge -- --pr 9")).toContain("--publish");
+  });
+
+  it("puts it in the owner's report, from the hook's denial or a push the session is blocked on", () => {
+    const ledger = new CcSessionLedger({ path: null, now: () => 0 });
+    const session = ledger.create({ id: "s", ownerBotId: "b", ownerThreadId: "t", title: "#9311", repo: "/r", permissionMode: "auto" });
+    session.blockedOn = "OK to push? `git push -u origin claude/chat-ticket-labels-bug-8c6c68` was denied by the hook";
+    const hook = JSON.stringify({ session: "s", outcome: "deny", input: JSON.stringify({ command: "CI=1 npm run ci:local" }) });
+    const report = ccReportForOwner(session, { hookDecision: hook });
+    expect(report).toContain("The corridor lets this through");
+    expect(report).toContain("HEAD:claude/chat-ticket-labels-bug-8c6c68");
+    expect(report).toContain("run `npm run ci:local` as it is");
+    expect(ccReportForOwner({ ...session, blockedOn: undefined }, {})).not.toContain("corridor");
   });
 });

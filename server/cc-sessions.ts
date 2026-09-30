@@ -422,6 +422,42 @@ export function ccModeLine(session: CcSession): string {
   return `Mode: headless CLI (claude -p), permission mode ${session.permissionMode} — nobody sees it and there is no approval dialog: a hook denial ends the turn; answer it with cc_session_send.`;
 }
 
+/** The corridor form of a command the review hook stopped, when there is
+ * one: what to send the session instead of handing the item to the owner. */
+export function corridorHint(command: string): string | null {
+  const cmd = command.trim();
+  if (/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+\S/.test(cmd)) {
+    return `no environment-variable prefixes: run \`${cmd.replace(/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+/, "")}\` as it is`;
+  }
+  if (/[|;&`]|\$\(/.test(cmd)) return "one command per call: no pipes, `&&`, `;` or `$(…)`";
+  const push = /^git push(?:\s+-u|\s+--set-upstream)?\s+origin\s+(?!HEAD:)([\w./-]+)$/.exec(cmd);
+  if (push && push[1] !== "main" && push[1] !== "HEAD") {
+    const branch = push[1]!;
+    const typed = /^(feat|fix|hotfix|chore|ci|docs|perf|refactor|test|claude)\//.test(branch) ? branch : `fix/${branch}`;
+    return `push by the corridor form: \`git push -u origin HEAD:${typed}\``;
+  }
+  const pnpm = /^pnpm (?:run )?(pr:merge|ci:local\S*)(.*)$/.exec(cmd);
+  if (pnpm) return `the repository's own command: \`npm run ${pnpm[1]}${pnpm[2]}\``;
+  if (/^npm run pr:merge\b/.test(cmd) && !/ -- --pr \d+ --(publish|merge)\b/.test(cmd)) {
+    return "the gate's exact forms: `npm run pr:merge -- --pr N --publish`, then `npm run pr:merge -- --pr N --merge`";
+  }
+  return null;
+}
+
+/** The command in a review-hook log line ("input" is the tool input JSON, maybe cut short). */
+export function hookLineCommand(line: string): string | null {
+  try {
+    const input = String((JSON.parse(line) as { input?: unknown }).input ?? "");
+    try {
+      return String((JSON.parse(input) as { command?: unknown }).command ?? "") || null;
+    } catch {
+      return /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(input)?.[1]?.replace(/\\"/g, '"') ?? null;
+    }
+  } catch {
+    return null;
+  }
+}
+
 export function ccReportForOwner(session: CcSession, extra: { hookDecision?: string | null } = {}): string {
   const head = session.status === "failed"
     ? `Claude Code session "${session.title}" (${session.id}) stopped with a problem: ${session.lastError ?? "unknown error"}`
@@ -432,9 +468,28 @@ export function ccReportForOwner(session: CcSession, extra: { hookDecision?: str
     head,
     ccModeLine(session),
     ...(extra.hookDecision ? [`Latest review-hook decision for this session (deny/ask preferred): ${extra.hookDecision}`] : []),
+    ...corridorHints(session, extra.hookDecision),
     ...(session.lastReport ? [`Its report:\n${session.lastReport}`] : []),
     "Decide the next step: answer or steer it with cc_session_send, verify its claims yourself (gh, git) before relaying them, or archive it with cc_session_archive once its work has shipped.",
   ].join("\n");
+}
+
+/** Corridor forms for what the hook stopped, or for a push the session says
+ * it is blocked on: send it that form with cc_session_send before listing
+ * the item as the owner's. */
+function corridorHints(session: CcSession, hookDecision?: string | null): string[] {
+  const commands = new Set<string>();
+  if (hookDecision && /"outcome"\s*:\s*"(deny|ask|block)/i.test(hookDecision)) {
+    const command = hookLineCommand(hookDecision);
+    if (command) commands.add(command);
+  }
+  for (const text of [session.blockedOn ?? "", session.lastReport ?? ""]) {
+    for (const match of text.matchAll(/git push(?: -u| --set-upstream)? origin [\w./:-]+/g)) commands.add(match[0]);
+  }
+  const hints = [...commands].map((command) => ({ command, hint: corridorHint(command) })).filter((item) => item.hint);
+  return hints.length
+    ? [`The corridor lets this through — send it to the session with cc_session_send instead of handing it to the owner:`, ...hints.map((item) => `- \`${item.command.slice(0, 160)}\` → ${item.hint}`)]
+    : [];
 }
 
 /** What the watchdog knows about a silent session, read from the app's
