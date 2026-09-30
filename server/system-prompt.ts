@@ -35,7 +35,7 @@ export const LANGUAGE_PROMPT = languagePrompt();
  * entire conversation at the cache-write rate. Mentions did the same on any
  * turn that tagged a bot, and recent work did it on every turn of an active
  * bot, because its "2h ago" labels drift even when nothing else changed. */
-const VOLATILE_SECTIONS = new Set(["memory", "mentions", "outstanding", "recent"]);
+const VOLATILE_SECTIONS = new Set(["memory", "mentions", "outstanding", "recent", "shared"]);
 
 export function buildSystemPrompt(
   persona: string,

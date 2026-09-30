@@ -72,6 +72,19 @@ it("tells the bot when a promise passes its deadline unkept, and never for a kep
   expect(chips.some((chip: string) => chip.includes("p2 passou do prazo"))).toBe(false);
 }), 60_000);
 
+it("carries what one conversation decided, and the owner's orders, into the bot's other conversations", () => fixture(async f => {
+  f.save({ turns: [
+    { reply: "Mergeei a PR #9313 pelo gate. Aguardo o carrier." },
+    { expectSystemIncludes: ["Estado das suas outras conversas", "Mergeei a PR #9313 pelo gate.", "Ordens do dono em vigor", "Não rode ci:local enquanto houver release"], reply: "Entendido, sigo a ordem." },
+  ] });
+  await f.send("Não rode ci:local enquanto houver release. Faça o merge da #9313.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  const created = await f.api(`/api/bots/${f.bot.id}/tasks`, { title: "Outra conversa" });
+  await runControlOmb(["send", "--bot", f.bot.id, "--task", created.task.threadId, "--text", "Qual o estado?"], { env: { OPENMAUSBOT_URL: f.session.info.url } });
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  expect(f.turns()[1].evidence?.some?.((entry: any) => entry.error)).toBeFalsy();
+}), 60_000);
+
 it("keeps giving a goal turns until the bot ends it, then goes quiet", () => fixture(async f => {
   f.save({ turns: [
     { steps: [{ tool: "goal_start", arguments: { goal: "SHIP_9195 to production", max_turns: 5 } }], reply: "Goal accepted" },

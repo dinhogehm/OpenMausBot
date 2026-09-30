@@ -1,0 +1,136 @@
+// What a bot's conversations need to know about each other. Each finished
+// turn leaves a short record for its conversation — the last decision, what
+// is pending with the person, the person's standing orders — and every turn
+// of the same bot, in any conversation, reads the others' records as one
+// block of its system prompt ("Estado das suas outras conversas"). So an
+// order the owner gave in one conversation ("não rode X") holds in all of
+// them, and no conversation redoes or contradicts another. Deterministic:
+// no model is involved in writing it. Kept per bot under
+// <dataDir>/bots/<id>/shared-state.json, with a readable shared-state.md.
+import { mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { writeFileAtomic } from "./atomic.ts";
+
+/** The block in the prompt stays under this. */
+export const SHARED_STATE_MAX_BYTES = 2_048;
+const ORDERS_MAX = 8;
+const THREADS_MAX = 12;
+
+export interface ThreadState {
+  threadId: string;
+  title: string;
+  at: number;
+  /** First sentence of the bot's last reply there. */
+  decision?: string;
+  /** What that conversation waits on the person for. */
+  pending?: string;
+}
+
+export interface OwnerOrder { threadId: string; at: number; text: string }
+
+interface BotState { threads: ThreadState[]; orders: OwnerOrder[] }
+
+/** A person's message that sets a rule rather than asks for one task. */
+export function isOwnerOrder(text: string): boolean {
+  return /\b(n[ãa]o (?:rode|fa[çc]a|mexa|use|envie|mande|publique|mergeie|arquive|abra)|nunca|sempre|pare\b|parar\b|PARAR|proibido|regra|a partir de agora|de agora em diante|daqui pra frente|at[ée] segunda ordem|s[óo] (?:com|depois|quando))/i.test(text);
+}
+
+const oneLine = (text: string, max: number) => {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
+};
+
+export function firstSentence(text: string, max = 160): string {
+  const flat = text.replace(/[*_`#>]+/g, "").replace(/\s+/g, " ").trim();
+  const end = flat.search(/[.!?](\s|$)/);
+  return oneLine(end === -1 ? flat : flat.slice(0, end + 1), max);
+}
+
+export class SharedState {
+  private readonly dir: string | null;
+  private readonly bots = new Map<string, BotState>();
+
+  // plain field assignment, not a parameter property (node type-stripping)
+  constructor(dir: string | null) {
+    this.dir = dir;
+  }
+
+  private state(botId: string): BotState {
+    let state = this.bots.get(botId);
+    if (!state) {
+      state = { threads: [], orders: [] };
+      if (this.dir) {
+        try {
+          const raw = JSON.parse(readFileSync(join(this.dir, botId, "shared-state.json"), "utf8")) as Partial<BotState>;
+          state = { threads: Array.isArray(raw.threads) ? raw.threads : [], orders: Array.isArray(raw.orders) ? raw.orders : [] };
+        } catch { /* first turn */ }
+      }
+      this.bots.set(botId, state);
+    }
+    return state;
+  }
+
+  /** A turn of `botId` in `thread` finished: its record, and any orders the person gave there. */
+  record(botId: string, thread: ThreadState, orders: OwnerOrder[] = [], now = Date.now()): void {
+    const state = this.state(botId);
+    state.threads = [thread, ...state.threads.filter((known) => known.threadId !== thread.threadId)].slice(0, THREADS_MAX);
+    for (const order of orders) {
+      const text = oneLine(order.text, 240);
+      state.orders = [{ ...order, text }, ...state.orders.filter((known) => known.text !== text)].slice(0, ORDERS_MAX);
+    }
+    this.save(botId, now);
+  }
+
+  forgetThread(botId: string, threadId: string): void {
+    const state = this.state(botId);
+    const before = state.threads.length;
+    state.threads = state.threads.filter((known) => known.threadId !== threadId);
+    if (state.threads.length !== before) this.save(botId, Date.now());
+  }
+
+  /** The prompt block for a turn in `threadId`: the other conversations'
+   * records and the person's orders (all of them), newest first, cut to
+   * SHARED_STATE_MAX_BYTES. `work` lines (sessions, PRs) come from the caller. */
+  render(botId: string, threadId: string, now: number, work: string[] = []): string {
+    const state = this.state(botId);
+    const others = state.threads.filter((known) => known.threadId !== threadId);
+    if (!others.length && !state.orders.length && !work.length) return "";
+    const when = (at: number) => new Date(at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+    const newest = Math.max(0, ...others.map((known) => known.at), ...state.orders.map((order) => order.at));
+    const head = `\n\nEstado das suas outras conversas (atualizado ${when(newest || now)}). The same bot speaks in all of them: what was decided or ordered in one holds in the others.\n`;
+    const lines: string[] = [];
+    if (state.orders.length) {
+      lines.push("Ordens do dono em vigor (valem em todas as conversas):");
+      for (const order of state.orders) lines.push(`- ${order.text} (${when(order.at)})`);
+    }
+    if (work.length) {
+      lines.push("Trabalho em andamento:");
+      for (const line of work) lines.push(`- ${line}`);
+    }
+    if (others.length) {
+      lines.push("Outras conversas:");
+      for (const known of others) {
+        lines.push(`- "${oneLine(known.title, 60)}" (${when(known.at)})${known.decision ? `: ${known.decision}` : ""}${known.pending ? ` — esperando o dono: ${known.pending}` : ""}`);
+      }
+    }
+    let text = head;
+    for (const line of lines) {
+      if (Buffer.byteLength(text + line + "\n") > SHARED_STATE_MAX_BYTES) break;
+      text += `${line}\n`;
+    }
+    return text;
+  }
+
+  private save(botId: string, now: number): void {
+    if (!this.dir) return;
+    const state = this.state(botId);
+    const folder = join(this.dir, botId);
+    try {
+      mkdirSync(folder, { recursive: true, mode: 0o700 });
+      writeFileAtomic(join(folder, "shared-state.json"), `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+      writeFileAtomic(join(folder, "shared-state.md"), this.render(botId, "", now).trimStart(), { mode: 0o600 });
+    } catch (error) {
+      console.error(`[shared-state] ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}

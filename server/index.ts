@@ -320,6 +320,7 @@ import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFi
 import { archiveBlockers, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
+import { firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { ciGroupToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
 import { readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState } from "./release-watch.ts";
 
@@ -3142,6 +3143,7 @@ function previewSystemPrompt(bot: BotRecord) {
       }),
     },
     { id: "language", label: "Language", text: languagePrompt(cfg.language) },
+    { id: "shared", label: "Other conversations", text: sharedStatePrompt(bot.id, bot.threadId) },
     { id: "computer", label: "Computer", text: computerPrompt(computerPromptKind) },
     { id: "team-computer", label: "Team computer", text: teamComputerPrompt(teamComputer) },
     // Auto cannot know its place until dispatch, so the preview stays silent
@@ -8145,6 +8147,51 @@ setInterval(() => {
     .finally(() => { autonomyTicking = false; });
 }, AUTONOMY_TICK_MS).unref();
 
+// ── what a bot's conversations know about each other (server/shared-state.ts)
+const sharedState = new SharedState(join(DATA_DIR, "bots"));
+
+function sharedStatePrompt(botId: string, threadId: string): string {
+  const work = ccLedger.all()
+    .filter((session) => session.ownerBotId === botId && session.status !== "archived")
+    .slice(-6)
+    .map((session) => `sessão Claude Code "${session.title}" (${session.status}${session.delivery ? `, PRs ${Object.keys(session.delivery.prs).map((n) => `#${n}`).join(" ")}` : ""})`);
+  return sharedState.render(botId, threadId, Date.now(), work);
+}
+
+/** A turn finished: its conversation's record for the others, and the
+ * person's orders given there. Rooms have their own shared transcript. */
+function recordSharedState(threadId: string): void {
+  const bot = store.botByThread(threadId);
+  const task = bot ? store.taskByThread(bot.id, threadId) : null;
+  if (!bot || !task || store.groupByThread(threadId)) return;
+  const messages = store.messagesFor(threadId);
+  const lastReply = messages.findLast((message) => message.role === "bot" && message.kind === "text" && !message.from);
+  const goal = autonomy.goalFor(threadId);
+  const asked = lastQuestionAt(messages, Date.now()) !== null && lastReply ? firstSentence(lastReply.text?.split(/(?<=[.!])\s+/).at(-1) ?? "", 200) : "";
+  const pending = goal?.status === "needs-input" ? firstSentence(goal.detail ?? "", 200) : asked;
+  const orders = messages
+    .slice(-40)
+    .filter((message) => message.role === "user" && message.kind === "text" && !message.peerAsk && !message.from && isOwnerOrder(message.text ?? ""))
+    .slice(-3)
+    .map((message) => ({ threadId, at: message.at, text: message.text ?? "" }));
+  sharedState.record(bot.id, {
+    threadId,
+    title: task.title,
+    at: Date.now(),
+    ...(lastReply?.text ? { decision: firstSentence(lastReply.text) } : {}),
+    ...(pending ? { pending } : {}),
+  }, orders);
+}
+
+bus.subscribe((event: RuntimeEvent) => {
+  if (shouldIgnoreProviderEvent(event) || event.type !== "turn.completed") return;
+  try {
+    recordSharedState(event.threadId);
+  } catch (error) {
+    console.error(`[shared-state] ${error instanceof Error ? error.message : String(error)}`);
+  }
+});
+
 // A goal turn that fails is retried after a pause; three in a row stop it.
 bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
@@ -10100,6 +10147,8 @@ async function startTurn(
         // what the bot said lately in its other conversations, so a task
         // never redoes — or forgets — what another one already did
         { id: "recent", label: "Recent work", text: recentWorkPrompt(recentWork(recentWorkSources(bot), bot, { userName: cfg.profile?.name?.trim() || "User", currentThreadId: threadId })) },
+        // decisions, pendings and the owner's orders from its other conversations
+        { id: "shared", label: "Other conversations", text: sharedStatePrompt(bot.id, threadId) },
         { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: Boolean(integrations.agents), fileTools: worksInWorkspace }) },
         { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
         { id: "skill-instructions", label: "Skill instructions", text: skillInstructions },
@@ -21666,6 +21715,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       roomHandoffs.cancelDirect(m[2], "The source conversation was deleted");
       cancelTeamSetupResumesForThread(m[2]);
       retireThreadWork(m[1], m[2], "apagada");
+      sharedState.forgetThread(m[1], m[2]);
       const updated = store.deleteTask(m[1], m[2]);
       if (!updated) return json(res, 404, { error: "no such task" });
       autonomy.forgetThread(m[2]);
