@@ -320,6 +320,7 @@ import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFi
 import { archiveBlockers, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
+import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { ciGroupToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
 import { readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState } from "./release-watch.ts";
@@ -7704,6 +7705,29 @@ function ccReport(session: CcSession, text: string): void {
   }
 }
 
+// ── the GitHub token sessions run with (server/session-token.ts) ────────
+const sessionToken = new SessionToken(process.env.OMB_CC_BIN ? { read: () => { throw new Error("tests use no Keychain"); } } : {});
+let sessionTokenMissingTold = false;
+
+/** GH_TOKEN/GITHUB_TOKEN for a session of the platform, from the Keychain.
+ * Missing: the session uses the owner's gh as before, and the Chief is told
+ * once. The value is never logged or stored. */
+function sessionTokenEnv(session: CcSession): Record<string, string> {
+  const { env, missing } = sessionToken.envFor(session.repo);
+  if (missing && !sessionTokenMissingTold) {
+    sessionTokenMissingTold = true;
+    const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+    const desk = chief ? chiefDeskThread(chief) : null;
+    const text = `token de sessão ausente — usando o gh do dono (Chaveiro: ${SESSION_TOKEN_SERVICE}); as sessões do Claude Code rodam com as permissões dele`;
+    console.warn(`[cc-sessions] ${text}`);
+    if (chief && desk && store.taskByThread(chief.id, desk)) {
+      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 200), ok: false } });
+      autonomy.addReport(chief.id, desk, `[Aviso do servidor] ${text}.`);
+    }
+  }
+  return env;
+}
+
 /** One headless turn. Its exit hands the report to the owning conversation,
  * unless a reply was queued meanwhile, which then runs as the next turn. */
 function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
@@ -7725,7 +7749,8 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   try {
     child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${ccTurnFooter(session)}${CC_CLI_FOOTER}` : prompt, first), {
       cwd,
-      env: { ...process.env, PATH: augmentedPath() },
+      // a token without admin rights for the platform's sessions, when the owner keeps one
+      env: { ...process.env, PATH: augmentedPath(), ...sessionTokenEnv(session) },
       stdio: ["ignore", "pipe", "pipe"],
       // its own process group: what it leaves running is told apart from
       // everything else in the worktree (server/bg-jobs.ts)
