@@ -118,6 +118,8 @@ function sectionLabel(id: string): string {
 
 function preview(bot: Bot): string {
   if (bot.activity === "waiting-on-you") return t("sidebar.preview.waiting");
+  // a goal that stopped to ask the person outranks any teammate wait
+  if (bot.goalNeedsInput) return t("sidebar.preview.needsYou");
   if (bot.waitingForTeammates) return t("sidebar.preview.waitingOnTeammate");
   if (bot.busy) return t("sidebar.preview.working");
   // the visible branch's tail — bot.messages holds every fork, so its last
@@ -1116,12 +1118,13 @@ export function BotListItem({
   const waiting = bot.activity === "waiting-on-you" || activityTasks.some((task) => task.activity === "waiting-on-you");
   // Real work in a sibling still outranks an idle coordination wait.
   const working = !waiting && (Boolean(bot.busy) || activityTasks.some((task) => task.busy || task.activity === "working"));
-  const teammateWait = !waiting && !working && (Boolean(bot.waitingForTeammates) || activityTasks.some((task) => Boolean(task.waitingForTeammates)));
+  const needsYou = !waiting && !working && (Boolean(bot.goalNeedsInput) || activityTasks.some((task) => Boolean(task.goalNeedsInput)));
+  const teammateWait = !waiting && !working && !needsYou && (Boolean(bot.waitingForTeammates) || activityTasks.some((task) => Boolean(task.waitingForTeammates)));
   const queued = activityTasks.some((task) => task.queued);
   const unread = bot.unread || activityTasks.some((task) => task.unread);
   // quiet rows drop the last-message preview but keep a line that reports
   // something happening now; an idle bot is just its name
-  const statusLine = deleting || working || waiting || teammateWait || queued;
+  const statusLine = deleting || working || waiting || needsYou || teammateWait || queued;
   const body = (
     <>
       {/* flex, not inline: an inline wrapper adds a baseline gap under the
@@ -1224,7 +1227,7 @@ export function BotListItem({
                   <span className="sr-only">{t("sidebar.preview.working")}</span>
                 </span>
               ) : (
-                <span className="truncate">{waiting ? t("sidebar.preview.waiting") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : preview(bot)}</span>
+                <span className="truncate">{waiting ? t("sidebar.preview.waiting") : needsYou ? t("sidebar.preview.needsYou") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : preview(bot)}</span>
               )}
             </span>
           )}
@@ -1261,7 +1264,7 @@ export function BotListItem({
           !renaming && iconOnly
             ? deleting
               ? t("sidebar.bot.deletingAria", { name: bot.name })
-              : `${bot.name}${waiting ? ` · ${t("sidebar.preview.waiting")}` : working ? ` · ${t("chat.activity.working")}` : teammateWait ? ` · ${t("sidebar.preview.waitingOnTeammate")}` : queued ? ` · ${t("task.queued")}` : ""}${unread ? ` · ${t("task.unread")}` : ""}`
+              : `${bot.name}${waiting ? ` · ${t("sidebar.preview.waiting")}` : working ? ` · ${t("chat.activity.working")}` : needsYou ? ` · ${t("sidebar.preview.needsYou")}` : teammateWait ? ` · ${t("sidebar.preview.waitingOnTeammate")}` : queued ? ` · ${t("task.queued")}` : ""}${unread ? ` · ${t("task.unread")}` : ""}`
             : undefined
         }
         aria-busy={deleting || undefined}

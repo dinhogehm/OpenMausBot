@@ -96,6 +96,14 @@ export function startUpdater() {
     setState({ status: "idle" });
     return;
   }
+  // A build packaged without a publish feed (a local build of a branch) has
+  // no app-update.yml: there is nothing to check, and electron-updater would
+  // log an ENOENT every hour. Stay dormant, like a dev build.
+  if (!existsSync(join(process.resourcesPath, "app-update.yml"))) {
+    updaterCoordinator = null;
+    setState({ status: "idle" });
+    return;
+  }
   try {
     ({ autoUpdater } = require("./vendor/electron-updater.cjs"));
   } catch {

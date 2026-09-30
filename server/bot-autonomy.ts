@@ -115,10 +115,27 @@ export interface PendingReports {
   items: string[];
 }
 
+/** A wake or reports handed to a turn that has not finished yet. Kept on
+ * disk until the turn completes, so a restart in between gives it back
+ * instead of losing it. */
+export interface InFlight {
+  kind: "wake" | "reports";
+  botId: string;
+  threadId: string;
+  startedAt: number;
+  wake?: BotWake;
+  items?: string[];
+}
+
+/** A lease older than this is not given back after a restart. */
+export const IN_FLIGHT_MAX_AGE_MS = 24 * 3_600_000;
+export const INTERRUPTED_PREFIX = "[A execução anterior foi interrompida por um restart do servidor antes de terminar; retome daqui.]";
+
 interface Ledger {
   wakes: BotWake[];
   goals: BotGoal[];
   reports?: PendingReports[];
+  inFlight?: InFlight[];
 }
 
 const clip = (value: unknown, max: number): string =>
@@ -192,6 +209,7 @@ export class BotAutonomy {
   private wakes = new Map<string, BotWake>();
   private goals = new Map<string, BotGoal>();
   private reports = new Map<string, PendingReports>();
+  private inFlight: InFlight[] = [];
   private readonly path: string | null;
   private readonly now: () => number;
   private readonly minuteMs: number;
@@ -227,6 +245,23 @@ export class BotAutonomy {
           this.goals.set(goal.threadId, goal);
         }
       }
+      // Turns a restart cut off: what woke them is due again, marked as such.
+      const at = this.now();
+      let recovered = false;
+      for (const lease of raw.inFlight ?? []) {
+        if (!lease || typeof lease.threadId !== "string" || typeof lease.botId !== "string" || at - lease.startedAt > IN_FLIGHT_MAX_AGE_MS) continue;
+        recovered = true;
+        if (lease.kind === "wake" && lease.wake && !this.wakes.has(lease.threadId)) {
+          this.wakes.set(lease.threadId, { ...lease.wake, dueAt: at, reason: `${INTERRUPTED_PREFIX} ${lease.wake.reason}`.slice(0, WAKE_REASON_MAX + INTERRUPTED_PREFIX.length + 1) });
+          continue;
+        }
+        const items = lease.kind === "reports" && lease.items?.length
+          ? lease.items
+          : [`Wake-up note: ${lease.wake?.reason ?? "(none)"}`];
+        const current = this.reports.get(lease.threadId);
+        this.reports.set(lease.threadId, { botId: lease.botId, threadId: lease.threadId, items: [INTERRUPTED_PREFIX, ...items, ...(current?.items ?? [])] });
+      }
+      if (recovered) this.save();
     } catch (error) {
       console.error(`[autonomy] ignoring unreadable ${this.path}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -234,7 +269,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()] };
+    const ledger: Ledger = { wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -367,9 +402,29 @@ export class BotAutonomy {
   /** Put back a wake that was taken but could not start (the thread got
    * busy in between); it stays due and keeps its original note and time. */
   restoreWake(wake: BotWake): void {
-    if (this.wakes.has(wakeKey(wake))) return;
-    this.wakes.set(wakeKey(wake), wake);
+    this.inFlight = this.inFlight.filter((lease) => lease.wake !== wake);
+    if (!this.wakes.has(wakeKey(wake))) this.wakes.set(wakeKey(wake), wake);
     this.save();
+  }
+
+  /** Take a due wake for a turn; it stays on disk until settleInFlight. A
+   * standing watch is not taken at all (it re-arms instead). */
+  leaseWake(wake: BotWake): void {
+    if (wake.watch?.standing) return;
+    if (this.wakes.get(wake.threadId) === wake) this.wakes.delete(wake.threadId);
+    this.inFlight.push({ kind: "wake", botId: wake.botId, threadId: wake.threadId, startedAt: this.now(), wake });
+    this.save();
+  }
+
+  /** The turn a lease was handed to finished (well or not): forget it. */
+  settleInFlight(threadId: string): void {
+    const before = this.inFlight.length;
+    this.inFlight = this.inFlight.filter((lease) => lease.threadId !== threadId);
+    if (this.inFlight.length !== before) this.save();
+  }
+
+  inFlightFor(threadId: string): InFlight[] {
+    return this.inFlight.filter((lease) => lease.threadId === threadId);
   }
 
   wakeFor(threadId: string): BotWake | null {
@@ -415,8 +470,19 @@ export class BotAutonomy {
     return pending;
   }
 
+  /** takeReports for a turn: kept on disk until settleInFlight. */
+  leaseReports(threadId: string): PendingReports | null {
+    const pending = this.reports.get(threadId) ?? null;
+    if (!pending) return null;
+    this.reports.delete(threadId);
+    this.inFlight.push({ kind: "reports", botId: pending.botId, threadId, startedAt: this.now(), items: pending.items });
+    this.save();
+    return pending;
+  }
+
   /** Put reports back when their turn could not start. */
   restoreReports(pending: PendingReports): void {
+    this.inFlight = this.inFlight.filter((lease) => !(lease.kind === "reports" && lease.threadId === pending.threadId && lease.items === pending.items));
     const current = this.reports.get(pending.threadId);
     this.reports.set(pending.threadId, current ? { ...pending, items: [...pending.items, ...current.items] } : pending);
     this.save();
@@ -515,12 +581,24 @@ export class BotAutonomy {
     return next;
   }
 
+  /** Should the Mac stay awake for self-paced work? A goal running, reports
+   * or a leased turn in flight, or a wake/watch due within `horizonMs`. */
+  wakeHold(horizonMs: number): { hold: boolean; reason?: "running" | "due"; at?: number } {
+    if (this.activeGoals().length || this.reportThreads().length || this.inFlight.length) return { hold: true, reason: "running" };
+    const at = this.now();
+    const due = [...this.wakes.values()].map((wake) => wake.watch && !wake.watch.trigger ? Math.min(wake.dueAt, wake.watch.lastRunAt + wake.watch.everyMs) : wake.dueAt)
+      .filter((when) => when <= at + horizonMs)
+      .sort((a, b) => a - b)[0];
+    return due === undefined ? { hold: false } : { hold: true, reason: "due", at: due };
+  }
+
   /** Drop everything tied to a conversation that no longer exists. */
   forgetThread(threadId: string): void {
     const hadStanding = this.wakes.delete(`${threadId}${STANDING}`);
     const hadWake = this.wakes.delete(threadId) || hadStanding;
     const hadGoal = this.goals.delete(threadId);
     const hadReports = this.reports.delete(threadId);
+    this.inFlight = this.inFlight.filter((lease) => lease.threadId !== threadId);
     if (hadWake || hadGoal || hadReports) this.save();
   }
 }
@@ -541,7 +619,12 @@ const GOAL_RULES = [
 ];
 
 export function goalStartedAck(goal: BotGoal): string {
-  return `Goal mode is on for this conversation: up to ${goal.maxTurns} turns or ${minutesLabel(goal.deadlineAt - goal.startedAt)}. After this turn ends you will be given the next one automatically. ${GOAL_RULES.slice(1).join(" ")}`;
+  return [
+    `Modo objetivo ligado nesta conversa: até ${goal.maxTurns} turnos ou ${minutesLabel(goal.deadlineAt - goal.startedAt)}. Quando este turno terminar, você recebe o próximo automaticamente.`,
+    "Quando estiver esperando algo fora desta conversa (CI, deploy, revisão), use wake_when com um comando só de leitura que mostre o estado — não custa nada até o estado mudar — ou wake_me para um despertador simples, e encerre o turno em vez de ficar consultando.",
+    "Quando colegas a quem você delegou ainda estiverem trabalhando, apenas encerre o turno: os resultados deles te acordam aqui.",
+    "Chame goal_end com status completed só quando a entrega estiver comprovadamente feita, blocked quando não puder seguir, ou needs_input quando só a pessoa puder decidir. Nunca declare conclusão que você não conferiu.",
+  ].join(" ");
 }
 
 export function goalContinuationPrompt(goal: BotGoal, now: number): string {
@@ -588,26 +671,80 @@ export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number): st
   ].join("\n");
 }
 
+// Chips are read by people, in the owner's language (pt-BR): short, cut on
+// a word, no backticks, and never the raw command a watch runs.
+
+/** `text` on one line, without backticks, cut at a word boundary with "…". */
+export function chipText(text: string, max: number): string {
+  const clean = text.replace(/`/g, "").replace(/\s+/g, " ").trim();
+  if (clean.length <= max) return clean;
+  const cut = clean.slice(0, max - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).replace(/[\s,;:.(—-]+$/, "")}…`;
+}
+
+/** A short name for what a watch looks at: "PR #9300", "Chat", a host. */
+export function watchLabel(command: string): string {
+  const words = command.trim().split(/\s+/).map((word) => word.replace(/^['"]|['"]$/g, ""));
+  const [program, group] = words;
+  const number = words.find((word, i) => i > 1 && /^#?\d+$/.test(word))?.replace("#", "");
+  if (program === "gh") {
+    if (group === "pr") return number ? `PR #${number}` : "PRs";
+    if (group === "issue") return number ? `issue #${number}` : "issues";
+    if (group === "run" || group === "workflow") return number ? `execução #${number} do CI` : "execuções do CI";
+    if (group === "release") return "releases";
+    if (group === "api") {
+      const pull = /pulls\/(\d+)/.exec(command) ?? /issues\/(\d+)/.exec(command);
+      return pull ? `#${pull[1]} no GitHub` : "GitHub";
+    }
+    return "GitHub";
+  }
+  if (program === "gog") return words.includes("sheets") ? "Planilha" : words.includes("chat") ? "Chat" : "Google";
+  if (program === "git") {
+    const tag = words.find((word) => word.startsWith("refs/tags/"));
+    return tag ? `tag ${tag.slice("refs/tags/".length)}` : words.includes("ls-remote") ? "repositório remoto" : "repositório";
+  }
+  if (program === "curl") {
+    const url = words.find((word) => /^https?:\/\//i.test(word));
+    try {
+      if (url) return new URL(url).host;
+    } catch { /* fall through */ }
+  }
+  return chipText(words.slice(0, 3).join(" "), 40);
+}
+
+const hhmm = (ms: number): string => {
+  const at = new Date(ms);
+  return `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+};
+
 export function wakeChip(wake: BotWake): string {
-  const at = new Date(wake.dueAt);
-  const hhmm = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+  const reason = chipText(wake.reason, 100);
   if (wake.watch) {
     const every = Math.round(wake.watch.everyMs / 60_000) || 1;
-    if (wake.watch.standing) return `Standing watch on \`${wake.watch.command.slice(0, 80)}\` every ${every} min (stays armed) — ${wake.reason.slice(0, 100)}`;
-    return `Watching \`${wake.watch.command.slice(0, 80)}\` every ${every} min, until ${hhmm} — ${wake.reason.slice(0, 100)}`;
+    const label = watchLabel(wake.watch.command);
+    if (wake.watch.standing) return `Vigia permanente em ${label} a cada ${every} min — ${reason}`;
+    return `Vigiando ${label} a cada ${every} min até ${hhmm(wake.dueAt)} — ${reason}`;
   }
-  return `Wake-up set for ${hhmm} — ${wake.reason.slice(0, 120)}`;
+  return `Despertador às ${hhmm(wake.dueAt)} — ${chipText(wake.reason, 120)}`;
+}
+
+/** The chip for a wake that fires: what woke the bot, in a few words. */
+export function wakeFiredChip(wake: BotWake): string {
+  if (!wake.watch) return `Acordou — ${chipText(wake.reason, 140)}`;
+  const why = { changed: "mudou", matched: "condição atingida", failing: "comando falhando" }[wake.watch.trigger ?? "changed"];
+  return `${wake.watch.standing ? "Vigia permanente" : "Vigia"} disparou (${wake.watch.trigger ? why : "tempo esgotado"}) em ${watchLabel(wake.watch.command)} — ${chipText(wake.reason, 110)}`;
 }
 
 export function goalEndChip(goal: BotGoal): string {
   const label = {
-    completed: "Goal completed",
-    blocked: "Goal blocked",
-    "needs-input": "Goal waiting for you",
-    stopped: "Goal stopped",
-    limit: "Goal paused at its limit",
+    completed: "Objetivo concluído",
+    blocked: "Objetivo bloqueado",
+    "needs-input": "Objetivo esperando você",
+    stopped: "Objetivo parado",
+    limit: "Objetivo pausado no limite",
   }[goal.status as Exclude<GoalStatus, "active">];
-  return `${label} after ${goal.turnCount} turn${goal.turnCount === 1 ? "" : "s"}${goal.detail ? ` — ${goal.detail.slice(0, 160)}` : ""}`;
+  return `${label} após ${goal.turnCount} turno${goal.turnCount === 1 ? "" : "s"}${goal.detail ? ` — ${chipText(goal.detail, 160)}` : ""}`;
 }
 
 export function reportsPrompt(pending: PendingReports, goal: BotGoal | null): string {

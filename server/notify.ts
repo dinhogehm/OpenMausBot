@@ -91,25 +91,26 @@ export function buildNotification(
   // A bot working in a room is not "Scout" to whoever reads the banner — it
   // is Scout, in that room. Name the room or the notification reads as if it
   // came from the 1:1 thread it will not open.
-  const who = extra?.group ? `${bot.name} in ${extra.group.name}` : bot.name;
+  // Titles are read on the lock screen by the owner, in pt-BR like the bots.
+  const who = extra?.group ? `${bot.name} em ${extra.group.name}` : bot.name;
   const title =
     kind === "approval"
-      ? `${who} needs approval`
+      ? `${who} precisa de aprovação`
       : kind === "question"
-        ? `${who} has a question`
+        ? `${who} tem uma pergunta`
         : kind === "takeover"
-          ? `${who} needs your hands`
+          ? `${who} precisa das suas mãos`
           : kind === "routine-failed"
-            ? `${who}'s routine failed`
+            ? `A rotina de ${who} falhou`
             : kind === "routine-deferred"
-              ? `${who}'s routine is waiting`
+              ? `A rotina de ${who} está esperando`
             : kind === "turn-failed"
-              ? `${who} couldn't start`
+              ? `${who} não conseguiu começar`
               : kind === "incident"
-                ? `${who} hit a problem`
+                ? `${who} teve um problema`
                 : kind === "delegation-settled"
-                  ? `${who} resumed with results`
-                  : `${who} finished`;
+                  ? `${who} retomou com os resultados`
+                  : `${who} terminou`;
 
   // A "finished" with nothing to say is not worth a notification — the
   // badge in the sidebar already carries that much.

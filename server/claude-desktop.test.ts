@@ -264,6 +264,26 @@ describe("archiveDesktopSession", () => {
     expect(app.actions.at(-1)).toBe("key 53");
   });
 
+  it("refuses to pick one of several sidebar entries with the same title", async () => {
+    const nightly = { text: "Relatorio nightly nuria", x: 100 };
+    const app = fakeApp({ screen: [nightly, { ...nightly }, { text: "Arquivar", x: 100 }] });
+    expect(await archiveDesktopSession(app.driver, { localId, title: "Relatorio nightly nuria" })).toMatchObject({ ok: false, retry: false, reason: expect.stringContaining("2 sessions") });
+    expect(app.actions.some((action) => action.startsWith("rclick") || action.startsWith("click"))).toBe(false);
+  });
+
+  it("takes the one exact title among entries that only share a prefix", async () => {
+    const app = fakeApp({ screen: [{ text: "Valida inatividade widget piperun 2", x: 100 }, { text: "Valida inatividade widget piperun", x: 100, y: 700 }, { text: "Arquivar", x: 100, y: 720 }] });
+    expect(await archiveDesktopSession(app.driver, { localId, title: "Valida inatividade widget piperun" })).toEqual({ ok: true });
+    expect(app.actions).toContain("rclick 130,708");
+  });
+
+  it("does not press Escape into another app when Claude lost the front", async () => {
+    // fronts: step start, open-session guard, menu guard, archive-menu guard (Terminal)
+    const app = fakeApp({ fronts: [CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, TERMINAL], screen: [{ text: "Teste modo app", x: 100 }] });
+    expect(await archiveDesktopSession(app.driver, { localId, title: "Teste modo app" })).toMatchObject({ ok: false, retry: true });
+    expect(app.actions).not.toContain("key 53");
+  });
+
   it("matches truncated sidebar titles, not unrelated ones", () => {
     expect(sidebarMatch("Automação inatividade não disp…", "Automação inatividade não dispara")).toBe(true);
     expect(sidebarMatch("Teste modo app", "Teste modo app")).toBe(true);

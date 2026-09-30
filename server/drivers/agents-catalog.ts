@@ -621,7 +621,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
         max_minutes: { type: "integer", minimum: 5, maximum: 1_440, description: "Wake anyway after this long, default 120." },
         reason: { type: "string", maxLength: 500, description: "Note to your future self: what to do when it fires." },
         standing: { type: "boolean", description: "true: never used up — after each firing it re-arms on the new output. For permanent watchers; set it once." },
-        cancel: { type: "boolean", description: "With standing: true, stops this conversation's standing watch (command and reason not needed)." },
+        cancel: { type: "boolean", description: "true cancels the pending wake or watch here (with standing: true, the standing watch); no command or reason." },
       },
     },
   },

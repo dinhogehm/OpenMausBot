@@ -248,6 +248,9 @@ import {
   reportsPrompt,
   wakeChip,
   wakePrompt,
+  chipText,
+  wakeFiredChip,
+  watchLabel,
 } from "./bot-autonomy.ts";
 import { parseWatchCommand, runWatchCommand, watchMatches } from "./wake-watch.ts";
 import {
@@ -277,12 +280,14 @@ import {
 } from "./claude-desktop.ts";
 import {
   ccSessionActive,
+  desktopBriefText,
   reportFor as desktopReportFor,
   runDesktopWork as runDesktopWorkFlow,
   watchStalledSessions,
   type DesktopWorkDeps,
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
+import { DiskWatch } from "./disk-watch.ts";
 import { spawn as spawnCcProcess, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 
 /** A session_read answer competes with the transcript for the context
@@ -424,6 +429,7 @@ import { checkSoulDrift, readSoulDrift, soulFile, writeSoulMirror } from "./bot-
 import {
   buildSystemPrompt,
   userProfileSystemPrompt,
+  LANGUAGE_PROMPT,
   computerPrompt,
   composioSystemPrompt,
   customMcpPrompt,
@@ -3013,12 +3019,15 @@ if (browserCleanupReferencesReconciled) browserCleanup.startPending();
  * than the desktop window did. Stripped here rather than at each call site
  * so a new broadcast cannot forget. */
 let activeCoordinationForThread = (_threadId: string): boolean => false;
+/** Goal mode in this thread stopped to ask the person (set once autonomy exists). */
+let goalNeedsInputForThread = (_threadId: string): boolean => false;
 const wireTask = (task: TaskRecord): WireTask => {
   // Time-based snoozes heal on read against the server clock — no client
   // timer, no device skew. The 0 sentinel ("until new activity") is not a
   // time and survives reads; only a wake event in the store clears it.
   const { snoozedUntil, ...base } = toWireTask(task);
-  const coordinated = { ...base, waitingForTeammates: activeCoordinationForThread(task.threadId) && !task.busy };
+  const needsInput = goalNeedsInputForThread(task.threadId);
+  const coordinated = { ...base, waitingForTeammates: !needsInput && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput ? { goalNeedsInput: true } : {}) };
   const asleep = snoozedUntil === 0 || (snoozedUntil !== undefined && snoozedUntil > Date.now());
   return asleep ? { ...coordinated, snoozedUntil } : coordinated;
 };
@@ -3031,7 +3040,9 @@ const wireBot = (bot: BotRecord): WireBot => {
   const visible = approvalGrant && !approvalGrant.threadOnly
     ? { ...rest, approvalMode: "ask" as const, autoApprove: false }
     : rest;
-  return { ...visible, waitingForTeammates: activeCoordinationForThread(bot.threadId) && !threadBusy(bot.id, bot.threadId),
+  const needsInput = goalNeedsInputForThread(bot.threadId);
+  return { ...visible, waitingForTeammates: !needsInput && activeCoordinationForThread(bot.threadId) && !threadBusy(bot.id, bot.threadId),
+    ...(needsInput ? { goalNeedsInput: true } : {}),
     avatarUrl: visible.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
 };
 
@@ -3087,6 +3098,7 @@ function previewSystemPrompt(bot: BotRecord) {
   const privateWorkspace = instance && supportsWorkspaceFiles(instance.driverKind);
   const built = buildSystemPrompt(persona, bot.soul ?? "", [
     { id: "user-profile", label: "About the user", text: userProfileSystemPrompt(cfg.profile) },
+    { id: "language", label: "Language", text: LANGUAGE_PROMPT },
     {
       id: "setup",
       label: "Setup",
@@ -7200,7 +7212,10 @@ const autonomy = new BotAutonomy({
   turnGapMs: autonomyTestMs("OMB_AUTONOMY_TURN_GAP_MS"),
 });
 const autonomyDispatching = new Set<string>();
+goalNeedsInputForThread = (threadId) => autonomy.goalFor(threadId)?.status === "needs-input";
 const AUTONOMY_TICK_MS = autonomyTestMs("OMB_AUTONOMY_TICK_MS") ?? 10_000;
+/** Self-paced work due within this keeps the Mac awake (/api/routines/wake). */
+const AUTONOMY_WAKE_HOLD_MS = 60 * 60_000;
 
 /** Somebody else owes this thread an answer, and delivering it will resume
  * the bot on its own: a teammate, a pending delegation wake, or a card. */
@@ -7228,7 +7243,7 @@ async function dispatchAutonomyTurn(botId: string, threadId: string, chip: strin
   } catch (error) {
     if (isTurnAdmissionBlocked(error)) return "busy";
     const message = error instanceof Error ? error.message : String(error);
-    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `error: could not resume on its own — ${message.slice(0, 120)}`, ok: false } });
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `erro: não conseguiu retomar sozinho — ${chipText(message, 120)}`, ok: false } });
     return "failed";
   } finally {
     autonomyDispatching.delete(threadId);
@@ -7239,13 +7254,13 @@ async function dispatchAutonomyTurn(botId: string, threadId: string, chip: strin
  * a red chip where it runs, and a report to the bot's Chief of Staff, which
  * wakes it — or, with no Chief on duty, a notification to the person. */
 function alertAutomationTrouble(bot: BotRecord, threadId: string, text: string): void {
-  if (store.taskByThread(bot.id, threadId)) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: text.slice(0, 240), ok: false } });
+  if (store.taskByThread(bot.id, threadId)) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: false } });
   const chief = chiefForBot(store.bots, bot);
   if (chief && store.taskByThread(chief.id, chief.threadId)) {
     store.appendMessage(chief.threadId, {
       role: "bot",
       kind: "activity",
-      tool: { name: `${bot.name}: ${text}`.slice(0, 240), ok: false },
+      tool: { name: chipText(`${bot.name}: ${text}`, 240), ok: false },
       threadRef: { botId: bot.id, threadId, title: store.taskByThread(bot.id, threadId)?.title ?? `${bot.name}'s conversation` },
     });
     autonomy.addReport(chief.id, chief.threadId, `[Automation trouble in ${bot.name}'s conversation ${threadId}] ${text}\nLook into it: fix it with ${bot.name}, or tell the person what is not being watched or run.`);
@@ -7258,7 +7273,7 @@ function alertAutomationTrouble(bot: BotRecord, threadId: string, text: string):
  * wake-up, before the interrupt settles the turn as failed. */
 function stopAutonomyByPerson(threadId: string): void {
   if (autonomy.cancelWake(threadId)) {
-    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: "Wake-up cancelled — stopped by you", ok: true } });
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: "Despertador cancelado — parado por você", ok: true } });
   }
   finishGoalWithChip(threadId, "stopped", "stopped by you");
 }
@@ -7285,8 +7300,31 @@ async function runDueWatches(): Promise<void> {
   }));
 }
 
+/** Low disk where the work happens: told once per band to the Chief of Staff. */
+// Test servers (spawned under vitest) share this Mac's real disk; they must
+// not wake their scripted Chief about it.
+const diskWatch = new DiskWatch({ paths: process.env.VITEST ? [] : [join(homedir(), "Projetos"), DATA_DIR].filter((path) => existsSync(path)) });
+
+function checkDiskSpace(): void {
+  const drops = diskWatch.check();
+  if (!drops.length) return;
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  for (const drop of drops) {
+    const text = `Pouco espaço em disco: ${drop.freeGiB} GiB livres em ${drop.path} (abaixo de ${drop.band} GiB). Worktrees, CI local e builds podem falhar, e em zero o servidor para de gravar. Libere espaço (worktrees antigas, caches de build) ou avise a pessoa.`;
+    console.warn(`[disk] ${text}`);
+    if (!chief || !store.taskByThread(chief.id, chief.threadId)) continue;
+    store.appendMessage(chief.threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 200), ok: false } });
+    autonomy.addReport(chief.id, chief.threadId, `[Alerta do servidor] ${text}`);
+  }
+}
+
 async function autonomyTick(): Promise<void> {
   void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
+  try {
+    checkDiskSpace();
+  } catch (error) {
+    console.error(`[disk] ${error instanceof Error ? error.message : String(error)}`);
+  }
   await runDueWatches();
   for (const wake of autonomy.dueWakes()) {
     if (!store.taskByThread(wake.botId, wake.threadId)) {
@@ -7298,10 +7336,12 @@ async function autonomyTick(): Promise<void> {
     if (!autonomy.isCurrent(wake)) continue;
     // A standing watch is not used up by firing; a plain wake or watch is.
     const standing = wake.watch?.standing === true;
-    if (!standing) autonomy.cancelWake(wake.threadId);
+    // Leased, not dropped: on disk until the turn completes, so a restart
+    // in between gives it back (bot-autonomy.ts, inFlight).
+    if (!standing) autonomy.leaseWake(wake);
     const goal = autonomy.goalFor(wake.threadId);
     const prompt = wakePrompt(wake, goal, Date.now());
-    const chip = wake.watch ? `${standing ? "Standing watch" : "Watch"} fired (${wake.watch.trigger ?? "time limit"}) — ${wake.reason.slice(0, 130)}` : `Woke up — ${wake.reason.slice(0, 140)}`;
+    const chip = wakeFiredChip(wake);
     // Raised once when it starts failing, not on every firing while it stays broken.
     const failing = standing && wake.watch!.trigger === "failing" && wake.watch!.lastTrigger !== "failing" ? `${wake.watch!.failures}` : null;
     const outcome = await dispatchAutonomyTurn(wake.botId, wake.threadId, chip, prompt);
@@ -7311,12 +7351,13 @@ async function autonomyTick(): Promise<void> {
       autonomy.rearmStanding(wake);
       const bot = store.bot(wake.botId);
       if (failing && bot) {
-        alertAutomationTrouble(bot, wake.threadId, `Standing watch failing — \`${wake.watch!.command.slice(0, 80)}\` failed ${failing} times in a row, so it sees nothing new until the command is fixed (${wake.reason.slice(0, 80)})`);
+        alertAutomationTrouble(bot, wake.threadId, `Vigia permanente falhando — ${watchLabel(wake.watch!.command)}: o comando falhou ${failing} vezes seguidas, então nada novo é visto até ele ser corrigido (${chipText(wake.reason, 80)})`);
       }
       continue;
     }
     // Put a wake that lost a race back where it was; the next tick retries.
     if (outcome === "busy") autonomy.restoreWake(wake);
+    else if (outcome === "failed") autonomy.settleInFlight(wake.threadId);
   }
   for (const pending of autonomy.reportThreads()) {
     if (!store.taskByThread(pending.botId, pending.threadId)) {
@@ -7324,11 +7365,12 @@ async function autonomyTick(): Promise<void> {
       continue;
     }
     if (autonomyTurnBlocked(pending.botId, pending.threadId)) continue;
-    const taken = autonomy.takeReports(pending.threadId);
+    const taken = autonomy.leaseReports(pending.threadId);
     if (!taken) continue;
-    const chip = taken.items.length === 1 ? "A report arrived" : `${taken.items.length} reports arrived`;
+    const chip = taken.items.length === 1 ? "Chegou um relatório" : `Chegaram ${taken.items.length} relatórios`;
     const outcome = await dispatchAutonomyTurn(taken.botId, taken.threadId, chip, reportsPrompt(taken, autonomy.goalFor(taken.threadId)));
     if (outcome === "busy") autonomy.restoreReports(taken);
+    else if (outcome === "failed") autonomy.settleInFlight(taken.threadId);
   }
   for (const goal of autonomy.activeGoals()) {
     if (!store.taskByThread(goal.botId, goal.threadId)) {
@@ -7347,7 +7389,7 @@ async function autonomyTick(): Promise<void> {
     const outcome = await dispatchAutonomyTurn(
       goal.botId,
       goal.threadId,
-      `Goal continues — turn ${goal.turnCount} of ${goal.maxTurns}`,
+      `Objetivo continua — turno ${goal.turnCount} de ${goal.maxTurns}`,
       goalContinuationPrompt(goal, Date.now()),
     );
     if (outcome === "busy") autonomy.undoGoalDispatch(goal.threadId);
@@ -7486,7 +7528,7 @@ async function getDesktopDriver(): Promise<DesktopDriver> {
 }
 
 function desktopBrief(session: CcSession, brief: string): string {
-  return `[${session.desktop!.marker}] ${session.title}\n\n${brief}${CC_TURN_FOOTER}`;
+  return desktopBriefText(session.title, session.desktop!.marker, brief, CC_TURN_FOOTER);
 }
 
 const DUAL_DECISIONS_LOG = join(homedir(), ".laya", "hooks", "dual-decisions.log");
@@ -7526,6 +7568,8 @@ setInterval(() => {
 bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
   if (event.type !== "turn.completed") return;
+  // The turn a wake or report was leased to is over: it is no longer owed.
+  autonomy.settleInFlight(event.threadId);
   const goal = autonomy.goalFor(event.threadId);
   if (!goal || goal.status !== "active") return;
   const failures = autonomy.noteGoalTurnOutcome(event.threadId, event.ok);
@@ -9426,6 +9470,7 @@ async function startTurn(
       }
       const prompt = buildSystemPrompt(persona, liveBot?.soul ?? bot.soul ?? "", [
         { id: "user-profile", label: "About the user", text: userProfileSystemPrompt(cfg.profile) },
+        { id: "language", label: "Language", text: LANGUAGE_PROMPT },
         // first after the soul: the block names agent tools, so it only goes
         // to a turn whose engine actually mounted them (setupMode is already
         // false when they are not — see agentsMounted above)
@@ -10007,7 +10052,7 @@ routines = new RoutineManager({
     // Two in a row is a pattern, not a blip: say so where the routine reports, and to the Chief.
     const streak = routines?.listRoutines().find((routine) => routine.id === run.routineId)?.failureStreak ?? 0;
     if (routineFailureAlertDue(streak)) {
-      alertAutomationTrouble(notificationBot, routineSourceThread(run) ?? run.threadId ?? bot.threadId, redactSecretsInText(`Routine "${run.routineName}" failed ${streak} times in a row — last: ${run.error ?? "no detail"}`));
+      alertAutomationTrouble(notificationBot, routineSourceThread(run) ?? run.threadId ?? bot.threadId, redactSecretsInText(`Rotina "${run.routineName}" falhou ${streak} vezes seguidas — última: ${run.error ?? "sem detalhe"}`));
     }
   },
   onRunDeferred: (run) => {
@@ -11503,6 +11548,7 @@ async function runGroupMemberTurn(
   }
   const roomSystem = buildSystemPrompt(system, store.bot(bot.id)?.soul ?? bot.soul ?? "", [
     { id: "user-profile", label: "About the user", text: userProfileSystemPrompt(cfg.profile) },
+    { id: "language", label: "Language", text: LANGUAGE_PROMPT },
     { id: "files", label: "File locations", text: workspace ? workspaceLocationsPrompt(bot.id, cwd, readyBot.cwd) : "" },
     { id: "mcp", label: "MCP servers", text: customMcpPrompt(Object.keys(integrations.custom ?? {})) },
     { id: "computer", label: "Computer", text: computerPrompt(roomComputerPromptKind) },
@@ -16994,7 +17040,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     // The desktop shell polls this to decide whether to hold the computer
     // awake: a run in flight, or a routine due within the hour.
     if (path === "/api/routines/wake" && method === "GET") {
-      return json(res, 200, routines!.wakeHold());
+      // Keep the Mac awake for routines, and for everything else that works
+      // on its own: wakes and watches due within the hour, goals, reports,
+      // Claude Code sessions running or waiting for the screen.
+      const routineHold = routines!.wakeHold();
+      if (routineHold.hold && routineHold.reason === "running") return json(res, 200, routineHold);
+      const ccBusy = ccLedger.all().some((session) => session.status === "running" || Boolean(session.desktop?.pending));
+      if (ccBusy) return json(res, 200, { hold: true, reason: "running" });
+      const selfPaced = autonomy.wakeHold(AUTONOMY_WAKE_HOLD_MS);
+      if (selfPaced.hold && selfPaced.reason === "running") return json(res, 200, selfPaced);
+      const due = [routineHold.at, selfPaced.at].filter((at): at is number => at !== undefined).sort((a, b) => a - b)[0];
+      return json(res, 200, due === undefined ? { hold: false } : { hold: true, reason: "due", at: due });
     }
     let routineMatch = path.match(/^\/api\/routines\/([\w-]+)\/run$/);
     if (routineMatch && method === "POST") {

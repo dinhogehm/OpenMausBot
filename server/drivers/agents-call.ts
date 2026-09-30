@@ -1130,10 +1130,11 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
     return { text: String(r.message ?? (cancel ? "Wake-up cancelled." : "Wake-up scheduled. End your turn now.")) };
   }
   if (name === "wake_when") {
-    if (args.cancel === true && args.standing === true) {
-      const r = await api("/api/internal/wake", { method: "POST", body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, cancel: true, standing: true }) });
-      if (r.error) return { text: `Couldn't stop the standing watch: ${String(r.error)}`, isError: true };
-      return { text: String(r.message ?? "Standing watch stopped.") };
+    if (args.cancel === true) {
+      const standing = args.standing === true;
+      const r = await api("/api/internal/wake", { method: "POST", body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, cancel: true, ...(standing ? { standing: true } : {}) }) });
+      if (r.error) return { text: `Não foi possível cancelar ${standing ? "o vigia permanente" : "o vigia"}: ${String(r.error)}`, isError: true };
+      return { text: String(r.message ?? (standing ? "Vigia permanente desligado." : "Vigia cancelado.")) };
     }
     if (typeof args.command !== "string" || !args.command.trim() || typeof args.reason !== "string" || !args.reason.trim()) {
       return { text: "wake_when needs command (a read-only gh, git or curl command) and reason (what to do when it fires).", isError: true };

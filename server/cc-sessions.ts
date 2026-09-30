@@ -85,6 +85,8 @@ export interface CcDesktopState {
   archiveWhenResolved?: boolean;
   /** The permission mode the app really runs it in (read from its record). */
   permissionMode?: string;
+  /** Remove its worktree once the app confirms it archived (remove_worktree). */
+  removeWorktree?: boolean;
 }
 
 export interface CcDesktopPending {
@@ -102,6 +104,10 @@ export interface CcDesktopPending {
   triedAt?: number;
   /** send: how many times this message was already typed without arriving. */
   deliveries?: number;
+  /** archive: clicked; the app's record must say archived by then. */
+  verifyUntil?: number;
+  /** archive: clicks that the app's record did not confirm. */
+  archiveTries?: number;
 }
 
 export function slugify(text: string): string {

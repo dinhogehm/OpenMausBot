@@ -1,4 +1,4 @@
-import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, Tray, WebContentsView, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences, utilityProcess } from "electron";
+import { app, autoUpdater as nativeAutoUpdater, BrowserWindow, Notification, Tray, WebContentsView, clipboard, desktopCapturer, dialog, ipcMain, Menu, nativeImage, powerMonitor, powerSaveBlocker, safeStorage, screen, session, shell, systemPreferences, utilityProcess } from "electron";
 import { createRequire } from "node:module";
 import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -328,13 +328,21 @@ const serverSupervisor = createServerSupervisor({
     routineWake.stop();
   },
   onExhausted() {
-    slog("server recovery paused after repeated failures; quit and reopen to retry");
-    dialog.showErrorBox(
-      "The bot server stopped",
-      "Automatic recovery could not restart the background server. Quit and reopen OpenMausBot to try again. Interrupted chat turns were not resent.\n\n" +
-        `Server log: ${path.join(LOG_DIR, "server.log")}`,
-    );
+    // No modal: a Mac left alone would stay down until someone clicked it.
+    // The supervisor keeps retrying on a long backoff; this only tells the person.
+    slog("server recovery: quick retries exhausted; retrying in 5, 15, then every 30 minutes");
+    try {
+      if (Notification.isSupported()) {
+        new Notification({
+          title: "O servidor dos bots parou",
+          body: "O OpenMausBot continua tentando religá-lo sozinho (em 5, 15 e depois a cada 30 min). Turnos interrompidos não foram reenviados.",
+        }).show();
+      }
+    } catch (error) {
+      slog(`server recovery notification failed: ${error?.message ?? error}`);
+    }
   },
+  slowRetryDelaysMs: [5 * 60_000, 15 * 60_000, 30 * 60_000],
   log: slog,
 });
 

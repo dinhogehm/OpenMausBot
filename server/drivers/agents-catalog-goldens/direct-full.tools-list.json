@@ -839,7 +839,7 @@
           },
           "cancel": {
             "type": "boolean",
-            "description": "With standing: true, stops this conversation's standing watch (command and reason not needed)."
+            "description": "true cancels the pending wake or watch here (with standing: true, the standing watch); no command or reason."
           }
         }
       }

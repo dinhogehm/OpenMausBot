@@ -280,6 +280,8 @@ export interface ModelSelection {
  * provider session. The bot's threadId points at the active one. */
 export interface Task {
   waitingForTeammates?: boolean;
+  /** Goal mode paused to ask the person: it needs them. */
+  goalNeedsInput?: boolean;
   threadId: string;
   /** Internal routine execution; reachable through its run receipt, not history menus. */
   routineRunId?: string;
@@ -360,6 +362,7 @@ export interface TaskUsage {
 
 export interface Bot {
   waitingForTeammates?: boolean;
+  goalNeedsInput?: boolean;
   id: string;
   threadId: string;
   /** every context this bot has, newest first */
@@ -492,6 +495,7 @@ export function currentTaskBot(bot: Bot, threadId = bot.threadId): Bot {
     pinnedMessageId: task.pinnedMessageId,
     turnStartedAt: task.turnStartedAt ?? null,
     waitingForTeammates: task.waitingForTeammates ?? false,
+    goalNeedsInput: task.goalNeedsInput ?? false,
   };
 }
 

@@ -4,11 +4,12 @@ import { Archive, ArchiveRestore, BellOff, Clock, Clock3, FolderInput, Link2, Lo
 import type { BotProject, Task } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
+import { displayThreadTitle } from "@/lib/thread-title";
 import { nextRename } from "@/lib/rename";
 import { threadRefUrl } from "@/lib/thread-refs";
 import { ConfirmDialog } from "./ConfirmDialog";
 
-type ThreadRowTask = Pick<Task, "threadId" | "title" | "projectId" | "busy" | "activity" | "unread" | "openedBy" | "closedBy" | "archivedAt" | "snoozedUntil" | "waitingForTeammates"> & {
+type ThreadRowTask = Pick<Task, "threadId" | "title" | "projectId" | "busy" | "activity" | "unread" | "openedBy" | "closedBy" | "archivedAt" | "snoozedUntil" | "waitingForTeammates" | "goalNeedsInput"> & {
   queued?: boolean;
   pinned?: boolean;
   createdAt?: number;
@@ -252,7 +253,7 @@ export function SidebarThreadRow({ task, ownerId, current, compact, folders, onS
   const finishing = useRef(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const actionRef = useRef<HTMLButtonElement>(null);
-  const status = task.activity === "waiting-on-you" ? t("task.waiting") : isWaitingOnTeammate(task) ? t("task.waitingOnTeammate") : isWorking(task) ? activityLabel ?? t("chat.activity.working") : task.queued ? t("task.queued") : null;
+  const status = task.activity === "waiting-on-you" ? t("task.waiting") : task.goalNeedsInput ? t("sidebar.preview.needsYou") : isWaitingOnTeammate(task) ? t("task.waitingOnTeammate") : isWorking(task) ? activityLabel ?? t("chat.activity.working") : task.queued ? t("task.queued") : null;
   const byline = threadByline(task);
   const updatedAt = threadRecency(task);
   const updatedStamp = formatUpdatedAt(updatedAt);
@@ -314,7 +315,7 @@ export function SidebarThreadRow({ task, ownerId, current, compact, folders, onS
         onKeyDown={(event) => { if (event.key === "ContextMenu" || event.shiftKey && event.key === "F10") { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openMenu(rect.left, rect.bottom); } }}
         className={cn("flex min-w-0 flex-1 items-center gap-2 rounded-md pl-6 pr-1 text-left text-[13px] font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/60", compact ? "min-h-7 py-1" : "min-h-8 py-1.5", current ? "font-semibold text-ink" : "text-ink-secondary hover:text-ink")}>
         <span className="flex min-w-0 flex-1 items-baseline gap-1.5">
-          <span className={cn("min-w-0 truncate", task.unread && "font-semibold text-ink", (closed || archived || snoozed) && !current && "text-ink-tertiary")}>{task.title}</span>
+          <span className={cn("min-w-0 truncate", task.unread && "font-semibold text-ink", (closed || archived || snoozed) && !current && "text-ink-tertiary")}>{displayThreadTitle(task.title)}</span>
           {byline && (
             // the same line and size as the title, only quieter: a second
             // line per thread made the list twice as tall as it needs to be

@@ -4,11 +4,14 @@ import type { DesktopRecord, DesktopStep } from "./claude-desktop.ts";
 import {
   CC_ACTIVE_MS,
   CC_STALL_MS,
+  DESKTOP_ARCHIVE_CONFIRM_MS,
+  DESKTOP_ARCHIVE_MAX_TRIES,
   DESKTOP_MAX_MISSES,
   DESKTOP_SEND_CONFIRM_MS,
   DESKTOP_SEND_MAX_DELIVERIES,
   ccSessionActive,
   desktopBackoffMs,
+  desktopBriefText,
   followDesktopSessions,
   pickDesktopPending,
   runDesktopWork,
@@ -65,6 +68,14 @@ function harness() {
     tick: () => runDesktopWork(deps, state),
   };
 }
+
+describe("the brief", () => {
+  it("opens with the title and its issue number, the marker on its own line", () => {
+    expect(desktopBriefText("automação inatividade não dispara", "OMBX", "Issue: https://github.com/o/r/issues/9298\nFaça X")).toBe("#9298 automação inatividade não dispara\n[OMBX]\n\nIssue: https://github.com/o/r/issues/9298\nFaça X");
+    expect(desktopBriefText("#9300 gate", "OMBY", "ver #9299", "\n\nfooter")).toBe("#9300 gate\n[OMBY]\n\nver #9299\n\nfooter");
+    expect(desktopBriefText("limpeza", "OMBZ", "sem número").split("\n")[0]).toBe("limpeza");
+  });
+});
 
 describe("backoff and the queue", () => {
   it("backs off 30s, doubling, up to 10 minutes", () => {
@@ -221,6 +232,40 @@ describe("messages", () => {
     await h.tick();
     expect(session.status).toBe("failed");
     expect(h.steps.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("archiving", () => {
+  it("waits for the app's record to confirm, clicks again, and fails after 3 unconfirmed clicks", async () => {
+    const h = harness();
+    const session = h.opened("a");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "archive", text: "", since: h.now, attempts: 0 };
+    for (let click = 1; click <= DESKTOP_ARCHIVE_MAX_TRIES; click++) {
+      await h.tick();
+      expect(session.desktop!.pending).toMatchObject({ archiveTries: click, verifyUntil: expect.any(Number) });
+      await h.tick(); // still verifying: no second click yet
+      expect(h.steps.archive).toHaveBeenCalledTimes(click);
+      h.advance(DESKTOP_ARCHIVE_CONFIRM_MS + 1_000);
+      followDesktopSessions(h.deps);
+    }
+    expect(session.status).toBe("failed");
+    expect(session.lastError).toContain("never marked the session archived");
+  });
+
+  it("marks it archived only when the record says so, then lets the worktree go", async () => {
+    const h = harness();
+    const archived: string[] = [];
+    h.deps.onArchived = (s) => archived.push(s.id);
+    const session = h.opened("a");
+    session.desktop!.pending = { kind: "archive", text: "", since: h.now, attempts: 0 };
+    await h.tick();
+    expect(session.status).not.toBe("archived");
+    h.records.get(LOCAL)!.isArchived = true;
+    followDesktopSessions(h.deps);
+    expect(session.status).toBe("archived");
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(archived).toEqual(["a"]);
   });
 });
 

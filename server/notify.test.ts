@@ -12,17 +12,17 @@ describe("buildNotification", () => {
       kind: "approval",
       botId: "bot-1",
       threadId: "thread-1",
-      title: "Scout needs approval",
+      title: "Scout precisa de aprovação",
       body: "rm -rf ./build",
     });
-    expect(buildNotification("question", bot, "thread-1", "which branch?")?.title).toBe("Scout has a question");
-    expect(buildNotification("done", bot, "thread-1", "pushed the branch")?.title).toBe("Scout finished");
-    expect(buildNotification("routine-failed", bot, "thread-1", "boom")?.title).toBe("Scout's routine failed");
+    expect(buildNotification("question", bot, "thread-1", "which branch?")?.title).toBe("Scout tem uma pergunta");
+    expect(buildNotification("done", bot, "thread-1", "pushed the branch")?.title).toBe("Scout terminou");
+    expect(buildNotification("routine-failed", bot, "thread-1", "boom")?.title).toBe("A rotina de Scout falhou");
     expect(buildNotification("routine-deferred", bot, "thread-1", "target busy for 30 minutes")?.title)
-      .toBe("Scout's routine is waiting");
-    expect(buildNotification("incident", bot, "thread-1", "the run stopped: exit_before_result")?.title).toBe("Scout hit a problem");
+      .toBe("A rotina de Scout está esperando");
+    expect(buildNotification("incident", bot, "thread-1", "the run stopped: exit_before_result")?.title).toBe("Scout teve um problema");
     expect(buildNotification("turn-failed", bot, "thread-1", "the Local VM is not ready")?.title)
-      .toBe("Scout couldn't start");
+      .toBe("Scout não conseguiu começar");
   });
 
   it("announces a delegation settle as a resume with results", () => {
@@ -30,7 +30,7 @@ describe("buildNotification", () => {
       kind: "delegation-settled",
       botId: "bot-1",
       threadId: "thread-1",
-      title: "Scout resumed with results",
+      title: "Scout retomou com os resultados",
       body: "Results in from Atlas",
     });
     // the toggle rules this frame like every other
@@ -98,11 +98,11 @@ describe("blockedTarget", () => {
       kind: "takeover",
       threadId: "room-thread",
       groupId: "room-1",
-      title: "Scout in Launch needs your hands",
+      title: "Scout em Launch precisa das suas mãos",
     });
     // a 1:1 takeover is untouched — no room to name, nothing to group under
     const direct = buildNotification("takeover", bot, bot.threadId, "the login page wants a code");
-    expect(direct?.title).toBe("Scout needs your hands");
+    expect(direct?.title).toBe("Scout precisa das suas mãos");
     expect(direct?.groupId).toBeUndefined();
   });
 });

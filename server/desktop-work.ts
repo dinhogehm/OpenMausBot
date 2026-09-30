@@ -36,6 +36,10 @@ export const DESKTOP_SEND_MAX_DELIVERIES = 3;
 export const DESKTOP_MAX_MISSES = 5;
 export const DESKTOP_BACKOFF_BASE_MS = 30_000;
 export const DESKTOP_BACKOFF_MAX_MS = 10 * 60_000;
+/** After the Archive click, the app's record must say archived within this... */
+export const DESKTOP_ARCHIVE_CONFIRM_MS = 2 * 60_000;
+/** ...or it is clicked again, up to this many times in all. */
+export const DESKTOP_ARCHIVE_MAX_TRIES = 3;
 /** A running session with no sign of work for this long is reported. */
 export const CC_STALL_MS = 30 * 60_000;
 /** A running session counts as "someone else is working on it" only this long after its last progress. */
@@ -58,11 +62,22 @@ export interface DesktopWorkDeps {
   report: (session: CcSession, text: string) => void;
   /** The review hook's latest decision for a folder, if known. */
   hookDecision?: (cwd: string) => string | null;
+  /** The app confirmed the session archived (remove its worktree if asked). */
+  onArchived?: (session: CcSession) => void;
   steps?: {
     create?: typeof createDesktopSession;
     send?: typeof sendToDesktopSession;
     archive?: typeof archiveDesktopSession;
   };
+}
+
+/** The brief as typed into the app. Its first line is the title with the
+ * issue number ("#9298 …"): the app titles the session from its opening
+ * words, and the number is what people look for in the sidebar. The marker
+ * that finds the session again goes on its own line below. */
+export function desktopBriefText(title: string, marker: string, brief: string, footer = ""): string {
+  const number = /#\d{3,6}\b/.test(title) ? null : /(?:#|\/issues\/|\/pull\/)(\d{3,6})\b/.exec(brief)?.[1];
+  return `${number ? `#${number} ${title}` : title}\n[${marker}]\n\n${brief}${footer}`;
 }
 
 /** Wait before retrying a screen action that touched the screen and stopped. */
@@ -76,7 +91,7 @@ const liveApp = (session: CcSession) =>
 /** The oldest screen action that may run now; one stuck action never blocks the rest. */
 export function pickDesktopPending(sessions: CcSession[], now: number): CcSession | null {
   return sessions
-    .filter((session) => liveApp(session) && session.desktop!.pending && (session.desktop!.pending!.nextAttemptAt ?? 0) <= now)
+    .filter((session) => liveApp(session) && session.desktop!.pending && !session.desktop!.pending!.verifyUntil && (session.desktop!.pending!.nextAttemptAt ?? 0) <= now)
     .sort((a, b) => a.desktop!.pending!.since - b.desktop!.pending!.since)[0] ?? null;
 }
 
@@ -149,9 +164,22 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       deps.ledger.save();
     }
     if (record.isArchived) {
+      delete desktop.pending;
       deps.ledger.setStatus(session, "archived");
       deps.chip(session, "archived in the Claude app");
+      deps.onArchived?.(session);
       continue;
+    }
+    const verifying = desktop.pending?.kind === "archive" ? desktop.pending : null;
+    if (verifying?.verifyUntil && now > verifying.verifyUntil) {
+      // Clicked, but the app never said archived: wrong entry, or a menu that changed.
+      delete verifying.verifyUntil;
+      if ((verifying.archiveTries ?? 0) >= DESKTOP_ARCHIVE_MAX_TRIES) {
+        failDesktopSession(deps, session, `Archive was clicked ${verifying.archiveTries} times in the Claude app, but the app never marked the session archived; archive it by hand there`);
+        continue;
+      }
+      deps.ledger.save();
+      deps.chip(session, "the app did not confirm the archive; trying again", false);
     }
     const transcript = deps.transcriptOf(record.cliSessionId);
     if (desktop.sent) {
@@ -263,12 +291,14 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     }
     const at = deps.now();
     if (step.ok) {
-      delete desktop.pending;
       if (pending.kind === "archive") {
-        // The app's record confirms it; followDesktopSessions marks it archived then.
+        // Only the app's record says it worked; followDesktopSessions checks it.
+        pending.verifyUntil = at + DESKTOP_ARCHIVE_CONFIRM_MS;
+        pending.archiveTries = (pending.archiveTries ?? 0) + 1;
         deps.ledger.save();
         return;
       }
+      delete desktop.pending;
       if (pending.kind === "create") desktop.sentAt = at;
       else desktop.sent = { text: pending.text, at, userFrameAt, deliveries: (pending.deliveries ?? 0) + 1 };
       next.status = "running";

@@ -277,17 +277,25 @@ export async function archiveDesktopSession(driver: DesktopDriver, input: { loca
     await driver.sleep(2_500);
     let stop = await guard(screen, "open session");
     if (stop) return stop;
-    const entry = (await driver.ocr()).find((line) => line.x < SIDEBAR_MAX_X && sidebarMatch(line.text, input.title));
-    if (!entry) return { ok: false, reason: `"${input.title}" is not visible in the app's sidebar`, retry: true, miss: true, touched: true };
+    // Titles repeat in the sidebar ("Relatorio nightly" fifteen times): act
+    // only on one unambiguous entry, never on the first of several.
+    const matches = (await driver.ocr()).filter((line) => line.x < SIDEBAR_MAX_X && sidebarMatch(line.text, input.title));
+    if (!matches.length) return { ok: false, reason: `"${input.title}" is not visible in the app's sidebar`, retry: true, miss: true, touched: true };
+    const exact = matches.filter((line) => normalize(line.text) === normalize(input.title));
+    const entry = matches.length === 1 ? matches[0]! : exact.length === 1 ? exact[0]! : null;
+    if (!entry) {
+      return { ok: false, reason: `${matches.length} sessions in the app's sidebar match "${input.title}", so it cannot tell which to archive; archive it by hand in the Claude app`, retry: false, touched: true };
+    }
     stop = await guard(screen, "session menu");
     if (stop) return stop;
     await act(screen, () => driver.rightClick(entry.x + 30, entry.y + entry.h / 2));
     await driver.sleep(800);
     const item = (await driver.ocr()).find((line) => (line.text.trim() === "Arquivar" || line.text.trim() === "Archive") && Math.abs(line.y - entry.y) < 400);
     stop = await guard(screen, "archive menu");
-    if (stop || !item) {
-      if (!stop || !("human" in stop && stop.human)) await act(screen, () => driver.key(ESCAPE));
-      return stop ?? { ok: false, reason: "the session menu showed no Archive item", retry: true, miss: true, touched: true };
+    if (stop) return stop; // the Claude app is not in front (or the person is back): no Escape into their app
+    if (!item) {
+      await act(screen, () => driver.key(ESCAPE));
+      return { ok: false, reason: "the session menu showed no Archive item", retry: true, miss: true, touched: true };
     }
     await act(screen, () => driver.click(item.x + item.w / 2, item.y + item.h / 2));
     await driver.sleep(1_000);

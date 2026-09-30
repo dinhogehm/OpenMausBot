@@ -115,6 +115,8 @@ export interface GroupThreadUsage extends TaskUsage {
 export interface WireTask {
   /** Outstanding handoffs, not an active provider turn. */
   waitingForTeammates?: boolean;
+  /** Goal mode here paused to ask the person something: it needs them. */
+  goalNeedsInput?: boolean;
   threadId: string;
   title: string;
   createdAt: number;
@@ -227,6 +229,7 @@ export const CONNECTOR_TOOL_NAME_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
  * (null when the bot has none). */
 export interface WireBot {
   waitingForTeammates?: boolean;
+  goalNeedsInput?: boolean;
   id: string;
   /** The task selected in the UI; running turns keep their own thread id. */
   threadId: string;

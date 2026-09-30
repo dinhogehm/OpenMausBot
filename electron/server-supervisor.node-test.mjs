@@ -163,3 +163,28 @@ test("repeated quit requests join the exact same child cleanup", async (t) => {
   await f.tick(1000);
   assert.equal(f.children.length, 1);
 });
+
+test("with slow retries it never gives up: long backoff after the quick budget, last delay repeating", async (t) => {
+  let failing = true;
+  let restarts = 0;
+  const f = fixture(t, {
+    slowRetryDelaysMs: [300, 900],
+    restart: async () => { restarts += 1; return failing ? { proc: null } : { proc: f.spawn() }; },
+  });
+  const first = f.spawn();
+  f.supervisor.ready(first);
+  first.emit("exit", 1);
+  await f.tick(10); await f.tick(20); await f.tick(40);
+  assert.equal(f.events.filter((event) => event[0] === "exhausted").length, 1, "the person hears it once");
+  const count = f.children.length;
+  await f.tick(299);
+  await f.tick(1);
+  await f.tick(900);
+  await f.tick(900);
+  assert.equal(f.children.length, count);
+  assert.equal(restarts, 3 + 3, "3 quick tries, then 300, 900, 900: still failing, still trying");
+  failing = false;
+  await f.tick(900);
+  assert.equal(f.children.length, count + 1);
+  assert.deepEqual(f.events.at(-1), ["ready", f.children.at(-1)]);
+});

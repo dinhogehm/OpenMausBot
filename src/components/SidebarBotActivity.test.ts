@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Bot, Group, GroupTask, Task } from "@/state/store";
-import { attentionJumpAction, attentionOwnerName, crossBotAttentionThreads, sidebarGroupActivityTasks } from "./SidebarBotActivity";
+import { attentionJumpAction, attentionOwnerName, crossBotAttentionThreads, sidebarBotActivityTasks, sidebarGroupActivityTasks } from "./SidebarBotActivity";
 
 const task = (threadId: string, title: string, extra: Partial<Task>): Task =>
   ({ threadId, title, createdAt: 0, ...extra }) as Task;
@@ -48,6 +48,13 @@ describe("cross-bot attention", () => {
     const alpha = bot("a", "Alpha", "a0", [task("a0", "Unread reply", { unread: true })]);
     const beta = bot("b", "Beta", "b0", [task("b0", "Waiting approval", { activity: "waiting-on-you" })]);
     expect(crossBotAttentionThreads([alpha, beta], {}).map((entry) => entry.task.threadId)).toEqual(["b0", "a0"]);
+  });
+});
+
+describe("goal waiting on the person", () => {
+  it("keeps a thread whose goal stopped to ask the person in the attention list", () => {
+    const chief = bot("c", "Chief", "c0", [task("c0", "Idle", {}), task("c1", "PR #9300 GO", { goalNeedsInput: true })]);
+    expect(sidebarBotActivityTasks(chief, {}).map((entry) => entry.threadId)).toEqual(["c1"]);
   });
 });
 

@@ -12,8 +12,11 @@ import {
   parseGoalInput,
   parseWakeInput,
   parseWatchInput,
+  chipText,
   reportsPrompt,
   wakeChip,
+  wakeFiredChip,
+  watchLabel,
   wakePrompt,
 } from "./bot-autonomy.ts";
 
@@ -166,7 +169,7 @@ describe("prompts", () => {
     const autonomy = make();
     autonomy.startGoal("bot", "t1", { goal: "ship", maxTurns: 5, maxHours: 1 });
     autonomy.noteGoalDispatch("t1");
-    expect(goalEndChip(autonomy.finishGoal("t1", "completed", "deployed")!)).toBe("Goal completed after 1 turn — deployed");
+    expect(goalEndChip(autonomy.finishGoal("t1", "completed", "deployed")!)).toBe("Objetivo concluído após 1 turno — deployed");
   });
 });
 
@@ -258,7 +261,7 @@ describe("standing watches", () => {
     now += 3 * 60_000;
     expect(autonomy.recordWatchRun(watch, { ok: true, output: "m1 m2 m3", fingerprint: "f3", matched: false })).toBe("changed");
     expect(wakePrompt(watch, null, now)).toContain("stays armed");
-    expect(wakeChip(watch)).toContain("Standing watch");
+    expect(wakeChip(watch)).toBe("Vigia permanente em Chat a cada 3 min — answer new chat messages");
   });
 
   it("with until, fires on each new matching output, not on every run while it matches", () => {
@@ -312,6 +315,102 @@ describe("migrating watches set before stdout-only fingerprints", () => {
     expect(wake.watch?.baseline).toBe("m1");
     expect(autonomy.recordWatchRun(wake, { ok: true, output: "m1", fingerprint: "stdout-only", matched: false })).toBeNull();
     expect(autonomy.recordWatchRun(wake, { ok: true, output: "m2", fingerprint: "stdout-2", matched: false })).toBe("changed");
+  });
+});
+
+describe("leases across a restart", () => {
+  it("gives a wake back, due and marked, when the server died before its turn finished", () => {
+    const autonomy = make();
+    const wake = autonomy.setWake("bot", "t1", 1, "checar o deploy");
+    now += 60_000;
+    autonomy.leaseWake(wake);
+    expect(autonomy.wakeFor("t1")).toBeNull();
+    const reloaded = make(); // restart mid-turn
+    const back = reloaded.wakeFor("t1")!;
+    expect(back.reason).toContain("interrompida por um restart");
+    expect(back.reason).toContain("checar o deploy");
+    expect(reloaded.dueWakes()).toEqual([back]);
+    // and the lease is not given back twice
+    expect(make().wakeFor("t1")?.reason).toBe(back.reason);
+  });
+
+  it("forgets a lease once the turn completes, and gives leased reports back after a restart", () => {
+    const autonomy = make();
+    const wake = autonomy.setWake("bot", "t1", 1, "x");
+    autonomy.leaseWake(wake);
+    autonomy.settleInFlight("t1");
+    expect(make().wakeFor("t1")).toBeNull();
+    autonomy.addReport("chief", "t2", "PR #9300 pronta");
+    expect(autonomy.leaseReports("t2")?.items).toEqual(["PR #9300 pronta"]);
+    expect(autonomy.hasReports("t2")).toBe(false);
+    const reloaded = make();
+    const back = reloaded.takeReports("t2")!;
+    expect(back.items[0]).toContain("interrompida por um restart");
+    expect(back.items).toContain("PR #9300 pronta");
+  });
+
+  it("drops a lease when the turn could not start and puts it back when it lost a race", () => {
+    const autonomy = make();
+    const wake = autonomy.setWake("bot", "t1", 1, "x");
+    autonomy.leaseWake(wake);
+    autonomy.restoreWake(wake);
+    expect(autonomy.inFlightFor("t1")).toEqual([]);
+    expect(autonomy.wakeFor("t1")).toBe(wake);
+    autonomy.addReport("chief", "t2", "r");
+    const taken = autonomy.leaseReports("t2")!;
+    autonomy.restoreReports(taken);
+    expect(autonomy.inFlightFor("t2")).toEqual([]);
+    expect(make().takeReports("t2")?.items).toEqual(["r"]);
+  });
+
+  it("never leases a standing watch: it survives a restart as it was", () => {
+    const autonomy = make();
+    const watch = autonomy.setWatch("bot", "t1", { command: "gog chat messages list", argv: ["gog"], everyMinutes: 3, maxMinutes: 60, reason: "chat", baseline: "m1", standing: true });
+    autonomy.leaseWake(watch);
+    expect(make().standingFor("t1")?.watch?.baseline).toBe("m1");
+  });
+});
+
+describe("keeping the Mac awake", () => {
+  it("holds for a wake within the horizon, a goal, reports or a turn in flight", () => {
+    const autonomy = make();
+    expect(autonomy.wakeHold(60 * 60_000)).toEqual({ hold: false });
+    autonomy.setWake("bot", "t1", 120, "later");
+    expect(autonomy.wakeHold(60 * 60_000)).toEqual({ hold: false });
+    autonomy.setWake("bot", "t2", 30, "soon");
+    expect(autonomy.wakeHold(60 * 60_000)).toEqual({ hold: true, reason: "due", at: now + 30 * 60_000 });
+    autonomy.addReport("bot", "t3", "r");
+    expect(autonomy.wakeHold(60 * 60_000)).toMatchObject({ hold: true, reason: "running" });
+  });
+
+  it("holds for a watch's next run, not only its time limit", () => {
+    const autonomy = make();
+    autonomy.setWatch("bot", "t1", { command: "gh pr view 1", argv: ["gh"], everyMinutes: 3, maxMinutes: 720, reason: "x", baseline: "OPEN", standing: true });
+    expect(autonomy.wakeHold(60 * 60_000)).toEqual({ hold: true, reason: "due", at: now + 3 * 60_000 });
+  });
+});
+
+describe("chips", () => {
+  it("names what a watch looks at instead of the raw command, and cuts on a word", () => {
+    expect(watchLabel("gh pr view 9300 -R dinhogehm/nuria-platform --json state")).toBe("PR #9300");
+    expect(watchLabel("gh issue view 9298 --json comments")).toBe("issue #9298");
+    expect(watchLabel("gog chat messages list spaces/AAQA4TXnzJ4 --plain")).toBe("Chat");
+    expect(watchLabel("gog sheets get 163U0 'Atendimento!A1:I200'")).toBe("Planilha");
+    expect(watchLabel("git ls-remote origin refs/tags/nuria-production-deployed")).toBe("tag nuria-production-deployed");
+    expect(watchLabel("curl -sL https://docs.google.com/spreadsheets/d/x/export?format=csv")).toBe("docs.google.com");
+    expect(chipText("confira `gh pr checks` e avise o Osvaldo sobre o resultado final do merge", 40)).toBe("confira gh pr checks e avise o Osvaldo…");
+    expect(chipText("curto", 40)).toBe("curto");
+  });
+
+  it("says in pt-BR when and why a watch or wake fires", () => {
+    const autonomy = make();
+    const watch = autonomy.setWatch("bot", "t1", { command: "gh pr view 9300 --json state", argv: ["gh"], everyMinutes: 15, maxMinutes: 60, reason: "avisar `GO` do merge", baseline: "OPEN" });
+    expect(wakeChip(watch)).toMatch(/^Vigiando PR #9300 a cada 15 min até \d\d:\d\d — avisar GO do merge$/);
+    autonomy.recordWatchRun(watch, { ok: true, output: "MERGED", matched: false });
+    expect(wakeFiredChip(watch)).toBe("Vigia disparou (mudou) em PR #9300 — avisar GO do merge");
+    const wake = autonomy.setWake("bot", "t2", 5, "checar deploy");
+    expect(wakeChip(wake)).toMatch(/^Despertador às \d\d:\d\d — checar deploy$/);
+    expect(wakeFiredChip(wake)).toBe("Acordou — checar deploy");
   });
 });
 

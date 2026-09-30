@@ -43,8 +43,8 @@ it("wakes the bot in the same conversation with its own note", () => fixture(asy
   expect(toolResult(f.turns()[0], "wake_me")).toContain("End your turn now");
   await expect.poll(async () => (await f.messages()).some((message: any) => message.text === "PR 9280 is merged"), { timeout: 10_000 }).toBe(true);
   const chips = await f.chips();
-  expect(chips.some((chip: string) => chip.startsWith("Wake-up set for"))).toBe(true);
-  expect(chips.some((chip: string) => chip.startsWith("Woke up — CHECK_PR_9280"))).toBe(true);
+  expect(chips.some((chip: string) => chip.startsWith("Despertador às"))).toBe(true);
+  expect(chips.some((chip: string) => chip.startsWith("Acordou — CHECK_PR_9280"))).toBe(true);
   // Nobody typed the wake: no second user line appears in the transcript.
   expect((await f.messages()).filter((message: any) => message.role === "user")).toHaveLength(1);
   expect(f.ledger().wakes).toEqual([]);
@@ -58,8 +58,8 @@ it("keeps giving a goal turns until the bot ends it, then goes quiet", () => fix
   ] });
   await f.send("Ship 9195 and don't stop until it is in production.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(3);
-  expect(toolResult(f.turns()[0], "goal_start")).toContain("Goal mode is on");
-  await expect.poll(async () => (await f.chips()).some((chip: string) => chip === "Goal completed after 2 turns — deployed and verified"), { timeout: 10_000 }).toBe(true);
+  expect(toolResult(f.turns()[0], "goal_start")).toContain("Modo objetivo ligado");
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip === "Objetivo concluído após 2 turnos — deployed and verified"), { timeout: 10_000 }).toBe(true);
   // An ended goal starts nothing more (a fourth turn would have no plan and fail).
   await new Promise(resolve => setTimeout(resolve, 1_000));
   expect(f.turns()).toHaveLength(3);
@@ -72,7 +72,7 @@ it("stops a goal at its turn limit", () => fixture(async f => {
     { reply: "Still working" },
   ] });
   await f.send("Work on it.");
-  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Goal paused at its limit after 1 turn")), { timeout: 20_000 }).toBe(true);
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Objetivo pausado no limite após 1 turno")), { timeout: 20_000 }).toBe(true);
   expect(f.turns()).toHaveLength(2);
 }), 60_000);
 
@@ -84,7 +84,7 @@ it("pauses for the person on needs_input and resumes on their answer", () => fix
     { expectContextIncludes: ["Goal mode — turn 2 of 5"], steps: [{ tool: "goal_end", arguments: { status: "completed", detail: "in production" } }], reply: "Done" },
   ] });
   await f.send("Deploy it.");
-  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Goal waiting for you")), { timeout: 20_000 }).toBe(true);
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Objetivo esperando você")), { timeout: 20_000 }).toBe(true);
   await new Promise(resolve => setTimeout(resolve, 500));
   expect(f.turns()).toHaveLength(2);
   await f.send("production please");
@@ -125,9 +125,9 @@ it("drops the goal and the pending wake when the person presses Stop", () => fix
   // is that nothing resumed on its own afterwards.
   expect(f.turns()).toHaveLength(0);
   const chips = await f.chips();
-  expect(chips).toContain("Wake-up cancelled — stopped by you");
-  expect(chips.some((chip: string) => chip.startsWith("Goal stopped"))).toBe(true);
-  expect(chips.some((chip: string) => chip.startsWith("Goal continues") || chip.startsWith("Woke up"))).toBe(false);
+  expect(chips).toContain("Despertador cancelado — parado por você");
+  expect(chips.some((chip: string) => chip.startsWith("Objetivo parado"))).toBe(true);
+  expect(chips.some((chip: string) => chip.startsWith("Objetivo continua") || chip.startsWith("Acordou"))).toBe(false);
 }), 60_000);
 
 it("retries a failing goal turn after a pause and blocks it after three failures", () => fixture(async f => {
@@ -167,7 +167,7 @@ it("watches a command without waking the bot until its output changes", () => fi
   expect(f.ledger().wakes[0].watch.runs).toBeGreaterThan(2);
   git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "second DONE");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
-  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Watch fired (changed)")), { timeout: 10_000 }).toBe(true);
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Vigia disparou (mudou)")), { timeout: 10_000 }).toBe(true);
   expect(f.ledger().wakes).toEqual([]);
 }), 60_000);
 
@@ -197,7 +197,7 @@ it("keeps a standing watch armed: it fires on each change and a wake_me does not
   expect(standing.watch.trigger).toBeUndefined();
   expect(standing.watch.baseline).toContain("third TWO");
   expect(f.ledger().wakes.some((wake: any) => wake.reason === "unrelated timer")).toBe(true);
-  expect((await f.chips()).filter((chip: string) => chip.startsWith("Standing watch fired (changed)"))).toHaveLength(2);
+  expect((await f.chips()).filter((chip: string) => chip.startsWith("Vigia permanente disparou (mudou)"))).toHaveLength(2);
 }), 60_000);
 
 it("manages a Claude Code session: start, get its report, answer it, archive it", async () => {
