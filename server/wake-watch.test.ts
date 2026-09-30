@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fingerprintOf, parseWatchCommand, WATCH_READABLE_DIRS, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
+import { fingerprintOf, newestStamp, parseWatchCommand, watchCommandWarnings, WATCH_READABLE_DIRS, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
 
 describe("parseWatchCommand", () => {
   it.each([
@@ -97,5 +97,20 @@ describe("local status files", () => {
     expect(parseWatchCommand(`tail -f ${home}/.nuria/x.log`).ok).toBe(false);
     expect(parseWatchCommand(`cat ${home}/.nuria/a ${home}/.nuria/b`).ok).toBe(false);
     expect(WATCH_READABLE_DIRS[0]).toBe(`${home}/.nuria`);
+  });
+});
+
+describe("what a watch will not see", () => {
+  it("warns about gog's oldest-first chat list and gh's created-order issue list", () => {
+    expect(watchCommandWarnings("gog chat messages list spaces/AAQA4TXnzJ4 --plain")[0]).toContain('--order "createTime desc"');
+    expect(watchCommandWarnings('gog chat messages list spaces/X --plain --max 10 --order "createTime desc"')).toEqual([]);
+    expect(watchCommandWarnings("gh issue list --state all --limit 30 --json number,updatedAt")[0]).toContain("sort:updated-desc");
+    expect(watchCommandWarnings('gh issue list --search "sort:updated-desc" --limit 40')).toEqual([]);
+    expect(watchCommandWarnings("gh pr view 9300")).toEqual([]);
+  });
+
+  it("finds the newest time stamp in an output", () => {
+    expect(newestStamp("2026-03-16T19:19:20Z Cezar\n2026-03-31T10:00:00Z x")).toBe(Date.parse("2026-03-31T10:00:00Z"));
+    expect(newestStamp("nothing dated")).toBeNull();
   });
 });

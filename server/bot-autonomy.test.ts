@@ -436,6 +436,52 @@ describe("keeping the Mac awake", () => {
   });
 });
 
+describe("watches that see nothing new, cut outputs and duplicates", () => {
+  const base = { argv: ["gog"], everyMinutes: 3, maxMinutes: 120, reason: "x", standing: true };
+
+  it("flags a standing watch whose unchanged output only shows items over a day old, once until it changes", () => {
+    const autonomy = make();
+    const old = "2026-03-16T19:19:20Z Cezar Boa!\n2026-03-31T10:00:00Z Marluce ok";
+    const wake = autonomy.setWatch("bot", "t1", { ...base, command: "gog chat messages list spaces/X --plain", label: "chat", baseline: old, baselineFingerprint: "f1" });
+    now += 2 * 3_600_000;
+    autonomy.recordWatchRun(wake, { ok: true, output: old, matched: false, fingerprint: "f1" });
+    expect(autonomy.staleWatches()).toEqual([]);
+    now += 2 * 3_600_000;
+    expect(autonomy.staleWatches()).toEqual([wake]);
+    autonomy.markWatchStaleAlerted(wake);
+    expect(autonomy.staleWatches()).toEqual([]);
+    const fresh = autonomy.setWatch("bot", "t2", { ...base, command: "gog x", label: "chat", baseline: `${new Date(now).toISOString()} Pedro`, baselineFingerprint: "f2" });
+    now += 4 * 3_600_000;
+    expect(autonomy.staleWatches()).not.toContain(fresh);
+  });
+
+  it("tells the bot which lines are new when the output is cut", () => {
+    const autonomy = make();
+    const rows = Array.from({ length: 5 }, (_, i) => `linha ${i}`);
+    const wake = autonomy.setWatch("bot", "t1", { ...base, command: "curl https://docs.google.com/x", label: "planilha", baseline: "linha 0", baselineFingerprint: "a" });
+    autonomy.recordWatchRun(wake, { ok: true, output: "linha 0", matched: false, fingerprint: "a", truncated: true, lines: rows });
+    now += 60_000;
+    autonomy.recordWatchRun(wake, { ok: true, output: "linha 0", matched: false, fingerprint: "b", truncated: true, lines: [...rows, "linha 5 — Pedro, nova"] });
+    expect(wake.watch!.trigger).toBe("changed");
+    const prompt = wakePrompt(wake, null, now);
+    expect(prompt).toContain("Lines new or changed since the run before (1):\nlinha 5 — Pedro, nova");
+  });
+
+  it("finds the same command already watched by this bot in another conversation", () => {
+    const autonomy = make();
+    autonomy.setWatch("bot", "t1", { ...base, command: "git ls-remote origin refs/tags/nuria-production-deployed", baseline: "x" });
+    expect(autonomy.sameWatchElsewhere("bot", "t2", "git  ls-remote origin refs/tags/nuria-production-deployed").map((wake) => wake.threadId)).toEqual(["t1"]);
+    expect(autonomy.sameWatchElsewhere("bot", "t1", "git ls-remote origin refs/tags/nuria-production-deployed")).toEqual([]);
+    expect(autonomy.sameWatchElsewhere("other", "t2", "git ls-remote origin refs/tags/nuria-production-deployed")).toEqual([]);
+  });
+
+  it("does not take a flag's value for the item a watch looks at", () => {
+    expect(watchLabel("gh issue list --state all --limit 30 --json number,updatedAt")).toBe("issues");
+    expect(watchLabel("gh pr checks 9300")).toBe("PR #9300");
+    expect(watchLabel("gh pr view -R o/r 9311")).toBe("PR #9311");
+  });
+});
+
 describe("several standing watches per conversation", () => {
   const base = { argv: ["gog"], everyMinutes: 3, maxMinutes: 720, reason: "x", baseline: "b", standing: true };
 

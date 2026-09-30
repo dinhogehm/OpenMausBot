@@ -259,7 +259,7 @@ import {
   wakeFiredChip,
   watchLabel,
 } from "./bot-autonomy.ts";
-import { parseWatchCommand, runWatchCommand, watchMatches } from "./wake-watch.ts";
+import { parseWatchCommand, runWatchCommand, watchCommandWarnings, watchMatches } from "./wake-watch.ts";
 import {
   CC_MAX_RUNNING,
   CC_TURN_TIMEOUT_MS,
@@ -311,6 +311,7 @@ import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { newDeliveryCache, watchProductionDelivery } from "./prod-delivery.ts";
+import { computerErrorPt } from "./error-pt.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -7309,10 +7310,10 @@ function autonomyDispatchFailed(botId: string, threadId: string, message: string
   if (!bot || !store.taskByThread(botId, threadId)) return;
   const worst = back.reduce((max, item) => (item.failures > max.failures ? item : max), { failures: 0, delayMs: 0 } as { failures: number; delayMs: number });
   const minutes = Math.max(1, Math.round(worst.delayMs / 60_000));
-  store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`O turno automático não começou (${message}) — nova tentativa em ${minutes} min`, 240), ok: false } });
+  store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`O turno automático não começou (${computerErrorPt(message)}) — nova tentativa em ${minutes} min`, 240), ok: false } });
   const booting = BOOT_TRANSIENT.test(message) && process.uptime() * 1_000 < BOOT_GRACE_MS;
   if (worst.failures === DISPATCH_ALERT_AFTER || (worst.failures === 1 && !booting)) {
-    alertAutomationTrouble(bot, threadId, `o turno automático não começou ${worst.failures === 1 ? "" : `${worst.failures} vezes seguidas `}(${chipText(message, 140)}); o servidor tenta de novo sozinho, com espera crescente até ${DISPATCH_RETRY_MAX_MINUTES} min`);
+    alertAutomationTrouble(bot, threadId, `o turno automático não começou ${worst.failures === 1 ? "" : `${worst.failures} vezes seguidas `}(${chipText(computerErrorPt(message), 140)}); o servidor tenta de novo sozinho, com espera crescente até ${DISPATCH_RETRY_MAX_MINUTES} min`);
   }
   refreshBotRow(botId);
 }
@@ -7375,6 +7376,14 @@ async function runDueWatches(): Promise<void> {
   }));
   // Rows show each watch's last run and failures: refresh the bots that ran one.
   for (const botId of new Set(watches.map((wake) => wake.botId))) refreshBotRow(botId);
+  // A standing watch that sees only old items and never changes is likely
+  // looking at the wrong page: say so once, where it runs and to the Chief.
+  for (const wake of autonomy.staleWatches()) {
+    autonomy.markWatchStaleAlerted(wake);
+    const bot = store.bot(wake.botId);
+    if (!bot || !store.taskByThread(bot.id, wake.threadId)) continue;
+    alertAutomationTrouble(bot, wake.threadId, `Vigia permanente ${wake.watch!.label ? `"${wake.watch!.label}" ` : ""}em ${watchLabel(wake.watch!.command)} não muda há horas e só mostra itens com mais de 24 h — ele pode estar olhando a página errada (ex.: gog sem --order "createTime desc") e não ver nada novo`);
+  }
 }
 
 function refreshBotRow(botId: string): void {
@@ -8103,7 +8112,7 @@ function finalizeDelegationWatch(
           const sourceReply: Omit<Message, "id" | "at"> = {
             role: "bot",
             kind: "text",
-            text: `@${targetName} replied to the delegated task:\n\n${reply.trim()}`,
+            text: `@${targetName} respondeu à tarefa delegada:\n\n${reply.trim()}`,
           };
           if (target) sourceReply.from = { botId: target.id, name: target.name, color: target.color };
           store.appendMessage(terminalThreadId, sourceReply);
@@ -8113,8 +8122,8 @@ function finalizeDelegationWatch(
             kind: "activity",
             tool: {
               name: ok
-                ? `Delegation to @${targetName} completed without a text reply`
-                : `Delegation to @${targetName} failed — ${failureName}`,
+                ? `Delegação para @${targetName} concluída sem resposta em texto`
+                : `Delegação para @${targetName} falhou — ${failureName}`,
               ok,
             },
           });
@@ -8132,7 +8141,7 @@ function finalizeDelegationWatch(
         const sourceReply: Omit<Message, "id" | "at"> = {
           role: "bot",
           kind: "text",
-          text: `@${targetName} replied to the delegated task:\n\n${reply.trim()}`,
+          text: `@${targetName} respondeu à tarefa delegada:\n\n${reply.trim()}`,
         };
         if (target) sourceReply.from = { botId: target.id, name: target.name, color: target.color };
         store.appendMessage(watched.sourceThreadId, sourceReply);
@@ -8142,8 +8151,8 @@ function finalizeDelegationWatch(
           kind: "activity",
           tool: {
             name: ok
-              ? `Delegation to @${targetName} completed without a text reply`
-              : `Delegation to @${targetName} failed — ${failureName}`,
+              ? `Delegação para @${targetName} concluída sem resposta em texto`
+              : `Delegação para @${targetName} falhou — ${failureName}`,
             ok,
           },
         });
@@ -10032,7 +10041,7 @@ async function startTurn(
         role: "bot",
         kind: "activity",
         turnSucceeded: false,
-        tool: { name: `error: ${message.slice(0, 160)}`, ok: false },
+        tool: { name: `error: ${computerErrorPt(message).slice(0, 160)}`, ok: false },
       });
       // Worth a buzz for the same reason a routine failure is, and the rule
       // notify.ts encodes: the bot is not working, and the cause is usually
@@ -16060,6 +16069,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             if (!command.ok) return json(res, 400, { error: command.error });
             const input = parseWatchInput(body);
             if (!input.ok) return json(res, 400, { error: input.error });
+            // one watch per command per bot: two conversations watching the
+            // same thing wake twice and answer twice
+            const elsewhere = autonomy.sameWatchElsewhere(bot.id, threadId, String(body.command));
+            if (elsewhere.length) {
+              const where = [...new Set(elsewhere.map((wake) => `"${store.taskByThread(bot.id, wake.threadId)?.title ?? wake.threadId}" (${wake.threadId})`))].join(", ");
+              return json(res, 409, { error: `você já tem um vigia com este mesmo comando em outra conversa: ${where}. Não armei outro — use aquele (acompanhe por lá), ou desligue-o com wake_when cancel naquela conversa antes de armar aqui.` });
+            }
+            const warnings = watchCommandWarnings(String(body.command));
             if (input.standing) {
               const armed = autonomy.standingsFor(threadId);
               const label = input.label ?? STANDING_DEFAULT_LABEL;
@@ -16078,8 +16095,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: wakeChip(wake), ok: true } });
             return json(res, 200, {
               message: input.standing
-                ? `Vigia permanente armado. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui toda vez que ${input.until ? `uma saída nova casar com "${input.until}"` : "a saída mudar"} (e a cada ${input.maxMinutes} min de qualquer forma). Ele continua armado depois de disparar — não chame wake_when de novo para ele; wake_me aqui não o substitui. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`
-                : `Vigiando. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui quando ${input.until ? `a saída casar com "${input.until}"` : "a saída mudar"}, ou depois de ${input.maxMinutes} min de qualquer forma. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`,
+                ? `${warnings.length ? `Atenção: ${warnings.join(" ")} ` : ""}Vigia permanente armado. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui toda vez que ${input.until ? `uma saída nova casar com "${input.until}"` : "a saída mudar"} (e a cada ${input.maxMinutes} min de qualquer forma). Ele continua armado depois de disparar — não chame wake_when de novo para ele; wake_me aqui não o substitui. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`
+                : `${warnings.length ? `Atenção: ${warnings.join(" ")} ` : ""}Vigiando. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui quando ${input.until ? `a saída casar com "${input.until}"` : "a saída mudar"}, ou depois de ${input.maxMinutes} min de qualquer forma. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`,
             });
           }
           // Promises with a deadline ride on wake_me, alone or beside a wake.

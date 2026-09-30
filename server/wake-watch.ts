@@ -169,6 +169,40 @@ export interface WatchRunResult {
   output: string;
   /** sha256 of the whole stdout (of the whole output on failure): what "changed" is decided on. */
   fingerprint: string;
+  /** The whole stdout was longer than `output`. */
+  truncated?: boolean;
+  /** stdout's lines (up to WATCH_LINES_MAX), to tell the bot what changed past the cut. */
+  lines?: string[];
+}
+
+export const WATCH_LINES_MAX = 20_000;
+
+/** A short hash of one output line: what a watch keeps to diff the next run. */
+export function lineHash(line: string): string {
+  return createHash("sha1").update(line).digest("hex").slice(0, 10);
+}
+
+/** What a watch command will not see the way the bot hopes: said in the
+ * tool result, the watch is still armed. */
+export function watchCommandWarnings(command: string): string[] {
+  const warnings: string[] = [];
+  if (/^gog\s+chat\s+messages\s+list\b/.test(command.trim()) && !/--order[=\s]+["']?createTime desc/i.test(command)) {
+    warnings.push('gog lista as mensagens em ordem crescente (as mais antigas primeiro): mensagens novas não mudam a saída e o vigia não as vê. Use --max 10 --order "createTime desc".');
+  }
+  if (/^gh\s+issue\s+list\b/.test(command.trim()) && !/sort:updated/.test(command)) {
+    warnings.push('gh issue list ordena pelas criadas mais recentemente: uma issue antiga que muda fica fora. Para ver atualizações, use --search "sort:updated-desc".');
+  }
+  return warnings;
+}
+
+/** The newest ISO time stamp (2026-09-30T19:21…) in a watch's output, or null. */
+export function newestStamp(text: string): number | null {
+  let newest: number | null = null;
+  for (const match of text.matchAll(/\b(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)(?:\.\d+)?(Z|[+-]\d{2}:?\d{2})?/g)) {
+    const at = Date.parse(`${match[1]}T${match[2]}${match[3] ?? "Z"}`);
+    if (Number.isFinite(at) && (newest === null || at > newest)) newest = at;
+  }
+  return newest;
 }
 
 export function fingerprintOf(text: string): string {
@@ -199,7 +233,8 @@ export function runWatchCommand(argv: string[], opts: { cwd: string; path: strin
         }
         // Only stdout decides "changed": stderr carries noise like a pager's
         // "Next page" token that differs on every run. It is still shown.
-        resolve({ ok: true, output: text, fingerprint: fingerprintOf(String(stdout ?? "").trim()) });
+        const out = String(stdout ?? "").trim();
+        resolve({ ok: true, output: text, fingerprint: fingerprintOf(out), truncated: full.length > text.length, lines: out.split("\n").slice(0, WATCH_LINES_MAX) });
       },
     );
   });

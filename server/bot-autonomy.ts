@@ -28,6 +28,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { languageReminder } from "./reply-language.ts";
+import { lineHash, newestStamp } from "./wake-watch.ts";
 
 export const WAKE_MIN_MINUTES = 1;
 export const WAKE_MAX_MINUTES = 1_440;
@@ -84,6 +85,15 @@ export interface WakeWatch {
   maxMs?: number;
   /** Times it fired; a standing watch keeps counting. */
   fired?: number;
+  /** Hashes of the latest stdout's lines, and the lines new since the run
+   * before (shown when the output is cut at WATCH_OUTPUT_MAX). */
+  lineHashes?: string[];
+  newLines?: string[];
+  truncated?: boolean;
+  /** When its stdout last changed (or it was set), and when an old,
+   * unchanging output was reported. */
+  changedAt?: number;
+  staleAlertedAt?: number;
 }
 
 export interface BotWake {
@@ -397,6 +407,7 @@ export class BotAutonomy {
         lastRunAt: at,
         runs: 1,
         failures: 0,
+        changedAt: at,
         ...(input.standing ? { standing: true as const, maxMs: input.maxMinutes * this.minuteMs, ...(input.label && input.label !== STANDING_DEFAULT_LABEL ? { label: input.label } : {}) } : {}),
       },
     };
@@ -416,12 +427,27 @@ export class BotAutonomy {
 
   /** Record one run; the wake becomes due now if the watch triggered. The
    * caller decides changed/matched (it owns the matching rule). */
-  recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean; fingerprint?: string }): WatchTrigger | null {
+  recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean; fingerprint?: string; truncated?: boolean; lines?: string[] }): WatchTrigger | null {
     const watch = wake.watch;
     if (!watch || this.wakes.get(wakeKey(wake)) !== wake || watch.trigger) return null;
     watch.lastRunAt = this.now();
     watch.runs += 1;
     watch.lastOutput = result.output;
+    if (result.ok && result.lines) {
+      // what is new since the run before, past the cut the bot reads
+      const hashes = result.lines.map(lineHash);
+      if (watch.lineHashes) {
+        const seen = new Set(watch.lineHashes);
+        const fresh = result.lines.filter((_, i) => !seen.has(hashes[i]!));
+        if (fresh.length) watch.newLines = clipLines(fresh, 8_000);
+      }
+      watch.lineHashes = hashes.slice(0, 5_000);
+      watch.truncated = result.truncated === true;
+    }
+    if (result.ok && result.fingerprint && result.fingerprint !== watch.lastFingerprint) {
+      watch.changedAt = this.now();
+      delete watch.staleAlertedAt;
+    }
     let trigger: WatchTrigger | null = null;
     if (!result.ok) {
       watch.failures += 1;
@@ -450,6 +476,32 @@ export class BotAutonomy {
     }
     this.save();
     return trigger;
+  }
+
+  /** Standing watches whose output has not changed for `afterMs` and whose
+   * newest time stamp is older than `oldMs`: likely looking at the wrong
+   * page (gog's oldest-first list). Each is returned once until it changes. */
+  staleWatches(afterMs = 3 * 3_600_000, oldMs = 24 * 3_600_000): BotWake[] {
+    const at = this.now();
+    return [...this.wakes.values()].filter((wake) => {
+      const watch = wake.watch;
+      if (!watch?.standing || watch.staleAlertedAt !== undefined || watch.failures > 0) return false;
+      if (at - (watch.changedAt ?? wake.createdAt) < afterMs) return false;
+      const newest = newestStamp(watch.lastOutput ?? watch.baseline);
+      return newest !== null && at - newest > oldMs;
+    });
+  }
+
+  markWatchStaleAlerted(wake: BotWake): void {
+    if (!wake.watch) return;
+    wake.watch.staleAlertedAt = this.now();
+    this.save();
+  }
+
+  /** Other watches of this bot, in other conversations, running the same command. */
+  sameWatchElsewhere(botId: string, threadId: string, command: string): BotWake[] {
+    const norm = (text: string) => text.trim().replace(/\s+/g, " ");
+    return [...this.wakes.values()].filter((wake) => wake.botId === botId && wake.threadId !== threadId && wake.watch && norm(wake.watch.command) === norm(command));
   }
 
   /** A standing watch fired (its turn started, or could not): arm it again on
@@ -867,7 +919,22 @@ function watchLines(wake: BotWake): string[] {
     ...(watch.standing ? ["It stays armed: the server re-arms it on this output after this turn, so do not call wake_when again for it."] : []),
     `${watch.standing ? "Output it last compared against" : "Output when you set it"}:\n${clipOutput(watch.baseline)}`,
     ...(watch.lastOutput !== undefined && watch.lastOutput !== watch.baseline ? [`Latest output:\n${clipOutput(watch.lastOutput)}`] : []),
+    // the output is cut: what changed may be past the cut, so say it here
+    ...(watch.truncated && watch.newLines?.length ? [`The output is longer than what is shown above. Lines new or changed since the run before (${watch.newLines.length}):\n${watch.newLines.join("\n")}`] : []),
+    ...(watch.truncated && !watch.newLines?.length ? ["The output is longer than what is shown above: fetch it again if you need the rest."] : []),
   ];
+}
+
+/** Lines, whole, up to `max` characters in all. */
+function clipLines(lines: string[], max: number): string[] {
+  const kept: string[] = [];
+  let size = 0;
+  for (const line of lines) {
+    if (size + line.length + 1 > max) break;
+    kept.push(line);
+    size += line.length + 1;
+  }
+  return kept;
 }
 
 export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, reminder = languageReminder()): string {
@@ -898,7 +965,8 @@ export function chipText(text: string, max: number): string {
 export function watchLabel(command: string): string {
   const words = command.trim().split(/\s+/).map((word) => word.replace(/^['"]|['"]$/g, ""));
   const [program, group] = words;
-  const number = words.find((word, i) => i > 1 && /^#?\d+$/.test(word))?.replace("#", "");
+  // a number right after a flag is its value (--limit 30, -L 30), not an item
+  const number = words.find((word, i) => i > 1 && /^#?\d+$/.test(word) && !words[i - 1]!.startsWith("-"))?.replace("#", "");
   if (program === "gh") {
     if (group === "pr") return number ? `PR #${number}` : "PRs";
     if (group === "issue") return number ? `issue #${number}` : "issues";
