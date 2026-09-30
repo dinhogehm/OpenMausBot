@@ -127,6 +127,7 @@ import {
   containerExec,
   containerRuntimeStatus,
   localVmRecreatableOnDemand,
+  localVmRecreatableAfterStop,
   localVmWorkspaceExists,
   perBotLocalVmTarget,
   poolLocalVmTarget,
@@ -14060,6 +14061,18 @@ async function localVmPayload(target: LocalVmTarget) {
  * instance cap; creating past it would quietly do what the lifecycle route
  * refuses.
  */
+/** Automatic recreates of a Local VM found stopped, per target. */
+const localVmStopRecreates = new Map<string, { attempts: number; lastAt: number }>();
+
+function alertChiefAboutVm(botId: string, text: string): void {
+  const bot = store.bot(botId);
+  const chief = bot ? chiefForBot(store.bots, bot) : store.bots.find((candidate) => candidate.chiefOfStaff && !candidate.hidden);
+  const desk = chief ? chiefDeskThread(chief) : null;
+  if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
+  store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: false } });
+  autonomy.addReport(chief.id, desk, `[Alerta do servidor: VM local] ${text}`);
+}
+
 async function readyLocalVmForTurn(botId: string, target: LocalVmTarget, isCurrent = () => true) {
   localVmLifecycleBusy.add(target.key);
   // Fence this target, and the cross-target capacity decision for creates,
@@ -14077,6 +14090,30 @@ async function readyLocalVmForTurn(botId: string, target: LocalVmTarget, isCurre
     status = await containerComputerStatus(undefined, undefined, target);
     noteLocalVmSeen(target, status);
     if (!isCurrent()) return status;
+    // Stopped by the Mac's restart: recreated on its own, a couple of times
+    // with a pause between, before it becomes the person's problem.
+    if (!status.ready && localVmRecreatableAfterStop(status)) {
+      const tries = localVmStopRecreates.get(target.key) ?? { attempts: 0, lastAt: 0 };
+      if (tries.attempts < 2 && Date.now() - tries.lastAt >= 5 * 60_000) {
+        localVmStopRecreates.set(target.key, { attempts: tries.attempts + 1, lastAt: Date.now() });
+        broadcast({ kind: "computer", botId, state: "provisioning" });
+        try {
+          await containerComputerAction("remove", undefined, undefined, target);
+          status = await containerComputerAction("run", undefined, undefined, target);
+          localVmStopRecreates.delete(target.key);
+          console.log(`[local-vm] ${target.key}: recreated after it was left stopped`);
+        } catch (error) {
+          const why = error instanceof Error ? error.message : String(error);
+          console.warn(`[local-vm] ${target.key}: recreate after stop failed: ${why}`);
+          alertChiefAboutVm(botId, `a VM local de ${store.bot(botId)?.name ?? botId} estava parada depois do restart e a recriação automática falhou (tentativa ${tries.attempts + 1} de 2): ${chipText(computerErrorPt(why), 160)}. Recrie-a em Configurações do app, ou verifique o Docker.`);
+          status = await containerComputerStatus(undefined, undefined, target).catch(() => status);
+        }
+        if (status.ready) {
+          localVmIdleFor(target).touch();
+          return status;
+        }
+      }
+    }
     if (status.ready || !localVmRecreatableOnDemand(status)) return status;
     // Another creation is already mid-flight and its container is not yet
     // visible to a count, so the safe answer is the inspected status —

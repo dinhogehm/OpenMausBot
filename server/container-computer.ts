@@ -389,6 +389,22 @@ export function localVmRecreatableOnDemand(
     && status.create_supported;
 }
 
+/** A Local VM the Mac's restart left stopped: our own container, with the
+ * desktop image prepared — "cannot safely resume" is what stands between it
+ * and a turn. Recreating it (remove, then run) is what the person would do;
+ * the server may do it on its own (index.ts readyLocalVmForTurn). The new
+ * container gets today's hardened run settings whatever the old one had
+ * (a stopped container does not show its effective security anyway), and
+ * its durable folder is a host mount, so the bot's files stay. */
+export function localVmRecreatableAfterStop(status: ContainerComputerStatus): boolean {
+  return Boolean(status.runtime)
+    && status.daemonUp
+    && status.image
+    && status.container === "stopped"
+    && status.managed
+    && status.create_supported;
+}
+
 /** Whether Auto may attach this Local VM without a person choosing it: the
  * desktop is ready, or its image is prepared and the container can simply be
  * recreated after idling away. Anything else — no runtime, daemon down, image

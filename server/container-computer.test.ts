@@ -28,6 +28,7 @@ import {
   containerRuntimeStatus,
   containerRunArgs,
   dockerSecurityIsHardened,
+  localVmRecreatableAfterStop,
   localVmRecreatableOnDemand,
   localVmWorkspaceExists,
   managedImageDockerfile,
@@ -979,6 +980,13 @@ describe("localVmRecreatableOnDemand", () => {
 
     expect(status.container).toBe("stopped");
     expect(localVmRecreatableOnDemand(status)).toBe(false);
+    // …but one of ours, current and safe, left stopped by a restart may be
+    // recreated by the server on its own
+    expect(localVmRecreatableAfterStop(status)).toBe(true);
+    expect(localVmRecreatableAfterStop({ ...status, managed: false })).toBe(false);
+    expect(localVmRecreatableAfterStop({ ...status, image: false })).toBe(false);
+    expect(localVmRecreatableAfterStop({ ...status, container: "running" })).toBe(false);
+    expect(localVmRecreatableAfterStop({ ...status, daemonUp: false })).toBe(false);
   });
 
   it("does not create anything when no container runtime is installed", async () => {
