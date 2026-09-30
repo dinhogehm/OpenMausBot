@@ -119,3 +119,19 @@ describe("lastHookDecision", () => {
     expect(lastHookDecision(join(dir, "missing.log"), "/repo")).toBeNull();
   });
 });
+
+describe("stalled sessions on load", () => {
+  it("turns a running session already reported as stalled (and not moving since) into stalled", () => {
+    const path = join(dir, "cc.json");
+    const base2 = { ...base, surface: "app" as const, status: "running", createdAt: 1, lastActivityAt: 1, turns: 1, costUsd: 0, queued: [], worktree: "w" };
+    writeFileSync(path, JSON.stringify({ sessions: [
+      { ...base2, id: "stuck", progressAt: 500, stallReportedAt: 500 },
+      { ...base2, id: "moving", progressAt: 900, stallReportedAt: 500 },
+      { ...base, id: "cli-stalled", status: "stalled", createdAt: 1, lastActivityAt: 1, turns: 1, costUsd: 0, queued: [], worktree: "w" },
+    ] }));
+    const l = new CcSessionLedger({ path, now: () => 10_000 });
+    expect(l.get("stuck")).toMatchObject({ status: "stalled", stallReports: 1, stallNotifiedAt: 10_000 });
+    expect(l.get("moving")?.status).toBe("running");
+    expect(l.get("cli-stalled")?.status).toBe("failed");
+  });
+});

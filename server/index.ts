@@ -7304,7 +7304,10 @@ async function runDueWatches(): Promise<void> {
 // Only the server the desktop app runs watches this Mac's disk. Test and
 // verification servers share the same real disk and must not wake their
 // scripted Chief about it (it would start turns the tests never planned).
-const diskWatch = new DiskWatch({ paths: DESKTOP_MANAGED && !process.env.VITEST ? [join(homedir(), "Projetos"), DATA_DIR].filter((path) => existsSync(path)) : [] });
+const diskWatch = new DiskWatch({
+  paths: DESKTOP_MANAGED && !process.env.VITEST ? [join(homedir(), "Projetos"), DATA_DIR].filter((path) => existsSync(path)) : [],
+  statePath: join(DATA_DIR, "disk-watch.json"),
+});
 
 function checkDiskSpace(): void {
   const drops = diskWatch.check();
@@ -15890,7 +15893,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             ccChip(session, "mensagem na fila para o app Claude");
             return json(res, 200, { message: "Na fila: vai para a sessão no app Claude assim que o Mac estiver livre, e o servidor confere que chegou; o próximo relatório volta aqui. Encerre o turno agora." });
           }
-          if (session.status === "running") {
+          // A stalled run may still be alive: never start a second one beside it.
+          if (session.status === "running" || (session.status === "stalled" && ccProcesses.has(session.id))) {
             const position = ccLedger.enqueue(session, message);
             return json(res, 200, { message: `A sessão está no meio de um turno; sua mensagem entrou na fila (#${position}) e roda assim que este turno terminar. Encerre o turno agora.` });
           }

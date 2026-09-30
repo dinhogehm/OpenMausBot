@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { CcSessionLedger, type CcSession } from "./cc-sessions.ts";
 import type { DesktopRecord, DesktopStep } from "./claude-desktop.ts";
 import {
-  CC_ACTIVE_MS,
+  CC_STALL_MAX_REPORTS,
   CC_STALL_MS,
+  CC_STALL_REMIND_MS,
   DESKTOP_ARCHIVE_CONFIRM_MS,
   DESKTOP_ARCHIVE_MAX_TRIES,
   DESKTOP_MAX_MISSES,
@@ -280,26 +281,46 @@ describe("following turns", () => {
     expect(h.reports[0]!.text).toContain("BLOCKED");
   });
 
-  it("reports a running session with no progress once per stall", () => {
+  it("marks a session without progress stalled: reported once, no longer active, back to running on any progress", () => {
     const h = harness();
     const session = h.opened("a");
     h.advance(CC_STALL_MS - 60_000);
     watchStalledSessions(h.deps);
     expect(h.reports).toEqual([]);
+    expect(ccSessionActive(session, h.now)).toBe(true);
     h.advance(2 * 60_000);
     watchStalledSessions(h.deps);
     watchStalledSessions(h.deps);
     expect(h.reports).toHaveLength(1);
     expect(h.reports[0]!.text).toMatch(/no progress for 31 min/);
-    expect(ccSessionActive(session, h.now)).toBe(true);
-    h.advance(CC_ACTIVE_MS);
+    expect(session.status).toBe("stalled");
+    // stalled: holds neither its thread nor the Mac
     expect(ccSessionActive(session, h.now)).toBe(false);
-    // it moves again, then stalls again: a new report
+    // it moves again: running, and a later stall is a new one
     h.transcripts.set("cli-a", { text: "brief\nmore", writtenAt: h.now });
     watchStalledSessions(h.deps);
+    expect(session.status).toBe("running");
+    expect(h.chips.at(-1)?.text).toBe("voltou a mostrar progresso");
     h.advance(CC_STALL_MS + 60_000);
     watchStalledSessions(h.deps);
     expect(h.reports).toHaveLength(2);
+    expect(session.status).toBe("stalled");
+  });
+
+  it("reminds the owner every 6 h while it stays stalled, 3 times in all", () => {
+    const h = harness();
+    const session = h.opened("a");
+    h.advance(CC_STALL_MS + 60_000);
+    watchStalledSessions(h.deps);
+    for (let i = 0; i < 5; i++) {
+      h.advance(CC_STALL_REMIND_MS - 60_000);
+      watchStalledSessions(h.deps);
+      h.advance(60_000);
+      watchStalledSessions(h.deps);
+    }
+    expect(h.reports).toHaveLength(CC_STALL_MAX_REPORTS);
+    expect(h.reports[1]!.text).toContain("Reminder 2 of 3");
+    expect(session.status).toBe("stalled");
   });
 
   it("watches headless sessions by their own transcript too", () => {

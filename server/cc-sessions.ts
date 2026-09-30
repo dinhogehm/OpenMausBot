@@ -26,7 +26,10 @@ export const CC_TURN_TIMEOUT_MS = 90 * 60_000;
 export const CC_PERMISSION_MODES = ["auto", "acceptEdits", "default", "plan"] as const;
 export type CcPermissionMode = (typeof CC_PERMISSION_MODES)[number];
 
-export type CcStatus = "running" | "idle" | "failed" | "stopped" | "archived";
+/** "stalled": was running, showed no progress past the watchdog's limit and
+ * was reported. It no longer holds the Mac awake or its thread; any sign of
+ * work puts it back to "running". */
+export type CcStatus = "running" | "stalled" | "idle" | "failed" | "stopped" | "archived";
 
 export interface CcSession {
   id: string;
@@ -61,6 +64,9 @@ export interface CcSession {
   progressAt?: number;
   /** progressAt of the stall already reported, so each stall is told once. */
   stallReportedAt?: number;
+  /** When the owner was last told about this stall, and how many times. */
+  stallNotifiedAt?: number;
+  stallReports?: number;
   /** What the session said it needs when its last turn ended blocked. */
   blockedOn?: string;
 }
@@ -228,10 +234,17 @@ export class CcSessionLedger {
       for (const session of raw.sessions ?? []) {
         if (!session || typeof session.id !== "string") continue;
         // A run cannot survive a server restart: it was lost mid-turn.
-        if (session.status === "running" && session.surface !== "app") {
+        if ((session.status === "running" || session.status === "stalled") && session.surface !== "app") {
           session.status = "failed";
           session.lastError = "the server restarted (the computer was shut down or the app quit) while this turn was running; resume it with cc_session_send";
           this.interruptedOnLoad.push(session);
+        }
+        // Reported as stalled before the "stalled" status existed, and no
+        // progress since: it is stalled, already told once.
+        if (session.status === "running" && session.stallReportedAt !== undefined && session.stallReportedAt === session.progressAt) {
+          session.status = "stalled";
+          session.stallReports = session.stallReports ?? 1;
+          session.stallNotifiedAt = session.stallNotifiedAt ?? this.now();
         }
         session.queued = Array.isArray(session.queued) ? session.queued : [];
         this.sessions.set(session.id, session);

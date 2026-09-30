@@ -40,8 +40,12 @@ export const DESKTOP_BACKOFF_MAX_MS = 10 * 60_000;
 export const DESKTOP_ARCHIVE_CONFIRM_MS = 2 * 60_000;
 /** ...or it is clicked again, up to this many times in all. */
 export const DESKTOP_ARCHIVE_MAX_TRIES = 3;
-/** A running session with no sign of work for this long is reported. */
+/** A running session with no sign of work for this long is reported and marked stalled. */
 export const CC_STALL_MS = 30 * 60_000;
+/** While it stays stalled, the owner is reminded this often... */
+export const CC_STALL_REMIND_MS = 6 * 3_600_000;
+/** ...this many times in all (the first report included). */
+export const CC_STALL_MAX_REPORTS = 3;
 /** A running session counts as "someone else is working on it" only this long after its last progress. */
 export const CC_ACTIVE_MS = 45 * 60_000;
 
@@ -337,11 +341,14 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
   }
 }
 
-/** Running sessions (app or CLI) with no sign of work for a while: tell the owner, once per stall. */
+/** Running sessions (app or CLI) with no sign of work: report them and
+ * mark them stalled (they stop holding the Mac and their thread), remind the
+ * owner every few hours a few times, and put them back to running on any
+ * sign of work. */
 export function watchStalledSessions(deps: DesktopWorkDeps): void {
   const now = deps.now();
   for (const session of deps.ledger.all()) {
-    if (session.status !== "running") continue;
+    if (session.status !== "running" && session.status !== "stalled") continue;
     // Waiting for an idle Mac to open it is not a stall of the session.
     if (session.surface === "app" && (session.desktop?.pending?.kind === "create" || !session.desktop?.localId)) continue;
     let progress = Math.max(session.progressAt ?? 0, session.lastActivityAt);
@@ -352,11 +359,34 @@ export function watchStalledSessions(deps: DesktopWorkDeps): void {
     const written = transcript ? deps.writtenAt(transcript) : null;
     if (written) progress = Math.max(progress, written);
     session.progressAt = progress;
-    if (now - progress <= CC_STALL_MS || session.stallReportedAt === progress) continue;
+    if (session.status === "stalled") {
+      if (session.stallReportedAt !== undefined && progress > session.stallReportedAt) {
+        session.status = "running";
+        delete session.stallReportedAt;
+        delete session.stallNotifiedAt;
+        delete session.stallReports;
+        deps.ledger.save();
+        deps.chip(session, "voltou a mostrar progresso");
+        continue;
+      }
+      const reports = session.stallReports ?? 1;
+      if (reports >= CC_STALL_MAX_REPORTS || now - (session.stallNotifiedAt ?? 0) < CC_STALL_REMIND_MS) continue;
+      session.stallReports = reports + 1;
+      session.stallNotifiedAt = now;
+      deps.ledger.save();
+      const minutes = Math.round((now - progress) / 60_000);
+      deps.chip(session, `ainda parada, sem progresso há ${minutes} min (aviso ${reports + 1} de ${CC_STALL_MAX_REPORTS})`, false);
+      deps.report(session, `${ccStallReport(session, minutes)}\n(Reminder ${reports + 1} of ${CC_STALL_MAX_REPORTS}; after the last one you are not reminded again.)`);
+      continue;
+    }
+    if (now - progress <= CC_STALL_MS) continue;
+    session.status = "stalled";
     session.stallReportedAt = progress;
+    session.stallNotifiedAt = now;
+    session.stallReports = 1;
     deps.ledger.save();
     const minutes = Math.round((now - progress) / 60_000);
-    deps.chip(session, `no progress for ${minutes} min`, false);
+    deps.chip(session, `sem progresso há ${minutes} min — marcada como parada`, false);
     deps.report(session, ccStallReport(session, minutes));
   }
 }
