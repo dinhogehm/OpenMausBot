@@ -501,6 +501,41 @@ export function lastHookDecision(logPath: string, sessionId: string, maxBytes = 
   }
 }
 
+/** The command the review hook last denied (or asked about) for a session,
+ * from its log line's input; `truncated` when the log cut it short. */
+export function lastHookBlock(logPath: string, sessionId: string, maxBytes = 256 * 1024): { command: string; truncated: boolean; cwd?: string; at: number } | null {
+  if (!sessionId) return null;
+  let fd: number | null = null;
+  try {
+    const size = statSync(logPath).size;
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    fd = openSync(logPath, "r");
+    readSync(fd, buffer, 0, length, size - length);
+    const needle = `"session":"${sessionId}"`;
+    const line = buffer.toString("utf8").split("\n").filter((entry) => entry.includes(needle) && /"outcome"\s*:\s*"(deny|ask|block)/i.test(entry)).at(-1);
+    if (!line) return null;
+    const entry = JSON.parse(line) as { at?: string; input?: string; cwd?: string };
+    const input = String(entry.input ?? "");
+    let command = "";
+    let truncated = false;
+    try {
+      command = String((JSON.parse(input) as { command?: unknown }).command ?? "");
+    } catch {
+      // the log keeps a prefix of the input: read the command as far as it goes
+      const raw = /"command"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(input)?.[1] ?? "";
+      try { command = JSON.parse(`"${raw.replace(/\\$/, "")}"`) as string; } catch { command = raw; }
+      truncated = true;
+    }
+    if (!command.trim()) return null;
+    return { command, truncated, ...(entry.cwd ? { cwd: entry.cwd } : {}), at: Date.parse(entry.at ?? "") || 0 };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
 /** What the owner hears about queued messages held back for their age. */
 export function ccHeldQueueReport(session: CcSession, held: CcQueued[], now: number): string {
   const age = (at: number) => (at ? `${Math.round((now - at) / 3_600_000)}h` : "age unknown");

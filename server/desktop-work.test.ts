@@ -16,6 +16,8 @@ import {
   desktopBriefText,
   issueNumber,
   followDesktopSessions,
+  liveSessionForIssue,
+  reviveScreenFailures,
   pickDesktopPending,
   runDesktopWork,
   watchStalledSessions,
@@ -465,6 +467,25 @@ describe("round 3: screen failures, questions, old queues, names", () => {
     expect(session.status).toBe("running");
   });
 
+  it("says the hook judges a blocked command again, and hands over the exact command to run by hand", () => {
+    const h = harness();
+    h.opened("a");
+    h.deps.hookBlock = () => ({ command: 'gh issue comment 9298 --body "pronto"', truncated: false, cwd: WORKTREE, at: h.now });
+    h.transcripts.set("cli-a", { text: "brief", writtenAt: h.now, question: { id: "tu1", text: "O hook bloqueou o gh issue comment. Posso publicar?" } });
+    h.advance(2 * 60_000 + 1_000);
+    followDesktopSessions(h.deps);
+    const text = h.reports[0]!.text;
+    expect(text).toContain("the hook judges the command again on every try");
+    expect(text).toContain(`  cd ${WORKTREE}\n  gh issue comment 9298 --body "pronto"`);
+    // without a block on record, the rule is still said
+    const plain = harness();
+    plain.opened("a");
+    plain.transcripts.set("cli-a", { text: "brief", writtenAt: plain.now, question: { id: "tu1", text: "Posso seguir?" } });
+    plain.advance(2 * 60_000 + 1_000);
+    followDesktopSessions(plain.deps);
+    expect(plain.reports[0]!.text).toContain("answering in the app does not get it past the hook");
+  });
+
   it("holds back a queued order older than 2h at reconciliation and asks the owner", () => {
     const h = harness();
     const session = h.opened("a", { completedTurns: 1 });
@@ -510,16 +531,89 @@ describe("round 3: screen failures, questions, old queues, names", () => {
     followDesktopSessions(h.deps);
     expect(session.desktop!.pending).toMatchObject({ kind: "rename", text: "#9311 Chat ticket agent/client labels bug" });
     session.queued.push({ text: "siga com o PR", at: h.now });
+    h.transcripts.get("cli-a")!.ended = true;
     await h.tick();
     expect(h.steps.rename).toHaveBeenCalled();
+    // clicked, not yet confirmed: it counts once the app's record shows the title
+    expect(h.chips.some((chip) => chip.text.startsWith("renomeada"))).toBe(false);
+    h.records.get(LOCAL)!.title = "#9311 Chat ticket agent/client labels bug";
+    followDesktopSessions(h.deps);
+    expect(h.chips.some((chip) => chip.text.startsWith("renomeada no app: #9311"))).toBe(true);
     followDesktopSessions(h.deps);
     expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "siga com o PR" });
     followDesktopSessions(h.deps);
     expect(h.steps.rename).toHaveBeenCalledTimes(1);
   });
 
+  it("never renames mid-turn, and reports a rename the app's record never showed", async () => {
+    const h = harness();
+    const session = h.opened("a", { title: "Chat ticket agent/client labels bug" });
+    session.desktop!.issue = "9311";
+    session.status = "idle";
+    followDesktopSessions(h.deps);
+    session.status = "running";
+    await h.tick();
+    expect(h.steps.rename).not.toHaveBeenCalled();
+    // idle by the ledger, but the transcript's turn is still going
+    session.status = "idle";
+    await h.tick();
+    expect(h.steps.rename).not.toHaveBeenCalled();
+    h.transcripts.get("cli-a")!.ended = true;
+    h.advance(61_000);
+    await h.tick();
+    expect(h.steps.rename).toHaveBeenCalledTimes(1);
+    h.advance(DESKTOP_ARCHIVE_CONFIRM_MS + 1);
+    followDesktopSessions(h.deps);
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(h.reports.at(-1)!.text).toContain('still says "Chat ticket agent/client labels bug"');
+    expect(h.chips.some((chip) => chip.text.startsWith("renomeada"))).toBe(false);
+  });
+
   it("never numbers the brief twice", () => {
     expect(desktopBriefText("9311 Chat no ticket mostra Agente e Cliente", "OMBX", "x").split("\n")[0]).toBe("#9311 Chat no ticket mostra Agente e Cliente");
     expect(issueNumber("9307 9306 Atendimento reaberto")).toBe("9307");
+  });
+});
+
+describe("old failures and duplicates", () => {
+  it("puts sessions failed over a screen step back to idle on load, with a chip; real failures stay", () => {
+    const h = harness();
+    const screen = h.opened("a");
+    screen.status = "failed";
+    screen.lastError = "a message was typed into the Claude app 3 times but never reached the session";
+    const outside = h.opened("b");
+    outside.status = "failed";
+    outside.lastError = "the session opened outside a git worktree (in /repo)";
+    const never = h.appSession("c");
+    never.status = "failed";
+    never.lastError = "could not open the session after 5 tries with the screen unlocked";
+    const gone = h.appSession("d", { localId: "local_gone" });
+    gone.status = "failed";
+    gone.lastError = "could not send the message: the Claude app lost focus";
+    expect(reviveScreenFailures(h.deps).map((session) => session.id)).toEqual(["a"]);
+    expect(screen.status).toBe("idle");
+    expect(screen.lastError).toBeUndefined();
+    expect(h.chips.find((chip) => chip.id === "a")!.text).toContain("voltou a aceitar mensagens");
+    expect([outside.status, never.status, gone.status]).toEqual(["failed", "failed", "failed"]);
+  });
+
+  it("finds the live session of an issue, by its number or its title, in the same repository only", () => {
+    const h = harness();
+    const live = h.opened("a");
+    live.desktop!.issue = "9311";
+    const titled = h.appSession("b");
+    titled.title = "#9307 Atendimento reaberto";
+    titled.desktop!.localId = LOCAL;
+    const archived = h.appSession("c", { issue: "9298" });
+    archived.status = "archived";
+    const neverOpened = h.appSession("d", { issue: "9300" });
+    neverOpened.status = "failed";
+    const repo = "/Users/o/Projetos/nuria-platform";
+    expect(liveSessionForIssue(h.ledger.all(), repo, "9311")?.id).toBe("a");
+    expect(liveSessionForIssue(h.ledger.all(), repo, "9307")?.id).toBe("b");
+    expect(liveSessionForIssue(h.ledger.all(), repo, "9298")).toBeNull();
+    expect(liveSessionForIssue(h.ledger.all(), repo, "9300")).toBeNull();
+    expect(liveSessionForIssue(h.ledger.all(), "/other", "9311")).toBeNull();
+    expect(liveSessionForIssue(h.ledger.all(), repo, undefined)).toBeNull();
   });
 });

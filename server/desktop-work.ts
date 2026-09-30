@@ -50,6 +50,8 @@ export const DESKTOP_BACKOFF_MAX_MS = 10 * 60_000;
 export const DESKTOP_ARCHIVE_CONFIRM_MS = 2 * 60_000;
 /** ...or it is clicked again, up to this many times in all. */
 export const DESKTOP_ARCHIVE_MAX_TRIES = 3;
+/** After a rename's Return, how long the app's record has to show the new title. */
+export const DESKTOP_RENAME_CONFIRM_MS = 2 * 60_000;
 /** A running session with no sign of work for this long is reported and marked stalled. */
 export const CC_STALL_MS = 30 * 60_000;
 /** While it stays stalled, the owner is reminded this often... */
@@ -79,6 +81,8 @@ export interface DesktopWorkDeps {
   report: (session: CcSession, text: string) => void;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
   hookDecision?: (sessionId: string) => string | null;
+  /** The command the review hook last denied or asked about for a session id. */
+  hookBlock?: (sessionId: string) => HookBlock | null;
   /** Does this folder exist (default: the real filesystem)? */
   pathExists?: (path: string) => boolean;
   /** The app confirmed the session archived (remove its worktree if asked). */
@@ -119,10 +123,12 @@ export function desktopBackoffMs(attempts: number): number {
 const liveApp = (session: CcSession) =>
   session.surface === "app" && Boolean(session.desktop) && session.status !== "archived" && session.status !== "stopped";
 
-/** The oldest screen action that may run now; one stuck action never blocks the rest. */
+/** The oldest screen action that may run now; one stuck action never blocks
+ * the rest. A rename waits until the session is idle: never mid-turn. */
 export function pickDesktopPending(sessions: CcSession[], now: number): CcSession | null {
   return sessions
     .filter((session) => liveApp(session) && session.desktop!.pending && !session.desktop!.pending!.verifyUntil && (session.desktop!.pending!.nextAttemptAt ?? 0) <= now)
+    .filter((session) => session.desktop!.pending!.kind !== "rename" || session.status === "idle")
     .sort((a, b) => a.desktop!.pending!.since - b.desktop!.pending!.since)[0] ?? null;
 }
 
@@ -131,6 +137,27 @@ export function pickDesktopPending(sessions: CcSession[], now: number): CcSessio
  * app's Claude Code session id for an app one. */
 export function hookSessionId(session: CcSession): string | undefined {
   return session.surface === "app" ? session.desktop?.cliSessionId : session.id;
+}
+
+export type HookBlock = { command: string; truncated: boolean; cwd?: string; at: number };
+
+/** For the owner, when an app session stopped on a question. Answering in
+ * the app does not get a blocked command past the review hook — the hook
+ * judges the command again on every try — so a question about one comes
+ * with the exact command for the person to run by hand. */
+export function openQuestionReport(session: Pick<CcSession, "title" | "id" | "cwd">, localId: string, question: string, block: HookBlock | null): string {
+  return [
+    `Claude Code session "${session.title}" (${session.id}) asked a question in the Claude app and is stopped on it — it reads nothing else (queued messages included) until someone answers there. Only the person can answer, in the app: claude://code/continue?session=${localId}`,
+    `Its question, verbatim:\n${question}`,
+    block
+      ? [
+        "The review hook blocked this command in that session. Answering \"yes\" in the app does not let it through: the hook judges the command again on every try. If it must run, the person runs it by hand, exactly:",
+        `  cd ${block.cwd ?? session.cwd ?? "<the session's worktree>"}`,
+        ...block.command.split("\n").map((line) => `  ${line}`),
+        ...(block.truncated ? ["(The hook's log cut the command short: copy the rest from the session in the app.)"] : []),
+      ].join("\n")
+      : "If it asks to run a command the review hook blocked: answering in the app does not get it past the hook — the hook judges the command again on every try. The person runs that command by hand, exactly as the session shows it.",
+  ].join("\n");
 }
 
 export function reportFor(deps: DesktopWorkDeps, session: CcSession): string {
@@ -253,6 +280,20 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       deps.ledger.save();
       deps.chip(session, "the app did not confirm the archive; trying again", false);
     }
+    // A rename counts only once the app's record shows the new title.
+    const renaming = desktop.pending?.kind === "rename" && desktop.pending.verifyUntil ? desktop.pending : null;
+    if (renaming) {
+      if (record.title?.trim() === renaming.text.trim()) {
+        delete desktop.pending;
+        deps.ledger.save();
+        deps.chip(session, `renomeada no app: ${renaming.text.slice(0, 80)}`);
+      } else if (now > renaming.verifyUntil!) {
+        delete desktop.pending;
+        deps.ledger.save();
+        deps.chip(session, "o app não mostra o novo título — renomear não foi confirmado", false);
+        deps.report(session, `Claude Code session "${session.title}" (${session.id}): the rename to "${renaming.text}" was tried in the Claude app, but the app's record still says "${record.title ?? "(no title)"}". It is not tried again; the person may rename it by hand (claude://code/continue?session=${desktop.localId}).`);
+      }
+    }
     // The owner wants every session named "#NNNN …" in the app, and the app
     // titles them itself: rename it once, the way a person would.
     if (desktop.issue && !desktop.renameTried && !desktop.pending && record.title && !record.title.includes(desktop.issue)) {
@@ -296,7 +337,10 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       desktop.questionReported = question.id;
       deps.ledger.save();
       deps.chip(session, `a sessão fez uma pergunta no app e está parada nela: ${question.text.split("\n")[0]!.slice(0, 100)}`, false);
-      deps.report(session, `Claude Code session "${session.title}" (${session.id}) asked a question in the Claude app and is stopped on it — it reads nothing else (queued messages included) until someone answers there. Only the person can answer, in the app: claude://code/continue?session=${desktop.localId}\nIts question, verbatim:\n${question.text}`);
+      // the hook's block counts only if it came in this turn, around the question
+      const block = desktop.cliSessionId ? deps.hookBlock?.(desktop.cliSessionId) ?? null : null;
+      const recent = block && block.at >= (desktop.lastSend?.at ?? desktop.sentAt ?? 0) - 60_000 ? block : null;
+      deps.report(session, openQuestionReport(session, desktop.localId!, question.text, recent));
     }
     const turns = record.completedTurns ?? 0;
     // Marked running, yet nothing is on its way and the app's last turn has
@@ -407,6 +451,14 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       return;
     }
   }
+  // Status can lag the app: a rename also waits for the transcript's turn to end.
+  if (pending.kind === "rename" && desktop.cliSessionId) {
+    const transcript = deps.transcriptOf(desktop.cliSessionId);
+    if (transcript !== null && !deps.turnEnded(transcript)) {
+      pending.nextAttemptAt = now + 60_000;
+      return;
+    }
+  }
   if (pending.kind !== "create" && !desktop.localId) {
     failDesktopSession(deps, next, "the session never opened in the Claude app, so nothing can be done to it there; start a new one");
     return;
@@ -457,9 +509,9 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
         return;
       }
       if (pending.kind === "rename") {
-        delete desktop.pending;
+        // Only the app's record says it worked; followDesktopSessions checks it.
+        pending.verifyUntil = at + DESKTOP_RENAME_CONFIRM_MS;
         deps.ledger.save();
-        deps.chip(next, `renomeada no app: ${pending.text.slice(0, 80)}`);
         return;
       }
       delete desktop.pending;
@@ -569,4 +621,42 @@ export function watchStalledSessions(deps: DesktopWorkDeps): void {
     deps.chip(session, `sem progresso há ${minutes} min — marcada como parada`, false);
     deps.report(session, ccStallReport(session, minutes, facts()));
   }
+}
+
+/** Failures that came from the screen (a step on the Claude app that could
+ * not be done), not from the session itself. */
+const SCREEN_FAILURE = /Claude app|screen|typed into|never reached|never idle|sidebar|menu|New Session|did not appear|stayed in the field/i;
+
+/** On load: app sessions an older build failed for a screen step are alive
+ * in the app and can take messages. Put them back to idle, with a chip. A
+ * session that never opened, or opened outside a worktree, stays failed. */
+export function reviveScreenFailures(deps: Pick<DesktopWorkDeps, "ledger" | "readRecord" | "chip">): CcSession[] {
+  const revived: CcSession[] = [];
+  for (const session of deps.ledger.all()) {
+    const desktop = session.desktop;
+    if (session.surface !== "app" || session.status !== "failed" || !desktop?.localId) continue;
+    const reason = session.lastError ?? "";
+    if (!SCREEN_FAILURE.test(reason) || /outside a git worktree/i.test(reason)) continue;
+    const record = deps.readRecord(desktop.localId);
+    if (!record || record.isArchived) continue;
+    session.status = "idle";
+    delete session.lastError;
+    delete desktop.pending;
+    delete desktop.sent;
+    revived.push(session);
+    deps.chip(session, `voltou a aceitar mensagens: a falha era de um passo na tela, não da sessão (${reason.slice(0, 80)})`);
+  }
+  if (revived.length) deps.ledger.save();
+  return revived;
+}
+
+/** A session still alive for the same issue in the same repository: a new
+ * one would duplicate the work, so the order goes to that one instead. */
+export function liveSessionForIssue(sessions: readonly CcSession[], repo: string, issue: string | undefined): CcSession | null {
+  if (!issue) return null;
+  return sessions.find((session) => session.repo === repo
+    && session.status !== "archived" && session.status !== "stopped"
+    // a create that never opened is not a session to send to
+    && !(session.status === "failed" && session.surface === "app" && !session.desktop?.localId)
+    && (session.desktop?.issue ?? issueNumber(session.title)) === issue) ?? null;
 }

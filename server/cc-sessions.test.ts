@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccHeldQueueReport, repoCorridor, repoPackageManager, useRepoScripts, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccHeldQueueReport, repoCorridor, repoPackageManager, useRepoScripts, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -118,6 +118,18 @@ describe("lastHookDecision", () => {
     expect(lastHookDecision(log, "79326d3c")).toContain('"outcome":"pass"');
     expect(lastHookDecision(log, "nope")).toBeNull();
     expect(lastHookDecision(join(dir, "missing.log"), "561eb60e")).toBeNull();
+  });
+  it("reads the exact command the hook blocked, even when the log cut its input short", () => {
+    const log = join(dir, "dual-decisions.log");
+    writeFileSync(log, [
+      JSON.stringify({ at: "2026-09-30T19:00:00Z", session: "s1", tool: "Bash", outcome: "deny", cwd: "/repo/.claude/worktrees/fix-9298", input: JSON.stringify({ command: "gh issue comment 9298 --body \"pronto\"" }) }),
+      JSON.stringify({ at: "2026-09-30T19:01:00Z", session: "s2", tool: "Bash", outcome: "ask", input: `{"command":"npm run pr:merge -- --pr 9313 --merge --receipt .local-ci/runs/abc/rec` }),
+      JSON.stringify({ at: "2026-09-30T19:02:00Z", session: "s1", tool: "Bash", outcome: "pass", input: JSON.stringify({ command: "ls" }) }),
+      "",
+    ].join("\n"));
+    expect(lastHookBlock(log, "s1")).toEqual({ command: 'gh issue comment 9298 --body "pronto"', truncated: false, cwd: "/repo/.claude/worktrees/fix-9298", at: Date.parse("2026-09-30T19:00:00Z") });
+    expect(lastHookBlock(log, "s2")).toMatchObject({ command: "npm run pr:merge -- --pr 9313 --merge --receipt .local-ci/runs/abc/rec", truncated: true });
+    expect(lastHookBlock(log, "s3")).toBeNull();
   });
 });
 

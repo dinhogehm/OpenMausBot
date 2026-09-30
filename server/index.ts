@@ -266,6 +266,7 @@ import {
   ccReportForOwner,
   ccSessionLine,
   ccTurnArgs,
+  lastHookBlock,
   lastHookDecision,
   parseCcStartInput,
   repoCorridor,
@@ -295,6 +296,8 @@ import {
   ccSessionActive,
   desktopBriefText,
   issueNumber,
+  liveSessionForIssue,
+  reviveScreenFailures,
   reportFor as desktopReportFor,
   takeFreshQueued,
   runDesktopWork as runDesktopWorkFlow,
@@ -7670,12 +7673,17 @@ const desktopWork: DesktopWorkDeps = {
   chip: ccChip,
   report: ccReport,
   hookDecision: (sessionId) => lastHookDecision(DUAL_DECISIONS_LOG, sessionId),
+  hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
   onArchived: (session) => {
     if (!session.desktop?.removeWorktree) return;
     const note = removeSessionWorktree(session);
     if (note) ccChip(session, note, !note.startsWith("A worktree foi mantida"));
   },
 };
+
+// App sessions an older build failed over a screen step are alive in the
+// app: back to idle on load, so they take messages again.
+if (process.platform === "darwin") reviveScreenFailures(desktopWork);
 
 /** `git worktree remove` without --force: a worktree with uncommitted
  * changes is kept. Only a session's own .claude/worktrees folder. Returns
@@ -16097,6 +16105,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (action === "start") {
           const input = parseCcStartInput(body, ccIsGitRepo);
           if (!input.ok) return json(res, 400, { error: input.error });
+          // One live session per issue: a second would redo the same work.
+          const duplicate = liveSessionForIssue(ccLedger.all(), input.repo, issueNumber(input.title, input.brief));
+          if (duplicate) {
+            const mine = duplicate.ownerBotId === bot.id;
+            return json(res, 409, { error: `já existe uma sessão viva para a issue #${issueNumber(input.title, input.brief)} em ${basename(input.repo)}: ${duplicate.id} ("${duplicate.title}", ${duplicate.status})${mine ? "" : `, de outro bot (${store.bot(duplicate.ownerBotId)?.name ?? duplicate.ownerBotId})`}. Não abri outra. ${mine ? `Mande a nova instrução para ela com cc_session_send (session_id ${duplicate.id})` : "Peça ao dono dela para mandar a instrução"}; se ela não serve mais, arquive com cc_session_archive e comece de novo.` });
+          }
           // The repository's own commands (npm run …), never a guessed pnpm.
           const scripts = useRepoScripts(input.brief, repoPackageManager(input.repo));
           input.brief = scripts.text;
