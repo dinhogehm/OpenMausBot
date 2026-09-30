@@ -129,6 +129,17 @@ describe("createDesktopSession", () => {
     expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("key"))).toBe(false);
   });
 
+  it("goes on in the empty new session an earlier try already opened, without New Session again", async () => {
+    const empty = [{ text: "Bem-vindo de volta, Osvaldo", y: 120 }, { text: "Local", y: 720 }, { text: "nuria-platform", x: 900, y: 720 }, { text: "main", x: 1_100, y: 720 }, { text: "worktree", x: 1_200, y: 720 }, { text: "Descreva uma tarefa ou faça uma pergunta", y: 780 }];
+    const app = fakeApp({ screens: [empty] });
+    expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "#9311 brief" })).toEqual({ ok: true });
+    expect(app.actions).toEqual(["activate", "click 620,788", "paste(all) #9311 brief", `type  ${DESKTOP_BRIEF_NOTE}`, "key 36"]);
+    // an empty session in another folder is not ours to fill
+    const other = fakeApp({ screens: [empty.map((line) => line.text === "nuria-platform" ? { ...line, text: "soph-ia" } : line), REPO_SCREEN] });
+    await createDesktopSession(other.driver, { repoName: "nuria-platform", text: "x" });
+    expect(other.actions[1]).toBe("menu new session");
+  });
+
   it("does not take the repository name from the sidebar", async () => {
     const app = fakeApp({ screens: [OPEN_SESSION, [{ text: "nuria-platform", x: 100 }, "soph-ia", "worktree"]] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x" })).toMatchObject({ ok: false, miss: true });
@@ -397,10 +408,31 @@ describe("the session's own menu, in its header", () => {
     expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 520,65", "click 620,148"]);
   });
 
-  it("renames it \"#NNNN …\" from the same menu", async () => {
-    const app = fakeApp({ screens: [[header], [header, { text: "Renomear", x: 520, y: 110 }]] });
+  const composer = { text: "Digite / para comandos", x: 547, y: 875 };
+  const field = { text: "Fila errada ao criar ticket", x: 520, y: 57 };
+  const renamed = { text: "#9305 Fila errada ao criar ticket", x: 520, y: 57 };
+
+  it("renames it \"#NNNN …\" from the same menu once the field is open, and confirms only what shows there", async () => {
+    const app = fakeApp({ screens: [[header, composer], [header, { text: "Renomear", x: 520, y: 110 }, composer], [field, composer], [renamed, composer]] });
     expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket" })).toEqual({ ok: true });
     expect(app.actions.slice(-3)).toEqual(["click 620,118", "paste(all) #9305 Fila errada ao criar ticket", "key 36"]);
+  });
+
+  it("types nothing when the rename field did not open (the menu stays, or the title is gone)", async () => {
+    const menu = [header, { text: "Renomear", x: 520, y: 110 }, composer];
+    for (const after of [menu, [composer], [header]]) {
+      const app = fakeApp({ screens: [[header, composer], menu, after] });
+      expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 x" })).toMatchObject({ ok: false, retry: false, reason: expect.stringContaining("did not open") });
+      expect(app.actions.some((action) => action.startsWith("paste") || action === "key 36")).toBe(false);
+    }
+  });
+
+  it("never sends the title as a message: pasted into the message field, it is cleared, and Return is never pressed", async () => {
+    const intoComposer = [header, { text: "#9305 Fila errada ao criar ticket", x: 547, y: 875 }];
+    const app = fakeApp({ screens: [[header, composer], [header, { text: "Renomear", x: 520, y: 110 }, composer], [field, composer], intoComposer] });
+    expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket" })).toMatchObject({ ok: false, retry: false, reason: expect.stringContaining("cleared and not sent") });
+    expect(app.actions).not.toContain("key 36");
+    expect(app.actions.slice(-2)).toEqual(["key 0+cmd", "key 51"]);
   });
 
   it("falls back to the sidebar when the header menu has no such item", async () => {
@@ -432,6 +464,10 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     write("local_a", { createdAt: 1, cwd: "/Users/o/Projetos/OpenMausBot" });
     write("local_b", { createdAt: 5, cwd: "/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f" });
     write("local_c", { createdAt: 3, cwd: "/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", isArchived: true });
+    expect(lastAppRepo(root)).toBe("/Users/o/Projetos/nuria-platform");
+    // a scheduled run and a scratch session opened later do not move the folder New Session uses
+    write("local_d", { createdAt: 7, cwd: "/Users/o/Projetos/OpenMausBot", scheduledTaskId: "relatorio-nightly" });
+    write("local_e", { createdAt: 8, cwd: "/Users/o/Library/Application Support/Claude/scratch-workspaces/a/b/scratch-2026-09-29-80c636" });
     expect(lastAppRepo(root)).toBe("/Users/o/Projetos/nuria-platform");
     expect(recordsUsingFolder("/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", "local_c", root).map((record) => record.sessionId)).toEqual(["local_b"]);
     expect(recordsUsingFolder("/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", "local_b", root)).toEqual([]);

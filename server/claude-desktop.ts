@@ -70,6 +70,10 @@ const SIDEBAR_MAX_X = 450;
 const HUMAN_SLACK_MS = 500;
 /** The empty message field's placeholder, the whole OCR line and nothing else. */
 const COMPOSER_PLACEHOLDER = /^(Digite \/ para comandos|Type \/ for commands|Responder\b.*|Reply\b.*)$/i;
+/** The field of a new, empty session ("Descreva uma tarefa ou faça uma pergunta"). */
+const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task)\b/i;
+const BACKSPACE = 51;
+const KEY_A = 0;
 
 export function parseOcr(text: string): OcrLine[] {
   const lines: OcrLine[] = [];
@@ -185,7 +189,7 @@ function seenText(lines: OcrLine[], max = 8): string {
  * line, not the whole line — OCR reads "nuria-platform main" as one line. */
 export function showsFolder(lines: OcrLine[], repoName: string): boolean {
   const wanted = repoName.toLowerCase();
-  return lines.some((line) => line.text.toLowerCase().split(/\s+/).some((word) => word.replace(/^[(\[•·"']+|[)\],;:"'•·]+$/g, "") === wanted));
+  return lines.some((line) => line.text.toLowerCase().split(/\s+/).some((word) => word.replace(/^[([•·"']+|[)\],;:"'•·]+$/g, "") === wanted));
 }
 
 /** What OCR should show of `text` once it is in the field: its first words. */
@@ -202,6 +206,16 @@ function showsPrefix(lines: OcrLine[], prefix: string): boolean {
   });
 }
 
+/** An empty new session in `repoName` already on screen (a create that
+ * stopped right after New Session): its own field, the folder chip and the
+ * worktree option near the bottom, and no conversation above. */
+export function emptyNewSession(lines: OcrLine[], size: { h: number }, repoName: string): OcrLine | null {
+  const bottom = lines.filter((line) => line.y > size.h * 0.55);
+  const field = bottom.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+  if (!field || !showsFolder(bottom, repoName) || !findLine(bottom, /worktree/i)) return null;
+  return field;
+}
+
 /**
  * New session in the Claude app for `repoName`, brief pasted and sent.
  * The app opens a new session in the last folder used; if that is not the
@@ -215,6 +229,16 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     if (stop) return stop;
     const size = await driver.screenSize();
     const before = mainArea(await driver.ocr());
+    // An earlier try already opened the new session and stopped there: go
+    // on in it (New Session again would leave the same screen, read as a miss).
+    const open = emptyNewSession(before, size, input.repoName);
+    if (open) {
+      stop = await guard(screen, "empty session field");
+      if (stop) return stop;
+      await act(screen, () => driver.click(open.x + 20, open.y + open.h / 2));
+      await driver.sleep(300);
+      return typeBrief(screen, input.text);
+    }
     await act(screen, () => driver.menuNewSession());
     await driver.sleep(2_500);
     stop = await guard(screen, "new session");
@@ -232,21 +256,27 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       return { ok: false, reason: `the new session did not open in ${input.repoName} (the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     }
     if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
-    stop = await guard(screen, "paste");
-    if (stop) return stop;
-    await act(screen, () => driver.paste(input.text, true));
-    await driver.sleep(500);
-    stop = await guard(screen, "note");
-    if (stop) return stop;
-    // Typed, not pasted: the app folds consecutive pastes into one pasted
-    // block, and the session must see these words as the user's own.
-    await act(screen, () => driver.typeText(` ${DESKTOP_BRIEF_NOTE}`));
-    await driver.sleep(300);
-    stop = await guard(screen, "send");
-    if (stop) return stop;
-    await act(screen, () => driver.key(RETURN));
-    return { ok: true };
+    return typeBrief(screen, input.text);
   });
+}
+
+/** Paste the brief into the new session's field, type the note, send. */
+async function typeBrief(screen: Screen, text: string): Promise<DesktopStep> {
+  const { driver } = screen;
+  let stop = await guard(screen, "paste");
+  if (stop) return stop;
+  await act(screen, () => driver.paste(text, true));
+  await driver.sleep(500);
+  stop = await guard(screen, "note");
+  if (stop) return stop;
+  // Typed, not pasted: the app folds consecutive pastes into one pasted
+  // block, and the session must see these words as the user's own.
+  await act(screen, () => driver.typeText(` ${DESKTOP_BRIEF_NOTE}`));
+  await driver.sleep(300);
+  stop = await guard(screen, "send");
+  if (stop) return stop;
+  await act(screen, () => driver.key(RETURN));
+  return { ok: true };
 }
 
 /**
@@ -397,16 +427,44 @@ export async function archiveDesktopSession(driver: DesktopDriver, input: { loca
   return sessionMenuAction(driver, input, ARCHIVE_ITEMS, "archive");
 }
 
-/** Rename a session in the app ("#9311 Chat no ticket…"), from its own menu. */
+/** Rename a session in the app ("#9311 Chat no ticket…"), from its own menu.
+ * Nothing is pasted unless the menu closed and the title is still on show
+ * in the upper half (the edit field) with the message field untouched below;
+ * Return is pressed only when the new title shows up there and the message
+ * field is still empty — otherwise the title would go to the session as a
+ * message. What was pasted where it should not be is cleared, and the step
+ * is not retried. Success here is only a click: the caller re-reads the
+ * app's record for the new title. */
 export async function renameDesktopSession(driver: DesktopDriver, input: { localId: string; title: string; newTitle: string }): Promise<DesktopStep> {
   return sessionMenuAction(driver, input, RENAME_ITEMS, "rename", async (screen) => {
     await driver.sleep(500);
     let stop = await guard(screen, "rename field");
     if (stop) return stop;
+    const size = await driver.screenSize();
+    const upper = (lines: OcrLine[]) => lines.filter((line) => line.y < size.h / 2);
+    const composerEmpty = (lines: OcrLine[]) => mainArea(lines).some((line) => line.y > size.h / 2 && (COMPOSER_PLACEHOLDER.test(line.text.trim()) || NEW_SESSION_PLACEHOLDER.test(line.text.trim())));
+    const opened = await driver.ocr();
+    const menuOpen = opened.some((line) => RENAME_ITEMS.includes(line.text.trim()));
+    if (menuOpen || !upper(opened).some((line) => sidebarMatch(line.text, input.title)) || !composerEmpty(opened)) {
+      await act(screen, () => driver.key(ESCAPE));
+      return { ok: false, reason: "the rename field did not open (nothing was typed)", retry: false, touched: true, seen: seenText(upper(opened)) };
+    }
     await act(screen, () => driver.paste(input.newTitle, true));
-    await driver.sleep(300);
+    await driver.sleep(400);
     stop = await guard(screen, "rename confirm");
     if (stop) return stop;
+    const typed = await driver.ocr();
+    const prefix = textPrefix(input.newTitle);
+    if (!composerEmpty(typed)) {
+      // it went into the message field: take it out again, never send it
+      await act(screen, () => driver.key(KEY_A, true));
+      await act(screen, () => driver.key(BACKSPACE));
+      return { ok: false, reason: "the new title went into the message field instead of a rename field; it was cleared and not sent", retry: false, touched: true };
+    }
+    if (!showsPrefix(upper(typed), prefix)) {
+      await act(screen, () => driver.key(ESCAPE));
+      return { ok: false, reason: "the new title did not show in a rename field; nothing was confirmed", retry: false, touched: true, seen: seenText(upper(typed)) };
+    }
     await act(screen, () => driver.key(RETURN));
     return null;
   });
@@ -437,6 +495,8 @@ export interface DesktopRecord {
   postTurnSummary?: { status_category?: string; needs_action?: unknown; summarizes_uuid?: string; [key: string]: unknown };
   /** The session's latest assistant message. */
   lastAssistantUuid?: string;
+  /** Set on runs of the app's scheduled tasks (routines). */
+  scheduledTaskId?: string;
 }
 
 /** Is the app's summary about the latest turn (and not still the previous one's)? */
@@ -510,13 +570,20 @@ export function repoOf(record: Pick<DesktopRecord, "cwd" | "worktreePath">): str
   return at >= 0 ? folder.slice(0, at) : folder;
 }
 
-/** The repository of the app's most recently created session: New Session
- * opens there, whatever we would like. */
+/** A session whose folder was not picked for work: a run of a scheduled
+ * task (it opens in its own folder) or a scratch workspace. */
+export function notPickedFolder(record: Pick<DesktopRecord, "scheduledTaskId" | "cwd">): boolean {
+  return Boolean(record.scheduledTaskId) || Boolean(record.cwd?.includes("/scratch-workspaces/"));
+}
+
+/** The repository of the app's most recent work session: New Session opens
+ * in the last folder picked, whatever we would like. Scheduled runs and
+ * scratch sessions do not move that folder, so they are skipped. */
 export function lastAppRepo(dir = DESKTOP_SESSIONS_DIR): string | undefined {
   let newest: DesktopRecord | null = null;
   for (const file of recordFiles(dir)) {
     const record = readRecord(file);
-    if (record && (record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
+    if (record && !notPickedFolder(record) && (record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
   }
   return newest ? repoOf(newest) : undefined;
 }
