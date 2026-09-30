@@ -21,3 +21,9 @@ export function computerErrorPt(message: string): string {
   }
   return message;
 }
+
+/** A start failure that comes from the computer or the engine being away
+ * (a VM still booting, docker down, a provider reloading), not from the work. */
+export function isInfraFailure(message: string): boolean {
+  return /cannot safely resume|Start (?:docker|podman|container) first|Cannot connect to the Docker daemon|is not running|Cua Driver is not ready|ECONNREFUSED|ETIMEDOUT|socket hang up|provider (?:settings|account) (?:are|is) being updated/i.test(message);
+}

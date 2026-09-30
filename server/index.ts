@@ -314,7 +314,7 @@ import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { newDeliveryCache, watchProductionDelivery } from "./prod-delivery.ts";
-import { computerErrorPt } from "./error-pt.ts";
+import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8255,6 +8255,10 @@ bus.subscribe((event: RuntimeEvent) => {
 /** How a drained delegation becomes a real turn on the target. Shared by
  * the settle-time drain and the boot-time drain of what a previous process
  * left queued. */
+/** Start failures of a handoff that come from the target's computer or
+ * engine, not from the handoff itself: retried (1, 2, 4 min) before failing. */
+const DELEGATION_INFRA_MAX_RETRIES = 3;
+const delegationInfraRetries = new Map<string, number>();
 const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, rawText, commsDepth, sourceThreadId, channel, taskId, sourceBotId, openedThreadId) => {
     // startTurn REJECTS on an ordinary condition — busy target, deleted bot,
     // unavailable provider. Unhandled, that rejection is fatal to the
@@ -8296,6 +8300,23 @@ const runDelegatedTurn: Parameters<typeof drainDelegations>[3] = (toBotId, rawTe
       failureReported = true;
       const bot = store.bot(toBotId);
       const why = error instanceof Error ? error.message : String(error);
+      // The target's computer or engine was not there (a VM still booting,
+      // docker down): the handoff is run again on its own, a few times.
+      const retryKey = `${toBotId}:${taskId ?? sourceThreadId}:${rawText.slice(0, 80)}`;
+      const tries = delegationInfraRetries.get(retryKey) ?? 0;
+      if (isInfraFailure(why) && tries < DELEGATION_INFRA_MAX_RETRIES) {
+        delegationInfraRetries.set(retryKey, tries + 1);
+        if (targetThreadId && delegationWatch.get(targetThreadId)?.taskId === taskId) delegationWatch.delete(targetThreadId);
+        const minutes = 2 ** tries;
+        if (store.botByThread(sourceThreadId)) {
+          store.appendMessage(sourceThreadId, { role: "bot", kind: "activity", tool: { name: chipText(`Delegação para @${bot?.name ?? toBotId} não começou (${computerErrorPt(why)}) — tentando de novo em ${minutes} min (${tries + 1} de ${DELEGATION_INFRA_MAX_RETRIES})`, 240), ok: false } });
+        }
+        setTimeout(() => {
+          void runDelegatedTurn(toBotId, rawText, commsDepth, sourceThreadId, channel, taskId, sourceBotId, openedThreadId);
+        }, minutes * 60_000).unref();
+        return;
+      }
+      delegationInfraRetries.delete(retryKey);
       if (targetThreadId) {
         const finalized = finalizeDelegationWatch(
           targetThreadId,
