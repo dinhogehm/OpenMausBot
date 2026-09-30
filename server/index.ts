@@ -298,6 +298,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
+import { backgroundProcesses, bgJobResumePrompt, pidAlive } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 
 /** A session_read answer competes with the transcript for the context
@@ -7534,6 +7535,23 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
       return;
     }
     ccChip(session, session.status === "failed" ? `stopped with a problem — ${String(session.lastError).slice(0, 100)}` : `finished turn ${session.turns}`, session.status !== "failed");
+    // A process it left running in its worktree (a gate in the background)
+    // would finish with nobody to tell: note it; the tick resumes the
+    // session when it is gone (watchBackgroundJobs).
+    const folder = session.cwd;
+    if (session.status === "idle" && folder && folder.includes("/.claude/worktrees/")) {
+      void backgroundProcesses(folder).then((left) => {
+        if (!left.length || session.status !== "idle") {
+          ccReport(session, desktopReportFor(desktopWork, session));
+          return;
+        }
+        session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), since: Date.now() };
+        ccLedger.save();
+        ccChip(session, `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`);
+        ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ended with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish — no watch needed.)`);
+      }).catch(() => ccReport(session, desktopReportFor(desktopWork, session)));
+      return;
+    }
     ccReport(session, desktopReportFor(desktopWork, session));
   };
   child.on("error", (error) => finish(null, null, `could not run ${ccBin()}: ${error.message}`));
@@ -7607,8 +7625,34 @@ function removeSessionWorktree(session: CcSession): string {
   }
 }
 
+/** Headless sessions whose turn ended with a background job: resume each
+ * once its processes are all gone. */
+function watchBackgroundJobs(): void {
+  const now = Date.now();
+  for (const session of ccLedger.all()) {
+    const job = session.bgJob;
+    if (!job || session.surface === "app") continue;
+    if (session.status === "archived" || session.status === "stopped") {
+      delete session.bgJob;
+      ccLedger.save();
+      continue;
+    }
+    if (job.pids.some(pidAlive)) continue;
+    delete session.bgJob;
+    ccLedger.save();
+    const prompt = bgJobResumePrompt(job, now);
+    if (session.status === "running" || ccLedger.runningCount() >= CC_MAX_RUNNING) {
+      ccLedger.enqueue(session, prompt);
+      continue;
+    }
+    ccChip(session, "o processo em segundo plano terminou — sessão retomada");
+    runCcTurn(session, prompt, false);
+  }
+}
+
 async function runDesktopWork(): Promise<void> {
   watchStalledSessions(desktopWork);
+  watchBackgroundJobs();
   if (process.platform !== "darwin") return;
   await runDesktopWorkFlow(desktopWork, desktopState);
 }

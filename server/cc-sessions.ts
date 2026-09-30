@@ -72,6 +72,9 @@ export interface CcSession {
   stallReports?: number;
   /** What the session said it needs when its last turn ended blocked. */
   blockedOn?: string;
+  /** CLI: processes its last turn left running in its worktree; the server
+   * resumes it when they are gone. */
+  bgJob?: { pids: number[]; commands: string[]; since: number };
 }
 
 export type CcSurface = "app" | "cli";
