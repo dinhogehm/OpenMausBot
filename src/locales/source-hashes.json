@@ -8813,7 +8813,15 @@
       "chat.digestNoFiles": "2354c1ccb8480c235fb7a6ec23efa875d66e8b64c55f4eff3dcd7486abba9d15",
       "chat.digestMemory": "38ab3f1afa38ba0bd0703ea181aa9dda395927382dbae4be4f80742a0cbab1e2",
       "chat.digestReply": "9f30598874f24795c49a330476e427f9e45676c58069c21f977d5b4d01dc90bb",
-      "chat.legacyFileUnavailable": "8872b48a74bb35dac2d34718aabf6df9fc5a2cd0ded0cda3a3380dc21b7395a3"
+      "chat.legacyFileUnavailable": "8872b48a74bb35dac2d34718aabf6df9fc5a2cd0ded0cda3a3380dc21b7395a3",
+      "needsYou.title": "74b6abdf59690fdffec2059089487cd63658249da5301cbf065e9977518fbd8f",
+      "needsYou.aria": "b488dcacfb2ce21e747c6ab2cd8207a457e30cbdfd3e20fa37c238c97b2229cb",
+      "needsYou.item": "c0ff4ebab5ffaba66cfd42dfdac9a1d6e97d1576f14f5c0630528676a2ceea10",
+      "needsYou.more": "964c39ce6c039246618b1a8f65ee6e305e8df89b6faffdb1ef425ea61962e362",
+      "needsYou.ageNow": "ed5eb9a37e2d8231af3388319b941995f6dc8755c56043d0cc52b5fe405a87de",
+      "needsYou.ageMinutes": "1829c58ba472520fd39e61f9e337a1b7da27e86299332dde5bfdea355c3895a8",
+      "needsYou.ageHours": "b7fc364731644a6667a1ab0d48785151323d2dce026a3cf09d2c24273ebb2585",
+      "needsYou.ageDays": "d7066a9380ea87cf3cc43bb821864872f856320ec7751e885c89caa0b9c748f4"
     },
     "zh": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",

@@ -103,6 +103,8 @@ import { botSignals } from "@/lib/thread-signals";
 import { SignalIcons } from "./SignalIcons";
 import { attentionJumpAction, AttentionThreadRows, crossBotAttentionThreads, SidebarBotActivity, sidebarBotActivityTasks } from "./SidebarBotActivity";
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
+import { SidebarNeedsYou } from "./SidebarNeedsYou";
+import { needsYouItems } from "@/lib/needs-you";
 import { ShortcutHint } from "./ShortcutHint";
 import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
 import { ccAlertState } from "@/lib/thread-signals";
@@ -1877,6 +1879,7 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
   // same rule and order as the sidebar tree, so the bell can never
   // disagree with it.
   const attention = crossBotAttentionThreads(state.bots, state.pendingQueued, undefined, state.groups);
+  const needsYou = needsYouItems(state.bots);
   const pendingBotUndo = teamFeedback?.restoreBot;
 
   return (
@@ -2104,6 +2107,8 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
           />
         </div>
       </div>
+
+      <SidebarNeedsYou items={needsYou} density={density} onJump={(item) => dispatch({ type: "switchTask", botId: item.botId, threadId: item.threadId })} />
 
       {attentionPinned && density !== "icons" && (
         <SidebarAttentionPanel
