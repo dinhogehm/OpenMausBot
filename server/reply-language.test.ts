@@ -10,6 +10,9 @@ describe("reply language", () => {
     expect(languageReminder("de")).toBe("(Reply to the person in German.)");
     expect(languagePrompt("")).toContain("Brazilian Portuguese (pt-BR)");
     expect(languagePrompt("fr")).toContain("written in French");
+    expect(languagePrompt()).toContain("Notes to yourself");
+    expect(languagePrompt()).toContain("including the short lines you write between tool calls");
+    expect(languagePrompt()).toContain("Every sentence people can see is in Brazilian Portuguese (pt-BR)");
   });
 
   it("closes every harness-written turn message with the reminder", () => {
