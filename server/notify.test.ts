@@ -108,6 +108,13 @@ describe("blockedTarget", () => {
 });
 
 describe("summarize", () => {
+  it("shows a model's markdown as plain text on the banner, keeping issue numbers and identifiers", () => {
+    expect(summarize("## Pronto\n\n**PR #9311** mergeada — veja [o PR](https://github.com/o/r/pull/9311).\n- `npm run ci:local` verde\n- *deploy* às 16h\n> nota")).toBe("Pronto PR #9311 mergeada — veja o PR. npm run ci:local verde deploy às 16h nota");
+    expect(summarize("| PR | estado |\n|---|---|\n| #9311 | merged |")).toBe("PR · estado #9311 · merged");
+    expect(summarize("rode snake_case_name e 2 * 3 * 4")).toBe("rode snake_case_name e 2 * 3 * 4");
+    expect(summarize("__feito__ e ~~velho~~ <b>ok</b>")).toBe("feito e velho ok");
+  });
+
   it("flattens a model's answer into one lock-screen line", () => {
     expect(summarize("line one\n\nline two")).toBe("line one line two");
     expect(summarize("before\n```js\nconst x = 1;\n```\nafter")).toBe("before after");
