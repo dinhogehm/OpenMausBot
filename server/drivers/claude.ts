@@ -261,6 +261,32 @@ export function readClaudeAuthSettings(
   }
 }
 
+/** The person's own PreToolUse hooks (~/.claude/settings.json), read at
+ * launch. Bots run with --setting-sources project, so without this the
+ * review hook the person relies on (fixed rules: hard denies, PARAR, never
+ * "Validado", fail-closed) would not run for them. Only that one hook list
+ * is carried — never permissions, MCP servers or any other key. [] when the
+ * person has none or the file cannot be read. */
+export function readUserPreToolUseHooks(env: NodeJS.ProcessEnv): unknown[] {
+  try {
+    const home = env.HOME || homedir();
+    const settings = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8")) as { hooks?: { PreToolUse?: unknown } };
+    const entries = settings?.hooks?.PreToolUse;
+    return Array.isArray(entries)
+      ? entries.filter((entry) => Boolean(entry) && typeof entry === "object" && Array.isArray((entry as { hooks?: unknown }).hooks))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** The private --settings object with the person's PreToolUse hooks added
+ * beside the harness's own hooks; unchanged when there are none. */
+export function withUserPreToolUse(settings: Record<string, unknown>, entries: readonly unknown[]): Record<string, unknown> {
+  if (!entries.length) return settings;
+  return { ...settings, hooks: { ...(settings.hooks as Record<string, unknown> | undefined), PreToolUse: [...entries] } };
+}
+
 /** MCP servers the bot's own project declares in `<cwd>/.mcp.json`.
  *
  * The CLI would find this file itself, but the harness launches it with
@@ -1451,8 +1477,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         // in the packaged app process.execPath is Electron — run the helper as node
         if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = "1";
       }
-      const settings: Record<string, unknown> = { ...authSettings };
-      if (hooks) settings.hooks = claudeHookSettings(HOOK_HELPER_PATH);
+      const harnessSettings: Record<string, unknown> = { ...authSettings };
+      if (hooks) harnessSettings.hooks = claudeHookSettings(HOOK_HELPER_PATH);
+      // The person's review hook runs for bots too: with --setting-sources
+      // project their own settings are not loaded, so its PreToolUse list
+      // (and nothing else from that file) is carried here.
+      const userPreToolUse = isolated ? readUserPreToolUseHooks(env) : [];
+      const settings = withUserPreToolUse(harnessSettings, userPreToolUse);
       const authSettingsPath = mcpConfigPath && Object.keys(settings).length
         ? join(dirname(mcpConfigPath), "auth-settings.json") : null;
       if (authSettingsPath) args.push("--settings", authSettingsPath);
@@ -1478,6 +1509,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         configDir: env.CLAUDE_CONFIG_DIR ?? null,
         // hooks on/off changes the settings file the process was launched with
         hooks: Boolean(hooks),
+        // a changed review hook relaunches the process with the new list
+        userHooks: userPreToolUse.length ? createHash("sha256").update(JSON.stringify(userPreToolUse)).digest("hex") : null,
         // Rotating an account's key/helper must not reuse the old process.
         auth: createHash("sha256").update(JSON.stringify({
           settings: authSettings,

@@ -28,6 +28,8 @@ import {
   parseClaudeCliVersion,
   permissionSocketPath,
   readClaudeAuthSettings,
+  readUserPreToolUseHooks,
+  withUserPreToolUse,
   claudeCostSnapshot,
   restoredCostBase,
   turnCostFromRunningTotal,
@@ -1311,6 +1313,32 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(readClaudeAuthSettings({ HOME: scratch, CLAUDE_CONFIG_DIR: join(scratch, "other-account") })).toEqual({});
     writeFileSync(join(account, "settings.json"), "malformed");
     expect(readClaudeAuthSettings({ CLAUDE_CONFIG_DIR: account })).toEqual({});
+  });
+
+  it("carries the person's PreToolUse review hook into a bot's settings, and nothing else of theirs", () => {
+    const home = join(scratch, "person");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    const review = { matcher: "Bash|Edit|Write", hooks: [{ type: "command", command: "node /x/.laya/hooks/dual-review.cjs", timeout: 20 }] };
+    writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({
+      permissions: { allow: ["Bash(*)"] },
+      mcpServers: { personal: { command: "x" } },
+      hooks: { PreToolUse: [review, "not-an-entry"], PostToolUse: [{ matcher: "", hooks: [] }] },
+    }));
+    const entries = readUserPreToolUseHooks({ HOME: home });
+    expect(entries).toEqual([review]);
+    const settings = withUserPreToolUse({ apiKeyHelper: "helper", hooks: claudeHookSettings("/omb/hook.mjs") }, entries);
+    expect((settings.hooks as Record<string, unknown>).PreToolUse).toEqual([review]);
+    // the harness's own hooks stay; the person's other keys never come along
+    expect(Object.keys(settings.hooks as Record<string, unknown>).sort()).toEqual(["PostToolUse", "PreCompact", "PreToolUse", "SessionStart", "Stop"]);
+    expect(settings.apiKeyHelper).toBe("helper");
+    expect(settings).not.toHaveProperty("permissions");
+    expect(settings).not.toHaveProperty("mcpServers");
+    // no hook, no file, or a malformed one: settings unchanged
+    expect(readUserPreToolUseHooks({ HOME: join(scratch, "nobody") })).toEqual([]);
+    writeFileSync(join(home, ".claude", "settings.json"), "malformed");
+    expect(readUserPreToolUseHooks({ HOME: home })).toEqual([]);
+    const plain = { apiKeyHelper: "helper" };
+    expect(withUserPreToolUse(plain, [])).toBe(plain);
   });
 
   it("withholds a flag from a CLI that predates it, instead of failing every turn", async () => {
