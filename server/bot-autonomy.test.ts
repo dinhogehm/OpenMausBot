@@ -645,8 +645,10 @@ describe("a bot waiting on the person's answer", () => {
     const at = now;
     expect(lastQuestionAt([{ role: "user", kind: "text", text: "troque o vigia", at: at - 5 }, { role: "bot", kind: "text", text: "O vigia está cego. **Posso trocar?** 🙂", at }, { role: "bot", kind: "activity", at: at + 1 }], at + 10)).toBe(at);
     expect(lastQuestionAt([{ role: "bot", kind: "text", text: "Posso trocar?", at }, { role: "user", kind: "text", text: "pode", at: at + 1 }], at + 10)).toBeNull();
-    expect(lastQuestionAt([{ role: "bot", kind: "text", text: "Feito.", at }], at + 10)).toBeNull();
-    expect(lastQuestionAt([{ role: "bot", kind: "text", text: "Posso?", at }], at + 25 * 3_600_000)).toBeNull();
+    expect(lastQuestionAt([{ role: "user", kind: "text", text: "x", at: at - 1 }, { role: "bot", kind: "text", text: "Feito.", at }], at + 10)).toBeNull();
+    expect(lastQuestionAt([{ role: "user", kind: "text", text: "x", at: at - 1 }, { role: "bot", kind: "text", text: "Posso?", at }], at + 25 * 3_600_000)).toBeNull();
+    // a new bot's greeting asks too, but nobody has said anything yet
+    expect(lastQuestionAt([{ role: "bot", kind: "text", text: "Hi, I'm Pepper. What would you like me to do?", at }], at + 10)).toBeNull();
   });
 
   it("closes a needs-input goal as stopped when asked to", () => {

@@ -1077,14 +1077,17 @@ export function prsCited(text: string): Array<{ number: number; slug?: string }>
 export const NEEDS_INPUT_EXPIRE_MS = 12 * 3_600_000;
 
 /** A bot's own reply that ends by asking the person something ("Posso
- * trocar?"): its time, or null. Only the conversation's last text counts. */
+ * trocar?"): its time, or null. Only the conversation's last text counts,
+ * and only as an answer to the person: a greeting a new bot opens with
+ * ("What would you like me to do?") has no message of theirs before it. */
 export function lastQuestionAt(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number }>, now: number, maxAgeMs = 24 * 3_600_000): number | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]!;
     if (message.kind !== "text") continue;
     if (message.role !== "bot") return null;
     const text = (message.text ?? "").replace(/[\s*_`)\]\p{Extended_Pictographic}\uFE0F]+$/u, "");
-    return text.endsWith("?") && now - message.at < maxAgeMs ? message.at : null;
+    const answersPerson = messages.slice(0, i).some((earlier) => earlier.role === "user" && earlier.kind === "text");
+    return answersPerson && text.endsWith("?") && now - message.at < maxAgeMs ? message.at : null;
   }
   return null;
 }
