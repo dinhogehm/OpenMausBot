@@ -567,7 +567,7 @@ export function AccessSection({
             [null, "Auto"],
             ["cloud", "Cloud"],
             ["vm", "Local VM"],
-            ["local", "This computer"],
+            ["local", t("place.local")],
             ["browser", "Browser"],
             ["off", "Off"],
           ] as const).map(([mode, label], i) => (

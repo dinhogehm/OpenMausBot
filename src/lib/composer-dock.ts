@@ -4,6 +4,9 @@ import { useLayoutEffect, useState, type RefObject } from "react";
  * this far above the composer when the pane is scrolled to the end. */
 export const TRANSCRIPT_GAP = "0.75rem";
 
+/** The "jump to the end" pill floats this far above the composer. */
+export const JUMP_PILL_GAP = "0.5rem";
+
 /** Empty one-line pill (~44px) plus the dock's `pb-3`. ResizeObserver
  * replaces this as soon as the real composer mounts. */
 const FALLBACK_COMPOSER_PX = 64;

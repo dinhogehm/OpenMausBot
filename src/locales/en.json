@@ -2759,5 +2759,12 @@
   "computer.phase.showSleepingBoat": "Auto found a sleeping cloud computer. It was not woken or changed.",
   "computer.phase.showPendingBoat": "Auto found an existing cloud computer that is not ready. It was not changed.",
   "computer.badge.autoBoat": "cloud boat · Auto · read-only",
-  "computer.addBoatKey": "Add a Boat API key to give this bot a cloud computer — it spins up right here."
+  "computer.addBoatKey": "Add a Boat API key to give this bot a cloud computer — it spins up right here.",
+  "effort.none": "None",
+  "effort.low": "Low",
+  "effort.medium": "Medium",
+  "effort.high": "High",
+  "effort.xhigh": "X-High",
+  "effort.max": "Max",
+  "effort.default": "Default"
 }

@@ -237,3 +237,23 @@ describe("screen reader announcements", () => {
     expect(markup).toMatch(/<p role="status" aria-live="polite" aria-atomic="true" class="sr-only" data-testid="transcript-announcer">/);
   });
 });
+
+describe("message timestamps", () => {
+  it("shows every message's date and time without hovering, one stamp per author and minute", () => {
+    const today = new Date();
+    const minute = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime() + 60_000;
+    const messages = [
+      { id: "u1", role: "user", kind: "text", text: "Oi", at: minute + 1_000 },
+      { id: "b1", role: "bot", kind: "text", text: "Olá", at: minute + 2_000 },
+      { id: "b2", role: "bot", kind: "text", text: "Mais uma", at: minute + 3_000 },
+      { id: "b3", role: "bot", kind: "text", text: "Depois", at: minute + 120_000 },
+    ];
+    const markup = renderToStaticMarkup(createElement(ChatView, { bot: { ...bot, busy: false, messages } as unknown as Bot }));
+    const stamps = markup.match(/<time [^>]*data-message-stamp[^>]*>[^<]*<\/time>/g) ?? [];
+    // u1, b1 (b2 shares b1's minute), b3
+    expect(stamps).toHaveLength(3);
+    expect(stamps[0]).not.toMatch(/opacity-0/);
+    expect(stamps[0]).toMatch(/title="[^"]+"/);
+    expect(stamps[0]).toMatch(/>today \d{1,2}:\d{2}/i);
+  });
+});

@@ -4,6 +4,7 @@ import { Card } from "./SettingsPrimitives";
 import { ComputerSharingSettings } from "./ComputerSharingSettings";
 import { useStore } from "@/state/store";
 import { sharedComputersEnabled } from "@/lib/feature-flags";
+import { t } from "@/lib/i18n";
 
 type SavedWorkspaces = Awaited<ReturnType<NonNullable<NonNullable<Window["ogb"]>["environments"]>["state"]>>;
 
@@ -63,7 +64,7 @@ export function ConnectedWorkspacesSettings() {
     <Card title="Your servers" subtitle="Saved on this computer. Your hosted bots keep running when you switch away.">
       {!saved ? <p role="status" className="text-[13px] text-ink-secondary">{error ? "Saved servers could not be loaded." : "Loading servers…"}</p> :
         <ul className="divide-y divide-hairline/40">
-          {[{ id: "local", name: "This computer", origin: "" }, ...saved.environments].map((entry) => {
+          {[{ id: "local", name: t("place.local"), origin: "" }, ...saved.environments].map((entry) => {
             const active = entry.id === saved.activeId;
             const Icon = entry.id === "local" ? Laptop : Cloud;
             return <li key={entry.id} className="flex items-center gap-3 py-3">

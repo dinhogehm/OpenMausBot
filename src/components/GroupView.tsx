@@ -52,7 +52,7 @@ import { cn } from "@/lib/cn";
 import { useFocusMessage } from "@/lib/focus-message";
 import { shortPath } from "@/lib/short-path";
 import { BOTTOM_FOLLOW_THRESHOLD, shouldResumeBottomFollow, useBottomFollowResize } from "@/lib/bottom-follow";
-import { useComposerDockPad } from "@/lib/composer-dock";
+import { JUMP_PILL_GAP, useComposerDockPad } from "@/lib/composer-dock";
 import { awaitedMemberId, showWorkingDots } from "@/lib/turn-tail";
 import { liveActivityLabel } from "@/lib/live-activity";
 import { splitTranscriptAttachments } from "@/lib/composer-attachments";
@@ -67,6 +67,7 @@ import { useReplyDraft } from "@/lib/drafts";
 import { latestReply, type TranscriptSnapshot } from "@/lib/transcript-announcer";
 import { pendingApprovals } from "./PendingApproval";
 import { TranscriptAnnouncer } from "./TranscriptAnnouncer";
+import { fullStamp, messageStamp, sharesStamp } from "@/lib/message-stamp";
 
 function dayLabel(at: number): string {
   const d = new Date(at);
@@ -365,9 +366,11 @@ const Transcript = memo(function Transcript({
                     <PinToggle group={group} message={m} />
                   </>
                 )}
-                <span className="self-end pb-1 text-[11px] tabular-nums text-ink-tertiary opacity-0 transition-opacity group-hover:opacity-100">
-                  {formatTime(m.at)}
-                </span>
+                {!sharesStamp(prev, m) && (
+                  <time dateTime={new Date(m.at).toISOString()} title={fullStamp(m.at)} data-message-stamp className="self-end whitespace-nowrap pb-1 text-[11px] tabular-nums text-ink-tertiary">
+                    {messageStamp(m.at)}
+                  </time>
+                )}
               </div>
             </div>
           ) : null;
@@ -1458,8 +1461,9 @@ export function GroupView({ group }: { group: Group }) {
             });
           }}
           aria-label={t("chat.jumpToLatestAria")}
-          className="animate-pop-in absolute left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-hairline/40 bg-raised px-3 py-1.5 text-[12.5px] text-ink shadow-lg hover:bg-raised-hover"
-          style={{ bottom: composerDock.height }}
+          className="animate-pop-in absolute right-4 z-10 flex items-center gap-1.5 rounded-full border border-hairline/40 bg-raised px-3 py-1.5 text-[12.5px] text-ink shadow-lg hover:bg-raised-hover"
+          // at the side, clear of the composer: centered, it sat over the text being read
+          style={{ bottom: `calc(${composerDock.height}px + ${JUMP_PILL_GAP})` }}
         >
           <ArrowDown size={13} /> {t("chat.jumpToLatest")}
         </button>

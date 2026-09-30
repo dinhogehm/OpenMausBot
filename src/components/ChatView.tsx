@@ -87,7 +87,7 @@ import { TurnNarrationRun } from "./TurnNarrationRun";
 import { webhookMessageView } from "@/lib/webhook-message";
 import { splitTranscriptAttachments } from "@/lib/composer-attachments";
 import { BOTTOM_FOLLOW_THRESHOLD, shouldResumeBottomFollow, useBottomFollowResize } from "@/lib/bottom-follow";
-import { useComposerDockPad } from "@/lib/composer-dock";
+import { JUMP_PILL_GAP, useComposerDockPad } from "@/lib/composer-dock";
 import {
   TRANSCRIPT_WINDOW_SIZE,
   expandWindowStart,
@@ -99,6 +99,7 @@ import { appendComposerDraft, useReplyDraft } from "@/lib/drafts";
 import { latestReply, type TranscriptSnapshot } from "@/lib/transcript-announcer";
 import { pendingApprovals } from "./PendingApproval";
 import { TranscriptAnnouncer } from "./TranscriptAnnouncer";
+import { fullStamp, messageStamp, sharesStamp } from "@/lib/message-stamp";
 
 /** Long user messages collapse behind a fade so pasted walls of text don't
  * bury the conversation; bots get full markdown. */
@@ -307,9 +308,12 @@ function Bubble({
   onRegenerate,
   replyTarget,
   onReply,
+  stampShared = false,
 }: {
   bot: Bot;
   message: Message;
+  /** The previous message, same author and minute, already shows the stamp. */
+  stampShared?: boolean;
   emerging?: boolean;
   eagerAttachments?: boolean;
   editing: boolean;
@@ -543,14 +547,20 @@ function Bubble({
             </button>
           </MessageActions>
         )}
-        <span
-          className={cn(
-            "self-end pb-1 text-[11px] tabular-nums text-ink-tertiary opacity-0 transition-opacity group-hover:opacity-100",
-            user ? "order-first mr-2" : "ml-2",
-          )}
-        >
-          {formatTime(message.at)}
-        </span>
+        {/* always visible: when each message was sent, in the reader's words */}
+        {!stampShared && (
+          <time
+            dateTime={new Date(message.at).toISOString()}
+            title={fullStamp(message.at)}
+            data-message-stamp
+            className={cn(
+              "self-end whitespace-nowrap pb-1 text-[11px] tabular-nums text-ink-tertiary",
+              user ? "order-first mr-2" : "ml-2",
+            )}
+          >
+            {messageStamp(message.at)}
+          </time>
+        )}
       </div>
       {versions.length > 1 && (
         <div className="mt-1 flex items-center gap-0.5 pr-1 text-[12px] text-ink-secondary">
@@ -862,6 +872,7 @@ const MessagesList = memo(function MessagesList({
                   onRegenerate={onRegenerate}
                   replyTarget={m.replyToId ? bot.messages.find((candidate) => candidate.id === m.replyToId) : undefined}
                   onReply={() => onReply(m)}
+                  stampShared={sharesStamp(prev, m)}
                 />
               );
           }
@@ -1531,8 +1542,9 @@ export function ChatView({ bot: profile }: { bot: Bot }) {
         <button
           onClick={jumpToLatest}
           aria-label={t("chat.jumpToLatestAria")}
-          className="animate-pop-in absolute left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-hairline/40 bg-raised px-3 py-1.5 text-[12.5px] text-ink shadow-lg hover:bg-raised-hover"
-          style={{ bottom: composerDock.height }}
+          className="animate-pop-in absolute right-4 z-10 flex items-center gap-1.5 rounded-full border border-hairline/40 bg-raised px-3 py-1.5 text-[12.5px] text-ink shadow-lg hover:bg-raised-hover"
+          // at the side, clear of the composer: centered, it sat over the text being read
+          style={{ bottom: `calc(${composerDock.height}px + ${JUMP_PILL_GAP})` }}
         >
           <ArrowDown size={13} /> {t("chat.jumpToLatest")}
         </button>

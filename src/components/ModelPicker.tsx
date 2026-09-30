@@ -74,9 +74,9 @@ export function offersLocalModels(instance: InstanceInfo | undefined, localCount
   return localCount > 0 || (instance.driverKind === "claudeAgent" && !needsCli(instance) && !instance.policy);
 }
 
-/** The others capitalize cleanly; "xhigh" would read "Xhigh". */
+/** The level's name in the person's language ("Medium" / "Médio"). */
 export function effortLabel(level: EffortLevel): string {
-  return level === "xhigh" ? "X-High" : level[0].toUpperCase() + level.slice(1);
+  return t(`effort.${level}`);
 }
 
 /** How hard the bot thinks, for the engine it currently runs on. Rendered
@@ -134,7 +134,7 @@ export function EffortRow({
                 : "border-hairline/40 text-ink-secondary hover:bg-control/60 hover:text-ink",
             )}
           >
-            {level === undefined ? "Default" : effortLabel(level)}
+            {level === undefined ? t("effort.default") : effortLabel(level)}
           </button>
         ))}
       </div>

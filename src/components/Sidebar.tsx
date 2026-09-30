@@ -33,7 +33,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { api, useStore, formatTime, visibleMessages, currentTaskBot, type AppState, type Bot, type Group } from "@/state/store";
+import { api, useStore, visibleMessages, currentTaskBot, type AppState, type Bot, type Group } from "@/state/store";
 import { peerLine } from "@/lib/peer-message";
 import { liveActivityLabel } from "@/lib/live-activity";
 
@@ -101,6 +101,7 @@ import { useShowThreads } from "@/lib/thread-preferences";
 import { attentionJumpAction, AttentionThreadRows, crossBotAttentionThreads, SidebarBotActivity, sidebarBotActivityTasks } from "./SidebarBotActivity";
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { ShortcutHint } from "./ShortcutHint";
+import { sidebarStamp } from "@/lib/message-stamp";
 
 const SECTION_LABEL_KEYS: Record<string, LocaleKey> = {
   [PINNED_SECTION_ID]: "sidebar.section.pinned",
@@ -256,7 +257,7 @@ export function GroupListItem({
       <div className={cn("min-w-0 flex-1", density === "icons" && "hidden")}>
         <div className="flex items-baseline justify-between gap-2">
           <span className="truncate text-[14px] font-semibold text-ink">{group.name}</span>
-          {selected && last && !expanded && <span className="shrink-0 text-[10px] text-ink-secondary">{formatTime(last.at)}</span>}
+          {selected && last && !expanded && <span className="shrink-0 text-[10px] text-ink-secondary">{sidebarStamp(last.at)}</span>}
           {(expanded || (quiet && !groupStatus)) && group.unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
         </div>
         {!expanded && (!quiet || groupStatus) && <div className="flex items-center justify-between gap-2">
@@ -1199,7 +1200,7 @@ export function BotListItem({
           </span>
           {selected && last && !renaming && !expanded && (
             <span className="shrink-0 text-xs text-ink-secondary transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 touch:opacity-0">
-              {formatTime(last.at)}
+              {sidebarStamp(last.at)}
             </span>
           )}
           {(expanded || (quiet && !statusLine)) && unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
