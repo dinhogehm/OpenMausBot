@@ -266,6 +266,9 @@ import {
   ccTurnArgs,
   lastHookDecision,
   parseCcStartInput,
+  repoCorridor,
+  repoPackageManager,
+  useRepoScripts,
   parseCcStream,
   type CcSession,
 } from "./cc-sessions.ts";
@@ -7458,7 +7461,9 @@ if (ccLedger.interruptedOnLoad.length) {
 const ccProcesses = new Map<string, CcChildProcess>();
 // OMB_CC_BIN points end-to-end tests at a scripted stand-in for `claude`.
 const ccBin = (): string => process.env.OMB_CC_BIN || "claude";
-const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases, and run its scripts with the package manager they name (npm run when the repository has a package-lock.json — never swap in pnpm or yarn). Do not use AskUserQuestion or wait for an answer mid-turn: if you need a decision or an approval, stop and put the question in your final report.";
+const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. When you merge a batch of PRs: hotfix/P0/P1 work (by label, title or the linked issue's priority) goes first, ahead of CI or infrastructure PRs, released on its own; PRs that change release scripts (release, carrier, merge-gate or production-watch scripts) go last, in a separate release, with a dry run first. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases, and run its scripts with the package manager they name (npm run when the repository has a package-lock.json — never swap in pnpm or yarn). Do not use AskUserQuestion or wait for an answer mid-turn: if you need a decision or an approval, stop and put the question in your final report.";
+/** The footer of a first turn: the general rules, plus the repository's own corridor. */
+const ccTurnFooter = (session: CcSession): string => `${CC_TURN_FOOTER}${repoCorridor(session.repo)}`;
 /** Headless runs only: nothing wakes such a session after its turn ends. */
 const CC_CLI_FOOTER = "\nYou run headless: nothing wakes you after you stop. Never end your turn waiting on a background job or a notification — run gates in the foreground and wait for them (up to 80 min), or report the PID, the log/receipt path and what to check.";
 
@@ -7513,7 +7518,7 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   };
   let child: CcChildProcess;
   try {
-    child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${CC_TURN_FOOTER}${CC_CLI_FOOTER}` : prompt, first), {
+    child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${ccTurnFooter(session)}${CC_CLI_FOOTER}` : prompt, first), {
       cwd,
       env: { ...process.env, PATH: augmentedPath() },
       stdio: ["ignore", "pipe", "pipe"],
@@ -7598,7 +7603,7 @@ async function getDesktopDriver(): Promise<DesktopDriver> {
 }
 
 function desktopBrief(session: CcSession, brief: string): string {
-  return desktopBriefText(session.title, session.desktop!.marker, brief, CC_TURN_FOOTER);
+  return desktopBriefText(session.title, session.desktop!.marker, brief, ccTurnFooter(session));
 }
 
 const DUAL_DECISIONS_LOG = join(homedir(), ".laya", "hooks", "dual-decisions.log");
@@ -15986,6 +15991,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (action === "start") {
           const input = parseCcStartInput(body, ccIsGitRepo);
           if (!input.ok) return json(res, 400, { error: input.error });
+          // The repository's own commands (npm run …), never a guessed pnpm.
+          const scripts = useRepoScripts(input.brief, repoPackageManager(input.repo));
+          input.brief = scripts.text;
           if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
             return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando neste computador; espere uma relatar, ou pare uma` });
           }
@@ -16006,7 +16014,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             ccLedger.save();
             ccChip(session, "na fila para abrir no app Claude quando o Mac estiver livre");
             const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", input.model ? "model" : ""].filter(Boolean);
-            return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.` });
+            return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
           }
           const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
           if (replyThreadId !== threadId) {
@@ -16015,12 +16023,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           }
           runCcTurn(session, input.brief, true);
           ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
-          return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.` });
+          return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
         }
         const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
         if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão — chame cc_session_list" });
         if (action === "send") {
-          const message = typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "";
+          const scripts = useRepoScripts(typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "", repoPackageManager(session.repo));
+          const message = scripts.text;
           if (!message) return json(res, 400, { error: "message é obrigatório" });
           if (session.status === "archived") return json(res, 409, { error: "essa sessão está arquivada; comece outra" });
           // The order came from this conversation: its report comes back here.
@@ -16060,7 +16069,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             session.status = "running";
             ccLedger.save();
             ccChip(session, "mensagem na fila para o app Claude");
-            return json(res, 200, { message: "Na fila: vai para a sessão no app Claude assim que o Mac estiver livre, e o servidor confere que chegou; o próximo relatório volta aqui. Encerre o turno agora." });
+            return json(res, 200, { message: `Na fila: vai para a sessão no app Claude assim que o Mac estiver livre, e o servidor confere que chegou; o próximo relatório volta aqui. Encerre o turno agora.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
           }
           // A stalled run may still be alive: never start a second one beside it.
           if (session.status === "running" || (session.status === "stalled" && ccProcesses.has(session.id))) {
@@ -16074,7 +16083,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           claim();
           runCcTurn(session, message, session.turns === 0);
           ccChip(session, "mensagem enviada");
-          return json(res, 200, { message: "Enviada. A sessão está trabalhando; o relatório volta aqui como um novo turno. Encerre o turno agora." });
+          return json(res, 200, { message: `Enviada. A sessão está trabalhando; o relatório volta aqui como um novo turno. Encerre o turno agora.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
         }
         if (session.surface === "app" && action === "stop") {
           // Nothing on the screen is touched: the server stops waiting for it,

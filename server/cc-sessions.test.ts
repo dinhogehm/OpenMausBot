@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccHeldQueueReport, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccHeldQueueReport, repoCorridor, repoPackageManager, useRepoScripts, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -156,5 +156,52 @@ describe("queue age", () => {
     const loaded = legacy.get(base.id)!;
     expect(loaded.queued).toEqual([{ text: "from before ages", at: 0 }]);
     expect(legacy.takeQueued(loaded)).toMatchObject({ next: null, held: [{ text: "from before ages" }] });
+  });
+});
+
+describe("the repository's own scripts", () => {
+  it("turns a guessed pnpm into npm run for an npm repository, and leaves the rest", () => {
+    const repo = join(dir, "npm-repo");
+    mkdirSync(repo);
+    writeFileSync(join(repo, "package-lock.json"), "{}");
+    expect(repoPackageManager(repo)).toBe("npm");
+    const brief = "rode `pnpm ci:local`, depois merge por `pnpm pr:merge -- --pr 9286 --merge`; pnpm install antes; pnpm run test";
+    expect(useRepoScripts(brief, repoPackageManager(repo))).toEqual({
+      text: "rode `npm run ci:local`, depois merge por `npm run pr:merge -- --pr 9286 --merge`; pnpm install antes; npm run test",
+      changed: true,
+    });
+    const pnpmRepo = join(dir, "pnpm-repo");
+    mkdirSync(pnpmRepo);
+    writeFileSync(join(pnpmRepo, "pnpm-lock.yaml"), "");
+    expect(useRepoScripts(brief, repoPackageManager(pnpmRepo)).changed).toBe(false);
+    const declared = join(dir, "declared");
+    mkdirSync(declared);
+    writeFileSync(join(declared, "package.json"), JSON.stringify({ packageManager: "npm@10.0.0" }));
+    expect(repoPackageManager(declared)).toBe("npm");
+    expect(repoPackageManager(join(dir, "nothing"))).toBeNull();
+  });
+});
+
+describe("a repository's corridor", () => {
+  it("lists the exact gate, push and carrier forms, and the order of a batch, only where they exist", () => {
+    const repo = join(dir, "platform");
+    mkdirSync(join(repo, "scripts"), { recursive: true });
+    writeFileSync(join(repo, "package-lock.json"), "{}");
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ scripts: { "pr:merge": "./scripts/pr-merge-gate.sh" } }));
+    writeFileSync(join(repo, "scripts", "release-carrier.sh"), "");
+    const corridor = repoCorridor(repo);
+    expect(corridor).toContain("`npm run pr:merge -- --pr N --publish`");
+    expect(corridor).toContain("`npm run pr:merge -- --pr N --merge --receipt .local-ci/runs/<run>/receipt.env`");
+    expect(corridor).toContain("`git push -u origin HEAD:<type>/<branch>`");
+    expect(corridor).toContain("`./scripts/release-carrier.sh --execute --label X`");
+    expect(corridor).toContain("no pipes");
+    expect(corridor).toContain("hotfix/P0/P1 first, ahead of any CI or infrastructure PR");
+    expect(corridor).toContain("separate carrier");
+    expect(corridor).not.toContain("pnpm run");
+    const plain = join(dir, "plain");
+    mkdirSync(plain);
+    writeFileSync(join(plain, "package.json"), JSON.stringify({ scripts: { test: "vitest" } }));
+    expect(repoCorridor(plain)).toBe("");
+    expect(repoCorridor(join(dir, "missing"))).toBe("");
   });
 });

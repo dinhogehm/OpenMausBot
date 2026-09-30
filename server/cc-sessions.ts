@@ -506,3 +506,62 @@ export function ccHeldQueueReport(session: CcSession, held: CcQueued[], now: num
     "Check what is current and send again with cc_session_send what still applies.",
   ].join("\n");
 }
+
+/** The package manager a repository runs its scripts with, from its
+ * lockfile or package.json "packageManager"; null when it cannot tell. */
+export function repoPackageManager(repo: string): "npm" | "pnpm" | "yarn" | null {
+  const has = (file: string) => existsSync(`${repo}/${file}`);
+  if (has("pnpm-lock.yaml")) return "pnpm";
+  if (has("yarn.lock")) return "yarn";
+  if (has("package-lock.json")) return "npm";
+  try {
+    const declared = String((JSON.parse(readFileSync(`${repo}/package.json`, "utf8")) as { packageManager?: unknown }).packageManager ?? "");
+    if (declared.startsWith("npm@")) return "npm";
+    if (declared.startsWith("pnpm@")) return "pnpm";
+    if (declared.startsWith("yarn@")) return "yarn";
+  } catch { /* no package.json */ }
+  return null;
+}
+
+/** "pnpm pr:merge" / "pnpm run ci:local" in an order to a session of an
+ * npm repository becomes "npm run …": the repository's gates and the review
+ * hook only know its own commands, and a session told "pnpm" goes off-road. */
+export function useRepoScripts(text: string, manager: ReturnType<typeof repoPackageManager>): { text: string; changed: boolean } {
+  if (manager !== "npm") return { text, changed: false };
+  const NOT_SCRIPTS = new Set(["install", "i", "add", "remove", "rm", "exec", "dlx", "x", "why", "list", "ls", "store", "update", "up", "outdated", "audit", "init", "create", "link", "unlink", "env", "config", "-v", "--version"]);
+  let changed = false;
+  const out = text.replace(/\bpnpm(?:\s+run)?\s+([a-z][\w:.-]*)/gi, (match, script: string) => {
+    if (NOT_SCRIPTS.has(script.toLowerCase())) return match;
+    changed = true;
+    return `npm run ${script}`;
+  });
+  return { text: out, changed };
+}
+
+/** For a repository with a local merge gate (`pr:merge`) and a release
+ * carrier: the exact command forms its review hook lets through, and the
+ * order a batch of PRs ships in. A session that improvises (pnpm, a pipe, an
+ * env prefix, a skipped gate) is stopped by the hook or goes off-road. "" for
+ * any other repository. */
+export function repoCorridor(repo: string): string {
+  let scripts: Record<string, unknown> = {};
+  try {
+    scripts = ((JSON.parse(readFileSync(`${repo}/package.json`, "utf8")) as { scripts?: Record<string, unknown> }).scripts) ?? {};
+  } catch { /* no package.json */ }
+  const gate = typeof scripts["pr:merge"] === "string" && repoPackageManager(repo) === "npm";
+  const carrier = existsSync(`${repo}/scripts/release-carrier.sh`);
+  if (!gate && !carrier) return "";
+  return [
+    "",
+    "",
+    "This repository's corridor — use these exact forms, one command per call: no pipes, no `&&`, no environment-variable prefixes, and `npm run` (never pnpm or yarn):",
+    ...(gate ? [
+      "- `npm run pr:merge -- --pr N --publish` (runs the local gate and publishes its status on the PR head)",
+      "- `npm run pr:merge -- --pr N --merge` or `npm run pr:merge -- --pr N --merge --receipt .local-ci/runs/<run>/receipt.env` (merges only with the gate green on the head)",
+    ] : []),
+    "- `git push -u origin HEAD:<type>/<branch>` (type: feat, fix, hotfix, chore, ci, docs, perf, refactor, test)",
+    ...(carrier ? ["- `./scripts/release-carrier.sh --check`, then `./scripts/release-carrier.sh --execute --label X`"] : []),
+    "Never skip, bypass or fake the gate; never push to main, never force.",
+    "Order of a batch: hotfix/P0/P1 first, ahead of any CI or infrastructure PR, and released on its own. PRs that change release scripts (scripts/*release*, watch-production-release, release-carrier) ship in a separate carrier of their own, after the rest.",
+  ].join("\n");
+}
