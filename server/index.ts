@@ -7548,7 +7548,27 @@ const desktopWork: DesktopWorkDeps = {
   chip: ccChip,
   report: ccReport,
   hookDecision: (cwd) => lastHookDecision(DUAL_DECISIONS_LOG, cwd),
+  onArchived: (session) => {
+    if (!session.desktop?.removeWorktree) return;
+    const note = removeSessionWorktree(session);
+    if (note) ccChip(session, note, !note.startsWith("A worktree foi mantida"));
+  },
 };
+
+/** `git worktree remove` without --force: a worktree with uncommitted
+ * changes is kept. Only a session's own .claude/worktrees folder. Returns
+ * what happened, for the chip and the tool result. */
+function removeSessionWorktree(session: CcSession): string {
+  if (!session.cwd || !session.cwd.includes("/.claude/worktrees/")) return "";
+  try {
+    const git = (...args: string[]) => execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } });
+    try { git("worktree", "unlock", session.cwd); } catch { /* not locked */ }
+    git("worktree", "remove", session.cwd);
+    return `Worktree ${session.cwd} removida.`;
+  } catch (error) {
+    return `A worktree foi mantida: ${error instanceof Error ? error.message.split("\n").slice(-2).join(" ") : String(error)}`;
+  }
+}
 
 async function runDesktopWork(): Promise<void> {
   watchStalledSessions(desktopWork);
@@ -15717,20 +15737,22 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const body = await readInternalBody();
         const bot = internalSender;
         const threadId = internalCapability.threadId;
+        // Tool results here are read by the bot and often relayed to people:
+        // in the owner's language (pt-BR), like the bots answer.
         if (store.groupByThread(threadId)) {
-          return json(res, 400, { error: "not available in rooms — rooms have their own /goal runs" });
+          return json(res, 400, { error: "não disponível em salas (not available in rooms) — salas têm as próprias execuções /goal" });
         }
-        if (!store.taskByThread(bot.id, threadId)) return json(res, 404, { error: "this conversation no longer exists" });
+        if (!store.taskByThread(bot.id, threadId)) return json(res, 404, { error: "esta conversa não existe mais" });
         requireActiveInternalCapability();
         if (path === "/api/internal/wake") {
           if (body.cancel === true && body.standing === true) {
             const cancelled = autonomy.cancelStanding(threadId);
-            if (cancelled) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Standing watch stopped — ${cancelled.watch!.command.slice(0, 100)}`, ok: false } });
-            return json(res, 200, { message: cancelled ? "Standing watch stopped." : "There was no standing watch here." });
+            if (cancelled) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Vigia permanente desligado — ${watchLabel(cancelled.watch!.command)}`, ok: false } });
+            return json(res, 200, { message: cancelled ? "Vigia permanente desligado." : "Não havia vigia permanente nesta conversa." });
           }
           if (body.cancel === true) {
             const cancelled = autonomy.cancelWake(threadId);
-            return json(res, 200, { message: cancelled ? "Wake-up cancelled." : "There was no pending wake-up here." });
+            return json(res, 200, { message: cancelled ? `${cancelled.watch ? "Vigia" : "Despertador"} cancelado.` : "Não havia despertador nem vigia pendente nesta conversa." });
           }
           if (body.command !== undefined) {
             const command = parseWatchCommand(body.command);
@@ -15740,16 +15762,16 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             // The first run proves the command works and becomes the baseline.
             const first = await runWatchCommand(command.argv, { cwd: watchCwd(bot.id, threadId), path: augmentedPath() });
             requireActiveInternalCapability();
-            if (!first.ok) return json(res, 400, { error: `the command failed on its first run — fix it before watching:\n${first.output.slice(0, 1_500)}` });
+            if (!first.ok) return json(res, 400, { error: `o comando falhou na primeira execução — corrija antes de vigiar:\n${first.output.slice(0, 1_500)}` });
             if (!input.standing && watchMatches(first.output, input.until)) {
-              return json(res, 200, { message: `Already true — the output matches "${input.until}" now, so nothing to wait for. Output:\n${first.output.slice(0, 1_500)}` });
+              return json(res, 200, { message: `Já é verdade — a saída casa com "${input.until}" agora, então não há o que esperar. Saída:\n${first.output.slice(0, 1_500)}` });
             }
             const wake = autonomy.setWatch(bot.id, threadId, { ...input, command: String(body.command).trim(), argv: command.argv, baseline: first.output, baselineFingerprint: first.fingerprint });
             store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: wakeChip(wake), ok: true } });
             return json(res, 200, {
               message: input.standing
-                ? `Standing watch armed. The server re-runs it every ${input.everyMinutes} min with no model involved and wakes you here each time ${input.until ? `a new output matches "${input.until}"` : "the output changes"} (and every ${input.maxMinutes} min regardless). It stays armed after firing — never call wake_when again for it; wake_me here does not replace it. End your turn now. Current output:\n${first.output.slice(0, 1_500)}`
-                : `Watching. The server re-runs it every ${input.everyMinutes} min with no model involved and wakes you here when ${input.until ? `the output matches "${input.until}"` : "the output changes"}, or after ${input.maxMinutes} min regardless. End your turn now. Current output:\n${first.output.slice(0, 1_500)}`,
+                ? `Vigia permanente armado. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui toda vez que ${input.until ? `uma saída nova casar com "${input.until}"` : "a saída mudar"} (e a cada ${input.maxMinutes} min de qualquer forma). Ele continua armado depois de disparar — não chame wake_when de novo para ele; wake_me aqui não o substitui. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`
+                : `Vigiando. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui quando ${input.until ? `a saída casar com "${input.until}"` : "a saída mudar"}, ou depois de ${input.maxMinutes} min de qualquer forma. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`,
             });
           }
           const input = parseWakeInput(body);
@@ -15757,54 +15779,54 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const wake = autonomy.setWake(bot.id, threadId, input.minutes, input.reason);
           store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: wakeChip(wake), ok: true } });
           return json(res, 200, {
-            message: `You will get a new turn here in ${input.minutes} min with your note. End your turn now; do not poll in the meantime.`,
+            message: `Você recebe um novo turno aqui em ${input.minutes} min, com a sua nota. Encerre o turno agora; não fique consultando enquanto isso.`,
           });
         }
         if (body.action === "start") {
           const input = parseGoalInput(body);
           if (!input.ok) return json(res, 400, { error: input.error });
           const goal = autonomy.startGoal(bot.id, threadId, input);
-          store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Goal mode on — ${goal.goal.slice(0, 140)}`, ok: true } });
+          store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Modo objetivo ligado — ${chipText(goal.goal, 140)}`, ok: true } });
           return json(res, 200, { message: goalStartedAck(goal) });
         }
         if (body.action === "end") {
           const input = parseGoalEndInput(body);
           if (!input.ok) return json(res, 400, { error: input.error });
           const goal = autonomy.finishGoal(threadId, input.status, input.detail);
-          if (!goal) return json(res, 409, { error: "goal mode is not on in this conversation" });
+          if (!goal) return json(res, 409, { error: "o modo objetivo não está ligado nesta conversa" });
           store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: goalEndChip(goal), ok: goal.status === "completed" } });
           return json(res, 200, {
             message: goal.status === "needs-input"
-              ? "Goal paused until the person answers; their next message resumes it. Ask your question in the reply."
-              : "Goal mode ended. Report the outcome in your reply.",
+              ? "Objetivo pausado até a pessoa responder; a próxima mensagem dela o retoma. Faça a sua pergunta na resposta."
+              : "Modo objetivo encerrado. Relate o resultado na sua resposta.",
           });
         }
-        return json(res, 400, { error: "action must be start or end" });
+        return json(res, 400, { error: "action deve ser start ou end" });
       }
       if (method === "POST" && path === "/api/internal/cc-session") {
         const body = await readInternalBody();
         const bot = internalSender;
         const threadId = internalCapability.threadId;
-        if (store.groupByThread(threadId)) return json(res, 400, { error: "manage Claude Code sessions from a direct conversation, not a room" });
+        if (store.groupByThread(threadId)) return json(res, 400, { error: "gerencie sessões do Claude Code de uma conversa direta, não de uma sala" });
         requireActiveInternalCapability();
         const action = String(body.action ?? "");
-        // Reports also go back to the thread the order came from: this one,
-        // or one of this bot's conversations named explicitly.
+        // Reports go back to the thread the order came from (see send); a
+        // second conversation of this bot may be named to get them too.
         let replyThreadId = threadId;
         if (typeof body.replyThreadId === "string" && body.replyThreadId.trim()) {
           replyThreadId = body.replyThreadId.trim();
           if (!store.taskByThread(bot.id, replyThreadId) || store.groupByThread(replyThreadId)) {
-            return json(res, 400, { error: "reply_thread_id must be one of your own direct conversations" });
+            return json(res, 400, { error: "reply_thread_id precisa ser uma das suas próprias conversas diretas" });
           }
         }
         if (action === "list") {
           const sessions = ccLedger.owned(bot.id, body.includeArchived === true);
           const detail = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
-          if (detail && detail.ownerBotId !== bot.id) return json(res, 404, { error: "no such session of yours" });
+          if (detail && detail.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão" });
           return json(res, 200, {
             message: [
-              sessions.length ? sessions.map(ccSessionLine).join("\n") : "You manage no Claude Code sessions.",
-              ...(detail ? [`\nLatest report of ${detail.id}:\n${detail.lastReport ?? "(none yet)"}${detail.lastError ? `\nLast problem: ${detail.lastError}` : ""}`] : []),
+              sessions.length ? sessions.map(ccSessionLine).join("\n") : "Você não gerencia nenhuma sessão do Claude Code.",
+              ...(detail ? [`\nÚltimo relatório de ${detail.id}:\n${detail.lastReport ?? "(nenhum ainda)"}${detail.lastError ? `\nÚltimo problema: ${detail.lastError}` : ""}`] : []),
             ].join("\n"),
           });
         }
@@ -15812,7 +15834,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const input = parseCcStartInput(body, ccIsGitRepo);
           if (!input.ok) return json(res, 400, { error: input.error });
           if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
-            return json(res, 409, { error: `${CC_MAX_RUNNING} Claude Code sessions are already running on this computer; wait for one to report, or stop one` });
+            return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando neste computador; espere uma relatar, ou pare uma` });
           }
           if (body.surface !== "cli" && process.platform === "darwin") {
             const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
@@ -15820,9 +15842,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             session.desktop!.pending = { kind: "create", text: desktopBrief(session, input.brief), since: Date.now(), attempts: 0 };
             session.status = "running";
             ccLedger.save();
-            ccChip(session, "queued to open in the Claude app when the Mac is idle");
+            ccChip(session, "na fila para abrir no app Claude quando o Mac estiver livre");
             const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", input.model ? "model" : ""].filter(Boolean);
-            return json(res, 200, { message: `Queued Claude Code session ${session.id} ("${session.title}") to open in the Claude app, in ${basename(input.repo)} with its own worktree, as soon as the Mac is unlocked and nobody has touched it for ${DESKTOP_IDLE_SECONDS} seconds — the person follows it there.${ignored.length ? ` ${ignored.join(" and ")} do not apply in the app (it uses its own settings; its report names the mode it really runs in).` : ""} When it finishes a turn you get its report here as a new turn. End your turn now — do not poll it.` });
+            return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.` });
           }
           const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
           if (replyThreadId !== threadId) {
@@ -15830,17 +15852,20 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             ccLedger.save();
           }
           runCcTurn(session, input.brief, true);
-          ccChip(session, `started in ${input.repo}/.claude/worktrees/${session.worktree}`);
-          return json(res, 200, { message: `Started Claude Code session ${session.id} ("${session.title}") in its own worktree. It works on its own; when it stops you get its report here as a new turn. End your turn now — do not poll it.` });
+          ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
+          return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.` });
         }
         const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
-        if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "no such session of yours — call cc_session_list" });
+        if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão — chame cc_session_list" });
         if (action === "send") {
           const message = typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "";
-          if (!message) return json(res, 400, { error: "message is required" });
-          if (session.status === "archived") return json(res, 409, { error: "that session is archived; start a new one" });
+          if (!message) return json(res, 400, { error: "message é obrigatório" });
+          if (session.status === "archived") return json(res, 409, { error: "essa sessão está arquivada; comece outra" });
+          // The order came from this conversation: its report comes back here.
+          const moved = threadId !== session.ownerThreadId;
+          if (moved) session.ownerThreadId = threadId;
           const reportTo = replyThreadId === session.ownerThreadId ? undefined : replyThreadId;
-          if (reportTo !== session.replyThreadId) {
+          if (moved || reportTo !== session.replyThreadId) {
             if (reportTo) session.replyThreadId = reportTo;
             else delete session.replyThreadId;
             ccLedger.save();
@@ -15849,61 +15874,69 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             const desktop = session.desktop;
             const opening = !desktop?.localId && session.status === "running" && Boolean(desktop?.pending?.kind === "create" || desktop?.sentAt);
             if (!desktop?.localId && !opening) {
-              return json(res, 409, { error: "that session never opened in the Claude app; start a new one with cc_session_start" });
+              return json(res, 409, { error: "essa sessão nunca abriu no app Claude; comece outra com cc_session_start" });
             }
             if (session.status === "failed") {
-              return json(res, 409, { error: `that session failed (${(session.lastError ?? "unknown error").slice(0, 300)}); look at it in the Claude app, then start a new one with cc_session_start` });
+              return json(res, 409, { error: `essa sessão falhou (${(session.lastError ?? "erro desconhecido").slice(0, 300)}); veja no app Claude e depois comece outra com cc_session_start` });
             }
-            if (desktop?.archiveWhenResolved) return json(res, 409, { error: "that session is being archived; start a new one" });
+            if (desktop?.archiveWhenResolved || desktop?.pending?.kind === "archive") return json(res, 409, { error: "essa sessão está sendo arquivada; comece outra" });
             if (session.status === "running" || desktop?.pending || desktop?.sent) {
               const position = ccLedger.enqueue(session, message);
-              return json(res, 200, { message: `The session is busy; your message is queued (#${position}) and goes into the Claude app after this turn. End your turn now.` });
+              return json(res, 200, { message: `A sessão está ocupada; sua mensagem entrou na fila (#${position}) e vai para o app Claude depois deste turno. Encerre o turno agora.` });
             }
             session.desktop!.pending = { kind: "send", text: message, since: Date.now(), attempts: 0 };
             session.status = "running";
             ccLedger.save();
-            ccChip(session, "message queued for the Claude app");
-            return json(res, 200, { message: "Queued: it goes into the session in the Claude app as soon as the Mac is idle; the next report comes back here. End your turn now." });
+            ccChip(session, "mensagem na fila para o app Claude");
+            return json(res, 200, { message: "Na fila: vai para a sessão no app Claude assim que o Mac estiver livre, e o servidor confere que chegou; o próximo relatório volta aqui. Encerre o turno agora." });
           }
           if (session.status === "running") {
             const position = ccLedger.enqueue(session, message);
-            return json(res, 200, { message: `The session is mid-turn; your message is queued (#${position}) and runs as soon as this turn ends. End your turn now.` });
+            return json(res, 200, { message: `A sessão está no meio de um turno; sua mensagem entrou na fila (#${position}) e roda assim que este turno terminar. Encerre o turno agora.` });
           }
           if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
-            return json(res, 409, { error: `${CC_MAX_RUNNING} Claude Code sessions are already running; try again after one reports` });
+            return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando; tente de novo depois que uma relatar` });
           }
           runCcTurn(session, message, session.turns === 0);
-          ccChip(session, "sent a message");
-          return json(res, 200, { message: "Sent. The session is working; its report comes back here as a new turn. End your turn now." });
+          ccChip(session, "mensagem enviada");
+          return json(res, 200, { message: "Enviada. A sessão está trabalhando; o relatório volta aqui como um novo turno. Encerre o turno agora." });
         }
         if (session.surface === "app" && action === "stop") {
-          return json(res, 409, { error: "this session runs in the Claude app; ask the person to stop it there (Esc in the session)" });
+          return json(res, 409, { error: "esta sessão roda no app Claude; peça à pessoa para pará-la lá (Esc na sessão)" });
         }
         if (session.surface === "app" && action === "archive") {
           const desktop = session.desktop!;
           if (desktop.pending?.kind === "archive" || desktop.archiveWhenResolved) {
-            return json(res, 200, { message: "Already queued to be archived in the Claude app." });
+            return json(res, 200, { message: "Já está na fila para ser arquivada no app Claude." });
           }
           const opening = !desktop.localId && (desktop.pending?.kind === "create" && desktop.pending.triedAt !== undefined || desktop.sentAt !== undefined);
           if (!desktop.localId && !opening) {
             ccLedger.setStatus(session, "archived");
             delete desktop.pending;
             ccLedger.save();
-            ccChip(session, "archived (it never opened in the app)");
-            return json(res, 200, { message: "Archived; it had not opened in the Claude app yet." });
+            ccChip(session, "arquivada (nunca abriu no app)");
+            return json(res, 200, { message: "Arquivada; ela ainda não tinha aberto no app Claude." });
           }
-          if (opening || desktop.pending || desktop.sent) {
-            // Never drop what is on its way: archive once it has opened / the message went in.
+          // Never drop a message on its way, never archive mid-turn. A session
+          // stalled past the watchdog may still be archived.
+          if (desktop.pending?.kind === "send" || desktop.sent || session.queued.length) {
+            return json(res, 409, { error: "há uma mensagem a caminho dessa sessão; arquive depois que ela chegar e a sessão relatar" });
+          }
+          if (desktop.localId && session.status === "running" && ccSessionActive(session, Date.now())) {
+            return json(res, 409, { error: "a sessão está no meio de um turno; arquive depois do relatório (ou peça à pessoa para pará-la no app)" });
+          }
+          // Its worktree goes only after the app's record confirms the archive.
+          if (body.removeWorktree === true) desktop.removeWorktree = true;
+          if (opening) {
             desktop.archiveWhenResolved = true;
-            session.queued = [];
             ccLedger.save();
-            ccChip(session, "will be archived in the Claude app once what is on its way has gone in");
-            return json(res, 200, { message: "Queued: it is archived in the Claude app as soon as it has opened and nothing else is waiting to go into it." });
+            ccChip(session, "será arquivada no app Claude assim que abrir");
+            return json(res, 200, { message: "Na fila: ela é arquivada no app Claude assim que abrir." });
           }
           desktop.pending = { kind: "archive", text: "", since: Date.now(), attempts: 0 };
           ccLedger.save();
-          ccChip(session, "queued to be archived in the Claude app");
-          return json(res, 200, { message: "Queued: it is archived in the Claude app as soon as the Mac is idle; the app then removes it from its list." });
+          ccChip(session, "na fila para ser arquivada no app Claude");
+          return json(res, 200, { message: `Na fila: ela é arquivada no app Claude assim que o Mac estiver livre, e o servidor confere no registro do app que arquivou${desktop.removeWorktree ? "; só então a worktree é removida (se não tiver alterações pendentes)" : ""}.` });
         }
         if (action === "stop" || action === "archive") {
           const child = ccProcesses.get(session.id);
@@ -15912,21 +15945,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
           }
           ccLedger.setStatus(session, action === "stop" ? "stopped" : "archived");
-          let worktreeNote = "";
-          if (action === "archive" && body.removeWorktree === true && session.cwd && session.cwd.includes("/.claude/worktrees/")) {
-            try {
-              const git = (...args: string[]) => execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } });
-              try { git("worktree", "unlock", session.cwd); } catch { /* not locked */ }
-              git("worktree", "remove", session.cwd);
-              worktreeNote = ` Worktree ${session.cwd} removed.`;
-            } catch (error) {
-              worktreeNote = ` The worktree was kept: ${error instanceof Error ? error.message.split("\n").slice(-2).join(" ") : String(error)}`;
-            }
-          }
-          ccChip(session, action === "stop" ? "stopped" : `archived${worktreeNote ? " (worktree handled)" : ""}`);
-          return json(res, 200, { message: `${action === "stop" ? "Stopped; cc_session_send resumes it later." : "Archived."}${worktreeNote}` });
+          const worktreeNote = action === "archive" && body.removeWorktree === true ? removeSessionWorktree(session) : "";
+          ccChip(session, action === "stop" ? "parada" : `arquivada${worktreeNote ? " (worktree tratada)" : ""}`);
+          return json(res, 200, { message: `${action === "stop" ? "Parada; cc_session_send a retoma depois." : "Arquivada."}${worktreeNote ? ` ${worktreeNote}` : ""}` });
         }
-        return json(res, 400, { error: "action must be start, send, list, stop or archive" });
+        return json(res, 400, { error: "action deve ser start, send, list, stop ou archive" });
       }
       if (method === "POST" && path === "/api/internal/retry-thread") {
         const body = await readInternalBody();

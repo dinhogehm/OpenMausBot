@@ -40,7 +40,7 @@ it("wakes the bot in the same conversation with its own note", () => fixture(asy
   ] });
   await f.send("Check PR 9280 in a minute.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
-  expect(toolResult(f.turns()[0], "wake_me")).toContain("End your turn now");
+  expect(toolResult(f.turns()[0], "wake_me")).toContain("Encerre o turno agora");
   await expect.poll(async () => (await f.messages()).some((message: any) => message.text === "PR 9280 is merged"), { timeout: 10_000 }).toBe(true);
   const chips = await f.chips();
   expect(chips.some((chip: string) => chip.startsWith("Despertador às"))).toBe(true);
@@ -160,7 +160,7 @@ it("watches a command without waking the bot until its output changes", () => fi
   ] });
   await f.send("Tell me when a new commit lands.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
-  expect(toolResult(f.turns()[0], "wake_when")).toContain("Watching. The server re-runs it");
+  expect(toolResult(f.turns()[0], "wake_when")).toContain("Vigiando. O servidor roda o comando");
   // Many cadences pass with no change: the command runs, the bot does not.
   await new Promise(resolve => setTimeout(resolve, 1_500));
   expect(f.turns()).toHaveLength(1);
@@ -186,7 +186,7 @@ it("keeps a standing watch armed: it fires on each change and a wake_me does not
   ] });
   await f.send("Watch the repo for good.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
-  expect(toolResult(f.turns()[0], "wake_when")).toContain("Standing watch armed");
+  expect(toolResult(f.turns()[0], "wake_when")).toContain("Vigia permanente armado");
   commit("second ONE");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
   await expect.poll(() => f.ledger().wakes.length, { timeout: 10_000 }).toBe(2);
@@ -251,6 +251,54 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(ccLedger()[0]).toMatchObject({ turns: 2, costUsd: 0.02 });
     const chips = await f.chips();
     expect(chips.some((chip: string) => chip.includes("finished turn 1"))).toBe(true);
-    expect(chips.some((chip: string) => chip.includes("archived"))).toBe(true);
+    expect(chips.some((chip: string) => chip.includes("arquivada"))).toBe(true);
+  }, { OMB_CC_BIN: fake });
+}, 90_000);
+
+it("sends a session's next report to the conversation that gave the last order", async () => {
+  const { chmodSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const tools = mkdtempSync(join(tmpdir(), "omb-fake-claude-"));
+  const fake = join(tools, "fake-claude.mjs");
+  writeFileSync(fake, `#!/usr/bin/env node
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+const argv = process.argv.slice(2);
+const prompt = argv[argv.length - 1];
+let cwd = process.cwd();
+const w = argv.indexOf("-w");
+if (w >= 0) { cwd = join(cwd, ".claude", "worktrees", argv[w + 1]); mkdirSync(cwd, { recursive: true }); }
+console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "did: " + prompt.split("\\n")[0].slice(0, 60), total_cost_usd: 0.01 }));
+`);
+  chmodSync(fake, 0o755);
+  await fixture(async f => {
+    const { execFileSync } = await import("node:child_process");
+    const data = f.session.info.dataDir;
+    const repo = join(data, "repo");
+    execFileSync("git", ["init", "-q", repo]);
+    const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
+    const startTurn = { steps: [{ tool: "cc_session_start", arguments: { title: "#9998 origem", brief: "BRIEF_A", repo, surface: "cli" } }], reply: "Session started" };
+    f.save({ turns: [startTurn, { expectContextIncludes: ["did: BRIEF_A"], reply: "Report read in A" }] });
+    await f.send("Open a Claude Code session for #9998.");
+    await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(2);
+    const id = ccLedger()[0].id;
+    const threadA = f.bot.activeTaskId;
+    const created = await f.api(`/api/bots/${f.bot.id}/tasks`, { title: "Chief desk" });
+    const threadB = created.task.threadId as string;
+    f.save({ turns: [
+      startTurn,
+      { expectContextIncludes: ["did: BRIEF_A"], reply: "Report read in A" },
+      { steps: [{ tool: "cc_session_send", arguments: { session_id: id, message: "ORDER_FROM_B" } }], reply: "Sent from B" },
+      { expectContextIncludes: ["did: ORDER_FROM_B"], reply: "Report read in B" },
+    ] });
+    await runControlOmb(["send", "--bot", f.bot.id, "--task", threadB, "--text", "Steer #9998 from here."], { env: { OPENMAUSBOT_URL: f.session.info.url } });
+    await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(4);
+    expect(ccLedger()[0].ownerThreadId).toBe(threadB);
+    const inB = (await f.api(`/api/threads/${threadB}/messages`, undefined, "GET")).messages as any[];
+    await expect.poll(async () => ((await f.api(`/api/threads/${threadB}/messages`, undefined, "GET")).messages as any[]).some((message: any) => message.text === "Report read in B"), { timeout: 10_000 }).toBe(true);
+    expect(inB.length).toBeGreaterThan(0);
+    const inA = (await f.api(`/api/threads/${threadA}/messages`, undefined, "GET")).messages as any[];
+    expect(inA.some((message: any) => message.text === "Report read in B")).toBe(false);
   }, { OMB_CC_BIN: fake });
 }, 90_000);
