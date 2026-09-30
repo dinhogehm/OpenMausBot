@@ -7301,9 +7301,10 @@ async function runDueWatches(): Promise<void> {
 }
 
 /** Low disk where the work happens: told once per band to the Chief of Staff. */
-// Test servers (spawned under vitest) share this Mac's real disk; they must
-// not wake their scripted Chief about it.
-const diskWatch = new DiskWatch({ paths: process.env.VITEST ? [] : [join(homedir(), "Projetos"), DATA_DIR].filter((path) => existsSync(path)) });
+// Only the server the desktop app runs watches this Mac's disk. Test and
+// verification servers share the same real disk and must not wake their
+// scripted Chief about it (it would start turns the tests never planned).
+const diskWatch = new DiskWatch({ paths: DESKTOP_MANAGED && !process.env.VITEST ? [join(homedir(), "Projetos"), DATA_DIR].filter((path) => existsSync(path)) : [] });
 
 function checkDiskSpace(): void {
   const drops = diskWatch.check();
