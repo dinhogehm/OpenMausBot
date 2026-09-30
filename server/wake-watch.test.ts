@@ -74,4 +74,14 @@ describe("change detection on the whole output", () => {
     expect(a.fingerprint).not.toBe(b.fingerprint);
     expect(a.fingerprint).toBe(fingerprintOf(big + "A"));
   });
+
+  it("ignores stderr noise (a pager token) when deciding it changed, but still shows it", async () => {
+    const script = "process.stdout.write('same messages'); process.stderr.write('# Next page: --page ' + process.argv[1])";
+    const run = (token: string) => runWatchCommand([process.execPath, "-e", script, token], { cwd: process.cwd(), path: process.env.PATH ?? "" });
+    const [a, b] = await Promise.all([run("abc"), run("xyz")]);
+    expect(a.ok).toBe(true);
+    expect(a.output).toContain("Next page: --page abc");
+    expect(a.fingerprint).toBe(b.fingerprint);
+    expect(a.fingerprint).toBe(fingerprintOf("same messages"));
+  });
 });

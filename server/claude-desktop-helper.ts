@@ -6,13 +6,17 @@ export const DESKTOP_HELPER_SOURCE = String.raw`// omb-desktop: the few native a
 // server/claude-desktop.ts (swiftc), so it needs no Python or extra packages.
 //
 //   omb-desktop idle                 seconds since the last keyboard/mouse input
-//   omb-desktop front                name of the frontmost application
+//   omb-desktop front                bundle id of the frontmost application
+//   omb-desktop locked               1 if the screen is locked or the main display asleep, else 0
+//   omb-desktop screen               "W H" of the main display, in points
+//   omb-desktop activate BUNDLE      bring the running app with that bundle id to the front
 //   omb-desktop ocr                  "x y w h | text" lines for the main display,
 //                                    in screen points, origin top-left
 //   omb-desktop click|rclick X Y     left or right click at screen point
 //   omb-desktop key CODE [cmd]       press a key (virtual key code), optionally with ⌘
 //   omb-desktop paste FILE [all]     put FILE's text on the clipboard, optionally ⌘A,
 //                                    then ⌘V, then restore the previous clipboard
+//                                    (every item and type: images and files too)
 import AppKit
 import CoreGraphics
 import Foundation
@@ -57,6 +61,23 @@ func key(_ code: CGKeyCode, command: Bool) {
   }
 }
 
+func screenLocked() -> Bool {
+  if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+     let locked = session["CGSSessionScreenIsLocked"] as? NSNumber, locked.boolValue { return true }
+  return CGDisplayIsAsleep(CGMainDisplayID()) != 0
+}
+
+/** A copy of everything on the clipboard, every item with every type. */
+func saveClipboard(_ board: NSPasteboard) -> [NSPasteboardItem] {
+  return (board.pasteboardItems ?? []).map { item in
+    let copy = NSPasteboardItem()
+    for type in item.types {
+      if let data = item.data(forType: type) { copy.setData(data, forType: type) }
+    }
+    return copy
+  }
+}
+
 func ocr() {
   // The system screencapture tool: CGDisplayCreateImage is gone in macOS 15.
   let file = NSTemporaryDirectory() + "omb-desktop-\(getpid()).png"
@@ -84,12 +105,21 @@ func ocr() {
 }
 
 let args = CommandLine.arguments
-guard args.count >= 2 else { fail("usage: omb-desktop idle|front|ocr|click|key|paste") }
+guard args.count >= 2 else { fail("usage: omb-desktop idle|front|locked|screen|activate|ocr|click|key|paste") }
 switch args[1] {
 case "idle":
   print(String(format: "%.1f", idleSeconds()))
 case "front":
-  print(NSWorkspace.shared.frontmostApplication?.localizedName ?? "")
+  print(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
+case "locked":
+  print(screenLocked() ? "1" : "0")
+case "screen":
+  let bounds = CGDisplayBounds(CGMainDisplayID())
+  print(String(format: "%.0f %.0f", bounds.width, bounds.height))
+case "activate":
+  guard args.count >= 3 else { fail("activate BUNDLE") }
+  guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: args[2]).first else { fail("\(args[2]) is not running") }
+  app.activate()
 case "ocr":
   ocr()
 case "click", "rclick":
@@ -101,14 +131,15 @@ case "key":
 case "paste":
   guard args.count >= 3, let text = try? String(contentsOfFile: args[2], encoding: .utf8) else { fail("paste FILE [all]") }
   let board = NSPasteboard.general
-  let previous = board.string(forType: .string)
+  let previous = saveClipboard(board)
   board.clearContents()
   board.setString(text, forType: .string)
   if args.count >= 4 && args[3] == "all" { key(0, command: true) } // ⌘A
   key(9, command: true) // ⌘V
   usleep(400_000)
+  // Our text never stays behind: the person's clipboard comes back, or an empty one.
   board.clearContents()
-  if let previous { board.setString(previous, forType: .string) }
+  if !previous.isEmpty { board.writeObjects(previous) }
 default:
   fail("unknown command \(args[1])")
 }

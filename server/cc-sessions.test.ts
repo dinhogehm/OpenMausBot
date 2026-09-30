@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccReportForOwner, ccTurnArgs, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -90,5 +90,32 @@ describe("ledger", () => {
     l.finishTurn(session, { ok: true, report: "PR #9286 open, gate green", costUsd: 1 });
     expect(ccReportForOwner(session)).toContain("PR #9286 open, gate green");
     expect(ccReportForOwner(session)).toContain("cc_session_send");
+  });
+
+  it("says how the session runs: headless denials end the turn, app sessions name the mode the app really uses", () => {
+    const l = ledger();
+    const cli = l.create(base);
+    expect(ccReportForOwner(cli)).toMatch(/headless CLI .* no approval dialog: a hook denial ends the turn/);
+    const app = l.create({ ...base, id: "22222222-2222-3333-4444-555555555555", surface: "app", desktop: { marker: "OMBX", turnsSeen: 0, permissionMode: "bypassPermissions" } });
+    expect(ccReportForOwner(app)).toContain("the app runs it as bypassPermissions");
+    expect(ccReportForOwner(app, { hookDecision: "deny gh issue comment" })).toContain("Latest review-hook decision in its folder: deny gh issue comment");
+    app.blockedOn = "approve the push";
+    expect(ccReportForOwner(app)).toContain("BLOCKED — it needs: approve the push");
+    expect(ccStallReport(app, 42)).toContain("no progress for 42 min");
+  });
+});
+
+describe("lastHookDecision", () => {
+  it("returns the latest log line about the folder, or null", () => {
+    const log = join(dir, "dual-decisions.log");
+    writeFileSync(log, [
+      "2026-09-30T00:40:02Z | /repo/.claude/worktrees/a | deny | git push",
+      "2026-09-30T00:41:00Z | /repo/.claude/worktrees/b | allow | gh pr view",
+      "2026-09-30T00:48:12Z | /repo/.claude/worktrees/a | pass | jev: deny (confiança 51%)",
+      "",
+    ].join("\n"));
+    expect(lastHookDecision(log, "/repo/.claude/worktrees/a")).toContain("jev: deny (confiança 51%)");
+    expect(lastHookDecision(log, "/elsewhere")).toBeNull();
+    expect(lastHookDecision(join(dir, "missing.log"), "/repo")).toBeNull();
   });
 });

@@ -610,7 +610,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
   {
     name: "wake_when",
     description:
-      "Wait for something outside this conversation without spending turns: the server re-runs a read-only command every few minutes, with no model involved, and gives you a new turn HERE only when its whole output changes (or matches until), after max_minutes regardless, or if it keeps failing. Use it instead of wake_me for CI, PR checks and reviews, workflow runs, deploy health. Allowed: gh pr view|checks|list|status, gh run|workflow|release view|list, gh issue view|list, gh api (GET), gog chat messages list / spaces|threads list|get, gog sheets get|metadata, git ls-remote|log|rev-parse|status, curl GET. No shell: no pipes or $vars; quote --jq filters. Pick stable fields (--json state,statusCheckRollup), not timestamps. Shares the one pending wake per conversation. End your turn after calling it.",
+      "Wait for something outside this conversation without spending turns: the server re-runs a read-only command every few minutes, with no model involved, and gives you a new turn HERE only when its whole output changes (or matches until), after max_minutes regardless, or if it keeps failing. Use it instead of wake_me for CI, PR checks and reviews, workflow runs, deploy health. Allowed: gh pr view|checks|list|status, gh run|workflow|release view|list, gh issue view|list, gh api (GET), gog chat messages list / spaces|threads list|get, gog sheets get|metadata, git ls-remote|log|rev-parse|status, curl GET. No shell: no pipes or $vars; quote --jq filters. Pick stable fields (--json state,statusCheckRollup), not timestamps. Shares the one pending wake per conversation, unless standing: a standing watch (an inbox, a chat space) stays armed after each firing and wake_me does not replace it. End your turn after calling it.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -620,8 +620,9 @@ const toolDefinitions = (externalRuntime: boolean) => [
         every_minutes: { type: "integer", minimum: 1, maximum: 60, description: "How often to re-run, default 2." },
         max_minutes: { type: "integer", minimum: 5, maximum: 1_440, description: "Wake anyway after this long, default 120." },
         reason: { type: "string", maxLength: 500, description: "Note to your future self: what to do when it fires." },
+        standing: { type: "boolean", description: "true: never used up — after each firing it re-arms on the new output. For permanent watchers; set it once." },
+        cancel: { type: "boolean", description: "With standing: true, stops this conversation's standing watch (command and reason not needed)." },
       },
-      required: ["command", "reason"],
     },
   },
   {
@@ -638,6 +639,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
         surface: { type: "string", enum: ["app", "cli"], description: "Default app: the session opens in the Claude desktop app, where the person follows it (it waits for an idle Mac to open). cli: headless, nobody sees it — only for internal chores." },
         permission_mode: { type: "string", enum: ["auto", "acceptEdits", "default", "plan"], description: "cli only. Default auto." },
         model: { type: "string", description: "Optional model id; default is the CLI's." },
+        reply_thread_id: { type: "string", description: "Optional: another of your conversations that should also get its reports (where the order came from)." },
       },
       required: ["title", "brief", "repo"],
     },
@@ -652,6 +654,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
       properties: {
         session_id: { type: "string" },
         message: { type: "string", maxLength: 20_000 },
+        reply_thread_id: { type: "string", description: "Optional: the conversation that should also get its reports; default this one." },
       },
       required: ["session_id", "message"],
     },

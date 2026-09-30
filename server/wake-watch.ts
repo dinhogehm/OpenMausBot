@@ -133,7 +133,7 @@ export interface WatchRunResult {
   ok: boolean;
   /** The first WATCH_OUTPUT_MAX characters, for the bot to read. */
   output: string;
-  /** sha256 of the whole output: what "changed" is decided on. */
+  /** sha256 of the whole stdout (of the whole output on failure): what "changed" is decided on. */
   fingerprint: string;
 }
 
@@ -163,7 +163,9 @@ export function runWatchCommand(argv: string[], opts: { cwd: string; path: strin
           resolve({ ok: false, output, fingerprint: fingerprintOf(output) });
           return;
         }
-        resolve({ ok: true, output: text, fingerprint: fingerprintOf(full) });
+        // Only stdout decides "changed": stderr carries noise like a pager's
+        // "Next page" token that differs on every run. It is still shown.
+        resolve({ ok: true, output: text, fingerprint: fingerprintOf(String(stdout ?? "").trim()) });
       },
     );
   });

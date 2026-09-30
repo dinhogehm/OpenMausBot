@@ -12,7 +12,7 @@
 //
 // This file is state, argv and stream parsing only. server/index.ts owns the
 // processes, the routes and the wake-ups.
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 
 export const CC_TITLE_MAX = 120;
@@ -54,6 +54,15 @@ export interface CcSession {
    * headless `claude -p` turns. */
   surface?: CcSurface;
   desktop?: CcDesktopState;
+  /** Where the last order came from (a thread of the owning bot); its
+   * reports go there too, besides the owning conversation. */
+  replyThreadId?: string;
+  /** Last sign of work (record, transcript, turn); the watchdog's clock. */
+  progressAt?: number;
+  /** progressAt of the stall already reported, so each stall is told once. */
+  stallReportedAt?: number;
+  /** What the session said it needs when its last turn ended blocked. */
+  blockedOn?: string;
 }
 
 export type CcSurface = "app" | "cli";
@@ -69,7 +78,30 @@ export interface CcDesktopState {
   /** When the brief was sent; the app's record must appear after this. */
   sentAt?: number;
   /** A screen action waiting for the Mac to be idle. */
-  pending?: { kind: "create" | "send" | "archive"; text: string; since: number; attempts: number; lastReason?: string };
+  pending?: CcDesktopPending;
+  /** A message typed into the session, not yet seen arriving in it. */
+  sent?: { text: string; at: number; userFrameAt: number; deliveries: number };
+  /** Archive once the session has opened and nothing is waiting to go in. */
+  archiveWhenResolved?: boolean;
+  /** The permission mode the app really runs it in (read from its record). */
+  permissionMode?: string;
+}
+
+export interface CcDesktopPending {
+  kind: "create" | "send" | "archive";
+  text: string;
+  since: number;
+  /** Tries that touched the screen and had to stop. */
+  attempts: number;
+  lastReason?: string;
+  /** Not before this (backoff after a try that touched the screen). */
+  nextAttemptAt?: number;
+  /** Tries where the screen, unlocked and with Claude in front, did not show what was expected. */
+  misses?: number;
+  /** A try began (the screen may have been changed); a crash after Return leaves this behind. */
+  triedAt?: number;
+  /** send: how many times this message was already typed without arriving. */
+  deliveries?: number;
 }
 
 export function slugify(text: string): string {
@@ -248,7 +280,9 @@ export class CcSessionLedger {
     session.status = "running";
     session.turns += 1;
     session.lastActivityAt = this.now();
+    session.progressAt = session.lastActivityAt;
     delete session.lastError;
+    delete session.blockedOn;
     this.save();
   }
 
@@ -256,6 +290,7 @@ export class CcSessionLedger {
     if (outcome.cwd) session.cwd = outcome.cwd;
     session.costUsd = Math.round((session.costUsd + outcome.costUsd) * 10_000) / 10_000;
     session.lastActivityAt = this.now();
+    session.progressAt = session.lastActivityAt;
     if (session.status === "stopped" || session.status === "archived") {
       this.save();
       return;
@@ -294,18 +329,69 @@ export function ccSessionLine(session: CcSession): string {
     `turns ${session.turns}, US$ ${session.costUsd.toFixed(2)}`,
     session.cwd ? `worktree ${session.cwd}` : session.surface === "app" ? "worktree chosen by the app (pending)" : `worktree ${session.repo}/.claude/worktrees/${session.worktree} (pending)`,
     ...(session.desktop?.pending ? [`waiting for an idle Mac to ${session.desktop.pending.kind === "create" ? "open it" : session.desktop.pending.kind === "archive" ? "archive it" : "send a message"}${session.desktop.pending.lastReason ? ` (${session.desktop.pending.lastReason})` : ""}`] : []),
+    ...(session.desktop?.sent ? ["message typed in the app, checking that it arrived"] : []),
+    ...(session.blockedOn ? [`BLOCKED — needs: ${session.blockedOn.slice(0, 200)}`] : []),
+    ...(session.desktop?.archiveWhenResolved ? ["to be archived once it opens"] : []),
     ...(session.queued.length ? [`${session.queued.length} message(s) queued`] : []),
   ];
   return bits.join(" · ");
 }
 
-export function ccReportForOwner(session: CcSession): string {
+/** How the session runs, for the manager: it decides who can approve what. */
+export function ccModeLine(session: CcSession): string {
+  if (session.surface === "app") {
+    const mode = session.desktop?.permissionMode ?? session.permissionMode;
+    return `Mode: in the Claude app, permission mode ${mode}${session.desktop?.permissionMode && session.desktop.permissionMode !== session.permissionMode ? ` (asked for ${session.permissionMode}; the app runs it as ${session.desktop.permissionMode})` : ""} — the person sees it there and can approve prompts in the app.`;
+  }
+  return `Mode: headless CLI (claude -p), permission mode ${session.permissionMode} — nobody sees it and there is no approval dialog: a hook denial ends the turn; answer it with cc_session_send.`;
+}
+
+export function ccReportForOwner(session: CcSession, extra: { hookDecision?: string | null } = {}): string {
   const head = session.status === "failed"
     ? `Claude Code session "${session.title}" (${session.id}) stopped with a problem: ${session.lastError ?? "unknown error"}`
-    : `Claude Code session "${session.title}" (${session.id}) finished its turn ${session.turns}.`;
+    : session.blockedOn
+      ? `Claude Code session "${session.title}" (${session.id}) finished its turn ${session.turns} BLOCKED — it needs: ${session.blockedOn}`
+      : `Claude Code session "${session.title}" (${session.id}) finished its turn ${session.turns}.`;
   return [
     head,
+    ccModeLine(session),
+    ...(extra.hookDecision ? [`Latest review-hook decision in its folder: ${extra.hookDecision}`] : []),
     ...(session.lastReport ? [`Its report:\n${session.lastReport}`] : []),
     "Decide the next step: answer or steer it with cc_session_send, verify its claims yourself (gh, git) before relaying them, or archive it with cc_session_archive once its work has shipped.",
   ].join("\n");
+}
+
+/** A running session that shows no sign of work: the manager must look. */
+export function ccStallReport(session: CcSession, minutes: number): string {
+  return [
+    `Claude Code session "${session.title}" (${session.id}) is marked running but has shown no progress for ${minutes} min.`,
+    ccModeLine(session),
+    session.surface === "app"
+      ? "It may be waiting on an approval or a question in the Claude app, or a message may not have reached it. Check it (cc_session_list with its session_id), tell the person what it waits on, or steer it with cc_session_send."
+      : "Its run may be stuck. Check it (cc_session_list with its session_id); stop it with cc_session_stop and resume with cc_session_send if needed.",
+  ].join("\n");
+}
+
+/** The review hook's latest decision about commands run in `cwd`, from the
+ * tail of its log (read only; the hook owns the file). */
+export function lastHookDecision(logPath: string, cwd: string, maxBytes = 256 * 1024): string | null {
+  if (!cwd) return null;
+  let fd: number | null = null;
+  try {
+    const size = statSync(logPath).size;
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    fd = openSync(logPath, "r");
+    readSync(fd, buffer, 0, length, size - length);
+    const lines = buffer.toString("utf8").split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]!.trim();
+      if (line && line.includes(cwd)) return line.slice(0, 400);
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
 }

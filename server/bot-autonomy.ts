@@ -9,6 +9,10 @@
 //     server runs it every few minutes, with no model involved, and moves
 //     the wake up to "now" once the output changes, matches what the bot
 //     waits for, or keeps failing. The time limit still wakes it regardless.
+//   - A standing watch (wake_when standing) is never used up: after it fires
+//     it re-arms on the output it fired on, whether or not the turn could
+//     start. It lives beside the conversation's one ordinary wake, so a
+//     wake_me there never replaces it.
 //   - A goal: the bot was told to keep working until something is delivered
 //     (goal_start). The harness keeps handing it continuation turns until it
 //     calls goal_end, a limit runs out, or the person presses Stop.
@@ -57,10 +61,22 @@ export interface WakeWatch {
   /** sha256 of the whole baseline output; absent on watches set before it existed. */
   baselineFingerprint?: string;
   lastOutput?: string;
+  /** sha256 of the latest successful output; a standing watch compares against it. */
+  lastFingerprint?: string;
+  /** Fingerprints cover stdout only (older watches fingerprinted stderr too). */
+  stdoutFingerprint?: true;
   lastRunAt: number;
   runs: number;
   failures: number;
   trigger?: WatchTrigger;
+  /** What made a standing watch fire last time. */
+  lastTrigger?: WatchTrigger;
+  /** Never used up: re-armed after each firing. */
+  standing?: true;
+  /** A standing watch's time limit, re-applied on each re-arm. */
+  maxMs?: number;
+  /** Times it fired; a standing watch keeps counting. */
+  fired?: number;
 }
 
 export interface BotWake {
@@ -122,10 +138,10 @@ export function parseWakeInput(body: { minutes?: unknown; reason?: unknown }): W
 }
 
 export type WatchInput =
-  | { ok: true; everyMinutes: number; maxMinutes: number; until?: string; reason: string }
+  | { ok: true; everyMinutes: number; maxMinutes: number; until?: string; reason: string; standing?: true }
   | { ok: false; error: string };
 
-export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unknown; until?: unknown; reason?: unknown }): WatchInput {
+export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unknown; until?: unknown; reason?: unknown; standing?: unknown }): WatchInput {
   const everyMinutes = body.everyMinutes === undefined
     ? WATCH_DEFAULT_EVERY_MINUTES
     : intIn(body.everyMinutes, WATCH_MIN_EVERY_MINUTES, WATCH_MAX_EVERY_MINUTES);
@@ -138,7 +154,8 @@ export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unk
   const until = clip(body.until, WATCH_UNTIL_MAX) || undefined;
   const reason = clip(body.reason, WAKE_REASON_MAX);
   if (!reason) return { ok: false, error: "reason is required: what to do when the watch fires" };
-  return { ok: true, everyMinutes, maxMinutes, ...(until ? { until } : {}), reason };
+  if (body.standing !== undefined && typeof body.standing !== "boolean") return { ok: false, error: "standing must be true or false" };
+  return { ok: true, everyMinutes, maxMinutes, ...(until ? { until } : {}), reason, ...(body.standing === true ? { standing: true as const } : {}) };
 }
 
 export type GoalInput =
@@ -167,6 +184,10 @@ export function parseGoalEndInput(body: { status?: unknown; detail?: unknown }):
   return { ok: true, status: raw, detail };
 }
 
+/** Where a wake is kept: the conversation's one ordinary wake, or its standing watch beside it. */
+const STANDING = "\u0000standing";
+const wakeKey = (wake: Pick<BotWake, "threadId" | "watch">): string => (wake.watch?.standing ? `${wake.threadId}${STANDING}` : wake.threadId);
+
 export class BotAutonomy {
   private wakes = new Map<string, BotWake>();
   private goals = new Map<string, BotGoal>();
@@ -193,7 +214,7 @@ export class BotAutonomy {
       const raw = JSON.parse(readFileSync(this.path, "utf8")) as Partial<Ledger>;
       for (const wake of raw.wakes ?? []) {
         if (wake && typeof wake.threadId === "string" && typeof wake.botId === "string" && Number.isFinite(wake.dueAt)) {
-          this.wakes.set(wake.threadId, wake);
+          this.wakes.set(wakeKey(wake), wake);
         }
       }
       for (const pending of raw.reports ?? []) {
@@ -222,6 +243,7 @@ export class BotAutonomy {
   setWake(botId: string, threadId: string, minutes: number, reason: string): BotWake {
     const at = this.now();
     const wake: BotWake = { botId, threadId, dueAt: at + minutes * this.minuteMs, reason, createdAt: at };
+    // the ordinary wake; a standing watch here is kept beside it
     this.wakes.set(threadId, wake);
     this.save();
     return wake;
@@ -232,7 +254,7 @@ export class BotAutonomy {
   setWatch(
     botId: string,
     threadId: string,
-    input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string; baselineFingerprint?: string },
+    input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string; baselineFingerprint?: string; standing?: boolean },
   ): BotWake {
     const at = this.now();
     const wake: BotWake = {
@@ -247,13 +269,15 @@ export class BotAutonomy {
         everyMs: input.everyMinutes * this.minuteMs,
         ...(input.until ? { until: input.until } : {}),
         baseline: input.baseline,
-        ...(input.baselineFingerprint ? { baselineFingerprint: input.baselineFingerprint } : {}),
+        ...(input.baselineFingerprint ? { baselineFingerprint: input.baselineFingerprint, lastFingerprint: input.baselineFingerprint } : {}),
+        stdoutFingerprint: true,
         lastRunAt: at,
         runs: 1,
         failures: 0,
+        ...(input.standing ? { standing: true as const, maxMs: input.maxMinutes * this.minuteMs } : {}),
       },
     };
-    this.wakes.set(threadId, wake);
+    this.wakes.set(wakeKey(wake), wake);
     this.save();
     return wake;
   }
@@ -270,7 +294,7 @@ export class BotAutonomy {
    * caller decides changed/matched (it owns the matching rule). */
   recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean; fingerprint?: string }): WatchTrigger | null {
     const watch = wake.watch;
-    if (!watch || this.wakes.get(wake.threadId) !== wake || watch.trigger) return null;
+    if (!watch || this.wakes.get(wakeKey(wake)) !== wake || watch.trigger) return null;
     watch.lastRunAt = this.now();
     watch.runs += 1;
     watch.lastOutput = result.output;
@@ -280,22 +304,71 @@ export class BotAutonomy {
       if (watch.failures >= WATCH_MAX_FAILURES) trigger = "failing";
     } else {
       watch.failures = 0;
-      if (result.matched) trigger = "matched";
-      else if (!watch.until && (watch.baselineFingerprint && result.fingerprint ? result.fingerprint !== watch.baselineFingerprint : result.output !== watch.baseline)) trigger = "changed";
+      if (result.fingerprint && !watch.stdoutFingerprint) {
+        // Set before fingerprints covered stdout only: take this run as the
+        // baseline instead of firing on the change of method.
+        watch.stdoutFingerprint = true;
+        watch.baselineFingerprint = result.fingerprint;
+        watch.lastFingerprint = result.fingerprint;
+      }
+      // A standing watch compares with the output it last saw, a one-shot with the one it was set on.
+      const reference = watch.standing ? watch.lastFingerprint ?? watch.baselineFingerprint : watch.baselineFingerprint;
+      const changed = reference && result.fingerprint ? result.fingerprint !== reference : result.output !== watch.baseline;
+      // A standing watch fires on a match only when it is a new output, not on every run while it matches.
+      if (result.matched && (!watch.standing || changed)) trigger = "matched";
+      else if (!watch.until && changed) trigger = "changed";
+      if (result.fingerprint) watch.lastFingerprint = result.fingerprint;
     }
     if (trigger) {
       watch.trigger = trigger;
+      watch.fired = (watch.fired ?? 0) + 1;
       wake.dueAt = this.now();
     }
     this.save();
     return trigger;
   }
 
+  /** A standing watch fired (its turn started, or could not): arm it again on
+   * the output it fired on, with a fresh time limit. */
+  rearmStanding(wake: BotWake): BotWake | null {
+    const watch = wake.watch;
+    if (!watch?.standing || this.wakes.get(wakeKey(wake)) !== wake) return null;
+    const at = this.now();
+    if (watch.lastOutput !== undefined && watch.failures === 0) watch.baseline = watch.lastOutput;
+    if (watch.lastFingerprint) watch.baselineFingerprint = watch.lastFingerprint;
+    if (watch.trigger) watch.lastTrigger = watch.trigger;
+    else delete watch.lastTrigger;
+    delete watch.trigger;
+    watch.failures = 0;
+    wake.createdAt = at;
+    wake.dueAt = at + (watch.maxMs ?? WATCH_DEFAULT_MAX_MINUTES * this.minuteMs);
+    this.save();
+    return wake;
+  }
+
+  /** Is this still the wake kept for its conversation (not replaced or cancelled)? */
+  isCurrent(wake: BotWake): boolean {
+    return this.wakes.get(wakeKey(wake)) === wake;
+  }
+
+  standingFor(threadId: string): BotWake | null {
+    return this.wakes.get(`${threadId}${STANDING}`) ?? null;
+  }
+
+  cancelStanding(threadId: string): BotWake | null {
+    const wake = this.wakes.get(`${threadId}${STANDING}`) ?? null;
+    if (wake) {
+      this.wakes.delete(`${threadId}${STANDING}`);
+      this.save();
+    }
+    return wake;
+  }
+
   /** Put back a wake that was taken but could not start (the thread got
    * busy in between); it stays due and keeps its original note and time. */
   restoreWake(wake: BotWake): void {
-    if (this.wakes.has(wake.threadId)) return;
-    this.wakes.set(wake.threadId, wake);
+    if (this.wakes.has(wakeKey(wake))) return;
+    this.wakes.set(wakeKey(wake), wake);
     this.save();
   }
 
@@ -444,7 +517,8 @@ export class BotAutonomy {
 
   /** Drop everything tied to a conversation that no longer exists. */
   forgetThread(threadId: string): void {
-    const hadWake = this.wakes.delete(threadId);
+    const hadStanding = this.wakes.delete(`${threadId}${STANDING}`);
+    const hadWake = this.wakes.delete(threadId) || hadStanding;
     const hadGoal = this.goals.delete(threadId);
     const hadReports = this.reports.delete(threadId);
     if (hadWake || hadGoal || hadReports) this.save();
@@ -496,8 +570,9 @@ function watchLines(wake: BotWake): string[] {
         ? `the command failed ${watch.failures} times in a row — fix or replace it`
         : "the time limit ran out before anything changed";
   return [
-    `Your watch \`${watch.command}\` ran ${watch.runs} time(s); you are woken because ${why}.`,
-    `Output when you set it:\n${clipOutput(watch.baseline)}`,
+    `Your ${watch.standing ? "standing " : ""}watch \`${watch.command}\` ran ${watch.runs} time(s); you are woken because ${why}.`,
+    ...(watch.standing ? ["It stays armed: the server re-arms it on this output after this turn, so do not call wake_when again for it."] : []),
+    `${watch.standing ? "Output it last compared against" : "Output when you set it"}:\n${clipOutput(watch.baseline)}`,
     ...(watch.lastOutput !== undefined && watch.lastOutput !== watch.baseline ? [`Latest output:\n${clipOutput(watch.lastOutput)}`] : []),
   ];
 }
@@ -518,6 +593,7 @@ export function wakeChip(wake: BotWake): string {
   const hhmm = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
   if (wake.watch) {
     const every = Math.round(wake.watch.everyMs / 60_000) || 1;
+    if (wake.watch.standing) return `Standing watch on \`${wake.watch.command.slice(0, 80)}\` every ${every} min (stays armed) — ${wake.reason.slice(0, 100)}`;
     return `Watching \`${wake.watch.command.slice(0, 80)}\` every ${every} min, until ${hhmm} — ${wake.reason.slice(0, 100)}`;
   }
   return `Wake-up set for ${hhmm} — ${wake.reason.slice(0, 120)}`;
@@ -536,7 +612,7 @@ export function goalEndChip(goal: BotGoal): string {
 
 export function reportsPrompt(pending: PendingReports, goal: BotGoal | null): string {
   return [
-    `[${pending.items.length === 1 ? "A Claude Code session you manage reported" : `${pending.items.length} Claude Code sessions you manage reported`}. Nobody typed this.]`,
+    `[${pending.items.length === 1 ? "A report arrived" : `${pending.items.length} reports arrived`} — from Claude Code sessions you manage or from the harness. Nobody typed this.]`,
     ...pending.items,
     ...(goal && goal.status === "active" ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`] : []),
   ].join("\n\n---\n\n");

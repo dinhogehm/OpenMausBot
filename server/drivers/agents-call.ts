@@ -1130,6 +1130,11 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
     return { text: String(r.message ?? (cancel ? "Wake-up cancelled." : "Wake-up scheduled. End your turn now.")) };
   }
   if (name === "wake_when") {
+    if (args.cancel === true && args.standing === true) {
+      const r = await api("/api/internal/wake", { method: "POST", body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, cancel: true, standing: true }) });
+      if (r.error) return { text: `Couldn't stop the standing watch: ${String(r.error)}`, isError: true };
+      return { text: String(r.message ?? "Standing watch stopped.") };
+    }
     if (typeof args.command !== "string" || !args.command.trim() || typeof args.reason !== "string" || !args.reason.trim()) {
       return { text: "wake_when needs command (a read-only gh, git or curl command) and reason (what to do when it fires).", isError: true };
     }
@@ -1143,6 +1148,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
         ...(typeof args.until === "string" && args.until.trim() ? { until: args.until } : {}),
         ...(args.every_minutes !== undefined ? { everyMinutes: args.every_minutes } : {}),
         ...(args.max_minutes !== undefined ? { maxMinutes: args.max_minutes } : {}),
+        ...(args.standing !== undefined ? { standing: args.standing } : {}),
       }),
     });
     if (r.error) return { text: `Couldn't start the watch: ${String(r.error)}`, isError: true };
@@ -1161,6 +1167,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
         fromThreadId: THREAD_ID,
         action,
         ...(sessionId ? { sessionId } : {}),
+        ...((action === "start" || action === "send") && typeof args.reply_thread_id === "string" && args.reply_thread_id.trim() ? { replyThreadId: args.reply_thread_id.trim() } : {}),
         ...(action === "start" ? { title: args.title, brief: args.brief, repo: args.repo, ...(args.surface !== undefined ? { surface: args.surface } : {}), ...(args.permission_mode !== undefined ? { permissionMode: args.permission_mode } : {}), ...(args.model !== undefined ? { model: args.model } : {}) } : {}),
         ...(action === "send" ? { message: args.message } : {}),
         ...(action === "list" && args.include_archived === true ? { includeArchived: true } : {}),

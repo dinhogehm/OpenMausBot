@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -12,6 +12,8 @@ import {
   parseGoalInput,
   parseWakeInput,
   parseWatchInput,
+  reportsPrompt,
+  wakeChip,
   wakePrompt,
 } from "./bot-autonomy.ts";
 
@@ -229,5 +231,92 @@ describe("watch fingerprints", () => {
     const wake = autonomy.setWatch("bot", "t1", { command: "curl https://x", argv: ["curl", "https://x"], everyMinutes: 2, maxMinutes: 60, reason: "sheet", baseline: "same start", baselineFingerprint: "aaa" });
     expect(autonomy.recordWatchRun(wake, { ok: true, output: "same start", fingerprint: "aaa", matched: false })).toBeNull();
     expect(autonomy.recordWatchRun(wake, { ok: true, output: "same start", fingerprint: "bbb", matched: false })).toBe("changed");
+  });
+});
+
+describe("standing watches", () => {
+  const chat = { command: "gog chat messages list spaces/X --plain", argv: ["gog", "chat", "messages", "list", "spaces/X", "--plain"], everyMinutes: 3, maxMinutes: 720, reason: "answer new chat messages", baseline: "m1", baselineFingerprint: "f1", standing: true };
+
+  it("is not replaced by wake_me, and fires again after re-arming on the new output", () => {
+    const autonomy = make();
+    const watch = autonomy.setWatch("bot", "t1", chat);
+    autonomy.setWake("bot", "t1", 5, "check the PR");
+    expect(autonomy.standingFor("t1")).toBe(watch);
+    expect(autonomy.wakeFor("t1")?.reason).toBe("check the PR");
+    now += 3 * 60_000;
+    expect(autonomy.recordWatchRun(watch, { ok: true, output: "m1 m2", fingerprint: "f2", matched: false })).toBe("changed");
+    expect(autonomy.dueWakes()).toEqual([watch]);
+    // the turn started (or could not): re-arm on what it fired on
+    autonomy.rearmStanding(watch);
+    expect(watch.watch).toMatchObject({ baseline: "m1 m2", baselineFingerprint: "f2", fired: 1 });
+    expect(watch.watch!.trigger).toBeUndefined();
+    expect(watch.dueAt).toBe(now + 720 * 60_000);
+    expect(autonomy.dueWakes()).toEqual([]);
+    now += 3 * 60_000;
+    expect(autonomy.watchesToRun()).toEqual([watch]);
+    expect(autonomy.recordWatchRun(watch, { ok: true, output: "m1 m2", fingerprint: "f2", matched: false })).toBeNull();
+    now += 3 * 60_000;
+    expect(autonomy.recordWatchRun(watch, { ok: true, output: "m1 m2 m3", fingerprint: "f3", matched: false })).toBe("changed");
+    expect(wakePrompt(watch, null, now)).toContain("stays armed");
+    expect(wakeChip(watch)).toContain("Standing watch");
+  });
+
+  it("with until, fires on each new matching output, not on every run while it matches", () => {
+    const autonomy = make();
+    const watch = autonomy.setWatch("bot", "t1", { ...chat, until: "Pedro" });
+    expect(autonomy.recordWatchRun(watch, { ok: true, output: "Pedro: oi", fingerprint: "f2", matched: true })).toBe("matched");
+    autonomy.rearmStanding(watch);
+    expect(autonomy.recordWatchRun(watch, { ok: true, output: "Pedro: oi", fingerprint: "f2", matched: true })).toBeNull();
+    expect(autonomy.recordWatchRun(watch, { ok: true, output: "Pedro: oi\nPedro: e aí?", fingerprint: "f3", matched: true })).toBe("matched");
+  });
+
+  it("re-arms after failing too, remembering it failed", () => {
+    const autonomy = make();
+    const watch = autonomy.setWatch("bot", "t1", chat);
+    for (let i = 0; i < 3; i++) autonomy.recordWatchRun(watch, { ok: false, output: "auth expired", fingerprint: "x", matched: false });
+    expect(watch.watch!.trigger).toBe("failing");
+    autonomy.rearmStanding(watch);
+    expect(watch.watch).toMatchObject({ failures: 0, lastTrigger: "failing", baseline: "m1" });
+    expect(autonomy.isCurrent(watch)).toBe(true);
+  });
+
+  it("survives a restart beside the ordinary wake, and forgetting the thread drops both", () => {
+    const autonomy = make();
+    autonomy.setWatch("bot", "t1", chat);
+    autonomy.setWake("bot", "t1", 5, "timer");
+    const reloaded = make();
+    expect(reloaded.standingFor("t1")?.watch?.standing).toBe(true);
+    expect(reloaded.wakeFor("t1")?.reason).toBe("timer");
+    expect(reloaded.cancelWake("t1")?.reason).toBe("timer");
+    expect(reloaded.standingFor("t1")).not.toBeNull();
+    reloaded.forgetThread("t1");
+    expect(make().standingFor("t1")).toBeNull();
+  });
+
+  it("parses standing and refuses anything but a boolean", () => {
+    expect(parseWatchInput({ reason: "x", standing: true })).toMatchObject({ ok: true, standing: true });
+    expect(parseWatchInput({ reason: "x", standing: false })).not.toHaveProperty("standing");
+    expect(parseWatchInput({ reason: "x", standing: "yes" }).ok).toBe(false);
+  });
+});
+
+describe("migrating watches set before stdout-only fingerprints", () => {
+  it("keeps an existing watch and does not fire on the change of method", () => {
+    const path = join(dir, "bot-autonomy.json");
+    writeFileSync(path, JSON.stringify({
+      wakes: [{ botId: "bot", threadId: "t1", dueAt: now + 60 * 60_000, reason: "chat", createdAt: now, watch: { command: "gog chat messages list", argv: ["gog"], everyMs: 120_000, baseline: "m1", baselineFingerprint: "stdout+stderr", lastRunAt: now, runs: 3, failures: 0 } }],
+      goals: [],
+    }));
+    const autonomy = make();
+    const wake = autonomy.wakeFor("t1")!;
+    expect(wake.watch?.baseline).toBe("m1");
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "m1", fingerprint: "stdout-only", matched: false })).toBeNull();
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "m2", fingerprint: "stdout-2", matched: false })).toBe("changed");
+  });
+});
+
+describe("reports", () => {
+  it("names what kind of reports arrived without assuming they are all sessions", () => {
+    expect(reportsPrompt({ botId: "b", threadId: "t", items: ["one", "two"] }, null)).toContain("2 reports arrived");
   });
 });

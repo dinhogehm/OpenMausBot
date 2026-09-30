@@ -41,6 +41,14 @@ export interface Incident {
 
 export const INCIDENTS_THREAD_TITLE = "Team incidents";
 
+/** Consecutive failed runs of one routine before it is raised as a pattern
+ * (where the routine reports, and to the Chief): at 2, then every 5th, so a
+ * routine that keeps failing is not forgotten but does not flood either. */
+export const ROUTINE_FAILURE_ALERT_STREAK = 2;
+export function routineFailureAlertDue(streak: number): boolean {
+  return streak === ROUTINE_FAILURE_ALERT_STREAK || (streak > ROUTINE_FAILURE_ALERT_STREAK && streak % 5 === 0);
+}
+
 const sectionKey = (section?: string): string => section?.trim() || "";
 
 /** The Chief responsible for a bot: the Chief of the bot's own section, else

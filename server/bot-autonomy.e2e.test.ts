@@ -171,6 +171,35 @@ it("watches a command without waking the bot until its output changes", () => fi
   expect(f.ledger().wakes).toEqual([]);
 }), 60_000);
 
+it("keeps a standing watch armed: it fires on each change and a wake_me does not replace it", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const repo = join(f.session.info.dataDir, "watched-repo");
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { stdio: "pipe" });
+  const commit = (message: string) => git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", message);
+  execFileSync("git", ["init", "-q", repo]);
+  commit("first");
+  const command = `git -C ${repo} log --format=%s -1`;
+  f.save({ turns: [
+    { steps: [{ tool: "wake_when", arguments: { command, reason: "INBOX answer what landed", every_minutes: 1, max_minutes: 60, standing: true } }], reply: "Standing watch on" },
+    { expectContextIncludes: ["standing watch", "second ONE", "stays armed"], steps: [{ tool: "wake_me", arguments: { minutes: 30, reason: "unrelated timer" } }], reply: "Handled the first" },
+    { expectContextIncludes: ["third TWO"], reply: "Handled the second" },
+  ] });
+  await f.send("Watch the repo for good.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  expect(toolResult(f.turns()[0], "wake_when")).toContain("Standing watch armed");
+  commit("second ONE");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  await expect.poll(() => f.ledger().wakes.length, { timeout: 10_000 }).toBe(2);
+  commit("third TWO");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(3);
+  await expect.poll(() => f.ledger().wakes.find((wake: any) => wake.watch?.standing)?.watch?.fired, { timeout: 10_000 }).toBe(2);
+  const standing = f.ledger().wakes.find((wake: any) => wake.watch?.standing);
+  expect(standing.watch.trigger).toBeUndefined();
+  expect(standing.watch.baseline).toContain("third TWO");
+  expect(f.ledger().wakes.some((wake: any) => wake.reason === "unrelated timer")).toBe(true);
+  expect((await f.chips()).filter((chip: string) => chip.startsWith("Standing watch fired (changed)"))).toHaveLength(2);
+}), 60_000);
+
 it("manages a Claude Code session: start, get its report, answer it, archive it", async () => {
   const { chmodSync, mkdtempSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");

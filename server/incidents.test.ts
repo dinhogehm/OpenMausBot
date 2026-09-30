@@ -1,7 +1,7 @@
 // Who hears about a broken run, how often, and in what words.
 import { describe, expect, it } from "vitest";
 
-import { chiefForBot, INCIDENT_HARD_LIMIT, INCIDENT_RETRY_LIMIT, IncidentLedger, incidentChip, incidentText, type Incident } from "./incidents.ts";
+import { chiefForBot, INCIDENT_HARD_LIMIT, INCIDENT_RETRY_LIMIT, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident } from "./incidents.ts";
 
 const bots = [
   { id: "clive", name: "Clive", section: "Ops", chiefOfStaff: true },
@@ -79,5 +79,11 @@ describe("incident wording", () => {
     expect(incidentChip({ ...incident, kind: "could-not-start", title: null })).toContain("Ada's run in its main conversation could not start");
     expect(incidentChip({ ...incident, kind: "routine-failed", title: "Inbox digest" })).toContain("Ada's scheduled routine in its thread #Inbox digest failed");
     expect(incidentChip({ ...incident, room: "Standup" })).toContain('Ada\'s run in the room "Standup" failed');
+  });
+});
+
+describe("routineFailureAlertDue", () => {
+  it("raises a routine's failures at two in a row, then every fifth", () => {
+    expect([1, 2, 3, 4, 5, 6, 10, 11].map(routineFailureAlertDue)).toEqual([false, true, false, false, true, false, true, false]);
   });
 });
