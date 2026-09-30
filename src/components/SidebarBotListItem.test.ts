@@ -334,4 +334,11 @@ describe("bot deletion feedback", () => {
     expect(markup).toContain("#9311");
     expect(renderRow(bot())).not.toContain("data-bot-signals");
   });
+
+  it("says only \"Needs you\" on the bot's own line, with since when in the tooltip, so a narrow row never cuts the hour", () => {
+    const markup = renderRow(bot({ goalNeedsInput: true, goalNeedsInputSince: Date.now() - 5 * 3_600_000 }));
+    const status = markup.match(/<span class="truncate" data-bot-status[^>]*>[^<]*<\/span>/)?.[0] ?? "";
+    expect(status).toContain(">Needs you<");
+    expect(status).toMatch(/title="Needs you · /);
+  });
 });

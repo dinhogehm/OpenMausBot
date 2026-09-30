@@ -228,7 +228,7 @@ class MessageBoundary extends Component<{ children: ReactNode; fallbackText: str
   render() {
     if (this.state.failed) {
       return (
-        <div className="chat-text w-fit max-w-[min(42rem,78%)] rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap text-ink">
+        <div className="chat-text w-fit max-w-[min(42rem,78%)] rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] text-ink">
           {this.props.fallbackText}
         </div>
       );
@@ -429,7 +429,7 @@ function Bubble({
               : attachmentsOnly
                 ? "text-ink"
                 : user
-                  ? "bg-bubble-user px-4 py-2.5 whitespace-pre-wrap text-ink"
+                  ? "bg-bubble-user px-4 py-2.5 whitespace-pre-wrap [overflow-wrap:anywhere] text-ink"
                   : "bg-card px-4 py-2.5 text-ink",
           )}
           title={new Date(message.at).toLocaleString()}

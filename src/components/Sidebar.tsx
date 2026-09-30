@@ -1236,7 +1236,9 @@ export function BotListItem({
                   <span className="sr-only">{t("sidebar.preview.working")}</span>
                 </span>
               ) : (
-                <span className="truncate">{waiting ? t("sidebar.preview.waiting") : needsYou ? needsYouLabel(bot.goalNeedsInputSince ?? activityTasks.find((task) => task.goalNeedsInput)?.goalNeedsInputSince) : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : preview(bot)}</span>
+                // "Precisa de você" stays whole; since when goes to the tooltip,
+                // where a narrow row cannot cut the hour off
+                <span className="truncate" data-bot-status title={needsYou ? needsYouLabel(bot.goalNeedsInputSince ?? activityTasks.find((task) => task.goalNeedsInput)?.goalNeedsInputSince) : undefined}>{waiting ? t("sidebar.preview.waiting") : needsYou ? t("sidebar.preview.needsYou") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : preview(bot)}</span>
               )}
             </span>
           )}

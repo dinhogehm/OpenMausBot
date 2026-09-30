@@ -29,7 +29,9 @@ describe("DigestChip", () => {
   it("shows total counts rather than only the truncated sample", () => {
     const html = renderToStaticMarkup(createElement(DigestChip, { message }));
     expect(html).toContain("Did 19 tool calls · 5 files changed");
-    expect(html).toContain('title="Observed work, not a completion verdict"');
+    // the tooltip is built in the reader's language, not the stored English line
+    expect(html).toContain("title=\"What this turn did\nTools: Bash ×12 (1 failed) +2 more\nFiles: changed a.ts; +4 more paths\nReply: Finished this turn.\"");
+    expect(html).not.toContain("Observed work, not a completion verdict");
   });
 
   it("does not imply zero changed files when capture was unavailable", () => {
