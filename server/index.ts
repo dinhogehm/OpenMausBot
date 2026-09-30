@@ -315,6 +315,7 @@ import { BG_JOB_MAX_MS, backgroundProcesses, bgJobOverdueReport, bgJobResumeProm
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { newDeliveryCache, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
+import { readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -7489,7 +7490,31 @@ async function revalidateNeedsInputGoals(): Promise<void> {
   }
 }
 
+/** A production release that fails twice on the same commit: a red chip and
+ * a report on the Chief's desk (server/release-watch.ts). Only the server the
+ * desktop app runs reads this Mac's release logs, every 2 min. */
+const releaseWatch = { state: DESKTOP_MANAGED && !process.env.VITEST ? new ReleaseWatchState(join(DATA_DIR, "release-watch.json")) : null, lastAt: 0 };
+function checkProductionRelease(): void {
+  if (!releaseWatch.state || Date.now() - releaseWatch.lastAt < 2 * 60_000) return;
+  releaseWatch.lastAt = Date.now();
+  const failed = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), readTail(RELEASED_SHA_FILE, 200));
+  if (!failed || !releaseWatch.state.take(failed.sha, failed.count)) return;
+  const cause = releaseFailureCause(readTail(RELEASE_OUT_LOG, 512 * 1024));
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  const desk = chief ? chiefDeskThread(chief) : null;
+  const text = `O release de produção falhou ${failed.count} vezes no mesmo commit ${failed.sha}${cause ? ` (último motivo: ${cause})` : ""}, e a tag de produção não se moveu: o que vinha nele não está em produção.`;
+  console.warn(`[release] ${text}`);
+  if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
+  store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: false } });
+  autonomy.addReport(chief.id, desk, `[Alerta do servidor: release de produção falhando] ${text}\nLogs: ${RELEASE_ERR_LOG} e ${RELEASE_OUT_LOG}. O watcher tenta de novo sozinho a cada 2 min. Veja se é carga da máquina (CI concorrente, timeouts) ou falha real, avise quem precisa (SRE/Delivery, o dono) e não dê a entrega como feita ao cliente.`);
+}
+
 async function autonomyTick(): Promise<void> {
+  try {
+    checkProductionRelease();
+  } catch (error) {
+    console.error(`[release] ${error instanceof Error ? error.message : String(error)}`);
+  }
   void revalidateNeedsInputGoals().catch((error) => console.error(`[autonomy] needs-input check failed: ${error instanceof Error ? error.message : String(error)}`));
   void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
   try {
@@ -16163,9 +16188,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // Promises with a deadline ride on wake_me, alone or beside a wake.
           const promiseNotes: string[] = [];
           if (typeof body.promiseKept === "string") {
+            // a message counts as sent only with the ID the send returned
+            const proof = typeof body.promiseProof === "string" ? body.promiseProof.trim().slice(0, 300) : "";
+            if (!proof) return json(res, 400, { error: "promise_kept precisa de promise_proof: o ID ou o link da mensagem enviada (o que o comando de envio devolveu). Sem ID, a mensagem não conta como enviada." });
             const kept = autonomy.keepPromise(threadId, body.promiseKept.trim());
             if (!kept.length) return json(res, 404, { error: `não há promessa "${body.promiseKept}" aberta nesta conversa${autonomy.promisesFor(threadId).length ? ` (abertas: ${autonomy.promisesFor(threadId).map((open) => `${open.id} "${chipText(open.text, 60)}"`).join(", ")})` : ""}` });
-            for (const promise of kept) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Promessa cumprida — ${chipText(promise.text, 140)}`, ok: true } });
+            for (const promise of kept) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Promessa cumprida — ${chipText(promise.text, 120)} · mensagem ${chipText(proof, 60)}`, ok: true } });
             promiseNotes.push(`Promessa${kept.length > 1 ? "s" : ""} ${kept.map((promise) => promise.id).join(", ")} marcada${kept.length > 1 ? "s" : ""} como cumprida${kept.length > 1 ? "s" : ""}.`);
           }
           if (body.promise !== undefined) {
