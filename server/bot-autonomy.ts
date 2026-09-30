@@ -90,6 +90,8 @@ export interface WakeWatch {
   lineHashes?: string[];
   newLines?: string[];
   truncated?: boolean;
+  /** Lines matching this do not count as a change (wake_when ignore). */
+  ignore?: string;
   /** When its stdout last changed (or it was set), and when an old,
    * unchanging output was reported. */
   changedAt?: number;
@@ -218,10 +220,10 @@ export function parsePromiseInput(body: { promise?: unknown; promiseMinutes?: un
 }
 
 export type WatchInput =
-  | { ok: true; everyMinutes: number; maxMinutes: number; until?: string; reason: string; standing?: true; label?: string }
+  | { ok: true; everyMinutes: number; maxMinutes: number; until?: string; reason: string; standing?: true; label?: string; ignore?: string }
   | { ok: false; error: string };
 
-export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unknown; until?: unknown; reason?: unknown; standing?: unknown; label?: unknown }): WatchInput {
+export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unknown; until?: unknown; reason?: unknown; standing?: unknown; label?: unknown; ignore?: unknown }): WatchInput {
   const everyMinutes = body.everyMinutes === undefined
     ? WATCH_DEFAULT_EVERY_MINUTES
     : intIn(body.everyMinutes, WATCH_MIN_EVERY_MINUTES, WATCH_MAX_EVERY_MINUTES);
@@ -237,7 +239,8 @@ export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unk
   if (body.standing !== undefined && typeof body.standing !== "boolean") return { ok: false, error: "standing must be true or false" };
   const label = parseStandingLabel(body.label);
   if (label === null) return { ok: false, error: "label must be 1-40 letters, digits, spaces or . _ # : -" };
-  return { ok: true, everyMinutes, maxMinutes, ...(until ? { until } : {}), reason, ...(body.standing === true ? { standing: true as const, ...(label !== STANDING_DEFAULT_LABEL ? { label } : {}) } : {}) };
+  const ignore = clip(body.ignore, WATCH_UNTIL_MAX) || undefined;
+  return { ok: true, everyMinutes, maxMinutes, ...(until ? { until } : {}), ...(ignore ? { ignore } : {}), reason, ...(body.standing === true ? { standing: true as const, ...(label !== STANDING_DEFAULT_LABEL ? { label } : {}) } : {}) };
 }
 
 /** A standing watch's label: default when absent, null when malformed. */
@@ -387,7 +390,7 @@ export class BotAutonomy {
   setWatch(
     botId: string,
     threadId: string,
-    input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string; baselineFingerprint?: string; standing?: boolean; label?: string },
+    input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string; baselineFingerprint?: string; standing?: boolean; label?: string; ignore?: string },
   ): BotWake {
     const at = this.now();
     const wake: BotWake = {
@@ -401,6 +404,7 @@ export class BotAutonomy {
         argv: input.argv,
         everyMs: input.everyMinutes * this.minuteMs,
         ...(input.until ? { until: input.until } : {}),
+        ...(input.ignore ? { ignore: input.ignore } : {}),
         baseline: input.baseline,
         ...(input.baselineFingerprint ? { baselineFingerprint: input.baselineFingerprint, lastFingerprint: input.baselineFingerprint } : {}),
         stdoutFingerprint: true,

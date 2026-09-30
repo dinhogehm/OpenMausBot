@@ -186,7 +186,8 @@ export function lineHash(line: string): string {
  * tool result, the watch is still armed. */
 export function watchCommandWarnings(command: string): string[] {
   const warnings: string[] = [];
-  if (/^gog\s+chat\s+messages\s+list\b/.test(command.trim()) && !/--order[=\s]+["']?createTime desc/i.test(command)) {
+  // global flags may come first: gog --account x chat messages list …
+  if (/^gog\b(?:\s+\S+)*?\s+chat\s+messages\s+list\b/.test(command.trim()) && !/--order[=\s]+["']?createTime desc/i.test(command)) {
     warnings.push('gog lista as mensagens em ordem crescente (as mais antigas primeiro): mensagens novas não mudam a saída e o vigia não as vê. Use --max 10 --order "createTime desc".');
   }
   if (/^gh\s+issue\s+list\b/.test(command.trim()) && !/sort:updated/.test(command)) {
@@ -209,8 +210,21 @@ export function fingerprintOf(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
+/** A watch's `ignore`: lines it matches (case-insensitive regex, else text)
+ * are left out of what decides "changed" — a bot's own posts, say. */
+export function ignoreMatcher(ignore: string | undefined): ((line: string) => boolean) | null {
+  if (!ignore) return null;
+  try {
+    const pattern = new RegExp(ignore, "i");
+    return (line) => pattern.test(line);
+  } catch {
+    const needle = ignore.toLowerCase();
+    return (line) => line.toLowerCase().includes(needle);
+  }
+}
+
 /** Run once, bounded in time and size. Never throws. */
-export function runWatchCommand(argv: string[], opts: { cwd: string; path: string; timeoutMs?: number }): Promise<WatchRunResult> {
+export function runWatchCommand(argv: string[], opts: { cwd: string; path: string; timeoutMs?: number; ignore?: string }): Promise<WatchRunResult> {
   return new Promise((resolve) => {
     execFile(
       argv[0]!,
@@ -234,7 +248,10 @@ export function runWatchCommand(argv: string[], opts: { cwd: string; path: strin
         // Only stdout decides "changed": stderr carries noise like a pager's
         // "Next page" token that differs on every run. It is still shown.
         const out = String(stdout ?? "").trim();
-        resolve({ ok: true, output: text, fingerprint: fingerprintOf(out), truncated: full.length > text.length, lines: out.split("\n").slice(0, WATCH_LINES_MAX) });
+        // ignored lines (the bot's own posts) never make it "changed"
+        const skip = ignoreMatcher(opts.ignore);
+        const counted = skip ? out.split("\n").filter((line) => !skip(line)) : out.split("\n");
+        resolve({ ok: true, output: text, fingerprint: fingerprintOf(skip ? counted.join("\n") : out), truncated: full.length > text.length, lines: counted.slice(0, WATCH_LINES_MAX) });
       },
     );
   });

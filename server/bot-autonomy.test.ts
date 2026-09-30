@@ -656,3 +656,13 @@ describe("a bot waiting on the person's answer", () => {
     expect(autonomy.resolveNeedsInput("t1", "sem resposta há mais de 12 h", "blocked")?.status).toBe("blocked");
   });
 });
+
+describe("a watch that ignores the bot's own lines", () => {
+  it("keeps ignore on the watch", () => {
+    const input = parseWatchInput({ reason: "x", standing: true, label: "chat", ignore: "\\tOsvaldo Gehm\\t" });
+    expect(input).toMatchObject({ ok: true, ignore: "\\tOsvaldo Gehm\\t" });
+    const wake = make().setWatch("bot", "t1", { argv: ["gog"], command: "gog chat", everyMinutes: 3, maxMinutes: 60, reason: "x", baseline: "b", standing: true, ignore: "Osvaldo" });
+    expect(make().standingFor("t1")?.watch?.ignore).toBe("Osvaldo");
+    expect(wake.watch?.ignore).toBe("Osvaldo");
+  });
+});

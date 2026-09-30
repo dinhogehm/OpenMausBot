@@ -626,6 +626,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
         reason: { type: "string", maxLength: 500, description: "Note to your future self: what to do when it fires." },
         standing: { type: "boolean", description: "true: never used up — after each firing it re-arms on the new output. For permanent watchers; set it once." },
         label: { type: "string", maxLength: 40, description: "With standing: names this watcher (e.g. chat, planilha) so a conversation can keep several; same label replaces it." },
+        ignore: { type: "string", maxLength: 200, description: "Optional: lines matching this (case-insensitive regex or text) do not count as a change — e.g. your own posts' sender, so your replies do not wake you." },
         cancel: { type: "boolean", description: "true cancels the pending wake or watch here (with standing: true, the standing watch); no command or reason." },
       },
     },

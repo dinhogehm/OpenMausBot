@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fingerprintOf, newestStamp, parseWatchCommand, watchCommandWarnings, WATCH_READABLE_DIRS, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
+import { fingerprintOf, ignoreMatcher, newestStamp, parseWatchCommand, watchCommandWarnings, WATCH_READABLE_DIRS, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
 
 describe("parseWatchCommand", () => {
   it.each([
@@ -112,5 +112,24 @@ describe("what a watch will not see", () => {
   it("finds the newest time stamp in an output", () => {
     expect(newestStamp("2026-03-16T19:19:20Z Cezar\n2026-03-31T10:00:00Z x")).toBe(Date.parse("2026-03-31T10:00:00Z"));
     expect(newestStamp("nothing dated")).toBeNull();
+  });
+});
+
+describe("echo of the bot's own posts", () => {
+  it("leaves ignored lines out of what decides a change", async () => {
+    const run = (text: string) => runWatchCommand(["printf", text], { cwd: process.cwd(), path: process.env.PATH ?? "", ignore: "\\tOsvaldo Gehm\\t" });
+    const before = await run("2026-09-30T18:10:00Z\\tDaiane\\terro no envio\\n");
+    const echo = await run("2026-09-30T18:15:34Z\\tOsvaldo Gehm\\tRecebido, Daiane\\n2026-09-30T18:10:00Z\\tDaiane\\terro no envio\\n");
+    const client = await run("2026-09-30T18:20:00Z\\tPedro\\tnovo relato\\n2026-09-30T18:15:34Z\\tOsvaldo Gehm\\tRecebido, Daiane\\n2026-09-30T18:10:00Z\\tDaiane\\terro no envio\\n");
+    expect(echo.fingerprint).toBe(before.fingerprint);
+    expect(echo.output).toContain("Osvaldo Gehm");
+    expect(client.fingerprint).not.toBe(before.fingerprint);
+    expect(ignoreMatcher("[unclosed")!("a [unclosed b")).toBe(true);
+    expect(ignoreMatcher(undefined)).toBeNull();
+  });
+
+  it("warns about gog's oldest-first list with global flags before the command", () => {
+    expect(watchCommandWarnings("gog --account o@x.com chat messages list spaces/X --plain")).toHaveLength(1);
+    expect(watchCommandWarnings('gog --account o@x.com chat messages list spaces/X --order "createTime desc"')).toEqual([]);
   });
 });
