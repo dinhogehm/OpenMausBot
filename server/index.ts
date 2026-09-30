@@ -7949,6 +7949,32 @@ const execCc = (file: string, args: string[], cwd?: string) => new Promise<strin
   execFileCc(file, args, { cwd, timeout: 30_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => error ? reject(error) : resolve(String(stdout)));
 });
 
+/** A conversation closed, archived or deleted: its goal ends (with a chip)
+ * and the Claude Code sessions it owned report to the bot's main
+ * conversation from now on, instead of to a thread nobody reads. */
+function retireThreadWork(botId: string, threadId: string, why: string): void {
+  const bot = store.bot(botId);
+  if (!bot) return;
+  const goal = autonomy.goalFor(threadId);
+  if (goal?.status === "active") finishGoalWithChip(threadId, "stopped", `a conversa foi ${why}`);
+  else if (goal?.status === "needs-input") autonomy.resolveNeedsInput(threadId, `a conversa foi ${why}`, "blocked");
+  const main = [chiefDeskThread(bot), bot.threadId].find((candidate) => candidate && candidate !== threadId && store.taskByThread(botId, candidate) && !store.taskByThread(botId, candidate)?.archivedAt);
+  const moved: CcSession[] = [];
+  for (const session of ccLedger.all()) {
+    if (session.ownerBotId !== botId || session.status === "archived") continue;
+    if (session.replyThreadId === threadId) delete session.replyThreadId;
+    if (session.ownerThreadId !== threadId || !main) continue;
+    session.ownerThreadId = main;
+    moved.push(session);
+  }
+  ccLedger.save();
+  if (!main || !moved.length) return;
+  const list = moved.map((session) => `"${session.title}" (${session.id}, ${session.status})`).join(", ");
+  store.appendMessage(main, { role: "bot", kind: "activity", tool: { name: chipText(`${moved.length} sessão(ões) do Claude Code passaram para esta conversa (a de origem foi ${why}): ${list}`, 240), ok: true } });
+  autonomy.addReport(botId, main, `[The conversation that owned these Claude Code sessions was ${why}; they report here from now on.] ${list}. Check what each still needs (cc_session_list) and carry on here.`);
+  refreshBotRow(botId);
+}
+
 /** A P1/hotfix issue whose sessions all ended while the issue is still open:
  * nobody is on it. Checked once per ended session (gh issue view), then the
  * Chief and the session's owner hear about it. */
@@ -15327,6 +15353,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // The stamp is what the sidebar folds on and what list_threads
         // reports; the chip above is only the transcript's record of it.
         store.setTaskClosedBy(owner.id, threadId, { botId: from.id, name: from.name, at: Date.now() });
+        retireThreadWork(owner.id, threadId, "fechada");
         return json(res, 200, { closed: true, threadId, title: task.title, botName: owner.name });
       }
       if (method === "POST" && path === "/api/internal/attach-file") {
@@ -21412,7 +21439,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       if (body.archivedAt !== undefined) {
         if (body.archivedAt === null) patch.archivedAt = undefined;
-        else if (typeof body.archivedAt === "number" && Number.isFinite(body.archivedAt) && body.archivedAt >= 0) patch.archivedAt = body.archivedAt;
+        else if (typeof body.archivedAt === "number" && Number.isFinite(body.archivedAt) && body.archivedAt >= 0) {
+          patch.archivedAt = body.archivedAt;
+          retireThreadWork(m[1], m[2], "arquivada");
+        }
         else return json(res, 400, { error: "archivedAt must be a timestamp, or null to unarchive" });
       }
       if (body.pinned !== undefined) {
@@ -21497,8 +21527,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const stagedSkillCleanups = stagedSkillCleanupsForThread(m[2]);
       roomHandoffs.cancelDirect(m[2], "The source conversation was deleted");
       cancelTeamSetupResumesForThread(m[2]);
+      retireThreadWork(m[1], m[2], "apagada");
       const updated = store.deleteTask(m[1], m[2]);
       if (!updated) return json(res, 404, { error: "no such task" });
+      autonomy.forgetThread(m[2]);
       clearTurnDigestState(m[2]);
       handoffs.forget(m[2]);
       settleDirectFollowup(directTurnGenerationByThread.get(m[2]));

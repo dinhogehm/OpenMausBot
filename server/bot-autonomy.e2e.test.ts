@@ -322,5 +322,18 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(inB.length).toBeGreaterThan(0);
     const inA = (await f.api(`/api/threads/${threadA}/messages`, undefined, "GET")).messages as any[];
     expect(inA.some((message: any) => message.text === "Report read in B")).toBe(false);
+    // Deleting B hands its session to the bot's main conversation, which is told.
+    f.save({ turns: [
+      startTurn,
+      { expectContextIncludes: ["did: BRIEF_A"], reply: "Report read in A" },
+      { steps: [{ tool: "cc_session_send", arguments: { session_id: id, message: "ORDER_FROM_B" } }], reply: "Sent from B" },
+      { expectContextIncludes: ["did: ORDER_FROM_B"], reply: "Report read in B" },
+      { expectContextIncludes: ["they report here from now on", "#9998 origem"], reply: "Taking #9998 over here" },
+    ] });
+    await f.api(`/api/bots/${f.bot.id}/tasks/${threadB}`, {}, "DELETE");
+    expect(ccLedger()[0].ownerThreadId).toBe(threadA);
+    await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(5);
+    const chips = ((await f.api(`/api/threads/${threadA}/messages`, undefined, "GET")).messages as any[]).map((message: any) => String(message.tool?.name ?? ""));
+    expect(chips.some((chip) => chip.includes("passaram para esta conversa"))).toBe(true);
   }, { OMB_CC_BIN: fake });
 }, 90_000);
