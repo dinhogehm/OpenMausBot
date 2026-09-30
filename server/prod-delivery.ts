@@ -89,6 +89,7 @@ export function deliveryReport(session: Pick<DeliverySession, "id" | "title">, p
     `[Claude Code session ${session.id} ("${session.title}"): delivered in production — em produção desde ${prs.map((pr) => pr.productionSince ?? "?").sort()[0]}.]`,
     ...prs.map((pr) => `- PR #${pr.number} (${pr.url}): merge ${pr.mergeSha?.slice(0, 8)} is contained in ${PRODUCTION_TAG} (${tagSha.slice(0, 8)}), em produção desde ${pr.productionSince ?? "?"}.`),
     "Close the cycle now: tell the requester it is live (in their channel), update the spreadsheet row and the issue, then archive the session with cc_session_archive once nothing else is pending in it.",
+    "The requester counts as told only with the ID of the message you sent (what the send command returned): write that ID in the issue and the spreadsheet. No ID, no notice — never report it as done without one.",
   ].join("\n");
 }
 

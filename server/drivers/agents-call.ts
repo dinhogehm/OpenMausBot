@@ -1121,7 +1121,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
     const cancel = args.cancel === true;
     const promise = {
       ...(typeof args.promise === "string" && args.promise.trim() ? { promise: args.promise, promiseMinutes: args.promise_minutes } : {}),
-      ...(typeof args.promise_kept === "string" && args.promise_kept.trim() ? { promiseKept: args.promise_kept.trim() } : {}),
+      ...(typeof args.promise_kept === "string" && args.promise_kept.trim() ? { promiseKept: args.promise_kept.trim(), ...(typeof args.promise_proof === "string" ? { promiseProof: args.promise_proof } : {}) } : {}),
     };
     const wake = typeof args.minutes === "number" || typeof args.reason === "string";
     if (!cancel && (wake || !Object.keys(promise).length) && (typeof args.minutes !== "number" || typeof args.reason !== "string" || !args.reason.trim())) {

@@ -1056,7 +1056,7 @@ export function reportsPrompt(pending: PendingReports, goal: BotGoal | null, rem
 export function promiseOverdueReport(promise: BotPromise, botName: string, now: number): string {
   return [
     `[Promise overdue by ${minutesLabel(now - promise.dueAt)}: ${botName} promised "${promise.text}" (${promise.id}), due ${minutesLabel(now - promise.createdAt)} after it was made, and it was not marked kept.]`,
-    "Send what was promised now, or tell the person when it will come and why — then mark it kept with wake_me promise_kept. If it was already sent, mark it kept.",
+    "Send what was promised now, or tell the person when it will come and why — then mark it kept with wake_me promise_kept and promise_proof (the sent message's ID). If it was already sent, mark it kept with that message's ID; without an ID it was not sent.",
   ].join("\n");
 }
 

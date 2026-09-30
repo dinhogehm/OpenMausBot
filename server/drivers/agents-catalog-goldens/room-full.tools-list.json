@@ -775,7 +775,12 @@
           "promise_kept": {
             "type": "string",
             "maxLength": 20,
-            "description": "Mark a promise of this conversation kept once it was sent: its id (p1, p2…) or \"all\". Can go alone."
+            "description": "Mark a promise of this conversation kept once it was sent: its id (p1, p2…) or \"all\". Needs promise_proof. Can go alone."
+          },
+          "promise_proof": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "With promise_kept: the ID or link of the message you sent (what the send command returned). No ID, not sent."
           }
         }
       }

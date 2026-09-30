@@ -54,6 +54,7 @@ describe("delivery in production", () => {
     expect(reports).toHaveLength(1);
     expect(reports[0]).toContain("em produção desde 30/09 16:40");
     expect(reports[0]).toContain("cc_session_archive");
+    expect(reports[0]).toContain("No ID, no notice");
     expect(chips[0]).toContain("PR #9400");
     const before = calls.length;
     advance(DELIVERY_CHECK_MS);
