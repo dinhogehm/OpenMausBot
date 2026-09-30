@@ -317,6 +317,7 @@ import { BG_JOB_MAX_MS, backgroundProcesses, bgJobOverdueReport, bgJobResumeProm
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { newDeliveryCache, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
+import { IntakeLock } from "./intake-lock.ts";
 import { readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -7267,9 +7268,17 @@ function threadWaitingOnOthers(botId: string, threadId: string): boolean {
   return store.taskByThread(botId, threadId)?.activity === "waiting-on-you";
 }
 
-function autonomyTurnBlocked(botId: string, threadId: string): boolean {
-  return autonomyDispatching.has(threadId) || threadBusy(botId, threadId) || botAtThreadCapacity(botId) || Boolean(activeGroupTurnForBot(botId));
+function autonomyTurnBlocked(botId: string, threadId: string, intake = false): boolean {
+  return autonomyDispatching.has(threadId) || threadBusy(botId, threadId) || botAtThreadCapacity(botId) || Boolean(activeGroupTurnForBot(botId))
+    || (intake && intakeBusyElsewhere(botId, threadId));
 }
+
+// One intake turn per bot (server/intake-lock.ts): a watch and a routine of
+// the same bot never read the same sources at the same time.
+const intakeLock = new IntakeLock((botId, threadId) => threadBusy(botId, threadId) || autonomyDispatching.has(threadId));
+const intakeBusyElsewhere = (botId: string, threadId?: string) => intakeLock.busyElsewhere(botId, threadId);
+const noteIntakeTurn = (botId: string, threadId: string) => intakeLock.note(botId, threadId);
+const settleIntakeTurn = (threadId: string) => intakeLock.settle(threadId);
 
 /** true = the turn started; false = not now (busy, or it failed and said so). */
 async function dispatchAutonomyTurn(botId: string, threadId: string, chip: string, prompt: string): Promise<"started" | "busy" | "failed"> {
@@ -7381,7 +7390,7 @@ async function runDueWatches(): Promise<void> {
   await Promise.all(watches.map(async (wake) => {
     if (!store.taskByThread(wake.botId, wake.threadId)) return;
     const watch = wake.watch!;
-    const result = await runWatchCommand(watch.argv, { cwd: watchCwd(wake.botId, wake.threadId), path: augmentedPath() });
+    const result = await runWatchCommand(watch.argv, { cwd: watchCwd(wake.botId, wake.threadId), path: augmentedPath(), ignore: watch.ignore });
     autonomy.recordWatchRun(wake, { ...result, matched: result.ok && watchMatches(result.output, watch.until) });
   }));
   // Rows show each watch's last run and failures: refresh the bots that ran one.
@@ -7547,8 +7556,10 @@ async function autonomyTick(): Promise<void> {
       continue;
     }
     // A due wake waits for the thread to be free; it is never dropped for it.
-    if (autonomyTurnBlocked(wake.botId, wake.threadId)) continue;
+    // a watch is intake work: it waits for the bot's other intake turn
+    if (autonomyTurnBlocked(wake.botId, wake.threadId, Boolean(wake.watch))) continue;
     if (!autonomy.isCurrent(wake)) continue;
+    if (wake.watch) noteIntakeTurn(wake.botId, wake.threadId);
     // A standing watch is not used up by firing; a plain wake or watch is.
     const standing = wake.watch?.standing === true;
     // Leased, not dropped: on disk until the turn completes, so a restart
@@ -7560,6 +7571,7 @@ async function autonomyTick(): Promise<void> {
     // Raised once when it starts failing, not on every firing while it stays broken.
     const failing = standing && wake.watch!.trigger === "failing" && wake.watch!.lastTrigger !== "failing" ? `${wake.watch!.failures}` : null;
     const outcome = await dispatchAutonomyTurn(wake.botId, wake.threadId, chip, prompt);
+    if (outcome !== "started") settleIntakeTurn(wake.threadId);
     if (standing) {
       // Busy: it stays due and fires next tick. Otherwise (started or not) it re-arms.
       if (outcome === "busy") continue;
@@ -7979,6 +7991,7 @@ bus.subscribe((event: RuntimeEvent) => {
   if (event.type !== "turn.completed") return;
   // The turn a wake or report was leased to is over: it is no longer owed.
   autonomy.settleInFlight(event.threadId);
+  settleIntakeTurn(event.threadId);
   const goal = autonomy.goalFor(event.threadId);
   if (!goal || goal.status !== "active") return;
   const failures = autonomy.noteGoalTurnOutcome(event.threadId, event.ok);
@@ -10391,7 +10404,8 @@ routines = new RoutineManager({
   hasPendingDelegations: (threadId) => pendingThreads().includes(threadId) ||
     [...delegationWatch.values()].some((watch) => watch.sourceThreadId === threadId) ||
     pendingDelegationWakes.has(threadId),
-  botState: unattendedDispatchState,
+  // a routine run waits while the bot's intake turn (a watch) runs elsewhere
+  botState: (botId) => (intakeBusyElsewhere(botId) ? "busy" : unattendedDispatchState(botId)),
   goalState: (groupId, coordinatorBotId) => {
     const group = store.group(groupId);
     const coordinator = store.bot(coordinatorBotId);
@@ -10442,7 +10456,16 @@ routines = new RoutineManager({
     }
   },
   startTurn: async (botId, threadId, prompt, runOn, triggerSource, onDispatchError) => {
-    await startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, onDispatchError });
+    noteIntakeTurn(botId, threadId);
+    try {
+      await startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, onDispatchError: (message) => {
+        settleIntakeTurn(threadId);
+        onDispatchError?.(message);
+      } });
+    } catch (error) {
+      settleIntakeTurn(threadId);
+      throw error;
+    }
   },
   startGoal: async (groupId, threadId, prompt, coordinatorBotId, runId, _onDispatchError) => {
     startGroupTurn(groupId, prompt, undefined, undefined, "goal", undefined, {
@@ -16187,7 +16210,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
               }
             }
             // The first run proves the command works and becomes the baseline.
-            const first = await runWatchCommand(command.argv, { cwd: watchCwd(bot.id, threadId), path: augmentedPath() });
+            const first = await runWatchCommand(command.argv, { cwd: watchCwd(bot.id, threadId), path: augmentedPath(), ignore: input.ignore });
             requireActiveInternalCapability();
             if (!first.ok) return json(res, 400, { error: `o comando falhou na primeira execução — corrija antes de vigiar:\n${first.output.slice(0, 1_500)}` });
             if (!input.standing && watchMatches(first.output, input.until)) {
