@@ -50,7 +50,7 @@ describe("buildTurnContext", () => {
   it("replays an out-of-band teammate result before the next user turn", () => {
     const updated = [
       ...transcript,
-      { role: "assistant" as const, text: "@Worker replied to the delegated task:\n\nfinished the report" },
+      { role: "assistant" as const, text: "@Worker respondeu à tarefa delegada:\n\nfinished the report" },
     ];
     const out = buildTurnContext({
       text: "what did they find?",
@@ -62,7 +62,7 @@ describe("buildTurnContext", () => {
     });
     expect(out.resume).toBe(false);
     expect(out.turnText).toContain("received an update outside your provider session");
-    expect(out.turnText).toContain("@Worker replied to the delegated task");
+    expect(out.turnText).toContain("@Worker respondeu à tarefa delegada");
     expect(out.turnText.endsWith("what did they find?")).toBe(true);
   });
 });

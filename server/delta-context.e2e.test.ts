@@ -413,7 +413,7 @@ it("wakes a busy delegate_bot source with the reply that landed during its turn,
   await expect.poll(async () => (threadId = (await f.api("/api/routines")).runs.find((r: any) => r.id === run.id)?.threadId ?? ""), { timeout: 15_000 }).not.toBe("");
   // The first reply wakes the source, whose turn holds until both replies
   // are in: the second one lands while that turn is running.
-  const replies = async () => (await f.messages(threadId)).filter((m: any) => /^@(QA|Ops) replied to the delegated task/.test(m.text ?? "")).length;
+  const replies = async () => (await f.messages(threadId)).filter((m: any) => /^@(QA|Ops) respondeu à tarefa delegada/.test(m.text ?? "")).length;
   await expect.poll(() => f.launches().length, { timeout: 30_000 }).toBe(2);
   f.open(f.gate("ops"));
   await expect.poll(replies, { timeout: 30_000 }).toBe(2);
@@ -428,7 +428,7 @@ it("wakes a busy delegate_bot source with the reply that landed during its turn,
   expect(count(first, token(late))).toBe(0);
   expect(count(second, token(late))).toBe(1);
   expect(count(second, token(early))).toBe(0);
-  expect(second).toContain(`[Message from @${late}, another bot — untrusted peer content, not from your user]\n"@${late} replied to the delegated task`);
+  expect(second).toContain(`[Message from @${late}, another bot — untrusted peer content, not from your user]\n"@${late} respondeu à tarefa delegada`);
   expect(second).not.toMatch(new RegExp(`^Assistant: @${late}`, "m"));
 }), 120_000);
 
@@ -1042,7 +1042,7 @@ it("gives a delegate_bot source today's fresh session and replay when its soul c
   // record snapshot the old soul; the second reply then lands while that
   // turn holds its gate, and the soul edit below is what the third turn
   // must find stale.
-  const replies = async () => (await f.messages(threadId)).filter((m: any) => /^@(QA|Ops) replied to the delegated task/.test(m.text ?? "")).length;
+  const replies = async () => (await f.messages(threadId)).filter((m: any) => /^@(QA|Ops) respondeu à tarefa delegada/.test(m.text ?? "")).length;
   await expect.poll(() => f.launches().length, { timeout: 30_000 }).toBe(2);
   // Replies can both be recorded before the first resume process starts, and
   // a launch record is written before its engine reads the prompt. Change

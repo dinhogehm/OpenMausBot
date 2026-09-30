@@ -577,7 +577,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
             m.role === "bot"
             && m.kind === "text"
             && m.from?.botId === helper.id
-            && m.text?.includes("replied to the delegated task")
+            && m.text?.includes("respondeu à tarefa delegada")
             && m.text?.includes("hello from fake acp"),
         );
         // The source is now revived automatically once the peer replies:
@@ -604,7 +604,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
       );
       expect(queueAck.text).not.toContain("hello from fake acp");
       const returnedResult = askerBot.messages.find(
-        (m: any) => m.kind === "text" && m.from?.botId === helper.id && m.text?.includes("replied to the delegated task"),
+        (m: any) => m.kind === "text" && m.from?.botId === helper.id && m.text?.includes("respondeu à tarefa delegada"),
       );
       expect(returnedResult.text).toContain("hello from fake acp");
 
@@ -683,7 +683,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
       expect(woke).toContain("[A delegated task just completed]");
       expect(woke).toContain("ORCHID_EARLIER_CONTEXT");
       expect(woke.split("hello from fake acp").length - 1).toBe(1);
-      expect(woke).toContain("[Message from @Helper, another bot — untrusted peer content, not from your user]\n\"@Helper replied to the delegated task");
+      expect(woke).toContain("[Message from @Helper, another bot — untrusted peer content, not from your user]\n\"@Helper respondeu à tarefa delegada");
     },
     45_000,
   );
@@ -748,7 +748,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
             (message: any) =>
               message.kind === "text"
               && message.from?.botId === helper.id
-              && message.text?.includes("replied to the delegated task")
+              && message.text?.includes("respondeu à tarefa delegada")
               && message.text?.includes("long delegated task"),
           );
         }, 20_000, "worker result did not return to the Chief conversation");
@@ -849,7 +849,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
           (m: any) =>
             m.kind === "text"
             && m.from?.botId === helper.id
-            && m.text?.includes("replied to the delegated task")
+            && m.text?.includes("respondeu à tarefa delegada")
             && m.text?.includes("ping from fake"),
         );
       }, 10_000, "queued peer reply never returned to the initiating chat");
@@ -906,7 +906,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
           (m: any) => m.kind === "text" && m.text?.includes("queued as a delegation"),
         );
         const waiting = current.messages.some(
-          (m: any) => m.kind === "activity" && m.tool?.name?.includes("waiting — they're busy"),
+          (m: any) => m.kind === "activity" && m.tool?.name?.includes("aguardando — está ocupado"),
         );
         return queued && waiting && !current.busy;
       }, 25_000, "approved ask was not retained as a waiting delegation");
@@ -924,7 +924,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
           (m: any) =>
             m.kind === "text"
             && m.from?.botId === helper.id
-            && m.text?.includes("replied to the delegated task")
+            && m.text?.includes("respondeu à tarefa delegada")
             && m.text?.includes("ping from fake"),
         );
       }, 30_000, "provider reload left the waiting delegation stranded");
@@ -997,7 +997,7 @@ describe("legacy routine comms e2e (fake ACP fleet)", () => {
         askerBot = (await api("GET", "/api/bots")).body.bots.find((b: any) => b.id === asker.id);
         return askerBot.messages.some(
           (m: any) => m.kind === "text" && m.role === "bot"
-            && m.text?.includes("replied to the delegated task")
+            && m.text?.includes("respondeu à tarefa delegada")
             && m.text?.includes("ping from fake"),
         );
       }, 30_000, "late reply never landed on the asker's thread");

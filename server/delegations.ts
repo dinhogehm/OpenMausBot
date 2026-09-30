@@ -561,8 +561,8 @@ function expireDelegation(bus: CommsBus, sourceThreadId: string, item: PendingDe
     kind: "activity",
     tool: {
       name: busyHold
-        ? `Delegation to @${name} expired — still busy after ${busyHoldCapText()}`
-        : `Delegation to @${name} expired — not picked up within 24 hours`,
+        ? `Delegação para @${name} expirou — ainda ocupado depois de ${busyHoldCapText().replace(/hours?$/, (unit) => (unit === "hour" ? "hora" : "horas")).replace(/minutes?$/, (unit) => (unit === "minute" ? "minuto" : "minutos"))}`
+        : `Delegação para @${name} expirou — ninguém pegou em 24 horas`,
       ok: false,
     },
   });
@@ -764,8 +764,8 @@ async function processOne(
       bus.store.appendMessage(sourceThreadId, {
         role: "bot",
         kind: "activity",
-        tool: { name: verdict === "deny" ? `Delegation to @${target.name} denied by user`
-          : `Delegation to @${target.name}: ${failure.error}`, ok: false },
+        tool: { name: verdict === "deny" ? `Delegação para @${target.name} negada pela pessoa`
+          : `Delegação para @${target.name}: ${failure.error}`, ok: false },
       });
       return "settled";
     }
@@ -864,7 +864,7 @@ function waitingChipText(store: Store, target: BotRecord, item: PendingDelegatio
   if (target.activity === "waiting-on-you") {
     return `Waiting for @${target.name}, who's waiting on you — it'll go through after you answer`;
   }
-  return `Delegation to @${target.name} waiting — they're busy; it'll go through when they're free`;
+  return `Delegação para @${target.name} aguardando — está ocupado; segue quando ficar livre`;
 }
 
 /** The thread a fresh-thread handoff was opened in may be deleted while the
@@ -933,7 +933,7 @@ function dropIfUnreachable(
   bus.store.appendMessage(sourceThreadId, {
     role: "bot",
     kind: "activity",
-    tool: { name: `Delegation to @${target.name} canceled — ${reason}`, ok: false },
+    tool: { name: `Delegação para @${target.name} cancelada — ${reason}`, ok: false },
   });
   return true;
 }

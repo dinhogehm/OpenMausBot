@@ -453,9 +453,9 @@ describe("drainDelegations", () => {
     const chip = await waitFor(() =>
       store
         .messagesFor(from.threadId)
-        .find((m) => m.kind === "activity" && (m.tool?.name ?? "").includes("waiting — they're busy")),
+        .find((m) => m.kind === "activity" && (m.tool?.name ?? "").includes("aguardando — está ocupado")),
     );
-    expect(chip.tool?.name).toBe("Delegation to @Helper waiting — they're busy; it'll go through when they're free");
+    expect(chip.tool?.name).toBe("Delegação para @Helper aguardando — está ocupado; segue quando ficar livre");
     expect(runTargetCalls).toEqual([]);
     // retained for the retry drain the target's settling turn triggers
     expect(_pendingCount(from.threadId)).toBe(1);
@@ -550,7 +550,7 @@ describe("drainDelegations", () => {
       expect(runTarget).not.toHaveBeenCalled();
       expect(resolvePeerComms(approvalBus, card.card!.requestId!, "allow")).toBe(false);
       if (outcome !== "deny") {
-        expect(store.messagesFor(from.threadId).some(m => m.tool?.name?.includes("denied by user"))).toBe(false);
+        expect(store.messagesFor(from.threadId).some(m => m.tool?.name?.includes("negada pela pessoa"))).toBe(false);
         expect(buildDelegationFailurePrompt(target.name, receipt.result!)).not.toContain("user denied");
       }
       _resetPending();
@@ -672,7 +672,7 @@ describe("drainDelegations", () => {
     const chip = await waitFor(() =>
       store
         .messagesFor(from.threadId)
-        .find((m) => m.kind === "activity" && (m.tool?.name ?? "").includes("denied by user")),
+        .find((m) => m.kind === "activity" && (m.tool?.name ?? "").includes("negada pela pessoa")),
     );
     expect(chip.tool?.ok).toBe(false);
     expect(runTargetCalls).toEqual([]);
@@ -1016,7 +1016,7 @@ describe("busy waits and expiry", () => {
     const runTarget = (...args: unknown[]) => void dispatched.push(args);
 
     drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
-    await waitFor(() => chipCount("waiting — they're busy;") === 1);
+    await waitFor(() => chipCount("aguardando — está ocupado;") === 1);
     expect(dispatched).toHaveLength(0);
     expect(_pendingCount(from.threadId)).toBe(1);
     // this is the set a settling target turn re-drains
@@ -1043,7 +1043,7 @@ describe("busy waits and expiry", () => {
       expect(releaseDelegationsWaitingOn(target.id)).toEqual([from.threadId]);
     }
     expect(findDelegationReceipt(queued.id!)).toBeNull();
-    expect(chipCount("waiting — they're busy;")).toBe(1);
+    expect(chipCount("aguardando — está ocupado;")).toBe(1);
 
     store.patchBot(target.id, { busy: false });
     drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
@@ -1085,13 +1085,13 @@ describe("busy waits and expiry", () => {
     queueDelegation(holdBus, from, { toBotId: target.id, message: "when you can", depth: 0 }, 1);
     const runTarget = vi.fn();
     drainDelegations(holdBus, approvalBus, from.threadId, runTarget);
-    await waitFor(() => chipCount("waiting — they're busy;") === 1);
+    await waitFor(() => chipCount("aguardando — está ocupado;") === 1);
     expect(runTarget).not.toHaveBeenCalled();
 
     admit = true;
     drainDelegations(holdBus, approvalBus, from.threadId, runTarget);
     await waitFor(() => runTarget.mock.calls.length === 1 && _pendingCount(from.threadId) === 0);
-    expect(chipCount("waiting — they're busy;")).toBe(1);
+    expect(chipCount("aguardando — está ocupado;")).toBe(1);
   });
 
   it("posts one waiting chip per handoff, however many drains run while the target is busy", async () => {
@@ -1100,14 +1100,14 @@ describe("busy waits and expiry", () => {
     const runTarget = vi.fn();
 
     drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
-    await waitFor(() => chipCount("waiting — they're busy;") === 1);
+    await waitFor(() => chipCount("aguardando — está ocupado;") === 1);
     // A source-thread redrain can happen while an approval for another item
     // settles. It must not re-announce the same wait.
     for (let index = 0; index < 4; index++) {
       drainDelegations(commsBus, approvalBus, from.threadId, runTarget);
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(chipCount("waiting — they're busy;")).toBe(1);
+    expect(chipCount("aguardando — está ocupado;")).toBe(1);
     expect(pendingDelegationInfo(queued.id!)).toMatchObject({ waiting: true });
 
     store.patchBot(target.id, { busy: false });
@@ -1122,7 +1122,7 @@ describe("busy waits and expiry", () => {
     drainDelegations(commsBus, approvalBus, from.threadId, vi.fn());
     await waitFor(() => chipCount("who's waiting on you") === 1);
     expect(chipCount("Waiting for @Helper, who's waiting on you — it'll go through after you answer")).toBe(1);
-    expect(chipCount("they're busy")).toBe(0);
+    expect(chipCount("está ocupado")).toBe(0);
   });
 
   it("persists receipts across a restart and prunes the drawer by count", () => {
@@ -1181,7 +1181,7 @@ describe("busy waits and expiry", () => {
         toBotName: "Helper",
         result: "@Helper was not free to take this for 24 hours",
       });
-      expect(chipCount("Delegation to @Helper expired — not picked up within 24 hours")).toBe(1);
+      expect(chipCount("Delegação para @Helper expirou — ninguém pegou em 24 horas")).toBe(1);
       expect(settled).toEqual(["expired"]);
     } finally {
       vi.useRealTimers();
@@ -1211,8 +1211,8 @@ describe("busy waits and expiry", () => {
         toBotName: "Helper",
         result: "@Helper was still busy after 2 hours",
       });
-      expect(chipCount("Delegation to @Helper expired — still busy after 2 hours")).toBe(1);
-      expect(chipCount("Delegation to @Helper expired — not picked up within 24 hours")).toBe(0);
+      expect(chipCount("Delegação para @Helper expirou — ainda ocupado depois de 2 horas")).toBe(1);
+      expect(chipCount("Delegação para @Helper expirou — ninguém pegou em 24 horas")).toBe(0);
       expect(settled).toEqual(["expired"]);
     } finally {
       vi.useRealTimers();
@@ -1266,7 +1266,7 @@ describe("busy waits and expiry", () => {
         status: "expired",
         result: "@Helper was still busy after 2 hours",
       });
-      expect(chipCount("Delegation to @Helper expired — still busy after 2 hours")).toBe(1);
+      expect(chipCount("Delegação para @Helper expirou — ainda ocupado depois de 2 horas")).toBe(1);
       expect(settled).toEqual(["expired"]);
       // the pending map is module-level: clear the kept item so the next
       // test's sweep does not inherit it

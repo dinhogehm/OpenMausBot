@@ -98,7 +98,7 @@ describe("routine delegation through the isolated harness", () => {
     finish(peerThread);
     await expect.poll(async () => (await runState(run.id))?.status, { timeout: 20_000 }).toBe("completed");
     const transcript = await messages(run.threadId);
-    expect(transcript.some((message) => message.text?.includes("@Routine peer replied to the delegated task"))).toBe(true);
+    expect(transcript.some((message) => message.text?.includes("@Routine peer respondeu à tarefa delegada"))).toBe(true);
     expect((await runState(run.id)).output).toContain("[A delegated task just completed]");
     evidence.push({ waitedForBusyPeer: true, resumedRoutine: run.id, threadId: run.threadId, transcript });
   }, 60_000);
@@ -140,7 +140,7 @@ describe("routine delegation through the isolated harness", () => {
     }
     finish("probe");
     await expect.poll(async () => (await messages(run.threadId)).some(
-      (message) => message.text?.includes("@Routine peer replied to the delegated task"),
+      (message) => message.text?.includes("@Routine peer respondeu à tarefa delegada"),
     ), { timeout: 15_000 }).toBe(true);
 
     const observer = (await control(["new-bot", "--name", "Unrelated observer"]) as any).bot;

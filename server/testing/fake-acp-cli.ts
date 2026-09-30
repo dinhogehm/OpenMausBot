@@ -767,7 +767,7 @@ function handle(msg: any) {
       if (wokeFromDelegation) {
         fakeLog("branch: wokeFromDelegation");
         const failed = promptText.includes("[A delegated task failed]");
-        const sawResult = promptText.includes("replied to the delegated task");
+        const sawResult = promptText.includes("respondeu à tarefa delegada");
         out({
           jsonrpc: "2.0",
           method: "session/update",
@@ -813,7 +813,7 @@ function handle(msg: any) {
       }
       if (mode === "chief-delegate" && promptText.includes("CHIEF_RESULT_CONTEXT")) {
         const sawDelegatedResult =
-          promptText.includes("@LongWorker replied to the delegated task")
+          promptText.includes("@LongWorker respondeu à tarefa delegada")
           && promptText.includes("long delegated task");
         out({
           jsonrpc: "2.0",

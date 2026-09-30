@@ -338,7 +338,7 @@ describe("per-bot thread capacity through an isolated HTTP fixture", () => {
       const reply = String(replies.at(-1)?.text ?? "");
       // the run recorded this same wake reply
       expect(reply.startsWith((await runState(turn.runId)).output)).toBe(true);
-      const peerReply = reply.indexOf("@Capacity fixture replied to the delegated task");
+      const peerReply = reply.indexOf("@Capacity fixture respondeu à tarefa delegada");
       const notice = reply.lastIndexOf("[A delegated task just completed]");
       expect(peerReply).toBeGreaterThan(-1);
       expect(notice).toBeGreaterThan(peerReply);
@@ -373,7 +373,7 @@ describe("per-bot thread capacity through an isolated HTTP fixture", () => {
       expect(held.body).toMatchObject({ queued: true, taskId: expect.any(String) });
       finish(second.threadId);
       await expect.poll(async () => (await runState(second.runId))?.status, { timeout: 15_000 }).toBe("waiting");
-      expect((await messages(second.threadId)).some((message) => message.kind === "activity" && message.tool?.name?.includes("waiting — they're busy"))).toBe(true);
+      expect((await messages(second.threadId)).some((message) => message.kind === "activity" && message.tool?.name?.includes("aguardando — está ocupado"))).toBe(true);
       expect((await busyThreads(target.botId)).sort()).toEqual([...target.threads].sort());
 
       // The standing thread frees while the other stays busy: the held
