@@ -16,6 +16,7 @@ import {
   recordBlocked,
   recordInWorktree,
   sendToDesktopSession,
+  showsFolder,
   sidebarMatch,
   summaryIsCurrent,
   transcriptMentions,
@@ -315,5 +316,60 @@ describe("archiveDesktopSession", () => {
     expect(sidebarMatch("Teste modo app", "Teste modo app")).toBe(true);
     expect(sidebarMatch("Teste", "Teste modo app")).toBe(false);
     expect(sidebarMatch("Transfer N2 sem agente", "Teste modo app")).toBe(false);
+  });
+});
+
+// What the Claude app's window really showed (OCR of a capture, 30/09): a
+// status dot before each sidebar title and the header's, an icon read as a
+// letter, the folder chip and branch on one line, the header's dropdown and
+// folder after the title.
+describe("the app's real screen (OCR fixture)", () => {
+  const localId = "local_63607854-a958-43e0-b2bc-ac77b4a92b4d";
+  const sidebar = [
+    { text: "i Merge e deploy de PRs abertos", x: 21, y: 172 },
+    { text: "• Atendimento reaberto bugs", x: 24, y: 304 },
+    { text: "• Chat ticket agent/client labels bug", x: 24, y: 338 },
+    { text: "• Fila errada ao criar ticket", x: 24, y: 411 },
+    { text: "• Automação inatividade não dispara", x: 24, y: 447 },
+  ];
+  const header = { text: "• Chat ticket agent/client labels bug v (nuria-platform", x: 500, y: 57 };
+  const chip = { text: "nuria-platform fix/9311-chat-labels", x: 547, y: 815 };
+  const field = { text: "Digite / para comandos", x: 547, y: 875 };
+
+  it("matches titles behind a status dot or an icon, and the header with its folder after it", () => {
+    expect(sidebarMatch("• Fila errada ao criar ticket", "Fila errada ao criar ticket")).toBe(true);
+    expect(sidebarMatch("i Merge e deploy de PRs abertos", "Merge e deploy de PRs abertos")).toBe(true);
+    expect(sidebarMatch(header.text, "Chat ticket agent/client labels bug")).toBe(true);
+    expect(sidebarMatch("• Atendimento reaberto bugs", "Fila errada ao criar ticket")).toBe(false);
+  });
+
+  it("finds the folder as a word of the chip line", () => {
+    const at = (text: string) => [{ x: 547, y: 815, w: 200, h: 16, text }];
+    expect(showsFolder(at(chip.text), "nuria-platform")).toBe(true);
+    expect(showsFolder(at("• Título v (nuria-platform"), "nuria-platform")).toBe(true);
+    expect(showsFolder(at("nuria-platform-old main"), "nuria-platform")).toBe(false);
+    expect(showsFolder(at("OpenMausBot main"), "nuria-platform")).toBe(false);
+  });
+
+  it("sends into the session whose header carries a status dot (8378b26a)", async () => {
+    const typed = { ...field, text: "Siga com o PR" };
+    const app = fakeApp({ screens: [[...sidebar, header, chip, field], [...sidebar, header, chip, typed], [...sidebar, header, chip, field]] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "Siga com o PR", title: "Chat ticket agent/client labels bug" })).toEqual({ ok: true });
+  });
+
+  it("archives the sidebar entry behind its status dot (28963e07)", async () => {
+    const app = fakeApp({ screen: [...sidebar, header, { text: "Arquivar", x: 60, y: 440 }] });
+    expect(await archiveDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket" })).toEqual({ ok: true });
+    expect(app.actions).toContain("rclick 54,419");
+  });
+
+  it("opens a new session whose folder chip reads with its branch (c30a1f34)", async () => {
+    const app = fakeApp({ screen: [{ text: "nuria-platform main", x: 547, y: 815 }, { text: "worktree", x: 700, y: 815 }] });
+    expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "#9307 brief" })).toEqual({ ok: true });
+  });
+
+  it("says what the screen showed when the folder is another one", async () => {
+    const app = fakeApp({ screen: [{ text: "nuria-platform main", x: 547, y: 815 }, { text: "worktree", x: 700, y: 815 }] });
+    expect(await createDesktopSession(app.driver, { repoName: "OpenMausBot", text: "brief" })).toMatchObject({ ok: false, miss: true, seen: expect.stringContaining("nuria-platform main") });
   });
 });

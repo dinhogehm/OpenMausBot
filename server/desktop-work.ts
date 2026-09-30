@@ -380,7 +380,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     if (step.miss) {
       pending.misses = (pending.misses ?? 0) + 1;
       if (pending.misses >= DESKTOP_MAX_MISSES) {
-        failDesktopSession(deps, next, `could not ${actionLabel(pending.kind)} after ${pending.misses} tries with the screen unlocked and the Claude app in front: ${step.reason}`);
+        failDesktopSession(deps, next, `could not ${actionLabel(pending.kind)} after ${pending.misses} tries with the screen unlocked and the Claude app in front: ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`);
         return;
       }
     }

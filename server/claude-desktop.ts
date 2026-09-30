@@ -58,7 +58,7 @@ export interface DesktopDriver {
 /** `miss`: the screen did not show what was expected (folder, worktree,
  * session) although it was unlocked and Claude was in front. `touched`: the
  * step acted on the screen before stopping, so a retry should back off. */
-export type DesktopStep = { ok: true } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean };
+export type DesktopStep = { ok: true } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -155,8 +155,28 @@ async function withScreen(driver: DesktopDriver, body: (screen: Screen) => Promi
   }
 }
 
-const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const normalize = (text: string) => text.toLowerCase().replace(/[…\s]+/g, " ").trim();
+
+/** How a title may read once OCR'd: the app puts a status dot ("•") or an
+ * icon read as a letter ("i", "oG") before it, and a dropdown and folder
+ * chip after it in the header ("… v (nuria-platform"). Forms to compare. */
+function titleForms(text: string): string[] {
+  const base = normalize(text).replace(/^[^\p{L}\p{N}#]+/u, "").trim();
+  const icon = /^[\p{L}]{1,2} (.+)$/u.exec(base);
+  return icon ? [base, icon[1]!] : [base];
+}
+
+/** A short trace of what the screen showed, for the error a person reads. */
+function seenText(lines: OcrLine[], max = 8): string {
+  return lines.slice(0, max).map((line) => line.text.trim()).filter(Boolean).join(" | ").slice(0, 300);
+}
+
+/** The folder chip (or header) names the repository: a word of a main-area
+ * line, not the whole line — OCR reads "nuria-platform main" as one line. */
+export function showsFolder(lines: OcrLine[], repoName: string): boolean {
+  const wanted = repoName.toLowerCase();
+  return lines.some((line) => line.text.toLowerCase().split(/\s+/).some((word) => word.replace(/^[(\[•·"']+|[)\],;:"'•·]+$/g, "") === wanted));
+}
 
 /** What OCR should show of `text` once it is in the field: its first words. */
 export function textPrefix(text: string): string {
@@ -188,10 +208,10 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     stop = await guard(screen, "new session");
     if (stop) return stop;
     const lines = mainArea(await driver.ocr());
-    if (!findLine(lines, new RegExp(`^${escapeRegExp(input.repoName)}$`))) {
-      return { ok: false, reason: `the new session did not open in ${input.repoName} (the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true };
+    if (!showsFolder(lines, input.repoName)) {
+      return { ok: false, reason: `the new session did not open in ${input.repoName} (the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
     }
-    if (!findLine(lines, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true };
+    if (!findLine(lines, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
     stop = await guard(screen, "paste");
     if (stop) return stop;
     await act(screen, () => driver.paste(input.text, true));
@@ -222,7 +242,7 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     const size = await driver.screenSize();
     const lines = mainArea(await driver.ocr());
     if (input.title && !lines.some((line) => sidebarMatch(line.text, input.title!))) {
-      return { ok: false, reason: `the session "${input.title}" is not the one on screen`, retry: true, miss: true, touched: true };
+      return { ok: false, reason: `the session "${input.title}" is not the one on screen`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 120)) };
     }
     const field = lines.find((line) => line.y > size.h / 2 && COMPOSER_PLACEHOLDER.test(line.text.trim()));
     if (!field) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true };
@@ -262,11 +282,16 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
 
 /** Normalised title prefix the sidebar shows (it truncates long titles). */
 export function sidebarMatch(lineText: string, title: string): boolean {
-  const shown = normalize(lineText);
-  const wanted = normalize(title);
-  if (shown.length < 6 || wanted.length < 6) return false;
+  const wanted = titleForms(title)[0]!;
+  if (wanted.length < 6) return false;
   const prefix = wanted.slice(0, Math.min(24, wanted.length));
-  return shown.startsWith(prefix) || (shown.length >= 12 && wanted.startsWith(shown));
+  return titleForms(lineText).some((shown) => shown.length >= 6 && (shown.startsWith(prefix) || (shown.length >= 12 && wanted.startsWith(shown))));
+}
+
+/** The same title, dot and icon aside (for telling duplicates apart). */
+function sameTitle(lineText: string, title: string): boolean {
+  const wanted = titleForms(title)[0]!;
+  return titleForms(lineText).some((shown) => shown === wanted || shown.startsWith(`${wanted} v `) || shown.startsWith(`${wanted} (`));
 }
 
 /** Archive a session in the app: its sidebar entry → right click → "Arquivar". */
@@ -279,9 +304,10 @@ export async function archiveDesktopSession(driver: DesktopDriver, input: { loca
     if (stop) return stop;
     // Titles repeat in the sidebar ("Relatorio nightly" fifteen times): act
     // only on one unambiguous entry, never on the first of several.
-    const matches = (await driver.ocr()).filter((line) => line.x < SIDEBAR_MAX_X && sidebarMatch(line.text, input.title));
-    if (!matches.length) return { ok: false, reason: `"${input.title}" is not visible in the app's sidebar`, retry: true, miss: true, touched: true };
-    const exact = matches.filter((line) => normalize(line.text) === normalize(input.title));
+    const sidebar = (await driver.ocr()).filter((line) => line.x < SIDEBAR_MAX_X);
+    const matches = sidebar.filter((line) => sidebarMatch(line.text, input.title));
+    if (!matches.length) return { ok: false, reason: `"${input.title}" is not visible in the app's sidebar`, retry: true, miss: true, touched: true, seen: seenText(sidebar) };
+    const exact = matches.filter((line) => sameTitle(line.text, input.title));
     const entry = matches.length === 1 ? matches[0]! : exact.length === 1 ? exact[0]! : null;
     if (!entry) {
       return { ok: false, reason: `${matches.length} sessions in the app's sidebar match "${input.title}", so it cannot tell which to archive; archive it by hand in the Claude app`, retry: false, touched: true };

@@ -182,12 +182,13 @@ describe("opening a session", () => {
     const session = h.appSession("a");
     session.desktop!.pending = { kind: "create", text: "brief", since: h.now, attempts: 0 };
     for (let i = 0; i < DESKTOP_MAX_MISSES; i++) {
-      h.results.push({ ok: false, reason: "the new session did not open in nuria-platform", retry: true, miss: true, touched: true });
+      h.results.push({ ok: false, reason: "the new session did not open in nuria-platform", retry: true, miss: true, touched: true, seen: "OpenMausBot main | worktree" });
       await h.tick();
       h.advance(10 * 60_000);
     }
     expect(session.status).toBe("failed");
     expect(session.lastError).toContain(`after ${DESKTOP_MAX_MISSES} tries`);
+    expect(session.lastError).toContain("the screen showed: OpenMausBot main | worktree");
   });
 
   it("archives a session asked to be archived while it was opening, once it opens", () => {
