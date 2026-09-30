@@ -12,6 +12,7 @@ import {
   parseGoalInput,
   parsePromiseInput,
   prsCited,
+  lastQuestionAt,
   parseWakeInput,
   promiseOverdueReport,
   parseWatchInput,
@@ -636,5 +637,22 @@ describe("a goal waiting on the person about a PR", () => {
     expect(autonomy.resolveNeedsInput("t1", "PR #9303 mergeada")?.status).toBe("completed");
     expect(autonomy.needsInputGoals()).toEqual([]);
     expect(autonomy.resolveNeedsInput("t1", "x")).toBeNull();
+  });
+});
+
+describe("a bot waiting on the person's answer", () => {
+  it("counts a last reply that asks something, not an older one or a newer message", () => {
+    const at = now;
+    expect(lastQuestionAt([{ role: "user", kind: "text", text: "troque o vigia", at: at - 5 }, { role: "bot", kind: "text", text: "O vigia está cego. **Posso trocar?** 🙂", at }, { role: "bot", kind: "activity", at: at + 1 }], at + 10)).toBe(at);
+    expect(lastQuestionAt([{ role: "bot", kind: "text", text: "Posso trocar?", at }, { role: "user", kind: "text", text: "pode", at: at + 1 }], at + 10)).toBeNull();
+    expect(lastQuestionAt([{ role: "bot", kind: "text", text: "Feito.", at }], at + 10)).toBeNull();
+    expect(lastQuestionAt([{ role: "bot", kind: "text", text: "Posso?", at }], at + 25 * 3_600_000)).toBeNull();
+  });
+
+  it("closes a needs-input goal as stopped when asked to", () => {
+    const autonomy = make();
+    autonomy.startGoal("chief", "t1", { goal: "teste", maxTurns: 5, maxHours: 2 });
+    autonomy.finishGoal("t1", "needs-input", "Sigo?");
+    expect(autonomy.resolveNeedsInput("t1", "sem resposta há mais de 12 h", "blocked")?.status).toBe("blocked");
   });
 });

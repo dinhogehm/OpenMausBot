@@ -246,6 +246,8 @@ import {
   parseGoalInput,
   parsePromiseInput,
   prsCited,
+  lastQuestionAt,
+  NEEDS_INPUT_EXPIRE_MS,
   parseWakeInput,
   promiseOverdueReport,
   parseWatchInput,
@@ -7243,7 +7245,11 @@ const autonomy = new BotAutonomy({
 const autonomyDispatching = new Set<string>();
 goalNeedsInputForThread = (threadId) => {
   const goal = autonomy.goalFor(threadId);
-  return goal?.status === "needs-input" ? goal.finishedAt ?? goal.startedAt : null;
+  if (goal?.status === "needs-input") return goal.finishedAt ?? goal.startedAt;
+  // the bot ended its last reply asking the person something: that waits on them too
+  const owner = store.botByThread(threadId);
+  if (!owner || threadBusy(owner.id, threadId)) return null;
+  return lastQuestionAt(store.messagesFor(threadId), Date.now());
 };
 const AUTONOMY_TICK_MS = autonomyTestMs("OMB_AUTONOMY_TICK_MS") ?? 10_000;
 /** Self-paced work due within this keeps the Mac awake (/api/routines/wake). */
@@ -7467,6 +7473,16 @@ async function revalidateNeedsInputGoals(): Promise<void> {
   try {
     const now = Date.now();
     for (const goal of autonomy.needsInputGoals()) {
+      // left unanswered too long: shown as stopped, no longer "needs you"
+      const since = goal.finishedAt ?? goal.startedAt;
+      if (now - since > NEEDS_INPUT_EXPIRE_MS) {
+        const detail = `sem resposta há mais de ${Math.round(NEEDS_INPUT_EXPIRE_MS / 3_600_000)} h — parado desde ${new Date(since).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}. Pergunta que ficou: ${chipText(goal.detail ?? "", 160)}`;
+        if (autonomy.resolveNeedsInput(goal.threadId, detail, "blocked")) {
+          store.appendMessage(goal.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Objetivo parado: ${detail}`, 240), ok: false } });
+          refreshBotRow(goal.botId);
+        }
+        continue;
+      }
       if (now - (needsInputChecks.get(goal.threadId) ?? 0) < 10 * 60_000) continue;
       needsInputChecks.set(goal.threadId, now);
       const prs = prsCited(`${goal.detail ?? ""}\n${goal.goal}`).slice(0, 4);
@@ -7633,7 +7649,7 @@ function reportResumptionToChief(): void {
 const ccProcesses = new Map<string, CcChildProcess>();
 // OMB_CC_BIN points end-to-end tests at a scripted stand-in for `claude`.
 const ccBin = (): string => process.env.OMB_CC_BIN || "claude";
-const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. When you merge a batch of PRs: hotfix/P0/P1 work (by label, title or the linked issue's priority) goes first, ahead of CI or infrastructure PRs, released on its own; PRs that change release scripts (release, carrier, merge-gate or production-watch scripts) go last, in a separate release, with a dry run first. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases, and run its scripts with the package manager they name (npm run when the repository has a package-lock.json — never swap in pnpm or yarn). Do not use AskUserQuestion or wait for an answer mid-turn: if you need a decision or an approval, stop and put the question in your final report.";
+const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. When you merge a batch of PRs: hotfix/P0/P1 work (by label, title or the linked issue's priority) goes first, ahead of CI or infrastructure PRs, released on its own; PRs that change release scripts (release, carrier, merge-gate or production-watch scripts) go last, in a separate release, with a dry run first. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases, and run its scripts with the package manager they name (npm run when the repository has a package-lock.json — never swap in pnpm or yarn). Do not use AskUserQuestion or wait for an answer mid-turn: if you need a decision or an approval, stop and put the question in your final report. Write your reports and summaries — everything the person reads in the app — in Brazilian Portuguese (pt-BR); keep code, commands and identifiers as they are.";
 /** The footer of a first turn: the general rules, plus the repository's own corridor. */
 const ccTurnFooter = (session: CcSession): string => `${CC_TURN_FOOTER}${repoCorridor(session.repo)}`;
 /** Headless runs only: nothing wakes such a session after its turn ends. */
@@ -10416,7 +10432,7 @@ routines = new RoutineManager({
     // run. Keep it distinct: it can belong to a teammate or room, whereas an
     // explicit resultsThreadId must be a visible task owned by the running bot.
     if (!forceNew && routineSourceOwner(routine)) return routine.resultsThreadId;
-    return store.createTask(routine.botId, `${routine.name} · Results`, false)?.threadId;
+    return store.createTask(routine.botId, `${routine.name} · Resultados`, false)?.threadId;
   },
   discardResultsThread: (botId, threadId) => {
     const task = store.taskByThread(botId, threadId);

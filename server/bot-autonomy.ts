@@ -785,10 +785,10 @@ export class BotAutonomy {
 
   /** A goal waiting on the person whose question the world already answered
    * (the PR it asked about was merged or closed): closed as completed. */
-  resolveNeedsInput(threadId: string, detail: string): BotGoal | null {
+  resolveNeedsInput(threadId: string, detail: string, status: "completed" | "blocked" = "completed"): BotGoal | null {
     const goal = this.goals.get(threadId);
     if (!goal || goal.status !== "needs-input") return null;
-    goal.status = "completed";
+    goal.status = status;
     goal.detail = detail;
     goal.finishedAt = this.now();
     this.save();
@@ -1066,4 +1066,21 @@ export function prsCited(text: string): Array<{ number: number; slug?: string }>
   for (const match of text.matchAll(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g)) found.set(Number(match[2]), match[1]);
   for (const match of text.matchAll(/\b(?:PR|pull request)\s*#?(\d{2,6})\b/gi)) if (!found.has(Number(match[1]))) found.set(Number(match[1]), undefined);
   return [...found].map(([number, slug]) => ({ number, ...(slug ? { slug } : {}) }));
+}
+
+/** A goal left waiting on the person this long is not "needs you" any more:
+ * it is shown as stopped, and the question as unanswered. */
+export const NEEDS_INPUT_EXPIRE_MS = 12 * 3_600_000;
+
+/** A bot's own reply that ends by asking the person something ("Posso
+ * trocar?"): its time, or null. Only the conversation's last text counts. */
+export function lastQuestionAt(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number }>, now: number, maxAgeMs = 24 * 3_600_000): number | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (message.kind !== "text") continue;
+    if (message.role !== "bot") return null;
+    const text = (message.text ?? "").replace(/[\s*_`)\]\p{Extended_Pictographic}\uFE0F]+$/u, "");
+    return text.endsWith("?") && now - message.at < maxAgeMs ? message.at : null;
+  }
+  return null;
 }
