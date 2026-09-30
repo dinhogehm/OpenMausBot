@@ -219,6 +219,7 @@ export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, re
   }
   session.status = "failed";
   session.lastError = reason;
+  session.failedAt = deps.now();
   deps.ledger.save();
   deps.chip(session, `stopped with a problem — ${reason.slice(0, 100)}`, false);
   deps.report(session, reportFor(deps, session));
@@ -703,4 +704,32 @@ export function liveSessionForIssue(sessions: readonly CcSession[], repo: string
     // a create that never opened is not a session to send to
     && !(session.status === "failed" && session.surface === "app" && !session.desktop?.localId)
     && (session.desktop?.issue ?? issueNumber(session.title)) === issue) ?? null;
+}
+
+/** A failed session nobody acted on for this long is reported once, with a
+ * suggestion to archive it; it then stops showing as an alert. */
+export const CC_FAILED_AGING_MS = 24 * 3_600_000;
+
+export function ageFailedSessions(deps: Pick<DesktopWorkDeps, "ledger" | "now" | "report" | "chip">): CcSession[] {
+  const now = deps.now();
+  const aged: CcSession[] = [];
+  for (const session of deps.ledger.all()) {
+    if (session.status !== "failed" || session.failedAgingReportedAt !== undefined) continue;
+    const since = session.failedAt ?? session.lastActivityAt;
+    if (now - since < CC_FAILED_AGING_MS) continue;
+    session.failedAgingReportedAt = now;
+    aged.push(session);
+    deps.chip(session, "falhou há mais de 24 h sem ação — sugiro arquivar", false);
+    deps.report(session, `Claude Code session "${session.title}" (${session.id}) has been failed for over 24 h with nobody acting on it (${(session.lastError ?? "no error recorded").slice(0, 200)}). If its work is done elsewhere or no longer needed, archive it with cc_session_archive${session.turns === 0 ? " (it never ran a turn)" : ""}; if not, start a new session for the work. It no longer shows as an alert.`);
+  }
+  if (aged.length) deps.ledger.save();
+  return aged;
+}
+
+/** A title no other live session of ours uses: the app lists sessions by
+ * title, and two alike cannot be told apart there. */
+export function uniqueSessionTitle(sessions: readonly CcSession[], title: string, id: string): string {
+  const norm = (text: string) => text.trim().toLowerCase().replace(/\s+/g, " ");
+  const taken = sessions.some((session) => session.status !== "archived" && norm(session.title) === norm(title));
+  return taken ? `${title} · ${id.slice(0, 4)}` : title;
 }

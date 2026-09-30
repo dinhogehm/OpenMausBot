@@ -18,6 +18,8 @@ import {
   followDesktopSessions,
   liveSessionForIssue,
   reviveScreenFailures,
+  ageFailedSessions,
+  uniqueSessionTitle,
   pickDesktopPending,
   runDesktopWork,
   watchStalledSessions,
@@ -636,5 +638,27 @@ describe("old failures and duplicates", () => {
     expect(liveSessionForIssue(h.ledger.all(), repo, "9300")).toBeNull();
     expect(liveSessionForIssue(h.ledger.all(), "/other", "9311")).toBeNull();
     expect(liveSessionForIssue(h.ledger.all(), repo, undefined)).toBeNull();
+  });
+});
+
+describe("failed sessions left alone, and titles alike", () => {
+  it("reports a session failed for over 24 h once, suggesting to archive it", () => {
+    const h = harness();
+    const session = h.appSession("a");
+    session.status = "failed";
+    session.failedAt = h.now;
+    h.advance(23 * 3_600_000);
+    expect(ageFailedSessions(h.deps)).toEqual([]);
+    h.advance(2 * 3_600_000);
+    expect(ageFailedSessions(h.deps).map((aged) => aged.id)).toEqual(["a"]);
+    expect(h.reports.at(-1)!.text).toContain("cc_session_archive");
+    expect(ageFailedSessions(h.deps)).toEqual([]);
+  });
+
+  it("gives a new session a short suffix when a live one has the same title", () => {
+    const h = harness();
+    h.appSession("a").title = "Automação inatividade não dispara";
+    expect(uniqueSessionTitle(h.ledger.all(), "automação  inatividade não dispara", "1819df34-x")).toBe("automação  inatividade não dispara · 1819");
+    expect(uniqueSessionTitle(h.ledger.all(), "Outra", "1819df34")).toBe("Outra");
   });
 });

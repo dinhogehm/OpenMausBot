@@ -300,6 +300,8 @@ import {
   desktopBriefText,
   issueNumber,
   liveSessionForIssue,
+  ageFailedSessions,
+  uniqueSessionTitle,
   reviveScreenFailures,
   reportFor as desktopReportFor,
   takeFreshQueued,
@@ -7875,7 +7877,8 @@ threadSignals = (threadId) => {
   const ccAlerts = ccLedger.all()
     .filter((session) => session.ownerThreadId === threadId && session.status !== "archived")
     .flatMap((session): WireCcAlert[] => {
-      if (session.status === "failed") return [{ sessionId: session.id, title: session.title, state: "failed", detail: (session.lastError ?? "").slice(0, 200) }];
+      // a failure already reported as a day old (archive suggested) stops alerting
+      if (session.status === "failed") return session.failedAgingReportedAt !== undefined ? [] : [{ sessionId: session.id, title: session.title, state: "failed", detail: (session.lastError ?? "").slice(0, 200) }];
       if (session.desktop?.questionReported && (session.status === "running" || session.status === "stalled")) return [{ sessionId: session.id, title: session.title, state: "question" }];
       if (session.status === "stalled") return [{ sessionId: session.id, title: session.title, state: "stalled" }];
       return [];
@@ -7913,6 +7916,7 @@ function watchDelivery(): void {
 
 async function runDesktopWork(): Promise<void> {
   watchStalledSessions(desktopWork);
+  ageFailedSessions(desktopWork);
   await watchBackgroundJobs();
   watchDelivery();
   if (process.platform !== "darwin") return;
@@ -16247,7 +16251,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             if (lastRepo && lastRepo !== input.repo) {
               return json(res, 409, { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` });
             }
-            const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
+            const appId = randomUUID();
+            const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
             if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
             const issue = issueNumber(input.title, input.brief);
             if (issue) session.desktop!.issue = issue;

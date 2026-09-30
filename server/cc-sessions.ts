@@ -77,6 +77,9 @@ export interface CcSession {
   /** CLI: processes its last turn left running in its worktree; the server
    * resumes it when they are gone. */
   bgJob?: BgJob;
+  /** When it failed, and when the owner was told it stayed failed a day. */
+  failedAt?: number;
+  failedAgingReportedAt?: number;
   /** Its PRs on the way to production (server/prod-delivery.ts). */
   delivery?: CcDelivery;
 }
@@ -360,6 +363,10 @@ export class CcSessionLedger {
       return;
     }
     session.status = outcome.ok ? "idle" : "failed";
+    if (outcome.ok) {
+      delete session.failedAt;
+      delete session.failedAgingReportedAt;
+    } else session.failedAt = this.now();
     if (outcome.report) session.lastReport = outcome.report;
     if (outcome.error) session.lastError = outcome.error;
     else delete session.lastError;
