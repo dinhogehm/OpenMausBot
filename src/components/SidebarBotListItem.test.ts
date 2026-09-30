@@ -320,4 +320,18 @@ describe("bot deletion feedback", () => {
       expect(renderRow(bot({ title: "Developer", chiefOfStaff: true }))).not.toContain('data-testid="chief-crown"');
     });
   });
+
+  it("shows the watch eye and the session triangle on a folded bot's own line", () => {
+    const markup = renderRow(bot({
+      tasks: [
+        { threadId: "thread-atlas", title: "Main", createdAt: 2, watches: [{ label: "chat", standing: true, everyMinutes: 3, lastRunAt: 1, failures: 0 }] },
+        { threadId: "thread-other", title: "Other", createdAt: 1, ccAlerts: [{ sessionId: "s", title: "#9311", state: "stalled" }] },
+      ],
+    }));
+    const signals = markup.match(/<span data-bot-signals[\s\S]*?<\/span>/)?.[0] ?? "";
+    expect(signals).toContain("data-thread-watches");
+    expect(signals).toContain("data-thread-cc-alert");
+    expect(markup).toContain("#9311");
+    expect(renderRow(bot())).not.toContain("data-bot-signals");
+  });
 });

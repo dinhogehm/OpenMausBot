@@ -99,6 +99,8 @@ import { DesktopWorkspaceSwitcher } from "./DesktopWorkspaceSwitcher";
 import { profileInitials, SidebarProfileMenu } from "./SidebarProfileMenu";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { useShowThreads } from "@/lib/thread-preferences";
+import { botSignals } from "@/lib/thread-signals";
+import { SignalIcons } from "./SignalIcons";
 import { attentionJumpAction, AttentionThreadRows, crossBotAttentionThreads, SidebarBotActivity, sidebarBotActivityTasks } from "./SidebarBotActivity";
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { ShortcutHint } from "./ShortcutHint";
@@ -1128,6 +1130,9 @@ export function BotListItem({
   // quiet rows drop the last-message preview but keep a line that reports
   // something happening now; an idle bot is just its name
   const statusLine = deleting || working || waiting || needsYou || teammateWait || queued;
+  // its watches and Claude Code sessions, while its thread list is folded
+  const folded = expanded ? null : botSignals(bot.tasks);
+  const signals = folded?.watch || folded?.cc ? folded : null;
   const body = (
     <>
       {/* flex, not inline: an inline wrapper adds a baseline gap under the
@@ -1205,6 +1210,7 @@ export function BotListItem({
               {sidebarStamp(last.at)}
             </span>
           )}
+          {signals && !renaming && <span data-bot-signals className="flex shrink-0 items-center gap-1 self-center"><SignalIcons watch={signals.watch} cc={signals.cc} /></span>}
           {(expanded || (quiet && !statusLine)) && unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
         </div>
         {bot.chiefOfStaff && !renaming && !quiet && (

@@ -1,6 +1,9 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { Bot, Group, GroupTask, Task } from "@/state/store";
-import { attentionJumpAction, attentionOwnerName, crossBotAttentionThreads, sidebarBotActivityTasks, sidebarGroupActivityTasks } from "./SidebarBotActivity";
+import { setLocale } from "@/lib/i18n";
+import { attentionJumpAction, attentionOwnerName, BotActivityRow, crossBotAttentionThreads, sidebarBotActivityTasks, sidebarGroupActivityTasks, threadsWhenTreeHidden } from "./SidebarBotActivity";
 
 const task = (threadId: string, title: string, extra: Partial<Task>): Task =>
   ({ threadId, title, createdAt: 0, ...extra }) as Task;
@@ -113,5 +116,50 @@ describe("group attention", () => {
     const alpha = bot("a", "Alpha", "a0", [task("a0", "Unread reply", { unread: true })]);
     const [entry] = crossBotAttentionThreads([alpha], {});
     expect(attentionJumpAction(entry)).toEqual({ type: "switchTask", botId: "a", threadId: "a0" });
+  });
+});
+
+describe("a folded bot's activity rows", () => {
+  const row = (extra: Partial<Task>) => renderToStaticMarkup(createElement(BotActivityRow, {
+    bot: { name: "Chief" }, task: { ...task("c1", "#9311 corrigir login do cliente com um título longo", extra), queued: false }, iconOnly: false, onJump: () => {},
+  }));
+
+  it("never lets the status swallow the title: the status truncates at 55%, the title keeps the rest", () => {
+    setLocale("pt-br");
+    try {
+      const markup = row({ goalNeedsInput: true, goalNeedsInputSince: Date.now() - 3 * 3_600_000 });
+      const status = markup.match(/<span data-activity-status[^>]*>/)?.[0] ?? "";
+      expect(status).toContain("max-w-[55%]");
+      expect(status).toContain("truncate");
+      expect(status).toContain("min-w-0");
+      expect(status).not.toContain("shrink-0");
+      expect(markup.match(/<span data-activity-title[^>]*>/)?.[0]).toContain("flex-1");
+      expect(markup).toContain("#9311 corrigir login");
+      expect(markup).toContain("Precisa de você");
+    } finally { setLocale("en"); }
+  });
+
+  it("shows the watch eye and the Claude Code triangle, as the thread row does", () => {
+    const markup = row({
+      unread: true,
+      watches: [{ label: "chat", standing: true, everyMinutes: 3, lastRunAt: Date.now(), failures: 3 }],
+      ccAlerts: [{ sessionId: "a", title: "#9308", state: "question" }],
+    });
+    expect(markup).toContain("data-thread-watches");
+    expect(markup.match(/<svg[^>]*data-thread-watches[^>]*>/)?.[0]).toContain("text-danger");
+    expect(markup).toContain("data-thread-cc-alert");
+    expect(markup).toContain("#9308");
+  });
+
+  it("keeps a conversation whose automation needs a look reachable while folded", () => {
+    const chief = bot("c", "Chief", "c0", [
+      task("c0", "Main", {}),
+      task("c1", "Vigias", { watchesLost: true }),
+      task("c2", "Sessão", { ccAlerts: [{ sessionId: "s", title: "#1", state: "failed" }] }),
+      task("c3", "Quiet", { watches: [{ label: "chat", standing: true, everyMinutes: 3, lastRunAt: 0, failures: 0 }] }),
+    ]);
+    expect(threadsWhenTreeHidden(chief, {}).map((entry) => entry.threadId).sort()).toEqual(["c1", "c2"]);
+    // the bell stays on attention only
+    expect(sidebarBotActivityTasks(chief, {})).toEqual([]);
   });
 });

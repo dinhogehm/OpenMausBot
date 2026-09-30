@@ -204,7 +204,10 @@ describe("activity-only escape hatch", () => {
     let tree: ReactNode;
     function Capture() { tree = SidebarBotActivity({ bot, density: "comfortable" }); return tree; }
     const markup = renderToStaticMarkup(createElement(Capture));
-    findElement(tree, "data-sidebar-activity-row", "approval")!.props.onClick!({} as MouseEvent);
+    // each row is a BotActivityRow; its onJump is the row button's onClick
+    const row = Children.toArray(isValidElement<{ children?: ReactNode }>(tree) ? tree.props.children : null)
+      .find((child) => isValidElement<{ task?: { threadId: string } }>(child) && child.props.task?.threadId === "approval") as ReactElement<{ onJump: () => void }>;
+    row.props.onJump();
     expect(fixture.dispatch).toHaveBeenCalledExactlyOnceWith({ type: "switchTask", botId: bot.id, threadId: "approval" });
     expect(markup).not.toContain("Actions for");
     expect(markup).not.toContain("New thread");

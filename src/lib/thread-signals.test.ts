@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { setLocale } from "@/lib/i18n";
-import { ccAlertSummary, watchSummary } from "./thread-signals";
+import { botSignals, ccAlertSummary, needsSignalLook, watchSummary } from "./thread-signals";
 
 const now = new Date("2026-09-30T10:30:00").getTime();
 beforeEach(() => setLocale("pt-br"));
@@ -22,5 +22,20 @@ describe("thread signals", () => {
     expect(summary.severe).toBe(true);
     expect(summary.text).toBe("Claude Code · #9308 e-mail — com pergunta aberta no app\nClaude Code · #9298 — parada");
     expect(ccAlertSummary([{ sessionId: "b", title: "x", state: "stalled" }])!.severe).toBe(false);
+  });
+
+  it("sums a bot's conversations for its folded row, and knows which need a look", () => {
+    const tasks = [
+      { watches: [{ label: "chat", standing: true, everyMinutes: 3, lastRunAt: now, failures: 0 }] },
+      { watchesLost: true, ccAlerts: [{ sessionId: "a", title: "#9308", state: "failed" as const }] },
+      { routineRunId: "r1", ccAlerts: [{ sessionId: "z", title: "routine", state: "failed" as const }] },
+    ];
+    const signals = botSignals(tasks, now);
+    expect(signals.watch).toMatchObject({ failing: true, text: expect.stringContaining("chat a cada 3 min") });
+    expect(signals.cc?.text).toBe("Claude Code · #9308 — falhou");
+    expect(botSignals([{}], now)).toEqual({ watch: null, cc: null });
+    expect(needsSignalLook(tasks[0]!)).toBe(false);
+    expect(needsSignalLook(tasks[1]!)).toBe(true);
+    expect(needsSignalLook({ watches: [{ label: "x", standing: false, everyMinutes: 2, lastRunAt: now, failures: 2 }] })).toBe(true);
   });
 });

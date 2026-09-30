@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Archive, ArchiveRestore, BellOff, Clock, Clock3, FolderInput, Link2, Loader2, MoreHorizontal, Pencil, Pin, PinOff, Trash2, AlertTriangle, Eye } from "lucide-react";
+import { Archive, ArchiveRestore, BellOff, Clock, Clock3, FolderInput, Link2, Loader2, MoreHorizontal, Pencil, Pin, PinOff, Trash2 } from "lucide-react";
 import type { BotProject, Task } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
@@ -10,6 +10,7 @@ import { threadRefUrl } from "@/lib/thread-refs";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { needsYouLabel } from "@/lib/message-stamp";
 import { ccAlertSummary, watchSummary } from "@/lib/thread-signals";
+import { SignalIcons } from "./SignalIcons";
 
 type ThreadRowTask = Pick<Task, "threadId" | "title" | "projectId" | "busy" | "activity" | "unread" | "openedBy" | "closedBy" | "archivedAt" | "snoozedUntil" | "waitingForTeammates" | "goalNeedsInput" | "goalNeedsInputSince" | "watches" | "watchesLost" | "ccAlerts"> & {
   queued?: boolean;
@@ -328,8 +329,7 @@ export function SidebarThreadRow({ task, ownerId, current, compact, folders, onS
         </span>
         {updatedLabel && <time dateTime={new Date(updatedAt).toISOString()} className="shrink-0 tabular-nums text-[10px] text-ink-secondary">{updatedLabel}</time>}
         {task.pinned === true && <Pin size={11} className="shrink-0 text-ink-secondary" aria-label={t("sidebar.bot.pin")} />}
-        {watchInfo && <Eye size={11} data-thread-watches className={cn("shrink-0", watchInfo.failing ? "text-danger" : "text-ink-secondary")} aria-label={watchInfo.text} role="img"><title>{watchInfo.text}</title></Eye>}
-        {ccInfo && <AlertTriangle size={11} data-thread-cc-alert className={cn("shrink-0", ccInfo.severe ? "text-danger" : "text-warning")} aria-label={ccInfo.text} role="img"><title>{ccInfo.text}</title></AlertTriangle>}
+        <SignalIcons watch={watchInfo} cc={ccInfo} />
         {task.activity === "waiting-on-you" ? <span className="shrink-0 text-[10px] font-medium text-warning">{t("task.waiting")}</span> : isWaitingOnTeammate(task) ? <Clock3 size={11} className="shrink-0 text-ink-secondary" aria-label={t("task.waitingOnTeammate")} /> : isWorking(task) ? <Loader2 size={11} className="shrink-0 animate-spin text-success" aria-label={activityLabel ?? t("chat.activity.working")} /> : task.queued ? <span className="shrink-0 text-[10px] text-ink-secondary">{t("task.queued")}</span> : null}
         {task.unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unread")} />}
       </button>}
