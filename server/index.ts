@@ -255,6 +255,7 @@ import {
   parseStandingLabel,
   STANDING_DEFAULT_LABEL,
   STANDING_MAX_PER_THREAD,
+  DISPATCH_RETRY_MAX_MINUTES,
   wakeFiredChip,
   watchLabel,
 } from "./bot-autonomy.ts";
@@ -7263,17 +7264,57 @@ function autonomyTurnBlocked(botId: string, threadId: string): boolean {
 async function dispatchAutonomyTurn(botId: string, threadId: string, chip: string, prompt: string): Promise<"started" | "busy" | "failed"> {
   autonomyDispatching.add(threadId);
   try {
-    await startTurn(botId, prompt, { threadId, cardContinuation: true, unattended: true });
+    // A turn can fail after dispatch (the VM, docker or the engine gave up):
+    // no turn.completed follows, so the lease is returned here.
+    await startTurn(botId, prompt, { threadId, cardContinuation: true, unattended: true, onDispatchError: (message) => autonomyDispatchFailed(botId, threadId, message) });
     store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chip, ok: true } });
     return "started";
   } catch (error) {
     if (isTurnAdmissionBlocked(error)) return "busy";
     const message = error instanceof Error ? error.message : String(error);
-    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `erro: não conseguiu retomar sozinho — ${chipText(message, 120)}`, ok: false } });
+    // a leased wake or reports go back with a growing wait, not dropped
+    if (autonomy.inFlightFor(threadId).length) autonomyDispatchFailed(botId, threadId, message);
+    else store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `erro: não conseguiu retomar sozinho — ${chipText(message, 120)}`, ok: false } });
     return "failed";
   } finally {
     autonomyDispatching.delete(threadId);
   }
+}
+
+/** Errors of a computer still coming up after a boot: waited out quietly. */
+const BOOT_TRANSIENT = /cannot safely resume|Start (?:docker|podman|container) first|is not running|Cua Driver is not ready yet|Cannot connect to the Docker daemon/i;
+/** Retries of a turn that would not start before the Chief is told, and the
+ * window after a server start in which computer errors count as boot noise. */
+const DISPATCH_ALERT_AFTER = 5;
+const BOOT_GRACE_MS = 20 * 60_000;
+
+/** An autonomous turn that failed after dispatch: its wake or reports go
+ * back, due after a growing wait (bot-autonomy.ts returnFailedDispatch), with
+ * a chip; its goal counts a failed turn. The Chief hears about it at once,
+ * unless it looks like a computer still booting — then only if it keeps
+ * failing. A Stop or a cancelled setup just drops the lease. */
+function autonomyDispatchFailed(botId: string, threadId: string, message: string): void {
+  if (/\bstopped\b|cancelled|changed before dispatch/i.test(message)) {
+    autonomy.settleInFlight(threadId);
+    return;
+  }
+  const back = autonomy.returnFailedDispatch(threadId, message);
+  const goal = autonomy.goalFor(threadId);
+  if (goal?.status === "active" && !back.length) {
+    const failures = autonomy.noteGoalTurnOutcome(threadId, false);
+    if (failures >= GOAL_MAX_CONSECUTIVE_FAILURES) finishGoalWithChip(threadId, "blocked", `${failures} turns in a row could not start — ${message.slice(0, 120)}.`);
+    else if (!autonomy.wakeFor(threadId)) autonomy.setWake(botId, threadId, 2 * failures, "The previous goal turn could not start. Check what went wrong, then continue the goal or call goal_end with blocked.");
+  }
+  const bot = store.bot(botId);
+  if (!bot || !store.taskByThread(botId, threadId)) return;
+  const worst = back.reduce((max, item) => (item.failures > max.failures ? item : max), { failures: 0, delayMs: 0 } as { failures: number; delayMs: number });
+  const minutes = Math.max(1, Math.round(worst.delayMs / 60_000));
+  store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`O turno automático não começou (${message}) — nova tentativa em ${minutes} min`, 240), ok: false } });
+  const booting = BOOT_TRANSIENT.test(message) && process.uptime() * 1_000 < BOOT_GRACE_MS;
+  if (worst.failures === DISPATCH_ALERT_AFTER || (worst.failures === 1 && !booting)) {
+    alertAutomationTrouble(bot, threadId, `o turno automático não começou ${worst.failures === 1 ? "" : `${worst.failures} vezes seguidas `}(${chipText(message, 140)}); o servidor tenta de novo sozinho, com espera crescente até ${DISPATCH_RETRY_MAX_MINUTES} min`);
+  }
+  refreshBotRow(botId);
 }
 
 /** Where the harness's own alerts reach a Chief: its pinned conversation,
@@ -7491,6 +7532,31 @@ const ccLedger = new CcSessionLedger({ path: join(DATA_DIR, "cc-sessions.json") 
 if (ccLedger.interruptedOnLoad.length) {
   for (const session of ccLedger.interruptedOnLoad) ccReport(session, ccReportForOwner(session));
   ccLedger.save();
+}
+reportResumptionToChief();
+
+/** After a restart: what it cut off, what the server re-ran on its own and
+ * what it left for someone to confirm — one report on the Chief's desk. */
+function reportResumptionToChief(): void {
+  const leases = autonomy.recoveredOnLoad;
+  const sessions = ccLedger.interruptedOnLoad;
+  if (!leases.length && !sessions.length) return;
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  const desk = chief ? chiefDeskThread(chief) : null;
+  if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
+  const when = (at: number) => new Date(at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const name = (botId: string) => store.bot(botId)?.name ?? botId;
+  const rerun = leases.filter((lease) => !lease.stale);
+  const asked = leases.filter((lease) => lease.stale);
+  const text = [
+    "[Relatório de retomada — o servidor reiniciou]",
+    ...(rerun.length ? ["Reenviado automaticamente (turnos cortados pelo restart, retomados como devidos):", ...rerun.map((lease) => `- ${name(lease.botId)} · ${lease.kind === "wake" ? "despertador/vigia" : "relatórios"} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what}`)] : []),
+    ...(asked.length ? ["NÃO repetido (mais de 6 h; o bot foi perguntado se ainda vale):", ...asked.map((lease) => `- ${name(lease.botId)} · ${lease.kind} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what}`)] : []),
+    ...(sessions.length ? ["Sessões do Claude Code cujo turno foi cortado (o dono de cada uma recebeu o relatório):", ...sessions.map((session) => `- "${session.title}" (${session.id}) de ${name(session.ownerBotId)}`)] : []),
+    "Confira o que ficou pendente e retome o que for preciso.",
+  ].join("\n");
+  store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Servidor reiniciado: ${rerun.length} retomado(s), ${asked.length} para confirmar, ${sessions.length} sessão(ões) cortada(s)`, 200), ok: asked.length === 0 } });
+  autonomy.addReport(chief.id, desk, text);
 }
 const ccProcesses = new Map<string, CcChildProcess>();
 // OMB_CC_BIN points end-to-end tests at a scripted stand-in for `claude`.

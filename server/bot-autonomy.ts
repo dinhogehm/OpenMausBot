@@ -93,6 +93,8 @@ export interface BotWake {
   reason: string;
   createdAt: number;
   watch?: WakeWatch;
+  /** Turns for it that failed to start (VM, docker, engine); spaces the retries. */
+  dispatchFailures?: number;
 }
 
 export type GoalEndStatus = "completed" | "blocked" | "needs-input";
@@ -120,6 +122,9 @@ export interface PendingReports {
   botId: string;
   threadId: string;
   items: string[];
+  /** A turn for them failed to start: not before this, and how many times. */
+  notBefore?: number;
+  dispatchFailures?: number;
 }
 
 /** A wake or reports handed to a turn that has not finished yet. Kept on
@@ -135,7 +140,16 @@ export interface InFlight {
 }
 
 /** A lease older than this is not given back after a restart. */
-export const IN_FLIGHT_MAX_AGE_MS = 24 * 3_600_000;
+export const IN_FLIGHT_MAX_AGE_MS = 7 * 24 * 3_600_000;
+/** A lease older than this is not re-run after a restart: the bot is asked
+ * whether it still holds (it may already have answered a client). */
+export const IN_FLIGHT_STALE_MS = 6 * 3_600_000;
+export const STALE_PREFIX = "[Este turno foi interrompido por um restart do servidor há mais de 6 h e NÃO foi repetido automaticamente. Antes de agir, confira se ainda vale — uma resposta a cliente pode já ter sido enviada.]";
+/** The longest wait between retries of a turn that failed to start. */
+export const DISPATCH_RETRY_MAX_MINUTES = 10;
+
+/** What a restart found cut off, for the resumption report. */
+export interface RecoveredLease { botId: string; threadId: string; kind: InFlight["kind"]; startedAt: number; stale: boolean; what: string }
 export const INTERRUPTED_PREFIX = "[A execução anterior foi interrompida por um restart do servidor antes de terminar; retome daqui.]";
 
 /** Something the bot owes by a time; see the header. */
@@ -266,6 +280,8 @@ export class BotAutonomy {
   private inFlight: InFlight[] = [];
   private standingLost = new Map<string, StandingLost>();
   private promises: BotPromise[] = [];
+  /** Leases a restart cut off, as found on load. */
+  readonly recoveredOnLoad: RecoveredLease[] = [];
   private readonly path: string | null;
   private readonly now: () => number;
   private readonly minuteMs: number;
@@ -313,6 +329,16 @@ export class BotAutonomy {
       for (const lease of raw.inFlight ?? []) {
         if (!lease || typeof lease.threadId !== "string" || typeof lease.botId !== "string" || at - lease.startedAt > IN_FLIGHT_MAX_AGE_MS) continue;
         recovered = true;
+        const what = (lease.kind === "wake" ? lease.wake?.reason : lease.items?.join(" / ")) ?? "";
+        const stale = at - lease.startedAt > IN_FLIGHT_STALE_MS;
+        this.recoveredOnLoad.push({ botId: lease.botId, threadId: lease.threadId, kind: lease.kind, startedAt: lease.startedAt, stale, what: what.slice(0, 200) });
+        if (stale) {
+          // not re-run: handed over as a question, with what it was about
+          const items = [STALE_PREFIX, lease.kind === "wake" ? `Wake-up note: ${lease.wake?.reason ?? "(none)"}` : "", ...(lease.kind === "reports" ? lease.items ?? [] : [])].filter(Boolean);
+          const current = this.reports.get(lease.threadId);
+          this.reports.set(lease.threadId, { botId: lease.botId, threadId: lease.threadId, items: [...items, ...(current?.items ?? [])] });
+          continue;
+        }
         if (lease.kind === "wake" && lease.wake && !this.wakes.has(lease.threadId)) {
           this.wakes.set(lease.threadId, { ...lease.wake, dueAt: at, reason: `${INTERRUPTED_PREFIX} ${lease.wake.reason}`.slice(0, WAKE_REASON_MAX + INTERRUPTED_PREFIX.length + 1) });
           continue;
@@ -558,6 +584,36 @@ export class BotAutonomy {
     this.save();
   }
 
+  /** A turn a lease was handed to failed to start after it was dispatched
+   * (the VM, docker or the engine gave up; no turn.completed will come).
+   * The wake or reports go back, due after a wait that doubles with each
+   * failure (1 min … DISPATCH_RETRY_MAX_MINUTES). Returns what went back. */
+  returnFailedDispatch(threadId: string, reason: string): Array<{ kind: InFlight["kind"]; failures: number; delayMs: number }> {
+    const leases = this.inFlight.filter((lease) => lease.threadId === threadId);
+    if (!leases.length) return [];
+    this.inFlight = this.inFlight.filter((lease) => lease.threadId !== threadId);
+    const at = this.now();
+    const delay = (failures: number) => Math.min(this.minuteMs * 2 ** (failures - 1), DISPATCH_RETRY_MAX_MINUTES * this.minuteMs);
+    const note = `[O turno anterior não começou (${reason.slice(0, 160)}); tentando de novo.]`;
+    const back: Array<{ kind: InFlight["kind"]; failures: number; delayMs: number }> = [];
+    for (const lease of leases) {
+      if (lease.kind === "wake" && lease.wake) {
+        if (this.wakes.has(threadId)) continue; // a newer wake replaced it
+        const failures = (lease.wake.dispatchFailures ?? 0) + 1;
+        const reasonText = lease.wake.reason.startsWith("[O turno anterior não começou") ? lease.wake.reason.replace(/^\[O turno anterior não começou[^\]]*\] /, "") : lease.wake.reason;
+        this.wakes.set(threadId, { ...lease.wake, dueAt: at + delay(failures), dispatchFailures: failures, reason: `${note} ${reasonText}`.slice(0, WAKE_REASON_MAX + 200) });
+        back.push({ kind: "wake", failures, delayMs: delay(failures) });
+      } else if (lease.kind === "reports" && lease.items?.length) {
+        const current = this.reports.get(threadId);
+        const failures = (current?.dispatchFailures ?? 0) + 1;
+        this.reports.set(threadId, { botId: lease.botId, threadId, items: [...lease.items, ...(current?.items ?? [])], notBefore: at + delay(failures), dispatchFailures: failures });
+        back.push({ kind: "reports", failures, delayMs: delay(failures) });
+      }
+    }
+    this.save();
+    return back;
+  }
+
   /** The turn a lease was handed to finished (well or not): forget it. */
   settleInFlight(threadId: string): void {
     const before = this.inFlight.length;
@@ -602,7 +658,8 @@ export class BotAutonomy {
   }
 
   reportThreads(): PendingReports[] {
-    return [...this.reports.values()].filter((pending) => pending.items.length > 0);
+    const at = this.now();
+    return [...this.reports.values()].filter((pending) => pending.items.length > 0 && (pending.notBefore ?? 0) <= at);
   }
 
   takeReports(threadId: string): PendingReports | null {

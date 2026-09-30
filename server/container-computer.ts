@@ -284,10 +284,11 @@ export async function containerRuntimeStatus(
           : candidate === "podman"
             ? ["info", "--format", "json"]
             : ["info", "--format", "{{.ServerVersion}}"];
+        // a daemon still starting after a boot answers slowly: give it time
         await runner(
           candidate,
           infoArgs,
-          10_000,
+          30_000,
         );
         return true;
       } catch {

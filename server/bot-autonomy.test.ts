@@ -366,6 +366,49 @@ describe("leases across a restart", () => {
     expect(make().takeReports("t2")?.items).toEqual(["r"]);
   });
 
+  it("gives a wake or reports back with a growing wait when their turn failed after dispatch", () => {
+    const autonomy = make();
+    const wake = autonomy.setWake("bot", "t1", 1, "checar o chat");
+    now += 60_000;
+    autonomy.leaseWake(wake);
+    expect(autonomy.returnFailedDispatch("t1", "This desktop image cannot safely resume")).toEqual([{ kind: "wake", failures: 1, delayMs: 60_000 }]);
+    expect(autonomy.inFlightFor("t1")).toEqual([]);
+    const back = autonomy.wakeFor("t1")!;
+    expect(back.reason).toBe("[O turno anterior não começou (This desktop image cannot safely resume); tentando de novo.] checar o chat");
+    expect(back.dueAt).toBe(now + 60_000);
+    // failing again: twice the wait, one note (not stacked), capped at 10 min
+    autonomy.leaseWake(back);
+    expect(autonomy.returnFailedDispatch("t1", "Start docker first")[0]!.delayMs).toBe(120_000);
+    expect(autonomy.wakeFor("t1")!.reason).toBe("[O turno anterior não começou (Start docker first); tentando de novo.] checar o chat");
+    for (let i = 0; i < 6; i++) {
+      autonomy.leaseWake(autonomy.wakeFor("t1")!);
+      autonomy.returnFailedDispatch("t1", "x");
+    }
+    expect(autonomy.wakeFor("t1")!.dueAt - now).toBe(10 * 60_000);
+    autonomy.addReport("chief", "t2", "relatório");
+    autonomy.leaseReports("t2");
+    expect(autonomy.returnFailedDispatch("t2", "engine down")).toEqual([{ kind: "reports", failures: 1, delayMs: 60_000 }]);
+    expect(autonomy.reportThreads()).toEqual([]);
+    now += 60_000;
+    expect(autonomy.reportThreads().map((pending) => pending.items)).toEqual([["relatório"]]);
+    expect(autonomy.returnFailedDispatch("t3", "x")).toEqual([]);
+  });
+
+  it("does not re-run a lease older than 6 h after a restart: it asks the bot, and lists what it found", () => {
+    const autonomy = make();
+    autonomy.leaseWake(autonomy.setWake("bot", "t1", 1, "responder ao cliente ACME"));
+    autonomy.leaseWake(autonomy.setWake("bot", "t2", 1, "checar o deploy"));
+    now += 7 * 3_600_000;
+    autonomy.leaseWake(autonomy.setWake("bot", "t2", 1, "checar o deploy de novo"));
+    const reloaded = make();
+    expect(reloaded.wakeFor("t1")).toBeNull();
+    const asked = reloaded.takeReports("t1")!;
+    expect(asked.items[0]).toContain("NÃO foi repetido automaticamente");
+    expect(asked.items[1]).toContain("responder ao cliente ACME");
+    expect(reloaded.wakeFor("t2")?.reason).toContain("checar o deploy de novo");
+    expect(reloaded.recoveredOnLoad.map((lease) => [lease.threadId, lease.stale])).toEqual([["t1", true], ["t2", true], ["t2", false]]);
+  });
+
   it("never leases a standing watch: it survives a restart as it was", () => {
     const autonomy = make();
     const watch = autonomy.setWatch("bot", "t1", { command: "gog chat messages list", argv: ["gog"], everyMinutes: 3, maxMinutes: 60, reason: "chat", baseline: "m1", standing: true });
