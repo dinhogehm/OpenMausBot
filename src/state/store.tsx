@@ -39,7 +39,7 @@ import { currentCall } from "@/lib/call";
 import { showNotification, type NotificationTarget } from "@/lib/notify";
 import { speaker } from "@/lib/tts";
 import { roleProfilePatch, type BotRole } from "@/lib/bot-roles";
-import { t } from "@/lib/i18n";
+import { activeLocale, t } from "@/lib/i18n";
 import { createBotPatchQueue, type BotUpdatePatch } from "./bot-patch-queue";
 import type { OnboardingStatus } from "@/lib/onboarding";
 import { openLiveEvents } from "@/lib/live-events";
@@ -3980,9 +3980,11 @@ export function BotEditorStore({ value, children }: { value: ReturnType<typeof u
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;
 }
 
+/** A clock time in the app's language — the same form as the message
+ * stamps beside it (the browser's own locale may differ from the app's). */
 export function formatTime(at: number) {
-  return new Date(at).toLocaleTimeString([], {
-    hour: "numeric",
+  return new Date(at).toLocaleTimeString(activeLocale(), {
+    hour: "2-digit",
     minute: "2-digit",
   });
 }
