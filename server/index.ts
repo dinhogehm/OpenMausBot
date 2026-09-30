@@ -245,6 +245,7 @@ import {
   parseGoalEndInput,
   parseGoalInput,
   parsePromiseInput,
+  prsCited,
   parseWakeInput,
   promiseOverdueReport,
   parseWatchInput,
@@ -7452,7 +7453,42 @@ function checkDiskSpace(): void {
   }
 }
 
+/** Goals waiting on the person about a PR: every 10 min, ask gh whether the
+ * PR they cite was merged or closed meanwhile; if every one was, the goal
+ * is closed as completed with a chip (the question is moot). */
+const needsInputChecks = new Map<string, number>();
+let needsInputRunning = false;
+async function revalidateNeedsInputGoals(): Promise<void> {
+  if (needsInputRunning) return;
+  needsInputRunning = true;
+  try {
+    const now = Date.now();
+    for (const goal of autonomy.needsInputGoals()) {
+      if (now - (needsInputChecks.get(goal.threadId) ?? 0) < 10 * 60_000) continue;
+      needsInputChecks.set(goal.threadId, now);
+      const prs = prsCited(`${goal.detail ?? ""}\n${goal.goal}`).slice(0, 4);
+      if (!prs.length) continue;
+      const states: string[] = [];
+      for (const pr of prs) {
+        try {
+          const out = await execCc("gh", ["pr", "view", String(pr.number), ...(pr.slug ? ["--repo", pr.slug] : []), "--json", "state", "--jq", ".state"], watchCwd(goal.botId, goal.threadId));
+          states.push(`${pr.number}:${out.trim()}`);
+        } catch { states.push(`${pr.number}:?`); }
+      }
+      if (!states.every((state) => /:(MERGED|CLOSED)$/.test(state))) continue;
+      const detail = `As PRs citadas já foram ${states.map((state) => `#${state.replace(":", " ").replace("MERGED", "mergeada").replace("CLOSED", "fechada")}`).join(", ")} — a pergunta ficou sem objeto; encerrado pelo servidor.`;
+      const done = autonomy.resolveNeedsInput(goal.threadId, detail);
+      if (!done) continue;
+      store.appendMessage(goal.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Objetivo encerrado: ${detail}`, 240), ok: true } });
+      refreshBotRow(goal.botId);
+    }
+  } finally {
+    needsInputRunning = false;
+  }
+}
+
 async function autonomyTick(): Promise<void> {
+  void revalidateNeedsInputGoals().catch((error) => console.error(`[autonomy] needs-input check failed: ${error instanceof Error ? error.message : String(error)}`));
   void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
   try {
     checkDiskSpace();

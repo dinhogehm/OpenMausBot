@@ -11,6 +11,7 @@ import {
   parseGoalEndInput,
   parseGoalInput,
   parsePromiseInput,
+  prsCited,
   parseWakeInput,
   promiseOverdueReport,
   parseWatchInput,
@@ -619,5 +620,21 @@ describe("chips", () => {
 describe("reports", () => {
   it("names what kind of reports arrived without assuming they are all sessions", () => {
     expect(reportsPrompt({ botId: "b", threadId: "t", items: ["one", "two"] }, null)).toContain("2 reports arrived");
+  });
+});
+
+describe("a goal waiting on the person about a PR", () => {
+  it("reads the PRs its question cites, and closes it when the question is moot", () => {
+    expect(prsCited("GO para mergear a PR #9303? https://github.com/dinhogehm/nuria-platform/pull/9286 e pull request 9290")).toEqual([
+      { number: 9286, slug: "dinhogehm/nuria-platform" }, { number: 9303 }, { number: 9290 },
+    ]);
+    expect(prsCited("nada aqui #12")).toEqual([]);
+    const autonomy = make();
+    autonomy.startGoal("chief", "t1", { goal: "merge", maxTurns: 5, maxHours: 2 });
+    autonomy.finishGoal("t1", "needs-input", "GO para a PR #9303?");
+    expect(autonomy.needsInputGoals().map((goal) => goal.threadId)).toEqual(["t1"]);
+    expect(autonomy.resolveNeedsInput("t1", "PR #9303 mergeada")?.status).toBe("completed");
+    expect(autonomy.needsInputGoals()).toEqual([]);
+    expect(autonomy.resolveNeedsInput("t1", "x")).toBeNull();
   });
 });

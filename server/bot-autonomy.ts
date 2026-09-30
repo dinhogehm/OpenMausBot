@@ -778,6 +778,23 @@ export class BotAutonomy {
     return goal;
   }
 
+  /** Goals stopped to ask the person something. */
+  needsInputGoals(): BotGoal[] {
+    return [...this.goals.values()].filter((goal) => goal.status === "needs-input");
+  }
+
+  /** A goal waiting on the person whose question the world already answered
+   * (the PR it asked about was merged or closed): closed as completed. */
+  resolveNeedsInput(threadId: string, detail: string): BotGoal | null {
+    const goal = this.goals.get(threadId);
+    if (!goal || goal.status !== "needs-input") return null;
+    goal.status = "completed";
+    goal.detail = detail;
+    goal.finishedAt = this.now();
+    this.save();
+    return goal;
+  }
+
   /** A person answered a goal that stopped to ask them something: the same
    * goal picks up again, with its limits intact. */
   resumeGoalAfterInput(threadId: string): BotGoal | null {
@@ -1041,4 +1058,12 @@ export function promiseOverdueReport(promise: BotPromise, botName: string, now: 
     `[Promise overdue by ${minutesLabel(now - promise.dueAt)}: ${botName} promised "${promise.text}" (${promise.id}), due ${minutesLabel(now - promise.createdAt)} after it was made, and it was not marked kept.]`,
     "Send what was promised now, or tell the person when it will come and why — then mark it kept with wake_me promise_kept. If it was already sent, mark it kept.",
   ].join("\n");
+}
+
+/** The PRs a goal's question cites: links (owner/repo) and "PR #N" / "#N". */
+export function prsCited(text: string): Array<{ number: number; slug?: string }> {
+  const found = new Map<number, string | undefined>();
+  for (const match of text.matchAll(/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g)) found.set(Number(match[2]), match[1]);
+  for (const match of text.matchAll(/\b(?:PR|pull request)\s*#?(\d{2,6})\b/gi)) if (!found.has(Number(match[1]))) found.set(Number(match[1]), undefined);
+  return [...found].map(([number, slug]) => ({ number, ...(slug ? { slug } : {}) }));
 }
