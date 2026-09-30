@@ -191,7 +191,7 @@ describe("an ordinary turn still announces itself", () => {
           candidate.notification?.botId === bot.id,
         20_000,
       );
-      expect(frame.notification).toMatchObject({ threadId: bot.threadId, title: "Herald finished" });
+      expect(frame.notification).toMatchObject({ threadId: bot.threadId, title: "Herald terminou" });
       expect(frame.notification.body).toContain("hello from fake claude");
       // no room in the picture, so nothing to group it under
       expect(frame.notification.groupId).toBeUndefined();
@@ -267,7 +267,7 @@ describe("a room turn belongs to the room", () => {
           botId: bot.id,
           threadId: room.threadId,
           groupId: room.id,
-          title: "Handsy in War Room needs your hands",
+          title: "Handsy em War Room precisa das suas mãos",
           body: "the login page wants a code",
         });
         // the DM is exactly where the person must NOT be sent: the screen
@@ -466,7 +466,7 @@ describe("bot-to-bot coordination is recorded, not announced", () => {
         kind: "approval",
         botId: asker.id,
         threadId: asker.threadId,
-        title: "Nib needs approval",
+        title: "Nib precisa de aprovação",
       });
       expect(frame.notification.body).toContain("wants to contact @Dot");
       // the card is really open where the banner points
@@ -507,7 +507,7 @@ describe("bot-to-bot coordination is recorded, not announced", () => {
         kind: "question",
         botId: peer.id,
         threadId: peer.threadId,
-        title: "Sage has a question",
+        title: "Sage tem uma pergunta",
       });
       // the card is really open in the peer's thread — the banner is not
       // announcing something the person cannot act on (a new bot's onboarding

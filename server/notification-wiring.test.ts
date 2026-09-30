@@ -147,7 +147,7 @@ posixOnly("routine failure notification wiring", () => {
         expect(frame.notification).toMatchObject({
           kind: "routine-failed",
           botId: bot.id,
-          title: "Routine Scout's routine failed",
+          title: "A rotina de Routine Scout falhou",
         });
         expect(frame.notification.threadId).not.toBe(bot.threadId);
         expect(frame.notification.body).toContain("Broken nightly report");

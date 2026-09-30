@@ -100,7 +100,7 @@ describe("peer approval card lifecycle", () => {
       kind: "approval",
       botId: from.id,
       threadId: from.threadId,
-      title: "Asker needs approval",
+      title: "Asker precisa de aprovação",
     });
     expect(frames[0]?.body).toContain("@Asker wants to contact @Helper");
     expect(frames[0]?.body).toContain("Helper, can you take the deploy?");
@@ -124,7 +124,7 @@ describe("peer approval card lifecycle", () => {
       kind: "approval",
       threadId: room.threadId,
       groupId: room.id,
-      title: "Asker in Standup needs approval",
+      title: "Asker em Standup precisa de aprovação",
     });
     expect(store.bot(from.id)?.activity).toBe("waiting-on-you");
     expect(store.taskByThread(from.id, from.threadId)?.activity).toBe("idle");

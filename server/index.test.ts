@@ -5349,7 +5349,7 @@ describe("harness HTTP API", () => {
       expect(buzz.notification).toMatchObject({
         botId: bot.id,
         threadId: bot.threadId,
-        title: `${bot.name} couldn't start`,
+        title: `${bot.name} não conseguiu começar`,
       });
       expect(String(buzz.notification.body)).toMatch(/box|cloud/i);
 

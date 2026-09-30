@@ -133,7 +133,7 @@ it("announces a settled delegation and its resume in the parent thread", () => f
     expect(chiefFrames).toHaveLength(1);
     expect(chiefFrames[0].notification).toMatchObject({
       threadId: f.chief.activeTaskId,
-      title: "Clive resumed with results",
+      title: "Clive retomou com os resultados",
       body: "Results in from Engineering lead",
     });
     // the nested lead resume is announced too, on its delegated thread
