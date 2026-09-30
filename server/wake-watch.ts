@@ -12,6 +12,9 @@
 // nobody mistakes this for a shell.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
 
 export const WATCH_COMMAND_MAX = 500;
 /** What is kept and shown of an output; changes are detected on the whole. */
@@ -126,7 +129,38 @@ export function parseWatchCommand(command: unknown): ParsedWatch {
     if (urls.length !== 1) return { ok: false, error: "curl needs exactly one http(s) URL" };
     return { ok: true, argv: split };
   }
-  return { ok: false, error: "wake_when runs only read-only gh, gog, git or curl commands" };
+  if (program === "cat" || program === "tail") return parseLocalRead(program, args);
+  return { ok: false, error: "wake_when runs only read-only gh, gog, git, curl, or cat/tail of a file under ~/.nuria" };
+}
+
+/** Folders whose files a watch may read (status files, release logs). */
+export const WATCH_READABLE_DIRS = [join(homedir(), ".nuria")];
+
+/** `cat FILE` or `tail -n N FILE`, FILE under an allowed folder (after
+ * resolving "~", "..", and symlinks). Runs without a shell like the rest. */
+function parseLocalRead(program: "cat" | "tail", args: string[], roots = WATCH_READABLE_DIRS): ParsedWatch {
+  const usage = "cat FILE or tail -n N FILE, with FILE under ~/.nuria (quote a path that starts with ~)";
+  let lines: string | null = null;
+  let file: string | undefined;
+  if (program === "cat") {
+    if (args.length !== 1) return { ok: false, error: usage };
+    file = args[0];
+  } else {
+    if (args.length !== 3 || args[0] !== "-n" || !/^\d{1,4}$/.test(args[1]!)) return { ok: false, error: usage };
+    lines = args[1]!;
+    file = args[2];
+  }
+  if (!file || file.startsWith("-")) return { ok: false, error: usage };
+  const expanded = file === "~" || file.startsWith("~/") ? join(homedir(), file.slice(1)) : file;
+  if (!expanded.startsWith("/")) return { ok: false, error: `${usage}: use an absolute path` };
+  let path = resolve(expanded);
+  if (existsSync(path)) path = realpathSync(path);
+  const allowed = roots.some((root) => {
+    const real = existsSync(root) ? realpathSync(root) : root;
+    return path.startsWith(`${real}${sep}`);
+  });
+  if (!allowed) return { ok: false, error: `${usage}: ${file} is outside the folders a watch may read` };
+  return { ok: true, argv: program === "cat" ? ["cat", path] : ["tail", "-n", lines!, path] };
 }
 
 export interface WatchRunResult {

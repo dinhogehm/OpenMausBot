@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fingerprintOf, parseWatchCommand, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
+import { fingerprintOf, parseWatchCommand, WATCH_READABLE_DIRS, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
 
 describe("parseWatchCommand", () => {
   it.each([
@@ -28,7 +28,7 @@ describe("parseWatchCommand", () => {
     ["curl -d a=1 https://x.dev", /may only GET/],
     ["curl -o /etc/x https://x.dev", /may only GET/],
     ["curl file:///etc/passwd", /exactly one http/],
-    ["rm -rf /", /only read-only gh, gog, git or curl/],
+    ["rm -rf /", /only read-only gh, gog, git, curl, or cat\/tail/],
     ["gh pr view 1 | sh", /not a shell/],
     ["gh pr view $(whoami)", /not a shell/],
     ["gh pr view 1; rm x", /not a shell/],
@@ -83,5 +83,19 @@ describe("change detection on the whole output", () => {
     expect(a.output).toContain("Next page: --page abc");
     expect(a.fingerprint).toBe(b.fingerprint);
     expect(a.fingerprint).toBe(fingerprintOf("same messages"));
+  });
+});
+
+describe("local status files", () => {
+  it("reads a file under ~/.nuria with cat or tail -n N, and nothing else", async () => {
+    const { homedir } = await import("node:os");
+    const home = homedir();
+    expect(parseWatchCommand(`cat "~/.nuria/release-skipped.json"`)).toEqual({ ok: true, argv: ["cat", expect.stringMatching(/\.nuria\/release-skipped\.json$/)] });
+    expect(parseWatchCommand(`tail -n 50 ${home}/.nuria/logs/production-release.err.log`)).toMatchObject({ ok: true, argv: ["tail", "-n", "50", expect.stringContaining(".nuria/logs/production-release.err.log")] });
+    expect(parseWatchCommand(`cat ${home}/.ssh/id_ed25519`).ok).toBe(false);
+    expect(parseWatchCommand(`cat ${home}/.nuria/../.ssh/id_ed25519`).ok).toBe(false);
+    expect(parseWatchCommand(`tail -f ${home}/.nuria/x.log`).ok).toBe(false);
+    expect(parseWatchCommand(`cat ${home}/.nuria/a ${home}/.nuria/b`).ok).toBe(false);
+    expect(WATCH_READABLE_DIRS[0]).toBe(`${home}/.nuria`);
   });
 });
