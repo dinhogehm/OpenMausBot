@@ -36,7 +36,9 @@ const toolResult = (turn: any, tool: string) =>
 it("wakes the bot in the same conversation with its own note", () => fixture(async f => {
   f.save({ turns: [
     { steps: [{ tool: "wake_me", arguments: { minutes: 1, reason: "CHECK_PR_9280 merged?" } }], reply: "I will check back" },
-    { expectContextIncludes: ["Wake-up you scheduled", "CHECK_PR_9280 merged?"], reply: "PR 9280 is merged" },
+    // an autonomous turn carries the language section, and its machine-written
+    // message ends with the reminder
+    { expectSystemIncludes: ["Language: every message meant for people", "Brazilian Portuguese (pt-BR)"], expectContextIncludes: ["Wake-up you scheduled", "CHECK_PR_9280 merged?", "(Responda à pessoa em português do Brasil.)"], reply: "PR 9280 is merged" },
   ] });
   await f.send("Check PR 9280 in a minute.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);

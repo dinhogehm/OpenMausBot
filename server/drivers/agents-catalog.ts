@@ -610,7 +610,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
   {
     name: "wake_when",
     description:
-      "Wait for something outside this conversation without spending turns: the server re-runs a read-only command every few minutes, with no model involved, and gives you a new turn HERE only when its whole output changes (or matches until), after max_minutes regardless, or if it keeps failing. Use it instead of wake_me for CI, PR checks and reviews, workflow runs, deploy health. Allowed: gh pr view|checks|list|status, gh run|workflow|release view|list, gh issue view|list, gh api (GET), gog chat messages list / spaces|threads list|get, gog sheets get|metadata, git ls-remote|log|rev-parse|status, curl GET. No shell: no pipes or $vars; quote --jq filters. Pick stable fields (--json state,statusCheckRollup), not timestamps. Shares the one pending wake per conversation, unless standing: a standing watch (an inbox, a chat space) stays armed after each firing and wake_me does not replace it. End your turn after calling it.",
+      "Wait for something outside this conversation without spending turns: the server re-runs a read-only command every few minutes, with no model involved, and gives you a new turn HERE only when its whole output changes (or matches until), after max_minutes regardless, or if it keeps failing. Use it instead of wake_me for CI, PR checks and reviews, workflow runs, deploy health. Allowed: gh pr view|checks|list|status, gh run|workflow|release view|list, gh issue view|list, gh api (GET), gog chat messages list / spaces|threads list|get, gog sheets get|metadata, git ls-remote|log|rev-parse|status, curl GET. No shell: no pipes or $vars; quote --jq filters. Pick stable fields (--json state,statusCheckRollup), not timestamps. Shares the one pending wake per conversation, unless standing: a standing watch (an inbox, a chat space) stays armed after each firing, wake_me does not replace it, and several can live in one conversation under different labels. End your turn after calling it.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -621,6 +621,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
         max_minutes: { type: "integer", minimum: 5, maximum: 1_440, description: "Wake anyway after this long, default 120." },
         reason: { type: "string", maxLength: 500, description: "Note to your future self: what to do when it fires." },
         standing: { type: "boolean", description: "true: never used up — after each firing it re-arms on the new output. For permanent watchers; set it once." },
+        label: { type: "string", maxLength: 40, description: "With standing: names this watcher (e.g. chat, planilha) so a conversation can keep several; same label replaces it." },
         cancel: { type: "boolean", description: "true cancels the pending wake or watch here (with standing: true, the standing watch); no command or reason." },
       },
     },
@@ -673,7 +674,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
   },
   {
     name: "cc_session_stop",
-    description: "Stop a Claude Code session you manage mid-turn (it can be resumed later with cc_session_send).",
+    description: "Stop a Claude Code session you manage mid-turn (resume later with cc_session_send). For one in the Claude app it only stops the waiting here and drops its queue; the person stops a live turn there.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

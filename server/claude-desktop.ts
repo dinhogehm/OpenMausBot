@@ -27,8 +27,8 @@ export const CLAUDE_BUNDLE_ID = "com.anthropic.claudefordesktop";
  * session follows pasted instructions only when its user's own words ask it to. */
 export const DESKTOP_BRIEF_NOTE = "Esta é a sua tarefa, enviada pelo gerente OpenMausBot: siga o conteúdo colado acima.";
 export const DESKTOP_MESSAGE_NOTE = "Mensagem do seu gerente OpenMausBot: siga o conteúdo colado acima.";
-/** Messages longer than this are pasted as content by the app; they get the note too. */
-const DESKTOP_NOTE_AFTER_CHARS = 800;
+/** Messages longer than this may be wrapped as pasted content by the app (seen at 360); they get the note too. */
+const DESKTOP_NOTE_AFTER_CHARS = 200;
 
 export interface OcrLine { x: number; y: number; w: number; h: number; text: string }
 
@@ -322,8 +322,18 @@ export interface DesktopRecord {
   permissionMode?: string;
   worktreePath?: string;
   worktreeName?: string;
-  /** The app's own summary of the last turn: status_category "blocked" means it waits on someone. */
-  postTurnSummary?: { status_category?: string; needs_action?: unknown; [key: string]: unknown };
+  /** The app's own summary of a turn: status_category "blocked" means it waits
+   * on someone. It is written after the turn, and summarizes_uuid names the
+   * assistant message it is about. */
+  postTurnSummary?: { status_category?: string; needs_action?: unknown; summarizes_uuid?: string; [key: string]: unknown };
+  /** The session's latest assistant message. */
+  lastAssistantUuid?: string;
+}
+
+/** Is the app's summary about the latest turn (and not still the previous one's)? */
+export function summaryIsCurrent(record: Pick<DesktopRecord, "postTurnSummary" | "lastAssistantUuid">): boolean {
+  const about = record.postTurnSummary?.summarizes_uuid;
+  return !about || !record.lastAssistantUuid || about === record.lastAssistantUuid;
 }
 
 const toMs = (value: unknown): number | undefined => {
@@ -336,9 +346,10 @@ const toMs = (value: unknown): number | undefined => {
 };
 
 /** Why the session says it cannot go on, when its last turn ended blocked. */
-export function recordBlocked(record: Pick<DesktopRecord, "postTurnSummary">): string | null {
+export function recordBlocked(record: Pick<DesktopRecord, "postTurnSummary" | "lastAssistantUuid">): string | null {
   const summary = record.postTurnSummary;
-  if (!summary || summary.status_category !== "blocked") return null;
+  // A summary of an earlier turn says nothing about this one.
+  if (!summary || summary.status_category !== "blocked" || !summaryIsCurrent(record)) return null;
   const need = summary.needs_action;
   const text = typeof need === "string" ? need : Array.isArray(need) ? need.map(String).join("; ") : need ? JSON.stringify(need) : "";
   return text.trim().slice(0, 1_000) || "it did not say what it needs";
@@ -429,16 +440,54 @@ export function lastAssistantText(transcript: string, max = 6_000): string {
   return "";
 }
 
-/** Did our message reach the session? Its first line shows in the transcript. */
-export function transcriptMentions(transcript: string, text: string): boolean {
+/** Did our message reach the session? A user event written after `since`
+ * (5 s of clock slack) carries its first line. Older messages and the
+ * assistant's own words do not count: openings like "Chief aqui." repeat. */
+export function transcriptMentions(transcript: string, text: string, since = 0): boolean {
   const first = text.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 60);
   if (!first) return false;
+  const needle = JSON.stringify(first).slice(1, -1);
+  let raw = "";
   try {
-    const raw = readFileSync(transcript, "utf8");
-    return raw.slice(-2_000_000).includes(JSON.stringify(first).slice(1, -1));
+    raw = readFileSync(transcript, "utf8").slice(-2_000_000);
   } catch {
     return false;
   }
+  const lines = raw.trimEnd().split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line.includes('"user"')) continue;
+    try {
+      const event = JSON.parse(line) as { type?: string; timestamp?: string; message?: { content?: unknown } };
+      if (event.type !== "user") continue;
+      const at = event.timestamp ? Date.parse(event.timestamp) : NaN;
+      if (Number.isFinite(at) && at < since - 5_000) return false;
+      if (JSON.stringify(event.message?.content ?? "").includes(needle)) return true;
+    } catch { /* partial line */ }
+  }
+  return false;
+}
+
+/** Did the session's last turn end? Its transcript's latest event closes a
+ * turn (the stop hook's summary, or an assistant message that ended the turn). */
+export function transcriptTurnEnded(transcript: string): boolean {
+  let raw = "";
+  try {
+    raw = readFileSync(transcript, "utf8").slice(-400_000);
+  } catch {
+    return false;
+  }
+  const lines = raw.trimEnd().split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const event = JSON.parse(lines[i]!) as { type?: string; subtype?: string; message?: { stop_reason?: string } };
+      if (event.type === "system" && (event.subtype === "stop_hook_summary" || event.subtype === "turn_duration")) return true;
+      if (event.type === "assistant") return event.message?.stop_reason === "end_turn";
+      if (event.type === "user") return false;
+      // other system/meta lines: look further back
+    } catch { /* partial line */ }
+  }
+  return false;
 }
 
 /** When the transcript was last written, or null. */

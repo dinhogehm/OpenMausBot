@@ -13,6 +13,7 @@ import {
   parseWakeInput,
   parseWatchInput,
   chipText,
+  parseStandingLabel,
   reportsPrompt,
   wakeChip,
   wakeFiredChip,
@@ -387,6 +388,45 @@ describe("keeping the Mac awake", () => {
     const autonomy = make();
     autonomy.setWatch("bot", "t1", { command: "gh pr view 1", argv: ["gh"], everyMinutes: 3, maxMinutes: 720, reason: "x", baseline: "OPEN", standing: true });
     expect(autonomy.wakeHold(60 * 60_000)).toEqual({ hold: true, reason: "due", at: now + 3 * 60_000 });
+  });
+});
+
+describe("several standing watches per conversation", () => {
+  const base = { argv: ["gog"], everyMinutes: 3, maxMinutes: 720, reason: "x", baseline: "b", standing: true };
+
+  it("keeps one per label beside the ordinary wake; the same label replaces; cancel by label", () => {
+    const autonomy = make();
+    const chat = autonomy.setWatch("bot", "t1", { ...base, command: "gog chat messages list", label: "chat" });
+    const sheet = autonomy.setWatch("bot", "t1", { ...base, command: "curl https://docs.google.com/x", label: "planilha" });
+    autonomy.setWake("bot", "t1", 5, "timer");
+    expect(autonomy.standingsFor("t1")).toEqual([chat, sheet]);
+    const chat2 = autonomy.setWatch("bot", "t1", { ...base, command: "gog chat messages list --max 30", label: "chat" });
+    expect(autonomy.standingsFor("t1")).toEqual([chat2, sheet]);
+    expect(autonomy.cancelStanding("t1", "planilha")).toBe(sheet);
+    expect(autonomy.standingsFor("t1")).toEqual([chat2]);
+    expect(autonomy.wakeFor("t1")?.reason).toBe("timer");
+    expect(wakeChip(chat2)).toContain('Vigia permanente "chat"');
+    const reloaded = make();
+    expect(reloaded.standingFor("t1", "chat")?.watch?.command).toContain("--max 30");
+    reloaded.forgetThread("t1");
+    expect(make().standingsFor("t1")).toEqual([]);
+  });
+
+  it("reads a standing watch saved before labels as the default one", () => {
+    const path = join(dir, "bot-autonomy.json");
+    writeFileSync(path, JSON.stringify({ wakes: [{ botId: "bot", threadId: "t1", dueAt: now + 60_000, reason: "chat", createdAt: now, watch: { command: "gog chat", argv: ["gog"], everyMs: 180_000, baseline: "m", lastRunAt: now, runs: 1, failures: 0, standing: true, maxMs: 60_000 } }], goals: [] }));
+    const autonomy = make();
+    expect(autonomy.standingFor("t1")?.reason).toBe("chat");
+    autonomy.setWatch("bot", "t1", { ...base, command: "curl https://x", label: "planilha" });
+    expect(autonomy.standingsFor("t1")).toHaveLength(2);
+    expect(autonomy.cancelStanding("t1")?.reason).toBe("chat");
+  });
+
+  it("validates labels", () => {
+    expect(parseStandingLabel(undefined)).toBe("default");
+    expect(parseStandingLabel(" Planilha ")).toBe("planilha");
+    expect(parseStandingLabel("a/b")).toBeNull();
+    expect(parseWatchInput({ reason: "x", standing: true, label: "chat" })).toMatchObject({ ok: true, label: "chat" });
   });
 });
 

@@ -73,6 +73,16 @@ export interface CcSession {
 
 export type CcSurface = "app" | "cli";
 
+/** A running session counts as "someone is working on it" only this long after its last progress. */
+export const CC_ACTIVE_MS = 45 * 60_000;
+
+/** Someone is working for this conversation: running, and recently alive. A
+ * session marked running but silent past this holds no slot, no thread and
+ * does not keep the Mac awake. */
+export function ccSessionActive(session: Pick<CcSession, "status" | "progressAt" | "lastActivityAt">, now: number): boolean {
+  return session.status === "running" && now - (session.progressAt ?? session.lastActivityAt) < CC_ACTIVE_MS;
+}
+
 export interface CcDesktopState {
   /** Written at the top of the brief; finds the session among the app's records. */
   marker: string;
@@ -93,6 +103,10 @@ export interface CcDesktopState {
   permissionMode?: string;
   /** Remove its worktree once the app confirms it archived (remove_worktree). */
   removeWorktree?: boolean;
+  /** Our latest message typed into the app, and whether its transcript showed it. */
+  lastSend?: { at: number; confirmed: boolean };
+  /** A finished turn whose app summary was still the previous turn's: wait a little for it. */
+  turnWaitSince?: number;
 }
 
 export interface CcDesktopPending {
@@ -110,6 +124,8 @@ export interface CcDesktopPending {
   triedAt?: number;
   /** send: how many times this message was already typed without arriving. */
   deliveries?: number;
+  /** Failed tries to prepare the screen helper. */
+  helperFailures?: number;
   /** archive: clicked; the app's record must say archived by then. */
   verifyUntil?: number;
   /** archive: clicks that the app's record did not confirm. */
@@ -291,8 +307,9 @@ export class CcSessionLedger {
     return [...this.sessions.values()];
   }
 
-  runningCount(): number {
-    return [...this.sessions.values()].filter((session) => session.status === "running").length;
+  /** Sessions actively running (a silent one does not hold one of the slots). */
+  runningCount(now = this.now()): number {
+    return [...this.sessions.values()].filter((session) => ccSessionActive(session, now)).length;
   }
 
   markRunning(session: CcSession): void {
@@ -374,27 +391,59 @@ export function ccReportForOwner(session: CcSession, extra: { hookDecision?: str
   return [
     head,
     ccModeLine(session),
-    ...(extra.hookDecision ? [`Latest review-hook decision in its folder: ${extra.hookDecision}`] : []),
+    ...(extra.hookDecision ? [`Latest review-hook decision for this session (deny/ask preferred): ${extra.hookDecision}`] : []),
     ...(session.lastReport ? [`Its report:\n${session.lastReport}`] : []),
     "Decide the next step: answer or steer it with cc_session_send, verify its claims yourself (gh, git) before relaying them, or archive it with cc_session_archive once its work has shipped.",
   ].join("\n");
 }
 
+/** What the watchdog knows about a silent session, read from the app's
+ * record and the transcript, so the report states facts instead of guesses. */
+export interface CcStallFacts {
+  /** The transcript's last event closed a turn; undefined when unreadable. */
+  turnEnded?: boolean;
+  lastActivityAt?: number;
+  completedTurns?: number;
+  /** This turn's app summary says blocked, with what it needs. */
+  blocked?: string | null;
+  /** Deep link that opens it in the Claude app. */
+  link?: string;
+}
+
+const clock = (ms: number) => new Date(ms).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+
 /** A running session that shows no sign of work: the manager must look. */
-export function ccStallReport(session: CcSession, minutes: number): string {
+export function ccStallReport(session: CcSession, minutes: number, facts: CcStallFacts = {}): string {
+  const app = session.surface === "app";
+  const mode = app ? session.desktop?.permissionMode ?? session.permissionMode : session.permissionMode;
+  const lastSend = session.desktop?.lastSend;
   return [
-    `Claude Code session "${session.title}" (${session.id}) is marked running but has shown no progress for ${minutes} min.`,
+    `Claude Code session "${session.title}" (${session.id}) is marked running but has shown no progress for ${minutes} min${facts.lastActivityAt ? ` (last activity ${clock(facts.lastActivityAt)})` : ""}.`,
     ccModeLine(session),
-    session.surface === "app"
-      ? "It may be waiting on an approval or a question in the Claude app, or a message may not have reached it. Check it (cc_session_list with its session_id), tell the person what it waits on, or steer it with cc_session_send."
-      : "Its run may be stuck. Check it (cc_session_list with its session_id); stop it with cc_session_stop and resume with cc_session_send if needed.",
+    facts.turnEnded === undefined
+      ? "Its transcript could not be read, so whether a turn is open is unknown."
+      : facts.turnEnded
+        ? `Its last turn ENDED${facts.completedTurns !== undefined ? ` (the app shows ${facts.completedTurns} completed turn(s))` : ""}: it is idle, waiting for a message — nothing is pending inside it.`
+        : `A turn is still open in its transcript, but nothing has been written for ${minutes} min.`,
+    ...(lastSend ? [lastSend.confirmed ? `Our last message (typed ${clock(lastSend.at)}) did reach it.` : `Our last message (typed ${clock(lastSend.at)}) never showed up in its transcript.`] : []),
+    ...(session.queued.length ? [`${session.queued.length} message(s) are queued for it here.`] : []),
+    ...(facts.blocked ? [`Its last turn ended BLOCKED — it needs: ${facts.blocked}`] : []),
+    // An approval prompt is only possible mid-turn, and never in bypass mode.
+    ...(!facts.turnEnded && app ? [mode === "bypassPermissions" ? "It runs in bypassPermissions: there is no approval dialog to answer." : `If it waits on anything, it is a prompt in the Claude app (mode ${mode}) — check before saying so.`] : []),
+    app
+      ? facts.turnEnded
+        ? "Next: send it what it should do with cc_session_send (it goes in right away), or archive it."
+        : `Next: look at it in the app${facts.link ? ` (${facts.link})` : ""} before telling anyone what it waits on.`
+      : "Next: check it with cc_session_list (session_id); stop it with cc_session_stop and resume with cc_session_send if needed.",
   ].join("\n");
 }
 
-/** The review hook's latest decision about commands run in `cwd`, from the
- * tail of its log (read only; the hook owns the file). */
-export function lastHookDecision(logPath: string, cwd: string, maxBytes = 256 * 1024): string | null {
-  if (!cwd) return null;
+/** The review hook's latest word on a Claude Code session, from the tail of
+ * its log (read only; the hook owns the file). Lines carry the session id
+ * ("session":"<id>"), not a folder. A deny or ask is what a manager needs,
+ * so the latest of those wins over later passes. */
+export function lastHookDecision(logPath: string, sessionId: string, maxBytes = 256 * 1024): string | null {
+  if (!sessionId) return null;
   let fd: number | null = null;
   try {
     const size = statSync(logPath).size;
@@ -402,12 +451,11 @@ export function lastHookDecision(logPath: string, cwd: string, maxBytes = 256 * 
     const buffer = Buffer.alloc(length);
     fd = openSync(logPath, "r");
     readSync(fd, buffer, 0, length, size - length);
-    const lines = buffer.toString("utf8").split("\n");
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]!.trim();
-      if (line && line.includes(cwd)) return line.slice(0, 400);
-    }
-    return null;
+    const needle = `"session":"${sessionId}"`;
+    const lines = buffer.toString("utf8").split("\n").map((line) => line.trim()).filter((line) => line.includes(needle));
+    const stop = lines.filter((line) => /"outcome"\s*:\s*"(deny|ask|block)/i.test(line)).at(-1);
+    const line = stop ?? lines.at(-1);
+    return line ? line.slice(0, 400) : null;
   } catch {
     return null;
   } finally {

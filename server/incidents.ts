@@ -41,6 +41,23 @@ export interface Incident {
 
 export const INCIDENTS_THREAD_TITLE = "Team incidents";
 
+/** The conversation a bot's harness alerts go to: its pinned one, else its
+ * oldest open one not running a goal (bot.threadId follows the UI, and a
+ * goal thread is somebody else's work in progress). */
+export function deskThread(
+  tasks: ReadonlyArray<{ threadId: string; createdAt: number; title: string; pinned?: boolean; archivedAt?: number; routineRunId?: string }>,
+  fallback: string,
+  goalActive: (threadId: string) => boolean,
+): string {
+  const open = tasks
+    .filter((task) => !task.archivedAt && !task.routineRunId && task.title !== INCIDENTS_THREAD_TITLE)
+    .sort((a, b) => a.createdAt - b.createdAt);
+  return open.find((task) => task.pinned)?.threadId
+    ?? open.find((task) => !goalActive(task.threadId))?.threadId
+    ?? open[0]?.threadId
+    ?? fallback;
+}
+
 /** Consecutive failed runs of one routine before it is raised as a pattern
  * (where the routine reports, and to the Chief): at 2, then every 5th, so a
  * routine that keeps failing is not forgotten but does not flood either. */

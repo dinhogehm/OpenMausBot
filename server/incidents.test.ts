@@ -1,7 +1,7 @@
 // Who hears about a broken run, how often, and in what words.
 import { describe, expect, it } from "vitest";
 
-import { chiefForBot, INCIDENT_HARD_LIMIT, INCIDENT_RETRY_LIMIT, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident } from "./incidents.ts";
+import { chiefForBot, INCIDENT_HARD_LIMIT, INCIDENT_RETRY_LIMIT, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, deskThread, type Incident } from "./incidents.ts";
 
 const bots = [
   { id: "clive", name: "Clive", section: "Ops", chiefOfStaff: true },
@@ -85,5 +85,15 @@ describe("incident wording", () => {
 describe("routineFailureAlertDue", () => {
   it("raises a routine's failures at two in a row, then every fifth", () => {
     expect([1, 2, 3, 4, 5, 6, 10, 11].map(routineFailureAlertDue)).toEqual([false, true, false, false, true, false, true, false]);
+  });
+});
+
+describe("deskThread", () => {
+  const task = (threadId: string, createdAt: number, extra: object = {}) => ({ threadId, createdAt, title: threadId, ...extra });
+  it("prefers the pinned conversation, else the oldest open one without an active goal", () => {
+    const tasks = [task("goal", 1), task("main", 2), task("new", 3), task("old", 0, { archivedAt: 5 })];
+    expect(deskThread(tasks, "selected", (id) => id === "goal")).toBe("main");
+    expect(deskThread([...tasks, task("pin", 9, { pinned: true })], "selected", () => false)).toBe("pin");
+    expect(deskThread([], "selected", () => false)).toBe("selected");
   });
 });

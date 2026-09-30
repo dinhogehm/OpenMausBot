@@ -278,10 +278,11 @@ describe("composioSystemPrompt", () => {
 });
 
 describe("language", () => {
-  it("tells every bot to answer in the user's language, pt-BR by default, reports included", () => {
-    expect(LANGUAGE_PROMPT).toContain("language they write in");
+  it("tells every bot to write to people in pt-BR unless the person's own message is in another language", () => {
     expect(LANGUAGE_PROMPT).toContain("Brazilian Portuguese (pt-BR)");
     expect(LANGUAGE_PROMPT).toMatch(/reports.*approval or a GO/);
-    expect(LANGUAGE_PROMPT).toContain("even when tool results");
+    expect(LANGUAGE_PROMPT).toContain("unless the person's own latest message is clearly in another language");
+    expect(LANGUAGE_PROMPT).toContain("machine text: they do not set the language");
+    expect(LANGUAGE_PROMPT).toContain("switch now");
   });
 });

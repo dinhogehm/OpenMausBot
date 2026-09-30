@@ -12,12 +12,14 @@
 // Everything outside the ledger comes in through DesktopWorkDeps, so the
 // whole flow is testable with a fake app and fake records.
 import type { CcDesktopPending, CcSession, CcSessionLedger } from "./cc-sessions.ts";
-import { ccReportForOwner, ccStallReport } from "./cc-sessions.ts";
+import { ccReportForOwner, ccStallReport, type CcStallFacts } from "./cc-sessions.ts";
+export { CC_ACTIVE_MS, ccSessionActive } from "./cc-sessions.ts";
 import {
   archiveDesktopSession,
   createDesktopSession,
   recordBlocked,
   recordInWorktree,
+  summaryIsCurrent,
   sendToDesktopSession,
   type DesktopDriver,
   type DesktopRecord,
@@ -32,6 +34,10 @@ export const DESKTOP_RECORD_WAIT_MS = 5 * 60_000;
 export const DESKTOP_SEND_CONFIRM_MS = 3 * 60_000;
 /** ...or it is typed again, up to this many times in all. */
 export const DESKTOP_SEND_MAX_DELIVERIES = 3;
+/** A finished turn whose app summary is still the previous turn's is held this long for it. */
+export const DESKTOP_SUMMARY_WAIT_MS = 60_000;
+/** Tries to prepare the screen helper (compile it) before giving up. */
+export const DESKTOP_HELPER_MAX_TRIES = 3;
 /** Screens that did not show what was expected (unlocked, Claude in front) before giving up. */
 export const DESKTOP_MAX_MISSES = 5;
 export const DESKTOP_BACKOFF_BASE_MS = 30_000;
@@ -46,8 +52,6 @@ export const CC_STALL_MS = 30 * 60_000;
 export const CC_STALL_REMIND_MS = 6 * 3_600_000;
 /** ...this many times in all (the first report included). */
 export const CC_STALL_MAX_REPORTS = 3;
-/** A running session counts as "someone else is working on it" only this long after its last progress. */
-export const CC_ACTIVE_MS = 45 * 60_000;
 
 export interface DesktopWorkDeps {
   ledger: CcSessionLedger;
@@ -58,14 +62,17 @@ export interface DesktopWorkDeps {
   /** The Claude Code transcript of a CLI session id, or null. */
   transcriptOf: (cliSessionId: string) => string | null;
   lastText: (transcript: string) => string;
-  mentions: (transcript: string, text: string) => boolean;
+  /** The transcript's latest event closes a turn. */
+  turnEnded: (transcript: string) => boolean;
+  /** A user event after `since` carries the text's first line. */
+  mentions: (transcript: string, text: string, since: number) => boolean;
   writtenAt: (transcript: string) => number | null;
   repoName: (session: CcSession) => string;
   chip: (session: CcSession, text: string, ok?: boolean) => void;
   /** Hand a report to the owning bot (and the thread the last order came from). */
   report: (session: CcSession, text: string) => void;
-  /** The review hook's latest decision for a folder, if known. */
-  hookDecision?: (cwd: string) => string | null;
+  /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
+  hookDecision?: (sessionId: string) => string | null;
   /** The app confirmed the session archived (remove its worktree if asked). */
   onArchived?: (session: CcSession) => void;
   steps?: {
@@ -99,14 +106,16 @@ export function pickDesktopPending(sessions: CcSession[], now: number): CcSessio
     .sort((a, b) => a.desktop!.pending!.since - b.desktop!.pending!.since)[0] ?? null;
 }
 
-/** Someone else is working for this conversation: running, and recently alive. */
-export function ccSessionActive(session: CcSession, now: number): boolean {
-  return session.status === "running" && now - (session.progressAt ?? session.lastActivityAt) < CC_ACTIVE_MS;
+
+/** The id the review hook logs a session under: its own for a CLI run, the
+ * app's Claude Code session id for an app one. */
+export function hookSessionId(session: CcSession): string | undefined {
+  return session.surface === "app" ? session.desktop?.cliSessionId : session.id;
 }
 
 export function reportFor(deps: DesktopWorkDeps, session: CcSession): string {
-  const cwd = session.cwd;
-  return ccReportForOwner(session, { hookDecision: cwd && deps.hookDecision ? deps.hookDecision(cwd) : null });
+  const id = hookSessionId(session);
+  return ccReportForOwner(session, { hookDecision: id && deps.hookDecision ? deps.hookDecision(id) : null });
 }
 
 export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, reason: string): void {
@@ -188,9 +197,10 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
     const transcript = deps.transcriptOf(record.cliSessionId);
     if (desktop.sent) {
       const sent = desktop.sent;
-      const arrived = (record.latestUserFrameAt ?? 0) > sent.userFrameAt || (transcript !== null && deps.mentions(transcript, sent.text));
+      const arrived = (record.latestUserFrameAt ?? 0) > sent.userFrameAt || (transcript !== null && deps.mentions(transcript, sent.text, sent.at));
       if (arrived) {
         delete desktop.sent;
+        desktop.lastSend = { at: sent.at, confirmed: true };
         session.progressAt = now;
         deps.ledger.save();
       } else if (now - sent.at > DESKTOP_SEND_CONFIRM_MS) {
@@ -206,7 +216,40 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       }
     }
     const turns = record.completedTurns ?? 0;
+    // Marked running, yet nothing is on its way and the app's last turn has
+    // ended long ago: no turn is coming to drain the queue (a message lost
+    // before sends were confirmed, a state that drifted). Take it as idle.
+    if ((session.status === "running" || session.status === "stalled") && !desktop.pending && !desktop.sent && turns === desktop.turnsSeen && transcript !== null && deps.turnEnded(transcript)) {
+      const lastActivity = Math.max(record.lastActivityAt ?? 0, deps.writtenAt(transcript) ?? 0);
+      if (now - lastActivity > DESKTOP_SEND_CONFIRM_MS) {
+        session.status = "idle";
+        session.progressAt = now;
+        delete session.stallReportedAt;
+        delete session.stallNotifiedAt;
+        delete session.stallReports;
+        session.lastReport = deps.lastText(transcript) || session.lastReport || "(no text in its last reply)";
+        const blocked = recordBlocked(record);
+        if (blocked) session.blockedOn = blocked;
+        else delete session.blockedOn;
+        const next = desktop.archiveWhenResolved ? null : deps.ledger.takeQueued(session);
+        if (next !== null) {
+          desktop.pending = { kind: "send", text: next, since: now, attempts: 0 };
+          session.status = "running";
+        }
+        deps.ledger.save();
+        deps.chip(session, `estava parada: o último turno no app já tinha terminado${next !== null ? "; a mensagem da fila vai agora" : ""}`, false);
+        deps.report(session, `${reportFor(deps, session)}\n(The server found it idle in the app — its last turn had ended and nothing reached it since${next !== null ? "; the message queued for it is being typed in now, and its answer comes back as a new report" : ""}.)`);
+        continue;
+      }
+    }
     if (turns > desktop.turnsSeen) {
+      // The app writes its turn summary after the turn: give it a minute
+      // rather than report the previous turn's "blocked" (or miss this one's).
+      if (!summaryIsCurrent(record)) {
+        desktop.turnWaitSince ??= now;
+        if (now - desktop.turnWaitSince < DESKTOP_SUMMARY_WAIT_MS) continue;
+      }
+      delete desktop.turnWaitSince;
       desktop.turnsSeen = turns;
       session.turns = turns;
       if (record.cwd) session.cwd = record.cwd;
@@ -217,6 +260,9 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       else delete session.blockedOn;
       session.status = "idle";
       delete session.lastError;
+      delete session.stallReportedAt;
+      delete session.stallNotifiedAt;
+      delete session.stallReports;
       session.lastActivityAt = now;
       session.progressAt = now;
       const next = desktop.archiveWhenResolved ? null : deps.ledger.takeQueued(session);
@@ -224,11 +270,13 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
         desktop.pending = { kind: "send", text: next, since: now, attempts: 0 };
         session.status = "running";
         deps.ledger.save();
-        deps.chip(session, "your queued message goes in next");
+        deps.chip(session, blocked ? `terminou o turno ${turns} bloqueada — precisa de: ${blocked.slice(0, 80)}; a mensagem da fila vai em seguida` : `terminou o turno ${turns}; a mensagem da fila vai em seguida`, !blocked);
+        // The owner still hears what this turn said before the queued message goes in.
+        deps.report(session, `${reportFor(deps, session)}\n(A message you queued earlier is being typed into it now; it may be out of date given this report — follow up with cc_session_send if so.)`);
         continue;
       }
       deps.ledger.save();
-      deps.chip(session, blocked ? `finished turn ${turns} blocked — needs: ${blocked.slice(0, 80)}` : `finished turn ${turns}`, !blocked);
+      deps.chip(session, blocked ? `terminou o turno ${turns} bloqueada — precisa de: ${blocked.slice(0, 80)}` : `terminou o turno ${turns}`, !blocked);
       deps.report(session, reportFor(deps, session));
     }
     if (desktop.archiveWhenResolved && !desktop.pending && !desktop.sent) {
@@ -276,7 +324,17 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     try {
       driver = await deps.getDriver();
     } catch (error) {
-      failDesktopSession(deps, next, `could not prepare the screen helper: ${error instanceof Error ? error.message : String(error)}`);
+      // Compiling the helper can fail for a while (Xcode tools updating, a
+      // full disk): back off and try again before giving up on the session.
+      const why = `could not prepare the screen helper: ${error instanceof Error ? error.message.slice(0, 300) : String(error)}`;
+      pending.helperFailures = (pending.helperFailures ?? 0) + 1;
+      if (pending.helperFailures >= DESKTOP_HELPER_MAX_TRIES) {
+        failDesktopSession(deps, next, `${why} (${pending.helperFailures} tries)`);
+        return;
+      }
+      pending.lastReason = why;
+      pending.nextAttemptAt = deps.now() + desktopBackoffMs(pending.helperFailures);
+      deps.ledger.save();
       return;
     }
     const steps = deps.steps ?? {};
@@ -304,7 +362,10 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       }
       delete desktop.pending;
       if (pending.kind === "create") desktop.sentAt = at;
-      else desktop.sent = { text: pending.text, at, userFrameAt, deliveries: (pending.deliveries ?? 0) + 1 };
+      else {
+        desktop.sent = { text: pending.text, at, userFrameAt, deliveries: (pending.deliveries ?? 0) + 1 };
+        desktop.lastSend = { at, confirmed: false };
+      }
       next.status = "running";
       next.lastActivityAt = at;
       next.progressAt = at;
@@ -359,6 +420,12 @@ export function watchStalledSessions(deps: DesktopWorkDeps): void {
     const written = transcript ? deps.writtenAt(transcript) : null;
     if (written) progress = Math.max(progress, written);
     session.progressAt = progress;
+    const facts = (): CcStallFacts => ({
+      ...(transcript ? { turnEnded: deps.turnEnded(transcript) } : {}),
+      lastActivityAt: progress,
+      ...(record ? { completedTurns: record.completedTurns ?? 0, blocked: recordBlocked(record) } : {}),
+      ...(session.desktop?.localId ? { link: `claude://code/continue?session=${session.desktop.localId}` } : {}),
+    });
     if (session.status === "stalled") {
       if (session.stallReportedAt !== undefined && progress > session.stallReportedAt) {
         session.status = "running";
@@ -376,7 +443,7 @@ export function watchStalledSessions(deps: DesktopWorkDeps): void {
       deps.ledger.save();
       const minutes = Math.round((now - progress) / 60_000);
       deps.chip(session, `ainda parada, sem progresso há ${minutes} min (aviso ${reports + 1} de ${CC_STALL_MAX_REPORTS})`, false);
-      deps.report(session, `${ccStallReport(session, minutes)}\n(Reminder ${reports + 1} of ${CC_STALL_MAX_REPORTS}; after the last one you are not reminded again.)`);
+      deps.report(session, `${ccStallReport(session, minutes, facts())}\n(Reminder ${reports + 1} of ${CC_STALL_MAX_REPORTS}; after the last one you are not reminded again.)`);
       continue;
     }
     if (now - progress <= CC_STALL_MS) continue;
@@ -387,6 +454,6 @@ export function watchStalledSessions(deps: DesktopWorkDeps): void {
     deps.ledger.save();
     const minutes = Math.round((now - progress) / 60_000);
     deps.chip(session, `sem progresso há ${minutes} min — marcada como parada`, false);
-    deps.report(session, ccStallReport(session, minutes));
+    deps.report(session, ccStallReport(session, minutes, facts()));
   }
 }

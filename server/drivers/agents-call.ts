@@ -1132,7 +1132,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
   if (name === "wake_when") {
     if (args.cancel === true) {
       const standing = args.standing === true;
-      const r = await api("/api/internal/wake", { method: "POST", body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, cancel: true, ...(standing ? { standing: true } : {}) }) });
+      const r = await api("/api/internal/wake", { method: "POST", body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, cancel: true, ...(standing ? { standing: true, ...(typeof args.label === "string" ? { label: args.label } : {}) } : {}) }) });
       if (r.error) return { text: `Não foi possível cancelar ${standing ? "o vigia permanente" : "o vigia"}: ${String(r.error)}`, isError: true };
       return { text: String(r.message ?? (standing ? "Vigia permanente desligado." : "Vigia cancelado.")) };
     }
@@ -1150,6 +1150,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
         ...(args.every_minutes !== undefined ? { everyMinutes: args.every_minutes } : {}),
         ...(args.max_minutes !== undefined ? { maxMinutes: args.max_minutes } : {}),
         ...(args.standing !== undefined ? { standing: args.standing } : {}),
+        ...(typeof args.label === "string" && args.label.trim() ? { label: args.label } : {}),
       }),
     });
     if (r.error) return { text: `Couldn't start the watch: ${String(r.error)}`, isError: true };

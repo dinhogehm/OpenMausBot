@@ -84,9 +84,10 @@ function clean(snippet: string): string {
     .trim();
 }
 
-export function renderRecall(passages: readonly RecallPassage[], maxChars = RECALL_MAX_CHARS): RecallResult | null {
+export function renderRecall(passages: readonly RecallPassage[], maxChars = RECALL_MAX_CHARS, reminder?: string): RecallResult | null {
   if (!passages.length) return null;
-  const lines = [RECALL_OPEN, ""];
+  // Recalled text is not the person's language; the reminder says so up front.
+  const lines = [reminder ? `${RECALL_OPEN} ${reminder}` : RECALL_OPEN, ""];
   let length = lines.join("\n").length + RECALL_CLOSE.length + 1;
   let notes = 0;
   let conversations = 0;
@@ -114,6 +115,8 @@ export interface RecallInput {
   label: (threadId: string) => string;
   /** How a message's author reads: the person's name or the bot's. */
   author: (hit: RecallHit) => string;
+  /** The reply-language reminder for the preamble (server/reply-language.ts). */
+  reminder?: string;
 }
 
 const TOPIC_PASSAGE_CHARS = 600;
@@ -190,5 +193,5 @@ export function buildRecall(input: RecallInput): RecallResult | null {
   const topics = topicPassages(input.botId, query);
   const named = new Set(topics.map((passage) => passage.label));
   const notes = [...topics, ...memoryPassages(input.botId, query).filter((passage) => !named.has(passage.label))].slice(0, MEMORY_HITS);
-  return renderRecall([...notes, ...conversationPassages(input, query)]);
+  return renderRecall([...notes, ...conversationPassages(input, query)], RECALL_MAX_CHARS, input.reminder);
 }

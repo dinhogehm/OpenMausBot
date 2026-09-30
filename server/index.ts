@@ -112,6 +112,7 @@ import * as composio from "./composio.ts";
 import { connectorCallFromFrame, connectorRefusalText, connectorUnrecognizedText, evaluateConnectorTools } from "./connector-verdict.ts";
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { buildRecall } from "./recall.ts";
+import { languagePrompt, languageReminder } from "./reply-language.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -234,7 +235,7 @@ import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type C
 import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing } from "./message-db.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, parseUntil, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
-import { chiefForBot, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
+import { chiefForBot, deskThread, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
 import {
   BotAutonomy,
   GOAL_MAX_CONSECUTIVE_FAILURES,
@@ -249,6 +250,9 @@ import {
   wakeChip,
   wakePrompt,
   chipText,
+  parseStandingLabel,
+  STANDING_DEFAULT_LABEL,
+  STANDING_MAX_PER_THREAD,
   wakeFiredChip,
   watchLabel,
 } from "./bot-autonomy.ts";
@@ -275,6 +279,7 @@ import {
   readDesktopRecord,
   transcriptMentions,
   transcriptPath,
+  transcriptTurnEnded,
   transcriptWrittenAt,
   type DesktopDriver,
 } from "./claude-desktop.ts";
@@ -429,7 +434,6 @@ import { checkSoulDrift, readSoulDrift, soulFile, writeSoulMirror } from "./bot-
 import {
   buildSystemPrompt,
   userProfileSystemPrompt,
-  LANGUAGE_PROMPT,
   computerPrompt,
   composioSystemPrompt,
   customMcpPrompt,
@@ -1066,6 +1070,7 @@ function autoRecallPrompt(bot: BotRecord, threadId: string, message: string, opt
         return id === bot.threadId ? "your main chat" : "an earlier chat";
       },
       author: (hit) => (hit.role === "user" ? hit.peer ?? opts.userName : hit.from ?? bot.name),
+      reminder: languageReminder(cfg.language),
     });
     if (recalled) console.log(`auto-recall: ${bot.name} (${bot.id}) got ${recalled.notes} note and ${recalled.conversations} conversation passage(s) in ${threadId}`);
     return recalled?.text ?? "";
@@ -3106,7 +3111,7 @@ function previewSystemPrompt(bot: BotRecord) {
         cwd: bot.cwd,
       }),
     },
-    { id: "language", label: "Language", text: LANGUAGE_PROMPT },
+    { id: "language", label: "Language", text: languagePrompt(cfg.language) },
     { id: "computer", label: "Computer", text: computerPrompt(computerPromptKind) },
     { id: "team-computer", label: "Team computer", text: teamComputerPrompt(teamComputer) },
     // Auto cannot know its place until dispatch, so the preview stays silent
@@ -7250,20 +7255,28 @@ async function dispatchAutonomyTurn(botId: string, threadId: string, chip: strin
   }
 }
 
+/** Where the harness's own alerts reach a Chief: its pinned conversation,
+ * else its oldest open one that is not running a goal — never whichever
+ * thread happens to be selected (bot.threadId follows the UI). */
+function chiefDeskThread(chief: BotRecord): string {
+  return deskThread(store.tasks(chief.id), chief.threadId, (threadId) => autonomy.goalFor(threadId)?.status === "active");
+}
+
 /** Automation that keeps failing on its own (a standing watch, a routine):
  * a red chip where it runs, and a report to the bot's Chief of Staff, which
  * wakes it — or, with no Chief on duty, a notification to the person. */
 function alertAutomationTrouble(bot: BotRecord, threadId: string, text: string): void {
   if (store.taskByThread(bot.id, threadId)) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: false } });
   const chief = chiefForBot(store.bots, bot);
-  if (chief && store.taskByThread(chief.id, chief.threadId)) {
-    store.appendMessage(chief.threadId, {
+  const desk = chief ? chiefDeskThread(chief) : null;
+  if (chief && desk && store.taskByThread(chief.id, desk)) {
+    store.appendMessage(desk, {
       role: "bot",
       kind: "activity",
       tool: { name: chipText(`${bot.name}: ${text}`, 240), ok: false },
       threadRef: { botId: bot.id, threadId, title: store.taskByThread(bot.id, threadId)?.title ?? `${bot.name}'s conversation` },
     });
-    autonomy.addReport(chief.id, chief.threadId, `[Automation trouble in ${bot.name}'s conversation ${threadId}] ${text}\nLook into it: fix it with ${bot.name}, or tell the person what is not being watched or run.`);
+    autonomy.addReport(chief.id, desk, `[Automation trouble in ${bot.name}'s conversation ${threadId}] ${text}\nLook into it: fix it with ${bot.name}, or tell the person what is not being watched or run.`);
     return;
   }
   notify(buildNotification("incident", bot, threadId, text, { avatarUrl: bot.avatarUrl }));
@@ -7316,9 +7329,10 @@ function checkDiskSpace(): void {
   for (const drop of drops) {
     const text = `Pouco espaço em disco: ${drop.freeGiB} GiB livres em ${drop.path} (abaixo de ${drop.band} GiB). Worktrees, CI local e builds podem falhar, e em zero o servidor para de gravar. Libere espaço (worktrees antigas, caches de build) ou avise a pessoa.`;
     console.warn(`[disk] ${text}`);
-    if (!chief || !store.taskByThread(chief.id, chief.threadId)) continue;
-    store.appendMessage(chief.threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 200), ok: false } });
-    autonomy.addReport(chief.id, chief.threadId, `[Alerta do servidor] ${text}`);
+    const desk = chief ? chiefDeskThread(chief) : null;
+    if (!chief || !desk || !store.taskByThread(chief.id, desk)) continue;
+    store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 200), ok: false } });
+    autonomy.addReport(chief.id, desk, `[Alerta do servidor] ${text}`);
   }
 }
 
@@ -7344,7 +7358,7 @@ async function autonomyTick(): Promise<void> {
     // in between gives it back (bot-autonomy.ts, inFlight).
     if (!standing) autonomy.leaseWake(wake);
     const goal = autonomy.goalFor(wake.threadId);
-    const prompt = wakePrompt(wake, goal, Date.now());
+    const prompt = wakePrompt(wake, goal, Date.now(), languageReminder(cfg.language));
     const chip = wakeFiredChip(wake);
     // Raised once when it starts failing, not on every firing while it stays broken.
     const failing = standing && wake.watch!.trigger === "failing" && wake.watch!.lastTrigger !== "failing" ? `${wake.watch!.failures}` : null;
@@ -7372,7 +7386,7 @@ async function autonomyTick(): Promise<void> {
     const taken = autonomy.leaseReports(pending.threadId);
     if (!taken) continue;
     const chip = taken.items.length === 1 ? "Chegou um relatório" : `Chegaram ${taken.items.length} relatórios`;
-    const outcome = await dispatchAutonomyTurn(taken.botId, taken.threadId, chip, reportsPrompt(taken, autonomy.goalFor(taken.threadId)));
+    const outcome = await dispatchAutonomyTurn(taken.botId, taken.threadId, chip, reportsPrompt(taken, autonomy.goalFor(taken.threadId), languageReminder(cfg.language)));
     if (outcome === "busy") autonomy.restoreReports(taken);
     else if (outcome === "failed") autonomy.settleInFlight(taken.threadId);
   }
@@ -7394,7 +7408,7 @@ async function autonomyTick(): Promise<void> {
       goal.botId,
       goal.threadId,
       `Objetivo continua — turno ${goal.turnCount} de ${goal.maxTurns}`,
-      goalContinuationPrompt(goal, Date.now()),
+      goalContinuationPrompt(goal, Date.now(), languageReminder(cfg.language)),
     );
     if (outcome === "busy") autonomy.undoGoalDispatch(goal.threadId);
     else if (outcome === "failed" && autonomy.noteGoalTurnOutcome(goal.threadId, false) >= GOAL_MAX_CONSECUTIVE_FAILURES) {
@@ -7545,12 +7559,13 @@ const desktopWork: DesktopWorkDeps = {
   findSession: (marker, since) => findDesktopSession(marker, since),
   transcriptOf: (cliSessionId) => transcriptPath({ cliSessionId }),
   lastText: (transcript) => lastAssistantText(transcript),
+  turnEnded: transcriptTurnEnded,
   mentions: transcriptMentions,
   writtenAt: transcriptWrittenAt,
   repoName: (session) => basename(session.repo),
   chip: ccChip,
   report: ccReport,
-  hookDecision: (cwd) => lastHookDecision(DUAL_DECISIONS_LOG, cwd),
+  hookDecision: (sessionId) => lastHookDecision(DUAL_DECISIONS_LOG, sessionId),
   onArchived: (session) => {
     if (!session.desktop?.removeWorktree) return;
     const note = removeSessionWorktree(session);
@@ -9499,7 +9514,7 @@ async function startTurn(
         // false when they are not — see agentsMounted above)
         { id: "setup", label: "Setup", text: setupSystemPrompt(setupMode, { skills: skillAuthoring, cwd: liveBot?.cwd ?? bot.cwd }) },
         { id: "files", label: "File locations", text: worksInWorkspace && opts?.runOn !== "cloud" ? workspaceLocationsPrompt(bot.id, cwd, liveBot?.cwd ?? bot.cwd) : "" },
-        { id: "language", label: "Language", text: LANGUAGE_PROMPT },
+        { id: "language", label: "Language", text: languagePrompt(cfg.language) },
         { id: "computer", label: "Computer", text: computerPrompt(computerPromptKind) },
         { id: "team-computer", label: "Team computer", text: teamComputerPrompt(teamComputer) },
         { id: "plan", label: "Surface", text: surfacePrompt({ computer: mountedComputer, browser: Boolean(integrations.browser) }, { pinned: plan.pinned, note: plan.note, canSelect: computerSelectionTurns.has(threadId) }) },
@@ -11574,7 +11589,7 @@ async function runGroupMemberTurn(
     { id: "user-profile", label: "About the user", text: userProfileSystemPrompt(cfg.profile) },
     { id: "files", label: "File locations", text: workspace ? workspaceLocationsPrompt(bot.id, cwd, readyBot.cwd) : "" },
     { id: "mcp", label: "MCP servers", text: customMcpPrompt(Object.keys(integrations.custom ?? {})) },
-    { id: "language", label: "Language", text: LANGUAGE_PROMPT },
+    { id: "language", label: "Language", text: languagePrompt(cfg.language) },
     { id: "computer", label: "Computer", text: computerPrompt(roomComputerPromptKind) },
     { id: "team-computer", label: "Team computer", text: teamComputerPrompt(roomTeamComputer) },
     { id: "plan", label: "Surface", text: surfacePrompt({ computer: roomTeamComputer ? "cloud" : roomVmTarget ? "vm" : surfaceOfComputerKind(roomComputerKind), browser: Boolean(integrations.browser) }, { note: roomPlan.note }) },
@@ -15749,9 +15764,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         requireActiveInternalCapability();
         if (path === "/api/internal/wake") {
           if (body.cancel === true && body.standing === true) {
-            const cancelled = autonomy.cancelStanding(threadId);
-            if (cancelled) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Vigia permanente desligado — ${watchLabel(cancelled.watch!.command)}`, ok: false } });
-            return json(res, 200, { message: cancelled ? "Vigia permanente desligado." : "Não havia vigia permanente nesta conversa." });
+            const label = parseStandingLabel(body.label);
+            if (label === null) return json(res, 400, { error: "label inválido: 1 a 40 letras, dígitos, espaços ou . _ # : -" });
+            const cancelled = autonomy.cancelStanding(threadId, label);
+            if (cancelled) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Vigia permanente${cancelled.watch?.label ? ` "${cancelled.watch.label}"` : ""} desligado — ${watchLabel(cancelled.watch!.command)}`, ok: false } });
+            const others = autonomy.standingsFor(threadId).map((wake) => wake.watch?.label ?? "default");
+            return json(res, 200, { message: `${cancelled ? `Vigia permanente "${label}" desligado.` : `Não havia vigia permanente "${label}" nesta conversa.`}${others.length ? ` Continuam armados: ${others.join(", ")}.` : ""}` });
           }
           if (body.cancel === true) {
             const cancelled = autonomy.cancelWake(threadId);
@@ -15762,6 +15780,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             if (!command.ok) return json(res, 400, { error: command.error });
             const input = parseWatchInput(body);
             if (!input.ok) return json(res, 400, { error: input.error });
+            if (input.standing) {
+              const armed = autonomy.standingsFor(threadId);
+              const label = input.label ?? STANDING_DEFAULT_LABEL;
+              if (!armed.some((wake) => (wake.watch?.label ?? STANDING_DEFAULT_LABEL) === label) && armed.length >= STANDING_MAX_PER_THREAD) {
+                return json(res, 409, { error: `esta conversa já tem ${STANDING_MAX_PER_THREAD} vigias permanentes (${armed.map((wake) => wake.watch?.label ?? STANDING_DEFAULT_LABEL).join(", ")}); desligue um com cancel e label antes de armar outro` });
+              }
+            }
             // The first run proves the command works and becomes the baseline.
             const first = await runWatchCommand(command.argv, { cwd: watchCwd(bot.id, threadId), path: augmentedPath() });
             requireActiveInternalCapability();
@@ -15865,14 +15890,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!message) return json(res, 400, { error: "message é obrigatório" });
           if (session.status === "archived") return json(res, 409, { error: "essa sessão está arquivada; comece outra" });
           // The order came from this conversation: its report comes back here.
-          const moved = threadId !== session.ownerThreadId;
-          if (moved) session.ownerThreadId = threadId;
-          const reportTo = replyThreadId === session.ownerThreadId ? undefined : replyThreadId;
-          if (moved || reportTo !== session.replyThreadId) {
-            if (reportTo) session.replyThreadId = reportTo;
-            else delete session.replyThreadId;
-            ccLedger.save();
-          }
+          // Only once the order is accepted — a refused one moves nothing.
+          const claim = () => {
+            const moved = threadId !== session.ownerThreadId;
+            if (moved) session.ownerThreadId = threadId;
+            const reportTo = replyThreadId === session.ownerThreadId ? undefined : replyThreadId;
+            if (moved || reportTo !== session.replyThreadId) {
+              if (reportTo) session.replyThreadId = reportTo;
+              else delete session.replyThreadId;
+              ccLedger.save();
+            }
+          };
           if (session.surface === "app") {
             const desktop = session.desktop;
             const opening = !desktop?.localId && session.status === "running" && Boolean(desktop?.pending?.kind === "create" || desktop?.sentAt);
@@ -15883,6 +15911,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
               return json(res, 409, { error: `essa sessão falhou (${(session.lastError ?? "erro desconhecido").slice(0, 300)}); veja no app Claude e depois comece outra com cc_session_start` });
             }
             if (desktop?.archiveWhenResolved || desktop?.pending?.kind === "archive") return json(res, 409, { error: "essa sessão está sendo arquivada; comece outra" });
+            claim();
             if (session.status === "running" || desktop?.pending || desktop?.sent) {
               const position = ccLedger.enqueue(session, message);
               return json(res, 200, { message: `A sessão está ocupada; sua mensagem entrou na fila (#${position}) e vai para o app Claude depois deste turno. Encerre o turno agora.` });
@@ -15895,18 +15924,31 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           }
           // A stalled run may still be alive: never start a second one beside it.
           if (session.status === "running" || (session.status === "stalled" && ccProcesses.has(session.id))) {
+            claim();
             const position = ccLedger.enqueue(session, message);
             return json(res, 200, { message: `A sessão está no meio de um turno; sua mensagem entrou na fila (#${position}) e roda assim que este turno terminar. Encerre o turno agora.` });
           }
           if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
             return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando; tente de novo depois que uma relatar` });
           }
+          claim();
           runCcTurn(session, message, session.turns === 0);
           ccChip(session, "mensagem enviada");
           return json(res, 200, { message: "Enviada. A sessão está trabalhando; o relatório volta aqui como um novo turno. Encerre o turno agora." });
         }
         if (session.surface === "app" && action === "stop") {
-          return json(res, 409, { error: "esta sessão roda no app Claude; peça à pessoa para pará-la lá (Esc na sessão)" });
+          // Nothing on the screen is touched: the server stops waiting for it,
+          // drops what it would still type into it, and says so.
+          const desktop = session.desktop!;
+          const dropped = session.queued.length + (desktop.pending?.kind === "send" ? 1 : 0);
+          session.queued = [];
+          if (desktop.pending?.kind === "send" || desktop.pending?.kind === "create") delete desktop.pending;
+          delete desktop.sent;
+          session.status = desktop.localId ? "idle" : "stopped";
+          session.lastActivityAt = Date.now();
+          ccLedger.save();
+          ccChip(session, `parada aqui${dropped ? ` — ${dropped} mensagem(ns) da fila descartada(s)` : ""}`, false);
+          return json(res, 200, { message: `Marcada como parada aqui; a sessão no app Claude não foi tocada (se ela estiver no meio de um turno, só a pessoa a interrompe, com Esc na sessão).${dropped ? ` ${dropped} mensagem(ns) que ainda iam para ela foram descartadas.` : ""} Para retomar, use cc_session_send.` });
         }
         if (session.surface === "app" && action === "archive") {
           const desktop = session.desktop!;
@@ -15921,14 +15963,21 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             ccChip(session, "arquivada (nunca abriu no app)");
             return json(res, 200, { message: "Arquivada; ela ainda não tinha aberto no app Claude." });
           }
-          // Never drop a message on its way, never archive mid-turn. A session
-          // stalled past the watchdog may still be archived.
-          if (desktop.pending?.kind === "send" || desktop.sent || session.queued.length) {
+          // An active session: never drop a message on its way, never archive
+          // mid-turn. A stalled or idle one may be archived; what was still
+          // queued for it is dropped, and said so.
+          const active = ccSessionActive(session, Date.now());
+          if (active && (desktop.pending?.kind === "send" || desktop.sent || session.queued.length)) {
             return json(res, 409, { error: "há uma mensagem a caminho dessa sessão; arquive depois que ela chegar e a sessão relatar" });
           }
-          if (desktop.localId && session.status === "running" && ccSessionActive(session, Date.now())) {
+          if (desktop.localId && active) {
             return json(res, 409, { error: "a sessão está no meio de um turno; arquive depois do relatório (ou peça à pessoa para pará-la no app)" });
           }
+          const dropped = session.queued.length + (desktop.pending?.kind === "send" ? 1 : 0);
+          session.queued = [];
+          if (desktop.pending?.kind === "send") delete desktop.pending;
+          delete desktop.sent;
+          if (dropped) ccChip(session, `${dropped} mensagem(ns) da fila descartada(s) ao arquivar`, false);
           // Its worktree goes only after the app's record confirms the archive.
           if (body.removeWorktree === true) desktop.removeWorktree = true;
           if (opening) {
@@ -17073,7 +17122,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // Claude Code sessions running or waiting for the screen.
       const routineHold = routines!.wakeHold();
       if (routineHold.hold && routineHold.reason === "running") return json(res, 200, routineHold);
-      const ccBusy = ccLedger.all().some((session) => session.status === "running" || Boolean(session.desktop?.pending));
+      const now = Date.now();
+      const ccBusy = ccLedger.all().some((session) => ccSessionActive(session, now) || Boolean(session.desktop?.pending));
       if (ccBusy) return json(res, 200, { hold: true, reason: "running" });
       const selfPaced = autonomy.wakeHold(AUTONOMY_WAKE_HOLD_MS);
       if (selfPaced.hold && selfPaced.reason === "running") return json(res, 200, selfPaced);

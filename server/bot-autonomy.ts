@@ -23,6 +23,7 @@
 // promised wake nor forgets a running goal.
 import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
+import { languageReminder } from "./reply-language.ts";
 
 export const WAKE_MIN_MINUTES = 1;
 export const WAKE_MAX_MINUTES = 1_440;
@@ -73,6 +74,8 @@ export interface WakeWatch {
   lastTrigger?: WatchTrigger;
   /** Never used up: re-armed after each firing. */
   standing?: true;
+  /** Names one of a conversation's standing watches ("chat", "planilha"); absent = "default". */
+  label?: string;
   /** A standing watch's time limit, re-applied on each re-arm. */
   maxMs?: number;
   /** Times it fired; a standing watch keeps counting. */
@@ -155,10 +158,10 @@ export function parseWakeInput(body: { minutes?: unknown; reason?: unknown }): W
 }
 
 export type WatchInput =
-  | { ok: true; everyMinutes: number; maxMinutes: number; until?: string; reason: string; standing?: true }
+  | { ok: true; everyMinutes: number; maxMinutes: number; until?: string; reason: string; standing?: true; label?: string }
   | { ok: false; error: string };
 
-export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unknown; until?: unknown; reason?: unknown; standing?: unknown }): WatchInput {
+export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unknown; until?: unknown; reason?: unknown; standing?: unknown; label?: unknown }): WatchInput {
   const everyMinutes = body.everyMinutes === undefined
     ? WATCH_DEFAULT_EVERY_MINUTES
     : intIn(body.everyMinutes, WATCH_MIN_EVERY_MINUTES, WATCH_MAX_EVERY_MINUTES);
@@ -172,7 +175,17 @@ export function parseWatchInput(body: { everyMinutes?: unknown; maxMinutes?: unk
   const reason = clip(body.reason, WAKE_REASON_MAX);
   if (!reason) return { ok: false, error: "reason is required: what to do when the watch fires" };
   if (body.standing !== undefined && typeof body.standing !== "boolean") return { ok: false, error: "standing must be true or false" };
-  return { ok: true, everyMinutes, maxMinutes, ...(until ? { until } : {}), reason, ...(body.standing === true ? { standing: true as const } : {}) };
+  const label = parseStandingLabel(body.label);
+  if (label === null) return { ok: false, error: "label must be 1-40 letters, digits, spaces or . _ # : -" };
+  return { ok: true, everyMinutes, maxMinutes, ...(until ? { until } : {}), reason, ...(body.standing === true ? { standing: true as const, ...(label !== STANDING_DEFAULT_LABEL ? { label } : {}) } : {}) };
+}
+
+/** A standing watch's label: default when absent, null when malformed. */
+export function parseStandingLabel(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return STANDING_DEFAULT_LABEL;
+  if (typeof value !== "string") return null;
+  const label = value.trim().toLowerCase();
+  return /^[\p{L}\p{N} ._#:-]{1,40}$/u.test(label) ? label : null;
 }
 
 export type GoalInput =
@@ -202,8 +215,13 @@ export function parseGoalEndInput(body: { status?: unknown; detail?: unknown }):
 }
 
 /** Where a wake is kept: the conversation's one ordinary wake, or its standing watch beside it. */
+/** Standing watches: several per conversation, one per label, beside the
+ * one ordinary wake. Keys written before labels existed read as "default". */
 const STANDING = "\u0000standing";
-const wakeKey = (wake: Pick<BotWake, "threadId" | "watch">): string => (wake.watch?.standing ? `${wake.threadId}${STANDING}` : wake.threadId);
+export const STANDING_DEFAULT_LABEL = "default";
+export const STANDING_MAX_PER_THREAD = 5;
+const standingKey = (threadId: string, label = STANDING_DEFAULT_LABEL) => `${threadId}${STANDING}\u0000${label}`;
+const wakeKey = (wake: Pick<BotWake, "threadId" | "watch">): string => (wake.watch?.standing ? standingKey(wake.threadId, wake.watch.label) : wake.threadId);
 
 export class BotAutonomy {
   private wakes = new Map<string, BotWake>();
@@ -289,7 +307,7 @@ export class BotAutonomy {
   setWatch(
     botId: string,
     threadId: string,
-    input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string; baselineFingerprint?: string; standing?: boolean },
+    input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string; baselineFingerprint?: string; standing?: boolean; label?: string },
   ): BotWake {
     const at = this.now();
     const wake: BotWake = {
@@ -309,7 +327,7 @@ export class BotAutonomy {
         lastRunAt: at,
         runs: 1,
         failures: 0,
-        ...(input.standing ? { standing: true as const, maxMs: input.maxMinutes * this.minuteMs } : {}),
+        ...(input.standing ? { standing: true as const, maxMs: input.maxMinutes * this.minuteMs, ...(input.label && input.label !== STANDING_DEFAULT_LABEL ? { label: input.label } : {}) } : {}),
       },
     };
     this.wakes.set(wakeKey(wake), wake);
@@ -386,18 +404,23 @@ export class BotAutonomy {
     return this.wakes.get(wakeKey(wake)) === wake;
   }
 
-  standingFor(threadId: string): BotWake | null {
-    return this.wakes.get(`${threadId}${STANDING}`) ?? null;
+  standingFor(threadId: string, label = STANDING_DEFAULT_LABEL): BotWake | null {
+    return this.wakes.get(standingKey(threadId, label)) ?? null;
   }
 
-  cancelStanding(threadId: string): BotWake | null {
-    const wake = this.wakes.get(`${threadId}${STANDING}`) ?? null;
+  standingsFor(threadId: string): BotWake[] {
+    return [...this.wakes.values()].filter((wake) => wake.threadId === threadId && wake.watch?.standing);
+  }
+
+  cancelStanding(threadId: string, label = STANDING_DEFAULT_LABEL): BotWake | null {
+    const wake = this.wakes.get(standingKey(threadId, label)) ?? null;
     if (wake) {
-      this.wakes.delete(`${threadId}${STANDING}`);
+      this.wakes.delete(standingKey(threadId, label));
       this.save();
     }
     return wake;
   }
+
 
   /** Put back a wake that was taken but could not start (the thread got
    * busy in between); it stays due and keeps its original note and time. */
@@ -594,7 +617,8 @@ export class BotAutonomy {
 
   /** Drop everything tied to a conversation that no longer exists. */
   forgetThread(threadId: string): void {
-    const hadStanding = this.wakes.delete(`${threadId}${STANDING}`);
+    let hadStanding = false;
+    for (const wake of this.standingsFor(threadId)) hadStanding = this.wakes.delete(wakeKey(wake)) || hadStanding;
     const hadWake = this.wakes.delete(threadId) || hadStanding;
     const hadGoal = this.goals.delete(threadId);
     const hadReports = this.reports.delete(threadId);
@@ -627,12 +651,16 @@ export function goalStartedAck(goal: BotGoal): string {
   ].join(" ");
 }
 
-export function goalContinuationPrompt(goal: BotGoal, now: number): string {
+// Each harness-written turn message ends with the reply-language reminder
+// (server/reply-language.ts): it is machine English, and what the model
+// reads last sets the language it answers people in.
+export function goalContinuationPrompt(goal: BotGoal, now: number, reminder = languageReminder()): string {
   return [
     `[Goal mode — turn ${goal.turnCount} of ${goal.maxTurns}, ${minutesLabel(goal.deadlineAt - now)} left. Nobody typed this; the harness continues your goal.]`,
     `Goal: ${goal.goal}`,
     "Use this conversation as your progress ledger: check what is already done before repeating anything.",
     ...GOAL_RULES,
+    reminder,
   ].join("\n");
 }
 
@@ -660,7 +688,7 @@ function watchLines(wake: BotWake): string[] {
   ];
 }
 
-export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number): string {
+export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, reminder = languageReminder()): string {
   return [
     `[${wake.watch ? "Watch" : "Wake-up"} you scheduled ${minutesLabel(now - wake.createdAt)} ago. Nobody typed this.]`,
     ...watchLines(wake),
@@ -668,6 +696,7 @@ export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number): st
     ...(goal && goal.status === "active"
       ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`, ...GOAL_RULES]
       : ["Do what the note says. If it still is not ready, call wake_when or wake_me again; if it is, report the result here."]),
+    reminder,
   ].join("\n");
 }
 
@@ -723,7 +752,7 @@ export function wakeChip(wake: BotWake): string {
   if (wake.watch) {
     const every = Math.round(wake.watch.everyMs / 60_000) || 1;
     const label = watchLabel(wake.watch.command);
-    if (wake.watch.standing) return `Vigia permanente em ${label} a cada ${every} min — ${reason}`;
+    if (wake.watch.standing) return `Vigia permanente${wake.watch.label ? ` "${wake.watch.label}"` : ""} em ${label} a cada ${every} min — ${reason}`;
     return `Vigiando ${label} a cada ${every} min até ${hhmm(wake.dueAt)} — ${reason}`;
   }
   return `Despertador às ${hhmm(wake.dueAt)} — ${chipText(wake.reason, 120)}`;
@@ -733,7 +762,7 @@ export function wakeChip(wake: BotWake): string {
 export function wakeFiredChip(wake: BotWake): string {
   if (!wake.watch) return `Acordou — ${chipText(wake.reason, 140)}`;
   const why = { changed: "mudou", matched: "condição atingida", failing: "comando falhando" }[wake.watch.trigger ?? "changed"];
-  return `${wake.watch.standing ? "Vigia permanente" : "Vigia"} disparou (${wake.watch.trigger ? why : "tempo esgotado"}) em ${watchLabel(wake.watch.command)} — ${chipText(wake.reason, 110)}`;
+  return `${wake.watch.standing ? `Vigia permanente${wake.watch.label ? ` "${wake.watch.label}"` : ""}` : "Vigia"} disparou (${wake.watch.trigger ? why : "tempo esgotado"}) em ${watchLabel(wake.watch.command)} — ${chipText(wake.reason, 110)}`;
 }
 
 export function goalEndChip(goal: BotGoal): string {
@@ -747,10 +776,11 @@ export function goalEndChip(goal: BotGoal): string {
   return `${label} após ${goal.turnCount} turno${goal.turnCount === 1 ? "" : "s"}${goal.detail ? ` — ${chipText(goal.detail, 160)}` : ""}`;
 }
 
-export function reportsPrompt(pending: PendingReports, goal: BotGoal | null): string {
+export function reportsPrompt(pending: PendingReports, goal: BotGoal | null, reminder = languageReminder()): string {
   return [
     `[${pending.items.length === 1 ? "A report arrived" : `${pending.items.length} reports arrived`} — from Claude Code sessions you manage or from the harness. Nobody typed this.]`,
     ...pending.items,
     ...(goal && goal.status === "active" ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`] : []),
+    reminder,
   ].join("\n\n---\n\n");
 }

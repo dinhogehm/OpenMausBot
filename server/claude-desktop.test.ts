@@ -17,7 +17,9 @@ import {
   recordInWorktree,
   sendToDesktopSession,
   sidebarMatch,
+  summaryIsCurrent,
   transcriptMentions,
+  transcriptTurnEnded,
   transcriptWrittenAt,
   type DesktopDriver,
   type OcrLine,
@@ -154,8 +156,8 @@ describe("sendToDesktopSession", () => {
     expect(await sendToDesktopSession(app.driver, { localId, text: "follow-up now", title: open.text })).toMatchObject({ ok: false, retry: true, reason: expect.stringContaining("stayed") });
   });
 
-  it("adds a line of its own after a long message", async () => {
-    const long = `Long steer ${"x".repeat(900)}`;
+  it("adds a line of its own after a message the app may wrap as pasted content", async () => {
+    const long = `Long steer ${"x".repeat(250)}`;
     const app = fakeApp({ screens: [[open, field], [open, { text: "Long steer xxxx", y: 820 }], [open, field]] });
     expect(await sendToDesktopSession(app.driver, { localId, text: long, title: open.text })).toEqual({ ok: true });
     expect(app.actions).toContain(`paste  ${DESKTOP_MESSAGE_NOTE}`);
@@ -232,11 +234,35 @@ describe("reading the app's records", () => {
     expect(recordBlocked({ postTurnSummary: { status_category: "done" } })).toBeNull();
   });
 
-  it("tells whether a message reached the transcript, and when it was last written", () => {
-    transcript("cli-m", [{ type: "user", message: { content: "Conferi o c445f4459 na branch local\nFique parada" } }]);
+  it("tells whether the last turn ended, and reads a blocked summary only when it is this turn's", () => {
+    transcript("cli-e", [
+      { type: "user", message: { content: "brief" } },
+      { type: "assistant", message: { stop_reason: "end_turn", content: [{ type: "text", text: "parei" }] } },
+      { type: "system", subtype: "stop_hook_summary" },
+    ]);
+    expect(transcriptTurnEnded(join(projects, "-repo-wt", "cli-e.jsonl"))).toBe(true);
+    transcript("cli-o", [{ type: "user", message: { content: "brief" } }, { type: "assistant", message: { stop_reason: "tool_use", content: [] } }]);
+    expect(transcriptTurnEnded(join(projects, "-repo-wt", "cli-o.jsonl"))).toBe(false);
+    expect(transcriptTurnEnded(join(projects, "nope.jsonl"))).toBe(false);
+    const blocked = { status_category: "blocked", needs_action: "GO", summarizes_uuid: "u1" };
+    expect(recordBlocked({ postTurnSummary: blocked, lastAssistantUuid: "u1" })).toBe("GO");
+    expect(recordBlocked({ postTurnSummary: blocked, lastAssistantUuid: "u2" })).toBeNull();
+    expect(summaryIsCurrent({ postTurnSummary: blocked })).toBe(true);
+  });
+
+  it("tells whether a message reached the transcript after it was sent, and when it was last written", () => {
+    const sentAt = Date.parse("2026-09-30T01:04:32Z");
+    transcript("cli-m", [
+      { type: "user", timestamp: "2026-09-29T22:40:00Z", message: { content: "Chief of Staff aqui. Faça X." } },
+      { type: "assistant", timestamp: "2026-09-30T01:04:40Z", message: { content: [{ type: "text", text: "Chief of Staff aqui. Faça Y." }] } },
+      { type: "user", timestamp: "2026-09-30T01:04:35Z", message: { content: "Conferi o c445f4459 na branch local\nFique parada" } },
+    ]);
     const path = join(projects, "-repo-wt", "cli-m.jsonl");
-    expect(transcriptMentions(path, "Conferi o c445f4459 na branch local\nFique parada")).toBe(true);
-    expect(transcriptMentions(path, "Outra mensagem")).toBe(false);
+    expect(transcriptMentions(path, "Conferi o c445f4459 na branch local\nFique parada", sentAt)).toBe(true);
+    expect(transcriptMentions(path, "Outra mensagem", sentAt)).toBe(false);
+    // the same opening sent earlier, or said by the assistant, is not our message arriving
+    expect(transcriptMentions(path, "Chief of Staff aqui. Faça X.", sentAt)).toBe(false);
+    expect(transcriptMentions(path, "Chief of Staff aqui. Faça Y.", sentAt)).toBe(false);
     expect(transcriptWrittenAt(path)).toBeGreaterThan(0);
     expect(transcriptWrittenAt(join(projects, "nope.jsonl"))).toBeNull();
   });

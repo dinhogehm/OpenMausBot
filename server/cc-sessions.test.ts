@@ -98,7 +98,7 @@ describe("ledger", () => {
     expect(ccReportForOwner(cli)).toMatch(/headless CLI .* no approval dialog: a hook denial ends the turn/);
     const app = l.create({ ...base, id: "22222222-2222-3333-4444-555555555555", surface: "app", desktop: { marker: "OMBX", turnsSeen: 0, permissionMode: "bypassPermissions" } });
     expect(ccReportForOwner(app)).toContain("the app runs it as bypassPermissions");
-    expect(ccReportForOwner(app, { hookDecision: "deny gh issue comment" })).toContain("Latest review-hook decision in its folder: deny gh issue comment");
+    expect(ccReportForOwner(app, { hookDecision: "deny gh issue comment" })).toContain("Latest review-hook decision for this session (deny/ask preferred): deny gh issue comment");
     app.blockedOn = "approve the push";
     expect(ccReportForOwner(app)).toContain("BLOCKED — it needs: approve the push");
     expect(ccStallReport(app, 42)).toContain("no progress for 42 min");
@@ -106,17 +106,18 @@ describe("ledger", () => {
 });
 
 describe("lastHookDecision", () => {
-  it("returns the latest log line about the folder, or null", () => {
+  it("finds the session by its id and prefers its latest deny or ask", () => {
     const log = join(dir, "dual-decisions.log");
     writeFileSync(log, [
-      "2026-09-30T00:40:02Z | /repo/.claude/worktrees/a | deny | git push",
-      "2026-09-30T00:41:00Z | /repo/.claude/worktrees/b | allow | gh pr view",
-      "2026-09-30T00:48:12Z | /repo/.claude/worktrees/a | pass | jev: deny (confiança 51%)",
+      JSON.stringify({ at: "1", session: "561eb60e", tool: "Bash", outcome: "deny", input: "gh issue comment 9298" }),
+      JSON.stringify({ at: "2", session: "79326d3c", tool: "Bash", outcome: "pass", input: "grep helpdesk-inatividade-automation-f30521" }),
+      JSON.stringify({ at: "3", session: "561eb60e", tool: "Read", outcome: "pass", input: "x" }),
       "",
     ].join("\n"));
-    expect(lastHookDecision(log, "/repo/.claude/worktrees/a")).toContain("jev: deny (confiança 51%)");
-    expect(lastHookDecision(log, "/elsewhere")).toBeNull();
-    expect(lastHookDecision(join(dir, "missing.log"), "/repo")).toBeNull();
+    expect(lastHookDecision(log, "561eb60e")).toContain("gh issue comment 9298");
+    expect(lastHookDecision(log, "79326d3c")).toContain('"outcome":"pass"');
+    expect(lastHookDecision(log, "nope")).toBeNull();
+    expect(lastHookDecision(join(dir, "missing.log"), "561eb60e")).toBeNull();
   });
 });
 

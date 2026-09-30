@@ -9,6 +9,7 @@ import {
   DESKTOP_ARCHIVE_MAX_TRIES,
   DESKTOP_MAX_MISSES,
   DESKTOP_SEND_CONFIRM_MS,
+  DESKTOP_SUMMARY_WAIT_MS,
   DESKTOP_SEND_MAX_DELIVERIES,
   ccSessionActive,
   desktopBackoffMs,
@@ -29,7 +30,7 @@ function harness() {
   const ledger = new CcSessionLedger({ path: null, now: () => now });
   const records = new Map<string, DesktopRecord>();
   const byMarker = new Map<string, DesktopRecord>();
-  const transcripts = new Map<string, { text: string; writtenAt: number }>();
+  const transcripts = new Map<string, { text: string; writtenAt: number; ended?: boolean }>();
   const chips: Array<{ id: string; text: string; ok: boolean }> = [];
   const reports: Array<{ id: string; text: string }> = [];
   const results: DesktopStep[] = [];
@@ -43,6 +44,7 @@ function harness() {
     findSession: (marker) => byMarker.get(marker) ?? null,
     transcriptOf: (cli) => (transcripts.has(cli) ? cli : null),
     lastText: (cli) => transcripts.get(cli)?.text.split("\n").at(-1) ?? "",
+    turnEnded: (cli) => transcripts.get(cli)?.ended ?? false,
     mentions: (cli, text) => transcripts.get(cli)?.text.includes(text.split("\n")[0]!) ?? false,
     writtenAt: (cli) => transcripts.get(cli)?.writtenAt ?? null,
     repoName: () => "nuria-platform",
@@ -137,7 +139,9 @@ describe("opening a session", () => {
     h.transcripts.set("cli-a", { text: "brief\nroot cause found", writtenAt: h.now });
     followDesktopSessions(h.deps);
     expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "now open the PR" });
-    expect(h.reports).toEqual([]);
+    // the owner still hears what that turn said before the queued message goes in
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]!.text).toContain("root cause found");
 
     await h.tick();
     expect(h.steps.send).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ localId: LOCAL, text: "now open the PR" }));
@@ -147,9 +151,9 @@ describe("opening a session", () => {
     followDesktopSessions(h.deps);
     expect(session.desktop!.sent).toBeUndefined();
     expect(session.status).toBe("idle");
-    expect(h.reports).toHaveLength(1);
-    expect(h.reports[0]!.text).toContain("PR #9301 open");
-    expect(h.reports[0]!.text).toContain("permission mode bypassPermissions");
+    expect(h.reports).toHaveLength(2);
+    expect(h.reports[1]!.text).toContain("PR #9301 open");
+    expect(h.reports[1]!.text).toContain("permission mode bypassPermissions");
   });
 
   it("fails loudly when the app opened the session outside a worktree", () => {
@@ -233,6 +237,93 @@ describe("messages", () => {
     await h.tick();
     expect(session.status).toBe("failed");
     expect(h.steps.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("sessions left running with no turn coming (#9298)", () => {
+  it("takes an app session whose last turn ended long ago as idle and delivers its queue", async () => {
+    const h = harness();
+    const session = h.opened("a", { completedTurns: 1 });
+    session.desktop!.turnsSeen = 1;
+    session.turns = 1;
+    h.ledger.enqueue(session, "Chief aqui: siga sem o comentário");
+    h.transcripts.set("cli-a", { text: "brief\nparei: o Jev negou o comentário", writtenAt: h.now, ended: true });
+    h.advance(DESKTOP_SEND_CONFIRM_MS - 60_000);
+    followDesktopSessions(h.deps);
+    expect(session.desktop!.pending).toBeUndefined(); // too recent to call
+    h.advance(2 * 60_000);
+    followDesktopSessions(h.deps);
+    expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "Chief aqui: siga sem o comentário" });
+    expect(session.queued).toEqual([]);
+    expect(h.chips.at(-1)).toMatchObject({ ok: false, text: expect.stringContaining("estava parada") });
+    expect(h.reports.at(-1)!.text).toContain("found it idle in the app");
+    await h.tick();
+    expect(h.steps.send).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ text: "Chief aqui: siga sem o comentário" }));
+  });
+
+  it("leaves a turn that is still open alone", () => {
+    const h = harness();
+    const session = h.opened("a", { completedTurns: 1 });
+    session.desktop!.turnsSeen = 1;
+    h.ledger.enqueue(session, "x");
+    h.transcripts.set("cli-a", { text: "brief", writtenAt: h.now, ended: false });
+    h.advance(10 * 60_000);
+    followDesktopSessions(h.deps);
+    expect(session.status).toBe("running");
+    expect(session.queued).toEqual(["x"]);
+  });
+
+  it("waits for the app's summary of this turn before reporting it blocked (or not)", () => {
+    const h = harness();
+    const session = h.opened("a", { completedTurns: 1, lastAssistantUuid: "u2", postTurnSummary: { status_category: "blocked", needs_action: "old", summarizes_uuid: "u1" } });
+    followDesktopSessions(h.deps);
+    expect(h.reports).toEqual([]); // still the previous turn's summary
+    h.records.get(LOCAL)!.postTurnSummary = { status_category: "completed", summarizes_uuid: "u2" };
+    followDesktopSessions(h.deps);
+    expect(h.reports).toHaveLength(1);
+    expect(session.blockedOn).toBeUndefined();
+  });
+
+  it("reports a turn after a minute even if the summary never catches up, without its stale blocked", () => {
+    const h = harness();
+    const session = h.opened("a", { completedTurns: 1, lastAssistantUuid: "u2", postTurnSummary: { status_category: "blocked", needs_action: "old", summarizes_uuid: "u1" } });
+    followDesktopSessions(h.deps);
+    h.advance(DESKTOP_SUMMARY_WAIT_MS + 1_000);
+    followDesktopSessions(h.deps);
+    expect(h.reports).toHaveLength(1);
+    expect(session.blockedOn).toBeUndefined();
+  });
+
+  it("states facts in a stall report: turn open, bypass has no approval dialog, queue size", () => {
+    const h = harness();
+    const session = h.opened("a", { completedTurns: 1 });
+    session.desktop!.turnsSeen = 1;
+    session.desktop!.permissionMode = "bypassPermissions";
+    h.ledger.enqueue(session, "x");
+    h.transcripts.set("cli-a", { text: "brief", writtenAt: h.now, ended: false });
+    h.advance(CC_STALL_MS + 60_000);
+    watchStalledSessions(h.deps);
+    const text = h.reports.at(-1)!.text;
+    expect(text).toContain("A turn is still open in its transcript");
+    expect(text).toContain("no approval dialog");
+    expect(text).toContain("1 message(s) are queued");
+    expect(text).not.toMatch(/waiting on an approval/);
+  });
+
+  it("retries preparing the screen helper with backoff before failing the session", async () => {
+    const h = harness();
+    h.deps.getDriver = async () => { throw new Error("xcrun: error: invalid active developer path"); };
+    const session = h.appSession("a");
+    session.desktop!.pending = { kind: "create", text: "brief", since: h.now, attempts: 0 };
+    await h.tick();
+    expect(session.status).toBe("running");
+    expect(session.desktop!.pending).toMatchObject({ helperFailures: 1, nextAttemptAt: h.now + 30_000 });
+    h.advance(30_000);
+    await h.tick();
+    h.advance(60_000);
+    await h.tick();
+    expect(session.status).toBe("failed");
+    expect(session.lastError).toContain("3 tries");
   });
 });
 
