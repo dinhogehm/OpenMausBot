@@ -11,12 +11,14 @@
 //
 // Everything outside the ledger comes in through DesktopWorkDeps, so the
 // whole flow is testable with a fake app and fake records.
+import { existsSync } from "node:fs";
 import type { CcDesktopPending, CcSession, CcSessionLedger } from "./cc-sessions.ts";
-import { ccReportForOwner, ccStallReport, type CcStallFacts } from "./cc-sessions.ts";
+import { ccHeldQueueReport, ccReportForOwner, ccStallReport, type CcStallFacts } from "./cc-sessions.ts";
 export { CC_ACTIVE_MS, ccSessionActive } from "./cc-sessions.ts";
 import {
   archiveDesktopSession,
   createDesktopSession,
+  renameDesktopSession,
   recordBlocked,
   recordInWorktree,
   summaryIsCurrent,
@@ -34,6 +36,8 @@ export const DESKTOP_RECORD_WAIT_MS = 5 * 60_000;
 export const DESKTOP_SEND_CONFIRM_MS = 3 * 60_000;
 /** ...or it is typed again, up to this many times in all. */
 export const DESKTOP_SEND_MAX_DELIVERIES = 3;
+/** A question left open in the app this long is reported to the owner. */
+export const DESKTOP_QUESTION_REPORT_MS = 2 * 60_000;
 /** A finished turn whose app summary is still the previous turn's is held this long for it. */
 export const DESKTOP_SUMMARY_WAIT_MS = 60_000;
 /** Tries to prepare the screen helper (compile it) before giving up. */
@@ -64,6 +68,8 @@ export interface DesktopWorkDeps {
   lastText: (transcript: string) => string;
   /** The transcript's latest event closes a turn. */
   turnEnded: (transcript: string) => boolean;
+  /** An AskUserQuestion in the transcript nobody answered yet. */
+  openQuestion?: (transcript: string) => { id: string; text: string } | null;
   /** A user event after `since` carries the text's first line. */
   mentions: (transcript: string, text: string, since: number) => boolean;
   writtenAt: (transcript: string) => number | null;
@@ -73,12 +79,15 @@ export interface DesktopWorkDeps {
   report: (session: CcSession, text: string) => void;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
   hookDecision?: (sessionId: string) => string | null;
+  /** Does this folder exist (default: the real filesystem)? */
+  pathExists?: (path: string) => boolean;
   /** The app confirmed the session archived (remove its worktree if asked). */
   onArchived?: (session: CcSession) => void;
   steps?: {
     create?: typeof createDesktopSession;
     send?: typeof sendToDesktopSession;
     archive?: typeof archiveDesktopSession;
+    rename?: typeof renameDesktopSession;
   };
 }
 
@@ -86,9 +95,20 @@ export interface DesktopWorkDeps {
  * issue number ("#9298 …"): the app titles the session from its opening
  * words, and the number is what people look for in the sidebar. The marker
  * that finds the session again goes on its own line below. */
+/** The issue a session is about: "#9311" or a leading "9311" in its title,
+ * else the first "#NNNN" or issue/PR link in its brief. */
+export function issueNumber(title: string, brief = ""): string | undefined {
+  return /#(\d{3,6})\b/.exec(title)?.[1]
+    ?? /^\s*(\d{3,6})\b/.exec(title)?.[1]
+    ?? /(?:#|\/issues\/|\/pull\/)(\d{3,6})\b/.exec(brief)?.[1];
+}
+
 export function desktopBriefText(title: string, marker: string, brief: string, footer = ""): string {
-  const number = /#\d{3,6}\b/.test(title) ? null : /(?:#|\/issues\/|\/pull\/)(\d{3,6})\b/.exec(brief)?.[1];
-  return `${number ? `#${number} ${title}` : title}\n[${marker}]\n\n${brief}${footer}`;
+  const number = issueNumber(title, brief);
+  // One "#NNNN" at the start, never twice ("#9311 9311 Chat…").
+  const bare = title.replace(/^\s*#?\d{3,6}\b\s*/, "");
+  const first = !number ? title : /#\d{3,6}\b/.test(title) && !/^\s*#\d/.test(title) ? title : `#${number} ${bare}`;
+  return `${first}\n[${marker}]\n\n${brief}${footer}`;
 }
 
 /** Wait before retrying a screen action that touched the screen and stopped. */
@@ -118,6 +138,45 @@ export function reportFor(deps: DesktopWorkDeps, session: CcSession): string {
   return ccReportForOwner(session, { hookDecision: id && deps.hookDecision ? deps.hookDecision(id) : null });
 }
 
+/** A screen action that cannot be done. Only a create that never opened
+ * fails the session; a message that could not be typed, or an archive or
+ * rename the screen would not allow, fails just that action — the session
+ * in the app is fine and keeps taking messages. The owner hears exactly
+ * what did not happen. */
+export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason: string): void {
+  const desktop = session.desktop!;
+  const pending = desktop.pending;
+  if (!pending || pending.kind === "create") {
+    failDesktopSession(deps, session, reason);
+    return;
+  }
+  delete desktop.pending;
+  const link = desktop.localId ? ` (claude://code/continue?session=${desktop.localId})` : "";
+  if (pending.kind === "send") {
+    if (session.status === "running" && !desktop.sent) session.status = "idle";
+    desktop.lastSend = { at: deps.now(), confirmed: false };
+    deps.ledger.save();
+    deps.chip(session, "a mensagem NÃO foi entregue no app", false);
+    deps.report(session, `Claude Code session "${session.title}" (${session.id}): your message was NOT delivered — ${reason}. The session itself is fine and idle in the app${link}; send it again with cc_session_send later, or tell the person. Undelivered message: "${pending.text.slice(0, 300)}"`);
+    return;
+  }
+  deps.ledger.save();
+  const what = pending.kind === "archive" ? "archive" : "rename";
+  deps.chip(session, pending.kind === "archive" ? "não foi possível arquivar no app — arquive à mão" : "não foi possível renomear no app", false);
+  deps.report(session, `Claude Code session "${session.title}" (${session.id}): could not ${what} it in the Claude app — ${reason}. Nothing else changed; ${pending.kind === "archive" ? "ask the person to archive it by hand" : "the person may rename it by hand"}${link}.`);
+}
+
+/** The next queued message still fresh enough to deliver; older ones are
+ * held back and the owner is asked to confirm or resend them. */
+export function takeFreshQueued(deps: Pick<DesktopWorkDeps, "ledger" | "now" | "chip" | "report">, session: CcSession): string | null {
+  const { next, held } = deps.ledger.takeQueued(session);
+  if (held.length) {
+    deps.chip(session, `${held.length} mensagem(ns) antiga(s) da fila retida(s) — reenvie o que ainda vale`, false);
+    deps.report(session, ccHeldQueueReport(session, held, deps.now()));
+  }
+  return next;
+}
+
 export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, reason: string): void {
   if (session.desktop) {
     delete session.desktop.pending;
@@ -131,7 +190,7 @@ export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, re
 }
 
 const actionLabel = (kind: CcDesktopPending["kind"]) =>
-  kind === "create" ? "open the session" : kind === "archive" ? "archive the session" : "send the message";
+  kind === "create" ? "open the session" : kind === "archive" ? "archive the session" : kind === "rename" ? "rename the session" : "send the message";
 
 /** The app's record of a session we opened: adopt its ids, mode and folder. */
 function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopRecord): boolean {
@@ -194,7 +253,22 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       deps.ledger.save();
       deps.chip(session, "the app did not confirm the archive; trying again", false);
     }
+    // The owner wants every session named "#NNNN …" in the app, and the app
+    // titles them itself: rename it once, the way a person would.
+    if (desktop.issue && !desktop.renameTried && !desktop.pending && record.title && !record.title.includes(desktop.issue)) {
+      desktop.renameTried = true;
+      desktop.pending = { kind: "rename", text: `#${desktop.issue} ${record.title}`, since: now, attempts: 0 };
+      deps.ledger.save();
+    }
     const transcript = deps.transcriptOf(record.cliSessionId);
+    // Its worktree is gone (removed by hand, or reused and cleaned up): the
+    // session cannot work there any more. Say so once; archiving stays possible.
+    if (session.cwd && !desktop.cwdGone && !(deps.pathExists ?? existsSync)(session.cwd)) {
+      desktop.cwdGone = true;
+      deps.ledger.save();
+      deps.chip(session, `a pasta da sessão não existe mais (${session.cwd})`, false);
+      deps.report(session, `Claude Code session "${session.title}" (${session.id}): its folder ${session.cwd} no longer exists, so it cannot keep working there. Archive it with cc_session_archive (nothing to remove) and start a new session if the work is not done.`);
+    }
     if (desktop.sent) {
       const sent = desktop.sent;
       const arrived = (record.latestUserFrameAt ?? 0) > sent.userFrameAt || (transcript !== null && deps.mentions(transcript, sent.text, sent.at));
@@ -215,6 +289,15 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
         continue;
       }
     }
+    // It asked something in the app and waits for an answer there: nothing
+    // we type reaches it until someone answers. Tell the owner what it asks.
+    const question = transcript !== null && (session.status === "running" || session.status === "stalled") ? deps.openQuestion?.(transcript) ?? null : null;
+    if (question && desktop.questionReported !== question.id && now - (deps.writtenAt(transcript!) ?? now) >= DESKTOP_QUESTION_REPORT_MS) {
+      desktop.questionReported = question.id;
+      deps.ledger.save();
+      deps.chip(session, `a sessão fez uma pergunta no app e está parada nela: ${question.text.split("\n")[0]!.slice(0, 100)}`, false);
+      deps.report(session, `Claude Code session "${session.title}" (${session.id}) asked a question in the Claude app and is stopped on it — it reads nothing else (queued messages included) until someone answers there. Only the person can answer, in the app: claude://code/continue?session=${desktop.localId}\nIts question, verbatim:\n${question.text}`);
+    }
     const turns = record.completedTurns ?? 0;
     // Marked running, yet nothing is on its way and the app's last turn has
     // ended long ago: no turn is coming to drain the queue (a message lost
@@ -231,7 +314,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
         const blocked = recordBlocked(record);
         if (blocked) session.blockedOn = blocked;
         else delete session.blockedOn;
-        const next = desktop.archiveWhenResolved ? null : deps.ledger.takeQueued(session);
+        const next = desktop.archiveWhenResolved ? null : takeFreshQueued(deps, session);
         if (next !== null) {
           desktop.pending = { kind: "send", text: next, since: now, attempts: 0 };
           session.status = "running";
@@ -265,7 +348,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       delete session.stallReports;
       session.lastActivityAt = now;
       session.progressAt = now;
-      const next = desktop.archiveWhenResolved ? null : deps.ledger.takeQueued(session);
+      const next = desktop.archiveWhenResolved ? null : takeFreshQueued(deps, session);
       if (next !== null) {
         desktop.pending = { kind: "send", text: next, since: now, attempts: 0 };
         session.status = "running";
@@ -278,6 +361,16 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       deps.ledger.save();
       deps.chip(session, blocked ? `terminou o turno ${turns} bloqueada — precisa de: ${blocked.slice(0, 80)}` : `terminou o turno ${turns}`, !blocked);
       deps.report(session, reportFor(deps, session));
+    }
+    // Idle with messages waiting (queued while a rename or another step was
+    // on its way): the next one goes in now.
+    if (session.status === "idle" && !desktop.pending && !desktop.sent && !desktop.archiveWhenResolved && session.queued.length) {
+      const next = takeFreshQueued(deps, session);
+      if (next !== null) {
+        desktop.pending = { kind: "send", text: next, since: now, attempts: 0 };
+        session.status = "running";
+        deps.ledger.save();
+      }
     }
     if (desktop.archiveWhenResolved && !desktop.pending && !desktop.sent) {
       delete desktop.archiveWhenResolved;
@@ -298,7 +391,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
   const desktop = next.desktop!;
   const pending = desktop.pending!;
   if (now - pending.since > DESKTOP_PENDING_MAX_MS) {
-    failDesktopSession(deps, next, `the Mac was never idle and unlocked for long enough in 12 hours to ${actionLabel(pending.kind)} (${pending.lastReason ?? "busy"})`);
+    giveUpPending(deps, next, `the Mac was never idle and unlocked for long enough in 12 hours to ${actionLabel(pending.kind)} (${pending.lastReason ?? "busy"})`);
     return;
   }
   // A crash between Return and saving leaves a create that may have gone
@@ -314,7 +407,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       return;
     }
   }
-  if ((pending.kind === "send" || pending.kind === "archive") && !desktop.localId) {
+  if (pending.kind !== "create" && !desktop.localId) {
     failDesktopSession(deps, next, "the session never opened in the Claude app, so nothing can be done to it there; start a new one");
     return;
   }
@@ -329,7 +422,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       const why = `could not prepare the screen helper: ${error instanceof Error ? error.message.slice(0, 300) : String(error)}`;
       pending.helperFailures = (pending.helperFailures ?? 0) + 1;
       if (pending.helperFailures >= DESKTOP_HELPER_MAX_TRIES) {
-        failDesktopSession(deps, next, `${why} (${pending.helperFailures} tries)`);
+        giveUpPending(deps, next, `${why} (${pending.helperFailures} tries)`);
         return;
       }
       pending.lastReason = why;
@@ -347,9 +440,12 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     } else {
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;
+      const target = { localId: desktop.localId!, title: record?.title ?? next.title };
       step = pending.kind === "archive"
-        ? await (steps.archive ?? archiveDesktopSession)(driver, { localId: desktop.localId!, title: record?.title ?? next.title })
-        : await (steps.send ?? sendToDesktopSession)(driver, { localId: desktop.localId!, text: pending.text, title: record?.title ?? next.title });
+        ? await (steps.archive ?? archiveDesktopSession)(driver, target)
+        : pending.kind === "rename"
+          ? await (steps.rename ?? renameDesktopSession)(driver, { ...target, newTitle: pending.text })
+          : await (steps.send ?? sendToDesktopSession)(driver, { ...target, text: pending.text });
     }
     const at = deps.now();
     if (step.ok) {
@@ -358,6 +454,12 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
         pending.verifyUntil = at + DESKTOP_ARCHIVE_CONFIRM_MS;
         pending.archiveTries = (pending.archiveTries ?? 0) + 1;
         deps.ledger.save();
+        return;
+      }
+      if (pending.kind === "rename") {
+        delete desktop.pending;
+        deps.ledger.save();
+        deps.chip(next, `renomeada no app: ${pending.text.slice(0, 80)}`);
         return;
       }
       delete desktop.pending;
@@ -374,13 +476,13 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       return;
     }
     if (!step.retry) {
-      failDesktopSession(deps, next, step.reason);
+      giveUpPending(deps, next, step.reason);
       return;
     }
     if (step.miss) {
       pending.misses = (pending.misses ?? 0) + 1;
       if (pending.misses >= DESKTOP_MAX_MISSES) {
-        failDesktopSession(deps, next, `could not ${actionLabel(pending.kind)} after ${pending.misses} tries with the screen unlocked and the Claude app in front: ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`);
+        giveUpPending(deps, next, `could not ${actionLabel(pending.kind)} after ${pending.misses} tries with the screen unlocked and the Claude app in front: ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`);
         return;
       }
     }
@@ -425,6 +527,7 @@ export function watchStalledSessions(deps: DesktopWorkDeps): void {
       lastActivityAt: progress,
       ...(record ? { completedTurns: record.completedTurns ?? 0, blocked: recordBlocked(record) } : {}),
       ...(session.desktop?.localId ? { link: `claude://code/continue?session=${session.desktop.localId}` } : {}),
+      ...(transcript && deps.openQuestion ? { question: deps.openQuestion(transcript)?.text ?? null } : {}),
     });
     if (session.status === "stalled") {
       if (session.stallReportedAt !== undefined && progress > session.stallReportedAt) {
@@ -438,12 +541,22 @@ export function watchStalledSessions(deps: DesktopWorkDeps): void {
       }
       const reports = session.stallReports ?? 1;
       if (reports >= CC_STALL_MAX_REPORTS || now - (session.stallNotifiedAt ?? 0) < CC_STALL_REMIND_MS) continue;
+      const minutes = Math.round((now - progress) / 60_000);
+      const known = facts();
+      // The last reminder, and no turn is under way (none ever ran, or the
+      // last one ended): nothing will move it. Close it instead of leaving it
+      // stalled forever with a queue nobody delivers.
+      if (reports + 1 >= CC_STALL_MAX_REPORTS && (session.turns === 0 || known.turnEnded === true)) {
+        const dropped = session.queued.length;
+        session.queued = [];
+        failDesktopSession(deps, session, `${session.turns === 0 ? "it never answered its brief" : "its last turn ended and it never moved again"} (no progress for ${minutes} min, ${CC_STALL_MAX_REPORTS} reminders)${dropped ? `; ${dropped} queued message(s) were dropped` : ""} — reopen the work in a new session or archive this one`);
+        continue;
+      }
       session.stallReports = reports + 1;
       session.stallNotifiedAt = now;
       deps.ledger.save();
-      const minutes = Math.round((now - progress) / 60_000);
       deps.chip(session, `ainda parada, sem progresso há ${minutes} min (aviso ${reports + 1} de ${CC_STALL_MAX_REPORTS})`, false);
-      deps.report(session, `${ccStallReport(session, minutes, facts())}\n(Reminder ${reports + 1} of ${CC_STALL_MAX_REPORTS}; after the last one you are not reminded again.)`);
+      deps.report(session, `${ccStallReport(session, minutes, known)}\n(Reminder ${reports + 1} of ${CC_STALL_MAX_REPORTS}; after the last one you are not reminded again.)`);
       continue;
     }
     if (now - progress <= CC_STALL_MS) continue;

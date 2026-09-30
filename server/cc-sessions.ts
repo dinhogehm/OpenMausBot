@@ -49,8 +49,11 @@ export interface CcSession {
   costUsd: number;
   lastReport?: string;
   lastError?: string;
-  /** Messages sent while a turn was running; each becomes the next turn. */
-  queued: string[];
+  /** Messages sent while a turn was running; each becomes the next turn,
+   * unless it waited so long it may no longer hold (see takeQueued). */
+  queued: CcQueued[];
+  /** Queued messages held back for being too old; the owner must resend. */
+  heldQueue?: CcQueued[];
   archivedAt?: number;
   /** "app": the session lives in the Claude desktop app, driven through its
    * screen (server/claude-desktop.ts); "cli" (default for older records):
@@ -72,6 +75,13 @@ export interface CcSession {
 }
 
 export type CcSurface = "app" | "cli";
+
+/** A message waiting for a session's turn to end, and when it was queued. */
+export interface CcQueued { text: string; at: number }
+
+/** A queued message older than this is not delivered on its own: the state
+ * it was written for may have changed (a policy, a branch, a GO). */
+export const CC_QUEUE_MAX_AGE_MS = 2 * 3_600_000;
 
 /** A running session counts as "someone is working on it" only this long after its last progress. */
 export const CC_ACTIVE_MS = 45 * 60_000;
@@ -103,6 +113,14 @@ export interface CcDesktopState {
   permissionMode?: string;
   /** Remove its worktree once the app confirms it archived (remove_worktree). */
   removeWorktree?: boolean;
+  /** The issue number the session is about ("9311"), from its title or brief. */
+  issue?: string;
+  /** A rename to "#NNNN …" was already tried (it is tried once). */
+  renameTried?: boolean;
+  /** tool_use id of the open question already reported to the owner. */
+  questionReported?: string;
+  /** Its folder was found missing (reported once). */
+  cwdGone?: boolean;
   /** Our latest message typed into the app, and whether its transcript showed it. */
   lastSend?: { at: number; confirmed: boolean };
   /** A finished turn whose app summary was still the previous turn's: wait a little for it. */
@@ -110,7 +128,7 @@ export interface CcDesktopState {
 }
 
 export interface CcDesktopPending {
-  kind: "create" | "send" | "archive";
+  kind: "create" | "send" | "archive" | "rename";
   text: string;
   since: number;
   /** Tries that touched the screen and had to stop. */
@@ -262,7 +280,10 @@ export class CcSessionLedger {
           session.stallReports = session.stallReports ?? 1;
           session.stallNotifiedAt = session.stallNotifiedAt ?? this.now();
         }
-        session.queued = Array.isArray(session.queued) ? session.queued : [];
+        // Older ledgers queued bare strings, with no age: treat them as old.
+        session.queued = Array.isArray(session.queued)
+          ? (session.queued as unknown[]).map((item) => (typeof item === "string" ? { text: item, at: 0 } : item as CcQueued)).filter((item) => item && typeof item.text === "string")
+          : [];
         this.sessions.set(session.id, session);
       }
     } catch (error) {
@@ -339,15 +360,22 @@ export class CcSessionLedger {
   }
 
   enqueue(session: CcSession, message: string): number {
-    session.queued.push(message);
+    session.queued.push({ text: message, at: this.now() });
     this.save();
     return session.queued.length;
   }
 
-  takeQueued(session: CcSession): string | null {
-    const next = session.queued.shift() ?? null;
-    if (next !== null) this.save();
-    return next;
+  /** The next queued message to deliver. Messages older than
+   * CC_QUEUE_MAX_AGE_MS are not delivered: they move to heldQueue, and the
+   * caller tells the owner (`held`) to confirm or resend them. */
+  takeQueued(session: CcSession): { next: string | null; held: CcQueued[] } {
+    const now = this.now();
+    const held: CcQueued[] = [];
+    while (session.queued.length && now - session.queued[0]!.at > CC_QUEUE_MAX_AGE_MS) held.push(session.queued.shift()!);
+    if (held.length) session.heldQueue = [...(session.heldQueue ?? []), ...held];
+    const next = session.queued.shift()?.text ?? null;
+    if (next !== null || held.length) this.save();
+    return { next, held };
   }
 
   setStatus(session: CcSession, status: "stopped" | "archived"): void {
@@ -364,7 +392,7 @@ export function ccSessionLine(session: CcSession): string {
     `${session.id} · "${session.title}" · ${session.status}${session.surface === "app" ? " · in the Claude app" : ""}`,
     `turns ${session.turns}, US$ ${session.costUsd.toFixed(2)}`,
     session.cwd ? `worktree ${session.cwd}` : session.surface === "app" ? "worktree chosen by the app (pending)" : `worktree ${session.repo}/.claude/worktrees/${session.worktree} (pending)`,
-    ...(session.desktop?.pending ? [`waiting for an idle Mac to ${session.desktop.pending.kind === "create" ? "open it" : session.desktop.pending.kind === "archive" ? "archive it" : "send a message"}${session.desktop.pending.lastReason ? ` (${session.desktop.pending.lastReason})` : ""}`] : []),
+    ...(session.desktop?.pending ? [`waiting for an idle Mac to ${session.desktop.pending.kind === "create" ? "open it" : session.desktop.pending.kind === "archive" ? "archive it" : session.desktop.pending.kind === "rename" ? "rename it" : "send a message"}${session.desktop.pending.lastReason ? ` (${session.desktop.pending.lastReason})` : ""}`] : []),
     ...(session.desktop?.sent ? ["message typed in the app, checking that it arrived"] : []),
     ...(session.blockedOn ? [`BLOCKED — needs: ${session.blockedOn.slice(0, 200)}`] : []),
     ...(session.desktop?.archiveWhenResolved ? ["to be archived once it opens"] : []),
@@ -408,6 +436,8 @@ export interface CcStallFacts {
   blocked?: string | null;
   /** Deep link that opens it in the Claude app. */
   link?: string;
+  /** A question it asked in the app that nobody answered. */
+  question?: string | null;
 }
 
 const clock = (ms: number) => new Date(ms).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
@@ -428,6 +458,7 @@ export function ccStallReport(session: CcSession, minutes: number, facts: CcStal
     ...(lastSend ? [lastSend.confirmed ? `Our last message (typed ${clock(lastSend.at)}) did reach it.` : `Our last message (typed ${clock(lastSend.at)}) never showed up in its transcript.`] : []),
     ...(session.queued.length ? [`${session.queued.length} message(s) are queued for it here.`] : []),
     ...(facts.blocked ? [`Its last turn ended BLOCKED — it needs: ${facts.blocked}`] : []),
+    ...(facts.question ? [`It is STOPPED ON A QUESTION in the app (only the person can answer there): ${facts.question}`] : []),
     // An approval prompt is only possible mid-turn, and never in bypass mode.
     ...(!facts.turnEnded && app ? [mode === "bypassPermissions" ? "It runs in bypassPermissions: there is no approval dialog to answer." : `If it waits on anything, it is a prompt in the Claude app (mode ${mode}) — check before saying so.`] : []),
     app
@@ -461,4 +492,14 @@ export function lastHookDecision(logPath: string, sessionId: string, maxBytes = 
   } finally {
     if (fd !== null) closeSync(fd);
   }
+}
+
+/** What the owner hears about queued messages held back for their age. */
+export function ccHeldQueueReport(session: CcSession, held: CcQueued[], now: number): string {
+  const age = (at: number) => (at ? `${Math.round((now - at) / 3_600_000)}h` : "age unknown");
+  return [
+    `Claude Code session "${session.title}" (${session.id}): ${held.length} queued message(s) were NOT delivered — they waited too long (over ${Math.round(CC_QUEUE_MAX_AGE_MS / 3_600_000)}h) and may no longer hold:`,
+    ...held.map((item) => `- (${age(item.at)}) ${item.text.split("\n")[0]!.slice(0, 200)}`),
+    "Check what is current and send again with cc_session_send what still applies.",
+  ].join("\n");
 }

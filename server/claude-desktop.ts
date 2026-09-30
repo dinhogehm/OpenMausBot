@@ -45,6 +45,8 @@ export interface DesktopDriver {
   click(x: number, y: number): Promise<void>;
   rightClick(x: number, y: number): Promise<void>;
   key(code: number, command?: boolean): Promise<void>;
+  /** Type `text` as keystrokes: the app keeps it as the user's own words. */
+  typeText(text: string): Promise<void>;
   /** Clipboard paste of `text`; `selectAll` first replaces what is in the field. */
   paste(text: string, selectAll: boolean): Promise<void>;
   menuNewSession(): Promise<void>;
@@ -166,6 +168,14 @@ function titleForms(text: string): string[] {
   return icon ? [base, icon[1]!] : [base];
 }
 
+/** Two OCR readings of the main area that are (nearly) the same screen. */
+function sameScreen(before: OcrLine[], after: OcrLine[]): boolean {
+  if (!before.length || !after.length) return false;
+  const seen = new Set(before.map((line) => normalize(line.text)));
+  const kept = after.filter((line) => seen.has(normalize(line.text))).length;
+  return kept / Math.max(before.length, after.length) >= 0.8;
+}
+
 /** A short trace of what the screen showed, for the error a person reads. */
 function seenText(lines: OcrLine[], max = 8): string {
   return lines.slice(0, max).map((line) => line.text.trim()).filter(Boolean).join(" | ").slice(0, 300);
@@ -203,22 +213,34 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     await driver.sleep(700);
     let stop = await guard(screen, "open");
     if (stop) return stop;
+    const size = await driver.screenSize();
+    const before = mainArea(await driver.ocr());
     await act(screen, () => driver.menuNewSession());
     await driver.sleep(2_500);
     stop = await guard(screen, "new session");
     if (stop) return stop;
     const lines = mainArea(await driver.ocr());
-    if (!showsFolder(lines, input.repoName)) {
-      return { ok: false, reason: `the new session did not open in ${input.repoName} (the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
+    // A session that is already open shows the same folder and a "worktree"
+    // word too: pasting there would send the brief into it. Require that
+    // the screen changed (New Session opened) and read the folder and the
+    // worktree option only near the composer, where a new session shows them.
+    if (sameScreen(before, lines)) {
+      return { ok: false, reason: "New Session did not open (the screen did not change)", retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
     }
-    if (!findLine(lines, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
+    const bottom = lines.filter((line) => line.y > size.h * 0.55);
+    if (!showsFolder(bottom, input.repoName)) {
+      return { ok: false, reason: `the new session did not open in ${input.repoName} (the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+    }
+    if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     stop = await guard(screen, "paste");
     if (stop) return stop;
     await act(screen, () => driver.paste(input.text, true));
     await driver.sleep(500);
     stop = await guard(screen, "note");
     if (stop) return stop;
-    await act(screen, () => driver.paste(` ${DESKTOP_BRIEF_NOTE}`, false));
+    // Typed, not pasted: the app folds consecutive pastes into one pasted
+    // block, and the session must see these words as the user's own.
+    await act(screen, () => driver.typeText(` ${DESKTOP_BRIEF_NOTE}`));
     await driver.sleep(300);
     stop = await guard(screen, "send");
     if (stop) return stop;
@@ -259,7 +281,7 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (input.text.length > DESKTOP_NOTE_AFTER_CHARS) {
       stop = await guard(screen, "note");
       if (stop) return stop;
-      await act(screen, () => driver.paste(` ${DESKTOP_MESSAGE_NOTE}`, false));
+      await act(screen, () => driver.typeText(` ${DESKTOP_MESSAGE_NOTE}`));
       await driver.sleep(300);
     }
     const prefix = textPrefix(input.text);
@@ -294,38 +316,99 @@ function sameTitle(lineText: string, title: string): boolean {
   return titleForms(lineText).some((shown) => shown === wanted || shown.startsWith(`${wanted} v `) || shown.startsWith(`${wanted} (`));
 }
 
-/** Archive a session in the app: its sidebar entry → right click → "Arquivar". */
-export async function archiveDesktopSession(driver: DesktopDriver, input: { localId: string; title: string }): Promise<DesktopStep> {
+type MenuItems = readonly string[];
+const ARCHIVE_ITEMS: MenuItems = ["Arquivar", "Archive"];
+const RENAME_ITEMS: MenuItems = ["Renomear", "Rename"];
+
+/**
+ * One item of a session's menu. The session is opened by its own link and
+ * checked by its title in the header; the header's dropdown is tried first
+ * (it is always on screen, while the sidebar shows only ~20 of 130+
+ * sessions), the sidebar entry's right-click menu only as a fallback.
+ * `then` runs after the item was clicked (rename types the new name).
+ */
+async function sessionMenuAction(
+  driver: DesktopDriver,
+  input: { localId: string; title: string },
+  items: MenuItems,
+  verb: string,
+  then?: (screen: Screen) => Promise<DesktopStep | null>,
+): Promise<DesktopStep> {
   if (!/^local_[0-9a-f-]{36}$/.test(input.localId)) return { ok: false, reason: "invalid desktop session id", retry: false };
+  const isItem = (line: OcrLine) => items.includes(line.text.trim());
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.openUrl(`claude://code/continue?session=${input.localId}`));
     await driver.sleep(2_500);
     let stop = await guard(screen, "open session");
     if (stop) return stop;
-    // Titles repeat in the sidebar ("Relatorio nightly" fifteen times): act
-    // only on one unambiguous entry, never on the first of several.
-    const sidebar = (await driver.ocr()).filter((line) => line.x < SIDEBAR_MAX_X);
+    const screenLines = await driver.ocr();
+    const header = mainArea(screenLines).find((line) => line.y < 140 && sidebarMatch(line.text, input.title));
+    const finish = async (): Promise<DesktopStep> => {
+      const after = then ? await then(screen) : null;
+      if (after) return after;
+      await driver.sleep(1_000);
+      return { ok: true };
+    };
+    if (header) {
+      stop = await guard(screen, "header menu");
+      if (stop) return stop;
+      await act(screen, () => driver.click(header.x + 20, header.y + header.h / 2));
+      await driver.sleep(800);
+      const item = (await driver.ocr()).find((line) => isItem(line) && line.y > header.y && line.y - header.y < 400);
+      stop = await guard(screen, `${verb} menu`);
+      if (stop) return stop;
+      if (item) {
+        await act(screen, () => driver.click(item.x + item.w / 2, item.y + item.h / 2));
+        return finish();
+      }
+      await act(screen, () => driver.key(ESCAPE));
+      await driver.sleep(300);
+    }
+    // Fallback: the sidebar entry. Titles repeat there ("Relatorio nightly"
+    // fifteen times): act only on one unambiguous entry.
+    const sidebar = screenLines.filter((line) => line.x < SIDEBAR_MAX_X);
     const matches = sidebar.filter((line) => sidebarMatch(line.text, input.title));
-    if (!matches.length) return { ok: false, reason: `"${input.title}" is not visible in the app's sidebar`, retry: true, miss: true, touched: true, seen: seenText(sidebar) };
+    if (!matches.length) {
+      return { ok: false, reason: `"${input.title}" is neither in the open session's header menu nor visible in the app's sidebar`, retry: true, miss: true, touched: true, seen: seenText([...mainArea(screenLines).filter((line) => line.y < 140), ...sidebar]) };
+    }
     const exact = matches.filter((line) => sameTitle(line.text, input.title));
     const entry = matches.length === 1 ? matches[0]! : exact.length === 1 ? exact[0]! : null;
     if (!entry) {
-      return { ok: false, reason: `${matches.length} sessions in the app's sidebar match "${input.title}", so it cannot tell which to archive; archive it by hand in the Claude app`, retry: false, touched: true };
+      return { ok: false, reason: `${matches.length} sessions in the app's sidebar match "${input.title}", so it cannot tell which to ${verb}; ${verb} it by hand in the Claude app`, retry: false, touched: true };
     }
     stop = await guard(screen, "session menu");
     if (stop) return stop;
     await act(screen, () => driver.rightClick(entry.x + 30, entry.y + entry.h / 2));
     await driver.sleep(800);
-    const item = (await driver.ocr()).find((line) => (line.text.trim() === "Arquivar" || line.text.trim() === "Archive") && Math.abs(line.y - entry.y) < 400);
-    stop = await guard(screen, "archive menu");
+    const item = (await driver.ocr()).find((line) => isItem(line) && Math.abs(line.y - entry.y) < 400);
+    stop = await guard(screen, `${verb} menu`);
     if (stop) return stop; // the Claude app is not in front (or the person is back): no Escape into their app
     if (!item) {
       await act(screen, () => driver.key(ESCAPE));
-      return { ok: false, reason: "the session menu showed no Archive item", retry: true, miss: true, touched: true };
+      return { ok: false, reason: `the session menu showed no ${items[1]} item`, retry: true, miss: true, touched: true };
     }
     await act(screen, () => driver.click(item.x + item.w / 2, item.y + item.h / 2));
-    await driver.sleep(1_000);
-    return { ok: true };
+    return finish();
+  });
+}
+
+/** Archive a session in the app, from its own menu. */
+export async function archiveDesktopSession(driver: DesktopDriver, input: { localId: string; title: string }): Promise<DesktopStep> {
+  return sessionMenuAction(driver, input, ARCHIVE_ITEMS, "archive");
+}
+
+/** Rename a session in the app ("#9311 Chat no ticket…"), from its own menu. */
+export async function renameDesktopSession(driver: DesktopDriver, input: { localId: string; title: string; newTitle: string }): Promise<DesktopStep> {
+  return sessionMenuAction(driver, input, RENAME_ITEMS, "rename", async (screen) => {
+    await driver.sleep(500);
+    let stop = await guard(screen, "rename field");
+    if (stop) return stop;
+    await act(screen, () => driver.paste(input.newTitle, true));
+    await driver.sleep(300);
+    stop = await guard(screen, "rename confirm");
+    if (stop) return stop;
+    await act(screen, () => driver.key(RETURN));
+    return null;
   });
 }
 
@@ -417,6 +500,36 @@ function readRecord(file: string): DesktopRecord | null {
 export function readDesktopRecord(localId: string, dir = DESKTOP_SESSIONS_DIR): DesktopRecord | null {
   for (const file of recordFiles(dir)) if (file.endsWith(`/${localId}.json`)) return readRecord(file);
   return null;
+}
+
+/** The repository a session's folder belongs to (a worktree's parent repo). */
+export function repoOf(record: Pick<DesktopRecord, "cwd" | "worktreePath">): string | undefined {
+  const folder = record.worktreePath ?? record.cwd;
+  if (!folder) return undefined;
+  const at = folder.indexOf("/.claude/worktrees/");
+  return at >= 0 ? folder.slice(0, at) : folder;
+}
+
+/** The repository of the app's most recently created session: New Session
+ * opens there, whatever we would like. */
+export function lastAppRepo(dir = DESKTOP_SESSIONS_DIR): string | undefined {
+  let newest: DesktopRecord | null = null;
+  for (const file of recordFiles(dir)) {
+    const record = readRecord(file);
+    if (record && (record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
+  }
+  return newest ? repoOf(newest) : undefined;
+}
+
+/** App sessions, not archived, working in `folder` (the app reuses worktrees). */
+export function recordsUsingFolder(folder: string, exceptLocalId?: string, dir = DESKTOP_SESSIONS_DIR): DesktopRecord[] {
+  const found: DesktopRecord[] = [];
+  for (const file of recordFiles(dir)) {
+    const record = readRecord(file);
+    if (!record || record.isArchived || record.sessionId === exceptLocalId) continue;
+    if (record.cwd === folder || record.worktreePath === folder) found.push(record);
+  }
+  return found;
 }
 
 export function transcriptPath(record: Pick<DesktopRecord, "cliSessionId">, projects = CLAUDE_PROJECTS_DIR): string | null {
@@ -516,6 +629,46 @@ export function transcriptTurnEnded(transcript: string): boolean {
   return false;
 }
 
+/** A question the session asked in the app (AskUserQuestion) that nobody
+ * has answered: its tool_use has no tool_result after it. The session is
+ * stopped on it and reads nothing else until someone answers in the app. */
+export function transcriptOpenQuestion(transcript: string): { id: string; text: string } | null {
+  let raw = "";
+  try {
+    raw = readFileSync(transcript, "utf8").slice(-1_000_000);
+  } catch {
+    return null;
+  }
+  const answered = new Set<string>();
+  const lines = raw.trimEnd().split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const event = JSON.parse(lines[i]!) as { type?: string; message?: { content?: unknown } };
+      const content = Array.isArray(event.message?.content) ? event.message!.content as Array<Record<string, unknown>> : [];
+      if (event.type === "user") {
+        for (const part of content) if (part?.type === "tool_result" && typeof part.tool_use_id === "string") answered.add(part.tool_use_id);
+        continue;
+      }
+      if (event.type !== "assistant") continue;
+      const ask = content.find((part) => part?.type === "tool_use" && part.name === "AskUserQuestion");
+      if (!ask) continue;
+      const id = String(ask.id ?? "");
+      if (answered.has(id)) return null;
+      return { id, text: questionText(ask.input) };
+    } catch { /* partial line */ }
+  }
+  return null;
+}
+
+function questionText(input: unknown): string {
+  const questions = (input as { questions?: Array<{ question?: unknown; options?: Array<{ label?: unknown }> }> } | undefined)?.questions;
+  if (!Array.isArray(questions) || !questions.length) return JSON.stringify(input ?? "").slice(0, 1_000);
+  return questions.map((item) => {
+    const options = Array.isArray(item.options) ? item.options.map((option) => String(option?.label ?? "")).filter(Boolean) : [];
+    return `${String(item.question ?? "").trim()}${options.length ? ` [opções: ${options.join(" / ")}]` : ""}`;
+  }).join("\n").slice(0, 2_000);
+}
+
 /** When the transcript was last written, or null. */
 export function transcriptWrittenAt(transcript: string): number | null {
   try {
@@ -576,6 +729,15 @@ export function macDesktopDriver(helper: string, env: NodeJS.ProcessEnv): Deskto
     },
     async key(code, command) {
       await run(helper, ["key", String(code), ...(command ? ["cmd"] : [])], env);
+    },
+    async typeText(text) {
+      const file = join(tmpdir(), `omb-desktop-type-${process.pid}-${Date.now()}.txt`);
+      writeFileSync(file, text, { mode: 0o600 });
+      try {
+        await run(helper, ["type", file], env);
+      } finally {
+        rmSync(file, { force: true });
+      }
     },
     async paste(text, selectAll) {
       const file = join(tmpdir(), `omb-desktop-paste-${process.pid}-${Date.now()}.txt`);

@@ -231,6 +231,7 @@
   "sidebar.searchAria": "Buscar bots e mensagens",
   "sidebar.noMatch": "Nada corresponde a “{query}”",
   "sidebar.preview.waiting": "Esperando por você…",
+  "sidebar.preview.needsYouSince": "Precisa de você · desde {when}",
   "sidebar.preview.needsYou": "Precisa de você",
   "sidebar.preview.waitingOnTeammate": "Esperando um colega…",
   "sidebar.preview.working": "Trabalhando…",
@@ -1749,5 +1750,8 @@
   "effort.high": "Alto",
   "effort.xhigh": "Muito alto",
   "effort.max": "Máximo",
-  "effort.default": "Padrão"
+  "effort.default": "Padrão",
+  "workspaceSwitcher.servers": "Servidores",
+  "workspaceSwitcher.aria": "Trocar servidor: {name}",
+  "workspaceSwitcher.menuError": "Não foi possível abrir a lista de servidores. Use o menu Servidor."
 }

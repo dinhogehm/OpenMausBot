@@ -5,6 +5,7 @@ import { t } from "@/lib/i18n";
 import { displayThreadTitle } from "@/lib/thread-title";
 import { orderedSidebarThreads, orderedThreadList } from "./SidebarThreadRow";
 import type { SidebarDensity } from "@/lib/sidebar-preferences";
+import { needsYouLabel } from "@/lib/message-stamp";
 
 /** Attention is not history browsing: idle conversations never enter this list.
  * Read the sibling's own status, not the bot's aggregate busy/waiting flags. */
@@ -12,7 +13,7 @@ export function sidebarBotActivityTasks(bot: Bot, queued: Record<string, unknown
   const tasks = bot.tasks ?? [{
     threadId: bot.threadId, title: t("task.newShort"), createdAt: 0,
     busy: bot.busy, activity: bot.activity, unread: bot.unread,
-    waitingForTeammates: bot.waitingForTeammates, goalNeedsInput: bot.goalNeedsInput,
+    waitingForTeammates: bot.waitingForTeammates, goalNeedsInput: bot.goalNeedsInput, goalNeedsInputSince: bot.goalNeedsInputSince,
   }];
   return tasks.map((task) => ({ ...task, queued: Boolean(queued[task.threadId]?.length) }))
     // Routine runs are reachable through their run receipt, never a menu.
@@ -112,7 +113,7 @@ export function AttentionThreadRows({ entries, onJump }: { entries: AttentionThr
       const waiting = entry.task.activity === "waiting-on-you" || entry.task.goalNeedsInput === true;
       const teammateWait = !waiting && entry.task.waitingForTeammates === true;
       const working = !waiting && !teammateWait && (entry.task.busy || entry.task.activity === "working");
-      const status = entry.task.goalNeedsInput && entry.task.activity !== "waiting-on-you" ? t("sidebar.preview.needsYou") : waiting ? t("task.waiting") : working ? t("chat.activity.working") : teammateWait ? t("task.waitingOnTeammate") : entry.task.queued ? t("task.queued") : t("task.unread");
+      const status = entry.task.goalNeedsInput && entry.task.activity !== "waiting-on-you" ? needsYouLabel(entry.task.goalNeedsInputSince) : waiting ? t("task.waiting") : working ? t("chat.activity.working") : teammateWait ? t("task.waitingOnTeammate") : entry.task.queued ? t("task.queued") : t("task.unread");
       const name = attentionOwnerName(entry);
       const label = t("attention.item", { title: entry.task.title, name, status });
       const Icon = waiting ? CircleAlert : working ? Loader2 : teammateWait || entry.task.queued ? Clock3 : BellDot;
@@ -142,7 +143,7 @@ export function SidebarBotActivity({ bot, density }: { bot: Bot; density: Sideba
       const waiting = task.activity === "waiting-on-you" || needsYou;
       const teammateWait = !waiting && task.waitingForTeammates === true;
       const working = !waiting && !teammateWait && (task.busy || task.activity === "working");
-      const status = needsYou ? t("sidebar.preview.needsYou") : waiting ? t("sidebar.preview.waiting") : working ? t("chat.activity.working") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : task.queued ? t("task.queued") : t("task.unread");
+      const status = needsYou ? needsYouLabel(task.goalNeedsInputSince) : waiting ? t("sidebar.preview.waiting") : working ? t("chat.activity.working") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : task.queued ? t("task.queued") : t("task.unread");
       // only unread: the accent bell already says so; no "Unread" label next to it
       const unreadOnly = !waiting && !working && !teammateWait && !task.queued;
       const label = `${bot.name}: ${task.title} · ${status}${task.unread && (waiting || working || teammateWait || task.queued) ? ` · ${t("task.unread")}` : ""}`;

@@ -720,6 +720,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
       properties: {
         status: { type: "string", enum: ["completed", "blocked", "needs_input"] },
         detail: { type: "string", minLength: 1, maxLength: 500, description: "What was delivered, or exactly what blocks it." },
+        thread_id: { type: "string", description: "Optional: end the goal of another of your conversations (e.g. the decision it waited for came here)." },
       },
       required: ["status", "detail"],
     },

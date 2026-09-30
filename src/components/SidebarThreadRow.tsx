@@ -8,8 +8,9 @@ import { displayThreadTitle } from "@/lib/thread-title";
 import { nextRename } from "@/lib/rename";
 import { threadRefUrl } from "@/lib/thread-refs";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { needsYouLabel } from "@/lib/message-stamp";
 
-type ThreadRowTask = Pick<Task, "threadId" | "title" | "projectId" | "busy" | "activity" | "unread" | "openedBy" | "closedBy" | "archivedAt" | "snoozedUntil" | "waitingForTeammates" | "goalNeedsInput"> & {
+type ThreadRowTask = Pick<Task, "threadId" | "title" | "projectId" | "busy" | "activity" | "unread" | "openedBy" | "closedBy" | "archivedAt" | "snoozedUntil" | "waitingForTeammates" | "goalNeedsInput" | "goalNeedsInputSince"> & {
   queued?: boolean;
   pinned?: boolean;
   createdAt?: number;
@@ -253,7 +254,7 @@ export function SidebarThreadRow({ task, ownerId, current, compact, folders, onS
   const finishing = useRef(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const actionRef = useRef<HTMLButtonElement>(null);
-  const status = task.activity === "waiting-on-you" ? t("task.waiting") : task.goalNeedsInput ? t("sidebar.preview.needsYou") : isWaitingOnTeammate(task) ? t("task.waitingOnTeammate") : isWorking(task) ? activityLabel ?? t("chat.activity.working") : task.queued ? t("task.queued") : null;
+  const status = task.activity === "waiting-on-you" ? t("task.waiting") : task.goalNeedsInput ? needsYouLabel(task.goalNeedsInputSince) : isWaitingOnTeammate(task) ? t("task.waitingOnTeammate") : isWorking(task) ? activityLabel ?? t("chat.activity.working") : task.queued ? t("task.queued") : null;
   const byline = threadByline(task);
   const updatedAt = threadRecency(task);
   const updatedStamp = formatUpdatedAt(updatedAt);

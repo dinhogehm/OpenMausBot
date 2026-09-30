@@ -276,17 +276,22 @@ import {
   lastAssistantText,
   macDesktopDriver,
   newMarker,
+  lastAppRepo,
   readDesktopRecord,
+  recordsUsingFolder,
   transcriptMentions,
   transcriptPath,
   transcriptTurnEnded,
+  transcriptOpenQuestion,
   transcriptWrittenAt,
   type DesktopDriver,
 } from "./claude-desktop.ts";
 import {
   ccSessionActive,
   desktopBriefText,
+  issueNumber,
   reportFor as desktopReportFor,
+  takeFreshQueued,
   runDesktopWork as runDesktopWorkFlow,
   watchStalledSessions,
   type DesktopWorkDeps,
@@ -3025,14 +3030,14 @@ if (browserCleanupReferencesReconciled) browserCleanup.startPending();
  * so a new broadcast cannot forget. */
 let activeCoordinationForThread = (_threadId: string): boolean => false;
 /** Goal mode in this thread stopped to ask the person (set once autonomy exists). */
-let goalNeedsInputForThread = (_threadId: string): boolean => false;
+let goalNeedsInputForThread = (_threadId: string): number | null => null;
 const wireTask = (task: TaskRecord): WireTask => {
   // Time-based snoozes heal on read against the server clock — no client
   // timer, no device skew. The 0 sentinel ("until new activity") is not a
   // time and survives reads; only a wake event in the store clears it.
   const { snoozedUntil, ...base } = toWireTask(task);
   const needsInput = goalNeedsInputForThread(task.threadId);
-  const coordinated = { ...base, waitingForTeammates: !needsInput && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput ? { goalNeedsInput: true } : {}) };
+  const coordinated = { ...base, waitingForTeammates: needsInput === null && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput } : {}) };
   const asleep = snoozedUntil === 0 || (snoozedUntil !== undefined && snoozedUntil > Date.now());
   return asleep ? { ...coordinated, snoozedUntil } : coordinated;
 };
@@ -3046,8 +3051,8 @@ const wireBot = (bot: BotRecord): WireBot => {
     ? { ...rest, approvalMode: "ask" as const, autoApprove: false }
     : rest;
   const needsInput = goalNeedsInputForThread(bot.threadId);
-  return { ...visible, waitingForTeammates: !needsInput && activeCoordinationForThread(bot.threadId) && !threadBusy(bot.id, bot.threadId),
-    ...(needsInput ? { goalNeedsInput: true } : {}),
+  return { ...visible, waitingForTeammates: needsInput === null && activeCoordinationForThread(bot.threadId) && !threadBusy(bot.id, bot.threadId),
+    ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput } : {}),
     avatarUrl: visible.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
 };
 
@@ -7217,7 +7222,10 @@ const autonomy = new BotAutonomy({
   turnGapMs: autonomyTestMs("OMB_AUTONOMY_TURN_GAP_MS"),
 });
 const autonomyDispatching = new Set<string>();
-goalNeedsInputForThread = (threadId) => autonomy.goalFor(threadId)?.status === "needs-input";
+goalNeedsInputForThread = (threadId) => {
+  const goal = autonomy.goalFor(threadId);
+  return goal?.status === "needs-input" ? goal.finishedAt ?? goal.startedAt : null;
+};
 const AUTONOMY_TICK_MS = autonomyTestMs("OMB_AUTONOMY_TICK_MS") ?? 10_000;
 /** Self-paced work due within this keeps the Mac awake (/api/routines/wake). */
 const AUTONOMY_WAKE_HOLD_MS = 60 * 60_000;
@@ -7427,7 +7435,9 @@ if (ccLedger.interruptedOnLoad.length) {
 const ccProcesses = new Map<string, CcChildProcess>();
 // OMB_CC_BIN points end-to-end tests at a scripted stand-in for `claude`.
 const ccBin = (): string => process.env.OMB_CC_BIN || "claude";
-const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases.";
+const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases, and run its scripts with the package manager they name (npm run when the repository has a package-lock.json — never swap in pnpm or yarn). Do not use AskUserQuestion or wait for an answer mid-turn: if you need a decision or an approval, stop and put the question in your final report.";
+/** Headless runs only: nothing wakes such a session after its turn ends. */
+const CC_CLI_FOOTER = "\nYou run headless: nothing wakes you after you stop. Never end your turn waiting on a background job or a notification — run gates in the foreground and wait for them (up to 80 min), or report the PID, the log/receipt path and what to check.";
 
 function ccIsGitRepo(path: string): boolean {
   if (!path.startsWith(homedir()) || !existsSync(path)) return false;
@@ -7478,7 +7488,7 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   };
   let child: CcChildProcess;
   try {
-    child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${CC_TURN_FOOTER}` : prompt, first), {
+    child = spawnCcProcess(ccBin(), ccTurnArgs(session, first ? `${prompt}${CC_TURN_FOOTER}${CC_CLI_FOOTER}` : prompt, first), {
       cwd,
       env: { ...process.env, PATH: augmentedPath() },
       stdio: ["ignore", "pipe", "pipe"],
@@ -7517,7 +7527,7 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     const outcome = parseCcStream([...lines, ...(spawnError ? [spawnError] : []), ...stderr.split("\n").slice(-5)], { code, signal, timedOut });
     ccLedger.finishTurn(session, outcome);
     if (session.status === "stopped" || session.status === "archived") return;
-    const next = session.status === "idle" ? ccLedger.takeQueued(session) : null;
+    const next = session.status === "idle" ? takeFreshQueued(desktopWork, session) : null;
     if (next !== null) {
       ccChip(session, "your queued message is running now");
       runCcTurn(session, next, false);
@@ -7560,6 +7570,7 @@ const desktopWork: DesktopWorkDeps = {
   transcriptOf: (cliSessionId) => transcriptPath({ cliSessionId }),
   lastText: (transcript) => lastAssistantText(transcript),
   turnEnded: transcriptTurnEnded,
+  openQuestion: transcriptOpenQuestion,
   mentions: transcriptMentions,
   writtenAt: transcriptWrittenAt,
   repoName: (session) => basename(session.repo),
@@ -7578,6 +7589,14 @@ const desktopWork: DesktopWorkDeps = {
  * what happened, for the chip and the tool result. */
 function removeSessionWorktree(session: CcSession): string {
   if (!session.cwd || !session.cwd.includes("/.claude/worktrees/")) return "";
+  if (!existsSync(session.cwd)) return `A worktree ${session.cwd} já não existia.`;
+  // The app reuses worktrees of archived sessions for new ones: never remove
+  // one that another live session (ours or the app's) works in.
+  const others = [
+    ...ccLedger.all().filter((other) => other.id !== session.id && other.cwd === session.cwd && other.status !== "archived").map((other) => `"${other.title}"`),
+    ...recordsUsingFolder(session.cwd, session.desktop?.localId).map((record) => `"${record.title ?? record.sessionId}" (app)`),
+  ];
+  if (others.length) return `A worktree foi mantida: ${session.cwd} está em uso por ${others.join(", ")}.`;
   try {
     const git = (...args: string[]) => execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } });
     try { git("worktree", "unlock", session.cwd); } catch { /* not locked */ }
@@ -15820,9 +15839,24 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (body.action === "end") {
           const input = parseGoalEndInput(body);
           if (!input.ok) return json(res, 400, { error: input.error });
-          const goal = autonomy.finishGoal(threadId, input.status, input.detail);
-          if (!goal) return json(res, 409, { error: "o modo objetivo não está ligado nesta conversa" });
-          store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: goalEndChip(goal), ok: goal.status === "completed" } });
+          // A decision given in another conversation ends the goal that was
+          // waiting for it there: one of this bot's own direct conversations.
+          let target = threadId;
+          if (typeof body.targetThreadId === "string" && body.targetThreadId.trim()) {
+            target = body.targetThreadId.trim();
+            if (!store.taskByThread(bot.id, target) || store.groupByThread(target)) {
+              return json(res, 400, { error: "thread_id precisa ser uma das suas próprias conversas diretas" });
+            }
+          }
+          const goal = autonomy.finishGoal(target, input.status, input.detail);
+          if (!goal) return json(res, 409, { error: target === threadId ? "o modo objetivo não está ligado nesta conversa" : "o modo objetivo não está ligado naquela conversa" });
+          store.appendMessage(target, { role: "bot", kind: "activity", tool: { name: goalEndChip(goal), ok: goal.status === "completed" } });
+          if (target !== threadId) {
+            // the sidebar row reads the goal state: refresh it
+            const owner = store.bot(bot.id);
+            if (owner) broadcast({ kind: "bot", bot: wireBot(owner) });
+            return json(res, 200, { message: `Objetivo da outra conversa encerrado (${goal.status}).` });
+          }
           return json(res, 200, {
             message: goal.status === "needs-input"
               ? "Objetivo pausado até a pessoa responder; a próxima mensagem dela o retoma. Faça a sua pergunta na resposta."
@@ -15865,8 +15899,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando neste computador; espere uma relatar, ou pare uma` });
           }
           if (body.surface !== "cli" && process.platform === "darwin") {
+            // New Session in the app opens in the folder of its latest
+            // session; another repository cannot be picked from here. Say so
+            // before touching the screen instead of failing five times.
+            const lastRepo = lastAppRepo();
+            if (lastRepo && lastRepo !== input.repo) {
+              return json(res, 409, { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` });
+            }
             const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
             if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
+            const issue = issueNumber(input.title, input.brief);
+            if (issue) session.desktop!.issue = issue;
             session.desktop!.pending = { kind: "create", text: desktopBrief(session, input.brief), since: Date.now(), attempts: 0 };
             session.status = "running";
             ccLedger.save();
@@ -15907,8 +15950,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             if (!desktop?.localId && !opening) {
               return json(res, 409, { error: "essa sessão nunca abriu no app Claude; comece outra com cc_session_start" });
             }
-            if (session.status === "failed") {
+            // A session that opened lives in the app whatever went wrong here
+            // (a screen step, a lost message): it can still take messages.
+            if (session.status === "failed" && !desktop?.localId) {
               return json(res, 409, { error: `essa sessão falhou (${(session.lastError ?? "erro desconhecido").slice(0, 300)}); veja no app Claude e depois comece outra com cc_session_start` });
+            }
+            if (session.status === "failed") {
+              session.status = "idle";
+              delete session.lastError;
             }
             if (desktop?.archiveWhenResolved || desktop?.pending?.kind === "archive") return json(res, 409, { error: "essa sessão está sendo arquivada; comece outra" });
             claim();

@@ -1200,7 +1200,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
   if (name === "goal_end") {
     const r = await api("/api/internal/goal", {
       method: "POST",
-      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: "end", status: args.status, detail: args.detail }),
+      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: "end", status: args.status, detail: args.detail, ...(typeof args.thread_id === "string" && args.thread_id.trim() ? { targetThreadId: args.thread_id.trim() } : {}) }),
     });
     if (r.error) return { text: `Couldn't end goal mode: ${String(r.error)}`, isError: true };
     return { text: String(r.message ?? "Goal mode ended.") };

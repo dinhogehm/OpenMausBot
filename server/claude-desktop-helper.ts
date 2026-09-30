@@ -14,6 +14,8 @@ export const DESKTOP_HELPER_SOURCE = String.raw`// omb-desktop: the few native a
 //                                    in screen points, origin top-left
 //   omb-desktop click|rclick X Y     left or right click at screen point
 //   omb-desktop key CODE [cmd]       press a key (virtual key code), optionally with ⌘
+//   omb-desktop type FILE            type FILE's text as keystrokes (not a paste, so the
+//                                    app does not fold it into pasted content)
 //   omb-desktop paste FILE [all]     put FILE's text on the clipboard, optionally ⌘A,
 //                                    then ⌘V, then restore the previous clipboard
 //                                    (every item and type: images and files too)
@@ -128,6 +130,19 @@ case "click", "rclick":
 case "key":
   guard args.count >= 3, let code = UInt16(args[2]) else { fail("key CODE [cmd]") }
   key(code, command: args.count >= 4 && args[3] == "cmd")
+case "type":
+  guard args.count >= 3, let text = try? String(contentsOfFile: args[2], encoding: .utf8) else { fail("type FILE") }
+  let units = Array(text.utf16)
+  var start = 0
+  while start < units.count {
+    let chunk = Array(units[start..<min(start + 20, units.count)])
+    for down in [true, false] {
+      let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: down)
+      chunk.withUnsafeBufferPointer { buffer in event?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: buffer.baseAddress) }
+      post(event)
+    }
+    start += 20
+  }
 case "paste":
   guard args.count >= 3, let text = try? String(contentsOfFile: args[2], encoding: .utf8) else { fail("paste FILE [all]") }
   let board = NSPasteboard.general

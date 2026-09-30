@@ -7269,6 +7269,7 @@
       "sidebar.searchAria": "71468c6a111dcb536d73c3a5dbf90cd78c31371e3139d180b59ebd0050ec2acf",
       "sidebar.noMatch": "5bb5e3f3f8eaec582b5d4972b1a1007e7c7704cf3c2f998524b473ac56f29eb9",
       "sidebar.preview.waiting": "3df1d52ccc2543a1a9baf123d11ebffea62659924e477be09cfec067c593652a",
+      "sidebar.preview.needsYouSince": "de14f8f88e6174dff4f13214f3fc4af94ff82bcfa0782edda010db1d7c5844e8",
       "sidebar.preview.needsYou": "74b6abdf59690fdffec2059089487cd63658249da5301cbf065e9977518fbd8f",
       "sidebar.preview.waitingOnTeammate": "7b23fdce858e5972dca42cc31b29d48a8f40046bcf701e99b7fec5719c988663",
       "sidebar.preview.working": "5474eef8d0f179c707cf418e2bbb468c77cc24edc5e9f5f4e137e85e06a8eea0",
@@ -8787,7 +8788,10 @@
       "effort.high": "c4ebc6d4a5832cd9415f906ad03661110c705a72381c8b8b145761d02e2dd23a",
       "effort.xhigh": "393d3e4bf2eea43ad08fcd583922c7db6a04ff13ba49467ac637a843510be575",
       "effort.max": "a1a5936d3b0f8a69fd62c91ed9990d3bd414c5e78c603e2837c65c9f46a93eb8",
-      "effort.default": "21b111cbfe6e8fca2d181c43f53ad548b22e38aca955b9824706a504b0a07a2d"
+      "effort.default": "21b111cbfe6e8fca2d181c43f53ad548b22e38aca955b9824706a504b0a07a2d",
+      "workspaceSwitcher.servers": "68d7beb6df59ee85bc11a6679c29ac3e6aab738833c6871c6df29ae0246d5d98",
+      "workspaceSwitcher.aria": "1c7057c76ebd42cee1ad08ca5126ae029566b1131aa0c61433ae5fa573cd759d",
+      "workspaceSwitcher.menuError": "a8ee1ec65d30a29574343cedbd9d5fa28a90d3d80e6879d1426122925a9d8e12"
     },
     "zh": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",

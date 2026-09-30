@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { setLocale } from "@/lib/i18n";
-import { fullStamp, messageStamp, sharesStamp, sidebarStamp } from "./message-stamp";
+import { fullStamp, messageStamp, needsYouLabel, sharesStamp, sidebarStamp } from "./message-stamp";
 
 const at = (text: string) => new Date(text).getTime();
 const now = at("2026-09-30T10:30:00");
@@ -32,5 +32,13 @@ describe("message stamps", () => {
     expect(sharesStamp(a, { role: "bot", at: at("2026-09-30T10:17:01") })).toBe(false);
     expect(sharesStamp(a, { role: "user", at: at("2026-09-30T10:16:50") })).toBe(false);
     expect(sharesStamp(undefined, a)).toBe(false);
+  });
+});
+
+describe("needs-you label", () => {
+  it("shows its age once the ask is not fresh", () => {
+    expect(needsYouLabel(now - 5 * 60_000, now)).toBe("Precisa de você");
+    expect(needsYouLabel(at("2026-09-29T22:18:00"), now)).toBe("Precisa de você · desde ontem 22:18");
+    expect(needsYouLabel(undefined, now)).toBe("Precisa de você");
   });
 });

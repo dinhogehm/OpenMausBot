@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronDown, Cloud, Laptop } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { t } from "@/lib/i18n";
 
 /** The dropdown is native: a remote workspace cannot choose a destination
  * itself or read the other workspaces saved on this computer. */
@@ -15,15 +16,16 @@ export function DesktopWorkspaceSwitcher({ compact = false }: { compact?: boolea
     return () => { alive = false; };
   }, [bridge]);
   if (!bridge) return null;
-  const name = current?.name ?? "Servers";
+  // the local workspace is "This computer" in the person's language
+  const name = current ? (current.local ? t("place.local") : current.name) : t("workspaceSwitcher.servers");
   const Icon = current?.local === false ? Cloud : Laptop;
   return <div className={cn("py-1.5", compact ? "px-2" : "px-3")}>
-    <button type="button" aria-label={`Switch server: ${name}`} aria-haspopup="menu" aria-expanded={open}
+    <button type="button" aria-label={t("workspaceSwitcher.aria", { name })} aria-haspopup="menu" aria-expanded={open}
       title={current?.origin ? `${name} · ${current.origin}` : name}
       onClick={() => {
         if (open) return;
         setError(""); setOpen(true);
-        void bridge.menu().catch(() => setError("Could not open the server list. Try the Server menu.")).finally(() => setOpen(false));
+        void bridge.menu().catch(() => setError(t("workspaceSwitcher.menuError"))).finally(() => setOpen(false));
       }}
       className={cn("flex w-full items-center gap-2 rounded-lg py-2 text-left text-[13px] font-medium text-ink hover:bg-control focus-visible:outline focus-visible:outline-accent", compact ? "justify-center px-1" : "px-2")}
       style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>

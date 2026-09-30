@@ -101,7 +101,7 @@ import { useShowThreads } from "@/lib/thread-preferences";
 import { attentionJumpAction, AttentionThreadRows, crossBotAttentionThreads, SidebarBotActivity, sidebarBotActivityTasks } from "./SidebarBotActivity";
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { ShortcutHint } from "./ShortcutHint";
-import { sidebarStamp } from "@/lib/message-stamp";
+import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
 
 const SECTION_LABEL_KEYS: Record<string, LocaleKey> = {
   [PINNED_SECTION_ID]: "sidebar.section.pinned",
@@ -120,7 +120,7 @@ function sectionLabel(id: string): string {
 function preview(bot: Bot): string {
   if (bot.activity === "waiting-on-you") return t("sidebar.preview.waiting");
   // a goal that stopped to ask the person outranks any teammate wait
-  if (bot.goalNeedsInput) return t("sidebar.preview.needsYou");
+  if (bot.goalNeedsInput) return needsYouLabel(bot.goalNeedsInputSince);
   if (bot.waitingForTeammates) return t("sidebar.preview.waitingOnTeammate");
   if (bot.busy) return t("sidebar.preview.working");
   // the visible branch's tail — bot.messages holds every fork, so its last
@@ -1228,7 +1228,7 @@ export function BotListItem({
                   <span className="sr-only">{t("sidebar.preview.working")}</span>
                 </span>
               ) : (
-                <span className="truncate">{waiting ? t("sidebar.preview.waiting") : needsYou ? t("sidebar.preview.needsYou") : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : preview(bot)}</span>
+                <span className="truncate">{waiting ? t("sidebar.preview.waiting") : needsYou ? needsYouLabel(bot.goalNeedsInputSince ?? activityTasks.find((task) => task.goalNeedsInput)?.goalNeedsInputSince) : teammateWait ? t("sidebar.preview.waitingOnTeammate") : queued ? t("task.queued") : preview(bot)}</span>
               )}
             </span>
           )}

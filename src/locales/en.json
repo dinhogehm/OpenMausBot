@@ -545,6 +545,7 @@
   "sidebar.searchAria": "Search bots and messages",
   "sidebar.noMatch": "Nothing matches “{query}”",
   "sidebar.preview.waiting": "Waiting for you…",
+  "sidebar.preview.needsYouSince": "Needs you · since {when}",
   "sidebar.preview.needsYou": "Needs you",
   "sidebar.preview.waitingOnTeammate": "Waiting on a teammate…",
   "sidebar.preview.working": "Working…",
@@ -2766,5 +2767,8 @@
   "effort.high": "High",
   "effort.xhigh": "X-High",
   "effort.max": "Max",
-  "effort.default": "Default"
+  "effort.default": "Default",
+  "workspaceSwitcher.servers": "Servers",
+  "workspaceSwitcher.aria": "Switch server: {name}",
+  "workspaceSwitcher.menuError": "Could not open the server list. Try the Server menu."
 }

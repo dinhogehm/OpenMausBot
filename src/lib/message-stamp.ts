@@ -52,3 +52,9 @@ export function sharesStamp(
   if (!previous || previous.role !== current.role || previous.from?.botId !== current.from?.botId) return false;
   return Math.floor(previous.at / 60_000) === Math.floor(current.at / 60_000);
 }
+
+/** "Precisa de você", with its age once it is not fresh: an old ask reads as old. */
+export function needsYouLabel(since: number | undefined, now = Date.now()): string {
+  if (!since || now - since < 30 * 60_000) return t("sidebar.preview.needsYou");
+  return t("sidebar.preview.needsYouSince", { when: sidebarStamp(since, now) });
+}

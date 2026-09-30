@@ -14,6 +14,7 @@ import {
   ccSessionActive,
   desktopBackoffMs,
   desktopBriefText,
+  issueNumber,
   followDesktopSessions,
   pickDesktopPending,
   runDesktopWork,
@@ -30,12 +31,12 @@ function harness() {
   const ledger = new CcSessionLedger({ path: null, now: () => now });
   const records = new Map<string, DesktopRecord>();
   const byMarker = new Map<string, DesktopRecord>();
-  const transcripts = new Map<string, { text: string; writtenAt: number; ended?: boolean }>();
+  const transcripts = new Map<string, { text: string; writtenAt: number; ended?: boolean; question?: { id: string; text: string } }>();
   const chips: Array<{ id: string; text: string; ok: boolean }> = [];
   const reports: Array<{ id: string; text: string }> = [];
   const results: DesktopStep[] = [];
   const next = (): DesktopStep => results.shift() ?? { ok: true };
-  const steps = { create: vi.fn(async () => next()), send: vi.fn(async () => next()), archive: vi.fn(async () => next()) };
+  const steps = { create: vi.fn(async () => next()), send: vi.fn(async () => next()), archive: vi.fn(async () => next()), rename: vi.fn(async () => next()) };
   const deps: DesktopWorkDeps = {
     ledger,
     now: () => now,
@@ -48,6 +49,8 @@ function harness() {
     mentions: (cli, text) => transcripts.get(cli)?.text.includes(text.split("\n")[0]!) ?? false,
     writtenAt: (cli) => transcripts.get(cli)?.writtenAt ?? null,
     repoName: () => "nuria-platform",
+    pathExists: () => true,
+    openQuestion: (cli) => transcripts.get(cli)?.question ?? null,
     chip: (session, text, ok = true) => { chips.push({ id: session.id, text, ok }); },
     report: (session, text) => { reports.push({ id: session.id, text }); },
     steps,
@@ -271,7 +274,7 @@ describe("sessions left running with no turn coming (#9298)", () => {
     h.advance(10 * 60_000);
     followDesktopSessions(h.deps);
     expect(session.status).toBe("running");
-    expect(session.queued).toEqual(["x"]);
+    expect(session.queued.map((item) => item.text)).toEqual(["x"]);
   });
 
   it("waits for the app's summary of this turn before reporting it blocked (or not)", () => {
@@ -402,6 +405,7 @@ describe("following turns", () => {
   it("reminds the owner every 6 h while it stays stalled, 3 times in all", () => {
     const h = harness();
     const session = h.opened("a");
+    session.turns = 1; // a turn is under way (not ended): it stays stalled
     h.advance(CC_STALL_MS + 60_000);
     watchStalledSessions(h.deps);
     for (let i = 0; i < 5; i++) {
@@ -426,5 +430,96 @@ describe("following turns", () => {
     h.advance(CC_STALL_MS);
     watchStalledSessions(h.deps);
     expect(h.reports[0]!.text).toContain("headless");
+  });
+});
+
+describe("round 3: screen failures, questions, old queues, names", () => {
+  it("a message the screen would not take fails only the message, not the session", async () => {
+    const h = harness();
+    const session = h.opened("a");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "send", text: "OK do gerente: siga com o push", since: h.now, attempts: 0 };
+    for (let i = 0; i < DESKTOP_MAX_MISSES; i++) {
+      h.results.push({ ok: false, reason: "the session is not the one on screen", retry: true, miss: true, touched: true });
+      await h.tick();
+      h.advance(10 * 60_000);
+    }
+    expect(session.status).toBe("idle");
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(session.desktop!.lastSend).toMatchObject({ confirmed: false });
+    expect(h.reports.at(-1)!.text).toMatch(/was NOT delivered[\s\S]*OK do gerente: siga com o push/);
+  });
+
+  it("reports a question left open in the app after 2 minutes, once, verbatim", () => {
+    const h = harness();
+    const session = h.opened("a");
+    h.transcripts.set("cli-a", { text: "brief", writtenAt: h.now, question: { id: "tu1", text: "Posso publicar o comentário? [opções: Sim / Não]" } });
+    followDesktopSessions(h.deps);
+    expect(h.reports).toEqual([]);
+    h.advance(2 * 60_000 + 1_000);
+    followDesktopSessions(h.deps);
+    followDesktopSessions(h.deps);
+    expect(h.reports).toHaveLength(1);
+    expect(h.reports[0]!.text).toContain("Posso publicar o comentário? [opções: Sim / Não]");
+    expect(h.reports[0]!.text).toContain(`claude://code/continue?session=${LOCAL}`);
+    expect(session.status).toBe("running");
+  });
+
+  it("holds back a queued order older than 2h at reconciliation and asks the owner", () => {
+    const h = harness();
+    const session = h.opened("a", { completedTurns: 1 });
+    session.desktop!.turnsSeen = 1;
+    session.queued.push({ text: "NÃO rode ci:local ainda", at: h.now });
+    h.transcripts.set("cli-a", { text: "brief", writtenAt: h.now, ended: true });
+    h.advance(11 * 3_600_000);
+    followDesktopSessions(h.deps);
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(session.heldQueue?.map((item) => item.text)).toEqual(["NÃO rode ci:local ainda"]);
+    expect(h.reports.some((report) => /NOT delivered[\s\S]*\(11h\) NÃO rode ci:local ainda/.test(report.text))).toBe(true);
+  });
+
+  it("closes a stalled session that never answered its brief at the last reminder", () => {
+    const h = harness();
+    const session = h.opened("a");
+    session.queued.push({ text: "status?", at: h.now });
+    h.advance(CC_STALL_MS + 60_000);
+    watchStalledSessions(h.deps);
+    h.advance(CC_STALL_REMIND_MS);
+    watchStalledSessions(h.deps);
+    h.advance(CC_STALL_REMIND_MS);
+    watchStalledSessions(h.deps);
+    expect(session.status).toBe("failed");
+    expect(session.lastError).toContain("never answered its brief");
+    expect(session.queued).toEqual([]);
+  });
+
+  it("says once when a session's folder is gone", () => {
+    const h = harness();
+    h.deps.pathExists = () => false;
+    h.opened("a").cwd = WORKTREE;
+    followDesktopSessions(h.deps);
+    followDesktopSessions(h.deps);
+    expect(h.reports.filter((report) => report.text.includes("no longer exists"))).toHaveLength(1);
+  });
+
+  it("renames a session to \"#NNNN …\" once, then delivers what was queued meanwhile", async () => {
+    const h = harness();
+    const session = h.opened("a", { title: "Chat ticket agent/client labels bug" });
+    session.status = "idle";
+    session.desktop!.issue = "9311";
+    followDesktopSessions(h.deps);
+    expect(session.desktop!.pending).toMatchObject({ kind: "rename", text: "#9311 Chat ticket agent/client labels bug" });
+    session.queued.push({ text: "siga com o PR", at: h.now });
+    await h.tick();
+    expect(h.steps.rename).toHaveBeenCalled();
+    followDesktopSessions(h.deps);
+    expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "siga com o PR" });
+    followDesktopSessions(h.deps);
+    expect(h.steps.rename).toHaveBeenCalledTimes(1);
+  });
+
+  it("never numbers the brief twice", () => {
+    expect(desktopBriefText("9311 Chat no ticket mostra Agente e Cliente", "OMBX", "x").split("\n")[0]).toBe("#9311 Chat no ticket mostra Agente e Cliente");
+    expect(issueNumber("9307 9306 Atendimento reaberto")).toBe("9307");
   });
 });

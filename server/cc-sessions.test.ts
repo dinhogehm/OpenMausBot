@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccHeldQueueReport, ccReportForOwner, ccStallReport, ccTurnArgs, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -59,7 +59,7 @@ describe("ledger", () => {
     expect(first.enqueue(session, "also run the tests")).toBe(1);
     first.finishTurn(session, { ok: true, cwd: "/repo/.claude/worktrees/w", report: "done", costUsd: 0.1 });
     expect(session).toMatchObject({ status: "idle", turns: 1, costUsd: 0.1, cwd: "/repo/.claude/worktrees/w", lastReport: "done" });
-    expect(first.takeQueued(session)).toBe("also run the tests");
+    expect(first.takeQueued(session)).toEqual({ next: "also run the tests", held: [] });
     expect(first.owned("someone-else")).toEqual([]);
     first.markRunning(session);
     const reloaded = ledger();
@@ -134,5 +134,27 @@ describe("stalled sessions on load", () => {
     expect(l.get("stuck")).toMatchObject({ status: "stalled", stallReports: 1, stallNotifiedAt: 10_000 });
     expect(l.get("moving")?.status).toBe("running");
     expect(l.get("cli-stalled")?.status).toBe("failed");
+  });
+});
+
+describe("queue age", () => {
+  it("holds back queued messages older than 2h and treats untimed ones as old", () => {
+    let now = 10 * 3_600_000;
+    const l = new CcSessionLedger({ path: join(dir, "cc.json"), now: () => now });
+    const session = l.create(base);
+    l.enqueue(session, "old order");
+    now += 3 * 3_600_000;
+    l.enqueue(session, "fresh order");
+    const taken = l.takeQueued(session);
+    expect(taken.next).toBe("fresh order");
+    expect(taken.held.map((item) => item.text)).toEqual(["old order"]);
+    expect(session.heldQueue?.map((item) => item.text)).toEqual(["old order"]);
+    expect(ccHeldQueueReport(session, taken.held, now)).toMatch(/NOT delivered[\s\S]*\(3h\) old order/);
+    const path = join(dir, "legacy.json");
+    writeFileSync(path, JSON.stringify({ sessions: [{ ...base, status: "idle", createdAt: 1, lastActivityAt: 1, turns: 1, costUsd: 0, worktree: "w", queued: ["from before ages"] }] }));
+    const legacy = new CcSessionLedger({ path, now: () => now });
+    const loaded = legacy.get(base.id)!;
+    expect(loaded.queued).toEqual([{ text: "from before ages", at: 0 }]);
+    expect(legacy.takeQueued(loaded)).toMatchObject({ next: null, held: [{ text: "from before ages" }] });
   });
 });
