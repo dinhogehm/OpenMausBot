@@ -14,6 +14,7 @@
 // processes, the routes and the wake-ups.
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
+import type { BgJob } from "./bg-jobs.ts";
 
 export const CC_TITLE_MAX = 120;
 export const CC_BRIEF_MAX = 20_000;
@@ -74,7 +75,7 @@ export interface CcSession {
   blockedOn?: string;
   /** CLI: processes its last turn left running in its worktree; the server
    * resumes it when they are gone. */
-  bgJob?: { pids: number[]; commands: string[]; since: number };
+  bgJob?: BgJob;
 }
 
 export type CcSurface = "app" | "cli";

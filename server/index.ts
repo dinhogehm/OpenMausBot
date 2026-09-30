@@ -301,7 +301,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
-import { backgroundProcesses, bgJobResumePrompt, pidAlive } from "./bg-jobs.ts";
+import { BG_JOB_MAX_MS, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 
 /** A session_read answer competes with the transcript for the context
@@ -7522,6 +7522,9 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
       cwd,
       env: { ...process.env, PATH: augmentedPath() },
       stdio: ["ignore", "pipe", "pipe"],
+      // its own process group: what it leaves running is told apart from
+      // everything else in the worktree (server/bg-jobs.ts)
+      detached: process.platform !== "win32",
     });
   } catch (error) {
     ccLedger.finishTurn(session, { ok: false, report: "", costUsd: 0, error: `could not start claude: ${error instanceof Error ? error.message : String(error)}` });
@@ -7529,6 +7532,17 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     return;
   }
   ccProcesses.set(session.id, child);
+  // The process tree under this turn's claude, sampled as it works: its
+  // background job is what is left of it when the turn ends.
+  const tree: TurnTree | null = child.pid ? newTurnTree(child.pid) : null;
+  let sampledAt = 0;
+  const sample = () => {
+    if (!tree || process.platform === "win32" || Date.now() - sampledAt < 5_000) return;
+    sampledAt = Date.now();
+    void psTable().then((rows) => noteDescendants(tree, rows)).catch(() => {});
+  };
+  const sampler = setInterval(sample, 30_000);
+  sampler.unref();
   const timer = setTimeout(() => {
     timedOut = true;
     child.kill("SIGTERM");
@@ -7536,6 +7550,7 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   }, CC_TURN_TIMEOUT_MS);
   timer.unref();
   child.stdout?.on("data", (chunk: Buffer) => {
+    sample();
     buffer += chunk.toString("utf8");
     let newline = buffer.indexOf("\n");
     while (newline >= 0) {
@@ -7552,6 +7567,7 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
+    clearInterval(sampler);
     ccProcesses.delete(session.id);
     if (buffer) keep(buffer);
     const outcome = parseCcStream([...lines, ...(spawnError ? [spawnError] : []), ...stderr.split("\n").slice(-5)], { code, signal, timedOut });
@@ -7568,16 +7584,16 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     // would finish with nobody to tell: note it; the tick resumes the
     // session when it is gone (watchBackgroundJobs).
     const folder = session.cwd;
-    if (session.status === "idle" && folder && folder.includes("/.claude/worktrees/")) {
-      void backgroundProcesses(folder).then((left) => {
+    if (session.status === "idle" && tree && folder && folder.includes("/.claude/worktrees/")) {
+      void backgroundProcesses(folder, tree).then((left) => {
         if (!left.length || session.status !== "idle") {
           ccReport(session, desktopReportFor(desktopWork, session));
           return;
         }
-        session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), since: Date.now() };
+        session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now() };
         ccLedger.save();
         ccChip(session, `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`);
-        ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ended with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish — no watch needed.)`);
+        ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ended with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.)`);
       }).catch(() => ccReport(session, desktopReportFor(desktopWork, session)));
       return;
     }
@@ -7655,8 +7671,11 @@ function removeSessionWorktree(session: CcSession): string {
 }
 
 /** Headless sessions whose turn ended with a background job: resume each
- * once its processes are all gone. */
-function watchBackgroundJobs(): void {
+ * once its processes are all gone (same pid and start time). One still
+ * running after BG_JOB_MAX_MS is reported to the owner and no longer
+ * waited on. With every slot taken, an idle session is retried next tick
+ * rather than queued, since nothing would deliver a queue to it. */
+async function watchBackgroundJobs(): Promise<void> {
   const now = Date.now();
   for (const session of ccLedger.all()) {
     const job = session.bgJob;
@@ -7666,14 +7685,28 @@ function watchBackgroundJobs(): void {
       ccLedger.save();
       continue;
     }
-    if (job.pids.some(pidAlive)) continue;
-    delete session.bgJob;
-    ccLedger.save();
-    const prompt = bgJobResumePrompt(job, now);
-    if (session.status === "running" || ccLedger.runningCount() >= CC_MAX_RUNNING) {
+    if (job.doneAt === undefined) {
+      if (await jobAlive(job)) {
+        if (now - job.since < BG_JOB_MAX_MS) continue;
+        delete session.bgJob;
+        ccLedger.save();
+        ccChip(session, `processo(s) em segundo plano ainda rodando após ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h — o dono foi avisado`, false);
+        ccReport(session, bgJobOverdueReport(session, job, now));
+        continue;
+      }
+      job.doneAt = now;
+      ccLedger.save();
+    }
+    const prompt = bgJobResumePrompt(job, job.doneAt);
+    if (session.status === "running") {
+      delete session.bgJob;
       ccLedger.enqueue(session, prompt);
+      ccLedger.save();
       continue;
     }
+    if (ccLedger.runningCount() >= CC_MAX_RUNNING) continue;
+    delete session.bgJob;
+    ccLedger.save();
     ccChip(session, "o processo em segundo plano terminou — sessão retomada");
     runCcTurn(session, prompt, false);
   }
@@ -7704,7 +7737,7 @@ threadSignals = (threadId) => {
 
 async function runDesktopWork(): Promise<void> {
   watchStalledSessions(desktopWork);
-  watchBackgroundJobs();
+  await watchBackgroundJobs();
   if (process.platform !== "darwin") return;
   await runDesktopWorkFlow(desktopWork, desktopState);
 }
@@ -17272,7 +17305,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const routineHold = routines!.wakeHold();
       if (routineHold.hold && routineHold.reason === "running") return json(res, 200, routineHold);
       const now = Date.now();
-      const ccBusy = ccLedger.all().some((session) => ccSessionActive(session, now) || Boolean(session.desktop?.pending));
+      // a background job the server resumes a session after counts too
+      const ccBusy = ccLedger.all().some((session) => ccSessionActive(session, now) || Boolean(session.desktop?.pending) || (Boolean(session.bgJob) && session.status !== "archived" && session.status !== "stopped"));
       if (ccBusy) return json(res, 200, { hold: true, reason: "running" });
       const selfPaced = autonomy.wakeHold(AUTONOMY_WAKE_HOLD_MS);
       if (selfPaced.hold && selfPaced.reason === "running") return json(res, 200, selfPaced);
