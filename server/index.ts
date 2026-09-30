@@ -302,7 +302,8 @@ import {
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
-import { spawn as spawnCcProcess, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
+import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
+import { newDeliveryCache, watchProductionDelivery } from "./prod-delivery.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -7735,9 +7736,34 @@ threadSignals = (threadId) => {
   };
 };
 
+/** `file args` in `cwd`, stdout; rejects on a non-zero exit. */
+const execCc = (file: string, args: string[], cwd?: string) => new Promise<string>((resolve, reject) => {
+  execFileCc(file, args, { cwd, timeout: 30_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => error ? reject(error) : resolve(String(stdout)));
+});
+
+// Merged PRs of Claude Code sessions reaching production (server/prod-delivery.ts).
+const deliveryCache = newDeliveryCache();
+const delivery = { running: false, lastAt: 0 };
+function watchDelivery(): void {
+  if (delivery.running || Date.now() - delivery.lastAt < 60_000) return;
+  delivery.running = true;
+  delivery.lastAt = Date.now();
+  void watchProductionDelivery(ccLedger.all(), {
+    now: Date.now,
+    gh: (args) => execCc("gh", args),
+    git: (repo, args) => execCc("git", ["-C", repo, ...args]),
+    report: (session, text) => ccReport(session as CcSession, text),
+    chip: (session, text) => ccChip(session as CcSession, text),
+    save: () => ccLedger.save(),
+  }, deliveryCache)
+    .catch((error) => console.error(`[delivery] ${error instanceof Error ? error.message : String(error)}`))
+    .finally(() => { delivery.running = false; });
+}
+
 async function runDesktopWork(): Promise<void> {
   watchStalledSessions(desktopWork);
   await watchBackgroundJobs();
+  watchDelivery();
   if (process.platform !== "darwin") return;
   await runDesktopWorkFlow(desktopWork, desktopState);
 }

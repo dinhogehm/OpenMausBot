@@ -15,6 +15,7 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import type { BgJob } from "./bg-jobs.ts";
+import type { CcDelivery } from "./prod-delivery.ts";
 
 export const CC_TITLE_MAX = 120;
 export const CC_BRIEF_MAX = 20_000;
@@ -76,6 +77,8 @@ export interface CcSession {
   /** CLI: processes its last turn left running in its worktree; the server
    * resumes it when they are gone. */
   bgJob?: BgJob;
+  /** Its PRs on the way to production (server/prod-delivery.ts). */
+  delivery?: CcDelivery;
 }
 
 export type CcSurface = "app" | "cli";
