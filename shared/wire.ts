@@ -112,6 +112,22 @@ export interface GroupThreadUsage extends TaskUsage {
 /** One task = one conversation with its own context, thread and provider
  * session. Wire form: no resumeCursors or lastInstanceId — the harness's
  * own bookkeeping that no client has ever used. */
+export interface WireWatch {
+  /** "chat", "planilha"… (standing) or the watched thing ("PR #9300"). */
+  label: string;
+  standing: boolean;
+  everyMinutes: number;
+  lastRunAt: number;
+  failures: number;
+}
+
+export interface WireCcAlert {
+  sessionId: string;
+  title: string;
+  state: "failed" | "stalled" | "question";
+  detail?: string;
+}
+
 export interface WireTask {
   /** Outstanding handoffs, not an active provider turn. */
   waitingForTeammates?: boolean;
@@ -119,6 +135,12 @@ export interface WireTask {
   goalNeedsInput?: boolean;
   /** Since when (the goal paused), so an old ask reads as old. */
   goalNeedsInputSince?: number;
+  /** Watches (wake_when) running for this conversation, for its row. */
+  watches?: WireWatch[];
+  /** It had a standing watch and has had none for a while. */
+  watchesLost?: boolean;
+  /** Claude Code sessions this conversation owns that need a look. */
+  ccAlerts?: WireCcAlert[];
   threadId: string;
   title: string;
   createdAt: number;

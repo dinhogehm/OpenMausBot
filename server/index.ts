@@ -99,7 +99,7 @@ import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as boat from "./boat.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner, type TeamComputerRecord } from "./team-computers.ts";
-import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireGroup, type WireTask } from "../shared/wire.ts";
+import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireCcAlert, type WireGroup, type WireTask } from "../shared/wire.ts";
 import type { TeamComputersPayload } from "../shared/team-computer.ts";
 import { boatCreateRecoverySnapshot, retireDeletedBoatCreate } from "./boat-create-idempotency.ts";
 import { boatDeletionSnapshot } from "./boat-delete-journal.ts";
@@ -3030,6 +3030,8 @@ if (browserCleanupReferencesReconciled) browserCleanup.startPending();
  * than the desktop window did. Stripped here rather than at each call site
  * so a new broadcast cannot forget. */
 let activeCoordinationForThread = (_threadId: string): boolean => false;
+/** Watches and Claude Code sessions of a thread, for its row (set once both exist). */
+let threadSignals = (_threadId: string): Pick<WireTask, "watches" | "watchesLost" | "ccAlerts"> => ({});
 /** Goal mode in this thread stopped to ask the person (set once autonomy exists). */
 let goalNeedsInputForThread = (_threadId: string): number | null => null;
 const wireTask = (task: TaskRecord): WireTask => {
@@ -3038,7 +3040,7 @@ const wireTask = (task: TaskRecord): WireTask => {
   // time and survives reads; only a wake event in the store clears it.
   const { snoozedUntil, ...base } = toWireTask(task);
   const needsInput = goalNeedsInputForThread(task.threadId);
-  const coordinated = { ...base, waitingForTeammates: needsInput === null && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput } : {}) };
+  const coordinated = { ...base, ...threadSignals(task.threadId), waitingForTeammates: needsInput === null && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput } : {}) };
   const asleep = snoozedUntil === 0 || (snoozedUntil !== undefined && snoozedUntil > Date.now());
   return asleep ? { ...coordinated, snoozedUntil } : coordinated;
 };
@@ -7320,6 +7322,25 @@ async function runDueWatches(): Promise<void> {
     const result = await runWatchCommand(watch.argv, { cwd: watchCwd(wake.botId, wake.threadId), path: augmentedPath() });
     autonomy.recordWatchRun(wake, { ...result, matched: result.ok && watchMatches(result.output, watch.until) });
   }));
+  // Rows show each watch's last run and failures: refresh the bots that ran one.
+  for (const botId of new Set(watches.map((wake) => wake.botId))) refreshBotRow(botId);
+}
+
+function refreshBotRow(botId: string): void {
+  const bot = store.bot(botId);
+  if (bot) broadcast({ kind: "bot", bot: wireBot(bot) });
+}
+
+/** A watcher bot left without any standing watch for a while: say so where
+ * it runs and to the Chief — nothing new is detected until it re-arms one. */
+function alertLostStandingWatches(): void {
+  for (const lost of autonomy.standingLostDue()) {
+    autonomy.markStandingLostAlerted(lost.threadId);
+    const bot = store.bot(lost.botId);
+    if (!bot || !store.taskByThread(bot.id, lost.threadId)) continue;
+    alertAutomationTrouble(bot, lost.threadId, `${bot.name} está sem vigia permanente nesta conversa há mais de 10 min — nada novo é detectado até rearmar um (wake_when com standing)`);
+    refreshBotRow(bot.id);
+  }
 }
 
 /** Low disk where the work happens: told once per band to the Chief of Staff. */
@@ -7353,6 +7374,7 @@ async function autonomyTick(): Promise<void> {
     console.error(`[disk] ${error instanceof Error ? error.message : String(error)}`);
   }
   await runDueWatches();
+  alertLostStandingWatches();
   for (const wake of autonomy.dueWakes()) {
     if (!store.taskByThread(wake.botId, wake.threadId)) {
       autonomy.forgetThread(wake.threadId);
@@ -7460,6 +7482,8 @@ function ccChip(session: CcSession, text: string, ok = true): void {
   for (const threadId of ccThreads(session)) {
     store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Claude Code "${session.title.slice(0, 60)}": ${text}`, ok } });
   }
+  // the owner's row carries the session's state (failed, stalled, question)
+  refreshBotRow(session.ownerBotId);
 }
 
 /** A session's report wakes its owner — and the thread that gave the order. */
@@ -7649,6 +7673,29 @@ function watchBackgroundJobs(): void {
     runCcTurn(session, prompt, false);
   }
 }
+
+threadSignals = (threadId) => {
+  const watches = autonomy.watchesFor(threadId).map((wake) => ({
+    label: wake.watch!.standing ? wake.watch!.label ?? STANDING_DEFAULT_LABEL : watchLabel(wake.watch!.command),
+    standing: wake.watch!.standing === true,
+    everyMinutes: Math.round(wake.watch!.everyMs / 60_000) || 1,
+    lastRunAt: wake.watch!.lastRunAt,
+    failures: wake.watch!.failures,
+  }));
+  const ccAlerts = ccLedger.all()
+    .filter((session) => session.ownerThreadId === threadId && session.status !== "archived")
+    .flatMap((session): WireCcAlert[] => {
+      if (session.status === "failed") return [{ sessionId: session.id, title: session.title, state: "failed", detail: (session.lastError ?? "").slice(0, 200) }];
+      if (session.desktop?.questionReported && (session.status === "running" || session.status === "stalled")) return [{ sessionId: session.id, title: session.title, state: "question" }];
+      if (session.status === "stalled") return [{ sessionId: session.id, title: session.title, state: "stalled" }];
+      return [];
+    });
+  return {
+    ...(watches.length ? { watches } : {}),
+    ...(autonomy.isStandingLost(threadId) ? { watchesLost: true } : {}),
+    ...(ccAlerts.length ? { ccAlerts } : {}),
+  };
+};
 
 async function runDesktopWork(): Promise<void> {
   watchStalledSessions(desktopWork);

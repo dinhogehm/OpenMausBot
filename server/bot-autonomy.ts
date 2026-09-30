@@ -139,7 +139,13 @@ interface Ledger {
   goals: BotGoal[];
   reports?: PendingReports[];
   inFlight?: InFlight[];
+  standingLost?: StandingLost[];
 }
+
+/** A conversation whose last standing watch was cancelled: a watcher bot
+ * left without its watcher. Alerted once if nothing re-arms it in time. */
+export interface StandingLost { botId: string; threadId: string; at: number; alerted?: boolean }
+export const STANDING_LOST_ALERT_MS = 10 * 60_000;
 
 const clip = (value: unknown, max: number): string =>
   typeof value === "string" ? value.trim().slice(0, max) : "";
@@ -228,6 +234,7 @@ export class BotAutonomy {
   private goals = new Map<string, BotGoal>();
   private reports = new Map<string, PendingReports>();
   private inFlight: InFlight[] = [];
+  private standingLost = new Map<string, StandingLost>();
   private readonly path: string | null;
   private readonly now: () => number;
   private readonly minuteMs: number;
@@ -263,6 +270,9 @@ export class BotAutonomy {
           this.goals.set(goal.threadId, goal);
         }
       }
+      for (const lost of raw.standingLost ?? []) {
+        if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
+      }
       // Turns a restart cut off: what woke them is due again, marked as such.
       const at = this.now();
       let recovered = false;
@@ -287,7 +297,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight };
+    const ledger: Ledger = { wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()] };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -331,6 +341,7 @@ export class BotAutonomy {
       },
     };
     this.wakes.set(wakeKey(wake), wake);
+    if (input.standing) this.standingLost.delete(threadId);
     this.save();
     return wake;
   }
@@ -408,6 +419,11 @@ export class BotAutonomy {
     return this.wakes.get(standingKey(threadId, label)) ?? null;
   }
 
+  /** Every watch (standing or not) of a conversation. */
+  watchesFor(threadId: string): BotWake[] {
+    return [...this.wakes.values()].filter((wake) => wake.threadId === threadId && wake.watch);
+  }
+
   standingsFor(threadId: string): BotWake[] {
     return [...this.wakes.values()].filter((wake) => wake.threadId === threadId && wake.watch?.standing);
   }
@@ -416,9 +432,29 @@ export class BotAutonomy {
     const wake = this.wakes.get(standingKey(threadId, label)) ?? null;
     if (wake) {
       this.wakes.delete(standingKey(threadId, label));
+      if (!this.standingsFor(threadId).length) this.standingLost.set(threadId, { botId: wake.botId, threadId, at: this.now() });
       this.save();
     }
     return wake;
+  }
+
+  /** Conversations left without any standing watch for `afterMs`, not yet alerted. */
+  standingLostDue(afterMs = STANDING_LOST_ALERT_MS): StandingLost[] {
+    const at = this.now();
+    return [...this.standingLost.values()].filter((lost) => !lost.alerted && at - lost.at >= afterMs);
+  }
+
+  markStandingLostAlerted(threadId: string): void {
+    const lost = this.standingLost.get(threadId);
+    if (!lost) return;
+    lost.alerted = true;
+    this.save();
+  }
+
+  /** It had a standing watch, has none now, and that has lasted. */
+  isStandingLost(threadId: string, afterMs = STANDING_LOST_ALERT_MS): boolean {
+    const lost = this.standingLost.get(threadId);
+    return Boolean(lost && this.now() - lost.at >= afterMs);
   }
 
 
@@ -443,6 +479,7 @@ export class BotAutonomy {
   settleInFlight(threadId: string): void {
     const before = this.inFlight.length;
     this.inFlight = this.inFlight.filter((lease) => lease.threadId !== threadId);
+    this.standingLost.delete(threadId);
     if (this.inFlight.length !== before) this.save();
   }
 

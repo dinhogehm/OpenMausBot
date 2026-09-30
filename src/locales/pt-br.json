@@ -1753,5 +1753,13 @@
   "effort.default": "Padrão",
   "workspaceSwitcher.servers": "Servidores",
   "workspaceSwitcher.aria": "Trocar servidor: {name}",
-  "workspaceSwitcher.menuError": "Não foi possível abrir a lista de servidores. Use o menu Servidor."
+  "workspaceSwitcher.menuError": "Não foi possível abrir a lista de servidores. Use o menu Servidor.",
+  "watch.indicator": "Vigias",
+  "watch.item": "{label} a cada {every} min · última execução {when}",
+  "watch.failing": "{label} falhando ({count}× seguidas)",
+  "watch.lost": "Sem vigia permanente há mais de 10 min",
+  "ccAlert.failed": "falhou",
+  "ccAlert.stalled": "parada",
+  "ccAlert.question": "com pergunta aberta no app",
+  "ccAlert.item": "Claude Code · {title} — {state}"
 }

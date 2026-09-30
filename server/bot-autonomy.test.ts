@@ -430,6 +430,27 @@ describe("several standing watches per conversation", () => {
   });
 });
 
+describe("a watcher left without its standing watch", () => {
+  it("is flagged once nothing re-arms it for 10 min, and cleared by a new one", () => {
+    const autonomy = make();
+    const base = { argv: ["gog"], everyMinutes: 3, maxMinutes: 720, reason: "x", baseline: "b", standing: true, command: "gog chat" };
+    autonomy.setWatch("bot", "t1", { ...base, label: "chat" });
+    autonomy.setWatch("bot", "t1", { ...base, label: "planilha" });
+    autonomy.cancelStanding("t1", "chat");
+    expect(autonomy.isStandingLost("t1")).toBe(false); // planilha still armed
+    autonomy.cancelStanding("t1", "planilha");
+    now += 9 * 60_000;
+    expect(autonomy.standingLostDue()).toEqual([]);
+    now += 2 * 60_000;
+    expect(autonomy.standingLostDue().map((lost) => lost.threadId)).toEqual(["t1"]);
+    expect(make().isStandingLost("t1")).toBe(true); // survives a restart
+    autonomy.markStandingLostAlerted("t1");
+    expect(autonomy.standingLostDue()).toEqual([]);
+    autonomy.setWatch("bot", "t1", { ...base, label: "chat" });
+    expect(autonomy.isStandingLost("t1")).toBe(false);
+  });
+});
+
 describe("chips", () => {
   it("names what a watch looks at instead of the raw command, and cuts on a word", () => {
     expect(watchLabel("gh pr view 9300 -R dinhogehm/nuria-platform --json state")).toBe("PR #9300");

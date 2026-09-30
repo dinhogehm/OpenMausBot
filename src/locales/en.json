@@ -2770,5 +2770,13 @@
   "effort.default": "Default",
   "workspaceSwitcher.servers": "Servers",
   "workspaceSwitcher.aria": "Switch server: {name}",
-  "workspaceSwitcher.menuError": "Could not open the server list. Try the Server menu."
+  "workspaceSwitcher.menuError": "Could not open the server list. Try the Server menu.",
+  "watch.indicator": "Watches",
+  "watch.item": "{label} every {every} min · last run {when}",
+  "watch.failing": "{label} failing ({count}× in a row)",
+  "watch.lost": "No standing watch for over 10 min",
+  "ccAlert.failed": "failed",
+  "ccAlert.stalled": "stalled",
+  "ccAlert.question": "asking a question in the app",
+  "ccAlert.item": "Claude Code · {title} — {state}"
 }

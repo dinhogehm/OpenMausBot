@@ -32,6 +32,7 @@ import {
   Trash2,
   Users,
   X,
+  AlertTriangle,
 } from "lucide-react";
 import { api, useStore, visibleMessages, currentTaskBot, type AppState, type Bot, type Group } from "@/state/store";
 import { peerLine } from "@/lib/peer-message";
@@ -102,6 +103,7 @@ import { attentionJumpAction, AttentionThreadRows, crossBotAttentionThreads, Sid
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { ShortcutHint } from "./ShortcutHint";
 import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
+import { ccAlertState } from "@/lib/thread-signals";
 
 const SECTION_LABEL_KEYS: Record<string, LocaleKey> = {
   [PINNED_SECTION_ID]: "sidebar.section.pinned",
@@ -2326,6 +2328,16 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
                 icon: <Puzzle size={18} />,
                 onSelect: () => dispatch({ type: "togglePlugins", open: true }),
               },
+              // Claude Code sessions that need a look, wherever their
+              // conversation is: folded here, the trigger still shows the dot
+              ...state.bots.flatMap((bot) => (bot.tasks ?? []).flatMap((task) => (task.ccAlerts ?? []).map((alert, i) => ({
+                key: `cc-${alert.sessionId}`,
+                label: t("ccAlert.item", { title: alert.title, state: ccAlertState(alert.state) }),
+                icon: <AlertTriangle size={18} />,
+                attention: alert.state !== "stalled",
+                separatorBefore: i === 0,
+                onSelect: () => dispatch({ type: "switchTask", botId: bot.id, threadId: task.threadId }),
+              })))),
             ]}
           />
         )}

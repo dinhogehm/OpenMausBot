@@ -13,7 +13,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { BotVisibility, CloudBackend, ConnectorToolGrant, EffortLevel, InstalledPackageMetadata, ServerFrame, GroupThreadUsage, SteerQueueReason } from "../../shared/wire";
+import type { BotVisibility, CloudBackend, ConnectorToolGrant, EffortLevel, InstalledPackageMetadata, ServerFrame, GroupThreadUsage, SteerQueueReason, WireCcAlert, WireWatch } from "../../shared/wire";
 import type { TurnDigest } from "../../shared/digest";
 import type { ModelVariantOption, RuntimeEvent } from "../../shared/runtime-events";
 import type { MausColor, MausMotion } from "@/lib/mascot";
@@ -283,6 +283,12 @@ export interface Task {
   /** Goal mode paused to ask the person: it needs them. */
   goalNeedsInput?: boolean;
   goalNeedsInputSince?: number;
+  /** Watches running for this conversation (wake_when). */
+  watches?: WireWatch[];
+  /** It had a standing watch and has had none for a while. */
+  watchesLost?: boolean;
+  /** Claude Code sessions it owns that need a look. */
+  ccAlerts?: WireCcAlert[];
   threadId: string;
   /** Internal routine execution; reachable through its run receipt, not history menus. */
   routineRunId?: string;

@@ -8791,7 +8791,15 @@
       "effort.default": "21b111cbfe6e8fca2d181c43f53ad548b22e38aca955b9824706a504b0a07a2d",
       "workspaceSwitcher.servers": "68d7beb6df59ee85bc11a6679c29ac3e6aab738833c6871c6df29ae0246d5d98",
       "workspaceSwitcher.aria": "1c7057c76ebd42cee1ad08ca5126ae029566b1131aa0c61433ae5fa573cd759d",
-      "workspaceSwitcher.menuError": "a8ee1ec65d30a29574343cedbd9d5fa28a90d3d80e6879d1426122925a9d8e12"
+      "workspaceSwitcher.menuError": "a8ee1ec65d30a29574343cedbd9d5fa28a90d3d80e6879d1426122925a9d8e12",
+      "watch.indicator": "0da94d9f2c64a161e1e262d2862a8cb6c29bdebc60ca44fda951f58f0af70c18",
+      "watch.item": "55e780cf963fe1c0d1cda2e89a084c84c5b9986ef6017c6e7cb47807b299905b",
+      "watch.failing": "0dda79215b98b3a5ccc7fc7ea99d04f16346c9e1cb4c84bcdba76f2044287a5e",
+      "watch.lost": "7d4cf3a8d0490c833b99ad81e6a0e172bb3d57f4d196cb44058dbe3b9d712d99",
+      "ccAlert.failed": "5d28a90f4498a81461efbaf6f628a19d9778390bb5c81a393dd936181cc3d826",
+      "ccAlert.stalled": "7b600e7fa8a5d86c7879c6764b9254397ca177a839ed068a5f2fe65d89983eea",
+      "ccAlert.question": "fef42bf44a2e1826017d8aff0d4b88036a52b4f109666af83a632b3936a5a824",
+      "ccAlert.item": "4046526ac67d5b2e6addfeb0df6d3b0433220f72b44c4b5d712d70962dcb73d6"
     },
     "zh": {
       "noEngines.title": "af88855a5f80377de709995229ba3907df9e8fb3b940fbf7c0d9cbe6eea54afe",
