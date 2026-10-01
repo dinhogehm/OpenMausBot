@@ -90,6 +90,19 @@ it("carries what one conversation decided, and the owner's orders, into the bot'
   expect(f.turns()[1].evidence?.some?.((entry: any) => entry.error)).toBeFalsy();
 }), 60_000);
 
+it("speaks to the owner in the one conversation they named, and shows there what was said to them elsewhere", () => fixture(async f => {
+  f.save({ turns: [
+    { reply: "Combinado: falo com você só por aqui." },
+    { expectSystemIncludes: ["Conversa com o dono:", "Não fale com o dono aqui"], reply: "Preciso de uma decisão sua: publico o carrier agora?" },
+  ] });
+  await f.send("Use só esta conversa para falar comigo.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  const created = await f.api(`/api/bots/${f.bot.id}/tasks`, { title: "Outra conversa" });
+  await runControlOmb(["send", "--bot", f.bot.id, "--task", created.task.threadId, "--text", "Qual o estado do carrier?"], { env: { OPENMAUSBOT_URL: f.session.info.url } });
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith('Dito ao dono em "Outra conversa"') && chip.includes("publico o carrier agora?")), { timeout: 10_000 }).toBe(true);
+}), 60_000);
+
 it("keeps giving a goal turns until the bot ends it, then goes quiet", () => fixture(async f => {
   f.save({ turns: [
     { steps: [{ tool: "goal_start", arguments: { goal: "SHIP_9195 to production", max_turns: 5 } }], reply: "Goal accepted" },

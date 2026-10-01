@@ -28,11 +28,30 @@ export interface ThreadState {
 
 export interface OwnerOrder { threadId: string; at: number; text: string }
 
-interface BotState { threads: ThreadState[]; orders: OwnerOrder[] }
+/** The one conversation the person wants to be spoken to in. */
+export interface OwnerThread { threadId: string; title: string; at: number }
+
+interface BotState { threads: ThreadState[]; orders: OwnerOrder[]; ownerThread?: OwnerThread }
 
 /** A person's message that sets a rule rather than asks for one task. */
 export function isOwnerOrder(text: string): boolean {
-  return /\b(n[ãa]o (?:rode|fa[çc]a|mexa|use|envie|mande|publique|mergeie|arquive|abra)|nunca|sempre|pare\b|parar\b|PARAR|proibido|regra|a partir de agora|de agora em diante|daqui pra frente|at[ée] segunda ordem|s[óo] (?:com|depois|quando))/i.test(text);
+  return isOwnerChannelOrder(text) || /\b(n[ãa]o (?:rode|fa[çc]a|mexa|use|envie|mande|publique|mergeie|arquive|abra)|nunca|sempre|pare\b|parar\b|PARAR|proibido|regra|a partir de agora|de agora em diante|daqui pra frente|at[ée] segunda ordem|s[óo] (?:com|depois|quando))/i.test(text);
+}
+
+/** "Use só a conversa da esteira para falar comigo", "fale comigo só por aqui":
+ * the person names the one conversation they are spoken to in. */
+export function isOwnerChannelOrder(text: string): boolean {
+  // accented words have no \b around them in JS regexes: spell the edges out
+  const only = "(?<![\\p{L}])(?:s[óo]|somente|apenas)(?![\\p{L}])";
+  return new RegExp(`(?<![\\p{L}])(?:use|usa|fale|falem|fala|escreva|me avise|me chame)(?![\\p{L}])[^.!?\\n]{0,40}${only}[^.!?\\n]{0,40}(?<![\\p{L}])(?:conversa|thread|aqui)(?![\\p{L}])|${only}\\s+(?:nesta|por esta|aqui|nessa)(?![\\p{L}])[^.!?\\n]{0,30}(?<![\\p{L}])(?:fale|falar|comigo)(?![\\p{L}])`, "iu").test(text);
+}
+
+/** What an order is about: the PRs/issues it names, else its first words.
+ * A newer order on the same thing replaces the older one. */
+export function orderTopic(text: string): string {
+  const numbers = [...text.matchAll(/#(\d{2,6})\b/g)].map((match) => match[1]).sort();
+  if (numbers.length) return `#${[...new Set(numbers)].join(",")}`;
+  return text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((word) => word.length > 2).slice(0, 4).join(" ");
 }
 
 const oneLine = (text: string, max: number) => {
@@ -40,10 +59,24 @@ const oneLine = (text: string, max: number) => {
   return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
 };
 
+/** Markdown marks out, "#9311" kept: only a heading's leading #s go. */
+const plain = (text: string) => text.replace(/^\s{0,3}#{1,6}\s+/gm, "").replace(/[*_`>]+/g, "").replace(/\s+/g, " ").trim();
+
 export function firstSentence(text: string, max = 160): string {
-  const flat = text.replace(/[*_`#>]+/g, "").replace(/\s+/g, " ").trim();
+  const flat = plain(text);
   const end = flat.search(/[.!?](\s|$)/);
   return oneLine(end === -1 ? flat : flat.slice(0, end + 1), max);
+}
+
+/** The decision a reply records: its last sentence that says what was done
+ * or decided ("mergeei", "vou", "fica", "decidi"…), else its first sentence
+ * without a leading "Osvaldo," — never just a greeting. */
+export function decisionOf(text: string, max = 200): string {
+  const flat = plain(text);
+  const sentences = flat.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const decided = sentences.filter((sentence) => /\b(decid\w*|vou\b|vamos\b|fica\b|ficou\b|fiz\b|feito|mergeei|mergeada|publiquei|publicad\w*|arquivei|abri\b|respondi|avisei|n[ãa]o vou|combinad\w*|aprovad\w*|cancelei|parei)\b/i.test(sentence)).at(-1);
+  const chosen = (decided ?? sentences[0] ?? "").replace(/^[A-ZÀ-Ú][\wÀ-ú]+,\s+/, "");
+  return oneLine(chosen, max);
 }
 
 export class SharedState {
@@ -62,7 +95,7 @@ export class SharedState {
       if (this.dir) {
         try {
           const raw = JSON.parse(readFileSync(join(this.dir, botId, "shared-state.json"), "utf8")) as Partial<BotState>;
-          state = { threads: Array.isArray(raw.threads) ? raw.threads : [], orders: Array.isArray(raw.orders) ? raw.orders : [] };
+          state = { threads: Array.isArray(raw.threads) ? raw.threads : [], orders: Array.isArray(raw.orders) ? raw.orders : [], ...(raw.ownerThread?.threadId ? { ownerThread: raw.ownerThread } : {}) };
         } catch { /* first turn */ }
       }
       this.bots.set(botId, state);
@@ -74,11 +107,23 @@ export class SharedState {
   record(botId: string, thread: ThreadState, orders: OwnerOrder[] = [], now = Date.now()): void {
     const state = this.state(botId);
     state.threads = [thread, ...state.threads.filter((known) => known.threadId !== thread.threadId)].slice(0, THREADS_MAX);
-    for (const order of orders) {
+    for (const order of [...orders].sort((a, b) => a.at - b.at)) {
       const text = oneLine(order.text, 240);
-      state.orders = [{ ...order, text }, ...state.orders.filter((known) => known.text !== text)].slice(0, ORDERS_MAX);
+      // a newer order on the same thing replaces the older, wherever it was given
+      const topic = orderTopic(text);
+      const older = state.orders.find((known) => known.text === text || orderTopic(known.text) === topic);
+      if (older && older.at > order.at) continue;
+      state.orders = [{ ...order, text }, ...state.orders.filter((known) => known !== older && known.text !== text)].slice(0, ORDERS_MAX);
+      if (isOwnerChannelOrder(text) && (!state.ownerThread || state.ownerThread.at <= order.at)) {
+        state.ownerThread = { threadId: order.threadId, title: thread.threadId === order.threadId ? thread.title : state.threads.find((known) => known.threadId === order.threadId)?.title ?? thread.title, at: order.at };
+      }
     }
     this.save(botId, now);
+  }
+
+  /** The conversation the person wants to be spoken to in, if they named one. */
+  ownerThread(botId: string): OwnerThread | null {
+    return this.state(botId).ownerThread ?? null;
   }
 
   forgetThread(botId: string, threadId: string): void {
@@ -96,13 +141,19 @@ export class SharedState {
     const state = this.state(botId);
     const others = state.threads.filter((known) => known.threadId !== threadId && (!include || include(known.threadId)));
     const orders = include ? state.orders.filter((order) => include(order.threadId)) : state.orders;
-    if (!others.length && !orders.length && !work.length) return "";
+    const owner = state.ownerThread && (!include || include(state.ownerThread.threadId)) ? state.ownerThread : null;
+    if (!others.length && !orders.length && !work.length && !owner) return "";
     const when = (at: number) => new Date(at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
     const newest = Math.max(0, ...others.map((known) => known.at), ...orders.map((order) => order.at));
     const head = `\n\nEstado das suas outras conversas (atualizado ${when(newest || now)}). The same bot speaks in all of them: what was decided or ordered in one holds in the others.\n`;
     const lines: string[] = [];
+    if (owner) {
+      lines.push(owner.threadId === threadId
+        ? "Esta é a conversa com o dono: é aqui que você fala com ele (decisões, perguntas, avisos)."
+        : `Conversa com o dono: "${oneLine(owner.title, 60)}" (definida por ele em ${when(owner.at)}). Não fale com o dono aqui: decisões, perguntas e avisos vão para lá; aqui, registre e siga — o servidor mostra lá o que você disser a ele aqui.`);
+    }
     if (orders.length) {
-      lines.push("Ordens do dono em vigor (valem em todas as conversas):");
+      lines.push("Ordens do dono em vigor (valem em todas as conversas; quando duas se contradizem, vale a mais recente):");
       for (const order of orders) lines.push(`- ${order.text} (${when(order.at)})`);
     }
     if (work.length) {

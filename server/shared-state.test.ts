@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { firstSentence, isOwnerOrder, SHARED_STATE_MAX_BYTES, SharedState } from "./shared-state.ts";
+import { decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, orderTopic, SHARED_STATE_MAX_BYTES, SharedState } from "./shared-state.ts";
 
 describe("what a bot's conversations know about each other", () => {
   it("shows a fact from one conversation in the prompt of another, never in its own", () => {
@@ -53,5 +53,37 @@ describe("what a bot's conversations know about each other", () => {
     expect(isOwnerOrder("PARAR")).toBe(true);
     expect(isOwnerOrder("Veja a PR 9300 por favor")).toBe(false);
     expect(firstSentence("**Feito.** Abri a PR #9401 e rodei o gate.")).toBe("Feito.");
+  });
+});
+
+describe("one conversation with the owner, and the newest order wins", () => {
+  it("knows the conversation the owner named, and tells the others to speak to them only there", () => {
+    expect(isOwnerChannelOrder("Use só a conversa da esteira para falar comigo")).toBe(true);
+    expect(isOwnerChannelOrder("fale comigo só por aqui")).toBe(true);
+    expect(isOwnerChannelOrder("Use só o gate local")).toBe(false);
+    const state = new SharedState(null);
+    state.record("chief", { threadId: "esteira", title: "Esteira", at: 10 }, [{ threadId: "esteira", at: 10, text: "Use só a conversa da esteira para falar comigo." }]);
+    expect(state.ownerThread("chief")).toMatchObject({ threadId: "esteira", title: "Esteira" });
+    expect(state.render("chief", "main", 20)).toContain('Conversa com o dono: "Esteira"');
+    expect(state.render("chief", "esteira", 20)).toContain("Esta é a conversa com o dono");
+  });
+
+  it("replaces an older order on the same thing with the newer one, wherever each was given", () => {
+    expect(orderTopic("Não mergeie a #9314 antes do lote")).toBe("#9314");
+    const state = new SharedState(null);
+    state.record("chief", { threadId: "a", title: "A", at: 1 }, [{ threadId: "a", at: 1, text: "Não mergeie a #9314 antes do lote." }]);
+    state.record("chief", { threadId: "b", title: "B", at: 2 }, [{ threadId: "b", at: 2, text: "Pode mergear a #9314 agora, a partir de agora ela vai primeiro." }]);
+    const block = state.render("chief", "c", 3);
+    expect(block).toContain("a #9314 agora");
+    expect(block).not.toContain("antes do lote");
+    expect(block).toContain("vale a mais recente");
+    // an older order arriving late does not undo a newer one
+    state.record("chief", { threadId: "a", title: "A", at: 4 }, [{ threadId: "a", at: 1, text: "Não mergeie a #9314 antes do lote." }]);
+    expect(state.render("chief", "c", 5)).not.toContain("antes do lote");
+  });
+
+  it("records what was decided, not the greeting", () => {
+    expect(decisionOf("Osvaldo, o retorno do QA chegou. Mergeei a #9315 pelo gate. Falta a #9316.")).toBe("Mergeei a #9315 pelo gate.");
+    expect(decisionOf("Osvaldo, o retorno do QA chegou.")).toBe("o retorno do QA chegou.");
   });
 });

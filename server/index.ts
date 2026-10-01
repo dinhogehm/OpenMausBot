@@ -329,7 +329,7 @@ import { archiveBlockers, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, wa
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
-import { firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
+import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { ciGroupToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
 import { readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState } from "./release-watch.ts";
 
@@ -8843,9 +8843,26 @@ function recordSharedState(threadId: string): void {
     threadId,
     title: task.title,
     at: Date.now(),
-    ...(lastReply?.text ? { decision: firstSentence(lastReply.text) } : {}),
+    ...(lastReply?.text ? { decision: decisionOf(lastReply.text) } : {}),
     ...(pending ? { pending } : {}),
   }, orders);
+  // The person named one conversation to be spoken to in: what the bot said
+  // to them anywhere else shows up there too, so nothing reaches them twice
+  // or contradicting itself without their seeing both.
+  const owner = sharedState.ownerThread(bot.id);
+  const ownerName = cfg.profile?.name?.trim().split(/\s+/)[0];
+  if (owner && owner.threadId !== threadId && store.taskByThread(bot.id, owner.threadId) && lastReply?.text) {
+    const toOwner = Boolean(asked) || /\b(decis[ãa]o (?:sua|para voc[êe])|preciso (?:de )?(?:uma )?(?:decis[ãa]o|resposta)|continua(?:m)? com voc[êe])\b/i.test(lastReply.text)
+      || Boolean(ownerName && new RegExp(`^\\W*${ownerName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(lastReply.text));
+    if (toOwner) {
+      store.appendMessage(owner.threadId, {
+        role: "bot",
+        kind: "activity",
+        tool: { name: chipText(`Dito ao dono em "${task.title}": ${firstSentence(lastReply.text.replace(/^\W*[A-ZÀ-Ú][\wÀ-ú]+,\s+/, ""), 200)}`, 240), ok: true },
+        threadRef: { botId: bot.id, threadId, title: task.title },
+      });
+    }
+  }
 }
 
 bus.subscribe((event: RuntimeEvent) => {
