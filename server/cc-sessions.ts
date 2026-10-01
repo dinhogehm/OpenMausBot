@@ -95,6 +95,9 @@ export interface CcSession {
   archivedOutsideAt?: number;
   /** Its PRs were checked after that (left without a session, or not). */
   archivedOutsideCheckedAt?: number;
+  /** Checks that could not reach GitHub, and when the last one was tried. */
+  archivedOutsideTries?: number;
+  archivedOutsideTriedAt?: number;
   /** Its PRs on the way to production (server/prod-delivery.ts). */
   delivery?: CcDelivery;
 }

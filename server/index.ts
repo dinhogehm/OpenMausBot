@@ -335,7 +335,8 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, githubSlug, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, prsOfSession, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, githubSlug, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
+import { checkArchivedOutside, notAPullRequest } from "./archived-outside.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
@@ -9157,40 +9158,71 @@ function drainCcStartQueue(): void {
   }
 }
 
+/** A conversation of the bot still open (not archived, closed or deleted). */
+function openThreadOf(botId: string, threadId: string | null | undefined): boolean {
+  const task = threadId ? store.taskByThread(botId, threadId) : null;
+  return Boolean(task && !task.archivedAt && !task.closedBy);
+}
+
+/** Where a bot hears what concerns a conversation that may be gone: that
+ * one while open, else its desk (the Chief's) or its main conversation. */
+function liveThreadFor(botId: string, threadId: string): string | null {
+  if (openThreadOf(botId, threadId)) return threadId;
+  const bot = store.bot(botId);
+  if (!bot) return null;
+  return [bot.chiefOfStaff ? chiefDeskThread(bot) : null, bot.threadId].find((candidate) => candidate && candidate !== threadId && openThreadOf(botId, candidate)) ?? null;
+}
+
 /** A session archived in the Claude app by someone, not by the server: its
  * PRs still open are left without a session. The owner hears which, and the
- * person gets a "Precisa de você" item (R8-followup F1: ffd6ee1a / #9328). */
+ * person gets a "Precisa de você" item (INSP-F F1: ffd6ee1a / #9328) — in
+ * the conversation that owned it, or in the bot's main one when that one
+ * was closed. The logic is server/archived-outside.ts. */
 const archivedOutsideWatch = { running: false };
 async function watchArchivedOutside(): Promise<void> {
   if (archivedOutsideWatch.running) return;
   archivedOutsideWatch.running = true;
+  const where = (session: CcSession) => liveThreadFor(session.ownerBotId, session.ownerThreadId);
   try {
-    for (const session of ccLedger.all().filter((each) => each.archivedOutsideAt !== undefined && each.archivedOutsideCheckedAt === undefined).slice(0, 3)) {
-      let slug = session.delivery?.slug ?? null;
-      if (!slug) {
-        try { slug = githubSlug((await execCc("git", ["-C", session.repo, "remote", "get-url", "origin"])).trim()); } catch { /* not a GitHub repository */ }
-      }
-      const open: number[] = [];
-      let unknown = false;
-      for (const number of prsOfSession(session, slug).slice(0, 5)) {
+    await checkArchivedOutside(ccLedger.all(), {
+      now: () => Date.now(),
+      save: () => ccLedger.save(),
+      slugOf: async (session) => githubSlug((await execCc("git", ["-C", session.repo, "remote", "get-url", "origin"])).trim()),
+      prState: async (number, slug) => {
         try {
-          const view = JSON.parse(await execCc("gh", ["pr", "view", String(number), ...(slug ? ["--repo", slug] : []), "--json", "state"], session.repo)) as { state?: string };
-          if (view.state === "OPEN") open.push(number);
-        } catch { unknown = true; }
-      }
-      if (unknown && !open.length) continue; // gh unavailable: next pass
-      session.archivedOutsideCheckedAt = Date.now();
-      ccLedger.save();
-      if (!open.length) continue;
-      const prs = open.map((number) => `#${number}`).join(", ");
-      const text = `PR ${prs} ficou sem sessão: "${session.title}" foi arquivada no app Claude por fora do OMB`;
-      ccChip(session, text, false);
-      ccReport(session, `${text}. Open PR(s) ${prs} have nobody working on them now. Start a session for them (cc_session_start), hand them to someone, or close them — and tell the owner which.`);
-      if (store.taskByThread(session.ownerBotId, session.ownerThreadId)) {
-        autonomy.addOwnerPending(session.ownerBotId, session.ownerThreadId, { title: `${text} — decida quem segue`, ...(slug ? { link: `https://github.com/${slug}/pull/${open[0]}` } : {}), key: `cc-orphan-pr:${session.id}` });
+          const view = JSON.parse(await execCc("gh", ["pr", "view", String(number), "--repo", slug, "--json", "state"])) as { state?: string };
+          return view.state === "OPEN" || view.state === "CLOSED" || view.state === "MERGED" ? view.state : "CLOSED";
+        } catch (error) {
+          if (notAPullRequest(error)) return "NOT_PR";
+          throw error;
+        }
+      },
+      openPrs: async (by, slug) => {
+        const filter = "issue" in by ? ["--search", by.issue] : ["--head", by.branch];
+        const list = JSON.parse(await execCc("gh", ["pr", "list", "--repo", slug, "--state", "open", ...filter, "--json", "number", "--limit", "10"])) as Array<{ number?: number }>;
+        return list.map((pr) => pr.number).filter((number): number is number => typeof number === "number");
+      },
+      branchOf: async (cwd) => {
+        const branch = (await execCc("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])).trim();
+        return branch || null;
+      },
+      chip: (session, text, ok) => {
+        const threadId = where(session);
+        if (threadId) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Claude Code "${session.title.slice(0, 60)}": ${text}`, 240), ok } });
         refreshBotRow(session.ownerBotId);
-      }
-    }
+      },
+      report: (session, text) => {
+        const threadId = where(session);
+        if (threadId) autonomy.addReport(session.ownerBotId, threadId, text);
+        else console.error(`[cc-sessions] archived-outside report for ${session.id} has no open conversation of ${session.ownerBotId}: ${text.slice(0, 200)}`);
+      },
+      ownerPending: (session, item) => {
+        const threadId = where(session);
+        if (!threadId) return;
+        autonomy.addOwnerPending(session.ownerBotId, threadId, item);
+        refreshBotRow(session.ownerBotId);
+      },
+    });
   } finally {
     archivedOutsideWatch.running = false;
   }
