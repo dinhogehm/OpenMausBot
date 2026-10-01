@@ -139,6 +139,8 @@ describe("after a release", () => {
     expect(haltedRelease({ escalationJson: json, haltedSha: "", haltedReason: "" })).toBeNull();
     // the JSON of another commit: only the .sha's own sha and reason
     expect(haltedRelease({ escalationJson: json, haltedSha: "c88f99d62", haltedReason: "post-deploy-health" })).toEqual({ sha: "c88f99d62", reason: "post-deploy-health" });
+    // INSP-R r2 item 5: the health halt's code (#9319) in pt-BR
+    expect(haltedRelease({ escalationJson: "", haltedSha: "c88f99d62", haltedReason: "post-release-health\n" })).toEqual({ sha: "c88f99d62", reason: "checagem de saúde pós-deploy" });
     // no .reason (post-deploy halts, exit 20/21/23, on main today): the post-deploy check
     expect(haltedRelease({ escalationJson: "", haltedSha: "c88f99d62\n", haltedReason: "" })).toEqual({ sha: "c88f99d62", reason: "checagem pós-deploy" });
     // a .sha that is not a commit sha is no halt

@@ -207,6 +207,8 @@ export function haltStillMatters(input: { haltedSha: string; releasedContainsHal
 /** The watcher's reason codes, said in pt-BR (unknown codes are kept as they are). */
 const HALT_REASONS: Record<string, string> = {
   "content-failure-limit": "limite de falhas de conteúdo atingido",
+  // nuria-platform #9319 (watch-production-release.sh): the post-deploy health halt
+  "post-release-health": "checagem de saúde pós-deploy",
 };
 
 /** The watcher's halt of a tip, or null when none. The halt exists if and
