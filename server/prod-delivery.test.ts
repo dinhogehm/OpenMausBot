@@ -51,7 +51,17 @@ describe("delivery in production", () => {
     // lists after one "PRs" (R8-followup F5), and still no bare issue numbers
     expect(prLinks("Mergeei as PRs #9329 e #9330; a issue #9326 segue aberta", SLUG).map((link) => link.number)).toEqual([9329, 9330]);
     expect(prLinks("PRs #9315, #9316 and #9317 are in the carrier", SLUG).map((link) => link.number)).toEqual([9315, 9316, 9317]);
-    expect(prLinks("PR #9328/#9330 com gate verde", SLUG).map((link) => link.number)).toEqual([9328, 9330]);
+    // an issue next to a PR is not a PR (INSP-F F5-a): a list only after the plural, never "/"
+    const numbers = (text: string) => prLinks(text, SLUG).map((link) => link.number);
+    expect(numbers("PR #9328, #9319 (issue) segue")).toEqual([9328]);
+    expect(numbers("PR #9328 / #9319 é a issue")).toEqual([9328]);
+    expect(numbers("PR #9328/#9319 com gate verde")).toEqual([9328]);
+    expect(numbers("PRs #9328 e #9319: a primeira é a correção... a segunda issue fica aberta")).toEqual([9328]);
+    expect(numbers("a PR #9328 & #9319")).toEqual([9328]);
+    expect(numbers("PRs #9328 e #9319 (issue) seguem")).toEqual([9328]);
+    expect(numbers("Abri a PR #9328 para a issue #9319")).toEqual([9328]);
+    expect(numbers("PRs #9329 e #9330")).toEqual([9329, 9330]);
+    expect(numbers("PRs #9329 & #9330 mergeadas. A issue #9326 segue aberta")).toEqual([9329, 9330]);
     // what a session archived in the app may have left open: its open deliveries and the PRs its report names
     expect(prsOfSession({ lastReport: "Abri a PR #9328 (F4-1).", delivery: { slug: SLUG, prs: { "9330": { number: 9330, url: "", state: "open" }, "9329": { number: 9329, url: "", state: "merged" } } } as unknown as CcDelivery }, SLUG).sort()).toEqual([9328, 9330]);
     expect(prsOfSession({ lastReport: "PR #9328" }, null)).toEqual([]);

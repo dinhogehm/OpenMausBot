@@ -54,16 +54,34 @@ export function prLinks(text: string, slug: string): Array<{ url: string; number
     const number = Number(match[2]);
     if (!found.has(number)) found.set(number, `https://github.com/${match[1]}/pull/${number}`);
   }
-  // sessions often report a PR only as "PR #9315", or a list: "PRs #9329 e
-  // #9330", "PRs #1, #2 and #3", "PR #1/#2" (a bare "#N" may be an issue, so
-  // only numbers in a run that starts with PR count)
-  for (const match of text.matchAll(/\b(?:PRs?|pull requests?)\s*(#\d{2,6}(?:\s*(?:,|\/|&|\be\b|\band\b)\s*#\d{2,6})*)/gi)) {
-    for (const each of match[1]!.matchAll(/#(\d{2,6})/g)) {
-      const number = Number(each[1]);
+  // sessions often report a PR only as "PR #9315", or a list after the
+  // plural: "PRs #9329 e #9330", "PRs #1, #2 and #3". A bare "#N" may be an
+  // issue, so only the number right after a singular "PR" counts ("PR #9328,
+  // #9319 (issue)", "PR #9328/#9319" name an issue second), and a list is cut
+  // where it names an issue: "#9319 (issue)", "#9319 é a issue", or "issue"
+  // later in the same clause ("PRs #9328 e #9319: … a segunda issue") keeps
+  // only the first number, the one that is certainly a PR. What is missed
+  // here is found by the issue and branch of the session (archived-outside.ts).
+  for (const match of text.matchAll(/\b(?:(PRs|pull requests)\s*(#\d{2,6}(?:\s*(?:,|&|\be\b|\band\b)\s*#\d{2,6})*)|(?:PR|pull request)\s*#(\d{2,6}))\b/gi)) {
+    const numbers = match[3] ? [Number(match[3])] : listedPrs(match[2]!, text.slice(match.index! + match[0].length));
+    for (const number of numbers) {
       if (!found.has(number)) found.set(number, `https://github.com/${slug}/pull/${number}`);
     }
   }
   return [...found].map(([number, url]) => ({ url, number }));
+}
+
+/** The PR numbers of a list that followed "PRs": a number tagged as an issue
+ * leaves it, and an issue named later in the same clause leaves only the first. */
+function listedPrs(list: string, after: string): number[] {
+  const numbers = [...list.matchAll(/#(\d{2,6})/g)].map((each) => Number(each[1]));
+  const issueTagged = (rest: string) => /^\s*(?:\(\s*(?:a\s+|the\s+)?issue\b|(?:é|e|is)\s+(?:a\s+|the\s+|uma\s+|an\s+)?issue\b)/i.test(rest);
+  // only the last one can carry a tag: inside the list a separator follows
+  const kept = numbers.filter((_, i) => i < numbers.length - 1 || !issueTagged(after));
+  // the rest of the clause (up to ; ! ? a line break or a sentence's end)
+  const clause = after.split(/[;!?\n]|\.(?=\s+[A-ZÀ-Ú]|\s*$)/)[0] ?? "";
+  if (kept.length > 1 && /\bissues?\b/i.test(clause)) return kept.slice(0, 1);
+  return kept;
 }
 
 /** `origin`'s "owner/repo" from its URL; null when not GitHub. Every form
@@ -277,10 +295,11 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
 export const IDLE_WITH_PR_MS = 6 * 3_600_000;
 const IDLE_REPORT_EVERY_MS = 24 * 3_600_000;
 
-/** Sessions idle past IDLE_WITH_PR_MS with known PRs not yet merged or
- * closed, not reported in the last day, oldest first. */
 /** The PRs a session may have left behind: those it delivered and are not
- * merged or closed, and those its last report names. */
+ * merged or closed, and those its last report names. Only candidates: a
+ * number may still be an issue ("Could not resolve to a PullRequest"), and
+ * the PRs only GitHub knows (by its issue, by its branch) are looked up by
+ * the caller (archived-outside.ts). */
 export function prsOfSession(session: Pick<DeliverySession, "delivery"> & { lastReport?: string }, slug: string | null): number[] {
   return [...new Set([
     ...Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.state !== "merged" && pr.state !== "closed").map((pr) => pr.number),
@@ -288,6 +307,8 @@ export function prsOfSession(session: Pick<DeliverySession, "delivery"> & { last
   ])];
 }
 
+/** Sessions idle past IDLE_WITH_PR_MS with known PRs not yet merged or
+ * closed, not reported in the last day, oldest first. */
 export function idleWithOpenPrs<T extends DeliverySession & { lastActivityAt: number; idleReportedAt?: number }>(sessions: readonly T[], now: number): Array<{ session: T; prs: number[] }> {
   return sessions
     .filter((session) => session.status === "idle" && now - session.lastActivityAt >= IDLE_WITH_PR_MS)
