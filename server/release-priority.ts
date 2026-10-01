@@ -1,10 +1,11 @@
 // A production release waits behind the local CI of another worktree
 // (admission-control: "ADMISSION_WAITING kind=release … blocked_by=ci-full:<pid>").
 // When that CI belongs to a Claude Code session this server manages, the
-// release wins: the server stops that CI's process group, tells the session
-// why, and resumes it once the production tag moves. It never touches a
-// process that is not a managed session's, and never the release itself.
-import type { PsRow } from "./bg-jobs.ts";
+// release wins: the server stops that CI, tells the session why, and resumes
+// it once the production tag moves. It never touches a process that is not a
+// managed session's CI, never the session's own claude, never the server or
+// the app, and never the release itself.
+import { isInteractiveShell, type PsRow } from "./bg-jobs.ts";
 
 /** How long the release must have waited before a CI is stopped for it. */
 export const RELEASE_WAIT_BEFORE_PREEMPT_S = 120;
@@ -19,8 +20,29 @@ export function releaseBlockedBy(logTail: string): { pid: number; waitedS: numbe
   return match ? { label: match[1]!, pid: Number(match[2]), waitedS: Number(match[3]) } : null;
 }
 
-const RELEASE_COMMAND = /release-production|local-release|release-carrier|watch-production-release/;
-const CI_COMMAND = /local-ci\.sh|ci:local/;
+// ── what a command is: anchored on the executable and the script, never on
+// free text — a `claude -p` carries its whole prompt in argv, and a prompt
+// that says "rode ci:local … ./scripts/release-carrier.sh --check" is not a CI
+// nor a release (INSP-R r1: the server picked the claude's group as "the CI").
+const SHELL = String.raw`(?:\S*/)?(?:ba|z)?sh`;
+const SHELL_OPTS = String.raw`(?:\s+-\S+)*`;
+/** `bash ./scripts/local-ci.sh --profile full`, `/bin/bash -p scripts/local-ci.sh`. */
+const CI_SCRIPT = new RegExp(`^${SHELL}${SHELL_OPTS}\\s+\\S*scripts/local-ci\\.sh(?:\\s|$)`);
+/** `npm run ci:local` (the process title npm sets). */
+const CI_NPM = /^(?:\S*\/)?npm(?:\s+-\S+)*\s+run(?:-script)?\s+ci:local(?:\s|$)/;
+/** The Bash tool's `/bin/zsh -c …` (or `bash -c`) that leads the CI's group. */
+const SHELL_C = new RegExp(`^${SHELL}${SHELL_OPTS}\\s+-c\\s`);
+/** The release: its scripts run by a shell, the watcher, or `npm run release…`. */
+const RELEASE_SCRIPT = new RegExp(`^${SHELL}${SHELL_OPTS}\\s+\\S*(?:scripts/(?:local-release|release-carrier)|watch-production-release)\\.sh(?:\\s|$)`);
+const RELEASE_NPM = /^(?:\S*\/)?npm(?:\s+-\S+)*\s+run(?:-script)?\s+release(?::\S*)?(?:\s|$)/;
+/** A Claude Code process: `claude …` or its node entry point. */
+const CLAUDE = /^(?:\S*\/)?claude(?:\s|$)|\/@anthropic-ai\/claude-code\//;
+/** An app bundle's process: the OpenMausBot app, its helpers (the server), Claude, a terminal. */
+const APP_BUNDLE = /\.app\/Contents\//;
+
+export const isCiCommand = (command: string): boolean => CI_SCRIPT.test(command.trim()) || CI_NPM.test(command.trim());
+export const isReleaseCommand = (command: string): boolean => RELEASE_SCRIPT.test(command.trim()) || RELEASE_NPM.test(command.trim());
+export const isClaudeCommand = (command: string): boolean => CLAUDE.test(command.trim());
 
 /** What the server knows of a managed session's processes. */
 export interface ManagedSessionProcs {
@@ -59,52 +81,71 @@ export function ownerSession(pid: number, rows: readonly PsRow[], cwdOf: (pid: n
   return null;
 }
 
-/** What to stop so the release can go: the CI's whole process group, or —
- * when that group also holds something else (the session's own claude, a
- * shell) — only the CI's process tree; or why nothing may be stopped. */
+/** What to stop so the release can go — the CI's whole process group, or,
+ * when that group also holds something else, only the CI's process tree —
+ * with every pid the signal reaches; or why nothing may be stopped: `reason`
+ * in pt-BR for the alert (no argv), `detail` with pids and commands for the log. */
 export type CiStop =
-  | { kind: "group"; pgid: number; root: PsRow }
+  | { kind: "group"; pgid: number; root: PsRow; pids: number[] }
   | { kind: "tree"; pids: number[]; root: PsRow }
-  | { kind: "refuse"; reason: string };
+  | { kind: "refuse"; reason: string; detail: string };
+
+/** What must never be signalled, besides the release: the server's own group,
+ * and every pid the caller names (managed sessions' claudes, the server, its parent). */
+export interface StopGuard {
+  ownPgid: number;
+  protectedPids?: readonly number[];
+}
 
 const describe = (row: PsRow) => `${row.pid} "${row.command.slice(0, 120)}" pgid ${row.pgid}`;
+const refuse = (reason: string, detail: string): CiStop => ({ kind: "refuse", reason, detail });
 
-/** The pid in the admission lock may be the CI script, or a child of it
- * (vitest, turbo, a `bash -p` of a trusted hook bin), or its `npm run`
- * parent: the CI is found by walking up from it to the topmost process
- * that is still the local CI. On 01/10 a release waited 870 s because the
- * lock's pid was not the script itself ("not a local CI group"). Never the
- * release, never the server's own group. */
-export function ciToStop(pid: number, rows: readonly PsRow[], ownPgid: number): CiStop {
+/** The pid in the lease is the CI script itself: admission-control.sh writes
+ * `$$` to lease/owner.pid, and it is sourced by local-ci.sh (01/10, live lease:
+ * owner.pid 40409 = `bash ./scripts/local-ci.sh --profile full`). The CI is
+ * found by walking up from it only through contiguous processes that are
+ * still the local CI (`local-ci.sh`, `npm run ci:local`) in the lease pid's
+ * own process group — plus that group's leader when it is the `zsh -c` that
+ * ran it. Nothing above that is ever part of the target. Refuses when the
+ * whole chain up to launchd holds the release, when the group or tree holds
+ * the release, or when the target would reach a claude, an app bundle (the
+ * server, the app), an interactive shell, the server's group or a protected pid. */
+export function ciToStop(pid: number, rows: readonly PsRow[], guard: StopGuard): CiStop {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const start = byPid.get(pid);
-  if (!start) return { kind: "refuse", reason: `ci-full:${pid} is not running` };
-  const chain: PsRow[] = [];
-  for (let row: PsRow | undefined = start; row && row.pid > 1 && chain.length < 32; row = byPid.get(row.ppid)) chain.push(row);
-  const ci = chain.map((row, i) => ({ row, i })).filter(({ row }) => CI_COMMAND.test(row.command));
-  if (!ci.length) return { kind: "refuse", reason: `neither ${describe(start)} nor its parents are a local CI` };
-  const root = ci.at(-1)!.row;
-  const below = chain.slice(0, ci.at(-1)!.i + 1);
-  const release = below.find((row) => RELEASE_COMMAND.test(row.command));
-  if (release) return { kind: "refuse", reason: `${describe(release)} is the release itself` };
-  if (root.pgid <= 1 || root.pgid === ownPgid) return { kind: "refuse", reason: `the CI ${describe(root)} runs in ${root.pgid <= 1 ? "no group of its own" : "the server's own group"}` };
-  const group = rows.filter((row) => row.pgid === root.pgid);
-  const releaseInGroup = group.find((row) => RELEASE_COMMAND.test(row.command));
-  if (releaseInGroup) return { kind: "refuse", reason: `the release ${describe(releaseInGroup)} shares the CI's group` };
-  // the CI's tree: the root and everything under it
+  if (!start) return refuse("o processo que segura o lease já não está rodando", `ci-full:${pid} is not running`);
+  if (!isCiCommand(start.command)) return refuse("o processo que segura o lease não é um ci:local reconhecível (local-ci.sh ou npm run ci:local)", `${describe(start)} is not local-ci.sh / npm run ci:local`);
+  const chain: PsRow[] = [start];
+  for (let row = start; row.ppid > 0 && chain.length < 128;) {
+    const parent = byPid.get(row.ppid);
+    if (!parent || chain.includes(parent)) break;
+    chain.push(parent);
+    row = parent;
+  }
+  const releaseAbove = chain.find((row) => isReleaseCommand(row.command));
+  if (releaseAbove) return refuse("o ci:local roda dentro do próprio release", `${describe(releaseAbove)} is an ancestor of ci-full:${pid}`);
+  let top = 0;
+  while (top + 1 < chain.length && chain[top + 1]!.pgid === start.pgid && isCiCommand(chain[top + 1]!.command)) top += 1;
+  const leader = chain[top + 1];
+  if (leader && leader.pgid === start.pgid && leader.pid === leader.pgid && SHELL_C.test(leader.command.trim())) top += 1;
+  const root = chain[top]!;
+  if (root.pgid <= 1 || root.pgid === guard.ownPgid) {
+    return refuse(root.pgid <= 1 ? "o ci:local não tem um grupo de processos próprio" : "o ci:local está no grupo de processos do próprio servidor", `the CI ${describe(root)} runs in ${root.pgid <= 1 ? "no group of its own" : "the server's own group"}`);
+  }
   const tree = new Set([root.pid]);
   for (let grew = true; grew;) {
     grew = false;
     for (const row of rows) if (!tree.has(row.pid) && tree.has(row.ppid)) { tree.add(row.pid); grew = true; }
   }
-  if (rows.some((row) => tree.has(row.pid) && RELEASE_COMMAND.test(row.command))) return { kind: "refuse", reason: `the release runs under the CI ${describe(root)}` };
-  // the group holds more than the CI (the session's claude): stop only the CI's tree
-  if (group.some((row) => !tree.has(row.pid))) return { kind: "tree", pids: [...tree], root };
-  return { kind: "group", pgid: root.pgid, root };
-}
-
-/** The process group to stop for `pid` (kept for callers that stop groups only). */
-export function ciGroupToStop(pid: number, rows: readonly PsRow[], ownPgid: number): number | null {
-  const stop = ciToStop(pid, rows, ownPgid);
-  return stop.kind === "group" ? stop.pgid : null;
+  const group = rows.filter((row) => row.pgid === root.pgid);
+  const release = [...group, ...rows.filter((row) => tree.has(row.pid))].find((row) => isReleaseCommand(row.command));
+  if (release) return refuse("o release roda no mesmo grupo de processos do ci:local, ou abaixo dele", `the release ${describe(release)} shares the CI's group or tree (root ${describe(root)})`);
+  // the whole group when it is only the CI; else only the CI's tree
+  const whole = group.every((row) => tree.has(row.pid));
+  const targets = whole ? group : rows.filter((row) => tree.has(row.pid));
+  const guarded = new Set(guard.protectedPids ?? []);
+  const forbidden = targets.find((row) => row.pid <= 1 || guarded.has(row.pid) || row.pgid === guard.ownPgid || isClaudeCommand(row.command) || APP_BUNDLE.test(row.command) || isInteractiveShell(row.command));
+  if (forbidden) return refuse("o alvo incluiria uma sessão do Claude, o servidor, o app ou um terminal do dono", `stopping ${whole ? `group ${root.pgid}` : `the tree of ${root.pid}`} would reach ${describe(forbidden)}`);
+  const pids = targets.map((row) => row.pid);
+  return whole ? { kind: "group", pgid: root.pgid, root, pids } : { kind: "tree", pids, root };
 }

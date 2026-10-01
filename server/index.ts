@@ -8864,7 +8864,7 @@ async function preemptCiForRelease(): Promise<void> {
       return;
     }
     const ownPgid = rows.find((row) => row.pid === process.pid)?.pgid ?? process.pid;
-    const stop = ciToStop(blocked.pid, rows, ownPgid);
+    const stop = ciToStop(blocked.pid, rows, { ownPgid, protectedPids: [process.pid, process.ppid, ...[...ccProcesses.values()].map((proc) => proc.pid).filter((pid): pid is number => typeof pid === "number")] });
     if (stop.kind === "refuse") {
       console.log(`[release-priority] leave alone: ci-full:${blocked.pid} ${lockSeen} of session ${session.id} — ${stop.reason}`);
       // the release keeps waiting: whoever decides hears it, once per lock
