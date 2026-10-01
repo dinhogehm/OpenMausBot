@@ -498,13 +498,18 @@ describe("archiveDesktopSession", () => {
     expect(far.actions).not.toContain("click 1240,68");
   });
 
-  it("matches the truncated sidebar entry, and says which items a menu without Rename showed", async () => {
+  it("matches the truncated sidebar entry, and says which items a menu without the wanted one showed", async () => {
     const entry = { text: "• Inbox 503 diagnós", x: 24, y: 411 };
-    const app = fakeApp({ screens: [[entry], [entry, { text: "Fixar", x: 60, y: 440 }, { text: "Arquivar", x: 60, y: 470 }]] });
-    const step = await renameDesktopSession(app.driver, { localId, title: "Inbox 503 diagnóstico e recuperação", newTitle: "#8891 Inbox 503 diagnóstico" });
-    expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: "the session menu showed no Rename item", seen: expect.stringContaining("Fixar | Arquivar") });
+    const app = fakeApp({ screens: [[entry], [entry, { text: "Fixar", x: 60, y: 440 }, { text: "Renomear", x: 60, y: 470 }]] });
+    const step = await archiveDesktopSession(app.driver, { localId, title: "Inbox 503 diagnóstico e recuperação" });
+    expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: "the session menu showed no Archive item", seen: expect.stringContaining("Fixar | Renomear") });
     expect(app.actions).toContain("rclick 54,419");
     expect(app.actions.at(-1)).toBe("key 53");
+    // a rename never goes by the sidebar alone: without the session's header
+    // on screen it neither clicks nor types (INSP-D B3)
+    const rename = fakeApp({ screens: [[entry]] });
+    expect(await renameDesktopSession(rename.driver, { localId, title: "Inbox 503 diagnóstico e recuperação", newTitle: "#8891 Inbox 503 diagnóstico" })).toMatchObject({ ok: false, miss: true });
+    expect(rename.actions).toEqual([`open claude://code/continue?session=${localId}`]);
   });
 
   it("closes the menu instead of clicking blind when Arquivar is missing", async () => {

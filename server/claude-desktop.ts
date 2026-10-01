@@ -625,17 +625,27 @@ async function sessionMenuAction(
     let stop = await guard(screen, "open session");
     if (stop) return stop;
     let screenLines = await driver.ocr();
-    if (before) {
-      const early = await before(screen, screenLines);
-      if ("stop" in early) return early.stop;
-      if (early.touched) screenLines = await driver.ocr();
-    }
     // The session was opened by its own id: its header is the line at the
     // top that names it — matched by the start of the title or its words, at
     // any x (with the app's sidebar folded the header starts at the left
     // edge). On 01/10 "• Inbox 503 diagnóstico e recuperação v (nuria-platform"
     // was on screen and the rename still said the session was not.
-    const header = screenLines.find((line) => line.y < 140 && isHeaderOf(line, input.title));
+    const headerIn = (lines: OcrLine[]) => lines.find((line) => line.y < 140 && isHeaderOf(line, input.title));
+    let header = headerIn(screenLines);
+    if (before) {
+      // A step that clicks or types in the session's field (the rename's
+      // probe) runs only once the header says this IS the session: a stale
+      // link or a slow app leaves another one on screen (INSP-D B3).
+      const notOnScreen = (lines: OcrLine[]): DesktopStep => ({ ok: false, reason: `the session "${input.title}" is not the one on screen (its header is not there); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 140)) });
+      if (!header) return notOnScreen(screenLines);
+      const early = await before(screen, screenLines);
+      if ("stop" in early) return early.stop;
+      if (early.touched) {
+        screenLines = await driver.ocr();
+        header = headerIn(screenLines);
+        if (!header) return notOnScreen(screenLines);
+      }
+    }
     const finish = async (): Promise<DesktopStep> => {
       const after = then ? await then(screen, isItem) : null;
       if (after) return after;
@@ -759,7 +769,8 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
     // draft nobody proved.
     if (fieldBefore?.text && fieldBefore.text !== suggestion) {
       await act(screen, () => driver.key(ESCAPE));
-      return { ok: false, reason: "the message field holds text that was not there before the menu opened; nothing was typed, the rename waits", retry: true, touched: true };
+      // a miss: three of these and the person is asked to rename it by hand (INSP-D B5)
+      return { ok: false, reason: "the message field holds text that was not there before the menu opened; nothing was typed, the rename waits", retry: true, miss: true, touched: true, seen: fieldBefore.text.slice(0, 40) };
     }
     const menuOpen = opened.some(isItem);
     if (menuOpen || !upper(opened).some((line) => sidebarMatch(line.text, input.title)) || !composerEmpty(opened)) {
