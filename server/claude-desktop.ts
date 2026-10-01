@@ -502,11 +502,14 @@ const words = (text: string) => normalize(text).split(/[^\p{L}\p{N}#]+/u).filter
 export function headerNames(header: OcrLine[], title: string): boolean {
   const wanted = words(title).slice(0, 6);
   if (wanted.length < 2) return false;
+  // OCR can eat the first letter after the status dot: "nbox 503 diagnóstico
+  // e recuperação v (nuria-platform" for "Inbox 503 …" (01/10 14:30Z)
+  const sameStart = (seen: string, word: string) => seen === word || word.startsWith(seen) || (seen.length >= 3 && word.endsWith(seen));
   return header.some((line) => {
     const shown = words(line.text);
     // the last word shown may be cut ("labe…"): a prefix of the wanted one counts
-    const hits = wanted.filter((word) => shown.some((seen) => seen === word || (seen.length >= 3 && word.startsWith(seen))));
-    return hits.length >= Math.min(wanted.length, Math.max(2, Math.ceil(wanted.length * 0.6))) && shown.slice(0, 2).some((seen) => wanted[0]!.startsWith(seen) || seen === wanted[0]);
+    const hits = wanted.filter((word, i) => shown.some((seen) => seen === word || (seen.length >= 3 && word.startsWith(seen)) || (i === 0 && sameStart(seen, word))));
+    return hits.length >= Math.min(wanted.length, Math.max(2, Math.ceil(wanted.length * 0.6))) && shown.slice(0, 2).some((seen) => sameStart(seen, wanted[0]!));
   });
 }
 
@@ -525,6 +528,10 @@ export function isHeaderOf(line: OcrLine, title: string): boolean {
 }
 
 type MenuItems = readonly string[];
+/** A menu item is a short line ("Renomear sessão")... */
+const MENU_ITEM_MAX_CHARS = 30;
+/** ...that opens next to the click that opened the menu. */
+const MENU_ITEM_MAX_DX = 250;
 const ARCHIVE_ITEMS: MenuItems = ["Arquivar", "Archive"];
 const RENAME_ITEMS: MenuItems = ["Renomear", "Rename", "Editar título", "Edit title", "Editar nome", "Edit name"];
 
@@ -540,17 +547,31 @@ async function sessionMenuAction(
   input: { localId: string; title: string },
   items: MenuItems,
   verb: string,
-  then?: (screen: Screen) => Promise<DesktopStep | null>,
+  then?: (screen: Screen, isItem: (line: OcrLine) => boolean) => Promise<DesktopStep | null>,
+  /** Runs on the opened session before its menu: a step to stop with, or
+   * whether it touched the screen (then the screen is read again). */
+  before?: (screen: Screen, lines: OcrLine[]) => Promise<{ stop: DesktopStep } | { touched: boolean }>,
 ): Promise<DesktopStep> {
   if (!/^local_[0-9a-f-]{36}$/.test(input.localId)) return { ok: false, reason: "invalid desktop session id", retry: false };
-  // the item as the app words it now ("Renomear", "Renomear sessão", "Rename chat"…)
-  const isItem = (line: OcrLine) => items.some((item) => line.text.trim() === item || line.text.trim().startsWith(`${item} `));
+  // the item as the app words it now ("Renomear", "Renomear sessão", "Rename
+  // chat"…): a short line next to where the menu was opened — never a line of
+  // the conversation that happens to start with "Renomear a sessão para…"
+  let clickedX = 0;
+  const isItem = (line: OcrLine) => {
+    const text = line.text.trim();
+    return text.length <= MENU_ITEM_MAX_CHARS && Math.abs(line.x - clickedX) <= MENU_ITEM_MAX_DX && items.some((item) => text === item || text.startsWith(`${item} `));
+  };
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.openUrl(`claude://code/continue?session=${input.localId}`));
     await driver.sleep(2_500);
     let stop = await guard(screen, "open session");
     if (stop) return stop;
-    const screenLines = await driver.ocr();
+    let screenLines = await driver.ocr();
+    if (before) {
+      const early = await before(screen, screenLines);
+      if ("stop" in early) return early.stop;
+      if (early.touched) screenLines = await driver.ocr();
+    }
     // The session was opened by its own id: its header is the line at the
     // top that names it — matched by the start of the title or its words, at
     // any x (with the app's sidebar folded the header starts at the left
@@ -558,7 +579,7 @@ async function sessionMenuAction(
     // was on screen and the rename still said the session was not.
     const header = screenLines.find((line) => line.y < 140 && isHeaderOf(line, input.title));
     const finish = async (): Promise<DesktopStep> => {
-      const after = then ? await then(screen) : null;
+      const after = then ? await then(screen, isItem) : null;
       if (after) return after;
       await driver.sleep(1_000);
       return { ok: true };
@@ -568,7 +589,8 @@ async function sessionMenuAction(
     if (header) {
       stop = await guard(screen, "header menu");
       if (stop) return stop;
-      await act(screen, () => driver.click(header.x + 20, header.y + header.h / 2));
+      clickedX = header.x + 20;
+      await act(screen, () => driver.click(clickedX, header.y + header.h / 2));
       await driver.sleep(800);
       const menu = (await driver.ocr()).filter((line) => line.y > header.y && line.y - header.y < 400);
       const item = menu.find(isItem);
@@ -598,7 +620,8 @@ async function sessionMenuAction(
     }
     stop = await guard(screen, "session menu");
     if (stop) return stop;
-    await act(screen, () => driver.rightClick(entry.x + 30, entry.y + entry.h / 2));
+    clickedX = entry.x + 30;
+    await act(screen, () => driver.rightClick(clickedX, entry.y + entry.h / 2));
     await driver.sleep(800);
     const menu = (await driver.ocr()).filter((line) => Math.abs(line.y - entry.y) < 400);
     const item = menu.find(isItem);
@@ -626,8 +649,33 @@ export async function archiveDesktopSession(driver: DesktopDriver, input: { loca
  * message. What was pasted where it should not be is cleared, and the step
  * is not retried. Success here is only a click: the caller re-reads the
  * app's record for the new title. */
-export async function renameDesktopSession(driver: DesktopDriver, input: { localId: string; title: string; newTitle: string }): Promise<DesktopStep> {
-  return sessionMenuAction(driver, input, RENAME_ITEMS, "rename", async (screen) => {
+export async function renameDesktopSession(driver: DesktopDriver, input: { localId: string; title: string; newTitle: string; repoName?: string }): Promise<DesktopStep> {
+  // The app's suggested reply in the message field is not a draft: proved
+  // with the same probe as a send (before the menu opens), the suggestion
+  // does not stop the rename. Only a proven draft does.
+  let suggestion: string | null = null;
+  const probeFirst = async (screen: Screen, lines: OcrLine[]): Promise<{ stop: DesktopStep } | { touched: boolean }> => {
+    const size = await driver.screenSize();
+    const main = mainArea(lines);
+    const composer = findComposer(main, size, input.repoName);
+    if (!composer || composer.text === null) return { touched: false };
+    let stop = await guard(screen, "click field");
+    if (stop) return { stop };
+    await act(screen, () => driver.click(composer.line.x + 20, composer.line.y + composer.line.h / 2));
+    await driver.sleep(300);
+    if (composer.text !== SUGGESTION_PROBE) {
+      const probe = await probeField(screen, { ...composer, text: composer.text }, main, size, input.repoName);
+      if (probe.kind !== "suggestion") return { stop: probe.step };
+    }
+    // take the probe back: the field is empty (or shows the suggestion again)
+    stop = await guard(screen, "undo probe");
+    if (stop) return { stop };
+    await act(screen, () => driver.key(BACKSPACE));
+    await driver.sleep(300);
+    suggestion = composer.text;
+    return { touched: true };
+  };
+  return sessionMenuAction(driver, input, RENAME_ITEMS, "rename", async (screen, isItem) => {
     await driver.sleep(500);
     let stop = await guard(screen, "rename field");
     if (stop) return stop;
@@ -638,7 +686,7 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
     const fieldOf = (lines: OcrLine[]) => {
       const main = mainArea(lines);
       if (main.some((line) => line.y > size.h / 2 && NEW_SESSION_PLACEHOLDER.test(line.text.trim()))) return { text: null as string | null };
-      const composer = findComposer(main, size);
+      const composer = findComposer(main, size, input.repoName);
       return composer ? { text: composer.text } : null;
     };
     const opened = await driver.ocr();
@@ -647,13 +695,15 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
       const now = fieldOf(lines);
       return Boolean(now && fieldBefore && now.text === fieldBefore.text);
     };
-    // a draft in the message field: a title pasted by mistake would land
-    // on it, and clearing that would take the draft too
-    if (fieldBefore?.text) {
+    // Text in the message field that the probe did not prove to be the
+    // app's suggestion (it showed up after the probe): a title pasted by
+    // mistake would land on it. Wait, without asking the person about a
+    // draft nobody proved.
+    if (fieldBefore?.text && fieldBefore.text !== suggestion) {
       await act(screen, () => driver.key(ESCAPE));
-      return { ok: false, reason: `há texto não enviado no campo desta sessão ("${fieldBefore.text.slice(0, 120)}"); não renomeei para não arriscar o rascunho`, retry: true, touched: true, draft: fieldBefore.text.slice(0, 500) };
+      return { ok: false, reason: "the message field holds text that was not there before the menu opened; nothing was typed, the rename waits", retry: true, touched: true };
     }
-    const menuOpen = opened.some((line) => RENAME_ITEMS.includes(line.text.trim()));
+    const menuOpen = opened.some(isItem);
     if (menuOpen || !upper(opened).some((line) => sidebarMatch(line.text, input.title)) || !composerEmpty(opened)) {
       await act(screen, () => driver.key(ESCAPE));
       return { ok: false, reason: "the rename field did not open (nothing was typed)", retry: false, touched: true, seen: seenText(upper(opened)) };
@@ -676,7 +726,7 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
     }
     await act(screen, () => driver.key(RETURN));
     return null;
-  });
+  }, probeFirst);
 }
 
 // ── reading the app's session records (never written) ────────────────────

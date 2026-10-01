@@ -15,6 +15,7 @@ import {
   notRepoRoot,
   lastAppWorktreeFolder,
   COMPOSER_MODE,
+  isHeaderOf,
   DESKTOP_BRIEF_NOTE,
   DESKTOP_MESSAGE_NOTE,
   findDesktopSession,
@@ -442,13 +443,36 @@ describe("archiveDesktopSession", () => {
     expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "rclick 130,508", "click 200,548"]);
   });
 
-  it("finds the opened session by its header at the left edge (sidebar folded) and the item as the app words it (01/10: rename 0 of ~12)", async () => {
-    // OCR of 14:12:32Z: the header at the window's left edge, a time stamp beside it
-    const top = { text: "• Inbox 503 diagnóstico e recuperação v (nuria-platform", x: 40, y: 57 };
-    const stamp = { text: "Qui. 1 de out. 11:12", x: 40, y: 30 };
-    const app = fakeApp({ screens: [[stamp, top], [stamp, top, { text: "Arquivar sessão", x: 60, y: 140 }]] });
-    expect(await archiveDesktopSession(app.driver, { localId, title: "Inbox 503 diagnóstico e recuperação" })).toEqual({ ok: true });
-    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 60,65", "click 160,148"]);
+  it("finds the opened session by the header the OCR really read, first letter eaten included (01/10 14:22Z and 14:30Z), and the item as the app words it", async () => {
+    // server.log: "• Inbox 503 diagnóstico e recuperação v (nuria-platform" (14:12, 14:22)
+    // and "nbox 503 diagnóstico e recuperação v (nuria-platform" (14:30: the "I" eaten).
+    // The log keeps no coordinates: the header goes where the R7 capture has
+    // the header (x 502, y 23). Where the app opens the menu is not known
+    // (its real menu was never captured): the item goes under the header.
+    for (const text of ["• Inbox 503 diagnóstico e recuperação v (nuria-platform", "nbox 503 diagnóstico e recuperação v (nuria-platform"]) {
+      const top = { text, x: 502, y: 23, w: 466, h: 21 };
+      expect(isHeaderOf(top, "Inbox 503 diagnóstico e recuperação")).toBe(true);
+      const app = fakeApp({ screens: [[top], [top, { text: "Arquivar sessão", x: 520, y: 60, w: 120, h: 16 }]] });
+      expect(await archiveDesktopSession(app.driver, { localId, title: "Inbox 503 diagnóstico e recuperação" })).toEqual({ ok: true });
+      expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 522,33.5", "click 580,68"]);
+    }
+    // a header of another session that only shares the tail of a word is not this one
+    expect(isHeaderOf({ text: "• Sandbox 503 erro de deploy v (nuria-platform", x: 502, y: 23, w: 466, h: 21 }, "Inbox 503 diagnóstico e recuperação")).toBe(false);
+  });
+
+  it("clicks a menu item only on a short line next to the click: never a conversation line that starts with \"Renomear\" (INSP-D A5)", async () => {
+    const top = { text: "• Inbox 503 diagnóstico e recuperação v (nuria-platform", x: 502, y: 23, w: 466, h: 21 };
+    // the Chief's words in the conversation, right under the header, and no real menu item
+    const said = { text: "Renomear a sessão para #8891 Inbox 503 diagnóstico e recuperação", x: 530, y: 120, w: 600, h: 19 };
+    const app = fakeApp({ screens: [[top], [top, said], [top, said]] });
+    const step = await renameDesktopSession(app.driver, { localId, title: "Inbox 503 diagnóstico e recuperação", newTitle: "#8891 Inbox 503 diagnóstico e recuperação" });
+    expect(step).toMatchObject({ ok: false, miss: true });
+    expect(app.actions).not.toContain("click 830,129.5");
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+    // a short item far from the click (another window's menu) is not it either
+    const far = fakeApp({ screens: [[top], [top, { text: "Renomear", x: 1_200, y: 60, w: 80, h: 16 }], [top]] });
+    expect(await renameDesktopSession(far.driver, { localId, title: "Inbox 503 diagnóstico e recuperação", newTitle: "#8891 x" })).toMatchObject({ ok: false });
+    expect(far.actions).not.toContain("click 1240,68");
   });
 
   it("matches the truncated sidebar entry, and says which items a menu without Rename showed", async () => {
@@ -696,14 +720,42 @@ describe("the session's own menu, in its header", () => {
     expect(app.actions.slice(-2)).toEqual(["key 0+cmd", "key 51"]);
   });
 
-  it("does not rename while the message field holds a draft: a mistaken paste would land on it", async () => {
-    // the field and the mode bar where the real screen has them (R7): the field starts in the bar's column
-    const draft = { text: "pode reescrever o corpo da PR", x: 547, y: 842 };
-    const bar = { text: "+ Q v Automático", x: 543, y: 889 };
-    const app = fakeApp({ screens: [[header, draft, bar], [header, { text: "Renomear", x: 520, y: 110 }, draft, bar], [field, draft, bar]] });
-    expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket" }))
-      .toMatchObject({ ok: false, retry: true, draft: "pode reescrever o corpo da PR" });
-    expect(app.actions.some((action) => action.startsWith("paste") || action === "key 36" || action === "key 51")).toBe(false);
+  // the composer of the R7 capture under this session's header
+  const composerOf = (text: string | null) => swap(R7_SESSION.filter((line) => line.y > 700), { [R7_FIELD]: text });
+
+  it("does not rename while the message field holds a proven draft: a mistaken paste would land on it", async () => {
+    const app = fakeApp({ screens: [[header, ...composerOf(R7_FIELD)], [header, ...composerOf(`${R7_FIELD}.`)]] });
+    expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket", repoName: "nuria-platform" }))
+      .toMatchObject({ ok: false, retry: true, draft: R7_FIELD });
+    // the probe key was taken back; no menu, no paste, no Return
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 567,852.5", "key 125+cmd", "type .", "key 51"]);
+  });
+
+  it("renames over the app's suggestion: it is proved with the probe, taken back, and asks the person nothing (INSP-D A5)", async () => {
+    const suggestion = composerOf(R7_FIELD);
+    const app = fakeApp({
+      screens: [
+        [header, ...suggestion], // opened
+        [header, ...composerOf(".")], // the suggestion gave way to the probe
+        [header, ...suggestion], // after taking the probe back the app shows its suggestion again
+        [header, { text: "Renomear", x: 520, y: 110 }, ...suggestion], // the header's menu
+        [field, ...suggestion], // the rename field
+        [renamed, ...suggestion],
+      ],
+    });
+    const step = await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket", repoName: "nuria-platform" });
+    expect(step).toEqual({ ok: true });
+    expect(app.actions).toEqual([
+      `open claude://code/continue?session=${localId}`, "click 567,852.5", "key 125+cmd", "type .", "key 51",
+      "click 520,65", "click 620,118", "paste(all) #9305 Fila errada ao criar ticket", "key 36",
+    ]);
+  });
+
+  it("sees a rename menu still open by the same rule as its items (\"Renomear sessão\"), and types nothing (INSP-D A5)", async () => {
+    const menu = [header, { text: "Renomear sessão", x: 520, y: 110 }, composer];
+    const app = fakeApp({ screens: [[header, composer], menu, menu] });
+    expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 x" })).toMatchObject({ ok: false, retry: false, reason: expect.stringContaining("did not open") });
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
   });
 
   it("falls back to the sidebar when the header menu has no such item", async () => {
