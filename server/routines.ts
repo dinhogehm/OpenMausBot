@@ -279,7 +279,8 @@ export interface RoutineManagerOptions {
   /** Keyed frames only: every payload on this bus is `{ kind, … }`, which
    * is what lets the server number and replay them. */
   emit?: (payload: Record<string, unknown>) => void;
-  botState: (botId: string) => "ready" | "busy" | "missing";
+  /** `routineId`: which routine asks (the intake lock times each one apart). */
+  botState: (botId: string, routineId?: string) => "ready" | "busy" | "missing";
   goalState?: (groupId: string, coordinatorBotId: string) => "ready" | "busy" | "missing";
   /** A task for one run of `routineId` (it may name who the run is for). */
   createTask: (botId: string, title: string, activate?: boolean, routineId?: string) => { threadId: string } | null;
@@ -299,6 +300,7 @@ export interface RoutineManagerOptions {
     runOn: RoutineRunOn,
     triggerSource: RoutineRunTrigger,
     onDispatchError: (message: string) => void,
+    routineId?: string,
   ) => Promise<void>;
   startGoal?: (
     groupId: string,
@@ -1628,6 +1630,7 @@ export class RoutineManager {
               run.runOn ?? "maus",
               triggerSource,
               (message) => this.failThread(task.threadId, message),
+              run.routineId,
             );
           }
         } catch (error) {
@@ -1766,7 +1769,7 @@ export class RoutineManager {
       if (!target.groupId || !this.options.goalState) return "missing";
       return this.options.goalState(target.groupId, target.botId);
     }
-    return this.options.botState(target.botId);
+    return this.options.botState(target.botId, (target as { routineId?: string }).routineId);
   }
 
   private missingTargetMessage(target: RoutineTarget): string {

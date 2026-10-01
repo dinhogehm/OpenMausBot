@@ -60,6 +60,47 @@ it("after a restart, re-runs a cut-off wake once, reports it and the cut-off ses
   expect(restarted?.exitCode !== null || restarted?.signalCode !== null).toBe(true);
 }, 60_000);
 
+it("tells a standing watch armed with an unanchored ignore, once, when the server starts (INSP-E 7)", async () => {
+  const parentEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50" };
+  const fixture = await launchVerificationServer(parentEnv);
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string) => request(path, {}, url) as Promise<any>;
+  let restarted: ChildProcess | undefined;
+  try {
+    const monitor = (await runControlOmb(["new-bot", "--name", "Monitor", "--url", url]) as any).bot;
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+    // the real planilha watch as it is armed today: ignore not anchored
+    const at = Date.now();
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [{
+      botId: monitor.id, threadId: monitor.activeTaskId, dueAt: at + 3_600_000, createdAt: at, reason: "planilha",
+      watch: { command: "gog sheets get SHEET_ID Atendimento!A1:H400 --plain", argv: ["gog", "sheets", "get", "SHEET_ID", "Atendimento!A1:H400", "--plain"], everyMs: 600_000, baseline: "", lastRunAt: at, runs: 1, failures: 0, standing: true, label: "planilha", ignore: "\\[(Monitor Chat Atendimento|Monitor)\\]" },
+    }], goals: [] }));
+    const boot = () => {
+      const log = openSync(logPath, "a", 0o600);
+      const child = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+        cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment(parentEnv, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+      });
+      closeSync(log);
+      return child;
+    };
+    const healthy = () => expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+    const warned = async () => ((await api(`/api/threads/${monitor.activeTaskId}/messages`)).messages as any[]).filter((message) => String(message.tool?.name ?? "").startsWith("Vigia planilha: o ignore pode esconder")).length;
+    restarted = boot();
+    await healthy();
+    await expect.poll(warned, { timeout: 10_000 }).toBe(1);
+    expect(JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")).wakes[0].watch.ignoreWarnedAt).toBeGreaterThan(0);
+    // a second start says nothing again
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    restarted = boot();
+    await healthy();
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(await warned()).toBe(1);
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 60_000);
+
 it("a test server goes away with the process that launched it", async () => {
   const fixture = await launchVerificationServer();
   const { url, dataDir, logPath } = fixture.info;

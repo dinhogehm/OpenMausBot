@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { IntakeLock } from "./intake-lock.ts";
+import { IntakeLock, WAIT_FORGET_MS } from "./intake-lock.ts";
 
 describe("one intake turn per bot", () => {
   it("holds a bot's second intake turn in another conversation while the first runs", () => {
@@ -29,17 +29,42 @@ describe("one intake turn per bot", () => {
     lock.noteWait("monitor", "vigia-issues");
     now += 20_000;
     lock.noteWait("monitor", "vigia-issues");
-    lock.noteWait("monitor", "routine");
+    lock.noteWait("monitor", "routine:r1");
     expect(lock.holder("monitor")).toBe("vigia-chat");
     busy.delete("vigia-chat");
     lock.settle("vigia-chat");
     now += 19_000;
-    expect(lock.note("monitor", "vigia-issues")).toEqual({ behind: "vigia-chat", ms: 39_000 });
-    // asked again, it is gone; the routine runs in its results thread, under its own name
-    expect(lock.note("monitor", "vigia-issues")).toBeNull();
-    expect(lock.note("monitor", "results-1", "routine")).toEqual({ behind: "vigia-chat", ms: 19_000 });
+    // the wait is spent only once its turn really started (the caller asks then)
+    lock.note("monitor", "vigia-issues");
+    expect(lock.takeWait("monitor", "vigia-issues")).toEqual({ behind: "vigia-chat", ms: 39_000 });
+    expect(lock.takeWait("monitor", "vigia-issues")).toBeNull();
+    // each routine waits under its own id: one does not take another's wait
+    expect(lock.takeWait("monitor", "routine:r2")).toBeNull();
+    expect(lock.takeWait("monitor", "routine:r1")).toEqual({ behind: "vigia-chat", ms: 19_000 });
     // a turn that never waited says nothing
-    expect(lock.note("chief", "c1")).toBeNull();
+    expect(lock.takeWait("chief", "c1")).toBeNull();
+  });
+
+  it("forgets a wait whose watch was cancelled, and one too old to be the same wait (INSP-E 10)", () => {
+    let now = 0;
+    const lock = new IntakeLock(() => true, () => now);
+    lock.note("monitor", "vigia-chat");
+    lock.noteWait("monitor", "vigia-planilha");
+    lock.noteWait("monitor", "vigia-issues");
+    lock.dropWaits("vigia-planilha");
+    expect(lock.takeWait("monitor", "vigia-planilha")).toBeNull();
+    now += WAIT_FORGET_MS + 1;
+    expect(lock.takeWait("monitor", "vigia-issues")).toBeNull();
+  });
+
+  it("keeps the wait of a turn that could not start, for the turn that does", () => {
+    const lock = new IntakeLock(() => true, () => 0);
+    lock.note("monitor", "vigia-chat");
+    lock.noteWait("monitor", "vigia-issues");
+    // dispatch failed: nothing asked the wait, it is still there
+    lock.note("monitor", "vigia-issues");
+    lock.settle("vigia-issues");
+    expect(lock.takeWait("monitor", "vigia-issues")).toEqual({ behind: "vigia-chat", ms: 0 });
   });
 
   it("makes a teammate's message to a watcher bot wait for its intake turn, and hold the lock while it runs", () => {

@@ -5,12 +5,15 @@
 // routine is deferred — until the first conversation is idle again.
 //
 // A teammate's message to such a bot is intake too: the Chief saying "pode
-// avisar a Daiane" in one conversation while the bot's own tag watch fires
+// avisar a Fulana" in one conversation while the bot's own tag watch fires
 // in another sends the same notice twice. So it takes the same lock.
 //
 // Every wait is remembered (who waited, behind which conversation, since
 // when) and handed back when the waiter runs, for the server log: the lock
 // has to be visible to be trusted (R8-intake 4).
+
+/** A wait older than this is no longer the same wait (2 h). */
+export const WAIT_FORGET_MS = 2 * 3_600_000;
 
 export interface IntakeWait {
   /** The conversation it waited behind. */
@@ -60,20 +63,32 @@ export class IntakeLock {
       this.noteWait(botId, threadId);
       return false;
     }
-    const wait = this.note(botId, threadId);
+    this.note(botId, threadId);
+    const wait = this.takeWait(botId, threadId);
     if (wait) onRun?.(wait);
     return true;
   }
 
-  /** The intake turn in `threadId` starts; how long it waited, if it did
-   * (`waiter` names it when it waited under another name, e.g. "routine"). */
-  note(botId: string, threadId: string, waiter = threadId): IntakeWait | null {
+  /** The intake turn in `threadId` holds the lock. */
+  note(botId: string, threadId: string): void {
     this.running.set(botId, threadId);
+  }
+
+  /** How long `waiter` waited, once its turn really started; the wait is
+   * spent. A wait older than WAIT_FORGET_MS (a watch cancelled, a routine
+   * that never ran) is dropped, not reported. */
+  takeWait(botId: string, waiter: string): IntakeWait | null {
     const key = `${botId}\u0000${waiter}`;
     const wait = this.waits.get(key);
     if (!wait) return null;
     this.waits.delete(key);
-    return { behind: wait.behind, ms: this.now() - wait.since };
+    const ms = this.now() - wait.since;
+    return ms > WAIT_FORGET_MS ? null : { behind: wait.behind, ms };
+  }
+
+  /** `waiter` will not run after all (its watch was cancelled or re-armed): its wait is dropped. */
+  dropWaits(waiter: string): void {
+    for (const key of this.waits.keys()) if (key.endsWith(`\u0000${waiter}`)) this.waits.delete(key);
   }
 
   /** The turn in `threadId` ended (or never started). */
