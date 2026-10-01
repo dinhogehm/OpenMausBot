@@ -6,7 +6,7 @@
 import { BOOT_CLOUD_SECRETS } from "./cloud-secrets-boot.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, rmSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, mkdirSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -346,9 +346,9 @@ import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
-import { ciToStop, isReleaseCommand, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
+import { isReleaseCommand, type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
 import { batteryAlert, parsePmsetBatt, startsCarrier, type PowerState } from "./power.ts";
-import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, tagStuck, tagStuckCause } from "./release-watch.ts";
+import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8324,7 +8324,7 @@ async function revalidateNeedsInputGoals(): Promise<void> {
 /** A production release that fails twice on the same commit: a red chip and
  * a report on the Chief's desk (server/release-watch.ts). Only the server the
  * desktop app runs reads this Mac's release logs, every 2 min. */
-const releaseWatch = { state: DESKTOP_MANAGED && !process.env.VITEST ? new ReleaseWatchState(join(DATA_DIR, "release-watch.json")) : null, lastAt: 0 };
+const releaseWatch = { state: DESKTOP_MANAGED && !process.env.VITEST ? new ReleaseWatchState(join(DATA_DIR, "release-watch.json")) : null, lastAt: 0, quiet: new Set<string>() };
 /** A release alert on the Chief's desk: a red chip and a report. */
 function releaseAlertToChief(text: string, report: string): void {
   console.warn(`[release] ${text}`);
@@ -8343,29 +8343,82 @@ function readHaltedRelease(): ReturnType<typeof haltedRelease> {
 /** Production ran ahead of the tag (GH013), or the watcher halted a tip: told once each. */
 async function checkReleaseAftermath(state: ReleaseWatchState, released: string): Promise<void> {
   const halted = readHaltedRelease();
-  if (halted && state.once(`halt:${halted.sha}`)) {
+  let haltMatters = false;
+  if (halted && !state.wasTold(`halt:${halted.sha}`)) {
+    // a .sha left behind after a LATER successful release is not news (main moving is not evidence)
+    const repo = join(homedir(), "Projetos", "nuria-platform");
+    const releasedContainsHalt = released
+      ? await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", halted.sha, released]).then(() => true, (error: unknown) => ((error as { code?: unknown }).code === 1 ? false : null))
+      : null;
+    const mtime = (path: string) => { try { return statSync(path).mtimeMs; } catch { return null; } };
+    const releasedAtMs = mtime(RELEASED_SHA_FILE);
+    const haltedAtMs = mtime(HALTED_SHA_FILE);
+    haltMatters = haltStillMatters({ haltedSha: halted.sha, releasedSha: released, releasedContainsHalt, releasedAtMs, haltedAtMs });
+    if (!haltMatters && !releaseWatch.quiet.has(`halt:${halted.sha}`) && releaseWatch.quiet.add(`halt:${halted.sha}`)) console.log(`[release] halt of ${halted.sha.slice(0, 9)} left behind: a later release went through (${released.slice(0, 9)}, contains it: ${releasedContainsHalt}) — no alert`);
+  }
+  if (halted && haltMatters && state.once(`halt:${halted.sha}`)) {
     const text = `O watcher de produção PAROU de tentar o commit ${halted.sha.slice(0, 9)} (${halted.reason}${halted.failures ? `, ${halted.failures} falhas` : ""}): ele não sai sozinho; precisa de ação.`;
     releaseAlertToChief(text, `[Alerta do servidor: release de produção parado] ${text}${halted.lastFailure ? ` Última falha: ${halted.lastFailure}.` : ""}\nArquivos: ${HALT_ESCALATION_FILE}, ${HALTED_SHA_FILE}. Descubra a causa (drift de tenant, saúde), corrija ou decida com o dono; para tentar de novo o mesmo commit, o halt precisa ser removido (rm ${HALTED_SHA_FILE}).`);
   }
   if (!released) return;
   const repo = join(homedir(), "Projetos", "nuria-platform");
   let tagSha: string | null = null;
-  let contains = false;
+  let contains: boolean | null = null;
   try {
     tagSha = parseLsRemoteTag(await execCc("git", ["-C", repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
-    if (tagSha) {
-      try {
-        await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", released, tagSha]);
-        contains = true;
-      } catch { contains = tagSha.startsWith(released) || released.startsWith(tagSha); }
-    }
   } catch { return; /* the tag could not be read: nothing to say */ }
+  if (tagSha && (tagSha.startsWith(released) || released.startsWith(tagSha))) contains = true;
+  else if (tagSha) {
+    // ls-remote does not fetch: both commits must be in this clone before merge-base can say "not contained"
+    const known = async (sha: string) => execCc("git", ["-C", repo, "cat-file", "-e", `${sha}^{commit}`]).then(() => true, () => false);
+    const [releasedKnown, tagKnown] = await Promise.all([known(released), known(tagSha)]);
+    let isAncestor: boolean | null = null;
+    if (releasedKnown && tagKnown) {
+      isAncestor = await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", released, tagSha])
+        .then(() => true, (error: unknown) => ((error as { code?: unknown }).code === 1 ? false : null));
+    }
+    contains = tagContainsRelease({ releasedKnown, tagKnown, isAncestor });
+    if (contains === null && !releaseWatch.quiet.has(`tag:${tagSha}:${released}`) && releaseWatch.quiet.add(`tag:${tagSha}:${released}`)) console.log(`[release] tag ${PRODUCTION_TAG} at ${tagSha.slice(0, 9)} vs released ${released.slice(0, 9)}: not verifiable in ${repo} (commit missing here, or git failed) — no stuck-tag alert`);
+  }
+  await resolveTagAdvancePendings(repo, tagSha, released, contains);
   let releasedAt = Date.now();
   try { releasedAt = statSync(RELEASED_SHA_FILE).mtimeMs; } catch { return; }
-  const cause = tagStuckCause(`${readTail(RELEASE_OUT_LOG, 128 * 1024)}\n${readTail(RELEASE_ERR_LOG, 64 * 1024)}`);
+  // the cause of THIS release only: its warning and the refusal just above it (stderr)
+  const cause = tagStuckCause(readTail(RELEASE_ERR_LOG, 128 * 1024), released);
   const text = tagStuck({ releasedSha: released, releasedAt, tagSha, tagContainsRelease: contains, now: Date.now(), cause });
   if (text && state.once(`tag:${released}`)) {
-    releaseAlertToChief(text, `[Alerta do servidor: tag de produção parada] ${text}\nLogs: ${RELEASE_OUT_LOG} e ${RELEASE_ERR_LOG}. Avise o dono; até a tag andar, confirme entregas a clientes pelo commit em produção, não pela tag.`);
+    // the force push past the ruleset is the owner's: the command goes to the log and the owner's pending list, never to a bot's report
+    const manual = tagManualAdvance(readTail(RELEASE_ERR_LOG, 128 * 1024), released);
+    console.warn(`[release] tag ${PRODUCTION_TAG} stuck at ${tagSha?.slice(0, 9)} while production runs ${released.slice(0, 9)}; manual advance (owner only, needs the ruleset bypass): ${manual ?? "(not printed by the release)"}`);
+    releaseAlertToChief(text, `${tagStuckReport(text, Boolean(manual))}\nLogs: ${RELEASE_OUT_LOG} e ${RELEASE_ERR_LOG}.`);
+    const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+    const desk = chief ? chiefDeskThread(chief) : null;
+    if (chief && desk && store.taskByThread(chief.id, desk)) {
+      autonomy.addOwnerPending(chief.id, desk, { title: tagAdvancePendingTitle(released), key: `tag-advance:${released}` });
+      refreshBotRow(chief.id);
+    }
+  }
+}
+
+/** The owner's "advance the tag" items close by themselves once the tag
+ * contains their commit (by hand or by a later release): left open, the
+ * command they point to would move the production tag back. */
+async function resolveTagAdvancePendings(repo: string, tagSha: string | null, released: string, releasedContained: boolean | null): Promise<void> {
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  if (!chief || !tagSha) return;
+  // by bot, not by the current desk: the desk can change, and the item would be left behind
+  const open = autonomy.ownerPendingOf(chief.id).map((item) => item.key ?? "").filter((key) => key.startsWith("tag-advance:"));
+  if (!open.length) return;
+  const contained = new Map<string, boolean | null>();
+  for (const key of open) {
+    const sha = key.slice("tag-advance:".length);
+    if (released && (sha.startsWith(released) || released.startsWith(sha))) contained.set(sha, releasedContained);
+    else contained.set(sha, await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", sha, tagSha]).then(() => true, () => null));
+  }
+  const done = tagAdvanceToResolve(open, tagSha, (sha) => contained.get(sha) ?? null);
+  for (const key of done) {
+    for (const item of autonomy.resolveOwnerPending({ key })) refreshBotRow(item.botId);
+    console.log(`[release] tag ${PRODUCTION_TAG} at ${tagSha.slice(0, 9)} contains ${key.slice("tag-advance:".length, "tag-advance:".length + 9)}: the owner's "advance the tag" item is closed`);
   }
 }
 
@@ -9058,64 +9111,97 @@ function sendToSessionFromServer(session: CcSession, text: string): void {
 // server manages: that CI's process group is stopped, the session is told,
 // and it is resumed when the production tag moves. Only on the server the
 // desktop app runs (it reads this Mac's release log and processes).
-const releasePriority = { running: false, lastAt: 0, handled: new Set<number>(), tagCheckAt: 0 };
-async function preemptCiForRelease(): Promise<void> {
+// decided cases survive a restart (release-watch.json), so nothing is told or signalled twice
+const preemptHandled = new Set<string>();
+const releasePriority = {
+  running: false,
+  lastAt: 0,
+  state: {
+    handled: {
+      has: (key: string) => preemptHandled.has(key) || Boolean(releaseWatch.state?.isDecided(key)),
+      add: (key: string) => { preemptHandled.add(key); releaseWatch.state?.decide(key); },
+    },
+    retries: new Map<string, number>(),
+  } as PreemptState,
+  tagCheckAt: 0,
+};
+/** admission-control.sh's state (nuria-platform scripts/admission-control.sh): lease and release intents. */
+const ADMISSION_DIR = join(homedir(), ".nuria", "admission");
+/** null only when there is no lease (ENOENT); any other read error throws. */
+function readAdmissionLease(): AdmissionLease | null {
+  const read = (name: string) => {
+    try {
+      return readFileSync(join(ADMISSION_DIR, "lease", name), "utf8").trim();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  };
+  const ownerPid = read("owner.pid");
+  if (!ownerPid) return null;
+  return { ownerPid, kind: read("kind") ?? "" };
+}
+function readReleaseIntents(): ReleaseIntent[] | null {
+  // admission-control.sh creates intents/ on every acquire: missing while a
+  // release logs a wait means we look in the wrong place — undecided, not "no release"
+  const dir = join(ADMISSION_DIR, "intents");
+  try {
+    return readdirSync(dir).filter((name) => /^\d+$/.test(name)).map((name) => ({ pid: Number(name), label: readTail(join(dir, name), 512).trim() }));
+  } catch {
+    return null;
+  }
+}
+
+async function preemptCiForReleaseTick(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || releasePriority.running || Date.now() - releasePriority.lastAt < 20_000) return;
   releasePriority.running = true;
   releasePriority.lastAt = Date.now();
   try {
     await resumeSessionsAfterTag();
-    const blocked = releaseBlockedBy(readTail(RELEASE_OUT_LOG, 64 * 1024));
-    if (!blocked || blocked.waitedS < RELEASE_WAIT_BEFORE_PREEMPT_S || releasePriority.handled.has(blocked.pid)) return;
-    releasePriority.handled.add(blocked.pid);
-    const rows = await psTable();
-    let cwd: string | null = null;
-    try {
-      cwd = parseLsofCwd(await execCc("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn", "-p", String(blocked.pid)]))[0]?.cwd ?? null;
-    } catch { /* gone, or not ours to read */ }
-    const live = ccLedger.all().filter((session) => session.status !== "archived");
-    const ownerId = ownerSession(blocked.pid, rows, (pid) => (pid === blocked.pid ? cwd : null), live.map((session) => ({
-      sessionId: session.id,
-      ...(ccProcesses.get(session.id)?.pid ? { claudePid: ccProcesses.get(session.id)!.pid } : {}),
-      ...(session.bgJob ? { jobPids: session.bgJob.pids } : {}),
-      ...(session.surface === "app" && session.cwd ? { worktree: session.cwd } : {}),
-    })));
-    const session = ownerId ? ccLedger.get(ownerId) : null;
-    const lockRow = rows.find((row) => row.pid === blocked.pid);
-    const lockSeen = lockRow ? `"${lockRow.command.slice(0, 120)}" pgid ${lockRow.pgid}` : "not running";
-    if (!session) {
-      console.log(`[release-priority] leave alone: the release (${blocked.label}, ${blocked.waitedS}s) waits on ci-full:${blocked.pid} ${lockSeen}, which is not a managed session's`);
-      return;
-    }
-    const ownPgid = rows.find((row) => row.pid === process.pid)?.pgid ?? process.pid;
-    const stop = ciToStop(blocked.pid, rows, ownPgid);
-    if (stop.kind === "refuse") {
-      console.log(`[release-priority] leave alone: ci-full:${blocked.pid} ${lockSeen} of session ${session.id} — ${stop.reason}`);
-      // the release keeps waiting: whoever decides hears it, once per lock
-      const owner = store.bot(session.ownerBotId);
-      if (owner) alertAutomationTrouble(owner, session.ownerThreadId, `O release de produção (${blocked.label}) espera há ${Math.round(blocked.waitedS / 60)} min atrás do ci:local da sessão "${session.title}" e o servidor NÃO o interrompeu: ${stop.reason}. Interrompa esse ci:local na sessão, ou deixe o release esperar.`);
-      return;
-    }
-    const pgid = stop.kind === "group" ? stop.pgid : stop.root.pgid;
-    try {
-      if (stop.kind === "group") process.kill(-stop.pgid, "SIGTERM");
-      else for (const pid of stop.pids) { try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ } }
-    } catch (error) {
-      console.warn(`[release-priority] could not stop group ${pgid}: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
-    console.log(`[release-priority] stop ${stop.kind === "group" ? `group ${stop.pgid}` : `tree ${stop.pids.join(",")} (its group ${stop.root.pgid} also holds other processes)`}: ci-full:${blocked.pid} ${lockSeen} of session ${session.id}, CI root ${stop.root.pid} "${stop.root.command.slice(0, 120)}", release ${blocked.label} waited ${blocked.waitedS}s`);
-    let tagSha: string | null = null;
-    try {
-      tagSha = parseLsRemoteTag(await execCc("git", ["-C", session.repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
-    } catch { /* resumed on the first tag read that works */ }
-    const note = "ci:local interrompido para liberar o release de produção; relançar quando a tag nuria-production-deployed andar";
-    session.resumeAfterTag = { fromSha: tagSha, at: Date.now(), message: `A tag ${PRODUCTION_TAG} andou: o release de produção que esperava passou. O seu ci:local (processo ${blocked.pid}) foi interrompido pelo servidor para liberar esse release — relance-o agora (npm run ci:local) e siga de onde parou.` };
-    ccLedger.save();
-    ccChip(session, note, false);
-    ccReport(session, `[Claude Code session "${session.title}" (${session.id})] ${note}. The server stopped process group ${pgid} (ci-full:${blocked.pid}) because ${blocked.label} had waited ${blocked.waitedS}s for it; it resumes the session with a message when the tag moves.`);
-    const owner = store.bot(session.ownerBotId);
-    if (owner) alertAutomationTrouble(owner, session.ownerThreadId, `ci:local da sessão "${session.title}" interrompido para liberar o release de produção (${blocked.label}), que esperava havia ${Math.round(blocked.waitedS / 60)} min; a sessão é retomada quando a tag de produção andar`);
+    await preemptCiForRelease({
+      outLogTail: () => readTail(RELEASE_OUT_LOG, 64 * 1024),
+      readLease: readAdmissionLease,
+      readIntents: readReleaseIntents,
+      ps: psTable,
+      cwdOf: async (pid) => {
+        try {
+          return parseLsofCwd(await execCc("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn", "-p", String(pid)]))[0]?.cwd ?? null;
+        } catch { return null; /* gone, or not ours to read */ }
+      },
+      sessions: () => ccLedger.all().filter((session) => session.status !== "archived").map((session) => ({
+        sessionId: session.id,
+        title: session.title,
+        ...(ccProcesses.get(session.id)?.pid ? { claudePid: ccProcesses.get(session.id)!.pid } : {}),
+        ...(session.bgJob ? { jobPids: session.bgJob.pids, ...(session.bgJob.starts ? { jobStarts: session.bgJob.starts } : {}) } : {}),
+        ...(session.surface === "app" && session.cwd ? { worktree: session.cwd } : {}),
+      })),
+      // never the server, its parent (the app), nor any managed session's claude
+      guard: (rows) => ({
+        ownPgid: rows.find((row) => row.pid === process.pid)?.pgid ?? process.pid,
+        protectedPids: [process.pid, process.ppid, ...[...ccProcesses.values()].map((proc) => proc.pid).filter((pid): pid is number => typeof pid === "number")],
+      }),
+      kill: (pid, signal) => { process.kill(pid, signal); },
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      alertChief: releaseAlertToChief,
+      log: (line) => console.log(line),
+      home: homedir(),
+      stopped: async ({ session: managed, blocked, target }) => {
+        const session = ccLedger.get(managed.sessionId);
+        if (!session) return;
+        let tagSha: string | null = null;
+        try {
+          tagSha = parseLsRemoteTag(await execCc("git", ["-C", session.repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
+        } catch { /* resumed on the first tag read that works */ }
+        const note = "ci:local interrompido para liberar o release de produção; relançar quando a tag nuria-production-deployed andar";
+        session.resumeAfterTag = { fromSha: tagSha, at: Date.now(), message: `A tag ${PRODUCTION_TAG} andou: o release de produção que esperava passou. O seu ci:local (processo ${blocked.pid}) foi interrompido pelo servidor para liberar esse release — relance-o agora (npm run ci:local) e siga de onde parou.` };
+        ccLedger.save();
+        ccChip(session, note, false);
+        const what = target.kind === "group" ? `o grupo de processos ${target.pgid}` : `a árvore de processos do CI (${target.pids.length} processos a partir de ${target.root.pid})`;
+        ccReport(session, `[Sessão Claude Code "${session.title}" (${session.id})] ${note}. O servidor interrompeu ${what} (ci-full:${blocked.pid}) porque ${blocked.label} esperava havia ${blocked.waitedS}s, e conferiu que o lease foi liberado; a sessão é retomada com uma mensagem quando a tag andar.`);
+        const owner = store.bot(session.ownerBotId);
+        if (owner) alertAutomationTrouble(owner, session.ownerThreadId, `ci:local da sessão "${session.title}" interrompido para liberar o release de produção (${blocked.label}), que esperava havia ${Math.round(blocked.waitedS / 60)} min; o lease foi liberado e a sessão é retomada quando a tag de produção andar`);
+      },
+    }, releasePriority.state);
   } finally {
     releasePriority.running = false;
   }
@@ -9355,7 +9441,7 @@ async function runDesktopWork(): Promise<void> {
   ageFailedSessions(desktopWork);
   await watchBackgroundJobs();
   watchDelivery();
-  void preemptCiForRelease().catch((error) => console.error(`[release-priority] ${error instanceof Error ? error.message : String(error)}`));
+  void preemptCiForReleaseTick().catch((error) => console.error(`[release-priority] ${error instanceof Error ? error.message : String(error)}`));
   void watchIdleSessionsWithOpenPrs().catch((error) => console.error(`[cc-sessions] idle check failed: ${error instanceof Error ? error.message : String(error)}`));
   drainCcStartQueue();
   void watchArchivedOutside().catch((error) => console.error(`[cc-sessions] archived-outside check failed: ${error instanceof Error ? error.message : String(error)}`));
