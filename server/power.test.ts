@@ -227,6 +227,18 @@ describe("power", () => {
     // "sem" / "nada de" negate only the verb right after them; a colon closes the part (INSP-G r5)
     for (const text of ["Pode seguir sem pressa: rode o carrier", "sem mais delongas rode o carrier", "Tudo verde, sem pendências: solte o carrier", "Sem bloqueio no gate rode o carrier"]) expect(carrierIntent(text), text).toBe("order");
     for (const text of ["Nada de rodar o carrier hoje", "Sem rodar o carrier até eu mandar", `explique como rodar ${script}`]) expect(carrierIntent(text), text).toBe("mention");
+    // INSP-G r6: a colon does not hide the verb from the script; follow-up steps do not veto it; "Como combinado" is no explanation
+    for (const text of [
+      `Rode no nuria-platform: \`${script}\` e confira o log`,
+      `Rode: ${script} e veja o log depois`,
+      `Execute agora: ${script} (os testes já passaram)`,
+      `Pode rodar: ${script} — depois confirme a produção`,
+      `Próximo passo: ${script} e confira a planilha`,
+      "Como combinado rode o carrier",
+      "como sempre rode o carrier",
+      "Faça como ontem: rode o carrier",
+    ]) expect(carrierIntent(text), text).toBe("order");
+    for (const text of [`O ${script} de ontem travou; veja o log`, `Ontem você rodou ${script}; confira`]) expect(carrierIntent(text), text).toBe("mention");
     // still a mention: the script cited in talk about a failure, or negated
     expect(carrierIntent("release-carrier.sh --execute falhou ontem com GH013, investigue")).toBe("mention");
     expect(carrierIntent("não rode ./scripts/release-carrier.sh --execute; só o --check")).toBe("mention");

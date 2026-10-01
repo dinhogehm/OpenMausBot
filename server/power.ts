@@ -161,8 +161,12 @@ const ABOUT = /\b(?:falh\w*|quebr\w*|trav\w*|erro|errou|logs?|ontem|investig\w*|
 const NEGATED = /(?:\bn[ãa]o|\bnunca|\bjamais|\bdon'?t|\bdo\s+not|\bnever)\s+(?!(?:se\s+)?(?:esque[çc]a|deixe|precisa)\b)(?:\S+\s+){0,3}$/iu;
 /** "sem" / "nada de" negate only the verb right after them ("Nada de rodar", "Sem rodar"), not "sem pressa: rode". */
 const NEGATED_NEAR = /(?:\bsem|\bnada\s+de)\s+$/iu;
-/** "como rodar o carrier", "explique como rodar <script>": an explanation, not an order. */
-const EXPLAINED = /\b(?:como|how\s+to)\s+(?:\S+\s+)?$/iu;
+/** "como rodar o carrier", "explique como rodar <script>": an explanation,
+ * not an order — but "Como combinado rode", "como sempre rode" are orders. */
+const EXPLAINED = /\b(?:como|how\s+to)\s+(?:(?:se\s+)?(?:rodar|executar|soltar|usar|disparar|run|use)\s+)?$/iu;
+/** For the script with --execute: only talk of a past run or a failure makes it a mention
+ * ("…--execute falhou ontem"); "confira", "veja o log", "os testes passaram" are follow-up steps. */
+const PAST_OR_FAILURE = /\b(?:falh\w*|quebr\w*|trav\w*|erro|errou|ontem|investig\w*|failed|fails?|error|why)\b|por\s*qu[eê]/iu;
 
 /** What a message says about the carrier: an "order" to run it, a "mention", or null. */
 export function carrierIntent(text: string): "order" | "mention" | null {
@@ -173,12 +177,15 @@ export function carrierIntent(text: string): "order" | "mention" | null {
     mention = true;
     const about = ABOUT.test(clause);
     // a negation counts only within its comma-part: "não precisa esperar, rode o carrier" is an order
-    // the part a negation or a verb belongs to ends at a comma or a colon ("sem pendências: solte o carrier")
-    const partBefore = (at: number) => clause.slice(0, at).split(/[,:]/).pop()!;
-    const negated = (at: number) => [NEGATED, NEGATED_NEAR, EXPLAINED].some((pattern) => pattern.test(partBefore(at)));
+    // a negation reaches back to a comma or a colon ("sem pendências: solte o carrier")
+    const negationPart = (at: number) => clause.slice(0, at).split(/[,:]/).pop()!;
+    const negated = (at: number) => [NEGATED, NEGATED_NEAR, EXPLAINED].some((pattern) => pattern.test(negationPart(at)));
+    // an order verb reaches over a colon ("Rode no nuria-platform: <script>"), not over a comma
+    const verbPart = (at: number) => clause.slice(0, at).split(",").pop()!;
     const starts = [0, ...[...clause.matchAll(/,/g)].map((match) => match.index! + 1)];
-    // the script with --execute, anywhere: an order with an order verb before it in its part, or with no talk "about" it
-    const scripts = [...clause.matchAll(SCRIPT_EXECUTE)].map((match) => match.index!).filter((at) => ORDER_VERB.test(partBefore(at)) || !about);
+    // the script with --execute, anywhere: an order with an order verb before it, or with no talk of a past run or a failure
+    const pastOrFailure = PAST_OR_FAILURE.test(clause);
+    const scripts = [...clause.matchAll(SCRIPT_EXECUTE)].map((match) => match.index!).filter((at) => ORDER_VERB.test(verbPart(at)) || !pastOrFailure);
     // /cpd at the start of a comma-part: the same
     const cpd = starts.filter((at) => {
       const found = ORDER_CPD.exec(clause.slice(at));
