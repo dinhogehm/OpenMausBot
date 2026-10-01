@@ -106,6 +106,19 @@ describe("the production release first", () => {
     expect(ciToStop(40409, real, { ownPgid: 40320 })).toMatchObject({ kind: "refuse", reason: "o ci:local está no grupo de processos do próprio servidor" });
   });
 
+  it("refuses when the target would reach the app, its server helper or a terminal; a CI's own Chromium is fine", () => {
+    const below = (command: string) => edited({}, [`70002 41154 40320 Thu Oct  1 15:33:00 2026     ${command}`]);
+    for (const command of [
+      "/Users/owner/Projetos/OpenMausBot/release/mac-arm64/OpenMausBot.app/Contents/Frameworks/OpenMausBot Helper.app/Contents/MacOS/OpenMausBot Helper --type=utility",
+      "/Applications/Claude.app/Contents/MacOS/Claude",
+      "-zsh",
+      "tmux new -s ci",
+      "/Users/o/.local/bin/claude --resume x",
+    ]) expect(ciToStop(40409, below(command), guard), command).toMatchObject({ kind: "refuse", reason: expect.stringContaining("o alvo incluiria") });
+    const chromium = below("/Users/o/Library/Caches/ms-playwright/chromium-1187/chrome-mac/Chromium.app/Contents/MacOS/Chromium --headless");
+    expect(ciToStop(40409, chromium, guard)).toMatchObject({ kind: "group", pgid: 40320 });
+  });
+
   it("finds the managed session a CI belongs to — its claude's tree, its job, or its app worktree — and no one else's", () => {
     const sessions = [{ sessionId: "29da", claudePid: 38002 }, { sessionId: "5f41", claudePid: 78795 }];
     expect(ownerSession(40409, real, () => null, sessions)).toBe("29da");
@@ -318,7 +331,7 @@ describe("stopping a session's CI for the release (fake kill, real table)", () =
   it("a ps that read nothing decides nothing: the next tick still acts", async () => {
     const run = harness({ log: waitingOn(40409), before: [[], live, live], after: without(live, 40320), leaseAfter: null });
     expect(await preemptCiForRelease(run.env, run.state)).toBe("retry");
-    expect(run.state.handled.size).toBe(0);
+    expect(run.state.handled.has(`${LABEL}#40409`)).toBe(false);
     expect(run.kills).toEqual([]);
     expect(await preemptCiForRelease(run.env, run.state)).toBe("stopped");
     expect(run.kills).toEqual([[-40320, "SIGTERM"]]);

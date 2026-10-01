@@ -37,8 +37,10 @@ const RELEASE_SCRIPT = new RegExp(`^${SHELL}${SHELL_OPTS}\\s+\\S*(?:scripts/(?:l
 const RELEASE_NPM = /^(?:\S*\/)?npm(?:\s+-\S+)*\s+run(?:-script)?\s+release(?::\S*)?(?:\s|$)/;
 /** A Claude Code process: `claude …` or its node entry point. */
 const CLAUDE = /^(?:\S*\/)?claude(?:\s|$)|\/@anthropic-ai\/claude-code\//;
-/** An app bundle's process: the OpenMausBot app, its helpers (the server), Claude, a terminal. */
-const APP_BUNDLE = /\.app\/Contents\//;
+/** A protected app bundle's process: the OpenMausBot app and its helpers (the
+ * server runs in one), and Claude. A CI's own browsers (Chromium.app under
+ * Playwright) are not protected; terminals are, through isOwnerTerminal. */
+const PROTECTED_APP = /\/(?:OpenMausBot|Claude)[^/]*\.app\/Contents\//;
 
 export const isCiCommand = (command: string): boolean => CI_SCRIPT.test(command.trim()) || CI_NPM.test(command.trim());
 export const isReleaseCommand = (command: string): boolean => RELEASE_SCRIPT.test(command.trim()) || RELEASE_NPM.test(command.trim());
@@ -159,7 +161,7 @@ export function ciToStop(pid: number, rows: readonly PsRow[], guard: StopGuard):
   const whole = group.every((row) => tree.has(row.pid));
   const targets = whole ? group : rows.filter((row) => tree.has(row.pid));
   const guarded = new Set(guard.protectedPids ?? []);
-  const forbidden = targets.find((row) => row.pid <= 1 || guarded.has(row.pid) || row.pgid === guard.ownPgid || isClaudeCommand(row.command) || APP_BUNDLE.test(row.command) || isInteractiveShell(row.command));
+  const forbidden = targets.find((row) => row.pid <= 1 || guarded.has(row.pid) || row.pgid === guard.ownPgid || isClaudeCommand(row.command) || PROTECTED_APP.test(row.command) || isOwnerTerminal(row.command));
   if (forbidden) return refuse("o alvo incluiria uma sessão do Claude, o servidor, o app ou um terminal do dono", `stopping ${whole ? `group ${root.pgid}` : `the tree of ${root.pid}`} would reach ${describe(forbidden)}`);
   const pids = targets.map((row) => row.pid);
   return whole ? { kind: "group", pgid: root.pgid, root, pids } : { kind: "tree", pids, root };
@@ -226,8 +228,9 @@ export const PREEMPT_RETRY_LIMIT = 3;
 export const PREEMPT_VERIFY_AFTER_MS = 15_000;
 
 export interface PreemptState {
-  /** `<label>#<pid>` decided: acted on, or told. Never decided twice. */
-  handled: Set<string>;
+  /** `<label>#<pid>` decided: acted on, or told. Never decided twice (the
+   * server keeps it across restarts; a Set works in tests). */
+  handled: { has(key: string): boolean; add(key: string): unknown };
   /** Undecided ticks per `<label>#<pid>`. */
   retries: Map<string, number>;
 }

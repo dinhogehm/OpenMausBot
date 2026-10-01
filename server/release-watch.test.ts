@@ -128,6 +128,10 @@ describe("after a release", () => {
       expect(state.once("tag:1bbd5c2a7")).toBe(false);
       expect(new ReleaseWatchState(join(dir, "release-watch.json")).once("tag:1bbd5c2a7")).toBe(false);
       expect(state.once("halt:2995ef215")).toBe(true);
+      // the release-priority decisions ride on it too
+      expect(state.has("preempt:release:production:c88f99d62#40409")).toBe(false);
+      state.once("preempt:release:production:c88f99d62#40409");
+      expect(new ReleaseWatchState(join(dir, "release-watch.json")).has("preempt:release:production:c88f99d62#40409")).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

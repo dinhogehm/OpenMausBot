@@ -89,6 +89,11 @@ export class ReleaseWatchState {
     return true;
   }
 
+  /** Whether `key` was already told. */
+  has(key: string): boolean {
+    return this.told.includes(key);
+  }
+
   /** Whether `key` (a stuck tag, a halt) is news. Records it if so. */
   once(key: string): boolean {
     if (this.told.includes(key)) return false;

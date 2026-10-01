@@ -8842,7 +8842,20 @@ function sendToSessionFromServer(session: CcSession, text: string): void {
 // server manages: that CI's process group is stopped, the session is told,
 // and it is resumed when the production tag moves. Only on the server the
 // desktop app runs (it reads this Mac's release log and processes).
-const releasePriority = { running: false, lastAt: 0, state: { handled: new Set<string>(), retries: new Map<string, number>() } as PreemptState, tagCheckAt: 0 };
+// decided cases survive a restart (release-watch.json), so nothing is told or signalled twice
+const preemptHandled = new Set<string>();
+const releasePriority = {
+  running: false,
+  lastAt: 0,
+  state: {
+    handled: {
+      has: (key: string) => preemptHandled.has(key) || Boolean(releaseWatch.state?.has(`preempt:${key}`)),
+      add: (key: string) => { preemptHandled.add(key); releaseWatch.state?.once(`preempt:${key}`); },
+    },
+    retries: new Map<string, number>(),
+  } as PreemptState,
+  tagCheckAt: 0,
+};
 /** admission-control.sh's state (nuria-platform scripts/admission-control.sh): lease and release intents. */
 const ADMISSION_DIR = join(homedir(), ".nuria", "admission");
 function readAdmissionLease(): AdmissionLease | null {
