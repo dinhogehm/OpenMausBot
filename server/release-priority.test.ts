@@ -240,13 +240,18 @@ function harness(options: {
   cwd?: string | null;
   guard?: PreemptEnv["guard"];
   killThrows?: boolean;
+  /** the lease exists but cannot be read: before the signal, or after it */
+  leaseThrows?: "before" | "after";
 }): Run {
   const run: Omit<Run, "env"> = { state: { handled: new Set(), retries: new Map() }, kills: [], alerts: [], reports: [], stopped: [], sleeps: [], logs: [] };
   const reads = [...options.before];
   let signalled = false;
   const env: PreemptEnv = {
     outLogTail: () => options.log,
-    readLease: () => (signalled && options.leaseAfter !== undefined ? options.leaseAfter : options.lease === undefined ? { ownerPid: "40409\n", kind: "ci-full\n" } : options.lease),
+    readLease: () => {
+      if (options.leaseThrows === (signalled ? "after" : "before")) throw new Error("EACCES");
+      return signalled && options.leaseAfter !== undefined ? options.leaseAfter : options.lease === undefined ? { ownerPid: "40409\n", kind: "ci-full\n" } : options.lease;
+    },
     readIntents: () => (options.intents === undefined ? [intent] : options.intents),
     ps: async () => (signalled ? options.after ?? reads[0] ?? [] : (reads.length > 1 ? reads.shift()! : reads[0] ?? [])),
     cwdOf: async () => (options.cwd === undefined ? "/Users/owner/Projetos/nuria-platform/.claude/worktrees/gate-a" : options.cwd),
@@ -400,7 +405,7 @@ describe("stopping a session's CI for the release (fake kill, real table)", () =
       { name: "inside the release", rows: [...edited({ 34250: "bash ./scripts/release-carrier.sh --execute --label x" }), ...releaseRows], reason: "o ci:local roda dentro do próprio release" },
       { name: "server's group", rows: live, guard: () => ({ ownPgid: 40320 }), reason: "o ci:local está no grupo de processos do próprio servidor" },
       { name: "release in the group", rows: [...live, ...parsePsTable("70000 40320 40320 Thu Oct  1 15:30:00 2026     bash scripts/local-release.sh --environment production")], reason: "o release roda no mesmo grupo de processos do ci:local, ou abaixo dele" },
-      { name: "protected pid in the target", rows: live, guard: () => ({ ownPgid: APP, protectedPids: [41154] }), reason: "o alvo incluiria uma sessão do Claude, o servidor, o app ou um terminal do dono" },
+      { name: "the zsh -c leader also chains the release", rows: edited({ 40320: "/bin/zsh -c eval 'npm run ci:local && ./scripts/release-carrier.sh --execute --label x'" }, releaseRows.map((row) => `${row.pid} ${row.ppid} ${row.pgid} ${row.start} ${row.command}`)), reason: "o shell que roda o ci:local também encadeia o release" },
     ];
     for (const each of cases) {
       const lease = each.lease ?? "40409";
@@ -414,5 +419,33 @@ describe("stopping a session's CI for the release (fake kill, real table)", () =
     expect(ciLabel("bash ./scripts/local-ci.sh --profile full")).toBe("local-ci.sh --profile full");
     expect(ciLabel("npm run ci:local   ")).toBe("npm run ci:local");
     expect(ciLabel(real.find((row) => row.pid === 38002)!.command)).toBe("processo não reconhecido");
+  });
+
+  // INSP-R r2, observations: a passing condition does not end the release's
+  // chance; an unreadable lease is never read as a free one
+  it("a forbidden process in the target is asked again before giving up; an unreadable lease is never 'free'", async () => {
+    // a bare `sh` (a CI step) in the group for one tick: not now, then the CI is stopped
+    const step = [...live, ...parsePsTable("70003 41154 40320 Thu Oct  1 15:33:30 2026     sh")];
+    const passing = harness({ log: waitingOn(40409), before: [step, live, live], after: without(live, 40320), leaseAfter: null });
+    expect(await preemptCiForRelease(passing.env, passing.state)).toBe("retry");
+    expect(passing.kills).toEqual([]);
+    expect(await preemptCiForRelease(passing.env, passing.state)).toBe("stopped");
+    expect(passing.kills).toEqual([[-40320, "SIGTERM"]]);
+    // still there after PREEMPT_RETRY_LIMIT ticks: the Chief hears it once, nothing signalled
+    const stuck = harness({ log: waitingOn(40409), before: [step] });
+    for (let tick = 0; tick < PREEMPT_RETRY_LIMIT + 1; tick += 1) await preemptCiForRelease(stuck.env, stuck.state);
+    expect(stuck.kills).toEqual([]);
+    expect(stuck.alerts).toHaveLength(1);
+    expect(stuck.alerts[0]).toContain("(o alvo incluiria uma sessão do Claude, o servidor, o app ou um terminal do dono): nada foi interrompido");
+    // the lease unreadable before the signal: undecided, no signal
+    const before = harness({ log: waitingOn(40409), before: [live, live], leaseThrows: "before" });
+    expect(await preemptCiForRelease(before.env, before.state)).toBe("retry");
+    expect(before.kills).toEqual([]);
+    // unreadable after the signal: not a success, the Chief hears it, nothing resumed
+    const after = harness({ log: waitingOn(40409), before: [live, live], after: without(live, 40320), leaseThrows: "after" });
+    expect(await preemptCiForRelease(after.env, after.state)).toBe("survived");
+    expect(after.stopped).toEqual([]);
+    expect(after.alerts[0]).toContain("não conseguiu ler o lease do admission: não sei se o release foi liberado");
+    expectNoArgv([...stuck.alerts, ...after.alerts]);
   });
 });

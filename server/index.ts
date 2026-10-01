@@ -8869,10 +8869,19 @@ const releasePriority = {
 };
 /** admission-control.sh's state (nuria-platform scripts/admission-control.sh): lease and release intents. */
 const ADMISSION_DIR = join(homedir(), ".nuria", "admission");
+/** null only when there is no lease (ENOENT); any other read error throws. */
 function readAdmissionLease(): AdmissionLease | null {
-  const ownerPid = readTail(join(ADMISSION_DIR, "lease", "owner.pid"), 64).trim();
+  const read = (name: string) => {
+    try {
+      return readFileSync(join(ADMISSION_DIR, "lease", name), "utf8").trim();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+  };
+  const ownerPid = read("owner.pid");
   if (!ownerPid) return null;
-  return { ownerPid, kind: readTail(join(ADMISSION_DIR, "lease", "kind"), 64).trim() };
+  return { ownerPid, kind: read("kind") ?? "" };
 }
 function readReleaseIntents(): ReleaseIntent[] | null {
   // admission-control.sh creates intents/ on every acquire: missing while a
