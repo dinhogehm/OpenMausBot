@@ -175,4 +175,28 @@ describe("power", () => {
     for (const text of mention) expect(carrierIntent(text), text).toBe("mention");
     expect(carrierIntent("rode os testes de novo")).toBeNull();
   });
+
+  it("an order stays an order when the clause also talks of logs, tests or errors (INSP-G r3, the inspector's 14 new phrases)", () => {
+    const order = [
+      "Rode o carrier da #9330 e confira o log depois",
+      "rode os testes e depois rode o carrier",
+      "Rode o carrier e veja se a produção subiu",
+      "rode o carrier, depois confira a planilha",
+      "Rode release-carrier.sh --execute --label hotfix e confirme no log",
+      "Carrier falhou ontem por GH013; rode o carrier de novo",
+      "O erro foi corrigido, rode o carrier",
+      "Rode o carrier agora (os testes já passaram)",
+      "Mergeie a #9330 e rode o carrier",
+      "pode soltar o carrier",
+      "Rodar o carrier: sim",
+      "libere o carrier",
+      "toca o carrier",
+      "Dispara o /cpd",
+    ];
+    expect(order).toHaveLength(14);
+    for (const text of order) expect(carrierIntent(text), text).toBe("order");
+    // a script or /cpd cited without a verb, in talk about a failure, stays a mention
+    expect(carrierIntent("release-carrier.sh --execute falhou ontem com GH013, investigue")).toBe("mention");
+    expect(carrierIntent("o /cpd de ontem falhou, veja o log")).toBe("mention");
+  });
 });

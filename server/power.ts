@@ -135,19 +135,22 @@ export function powerStep(watch: PowerWatchState, power: PowerState, now: number
 // that failed yesterday, "investigue", "veja o log", "não é para rodar" —
 // passes, with a note that the Mac is on battery: on battery the Chief must
 // still be able to send a session to investigate a failed carrier.
-const CARRIER_VERB = String.raw`(?:rod(?:a|e|ar)|execut(?:a|e|ar)|mand(?:a|e|ar)|solt(?:a|e|ar)|dispar(?:a|e|ar)|public(?:a|ar)|publique|inici(?:a|e|ar)|lan[çc](?:a|e|ar)|lance|faz|fa[çc]a|fazer|segu(?:e|ir)|siga|vai|v[áa]|run|start|publish|kick\s+off|go)`;
+const CARRIER_VERB = String.raw`(?:rod(?:a|e|ar)|liber(?:a|e|ar)|toc(?:a|ar)|toque|execut(?:a|e|ar)|mand(?:a|e|ar)|solt(?:a|e|ar)|dispar(?:a|e|ar)|public(?:a|ar)|publique|inici(?:a|e|ar)|lan[çc](?:a|e|ar)|lance|faz|fa[çc]a|fazer|segu(?:e|ir)|siga|vai|v[áa]|run|start|publish|kick\s+off|go)`;
 const CARRIER_FILLER = String.raw`(?:o|a|os|as|um|uma|ess[ea]|est[ea]|aquel[ea]|seu|sua|teu|tua|meu|minha|nosso|nossa|com|de|do|da|no|na|em|via|pelo|pela|ver|j[áa]|agora|logo|the|an|this|that|our|your|with)`;
 /** Verb, then at most three small words, then the carrier: "roda o carrier", "manda ver no carrier", "Publicar: carrier". */
 const ORDER_BEFORE = new RegExp(String.raw`(?<![\p{L}\p{N}_/-])${CARRIER_VERB}(?:\s*[:\-–—])?(?:\s+${CARRIER_FILLER}){0,3}\s+(?:release-)?carrier\b`, "giu");
 /** The carrier, then the order: "Agora o carrier: execute", "carrier da #9330 liberado, pode rodar". */
 const ORDER_AFTER = /\bcarrier\b[^:,;]{0,40}[:,]\s*(?:pode\s+|j[áa]\s+)?(rod\w*|execut\w*|solt\w*|dispar\w*|public\w*|mand\w*|run|go)\b/giu;
 /** The script with --execute at the start of a clause (or right after an order verb or a shell). */
-const ORDER_SCRIPT = new RegExp(String.raw`^\s*(?:(?:agora|ent[ãa]o|pode)\s+)?(?:${CARRIER_VERB}\s+)?(?:(?:\S*/)?(?:ba|z)?sh\s+)?\S*release-carrier(?:\.sh)?\b[^\n]*?\s--execute\b`, "iu");
+const ORDER_SCRIPT = new RegExp(String.raw`^\s*(?:(?:agora|ent[ãa]o|pode)\s+)?(?:(${CARRIER_VERB})\s+)?(?:(?:\S*/)?(?:ba|z)?sh\s+)?\S*release-carrier(?:\.sh)?\b[^\n]*?\s--execute\b`, "iu");
 /** The /cpd skill (it ends in the carrier) at the start of a clause. */
-const ORDER_CPD = /^\s*(?:(?:agora|ent[ãa]o|pode)\s+)?(?:(?:faz|fa[çc]a|fazer|rod\w*|execut\w*|mand\w*|run)\s+)?(?:o\s+)?\/?cpd\b/iu;
+const ORDER_CPD = /^\s*(?:(?:agora|ent[ãa]o|pode)\s+)?(?:(faz|fa[çc]a|fazer|rod\w*|execut\w*|mand\w*|dispar\w*|solt\w*|lan[çc]\w*|run)\s+)?(?:o\s+)?\/?cpd\b/iu;
 /** The carrier or /cpd is talked about. */
 const MENTION = /\b(?:release-)?carrier\b|(?:^|\s)\/?cpd\b/iu;
-/** Talk about a past run, a failure, its tests or a review: never an order to run it. */
+/** Talk about a past run, a failure, its tests or a review. It only turns
+ * into a mention a script or /cpd cited WITHOUT an order verb ("…--execute
+ * falhou ontem", "o /cpd de ontem falhou"); a verb plus the carrier is an
+ * order whatever else the clause says ("Rode o carrier e confira o log"). */
 const ABOUT = /\b(?:falh\w*|quebr\w*|trav\w*|erro|errou|logs?|ontem|investig\w*|vej[ao]|veja|confir\w*|analis\w*|testes?|tests?|revis[ãa]o|review|failed|fails?|error|why)\b|por\s*qu[eê]/iu;
 /** A negation up to three words before the order ("não rode", "Não é para rodar"), but not "não esqueça de". */
 const NEGATED = /(?:\bn[ãa]o|\bnunca|\bjamais|\bdon'?t|\bdo\s+not|\bnever)\s+(?!(?:se\s+)?(?:esque[çc]a|deixe|precisa)\b)(?:\S+\s+){0,3}$/iu;
@@ -159,14 +162,20 @@ export function carrierIntent(text: string): "order" | "mention" | null {
   for (const clause of text.split(/;|\n|[.!?](?=\s|$)/)) {
     if (!MENTION.test(clause)) continue;
     mention = true;
-    if (ABOUT.test(clause)) continue;
+    const about = ABOUT.test(clause);
     // a negation counts only within its comma-part: "não precisa esperar, rode o carrier" is an order
     const negated = (at: number) => NEGATED.test(clause.slice(0, at).split(",").pop()!);
     const starts = [0, ...[...clause.matchAll(/,/g)].map((match) => match.index! + 1)];
+    // a script or /cpd at the start of a comma-part: an order with a verb, or with no talk "about" it
+    const cited = starts.filter((at) => {
+      const part = clause.slice(at);
+      const found = ORDER_SCRIPT.exec(part) ?? ORDER_CPD.exec(part);
+      return found !== null && (found[1] !== undefined || !about);
+    });
     const orders = [
       ...[...clause.matchAll(ORDER_BEFORE)].map((match) => match.index!),
       ...[...clause.matchAll(ORDER_AFTER)].map((match) => match.index! + match[0].lastIndexOf(match[1]!)),
-      ...starts.filter((at) => ORDER_SCRIPT.test(clause.slice(at)) || ORDER_CPD.test(clause.slice(at))).map((at) => at + (clause.slice(at).length - clause.slice(at).trimStart().length)),
+      ...cited.map((at) => at + (clause.slice(at).length - clause.slice(at).trimStart().length)),
     ];
     if (orders.some((at) => !negated(at))) return "order";
   }
