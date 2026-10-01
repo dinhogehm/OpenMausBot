@@ -237,6 +237,31 @@ it("watches a command without waking the bot until its output changes", () => fi
   expect(f.ledger().wakes).toEqual([]);
 }), 60_000);
 
+it("moves a watch to this conversation when asked, switching off the one elsewhere", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const repo = join(f.session.info.dataDir, "moved-repo");
+  execFileSync("git", ["init", "-q", repo]);
+  execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"]);
+  const command = `git -C ${repo} log --format=%s -1`;
+  f.save({ turns: [
+    { steps: [{ tool: "wake_when", arguments: { command, reason: "prod", standing: true, label: "prod" } }], reply: "Armed in A" },
+    { steps: [
+      { tool: "wake_when", arguments: { command, reason: "prod", standing: true, label: "prod" }, expectError: true },
+      { tool: "wake_when", arguments: { command, reason: "prod here", standing: true, label: "prod", move: true } },
+    ], reply: "Moved to B" },
+  ] });
+  await f.send("Watch the repo.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  const threadA = f.bot.activeTaskId;
+  const created = await f.api(`/api/bots/${f.bot.id}/tasks`, { title: "Esteira" });
+  await runControlOmb(["send", "--bot", f.bot.id, "--task", created.task.threadId, "--text", "Bring the watch here."], { env: { OPENMAUSBOT_URL: f.session.info.url } });
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  expect(toolResult(f.turns()[1], "wake_when")).toContain('Movido de "');
+  const wakes = f.ledger().wakes as any[];
+  expect(wakes.filter((wake) => wake.watch?.label === "prod").map((wake) => wake.threadId)).toEqual([created.task.threadId]);
+  expect(wakes.some((wake) => wake.threadId === threadA)).toBe(false);
+}), 60_000);
+
 it("keeps a standing watch armed: it fires on each change and a wake_me does not replace it", () => fixture(async f => {
   const { execFileSync } = await import("node:child_process");
   const repo = join(f.session.info.dataDir, "watched-repo");

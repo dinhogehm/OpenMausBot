@@ -297,6 +297,8 @@ export class CcSessionLedger {
           session.stallReports = session.stallReports ?? 1;
           session.stallNotifiedAt = session.stallNotifiedAt ?? this.now();
         }
+        // Archived before archiving cleared it: an old error only misleads.
+        if (session.status === "archived") delete session.lastError;
         // Older ledgers queued bare strings, with no age: treat them as old.
         session.queued = Array.isArray(session.queued)
           ? (session.queued as unknown[]).map((item) => (typeof item === "string" ? { text: item, at: 0 } : item as CcQueued)).filter((item) => item && typeof item.text === "string")
@@ -420,6 +422,8 @@ export function ccSessionLine(session: CcSession): string {
     session.cwd ? `worktree ${session.cwd}` : session.surface === "app" ? "worktree chosen by the app (pending)" : `worktree ${session.repo}/.claude/worktrees/${session.worktree} (pending)`,
     ...(session.desktop?.pending ? [`waiting for an idle Mac to ${session.desktop.pending.kind === "create" ? "open it" : session.desktop.pending.kind === "archive" ? "archive it" : session.desktop.pending.kind === "rename" ? "rename it" : "send a message"}${session.desktop.pending.lastReason ? ` (${session.desktop.pending.lastReason})` : ""}`] : []),
     ...(session.desktop?.sent ? ["message typed in the app, checking that it arrived"] : []),
+    ...(!session.desktop?.sent && session.desktop?.lastSend && !session.desktop.lastSend.confirmed ? [`last message did NOT arrive (${new Date(session.desktop.lastSend.at).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" })})`] : []),
+    ...(session.surface !== "app" ? ["CLI: not visible in the Claude app"] : []),
     ...(session.blockedOn ? [`BLOCKED — needs: ${session.blockedOn.slice(0, 200)}`] : []),
     ...(session.desktop?.archiveWhenResolved ? ["to be archived once it opens"] : []),
     ...(session.queued.length ? [`${session.queued.length} message(s) queued`] : []),

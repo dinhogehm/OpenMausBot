@@ -37,6 +37,9 @@ import { shouldOpenKeyboardShortcuts } from "@/lib/keyboard-shortcuts";
 import { effectiveLanguage, useLanguageChoice } from "@/lib/language-preference";
 import { botShowsUnread } from "@/lib/bot-unread";
 
+/** This build does not float the Pro introduction over the app. */
+const SHOW_PRO_INTRODUCTION = false;
+
 function Shell({ viewer }: { viewer: WelcomeViewer | null }) {
   const { state, dispatch } = useStore();
   const { capabilities } = useDesktopCapabilities();
@@ -253,7 +256,9 @@ function Shell({ viewer }: { viewer: WelcomeViewer | null }) {
     <div className="flex h-full flex-col">
       {/* fixed-position popup, bottom-left — outside the layout flow */}
       <UpdateBanner />
-      <ProIntroduction quiet={paletteOpen || drawerOpen || Boolean(localVmWorkspaceBotId)} />
+      {/* local/patches: the upstream Pro sales card covered the sidebar's
+          bottom (R7-visual V1); Pro stays offered in Settings → OMB Cloud */}
+      <ProIntroduction quiet={!SHOW_PRO_INTRODUCTION || paletteOpen || drawerOpen || Boolean(localVmWorkspaceBotId)} />
       <div className="relative flex min-h-0 flex-1">
       {!calendarFocus && <button
         type="button"

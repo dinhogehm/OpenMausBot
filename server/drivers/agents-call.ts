@@ -1157,6 +1157,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
         ...(args.standing !== undefined ? { standing: args.standing } : {}),
         ...(typeof args.label === "string" && args.label.trim() ? { label: args.label } : {}),
         ...(typeof args.ignore === "string" && args.ignore.trim() ? { ignore: args.ignore } : {}),
+        ...(args.move === true ? { move: true } : {}),
       }),
     });
     if (r.error) return { text: `Couldn't start the watch: ${String(r.error)}`, isError: true };

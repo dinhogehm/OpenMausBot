@@ -668,3 +668,14 @@ describe("a watch that ignores the bot's own lines", () => {
     expect(wake.watch?.ignore).toBe("Osvaldo");
   });
 });
+
+describe("a standing watch's old note", () => {
+  it("is shown with its age, so the bot checks it still holds", () => {
+    const autonomy = make();
+    const wake = autonomy.setWatch("chief", "t1", { argv: ["git"], command: "git ls-remote origin refs/tags/x", everyMinutes: 5, maxMinutes: 60, reason: "Conferir se contém 2995ef215 e pedir ao QA", baseline: "a", standing: true, label: "prod" });
+    expect(wakePrompt(wake, null, now + 30 * 60_000)).toContain("Your note for this moment: Conferir");
+    const late = wakePrompt(wake, null, now + 5 * 3_600_000);
+    expect(late).toContain("written 5 h ago — check it still holds");
+    expect(late).toContain("Conferir se contém 2995ef215");
+  });
+});

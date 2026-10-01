@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -255,5 +255,20 @@ describe("the corridor form of what the hook stopped", () => {
     expect(report).toContain("HEAD:claude/chat-ticket-labels-bug-8c6c68");
     expect(report).toContain("run `npm run ci:local` as it is");
     expect(ccReportForOwner({ ...session, blockedOn: undefined }, {})).not.toContain("corridor");
+  });
+});
+
+describe("what cc_session_list says about a session", () => {
+  it("says a message that never arrived, and that a CLI session is not in the app; an archived one carries no old error", () => {
+    const path = join(dir, "ledger.json");
+    const ledger = new CcSessionLedger({ path, now: () => 0 });
+    const app = ledger.create({ id: "a", ownerBotId: "b", ownerThreadId: "t", title: "#9298", repo: "/r", permissionMode: "auto", surface: "app", desktop: { marker: "M", turnsSeen: 0, lastSend: { at: Date.parse("2026-09-30T22:58:00Z"), confirmed: false } } });
+    expect(ccSessionLine(app)).toContain("last message did NOT arrive (19:58)");
+    const cli = ledger.create({ id: "c", ownerBotId: "b", ownerThreadId: "t", title: "lote", repo: "/r", permissionMode: "auto" });
+    expect(ccSessionLine(cli)).toContain("CLI: not visible in the Claude app");
+    cli.status = "archived";
+    cli.lastError = "could not archive it";
+    ledger.save();
+    expect(new CcSessionLedger({ path, now: () => 0 }).get("c")?.lastError).toBeUndefined();
   });
 });

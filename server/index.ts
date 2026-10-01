@@ -7922,6 +7922,15 @@ const intakeLock = new IntakeLock((botId, threadId) => threadBusy(botId, threadI
 const intakeBusyElsewhere = (botId: string, threadId?: string) => intakeLock.busyElsewhere(botId, threadId);
 const noteIntakeTurn = (botId: string, threadId: string) => intakeLock.note(botId, threadId);
 const settleIntakeTurn = (threadId: string) => intakeLock.settle(threadId);
+/** One server.log line per waiting thing per minute: the lock is visible, not silent. */
+const intakeWaitLogged = new Map<string, number>();
+function logIntakeWait(line: string): void {
+  const at = Date.now();
+  if (at - (intakeWaitLogged.get(line) ?? 0) < 60_000) return;
+  intakeWaitLogged.set(line, at);
+  if (intakeWaitLogged.size > 200) intakeWaitLogged.clear();
+  console.log(`[intake] ${line}`);
+}
 
 /** true = the turn started; false = not now (busy, or it failed and said so). */
 async function dispatchAutonomyTurn(botId: string, threadId: string, chip: string, prompt: string): Promise<"started" | "busy" | "failed"> {
@@ -8162,11 +8171,20 @@ async function revalidateNeedsInputGoals(): Promise<void> {
  * a report on the Chief's desk (server/release-watch.ts). Only the server the
  * desktop app runs reads this Mac's release logs, every 2 min. */
 const releaseWatch = { state: DESKTOP_MANAGED && !process.env.VITEST ? new ReleaseWatchState(join(DATA_DIR, "release-watch.json")) : null, lastAt: 0 };
-function checkProductionRelease(): void {
+async function checkProductionRelease(): Promise<void> {
   if (!releaseWatch.state || Date.now() - releaseWatch.lastAt < 2 * 60_000) return;
   releaseWatch.lastAt = Date.now();
-  const failed = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), readTail(RELEASED_SHA_FILE, 200));
-  if (!failed || !releaseWatch.state.take(failed.sha, failed.count)) return;
+  const released = readTail(RELEASED_SHA_FILE, 200).trim();
+  const failed = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), released);
+  if (!failed) return;
+  // a later release that already contains the failed commit settles it
+  if (released) {
+    try {
+      await execCc("git", ["-C", join(homedir(), "Projetos", "nuria-platform"), "merge-base", "--is-ancestor", failed.sha, released]);
+      return;
+    } catch { /* not an ancestor, or unknown here: alert */ }
+  }
+  if (!releaseWatch.state.take(failed.sha, failed.count)) return;
   const cause = releaseFailureCause(readTail(RELEASE_OUT_LOG, 512 * 1024));
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   const desk = chief ? chiefDeskThread(chief) : null;
@@ -8178,11 +8196,7 @@ function checkProductionRelease(): void {
 }
 
 async function autonomyTick(): Promise<void> {
-  try {
-    checkProductionRelease();
-  } catch (error) {
-    console.error(`[release] ${error instanceof Error ? error.message : String(error)}`);
-  }
+  void checkProductionRelease().catch((error) => console.error(`[release] ${error instanceof Error ? error.message : String(error)}`));
   void revalidateNeedsInputGoals().catch((error) => console.error(`[autonomy] needs-input check failed: ${error instanceof Error ? error.message : String(error)}`));
   void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
   try {
@@ -8200,7 +8214,10 @@ async function autonomyTick(): Promise<void> {
     }
     // A due wake waits for the thread to be free; it is never dropped for it.
     // a watch is intake work: it waits for the bot's other intake turn
-    if (autonomyTurnBlocked(wake.botId, wake.threadId, Boolean(wake.watch))) continue;
+    if (autonomyTurnBlocked(wake.botId, wake.threadId, Boolean(wake.watch))) {
+      if (wake.watch && intakeBusyElsewhere(wake.botId, wake.threadId)) logIntakeWait(`wake ${wake.watch.label ?? watchLabel(wake.watch.command)} in ${wake.threadId} waits for the bot's other intake turn`);
+      continue;
+    }
     if (!autonomy.isCurrent(wake)) continue;
     if (wake.watch) noteIntakeTurn(wake.botId, wake.threadId);
     // A standing watch is not used up by firing; a plain wake or watch is.
@@ -8277,6 +8294,27 @@ if (ccLedger.interruptedOnLoad.length) {
   ccLedger.save();
 }
 reportResumptionToChief();
+retireWorkOfClosedThreads();
+
+/** Sessions still owned by a conversation that was closed, archived or
+ * deleted before closing handed work over (or while the server was down):
+ * handed over now, on load. */
+function retireWorkOfClosedThreads(): void {
+  const seen = new Set<string>();
+  for (const session of ccLedger.all()) {
+    if (session.status === "archived") continue;
+    const key = `${session.ownerBotId}:${session.ownerThreadId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const task = store.taskByThread(session.ownerBotId, session.ownerThreadId);
+    if (task && !task.closedBy && !task.archivedAt) continue;
+    try {
+      retireThreadWork(session.ownerBotId, session.ownerThreadId, task?.closedBy ? "fechada" : task?.archivedAt ? "arquivada" : "apagada");
+    } catch (error) {
+      console.error(`[cc-sessions] could not hand over the work of ${session.ownerThreadId}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
 
 /** After a restart: what it cut off, what the server re-ran on its own and
  * what it left for someone to confirm — one report on the Chief's desk. */
@@ -11352,7 +11390,11 @@ routines = new RoutineManager({
     [...delegationWatch.values()].some((watch) => watch.sourceThreadId === threadId) ||
     pendingDelegationWakes.has(threadId),
   // a routine run waits while the bot's intake turn (a watch) runs elsewhere
-  botState: (botId) => (intakeBusyElsewhere(botId) ? "busy" : unattendedDispatchState(botId)),
+  botState: (botId) => {
+    if (!intakeBusyElsewhere(botId)) return unattendedDispatchState(botId);
+    logIntakeWait(`routine of ${botId} deferred: the bot's intake turn is running`);
+    return "busy";
+  },
   goalState: (groupId, coordinatorBotId) => {
     const group = store.group(groupId);
     const coordinator = store.bot(coordinatorBotId);
@@ -17497,9 +17539,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             // one watch per command per bot: two conversations watching the
             // same thing wake twice and answer twice
             const elsewhere = autonomy.sameWatchElsewhere(bot.id, threadId, String(body.command));
-            if (elsewhere.length) {
+            const movedFrom: string[] = [];
+            if (elsewhere.length && body.move === true) {
+              // move it here: the watch in the other conversation is switched off
+              for (const wake of elsewhere) {
+                const removed = wake.watch?.standing ? autonomy.cancelStanding(wake.threadId, wake.watch.label ?? STANDING_DEFAULT_LABEL) : autonomy.cancelWake(wake.threadId);
+                if (!removed) continue;
+                const title = store.taskByThread(bot.id, wake.threadId)?.title ?? wake.threadId;
+                movedFrom.push(`"${title}"`);
+                store.appendMessage(wake.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Vigia ${watchLabel(wake.watch!.command)} movido para "${store.taskByThread(bot.id, threadId)?.title ?? threadId}"`, 200), ok: true } });
+              }
+            } else if (elsewhere.length) {
               const where = [...new Set(elsewhere.map((wake) => `"${store.taskByThread(bot.id, wake.threadId)?.title ?? wake.threadId}" (${wake.threadId})`))].join(", ");
-              return json(res, 409, { error: `você já tem um vigia com este mesmo comando em outra conversa: ${where}. Não armei outro — use aquele (acompanhe por lá), ou desligue-o com wake_when cancel naquela conversa antes de armar aqui.` });
+              return json(res, 409, { error: `você já tem um vigia com este mesmo comando em outra conversa: ${where}. Não armei outro. Para trazê-lo para esta conversa, chame wake_when de novo com move: true (o de lá é desligado); ou acompanhe por lá.` });
             }
             const warnings = watchCommandWarnings(String(body.command));
             if (input.standing) {
@@ -17520,8 +17572,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: wakeChip(wake), ok: true } });
             return json(res, 200, {
               message: input.standing
-                ? `${warnings.length ? `Atenção: ${warnings.join(" ")} ` : ""}Vigia permanente armado. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui toda vez que ${input.until ? `uma saída nova casar com "${input.until}"` : "a saída mudar"} (e a cada ${input.maxMinutes} min de qualquer forma). Ele continua armado depois de disparar — não chame wake_when de novo para ele; wake_me aqui não o substitui. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`
-                : `${warnings.length ? `Atenção: ${warnings.join(" ")} ` : ""}Vigiando. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui quando ${input.until ? `a saída casar com "${input.until}"` : "a saída mudar"}, ou depois de ${input.maxMinutes} min de qualquer forma. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`,
+                ? `${movedFrom.length ? `Movido de ${movedFrom.join(", ")} (lá ficou desligado). ` : ""}${warnings.length ? `Atenção: ${warnings.join(" ")} ` : ""}Vigia permanente armado. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui toda vez que ${input.until ? `uma saída nova casar com "${input.until}"` : "a saída mudar"} (e a cada ${input.maxMinutes} min de qualquer forma). Ele continua armado depois de disparar — não chame wake_when de novo para ele; wake_me aqui não o substitui. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`
+                : `${movedFrom.length ? `Movido de ${movedFrom.join(", ")} (lá ficou desligado). ` : ""}${warnings.length ? `Atenção: ${warnings.join(" ")} ` : ""}Vigiando. O servidor roda o comando a cada ${input.everyMinutes} min, sem modelo, e te acorda aqui quando ${input.until ? `a saída casar com "${input.until}"` : "a saída mudar"}, ou depois de ${input.maxMinutes} min de qualquer forma. Encerre o turno agora. Saída atual:\n${first.output.slice(0, 1_500)}`,
             });
           }
           // Promises with a deadline ride on wake_me, alone or beside a wake.

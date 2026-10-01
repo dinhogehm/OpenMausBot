@@ -90,6 +90,8 @@ export interface WakeWatch {
   lineHashes?: string[];
   newLines?: string[];
   truncated?: boolean;
+  /** When its reason was written (a standing watch keeps it across re-arms). */
+  reasonAt?: number;
   /** Lines matching this do not count as a change (wake_when ignore). */
   ignore?: string;
   /** When its stdout last changed (or it was set), and when an old,
@@ -412,6 +414,7 @@ export class BotAutonomy {
         runs: 1,
         failures: 0,
         changedAt: at,
+        reasonAt: at,
         ...(input.standing ? { standing: true as const, maxMs: input.maxMinutes * this.minuteMs, ...(input.label && input.label !== STANDING_DEFAULT_LABEL ? { label: input.label } : {}) } : {}),
       },
     };
@@ -962,7 +965,10 @@ export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, rem
   return [
     `[${wake.watch ? "Watch" : "Wake-up"} you scheduled ${minutesLabel(now - wake.createdAt)} ago. Nobody typed this.]`,
     ...watchLines(wake),
-    `Your note for this moment: ${wake.reason}`,
+    // a standing watch's note was written when it was set: it can be stale by now
+    wake.watch?.standing && wake.watch.reasonAt !== undefined && now - wake.watch.reasonAt >= 3_600_000
+      ? `Your note for this moment, written ${minutesLabel(now - wake.watch.reasonAt)} ago — check it still holds before acting on it; if not, re-arm this watch (same label) with a current reason: ${wake.reason}`
+      : `Your note for this moment: ${wake.reason}`,
     ...(goal && goal.status === "active"
       ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`, ...GOAL_RULES]
       : ["Do what the note says. If it still is not ready, call wake_when or wake_me again; if it is, report the result here."]),
