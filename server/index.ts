@@ -405,6 +405,7 @@ import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-s
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
+import { CcStartQueue, priorityLabel, startPriority } from "./cc-start-queue.ts";
 import { removeNestedWorktrees } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
@@ -8951,6 +8952,91 @@ async function watchIdleSessionsWithOpenPrs(): Promise<void> {
   }
 }
 
+// ── starting a Claude Code session (cc_session_start) ──────────────────
+// Every slot taken: the start waits in the queue (server/cc-start-queue.ts)
+// and opens by itself when one frees, P1 first (R8-followup F3).
+const ccStartQueue = new CcStartQueue(process.env.VITEST ? null : join(DATA_DIR, "cc-start-queue.json"));
+
+function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string, body: Record<string, unknown>, fromQueue = false): { status: number; body: Record<string, unknown> } {
+  const input = parseCcStartInput(body, ccIsGitRepo);
+  if (!input.ok) return { status: 400, body: { error: input.error } };
+  // One live session per issue: a second would redo the same work.
+  const duplicate = liveSessionForIssue(ccLedger.all(), input.repo, issueNumber(input.title, input.brief));
+  if (duplicate) {
+    const mine = duplicate.ownerBotId === bot.id;
+    return { status: 409, body: { error: `já existe uma sessão viva para a issue #${issueNumber(input.title, input.brief)} em ${basename(input.repo)}: ${duplicate.id} ("${duplicate.title}", ${duplicate.status})${mine ? "" : `, de outro bot (${store.bot(duplicate.ownerBotId)?.name ?? duplicate.ownerBotId})`}. Não abri outra. ${mine ? `Mande a nova instrução para ela com cc_session_send (session_id ${duplicate.id})` : "Peça ao dono dela para mandar a instrução"}; se ela não serve mais, arquive com cc_session_archive e comece de novo.` } };
+  }
+  // The repository's own commands (npm run …), never a guessed pnpm.
+  const scripts = useRepoScripts(input.brief, repoPackageManager(input.repo), repoScripts(input.repo));
+  input.brief = scripts.text;
+  const corridor = repoCorridor(input.repo);
+  const mixWarning = corridor ? hotfixWithReleaseScripts(`${input.title}\n${input.brief}`) : null;
+  const cliReason = typeof body.cliReason === "string" ? body.cliReason.trim().slice(0, 300) : "";
+  if (body.surface === "cli") {
+    const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason });
+    if (refusal) return { status: 409, body: { error: refusal } };
+  }
+  if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
+    if (fromQueue) return { status: 409, body: { error: "busy" } };
+    const priority = startPriority(`${input.title}\n${input.brief}`);
+    const position = ccStartQueue.add({ id: randomUUID().slice(0, 8), botId: bot.id, threadId, ...(replyThreadId !== threadId ? { replyThreadId } : {}), body, title: input.title, priority, at: Date.now() });
+    if (position === null) return { status: 409, body: { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando e a fila de espera está cheia; espere uma relatar, ou pare uma` } };
+    return { status: 200, body: { message: `Já há ${CC_MAX_RUNNING} sessões do Claude Code rodando neste computador: "${input.title}" entrou na fila de sessões (#${position}, prioridade ${priorityLabel(priority)}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list. Encerre o turno agora.` } };
+  }
+  if (body.surface !== "cli" && process.platform === "darwin") {
+    // New Session in the app opens in the folder of its latest
+    // session; another repository cannot be picked from here. Say so
+    // before touching the screen instead of failing five times.
+    const lastRepo = lastAppRepo();
+    if (lastRepo && lastRepo !== input.repo) {
+      return { status: 409, body: { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` } };
+    }
+    const lastWorktree = lastAppWorktreeFolder();
+    if (lastWorktree) {
+      return { status: 409, body: { error: `não abri: a última pasta usada no app Claude é ${lastWorktree.folder}, a worktree de outra sessão${lastWorktree.title ? ` ("${lastWorktree.title}")` : ""}, e o app abriria a sessão nova lá (foi o que aconteceu em 6 de 7 creates em 01/10). Peça ao dono para abrir no app uma sessão na raiz de ${basename(input.repo)} (branch principal, worktree ligada) e fechá-la sem enviar; depois tente de novo. Se não der para esperar, use surface "cli" com cli_reason.` } };
+    }
+    const appId = randomUUID();
+    const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
+    if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
+    const issue = issueNumber(input.title, input.brief);
+    if (issue) session.desktop!.issue = issue;
+    session.desktop!.pending = { kind: "create", text: desktopBrief(session, input.brief), since: Date.now(), attempts: 0 };
+    if (corridor) session.corridorVersion = corridorVersionOf(corridor);
+    session.status = "running";
+    ccLedger.save();
+    ccChip(session, "na fila para abrir no app Claude quando o Mac estiver livre");
+    const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", input.model ? "model" : ""].filter(Boolean);
+    return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
+  }
+  const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
+  if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
+  if (corridor) session.corridorVersion = corridorVersionOf(corridor);
+  ccLedger.save();
+  runCcTurn(session, input.brief, true);
+  ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
+  if (cliReason) ccChip(session, `sessão CLI, não visível no app Claude — motivo: ${cliReason}`);
+  return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
+}
+
+/** Open queued starts while there are free slots; the bot hears how each went. */
+function drainCcStartQueue(): void {
+  while (ccLedger.runningCount() < CC_MAX_RUNNING) {
+    const next = ccStartQueue.take();
+    if (!next) return;
+    const bot = store.bot(next.botId);
+    if (!bot || !store.taskByThread(bot.id, next.threadId)) continue;
+    const reply = next.replyThreadId && store.taskByThread(bot.id, next.replyThreadId) ? next.replyThreadId : next.threadId;
+    const started = startCcSession(bot, next.threadId, reply, next.body, true);
+    if (started.status === 409 && started.body.error === "busy") {
+      ccStartQueue.restore(next);
+      return;
+    }
+    const said = String(started.body.message ?? started.body.error ?? "");
+    store.appendMessage(next.threadId, { role: "bot", kind: "activity", tool: { name: chipText(started.status === 200 ? `Fila de sessões: "${next.title}" abriu` : `Fila de sessões: "${next.title}" não abriu`, 200), ok: started.status === 200 } });
+    autonomy.addReport(bot.id, next.threadId, `[Fila de sessões do Claude Code] Uma vaga liberou para "${next.title}": ${started.status === 200 ? said : `não abri — ${said}`}`);
+  }
+}
+
 /** A session archived in the Claude app by someone, not by the server: its
  * PRs still open are left without a session. The owner hears which, and the
  * person gets a "Precisa de você" item (R8-followup F1: ffd6ee1a / #9328). */
@@ -9046,6 +9132,7 @@ async function runDesktopWork(): Promise<void> {
   watchDelivery();
   void preemptCiForRelease().catch((error) => console.error(`[release-priority] ${error instanceof Error ? error.message : String(error)}`));
   void watchIdleSessionsWithOpenPrs().catch((error) => console.error(`[cc-sessions] idle check failed: ${error instanceof Error ? error.message : String(error)}`));
+  drainCcStartQueue();
   void watchArchivedOutside().catch((error) => console.error(`[cc-sessions] archived-outside check failed: ${error instanceof Error ? error.message : String(error)}`));
   void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
   if (process.platform !== "darwin") return;
@@ -17909,65 +17996,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
                 const record = session.surface === "app" && session.desktop?.localId && session.status !== "archived" ? readDesktopRecord(session.desktop.localId) : null;
                 return ccSessionLine(session, { blocked: record ? recordBlocked(record) : null });
               }).join("\n") : "Você não gerencia nenhuma sessão do Claude Code.",
+              ...(ccStartQueue.of(bot.id).length ? [`\nNa fila para abrir quando uma vaga liberar (${CC_MAX_RUNNING} rodando no máximo), nesta ordem:\n${ccStartQueue.of(bot.id).map((item, i) => `${i + 1}. "${item.title}" · prioridade ${priorityLabel(item.priority)} · desde ${new Date(item.at).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" })}`).join("\n")}`] : []),
               ...(detail ? [`\nÚltimo relatório de ${detail.id}:\n${detail.lastReport ?? "(nenhum ainda)"}${detail.lastError ? `\nÚltimo problema: ${detail.lastError}` : ""}`] : []),
             ].join("\n"),
           });
         }
         if (action === "start") {
-          const input = parseCcStartInput(body, ccIsGitRepo);
-          if (!input.ok) return json(res, 400, { error: input.error });
-          // One live session per issue: a second would redo the same work.
-          const duplicate = liveSessionForIssue(ccLedger.all(), input.repo, issueNumber(input.title, input.brief));
-          if (duplicate) {
-            const mine = duplicate.ownerBotId === bot.id;
-            return json(res, 409, { error: `já existe uma sessão viva para a issue #${issueNumber(input.title, input.brief)} em ${basename(input.repo)}: ${duplicate.id} ("${duplicate.title}", ${duplicate.status})${mine ? "" : `, de outro bot (${store.bot(duplicate.ownerBotId)?.name ?? duplicate.ownerBotId})`}. Não abri outra. ${mine ? `Mande a nova instrução para ela com cc_session_send (session_id ${duplicate.id})` : "Peça ao dono dela para mandar a instrução"}; se ela não serve mais, arquive com cc_session_archive e comece de novo.` });
-          }
-          // The repository's own commands (npm run …), never a guessed pnpm.
-          const scripts = useRepoScripts(input.brief, repoPackageManager(input.repo), repoScripts(input.repo));
-          input.brief = scripts.text;
-          if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
-            return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando neste computador; espere uma relatar, ou pare uma` });
-          }
-          const corridor = repoCorridor(input.repo);
-          const mixWarning = corridor ? hotfixWithReleaseScripts(`${input.title}\n${input.brief}`) : null;
-          const cliReason = typeof body.cliReason === "string" ? body.cliReason.trim().slice(0, 300) : "";
-          if (body.surface === "cli") {
-            const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason });
-            if (refusal) return json(res, 409, { error: refusal });
-          }
-          if (body.surface !== "cli" && process.platform === "darwin") {
-            // New Session in the app opens in the folder of its latest
-            // session; another repository cannot be picked from here. Say so
-            // before touching the screen instead of failing five times.
-            const lastRepo = lastAppRepo();
-            if (lastRepo && lastRepo !== input.repo) {
-              return json(res, 409, { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` });
-            }
-            const lastWorktree = lastAppWorktreeFolder();
-            if (lastWorktree) {
-              return json(res, 409, { error: `não abri: a última pasta usada no app Claude é ${lastWorktree.folder}, a worktree de outra sessão${lastWorktree.title ? ` ("${lastWorktree.title}")` : ""}, e o app abriria a sessão nova lá (foi o que aconteceu em 6 de 7 creates em 01/10). Peça ao dono para abrir no app uma sessão na raiz de ${basename(input.repo)} (branch principal, worktree ligada) e fechá-la sem enviar; depois tente de novo. Se não der para esperar, use surface "cli" com cli_reason.` });
-            }
-            const appId = randomUUID();
-            const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
-            if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
-            const issue = issueNumber(input.title, input.brief);
-            if (issue) session.desktop!.issue = issue;
-            session.desktop!.pending = { kind: "create", text: desktopBrief(session, input.brief), since: Date.now(), attempts: 0 };
-            if (corridor) session.corridorVersion = corridorVersionOf(corridor);
-            session.status = "running";
-            ccLedger.save();
-            ccChip(session, "na fila para abrir no app Claude quando o Mac estiver livre");
-            const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", input.model ? "model" : ""].filter(Boolean);
-            return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
-          }
-          const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
-          if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
-          if (corridor) session.corridorVersion = corridorVersionOf(corridor);
-          ccLedger.save();
-          runCcTurn(session, input.brief, true);
-          ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
-          if (cliReason) ccChip(session, `sessão CLI, não visível no app Claude — motivo: ${cliReason}`);
-          return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
+          const started = startCcSession(bot, threadId, replyThreadId, body);
+          return json(res, started.status, started.body);
         }
         const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
         if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão — chame cc_session_list" });
