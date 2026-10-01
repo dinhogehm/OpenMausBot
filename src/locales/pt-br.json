@@ -812,6 +812,7 @@
   "needsYou.ageDays": "{count} d",
   "needsYou.due": "até {due}",
   "needsYou.resolve": "Marcar como resolvido: {title}",
+  "needsYou.openLink": "Abrir: {title}",
   "chat.digestTools": "Ferramentas: {tools}",
   "chat.digestToolFailed": "{name} ×{count} ({failed} com falha)",
   "chat.digestToolsMore": "+{count} outras",

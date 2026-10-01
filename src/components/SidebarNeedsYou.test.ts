@@ -49,4 +49,32 @@ describe("what needs the person, from every bot", () => {
     expect(html).toContain("Aprovar o carrier da #9315 · Chief of Staff · esperando há 2 h · até hoje 18h · https://github.com/o/r/pull/9315");
     expect(html).toContain('aria-label="Marcar como resolvido: Aprovar o carrier da #9315"');
   });
+
+  it("gives an owner_pending item with a link a button that opens it, and the whole title on two lines (INSP-D A7)", () => {
+    const link = "claude://code/continue?session=local_0a000006-aa11-4b2c-9d3e-0123456789ab";
+    const title = 'Renomear no app: "Inbox 503 diagnóstico e recuperação" → "#8891 Inbox 503 diagnóstico e recuperação"';
+    const listed = [bot("chief", "Chief of Staff", [task("c0", "Main", { ownerPending: [{ id: "o2", title, since: now - 60_000, link }, { id: "o3", title: "Sem link", since: now }] })])];
+    const items = needsYouItems(listed);
+    const opened: string[] = [];
+    const element = SidebarNeedsYou({ items, density: "comfortable", now, onJump: () => {}, onResolve: () => {}, onOpenLink: (url) => opened.push(url) });
+    const html = renderToStaticMarkup(element!);
+    expect(html).toContain(`data-needs-you-link="${link}"`);
+    expect(html).toContain(`aria-label="Abrir: ${title.replaceAll('"', "&quot;")}"`);
+    expect(html.match(/data-needs-you-link=/g)).toHaveLength(1);
+    expect(html).toContain("line-clamp-2");
+    // the button calls onOpenLink with the item's link
+    const findButton = (node: unknown): { props: { onClick: () => void } } | null => {
+      if (!node || typeof node !== "object") return null;
+      const el = node as { props?: Record<string, unknown> };
+      if (el.props?.["data-needs-you-link"] === link) return el as { props: { onClick: () => void } };
+      const children = el.props?.children;
+      for (const child of Array.isArray(children) ? children.flat(Infinity) : [children]) {
+        const found = findButton(child);
+        if (found) return found;
+      }
+      return null;
+    };
+    findButton(element)!.props.onClick();
+    expect(opened).toEqual([link]);
+  });
 });
