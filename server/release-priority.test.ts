@@ -35,6 +35,21 @@ describe("the production release first", () => {
     expect(releaseBlockedBy("")).toBeNull();
   });
 
+  // INSP-R r2 item 1: this repo's fork is public — the fixture keeps the real
+  // shape (pids, groups, lstart, the head of every command) and nothing else.
+  // Allowlists, so the guard itself names nothing private.
+  it("the fixture stays redacted: fake home, ids, sockets, tokens, worktrees, PRs", () => {
+    expect(realText).not.toMatch(/token-file\s+\S*connector|\.token\b|#?93\d\d\b/i);
+    expect(realText).not.toMatch(/\/Users\/(?!owner\b)/);
+    expect(realText).not.toMatch(/--pr \d/);
+    for (const uuid of realText.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi) ?? []) expect(uuid).toMatch(/^00000000-0000-4000-8000-0000000000\d\d$/);
+    for (const sock of realText.match(/\S+\.sock\b/g) ?? []) expect(sock).toBe("/var/folders/xx/redacted/T/cua-34233-00000000.sock");
+    for (const worktree of realText.match(/\/\.claude\/worktrees\/[^/\s]+/g) ?? []) expect(worktree).toMatch(/^\/\.claude\/worktrees\/session-[ab]$/);
+    for (const sha of realText.match(/\b(?:head|em) `?[0-9a-f]{9}\b/g) ?? []) expect(sha).toMatch(/0000000[a-f]\d$/);
+    // the redaction kept the shape the tests need
+    expect(real).toHaveLength(37);
+  });
+
   it("the fixture is the real table: the claudes carry ci:local and release-carrier in argv", () => {
     const claude = real.find((row) => row.pid === 38002)!;
     expect(claude.command).toMatch(/^claude -p --resume 00000000/);
