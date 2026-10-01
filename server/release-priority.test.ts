@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parsePsTable } from "./bg-jobs.ts";
-import { ciGroupToStop, ownerSession, releaseBlockedBy } from "./release-priority.ts";
+import { ciGroupToStop, ciToStop, ownerSession, releaseBlockedBy } from "./release-priority.ts";
 
 const log = [
   "ADMISSION_LOAD_CLEAR label=release:production load1=7.55 threshold=12.00 ncpu=10 waited=90s",
@@ -43,5 +43,41 @@ describe("the production release first", () => {
     expect(ciGroupToStop(1338, table, 100)).toBeNull(); // the release
     expect(ciGroupToStop(500, table, 100)).toBeNull(); // not a CI
     expect(ciGroupToStop(48250, table, 48250)).toBeNull(); // our own group
+  });
+
+  // 01/10: the release waited 870 s behind ci-full:25900 of session 5f41b133,
+  // and the server left it alone — the lock's pid was not the script itself
+  const real = parsePsTable([
+    "  100     1   100 Wed Oct  1 13:00:00 2026 node server/index.js",
+    "24000   100 24000 Wed Oct  1 13:30:00 2026 claude -p --resume 5f41b133",
+    "25880 24000 25880 Wed Oct  1 13:40:00 2026 npm run ci:local -- --profile full",
+    "25890 25880 25880 Wed Oct  1 13:40:01 2026 /bin/bash -p ./scripts/local-ci.sh --profile full",
+    "25900 25890 25880 Wed Oct  1 13:40:02 2026 /bin/bash -p /Users/o/.nuria/trusted-hook-bin/run-gate full",
+    "25910 25900 25880 Wed Oct  1 13:40:03 2026 node node_modules/.bin/vitest run --project web",
+    " 1338     1  1338 Wed Oct  1 13:50:00 2026 bash scripts/local-release.sh --environment production",
+  ].join("\n"));
+
+  it("finds the CI from a child pid in the lock (npm → bash -p local-ci.sh → children) and stops its group", () => {
+    expect(ciToStop(25900, real, 100)).toMatchObject({ kind: "group", pgid: 25880, root: { pid: 25880 } });
+    expect(ciToStop(25910, real, 100)).toMatchObject({ kind: "group", pgid: 25880 });
+  });
+
+  it("stops only the CI's tree when its group also holds the session's claude", () => {
+    const shared = parsePsTable([
+      "  100     1   100 Wed Oct  1 13:00:00 2026 node server/index.js",
+      "24000   100 24000 Wed Oct  1 13:30:00 2026 claude -p --resume 5f41b133",
+      "25890 24000 24000 Wed Oct  1 13:40:01 2026 /bin/bash -p ./scripts/local-ci.sh --profile full",
+      "25900 25890 24000 Wed Oct  1 13:40:02 2026 node node_modules/.bin/vitest run",
+    ].join("\n"));
+    const stop = ciToStop(25900, shared, 100);
+    expect(stop).toMatchObject({ kind: "tree", root: { pid: 25890 } });
+    expect(stop.kind === "tree" && stop.pids.sort()).toEqual([25890, 25900]);
+  });
+
+  it("says why it leaves a CI alone", () => {
+    expect(ciToStop(99999, real, 100)).toEqual({ kind: "refuse", reason: "ci-full:99999 is not running" });
+    expect(ciToStop(24000, real, 100)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("nor its parents are a local CI") });
+    expect(ciToStop(25900, real, 25880)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("the server's own group") });
+    expect(ciToStop(1400, table, 100)).toMatchObject({ kind: "refuse", reason: expect.stringContaining("shares the CI's group") });
   });
 });

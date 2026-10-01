@@ -340,7 +340,7 @@ import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
-import { ciGroupToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
+import { ciToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
 import { readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -8807,22 +8807,30 @@ async function preemptCiForRelease(): Promise<void> {
       ...(session.surface === "app" && session.cwd ? { worktree: session.cwd } : {}),
     })));
     const session = ownerId ? ccLedger.get(ownerId) : null;
+    const lockRow = rows.find((row) => row.pid === blocked.pid);
+    const lockSeen = lockRow ? `"${lockRow.command.slice(0, 120)}" pgid ${lockRow.pgid}` : "not running";
     if (!session) {
-      console.log(`[release-priority] the release waits on ci-full:${blocked.pid}, which is not a managed session's — left alone`);
+      console.log(`[release-priority] leave alone: the release (${blocked.label}, ${blocked.waitedS}s) waits on ci-full:${blocked.pid} ${lockSeen}, which is not a managed session's`);
       return;
     }
     const ownPgid = rows.find((row) => row.pid === process.pid)?.pgid ?? process.pid;
-    const pgid = ciGroupToStop(blocked.pid, rows, ownPgid);
-    if (!pgid) {
-      console.log(`[release-priority] ci-full:${blocked.pid} of session ${session.id} is not a local CI group it may stop — left alone`);
+    const stop = ciToStop(blocked.pid, rows, ownPgid);
+    if (stop.kind === "refuse") {
+      console.log(`[release-priority] leave alone: ci-full:${blocked.pid} ${lockSeen} of session ${session.id} — ${stop.reason}`);
+      // the release keeps waiting: whoever decides hears it, once per lock
+      const owner = store.bot(session.ownerBotId);
+      if (owner) alertAutomationTrouble(owner, session.ownerThreadId, `O release de produção (${blocked.label}) espera há ${Math.round(blocked.waitedS / 60)} min atrás do ci:local da sessão "${session.title}" e o servidor NÃO o interrompeu: ${stop.reason}. Interrompa esse ci:local na sessão, ou deixe o release esperar.`);
       return;
     }
+    const pgid = stop.kind === "group" ? stop.pgid : stop.root.pgid;
     try {
-      process.kill(-pgid, "SIGTERM");
+      if (stop.kind === "group") process.kill(-stop.pgid, "SIGTERM");
+      else for (const pid of stop.pids) { try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ } }
     } catch (error) {
       console.warn(`[release-priority] could not stop group ${pgid}: ${error instanceof Error ? error.message : String(error)}`);
       return;
     }
+    console.log(`[release-priority] stop ${stop.kind === "group" ? `group ${stop.pgid}` : `tree ${stop.pids.join(",")} (its group ${stop.root.pgid} also holds other processes)`}: ci-full:${blocked.pid} ${lockSeen} of session ${session.id}, CI root ${stop.root.pid} "${stop.root.command.slice(0, 120)}", release ${blocked.label} waited ${blocked.waitedS}s`);
     let tagSha: string | null = null;
     try {
       tagSha = parseLsRemoteTag(await execCc("git", ["-C", session.repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
