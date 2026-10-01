@@ -684,6 +684,17 @@ describe("an issue left without a live session", () => {
 });
 
 describe("a field that already held text", () => {
+  it("says when the app's suggestion was sent over", async () => {
+    const h = harness();
+    const session = h.opened("s");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "send", text: "Siga", since: h.now, attempts: 0 };
+    h.results.push({ ok: true, suggestion: "qual o status do gate da #9330?" });
+    await h.tick();
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(h.chips.some((chip) => chip.text.includes("sugestão do app") && chip.text.includes("#9330"))).toBe(true);
+  });
+
   it("keeps the message, asks the person once in \"Precisa de você\", and settles it when the field is free", async () => {
     const h = harness();
     const pendings: { title: string; link?: string; key: string }[] = [];

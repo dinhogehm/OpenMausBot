@@ -420,16 +420,33 @@ describe("the app's real screen (OCR fixture)", () => {
     expect(findComposer([{ x: 547, y: 300, w: 200, h: 16, text: "conversation text" }], { h: 900 })).toBeNull();
   });
 
-  it("never types over text in the field (maybe the person's draft): stops before touching it, and names it", async () => {
+  it("keeps the person's draft: one probe key, the draft stays, the key is taken back and nothing is sent", async () => {
     const strip = { text: "#9317 nuria-platform fix/9298", x: 520, y: 732 };
     const bar = { text: "Automático", x: 578, y: 830 };
     const model = { text: "Opus 5.5", x: 1140, y: 830 };
     const draft = { text: "pode reescrever o corpo da PR com a seção de riscos", x: 505, y: 788 };
-    const app = fakeApp({ screens: [[header, strip, draft, bar, model]] });
+    const probed = { ...draft, text: "pode reescrever o corpo da PR com a seção de riscos." };
+    const app = fakeApp({ screens: [[header, strip, draft, bar, model], [header, strip, probed, bar, model]] });
     expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim, reescreva o corpo", title: "Chat ticket agent/client labels bug" }))
-      .toMatchObject({ ok: false, retry: true, draft: "pode reescrever o corpo da PR com a seção de riscos", reason: expect.stringContaining("texto não enviado") });
-    // opened the session, and nothing else: no click in the field, no paste, no Return
-    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`]);
+      .toMatchObject({ ok: false, retry: true, draft: "pode reescrever o corpo da PR com a seção de riscos", reason: expect.stringContaining("rascunho") });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 525,796", "type .", "key 51"]);
+  });
+
+  it("sends over the app's suggested reply: it gives way to the probe key (36300f35, R8: \"qual o status do gate da #9330?\")", async () => {
+    // OCR of the session on 01/10 (send 1 of 6): branch strip, the suggestion, the mode/model bar
+    const strip = { text: "nuria-platform fix/9326-guard-previous-commit", x: 520, y: 732 };
+    const bar = { text: "+ O v Automático", x: 560, y: 830 };
+    const model = { text: "Opus 5.5", x: 1140, y: 830 };
+    const suggestion = { text: "qual o status do gate da #9330?", x: 505, y: 788 };
+    const probed = { ...suggestion, text: "." };
+    const typed = { ...suggestion, text: "Siga com o gate da #9330 agora" };
+    const sent = { text: "Responder…", x: 505, y: 788 };
+    const title = "Post-release-guard PREVIOUS_COMMIT vazio";
+    const top = { text: `• ${title} v (nuria-platform`, x: 520, y: 57 };
+    const app = fakeApp({ screens: [[top, strip, suggestion, bar, model], [top, strip, probed, bar, model], [top, strip, typed, bar, model], [top, strip, sent, bar, model]] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "Siga com o gate da #9330 agora", title }))
+      .toEqual({ ok: true, suggestion: "qual o status do gate da #9330?" });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 525,796", "type .", "paste(all) Siga com o gate da #9330 agora", "key 36"]);
   });
 
   it("sends into the session whose header carries a status dot (8378b26a)", async () => {

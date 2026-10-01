@@ -60,7 +60,7 @@ export interface DesktopDriver {
 /** `miss`: the screen did not show what was expected (folder, worktree,
  * session) although it was unlocked and Claude was in front. `touched`: the
  * step acted on the screen before stopping, so a retry should back off. */
-export type DesktopStep = { ok: true } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string };
+export type DesktopStep = { ok: true; suggestion?: string } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -73,6 +73,8 @@ const COMPOSER_PLACEHOLDER = /^(Digite \/ para comandos|Type \/ for commands|Res
 /** The field of a new, empty session ("Descreva uma tarefa ou faça uma pergunta"). */
 const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task)\b/i;
 const BACKSPACE = 51;
+/** The one character typed to tell an app suggestion from a draft. */
+const SUGGESTION_PROBE = ".";
 const KEY_A = 0;
 
 export function parseOcr(text: string): OcrLine[] {
@@ -322,19 +324,30 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     const composer = findComposer(lines, size);
     if (!composer) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y > size.h / 2).slice(-8)) };
     const field = composer.line;
-    // Text in the field may be the person's own unsent draft: it is never
-    // overwritten. OCR cannot tell an app suggestion from a draft safely
-    // (same place, colour lost), so any text there stops the send; the
-    // caller asks the person and tries again later.
-    if (composer.text !== null) {
-      return { ok: false, reason: `há texto não enviado no campo desta sessão ("${composer.text.slice(0, 120)}"); não sobrescrevi`, retry: true, touched: true, draft: composer.text.slice(0, 500) };
-    }
     // What is near the field (it grows upwards as text goes in).
     const nearField = (all: OcrLine[]) => mainArea(all).filter((line) => line.y > Math.max(size.h / 2, field.y - 200));
     stop = await guard(screen, "click field");
     if (stop) return stop;
     await act(screen, () => driver.click(field.x + 20, field.y + field.h / 2));
     await driver.sleep(300);
+    // Text in the field is either the app's suggested reply (shown in the
+    // field until the first keystroke) or the person's own unsent draft.
+    // OCR sees no colour, so one character tells them apart: a suggestion
+    // gives way to it, a draft keeps its words. A draft is never typed
+    // over — the character is taken back and the caller asks the person.
+    if (composer.text !== null) {
+      stop = await guard(screen, "probe field");
+      if (stop) return stop;
+      await act(screen, () => driver.typeText(SUGGESTION_PROBE));
+      await driver.sleep(400);
+      const probed = nearField(await driver.ocr());
+      if (showsPrefix(probed, textPrefix(composer.text))) {
+        stop = await guard(screen, "undo probe");
+        if (stop) return stop;
+        await act(screen, () => driver.key(BACKSPACE));
+        return { ok: false, reason: `há texto não enviado no campo desta sessão ("${composer.text.slice(0, 120)}"): é rascunho (continuou depois de uma tecla); não sobrescrevi`, retry: true, touched: true, draft: composer.text.slice(0, 500) };
+      }
+    }
     stop = await guard(screen, "paste");
     if (stop) return stop;
     await act(screen, () => driver.paste(input.text, true));
@@ -360,12 +373,12 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (!after.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim())) && showsPrefix(after, prefix)) {
       return { ok: false, reason: "the message stayed in the field after Return", retry: true, touched: true };
     }
-    return { ok: true };
+    return composer.text !== null ? { ok: true, suggestion: composer.text.slice(0, 300) } : { ok: true };
   });
 }
 
 /** The bar under the message field: the mode ("Automático") and the model ("Opus 5.5"). */
-const COMPOSER_BAR = /^(Automático|Automatic|Auto|Pedir aprova[çc][ãa]o|Ask|Plan|Planejar|Bypass\b.*|Aceitar edi[çc][õo]es|Accept edits)$|\b(Opus|Sonnet|Haiku|Fable)\s*\d/i;
+const COMPOSER_BAR = /(?:^|\s)(Automático|Automatic|Auto|Pedir aprova[çc][ãa]o|Ask|Plan|Planejar|Bypass\b.*|Aceitar edi[çc][õo]es|Accept edits)$|\b(Opus|Sonnet|Haiku|Fable)\s*\d/i;
 
 /** The session's message field, found as a person would: its placeholder
  * when it is empty, else the line right above the mode/model bar — where an
@@ -380,7 +393,7 @@ export function findComposer(lines: OcrLine[], size: { h: number }): { line: Ocr
   const above = lower
     .filter((line) => line.y < bar.y - 4 && bar.y - line.y <= 90 && line.text.trim())
     // the PR/branch strip above the field is not the field
-    .filter((line) => !/^#\d+\b|[+]\d+\s*-\d+|\bCI\b/.test(line.text.trim()))
+    .filter((line) => !/^#\d+\b|[+]\d+\s*-\d+|\bCI\b|^\S+\s+[\w.-]+\/\S+$/.test(line.text.trim()))
     .sort((a, b) => b.y - a.y)[0];
   return above ? { line: above, text: above.text.trim() } : null;
 }

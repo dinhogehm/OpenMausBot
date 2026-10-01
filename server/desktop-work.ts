@@ -564,6 +564,8 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
         return;
       }
       delete desktop.pending;
+      // the app's suggested reply gave way to the message (a draft never does)
+      if (pending.kind === "send" && "suggestion" in step && step.suggestion) deps.chip(next, `a sugestão do app no campo (“${step.suggestion.slice(0, 80)}”) foi substituída pela mensagem`, true);
       if (pending.kind === "create") desktop.sentAt = at;
       else {
         desktop.sent = { text: pending.text, at, userFrameAt, deliveries: (pending.deliveries ?? 0) + 1 };
