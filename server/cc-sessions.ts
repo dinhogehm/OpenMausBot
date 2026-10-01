@@ -370,6 +370,19 @@ export class CcSessionLedger {
     return [...this.sessions.values()].filter((session) => ccSessionActive(session, now)).length;
   }
 
+  /** Slots held, for deciding whether another session may start: the ones
+   * at work, and every app session still on its way in or with a message on
+   * its way — a create or a send waiting for the Mac, a brief typed but not
+   * yet adopted, a message typed but not yet seen arriving. Those make no
+   * progress while the Mac is locked, so the 45 min of ccSessionActive would
+   * free their slot and let the start queue open more (INSP-F F3-b). */
+  slotsTaken(now = this.now()): number {
+    return [...this.sessions.values()].filter((session) => ccSessionActive(session, now) || (
+      session.status === "running" && session.surface === "app" && Boolean(session.desktop)
+      && (!session.desktop!.localId || session.desktop!.pending?.kind === "create" || session.desktop!.pending?.kind === "send" || Boolean(session.desktop!.sent))
+    )).length;
+  }
+
   markRunning(session: CcSession): void {
     session.status = "running";
     session.turns += 1;
