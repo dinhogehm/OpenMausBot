@@ -71,8 +71,10 @@ const ESCAPE = 53;
 const SIDEBAR_MAX_X = 450;
 /** A person's input newer than our own last action by more than this is theirs. */
 const HUMAN_SLACK_MS = 500;
-/** The empty message field's placeholder, the whole OCR line and nothing else. */
-const COMPOSER_PLACEHOLDER = /^(Digite \/ para comandos|Type \/ for commands|Responder\b.*|Reply\b.*)$/i;
+/** The empty message field's placeholder: its exact text as the whole OCR
+ * line ("Responder…", never "Responder ao cliente…"), and only where the
+ * field is (see findComposer) — a line of the conversation is not it. */
+const COMPOSER_PLACEHOLDER = /^(Digite \/ para comandos|Type \/ for commands|Responder|Reply)(?:\s*(?:…|\.{3}))?$/i;
 /** The field of a new, empty session ("Descreva uma tarefa ou faça uma pergunta"). */
 const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task)\b/i;
 const BACKSPACE = 51;
@@ -372,7 +374,7 @@ async function typeBrief(screen: Screen, text: string, size: { h: number }, repo
   if (newSessionScreen(after, repoName)) {
     return { ok: false, reason: "the brief did not leave the new session's screen after Return (its field or chips are still there)", retry: true, touched: true, seen: seenText(after.slice(-8)) };
   }
-  if (!after.some((line) => COMPOSER_MODE.test(line.text.trim()) || COMPOSER_MODEL.test(line.text.trim()) || COMPOSER_PLACEHOLDER.test(line.text.trim()))) {
+  if (!after.some((line) => COMPOSER_MODE.test(line.text.trim()) || COMPOSER_MODEL.test(line.text.trim())) && !placeholderShown(after, size, repoName)) {
     return { ok: false, reason: "could not read the screen after Return to confirm the brief left the new session's field", retry: true, touched: true, seen: seenText(after.slice(-8)) };
   }
   return { ok: true };
@@ -425,7 +427,7 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     const typed = nearField(await driver.ocr());
     // In the field: its first words show, or at least the placeholder (or the
     // text that was there) gave way.
-    if (!showsPrefix(typed, prefix) && typed.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim()))) {
+    if (!showsPrefix(typed, prefix) && placeholderShown(typed, size, input.repoName)) {
       return { ok: false, reason: "the message did not appear in the session's field", retry: true, touched: true };
     }
     stop = await guard(screen, "send");
@@ -433,7 +435,8 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     await act(screen, () => driver.key(RETURN));
     await driver.sleep(1_500);
     const after = nearField(await driver.ocr());
-    if (!after.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim())) && showsPrefix(after, prefix)) {
+    // the placeholder counts only where the field is: a "Responder…" of the conversation proves nothing
+    if (!placeholderShown(after, size, input.repoName) && showsPrefix(after, prefix)) {
       return { ok: false, reason: "the message stayed in the field after Return", retry: true, touched: true };
     }
     return composer.text !== null && !PROBE_LEFTOVER.test(composer.text) ? { ok: true, suggestion: composer.text.slice(0, 300) } : { ok: true };
@@ -458,24 +461,31 @@ function stripLine(text: string, repoName?: string): boolean {
   return Boolean(repoName) && /\S\/\S/.test(text) && showsFolder([{ x: 0, y: 0, w: 0, h: 0, text }], repoName!);
 }
 
-/** The session's message field, found as a person would: its placeholder
- * when it is empty, else the line right above the mode bar, in its column —
- * where an unsent draft sits ("pode reescrever o corpo…"), never
- * overwritten. When that closest line is a button or the PR strip ("Criar
- * PR", "+114 - 4") there is no field to click: null. `text` is what was in
- * it then (null when it showed the placeholder); `bar` is the mode line. */
-export function findComposer(lines: OcrLine[], size: { h: number }, repoName?: string): { line: OcrLine; text: string | null; bar?: OcrLine } | null {
+/** The session's message field, found as a person would: the line right
+ * above the mode bar, in its column (±40 pt, up to 90 pt above it) — its
+ * placeholder when it is empty, else where an unsent draft sits ("pode
+ * reescrever o corpo…"), never overwritten. A placeholder-like line
+ * anywhere else ("Responder ao cliente…" in the conversation) is not the
+ * field (INSP-D D1). When that closest line is a button or the PR strip
+ * ("Criar PR", "+114 - 4") there is no field to click: null. `text` is what
+ * was in it then (null when it showed the placeholder); `bar` is the mode line. */
+export function findComposer(lines: OcrLine[], size: { h: number }, repoName?: string): { line: OcrLine; text: string | null; bar: OcrLine } | null {
   const lower = lines.filter((line) => line.y > size.h / 2);
-  const empty = lower.find((line) => COMPOSER_PLACEHOLDER.test(line.text.trim()));
-  if (empty) return { line: empty, text: null };
   // the lowest mode line: the composer is at the bottom, the conversation above it
   const bar = lower.filter((line) => COMPOSER_MODE.test(line.text.trim())).sort((a, b) => b.y - a.y)[0];
   if (!bar) return null;
   const above = lower
     .filter((line) => line.y < bar.y - 4 && bar.y - line.y <= 90 && line.text.trim() && Math.abs(line.x - bar.x) <= COMPOSER_COLUMN_SLACK)
     .sort((a, b) => b.y - a.y)[0];
-  if (!above || stripLine(above.text.trim(), repoName)) return null;
+  if (!above) return null;
+  if (COMPOSER_PLACEHOLDER.test(above.text.trim())) return { line: above, text: null, bar };
+  if (stripLine(above.text.trim(), repoName)) return null;
   return { line: above, text: above.text.trim(), bar };
+}
+
+/** The field shows its placeholder, read where the field is. */
+function placeholderShown(lines: OcrLine[], size: { h: number }, repoName?: string): boolean {
+  return findComposer(lines, size, repoName)?.text === null;
 }
 
 /** The field emptied while the rest of the composer stayed put: the mode bar

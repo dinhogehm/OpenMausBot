@@ -307,9 +307,11 @@ describe("sendToDesktopSession", () => {
   const localId = "local_6415ced5-d3d5-4055-9d33-58c585c87de3";
   const open = { text: "Automação inatividade não dispara", y: 60 };
   const field = { text: "Responder...", y: 820 };
+  // the mode bar under the field, in its column: the field is only ever read there
+  const bar = { text: "+ O v Automático", y: 866 };
 
   it("reopens the session, checks its title, types into its field and sees the field empty again", async () => {
-    const app = fakeApp({ screens: [[open, field], [open, { text: "follow-up now", y: 820 }], [open, { text: "follow-up now", y: 400 }, field]] });
+    const app = fakeApp({ screens: [[open, field, bar], [open, { text: "follow-up now", y: 820 }, bar], [open, { text: "follow-up now", y: 400 }, field, bar]] });
     expect(await sendToDesktopSession(app.driver, { localId, text: "follow-up now", title: "Automação inatividade não dispara" })).toEqual({ ok: true });
     expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 620,828", "paste(all) follow-up now", "key 36"]);
   });
@@ -327,20 +329,20 @@ describe("sendToDesktopSession", () => {
   });
 
   it("does not press Return when the text did not reach the field", async () => {
-    const app = fakeApp({ screens: [[open, field], [open, field]] });
+    const app = fakeApp({ screens: [[open, field, bar], [open, field, bar]] });
     expect(await sendToDesktopSession(app.driver, { localId, text: "follow-up now", title: open.text })).toMatchObject({ ok: false, retry: true });
     expect(app.actions.some((action) => action.startsWith("key"))).toBe(false);
   });
 
   it("retries when the text is still in the field after Return", async () => {
     const typed = { text: "follow-up now", y: 820 };
-    const app = fakeApp({ screens: [[open, field], [open, typed], [open, typed]] });
+    const app = fakeApp({ screens: [[open, field, bar], [open, typed, bar], [open, typed, bar]] });
     expect(await sendToDesktopSession(app.driver, { localId, text: "follow-up now", title: open.text })).toMatchObject({ ok: false, retry: true, reason: expect.stringContaining("stayed") });
   });
 
   it("adds a line of its own after a message the app may wrap as pasted content", async () => {
     const long = `Long steer ${"x".repeat(250)}`;
-    const app = fakeApp({ screens: [[open, field], [open, { text: "Long steer xxxx", y: 820 }], [open, field]] });
+    const app = fakeApp({ screens: [[open, field, bar], [open, { text: "Long steer xxxx", y: 820 }, bar], [open, field, bar]] });
     expect(await sendToDesktopSession(app.driver, { localId, text: long, title: open.text })).toEqual({ ok: true });
     expect(app.actions).toContain(`type  ${DESKTOP_MESSAGE_NOTE}`);
   });
@@ -561,7 +563,8 @@ describe("the app's real screen (OCR fixture)", () => {
   ];
   const header = { text: "• Chat ticket agent/client labels bug v (nuria-platform", x: 500, y: 57 };
   const chip = { text: "nuria-platform fix/9311-chat-labels", x: 547, y: 815 };
-  const field = { text: "Digite / para comandos", x: 547, y: 875 };
+  const field = { text: "Digite / para comandos", x: 547, y: 842 };
+  const bar = { text: "+ Q v Automático", x: 543, y: 889 };
 
   it("matches titles behind a status dot or an icon, and the header with its folder after it", () => {
     expect(sidebarMatch("• Fila errada ao criar ticket", "Fila errada ao criar ticket")).toBe(true);
@@ -597,8 +600,32 @@ describe("the app's real screen (OCR fixture)", () => {
   it("finds the field above the mode bar, in its column, on the real screen (R7 capture)", () => {
     expect(findComposer(R7_SESSION, REAL_SIZE, "nuria-platform")).toMatchObject({ text: R7_FIELD, line: { x: 547, y: 842 }, bar: { text: "+ Q v Automático" } });
     expect(findComposer(S36300F35, REAL_SIZE, "nuria-platform")).toMatchObject({ text: "qual o status do gate da #9330?" });
-    expect(findComposer([{ x: 547, y: 875, w: 200, h: 16, text: "Digite / para comandos" }], REAL_SIZE)).toMatchObject({ text: null });
+    expect(findComposer(swap(R7_SESSION, { [R7_FIELD]: "Digite / para comandos" }), REAL_SIZE)).toMatchObject({ text: null, line: { y: 842 } });
+    // a placeholder with no mode bar under it is not a field
+    expect(findComposer([{ x: 547, y: 875, w: 200, h: 16, text: "Digite / para comandos" }], REAL_SIZE)).toBeNull();
     expect(findComposer([{ x: 547, y: 300, w: 200, h: 16, text: "conversation text" }], REAL_SIZE)).toBeNull();
+  });
+
+  it("takes the placeholder only where the field is: \"Responder ao cliente…\" in the conversation is not an empty field (INSP-D D1)", async () => {
+    const draft = "pode reescrever o corpo da PR";
+    const said = { x: 530, y: 594, w: 600, h: 19, text: "Responder ao cliente com o novo prazo e fechar o ticket" };
+    const screen = [...swap(R7_SESSION, { [R7_FIELD]: draft }), said];
+    expect(findComposer(screen, REAL_SIZE, "nuria-platform")).toMatchObject({ text: draft });
+    // even the bare word, far from the field's slot, is conversation
+    expect(findComposer([...swap(R7_SESSION, { [R7_FIELD]: draft }), { ...said, text: "Responder…" }], REAL_SIZE, "nuria-platform")).toMatchObject({ text: draft });
+    // the send goes through the probe on the draft and pastes nothing
+    const probed = [...swap(R7_SESSION, { [R7_FIELD]: `${draft}.` }), said];
+    const app = fakeApp({ screens: [screen, screen, probed] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim", title: "Automação inatividade não dispara", repoName: "nuria-platform" })).toMatchObject({ ok: false, draft });
+    expect(app.actions).toContain("type .");
+    expect(app.actions.at(-1)).toBe("key 51");
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+    // after Return the same rule: the message still in the field and a "Responder…" in the conversation is not "sent"
+    const empty = swap(R7_SESSION, { [R7_FIELD]: "Responder…" });
+    const stuck = [...swap(R7_SESSION, { [R7_FIELD]: "Siga com o prazo novo" }), { ...said, text: "Responder…" }];
+    const sent = fakeApp({ screens: [empty, stuck, stuck] });
+    expect(await sendToDesktopSession(sent.driver, { localId, text: "Siga com o prazo novo", title: "Automação inatividade não dispara", repoName: "nuria-platform" }))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("stayed in the field") });
   });
 
   it("reads the real mode bar \"+ O v Ignorar permissões\" (3 of 4 sessions on 01/10), and no sentence of the conversation as a bar (INSP-D A4)", () => {
@@ -726,7 +753,7 @@ describe("the app's real screen (OCR fixture)", () => {
 
   it("sends into the session whose header carries a status dot (8378b26a)", async () => {
     const typed = { ...field, text: "Siga com o PR" };
-    const app = fakeApp({ screens: [[...sidebar, header, chip, field], [...sidebar, header, chip, typed], [...sidebar, header, chip, field]] });
+    const app = fakeApp({ screens: [[...sidebar, header, chip, field, bar], [...sidebar, header, chip, typed, bar], [...sidebar, header, chip, field, bar]] });
     expect(await sendToDesktopSession(app.driver, { localId, text: "Siga com o PR", title: "Chat ticket agent/client labels bug" })).toEqual({ ok: true });
   });
 
@@ -757,12 +784,14 @@ describe("the session's own menu, in its header", () => {
     expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 520,65", "click 620,148"]);
   });
 
-  const composer = { text: "Digite / para comandos", x: 547, y: 875 };
+  const composer = { text: "Digite / para comandos", x: 547, y: 842 };
+  // the mode bar under it (R7 geometry): the message field is read only above it
+  const modeBar = { text: "+ O v Automático", x: 543, y: 889 };
   const field = { text: "Fila errada ao criar ticket", x: 520, y: 57 };
   const renamed = { text: "#9305 Fila errada ao criar ticket", x: 520, y: 57 };
 
   it("renames it \"#NNNN …\" from the same menu once the field is open, and confirms only what shows there", async () => {
-    const app = fakeApp({ screens: [[header, composer], [header, { text: "Renomear", x: 520, y: 110 }, composer], [field, composer], [renamed, composer]] });
+    const app = fakeApp({ screens: [[header, composer, modeBar], [header, { text: "Renomear", x: 520, y: 110 }, composer, modeBar], [field, composer, modeBar], [renamed, composer, modeBar]] });
     expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket" })).toEqual({ ok: true });
     expect(app.actions.slice(-3)).toEqual(["click 620,118", "paste(all) #9305 Fila errada ao criar ticket", "key 36"]);
   });
@@ -777,8 +806,8 @@ describe("the session's own menu, in its header", () => {
   });
 
   it("never sends the title as a message: pasted into the message field, it is cleared, and Return is never pressed", async () => {
-    const intoComposer = [header, { text: "#9305 Fila errada ao criar ticket", x: 547, y: 875 }];
-    const app = fakeApp({ screens: [[header, composer], [header, { text: "Renomear", x: 520, y: 110 }, composer], [field, composer], intoComposer] });
+    const intoComposer = [header, { text: "#9305 Fila errada ao criar ticket", x: 547, y: 842 }, modeBar];
+    const app = fakeApp({ screens: [[header, composer, modeBar], [header, { text: "Renomear", x: 520, y: 110 }, composer, modeBar], [field, composer, modeBar], intoComposer] });
     expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket" })).toMatchObject({ ok: false, retry: false, reason: expect.stringContaining("cleared and not sent") });
     expect(app.actions).not.toContain("key 36");
     expect(app.actions.slice(-2)).toEqual(["key 0+cmd", "key 51"]);
