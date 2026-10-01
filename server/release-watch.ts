@@ -113,13 +113,36 @@ export const HALT_ESCALATION_FILE = join(homedir(), ".nuria", "escalations", "pr
 /** How long production may run ahead of the tag before the Chief hears it. */
 export const TAG_STUCK_AFTER_MS = 15 * 60_000;
 
-/** Why the tag did not move, from the release logs' tails: the release's own warning and GitHub's refusal. */
-export function tagStuckCause(logTail: string): string | null {
-  const lines = logTail.split("\n").map((line) => line.replace(ANSI_COLOUR, "").trim()).filter(Boolean);
-  const refusal = lines.findLast((line) => /GH013|protected ref|Cannot update this protected/i.test(line));
-  const warning = lines.findLast((line) => /certification tag was NOT advanced/i.test(line));
-  const parts = [warning, refusal].filter((line): line is string => Boolean(line)).map((line) => line.slice(0, 200));
-  return parts.length ? [...new Set(parts)].join(" · ") : null;
+const TAG_NOT_ADVANCED = /production is live at ([0-9a-f]{7,40}) but the certification tag was NOT advanced/i;
+const TAG_REFUSAL = /GH013|protected ref|Cannot update this protected/i;
+/** Lines that close one release's output in the err log: nothing before them is this release's. */
+const RELEASE_BOUNDARY = /production is live at [0-9a-f]{7,40}|Release production failed for [0-9a-f]{7,40}|Certification tag (?:nuria-production-deployed advanced|unchanged)/i;
+/** How far above its warning a release's push refusal may sit. */
+const TAG_CAUSE_WINDOW = 40;
+
+/** Why the tag did not move for `releasedSha`, from the err log's tail
+ * (local-release.sh writes both to stderr): that release's own warning
+ * ("production is live at <releasedSha> but the certification tag was NOT
+ * advanced") and GitHub's refusal of its push, which comes just before it —
+ * never a refusal from an earlier release (01/10: the GH013 of 1bbd5c2a7
+ * stays in the tail for days). Null when this release left no warning. */
+export function tagStuckCause(errTail: string, releasedSha: string): string | null {
+  const released = releasedSha.trim();
+  if (!released) return null;
+  const lines = errTail.split("\n").map((line) => line.replace(ANSI_COLOUR, "").trim()).filter(Boolean);
+  const at = lines.findLastIndex((line) => {
+    const sha = TAG_NOT_ADVANCED.exec(line)?.[1];
+    return Boolean(sha && (sha.startsWith(released) || released.startsWith(sha)));
+  });
+  if (at < 0) return null;
+  let refusal: string | undefined;
+  for (let i = at - 1; i >= 0 && at - i <= TAG_CAUSE_WINDOW && !RELEASE_BOUNDARY.test(lines[i]!); i -= 1) {
+    if (TAG_REFUSAL.test(lines[i]!)) { refusal = lines[i]; break; }
+  }
+  const exit = /\(exit (\d+)\)/.exec(lines[at]!)?.[1];
+  const warned = `o release avisou que a tag não avançou${exit ? ` (exit ${exit})` : ""}`;
+  if (!refusal) return warned;
+  return `${warned}; o GitHub recusou o push da tag (${/GH013/.test(refusal) ? "GH013: regra de proteção do repositório" : "ref protegida"})`;
 }
 
 /** Production runs `releasedSha` (released at `releasedAt`) and the tag is

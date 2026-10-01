@@ -8242,7 +8242,8 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
   } catch { return; /* the tag could not be read: nothing to say */ }
   let releasedAt = Date.now();
   try { releasedAt = statSync(RELEASED_SHA_FILE).mtimeMs; } catch { return; }
-  const cause = tagStuckCause(`${readTail(RELEASE_OUT_LOG, 128 * 1024)}\n${readTail(RELEASE_ERR_LOG, 64 * 1024)}`);
+  // the cause of THIS release only: its warning and the refusal just above it (stderr)
+  const cause = tagStuckCause(readTail(RELEASE_ERR_LOG, 128 * 1024), released);
   const text = tagStuck({ releasedSha: released, releasedAt, tagSha, tagContainsRelease: contains, now: Date.now(), cause });
   if (text && state.once(`tag:${released}`)) {
     releaseAlertToChief(text, `[Alerta do servidor: tag de produção parada] ${text}\nLogs: ${RELEASE_OUT_LOG} e ${RELEASE_ERR_LOG}. Avise o dono; até a tag andar, confirme entregas a clientes pelo commit em produção, não pela tag.`);

@@ -54,16 +54,40 @@ describe("after a release", () => {
     const log = [
       "Release production completed for 1bbd5c2",
       "remote: error: GH013: Repository rule violations found for refs/tags/nuria-production-deployed.",
-      "WARNING: production is live at 1bbd5c2a7 but the certification tag was NOT advanced (exit 1)",
+      "WARNING: production is live at 1bbd5c2a72a2ed67bc5a6a0d163f3ac2df576e44 but the certification tag was NOT advanced (exit 1)",
     ].join("\n");
-    const cause = tagStuckCause(log);
-    expect(cause).toContain("certification tag was NOT advanced");
-    expect(cause).toContain("GH013");
+    const cause = tagStuckCause(log, "1bbd5c2a72a2ed67bc5a6a0d163f3ac2df576e44");
+    expect(cause).toBe("o release avisou que a tag não avançou (exit 1); o GitHub recusou o push da tag (GH013: regra de proteção do repositório)");
     const base = { releasedSha: "1bbd5c2a7f00", releasedAt: 0, tagSha: "90b3ef2a5aaa", tagContainsRelease: false, cause };
     expect(tagStuck({ ...base, now: TAG_STUCK_AFTER_MS - 1 })).toBeNull();
     expect(tagStuck({ ...base, now: 20 * 60_000 })).toContain("Produção está no ar em 1bbd5c2a7 há 20 min, mas a tag de produção continua em 90b3ef2a5");
     expect(tagStuck({ ...base, now: 20 * 60_000, tagContainsRelease: true })).toBeNull();
-    expect(tagStuckCause("Release production completed for abc")).toBeNull();
+    expect(tagStuckCause("Release production completed for abc", "abc1234")).toBeNull();
+  });
+
+  // INSP-R r1 item 9: the err log keeps the GH013 of 1bbd5c2a7 for days
+  it("cites only the cause of the release whose tag is stuck, never an older release's GH013", () => {
+    const A = "1bbd5c2a72a2ed67bc5a6a0d163f3ac2df576e44";
+    const B = "c88f99d62aaaabbbbccccddddeeeeffff0000111";
+    const tail = [
+      "To github.com:example/platform.git",
+      " ! [remote rejected] nuria-production-deployed -> nuria-production-deployed (push declined due to repository rule violations)",
+      "remote: error: GH013: Repository rule violations found for refs/tags/nuria-production-deployed.",
+      `WARNING: production is live at ${A} but the certification tag was NOT advanced (exit 1)`,
+      "Runtime targets and the deploy receipt are unaffected. Advance it manually:",
+      "npm WARN deprecated glob",
+    ].join("\n");
+    // B was released and its tag is stuck, with no cause of its own in the log
+    expect(tagStuckCause(tail, B)).toBeNull();
+    expect(tagStuckCause(tail, A)).toContain("GH013");
+    expect(tagStuckCause(tail, A.slice(0, 9))).toContain("GH013");
+    // B warned, without a refusal of its own: the older GH013 above A's warning is not B's
+    const later = `${tail}\nRelease production failed for d3415792b (exit 1)\nremote: error: GH013: old\nWARNING: production is live at ${A} but the certification tag was NOT advanced (exit 1)\nsomething\nWARNING: production is live at ${B} but the certification tag was NOT advanced (exit 128)`;
+    expect(tagStuckCause(later, B)).toBe("o release avisou que a tag não avançou (exit 128)");
+    // a refusal far above the warning (other output in between) is not taken
+    const far = ["remote: error: GH013: x", ...Array.from({ length: 50 }, (_, i) => `line ${i}`), `WARNING: production is live at ${B} but the certification tag was NOT advanced (exit 1)`].join("\n");
+    expect(tagStuckCause(far, B)).toBe("o release avisou que a tag não avançou (exit 1)");
+    expect(tagStuckCause(tail, "")).toBeNull();
   });
 
   // INSP-R r1 item 8: the halt is the .sha file — the one the watcher reads — and nothing else
