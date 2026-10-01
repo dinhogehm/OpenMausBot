@@ -8864,8 +8864,9 @@ function readAdmissionLease(): AdmissionLease | null {
   return { ownerPid, kind: readTail(join(ADMISSION_DIR, "lease", "kind"), 64).trim() };
 }
 function readReleaseIntents(): ReleaseIntent[] | null {
+  // admission-control.sh creates intents/ on every acquire: missing while a
+  // release logs a wait means we look in the wrong place — undecided, not "no release"
   const dir = join(ADMISSION_DIR, "intents");
-  if (!existsSync(dir)) return [];
   try {
     return readdirSync(dir).filter((name) => /^\d+$/.test(name)).map((name) => ({ pid: Number(name), label: readTail(join(dir, name), 512).trim() }));
   } catch {

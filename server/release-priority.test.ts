@@ -295,6 +295,12 @@ describe("stopping a session's CI for the release (fake kill, real table)", () =
     expect(moved.kills).toEqual([]);
     expect(moved.alerts).toHaveLength(1);
     expect(moved.alerts[0]).toContain("não conseguiu confirmar que pode interrompê-lo (o lease é de outro processo (83637), não do ci-full:40409 que o log cita): nada foi interrompido");
+    // intents/ unreadable (or not where we look): undecided, never "no release waits"; the Chief hears it on the 3rd tick
+    const blind = harness({ log: waitingOn(40409), before: [live], intents: null });
+    for (let tick = 0; tick < PREEMPT_RETRY_LIMIT; tick += 1) expect(await preemptCiForRelease(blind.env, blind.state)).toBe("retry");
+    expect(blind.kills).toEqual([]);
+    expect(blind.alerts).toHaveLength(1);
+    expect(blind.alerts[0]).toContain("a pasta de intenções do admission não pôde ser lida");
     // pid reused between the two reads (same pid, other start): no signal
     const reused = live.map((row) => (row.pid === 40409 ? { ...row, start: "Thu Oct 1 15:40:00 2026" } : row));
     const drift = harness({ log: waitingOn(40409), before: [live, reused] });
