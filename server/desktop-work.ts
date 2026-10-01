@@ -204,6 +204,8 @@ export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason:
     deps.report(session, `Claude Code session "${session.title}" (${session.id}): your message was NOT delivered — ${reason}. The session itself is fine and idle in the app${link}; send it again with cc_session_send later, or tell the person. Undelivered message: "${pending.text.slice(0, 300)}"`);
     return;
   }
+  // "arquive à mão": when the person does, it is what the server asked for
+  if (pending.kind === "archive") desktop.archiveHandedOver = true;
   deps.ledger.save();
   if (pending.kind === "rename") {
     deps.ownerPending?.(session, { title: `Renomeie no app Claude a sessão "${session.title}" para "${pending.text}"`, ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}), key: `cc-rename:${session.id}` });
@@ -317,16 +319,19 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
     }
     if (record.isArchived) {
       // archived by someone in the app, not by an order to the server: the
-      // owner must hear it (its PR may be left without a session)
-      const ordered = desktop.pending?.kind === "archive" || Boolean(desktop.archiveWhenResolved);
+      // owner must hear it (its PR may be left without a session). Asked
+      // for: an archive on its way, one handed to the person ("arquive à
+      // mão"), or a failed session the owner was told to see to in the app.
+      const ordered = desktop.pending?.kind === "archive" || Boolean(desktop.archiveWhenResolved) || Boolean(desktop.archiveHandedOver) || session.status === "failed";
       delete desktop.pending;
       deps.ledger.setStatus(session, "archived");
       if (ordered) deps.chip(session, "arquivada no app Claude");
       else {
         session.archivedOutsideAt = now;
         deps.ledger.save();
-        deps.chip(session, "arquivada no app Claude por fora do OMB (ninguém pediu pelo cc_session_archive)", false);
-        deps.report(session, `Claude Code session "${session.title}" (${session.id}) was archived in the Claude app by someone, not through cc_session_archive. Whatever it was still doing stopped there. The server checks whether a PR of it is still open and tells you; meanwhile check its last report (cc_session_list with its id) and decide who carries the work on.`);
+        deps.chip(session, "arquivada no app Claude por alguém, sem pedido do OMB", false);
+        deps.chip(session, `abrir no app: claude://code/continue?session=${desktop.localId}`, false);
+        deps.report(session, `Claude Code session "${session.title}" (${session.id}) was archived in the Claude app by someone, not through cc_session_archive (claude://code/continue?session=${desktop.localId}). Whatever it was still doing stopped there. The server checks whether a PR of it is still open and tells you; meanwhile check its last report (cc_session_list with its id) and decide who carries the work on.`);
       }
       deps.onArchived?.(session);
       continue;

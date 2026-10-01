@@ -17,7 +17,9 @@ import {
   desktopBackoffMs,
   desktopBriefText,
   issueNumber,
+  failDesktopSession,
   followDesktopSessions,
+  giveUpPending,
   liveSessionForIssue,
   orphanedIssues,
   reviveScreenFailures,
@@ -408,8 +410,44 @@ describe("archiving", () => {
     followDesktopSessions(h.deps);
     expect(session.status).toBe("archived");
     expect(session.archivedOutsideAt).toBe(h.now);
-    expect(h.chips.at(-1)).toMatchObject({ text: expect.stringContaining("por fora do OMB"), ok: false });
+    // short, in Portuguese, no tool name, and a separate chip with the link to it (INSP-F F1-d)
+    expect(h.chips.slice(-2)).toEqual([
+      { id: "f", text: "arquivada no app Claude por alguém, sem pedido do OMB", ok: false },
+      { id: "f", text: `abrir no app: claude://code/continue?session=${LOCAL}`, ok: false },
+    ]);
     expect(h.reports.at(-1)!.text).toContain("not through cc_session_archive");
+    expect(h.reports.at(-1)!.text).toContain(`claude://code/continue?session=${LOCAL}`);
+  });
+
+  it("is not \"behind the server's back\" when the server itself asked the person to archive it by hand (INSP-F F1-b)", async () => {
+    const h = harness();
+    const session = h.opened("g");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "archive", text: "", since: h.now, attempts: 0 };
+    giveUpPending(h.deps, session, "the Claude window could not be brought to the front");
+    expect(h.chips.at(-1)!.text).toBe("não foi possível arquivar no app — arquive à mão");
+    expect(session.desktop!.pending).toBeUndefined();
+    const reports = h.reports.length;
+    // the person does as asked
+    h.records.get(LOCAL)!.isArchived = true;
+    followDesktopSessions(h.deps);
+    expect(session.status).toBe("archived");
+    expect(session.archivedOutsideAt).toBeUndefined();
+    expect(h.chips.at(-1)).toEqual({ id: "g", text: "arquivada no app Claude", ok: true });
+    expect(h.reports).toHaveLength(reports);
+  });
+
+  it("is not \"behind the server's back\" for a failed session the owner was told to see to in the app (INSP-F F1-b)", () => {
+    const h = harness();
+    const session = h.opened("h");
+    failDesktopSession(h.deps, session, "Archive was clicked 3 times in the Claude app, but the app never marked the session archived; archive it by hand there");
+    const reports = h.reports.length;
+    h.records.get(LOCAL)!.isArchived = true;
+    followDesktopSessions(h.deps);
+    expect(session.status).toBe("archived");
+    expect(session.archivedOutsideAt).toBeUndefined();
+    expect(h.chips.at(-1)).toEqual({ id: "h", text: "arquivada no app Claude", ok: true });
+    expect(h.reports).toHaveLength(reports);
   });
 });
 

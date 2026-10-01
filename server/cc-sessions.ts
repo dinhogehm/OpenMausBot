@@ -137,6 +137,11 @@ export interface CcDesktopState {
   sent?: { text: string; at: number; userFrameAt: number; deliveries: number };
   /** Archive once the session has opened and nothing is waiting to go in. */
   archiveWhenResolved?: boolean;
+  /** The server could not archive it on the screen and asked the person to
+   * archive it by hand: their archiving is the expected end, not something
+   * done behind the server's back. (A failed session, which the owner was
+   * told to see to in the app, counts the same while it is failed.) */
+  archiveHandedOver?: boolean;
   /** The permission mode the app really runs it in (read from its record). */
   permissionMode?: string;
   /** Remove its worktree once the app confirms it archived (remove_worktree). */
