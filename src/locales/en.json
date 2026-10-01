@@ -3010,5 +3010,13 @@
   "ccAlert.failed": "failed",
   "ccAlert.stalled": "stalled",
   "ccAlert.question": "asking a question in the app",
-  "ccAlert.item": "Claude Code · {title} — {state}"
+  "ccAlert.item": "Claude Code · {title} — {state}",
+  "ccSession.indicator": "Claude Code sessions here",
+  "ccSession.cliItem": "{title} — {status} · CLI, not visible in the Claude app",
+  "ccSession.appItem": "{title} — {status} · in the Claude app",
+  "ccSession.status.running": "working",
+  "ccSession.status.idle": "idle",
+  "ccSession.status.stalled": "stalled",
+  "ccSession.status.failed": "failed",
+  "ccSession.status.stopped": "stopped"
 }

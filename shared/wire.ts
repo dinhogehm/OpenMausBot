@@ -128,6 +128,15 @@ export interface WireCcAlert {
   detail?: string;
 }
 
+/** A Claude Code session this conversation runs, for its row: where it runs and how it is. */
+export interface WireCcSession {
+  sessionId: string;
+  title: string;
+  status: "running" | "idle" | "stalled" | "failed" | "stopped";
+  /** cli: headless, not visible in the Claude app. */
+  surface: "app" | "cli";
+}
+
 /** One thing that waits on the person (owner_pending), for "Precisa de você". */
 export interface WireOwnerPending {
   id: string;
@@ -152,6 +161,8 @@ export interface WireTask {
   ccAlerts?: WireCcAlert[];
   /** What the bot (or the server) listed as waiting on the person. */
   ownerPending?: WireOwnerPending[];
+  /** Its Claude Code sessions not archived, CLI ones included (they are not in the app). */
+  ccSessions?: WireCcSession[];
   threadId: string;
   title: string;
   createdAt: number;

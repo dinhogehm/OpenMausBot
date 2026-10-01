@@ -104,7 +104,7 @@ import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as boat from "./boat.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner, type TeamComputerRecord } from "./team-computers.ts";
-import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireCcAlert, type WireGroup, type WireOwnerPending, type WireTask } from "../shared/wire.ts";
+import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireCcAlert, type WireGroup, type WireOwnerPending, type WireCcSession, type WireTask } from "../shared/wire.ts";
 import type { TeamComputersPayload } from "../shared/team-computer.ts";
 import { boatCreateRecoverySnapshot, retireDeletedBoatCreate } from "./boat-create-idempotency.ts";
 import { boatDeletionSnapshot } from "./boat-delete-journal.ts";
@@ -3612,7 +3612,7 @@ if (browserCleanupReferencesReconciled) browserCleanup.startPending();
  * so a new broadcast cannot forget. */
 let activeCoordinationForThread = (_threadId: string): boolean => false;
 /** Watches and Claude Code sessions of a thread, for its row (set once both exist). */
-let threadSignals = (_threadId: string): Pick<WireTask, "watches" | "watchesLost" | "ccAlerts" | "ownerPending"> => ({});
+let threadSignals = (_threadId: string): Pick<WireTask, "watches" | "watchesLost" | "ccAlerts" | "ownerPending" | "ccSessions"> => ({});
 /** Goal mode in this thread stopped to ask the person (set once autonomy exists). */
 let goalNeedsInputForThread = (_threadId: string): number | null => null;
 const wireTask = (task: TaskRecord): WireTask => {
@@ -8696,6 +8696,9 @@ threadSignals = (threadId) => {
       if (session.status === "stalled") return [{ sessionId: session.id, title: session.title, state: "stalled" }];
       return [];
     });
+  const ccSessions = ccLedger.all()
+    .filter((session) => session.ownerThreadId === threadId && session.status !== "archived")
+    .map((session): WireCcSession => ({ sessionId: session.id, title: session.title, status: session.status as WireCcSession["status"], surface: session.surface === "app" ? "app" : "cli" }));
   const ownerPending = autonomy.ownerPendingFor(threadId).map((item): WireOwnerPending => ({
     id: item.id, title: item.title, since: item.createdAt, ...(item.due ? { due: item.due } : {}), ...(item.link ? { link: item.link } : {}),
   }));
@@ -8704,6 +8707,7 @@ threadSignals = (threadId) => {
     ...(autonomy.isStandingLost(threadId) ? { watchesLost: true } : {}),
     ...(ccAlerts.length ? { ccAlerts } : {}),
     ...(ownerPending.length ? { ownerPending } : {}),
+    ...(ccSessions.length ? { ccSessions } : {}),
   };
 };
 

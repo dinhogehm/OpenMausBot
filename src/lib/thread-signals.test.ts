@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { setLocale } from "@/lib/i18n";
-import { botSignals, ccAlertSummary, needsSignalLook, watchSummary } from "./thread-signals";
+import { botSignals, ccAlertSummary, ccSessionsSummary, needsSignalLook, watchSummary } from "./thread-signals";
 
 const now = new Date("2026-09-30T10:30:00").getTime();
 beforeEach(() => setLocale("pt-br"));
@@ -26,6 +26,22 @@ describe("thread signals", () => {
       .toBe("Claude Code · #9298 — falhou: não foi possível enviar a mensagem depois de 5 tentativas");
   });
 
+  it("says where each Claude Code session runs, a CLI one out of the Claude app, and keeps its conversation reachable", () => {
+    const sessions = [
+      { sessionId: "a", title: "#9315 lote", status: "running" as const, surface: "cli" as const },
+      { sessionId: "b", title: "#9298 inatividade", status: "idle" as const, surface: "app" as const },
+    ];
+    expect(ccSessionsSummary(sessions)).toEqual({
+      cli: true,
+      text: "Sessões do Claude Code desta conversa\n#9315 lote — trabalhando · CLI, não aparece no app Claude\n#9298 inatividade — parada esperando ordem · no app Claude",
+    });
+    expect(ccSessionsSummary([sessions[1]!])?.cli).toBe(false);
+    expect(ccSessionsSummary([])).toBeNull();
+    expect(needsSignalLook({ ccSessions: [sessions[0]!] })).toBe(true);
+    expect(needsSignalLook({ ccSessions: [sessions[1]!] })).toBe(false);
+    expect(botSignals([{ ccSessions: sessions }]).sessions?.cli).toBe(true);
+  });
+
   it("sums a bot's conversations for its folded row, and knows which need a look", () => {
     const tasks = [
       { watches: [{ label: "chat", standing: true, everyMinutes: 3, lastRunAt: now, failures: 0 }] },
@@ -35,7 +51,7 @@ describe("thread signals", () => {
     const signals = botSignals(tasks, now);
     expect(signals.watch).toMatchObject({ failing: true, text: expect.stringContaining("chat a cada 3 min") });
     expect(signals.cc?.text).toBe("Claude Code · #9308 — falhou");
-    expect(botSignals([{}], now)).toEqual({ watch: null, cc: null });
+    expect(botSignals([{}], now)).toEqual({ watch: null, cc: null, sessions: null });
     expect(needsSignalLook(tasks[0]!)).toBe(false);
     expect(needsSignalLook(tasks[1]!)).toBe(true);
     expect(needsSignalLook({ watches: [{ label: "x", standing: false, everyMinutes: 2, lastRunAt: now, failures: 2 }] })).toBe(true);

@@ -2744,5 +2744,13 @@
   "ccAlert.failed": "falhou",
   "ccAlert.stalled": "parada",
   "ccAlert.question": "com pergunta aberta no app",
-  "ccAlert.item": "Claude Code · {title} — {state}"
+  "ccAlert.item": "Claude Code · {title} — {state}",
+  "ccSession.indicator": "Sessões do Claude Code desta conversa",
+  "ccSession.cliItem": "{title} — {status} · CLI, não aparece no app Claude",
+  "ccSession.appItem": "{title} — {status} · no app Claude",
+  "ccSession.status.running": "trabalhando",
+  "ccSession.status.idle": "parada esperando ordem",
+  "ccSession.status.stalled": "travada",
+  "ccSession.status.failed": "falhou",
+  "ccSession.status.stopped": "parada"
 }

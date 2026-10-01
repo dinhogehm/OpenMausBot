@@ -6,7 +6,7 @@ import { displayThreadTitle } from "@/lib/thread-title";
 import { orderedSidebarThreads, orderedThreadList } from "./SidebarThreadRow";
 import type { SidebarDensity } from "@/lib/sidebar-preferences";
 import { needsYouLabel } from "@/lib/message-stamp";
-import { ccAlertSummary, needsSignalLook, watchSummary } from "@/lib/thread-signals";
+import { ccAlertSummary, ccSessionsSummary, needsSignalLook, watchSummary } from "@/lib/thread-signals";
 import { SignalIcons } from "./SignalIcons";
 
 /** Attention is not history browsing: idle conversations never enter this list.
@@ -152,6 +152,7 @@ export function SidebarBotActivity({ bot, density }: { bot: Bot; density: Sideba
 export function BotActivityRow({ bot, task, iconOnly, onJump, now }: { bot: Pick<Bot, "name">; task: Task & { queued: boolean }; iconOnly: boolean; onJump: () => void; now?: number }) {
   const watch = watchSummary(task.watches, task.watchesLost, now);
   const cc = ccAlertSummary(task.ccAlerts);
+  const sessions = ccSessionsSummary(task.ccSessions);
   const needsYou = task.activity !== "waiting-on-you" && task.goalNeedsInput === true;
   const waiting = task.activity === "waiting-on-you" || needsYou;
   const teammateWait = !waiting && task.waitingForTeammates === true;
@@ -169,7 +170,7 @@ export function BotActivityRow({ bot, task, iconOnly, onJump, now }: { bot: Pick
     {attention && <Icon size={12} aria-hidden="true" className={cn("shrink-0", working && "animate-spin text-success", teammateWait && "text-warning", task.unread && !waiting && !working && !teammateWait && "text-accent")} />}
     {!iconOnly && <><span data-activity-title className="min-w-0 flex-1 truncate">{displayThreadTitle(task.title)}</span>
       {!unreadOnly && <span data-activity-status className="min-w-0 max-w-[55%] shrink truncate text-[10px]">{waiting && !needsYou ? t("task.waiting") : status}</span>}
-      <SignalIcons watch={watch} cc={cc} />
+      <SignalIcons watch={watch} cc={cc} sessions={sessions} />
       {task.unread && (waiting || working || teammateWait || task.queued) && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden="true" />}</>}
     {iconOnly && !attention && <SignalIcons watch={watch} cc={cc} size={12} />}
   </button>;

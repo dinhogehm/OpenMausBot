@@ -2,7 +2,7 @@
 // watches (label, last run, failures) and the Claude Code sessions it owns
 // that need a look. Red when something is failing or a watcher bot lost its
 // standing watch; the tooltip spells it out.
-import type { WireCcAlert, WireWatch } from "../../shared/wire";
+import type { WireCcAlert, WireCcSession, WireWatch } from "../../shared/wire";
 import { t } from "@/lib/i18n";
 import { sidebarStamp } from "@/lib/message-stamp";
 import { sessionErrorPt } from "../../shared/session-error-pt";
@@ -29,20 +29,33 @@ export function ccAlertSummary(alerts: readonly WireCcAlert[] | undefined): { te
   };
 }
 
-type SignalTask = { watches?: readonly WireWatch[]; watchesLost?: boolean; ccAlerts?: readonly WireCcAlert[]; routineRunId?: string };
+/** The conversation's Claude Code sessions, each with where it runs: a CLI
+ * one is said to be out of the Claude app, so the person knows to follow it
+ * here (R8-visual N2). `cli` when any of them is headless. */
+export function ccSessionsSummary(sessions: readonly WireCcSession[] | undefined): { text: string; cli: boolean } | null {
+  if (!sessions?.length) return null;
+  return {
+    text: [t("ccSession.indicator"), ...sessions.map((session) => t(session.surface === "cli" ? "ccSession.cliItem" : "ccSession.appItem", { title: session.title, status: t(`ccSession.status.${session.status}`) }))].join("\n"),
+    cli: sessions.some((session) => session.surface === "cli"),
+  };
+}
+
+type SignalTask = { watches?: readonly WireWatch[]; watchesLost?: boolean; ccAlerts?: readonly WireCcAlert[]; ccSessions?: readonly WireCcSession[]; routineRunId?: string };
 
 /** The same two signals for a whole bot, across its conversations: what its
  * row shows while its thread list is folded away. */
-export function botSignals(tasks: readonly SignalTask[] | undefined, now = Date.now()): { watch: ReturnType<typeof watchSummary>; cc: ReturnType<typeof ccAlertSummary> } {
+export function botSignals(tasks: readonly SignalTask[] | undefined, now = Date.now()): { watch: ReturnType<typeof watchSummary>; cc: ReturnType<typeof ccAlertSummary>; sessions: ReturnType<typeof ccSessionsSummary> } {
   const own = (tasks ?? []).filter((task) => !task.routineRunId);
   return {
     watch: watchSummary(own.flatMap((task) => task.watches ?? []), own.some((task) => task.watchesLost === true), now),
     cc: ccAlertSummary(own.flatMap((task) => task.ccAlerts ?? [])),
+    sessions: ccSessionsSummary(own.flatMap((task) => task.ccSessions ?? [])),
   };
 }
 
 /** A conversation whose automation needs a look: a failing or lost watch, a
  * Claude Code session in trouble. Kept reachable when its tree is folded. */
 export function needsSignalLook(task: SignalTask): boolean {
-  return Boolean(task.watchesLost || task.watches?.some((watch) => watch.failures > 0) || task.ccAlerts?.length);
+  // a headless session is followed here, nowhere else: keep its conversation reachable
+  return Boolean(task.watchesLost || task.watches?.some((watch) => watch.failures > 0) || task.ccAlerts?.length || task.ccSessions?.some((session) => session.surface === "cli"));
 }

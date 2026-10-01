@@ -13,7 +13,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { BotVisibility, CloudBackend, ConnectorToolGrant, EffortLevel, InstalledPackageMetadata, ServerFrame, GroupThreadUsage, SteerQueueReason, WireCcAlert, WireOwnerPending, WireWatch } from "../../shared/wire";
+import type { BotVisibility, CloudBackend, ConnectorToolGrant, EffortLevel, InstalledPackageMetadata, ServerFrame, GroupThreadUsage, SteerQueueReason, WireCcAlert, WireCcSession, WireOwnerPending, WireWatch } from "../../shared/wire";
 import type { TurnDigest } from "../../shared/digest";
 import type { ModelVariantOption, RuntimeEvent } from "../../shared/runtime-events";
 import type { MausColor, MausMotion } from "@/lib/mascot";
@@ -291,6 +291,8 @@ export interface Task {
   ccAlerts?: WireCcAlert[];
   /** What waits on the person here (owner_pending). */
   ownerPending?: WireOwnerPending[];
+  /** Its Claude Code sessions, CLI ones marked (they are not in the Claude app). */
+  ccSessions?: WireCcSession[];
   threadId: string;
   /** Internal routine execution; reachable through its run receipt, not history menus. */
   routineRunId?: string;

@@ -1158,7 +1158,7 @@ export function BotListItem({
   const statusLine = deleting || working || waiting || needsYou || teammateWait || queued;
   // its watches and Claude Code sessions, while its thread list is folded
   const folded = expanded ? null : botSignals(bot.tasks);
-  const signals = folded?.watch || folded?.cc ? folded : null;
+  const signals = folded?.watch || folded?.cc || folded?.sessions ? folded : null;
   const body = (
     <>
       {/* flex, not inline: an inline wrapper adds a baseline gap under the
@@ -1238,7 +1238,7 @@ export function BotListItem({
               {sidebarStamp(last.at)}
             </span>
           )}
-          {signals && !renaming && <span data-bot-signals className="flex shrink-0 items-center gap-1 self-center"><SignalIcons watch={signals.watch} cc={signals.cc} /></span>}
+          {signals && !renaming && <span data-bot-signals className="flex shrink-0 items-center gap-1 self-center"><SignalIcons watch={signals.watch} cc={signals.cc} sessions={signals.sessions} /></span>}
           {(expanded || (quiet && !statusLine)) && unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
         </div>
         {bot.chiefOfStaff && !renaming && !quiet && (

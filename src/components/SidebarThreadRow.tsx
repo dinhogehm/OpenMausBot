@@ -10,10 +10,10 @@ import { nextRename } from "@/lib/rename";
 import { threadRefUrl } from "@/lib/thread-refs";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { needsYouLabel } from "@/lib/message-stamp";
-import { ccAlertSummary, watchSummary } from "@/lib/thread-signals";
+import { ccAlertSummary, ccSessionsSummary, watchSummary } from "@/lib/thread-signals";
 import { SignalIcons } from "./SignalIcons";
 
-type ThreadRowTask = Pick<Task, "threadId" | "title" | "projectId" | "busy" | "activity" | "unread" | "openedBy" | "closedBy" | "archivedAt" | "snoozedUntil" | "waitingForTeammates" | "goalNeedsInput" | "goalNeedsInputSince" | "watches" | "watchesLost" | "ccAlerts"> & {
+type ThreadRowTask = Pick<Task, "threadId" | "title" | "projectId" | "busy" | "activity" | "unread" | "openedBy" | "closedBy" | "archivedAt" | "snoozedUntil" | "waitingForTeammates" | "goalNeedsInput" | "goalNeedsInputSince" | "watches" | "watchesLost" | "ccAlerts" | "ccSessions"> & {
   queued?: boolean;
   pinned?: boolean;
   createdAt?: number;
@@ -263,6 +263,7 @@ export function SidebarThreadRow({ task, ownerId, current, compact, folders, onS
   const updatedAt = threadRecency(task);
   const watchInfo = watchSummary(task.watches, task.watchesLost);
   const ccInfo = ccAlertSummary(task.ccAlerts);
+  const sessionsInfo = ccSessionsSummary(task.ccSessions);
   const updatedStamp = formatUpdatedAt(updatedAt);
   const updatedLabel = now === undefined ? updatedStamp : threadUpdatedLabel(updatedAt, now);
   const closed = Boolean(task.closedBy) && !status;
@@ -331,7 +332,7 @@ export function SidebarThreadRow({ task, ownerId, current, compact, folders, onS
         </span>
         {updatedLabel && <time dateTime={new Date(updatedAt).toISOString()} className="shrink-0 tabular-nums text-[10px] text-ink-secondary">{updatedLabel}</time>}
         {task.pinned === true && <Pin size={11} className="shrink-0 text-ink-secondary" aria-label={t("sidebar.bot.pin")} />}
-        <SignalIcons watch={watchInfo} cc={ccInfo} />
+        <SignalIcons watch={watchInfo} cc={ccInfo} sessions={sessionsInfo} />
         {task.activity === "waiting-on-you" ? <span className="shrink-0 text-[10px] font-medium text-warning">{t("task.waiting")}</span> : isWaitingOnTeammate(task) ? <Clock3 size={11} className="shrink-0 text-ink-secondary" aria-label={t("task.waitingOnTeammate")} /> : isWorking(task) ? <Loader2 size={11} className="shrink-0 animate-spin text-success" aria-label={activityLabel ?? t("chat.activity.working")} /> : task.queued ? <span className="shrink-0 text-[10px] text-ink-secondary">{t("task.queued")}</span> : null}
         {task.unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unread")} />}
       </button>}

@@ -331,8 +331,12 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
       { expectContextIncludes: ["finished its turn 1", "did: BRIEF_ONE"], steps: [{ tool: "cc_session_send", arguments: { session_id: id, message: "FOLLOWUP_TWO" } }], reply: "Answered it" },
       { expectContextIncludes: ["finished its turn 2", "did: FOLLOWUP_TWO"], steps: [{ tool: "cc_session_archive", arguments: { session_id: id } }], reply: "Archived it" },
     ] });
+    // while it works, its conversation's row says it runs headless, out of the Claude app
+    const rowSessions = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ccSessions ?? []);
+    await expect.poll(rowSessions, { timeout: 10_000 }).toEqual([expect.objectContaining({ sessionId: id, title: "#9999 teste", surface: "cli" })]);
     await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
     await expect.poll(() => ccLedger()[0].status, { timeout: 10_000 }).toBe("archived");
+    expect(await rowSessions()).toEqual([]);
     const [first, second] = callLog();
     expect(first.argv.slice(0, 5)).toEqual(["-p", "--session-id", id, "-w", ccLedger()[0].worktree]);
     const { realpathSync } = await import("node:fs");
