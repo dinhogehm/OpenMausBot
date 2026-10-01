@@ -1183,7 +1183,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
         action,
         ...(sessionId ? { sessionId } : {}),
         ...((action === "start" || action === "send") && typeof args.reply_thread_id === "string" && args.reply_thread_id.trim() ? { replyThreadId: args.reply_thread_id.trim() } : {}),
-        ...(action === "start" ? { title: args.title, brief: args.brief, repo: args.repo, ...(args.surface !== undefined ? { surface: args.surface } : {}), ...(args.permission_mode !== undefined ? { permissionMode: args.permission_mode } : {}), ...(args.model !== undefined ? { model: args.model } : {}), ...(typeof args.cli_reason === "string" ? { cliReason: args.cli_reason } : {}) } : {}),
+        ...(action === "start" ? { title: args.title, brief: args.brief, repo: args.repo, ...(args.surface !== undefined ? { surface: args.surface } : {}), ...(args.permission_mode !== undefined ? { permissionMode: args.permission_mode } : {}), ...(args.model !== undefined ? { model: args.model } : {}), ...(typeof args.cli_reason === "string" ? { cliReason: args.cli_reason } : {}), ...(typeof args.priority === "string" ? { priority: args.priority } : {}) } : {}),
         ...(action === "send" ? { message: args.message } : {}),
         ...(action === "list" && args.include_archived === true ? { includeArchived: true } : {}),
         ...(action === "archive" && args.remove_worktree === true ? { removeWorktree: true } : {}),

@@ -248,7 +248,7 @@ import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type C
 import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing } from "./message-db.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, parseUntil, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
-import { chiefForBot, deskThread, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
+import { chiefForBot, deskThread, OwnerWroteAt, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
 import {
   BotAutonomy,
   GOAL_MAX_CONSECUTIVE_FAILURES,
@@ -340,7 +340,8 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, githubSlug, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, prsOfSession, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, githubSlug, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
+import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
@@ -412,7 +413,7 @@ import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-s
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
-import { CcStartQueue, priorityLabel, startPriority } from "./cc-start-queue.ts";
+import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
 import { removeNestedWorktrees, removeReleasedWorktrees } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
@@ -8128,16 +8129,57 @@ function autonomyDispatchFailed(botId: string, threadId: string, message: string
   refreshBotRow(botId);
 }
 
-/** Where the harness's own alerts reach a Chief: its pinned conversation,
- * else its oldest open one that is not running a goal — never whichever
- * thread happens to be selected (bot.threadId follows the UI). */
-function chiefDeskThread(chief: BotRecord): string {
-  // the conversation the owner named ("fale comigo só aqui") gets the
-  // automatic alerts too (R8-followup F2); sharedState is set up further
-  // down, so a call made while the server loads falls back to the old rule
+/** When the owner last wrote in each conversation (server/incidents.ts):
+ * read from a conversation's newest messages once, then kept current. */
+const ownerWroteAt = new OwnerWroteAt((threadId) => store.messagesTail(threadId, 300).messages);
+store.onChange((change) => {
+  if (change.type === "message") ownerWroteAt.note(change.threadId, change.message);
+  else if (change.type === "thread.deleted") ownerWroteAt.forget(change.threadId);
+});
+
+/** Where the harness's own alerts reach a Chief (deskThread): the
+ * conversation the owner named, else its pinned one, else the one where the
+ * owner wrote last, else its oldest open one not running a goal — never
+ * whichever thread happens to be selected (bot.threadId follows the UI).
+ * `except`: a conversation on its way out (being archived or deleted). */
+function chiefDeskThread(chief: BotRecord, except?: string): string {
+  // sharedState and ownerWroteAt are set up as the server loads: a call made
+  // before that falls back to the rest of the rule
   let ownerThread: string | null = null;
-  try { ownerThread = sharedState.ownerThread(chief.id)?.threadId ?? null; } catch { /* not set up yet */ }
-  return deskThread(store.tasks(chief.id), chief.threadId, (threadId) => autonomy.goalFor(threadId)?.status === "active", ownerThread);
+  try {
+    const named = sharedState.ownerThread(chief.id);
+    // closed while nobody was looking (or before this check existed): forget it, and say so
+    if (named && !openThreadOf(chief.id, named.threadId)) ownerThreadGone(chief.id, named.threadId, "fechada");
+    else ownerThread = named?.threadId ?? null;
+  } catch { /* not set up yet */ }
+  const wrote = (threadId: string) => {
+    try { return ownerWroteAt.at(threadId); } catch { return null; }
+  };
+  const tasks = store.tasks(chief.id).filter((task) => task.threadId !== except);
+  return deskThread(tasks, chief.threadId, (threadId) => autonomy.goalFor(threadId)?.status === "active", ownerThread, wrote);
+}
+
+/** The conversation the owner named for talking to them was closed,
+ * archived or deleted: it is forgotten as theirs, and the conversation that
+ * now gets what was meant for them says so (INSP-F F2-b). */
+function ownerThreadGone(botId: string, threadId: string, why: string): void {
+  const title = store.taskByThread(botId, threadId)?.title;
+  if (!sharedState.forgetOwnerThread(botId, threadId)) return;
+  const bot = store.bot(botId);
+  if (!bot) return;
+  const next = mainThreadOf(botId, threadId);
+  console.log(`[shared-state] ${bot.name}: the conversation with the owner (${threadId}) was ${why}; ${next ? `now ${next}` : "no open conversation left"}`);
+  if (!next) return;
+  store.appendMessage(next, { role: "bot", kind: "activity", tool: { name: chipText(`a conversa com o dono${title ? ` ("${title}")` : ""} foi ${why}; os avisos vêm para cá`, 240), ok: false } });
+}
+
+/** A bot's main conversation other than `except`, still open: its desk
+ * (deskThread: the named one, the pin, where the owner wrote last, the
+ * oldest), else the one selected in the UI. */
+function mainThreadOf(botId: string, except?: string): string | null {
+  const bot = store.bot(botId);
+  if (!bot) return null;
+  return [chiefDeskThread(bot, except), bot.threadId].find((candidate) => candidate && candidate !== except && openThreadOf(botId, candidate)) ?? null;
 }
 
 /** Automation that keeps failing on its own (a standing watch, a routine):
@@ -9020,7 +9062,8 @@ async function watchBackgroundJobs(): Promise<void> {
       ccLedger.save();
       continue;
     }
-    if (ccLedger.runningCount() >= CC_MAX_RUNNING) continue;
+    // a P1 waiting in the start queue gets its slot first
+    if (!ccSlotFreeForWork()) continue;
     delete session.bgJob;
     ccLedger.save();
     ccChip(session, "o processo em segundo plano terminou — sessão retomada");
@@ -9074,7 +9117,8 @@ function retireThreadWork(botId: string, threadId: string, why: string): void {
   const goal = autonomy.goalFor(threadId);
   if (goal?.status === "active") finishGoalWithChip(threadId, "stopped", `a conversa foi ${why}`);
   else if (goal?.status === "needs-input") autonomy.resolveNeedsInput(threadId, `a conversa foi ${why}`, "blocked");
-  const main = [chiefDeskThread(bot), bot.threadId].find((candidate) => candidate && candidate !== threadId && store.taskByThread(botId, candidate) && !store.taskByThread(botId, candidate)?.archivedAt);
+  ownerThreadGone(botId, threadId, why);
+  const main = [chiefDeskThread(bot, threadId), bot.threadId].find((candidate) => candidate && candidate !== threadId && store.taskByThread(botId, candidate) && !store.taskByThread(botId, candidate)?.archivedAt);
   const moved: CcSession[] = [];
   for (const session of ccLedger.all()) {
     if (session.ownerBotId !== botId || session.status === "archived") continue;
@@ -9102,7 +9146,7 @@ function sendToSessionFromServer(session: CcSession, text: string): void {
     } else ccLedger.enqueue(session, text);
     return;
   }
-  if (session.status !== "running" && !ccProcesses.has(session.id) && ccLedger.runningCount() < CC_MAX_RUNNING) runCcTurn(session, text, false);
+  if (session.status !== "running" && !ccProcesses.has(session.id) && ccSlotFreeForWork()) runCcTurn(session, text, false);
   else ccLedger.enqueue(session, text);
 }
 
@@ -9262,11 +9306,14 @@ async function watchIdleSessionsWithOpenPrs(): Promise<void> {
 }
 
 // ── starting a Claude Code session (cc_session_start) ──────────────────
-// Every slot taken: the start waits in the queue (server/cc-start-queue.ts)
-// and opens by itself when one frees, P1 first (R8-followup F3).
+// Every slot taken, or starts already waiting: the start waits in the queue
+// (server/cc-start-queue.ts) and opens by itself when a slot frees, P1 first.
 const ccStartQueue = new CcStartQueue(process.env.VITEST ? null : join(DATA_DIR, "cc-start-queue.json"));
 
-function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string, body: Record<string, unknown>, fromQueue = false): { status: number; body: Record<string, unknown> } {
+/** Existing work may take a slot: one stays free for each P1 waiting. */
+const ccSlotFreeForWork = () => slotFreeForWork({ taken: ccLedger.slotsTaken(), urgentQueued: ccStartQueue.urgentCount(), max: CC_MAX_RUNNING });
+
+function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string, body: Record<string, unknown>, fromQueue = false): StartResult {
   const input = parseCcStartInput(body, ccIsGitRepo);
   if (!input.ok) return { status: 400, body: { error: input.error } };
   // One live session per issue: a second would redo the same work.
@@ -9285,26 +9332,36 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason });
     if (refusal) return { status: 409, body: { error: refusal } };
   }
+  // on battery a carrier does not start; from the queue it keeps its place until the Mac is plugged in
   const onBattery = carrierPowerRefusal(`${input.title}\n${input.brief}`);
-  if (onBattery) return { status: 409, body: { error: onBattery } };
-  if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
-    if (fromQueue) return { status: 409, body: { error: "busy" } };
-    const priority = startPriority(`${input.title}\n${input.brief}`);
-    const position = ccStartQueue.add({ id: randomUUID().slice(0, 8), botId: bot.id, threadId, ...(replyThreadId !== threadId ? { replyThreadId } : {}), body, title: input.title, priority, at: Date.now() });
-    if (position === null) return { status: 409, body: { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando e a fila de espera está cheia; espere uma relatar, ou pare uma` } };
-    return { status: 200, body: { message: `Já há ${CC_MAX_RUNNING} sessões do Claude Code rodando neste computador: "${input.title}" entrou na fila de sessões (#${position}, prioridade ${priorityLabel(priority)}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list. Encerre o turno agora.` } };
+  if (onBattery) return { status: 409, body: { error: onBattery }, retry: fromQueue };
+  const taken = ccLedger.slotsTaken();
+  const gate = startGate({ fromQueue, queued: ccStartQueue.ordered().length, taken, max: CC_MAX_RUNNING });
+  if (gate === "busy") return { status: 409, body: { error: "busy" }, busy: true };
+  if (gate === "queue") {
+    // urgency from the bot's explicit priority, else the title; never the brief
+    const priority = startPriority(input.title, body.priority);
+    const queued = ccStartQueue.add({ id: randomUUID().slice(0, 8), botId: bot.id, threadId, ...(replyThreadId !== threadId ? { replyThreadId } : {}), body, title: input.title, ...(issueNumber(input.title, input.brief) ? { issue: issueNumber(input.title, input.brief) } : {}), priority, at: Date.now() });
+    if (queued === null) return { status: 409, body: { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code ocupando as vagas e a fila de espera está cheia (${START_QUEUE_MAX}); espere uma relatar, ou tire um start seu da fila (cc_session_archive com o id dele)` } };
+    const why = taken >= CC_MAX_RUNNING ? `as ${CC_MAX_RUNNING} vagas do Claude Code estão ocupadas` : "há starts esperando na fila (um novo não passa na frente deles)";
+    if (queued.duplicate) {
+      return { status: 200, body: { message: `"${input.title}" já estava na fila de sessões (#${queued.position}, id ${queued.id}); não enfileirei de novo. Encerre o turno agora.` } };
+    }
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Fila de sessões: "${input.title}" é a #${queued.position} (prioridade ${priorityLabel(priority)}); abre sozinha quando uma vaga liberar`, 240), ok: true } });
+    return { status: 200, body: { message: `Não abri agora porque ${why}: "${input.title}" entrou na fila de sessões (#${queued.position}, prioridade ${priorityLabel(priority)}, id ${queued.id}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list; para tirá-la da fila, cc_session_archive com session_id ${queued.id}. Encerre o turno agora.` } };
   }
   if (body.surface !== "cli" && process.platform === "darwin") {
     // New Session in the app opens in the folder of its latest
     // session; another repository cannot be picked from here. Say so
-    // before touching the screen instead of failing five times.
+    // before touching the screen instead of failing five times. From the
+    // queue it may pass (the person opens one there): it keeps its place.
     const lastRepo = lastAppRepo();
     if (lastRepo && lastRepo !== input.repo) {
-      return { status: 409, body: { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` } };
+      return { status: 409, body: { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` }, retry: fromQueue };
     }
     const lastWorktree = lastAppWorktreeFolder();
     if (lastWorktree) {
-      return { status: 409, body: { error: reusedFolderRefusal(lastWorktree, basename(input.repo), fromQueue) } };
+      return { status: 409, body: { error: reusedFolderRefusal(lastWorktree, basename(input.repo), fromQueue) }, retry: fromQueue };
     }
     const appId = randomUUID();
     const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
@@ -9329,59 +9386,81 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
 }
 
-/** Open queued starts while there are free slots; the bot hears how each went. */
+/** Open queued starts while there are free slots; the bot hears how each
+ * went (server/cc-start-queue.ts drainStartQueue). */
 function drainCcStartQueue(): void {
-  while (ccLedger.runningCount() < CC_MAX_RUNNING) {
-    const next = ccStartQueue.take();
-    if (!next) return;
-    const bot = store.bot(next.botId);
-    if (!bot || !store.taskByThread(bot.id, next.threadId)) continue;
-    const reply = next.replyThreadId && store.taskByThread(bot.id, next.replyThreadId) ? next.replyThreadId : next.threadId;
-    const started = startCcSession(bot, next.threadId, reply, next.body, true);
-    if (started.status === 409 && started.body.error === "busy") {
-      ccStartQueue.restore(next);
-      return;
+  if (ccStartQueue.corruptPath) {
+    // the file could not be read at startup: kept aside, and the Chief hears it once
+    const aside = ccStartQueue.corruptPath;
+    ccStartQueue.corruptPath = null;
+    const chief = store.bots.find((bot) => bot.chiefOfStaff);
+    const desk = chief ? chiefDeskThread(chief) : null;
+    if (chief && desk && openThreadOf(chief.id, desk)) {
+      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`A fila de sessões do Claude Code não pôde ser lida ao iniciar; o arquivo foi guardado em ${aside} e a fila começou vazia`, 240), ok: false } });
+      autonomy.addReport(chief.id, desk, `[Fila de sessões do Claude Code] The queue file could not be read when the server started; it was kept as ${aside} and the queue started empty. Starts queued before may be lost: check it, and ask the bots to queue again what still applies.`);
     }
-    const said = String(started.body.message ?? started.body.error ?? "");
-    store.appendMessage(next.threadId, { role: "bot", kind: "activity", tool: { name: chipText(started.status === 200 ? `Fila de sessões: "${next.title}" abriu` : `Fila de sessões: "${next.title}" não abriu`, 200), ok: started.status === 200 } });
-    autonomy.addReport(bot.id, next.threadId, `[Fila de sessões do Claude Code] Uma vaga liberou para "${next.title}": ${started.status === 200 ? said : `não abri — ${said}`}`);
   }
+  drainStartQueue(ccStartQueue, {
+    now: () => Date.now(),
+    slotFree: () => ccLedger.slotsTaken() < CC_MAX_RUNNING,
+    botExists: (botId) => Boolean(store.bot(botId)),
+    threadOpen: (botId, threadId) => openThreadOf(botId, threadId),
+    mainThread: (botId, except) => mainThreadOf(botId, except),
+    start: (item, threadId, replyThreadId) => {
+      const bot = store.bot(item.botId);
+      return bot ? startCcSession(bot, threadId, replyThreadId, item.body, true) : { status: 404, body: { error: "o bot não existe mais" } };
+    },
+    chip: (threadId, text, ok) => { store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok } }); },
+    report: (botId, threadId, text) => autonomy.addReport(botId, threadId, text),
+    log: (text) => console.error(`[cc-start-queue] ${text}`),
+  });
+}
+
+/** A conversation of the bot still open (not archived, closed or deleted). */
+function openThreadOf(botId: string, threadId: string | null | undefined): boolean {
+  const task = threadId ? store.taskByThread(botId, threadId) : null;
+  return Boolean(task && !task.archivedAt && !task.closedBy);
+}
+
+/** Where a bot hears what concerns a conversation that may be gone: that
+ * one while open, else its main conversation (mainThreadOf). */
+function liveThreadFor(botId: string, threadId: string): string | null {
+  return openThreadOf(botId, threadId) ? threadId : mainThreadOf(botId, threadId);
 }
 
 /** A session archived in the Claude app by someone, not by the server: its
  * PRs still open are left without a session. The owner hears which, and the
- * person gets a "Precisa de você" item (R8-followup F1: ffd6ee1a / #9328). */
+ * person gets a "Precisa de você" item (INSP-F F1: ffd6ee1a / #9328) — in
+ * the conversation that owned it, or in the bot's main one when that one
+ * was closed. The logic is server/archived-outside.ts. */
 const archivedOutsideWatch = { running: false };
 async function watchArchivedOutside(): Promise<void> {
   if (archivedOutsideWatch.running) return;
   archivedOutsideWatch.running = true;
+  const where = (session: CcSession) => liveThreadFor(session.ownerBotId, session.ownerThreadId);
   try {
-    for (const session of ccLedger.all().filter((each) => each.archivedOutsideAt !== undefined && each.archivedOutsideCheckedAt === undefined).slice(0, 3)) {
-      let slug = session.delivery?.slug ?? null;
-      if (!slug) {
-        try { slug = githubSlug((await execCc("git", ["-C", session.repo, "remote", "get-url", "origin"])).trim()); } catch { /* not a GitHub repository */ }
-      }
-      const open: number[] = [];
-      let unknown = false;
-      for (const number of prsOfSession(session, slug).slice(0, 5)) {
-        try {
-          const view = JSON.parse(await execCc("gh", ["pr", "view", String(number), ...(slug ? ["--repo", slug] : []), "--json", "state"], session.repo)) as { state?: string };
-          if (view.state === "OPEN") open.push(number);
-        } catch { unknown = true; }
-      }
-      if (unknown && !open.length) continue; // gh unavailable: next pass
-      session.archivedOutsideCheckedAt = Date.now();
-      ccLedger.save();
-      if (!open.length) continue;
-      const prs = open.map((number) => `#${number}`).join(", ");
-      const text = `PR ${prs} ficou sem sessão: "${session.title}" foi arquivada no app Claude por fora do OMB`;
-      ccChip(session, text, false);
-      ccReport(session, `${text}. Open PR(s) ${prs} have nobody working on them now. Start a session for them (cc_session_start), hand them to someone, or close them — and tell the owner which.`);
-      if (store.taskByThread(session.ownerBotId, session.ownerThreadId)) {
-        autonomy.addOwnerPending(session.ownerBotId, session.ownerThreadId, { title: `${text} — decida quem segue`, ...(slug ? { link: `https://github.com/${slug}/pull/${open[0]}` } : {}), key: `cc-orphan-pr:${session.id}` });
+    await checkArchivedOutside(ccLedger.all(), {
+      now: () => Date.now(),
+      save: () => ccLedger.save(),
+      slugOf: async (session) => githubSlug((await execCc("git", ["-C", session.repo, "remote", "get-url", "origin"])).trim()),
+      ...githubLookups(execCc),
+      chip: (session, text, ok) => {
+        const threadId = where(session);
+        if (threadId) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Claude Code "${session.title.slice(0, 60)}": ${text}`, 240), ok } });
         refreshBotRow(session.ownerBotId);
-      }
-    }
+      },
+      report: (session, text) => {
+        const threadId = where(session);
+        if (threadId) autonomy.addReport(session.ownerBotId, threadId, text);
+        else console.error(`[cc-sessions] archived-outside report for ${session.id} has no open conversation of ${session.ownerBotId}: ${text.slice(0, 200)}`);
+      },
+      ownerPending: (session, item) => {
+        const threadId = where(session);
+        if (!threadId) return;
+        autonomy.addOwnerPending(session.ownerBotId, threadId, item);
+        refreshBotRow(session.ownerBotId);
+      },
+    });
   } finally {
     archivedOutsideWatch.running = false;
   }
@@ -18365,7 +18444,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
                 const record = session.surface === "app" && session.desktop?.localId && session.status !== "archived" ? readDesktopRecord(session.desktop.localId) : null;
                 return ccSessionLine(session, { blocked: record ? recordBlocked(record) : null });
               }).join("\n") : "Você não gerencia nenhuma sessão do Claude Code.",
-              ...(ccStartQueue.of(bot.id).length ? [`\nNa fila para abrir quando uma vaga liberar (${CC_MAX_RUNNING} rodando no máximo), nesta ordem:\n${ccStartQueue.of(bot.id).map((item, i) => `${i + 1}. "${item.title}" · prioridade ${priorityLabel(item.priority)} · desde ${new Date(item.at).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" })}`).join("\n")}`] : []),
+              // the slots are shared: everyone sees the whole queue, the Chief with whose each item is
+              ...(ccStartQueue.ordered().length ? [queueListing(ccStartQueue, { id: bot.id, chief: Boolean(bot.chiefOfStaff) }, (botId) => store.bot(botId)?.name ?? botId, CC_MAX_RUNNING)] : []),
               ...(detail ? [`\nÚltimo relatório de ${detail.id}:\n${detail.lastReport ?? "(nenhum ainda)"}${detail.lastError ? `\nÚltimo problema: ${detail.lastError}` : ""}`] : []),
             ].join("\n"),
           });
@@ -18373,6 +18453,17 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (action === "start") {
           const started = startCcSession(bot, threadId, replyThreadId, body);
           return json(res, started.status, started.body);
+        }
+        // A start still in the queue has no session yet: archive (or stop)
+        // with its queue id takes it out of the queue.
+        if ((action === "archive" || action === "stop") && typeof body.sessionId === "string") {
+          const dropped = ccStartQueue.remove(bot.id, body.sessionId.trim());
+          if (dropped) {
+            if (openThreadOf(bot.id, dropped.threadId)) store.appendMessage(dropped.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Fila de sessões: "${dropped.title}" saiu da fila (cancelado)`, 240), ok: true } });
+            return json(res, 200, { message: `"${dropped.title}" saiu da fila de sessões; não vai abrir.` });
+          }
+          const others = ccStartQueue.ordered().find((item) => item.id === body.sessionId.trim());
+          if (others) return json(res, 403, { error: `esse start da fila é de ${store.bot(others.botId)?.name ?? others.botId}; só o bot que o enfileirou pode tirá-lo` });
         }
         const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
         if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão — chame cc_session_list" });
@@ -18438,8 +18529,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             const position = ccLedger.enqueue(session, message);
             return json(res, 200, { message: `A sessão está no meio de um turno; sua mensagem entrou na fila (#${position}) e roda assim que este turno terminar. Encerre o turno agora.${sendWarning ? ` ${sendWarning}` : ""}` });
           }
-          if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
-            return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando; tente de novo depois que uma relatar` });
+          if (!ccSlotFreeForWork()) {
+            return json(res, 409, { error: ccLedger.slotsTaken() >= CC_MAX_RUNNING
+              ? `já há ${CC_MAX_RUNNING} sessões do Claude Code ocupando as vagas; tente de novo depois que uma relatar`
+              : `a vaga livre está reservada para ${ccStartQueue.urgentCount()} start(s) P1 na fila de sessões; tente de novo depois que ele(s) abrir(em) (veja cc_session_list)` });
           }
           claim();
           runCcTurn(session, message, session.turns === 0);

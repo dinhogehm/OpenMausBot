@@ -93,8 +93,14 @@ export interface CcSession {
   failedAgingReportedAt?: number;
   /** Archived in the Claude app by someone, not through cc_session_archive. */
   archivedOutsideAt?: number;
+  /** Archived in the app by the person after it failed: expected (no "por
+   * fora"), but its PRs are still checked, since nobody else did. */
+  archivedAfterFailure?: boolean;
   /** Its PRs were checked after that (left without a session, or not). */
   archivedOutsideCheckedAt?: number;
+  /** Checks that could not reach GitHub, and when the last one was tried. */
+  archivedOutsideTries?: number;
+  archivedOutsideTriedAt?: number;
   /** Its PRs on the way to production (server/prod-delivery.ts). */
   delivery?: CcDelivery;
 }
@@ -134,6 +140,11 @@ export interface CcDesktopState {
   sent?: { text: string; at: number; userFrameAt: number; deliveries: number };
   /** Archive once the session has opened and nothing is waiting to go in. */
   archiveWhenResolved?: boolean;
+  /** The server could not archive it on the screen and asked the person to
+   * archive it by hand: their archiving is the expected end, not something
+   * done behind the server's back. (A failed session, which the owner was
+   * told to see to in the app, counts the same while it is failed.) */
+  archiveHandedOver?: boolean;
   /** The permission mode the app really runs it in (read from its record). */
   permissionMode?: string;
   /** Remove its worktree once the app confirms it archived (remove_worktree). */
@@ -362,6 +373,19 @@ export class CcSessionLedger {
   /** Sessions actively running (a silent one does not hold one of the slots). */
   runningCount(now = this.now()): number {
     return [...this.sessions.values()].filter((session) => ccSessionActive(session, now)).length;
+  }
+
+  /** Slots held, for deciding whether another session may start: the ones
+   * at work, and every app session still on its way in or with a message on
+   * its way — a create or a send waiting for the Mac, a brief typed but not
+   * yet adopted, a message typed but not yet seen arriving. Those make no
+   * progress while the Mac is locked, so the 45 min of ccSessionActive would
+   * free their slot and let the start queue open more (INSP-F F3-b). */
+  slotsTaken(now = this.now()): number {
+    return [...this.sessions.values()].filter((session) => ccSessionActive(session, now) || (
+      session.status === "running" && session.surface === "app" && Boolean(session.desktop)
+      && (!session.desktop!.localId || session.desktop!.pending?.kind === "create" || session.desktop!.pending?.kind === "send" || Boolean(session.desktop!.sent))
+    )).length;
   }
 
   markRunning(session: CcSession): void {

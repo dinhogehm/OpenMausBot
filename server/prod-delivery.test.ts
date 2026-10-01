@@ -51,7 +51,22 @@ describe("delivery in production", () => {
     // lists after one "PRs" (R8-followup F5), and still no bare issue numbers
     expect(prLinks("Mergeei as PRs #9329 e #9330; a issue #9326 segue aberta", SLUG).map((link) => link.number)).toEqual([9329, 9330]);
     expect(prLinks("PRs #9315, #9316 and #9317 are in the carrier", SLUG).map((link) => link.number)).toEqual([9315, 9316, 9317]);
-    expect(prLinks("PR #9328/#9330 com gate verde", SLUG).map((link) => link.number)).toEqual([9328, 9330]);
+    // an issue next to a PR is not a PR (INSP-F F5-a): a list only after the plural, never "/"
+    const numbers = (text: string) => prLinks(text, SLUG).map((link) => link.number);
+    expect(numbers("PR #9328, #9319 (issue) segue")).toEqual([9328]);
+    expect(numbers("PR #9328 / #9319 é a issue")).toEqual([9328]);
+    expect(numbers("PR #9328/#9319 com gate verde")).toEqual([9328]);
+    // an issue named elsewhere in the sentence never cuts the list (INSP-F r2 #1):
+    // the consumers ask GitHub, and a number that is no PR is dropped there
+    expect(numbers("PRs #9329 e #9330 fecham a issue #9326")).toEqual([9329, 9330]);
+    expect(numbers("PRs #9329 e #9330 (issue #9326) no carrier")).toEqual([9329, 9330]);
+    expect(numbers("As PRs #9329 e #9330 resolvem as issues")).toEqual([9329, 9330]);
+    expect(numbers("PRs #9328 e #9319: a primeira é a correção... a segunda issue fica aberta")).toEqual([9328, 9319]);
+    expect(numbers("a PR #9328 & #9319")).toEqual([9328]);
+    expect(numbers("PRs #9328 e #9319 (issue) seguem")).toEqual([9328]);
+    expect(numbers("Abri a PR #9328 para a issue #9319")).toEqual([9328]);
+    expect(numbers("PRs #9329 e #9330")).toEqual([9329, 9330]);
+    expect(numbers("PRs #9329 & #9330 mergeadas. A issue #9326 segue aberta")).toEqual([9329, 9330]);
     // what a session archived in the app may have left open: its open deliveries and the PRs its report names
     expect(prsOfSession({ lastReport: "Abri a PR #9328 (F4-1).", delivery: { slug: SLUG, prs: { "9330": { number: 9330, url: "", state: "open" }, "9329": { number: 9329, url: "", state: "merged" } } } as unknown as CcDelivery }, SLUG).sort()).toEqual([9328, 9330]);
     expect(prsOfSession({ lastReport: "PR #9328" }, null)).toEqual([]);
@@ -123,6 +138,46 @@ describe("archiving before delivery", () => {
     const offline = fakeDeps();
     offline.deps.gh = async () => { throw new Error("gh: not logged in"); };
     expect(await archiveBlockers(session(), offline.deps)).toEqual({ blockers: [], unknown: ["PR #9400"] });
+  });
+
+  /** gh as execFile hands it over: exit 1, the GraphQL message on stderr and in the message. */
+  const notPr = (number: number) => Object.assign(new Error(`Command failed: gh pr view ${number} --repo ${SLUG} --json state,mergeCommit\nGraphQL: Could not resolve to a PullRequest with the number of ${number}. (repository.pullRequest)\n`), { code: 1, stderr: `GraphQL: Could not resolve to a PullRequest with the number of ${number}. (repository.pullRequest)\n` });
+  const listReport = { ...session(), lastReport: "PRs #9329 e #9330 fecham a issue #9326. A #9329 já foi mergeada." };
+  const ghByNumber = (states: Record<number, string>) => async (args: string[]) => {
+    if (args[0] === "pr") {
+      const number = Number(args[2]);
+      if (!(number in states)) throw notPr(number);
+      return JSON.stringify({ state: states[number], mergeCommit: states[number] === "MERGED" ? { oid: MERGE } : null });
+    }
+    if (args[1]!.includes("/compare/")) return "ahead\n";
+    throw new Error("unexpected");
+  };
+
+  it("holds a session whose report lists an open PR next to the issue it closes, and an issue is no blocker nor unknown (INSP-F r2 #1)", async () => {
+    const { deps } = fakeDeps();
+    deps.gh = ghByNumber({ 9329: "MERGED", 9330: "OPEN" });
+    expect(await archiveBlockers(listReport, deps)).toEqual({ blockers: ["a PR #9330 ainda está aberta"], unknown: [] });
+    // the issue is not even a candidate: "#9326" is not in a PR list
+    deps.gh = ghByNumber({ 9329: "MERGED" });
+    const issueListed = { ...session(), lastReport: "PRs #9329 e #9326 (a #9326 é a issue, não PR)" };
+    expect(await archiveBlockers(issueListed, deps)).toEqual({ blockers: [], unknown: [] });
+  });
+
+  it("drops a reported number that is no PR for good while following deliveries (INSP-F r2 #1)", async () => {
+    const f = fakeDeps();
+    f.deps.gh = ghByNumber({ 9329: "OPEN" });
+    const s = { ...session(), lastReport: "PRs #9329 e #9326 fecham a issue" };
+    await watchProductionDelivery([s], f.deps, newDeliveryCache());
+    expect(Object.keys(s.delivery!.prs)).toEqual(["9329"]);
+    expect(s.delivery!.notPrs).toEqual([9326]);
+    // never asked again, never back among its PRs
+    f.advance(DELIVERY_CHECK_MS + 1);
+    const asked: string[] = [];
+    const gh = f.deps.gh;
+    f.deps.gh = async (args) => { asked.push(args.join(" ")); return gh(args); };
+    await watchProductionDelivery([s], f.deps, newDeliveryCache());
+    expect(asked.some((call) => call.includes("view 9326"))).toBe(false);
+    expect(Object.keys(s.delivery!.prs)).toEqual(["9329"]);
   });
 });
 

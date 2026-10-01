@@ -932,10 +932,10 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     expect(direct).toContain("enviar nela uma mensagem curta");
     expect(direct).not.toMatch(/6 de 7|sem enviar;|fechá-la/);
     expect(direct).toContain("Então tente de novo.");
-    // the start that waited in the queue: the bot hears it was dropped and must start again
+    // the start that waited in the queue stays there (retry: fromQueue) and is tried again
     const queued = reusedFolderRefusal(real, "nuria-platform", true);
-    expect(queued).toContain("saiu da fila de sessões e foi descartado");
-    expect(queued).toContain("chame cc_session_start de novo");
+    expect(queued).toContain("veio da fila de sessões e continua nela");
+    expect(queued).not.toMatch(/descartado|chame cc_session_start de novo/);
     // both ways in (the tool call and the queue) go through startCcSession with this text
     const index = readFileSync(join(import.meta.dirname, "index.ts"), "utf8");
     expect(index).toContain("reusedFolderRefusal(lastWorktree, basename(input.repo), fromQueue)");

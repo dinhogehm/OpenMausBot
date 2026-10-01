@@ -126,11 +126,31 @@ export class SharedState {
     return this.state(botId).ownerThread ?? null;
   }
 
-  forgetThread(botId: string, threadId: string): void {
+  /** A conversation was deleted: its record goes, and it stops being the
+   * conversation with the owner. True when it was that one (the caller
+   * tells the owner where they are spoken to now). */
+  forgetThread(botId: string, threadId: string): boolean {
     const state = this.state(botId);
     const before = state.threads.length;
     state.threads = state.threads.filter((known) => known.threadId !== threadId);
-    if (state.threads.length !== before) this.save(botId, Date.now());
+    const wasOwner = this.dropOwnerThread(state, threadId);
+    if (state.threads.length !== before || wasOwner) this.save(botId, Date.now());
+    return wasOwner;
+  }
+
+  /** The conversation with the owner was closed or archived (its record
+   * stays): it is no longer where they are spoken to. True when it was. */
+  forgetOwnerThread(botId: string, threadId: string): boolean {
+    const state = this.state(botId);
+    const wasOwner = this.dropOwnerThread(state, threadId);
+    if (wasOwner) this.save(botId, Date.now());
+    return wasOwner;
+  }
+
+  private dropOwnerThread(state: BotState, threadId: string): boolean {
+    if (state.ownerThread?.threadId !== threadId) return false;
+    delete state.ownerThread;
+    return true;
   }
 
   /** The prompt block for a turn in `threadId`: the other conversations'
