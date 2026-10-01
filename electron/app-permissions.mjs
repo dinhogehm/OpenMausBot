@@ -59,9 +59,15 @@ export function appPermissionAllowed(permission, requestingUrlOrOrigin, renderer
   return ALLOWED_APP_PERMISSIONS.has(permission);
 }
 
+/** The one non-web link the app hands to the OS: a Claude Code session in
+ * the Claude desktop app ("Precisa de você" → open it there), exactly this
+ * shape and nothing else of the claude: scheme. */
+const CLAUDE_SESSION_LINK = /^claude:\/\/code\/continue\?session=local_[0-9a-f-]{36}$/;
+
 // Both explicit IPC links and window.open must use the same web-only policy.
 export function externalWebUrl(rawUrl) {
   if (typeof rawUrl !== "string") throw new Error("A web address is required");
+  if (CLAUDE_SESSION_LINK.test(rawUrl)) return rawUrl;
   let url;
   try {
     url = new URL(rawUrl);

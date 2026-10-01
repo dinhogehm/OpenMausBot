@@ -24,12 +24,13 @@ import {
   ageFailedSessions,
   uniqueSessionTitle,
   pickDesktopPending,
+  renameAskTitle,
   runDesktopWork,
   watchStalledSessions,
   type DesktopWorkDeps,
 } from "./desktop-work.ts";
 
-const LOCAL = "local_9d56adfd-0000-4000-8000-000000000000";
+const LOCAL = "local_0a000004-0000-4000-8000-000000000000";
 const WORKTREE = "/Users/o/Projetos/nuria-platform/.claude/worktrees/helpdesk-f30521";
 
 /** The ledger, the app's records and transcripts, and a scripted screen. */
@@ -720,7 +721,52 @@ describe("a rename that cannot be done", () => {
     }
     expect(session.desktop!.pending).toBeUndefined();
     expect(h.steps.rename).toHaveBeenCalledTimes(DESKTOP_RENAME_MAX_MISSES);
-    expect(pendings).toEqual([expect.objectContaining({ key: "cc-rename:r", title: expect.stringContaining('para "#8891 Inbox 503 diagnóstico"'), link: expect.stringContaining("claude://code/continue?session=") })]);
+    expect(pendings).toEqual([expect.objectContaining({ key: "cc-rename:r", title: expect.stringContaining('→ "#8891 Inbox 503 diagnóstico"'), link: expect.stringContaining("claude://code/continue?session=") })]);
+  });
+
+  it("names the session by the app's title, short, and settles the item when the person renames it by hand or it is archived (INSP-D A6)", async () => {
+    const h = harness();
+    const pendings: { title: string; link?: string; key: string }[] = [];
+    const resolved: string[] = [];
+    h.deps.ownerPending = (_session, item) => pendings.push(item);
+    h.deps.resolveOwnerPending = (key) => resolved.push(key);
+    // e25edbb6 on 01/10: our title and the app's differ
+    const session = h.opened("e", { title: "Inbox 503 diagnóstico e recuperação" });
+    session.title = "8891 inbox 503 diagnóstico encerrar e recuperação";
+    session.desktop!.issue = "8891";
+    session.desktop!.renameTried = true;
+    h.transcripts.set("cli-e", { text: "brief", writtenAt: h.now, ended: true });
+    session.status = "idle";
+    session.desktop!.pending = { kind: "rename", text: "#8891 Inbox 503 diagnóstico e recuperação", since: h.now, attempts: 0 };
+    for (let i = 0; i < DESKTOP_RENAME_MAX_MISSES; i += 1) {
+      h.results.push({ ok: false, reason: "the session menu showed no Rename item", retry: true, miss: true, touched: true });
+      await h.tick();
+      h.advance(11 * 60_000);
+    }
+    expect(pendings).toHaveLength(1);
+    expect(pendings[0]!.title).toBe('Renomear no app: "Inbox 503 diagnóstico e recuperação" → "#8891 Inbox 503 diagnóstico e recuperação"');
+    expect(pendings[0]!.title).not.toContain("encerrar");
+    // long titles are cut, each with "…": the line stays short and the new title's number stays in it
+    const long = renameAskTitle("Uma sessão com um título bem mais comprido do que cabe na linha", "#9999 Uma sessão com um título bem mais comprido do que cabe na linha");
+    expect(long).toBe('Renomear no app: "Uma sessão com um título bem mais c…" → "#9999 Uma sessão com um título bem mais com…"');
+    // not yet renamed: nothing settles
+    followDesktopSessions(h.deps);
+    expect(resolved).toEqual([]);
+    // the person renamed it by hand in the app
+    h.records.set(LOCAL, { ...h.records.get(LOCAL)!, title: "#8891 Inbox 503 diagnóstico e recuperação" });
+    followDesktopSessions(h.deps);
+    expect(resolved).toEqual(["cc-rename:e"]);
+    followDesktopSessions(h.deps);
+    expect(resolved).toEqual(["cc-rename:e"]);
+    // archived without being renamed: settled too
+    const other = harness();
+    const settled: string[] = [];
+    other.deps.resolveOwnerPending = (key) => settled.push(key);
+    const archived = other.opened("f", { title: "Outra" });
+    archived.desktop!.renameAsked = true;
+    other.records.set(LOCAL, { ...other.records.get(LOCAL)!, isArchived: true });
+    followDesktopSessions(other.deps);
+    expect(settled).toEqual(["cc-rename:f"]);
   });
 });
 
@@ -734,6 +780,70 @@ describe("a field that already held text", () => {
     await h.tick();
     expect(session.desktop!.pending).toBeUndefined();
     expect(h.chips.some((chip) => chip.text.includes("sugestão do app") && chip.text.includes("#9330"))).toBe(true);
+  });
+
+  it("writes in server.log that a send went over the app's suggestion (INSP-D A9)", async () => {
+    const h = harness();
+    const log: string[] = [];
+    h.deps.log = (line) => log.push(line);
+    const session = h.opened("s");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "send", text: "Siga", since: h.now, attempts: 0 };
+    h.results.push({ ok: true, suggestion: "qual o status do gate da #9330?" });
+    await h.tick();
+    expect(log.find((line) => line.startsWith("send ok"))).toBe('send ok: session s (over app suggestion: "qual o status do gate da #9330?")');
+    // a plain send says nothing of the kind
+    session.desktop!.pending = { kind: "send", text: "Mais", since: h.now, attempts: 0 };
+    delete session.desktop!.sent;
+    h.results.push({ ok: true });
+    await h.tick();
+    expect(log.filter((line) => line.startsWith("send ok")).at(-1)).toBe("send ok: session s");
+  });
+
+  it("tells the person when the probe \".\" stayed at the end of their draft, every time (INSP-D A1)", async () => {
+    const h = harness();
+    const pendings: { title: string; link?: string; key: string }[] = [];
+    h.deps.ownerPending = (_session, item) => pendings.push(item);
+    const session = h.opened("p");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "send", text: "Pode sim", since: h.now, attempts: 0 };
+    const draft = "pode reescrever o corpo da PR com a seção de riscos";
+    h.results.push({ ok: false, reason: "the Claude app lost focus at \"undo probe\"", retry: true, touched: true, draft, leftProbe: true });
+    await h.tick();
+    expect(pendings).toHaveLength(1);
+    expect(pendings[0]!.title).toContain('deixei um "." no fim dele');
+    expect(h.reports.at(-1)!.text).toContain('the test "." stayed at the end of their draft');
+    expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "Pode sim" });
+    // 20 min later the field reads the draft WITH our dot; the probe takes its own dot back
+    // and returns "texto." — the item must keep saying the dot is ours (INSP-D B4)
+    h.advance(DESKTOP_DRAFT_RECHECK_MS);
+    h.results.push({ ok: false, reason: "há texto não enviado", retry: true, touched: true, draft: `${draft}.` });
+    await h.tick();
+    expect(pendings.every((item) => item.title.includes('deixei um "." no fim dele'))).toBe(true);
+    expect(session.desktop!.draftSeen).toMatchObject({ text: draft, leftProbe: true });
+    // the person took the dot out but did not send: now it is a plain draft again
+    h.advance(DESKTOP_DRAFT_RECHECK_MS);
+    h.results.push({ ok: false, reason: "há texto não enviado", retry: true, touched: true, draft });
+    await h.tick();
+    expect(pendings.at(-1)!.title).toContain("Texto não enviado");
+  });
+
+  it("asks the person to rename by hand after three \"text that was not there\" waits (INSP-D B5)", async () => {
+    const h = harness();
+    const pendings: { title: string; link?: string; key: string }[] = [];
+    h.deps.ownerPending = (_session, item) => pendings.push(item);
+    const session = h.opened("w", { title: "Fila errada ao criar ticket" });
+    session.desktop!.renameTried = true;
+    h.transcripts.set("cli-w", { text: "brief", writtenAt: h.now, ended: true });
+    session.status = "idle";
+    session.desktop!.pending = { kind: "rename", text: "#9305 Fila errada ao criar ticket", since: h.now, attempts: 0 };
+    for (let i = 0; i < DESKTOP_RENAME_MAX_MISSES; i += 1) {
+      h.results.push({ ok: false, reason: "the message field holds text that was not there before the menu opened; nothing was typed, the rename waits", retry: true, miss: true, touched: true });
+      await h.tick();
+      h.advance(11 * 60_000);
+    }
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(pendings).toEqual([expect.objectContaining({ key: "cc-rename:w" })]);
   });
 
   it("keeps the message, asks the person once in \"Precisa de você\", and settles it when the field is free", async () => {

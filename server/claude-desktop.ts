@@ -60,7 +60,10 @@ export interface DesktopDriver {
 /** `miss`: the screen did not show what was expected (folder, worktree,
  * session) although it was unlocked and Claude was in front. `touched`: the
  * step acted on the screen before stopping, so a retry should back off. */
-export type DesktopStep = { ok: true; suggestion?: string } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string };
+export type DesktopStep = { ok: true; suggestion?: string } | DesktopStop;
+/** `draft`: text nobody sent sits in the field (never typed over);
+ * `leftProbe`: the probe "." stayed at its end (the person came back first). */
+export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -68,14 +71,20 @@ const ESCAPE = 53;
 const SIDEBAR_MAX_X = 450;
 /** A person's input newer than our own last action by more than this is theirs. */
 const HUMAN_SLACK_MS = 500;
-/** The empty message field's placeholder, the whole OCR line and nothing else. */
-const COMPOSER_PLACEHOLDER = /^(Digite \/ para comandos|Type \/ for commands|Responder\b.*|Reply\b.*)$/i;
+/** The empty message field's placeholder: its exact text as the whole OCR
+ * line ("Responder…", never "Responder ao cliente…"), and only where the
+ * field is (see findComposer) — a line of the conversation is not it. */
+const COMPOSER_PLACEHOLDER = /^(Digite \/ para comandos|Type \/ for commands|Responder|Reply)(?:\s*(?:…|\.{3}))?$/i;
 /** The field of a new, empty session ("Descreva uma tarefa ou faça uma pergunta"). */
 const NEW_SESSION_PLACEHOLDER = /^(Descreva uma tarefa|Describe a task)\b/i;
 const BACKSPACE = 51;
 /** The one character typed to tell an app suggestion from a draft. */
 const SUGGESTION_PROBE = ".";
+/** The probe character as OCR may read it alone in a field ("." "·" "," …): ours, never the person's. */
+const PROBE_LEFTOVER = /^[.·,'`]$/;
 const KEY_A = 0;
+/** With Command: to the end of the text, whatever line the click landed on. */
+const DOWN_ARROW = 125;
 
 export function parseOcr(text: string): OcrLine[] {
   const lines: OcrLine[] = [];
@@ -129,7 +138,7 @@ async function act(screen: Screen, action: () => Promise<void>): Promise<void> {
   screen.quietSince = Date.now();
 }
 
-async function guard(screen: Screen, step: string): Promise<DesktopStep | null> {
+async function guard(screen: Screen, step: string): Promise<DesktopStop | null> {
   const before = Date.now();
   const idle = await screen.driver.idleSeconds();
   if (before - idle * 1_000 > screen.quietSince + HUMAN_SLACK_MS) {
@@ -233,22 +242,47 @@ export function reusedWorktreeChip(lines: OcrLine[], liveNames: readonly string[
   return null;
 }
 
-/** Why the new session's chips do not show the repository's own root
- * (its base branch): a branch of other work ("fix/9326-…", "claude/…"), a
- * detached HEAD (a bare sha, "HEAD") or no base branch at all. On 01/10, 6
- * of 7 creates opened in the folder of an archived session, on a detached
- * HEAD or its "fix/…" branch (R8-dispatch D1). null when it is the root. */
+/** The new session's row of chips — "• Local | nuria-platform | gº main |
+ * v worktree" on the real screen (R8, 01/10), all within a few points of
+ * the same y — found by its worktree option. Nothing else on the screen
+ * (the "Sessões" list, a date, a conversation) is a chip. */
+export function chipRow(lines: OcrLine[]): OcrLine[] {
+  const option = lines.filter((line) => /\bworktree\b/i.test(line.text)).sort((a, b) => b.y - a.y)[0];
+  return option ? lines.filter((line) => Math.abs(line.y - option.y) <= 12) : [];
+}
+
+/** Why the new session's chips do not show the repository's own root (its
+ * base branch): a branch of other work ("fix/9326-…", "claude/…"), a
+ * detached HEAD (a bare sha, "HEAD") or no base branch at all. null when the
+ * branch chip shows the base ("main", "origin/main").
+ *
+ * What this does NOT cover: the branch chip is the base the new worktree
+ * starts from, not the folder's checkout — on 01/10 the root of
+ * nuria-platform was on a detached HEAD and the chip still read "main"
+ * (R8-visual-claude-1). No capture exists of a new session in a reused
+ * folder, so it may well read "main" there too. The guards that count for
+ * folder reuse are the server's 409 (lastAppWorktreeFolder) before the
+ * screen is touched, and reusedWorktree when the session is adopted. */
 export function notRepoRoot(lines: OcrLine[], baseBranch = "main"): string | null {
-  const words = lines.flatMap((line) => line.text.split(/\s+/)).map((raw) => raw.replace(/^[([•·"']+|[)\],;:"'•·…]+$/g, "")).filter(Boolean);
+  const words = chipRow(lines).flatMap((line) => line.text.split(/\s+/)).map((raw) => raw.replace(/^[([•·"']+|[)\],;:"'•·…]+$/g, "")).filter(Boolean);
   const base = baseBranch.toLowerCase();
+  const isBase = (lower: string) => lower === base || lower === `origin/${base}`;
   const other = words.find((word) => {
     const lower = word.toLowerCase();
-    if (lower === base) return false;
-    return /^[\w.-]+\/[\w./-]+$/.test(lower) || /^[0-9a-f]{7,40}$/.test(lower) || lower === "head" || lower.startsWith("detached");
+    if (isBase(lower) || /^\d{1,2}\/\d{1,2}(?:\/\d{2,4})?$/.test(lower)) return false;
+    return /^[\w.-]+\/[\w./-]+$/.test(lower) || (/^[0-9a-f]{7,40}$/.test(lower) && /\d/.test(lower)) || lower === "head" || lower.startsWith("detached");
   });
   if (other) return `it shows ${other}, not ${baseBranch}`;
-  if (!words.some((word) => word.toLowerCase() === base)) return `it does not show the base branch ${baseBranch}`;
+  if (!words.some((word) => isBase(word.toLowerCase()))) return `it does not show the base branch ${baseBranch}`;
   return null;
+}
+
+/** The new session's own screen still up: its placeholder, or its row of
+ * chips (Local or the folder, with the worktree option). */
+function newSessionScreen(lines: OcrLine[], repoName: string): boolean {
+  if (lines.some((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()))) return true;
+  const row = chipRow(lines);
+  return row.length >= 2 && (row.some((line) => /^\W*Local$/i.test(line.text.trim())) || showsFolder(row, repoName));
 }
 
 /**
@@ -269,8 +303,9 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     const open = emptyNewSession(before, size, input.repoName);
     const reused = (lines: OcrLine[]) => {
       const bottom = lines.filter((line) => line.y > size.h * 0.55);
-      const why = reusedWorktreeChip(bottom, input.liveWorktrees) ? `it shows ${reusedWorktreeChip(bottom, input.liveWorktrees)}, another session's worktree` : notRepoRoot(bottom, input.baseBranch);
-      return why ? { ok: false as const, reason: `the new session is not in the root of ${input.repoName} (${why}); nothing was typed. In the Claude app, open one session in ${input.repoName} itself (branch ${input.baseBranch ?? "main"}, worktree on) and close it without sending, then this create runs`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } : null;
+      const chip = reusedWorktreeChip(chipRow(bottom), input.liveWorktrees);
+      const why = chip ? `it shows ${chip}, another session's worktree` : notRepoRoot(bottom, input.baseBranch);
+      return why ? { ok: false as const, reason: `the new session is not in the root of ${input.repoName} (${why}); nothing was typed. ${ROOT_SESSION_HOWTO(input.repoName, input.baseBranch ?? "main")}`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } : null;
     };
     if (open) {
       const refusal = reused(before);
@@ -279,7 +314,7 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       if (stop) return stop;
       await act(screen, () => driver.click(open.x + 20, open.y + open.h / 2));
       await driver.sleep(300);
-      return typeBrief(screen, input.text, size);
+      return typeBrief(screen, input.text, size, input.repoName);
     }
     await act(screen, () => driver.menuNewSession());
     await driver.sleep(2_500);
@@ -300,12 +335,20 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     const refusal = reused(lines);
     if (refusal) return refusal;
-    return typeBrief(screen, input.text, size);
+    return typeBrief(screen, input.text, size, input.repoName);
   });
 }
 
+/** What the person does so New Session opens in the repository's root
+ * again. A session must SEND something to exist: of the app's 390 records
+ * on 01/10 none is of a session closed without a message (every one has a
+ * title, which the app takes from the first message), so "open one and
+ * close it" leaves the app's last folder where it was. */
+export const ROOT_SESSION_HOWTO = (repoName: string, baseBranch: string) =>
+  `In the Claude app, start one new session in ${repoName} itself (folder ${repoName}, branch ${baseBranch}, worktree on) and send it a short message — the app records a session only once something is sent; it may be archived afterwards. Then this create runs`;
+
 /** Paste the brief into the new session's field, type the note, send. */
-async function typeBrief(screen: Screen, text: string, size: { h: number }): Promise<DesktopStep> {
+async function typeBrief(screen: Screen, text: string, size: { h: number }, repoName: string): Promise<DesktopStep> {
   const { driver } = screen;
   let stop = await guard(screen, "paste");
   if (stop) return stop;
@@ -320,13 +363,19 @@ async function typeBrief(screen: Screen, text: string, size: { h: number }): Pro
   stop = await guard(screen, "send");
   if (stop) return stop;
   await act(screen, () => driver.key(RETURN));
-  // Sent only when the brief left the field: the new-session screen (its
-  // field with the brief, the worktree option) gone. On 01/10 one "create
-  // ok" lost its brief and nothing said so for 5 minutes (R8-dispatch D5).
+  // Sent only on positive proof that the new-session screen is gone: no
+  // placeholder and no row of chips (Local | repo | worktree), with the
+  // composer's bar read (an empty or half-drawn OCR proves nothing). The
+  // brief's own words are not looked for: the app may fold a long brief
+  // into a pasted block that does not show them. On 01/10 one "create ok"
+  // lost its brief and nothing said so for 5 minutes (R8-dispatch D5).
   await driver.sleep(1_500);
   const after = mainArea(await driver.ocr()).filter((line) => line.y > size.h * 0.55);
-  if (showsPrefix(after, textPrefix(text)) && findLine(after, /worktree/i)) {
-    return { ok: false, reason: "the brief stayed in the new session's field after Return", retry: true, touched: true, seen: seenText(after.slice(-8)) };
+  if (newSessionScreen(after, repoName)) {
+    return { ok: false, reason: "the brief did not leave the new session's screen after Return (its field or chips are still there)", retry: true, touched: true, seen: seenText(after.slice(-8)) };
+  }
+  if (!after.some((line) => COMPOSER_MODE.test(line.text.trim()) || COMPOSER_MODEL.test(line.text.trim())) && !placeholderShown(after, size, repoName)) {
+    return { ok: false, reason: "could not read the screen after Return to confirm the brief left the new session's field", retry: true, touched: true, seen: seenText(after.slice(-8)) };
   }
   return { ok: true };
 }
@@ -336,7 +385,7 @@ async function typeBrief(screen: Screen, text: string, size: { h: number }): Pro
  * session's title must be on screen, the text must show up in its field,
  * and the field must empty after Return; otherwise the step is retried.
  */
-export async function sendToDesktopSession(driver: DesktopDriver, input: { localId: string; text: string; title?: string }): Promise<DesktopStep> {
+export async function sendToDesktopSession(driver: DesktopDriver, input: { localId: string; text: string; title?: string; repoName?: string }): Promise<DesktopStep> {
   if (!/^local_[0-9a-f-]{36}$/.test(input.localId)) return { ok: false, reason: "invalid desktop session id", retry: false };
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.openUrl(`claude://code/continue?session=${input.localId}`));
@@ -348,7 +397,7 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (input.title && !lines.some((line) => sidebarMatch(line.text, input.title!)) && !headerNames(lines.filter((line) => line.y < 140), input.title)) {
       return { ok: false, reason: `the session "${input.title}" is not the one on screen`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 140)) };
     }
-    const composer = findComposer(lines, size);
+    const composer = findComposer(lines, size, input.repoName);
     if (!composer) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y > size.h / 2).slice(-8)) };
     const field = composer.line;
     // What is near the field (it grows upwards as text goes in).
@@ -357,26 +406,15 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (stop) return stop;
     await act(screen, () => driver.click(field.x + 20, field.y + field.h / 2));
     await driver.sleep(300);
-    // Text in the field is either the app's suggested reply (shown in the
-    // field until the first keystroke) or the person's own unsent draft.
-    // OCR sees no colour, so one character tells them apart: a suggestion
-    // gives way to it, a draft keeps its words. A draft is never typed
-    // over — the character is taken back and the caller asks the person.
-    if (composer.text !== null) {
-      stop = await guard(screen, "probe field");
-      if (stop) return stop;
-      await act(screen, () => driver.typeText(SUGGESTION_PROBE));
-      await driver.sleep(400);
-      const probed = nearField(await driver.ocr());
-      if (showsPrefix(probed, textPrefix(composer.text))) {
-        stop = await guard(screen, "undo probe");
-        if (stop) return stop;
-        await act(screen, () => driver.key(BACKSPACE));
-        return { ok: false, reason: `há texto não enviado no campo desta sessão ("${composer.text.slice(0, 120)}"): é rascunho (continuou depois de uma tecla); não sobrescrevi`, retry: true, touched: true, draft: composer.text.slice(0, 500) };
-      }
+    // A lone "." (or how OCR reads it alone: "·", ",") is the probe of an earlier try that stopped right after it
+    // (the suggestion had given way): ours to replace. Any other text is
+    // probed — a draft is never typed over (see probeField).
+    if (composer.text !== null && !PROBE_LEFTOVER.test(composer.text)) {
+      const probe = await probeField(screen, { ...composer, text: composer.text }, lines, size, input.repoName);
+      if (probe.kind !== "suggestion") return probe.step;
     }
     stop = await guard(screen, "paste");
-    if (stop) return stop;
+    if (stop) return composer.text !== null ? { ...stop, reason: `${stop.reason}; the app's suggestion had given way to a "." in the field` } : stop;
     await act(screen, () => driver.paste(input.text, true));
     await driver.sleep(500);
     if (input.text.length > DESKTOP_NOTE_AFTER_CHARS) {
@@ -389,7 +427,7 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     const typed = nearField(await driver.ocr());
     // In the field: its first words show, or at least the placeholder (or the
     // text that was there) gave way.
-    if (!showsPrefix(typed, prefix) && typed.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim()))) {
+    if (!showsPrefix(typed, prefix) && placeholderShown(typed, size, input.repoName)) {
       return { ok: false, reason: "the message did not appear in the session's field", retry: true, touched: true };
     }
     stop = await guard(screen, "send");
@@ -397,32 +435,127 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     await act(screen, () => driver.key(RETURN));
     await driver.sleep(1_500);
     const after = nearField(await driver.ocr());
-    if (!after.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim())) && showsPrefix(after, prefix)) {
+    // the placeholder counts only where the field is: a "Responder…" of the conversation proves nothing
+    if (!placeholderShown(after, size, input.repoName) && showsPrefix(after, prefix)) {
       return { ok: false, reason: "the message stayed in the field after Return", retry: true, touched: true };
     }
-    return composer.text !== null ? { ok: true, suggestion: composer.text.slice(0, 300) } : { ok: true };
+    return composer.text !== null && !PROBE_LEFTOVER.test(composer.text) ? { ok: true, suggestion: composer.text.slice(0, 300) } : { ok: true };
   });
 }
 
-/** The bar under the message field: the mode ("Automático") and the model ("Opus 5.5"). */
-const COMPOSER_BAR = /(?:^|\s)(Automático|Automatic|Auto|Pedir aprova[çc][ãa]o|Ask|Plan|Planejar|Bypass\b.*|Aceitar edi[çc][õo]es|Accept edits)$|\b(Opus|Sonnet|Haiku|Fable)\s*\d/i;
+/** The mode under the message field, as the whole OCR line: at most three
+ * short icon tokens before it ("+ O v Ignorar permissões", "+ Q v
+ * Automático" — the real bar), never a sentence that ends in "plan". */
+export const COMPOSER_MODE = /^(?:\+\s*)?(?:\S{1,2}\s+){0,3}(Automático|Automatic|Auto|Pedir aprova[çc][ãa]o|Ask|Plan|Planejar|Ignorar permiss[õo]es|Bypass permissions|Aceitar edi[çc][õo]es|Accept edits)$/i;
+/** The model on the right of that bar ("Opus 5.5", cut to "Opus" at times). */
+const COMPOSER_MODEL = /^(Opus|Sonnet|Haiku|Fable)(\s*\d[\d.]*)?$/i;
+/** The field's text starts where the mode bar starts (x 547 against 543 on
+ * the real screen); the branch strip and the diff/CI chips do not. */
+const COMPOSER_COLUMN_SLACK = 40;
+/** Buttons and chips of the PR strip above the field: never a field to click. */
+const STRIP_OR_BUTTON = /^(?:(?:Criar|Create|Ver|View|Abrir|Open|Revisar|Review) PR|Mesclar(?: PR)?|Merge(?: PR)?)$|^\S{0,2}\s*#\d+$|[+]\d+\s*-\s*\d+|^\W*CI\b|^[Xx×]$/;
 
-/** The session's message field, found as a person would: its placeholder
- * when it is empty, else the line right above the mode/model bar — where an
- * unsent draft sits ("pode reescrever o corpo…"), never overwritten.
- * `text` is what was in it then (null when it showed the placeholder). */
-export function findComposer(lines: OcrLine[], size: { h: number }): { line: OcrLine; text: string | null } | null {
+/** The PR strip's "repo branch" line ("nuria-platform fix/9326-…"): it names the repository. */
+function stripLine(text: string, repoName?: string): boolean {
+  if (STRIP_OR_BUTTON.test(text)) return true;
+  return Boolean(repoName) && /\S\/\S/.test(text) && showsFolder([{ x: 0, y: 0, w: 0, h: 0, text }], repoName!);
+}
+
+/** The session's message field, found as a person would: the line right
+ * above the mode bar, in its column (±40 pt, up to 90 pt above it) — its
+ * placeholder when it is empty, else where an unsent draft sits ("pode
+ * reescrever o corpo…"), never overwritten. A placeholder-like line
+ * anywhere else ("Responder ao cliente…" in the conversation) is not the
+ * field (INSP-D D1). When that closest line is a button or the PR strip
+ * ("Criar PR", "+114 - 4") there is no field to click: null. `text` is what
+ * was in it then (null when it showed the placeholder); `bar` is the mode line. */
+export function findComposer(lines: OcrLine[], size: { h: number }, repoName?: string): { line: OcrLine; text: string | null; bar: OcrLine } | null {
   const lower = lines.filter((line) => line.y > size.h / 2);
-  const empty = lower.find((line) => COMPOSER_PLACEHOLDER.test(line.text.trim()));
-  if (empty) return { line: empty, text: null };
-  const bar = lower.filter((line) => COMPOSER_BAR.test(line.text.trim())).sort((a, b) => a.y - b.y)[0];
+  // the lowest mode line: the composer is at the bottom, the conversation above it
+  const bar = lower.filter((line) => COMPOSER_MODE.test(line.text.trim())).sort((a, b) => b.y - a.y)[0];
   if (!bar) return null;
   const above = lower
-    .filter((line) => line.y < bar.y - 4 && bar.y - line.y <= 90 && line.text.trim())
-    // the PR/branch strip above the field is not the field
-    .filter((line) => !/^#\d+\b|[+]\d+\s*-\d+|\bCI\b|^\S+\s+[\w.-]+\/\S+$/.test(line.text.trim()))
+    .filter((line) => line.y < bar.y - 4 && bar.y - line.y <= 90 && line.text.trim() && Math.abs(line.x - bar.x) <= COMPOSER_COLUMN_SLACK)
     .sort((a, b) => b.y - a.y)[0];
-  return above ? { line: above, text: above.text.trim() } : null;
+  if (!above) return null;
+  if (COMPOSER_PLACEHOLDER.test(above.text.trim())) return { line: above, text: null, bar };
+  if (stripLine(above.text.trim(), repoName)) return null;
+  return { line: above, text: above.text.trim(), bar };
+}
+
+/** The field shows its placeholder, read where the field is. */
+function placeholderShown(lines: OcrLine[], size: { h: number }, repoName?: string): boolean {
+  return findComposer(lines, size, repoName)?.text === null;
+}
+
+/** The field emptied while the rest of the composer stayed put: the mode bar
+ * where it was, nothing in the field's column above it, and the other lower
+ * lines still there (a screen being redrawn is not an empty field). */
+function fieldEmptied(before: OcrLine[], after: OcrLine[], field: OcrLine, bar: OcrLine, size: { h: number }): boolean {
+  const lower = (lines: OcrLine[]) => lines.filter((line) => line.y > size.h / 2);
+  const barNow = lower(after).find((line) => COMPOSER_MODE.test(line.text.trim()) && Math.abs(line.y - bar.y) <= 6);
+  if (!barNow) return false;
+  const inField = lower(after).some((line) => line.y < barNow.y - 4 && barNow.y - line.y <= 90 && line.text.trim() && Math.abs(line.x - barNow.x) <= COMPOSER_COLUMN_SLACK && !stripLine(line.text.trim()));
+  if (inField) return false;
+  const rest = lower(before).filter((line) => line !== field);
+  const seen = new Set(lower(after).map((line) => normalize(line.text)));
+  return rest.length > 0 && rest.filter((line) => seen.has(normalize(line.text))).length / rest.length >= 0.8;
+}
+
+/** `probed`: the probe key was typed (and is in the field now). */
+type Probe = { kind: "suggestion"; probed: boolean } |{ kind: "draft"; step: DesktopStep } | { kind: "stop"; step: DesktopStep };
+
+/**
+ * Text in the field is either the app's suggested reply (shown there until
+ * the first keystroke) or the person's own unsent draft. OCR sees no colour,
+ * so one character tells them apart — with the cursor at the END of the
+ * text first (a click lands a few letters in, and a probe there would split
+ * a word: "po.de reescrever…"). It is a suggestion only on positive proof:
+ * the field, read again, shows just the probe character, or the placeholder,
+ * or is visibly empty with the composer otherwise unchanged. Anything else —
+ * the text still there, changed, unreadable — is a draft: the character is
+ * taken back, and if the person comes back before that, the draft is
+ * returned saying a "." was left at its end.
+ *
+ * Absence of the text is evidence only when it is stable: the field must
+ * read the same text twice before the key, and BOTH readings after it
+ * (300 ms apart) must show it gave way. One OCR that skipped the draft's
+ * line would otherwise let the paste replace the draft (INSP-D B2).
+ */
+async function probeField(screen: Screen, composer: { line: OcrLine; text: string; bar?: OcrLine }, before: OcrLine[], size: { h: number }, repoName?: string): Promise<Probe> {
+  const { driver } = screen;
+  const draftStep = (reason: string): DesktopStop => ({ ok: false, reason, retry: true, touched: true, draft: composer.text.slice(0, 500) });
+  // the field's text, read a second time before anything is typed
+  const again = findComposer(mainArea(await driver.ocr()), size, repoName);
+  // The app hid its suggestion once the field took focus: the placeholder
+  // shows, the field is empty, nothing of the person's is there — no probe
+  // key, the message goes as into any empty field (INSP-D C1).
+  if (again !== null && again.text === null) return { kind: "suggestion", probed: false };
+  if (again?.text !== composer.text) {
+    return { kind: "stop", step: { ok: false, reason: `the message field read differently twice ("${composer.text.slice(0, 40)}…", then "${(again?.text ?? "nothing").slice(0, 40)}"); nothing was typed`, retry: true, miss: true, touched: true } };
+  }
+  let stop = await guard(screen, "cursor to end");
+  if (stop) return { kind: "stop", step: stop };
+  await act(screen, () => driver.key(DOWN_ARROW, true));
+  stop = await guard(screen, "probe field");
+  if (stop) return { kind: "stop", step: stop };
+  await act(screen, () => driver.typeText(SUGGESTION_PROBE));
+  const gaveWayIn = (probed: OcrLine[]) => {
+    const now = findComposer(probed, size, repoName);
+    return (now !== null && (now.text === null || PROBE_LEFTOVER.test(now.text)))
+      || (now === null && composer.bar !== undefined && fieldEmptied(before, probed, composer.line, composer.bar, size));
+  };
+  await driver.sleep(400);
+  const first = gaveWayIn(mainArea(await driver.ocr()));
+  await driver.sleep(300);
+  const second = gaveWayIn(mainArea(await driver.ocr()));
+  if (first && second) return { kind: "suggestion", probed: true };
+  stop = await guard(screen, "undo probe");
+  if (stop) {
+    return { kind: "draft", step: { ...draftStep(`${stop.reason}; há texto não enviado no campo desta sessão ("${composer.text.slice(0, 40)}…") e deixei um "." no fim dele, que não consegui apagar`), human: stop.human, leftProbe: true } };
+  }
+  await act(screen, () => driver.key(BACKSPACE));
+  return { kind: "draft", step: draftStep(`há texto não enviado no campo desta sessão ("${composer.text.slice(0, 40)}…"): é rascunho (não cedeu a uma tecla no fim dele); não sobrescrevi`) };
 }
 
 /** Normalised title prefix the sidebar shows (it truncates long titles). */
@@ -442,11 +575,14 @@ const words = (text: string) => normalize(text).split(/[^\p{L}\p{N}#]+/u).filter
 export function headerNames(header: OcrLine[], title: string): boolean {
   const wanted = words(title).slice(0, 6);
   if (wanted.length < 2) return false;
+  // OCR can eat the first letter after the status dot: "nbox 503 diagnóstico
+  // e recuperação v (nuria-platform" for "Inbox 503 …" (01/10 14:30Z)
+  const sameStart = (seen: string, word: string) => seen === word || word.startsWith(seen) || (seen.length >= 3 && word.endsWith(seen));
   return header.some((line) => {
     const shown = words(line.text);
     // the last word shown may be cut ("labe…"): a prefix of the wanted one counts
-    const hits = wanted.filter((word) => shown.some((seen) => seen === word || (seen.length >= 3 && word.startsWith(seen))));
-    return hits.length >= Math.min(wanted.length, Math.max(2, Math.ceil(wanted.length * 0.6))) && shown.slice(0, 2).some((seen) => wanted[0]!.startsWith(seen) || seen === wanted[0]);
+    const hits = wanted.filter((word, i) => shown.some((seen) => seen === word || (seen.length >= 3 && word.startsWith(seen)) || (i === 0 && sameStart(seen, word))));
+    return hits.length >= Math.min(wanted.length, Math.max(2, Math.ceil(wanted.length * 0.6))) && shown.slice(0, 2).some((seen) => sameStart(seen, wanted[0]!));
   });
 }
 
@@ -465,6 +601,10 @@ export function isHeaderOf(line: OcrLine, title: string): boolean {
 }
 
 type MenuItems = readonly string[];
+/** A menu item is a short line ("Renomear sessão")... */
+const MENU_ITEM_MAX_CHARS = 30;
+/** ...that opens next to the click that opened the menu. */
+const MENU_ITEM_MAX_DX = 250;
 const ARCHIVE_ITEMS: MenuItems = ["Arquivar", "Archive"];
 const RENAME_ITEMS: MenuItems = ["Renomear", "Rename", "Editar título", "Edit title", "Editar nome", "Edit name"];
 
@@ -480,25 +620,49 @@ async function sessionMenuAction(
   input: { localId: string; title: string },
   items: MenuItems,
   verb: string,
-  then?: (screen: Screen) => Promise<DesktopStep | null>,
+  then?: (screen: Screen, isItem: (line: OcrLine) => boolean) => Promise<DesktopStep | null>,
+  /** Runs on the opened session before its menu: a step to stop with, or
+   * whether it touched the screen (then the screen is read again). */
+  before?: (screen: Screen, lines: OcrLine[]) => Promise<{ stop: DesktopStep } | { touched: boolean }>,
 ): Promise<DesktopStep> {
   if (!/^local_[0-9a-f-]{36}$/.test(input.localId)) return { ok: false, reason: "invalid desktop session id", retry: false };
-  // the item as the app words it now ("Renomear", "Renomear sessão", "Rename chat"…)
-  const isItem = (line: OcrLine) => items.some((item) => line.text.trim() === item || line.text.trim().startsWith(`${item} `));
+  // the item as the app words it now ("Renomear", "Renomear sessão", "Rename
+  // chat"…): a short line next to where the menu was opened — never a line of
+  // the conversation that happens to start with "Renomear a sessão para…"
+  let clickedX = 0;
+  const isItem = (line: OcrLine) => {
+    const text = line.text.trim();
+    return text.length <= MENU_ITEM_MAX_CHARS && Math.abs(line.x - clickedX) <= MENU_ITEM_MAX_DX && items.some((item) => text === item || text.startsWith(`${item} `));
+  };
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.openUrl(`claude://code/continue?session=${input.localId}`));
     await driver.sleep(2_500);
     let stop = await guard(screen, "open session");
     if (stop) return stop;
-    const screenLines = await driver.ocr();
+    let screenLines = await driver.ocr();
     // The session was opened by its own id: its header is the line at the
     // top that names it — matched by the start of the title or its words, at
     // any x (with the app's sidebar folded the header starts at the left
     // edge). On 01/10 "• Inbox 503 diagnóstico e recuperação v (nuria-platform"
     // was on screen and the rename still said the session was not.
-    const header = screenLines.find((line) => line.y < 140 && isHeaderOf(line, input.title));
+    const headerIn = (lines: OcrLine[]) => lines.find((line) => line.y < 140 && isHeaderOf(line, input.title));
+    let header = headerIn(screenLines);
+    if (before) {
+      // A step that clicks or types in the session's field (the rename's
+      // probe) runs only once the header says this IS the session: a stale
+      // link or a slow app leaves another one on screen (INSP-D B3).
+      const notOnScreen = (lines: OcrLine[]): DesktopStep => ({ ok: false, reason: `the session "${input.title}" is not the one on screen (its header is not there); nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 140)) });
+      if (!header) return notOnScreen(screenLines);
+      const early = await before(screen, screenLines);
+      if ("stop" in early) return early.stop;
+      if (early.touched) {
+        screenLines = await driver.ocr();
+        header = headerIn(screenLines);
+        if (!header) return notOnScreen(screenLines);
+      }
+    }
     const finish = async (): Promise<DesktopStep> => {
-      const after = then ? await then(screen) : null;
+      const after = then ? await then(screen, isItem) : null;
       if (after) return after;
       await driver.sleep(1_000);
       return { ok: true };
@@ -508,7 +672,8 @@ async function sessionMenuAction(
     if (header) {
       stop = await guard(screen, "header menu");
       if (stop) return stop;
-      await act(screen, () => driver.click(header.x + 20, header.y + header.h / 2));
+      clickedX = header.x + 20;
+      await act(screen, () => driver.click(clickedX, header.y + header.h / 2));
       await driver.sleep(800);
       const menu = (await driver.ocr()).filter((line) => line.y > header.y && line.y - header.y < 400);
       const item = menu.find(isItem);
@@ -538,7 +703,8 @@ async function sessionMenuAction(
     }
     stop = await guard(screen, "session menu");
     if (stop) return stop;
-    await act(screen, () => driver.rightClick(entry.x + 30, entry.y + entry.h / 2));
+    clickedX = entry.x + 30;
+    await act(screen, () => driver.rightClick(clickedX, entry.y + entry.h / 2));
     await driver.sleep(800);
     const menu = (await driver.ocr()).filter((line) => Math.abs(line.y - entry.y) < 400);
     const item = menu.find(isItem);
@@ -566,8 +732,37 @@ export async function archiveDesktopSession(driver: DesktopDriver, input: { loca
  * message. What was pasted where it should not be is cleared, and the step
  * is not retried. Success here is only a click: the caller re-reads the
  * app's record for the new title. */
-export async function renameDesktopSession(driver: DesktopDriver, input: { localId: string; title: string; newTitle: string }): Promise<DesktopStep> {
-  return sessionMenuAction(driver, input, RENAME_ITEMS, "rename", async (screen) => {
+export async function renameDesktopSession(driver: DesktopDriver, input: { localId: string; title: string; newTitle: string; repoName?: string }): Promise<DesktopStep> {
+  // The app's suggested reply in the message field is not a draft: proved
+  // with the same probe as a send (before the menu opens), the suggestion
+  // does not stop the rename. Only a proven draft does.
+  let suggestion: string | null = null;
+  const probeFirst = async (screen: Screen, lines: OcrLine[]): Promise<{ stop: DesktopStep } | { touched: boolean }> => {
+    const size = await driver.screenSize();
+    const main = mainArea(lines);
+    const composer = findComposer(main, size, input.repoName);
+    if (!composer || composer.text === null) return { touched: false };
+    let stop = await guard(screen, "click field");
+    if (stop) return { stop };
+    await act(screen, () => driver.click(composer.line.x + 20, composer.line.y + composer.line.h / 2));
+    await driver.sleep(300);
+    let typed = true;
+    if (!PROBE_LEFTOVER.test(composer.text)) {
+      const probe = await probeField(screen, { ...composer, text: composer.text }, main, size, input.repoName);
+      if (probe.kind !== "suggestion") return { stop: probe.step };
+      typed = probe.probed;
+    }
+    suggestion = composer.text;
+    // the suggestion hid on focus: no probe key was typed, nothing to take back
+    if (!typed) return { touched: true };
+    // take the probe back: the field is empty (or shows the suggestion again)
+    stop = await guard(screen, "undo probe");
+    if (stop) return { stop };
+    await act(screen, () => driver.key(BACKSPACE));
+    await driver.sleep(300);
+    return { touched: true };
+  };
+  return sessionMenuAction(driver, input, RENAME_ITEMS, "rename", async (screen, isItem) => {
     await driver.sleep(500);
     let stop = await guard(screen, "rename field");
     if (stop) return stop;
@@ -578,7 +773,7 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
     const fieldOf = (lines: OcrLine[]) => {
       const main = mainArea(lines);
       if (main.some((line) => line.y > size.h / 2 && NEW_SESSION_PLACEHOLDER.test(line.text.trim()))) return { text: null as string | null };
-      const composer = findComposer(main, size);
+      const composer = findComposer(main, size, input.repoName);
       return composer ? { text: composer.text } : null;
     };
     const opened = await driver.ocr();
@@ -587,13 +782,16 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
       const now = fieldOf(lines);
       return Boolean(now && fieldBefore && now.text === fieldBefore.text);
     };
-    // a draft in the message field: a title pasted by mistake would land
-    // on it, and clearing that would take the draft too
-    if (fieldBefore?.text) {
+    // Text in the message field that the probe did not prove to be the
+    // app's suggestion (it showed up after the probe): a title pasted by
+    // mistake would land on it. Wait, without asking the person about a
+    // draft nobody proved.
+    if (fieldBefore?.text && fieldBefore.text !== suggestion) {
       await act(screen, () => driver.key(ESCAPE));
-      return { ok: false, reason: `há texto não enviado no campo desta sessão ("${fieldBefore.text.slice(0, 120)}"); não renomeei para não arriscar o rascunho`, retry: true, touched: true, draft: fieldBefore.text.slice(0, 500) };
+      // a miss: three of these and the person is asked to rename it by hand (INSP-D B5)
+      return { ok: false, reason: "the message field holds text that was not there before the menu opened; nothing was typed, the rename waits", retry: true, miss: true, touched: true, seen: fieldBefore.text.slice(0, 40) };
     }
-    const menuOpen = opened.some((line) => RENAME_ITEMS.includes(line.text.trim()));
+    const menuOpen = opened.some(isItem);
     if (menuOpen || !upper(opened).some((line) => sidebarMatch(line.text, input.title)) || !composerEmpty(opened)) {
       await act(screen, () => driver.key(ESCAPE));
       return { ok: false, reason: "the rename field did not open (nothing was typed)", retry: false, touched: true, seen: seenText(upper(opened)) };
@@ -616,7 +814,7 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
     }
     await act(screen, () => driver.key(RETURN));
     return null;
-  });
+  }, probeFirst);
 }
 
 // ── reading the app's session records (never written) ────────────────────
@@ -737,19 +935,28 @@ export function lastAppRepo(dir = DESKTOP_SESSIONS_DIR): string | undefined {
   return newest ? repoOf(newest) : undefined;
 }
 
-/** The app's last picked folder when it is another session's worktree: the
- * newest work session sits in a worktree the app did not make for it
- * (`worktreeName` null), so New Session would open there again (01/10: 6 of
- * 7 creates). null when the last folder is a repository root. */
-export function lastAppWorktreeFolder(dir = DESKTOP_SESSIONS_DIR): { folder: string; title?: string } | null {
-  let newest: DesktopRecord | null = null;
+/** The app is reusing worktrees: its newest work session opened in a
+ * worktree folder that an OLDER session (archived ones included) had used
+ * already — the app's last picked folder is that worktree, and New Session
+ * would open there again. null when the newest session is in a repository
+ * root or in a worktree of its own (no one used the folder before it).
+ *
+ * `worktreeName` says nothing here: the app drops it when a session is
+ * archived (163 of 179 archived worktree sessions on 01/10 have it null,
+ * the ones it created right included), and a reused folder can carry it
+ * (local_0a000005 in the folder of local_0a000004). */
+export function lastAppWorktreeFolder(dir = DESKTOP_SESSIONS_DIR): { folder: string; title?: string; earlier: string[] } | null {
+  const records: DesktopRecord[] = [];
   for (const file of recordFiles(dir)) {
     const record = readRecord(file);
-    if (record && !notPickedFolder(record) && (record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
+    if (record) records.push(record);
   }
-  const folder = newest?.cwd;
-  if (!newest || !folder || newest.worktreeName || !/\/\.(?:claude\/)?worktrees\//.test(folder)) return null;
-  return { folder, ...(newest.title ? { title: newest.title } : {}) };
+  const newest = records.filter((record) => !notPickedFolder(record)).sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+  const folder = newest ? newest.worktreePath ?? newest.cwd : undefined;
+  if (!newest || !folder || !/\/\.(?:claude\/)?worktrees\//.test(folder)) return null;
+  const earlier = records.filter((record) => record.sessionId !== newest.sessionId && (record.cwd === folder || record.worktreePath === folder) && (record.createdAt ?? 0) < (newest.createdAt ?? 0));
+  if (!earlier.length) return null;
+  return { folder, ...(newest.title ? { title: newest.title } : {}), earlier: earlier.map((record) => record.title ?? record.sessionId) };
 }
 
 /** Folders the app's sessions not archived work in (their cwd and worktree). */
@@ -762,6 +969,20 @@ export function liveRecordFolders(dir = DESKTOP_SESSIONS_DIR): string[] {
     if (record.worktreePath) folders.add(record.worktreePath);
   }
   return [...folders];
+}
+
+/** What cc_session_start answers (409) while the app is reusing worktrees.
+ * `fromQueue`: the start waited in the session queue and is dropped here —
+ * the bot must start it again once the person fixed the app's folder. */
+export function reusedFolderRefusal(last: { folder: string; title?: string; earlier: string[] }, repoName: string, fromQueue = false): string {
+  const earlier = [...new Set(last.earlier)].slice(0, 3).map((title) => `"${title}"`).join(", ");
+  return [
+    `não abri: a sessão mais recente do app Claude${last.title ? ` ("${last.title}")` : ""} abriu em ${last.folder}, pasta que já era de ${earlier}. O app está reaproveitando worktrees e abriria a sessão nova lá também.`,
+    `Peça ao dono para iniciar no app uma sessão nova na raiz de ${repoName} (pasta ${repoName}, worktree ligada) e enviar nela uma mensagem curta: o app só grava a sessão depois do primeiro envio, então abrir e fechar sem enviar não muda nada. Depois ela pode ser arquivada.`,
+    fromQueue
+      ? `Este pedido saiu da fila de sessões e foi descartado (não volta para a fila): quando o dono confirmar, chame cc_session_start de novo. Se não der para esperar, use surface "cli" com cli_reason.`
+      : `Então tente de novo. Se não der para esperar, use surface "cli" com cli_reason.`,
+  ].join(" ");
 }
 
 /** Worktree names of the app's sessions (archived ones too with `includeArchived`:

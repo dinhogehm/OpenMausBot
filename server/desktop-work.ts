@@ -180,6 +180,15 @@ export function reportFor(deps: DesktopWorkDeps, session: CcSession): string {
   return ccReportForOwner(session, { hookDecision: id && deps.hookDecision ? deps.hookDecision(id) : null });
 }
 
+const renameKey = (session: CcSession) => `cc-rename:${session.id}`;
+
+/** "Precisa de você" shows one line: the app's title (what the person finds
+ * in the app's sidebar) and the new one, short. */
+export function renameAskTitle(appTitle: string, newTitle: string): string {
+  const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
+  return `Renomear no app: "${cut(appTitle, 36)}" → "${cut(newTitle, 44)}"`;
+}
+
 /** A screen action that cannot be done. Only a create that never opened
  * fails the session; a message that could not be typed, or an archive or
  * rename the screen would not allow, fails just that action — the session
@@ -204,10 +213,13 @@ export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason:
     deps.report(session, `Claude Code session "${session.title}" (${session.id}): your message was NOT delivered — ${reason}. The session itself is fine and idle in the app${link}; send it again with cc_session_send later, or tell the person. Undelivered message: "${pending.text.slice(0, 300)}"`);
     return;
   }
-  deps.ledger.save();
   if (pending.kind === "rename") {
-    deps.ownerPending?.(session, { title: `Renomeie no app Claude a sessão "${session.title}" para "${pending.text}"`, ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}), key: `cc-rename:${session.id}` });
+    // The title the person sees in the app (not our ledger's), and the new one, essentials first.
+    const appTitle = (desktop.localId ? deps.readRecord(desktop.localId)?.title : undefined) ?? session.title;
+    desktop.renameAsked = true;
+    deps.ownerPending?.(session, { title: renameAskTitle(appTitle, pending.text), ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}), key: renameKey(session) });
   }
+  deps.ledger.save();
   const what = pending.kind === "archive" ? "archive" : "rename";
   deps.chip(session, pending.kind === "archive" ? "não foi possível arquivar no app — arquive à mão" : "não foi possível renomear no app", false);
   deps.report(session, `Claude Code session "${session.title}" (${session.id}): could not ${what} it in the Claude app — ${reason}. Nothing else changed; ${pending.kind === "archive" ? "ask the person to archive it by hand" : "the person may rename it by hand"}${link}.`);
@@ -314,6 +326,13 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
     if (record.permissionMode && record.permissionMode !== desktop.permissionMode) {
       desktop.permissionMode = record.permissionMode;
       deps.ledger.save();
+    }
+    // The person renamed it by hand (the app's title has "#NNNN"), or it was
+    // archived: the "rename it" item is settled.
+    if (desktop.renameAsked && (record.isArchived || (desktop.issue && record.title?.includes(`#${desktop.issue}`)))) {
+      delete desktop.renameAsked;
+      deps.ledger.save();
+      deps.resolveOwnerPending?.(renameKey(session));
     }
     if (record.isArchived) {
       // archived by someone in the app, not by an order to the server: the
@@ -556,15 +575,17 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;
       const target = { localId: desktop.localId!, title: record?.title ?? next.title };
+      const repoName = deps.repoName(next);
       step = pending.kind === "archive"
         ? await (steps.archive ?? archiveDesktopSession)(driver, target)
         : pending.kind === "rename"
-          ? await (steps.rename ?? renameDesktopSession)(driver, { ...target, newTitle: pending.text })
-          : await (steps.send ?? sendToDesktopSession)(driver, { ...target, text: pending.text });
+          ? await (steps.rename ?? renameDesktopSession)(driver, { ...target, newTitle: pending.text, repoName })
+          : await (steps.send ?? sendToDesktopSession)(driver, { ...target, text: pending.text, repoName });
     }
     const at = deps.now();
     // a create is "sent" here (the brief left the field); "adopted" comes when the app's record shows up
-    deps.log?.(`${pending.kind} ${step.ok ? (pending.kind === "create" ? "sent (brief left the field)" : "ok") : step.retry ? "stopped" : "gave up"}: session ${next.id}${step.ok ? "" : ` — ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}${step.touched ? " (touched the screen)" : ""}`}`);
+    const over = step.ok && step.suggestion ? ` (over app suggestion: "${step.suggestion.slice(0, 80)}")` : "";
+    deps.log?.(`${pending.kind} ${step.ok ? (pending.kind === "create" ? "sent (brief left the field)" : "ok") : step.retry ? "stopped" : "gave up"}: session ${next.id}${over}${step.ok ? "" : ` — ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}${step.touched ? " (touched the screen)" : ""}`}`);
     if (step.ok) {
       if (pending.kind === "send" || pending.kind === "rename") clearDraft(deps, next);
       if (pending.kind === "archive") {
@@ -596,7 +617,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       return;
     }
     if (step.draft !== undefined) {
-      holdForDraft(deps, next, step.draft, at);
+      holdForDraft(deps, next, step.draft, at, step.leftProbe === true);
       return;
     }
     if (!step.retry) {
@@ -639,19 +660,30 @@ const draftKey = (session: CcSession) => `cc-draft:${session.id}`;
 /** The session's field holds text nobody sent: maybe the person's draft. It
  * is never overwritten — the message waits, and the person is asked (once
  * per draft) in "Precisa de você", with the link to the session. */
-function holdForDraft(deps: DesktopWorkDeps, session: CcSession, draft: string, at: number): void {
+function holdForDraft(deps: DesktopWorkDeps, session: CcSession, draft: string, at: number, leftProbe = false): void {
   const desktop = session.desktop!;
   const pending = desktop.pending!;
-  pending.lastReason = `há texto não enviado no campo da sessão: "${draft.slice(0, 120)}"`;
+  // The next try reads the draft WITH the "." we left ("texto."): still our
+  // dot, so the item keeps saying so instead of becoming a plain "send or
+  // clear it" (INSP-D B4).
+  const prev = desktop.draftSeen;
+  // (once the person took the dot out, the draft is a plain draft again)
+  const ourDot = !leftProbe && prev?.leftProbe === true && draft === `${prev.text}.`;
+  if (ourDot) {
+    leftProbe = true;
+    draft = prev!.text;
+  }
+  pending.lastReason = `há texto não enviado no campo da sessão: "${draft.slice(0, 40)}…"${leftProbe ? ' (ficou um "." no fim dele)' : ""}`;
   pending.nextAttemptAt = at + DESKTOP_DRAFT_RECHECK_MS;
-  const seen = desktop.draftSeen?.text === draft;
-  desktop.draftSeen = { text: draft, at: seen ? desktop.draftSeen!.at : at };
+  const seen = prev?.text === draft && (prev.leftProbe === true) === leftProbe;
+  desktop.draftSeen = { text: draft, at: seen ? prev!.at : at, ...(leftProbe ? { leftProbe: true } : {}) };
   deps.ledger.save();
+  // a "." just left in the person's draft is said at once, even for a draft already reported
   if (seen) return;
   const link = desktop.localId ? `claude://code/continue?session=${desktop.localId}` : undefined;
-  deps.chip(session, `há texto não enviado no campo desta sessão — não sobrescrevi; ${pending.kind === "rename" ? "o novo título" : "a mensagem"} espera: “${draft.slice(0, 80)}”`, false);
-  deps.ownerPending?.(session, { title: `Texto não enviado no campo da sessão "${session.title}": envie ou apague (“${draft.slice(0, 60)}”)`, ...(link ? { link } : {}), key: draftKey(session) });
-  deps.report(session, `Claude Code session "${session.title}" (${session.id}): its message field holds text nobody sent — "${draft.slice(0, 300)}". It may be the person's own draft, so nothing was typed over it; your ${pending.kind === "send" ? "message" : pending.kind} waits and is tried again every ${DESKTOP_DRAFT_RECHECK_MS / 60_000} min. The person was asked in "Precisa de você" to send or clear it${link ? ` (${link})` : ""}. Do not ask them to type your message for you.`);
+  deps.chip(session, `há texto não enviado no campo desta sessão — não sobrescrevi; ${pending.kind === "rename" ? "o novo título" : "a mensagem"} espera: “${draft.slice(0, 80)}”${leftProbe ? ' — ficou um "." no fim dele' : ""}`, false);
+  deps.ownerPending?.(session, { title: leftProbe ? `Rascunho na sessão "${session.title}": deixei um "." no fim dele — apague-o (“${draft.slice(0, 40)}”)` : `Texto não enviado no campo da sessão "${session.title}": envie ou apague (“${draft.slice(0, 60)}”)`, ...(link ? { link } : {}), key: draftKey(session) });
+  deps.report(session, `Claude Code session "${session.title}" (${session.id}): its message field holds text nobody sent — "${draft.slice(0, 300)}". It is the person's own draft (it did not give way to a keystroke), so nothing was typed over it; your ${pending.kind === "send" ? "message" : pending.kind} waits and is tried again every ${DESKTOP_DRAFT_RECHECK_MS / 60_000} min. The person was asked in "Precisa de você" to send or clear it${link ? ` (${link})` : ""}.${leftProbe ? ' The person came back mid-check, so the test "." stayed at the end of their draft; they were told.' : ""} Do not ask them to type your message for you.`);
 }
 
 /** The field was free again: the draft item is settled. */

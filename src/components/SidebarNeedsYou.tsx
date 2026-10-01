@@ -1,4 +1,5 @@
-import { Check, CircleAlert, ListTodo, ShieldQuestion } from "lucide-react";
+import { Check, CircleAlert, ExternalLink, ListTodo, ShieldQuestion } from "lucide-react";
+import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { waitingAge, type NeedsYouItem } from "@/lib/needs-you";
@@ -8,13 +9,15 @@ import type { SidebarDensity } from "@/lib/sidebar-preferences";
 /** The top of the sidebar: what waits on the person, from every bot, with
  * how long it has waited — one place to answer from. Absent when nothing
  * waits. Each row jumps to its conversation. */
-export function SidebarNeedsYou({ items, density, now, onJump, onResolve }: {
+export function SidebarNeedsYou({ items, density, now, onJump, onResolve, onOpenLink = (url) => void openExternalLink(url) }: {
   items: NeedsYouItem[];
   density: SidebarDensity;
   now?: number;
   onJump: (item: NeedsYouItem) => void;
   /** Mark an owner_pending item done (the bot hears it in that conversation). */
   onResolve?: (item: NeedsYouItem) => void;
+  /** Open an owner_pending item's link (a PR, a session in the Claude app). */
+  onOpenLink?: (url: string) => void;
 }) {
   if (!items.length || density === "icons") return null;
   const compact = density === "compact";
@@ -47,11 +50,24 @@ export function SidebarNeedsYou({ items, density, now, onJump, onResolve }: {
               >
                 <Icon size={13} aria-hidden="true" className="shrink-0 text-warning" />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate">{item.pendingId ? item.title : displayThreadTitle(item.title)}</span>
+                  {/* an owner_pending title says what to do: two lines, not cut before the essential */}
+                  <span className={cn("block", item.pendingId ? "line-clamp-2 break-words" : "truncate")}>{item.pendingId ? item.title : displayThreadTitle(item.title)}</span>
                   <span className="block truncate text-[10.5px] text-ink-secondary">{item.botName}</span>
                 </span>
                 <span className="shrink-0 text-[10.5px] tabular-nums text-ink-secondary">{item.due ?? age}</span>
               </button>
+              {item.pendingId && item.link && (
+                <button
+                  type="button"
+                  data-needs-you-link={item.link}
+                  aria-label={t("needsYou.openLink", { title: item.title })}
+                  title={item.link}
+                  onClick={() => onOpenLink(item.link!)}
+                  className="flex size-6 shrink-0 items-center justify-center rounded text-ink-secondary hover:bg-raised hover:text-ink"
+                >
+                  <ExternalLink size={12} aria-hidden="true" />
+                </button>
+              )}
               {item.pendingId && onResolve && (
                 <button
                   type="button"

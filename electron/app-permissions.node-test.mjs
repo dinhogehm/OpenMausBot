@@ -78,6 +78,15 @@ test("web links reject embedded credentials and non-web schemes", () => {
     assert.throws(() => externalWebUrl(url), /web address/);
 });
 
+test("opens a Claude app session link, and no other claude: link", () => {
+  const link = "claude://code/continue?session=local_0a000006-aa11-4b2c-9d3e-0123456789ab";
+  assert.equal(externalWebUrl(link), link);
+  for (const url of [
+    "claude://code/continue?session=../../etc", "claude://code/continue?session=local_0a000006&x=1",
+    "claude://settings", `${link}&then=x`, `claude://code/continue?session=local_0a000006-aa11-4b2c-9d3e-0123456789ab#x`,
+  ]) assert.throws(() => externalWebUrl(url), /Only web/);
+});
+
 test("both external-link entry points use the policy and IPC retains the local-origin gate", () => {
   const main = readFileSync(new URL("./main.mjs", import.meta.url), "utf8");
   assert.match(main, /ipcMain\.handle\("desktop:open-external", localOnly\("desktop:open-external"/);
