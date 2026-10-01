@@ -158,14 +158,19 @@ export function tagStuckCause(errTail: string, releasedSha: string): string | nu
     return Boolean(sha && (sha.startsWith(released) || released.startsWith(sha)));
   });
   if (at < 0) return null;
-  let refusal: string | undefined;
+  // the whole window up to the previous release's end: GitHub prints GH013
+  // first and "- Cannot update this protected ref." closer to the warning
+  const refusals: string[] = [];
   for (let i = at - 1; i >= 0 && at - i <= TAG_CAUSE_WINDOW && !RELEASE_BOUNDARY.test(lines[i]!); i -= 1) {
-    if (TAG_REFUSAL.test(lines[i]!)) { refusal = lines[i]; break; }
+    if (TAG_REFUSAL.test(lines[i]!)) refusals.push(lines[i]!);
   }
   const exit = /\(exit (\d+)\)/.exec(lines[at]!)?.[1];
-  const warned = `o release avisou que a tag não avançou${exit ? ` (exit ${exit})` : ""}`;
-  if (!refusal) return warned;
-  return `${warned}; o GitHub recusou o push da tag (${/GH013/.test(refusal) ? "GH013: regra de proteção do repositório" : "ref protegida"})`;
+  const parts = [`o release avisou que a tag não avançou${exit ? ` (exit ${exit})` : ""}`];
+  if (refusals.length) parts.push(`o GitHub recusou o push da tag (${refusals.some((line) => /GH013/.test(line)) ? "GH013: regra de proteção do repositório" : "ref protegida"})`);
+  // the release prints the manual advance right after its warning ("Advance it manually:" + the command)
+  const manual = lines.slice(at + 1, at + 4).find((line) => /^git tag -f nuria-production-deployed [0-9a-f]{7,40}\b/.test(line));
+  const text = parts.join("; ");
+  return manual ? `${text}. Para avançar à mão: ${manual.slice(0, 400)}` : text;
 }
 
 /** Whether the tag contains the release, as far as this clone can verify:

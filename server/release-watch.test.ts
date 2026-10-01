@@ -90,6 +90,32 @@ describe("after a release", () => {
     expect(tagStuckCause(tail, "")).toBeNull();
   });
 
+  // INSP-R r2 item 4: in the real order (err.log :16706-16716) the line closest to
+  // the warning is "- Cannot update this protected ref.", and GH013 is 8 lines up.
+  // Rebuilt from git/GitHub's output and local-release.sh:431-433, owner/repo redacted.
+  it("prefers GH013 anywhere in the release's window, and adds the manual advance the release printed", () => {
+    const sha = "1bbd5c2a72a2ed67bc5a6a0d163f3ac2df576e44";
+    const real = [
+      "remote: error: GH013: Repository rule violations found for refs/tags/nuria-production-deployed.        ",
+      "remote: Review all repository rules at https://github.com/owner/repo/rules?ref=refs%2Ftags%2Fnuria-production-deployed        ",
+      "remote: ",
+      "remote: - Cannot update this protected ref.        ",
+      "remote: ",
+      "To github.com:owner/repo.git",
+      " ! [remote rejected]   nuria-production-deployed -> nuria-production-deployed (push declined due to repository rule violations)",
+      "error: failed to push some refs to 'github.com:owner/repo.git'",
+      `WARNING: production is live at ${sha} but the certification tag was NOT advanced (exit 1)`,
+      "Runtime targets and the deploy receipt are unaffected. Advance it manually:",
+      `  git tag -f nuria-production-deployed ${sha} && git push --force-with-lease=refs/tags/nuria-production-deployed origin refs/tags/nuria-production-deployed:refs/tags/nuria-production-deployed`,
+    ].join("\n");
+    const cause = tagStuckCause(real, sha);
+    expect(cause).toContain("GH013");
+    expect(cause).not.toContain("ref protegida");
+    expect(cause).toBe(`o release avisou que a tag não avançou (exit 1); o GitHub recusou o push da tag (GH013: regra de proteção do repositório). Para avançar à mão: git tag -f nuria-production-deployed ${sha} && git push --force-with-lease=refs/tags/nuria-production-deployed origin refs/tags/nuria-production-deployed:refs/tags/nuria-production-deployed`);
+    // only the protected-ref line: said as such
+    expect(tagStuckCause(real.split("\n").slice(1).join("\n"), sha)).toContain("(ref protegida)");
+  });
+
   // INSP-R r1 item 10: ls-remote does not fetch; a commit missing in the clone is no evidence
   it("says nothing about the tag when the clone cannot verify it", () => {
     const base = { releasedSha: "1bbd5c2a7f00", releasedAt: 0, tagSha: "90b3ef2a5aaa", now: 20 * 60_000, cause: null };
