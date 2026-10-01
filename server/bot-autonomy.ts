@@ -29,7 +29,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { languageReminder } from "./reply-language.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
-import { ECHO_WINDOW_MS, isEcho, watchKindOf, type SelfWrite } from "./watch-echo.ts";
+import { chatTexts, ECHO_WINDOW_MS, isEcho, vmChatPostOf, watchKindOf, type SelfWrite } from "./watch-echo.ts";
 
 export const WAKE_MIN_MINUTES = 1;
 export const WAKE_MAX_MINUTES = 1_440;
@@ -557,6 +557,18 @@ export class BotAutonomy {
     this.selfWrites.set(botId, [...kept, write].slice(-20));
   }
 
+  /** Text the bot put on the VM's clipboard: kept as its Chat post only when
+   * it is one (server/watch-echo.ts vmChatPostOf), checked against what its
+   * Chat watches last showed. True when kept. */
+  noteVmClipboard(botId: string, text: string): boolean {
+    const shown = [...this.wakes.entries()]
+      .filter(([, wake]) => wake.botId === botId && wake.watch && watchKindOf(wake.watch.argv) === "chat")
+      .flatMap(([key]) => chatTexts(this.lastLines.get(key) ?? []));
+    const write = vmChatPostOf(text, this.now(), shown);
+    if (write) this.noteSelfWrite(botId, write);
+    return write !== null;
+  }
+
   /** Standing watches whose output has not changed for `afterMs` and whose
    * newest time stamp is older than `oldMs`: likely looking at the wrong
    * page (gog's oldest-first list). Each is returned once until it changes. */
@@ -778,6 +790,8 @@ export class BotAutonomy {
   leaseWake(wake: BotWake): void {
     if (wake.watch?.standing) return;
     if (this.wakes.get(wake.threadId) === wake) this.wakes.delete(wake.threadId);
+    // a one-shot watch handed to its turn (fired, or out of time): its lines go
+    if (wake.watch) this.lastLines.delete(wake.threadId);
     this.inFlight.push({ kind: "wake", botId: wake.botId, threadId: wake.threadId, startedAt: this.now(), wake });
     this.save();
   }

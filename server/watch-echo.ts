@@ -27,11 +27,14 @@
 // that scrolled off; else it is a change too. Without the complete run
 // before (after a restart, or past WATCH_LINES_MAX), nothing is an echo.
 //
-// Writes through the VM's computer (typing or pasting into the Chat or the
-// spreadsheet in its browser) are NOT recognised: the real calls (a URL put
-// on the clipboard then pasted, a mention typed for the autocomplete, the
-// body pasted, a search typed with cmd+f) cannot be told apart safely from
-// the tool calls alone. Those echoes wake the bot, as before (INSP-E r2 B3).
+// Writes through the VM's computer: only one narrow case is recognised —
+// the body of a Chat post the bot put on the clipboard (`clipboard_write`)
+// to paste it: 40+ characters, not a URL, and not already the text of a
+// message in the bot's Chat watch (copying a client's message to quote it
+// elsewhere is not a post). It matches a new message whose text, @mentions
+// aside, starts with it. Nothing assumes which page is open. Everything else
+// typed through the VM (a URL, a mention, a search, a Status in the
+// spreadsheet) is not recognised and wakes the bot (INSP-E r2 B3, r3 4).
 
 export type WatchKind = "issues" | "chat" | "sheets";
 
@@ -42,7 +45,7 @@ export interface SelfWrite {
   marks: string[];
   /** Short values it set (a spreadsheet's "Publicado"), each good for one line. */
   values?: string[];
-  via: "shell";
+  via: "shell" | "vm";
 }
 
 /** How long after a write its echo can still show up (the slowest watch runs every 10 min). */
@@ -73,9 +76,27 @@ function flagValue(command: string, flags: readonly string[]): string | null {
   return null;
 }
 
-/** A Chat text without the @mentions it opens with ("@Fulana Tal …"). */
+const NAME_CONNECTORS = new Set(["da", "de", "do", "das", "dos", "e"]);
+
+/** A Chat text without the @mentions it opens with ("@Fulana Tal …"): the
+ * @word and at most three more name words (capitalised, no punctuation
+ * after them, or a connector like "da"), so the sentence's first word stays
+ * ("@Dono Exemplo Combinado, obrigada" keeps "Combinado,"). */
 export function withoutLeadingMentions(text: string): string {
-  return text.replace(/^(?:\s*@[\p{L}\p{N}._-]+(?:\s+(?:(?:da|de|do|das|dos|e)\s+)?[\p{Lu}][\p{L}.-]*){0,5}[,:]?)+\s*/u, "");
+  const words = text.trim().split(/\s+/);
+  let at = 0;
+  while (words[at]?.startsWith("@")) {
+    at += 1;
+    let names = 0;
+    while (names < 3 && at < words.length) {
+      const word = words[at]!;
+      const connector = NAME_CONNECTORS.has(word) && /^\p{Lu}[\p{L}'-]*$/u.test(words[at + 1] ?? "");
+      if (!connector && !/^\p{Lu}[\p{L}'-]*$/u.test(word)) break;
+      at += 1;
+      if (!connector) names += 1;
+    }
+  }
+  return words.slice(at).join(" ");
 }
 
 /** Only the words of a text: no URL, #number, long number or hash. */
@@ -125,6 +146,22 @@ export function selfWriteOf(command: string, at: number): SelfWrite | null {
   return null;
 }
 
+/** The Chat post the bot put on the VM's clipboard to paste (see the
+ * header). `shown`: the TEXT of every message in the bot's Chat watches'
+ * last output — a text already there is a copy of someone's message. */
+export function vmChatPostOf(clipboard: string, at: number, shown: readonly string[]): SelfWrite | null {
+  if (/^\s*https?:\/\/\S+\s*$/.test(clipboard)) return null;
+  const body = normalize(withoutLeadingMentions(clipboard));
+  if (body.length < TEXT_MARK_MAX) return null;
+  const start = body.slice(0, TEXT_MARK_MAX);
+  if (shown.some((text) => normalize(withoutLeadingMentions(text)).includes(start))) return null;
+  return { at, kind: "chat", marks: [start], via: "vm" };
+}
+
+/** The TEXT column of a Chat watch's lines (gog chat messages list --plain);
+ * a line of another shape (--json) counts whole. */
+export const chatTexts = (lines: readonly string[]): string[] => lines.map((line) => line.split("\t")[3] ?? line).filter(Boolean);
+
 /** What a watch command reads, for matching it with the bot's writes. */
 export function watchKindOf(argv: readonly string[]): WatchKind | null {
   const [program, ...args] = argv;
@@ -155,8 +192,15 @@ export function botSlug(botName: string): string {
 }
 
 const startsWithMark = (text: string, mark: RegExp): boolean => (mark.exec(text)?.index ?? -1) === text.length - text.trimStart().length;
-/** What was added after `old` starts with the mark, past spaces and a separator. */
-const addedWithMark = (added: string, mark: RegExp): boolean => startsWithMark(added.replace(/^[\s|·;—,-]+/, ""), mark);
+/** Everything added after `old` is the bot's: every segment of it (split on
+ * the separators notes are chained with: " | ", "·", ";", "—") starts with
+ * the bot's mark. A person's " | Dono: …" after the bot's new note is not
+ * the bot's, and neither is a note of the bot with one of those separators
+ * inside it (in doubt, wake). */
+const addedWithMark = (added: string, mark: RegExp): boolean => {
+  const segments = added.split(/\s*(?:\||·|;|—)\s*/).map((segment) => segment.trim()).filter(Boolean);
+  return segments.length > 0 && segments.every((segment) => startsWithMark(segment, mark));
+};
 const markAt = (line: string, mark: RegExp): number => mark.exec(line)?.index ?? -1;
 const endsWithMark = (line: string, mark: RegExp): boolean => {
   const end = line.trimEnd().length;
@@ -242,7 +286,8 @@ export function isEcho(
     // the text the bot just wrote
     if (kind === "chat") {
       const text = normalize(withoutLeadingMentions(line.split("\t")[3] ?? ""));
-      const carried = recent.find((write) => write.marks.some((textMark) => text.startsWith(textMark)));
+      // a short text of the bot is its whole post: equal, never a prefix of someone else's
+      const carried = recent.find((write) => write.marks.some((textMark) => (textMark.length < TEXT_MARK_MAX ? text === textMark : text.startsWith(textMark))));
       if (!carried) return NOT_ECHO;
       reasons.push(`post do bot ("${carried.marks[0]!.slice(0, 40)}")`);
       continue;

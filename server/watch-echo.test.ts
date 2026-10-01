@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { botMarkPattern, botSlug, isEcho, selfWriteOf, watchKindOf, type SelfWrite } from "./watch-echo.ts";
+import { botMarkPattern, botSlug, chatTexts, isEcho, selfWriteOf, vmChatPostOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
 
 // The real outputs of the Monitor's watches on 01/10, words pseudonymised
 // (same length, same case, same word → same pseudonym; spacing, tabs, line
@@ -49,6 +49,22 @@ describe("the real spreadsheet output (gog --plain, no tabs)", () => {
     expect(STARTS_WITH_MARK).toBeGreaterThan(0);
     expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}`] }))).toBe(true);
     expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [`${SHEET[STARTS_WITH_MARK]}${NOTE}`] }))).toBe(true);
+  });
+
+  it("wakes the bot when a person adds after the bot's new note in the same run; two notes of the bot are its own (INSP-E r3 1)", () => {
+    const NOTE2 = ` | [${MONITOR}] 01/10 16:12 BRT: cliente avisada`;
+    const person = " | Dono: cliente disse que ainda falha";
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}${person}`] }))).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [`${SHEET[STARTS_WITH_MARK]}${NOTE}${person}`] }))).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}${NOTE2}`] }))).toBe(true);
+    // the same with the other separators notes are chained with
+    for (const separator of [" · ", "; ", " — "]) {
+      expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}${separator}Dono: ainda falha`] }))).toBe(false);
+    }
+    // and in a Status the bot set: its note grows, then a person's text
+    const write = selfWriteOf(`gog sheets update SHEET_ID 'Atendimento!E178' --values-json '[["Fazendo"]]'`, 1_000)!;
+    const fazendo = `${SHEET[ROW_178]!.replace("Pendente    ", "Fazendo     ")} | [${MONITOR}] Status → Fazendo${person}`;
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo] }), [write])).toBe(false);
   });
 
   it("wakes the bot when a person adds to its note, or edits inside it (INSP-E r2 B1)", () => {
@@ -134,6 +150,27 @@ describe("the real Chat output (gog --plain, TSV)", () => {
     expect(chatEcho(scrolled(message("nWw4", "Karntf Fhqxr", `você disse: ${posted}`)), [write])).toBe(false);
     // a mention alone is never a mark
     expect(selfWriteOf(`gog chat messages send spaces/AAAAexample --text "@Fulana de Tal da Silva"`, 1)).toBeNull();
+  });
+
+  it("takes a short post of the bot only when the message is exactly it, and keeps the sentence's first word (INSP-E r3 2)", () => {
+    const write = selfWriteOf(`gog chat messages send spaces/AAAAexample --text "@Fulana de Tal da Silva combinado, pode testar!"`, 1_000)!;
+    expect(write.marks).toEqual(["combinado, pode testar!"]);
+    expect(chatEcho(scrolled(message("nWw5", "Neewdoa Ocex", "@Fulana de Tal da Silva combinado, pode testar!")), [write])).toBe(true);
+    expect(chatEcho(scrolled(message("nWw6", "Karntf Fhqxr", "combinado, pode testar! mas ainda dá erro")), [write])).toBe(false);
+    expect(withoutLeadingMentions("@Dono Exemplo Combinado, obrigada")).toBe("Combinado, obrigada");
+    expect(withoutLeadingMentions("@Fulana de Tal da Silva saiu hoje")).toBe("saiu hoje");
+    expect(withoutLeadingMentions("@Fulana Tal, @Dono Exemplo veja")).toBe("Tal, @Dono Exemplo veja");
+  });
+
+  it("takes as the bot's post only a long body it put on the VM's clipboard, never a URL, a mention or a copied message (INSP-E r3 4)", () => {
+    const body = "saiu hoje à tarde a correção do atendimento reaberto, pode testar";
+    expect(vmChatPostOf("https://mail.google.com/chat/u/0/#chat/space/AAAAexample\n", 1, [])).toBeNull();
+    expect(vmChatPostOf("@Fulana de Tal", 1, [])).toBeNull();
+    expect(vmChatPostOf("curto demais", 1, [])).toBeNull();
+    expect(vmChatPostOf(body, 1, chatTexts(CHAT))).toMatchObject({ kind: "chat", via: "vm", marks: [body.slice(0, 40)] });
+    // the text of a message already in the watch: the bot copied it (to quote it in an issue), it did not post it
+    const copied = CHAT.find((line) => (line.split("\t")[3] ?? "").length > 100)!.split("\t")[3]!;
+    expect(vmChatPostOf(copied, 1, chatTexts(CHAT))).toBeNull();
   });
 });
 

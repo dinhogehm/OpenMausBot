@@ -9653,13 +9653,21 @@ bus.subscribe((event: RuntimeEvent) => {
 
 // A watcher bot's own comment, post or spreadsheet note is remembered for
 // a while, so its watch does not wake it on that echo (server/watch-echo.ts).
-// Only shell commands (gh, gog) count: writes typed or pasted through the
-// VM's computer are not recognised (server/watch-echo.ts) — they wake.
+// Shell commands (gh, gog) count, and of the VM's computer only the Chat
+// post put on its clipboard to paste (server/watch-echo.ts vmChatPostOf).
 bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
-  if (event.type !== "item.started" || event.itemType !== "tool" || !event.summary) return;
+  if (event.type !== "item.started" || event.itemType !== "tool") return;
   const bot = store.botByThread(event.threadId);
   if (!bot) return;
+  if (/(?:^|__)clipboard_write$/.test(event.title ?? "")) {
+    try {
+      const { text } = JSON.parse(event.input ?? "") as { text?: unknown };
+      if (typeof text === "string") autonomy.noteVmClipboard(bot.id, text);
+    } catch { /* a preview that is not JSON: nothing kept */ }
+    return;
+  }
+  if (!event.summary) return;
   // the whole command when the preview has it (the summary stops at 200 characters)
   let command = event.summary;
   try {
