@@ -66,19 +66,37 @@ export function readTail(path: string, bytes: number): string {
 export class ReleaseWatchState {
   private readonly path: string;
   private alerted: Record<string, number> = {};
+  /** Alerts told (stuck tags, halts): few, and each must never repeat. */
   private told: string[] = [];
+  /** release-priority's decisions (`<label>#<pid>`): many, in a list of their
+   * own so they never push a halt or a tag out of `told`. */
+  private decided: string[] = [];
 
   constructor(path: string) {
     this.path = path;
     try {
-      const raw = JSON.parse(readFileSync(path, "utf8")) as { alerted?: Record<string, number>; told?: string[] };
+      const raw = JSON.parse(readFileSync(path, "utf8")) as { alerted?: Record<string, number>; told?: string[]; decided?: string[] };
       this.alerted = raw.alerted ?? {};
-      this.told = raw.told ?? [];
+      // decisions written to `told` by an earlier build move to their own list
+      this.told = (raw.told ?? []).filter((key) => !key.startsWith("preempt:"));
+      this.decided = [...(raw.decided ?? []), ...(raw.told ?? []).filter((key) => key.startsWith("preempt:")).map((key) => key.slice("preempt:".length))];
     } catch { /* first run */ }
   }
 
   private save(): void {
-    writeFileAtomic(this.path, `${JSON.stringify({ alerted: this.alerted, told: this.told }, null, 2)}\n`, { mode: 0o600 });
+    writeFileAtomic(this.path, `${JSON.stringify({ alerted: this.alerted, told: this.told, decided: this.decided }, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  /** Whether release-priority already decided `key`. */
+  isDecided(key: string): boolean {
+    return this.decided.includes(key);
+  }
+
+  /** Records a release-priority decision (the last 200 are kept). */
+  decide(key: string): void {
+    if (this.decided.includes(key)) return;
+    this.decided = [...this.decided.slice(-199), key];
+    this.save();
   }
 
   /** Whether `count` failures of `sha` are news. Records them if so. */
@@ -89,8 +107,8 @@ export class ReleaseWatchState {
     return true;
   }
 
-  /** Whether `key` was already told. */
-  has(key: string): boolean {
+  /** Whether `key` (a stuck tag, a halt) was told already. */
+  wasTold(key: string): boolean {
     return this.told.includes(key);
   }
 
@@ -169,6 +187,18 @@ export function tagStuck(input: { releasedSha: string; releasedAt: number; tagSh
 }
 
 const COMMIT_SHA = /^[0-9a-f]{7,40}$/;
+const sameCommit = (a: string, b: string) => a.startsWith(b) || b.startsWith(a);
+
+/** Whether a halt is still news: the .sha stays on disk until someone deletes
+ * it, even after a newer tip shipped (the watcher only compares it with the
+ * remote tip). Not when production already contains the halted commit, nor
+ * when main's tip moved past it (the watcher tries the new tip). Unknowns
+ * (null) keep the alert: a halt is never hidden on a guess. */
+export function haltStillMatters(input: { haltedSha: string; releasedContainsHalt: boolean | null; mainTip: string | null }): boolean {
+  if (input.releasedContainsHalt === true) return false;
+  if (input.mainTip && COMMIT_SHA.test(input.mainTip) && !sameCommit(input.mainTip, input.haltedSha)) return false;
+  return true;
+}
 /** The watcher's reason codes, said in pt-BR (unknown codes are kept as they are). */
 const HALT_REASONS: Record<string, string> = {
   "content-failure-limit": "limite de falhas de conteúdo atingido",

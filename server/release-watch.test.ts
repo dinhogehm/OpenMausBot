@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { haltedRelease, releaseFailureCause, releaseFailures, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagContainsRelease, tagStuck, tagStuckCause } from "./release-watch.ts";
+import { haltedRelease, haltStillMatters, releaseFailureCause, releaseFailures, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagContainsRelease, tagStuck, tagStuckCause } from "./release-watch.ts";
 
 const log = [
   "Release production failed for b51648498 (exit 1)",
@@ -128,12 +128,46 @@ describe("after a release", () => {
       expect(state.once("tag:1bbd5c2a7")).toBe(false);
       expect(new ReleaseWatchState(join(dir, "release-watch.json")).once("tag:1bbd5c2a7")).toBe(false);
       expect(state.once("halt:2995ef215")).toBe(true);
-      // the release-priority decisions ride on it too
-      expect(state.has("preempt:release:production:c88f99d62#40409")).toBe(false);
-      state.once("preempt:release:production:c88f99d62#40409");
-      expect(new ReleaseWatchState(join(dir, "release-watch.json")).has("preempt:release:production:c88f99d62#40409")).toBe(true);
+      // the release-priority decisions persist too, in a list of their own
+      expect(state.isDecided("release:production:c88f99d62#40409")).toBe(false);
+      state.decide("release:production:c88f99d62#40409");
+      expect(new ReleaseWatchState(join(dir, "release-watch.json")).isDecided("release:production:c88f99d62#40409")).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // INSP-R r2 item 3: 40+ preemption decisions pushed `halt:X` out of the alert list
+  it("keeps release-priority decisions apart: they never push a halt out, and an old build's are moved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-release-"));
+    try {
+      const path = join(dir, "release-watch.json");
+      const state = new ReleaseWatchState(path);
+      expect(state.once("halt:2995ef215")).toBe(true);
+      for (let i = 0; i < 45; i += 1) state.decide(`release:production:x#${1000 + i}`);
+      expect(state.once("halt:2995ef215")).toBe(false);
+      expect(new ReleaseWatchState(path).once("halt:2995ef215")).toBe(false);
+      expect(new ReleaseWatchState(path).isDecided("release:production:x#1044")).toBe(true);
+      // the previous build wrote decisions into `told` as "preempt:…"
+      writeFileSync(path, JSON.stringify({ told: ["halt:aaaaaaa1", "preempt:release:production:y#7"] }));
+      const old = new ReleaseWatchState(path);
+      expect(old.isDecided("release:production:y#7")).toBe(true);
+      expect(old.wasTold("halt:aaaaaaa1")).toBe(true);
+      expect(old.wasTold("preempt:release:production:y#7")).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not tell a halt that production already contains, or that main's tip moved past", () => {
+    const haltedSha = "2995ef215";
+    expect(haltStillMatters({ haltedSha, releasedContainsHalt: false, mainTip: "2995ef215fc784ea87387cb1550c1a733aba4dc5" })).toBe(true);
+    // superseded: a newer tip shipped and contains it, or main moved on
+    expect(haltStillMatters({ haltedSha, releasedContainsHalt: true, mainTip: "2995ef215fc784ea87387cb1550c1a733aba4dc5" })).toBe(false);
+    expect(haltStillMatters({ haltedSha, releasedContainsHalt: false, mainTip: "c88f99d62000000000000000000000000000000a" })).toBe(false);
+    expect(haltStillMatters({ haltedSha, releasedContainsHalt: true, mainTip: "c88f99d62000000000000000000000000000000a" })).toBe(false);
+    // unknowns never hide a halt
+    expect(haltStillMatters({ haltedSha, releasedContainsHalt: null, mainTip: null })).toBe(true);
+    expect(haltStillMatters({ haltedSha, releasedContainsHalt: null, mainTip: "garbage" })).toBe(true);
   });
 });

@@ -341,7 +341,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
-import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, tagContainsRelease, tagStuck, tagStuckCause } from "./release-watch.ts";
+import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, haltStillMatters, tagContainsRelease, tagStuck, tagStuckCause } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8204,7 +8204,7 @@ async function revalidateNeedsInputGoals(): Promise<void> {
 /** A production release that fails twice on the same commit: a red chip and
  * a report on the Chief's desk (server/release-watch.ts). Only the server the
  * desktop app runs reads this Mac's release logs, every 2 min. */
-const releaseWatch = { state: DESKTOP_MANAGED && !process.env.VITEST ? new ReleaseWatchState(join(DATA_DIR, "release-watch.json")) : null, lastAt: 0 };
+const releaseWatch = { state: DESKTOP_MANAGED && !process.env.VITEST ? new ReleaseWatchState(join(DATA_DIR, "release-watch.json")) : null, lastAt: 0, quiet: new Set<string>() };
 /** A release alert on the Chief's desk: a red chip and a report. */
 function releaseAlertToChief(text: string, report: string): void {
   console.warn(`[release] ${text}`);
@@ -8223,7 +8223,18 @@ function readHaltedRelease(): ReturnType<typeof haltedRelease> {
 /** Production ran ahead of the tag (GH013), or the watcher halted a tip: told once each. */
 async function checkReleaseAftermath(state: ReleaseWatchState, released: string): Promise<void> {
   const halted = readHaltedRelease();
-  if (halted && state.once(`halt:${halted.sha}`)) {
+  let haltMatters = false;
+  if (halted && !state.wasTold(`halt:${halted.sha}`)) {
+    // a .sha left behind after a newer tip shipped is not news
+    const repo = join(homedir(), "Projetos", "nuria-platform");
+    const releasedContainsHalt = released
+      ? await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", halted.sha, released]).then(() => true, (error: unknown) => ((error as { code?: unknown }).code === 1 ? false : null))
+      : null;
+    const mainTip = await execCc("git", ["-C", repo, "ls-remote", "origin", "refs/heads/main"]).then((out) => out.split(/\s+/)[0] || null, () => null);
+    haltMatters = haltStillMatters({ haltedSha: halted.sha, releasedContainsHalt, mainTip });
+    if (!haltMatters && !releaseWatch.quiet.has(`halt:${halted.sha}`) && releaseWatch.quiet.add(`halt:${halted.sha}`)) console.log(`[release] halt of ${halted.sha.slice(0, 9)} left behind: production contains it (${releasedContainsHalt}) or main's tip moved (${mainTip?.slice(0, 9) ?? "?"}) — no alert`);
+  }
+  if (halted && haltMatters && state.once(`halt:${halted.sha}`)) {
     const text = `O watcher de produção PAROU de tentar o commit ${halted.sha.slice(0, 9)} (${halted.reason}${halted.failures ? `, ${halted.failures} falhas` : ""}): ele não sai sozinho; precisa de ação.`;
     releaseAlertToChief(text, `[Alerta do servidor: release de produção parado] ${text}${halted.lastFailure ? ` Última falha: ${halted.lastFailure}.` : ""}\nArquivos: ${HALT_ESCALATION_FILE}, ${HALTED_SHA_FILE}. Descubra a causa (drift de tenant, saúde), corrija ou decida com o dono; para tentar de novo o mesmo commit, o halt precisa ser removido (rm ${HALTED_SHA_FILE}).`);
   }
@@ -8245,7 +8256,7 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
         .then(() => true, (error: unknown) => ((error as { code?: unknown }).code === 1 ? false : null));
     }
     contains = tagContainsRelease({ releasedKnown, tagKnown, isAncestor });
-    if (contains === null) console.log(`[release] tag ${PRODUCTION_TAG} at ${tagSha.slice(0, 9)} vs released ${released.slice(0, 9)}: not verifiable in ${repo} (commit missing here, or git failed) — no stuck-tag alert`);
+    if (contains === null && !releaseWatch.quiet.has(`tag:${tagSha}:${released}`) && releaseWatch.quiet.add(`tag:${tagSha}:${released}`)) console.log(`[release] tag ${PRODUCTION_TAG} at ${tagSha.slice(0, 9)} vs released ${released.slice(0, 9)}: not verifiable in ${repo} (commit missing here, or git failed) — no stuck-tag alert`);
   }
   let releasedAt = Date.now();
   try { releasedAt = statSync(RELEASED_SHA_FILE).mtimeMs; } catch { return; }
@@ -8849,8 +8860,8 @@ const releasePriority = {
   lastAt: 0,
   state: {
     handled: {
-      has: (key: string) => preemptHandled.has(key) || Boolean(releaseWatch.state?.has(`preempt:${key}`)),
-      add: (key: string) => { preemptHandled.add(key); releaseWatch.state?.once(`preempt:${key}`); },
+      has: (key: string) => preemptHandled.has(key) || Boolean(releaseWatch.state?.isDecided(key)),
+      add: (key: string) => { preemptHandled.add(key); releaseWatch.state?.decide(key); },
     },
     retries: new Map<string, number>(),
   } as PreemptState,
