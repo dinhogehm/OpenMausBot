@@ -20,6 +20,9 @@ export interface SelfWrite {
   kind: WatchKind;
   /** What the write leaves in the watched output: its text. */
   marks: string[];
+  /** Every value it wrote, short ones too ("Publicado"): they count only in a
+   * row that carries the bot's mark. */
+  values?: string[];
 }
 
 /** How long after a write its echo can still show up (the slowest watch runs every 10 min). */
@@ -37,14 +40,15 @@ const words = (command: string): string[] => command.trim().split(/\s+/);
 const normalize = (text: string): string => text.toLowerCase().replace(/\s+/g, " ").trim();
 
 /** Quoted text in the command, and the strings inside quoted JSON values. */
-function textMarks(command: string): string[] {
+function quotedValues(command: string): string[] {
   const quoted = [...command.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2] ?? "");
   const inner = quoted.flatMap((text) => [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]!));
-  return [...new Set([...quoted, ...inner]
-    .map((text) => normalize(text.replace(/\\(.)/g, "$1")))
-    // not JSON itself, not a range ("Clientes!H173")
-    .filter((text) => text.length >= MIN_TEXT_MARK && !/^[[{]/.test(text) && !/![a-z]+\d/.test(text))
-    .map((text) => text.slice(0, TEXT_MARK_MAX)))];
+  // not JSON itself, not a range ("Clientes!H173")
+  return [...new Set([...quoted, ...inner].map((text) => normalize(text.replace(/\\(.)/g, "$1"))).filter((text) => text && !/^[[{]/.test(text) && !/![a-z]+\d/.test(text)))];
+}
+
+function textMarks(command: string): string[] {
+  return [...new Set(quotedValues(command).filter((text) => text.length >= MIN_TEXT_MARK).map((text) => text.slice(0, TEXT_MARK_MAX)))];
 }
 
 /** The write a shell command makes to something a watch can read, if any.
@@ -65,7 +69,9 @@ export function selfWriteOf(command: string, at: number): SelfWrite | null {
   }
   if (!kind) return null;
   const marks = textMarks(bare);
-  return marks.length ? { at, kind, marks } : null;
+  const values = quotedValues(bare).filter((text) => text.length >= 3 && text.length <= 60);
+  if (!marks.length && !values.length) return null;
+  return { at, kind, marks, ...(values.length ? { values } : {}) };
 }
 
 /** What a watch command reads, for matching it with the bot's writes. */
@@ -101,13 +107,20 @@ const rowKey = (line: string): string => line.trim().split(/\t| {2,}| \| /)[0]!.
 /** Only the bot's marked cell of this line is new: the same row before is
  * the same once marked cells are emptied. A line with the mark and no row
  * before is one the bot wrote (its comment, its post, the row it opened). */
-function onlyMarkedChanged(line: string, previous: readonly string[], mark: RegExp): boolean {
+function onlyMarkedChanged(line: string, previous: readonly string[], mark: RegExp, wrote: ReadonlySet<string> = new Set()): boolean {
   const kept = unmarked(line, mark);
   if (kept === line) return false;
   const key = rowKey(line);
   const before = key ? previous.filter((old) => old !== line && rowKey(old) === key) : [];
   if (!before.length) return true;
-  return before.length === 1 && normalize(unmarked(before[0]!, mark)) === normalize(kept);
+  if (before.length > 1) return false;
+  if (normalize(unmarked(before[0]!, mark)) === normalize(kept)) return true;
+  // the bot also set a short value in its marked row ("Publicado" in Status):
+  // each other changed cell must be exactly a value it just wrote
+  const cells = line.split(/\t| \| /);
+  const old = before[0]!.split(/\t| \| /);
+  if (!wrote.size || cells.length !== old.length) return false;
+  return cells.every((cell, i) => normalize(cell) === normalize(old[i]!) || mark.test(cell) || wrote.has(normalize(cell)));
 }
 
 function carries(line: string, write: SelfWrite): boolean {
@@ -126,7 +139,8 @@ export function isEcho(
 ): boolean {
   if (!freshLines.length) return false;
   const recent = kind ? writes.filter((write) => write.kind === kind && now - write.at <= ECHO_WINDOW_MS) : [];
+  const wrote = new Set(recent.flatMap((write) => write.values ?? []));
   return freshLines.every((line) =>
-    (own.mark ? onlyMarkedChanged(line, own.previous ?? [], own.mark) : false)
+    (own.mark ? onlyMarkedChanged(line, own.previous ?? [], own.mark, wrote) : false)
     || recent.some((write) => carries(line, write)));
 }
