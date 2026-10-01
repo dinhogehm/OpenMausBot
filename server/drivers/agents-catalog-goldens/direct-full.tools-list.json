@@ -885,7 +885,7 @@
     },
     {
       "name": "cc_session_start",
-      "description": "Open a Claude Code session to do a piece of work: it runs on its own in a new git worktree of repo and does the coding, tests, PR and gates itself. You are its manager, not the one who codes. When it stops you get its report in THIS conversation as a new turn — end your turn after starting it; never poll. Up to 4 sessions run at once on this computer.",
+      "description": "Open a Claude Code session to do a piece of work: it runs on its own in a new git worktree of repo and does the coding, tests, PR and gates itself. You are its manager, not the one who codes. When it stops you get its report in THIS conversation as a new turn — end your turn after starting it; never poll. Up to 4 sessions run at once on this computer; when they are taken (or starts are already waiting) it waits in the session queue, P1 first, and opens by itself — the answer gives its place and id.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -934,6 +934,15 @@
           "reply_thread_id": {
             "type": "string",
             "description": "Optional: another of your conversations that should also get its reports (where the order came from)."
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "P1",
+              "Reprovado",
+              "normal"
+            ],
+            "description": "Its place in the session queue if it has to wait: P1 (production down, hotfix), Reprovado (a client rejected a delivery), normal. Default: read from the title only."
           }
         },
         "required": [
@@ -1002,7 +1011,7 @@
     },
     {
       "name": "cc_session_archive",
-      "description": "Archive a Claude Code session once its work has shipped (merged and in production) or was abandoned. Refused while a PR of it is open or its merge is not yet in production, unless force with a reason. remove_worktree deletes its worktree only if it has no uncommitted changes.",
+      "description": "Archive a Claude Code session once its work has shipped (merged and in production) or was abandoned. Refused while a PR of it is open or its merge is not yet in production, unless force with a reason. remove_worktree deletes its worktree only if it has no uncommitted changes. With the id of a start of yours still in the session queue (cc_session_list), it takes it out of the queue.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

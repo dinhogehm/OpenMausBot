@@ -500,3 +500,79 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(JSON.parse(readFileSync(calls, "utf8").trim().split("\n")[1]!).argv.slice(0, 3)).toEqual(["-p", "--resume", ccLedger()[0].id]);
   }, { OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000" });
 }, 90_000);
+
+it("queues starts once the 4 slots are taken, opens the P1 first when they free, and lets the bot cancel one (INSP-F F3)", async () => {
+  const { chmodSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const tools = mkdtempSync(join(tmpdir(), "omb-fake-claude-queue-"));
+  const fake = join(tools, "fake-claude.mjs");
+  const calls = join(tools, "calls.jsonl");
+  // HOLD:<ms> keeps the session's turn (and its slot) that long
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+const argv = process.argv.slice(2);
+const prompt = argv[argv.length - 1];
+let cwd = process.cwd();
+const w = argv.indexOf("-w");
+if (w >= 0) { cwd = join(cwd, ".claude", "worktrees", argv[w + 1]); mkdirSync(cwd, { recursive: true }); }
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ first: prompt.split("\\n")[0] }) + "\\n");
+console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
+const hold = /HOLD:(\\d+)/.exec(prompt);
+if (hold) await new Promise(r => setTimeout(r, Number(hold[1])));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "done", total_cost_usd: 0.01 }));
+`);
+  chmodSync(fake, 0o755);
+  await fixture(async f => {
+    const { execFileSync } = await import("node:child_process");
+    const data = f.session.info.dataDir;
+    const repo = join(data, "repo");
+    execFileSync("git", ["init", "-q", repo]);
+    const start = (title: string, hold: number, extra: object = {}) => ({ tool: "cc_session_start", arguments: { title, brief: `${title} HOLD:${hold}`, repo, surface: "cli", ...extra } });
+    f.save({ turns: [
+      { steps: [
+        start("#9901 um", 6000), start("#9902 dois", 6000), start("#9903 três", 6000), start("#9904 quatro", 6000),
+        // the brief says "hotfix" in passing: not urgent, the title decides
+        { tool: "cc_session_start", arguments: { title: "#9905 limpeza", brief: "não use os scripts de hotfix HOLD:100", repo, surface: "cli" } },
+        start("#9906 queda do login", 100, { priority: "P1" }),
+        start("#9907 a cancelar", 100),
+        // the same start twice keeps its one place
+        start("#9907 a cancelar", 100),
+        { tool: "cc_session_list", arguments: {} },
+      ], reply: "Queued" },
+      ...Array.from({ length: 20 }, () => ({ reply: "ok" })),
+    ] });
+    await f.send("Abra as sete sessões.");
+    await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBeGreaterThan(0);
+    const results = f.turns()[0].evidence.filter((entry: any) => entry.step?.tool).map((entry: any) => String(entry.response?.result?.content?.[0]?.text ?? ""));
+    expect(results.slice(0, 4).every((text: string) => text.includes("iniciada na própria worktree"))).toBe(true);
+    expect(results[4]).toContain("entrou na fila de sessões (#1, prioridade normal");
+    expect(results[5]).toContain("entrou na fila de sessões (#1, prioridade P1");
+    expect(results[6]).toContain("entrou na fila de sessões (#3, prioridade normal");
+    const queueId = /id ([0-9a-f]{8})\)/.exec(results[6])![1];
+    expect(results[7]).toContain(`já estava na fila de sessões (#3, id ${queueId})`);
+    expect(results[8]).toContain('1. "#9906 queda do login" · prioridade P1');
+    expect(results[8]).toContain(`3. "#9907 a cancelar" · prioridade normal`);
+    const chips = await f.chips();
+    expect(chips).toContain('Fila de sessões: "#9906 queda do login" é a #1 (prioridade P1); abre sozinha quando uma vaga liberar');
+    // the bot takes one out of the queue with its id, in its next turn (the
+    // four sessions hold their slots for 6 s, so nothing else wakes it before)
+    expect(f.turns()).toHaveLength(1);
+    f.save({ turns: [
+      { reply: "Queued" },
+      { steps: [{ tool: "cc_session_archive", arguments: { session_id: queueId } }], reply: "Cancelled" },
+      ...Array.from({ length: 20 }, () => ({ reply: "ok" })),
+    ] });
+    await f.send("Tire a #9907 da fila.");
+    await expect.poll(async () => (await f.chips()).includes('Fila de sessões: "#9907 a cancelar" saiu da fila (cancelado)'), { timeout: 20_000 }).toBe(true);
+    // the four free their slots: the P1 opens before the one that came first
+    await expect.poll(() => readFileSync(calls, "utf8").trim().split("\n").length, { timeout: 30_000 }).toBe(6);
+    const opened = readFileSync(calls, "utf8").trim().split("\n").map((line) => JSON.parse(line).first as string);
+    // (a CLI session's first line is its brief)
+    expect(opened.slice(4)).toEqual(["#9906 queda do login HOLD:100", "não use os scripts de hotfix HOLD:100"]);
+    const after = await f.chips();
+    expect(after.indexOf('Fila de sessões: "#9906 queda do login" abriu')).toBeGreaterThan(-1);
+    expect(after.indexOf('Fila de sessões: "#9906 queda do login" abriu')).toBeLessThan(after.indexOf('Fila de sessões: "#9905 limpeza" abriu'));
+    expect(after.some((chip: string) => chip.includes('"#9907 a cancelar" abriu'))).toBe(false);
+  }, { OMB_CC_BIN: fake });
+}, 120_000);
