@@ -54,13 +54,21 @@ export function prLinks(text: string, slug: string): Array<{ url: string; number
     const number = Number(match[2]);
     if (!found.has(number)) found.set(number, `https://github.com/${match[1]}/pull/${number}`);
   }
+  // sessions often report a PR only as "PR #9315" (a bare "#N" may be an issue, so it is not taken)
+  for (const match of text.matchAll(/\b(?:PR|pull request)\s*#(\d{2,6})\b/gi)) {
+    const number = Number(match[1]);
+    if (!found.has(number)) found.set(number, `https://github.com/${slug}/pull/${number}`);
+  }
   return [...found].map(([number, url]) => ({ url, number }));
 }
 
-/** `origin`'s "owner/repo" from its URL (https or ssh); null when not GitHub. */
+/** `origin`'s "owner/repo" from its URL; null when not GitHub. Every form
+ * git accepts: https://github.com/o/r(.git), git@github.com:o/r(.git),
+ * ssh://git@github.com/o/r and the port-443 route
+ * ssh://git@ssh.github.com:443/o/r.git (nuria-platform's origin). */
 export function githubSlug(remoteUrl: string): string | null {
-  const match = /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(remoteUrl.trim());
-  return match ? match[1]! : null;
+  const match = /(?:^|[@/])(?:ssh\.)?github\.com(?::\d+)?[:/]([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(remoteUrl.trim());
+  return match ? `${match[1]}/${match[2]}` : null;
 }
 
 /** The commit a tag points at, from `git ls-remote origin <tag> <tag>^{}`
@@ -128,7 +136,7 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
   for (const session of sessions) {
     if (session.status === "archived") continue;
     if (!session.delivery) {
-      if (!session.lastReport?.includes("/pull/")) continue;
+      if (!/\/pull\/|\b(?:PR|pull request)\s*#\d/i.test(session.lastReport ?? "")) continue;
       session.delivery = { prs: {} };
     }
     const delivery = session.delivery;
@@ -219,7 +227,8 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
       slug = githubSlug(await deps.git(session.repo, ["remote", "get-url", "origin"])) ?? undefined;
     } catch { /* not a repository any more */ }
   }
-  if (!slug) return { blockers, unknown };
+  // a repository whose GitHub address cannot be read is not "nothing holds it"
+  if (!slug) return { blockers, unknown: ["o repositório (não consegui ler o endereço do GitHub)"] };
   const numbers = new Map<number, DeliveryPr | undefined>();
   for (const pr of Object.values(session.delivery?.prs ?? {})) numbers.set(pr.number, pr);
   for (const link of prLinks(session.lastReport ?? "", slug)) if (!numbers.has(link.number)) numbers.set(link.number, undefined);

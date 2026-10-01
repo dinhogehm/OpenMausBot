@@ -40,6 +40,14 @@ describe("delivery in production", () => {
     expect(githubSlug("https://github.com/dinhogehm/nuria-platform.git")).toBe(SLUG);
     expect(githubSlug("git@github.com:dinhogehm/nuria-platform.git")).toBe(SLUG);
     expect(githubSlug("git@gitlab.com:a/b.git")).toBeNull();
+    // every form git accepts, including nuria-platform's port-443 ssh origin
+    expect(githubSlug("ssh://git@ssh.github.com:443/dinhogehm/nuria-platform.git")).toBe(SLUG);
+    expect(githubSlug("ssh://git@github.com/dinhogehm/nuria-platform")).toBe(SLUG);
+    expect(githubSlug("https://github.com/dinhogehm/nuria-platform")).toBe(SLUG);
+    expect(githubSlug("https://github.com/dinhogehm/nuria-platform/")).toBe(SLUG);
+    expect(githubSlug("git@github.com:dinhogehm/nuria-platform")).toBe(SLUG);
+    expect(githubSlug("https://notgithub.com/a/b.git")).toBeNull();
+    expect(prLinks("Merged PR #9315 and pull request #9316; issue #9295 stays open", SLUG).map((link) => link.number)).toEqual([9315, 9316]);
     expect(parseLsRemoteTag(`aaa\trefs/tags/x\nbbb\trefs/tags/x^{}\n`, "x")).toBe("bbb");
     expect(parseLsRemoteTag(`aaa\trefs/tags/x\n`, "x")).toBe("aaa");
     expect(parseLsRemoteTag("", "x")).toBeNull();
@@ -108,5 +116,13 @@ describe("archiving before delivery", () => {
     const offline = fakeDeps();
     offline.deps.gh = async () => { throw new Error("gh: not logged in"); };
     expect(await archiveBlockers(session(), offline.deps)).toEqual({ blockers: [], unknown: ["PR #9400"] });
+  });
+});
+
+describe("a repository whose GitHub address cannot be read", () => {
+  it("is reported as not checked when archiving, never as nothing holding it", async () => {
+    const { deps } = fakeDeps();
+    deps.git = async () => "/local/path/not/github\n";
+    expect(await archiveBlockers(session(), deps)).toEqual({ blockers: [], unknown: ["o repositório (não consegui ler o endereço do GitHub)"] });
   });
 });
