@@ -8721,9 +8721,6 @@ const desktopWork: DesktopWorkDeps = {
 // app: back to idle on load, so they take messages again.
 if (process.platform === "darwin") reviveScreenFailures(desktopWork);
 
-/** `git worktree remove` without --force: a worktree with uncommitted
- * changes is kept. Only a session's own .claude/worktrees folder. Returns
- * what happened, for the chip and the tool result. */
 /** The branch origin/HEAD points to ("main"), what a new app session must show. */
 function repoBaseBranch(repo: string): string {
   try {
@@ -8780,6 +8777,9 @@ function cleanNestedWorktrees(session: CcSession): string {
   return removeNestedWorktrees(session.cwd, (args) => String(execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } })));
 }
 
+/** `git worktree remove` without --force: a worktree with uncommitted
+ * changes is kept. Only a session's own .claude/worktrees folder. Returns
+ * what happened, for the chip and the tool result. */
 function removeSessionWorktree(session: CcSession): string {
   if (!session.cwd || !session.cwd.includes("/.claude/worktrees/")) return "";
   if (!existsSync(session.cwd)) return `A worktree ${session.cwd} já não existia.`;
