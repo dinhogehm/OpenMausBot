@@ -1053,6 +1053,46 @@
       }
     },
     {
+      "name": "owner_pending",
+      "description": "Keep a list of what waits on the person (a decision, an approval, an answer only they have), shown to them in \"Precisa de você\" until resolved. add one item per thing, instead of ending replies with \"continua com você…\"; resolve it when it is settled; list to see what is open. Not for rooms.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "add",
+              "resolve",
+              "list"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "add: what the person must do or decide, in their words (\"aprovar o carrier da #9315\")."
+          },
+          "due": {
+            "type": "string",
+            "maxLength": 80,
+            "description": "add, optional: by when (\"hoje 18h\")."
+          },
+          "link": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "add, optional: where to act (PR, issue, session link)."
+          },
+          "id": {
+            "type": "string",
+            "description": "resolve: the item's id from add or list, or \"all\" for this conversation's."
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
       "name": "memory_log",
       "description": "Write one line to today's log file, memory/log/YYYY-MM-DD.md, stamped with the time and this conversation: what happened, not what is true. Use it for events worth a trace — a deploy went out, a person decided something, a check failed — that should not shape future sessions. Logs are never loaded into your prompt; the person can read them, and session_search finds them later. A fact that should hold in every session goes to memory_update instead.",
       "inputSchema": {

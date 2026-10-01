@@ -809,6 +809,8 @@
   "needsYou.ageMinutes": "{count} min",
   "needsYou.ageHours": "{count} h",
   "needsYou.ageDays": "{count} d",
+  "needsYou.due": "até {due}",
+  "needsYou.resolve": "Marcar como resolvido: {title}",
   "chat.digestTools": "Ferramentas: {tools}",
   "chat.digestToolFailed": "{name} ×{count} ({failed} com falha)",
   "chat.digestToolsMore": "+{count} outras",

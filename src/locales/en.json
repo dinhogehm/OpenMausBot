@@ -885,6 +885,8 @@
   "needsYou.ageMinutes": "{count} min",
   "needsYou.ageHours": "{count} h",
   "needsYou.ageDays": "{count} d",
+  "needsYou.due": "by {due}",
+  "needsYou.resolve": "Mark done: {title}",
   "chat.digestTools": "Tools: {tools}",
   "chat.digestToolFailed": "{name} ×{count} ({failed} failed)",
   "chat.digestToolsMore": "+{count} more",

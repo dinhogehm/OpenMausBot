@@ -40,4 +40,13 @@ describe("what needs the person, from every bot", () => {
     expect(renderToStaticMarkup(createElement(SidebarNeedsYou, { items: [], density: "comfortable", now, onJump: () => {} }))).toBe("");
     expect(renderToStaticMarkup(createElement(SidebarNeedsYou, { items: needsYouItems(bots), density: "icons", now, onJump: () => {} }))).toBe("");
   });
+
+  it("lists each owner_pending item with its deadline, and offers to mark it done", () => {
+    const listed = [bot("chief", "Chief of Staff", [task("c0", "Main", { ownerPending: [{ id: "o1", title: "Aprovar o carrier da #9315", since: now - 2 * 3_600_000, due: "hoje 18h", link: "https://github.com/o/r/pull/9315" }] })])];
+    const items = needsYouItems(listed);
+    expect(items).toEqual([expect.objectContaining({ threadId: "c0", title: "Aprovar o carrier da #9315", pendingId: "o1", due: "hoje 18h" })]);
+    const html = renderToStaticMarkup(createElement(SidebarNeedsYou, { items, density: "comfortable", now, onJump: () => {}, onResolve: () => {} }));
+    expect(html).toContain("Aprovar o carrier da #9315 · Chief of Staff · esperando há 2 h · até hoje 18h · https://github.com/o/r/pull/9315");
+    expect(html).toContain('aria-label="Marcar como resolvido: Aprovar o carrier da #9315"');
+  });
 });

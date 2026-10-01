@@ -1213,6 +1213,14 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
     if (r.error) return { text: `Couldn't end goal mode: ${String(r.error)}`, isError: true };
     return { text: String(r.message ?? "Goal mode ended.") };
   }
+  if (name === "owner_pending") {
+    const r = await api("/api/internal/owner-pending", {
+      method: "POST",
+      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: args.action, title: args.title, due: args.due, link: args.link, id: args.id }),
+    });
+    if (r.error) return { text: `owner_pending: ${String(r.error)}`, isError: true };
+    return { text: String(r.message ?? "ok") };
+  }
   if (name === "memory_log") {
     if (typeof args.text !== "string" || !args.text.trim()) {
       return { text: "memory_log needs text: one line about what happened.", isError: true };

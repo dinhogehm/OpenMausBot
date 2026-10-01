@@ -2142,7 +2142,15 @@ export function Sidebar({ open, onClose }: { open: boolean; onClose: () => void 
         </div>
       </div>
 
-      <SidebarNeedsYou items={needsYou} density={density} onJump={(item) => dispatch({ type: "switchTask", botId: item.botId, threadId: item.threadId })} />
+      <SidebarNeedsYou
+        items={needsYou}
+        density={density}
+        onJump={(item) => dispatch({ type: "switchTask", botId: item.botId, threadId: item.threadId })}
+        onResolve={(item) => {
+          void api(`/api/bots/${item.botId}/owner-pending/${item.pendingId}/resolve`, { method: "POST" })
+            .catch((cause) => dispatch({ type: "error", message: cause instanceof Error ? cause.message : String(cause) }));
+        }}
+      />
 
       {attentionPinned && density !== "icons" && (
         <SidebarAttentionPanel

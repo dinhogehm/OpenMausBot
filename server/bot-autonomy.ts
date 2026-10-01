@@ -180,12 +180,32 @@ export interface BotPromise {
   /** Reported as overdue (once). */
   overdueAt?: number;
 }
+/** Something that waits on the person (owner_pending): a decision, an
+ * approval, a draft left in a field. It stays in "Precisa de você" until
+ * the bot, the server or the person resolves it. */
+export interface OwnerPending {
+  id: string;
+  botId: string;
+  threadId: string;
+  title: string;
+  createdAt: number;
+  /** By when, as the bot wrote it ("hoje 18h", "2026-10-02"). */
+  due?: string;
+  /** Where to act on it (a PR, a claude:// session link). */
+  link?: string;
+  /** Set by the server for its own items, so it can resolve them itself. */
+  key?: string;
+}
+export const OWNER_PENDING_TITLE_MAX = 200;
+export const OWNER_PENDING_MAX_PER_THREAD = 10;
+
 export const PROMISE_TEXT_MAX = 300;
 export const PROMISE_MAX_MINUTES = 7 * 1_440;
 export const PROMISES_MAX_PER_THREAD = 10;
 
 interface Ledger {
   promises?: BotPromise[];
+  ownerPending?: OwnerPending[];
   wakes: BotWake[];
   goals: BotGoal[];
   reports?: PendingReports[];
@@ -298,6 +318,7 @@ export class BotAutonomy {
   private inFlight: InFlight[] = [];
   private standingLost = new Map<string, StandingLost>();
   private promises: BotPromise[] = [];
+  private ownerPending: OwnerPending[] = [];
   /** The bot's recent writes to watched sources, per bot (not persisted). */
   private selfWrites = new Map<string, SelfWrite[]>();
   /** Leases a restart cut off, as found on load. */
@@ -340,6 +361,9 @@ export class BotAutonomy {
       for (const promise of raw.promises ?? []) {
         if (promise && typeof promise.id === "string" && typeof promise.threadId === "string" && typeof promise.botId === "string" && Number.isFinite(promise.dueAt)) this.promises.push(promise);
       }
+      for (const pending of raw.ownerPending ?? []) {
+        if (pending && typeof pending.id === "string" && typeof pending.threadId === "string" && typeof pending.botId === "string" && typeof pending.title === "string") this.ownerPending.push(pending);
+      }
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
       }
@@ -377,7 +401,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()] };
+    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()] };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -631,6 +655,50 @@ export class BotAutonomy {
 
   promisesFor(threadId: string): BotPromise[] {
     return this.promises.filter((promise) => promise.threadId === threadId);
+  }
+
+  // ── what waits on the person ───────────────────────────────────────────
+
+  /** Add (or refresh, same key or title in the conversation) one item. */
+  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string }): OwnerPending {
+    const title = input.title.replace(/\s+/g, " ").trim().slice(0, OWNER_PENDING_TITLE_MAX);
+    const same = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
+    const existing = this.ownerPending.find(same);
+    const used = new Set(this.ownerPending.map((open) => open.id));
+    let n = this.ownerPending.length + 1;
+    while (used.has(`o${n}`)) n += 1;
+    const pending: OwnerPending = {
+      id: existing?.id ?? `o${n}`, botId, threadId, title, createdAt: existing?.createdAt ?? this.now(),
+      ...(input.due?.trim() ? { due: input.due.trim().slice(0, 80) } : {}),
+      ...(input.link?.trim() ? { link: input.link.trim().slice(0, 500) } : {}),
+      ...(input.key ? { key: input.key } : {}),
+    };
+    this.ownerPending = [...this.ownerPending.filter((open) => !same(open)), pending];
+    const mine = this.ownerPending.filter((open) => open.threadId === threadId);
+    if (mine.length > OWNER_PENDING_MAX_PER_THREAD) this.ownerPending = this.ownerPending.filter((open) => open !== mine[0]);
+    this.save();
+    return pending;
+  }
+
+  /** Resolve one item of a bot by id, all of a conversation with "all", or a server item by key. */
+  resolveOwnerPending(match: { botId?: string; threadId?: string; id?: string; key?: string }): OwnerPending[] {
+    const done = this.ownerPending.filter((open) =>
+      (match.botId === undefined || open.botId === match.botId)
+      && (match.key !== undefined ? open.key === match.key
+        : match.id === "all" ? open.threadId === match.threadId
+          : open.id === match.id));
+    if (!done.length) return [];
+    this.ownerPending = this.ownerPending.filter((open) => !done.includes(open));
+    this.save();
+    return done;
+  }
+
+  ownerPendingFor(threadId: string): OwnerPending[] {
+    return this.ownerPending.filter((open) => open.threadId === threadId);
+  }
+
+  ownerPendingOf(botId: string): OwnerPending[] {
+    return this.ownerPending.filter((open) => open.botId === botId);
   }
 
   /** Past their time, not kept, not yet reported. */
@@ -901,8 +969,10 @@ export class BotAutonomy {
     const hadReports = this.reports.delete(threadId);
     const hadPromises = this.promises.some((promise) => promise.threadId === threadId);
     this.promises = this.promises.filter((promise) => promise.threadId !== threadId);
+    const hadPending = this.ownerPending.some((open) => open.threadId === threadId);
+    this.ownerPending = this.ownerPending.filter((open) => open.threadId !== threadId);
     this.inFlight = this.inFlight.filter((lease) => lease.threadId !== threadId);
-    if (hadWake || hadGoal || hadReports || hadPromises) this.save();
+    if (hadWake || hadGoal || hadReports || hadPromises || hadPending) this.save();
   }
 }
 

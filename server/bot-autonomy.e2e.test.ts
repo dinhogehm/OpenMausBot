@@ -406,3 +406,22 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(chips.some((chip) => chip.includes("passaram para esta conversa"))).toBe(true);
   }, { OMB_CC_BIN: fake });
 }, 90_000);
+
+it("lists what waits on the person in \"Precisa de você\" until the bot or the person resolves it", () => fixture(async f => {
+  f.save({ turns: [
+    { steps: [
+      { tool: "owner_pending", arguments: { action: "add", title: "Aprovar o carrier da #9315", due: "hoje 18h" } },
+      { tool: "owner_pending", arguments: { action: "add", title: "Decidir sobre a volta da #9290" } },
+      { tool: "owner_pending", arguments: { action: "resolve", id: "o2" } },
+      { tool: "owner_pending", arguments: { action: "list" } },
+    ], reply: "Anotado para você." },
+  ] });
+  await f.send("O que depende de mim?");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  expect(toolResult(f.turns()[0], "owner_pending")).toContain("o1: Aprovar o carrier da #9315 (até hoje 18h)");
+  const pending = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ownerPending ?? []);
+  await expect.poll(async () => (await pending()).map((item: any) => item.title), { timeout: 10_000 }).toEqual(["Aprovar o carrier da #9315"]);
+  await f.api(`/api/bots/${f.bot.id}/owner-pending/o1/resolve`, {});
+  expect(await pending()).toEqual([]);
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip === "Resolvido pela pessoa: Aprovar o carrier da #9315"), { timeout: 10_000 }).toBe(true);
+}), 60_000);

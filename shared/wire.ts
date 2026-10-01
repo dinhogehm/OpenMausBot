@@ -128,6 +128,15 @@ export interface WireCcAlert {
   detail?: string;
 }
 
+/** One thing that waits on the person (owner_pending), for "Precisa de você". */
+export interface WireOwnerPending {
+  id: string;
+  title: string;
+  since: number;
+  due?: string;
+  link?: string;
+}
+
 export interface WireTask {
   /** Outstanding handoffs, not an active provider turn. */
   waitingForTeammates?: boolean;
@@ -141,6 +150,8 @@ export interface WireTask {
   watchesLost?: boolean;
   /** Claude Code sessions this conversation owns that need a look. */
   ccAlerts?: WireCcAlert[];
+  /** What the bot (or the server) listed as waiting on the person. */
+  ownerPending?: WireOwnerPending[];
   threadId: string;
   title: string;
   createdAt: number;

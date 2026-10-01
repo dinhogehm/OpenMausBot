@@ -4,7 +4,18 @@
 import type { Bot, Task } from "@/state/store";
 import { t } from "@/lib/i18n";
 
-export interface NeedsYouItem { botId: string; botName: string; threadId: string; title: string; since: number; approval: boolean }
+export interface NeedsYouItem {
+  botId: string;
+  botName: string;
+  threadId: string;
+  title: string;
+  since: number;
+  approval: boolean;
+  /** An owner_pending item: its id (the person can resolve it), deadline and link. */
+  pendingId?: string;
+  due?: string;
+  link?: string;
+}
 
 export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
   const items: NeedsYouItem[] = [];
@@ -13,6 +24,10 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
     const tasks: Task[] = bot.tasks ?? [{ threadId: bot.threadId, title: bot.name, createdAt: 0, activity: bot.activity, goalNeedsInput: bot.goalNeedsInput, goalNeedsInputSince: bot.goalNeedsInputSince } as Task];
     for (const task of tasks) {
       if (task.routineRunId || task.archivedAt) continue;
+      // listed by the bot (or the server): one row each, until resolved
+      for (const pending of task.ownerPending ?? []) {
+        items.push({ botId: bot.id, botName: bot.name, threadId: task.threadId, title: pending.title, since: pending.since, approval: false, pendingId: pending.id, ...(pending.due ? { due: pending.due } : {}), ...(pending.link ? { link: pending.link } : {}) });
+      }
       const approval = task.activity === "waiting-on-you";
       if (!approval && task.goalNeedsInput !== true) continue;
       items.push({ botId: bot.id, botName: bot.name, threadId: task.threadId, title: task.title, since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval });

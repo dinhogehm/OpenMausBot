@@ -714,3 +714,20 @@ describe("a bot waiting on the person, in plain words", () => {
     expect(ownerAskAt([person, { role: "user", kind: "text", text: "@Monitor confira", at: at - 5, peerAsk: { botId: "c" } }, ask], at + 1)).toBeNull();
   });
 });
+
+describe("what waits on the person", () => {
+  it("keeps one item per thing until resolved, survives a restart, and lets the server resolve its own by key", () => {
+    const autonomy = make();
+    const a = autonomy.addOwnerPending("chief", "c1", { title: "Aprovar o carrier da #9315", due: "hoje 18h", link: "https://github.com/o/r/pull/9315" });
+    const again = autonomy.addOwnerPending("chief", "c1", { title: "Aprovar o carrier da #9315", due: "hoje 19h" });
+    expect(again.id).toBe(a.id);
+    expect(autonomy.ownerPendingFor("c1")).toEqual([again]);
+    const draft = autonomy.addOwnerPending("chief", "c1", { title: "Texto não enviado no campo da sessão #9298", key: "cc-draft:s1" });
+    expect(make().ownerPendingFor("c1").map((item) => item.id)).toEqual([a.id, draft.id]);
+    expect(autonomy.resolveOwnerPending({ key: "cc-draft:s1" })).toEqual([draft]);
+    // another bot cannot resolve this one
+    expect(autonomy.resolveOwnerPending({ botId: "monitor", id: a.id })).toEqual([]);
+    expect(autonomy.resolveOwnerPending({ botId: "chief", threadId: "c1", id: "all" })).toHaveLength(1);
+    expect(autonomy.ownerPendingOf("chief")).toEqual([]);
+  });
+});

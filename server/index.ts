@@ -104,7 +104,7 @@ import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as boat from "./boat.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner, type TeamComputerRecord } from "./team-computers.ts";
-import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireCcAlert, type WireGroup, type WireTask } from "../shared/wire.ts";
+import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireCcAlert, type WireGroup, type WireOwnerPending, type WireTask } from "../shared/wire.ts";
 import type { TeamComputersPayload } from "../shared/team-computer.ts";
 import { boatCreateRecoverySnapshot, retireDeletedBoatCreate } from "./boat-create-idempotency.ts";
 import { boatDeletionSnapshot } from "./boat-delete-journal.ts";
@@ -260,6 +260,7 @@ import {
   NEEDS_INPUT_EXPIRE_MS,
   parseWakeInput,
   promiseOverdueReport,
+  type OwnerPending,
   parseWatchInput,
   reportsPrompt,
   wakeChip,
@@ -3606,7 +3607,7 @@ if (browserCleanupReferencesReconciled) browserCleanup.startPending();
  * so a new broadcast cannot forget. */
 let activeCoordinationForThread = (_threadId: string): boolean => false;
 /** Watches and Claude Code sessions of a thread, for its row (set once both exist). */
-let threadSignals = (_threadId: string): Pick<WireTask, "watches" | "watchesLost" | "ccAlerts"> => ({});
+let threadSignals = (_threadId: string): Pick<WireTask, "watches" | "watchesLost" | "ccAlerts" | "ownerPending"> => ({});
 /** Goal mode in this thread stopped to ask the person (set once autonomy exists). */
 let goalNeedsInputForThread = (_threadId: string): number | null => null;
 const wireTask = (task: TaskRecord): WireTask => {
@@ -8664,10 +8665,14 @@ threadSignals = (threadId) => {
       if (session.status === "stalled") return [{ sessionId: session.id, title: session.title, state: "stalled" }];
       return [];
     });
+  const ownerPending = autonomy.ownerPendingFor(threadId).map((item): WireOwnerPending => ({
+    id: item.id, title: item.title, since: item.createdAt, ...(item.due ? { due: item.due } : {}), ...(item.link ? { link: item.link } : {}),
+  }));
   return {
     ...(watches.length ? { watches } : {}),
     ...(autonomy.isStandingLost(threadId) ? { watchesLost: true } : {}),
     ...(ccAlerts.length ? { ccAlerts } : {}),
+    ...(ownerPending.length ? { ownerPending } : {}),
   };
 };
 
@@ -17544,6 +17549,35 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // same thread, its conversation and files, one more turn, with a line
       // saying who asked and why. Chief-only, for a teammate it can reach,
       // never a room (coordinate there) and never a thread still running.
+      if (method === "POST" && path === "/api/internal/owner-pending") {
+        const body = await readInternalBody();
+        const bot = internalSender;
+        const threadId = internalCapability.threadId;
+        if (store.groupByThread(threadId)) return json(res, 400, { error: "não disponível em salas" });
+        if (!store.taskByThread(bot.id, threadId)) return json(res, 404, { error: "esta conversa não existe mais" });
+        requireActiveInternalCapability();
+        const line = (item: OwnerPending) => `${item.id}: ${item.title}${item.due ? ` (até ${item.due})` : ""}${item.link ? ` — ${item.link}` : ""}`;
+        if (body.action === "add") {
+          const title = typeof body.title === "string" ? body.title.trim() : "";
+          if (!title) return json(res, 400, { error: "title é obrigatório: o que a pessoa precisa fazer ou decidir" });
+          const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}) });
+          refreshBotRow(bot.id);
+          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}. Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
+        }
+        if (body.action === "resolve") {
+          const id = typeof body.id === "string" ? body.id.trim() : "";
+          if (!id) return json(res, 400, { error: "id é obrigatório (ou \"all\" para os desta conversa)" });
+          const done = autonomy.resolveOwnerPending({ botId: bot.id, threadId, id });
+          if (!done.length) return json(res, 404, { error: `nenhum item ${id}; chame owner_pending list` });
+          refreshBotRow(bot.id);
+          return json(res, 200, { message: `Resolvido: ${done.map(line).join("; ")}` });
+        }
+        if (body.action === "list") {
+          const open = autonomy.ownerPendingOf(bot.id);
+          return json(res, 200, { message: open.length ? open.map((item) => `${line(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}`).join("\n") : "Nada esperando a pessoa." });
+        }
+        return json(res, 400, { error: "action deve ser add, resolve ou list" });
+      }
       if (method === "POST" && (path === "/api/internal/wake" || path === "/api/internal/goal")) {
         const body = await readInternalBody();
         const bot = internalSender;
@@ -21155,6 +21189,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const visible = wireBot(bot);
       broadcast({ kind: "bot", bot: visible });
       return json(res, 200, { bot: visible });
+    }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/resolve$/);
+    if (m && method === "POST") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const done = autonomy.resolveOwnerPending({ botId: bot.id, id: m[2]! });
+      // the bot reads it in that conversation: the person settled it
+      for (const item of done) {
+        if (store.taskByThread(bot.id, item.threadId)) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Resolvido pela pessoa: ${item.title}`, 240), ok: true } });
+      }
+      refreshBotRow(bot.id);
+      return json(res, 200, { resolved: done.length });
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/command-allowlist(?:\/([\w-]+))?$/);
     if (m && ["GET", "POST", "DELETE"].includes(method)) {
