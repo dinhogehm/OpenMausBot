@@ -473,9 +473,9 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
 
   it("takes the bot's own comment as the new baseline instead of waking it", () => {
     const autonomy = make();
-    // a watch on the comments of #9307: one line per comment
-    const old = "9307\tfulana\tO login ainda falha\t2026-09-30T20:00:00Z";
-    const mine = "9307\tmonitor\tPublicado em produção, pode testar\t2026-10-01T08:37:20Z";
+    // a watch on the comments of #9307, as its --jq prints them: "#N login id: <end of the body>"
+    const old = "#9307 fulana 4400: O login ainda falha";
+    const mine = "#9307 bot-user 4401: Publicado em produção, pode testar";
     const wake = autonomy.setWatch("bot", "t1", { ...base, command: "gh api repos/o/r/issues/9307/comments", argv: ["gh", "api", "repos/o/r/issues/9307/comments"], standing: true, label: "issues", baseline: old, baselineFingerprint: "a" });
     autonomy.recordWatchRun(wake, { ok: true, output: old, matched: false, fingerprint: "a", lines: [old] });
     autonomy.noteSelfWrite("bot", selfWriteOf('gh issue comment 9307 --body "Publicado em produção, pode testar"', now)!);
@@ -483,7 +483,7 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     expect(autonomy.recordWatchRun(wake, { ok: true, output: `${old}\n${mine}`, matched: false, fingerprint: "b", lines: [old, mine] })).toBeNull();
     expect(wake.watch!.echoAt).toBe(now);
     // a person on the same issue two minutes later: it wakes the bot
-    const human = "9307\tfulana\tTestei e continua com erro\t2026-10-01T08:39:20Z";
+    const human = "#9307 fulana 4402: Testei e continua com erro";
     now += 2 * 60_000;
     expect(autonomy.recordWatchRun(wake, { ok: true, output: `${old}\n${mine}\n${human}`, matched: false, fingerprint: "c", lines: [old, mine, human] })).toBe("changed");
   });
@@ -499,9 +499,9 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     autonomy.recordWatchRun(wake, run(sheet, "a"));
     // the bot's note after its mark: an echo, said with why
     now += 60_000;
-    const noted = sheet.map((line, i) => (i === row ? `${line} · 01/10 16:10 BRT: sessão aberta` : line));
+    const noted = sheet.map((line, i) => (i === row ? `${line} | [Monitor Chat Atendimento] 01/10 16:10 BRT: sessão aberta` : line));
     expect(autonomy.recordWatchRun(wake, run(noted, "b"))).toBeNull();
-    expect(wake.watch!.echo).toMatchObject({ at: now, lines: 1, reasons: ["só o texto depois da marca mudou"], sample: expect.stringContaining("Oqvnflfa") });
+    expect(wake.watch!.echo).toMatchObject({ at: now, lines: 1, reasons: ["nota do bot acrescentada com a marca"], sample: expect.stringContaining("Oqvnflfa") });
     // the client's "Reprovado" in that same row: it wakes the bot
     now += 60_000;
     const reproved = noted.map((line, i) => (i === row ? line.replace("Pendente    Atendimento", "Pendente    Reprovado  Atendimento") : line));
@@ -519,6 +519,29 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     const again = restarted.standingFor("t1", "planilha")!;
     const more = [...lines, "[Monitor Chat Atendimento] outra nota"];
     expect(restarted.recordWatchRun(again, { ok: true, output: more.join("\n"), matched: false, fingerprint: "b", lines: more, ownMark })).toBe("changed");
+  });
+
+  it("lets go of a watch's kept lines when it is cancelled, replaced or fires once (INSP-E r2 5)", () => {
+    const autonomy = make();
+    const lines = ["linha 1", "linha 2"];
+    const run = (wake: ReturnType<typeof autonomy.setWatch>, output: string[], fingerprint: string) =>
+      autonomy.recordWatchRun(wake, { ok: true, output: output.join("\n"), matched: false, fingerprint, lines: output });
+    const standing = autonomy.setWatch("bot", "t1", { ...base, command: "gog sheets get x --plain", label: "planilha", baseline: "x", baselineFingerprint: "a" });
+    run(standing, lines, "a");
+    const once = autonomy.setWatch("bot", "t2", { ...base, standing: false, command: "gh pr view 1", baseline: "x", baselineFingerprint: "a" });
+    run(once, lines, "a");
+    expect(autonomy.keptLineSets()).toBe(2);
+    // the one-shot watch fires: used up
+    now += 60_000;
+    expect(run(once, [...lines, "linha 3"], "b")).toBe("changed");
+    expect(autonomy.keptLineSets()).toBe(1);
+    // replaced, then cancelled
+    const replaced = autonomy.setWatch("bot", "t1", { ...base, command: "gog sheets get x --plain", label: "planilha", baseline: "x", baselineFingerprint: "a" });
+    expect(autonomy.keptLineSets()).toBe(0);
+    run(replaced, lines, "a");
+    expect(autonomy.keptLineSets()).toBe(1);
+    autonomy.cancelStanding("t1", "planilha");
+    expect(autonomy.keptLineSets()).toBe(0);
   });
 
   it("finds the same command already watched by this bot in another conversation", () => {

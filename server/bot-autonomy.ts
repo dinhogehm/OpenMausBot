@@ -418,6 +418,7 @@ export class BotAutonomy {
     const wake: BotWake = { botId, threadId, dueAt: at + minutes * this.minuteMs, reason, createdAt: at };
     // the ordinary wake; a standing watch here is kept beside it
     this.wakes.set(threadId, wake);
+    this.lastLines.delete(threadId);
     this.save();
     return wake;
   }
@@ -454,9 +455,16 @@ export class BotAutonomy {
       },
     };
     this.wakes.set(wakeKey(wake), wake);
+    // a new watch (or one replacing another) starts with no lines of its own
+    this.lastLines.delete(wakeKey(wake));
     if (input.standing) this.standingLost.delete(threadId);
     this.save();
     return wake;
+  }
+
+  /** How many watches keep the lines of their last run (for tests). */
+  keptLineSets(): number {
+    return this.lastLines.size;
   }
 
   /** Watches whose command is due to run again (not yet triggered). */
@@ -535,6 +543,8 @@ export class BotAutonomy {
       watch.trigger = trigger;
       watch.fired = (watch.fired ?? 0) + 1;
       wake.dueAt = this.now();
+      // a one-shot watch is used up by firing: nothing more to compare
+      if (!watch.standing) this.lastLines.delete(wakeKey(wake));
     }
     this.save();
     return trigger;
@@ -635,6 +645,7 @@ export class BotAutonomy {
     const wake = this.wakes.get(standingKey(threadId, label)) ?? null;
     if (wake) {
       this.wakes.delete(standingKey(threadId, label));
+      this.lastLines.delete(standingKey(threadId, label));
       if (!this.standingsFor(threadId).length) this.standingLost.set(threadId, { botId: wake.botId, threadId, at: this.now() });
       this.save();
     }
@@ -821,6 +832,7 @@ export class BotAutonomy {
     const wake = this.wakes.get(threadId) ?? null;
     if (wake) {
       this.wakes.delete(threadId);
+      this.lastLines.delete(threadId);
       this.save();
     }
     return wake;
@@ -1001,6 +1013,7 @@ export class BotAutonomy {
 
   /** Drop everything tied to a conversation that no longer exists. */
   forgetThread(threadId: string): void {
+    for (const key of this.lastLines.keys()) if (key === threadId || key.startsWith(`${threadId}${STANDING}`)) this.lastLines.delete(key);
     let hadStanding = false;
     for (const wake of this.standingsFor(threadId)) hadStanding = this.wakes.delete(wakeKey(wake)) || hadStanding;
     const hadWake = this.wakes.delete(threadId) || hadStanding;

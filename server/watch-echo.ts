@@ -6,43 +6,55 @@
 // The rule above all others: IN DOUBT, WAKE. A person's line must never be
 // taken for the bot's. So a change is the bot's only when one of these holds,
 // line by line, against the complete output of the run before:
-// - the new line STARTS with this bot's own mark (`[<Bot name>]`, or
-//   `<!-- bot:<its slug> -->`): a note it wrote (a continuation line of the
-//   Observações cell, a comment body);
-// - the line has the mark further on, and the same line before had the same
-//   text up to the mark (only what follows the bot's mark changed). The
-//   spreadsheet comes as `gog sheets get --plain`: columns aligned by spaces,
-//   no tabs, multi-line cells broken over lines — so nothing is decided by
-//   cells, only by what precedes the mark;
-// - in a marked row, exactly one field before the mark changed, to a value
-//   the bot itself just wrote there (its "Publicado"), each write used once;
-// - in the Chat, the message TEXT starts with what the bot just posted (by
-//   a `gog chat` command, or typed or pasted through the VM's computer);
-// - on an issue, the line holds the start or the end of the body the bot
-//   just sent with `gh` (never the issue number alone).
-// And every line that disappeared must be accounted for (an old version of
-// a line above, the bot's own note, or the oldest lines of a list that
-// scrolled off), or it is a change too. Without the complete run before
-// (after a restart, or past WATCH_LINES_MAX), nothing is an echo.
+// - a line that was there grew, and what was added starts — after spaces
+//   and a separator (" | ", "·", ";", "—") — with this bot's own mark
+//   (`[<Bot name>]`, `<!-- bot:<its slug> -->`). That is how its notes are
+//   chained in the Observações cell (`… | [Monitor Chat Atendimento] …`).
+//   Anything else added, or any edit inside the old text, is a person's;
+// - a line that is new and starts with the bot's mark (a continuation line
+//   of its note), or — on an issue — a new comment whose body ends with it
+//   (the bot signs its comments `<!-- bot:<slug> -->`);
+// - in a row whose note grew as above in the same run, exactly one field
+//   before the mark changed to a value the bot itself wrote with `gog
+//   sheets` (its "Publicado"), never Validado/Reprovado (the requester's);
+// - in the Chat, the message TEXT, leading @mentions removed, starts with
+//   what the bot posted with `gog chat`;
+// - on an issue, the comment's text ends with the end of the body the bot
+//   sent with `gh` (words only: no URL, #number or hash; never the issue
+//   number alone).
+// And every line that disappeared must be the old version of a line that
+// grew, or (in a Chat or issue list keeping its last N) the oldest lines
+// that scrolled off; else it is a change too. Without the complete run
+// before (after a restart, or past WATCH_LINES_MAX), nothing is an echo.
+//
+// Writes through the VM's computer (typing or pasting into the Chat or the
+// spreadsheet in its browser) are NOT recognised: the real calls (a URL put
+// on the clipboard then pasted, a mention typed for the autocomplete, the
+// body pasted, a search typed with cmd+f) cannot be told apart safely from
+// the tool calls alone. Those echoes wake the bot, as before (INSP-E r2 B3).
 
 export type WatchKind = "issues" | "chat" | "sheets";
 
 export interface SelfWrite {
   at: number;
   kind: WatchKind;
-  /** What the write leaves in the output: the start (and for issues the end) of its text. */
+  /** What the write leaves in the output: for the Chat the start, for issues the end of its text. */
   marks: string[];
   /** Short values it set (a spreadsheet's "Publicado"), each good for one line. */
   values?: string[];
-  via: "shell" | "vm";
+  via: "shell";
 }
 
 /** How long after a write its echo can still show up (the slowest watch runs every 10 min). */
 export const ECHO_WINDOW_MS = 15 * 60_000;
 /** Shorter text could be anyone's ("ok", "obrigada"). */
 const MIN_TEXT_MARK = 10;
+/** An issue body's end: at least this much of words (no URL, number or hash). */
+const MIN_END_MARK = 20;
 const TEXT_MARK_MAX = 40;
 const VALUE_MAX = 60;
+/** The requester's (or the owner's) column: never a value the bot sets. */
+const NEVER_BOT_VALUES = new Set(["validado", "reprovado"]);
 
 const GH_WRITES = new Set(["comment", "edit", "close", "reopen", "create", "review", "merge", "lock", "unlock", "pin", "unpin", "transfer", "ready"]);
 const GH_API_WRITE = /(?:^|\s)(?:-X|--method)\s*(?:POST|PATCH|PUT|DELETE)\b|(?:^|\s)(?:-f|-F|--field|--raw-field|--input)\s/i;
@@ -61,12 +73,13 @@ function flagValue(command: string, flags: readonly string[]): string | null {
   return null;
 }
 
-/** Where a text starts (and ends): what a list shows of it. */
-function textMarksOf(text: string, withEnd: boolean): string[] {
-  const flat = normalize(text);
-  if (flat.length < MIN_TEXT_MARK) return [];
-  return [...new Set([flat.slice(0, TEXT_MARK_MAX), ...(withEnd ? [flat.slice(-TEXT_MARK_MAX)] : [])])];
+/** A Chat text without the @mentions it opens with ("@Fulana Tal …"). */
+export function withoutLeadingMentions(text: string): string {
+  return text.replace(/^(?:\s*@[\p{L}\p{N}._-]+(?:\s+(?:(?:da|de|do|das|dos|e)\s+)?[\p{Lu}][\p{L}.-]*){0,5}[,:]?)+\s*/u, "");
 }
+
+/** Only the words of a text: no URL, #number, long number or hash. */
+const wordsOnly = (text: string): string => normalize(text.replace(/https?:\/\/\S+/g, " ").replace(/#\d+/g, " ").replace(/\b[0-9a-f]{7,40}\b/gi, " ").replace(/\b\d{3,}\b/g, " "));
 
 /** The strings of a quoted JSON value (`--values-json '[["Publicado"]]'`); none when it is not JSON. */
 function jsonStrings(command: string): string[] {
@@ -94,61 +107,22 @@ export function selfWriteOf(command: string, at: number): SelfWrite | null {
     const writes = group === "api" ? GH_API_WRITE.test(bare) && /\/(?:issues|pulls)\/\d+/.test(bare)
       : (group === "issue" || group === "pr") && Boolean(action && GH_WRITES.has(action));
     const body = writes ? flagValue(bare, ["--body", "-b", "-f body", "--field body", "--raw-field body"]) ?? flagValue(bare, ["-f", "--raw-field", "--field"])?.replace(/^body=/, "") ?? null : null;
-    const marks = body ? textMarksOf(body, true) : [];
-    return marks.length ? { at, kind: "issues", marks, via: "shell" } : null;
+    // what a comment list shows is the body's end: its last words
+    const end = body ? wordsOnly(body).slice(-TEXT_MARK_MAX).trim() : "";
+    return end.length >= MIN_END_MARK ? { at, kind: "issues", marks: [end], via: "shell" } : null;
   }
   if (program === "gog") {
     if (args.includes("chat") && args.some((arg) => GOG_CHAT_WRITES.has(arg.toLowerCase()))) {
       const text = flagValue(bare, ["--text", "-t", "--message"]);
-      const marks = text ? textMarksOf(text, false) : [];
-      return marks.length ? { at, kind: "chat", marks, via: "shell" } : null;
+      const start = text ? normalize(withoutLeadingMentions(text)).slice(0, TEXT_MARK_MAX) : "";
+      return start.length >= MIN_TEXT_MARK ? { at, kind: "chat", marks: [start], via: "shell" } : null;
     }
     if (args.includes("sheets") && args.some((arg) => GOG_SHEETS_WRITES.has(arg.toLowerCase()))) {
-      const values = jsonStrings(bare).map(normalize).filter((value) => value && value.length <= VALUE_MAX);
+      const values = jsonStrings(bare).map(normalize).filter((value) => value && value.length <= VALUE_MAX && !NEVER_BOT_VALUES.has(value));
       return values.length ? { at, kind: "sheets", marks: [], values, via: "shell" } : null;
     }
   }
   return null;
-}
-
-// ── writes through the VM's computer (typing, pasting) ─────────────────
-// The bot posts in the Chat and edits the spreadsheet with the VM's
-// browser: the server sees the URL it opened and the text it typed or put
-// on the clipboard, and keeps them as its writes.
-
-/** What a URL the VM opened is, for the writes that follow it. */
-export function urlKind(url: string): WatchKind | null {
-  if (/docs\.google\.com\/spreadsheets/i.test(url)) return "sheets";
-  if (/mail\.google\.com\/[^\s"]*chat|chat\.google\.com/i.test(url)) return "chat";
-  return null;
-}
-
-/** A URL a tool call opens (navigate, open_url, a link in its arguments). */
-export function urlOfToolCall(tool: string, input: string | undefined): string | null {
-  if (!input || !/navigate|open|goto|url|computer_exec|launch/i.test(tool)) return null;
-  return /https?:\/\/[^\s"'<>]+/.exec(input)?.[0] ?? null;
-}
-
-const VM_TYPING = /(?:^|__)(?:type|type_text|paste|clipboard_write|fill|browser_type|browser_fill|input_text|send_keys)$/i;
-
-/** Text the bot typed or pasted through the VM, as a write to the page it has open. */
-export function vmWriteOf(tool: string, input: string | undefined, openUrl: string | null, at: number): SelfWrite | null {
-  if (!input || !openUrl || !VM_TYPING.test(tool)) return null;
-  const kind = urlKind(openUrl);
-  if (kind !== "chat" && kind !== "sheets") return null;
-  let text: string | null = null;
-  try {
-    const fields = JSON.parse(input) as Record<string, unknown>;
-    const value = fields.text ?? fields.value ?? fields.content ?? fields.string;
-    if (typeof value === "string") text = value;
-  } catch { /* a preview that is not JSON: nothing to keep */ }
-  if (!text?.trim()) return null;
-  if (kind === "chat") {
-    const marks = textMarksOf(text, false);
-    return marks.length ? { at, kind, marks, via: "vm" } : null;
-  }
-  const value = normalize(text);
-  return value.length <= VALUE_MAX ? { at, kind, marks: [], values: [value], via: "vm" } : null;
 }
 
 /** What a watch command reads, for matching it with the bot's writes. */
@@ -180,20 +154,13 @@ export function botSlug(botName: string): string {
   return botName.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 
-const startsWithMark = (line: string, mark: RegExp): boolean => (mark.exec(line)?.index ?? -1) === line.length - line.trimStart().length;
+const startsWithMark = (text: string, mark: RegExp): boolean => (mark.exec(text)?.index ?? -1) === text.length - text.trimStart().length;
+/** What was added after `old` starts with the mark, past spaces and a separator. */
+const addedWithMark = (added: string, mark: RegExp): boolean => startsWithMark(added.replace(/^[\s|·;—,-]+/, ""), mark);
+const markAt = (line: string, mark: RegExp): number => mark.exec(line)?.index ?? -1;
 const endsWithMark = (line: string, mark: RegExp): boolean => {
   const end = line.trimEnd().length;
   return [...line.matchAll(new RegExp(mark.source, "gi"))].some((match) => match.index! + match[0].length === end);
-};
-/** The text before the mark as it is (null without a mark). */
-const rawBeforeMark = (line: string, mark: RegExp): string | null => {
-  const at = mark.exec(line)?.index;
-  return at === undefined || at < 0 ? null : line.slice(0, at);
-};
-/** The same, spaces collapsed (column widths shift between runs). */
-const beforeMark = (line: string, mark: RegExp): string | null => {
-  const raw = rawBeforeMark(line, mark);
-  return raw === null ? null : normalize(raw);
 };
 /** Fields of the part before the mark: split on runs of 2+ spaces or tabs. */
 const fields = (text: string): string[] => text.trim().split(/\t| {2,}/).map(normalize).filter(Boolean);
@@ -229,57 +196,72 @@ export function isEcho(
   }
   const spent: Array<{ write: SelfWrite; value: string }> = [];
   const reasons: string[] = [];
+  const mark = own.mark;
   for (const line of freshLines) {
-    const mark = own.mark;
-    if (mark && startsWithMark(line, mark)) {
-      reasons.push("marca no começo da linha");
+    // a line that was there and grew
+    const grownFrom = removed.find((old) => !old.used && old.line.length < line.length && line.startsWith(old.line));
+    if (grownFrom) {
+      if (!mark || !addedWithMark(line.slice(grownFrom.line.length), mark)) return NOT_ECHO;
+      grownFrom.used = true;
+      reasons.push("nota do bot acrescentada com a marca");
       continue;
     }
-    // a comment the bot signed: its body ends with its own mark
+    if (mark && startsWithMark(line, mark)) {
+      reasons.push("linha nova com a marca do bot");
+      continue;
+    }
+    // a new comment the bot signed: its body ends with this bot's own mark
     if (mark && kind === "issues" && endsWithMark(line, mark)) {
       reasons.push("comentário assinado com a marca do bot");
       continue;
     }
-    const prefix = mark ? beforeMark(line, mark) : null;
-    if (mark && prefix !== null) {
-      const same = removed.find((old) => !old.used && beforeMark(old.line, mark) === prefix);
-      if (same) {
-        same.used = true;
-        reasons.push("só o texto depois da marca mudou");
-        continue;
-      }
-      // one field before the mark changed, to a value the bot just wrote
-      const now_ = fields(rawBeforeMark(line, mark)!);
-      const value = removed.map((old) => {
+    if (mark && markAt(line, mark) > 0) {
+      // a Status the bot set, in the same run as its note grew in that row
+      const at = markAt(line, mark);
+      const set = removed.map((old) => {
         if (old.used) return null;
-        const before = rawBeforeMark(old.line, mark);
-        if (before === null) return null;
-        const then = fields(before);
-        if (then.length !== now_.length) return null;
+        const oldAt = markAt(old.line, mark);
+        if (oldAt < 0) return null;
+        const after = line.slice(at);
+        const oldAfter = old.line.slice(oldAt);
+        if (!(after.length > oldAfter.length && after.startsWith(oldAfter) && addedWithMark(after.slice(oldAfter.length), mark))) return null;
+        const now_ = fields(line.slice(0, at));
+        const then = fields(old.line.slice(0, oldAt));
+        if (now_.length !== then.length) return null;
         const changed = now_.filter((field, i) => field !== then[i]);
-        if (changed.length !== 1) return null;
+        if (changed.length !== 1 || NEVER_BOT_VALUES.has(changed[0]!)) return null;
         const write = recent.find((each) => each.values?.includes(changed[0]!) && !spent.some((use) => use.write === each && use.value === changed[0]));
         return write ? { old, write, value: changed[0]! } : null;
       }).find(Boolean);
-      if (value) {
-        value.old.used = true;
-        spent.push({ write: value.write, value: value.value });
-        reasons.push(`valor "${value.value}" escrito pelo bot`);
-        continue;
-      }
-      return NOT_ECHO;
+      if (!set) return NOT_ECHO;
+      set.old.used = true;
+      spent.push({ write: set.write, value: set.value });
+      reasons.push(`valor "${set.value}" escrito pelo bot, com a nota dele na mesma linha`);
+      continue;
     }
     // the text the bot just wrote
-    const text = kind === "chat" ? normalize(line.split("\t")[3] ?? "") : normalize(line);
-    const carried = recent.find((write) => write.marks.some((textMark) => (kind === "chat" ? text.startsWith(textMark) : kind === "issues" && text.includes(textMark))));
-    if (!carried) return NOT_ECHO;
-    reasons.push(`texto que o bot escreveu ("${carried.marks[0]!.slice(0, 40)}")`);
+    if (kind === "chat") {
+      const text = normalize(withoutLeadingMentions(line.split("\t")[3] ?? ""));
+      const carried = recent.find((write) => write.marks.some((textMark) => text.startsWith(textMark)));
+      if (!carried) return NOT_ECHO;
+      reasons.push(`post do bot ("${carried.marks[0]!.slice(0, 40)}")`);
+      continue;
+    }
+    if (kind === "issues") {
+      // the comment list shows "<#N> <login> <id>: <end of the body>"
+      const body = wordsOnly(line.slice(line.indexOf(": ") + 2));
+      const carried = recent.find((write) => write.marks.some((textMark) => body.endsWith(textMark)));
+      if (!carried) return NOT_ECHO;
+      reasons.push(`comentário do bot ("${carried.marks[0]!.slice(0, 40)}")`);
+      continue;
+    }
+    return NOT_ECHO;
   }
-  // every line that went away: an old version above, the bot's own note, or
-  // — in a Chat or issue list that keeps its last N — the oldest lines that
+  // every line that went away: an old version of a line that grew, or — in
+  // a Chat or issue list that keeps its last N — the oldest lines that
   // scrolled off the end (a spreadsheet's rows never scroll)
   const tail = new Set(kind === "chat" || kind === "issues" ? own.previous.slice(-freshLines.length) : []);
-  if (removed.some((old) => !old.used && !(own.mark && startsWithMark(old.line, own.mark)) && !tail.has(old.line))) return NOT_ECHO;
+  if (removed.some((old) => !old.used && !tail.has(old.line))) return NOT_ECHO;
   // the values used are spent: they do not explain another line later
   for (const use of spent) use.write.values = use.write.values?.filter((value, i, all) => !(value === use.value && all.indexOf(value) === i));
   return { echo: true, reasons };

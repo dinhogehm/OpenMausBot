@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { botMarkPattern, botSlug, isEcho, selfWriteOf, urlOfToolCall, vmWriteOf, watchKindOf, type SelfWrite } from "./watch-echo.ts";
+import { botMarkPattern, botSlug, isEcho, selfWriteOf, watchKindOf, type SelfWrite } from "./watch-echo.ts";
 
 // The real outputs of the Monitor's watches on 01/10, words pseudonymised
 // (same length, same case, same word → same pseudonym; spacing, tabs, line
@@ -41,8 +41,24 @@ describe("the real spreadsheet output (gog --plain, no tabs)", () => {
     expect(sheetEcho(edit(SHEET, { [ROW_178]: [reproved] }), [publicado])).toBe(false);
   });
 
-  it("takes only what follows the bot's mark changing as its own note", () => {
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]} · 01/10 16:10 BRT: sessão aberta`] }))).toBe(true);
+  // the real convention: notes chained in the same cell, " | [Monitor Chat Atendimento] …"
+  const NOTE = ` | [${MONITOR}] 01/10 16:10 BRT: sessão aberta`;
+  const STARTS_WITH_MARK = SHEET.findIndex((line) => line.startsWith(`[${MONITOR}] `) && line.includes(` | [${MONITOR}] `));
+
+  it("takes a note grown by a new note of the bot, chained with its mark, as its own (INSP-E r2 1)", () => {
+    expect(STARTS_WITH_MARK).toBeGreaterThan(0);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}`] }))).toBe(true);
+    expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [`${SHEET[STARTS_WITH_MARK]}${NOTE}`] }))).toBe(true);
+  });
+
+  it("wakes the bot when a person adds to its note, or edits inside it (INSP-E r2 B1)", () => {
+    const person = " | Dono 16:40: cliente confirmou que falhou de novo";
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${person}`] }))).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [`${SHEET[STARTS_WITH_MARK]}${person}`] }))).toBe(false);
+    // a word changed inside the old note (the line still starts with the mark)
+    const edited = SHEET[STARTS_WITH_MARK]!.replace(/ BRT: /, " BRT: (corrigido) ");
+    expect(edited).not.toBe(SHEET[STARTS_WITH_MARK]);
+    expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [edited] }))).toBe(false);
   });
 
   it("takes a new continuation line that starts with its mark as its own", () => {
@@ -54,25 +70,34 @@ describe("the real spreadsheet output (gog --plain, no tabs)", () => {
   });
 
   it("decides nothing without the complete run before (after a restart): it wakes", () => {
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]} · nota`] }), [], null)).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}`] }), [], null)).toBe(false);
   });
 
   it("wakes when a person removed a line in the same run as the bot's note (INSP-E 9)", () => {
     expect(sheetEcho(edit(SHEET, { 401: [SHEET[401]!, `[${MONITOR}] 01/10 16:20 BRT: nota.`], [ROW_180]: [] }))).toBe(false);
   });
 
-  it("takes a Status the bot itself set in its marked row, once; the same value elsewhere, or by nobody, wakes (F4)", () => {
-    const fazendo = (i: number) => SHEET[i]!.replace("Pendente    ", "Fazendo     ");
-    const vm = vmWriteOf("mcp__computer__type", JSON.stringify({ text: "Fazendo" }), "https://docs.google.com/spreadsheets/d/SHEET_ID/edit#gid=50318669&range=E178", 1_000)!;
-    expect(vm).toMatchObject({ kind: "sheets", values: ["fazendo"], via: "vm" });
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178)] }), [structuredClone(vm)])).toBe(true);
-    // one write explains one line: the second "Fazendo" is a person's
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178)], [ROW_180]: [fazendo(ROW_180)] }), [structuredClone(vm)])).toBe(false);
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178)] }), [])).toBe(false);
+  it("takes a Status the bot set only with its note grown in the same row and run; never Validado/Reprovado (INSP-E r2 2, F4)", () => {
+    const fazendo = (i: number, note = "") => `${SHEET[i]!.replace("Pendente    ", "Fazendo     ")}${note}`;
+    const write = () => selfWriteOf(`gog sheets update SHEET_ID 'Atendimento!E178' --values-json '[["Fazendo"]]'`, 1_000)!;
+    expect(write()).toMatchObject({ kind: "sheets", values: ["fazendo"], via: "shell" });
+    // (i) the value written, but no note of the bot in that row: a person could have set it
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178)] }), [write()])).toBe(false);
+    // (ii) with the note "Status → Fazendo" chained in the same run: the bot's
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178, ` | [${MONITOR}] Status → Fazendo`)] }), [write()])).toBe(true);
+    // one write explains one row: the second is a person's
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178, ` | [${MONITOR}] Status → Fazendo`)], [ROW_180]: [fazendo(ROW_180, ` | [${MONITOR}] Status → Fazendo`)] }), [write()])).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178, ` | [${MONITOR}] Status → Fazendo`)] }), [])).toBe(false);
+    // (iii) Validado → Reprovado is the requester's, even with a note and a value on record
+    const validated = SHEET[ROW_178]!.replace("Pendente    Atendimento", "Publicado   Validado   Atendimento");
+    const reproved = `${validated.replace("Validado ", "Reprovado")}${NOTE}`;
+    const recorded: SelfWrite = { at: 1_000, kind: "sheets", marks: [], values: ["reprovado"], via: "shell" };
+    expect(isEcho([reproved], "sheets", [recorded], 2_000, { mark, previous: edit(SHEET, { [ROW_178]: [validated] }), current: edit(SHEET, { [ROW_178]: [reproved] }) }).echo).toBe(false);
+    expect(selfWriteOf(`gog sheets update SHEET_ID 'Atendimento!F178' --values-json '[["Reprovado"]]'`, 1)).toBeNull();
     // a Status changed in a row whose line has no mark (the mark is on a continuation line): it wakes, as before
     const unmarkedStatus = SHEET.findIndex((line) => line.includes("Publicado    Atendimento"));
     expect(unmarkedStatus).toBeGreaterThan(0);
-    expect(sheetEcho(edit(SHEET, { [unmarkedStatus]: [SHEET[unmarkedStatus]!.replace("Publicado    ", "Fazendo      ")] }), [structuredClone(vm)])).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [unmarkedStatus]: [SHEET[unmarkedStatus]!.replace("Publicado    ", "Fazendo      ")] }), [write()])).toBe(false);
   });
 
   it("does not take a quoted value it wrote in one row for the same words a person writes in a row without its mark", () => {
@@ -84,30 +109,31 @@ describe("the real spreadsheet output (gog --plain, no tabs)", () => {
 });
 
 describe("the real Chat output (gog --plain, TSV)", () => {
-  const url = "https://mail.google.com/chat/u/0/#chat/space/AAAAexample";
-  const posted = "@Fulana de Tal entrou no ar a correção do atendimento reaberto";
-  const own = `spaces/GSMW4KYdbE4/messages/nWw1.nWw1\tNeewdoa Ocex\t2026-10-01T13:34:00.000000Z\t${posted}`;
-  const person = "spaces/GSMW4KYdbE4/messages/nWw2.nWw2\tKarntf Fhqxr\t2026-10-01T13:35:00.000000Z\tobrigada!";
+  // as the Chat shows it: the mention expanded to the full name, then the body
+  const posted = "@Fulana de Tal da Silva saiu hoje à tarde a correção do atendimento reaberto";
+  const message = (id: string, sender: string, text: string) => `spaces/GSMW4KYdbE4/messages/${id}.${id}\t${sender}\t2026-10-01T13:34:00.000000Z\t${text}`;
+  const own = message("nWw1", "Neewdoa Ocex", posted);
+  const person = message("nWw2", "Karntf Fhqxr", "obrigada!");
   // newest first: the new message on top, the oldest drops off the end
   const scrolled = (...lines: string[]) => [CHAT[0]!, ...lines, ...CHAT.slice(1, -lines.length)];
   const chatEcho = (after: string[], writes: SelfWrite[]) => isEcho(fresh(CHAT, after), "chat", writes, 2_000, { mark, previous: CHAT, current: after }).echo;
 
-  it("takes the post the bot pasted through the VM as its own, and a person's message beside it wakes the bot (INSP-E 5)", () => {
-    expect(urlOfToolCall("mcp__computer__open_url", JSON.stringify({ url }))).toBe(url);
-    const vm = vmWriteOf("mcp__computer__clipboard_write", JSON.stringify({ text: posted }), url, 1_000)!;
-    expect(vm).toMatchObject({ kind: "chat", via: "vm" });
-    expect(chatEcho(scrolled(own), [vm])).toBe(true);
-    expect(chatEcho(scrolled(own, person), [vm])).toBe(false);
-    // typed on another page: not a Chat write
-    expect(vmWriteOf("mcp__computer__type", JSON.stringify({ text: posted }), "https://app.example.com/inbox", 1_000)).toBeNull();
+  it("does not recognise a post typed or pasted through the VM: it wakes the bot (INSP-E r2 3, capture off)", () => {
+    // the real sequence (clipboard_write URL, hotkey, type_text "@Fulana de Tal", clipboard_write body, press_key) leaves no write
+    expect(chatEcho(scrolled(own), [])).toBe(false);
   });
 
-  it("takes the post of a gog chat command, only from the start of its text", () => {
-    const write = selfWriteOf(`gog chat messages send spaces/AAAAexample --text "${posted}"`, 1_000)!;
+  it("takes the post of a gog chat command by its body, mentions aside, and never a person's message that opens with the same mention", () => {
+    const write = selfWriteOf(`gog chat messages send spaces/AAAAexample --text "@Fulana de Tal da Silva saiu hoje à tarde a correção do atendimento reaberto"`, 1_000)!;
+    expect(write.marks).toEqual(["saiu hoje à tarde a correção do atendime"]);
     expect(chatEcho(scrolled(own), [write])).toBe(true);
+    expect(chatEcho(scrolled(own, person), [write])).toBe(false);
+    // someone else calling the same person
+    expect(chatEcho(scrolled(message("nWw3", "Dono Exemplo", "@Fulana de Tal da Silva pode confirmar?")), [write])).toBe(false);
     // a person quoting the same words later in their message is not the bot
-    const quoting = `spaces/GSMW4KYdbE4/messages/nWw3.nWw3\tKarntf Fhqxr\t2026-10-01T13:36:00.000000Z\tvocê disse: ${posted}`;
-    expect(chatEcho(scrolled(quoting), [write])).toBe(false);
+    expect(chatEcho(scrolled(message("nWw4", "Karntf Fhqxr", `você disse: ${posted}`)), [write])).toBe(false);
+    // a mention alone is never a mark
+    expect(selfWriteOf(`gog chat messages send spaces/AAAAexample --text "@Fulana de Tal da Silva"`, 1)).toBeNull();
   });
 });
 
@@ -126,10 +152,22 @@ describe("issues", () => {
     expect(isEcho([signed("qa-prodev")], "issues", [], 2_000, { mark, previous, current: [...previous, signed("qa-prodev")] }).echo).toBe(false);
   });
 
-  it("keeps the start and end of a gh body, reads through a leading cd, never just the issue number", () => {
-    expect(selfWriteOf('cd /Users/owner/wt && gh issue comment 1002 --body "Diagnóstico enviado ao cliente, aguardando retorno dele"', 1)).toMatchObject({ kind: "issues", via: "shell", marks: ["diagnóstico enviado ao cliente, aguardando retorno dele".slice(0, 40), "diagnóstico enviado ao cliente, aguardando retorno dele".slice(-40)] });
+  it("keeps the words at the end of a gh body, reads through a leading cd, never just the issue number", () => {
+    expect(selfWriteOf('cd /Users/owner/wt && gh issue comment 1002 --body "Diagnóstico enviado ao cliente, aguardando retorno dele"', 1)).toMatchObject({ kind: "issues", via: "shell", marks: ["diagnóstico enviado ao cliente, aguardando retorno dele".slice(-40).trim()] });
     expect(selfWriteOf("gh issue comment 1002 --body-file /tmp/x.md", 1)).toBeNull();
     expect(selfWriteOf("gh issue view 1003", 1)).toBeNull();
+    // nothing but a link: no words to recognise it by
+    expect(selfWriteOf("gh issue comment 1002 --body 'https://github.com/example-org/example-repo/pull/1234'", 1)).toBeNull();
+  });
+
+  it("matches a body's end at the end of the comment, without its URL: a person citing the same PR wakes (INSP-E r2 4)", () => {
+    const write = selfWriteOf("gh issue comment 1002 --body 'Correção publicada em produção, veja https://github.com/example-org/example-repo/pull/1234'", 1_000)!;
+    expect(write.marks).toEqual(["correção publicada em produção, veja"]);
+    const previous = ["#1002 monitor 4400: Issue registrada"];
+    const own = "#1002 bot-user 4403: Correção publicada em produção, veja https://github.com/example-org/example-repo/pull/1234";
+    const human = "#1002 cliente 4404: ainda falha, veja https://github.com/example-org/example-repo/pull/1234";
+    expect(isEcho([own], "issues", [write], 2_000, { mark, previous, current: [...previous, own] }).echo).toBe(true);
+    expect(isEcho([human], "issues", [write], 2_000, { mark, previous, current: [...previous, human] }).echo).toBe(false);
   });
 
   it("knows what a watch reads", () => {
