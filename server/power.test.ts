@@ -102,4 +102,36 @@ describe("power", () => {
     expect(startsCarrier("rode os testes de novo")).toBe(false);
     expect(startsCarrier("o carrier anterior já foi publicado?")).toBe(false);
   });
+
+  it("refuses the carrier orders the Chief really writes, and lets the rest through (INSP-G r1 item 8, OMB side)", () => {
+    const starts = [
+      "roda o carrier da #9330",
+      "manda o carrier",
+      "executa o carrier",
+      "solta o carrier",
+      "dispare o carrier agora",
+      "faz o /cpd",
+      "cpd da #9330",
+      "./scripts/release-carrier.sh --pr 9330 --execute",
+      "bash scripts/release-carrier.sh --label hotfix --execute",
+      "rodar carrier",
+      "Publicar: carrier da #9315",
+      "Conferi o gate. Agora rode o release-carrier da #9330",
+      "Run the carrier for #9330",
+    ];
+    const passes = [
+      "não rode o carrier ainda, só o --check",
+      "execute os testes do release-carrier.sh",
+      "inicie a revisão do PR que mexe no carrier",
+      "run the unit tests for carrier parsing",
+      "Rode ci:local no head; depois o carrier fica com o Chief",
+      "rode ./scripts/release-carrier.sh --check e PARE",
+      "não rode ./scripts/release-carrier.sh --execute; só o --check",
+      "rode os testes de novo",
+      "o carrier anterior já foi publicado?",
+      "Conferi: head da #9330 bate. Rode ci:local no head e PARE.",
+    ];
+    for (const text of starts) expect(startsCarrier(text), text).toBe(true);
+    for (const text of passes) expect(startsCarrier(text), text).toBe(false);
+  });
 });

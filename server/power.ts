@@ -114,7 +114,30 @@ export function powerStep(watch: PowerWatchState, power: PowerState, now: number
   return { watch: next, changed, resolvePending: false, alert: { ...found, log: `[power] ${found.text}`, pendingTitle } };
 }
 
-/** A message or brief that starts a release carrier. */
+// A message or brief that starts a carrier, as the Chief writes them: the
+// script with --execute (flags in any order), a colloquial order whose object
+// is the carrier itself ("roda o carrier da #9330", "Publicar: carrier"), or
+// the /cpd skill (which ends in the carrier). Not one that negates it ("não
+// rode o carrier ainda"), nor one whose object is something else about the
+// carrier (its tests, a review, a PR), nor across a clause ("Rode ci:local;
+// depois o carrier fica com o Chief"). This only advises: the real gate on
+// battery belongs in release-carrier.sh --execute itself (nuria-platform, R8 BAT).
+const CARRIER_VERB = String.raw`(?:rod(?:a|e|ar)|execut(?:a|e|ar)|mand(?:a|e|ar)|solt(?:a|e|ar)|dispar(?:a|e|ar)|public(?:a|ar)|publique|inici(?:a|e|ar)|lan[çc](?:a|e|ar)|faz|fa[çc]a|fazer|run|start|publish|kick\s+off)`;
+const CARRIER_FILLER = String.raw`(?:o|a|os|as|um|uma|ess[ea]|est[ea]|aquel[ea]|seu|sua|teu|tua|meu|minha|nosso|nossa|the|an|this|that|our|your|j[áa]|agora|logo)`;
+const CARRIER_ORDER = new RegExp(String.raw`(?<![\p{L}\p{N}_-])${CARRIER_VERB}(?:\s*[:\-–—])?(?:\s+${CARRIER_FILLER}){0,2}\s+(?:release-)?carrier\b`, "giu");
+const CARRIER_EXECUTE = /\S*release-carrier(?:\.sh)?\b[^\n]*?\s--execute\b/gi;
+const CPD = /(?:^|\s)(\/?cpd)\b/gi;
+const NEGATED = /(?:\bn[ãa]o|\bnunca|\bjamais|\bdon'?t|\bdo\s+not|\bnever)\s+(?:\S+\s+)?$/i;
+
 export function startsCarrier(text: string): boolean {
-  return /release-carrier(?:\.sh)?\s+--execute|\b(?:rode|rodar|execute|executar|publique|publicar|inicie|iniciar|solte|soltar|run|start|publish)\b[^.?!\n]{0,40}\bcarrier\b/i.test(text);
+  // clauses: a ";" or a sentence end closes one (not the dot of "release-carrier.sh")
+  for (const clause of text.split(/;|\n|[.!?](?=\s|$)/)) {
+    for (const pattern of [CARRIER_EXECUTE, CARRIER_ORDER, CPD]) {
+      for (const match of clause.matchAll(pattern)) {
+        const at = match.index! + (pattern === CPD ? match[0].indexOf(match[1]!) : 0);
+        if (!NEGATED.test(clause.slice(0, at))) return true;
+      }
+    }
+  }
+  return false;
 }
