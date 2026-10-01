@@ -55,30 +55,45 @@ export interface ManagedSessionProcs {
   worktree?: string;
 }
 
-/** The session owning `pid`: a descendant of its running claude, one of its
- * background job's processes (or their descendants), or — for a worktree —
- * a process working inside it. Interactive shells never count. */
-export function ownerSession(pid: number, rows: readonly PsRow[], cwdOf: (pid: number) => string | null, sessions: readonly ManagedSessionProcs[]): string | null {
+/** A process a person types into, or the terminal holding it: an interactive
+ * shell (`-zsh`, `bash -il`), login, tmux/screen, sshd, a terminal app. */
+const OWNER_TERMINAL = /^(?:\S*\/)?(?:login|tmux|screen|sshd|mosh-server)(?:[\s:]|$)|\/(?:Terminal|iTerm2?|iTerm|Ghostty|WezTerm|Alacritty|kitty|Warp|Visual Studio Code|Cursor)\.app\/Contents\//;
+export const isOwnerTerminal = (command: string): boolean => isInteractiveShell(command) || OWNER_TERMINAL.test(command.trim());
+
+/** Whose CI `pid` is: a managed session's (a descendant of its running
+ * claude, of one of its background jobs, or — for an app session — working
+ * inside its worktree), the owner's (walking up, a terminal of the owner
+ * comes before any session process: `-zsh → npm run ci:local → local-ci.sh`,
+ * even inside a session's worktree), or no one the server knows. */
+export type CiOwner =
+  | { kind: "session"; sessionId: string }
+  | { kind: "owner"; terminal: PsRow }
+  | { kind: "unknown" };
+
+export function ciOwner(pid: number, rows: readonly PsRow[], cwdOf: (pid: number) => string | null, sessions: readonly ManagedSessionProcs[]): CiOwner {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
-  const self = byPid.get(pid);
-  if (!self || /^-\S*sh$/.test(self.command.trim())) return null;
-  const ancestors = new Set<number>();
-  for (let row = self, hops = 0; row && hops < 64; row = byPid.get(row.ppid)!, hops++) {
-    ancestors.add(row.pid);
-    if (row.ppid <= 1) break;
+  const seen = new Set<number>();
+  for (let row = byPid.get(pid); row && !seen.has(row.pid) && seen.size < 128; row = row.ppid > 0 ? byPid.get(row.ppid) : undefined) {
+    seen.add(row.pid);
+    const session = sessions.find((each) => each.claudePid === row!.pid || each.jobPids?.includes(row!.pid));
+    if (session) return { kind: "session", sessionId: session.sessionId };
+    if (isOwnerTerminal(row.command)) return { kind: "owner", terminal: row };
   }
-  for (const session of sessions) {
-    if (session.claudePid && ancestors.has(session.claudePid)) return session.sessionId;
-    if (session.jobPids?.some((job) => ancestors.has(job))) return session.sessionId;
-  }
+  if (!seen.size) return { kind: "unknown" };
   const cwd = cwdOf(pid);
   if (cwd) {
     for (const session of sessions) {
       const root = session.worktree?.replace(/\/+$/, "");
-      if (root && root.includes("/.claude/worktrees/") && (cwd === root || cwd.startsWith(`${root}/`))) return session.sessionId;
+      if (root && root.includes("/.claude/worktrees/") && (cwd === root || cwd.startsWith(`${root}/`))) return { kind: "session", sessionId: session.sessionId };
     }
   }
-  return null;
+  return { kind: "unknown" };
+}
+
+/** The managed session owning `pid`, or null (the owner's, or no one's). */
+export function ownerSession(pid: number, rows: readonly PsRow[], cwdOf: (pid: number) => string | null, sessions: readonly ManagedSessionProcs[]): string | null {
+  const owner = ciOwner(pid, rows, cwdOf, sessions);
+  return owner.kind === "session" ? owner.sessionId : null;
 }
 
 /** What to stop so the release can go — the CI's whole process group, or,

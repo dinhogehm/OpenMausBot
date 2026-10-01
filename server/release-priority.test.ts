@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePsTable, type PsRow } from "./bg-jobs.ts";
-import { ciToStop, type CiStop, ownerSession, releaseBlockedBy } from "./release-priority.ts";
+import { ciOwner, ciToStop, type CiStop, ownerSession, releaseBlockedBy } from "./release-priority.ts";
 
 const log = [
   "ADMISSION_LOAD_CLEAR label=release:production load1=7.55 threshold=12.00 ncpu=10 waited=90s",
@@ -112,5 +112,38 @@ describe("the production release first", () => {
     expect(ownerSession(83637, real, () => null, sessions)).toBe("5f41");
     expect(ownerSession(40409, real, () => null, [{ sessionId: "job", jobPids: [40324] }])).toBe("job");
     expect(ownerSession(99999, real, () => null, sessions)).toBeNull();
+    // an app session (no claude pid): a CI working inside its worktree, started by nothing of the owner's
+    const app = [{ sessionId: "app", worktree: "/Users/o/Projetos/nuria-platform/.claude/worktrees/fix-b" }];
+    expect(ownerSession(83637, real, () => "/Users/o/Projetos/nuria-platform/.claude/worktrees/fix-b/packages", app)).toBe("app");
+    expect(ownerSession(83637, real, () => "/Users/o/Projetos/nuria-platform", app)).toBeNull();
+  });
+
+  // INSP-R r1 item 7: the owner's own ci:local, typed in a terminal inside an
+  // app session's worktree, was attributed to that session
+  it("a ci:local the owner typed in a terminal is the owner's, even inside a session's worktree", () => {
+    const worktree = "/Users/o/Projetos/nuria-platform/.claude/worktrees/fix-b";
+    const terminal = parsePsTable([
+      "    1     0     1 Wed Sep 30 15:49:16 2026     /sbin/launchd",
+      "  700     1   700 Thu Oct  1 09:00:00 2026     /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+      "  710   700   710 Thu Oct  1 09:00:01 2026     login -pf osvaldo",
+      "  711   710   711 Thu Oct  1 09:00:01 2026     -zsh",
+      "  900   711   900 Thu Oct  1 15:20:00 2026     npm run ci:local   ",
+      "  905   900   900 Thu Oct  1 15:20:01 2026     bash ./scripts/local-ci.sh --profile full",
+    ].join("\n"));
+    const app = [{ sessionId: "app", worktree }];
+    expect(ciOwner(905, terminal, () => `${worktree}/packages`, app)).toMatchObject({ kind: "owner", terminal: { pid: 711 } });
+    expect(ownerSession(905, terminal, () => worktree, app)).toBeNull();
+    // in tmux too
+    const tmux = terminal.map((row) => (row.pid === 711 ? { ...row, command: "tmux: server" } : row));
+    expect(ciOwner(905, tmux, () => worktree, app).kind).toBe("owner");
+    // a managed claude below the owner's shell still owns its CI (it comes first walking up)
+    const claudeInTerminal = parsePsTable([
+      ...terminal.slice(0, 4).map((row) => `${row.pid} ${row.ppid} ${row.pgid} ${row.start} ${row.command}`),
+      "  800   711   800 Thu Oct  1 15:00:00 2026     claude --resume abc",
+      "  810   800   810 Thu Oct  1 15:20:00 2026     /bin/zsh -c eval 'npm run ci:local'",
+      "  815   810   810 Thu Oct  1 15:20:01 2026     bash ./scripts/local-ci.sh --profile full",
+    ].join("\n"));
+    expect(ciOwner(815, claudeInTerminal, () => null, [{ sessionId: "cli", claudePid: 800 }])).toEqual({ kind: "session", sessionId: "cli" });
+    expect(ciOwner(815, claudeInTerminal, () => null, [])).toMatchObject({ kind: "owner" });
   });
 });
