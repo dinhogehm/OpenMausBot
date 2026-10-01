@@ -16,6 +16,7 @@ export function RenameTitle({
   showEditButton = false,
   className,
   inputClassName,
+  showValueInTooltip = false,
 }: {
   value: string;
   onCommit: (next: string) => void;
@@ -26,6 +27,8 @@ export function RenameTitle({
   showEditButton?: boolean;
   className?: string;
   inputClassName?: string;
+  /** Put the whole value in the tooltip, for rows that truncate it. */
+  showValueInTooltip?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -113,7 +116,7 @@ export function RenameTitle({
   return (
     <span
       className={cn("cursor-text", className)}
-      title={t("rename.doubleClick")}
+      title={showValueInTooltip ? `${value}\n${t("rename.doubleClick")}` : t("rename.doubleClick")}
       tabIndex={0}
       role="button"
       aria-label={t("rename.named", { name: value })}

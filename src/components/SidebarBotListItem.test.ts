@@ -155,7 +155,7 @@ describe("BotListItem", () => {
     expect(titleLine.exec(markup)?.[1]).toBe("Developer");
     expect(markup.indexOf(">Developer<")).toBeLessThan(markup.indexOf(">Atlas<"));
     // the rename hint is unrelated to the bot's title
-    expect(markup).toContain('title="Double-click to rename"');
+    expect(markup).toContain('title="Atlas\nDouble-click to rename"');
 
     expect(titleLine.test(renderRow(bot()))).toBe(false);
     expect(titleLine.test(renderRow(bot({ title: "  " })))).toBe(false);
@@ -319,6 +319,12 @@ describe("bot deletion feedback", () => {
       expect(renderRow(bot({ title: "Developer", chiefOfStaff: true }))).toContain("Chief of Staff</span>");
       expect(renderRow(bot({ title: "Developer", chiefOfStaff: true }))).not.toContain('data-testid="chief-crown"');
     });
+  });
+
+  it("leaves the pin to the Pinned section and keeps the whole name in the tooltip", () => {
+    const markup = renderRow(bot({ name: "Chief of Staff Nuria", pinned: true }));
+    expect(markup).not.toContain("lucide-pin");
+    expect(markup).toContain('title="Chief of Staff Nuria\nDouble-click to rename"');
   });
 
   it("shows the watch eye and the session triangle on a folded bot's own line", () => {

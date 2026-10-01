@@ -1205,7 +1205,8 @@ export function BotListItem({
         )}
         <div className="flex items-baseline justify-between gap-2">
           <span className="flex min-w-0 grow items-center gap-1.5 truncate text-[14px] font-semibold text-ink">
-            {bot.pinned && <Pin size={12} className="shrink-0 text-ink-secondary" />}
+            {/* no pin icon here: the Pinned section already says it, and
+                the icon cost the name its last characters (R7 V6) */}
             <RenameTitle
               key={iconOnly ? "icons" : "expanded"}
               value={bot.name}
@@ -1221,6 +1222,7 @@ export function BotListItem({
               onEditingChange={setRenaming}
               className="truncate"
               inputClassName="w-full rounded bg-inset px-1 py-0.5 text-[14px] font-semibold"
+              showValueInTooltip
             />
             {quiet && bot.chiefOfStaff && !renaming && (
               // quiet rows fold the Chief of Staff line into a crown right
