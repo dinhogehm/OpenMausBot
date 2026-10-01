@@ -187,15 +187,25 @@ describe("after a release", () => {
     }
   });
 
-  it("does not tell a halt that production already contains, or that main's tip moved past", () => {
+  // INSP-R r3 item 1: only a LATER successful release supersedes a halt; main moving does not
+  it("does not tell a halt only when a later release went through", () => {
     const haltedSha = "2995ef215";
-    expect(haltStillMatters({ haltedSha, releasedContainsHalt: false, mainTip: "2995ef215fc784ea87387cb1550c1a733aba4dc5" })).toBe(true);
-    // superseded: a newer tip shipped and contains it, or main moved on
-    expect(haltStillMatters({ haltedSha, releasedContainsHalt: true, mainTip: "2995ef215fc784ea87387cb1550c1a733aba4dc5" })).toBe(false);
-    expect(haltStillMatters({ haltedSha, releasedContainsHalt: false, mainTip: "c88f99d62000000000000000000000000000000a" })).toBe(false);
-    expect(haltStillMatters({ haltedSha, releasedContainsHalt: true, mainTip: "c88f99d62000000000000000000000000000000a" })).toBe(false);
-    // unknowns never hide a halt
-    expect(haltStillMatters({ haltedSha, releasedContainsHalt: null, mainTip: null })).toBe(true);
-    expect(haltStillMatters({ haltedSha, releasedContainsHalt: null, mainTip: "garbage" })).toBe(true);
+    const older = "b51648498aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // released before the halt
+    const later = "c88f99d62000000000000000000000000000000a";
+    // exit 21 (post-release-health): production runs the halted commit, nothing released after it,
+    // main moved on meanwhile — the alert goes out
+    expect(haltedRelease({ escalationJson: "", haltedSha, haltedReason: "post-release-health" })?.reason).toBe("checagem de saúde pós-deploy");
+    expect(haltStillMatters({ haltedSha, releasedSha: older, releasedContainsHalt: false, releasedAtMs: 1_000, haltedAtMs: 2_000 })).toBe(true);
+    expect(haltStillMatters({ haltedSha, releasedSha: older, releasedContainsHalt: null, releasedAtMs: 1_000, haltedAtMs: 2_000 })).toBe(true);
+    // superseded: the released sha contains it, or a later release (newer file, another sha)
+    expect(haltStillMatters({ haltedSha, releasedSha: later, releasedContainsHalt: true, releasedAtMs: 3_000, haltedAtMs: 2_000 })).toBe(false);
+    expect(haltStillMatters({ haltedSha, releasedSha: later, releasedContainsHalt: false, releasedAtMs: 3_000, haltedAtMs: 2_000 })).toBe(false);
+    expect(haltStillMatters({ haltedSha, releasedSha: later, releasedContainsHalt: null, releasedAtMs: 3_000, haltedAtMs: 2_000 })).toBe(false);
+    // the same commit "released" after its own halt is no later release; unknown times keep the alert
+    expect(haltStillMatters({ haltedSha, releasedSha: "2995ef215fc784ea87387cb1550c1a733aba4dc5", releasedContainsHalt: null, releasedAtMs: 3_000, haltedAtMs: 2_000 })).toBe(true);
+    expect(haltStillMatters({ haltedSha, releasedSha: later, releasedContainsHalt: null, releasedAtMs: null, haltedAtMs: 2_000 })).toBe(true);
+    expect(haltStillMatters({ haltedSha, releasedSha: "", releasedContainsHalt: null, releasedAtMs: null, haltedAtMs: null })).toBe(true);
+    // there is no main-tip input any more: main moving cannot silence it
+    expect(haltStillMatters.length).toBe(1);
   });
 });

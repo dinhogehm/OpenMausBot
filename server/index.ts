@@ -8225,14 +8225,16 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
   const halted = readHaltedRelease();
   let haltMatters = false;
   if (halted && !state.wasTold(`halt:${halted.sha}`)) {
-    // a .sha left behind after a newer tip shipped is not news
+    // a .sha left behind after a LATER successful release is not news (main moving is not evidence)
     const repo = join(homedir(), "Projetos", "nuria-platform");
     const releasedContainsHalt = released
       ? await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", halted.sha, released]).then(() => true, (error: unknown) => ((error as { code?: unknown }).code === 1 ? false : null))
       : null;
-    const mainTip = await execCc("git", ["-C", repo, "ls-remote", "origin", "refs/heads/main"]).then((out) => out.split(/\s+/)[0] || null, () => null);
-    haltMatters = haltStillMatters({ haltedSha: halted.sha, releasedContainsHalt, mainTip });
-    if (!haltMatters && !releaseWatch.quiet.has(`halt:${halted.sha}`) && releaseWatch.quiet.add(`halt:${halted.sha}`)) console.log(`[release] halt of ${halted.sha.slice(0, 9)} left behind: production contains it (${releasedContainsHalt}) or main's tip moved (${mainTip?.slice(0, 9) ?? "?"}) — no alert`);
+    const mtime = (path: string) => { try { return statSync(path).mtimeMs; } catch { return null; } };
+    const releasedAtMs = mtime(RELEASED_SHA_FILE);
+    const haltedAtMs = mtime(HALTED_SHA_FILE);
+    haltMatters = haltStillMatters({ haltedSha: halted.sha, releasedSha: released, releasedContainsHalt, releasedAtMs, haltedAtMs });
+    if (!haltMatters && !releaseWatch.quiet.has(`halt:${halted.sha}`) && releaseWatch.quiet.add(`halt:${halted.sha}`)) console.log(`[release] halt of ${halted.sha.slice(0, 9)} left behind: a later release went through (${released.slice(0, 9)}, contains it: ${releasedContainsHalt}) — no alert`);
   }
   if (halted && haltMatters && state.once(`halt:${halted.sha}`)) {
     const text = `O watcher de produção PAROU de tentar o commit ${halted.sha.slice(0, 9)} (${halted.reason}${halted.failures ? `, ${halted.failures} falhas` : ""}): ele não sai sozinho; precisa de ação.`;

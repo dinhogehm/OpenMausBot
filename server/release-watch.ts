@@ -196,12 +196,17 @@ const sameCommit = (a: string, b: string) => a.startsWith(b) || b.startsWith(a);
 
 /** Whether a halt is still news: the .sha stays on disk until someone deletes
  * it, even after a newer tip shipped (the watcher only compares it with the
- * remote tip). Not when production already contains the halted commit, nor
- * when main's tip moved past it (the watcher tries the new tip). Unknowns
- * (null) keep the alert: a halt is never hidden on a guess. */
-export function haltStillMatters(input: { haltedSha: string; releasedContainsHalt: boolean | null; mainTip: string | null }): boolean {
+ * remote tip). It is superseded only by a LATER release that went through:
+ * the released sha contains the halted one, or last-production-release.sha
+ * (written only on success) is newer than the halt and holds another commit.
+ * main moving is no evidence: on exit 21 (bad health, no automatic way back)
+ * production runs the halted commit and nothing was released after it.
+ * Unknowns (null) keep the alert: a halt is never hidden on a guess. */
+export function haltStillMatters(input: { haltedSha: string; releasedSha: string; releasedContainsHalt: boolean | null; releasedAtMs: number | null; haltedAtMs: number | null }): boolean {
   if (input.releasedContainsHalt === true) return false;
-  if (input.mainTip && COMMIT_SHA.test(input.mainTip) && !sameCommit(input.mainTip, input.haltedSha)) return false;
+  const released = input.releasedSha.trim();
+  // a later release went through: the watcher writes last-production-release.sha only on success
+  if (COMMIT_SHA.test(released) && !sameCommit(released, input.haltedSha) && input.releasedAtMs !== null && input.haltedAtMs !== null && input.releasedAtMs > input.haltedAtMs) return false;
   return true;
 }
 /** The watcher's reason codes, said in pt-BR (unknown codes are kept as they are). */
