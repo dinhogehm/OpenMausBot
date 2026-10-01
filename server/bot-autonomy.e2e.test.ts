@@ -341,7 +341,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(realpathSync(second.cwd)).toBe(realpathSync(join(repo, ".claude", "worktrees", ccLedger()[0].worktree)));
     expect(ccLedger()[0]).toMatchObject({ turns: 2, costUsd: 0.02 });
     const chips = await f.chips();
-    expect(chips.some((chip: string) => chip.includes("finished turn 1"))).toBe(true);
+    expect(chips.some((chip: string) => chip.includes("terminou o turno 1"))).toBe(true);
     expect(chips.some((chip: string) => chip.includes("arquivada"))).toBe(true);
   }, { OMB_CC_BIN: fake });
 }, 90_000);

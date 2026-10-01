@@ -12,6 +12,7 @@
 // Everything outside the ledger comes in through DesktopWorkDeps, so the
 // whole flow is testable with a fake app and fake records.
 import { existsSync, statSync } from "node:fs";
+import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import type { CcDesktopPending, CcSession, CcSessionLedger } from "./cc-sessions.ts";
 import { ccHeldQueueReport, ccReportForOwner, ccStallReport, type CcStallFacts } from "./cc-sessions.ts";
 export { CC_ACTIVE_MS, ccSessionActive } from "./cc-sessions.ts";
@@ -221,7 +222,7 @@ export function failDesktopSession(deps: DesktopWorkDeps, session: CcSession, re
   session.lastError = reason;
   session.failedAt = deps.now();
   deps.ledger.save();
-  deps.chip(session, `stopped with a problem — ${reason.slice(0, 100)}`, false);
+  deps.chip(session, `parou com um problema — ${sessionErrorPt(reason).slice(0, 120)}`, false);
   deps.report(session, reportFor(deps, session));
 }
 
@@ -247,7 +248,7 @@ function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopR
     failDesktopSession(deps, session, `the session opened in ${reused} instead of a new worktree of its own (${record.cwd}), so it would edit the same folder — stop it in the Claude app now and start the work again`);
     return false;
   }
-  deps.chip(session, "opened in the Claude app");
+  deps.chip(session, "aberta no app Claude");
   return true;
 }
 
@@ -305,7 +306,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
     if (record.isArchived) {
       delete desktop.pending;
       deps.ledger.setStatus(session, "archived");
-      deps.chip(session, "archived in the Claude app");
+      deps.chip(session, "arquivada no app Claude");
       deps.onArchived?.(session);
       continue;
     }
@@ -318,7 +319,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
         continue;
       }
       deps.ledger.save();
-      deps.chip(session, "the app did not confirm the archive; trying again", false);
+      deps.chip(session, "o app não confirmou o arquivamento; tentando de novo", false);
     }
     // A rename counts only once the app's record shows the new title.
     const renaming = desktop.pending?.kind === "rename" && desktop.pending.verifyUntil ? desktop.pending : null;
@@ -366,7 +367,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
         }
         desktop.pending = { kind: "send", text: sent.text, since: now, attempts: 0, deliveries: sent.deliveries };
         deps.ledger.save();
-        deps.chip(session, `the message did not reach the session; typing it again (${sent.deliveries + 1} of ${DESKTOP_SEND_MAX_DELIVERIES})`, false);
+        deps.chip(session, `a mensagem não chegou à sessão; digitando de novo (${sent.deliveries + 1} de ${DESKTOP_SEND_MAX_DELIVERIES})`, false);
         continue;
       }
     }
@@ -460,7 +461,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       delete desktop.archiveWhenResolved;
       desktop.pending = { kind: "archive", text: "", since: now, attempts: 0 };
       deps.ledger.save();
-      deps.chip(session, "queued to be archived in the Claude app");
+      deps.chip(session, "na fila para ser arquivada no app Claude");
     }
   }
 }
@@ -572,7 +573,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       next.lastActivityAt = at;
       next.progressAt = at;
       deps.ledger.save();
-      deps.chip(next, pending.kind === "create" ? "brief sent in the Claude app" : "message typed in the Claude app (checking that it arrives)");
+      deps.chip(next, pending.kind === "create" ? "brief enviado no app Claude" : "mensagem digitada no app Claude (conferindo se chegou)");
       return;
     }
     if (!step.retry) {

@@ -132,7 +132,7 @@ describe("opening a session", () => {
     await h.tick();
     expect(session.desktop).toMatchObject({ sentAt: h.now });
     expect(session.desktop!.pending).toBeUndefined();
-    expect(h.chips.at(-1)?.text).toBe("brief sent in the Claude app");
+    expect(h.chips.at(-1)?.text).toBe("brief enviado no app Claude");
 
     h.advance(14_000);
     h.byMarker.set("OMBA", { sessionId: LOCAL, cliSessionId: "cli-a", cwd: WORKTREE, completedTurns: 0, permissionMode: "bypassPermissions", worktreeName: "helpdesk-f30521" });
@@ -141,7 +141,7 @@ describe("opening a session", () => {
     followDesktopSessions(h.deps);
     expect(session.desktop).toMatchObject({ localId: LOCAL, cliSessionId: "cli-a", permissionMode: "bypassPermissions" });
     expect(session.worktree).toBe("helpdesk-f30521");
-    expect(h.chips.at(-1)?.text).toBe("opened in the Claude app");
+    expect(h.chips.at(-1)?.text).toBe("aberta no app Claude");
 
     h.ledger.enqueue(session, "now open the PR");
     h.records.get(LOCAL)!.completedTurns = 1;

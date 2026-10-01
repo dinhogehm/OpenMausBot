@@ -328,6 +328,7 @@ import { BG_JOB_MAX_MS, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, b
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
+import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
@@ -8296,6 +8297,19 @@ if (ccLedger.interruptedOnLoad.length) {
 }
 reportResumptionToChief();
 retireWorkOfClosedThreads();
+renameResultsThreads();
+
+/** Routine results threads made before they were titled in pt-BR. */
+function renameResultsThreads(): void {
+  for (const bot of store.bots) {
+    for (const task of store.tasks(bot.id)) {
+      if (!task.title.endsWith(" · Results")) continue;
+      try {
+        store.patchTask(bot.id, task.threadId, { title: `${task.title.slice(0, -" · Results".length)} · Resultados` });
+      } catch { /* a task that cannot be patched keeps its title */ }
+    }
+  }
+}
 
 /** Sessions still owned by a conversation that was closed, archived or
  * deleted before closing handed work over (or while the server was down):
@@ -8481,11 +8495,11 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     if (session.status === "stopped" || session.status === "archived") return;
     const next = session.status === "idle" ? takeFreshQueued(desktopWork, session) : null;
     if (next !== null) {
-      ccChip(session, "your queued message is running now");
+      ccChip(session, "a mensagem da fila está rodando agora");
       runCcTurn(session, next, false);
       return;
     }
-    ccChip(session, session.status === "failed" ? `stopped with a problem — ${String(session.lastError).slice(0, 100)}` : `finished turn ${session.turns}`, session.status !== "failed");
+    ccChip(session, session.status === "failed" ? `parou com um problema — ${sessionErrorPt(String(session.lastError)).slice(0, 120)}` : `terminou o turno ${session.turns}`, session.status !== "failed");
     // A process it left running in its worktree (a gate in the background)
     // would finish with nobody to tell: note it; the tick resumes the
     // session when it is gone (watchBackgroundJobs).

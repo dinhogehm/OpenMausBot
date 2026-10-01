@@ -22,6 +22,8 @@ describe("thread signals", () => {
     expect(summary.severe).toBe(true);
     expect(summary.text).toBe("Claude Code · #9308 e-mail — com pergunta aberta no app\nClaude Code · #9298 — parada");
     expect(ccAlertSummary([{ sessionId: "b", title: "x", state: "stalled" }])!.severe).toBe(false);
+    expect(ccAlertSummary([{ sessionId: "c", title: "#9298", state: "failed", detail: "could not send the message after 5 tries" }])!.text)
+      .toBe("Claude Code · #9298 — falhou: não foi possível enviar a mensagem depois de 5 tentativas");
   });
 
   it("sums a bot's conversations for its folded row, and knows which need a look", () => {

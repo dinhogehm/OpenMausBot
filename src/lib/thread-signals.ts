@@ -5,6 +5,7 @@
 import type { WireCcAlert, WireWatch } from "../../shared/wire";
 import { t } from "@/lib/i18n";
 import { sidebarStamp } from "@/lib/message-stamp";
+import { sessionErrorPt } from "../../shared/session-error-pt";
 
 export function watchSummary(watches: readonly WireWatch[] | undefined, lost: boolean | undefined, now = Date.now()): { text: string; failing: boolean } | null {
   if (!watches?.length && !lost) return null;
@@ -22,7 +23,8 @@ export function ccAlertState(state: WireCcAlert["state"]): string {
 export function ccAlertSummary(alerts: readonly WireCcAlert[] | undefined): { text: string; severe: boolean } | null {
   if (!alerts?.length) return null;
   return {
-    text: alerts.map((alert) => t("ccAlert.item", { title: alert.title, state: ccAlertState(alert.state) })).join("\n"),
+    // a failure says why, in the reader's words when it is a known one
+    text: alerts.map((alert) => `${t("ccAlert.item", { title: alert.title, state: ccAlertState(alert.state) })}${alert.state === "failed" && alert.detail ? `: ${sessionErrorPt(alert.detail)}` : ""}`).join("\n"),
     severe: alerts.some((alert) => alert.state !== "stalled"),
   };
 }
