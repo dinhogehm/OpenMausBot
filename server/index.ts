@@ -6,7 +6,7 @@
 import { BOOT_CLOUD_SECRETS } from "./cloud-secrets-boot.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, rmSync, mkdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, mkdirSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -408,7 +408,7 @@ import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerC
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
 import { CcStartQueue, priorityLabel, startPriority } from "./cc-start-queue.ts";
-import { removeNestedWorktrees, removeReleasedWorktrees } from "./nested-worktrees.ts";
+import { codexRolloutFolders, planReleasedWorktrees, releasedPlanLine, removeNestedWorktrees, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -8734,39 +8734,109 @@ function repoBaseBranch(repo: string): string {
 }
 
 /** Worktrees whose work is already in the production tag, in the
- * repositories the sessions use: removed every 6 h when not in use, not
- * locked and clean (never --force), and the Chief gets the list (R8 G3). */
-const releasedCleanup = { lastAt: 0, running: false };
+ * repositories the sessions use: every 6 h the Chief gets the ones a person
+ * may remove, with the command, and those kept and why — only when that
+ * changed. The server removes none (R8 G3, server/nested-worktrees.ts). */
+const releasedCleanup: { lastAt: number; running: boolean; lastKey: Map<string, string> } = { lastAt: 0, running: false, lastKey: new Map() };
+/** `git` with git's stderr on the error, async, with a timeout. */
+const gitAsync = (args: string[]) => new Promise<string>((resolve, reject) => {
+  execFileCc("git", args, { timeout: 120_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath(), GIT_OPTIONAL_LOCKS: "0" } }, (error, stdout, stderr) => {
+    if (error) reject(Object.assign(error, { stderr: String(stderr ?? "") }));
+    else resolve(String(stdout));
+  });
+});
+/** Every process's cwd (`lsof -a -d cwd -Fpn`), or null when it cannot be read. */
+const allProcessCwds = () => new Promise<string[] | null>((resolve) => {
+  execFileCc("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn"], { timeout: 60_000, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } }, (_error, stdout) => {
+    // lsof exits 1 when it could not read another user's process: the output still counts
+    const found = parseLsofCwd(String(stdout ?? ""));
+    resolve(found.length ? found.map((proc) => proc.cwd) : null);
+  });
+});
+/** Codex sessions of the last week: the folders they work in (`session_meta.cwd`). */
+function recentCodexFolders(now: number): string[] {
+  const root = join(homedir(), ".codex", "sessions");
+  const folders = new Set<string>();
+  const walk = (dir: string, depth: number) => {
+    let names: string[];
+    try { names = readdirSync(dir); } catch { return; }
+    for (const name of names) {
+      const path = join(dir, name);
+      if (depth < 3) { walk(path, depth + 1); continue; }
+      if (!name.endsWith(".jsonl")) continue;
+      try {
+        if (now - statSync(path).mtimeMs > 7 * 86_400_000) continue;
+        for (const folder of codexRolloutFolders(readHead(path, 256 * 1024))) folders.add(folder);
+      } catch { /* unreadable: skipped */ }
+    }
+  };
+  walk(root, 0);
+  return [...folders];
+}
+function readHead(path: string, bytes: number): string {
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(bytes);
+    return buffer.subarray(0, readSync(fd, buffer, 0, bytes, 0)).toString("utf8");
+  } finally { closeSync(fd); }
+}
+/** Folders agents work in: our sessions, the app's sessions, every bot's
+ * open conversation (its folder or its task-workspace), rooms, Codex. */
+function foldersInUse(): string[] {
+  const folders: string[] = ccLedger.all().filter((session) => session.status !== "archived" && session.cwd).map((session) => session.cwd!);
+  if (process.platform === "darwin") folders.push(...liveRecordFolders());
+  for (const bot of store.bots) {
+    if (bot.cwd) folders.push(bot.cwd);
+    for (const task of store.tasks(bot.id)) {
+      if (task.archivedAt) continue;
+      if (typeof task.cwd === "string") folders.push(task.cwd);
+      folders.push(join(TASK_WORKSPACES_DIR, bot.id, task.threadId));
+    }
+  }
+  for (const group of store.groups ?? []) {
+    if (group.cwd) folders.push(group.cwd);
+    if (group.pinnedCwd) folders.push(group.pinnedCwd);
+  }
+  folders.push(...recentCodexFolders(Date.now()));
+  return folders;
+}
+const canonPath = (path: string) => { try { return realpathSync(path); } catch { return path; } };
 async function cleanReleasedWorktrees(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || releasedCleanup.running || Date.now() - releasedCleanup.lastAt < 6 * 3_600_000) return;
   releasedCleanup.running = true;
   releasedCleanup.lastAt = Date.now();
   try {
-    const sessions = ccLedger.all();
-    const inUse = new Set<string>([
-      ...sessions.filter((session) => session.status !== "archived" && session.cwd).map((session) => session.cwd!),
-      ...(process.platform === "darwin" ? liveRecordFolders() : []),
-    ]);
+    // without every process's cwd and argv nothing can be judged in use: no report
+    const [cwds, rows] = await Promise.all([allProcessCwds(), psTable()]);
+    if (!cwds || !rows.length) return;
+    const inUse = foldersInUse();
     const lines: string[] = [];
-    for (const repo of new Set(sessions.map((session) => session.repo))) {
-      const git = (args: string[]) => String(execFileSyncCc("git", ["-C", repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } }));
+    for (const repo of new Set(ccLedger.all().map((session) => session.repo))) {
+      const git = (args: string[]) => gitAsync(["-C", repo, ...args]);
       let tagSha: string | null = null;
       try {
         tagSha = parseLsRemoteTag(await execCc("git", ["-C", repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
-        if (tagSha) git(["cat-file", "-e", `${tagSha}^{commit}`]);
+        if (tagSha) await git(["cat-file", "-e", `${tagSha}^{commit}`]);
       } catch { continue; } // no tag, or its commit is not fetched here: nothing can be judged
       if (!tagSha) continue;
-      const { removed, kept } = removeReleasedWorktrees(repo, tagSha, git, inUse);
-      if (removed.length || kept.length) {
-        console.log(`[worktrees] ${repo}: removed ${removed.length} already in ${PRODUCTION_TAG} (${removed.join(", ")}); kept ${kept.join(", ") || "none"}`);
-        lines.push(`${basename(repo)}: ${removed.length} removida(s)${kept.length ? `; mantidas: ${kept.map((path) => basename(path.split(" (")[0]!) + ` (${path.split(" (")[1]}`).join(", ")}` : ""}`);
-      }
+      const plan = await planReleasedWorktrees(repo, tagSha, {
+        git, inUse, processCwds: cwds, processCommands: rows.map((row) => row.command), now: Date.now(), canon: canonPath,
+        lastActivity: (path) => worktreeLastActivity(path, { readFile: (file) => readFileSync(file, "utf8"), mtime: (file) => { try { return statSync(file).mtimeMs; } catch { return null; } } }),
+      });
+      const { line, key } = releasedPlanLine(basename(repo), plan, releasedCleanup.lastKey.get(repo));
+      releasedCleanup.lastKey.set(repo, key);
+      if (!line) continue;
+      console.log(`[worktrees] ${repo}: ${plan.candidates.length} in ${PRODUCTION_TAG} may be removed (${plan.candidates.map((candidate) => candidate.path).join(", ") || "none"}); kept ${plan.kept.join(", ") || "none"}`);
+      lines.push(line);
+      if (plan.candidates.length) lines.push(`Para remover (sem --force; confira antes): ${plan.candidates.map((candidate) => candidate.command).join(" ; ")}`);
     }
     if (!lines.length) return;
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
     const desk = chief ? chiefDeskThread(chief) : null;
     if (chief && desk && store.taskByThread(chief.id, desk)) {
-      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Worktrees já em produção limpas — ${lines.join(" · ")}`, 240), ok: true } });
+      const text = `Worktrees já em produção — ${lines[0]}${lines.length > 1 ? " …" : ""}`;
+      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: true } });
+      autonomy.addReport(chief.id, desk, `[Servidor: worktrees já em produção] O servidor não remove worktrees; estas podem ser removidas por uma pessoa, depois de conferir:\n${lines.join("\n")}`);
     }
   } finally {
     releasedCleanup.running = false;
