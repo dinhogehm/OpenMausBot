@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { nestedWorktrees, parseWorktreeList, removeNestedWorktrees } from "./nested-worktrees.ts";
+import { nestedWorktrees, parseWorktreeList, removeNestedWorktrees, removeReleasedWorktrees } from "./nested-worktrees.ts";
 
 const parent = "/r/nuria-platform/.claude/worktrees/9286-lote";
 const porcelain = [
@@ -35,6 +35,31 @@ describe("worktrees a session left inside its own", () => {
     // never forced, never the session's own worktree
     expect(calls.some((call) => call.includes("--force"))).toBe(false);
     expect(calls).not.toContain(`worktree remove ${parent}`);
+  });
+
+  it("removes the worktrees already in production, and never the main checkout, one in use, a locked or a dirty one", () => {
+    const list = [
+      "worktree /r/nuria-platform\nHEAD aaa\nbranch refs/heads/main",
+      "worktree /r/nuria-platform/.claude/worktrees/fix-9298\nHEAD p1\nbranch refs/heads/fix/9298",
+      "worktree /r/nuria-platform/.claude/worktrees/live-9331\nHEAD p2\nbranch refs/heads/fix/9331",
+      "worktree /r/nuria-platform/.claude/worktrees/live-9331/g9278\nHEAD p3\nbranch refs/heads/hotfix/9278",
+      "worktree /r/nuria-platform/.worktrees/wt9278\nHEAD p4\nbranch refs/heads/fix/9278\nlocked",
+      "worktree /r/nuria-platform/.claude/worktrees/dirty\nHEAD p5\nbranch refs/heads/fix/dirty",
+      "worktree /r/nuria-platform/.claude/worktrees/open-9340\nHEAD n1\nbranch refs/heads/fix/9340",
+    ].join("\n\n");
+    const calls: string[] = [];
+    const git = (args: string[]) => {
+      calls.push(args.join(" "));
+      if (args[1] === "list") return list;
+      if (args[0] === "merge-base" && args[2] === "n1") throw new Error("not ancestor");
+      if (args[1] === "remove" && args[2]!.endsWith("/dirty")) throw new Error("contains modified or untracked files");
+      return "";
+    };
+    const result = removeReleasedWorktrees("/r/nuria-platform", "c88f99d62", git, new Set(["/r/nuria-platform/.claude/worktrees/live-9331"]));
+    expect(result.removed).toEqual(["/r/nuria-platform/.claude/worktrees/fix-9298"]);
+    expect(result.kept).toEqual(["/r/nuria-platform/.worktrees/wt9278 (bloqueada)", "/r/nuria-platform/.claude/worktrees/dirty (tem mudanças locais)"]);
+    expect(calls.some((call) => call.includes("--force"))).toBe(false);
+    expect(calls.filter((call) => call.startsWith("worktree remove")).some((call) => call.includes("live-9331") || call.endsWith("/r/nuria-platform"))).toBe(false);
   });
 
   it("says nothing when there are none, or git cannot list them", () => {

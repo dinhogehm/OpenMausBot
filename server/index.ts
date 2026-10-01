@@ -304,6 +304,7 @@ import {
   newMarker,
   lastAppRepo,
   liveWorktreeNames,
+  liveRecordFolders,
   lastAppWorktreeFolder,
   readDesktopRecord,
   recordBlocked,
@@ -407,7 +408,7 @@ import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerC
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
 import { CcStartQueue, priorityLabel, startPriority } from "./cc-start-queue.ts";
-import { removeNestedWorktrees } from "./nested-worktrees.ts";
+import { removeNestedWorktrees, removeReleasedWorktrees } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -8732,6 +8733,46 @@ function repoBaseBranch(repo: string): string {
   }
 }
 
+/** Worktrees whose work is already in the production tag, in the
+ * repositories the sessions use: removed every 6 h when not in use, not
+ * locked and clean (never --force), and the Chief gets the list (R8 G3). */
+const releasedCleanup = { lastAt: 0, running: false };
+async function cleanReleasedWorktrees(): Promise<void> {
+  if (!DESKTOP_MANAGED || process.env.VITEST || releasedCleanup.running || Date.now() - releasedCleanup.lastAt < 6 * 3_600_000) return;
+  releasedCleanup.running = true;
+  releasedCleanup.lastAt = Date.now();
+  try {
+    const sessions = ccLedger.all();
+    const inUse = new Set<string>([
+      ...sessions.filter((session) => session.status !== "archived" && session.cwd).map((session) => session.cwd!),
+      ...(process.platform === "darwin" ? liveRecordFolders() : []),
+    ]);
+    const lines: string[] = [];
+    for (const repo of new Set(sessions.map((session) => session.repo))) {
+      const git = (args: string[]) => String(execFileSyncCc("git", ["-C", repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } }));
+      let tagSha: string | null = null;
+      try {
+        tagSha = parseLsRemoteTag(await execCc("git", ["-C", repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
+        if (tagSha) git(["cat-file", "-e", `${tagSha}^{commit}`]);
+      } catch { continue; } // no tag, or its commit is not fetched here: nothing can be judged
+      if (!tagSha) continue;
+      const { removed, kept } = removeReleasedWorktrees(repo, tagSha, git, inUse);
+      if (removed.length || kept.length) {
+        console.log(`[worktrees] ${repo}: removed ${removed.length} already in ${PRODUCTION_TAG} (${removed.join(", ")}); kept ${kept.join(", ") || "none"}`);
+        lines.push(`${basename(repo)}: ${removed.length} removida(s)${kept.length ? `; mantidas: ${kept.map((path) => basename(path.split(" (")[0]!) + ` (${path.split(" (")[1]}`).join(", ")}` : ""}`);
+      }
+    }
+    if (!lines.length) return;
+    const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+    const desk = chief ? chiefDeskThread(chief) : null;
+    if (chief && desk && store.taskByThread(chief.id, desk)) {
+      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Worktrees já em produção limpas — ${lines.join(" · ")}`, 240), ok: true } });
+    }
+  } finally {
+    releasedCleanup.running = false;
+  }
+}
+
 /** Merged worktrees the session left inside its own folder (server/nested-worktrees.ts). */
 function cleanNestedWorktrees(session: CcSession): string {
   if (!session.cwd || !existsSync(session.cwd)) return "";
@@ -9184,6 +9225,7 @@ async function runDesktopWork(): Promise<void> {
   void watchIdleSessionsWithOpenPrs().catch((error) => console.error(`[cc-sessions] idle check failed: ${error instanceof Error ? error.message : String(error)}`));
   drainCcStartQueue();
   void watchArchivedOutside().catch((error) => console.error(`[cc-sessions] archived-outside check failed: ${error instanceof Error ? error.message : String(error)}`));
+  void cleanReleasedWorktrees().catch((error) => console.error(`[worktrees] cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
   void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
   if (process.platform !== "darwin") return;
   await runDesktopWorkFlow(desktopWork, desktopState);

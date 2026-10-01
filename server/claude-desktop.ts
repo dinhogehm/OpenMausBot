@@ -752,6 +752,18 @@ export function lastAppWorktreeFolder(dir = DESKTOP_SESSIONS_DIR): { folder: str
   return { folder, ...(newest.title ? { title: newest.title } : {}) };
 }
 
+/** Folders the app's sessions not archived work in (their cwd and worktree). */
+export function liveRecordFolders(dir = DESKTOP_SESSIONS_DIR): string[] {
+  const folders = new Set<string>();
+  for (const file of recordFiles(dir)) {
+    const record = readRecord(file);
+    if (!record || record.isArchived) continue;
+    if (record.cwd) folders.add(record.cwd);
+    if (record.worktreePath) folders.add(record.worktreePath);
+  }
+  return [...folders];
+}
+
 /** Worktree names of the app's sessions (archived ones too with `includeArchived`:
  * the app reopens the folder of an archived session as well). */
 export function liveWorktreeNames(dir = DESKTOP_SESSIONS_DIR, includeArchived = false): string[] {
