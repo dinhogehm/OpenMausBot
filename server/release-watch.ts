@@ -27,9 +27,22 @@ export function releaseFailures(errLog: string, releasedSha: string): { sha: str
 }
 
 /** The last line saying why (the local CI lane that failed), from the out log's tail. */
+// ESC [ … m, built from a string so no control character sits in a regex literal
+const ANSI_COLOUR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
 export function releaseFailureCause(outTail: string): string | null {
-  const lines = outTail.split("\n").filter((line) => /Local CI failed at|failed at \w+|FAIL |Error:/.test(line));
-  return lines.at(-1)?.trim().slice(0, 300) ?? null;
+  // ANSI colours out; a workspace's test noise (@nuria/web:test: …) is never the cause
+  const lines = outTail.split("\n").map((line) => line.replace(ANSI_COLOUR, "").trim()).filter((line) => line && !/@[\w.-]+\/[\w.-]+:test:/.test(line));
+  // the release's own verdict: the first [ERROR] of the block that ends in "Release abortado"
+  const abort = lines.findLastIndex((line) => /Release abortado|Release aborted/i.test(line));
+  if (abort >= 0) {
+    let start = abort;
+    while (start > 0 && /\[ERROR\]/.test(lines[start - 1]!)) start -= 1;
+    if (start < abort) return lines[start]!.replace(/^\[ERROR\]\s*/, "").slice(0, 300);
+  }
+  const named = lines.findLast((line) => /Release snapshot changed|ADMISSION_TIMEOUT|Local CI failed at/.test(line))
+    ?? lines.findLast((line) => /\[ERROR\]/.test(line));
+  return named ? named.replace(/^\[ERROR\]\s*/, "").slice(0, 300) : null;
 }
 
 export function readTail(path: string, bytes: number): string {

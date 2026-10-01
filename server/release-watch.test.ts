@@ -21,6 +21,15 @@ describe("production release failures", () => {
 
   it("finds the cause in the release's own log", () => {
     expect(releaseFailureCause("x\n✗ helpdesk: 4 failed\nLocal CI failed at tests\ndone")).toBe("Local CI failed at tests");
+    // the real tail of 01/10: test noise after the verdict, coloured [ERROR] lines
+    const real = [
+      "@nuria/web:test: Error: usePlanContext must be used within PlanProvider",
+      "\x1b[0;31m[ERROR]\x1b[0m Tenant nuria-ws-01a0ed885c1a reprovou inspecao da migration 0608",
+      "\x1b[0;31m[ERROR]\x1b[0m   reconciler nao emitiu stderr — investigue timeout, sinal ou rede",
+      "\x1b[0;31m[ERROR]\x1b[0m Release abortado",
+      "@nuria/web:test: Error: usePlanContext must be used within PlanProvider",
+    ].join("\n");
+    expect(releaseFailureCause(real)).toBe("Tenant nuria-ws-01a0ed885c1a reprovou inspecao da migration 0608");
     expect(releaseFailureCause("all good")).toBeNull();
   });
 
