@@ -403,6 +403,7 @@ import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-s
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { selfWriteOf } from "./watch-echo.ts";
+import { removeNestedWorktrees } from "./nested-worktrees.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
 import {
@@ -8584,6 +8585,8 @@ const desktopWork: DesktopWorkDeps = {
   folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
   log: (line) => console.log(`[claude-desktop] ${line}`),
   onArchived: (session) => {
+    const nested = cleanNestedWorktrees(session);
+    if (nested) ccChip(session, nested, !nested.includes("Mantidas"));
     if (!session.desktop?.removeWorktree) return;
     const note = removeSessionWorktree(session);
     if (note) ccChip(session, note, !note.startsWith("A worktree foi mantida"));
@@ -8597,6 +8600,12 @@ if (process.platform === "darwin") reviveScreenFailures(desktopWork);
 /** `git worktree remove` without --force: a worktree with uncommitted
  * changes is kept. Only a session's own .claude/worktrees folder. Returns
  * what happened, for the chip and the tool result. */
+/** Merged worktrees the session left inside its own folder (server/nested-worktrees.ts). */
+function cleanNestedWorktrees(session: CcSession): string {
+  if (!session.cwd || !existsSync(session.cwd)) return "";
+  return removeNestedWorktrees(session.cwd, (args) => String(execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } })));
+}
+
 function removeSessionWorktree(session: CcSession): string {
   if (!session.cwd || !session.cwd.includes("/.claude/worktrees/")) return "";
   if (!existsSync(session.cwd)) return `A worktree ${session.cwd} já não existia.`;
@@ -17965,7 +17974,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
           }
           ccLedger.setStatus(session, action === "stop" ? "stopped" : "archived");
-          const worktreeNote = action === "archive" && body.removeWorktree === true ? removeSessionWorktree(session) : "";
+          const nestedNote = action === "archive" ? cleanNestedWorktrees(session) : "";
+          const worktreeNote = [nestedNote, action === "archive" && body.removeWorktree === true ? removeSessionWorktree(session) : ""].filter(Boolean).join(" ");
           ccChip(session, action === "stop" ? "parada" : `arquivada${worktreeNote ? " (worktree tratada)" : ""}`);
           return json(res, 200, { message: `${action === "stop" ? "Parada; cc_session_send a retoma depois." : "Arquivada."}${worktreeNote ? ` ${worktreeNote}` : ""}${archiveNote}` });
         }
