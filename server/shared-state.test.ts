@@ -68,6 +68,27 @@ describe("one conversation with the owner, and the newest order wins", () => {
     expect(state.render("chief", "esteira", 20)).toContain("Esta é a conversa com o dono");
   });
 
+  it("forgets the conversation with the owner when it is deleted, closed or archived (INSP-F F2-b)", () => {
+    const named = () => {
+      const state = new SharedState(null);
+      state.record("chief", { threadId: "dbb9f1cf", title: "@Monitor", at: 10 }, [{ threadId: "dbb9f1cf", at: 10, text: "Use só a conversa da esteira para falar comigo." }]);
+      state.record("chief", { threadId: "ade82a65", title: "New thread", at: 11 });
+      return state;
+    };
+    const deleted = named();
+    expect(deleted.forgetThread("chief", "ade82a65")).toBe(false);
+    expect(deleted.ownerThread("chief")?.threadId).toBe("dbb9f1cf");
+    expect(deleted.forgetThread("chief", "dbb9f1cf")).toBe(true);
+    expect(deleted.ownerThread("chief")).toBeNull();
+    expect(deleted.render("chief", "ade82a65", 20)).not.toContain("Conversa com o dono");
+    const archived = named();
+    expect(archived.forgetOwnerThread("chief", "dbb9f1cf")).toBe(true);
+    expect(archived.ownerThread("chief")).toBeNull();
+    expect(archived.forgetOwnerThread("chief", "dbb9f1cf")).toBe(false);
+    // its record stays: only the deleted conversation's goes
+    expect(archived.render("chief", "ade82a65", 20)).toContain('"@Monitor"');
+  });
+
   it("replaces an older order on the same thing with the newer one, wherever each was given", () => {
     expect(orderTopic("Não mergeie a #9314 antes do lote")).toBe("#9314");
     const state = new SharedState(null);

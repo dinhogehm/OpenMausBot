@@ -1,7 +1,7 @@
 // Who hears about a broken run, how often, and in what words.
 import { describe, expect, it } from "vitest";
 
-import { chiefForBot, INCIDENT_HARD_LIMIT, INCIDENT_RETRY_LIMIT, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, deskThread, type Incident } from "./incidents.ts";
+import { chiefForBot, INCIDENT_HARD_LIMIT, INCIDENT_RETRY_LIMIT, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, deskThread, OwnerWroteAt, ownerWrote, type Incident } from "./incidents.ts";
 
 const bots = [
   { id: "clive", name: "Clive", section: "Ops", chiefOfStaff: true },
@@ -102,5 +102,78 @@ describe("deskThread", () => {
     expect(deskThread(tasks, "selected", () => false, "dbb9f1cf")).toBe("dbb9f1cf");
     expect(deskThread(tasks, "selected", () => false, "closed")).toBe("pin");
     expect(deskThread(tasks, "selected", () => false, null)).toBe("pin");
+    // the named one wins even while it runs a goal: the owner chose it (INSP-F F2-c)
+    expect(deskThread(tasks, "selected", (id) => id === "dbb9f1cf", "dbb9f1cf")).toBe("dbb9f1cf");
+  });
+
+  /** The shape of the Chief's real state on 01/10 (redacted titles): 14 open
+   * conversations, none pinned, ownerThread null in shared-state.json, the
+   * oldest (ade82a65) a "New thread" nobody writes in, the owner's last
+   * message in dbb9f1cf (also bot.threadId), older ones elsewhere, and the
+   * rest only peers' delegations and bot posts. createdAt and the owner's
+   * last-message times are the real ones. */
+  const CHIEF_TASKS = [
+    ["bdba1ace", "New thread", 1790877733388],
+    ["52417e4a", "@Monitor · parallel work", 1790875675236],
+    ["57eeeb2d", "@QA", 1790867685658],
+    ["3e55c0fd", "@Monitor · parallel work", 1790863874924],
+    ["dd9c5ece", "Prioridade da esteira", 1790726227093],
+    ["a8416843", "@Eng", 1790706948117],
+    ["6477b3f4", "PRs sem dono", 1790703521574],
+    ["e7e94e89", "@Lead", 1790694164742],
+    ["cc5c122f", "Teste do fluxo completo", 1790686305968],
+    ["f4d06b8a", "@Monitor · parallel work", 1790647260730],
+    ["dbb9f1cf", "@Monitor", 1790644603310],
+    ["590384ea", "Continuação de outro bot", 1790639581483],
+    ["936f8e51", "Team incidents", 1790637419160],
+    ["ade82a65", "New thread", 1790636853409],
+  ].map(([threadId, title, createdAt]) => ({ threadId: threadId as string, title: title as string, createdAt: createdAt as number }));
+  const OWNER_WROTE: Record<string, number> = {
+    dbb9f1cf: 1790879604293,
+    "6477b3f4": 1790869726485,
+    dd9c5ece: 1790728775199,
+    cc5c122f: 1790686349497,
+    f4d06b8a: 1790686088516,
+    "590384ea": 1790644993032,
+  };
+
+  it("with no named conversation and no pin, alerts go where the owner wrote last, not to the oldest (INSP-F F2-a, state of 01/10)", () => {
+    const chiefThreadId = "dbb9f1cf";
+    // what the old rule gave: the oldest open one, ade82a65 (the 10:10 disk alert landed there)
+    expect(deskThread(CHIEF_TASKS, chiefThreadId, () => false, null)).toBe("ade82a65");
+    expect(deskThread(CHIEF_TASKS, chiefThreadId, () => false, null, (id) => OWNER_WROTE[id] ?? null)).toBe("dbb9f1cf");
+    // closed: the next one the owner wrote in
+    const closed = CHIEF_TASKS.map((task) => (task.threadId === "dbb9f1cf" ? { ...task, archivedAt: 1 } : task));
+    expect(deskThread(closed, chiefThreadId, () => false, null, (id) => OWNER_WROTE[id] ?? null)).toBe("6477b3f4");
+  });
+
+  it("knows where the owner wrote last from the messages, ignoring a peer's delegation and bot posts", () => {
+    const threads: Record<string, Array<{ at: number; role: string; kind: string; from?: unknown; peerAsk?: unknown }>> = {
+      dbb9f1cf: [
+        { at: 1790876346668, role: "user", kind: "text" },
+        { at: 1790877695393, role: "user", kind: "text", peerAsk: { botId: "monitor", name: "Monitor" } },
+        { at: 1790879604293, role: "user", kind: "text" },
+        { at: 1790881029980, role: "bot", kind: "text" },
+      ],
+      ade82a65: [
+        { at: 1790877165827, role: "bot", kind: "text" },
+        { at: 1790877166006, role: "user", kind: "text", from: { botId: "monitor" } },
+      ],
+      "57eeeb2d": [{ at: 1790880758062, role: "user", kind: "text", peerAsk: { botId: "qa", name: "QA" } }],
+    };
+    let reads = 0;
+    const wrote = new OwnerWroteAt((threadId) => { reads += 1; return threads[threadId] ?? []; });
+    expect(wrote.at("dbb9f1cf")).toBe(1790879604293);
+    expect(wrote.at("ade82a65")).toBeNull();
+    expect(wrote.at("57eeeb2d")).toBeNull();
+    const tasks = [task("ade82a65", 1), task("dbb9f1cf", 2), task("57eeeb2d", 3)];
+    expect(deskThread(tasks, "x", () => false, null, (id) => wrote.at(id))).toBe("dbb9f1cf");
+    // kept current without reading again
+    wrote.note("ade82a65", { at: 1790890000000, role: "user", kind: "text" });
+    wrote.note("ade82a65", { at: 1790890000001, role: "user", kind: "text", peerAsk: { botId: "qa" } });
+    expect(wrote.at("ade82a65")).toBe(1790890000000);
+    expect(deskThread(tasks, "x", () => false, null, (id) => wrote.at(id))).toBe("ade82a65");
+    expect(reads).toBe(3);
+    expect(ownerWrote({ role: "user", kind: "text", aside: true })).toBe(false);
   });
 });

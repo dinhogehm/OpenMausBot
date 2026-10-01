@@ -41,24 +41,74 @@ export interface Incident {
 
 export const INCIDENTS_THREAD_TITLE = "Team incidents";
 
-/** The conversation a bot's harness alerts go to: its pinned one, else its
- * oldest open one not running a goal (bot.threadId follows the UI, and a
- * goal thread is somebody else's work in progress). */
+/** The conversation a bot's harness alerts go to, the first that applies:
+ * 1. the one the owner named for talking to them ("fale comigo só aqui"),
+ *    while open — even mid-goal: the owner chose it, and an alert there is
+ *    what they asked for;
+ * 2. its pinned one;
+ * 3. the open one where the owner wrote last (their own messages, not a
+ *    peer's delegation) — where they are actually reading. On 01/10 the
+ *    Chief had no named conversation and no pin, and its alerts went to the
+ *    oldest one (ade82a65) while the owner talked in dbb9f1cf (INSP-F F2-a);
+ * 4. its oldest open one not running a goal (a goal thread is somebody
+ *    else's work in progress), else its oldest open one.
+ * bot.threadId only as the last fallback: it follows the UI. */
 export function deskThread(
-  tasks: ReadonlyArray<{ threadId: string; createdAt: number; title: string; pinned?: boolean; archivedAt?: number; routineRunId?: string }>,
+  tasks: ReadonlyArray<{ threadId: string; createdAt: number; title: string; pinned?: boolean; archivedAt?: number; closedBy?: unknown; routineRunId?: string }>,
   fallback: string,
   goalActive: (threadId: string) => boolean,
   /** The conversation the owner named for talking to them, first when still open. */
   ownerThread?: string | null,
+  /** When the owner last wrote in a conversation, if known. */
+  ownerWroteAt?: (threadId: string) => number | null,
 ): string {
   const open = tasks
-    .filter((task) => !task.archivedAt && !task.routineRunId && task.title !== INCIDENTS_THREAD_TITLE)
+    .filter((task) => !task.archivedAt && !task.closedBy && !task.routineRunId && task.title !== INCIDENTS_THREAD_TITLE)
     .sort((a, b) => a.createdAt - b.createdAt);
+  const wrote = ownerWroteAt
+    ? open.map((task) => ({ threadId: task.threadId, at: ownerWroteAt(task.threadId) })).filter((each): each is { threadId: string; at: number } => each.at !== null).sort((a, b) => b.at - a.at)[0]?.threadId
+    : undefined;
   return open.find((task) => task.threadId === ownerThread)?.threadId
     ?? open.find((task) => task.pinned)?.threadId
+    ?? wrote
     ?? open.find((task) => !goalActive(task.threadId))?.threadId
     ?? open[0]?.threadId
     ?? fallback;
+}
+
+/** A message the owner wrote themselves: not a peer bot's delegation or
+ * aside, not something a bot posted. */
+export function ownerWrote(message: { role: string; kind: string; from?: unknown; peerAsk?: unknown; aside?: boolean }): boolean {
+  return message.role === "user" && message.kind === "text" && !message.from && !message.peerAsk && !message.aside;
+}
+
+/** When the owner last wrote in each conversation: read once per
+ * conversation from its newest messages (`tail`), then kept current from
+ * the messages as they arrive (`note`), so finding the desk never loads
+ * whole transcripts. */
+export class OwnerWroteAt {
+  private readonly known = new Map<string, number | null>();
+  private readonly tail: (threadId: string) => ReadonlyArray<Parameters<typeof ownerWrote>[0] & { at: number }>;
+
+  // plain field assignment, not a parameter property (node type-stripping)
+  constructor(tail: (threadId: string) => ReadonlyArray<Parameters<typeof ownerWrote>[0] & { at: number }>) {
+    this.tail = tail;
+  }
+
+  at(threadId: string): number | null {
+    if (!this.known.has(threadId)) this.known.set(threadId, this.tail(threadId).findLast(ownerWrote)?.at ?? null);
+    return this.known.get(threadId) ?? null;
+  }
+
+  note(threadId: string, message: Parameters<typeof ownerWrote>[0] & { at: number }): void {
+    if (!ownerWrote(message)) return;
+    // not read yet: the first at() reads the tail, this message included
+    if (this.known.has(threadId)) this.known.set(threadId, Math.max(this.known.get(threadId) ?? 0, message.at));
+  }
+
+  forget(threadId: string): void {
+    this.known.delete(threadId);
+  }
 }
 
 /** Consecutive failed runs of one routine before it is raised as a pattern

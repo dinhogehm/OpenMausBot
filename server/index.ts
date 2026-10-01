@@ -244,7 +244,7 @@ import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type C
 import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing } from "./message-db.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, parseUntil, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
-import { chiefForBot, deskThread, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
+import { chiefForBot, deskThread, OwnerWroteAt, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
 import {
   BotAutonomy,
   GOAL_MAX_CONSECUTIVE_FAILURES,
@@ -8024,16 +8024,48 @@ function autonomyDispatchFailed(botId: string, threadId: string, message: string
   refreshBotRow(botId);
 }
 
-/** Where the harness's own alerts reach a Chief: its pinned conversation,
- * else its oldest open one that is not running a goal — never whichever
- * thread happens to be selected (bot.threadId follows the UI). */
-function chiefDeskThread(chief: BotRecord): string {
-  // the conversation the owner named ("fale comigo só aqui") gets the
-  // automatic alerts too (R8-followup F2); sharedState is set up further
-  // down, so a call made while the server loads falls back to the old rule
+/** When the owner last wrote in each conversation (server/incidents.ts):
+ * read from a conversation's newest messages once, then kept current. */
+const ownerWroteAt = new OwnerWroteAt((threadId) => store.messagesTail(threadId, 300).messages);
+store.onChange((change) => {
+  if (change.type === "message") ownerWroteAt.note(change.threadId, change.message);
+  else if (change.type === "thread.deleted") ownerWroteAt.forget(change.threadId);
+});
+
+/** Where the harness's own alerts reach a Chief (deskThread): the
+ * conversation the owner named, else its pinned one, else the one where the
+ * owner wrote last, else its oldest open one not running a goal — never
+ * whichever thread happens to be selected (bot.threadId follows the UI).
+ * `except`: a conversation on its way out (being archived or deleted). */
+function chiefDeskThread(chief: BotRecord, except?: string): string {
+  // sharedState and ownerWroteAt are set up as the server loads: a call made
+  // before that falls back to the rest of the rule
   let ownerThread: string | null = null;
-  try { ownerThread = sharedState.ownerThread(chief.id)?.threadId ?? null; } catch { /* not set up yet */ }
-  return deskThread(store.tasks(chief.id), chief.threadId, (threadId) => autonomy.goalFor(threadId)?.status === "active", ownerThread);
+  try {
+    const named = sharedState.ownerThread(chief.id);
+    // closed while nobody was looking (or before this check existed): forget it, and say so
+    if (named && !openThreadOf(chief.id, named.threadId)) ownerThreadGone(chief.id, named.threadId, "fechada");
+    else ownerThread = named?.threadId ?? null;
+  } catch { /* not set up yet */ }
+  const wrote = (threadId: string) => {
+    try { return ownerWroteAt.at(threadId); } catch { return null; }
+  };
+  const tasks = store.tasks(chief.id).filter((task) => task.threadId !== except);
+  return deskThread(tasks, chief.threadId, (threadId) => autonomy.goalFor(threadId)?.status === "active", ownerThread, wrote);
+}
+
+/** The conversation the owner named for talking to them was closed,
+ * archived or deleted: it is forgotten as theirs, and the conversation that
+ * now gets what was meant for them says so (INSP-F F2-b). */
+function ownerThreadGone(botId: string, threadId: string, why: string, alreadyForgotten = false): void {
+  const title = store.taskByThread(botId, threadId)?.title;
+  if (!alreadyForgotten && !sharedState.forgetOwnerThread(botId, threadId)) return;
+  const bot = store.bot(botId);
+  if (!bot) return;
+  const next = [bot.chiefOfStaff ? chiefDeskThread(bot, threadId) : null, bot.threadId].find((candidate) => candidate && candidate !== threadId && openThreadOf(botId, candidate));
+  console.log(`[shared-state] ${bot.name}: the conversation with the owner (${threadId}) was ${why}; ${next ? `now ${next}` : "no open conversation left"}`);
+  if (!next) return;
+  store.appendMessage(next, { role: "bot", kind: "activity", tool: { name: chipText(`a conversa com o dono${title ? ` ("${title}")` : ""} foi ${why}; os avisos vêm para cá`, 240), ok: false } });
 }
 
 /** Automation that keeps failing on its own (a standing watch, a routine):
@@ -8917,7 +8949,8 @@ function retireThreadWork(botId: string, threadId: string, why: string): void {
   const goal = autonomy.goalFor(threadId);
   if (goal?.status === "active") finishGoalWithChip(threadId, "stopped", `a conversa foi ${why}`);
   else if (goal?.status === "needs-input") autonomy.resolveNeedsInput(threadId, `a conversa foi ${why}`, "blocked");
-  const main = [chiefDeskThread(bot), bot.threadId].find((candidate) => candidate && candidate !== threadId && store.taskByThread(botId, candidate) && !store.taskByThread(botId, candidate)?.archivedAt);
+  ownerThreadGone(botId, threadId, why);
+  const main = [chiefDeskThread(bot, threadId), bot.threadId].find((candidate) => candidate && candidate !== threadId && store.taskByThread(botId, candidate) && !store.taskByThread(botId, candidate)?.archivedAt);
   const moved: CcSession[] = [];
   for (const session of ccLedger.all()) {
     if (session.ownerBotId !== botId || session.status === "archived") continue;
