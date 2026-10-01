@@ -12,6 +12,7 @@
 //
 // This file is state, argv and stream parsing only. server/index.ts owns the
 // processes, the routes and the wake-ups.
+import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import type { BgJob } from "./bg-jobs.ts";
@@ -51,6 +52,9 @@ export interface CcSession {
   costUsd: number;
   lastReport?: string;
   lastError?: string;
+  /** The repository corridor this session was last given (hash), so a
+   * send that ships work carries it once, and again only when it changes. */
+  corridorVersion?: string;
   /** Messages sent while a turn was running; each becomes the next turn,
    * unless it waited so long it may no longer hold (see takeQueued). */
   queued: CcQueued[];
@@ -247,7 +251,7 @@ export function parseCcStartInput(
   body: { title?: unknown; brief?: unknown; repo?: unknown; permissionMode?: unknown; model?: unknown },
   isGitRepo: (path: string) => boolean,
 ): CcStartInput {
-  const title = typeof body.title === "string" ? body.title.trim().slice(0, CC_TITLE_MAX) : "";
+  const title = typeof body.title === "string" ? issueTitle(body.title.trim().slice(0, CC_TITLE_MAX)) : "";
   if (!title) return { ok: false, error: "title is required: a short name for the work (e.g. the issue)" };
   const brief = typeof body.brief === "string" ? body.brief.trim() : "";
   if (!brief) return { ok: false, error: "brief is required: the complete task for the session" };
@@ -662,6 +666,34 @@ export function useRepoScripts(text: string, manager: ReturnType<typeof repoPack
     return `npm run ${script}`;
   });
   return { text: out, changed };
+}
+
+/** "9286 9303 Merge…" → "#9286 #9303 Merge…": a title that opens with
+ * bare issue/PR numbers names them the way the app sidebar is searched. */
+export function issueTitle(title: string): string {
+  return title.replace(/^(?:\d{3,6}[\s,]+)*\d{3,6}(?=[\s,:—-]|$)/, (run) => run.replace(/\d{3,6}/g, "#$&"));
+}
+
+/** The text merges, publishes or releases (or asks for it). */
+export function shipsWork(text: string): boolean {
+  return /\b(?:merge|mergear|mergeie|publica\w*|publish\w*|publique|carrier|release|deploy\w*|produção|production|pr:merge)\b/i.test(text);
+}
+
+/** Why a headless session of shipping work is refused without a reason:
+ * the person follows merges and releases in the app. null when allowed. */
+export function cliSurfaceRefusal(input: { corridor: string; title: string; brief: string; reason?: string }): string | null {
+  if (!input.corridor || input.reason?.trim() || !shipsWork(`${input.title}\n${input.brief}`)) return null;
+  return "este brief faz merge ou publicação num repositório com gate e carrier, e uma sessão cli fica invisível para a pessoa no app Claude. Use surface \"app\", ou repita com cli_reason dizendo por que precisa ser cli (ex.: o envio no app está falhando).";
+}
+
+export const corridorVersionOf = (corridor: string): string => createHash("sha256").update(corridor).digest("hex").slice(0, 12);
+
+/** The corridor to append to a send that ships work, once per version. */
+export function corridorForSend(session: Pick<CcSession, "corridorVersion">, corridor: string, message: string): { text: string; version?: string } {
+  if (!corridor || !shipsWork(message)) return { text: message };
+  const version = corridorVersionOf(corridor);
+  if (session.corridorVersion === version) return { text: message };
+  return { text: `${message}${corridor}`, version };
 }
 
 /** For a repository with a local merge gate (`pr:merge`) and a release

@@ -873,6 +873,11 @@
             ],
             "description": "Default app: the session opens in the Claude desktop app, where the person follows it (it waits for an idle Mac to open). cli: headless, nobody sees it — only for internal chores."
           },
+          "cli_reason": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "With cli, when the brief merges or publishes: why it cannot run in the app (it is refused without one)."
+          },
           "permission_mode": {
             "type": "string",
             "enum": [

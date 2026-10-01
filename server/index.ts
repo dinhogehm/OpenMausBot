@@ -284,6 +284,9 @@ import {
   lastHookDecision,
   parseCcStartInput,
   repoCorridor,
+  cliSurfaceRefusal,
+  corridorForSend,
+  corridorVersionOf,
   repoPackageManager,
   repoScripts,
   useRepoScripts,
@@ -17721,6 +17724,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
             return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando neste computador; espere uma relatar, ou pare uma` });
           }
+          const corridor = repoCorridor(input.repo);
+          const cliReason = typeof body.cliReason === "string" ? body.cliReason.trim().slice(0, 300) : "";
+          if (body.surface === "cli") {
+            const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason });
+            if (refusal) return json(res, 409, { error: refusal });
+          }
           if (body.surface !== "cli" && process.platform === "darwin") {
             // New Session in the app opens in the folder of its latest
             // session; another repository cannot be picked from here. Say so
@@ -17735,6 +17744,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             const issue = issueNumber(input.title, input.brief);
             if (issue) session.desktop!.issue = issue;
             session.desktop!.pending = { kind: "create", text: desktopBrief(session, input.brief), since: Date.now(), attempts: 0 };
+            if (corridor) session.corridorVersion = corridorVersionOf(corridor);
             session.status = "running";
             ccLedger.save();
             ccChip(session, "na fila para abrir no app Claude quando o Mac estiver livre");
@@ -17742,24 +17752,31 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
           }
           const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
-          if (replyThreadId !== threadId) {
-            session.replyThreadId = replyThreadId;
-            ccLedger.save();
-          }
+          if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
+          if (corridor) session.corridorVersion = corridorVersionOf(corridor);
+          ccLedger.save();
           runCcTurn(session, input.brief, true);
           ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
+          if (cliReason) ccChip(session, `sessão CLI, não visível no app Claude — motivo: ${cliReason}`);
           return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
         }
         const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
         if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão — chame cc_session_list" });
         if (action === "send") {
           const scripts = useRepoScripts(typeof body.message === "string" ? body.message.trim().slice(0, 20_000) : "", repoPackageManager(session.repo), repoScripts(session.repo));
-          const message = scripts.text;
-          if (!message) return json(res, 400, { error: "message é obrigatório" });
+          if (!scripts.text) return json(res, 400, { error: "message é obrigatório" });
           if (session.status === "archived") return json(res, 409, { error: "essa sessão está arquivada; comece outra" });
+          // A send that merges or publishes carries the repository's
+          // corridor once (sessions started before it, or since it changed).
+          const corridored = corridorForSend(session, repoCorridor(session.repo), scripts.text);
+          const message = corridored.text;
           // The order came from this conversation: its report comes back here.
           // Only once the order is accepted — a refused one moves nothing.
           const claim = () => {
+            if (corridored.version) {
+              session.corridorVersion = corridored.version;
+              ccLedger.save();
+            }
             const moved = threadId !== session.ownerThreadId;
             if (moved) session.ownerThreadId = threadId;
             const reportTo = replyThreadId === session.ownerThreadId ? undefined : replyThreadId;

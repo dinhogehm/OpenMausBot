@@ -648,6 +648,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
         brief: { type: "string", maxLength: 20_000, description: "The complete task: issue link, expected outcome, constraints, what to report." },
         repo: { type: "string", description: "Absolute path of the git repository, e.g. /Users/osvaldo/Projetos/nuria-platform." },
         surface: { type: "string", enum: ["app", "cli"], description: "Default app: the session opens in the Claude desktop app, where the person follows it (it waits for an idle Mac to open). cli: headless, nobody sees it — only for internal chores." },
+        cli_reason: { type: "string", maxLength: 300, description: "With cli, when the brief merges or publishes: why it cannot run in the app (it is refused without one)." },
         permission_mode: { type: "string", enum: ["auto", "acceptEdits", "default", "plan"], description: "cli only. Default auto." },
         model: { type: "string", description: "Optional model id; default is the CLI's." },
         reply_thread_id: { type: "string", description: "Optional: another of your conversations that should also get its reports (where the order came from)." },

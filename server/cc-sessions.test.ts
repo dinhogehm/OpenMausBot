@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, cliSurfaceRefusal, corridorForSend, corridorVersionOf, issueTitle, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -217,6 +217,33 @@ describe("a repository's corridor", () => {
     writeFileSync(join(plain, "package.json"), JSON.stringify({ scripts: { test: "vitest" } }));
     expect(repoCorridor(plain)).toBe("");
     expect(repoCorridor(join(dir, "missing"))).toBe("");
+  });
+
+  it("goes with a send that merges or publishes, once per version", () => {
+    const corridor = "\n\nThis repository's corridor — …";
+    const old: { corridorVersion?: string } = {};
+    const sent = corridorForSend(old, corridor, "Inclua o hotfix #9278 no carrier e publique");
+    expect(sent.text).toBe(`Inclua o hotfix #9278 no carrier e publique${corridor}`);
+    expect(sent.version).toBe(corridorVersionOf(corridor));
+    expect(corridorForSend({ corridorVersion: sent.version }, corridor, "agora faça o merge da #9289").text).toBe("agora faça o merge da #9289");
+    expect(corridorForSend({ corridorVersion: "older" }, corridor, "merge da #9289").version).toBe(sent.version);
+    expect(corridorForSend(old, corridor, "rode os testes de novo")).toEqual({ text: "rode os testes de novo" });
+    expect(corridorForSend(old, "", "publique")).toEqual({ text: "publique" });
+  });
+
+  it("refuses a headless session of merges and releases without a reason", () => {
+    const shipping = { corridor: "x", title: "#9286 #9303 Merge e publicação", brief: "merge e carrier" };
+    expect(cliSurfaceRefusal(shipping)).toContain("cli_reason");
+    expect(cliSurfaceRefusal({ ...shipping, reason: "o envio no app está falhando" })).toBeNull();
+    expect(cliSurfaceRefusal({ ...shipping, corridor: "" })).toBeNull();
+    expect(cliSurfaceRefusal({ corridor: "x", title: "limpar worktrees", brief: "apague pastas mergeadas antigas? não, só liste" })).toBeNull();
+  });
+
+  it("names the issues a title opens with", () => {
+    expect(issueTitle("9286 9303 9289 9290 Merge do lote")).toBe("#9286 #9303 #9289 #9290 Merge do lote");
+    expect(issueTitle("9298 automação inatividade")).toBe("#9298 automação inatividade");
+    expect(issueTitle("#9237 webauthn flaky")).toBe("#9237 webauthn flaky");
+    expect(issueTitle("Lote 2026 de PRs")).toBe("Lote 2026 de PRs");
   });
 });
 
