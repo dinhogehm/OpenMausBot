@@ -8442,6 +8442,8 @@ function reportResumptionToChief(): void {
 const ccProcesses = new Map<string, CcChildProcess>();
 // OMB_CC_BIN points end-to-end tests at a scripted stand-in for `claude`.
 const ccBin = (): string => process.env.OMB_CC_BIN || "claude";
+// OMB_CC_TURN_TIMEOUT_MS shortens the turn cut for end-to-end tests only.
+const ccTurnTimeoutMs = Number(process.env.OMB_CC_TURN_TIMEOUT_MS) > 0 ? Number(process.env.OMB_CC_TURN_TIMEOUT_MS) : CC_TURN_TIMEOUT_MS;
 const CC_TURN_FOOTER = "\n\nWhen you stop, end with a short report for your manager: what you changed, the branch and PR (link), what the tests and the repository's gates say, and exactly what is blocked or needs a decision. When you merge a batch of PRs: hotfix/P0/P1 work (by label, title or the linked issue's priority) goes first, ahead of CI or infrastructure PRs, released on its own; PRs that change release scripts (release, carrier, merge-gate or production-watch scripts) go last, in a separate release, with a dry run first. Follow the repository's own rules (CLAUDE.md/AGENTS.md) for issues, PRs, gates and releases, and run its scripts with the package manager they name (npm run when the repository has a package-lock.json — never swap in pnpm or yarn). Do not use AskUserQuestion or wait for an answer mid-turn: if you need a decision or an approval, stop and put the question in your final report. Write your reports and summaries — everything the person reads in the app — in Brazilian Portuguese (pt-BR); keep code, commands and identifiers as they are.";
 /** The footer of a first turn: the general rules, plus the repository's own corridor. */
 const ccTurnFooter = (session: CcSession): string => `${CC_TURN_FOOTER}${repoCorridor(session.repo)}`;
@@ -8552,7 +8554,7 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     timedOut = true;
     child.kill("SIGTERM");
     setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
-  }, CC_TURN_TIMEOUT_MS);
+  }, ccTurnTimeoutMs);
   timer.unref();
   child.stdout?.on("data", (chunk: Buffer) => {
     sample();
@@ -8589,15 +8591,22 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     // would finish with nobody to tell: note it; the tick resumes the
     // session when it is gone (watchBackgroundJobs).
     const folder = session.cwd;
-    if (session.status === "idle" && tree && folder && folder.includes("/.claude/worktrees/")) {
+    // A turn cut at 90 min leaves its gate running in a group of its own
+    // (npm → local-ci): followed like a background job, so the session is
+    // resumed when it ends instead of the CI running on with nobody to tell
+    // (R8-resilience TO). Nothing is killed here.
+    const cut = timedOut && session.status === "failed";
+    if ((session.status === "idle" || cut) && tree && folder && folder.includes("/.claude/worktrees/")) {
       void backgroundProcesses(folder, tree).then((left) => {
-        if (!left.length || session.status !== "idle") {
+        if (!left.length || (session.status !== "idle" && !(cut && session.status === "failed"))) {
           ccReport(session, desktopReportFor(desktopWork, session));
           return;
         }
         session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now() };
         ccLedger.save();
-        ccChip(session, `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`);
+        ccChip(session, cut
+          ? `turno cortado em ${Math.round(ccTurnTimeoutMs / 60_000)} min com ${left.length} processo(s) ainda rodando — o servidor retoma a sessão quando terminarem`
+          : `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`);
         ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ended with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.)`);
       }).catch(() => ccReport(session, desktopReportFor(desktopWork, session)));
       return;

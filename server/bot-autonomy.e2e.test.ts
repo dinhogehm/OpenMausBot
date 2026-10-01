@@ -453,3 +453,50 @@ it("renews a standing watch whose time limit ran out with nothing seen, without 
   expect(standing().reason).toBe("NEW note");
   expect(standing().watch.fired ?? 0).toBe(0);
 }), 60_000);
+
+it("follows the gate a turn cut at the time limit left running, and resumes the session when it ends (R8-resilience TO)", async () => {
+  const { chmodSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const tools = mkdtempSync(join(tmpdir(), "omb-fake-claude-cut-"));
+  const fake = join(tools, "fake-claude.mjs");
+  const calls = join(tools, "calls.jsonl");
+  // GATE:<ms> starts a "ci:local" in its own process group inside the worktree, HOLD:<ms> outlasts the turn limit
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
+const argv = process.argv.slice(2);
+const prompt = argv[argv.length - 1];
+let cwd = process.cwd();
+const w = argv.indexOf("-w");
+if (w >= 0) { cwd = join(cwd, ".claude", "worktrees", argv[w + 1]); mkdirSync(cwd, { recursive: true }); }
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv }) + "\\n");
+const gate = /GATE:(\\d+)/.exec(prompt);
+if (gate) spawn(process.execPath, ["-e", "setTimeout(() => {}, " + gate[1] + ")", "ci:local"], { cwd, detached: true, stdio: "ignore" }).unref();
+console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
+const hold = /HOLD:(\\d+)/.exec(prompt);
+if (hold) await new Promise(r => setTimeout(r, Number(hold[1])));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "did: " + prompt.split("\\n")[0].slice(0, 60), total_cost_usd: 0.01 }));
+`);
+  chmodSync(fake, 0o755);
+  await fixture(async f => {
+    const { execFileSync } = await import("node:child_process");
+    const data = f.session.info.dataDir;
+    const repo = join(data, "repo");
+    execFileSync("git", ["init", "-q", repo]);
+    const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
+    f.save({ turns: [
+      { steps: [{ tool: "cc_session_start", arguments: { title: "#9998 gate longo", brief: "GATE:9000 HOLD:30000", repo, surface: "cli" } }], reply: "Started" },
+      { reply: "Cut, waiting for its gate" },
+      { reply: "Resumed and done" },
+    ] });
+    await f.send("Run the long gate.");
+    // the turn is cut; its gate is followed, not lost
+    await expect.poll(() => (existsSync(join(data, "cc-sessions.json")) ? ccLedger()[0]?.bgJob?.pids?.length ?? 0 : 0), { timeout: 20_000 }).toBeGreaterThan(0);
+    expect(ccLedger()[0].status).toBe("failed");
+    await expect.poll(async () => (await f.chips()).some((chip: string) => chip.includes("turno cortado em")), { timeout: 10_000 }).toBe(true);
+    // the gate ends: the session is resumed with a new turn
+    await expect.poll(() => readFileSync(calls, "utf8").trim().split("\n").length, { timeout: 30_000 }).toBe(2);
+    expect(JSON.parse(readFileSync(calls, "utf8").trim().split("\n")[1]!).argv.slice(0, 3)).toEqual(["-p", "--resume", ccLedger()[0].id]);
+  }, { OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000" });
+}, 90_000);
