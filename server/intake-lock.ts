@@ -3,6 +3,10 @@
 // conversations: run together, both answer the same client message. So a
 // bot runs one such turn at a time; the other waits — a watch stays due, a
 // routine is deferred — until the first conversation is idle again.
+//
+// A teammate's message to such a bot is intake too: the Chief saying "pode
+// avisar a Daiane" in one conversation while the bot's own tag watch fires
+// in another sends the same notice twice. So it takes the same lock.
 
 export class IntakeLock {
   private readonly running = new Map<string, string>();
@@ -20,6 +24,16 @@ export class IntakeLock {
     if (this.busy(botId, running)) return true;
     this.running.delete(botId);
     return false;
+  }
+
+  /** A teammate's turn for a bot that reads intake through standing watches:
+   * false while another intake turn runs elsewhere, else it holds the lock.
+   * A bot's message to itself (a thread it opened) never waits on itself. */
+  admitPeer(botId: string, threadId: string, fromBotId: string, readsIntake: boolean): boolean {
+    if (!readsIntake || fromBotId === botId) return true;
+    if (this.busyElsewhere(botId, threadId)) return false;
+    this.note(botId, threadId);
+    return true;
   }
 
   note(botId: string, threadId: string): void {

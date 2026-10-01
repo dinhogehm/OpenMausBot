@@ -7924,6 +7924,10 @@ const intakeLock = new IntakeLock((botId, threadId) => threadBusy(botId, threadI
 const intakeBusyElsewhere = (botId: string, threadId?: string) => intakeLock.busyElsewhere(botId, threadId);
 const noteIntakeTurn = (botId: string, threadId: string) => intakeLock.note(botId, threadId);
 const settleIntakeTurn = (threadId: string) => intakeLock.settle(threadId);
+/** The bot reads Chat, spreadsheet or issues through a standing watch. */
+const readsIntake = (botId: string) => store.tasks(botId).some((task) => autonomy.standingsFor(task.threadId).length > 0);
+/** A teammate's handoff to this bot waits while its intake turn runs elsewhere. */
+const peerHeldByIntake = (botId: string, threadId?: string) => readsIntake(botId) && intakeBusyElsewhere(botId, threadId);
 /** One server.log line per waiting thing per minute: the lock is visible, not silent. */
 const intakeWaitLogged = new Map<string, number>();
 function logIntakeWait(line: string): void {
@@ -9899,6 +9903,10 @@ async function startTurn(
   if (botAtThreadCapacity(botId)) {
     throw Object.assign(new Error(`this bot has reached its limit of ${maxConcurrentBotThreads(cfg)} parallel threads — wait for one to finish`), { status: 409, code: "thread_limit" });
   }
+  if (opts?.peerAsk && !intakeLock.admitPeer(botId, threadId, opts.peerAsk.botId, readsIntake(botId))) {
+    logIntakeWait(`message from ${opts.peerAsk.name} to ${botId} in ${threadId} waits for the bot's other intake turn`);
+    throw Object.assign(new Error("this bot is handling its intake in another conversation — wait for it to finish"), { status: 409, code: "thread_busy" });
+  }
   // Steering is never a cancel. A message sent while teammates are working
   // runs now, with their assignments still attached: they keep running and
   // their results still return here (outstandingAssignmentsPrompt tells this
@@ -11394,8 +11402,8 @@ async function stopBotForEmergencyApprovalDowngrade(botId: string): Promise<void
 const commsBus: CommsBus = {
   store,
   broadcast,
-  threadSlotFree: (botId) => !botAtThreadCapacity(botId),
-  canAdmitDirectTurn,
+  threadSlotFree: (botId) => !botAtThreadCapacity(botId) && !peerHeldByIntake(botId),
+  canAdmitDirectTurn: (botId, threadId) => canAdmitDirectTurn(botId, threadId) && !peerHeldByIntake(botId, threadId),
 };
 _loadPending();
 
