@@ -44,6 +44,8 @@ export interface QueuedStart {
   retryAt?: number;
   /** Why it could not open the last time it was tried. */
   lastReason?: string;
+  /** The first of the failures in a row (cleared when only a slot is missing). */
+  failingSince?: number;
 }
 
 export const START_QUEUE_MAX = 30;
@@ -150,7 +152,9 @@ export class CcStartQueue {
   /** Take out the starts that have been failing to open for longer than
    * START_RETRY_MAX_MS: they are not tried forever. */
   expire(now = Date.now()): QueuedStart[] {
-    const expired = this.items.filter((item) => item.lastReason !== undefined && now - item.at > START_RETRY_MAX_MS);
+    // counted from the first failure in a row, not from when it was queued:
+    // a P1 that waited 23 h for a slot and then met the battery once stays
+    const expired = this.items.filter((item) => item.failingSince !== undefined && now - item.failingSince > START_RETRY_MAX_MS);
     if (!expired.length) return [];
     this.items = this.items.filter((item) => !expired.includes(item));
     this.save();
@@ -272,7 +276,7 @@ export function drainStartQueue(queue: CcStartQueue, deps: DrainDeps): void {
       const main = deps.mainThread(next.botId, threadId);
       if (!main) {
         // nowhere to tell the bot: keep it, and say so in the log
-        queue.restore({ ...next, retryAt: deps.now() + START_RETRY_MS, lastReason: "a conversa de origem foi fechada e o bot não tem outra aberta" });
+        queue.restore({ ...next, retryAt: deps.now() + START_RETRY_MS, lastReason: "a conversa de origem foi fechada e o bot não tem outra aberta", failingSince: next.failingSince ?? deps.now() });
         deps.log(`queued start "${next.title}" (${next.id}) kept: the conversation that queued it is gone and its bot has no open one`);
         continue;
       }
@@ -281,13 +285,15 @@ export function drainStartQueue(queue: CcStartQueue, deps: DrainDeps): void {
     const reply = next.replyThreadId && deps.threadOpen(next.botId, next.replyThreadId) ? next.replyThreadId : threadId;
     const started = deps.start(next, threadId, reply);
     if (started.busy) {
-      queue.restore(next);
+      // the reason passed and only a slot is missing: no longer failing
+      const { lastReason: _reason, retryAt: _retry, failingSince: _since, ...waiting } = next;
+      queue.restore(waiting);
       return;
     }
     const said = String(started.body.message ?? started.body.error ?? "");
     const where = moved ? " (a conversa que pediu foi fechada; o aviso veio para cá)" : "";
     if (started.retry) {
-      queue.restore({ ...next, retryAt: deps.now() + START_RETRY_MS, lastReason: said.slice(0, 300) });
+      queue.restore({ ...next, retryAt: deps.now() + START_RETRY_MS, lastReason: said.slice(0, 300), failingSince: next.failingSince ?? deps.now() });
       if (next.lastReason !== said.slice(0, 300)) {
         deps.chip(threadId, `Fila de sessões: "${next.title}" ainda não abriu e segue na fila (#${queue.position(next.id)}): ${said.slice(0, 140)}`, false);
         deps.report(next.botId, threadId, `[Fila de sessões do Claude Code] A slot freed for "${next.title}" (queue id ${next.id}), but it could not open yet: ${said} It stays queued in its place and is tried again every ${START_RETRY_MS / 60_000} min; cancel it with cc_session_archive and its id if it no longer applies.${where}`);
