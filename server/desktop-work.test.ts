@@ -782,6 +782,40 @@ describe("a field that already held text", () => {
     expect(h.chips.some((chip) => chip.text.includes("sugestão do app") && chip.text.includes("#9330"))).toBe(true);
   });
 
+  it("writes in server.log that a send went over the app's suggestion (INSP-D A9)", async () => {
+    const h = harness();
+    const log: string[] = [];
+    h.deps.log = (line) => log.push(line);
+    const session = h.opened("s");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "send", text: "Siga", since: h.now, attempts: 0 };
+    h.results.push({ ok: true, suggestion: "qual o status do gate da #9330?" });
+    await h.tick();
+    expect(log.find((line) => line.startsWith("send ok"))).toBe('send ok: session s (over app suggestion: "qual o status do gate da #9330?")');
+    // a plain send says nothing of the kind
+    session.desktop!.pending = { kind: "send", text: "Mais", since: h.now, attempts: 0 };
+    delete session.desktop!.sent;
+    h.results.push({ ok: true });
+    await h.tick();
+    expect(log.filter((line) => line.startsWith("send ok")).at(-1)).toBe("send ok: session s");
+  });
+
+  it("tells the person when the probe \".\" stayed at the end of their draft, every time (INSP-D A1)", async () => {
+    const h = harness();
+    const pendings: { title: string; link?: string; key: string }[] = [];
+    h.deps.ownerPending = (_session, item) => pendings.push(item);
+    const session = h.opened("p");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "send", text: "Pode sim", since: h.now, attempts: 0 };
+    const draft = "pode reescrever o corpo da PR com a seção de riscos";
+    h.results.push({ ok: false, reason: "the Claude app lost focus at \"undo probe\"", retry: true, touched: true, draft, leftProbe: true });
+    await h.tick();
+    expect(pendings).toHaveLength(1);
+    expect(pendings[0]!.title).toContain('deixei um "." no fim dele');
+    expect(h.reports.at(-1)!.text).toContain('the test "." stayed at the end of their draft');
+    expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "Pode sim" });
+  });
+
   it("keeps the message, asks the person once in \"Precisa de você\", and settles it when the field is free", async () => {
     const h = harness();
     const pendings: { title: string; link?: string; key: string }[] = [];
