@@ -8894,7 +8894,7 @@ async function preemptCiForReleaseTick(): Promise<void> {
         sessionId: session.id,
         title: session.title,
         ...(ccProcesses.get(session.id)?.pid ? { claudePid: ccProcesses.get(session.id)!.pid } : {}),
-        ...(session.bgJob ? { jobPids: session.bgJob.pids } : {}),
+        ...(session.bgJob ? { jobPids: session.bgJob.pids, ...(session.bgJob.starts ? { jobStarts: session.bgJob.starts } : {}) } : {}),
         ...(session.surface === "app" && session.cwd ? { worktree: session.cwd } : {}),
       })),
       // never the server, its parent (the app), nor any managed session's claude

@@ -138,7 +138,7 @@ describe("the production release first", () => {
     const sessions = [{ sessionId: "29da", claudePid: 38002 }, { sessionId: "5f41", claudePid: 78795 }];
     expect(ownerSession(40409, real, () => null, sessions)).toBe("29da");
     expect(ownerSession(83637, real, () => null, sessions)).toBe("5f41");
-    expect(ownerSession(40409, real, () => null, [{ sessionId: "job", jobPids: [40324] }])).toBe("job");
+    expect(ownerSession(40409, real, () => null, [{ sessionId: "job", jobPids: [40324], jobStarts: ["Thu Oct 1 15:01:46 2026"] }])).toBe("job");
     expect(ownerSession(99999, real, () => null, sessions)).toBeNull();
     // an app session (no claude pid): a CI working inside its worktree, started by nothing of the owner's
     const app = [{ sessionId: "app", worktree: "/Users/o/Projetos/nuria-platform/.claude/worktrees/fix-b" }];
@@ -173,6 +173,32 @@ describe("the production release first", () => {
     ].join("\n"));
     expect(ciOwner(815, claudeInTerminal, () => null, [{ sessionId: "cli", claudePid: 800 }])).toEqual({ kind: "session", sessionId: "cli" });
     expect(ciOwner(815, claudeInTerminal, () => null, [])).toMatchObject({ kind: "owner" });
+  });
+
+  // INSP-R r2 item 2: a session's job pid, reused by the owner's processes, made the owner's CI the session's
+  it("a job pid counts only with its start time, and never above the owner's terminal", () => {
+    const tree = parsePsTable([
+      "    1     0     1 Wed Sep 30 15:49:16 2026     /sbin/launchd",
+      "  500     1   500 Thu Oct  1 09:00:00 2026     /System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+      "  550   500   550 Thu Oct  1 09:00:01 2026     login -pf owner",
+      "  601   550   601 Thu Oct  1 09:00:01 2026     -zsh",
+      "  700   601   700 Thu Oct  1 15:20:00 2026     npm run ci:local   ",
+      "  701   700   700 Thu Oct  1 15:20:01 2026     bash ./scripts/local-ci.sh --profile full",
+    ].join("\n"));
+    // the session's job had pid 700 (or 601) once — another process, another start
+    for (const job of [700, 601]) {
+      expect(ciOwner(701, tree, () => null, [{ sessionId: "s", jobPids: [job] }]), `${job} without start`).toMatchObject({ kind: "owner" });
+      expect(ciOwner(701, tree, () => null, [{ sessionId: "s", jobPids: [job], jobStarts: ["Wed Oct 1 08:00:00 2026"] }]), `${job} other start`).toMatchObject({ kind: "owner" });
+    }
+    // even with the same start, the owner's terminal above it wins
+    expect(ciOwner(701, tree, () => null, [{ sessionId: "s", jobPids: [700], jobStarts: ["Thu Oct 1 15:20:00 2026"] }])).toMatchObject({ kind: "owner", terminal: { pid: 601 } });
+    // so ciToStop is never asked to stop it as a session's
+    expect(ownerSession(701, tree, () => null, [{ sessionId: "s", jobPids: [700] }])).toBeNull();
+    // a session's job with the same start and no terminal above: the session's
+    const orphan = tree.filter((row) => row.pid >= 700 || row.pid === 1).map((row) => (row.pid === 700 ? { ...row, ppid: 1 } : row));
+    expect(ciOwner(701, orphan, () => null, [{ sessionId: "s", jobPids: [700], jobStarts: ["Thu Oct 1 15:20:00 2026"] }])).toEqual({ kind: "session", sessionId: "s" });
+    expect(ciOwner(701, orphan, () => null, [{ sessionId: "s", jobPids: [700], jobStarts: ["Thu Oct 1 15:20:09 2026"] }])).toEqual({ kind: "unknown" });
+    expect(ciOwner(701, orphan, () => null, [{ sessionId: "s", jobPids: [700] }])).toEqual({ kind: "unknown" });
   });
 });
 

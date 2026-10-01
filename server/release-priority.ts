@@ -51,8 +51,11 @@ export interface ManagedSessionProcs {
   sessionId: string;
   /** A running headless turn's claude pid, if any. */
   claudePid?: number;
-  /** Background job pids (with start times) it left. */
+  /** Background job pids it left, and their start times (BgJob.starts, same
+   * order). A job pid counts only with the same start: pids are reused, and
+   * a record without starts matches nothing. */
   jobPids?: number[];
+  jobStarts?: string[];
   /** Its worktree (for app sessions: a process working inside counts). */
   worktree?: string;
 }
@@ -62,11 +65,13 @@ export interface ManagedSessionProcs {
 const OWNER_TERMINAL = /^(?:\S*\/)?(?:login|tmux|screen|sshd|mosh-server)(?:[\s:]|$)|\/(?:Terminal|iTerm2?|iTerm|Ghostty|WezTerm|Alacritty|kitty|Warp|Visual Studio Code|Cursor)\.app\/Contents\//;
 export const isOwnerTerminal = (command: string): boolean => isInteractiveShell(command) || OWNER_TERMINAL.test(command.trim());
 
-/** Whose CI `pid` is: a managed session's (a descendant of its running
- * claude, of one of its background jobs, or — for an app session — working
- * inside its worktree), the owner's (walking up, a terminal of the owner
- * comes before any session process: `-zsh → npm run ci:local → local-ci.sh`,
- * even inside a session's worktree), or no one the server knows. */
+/** Whose CI `pid` is. A managed session's when, walking up, its running
+ * claude comes before any terminal. Else the owner's when a terminal of the
+ * owner is anywhere in the chain (`-zsh → npm run ci:local → local-ci.sh`,
+ * even inside a session's worktree or above a pid a job once had). Else a
+ * session's when a process in the chain is one of its background jobs by pid
+ * AND start time, or — for an app session — the CI works inside its
+ * worktree. Else no one the server knows. */
 export type CiOwner =
   | { kind: "session"; sessionId: string }
   | { kind: "owner"; terminal: PsRow }
@@ -74,14 +79,23 @@ export type CiOwner =
 
 export function ciOwner(pid: number, rows: readonly PsRow[], cwdOf: (pid: number) => string | null, sessions: readonly ManagedSessionProcs[]): CiOwner {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
-  const seen = new Set<number>();
-  for (let row = byPid.get(pid); row && !seen.has(row.pid) && seen.size < 128; row = row.ppid > 0 ? byPid.get(row.ppid) : undefined) {
-    seen.add(row.pid);
-    const session = sessions.find((each) => each.claudePid === row!.pid || each.jobPids?.includes(row!.pid));
+  const chain: PsRow[] = [];
+  for (let row = byPid.get(pid); row && !chain.includes(row) && chain.length < 128; row = row.ppid > 0 ? byPid.get(row.ppid) : undefined) chain.push(row);
+  if (!chain.length) return { kind: "unknown" };
+  // the server's own claude, met before any terminal (the server may run in one, in dev)
+  for (const row of chain) {
+    const session = sessions.find((each) => each.claudePid === row.pid);
     if (session) return { kind: "session", sessionId: session.sessionId };
-    if (isOwnerTerminal(row.command)) return { kind: "owner", terminal: row };
+    if (isOwnerTerminal(row.command)) break;
   }
-  if (!seen.size) return { kind: "unknown" };
+  // a terminal of the owner anywhere in the chain: the owner's, even above a job's pid
+  const terminal = chain.find((row) => isOwnerTerminal(row.command));
+  if (terminal) return { kind: "owner", terminal };
+  // a job's process, by pid AND start time
+  for (const row of chain) {
+    const session = sessions.find((each) => each.jobPids?.some((job, i) => job === row.pid && each.jobStarts?.[i] !== undefined && each.jobStarts[i] === row.start));
+    if (session) return { kind: "session", sessionId: session.sessionId };
+  }
   const cwd = cwdOf(pid);
   if (cwd) {
     for (const session of sessions) {
