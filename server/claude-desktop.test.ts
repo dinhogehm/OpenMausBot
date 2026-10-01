@@ -693,6 +693,20 @@ describe("the app's real screen (OCR fixture)", () => {
     expect(await sendToDesktopSession(dot.driver, { localId, text: "Siga", title, repoName: "nuria-platform" })).toEqual({ ok: true, suggestion: field });
   });
 
+  it("sends straight away when the suggestion hid as the field took focus: the placeholder shows, no probe key (INSP-D C1)", async () => {
+    const title = "Automação inatividade não dispara";
+    const focused = swap(R7_SESSION, { [R7_FIELD]: "Responder…" });
+    const app = fakeApp({ screens: [R7_SESSION, focused, swap(R7_SESSION, { [R7_FIELD]: "Pode sim, reescreva o corpo" }), focused] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim, reescreva o corpo", title, repoName: "nuria-platform" }))
+      .toEqual({ ok: true, suggestion: R7_FIELD });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 567,852.5", "paste(all) Pode sim, reescreva o corpo", "key 36"]);
+    expect(app.actions.some((action) => action.startsWith("type"))).toBe(false);
+    // any other text on the second reading still stops (it is not the placeholder)
+    const changed = fakeApp({ screens: [R7_SESSION, swap(R7_SESSION, { [R7_FIELD]: "outro texto no campo" })] });
+    expect(await sendToDesktopSession(changed.driver, { localId, text: "Pode sim", title, repoName: "nuria-platform" })).toMatchObject({ ok: false, miss: true });
+    expect(changed.actions.some((action) => action.startsWith("paste") || action.startsWith("type"))).toBe(false);
+  });
+
   it("takes an empty field for proof only when two readings after the key agree, and the field read the same twice before it (INSP-D B2)", async () => {
     const title = "Automação inatividade não dispara";
     const without = swap(R7_SESSION, { [R7_FIELD]: null });
@@ -801,6 +815,14 @@ describe("the session's own menu, in its header", () => {
       `open claude://code/continue?session=${localId}`, "click 567,852.5", "key 125+cmd", "type .", "key 51",
       "click 520,65", "click 620,118", "paste(all) #9305 Fila errada ao criar ticket", "key 36",
     ]);
+  });
+
+  it("renames when the suggestion hid as the field took focus, with no probe key and nothing to take back (INSP-D C1)", async () => {
+    const suggestion = composerOf(R7_FIELD);
+    const focused = composerOf("Responder…");
+    const app = fakeApp({ screens: [[header, ...suggestion], [header, ...focused], [header, ...focused], [header, { text: "Renomear", x: 520, y: 110 }, ...focused], [field, ...focused], [renamed, ...focused]] });
+    expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket", repoName: "nuria-platform" })).toEqual({ ok: true });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 567,852.5", "click 520,65", "click 620,118", "paste(all) #9305 Fila errada ao criar ticket", "key 36"]);
   });
 
   it("checks the header before touching the field: another session on screen gets no click and no key (INSP-D B3)", async () => {

@@ -492,7 +492,8 @@ function fieldEmptied(before: OcrLine[], after: OcrLine[], field: OcrLine, bar: 
   return rest.length > 0 && rest.filter((line) => seen.has(normalize(line.text))).length / rest.length >= 0.8;
 }
 
-type Probe = { kind: "suggestion" } | { kind: "draft"; step: DesktopStep } | { kind: "stop"; step: DesktopStep };
+/** `probed`: the probe key was typed (and is in the field now). */
+type Probe = { kind: "suggestion"; probed: boolean } |{ kind: "draft"; step: DesktopStep } | { kind: "stop"; step: DesktopStep };
 
 /**
  * Text in the field is either the app's suggested reply (shown there until
@@ -516,6 +517,10 @@ async function probeField(screen: Screen, composer: { line: OcrLine; text: strin
   const draftStep = (reason: string): DesktopStop => ({ ok: false, reason, retry: true, touched: true, draft: composer.text.slice(0, 500) });
   // the field's text, read a second time before anything is typed
   const again = findComposer(mainArea(await driver.ocr()), size, repoName);
+  // The app hid its suggestion once the field took focus: the placeholder
+  // shows, the field is empty, nothing of the person's is there — no probe
+  // key, the message goes as into any empty field (INSP-D C1).
+  if (again !== null && again.text === null) return { kind: "suggestion", probed: false };
   if (again?.text !== composer.text) {
     return { kind: "stop", step: { ok: false, reason: `the message field read differently twice ("${composer.text.slice(0, 40)}…", then "${(again?.text ?? "nothing").slice(0, 40)}"); nothing was typed`, retry: true, miss: true, touched: true } };
   }
@@ -534,7 +539,7 @@ async function probeField(screen: Screen, composer: { line: OcrLine; text: strin
   const first = gaveWayIn(mainArea(await driver.ocr()));
   await driver.sleep(300);
   const second = gaveWayIn(mainArea(await driver.ocr()));
-  if (first && second) return { kind: "suggestion" };
+  if (first && second) return { kind: "suggestion", probed: true };
   stop = await guard(screen, "undo probe");
   if (stop) {
     return { kind: "draft", step: { ...draftStep(`${stop.reason}; há texto não enviado no campo desta sessão ("${composer.text.slice(0, 40)}…") e deixei um "." no fim dele, que não consegui apagar`), human: stop.human, leftProbe: true } };
@@ -731,16 +736,20 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
     if (stop) return { stop };
     await act(screen, () => driver.click(composer.line.x + 20, composer.line.y + composer.line.h / 2));
     await driver.sleep(300);
+    let typed = true;
     if (!PROBE_LEFTOVER.test(composer.text)) {
       const probe = await probeField(screen, { ...composer, text: composer.text }, main, size, input.repoName);
       if (probe.kind !== "suggestion") return { stop: probe.step };
+      typed = probe.probed;
     }
+    suggestion = composer.text;
+    // the suggestion hid on focus: no probe key was typed, nothing to take back
+    if (!typed) return { touched: true };
     // take the probe back: the field is empty (or shows the suggestion again)
     stop = await guard(screen, "undo probe");
     if (stop) return { stop };
     await act(screen, () => driver.key(BACKSPACE));
     await driver.sleep(300);
-    suggestion = composer.text;
     return { touched: true };
   };
   return sessionMenuAction(driver, input, RENAME_ITEMS, "rename", async (screen, isItem) => {
