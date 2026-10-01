@@ -642,6 +642,7 @@ describe("agents-proxy MCP surface", () => {
       "cc_session_archive",
       "goal_start",
       "goal_end",
+      "owner_pending",
       "memory_log",
       "session_search",
       "session_read",
