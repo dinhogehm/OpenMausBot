@@ -1097,3 +1097,26 @@ export function lastQuestionAt(messages: ReadonlyArray<{ role: string; kind: str
   }
   return null;
 }
+
+/** "Preciso de você", "Continuam com você", "Decisão para você"…: the bot
+ * asks the person for something in plain words, not only with a "?". */
+const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa de voc[êe]|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
+
+/** Since when the bot has been waiting on the person: the first of its
+ * replies, after the person's last message, that asks them something (a
+ * question at its end, or an explicit ask anywhere in it). It holds until the
+ * person writes again, however many replies come after. null when none, or
+ * older than `maxAgeMs`. */
+export function ownerAskAt(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number; peerAsk?: unknown; from?: unknown }>, now: number, maxAgeMs = 48 * 3_600_000): number | null {
+  const fromPerson = (message: { role: string; kind: string; peerAsk?: unknown; from?: unknown }) => message.role === "user" && message.kind === "text" && !message.peerAsk && !message.from;
+  const lastPerson = messages.findLastIndex(fromPerson);
+  if (lastPerson < 0) return null; // a greeting nobody answered yet asks nothing of anyone
+  for (const message of messages.slice(lastPerson + 1)) {
+    // once another bot speaks to it, what it asks is for that bot
+    if (message.role === "user" && message.peerAsk) break;
+    if (message.role !== "bot" || message.kind !== "text" || message.from) continue;
+    const text = (message.text ?? "").replace(/[\s*_`)\]\p{Extended_Pictographic}\uFE0F]+$/u, "");
+    if ((text.endsWith("?") || OWNER_ASK.test(text)) && now - message.at < maxAgeMs) return message.at;
+  }
+  return null;
+}

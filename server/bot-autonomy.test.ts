@@ -13,6 +13,7 @@ import {
   parsePromiseInput,
   prsCited,
   lastQuestionAt,
+  ownerAskAt,
   parseWakeInput,
   promiseOverdueReport,
   parseWatchInput,
@@ -677,5 +678,22 @@ describe("a standing watch's old note", () => {
     const late = wakePrompt(wake, null, now + 5 * 3_600_000);
     expect(late).toContain("written 5 h ago — check it still holds");
     expect(late).toContain("Conferir se contém 2995ef215");
+  });
+});
+
+describe("a bot waiting on the person, in plain words", () => {
+  it("counts an explicit ask anywhere in a reply since the person's last message, until they write again", () => {
+    const at = now;
+    const person = { role: "user", kind: "text", text: "Como está o lote?", at: at - 10 };
+    const ask = { role: "bot", kind: "text", text: "Lote publicado. Continuam com você: ligar a volta automática da #9290 e encerrar os processos 14351 e 14474.", at };
+    const later = { role: "bot", kind: "text", text: "Merge da #9315 feito.", at: at + 60_000 };
+    expect(ownerAskAt([person, ask, later], at + 120_000)).toBe(at);
+    expect(ownerAskAt([person, { ...ask, text: "**Preciso de você:** abra a sessão no app." }], at + 1)).toBe(at);
+    expect(ownerAskAt([person, ask, later, { role: "user", kind: "text", text: "feito", at: at + 90_000 }], at + 120_000)).toBeNull();
+    expect(ownerAskAt([person, later], at + 120_000)).toBeNull();
+    expect(ownerAskAt([{ role: "bot", kind: "text", text: "Hi! What would you like me to do?", at }], at + 1)).toBeNull();
+    expect(ownerAskAt([person, ask], at + 49 * 3_600_000)).toBeNull();
+    // after a teammate's message, the asks go to the teammate
+    expect(ownerAskAt([person, { role: "user", kind: "text", text: "@Monitor confira", at: at - 5, peerAsk: { botId: "c" } }, ask], at + 1)).toBeNull();
   });
 });

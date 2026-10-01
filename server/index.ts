@@ -256,6 +256,7 @@ import {
   parsePromiseInput,
   prsCited,
   lastQuestionAt,
+  ownerAskAt,
   NEEDS_INPUT_EXPIRE_MS,
   parseWakeInput,
   promiseOverdueReport,
@@ -7893,7 +7894,7 @@ goalNeedsInputForThread = (threadId) => {
   // the bot ended its last reply asking the person something: that waits on them too
   const owner = store.botByThread(threadId);
   if (!owner || threadBusy(owner.id, threadId)) return null;
-  return lastQuestionAt(store.messagesFor(threadId), Date.now());
+  return ownerAskAt(store.messagesFor(threadId), Date.now());
 };
 const AUTONOMY_TICK_MS = autonomyTestMs("OMB_AUTONOMY_TICK_MS") ?? 10_000;
 /** Self-paced work due within this keeps the Mac awake (/api/routines/wake). */
