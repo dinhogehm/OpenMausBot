@@ -96,4 +96,11 @@ describe("deskThread", () => {
     expect(deskThread([...tasks, task("pin", 9, { pinned: true })], "selected", () => false)).toBe("pin");
     expect(deskThread([], "selected", () => false)).toBe("selected");
   });
+
+  it("puts the automatic alerts in the conversation the owner named, while it is open (R8-followup F2)", () => {
+    const tasks = [task("ade82a65", 1), task("dbb9f1cf", 2), task("pin", 3, { pinned: true }), task("closed", 4, { archivedAt: 5 })];
+    expect(deskThread(tasks, "selected", () => false, "dbb9f1cf")).toBe("dbb9f1cf");
+    expect(deskThread(tasks, "selected", () => false, "closed")).toBe("pin");
+    expect(deskThread(tasks, "selected", () => false, null)).toBe("pin");
+  });
 });

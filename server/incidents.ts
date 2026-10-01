@@ -48,11 +48,14 @@ export function deskThread(
   tasks: ReadonlyArray<{ threadId: string; createdAt: number; title: string; pinned?: boolean; archivedAt?: number; routineRunId?: string }>,
   fallback: string,
   goalActive: (threadId: string) => boolean,
+  /** The conversation the owner named for talking to them, first when still open. */
+  ownerThread?: string | null,
 ): string {
   const open = tasks
     .filter((task) => !task.archivedAt && !task.routineRunId && task.title !== INCIDENTS_THREAD_TITLE)
     .sort((a, b) => a.createdAt - b.createdAt);
-  return open.find((task) => task.pinned)?.threadId
+  return open.find((task) => task.threadId === ownerThread)?.threadId
+    ?? open.find((task) => task.pinned)?.threadId
     ?? open.find((task) => !goalActive(task.threadId))?.threadId
     ?? open[0]?.threadId
     ?? fallback;

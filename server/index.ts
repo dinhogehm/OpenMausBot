@@ -8021,7 +8021,12 @@ function autonomyDispatchFailed(botId: string, threadId: string, message: string
  * else its oldest open one that is not running a goal — never whichever
  * thread happens to be selected (bot.threadId follows the UI). */
 function chiefDeskThread(chief: BotRecord): string {
-  return deskThread(store.tasks(chief.id), chief.threadId, (threadId) => autonomy.goalFor(threadId)?.status === "active");
+  // the conversation the owner named ("fale comigo só aqui") gets the
+  // automatic alerts too (R8-followup F2); sharedState is set up further
+  // down, so a call made while the server loads falls back to the old rule
+  let ownerThread: string | null = null;
+  try { ownerThread = sharedState.ownerThread(chief.id)?.threadId ?? null; } catch { /* not set up yet */ }
+  return deskThread(store.tasks(chief.id), chief.threadId, (threadId) => autonomy.goalFor(threadId)?.status === "active", ownerThread);
 }
 
 /** Automation that keeps failing on its own (a standing watch, a routine):
