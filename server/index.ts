@@ -6,7 +6,7 @@
 import { BOOT_CLOUD_SECRETS } from "./cloud-secrets-boot.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, rmSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, rmSync, mkdirSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -341,7 +341,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { ciToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
-import { readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState } from "./release-watch.ts";
+import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, tagStuck, tagStuckCause } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8200,10 +8200,55 @@ async function revalidateNeedsInputGoals(): Promise<void> {
  * a report on the Chief's desk (server/release-watch.ts). Only the server the
  * desktop app runs reads this Mac's release logs, every 2 min. */
 const releaseWatch = { state: DESKTOP_MANAGED && !process.env.VITEST ? new ReleaseWatchState(join(DATA_DIR, "release-watch.json")) : null, lastAt: 0 };
+/** A release alert on the Chief's desk: a red chip and a report. */
+function releaseAlertToChief(text: string, report: string): void {
+  console.warn(`[release] ${text}`);
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  const desk = chief ? chiefDeskThread(chief) : null;
+  if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
+  store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: false } });
+  autonomy.addReport(chief.id, desk, report);
+}
+
+/** The watcher's halt of a tip (nuria-platform #9328), if any. */
+function readHaltedRelease(): ReturnType<typeof haltedRelease> {
+  return haltedRelease({ escalationJson: readTail(HALT_ESCALATION_FILE, 8 * 1024), haltedSha: readTail(HALTED_SHA_FILE, 200), haltedReason: readTail(HALTED_REASON_FILE, 200) });
+}
+
+/** Production ran ahead of the tag (GH013), or the watcher halted a tip: told once each. */
+async function checkReleaseAftermath(state: ReleaseWatchState, released: string): Promise<void> {
+  const halted = readHaltedRelease();
+  if (halted && state.once(`halt:${halted.sha}`)) {
+    const text = `O watcher de produção PAROU de tentar o commit ${halted.sha.slice(0, 9)} (${halted.reason}${halted.failures ? `, ${halted.failures} falhas` : ""}): ele não sai sozinho; precisa de ação.`;
+    releaseAlertToChief(text, `[Alerta do servidor: release de produção parado] ${text}${halted.lastFailure ? ` Última falha: ${halted.lastFailure}.` : ""}\nArquivos: ${HALT_ESCALATION_FILE}, ${HALTED_SHA_FILE}. Descubra a causa (drift de tenant, saúde), corrija ou decida com o dono; para tentar de novo o mesmo commit, o halt precisa ser removido (rm ${HALTED_SHA_FILE}).`);
+  }
+  if (!released) return;
+  const repo = join(homedir(), "Projetos", "nuria-platform");
+  let tagSha: string | null = null;
+  let contains = false;
+  try {
+    tagSha = parseLsRemoteTag(await execCc("git", ["-C", repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
+    if (tagSha) {
+      try {
+        await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", released, tagSha]);
+        contains = true;
+      } catch { contains = tagSha.startsWith(released) || released.startsWith(tagSha); }
+    }
+  } catch { return; /* the tag could not be read: nothing to say */ }
+  let releasedAt = Date.now();
+  try { releasedAt = statSync(RELEASED_SHA_FILE).mtimeMs; } catch { return; }
+  const cause = tagStuckCause(`${readTail(RELEASE_OUT_LOG, 128 * 1024)}\n${readTail(RELEASE_ERR_LOG, 64 * 1024)}`);
+  const text = tagStuck({ releasedSha: released, releasedAt, tagSha, tagContainsRelease: contains, now: Date.now(), cause });
+  if (text && state.once(`tag:${released}`)) {
+    releaseAlertToChief(text, `[Alerta do servidor: tag de produção parada] ${text}\nLogs: ${RELEASE_OUT_LOG} e ${RELEASE_ERR_LOG}. Avise o dono; até a tag andar, confirme entregas a clientes pelo commit em produção, não pela tag.`);
+  }
+}
+
 async function checkProductionRelease(): Promise<void> {
   if (!releaseWatch.state || Date.now() - releaseWatch.lastAt < 2 * 60_000) return;
   releaseWatch.lastAt = Date.now();
   const released = readTail(RELEASED_SHA_FILE, 200).trim();
+  await checkReleaseAftermath(releaseWatch.state, released);
   const failed = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), released);
   if (!failed) return;
   // a later release that already contains the failed commit settles it
@@ -8215,13 +8260,13 @@ async function checkProductionRelease(): Promise<void> {
   }
   if (!releaseWatch.state.take(failed.sha, failed.count)) return;
   const cause = releaseFailureCause(readTail(RELEASE_OUT_LOG, 512 * 1024));
-  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
-  const desk = chief ? chiefDeskThread(chief) : null;
   const text = `O release de produção falhou ${failed.count} vezes no mesmo commit ${failed.sha}${cause ? ` (último motivo: ${cause})` : ""}, e a tag de produção não se moveu: o que vinha nele não está em produção.`;
-  console.warn(`[release] ${text}`);
-  if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
-  store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: false } });
-  autonomy.addReport(chief.id, desk, `[Alerta do servidor: release de produção falhando] ${text}\nLogs: ${RELEASE_ERR_LOG} e ${RELEASE_OUT_LOG}. O watcher tenta de novo sozinho a cada 2 min. Veja se é carga da máquina (CI concorrente, timeouts) ou falha real, avise quem precisa (SRE/Delivery, o dono) e não dê a entrega como feita ao cliente.`);
+  // after the watcher's halt it does not retry: never say it does
+  const halted = readHaltedRelease();
+  const retries = halted && (halted.sha.startsWith(failed.sha) || failed.sha.startsWith(halted.sha))
+    ? "O watcher PAROU de tentar este commit (halt): ele não sai sozinho."
+    : "O watcher tenta de novo sozinho a cada 2 min.";
+  releaseAlertToChief(text, `[Alerta do servidor: release de produção falhando] ${text}\nLogs: ${RELEASE_ERR_LOG} e ${RELEASE_OUT_LOG}. ${retries} Veja se é carga da máquina (CI concorrente, timeouts) ou falha real, avise quem precisa (SRE/Delivery, o dono) e não dê a entrega como feita ao cliente.`);
 }
 
 async function autonomyTick(): Promise<void> {
