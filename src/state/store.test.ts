@@ -195,6 +195,15 @@ describe("independent bot threads", () => {
     expect(pinBotThreadAction(pinned, [bot])).toBe(pinned);
   });
 
+  it("clears \"Precisa de você\" and waiting-on-teammates when a later frame leaves them out", () => {
+    let state = reducer(start(), { type: "botPatched", bot: { ...bot, goalNeedsInput: true, goalNeedsInputSince: 5, waitingForTeammates: true } });
+    expect(state.bots[0]).toMatchObject({ goalNeedsInput: true, goalNeedsInputSince: 5, waitingForTeammates: true });
+    const { goalNeedsInput: _a, goalNeedsInputSince: _b, waitingForTeammates: _c, ...plain } = bot as typeof bot & { goalNeedsInput?: boolean; goalNeedsInputSince?: number; waitingForTeammates?: boolean };
+    state = reducer(state, { type: "botPatched", bot: plain });
+    expect(state.bots[0]).toMatchObject({ goalNeedsInput: false, waitingForTeammates: false });
+    expect(state.bots[0]?.goalNeedsInputSince).toBeUndefined();
+  });
+
   it("keeps background bot frames from switching the visible transcript or clearing unread", () => {
     const patched = reducer(start(), { type: "botPatched", bot: { ...bot, threadId: "second", messages: [], activeLeafId: "other" } });
     expect(patched.bots[0]?.threadId).toBe("first");

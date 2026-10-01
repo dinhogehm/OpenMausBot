@@ -1735,6 +1735,11 @@ export function reducer(state: AppState, action: Action): AppState {
         // into General. Retaining the old label strands an empty team in UI.
         section: action.bot.section,
         tasks: action.bot.tasks ? mergeTaskStamps(b.tasks, action.bot.tasks) : b.tasks,
+        // Signals a frame states only while they hold: absent means off, so
+        // an old "Precisa de você" never sticks to the row (R8-visual N1).
+        goalNeedsInput: action.bot.goalNeedsInput ?? false,
+        goalNeedsInputSince: action.bot.goalNeedsInputSince,
+        waitingForTeammates: action.bot.waitingForTeammates ?? false,
         // Clear immediately on deletion: old approvals must never be sent
         // to the replacement thread while waiting for its transcript.
         messages: switchedThread ? [] : b.messages,

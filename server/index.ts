@@ -3636,7 +3636,9 @@ const wireBot = (bot: BotRecord): WireBot => {
     : rest;
   const needsInput = goalNeedsInputForThread(bot.threadId);
   return { ...visible, waitingForTeammates: needsInput === null && activeCoordinationForThread(bot.threadId) && !threadBusy(bot.id, bot.threadId),
-    ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput } : {}),
+    // always said, false included: a client merges bot frames, and a field
+    // left out would keep an old "Precisa de você" forever (R8-visual N1)
+    goalNeedsInput: needsInput !== null, ...(needsInput !== null ? { goalNeedsInputSince: needsInput } : {}),
     avatarUrl: visible.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
 };
 
