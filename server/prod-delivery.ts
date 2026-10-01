@@ -34,6 +34,8 @@ export interface CcDelivery {
   /** "owner/repo" of the session's origin, once known. */
   slug?: string;
   prs: Record<string, DeliveryPr>;
+  /** Numbers a report named as PRs that GitHub says are not PRs (issues). */
+  notPrs?: number[];
 }
 
 interface DeliverySession {
@@ -57,11 +59,14 @@ export function prLinks(text: string, slug: string): Array<{ url: string; number
   // sessions often report a PR only as "PR #9315", or a list after the
   // plural: "PRs #9329 e #9330", "PRs #1, #2 and #3". A bare "#N" may be an
   // issue, so only the number right after a singular "PR" counts ("PR #9328,
-  // #9319 (issue)", "PR #9328/#9319" name an issue second), and a list is cut
-  // where it names an issue: "#9319 (issue)", "#9319 é a issue", or "issue"
-  // later in the same clause ("PRs #9328 e #9319: … a segunda issue") keeps
-  // only the first number, the one that is certainly a PR. What is missed
-  // here is found by the issue and branch of the session (archived-outside.ts).
+  // #9319 (issue)", "PR #9328/#9319" name an issue second), and a number in
+  // a list tagged as an issue right after it ("#9319 (issue)", "#9319 é a
+  // issue") leaves it. An issue named elsewhere in the sentence ("PRs #9329 e
+  // #9330 fecham a issue #9326") does not cut the list: these are candidates,
+  // and whoever uses them asks GitHub — a number that is no PR answers "Could
+  // not resolve to a PullRequest" (notAPullRequest) and is dropped there.
+  // Missing a PR is worse than checking one too many: archiveBlockers would
+  // let a session with an open PR be archived.
   for (const match of text.matchAll(/\b(?:(PRs|pull requests)\s*(#\d{2,6}(?:\s*(?:,|&|\be\b|\band\b)\s*#\d{2,6})*)|(?:PR|pull request)\s*#(\d{2,6}))\b/gi)) {
     const numbers = match[3] ? [Number(match[3])] : listedPrs(match[2]!, text.slice(match.index! + match[0].length));
     for (const number of numbers) {
@@ -72,16 +77,21 @@ export function prLinks(text: string, slug: string): Array<{ url: string; number
 }
 
 /** The PR numbers of a list that followed "PRs": a number tagged as an issue
- * leaves it, and an issue named later in the same clause leaves only the first. */
+ * right after it ("#9319 (issue)", "#9319 é a issue") leaves it. */
 function listedPrs(list: string, after: string): number[] {
   const numbers = [...list.matchAll(/#(\d{2,6})/g)].map((each) => Number(each[1]));
-  const issueTagged = (rest: string) => /^\s*(?:\(\s*(?:a\s+|the\s+)?issue\b|(?:é|e|is)\s+(?:a\s+|the\s+|uma\s+|an\s+)?issue\b)/i.test(rest);
+  const issueTagged = (rest: string) => /^\s*(?:\(\s*(?:a\s+|the\s+)?issue\s*\)|(?:é|e|is)\s+(?:a\s+|the\s+|uma\s+|an\s+)?issue\b)/i.test(rest);
   // only the last one can carry a tag: inside the list a separator follows
-  const kept = numbers.filter((_, i) => i < numbers.length - 1 || !issueTagged(after));
-  // the rest of the clause (up to ; ! ? a line break or a sentence's end)
-  const clause = after.split(/[;!?\n]|\.(?=\s+[A-ZÀ-Ú]|\s*$)/)[0] ?? "";
-  if (kept.length > 1 && /\bissues?\b/i.test(clause)) return kept.slice(0, 1);
-  return kept;
+  return numbers.filter((_, i) => i < numbers.length - 1 || !issueTagged(after));
+}
+
+/** gh's answer for a number that is an issue (or nothing), not a PR: `gh pr
+ * view N` exits 1 with "GraphQL: Could not resolve to a PullRequest with the
+ * number of N." on stderr, which execFile puts in the error's message and
+ * in its `stderr`. Settled — never a reason to try again. */
+export function notAPullRequest(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.message}\n${String((error as { stderr?: unknown }).stderr ?? "")}` : String(error);
+  return /Could not resolve to a PullRequest|no pull requests? found/i.test(text);
 }
 
 /** `origin`'s "owner/repo" from its URL; null when not GitHub. Every form
@@ -158,7 +168,8 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
   for (const session of sessions) {
     if (session.status === "archived") continue;
     if (!session.delivery) {
-      if (!/\/pull\/|\b(?:PR|pull request)\s*#\d/i.test(session.lastReport ?? "")) continue;
+      // "PRs #9329 e #9330" too: a plural report used to start no delivery at all
+      if (!/\/pull\/|\b(?:PRs?|pull requests?)\s*#\d/i.test(session.lastReport ?? "")) continue;
       session.delivery = { prs: {} };
     }
     const delivery = session.delivery;
@@ -171,7 +182,7 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     }
     let added = false;
     for (const link of prLinks(session.lastReport ?? "", delivery.slug)) {
-      if (delivery.prs[String(link.number)]) continue;
+      if (delivery.prs[String(link.number)] || delivery.notPrs?.includes(link.number)) continue;
       delivery.prs[String(link.number)] = { ...link };
       added = true;
     }
@@ -203,7 +214,14 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
           } else {
             pr.state = view.state === "CLOSED" ? "closed" : "open";
           }
-        } catch { /* gh unavailable: next time */ }
+        } catch (error) {
+          // an issue the report named next to its PRs: not a PR, for good
+          if (notAPullRequest(error)) {
+            delete delivery.prs[String(pr.number)];
+            delivery.notPrs = [...new Set([...(delivery.notPrs ?? []), pr.number])];
+          }
+          /* else gh unavailable: next time */
+        }
         deps.save();
         if (pr.state !== "merged") continue;
       }
@@ -253,7 +271,7 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
   if (!slug) return { blockers, unknown: ["o repositório (não consegui ler o endereço do GitHub)"] };
   const numbers = new Map<number, DeliveryPr | undefined>();
   for (const pr of Object.values(session.delivery?.prs ?? {})) numbers.set(pr.number, pr);
-  for (const link of prLinks(session.lastReport ?? "", slug)) if (!numbers.has(link.number)) numbers.set(link.number, undefined);
+  for (const link of prLinks(session.lastReport ?? "", slug)) if (!numbers.has(link.number) && !session.delivery?.notPrs?.includes(link.number)) numbers.set(link.number, undefined);
   let tagSha: string | null | undefined;
   for (const [number, known] of [...numbers].slice(0, 6)) {
     if (known?.reportedAt !== undefined || known?.state === "closed") continue;
@@ -264,8 +282,9 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
         const view = JSON.parse(await deps.gh(["pr", "view", String(number), "--repo", slug, "--json", "state,mergeCommit"])) as { state?: string; mergeCommit?: { oid?: string } | null };
         state = view.state ?? "";
         mergeSha = view.mergeCommit?.oid ?? undefined;
-      } catch {
-        unknown.push(`PR #${number}`);
+      } catch (error) {
+        // an issue named in the report ("fecham a issue #9326"): nothing to hold
+        if (!notAPullRequest(error)) unknown.push(`PR #${number}`);
         continue;
       }
     }

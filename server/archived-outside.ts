@@ -16,7 +16,9 @@
 // conferir"; sessions are taken least-recently-tried first, so a few that
 // keep failing never hold back the others.
 import type { CcSession } from "./cc-sessions.ts";
-import { prsOfSession } from "./prod-delivery.ts";
+import { notAPullRequest, prsOfSession } from "./prod-delivery.ts";
+
+export { notAPullRequest };
 
 export const ARCHIVED_OUTSIDE_MAX_TRIES = 6;
 /** Sessions looked at per pass (each costs a few gh calls). */
@@ -45,12 +47,6 @@ export interface ArchivedOutsideDeps {
   report(session: CcSession, text: string): void;
   /** A "Precisa de você" item; the caller puts it in a conversation still open. */
   ownerPending(session: CcSession, item: OwnerPendingItem): void;
-}
-
-/** gh's answer for a number that is an issue (or nothing), not a PR. */
-export function notAPullRequest(error: unknown): boolean {
-  const text = error instanceof Error ? `${error.message}\n${String((error as { stderr?: unknown }).stderr ?? "")}` : String(error);
-  return /Could not resolve to a PullRequest|no pull requests? found/i.test(text);
 }
 
 /** Sessions still to check, the ones tried least recently first; those
