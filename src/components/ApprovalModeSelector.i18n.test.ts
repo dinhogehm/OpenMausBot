@@ -39,8 +39,7 @@ describe("held notes name the buttons the selector shows", () => {
     setLocale("pt-br");
     expect(approvalModeOptions().map((option) => option.label)).toEqual([
       "Pedir aprovação",
-      // new level, not yet drafted: English fallback
-      "Auto-accept edits",
+      "Aceitar edições automaticamente",
       "Aprovar por mim",
       "Acesso total",
       "Personalizado (config.toml)",
