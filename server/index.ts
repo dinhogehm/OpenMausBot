@@ -340,7 +340,8 @@ import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
-import { ciToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
+import { ciToStop, isReleaseCommand, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
+import { batteryAlert, parsePmsetBatt, startsCarrier, type PowerState } from "./power.ts";
 import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, tagStuck, tagStuckCause } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -8250,6 +8251,43 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
   }
 }
 
+/** The Mac's power (server/power.ts): on battery long or low, the Chief and
+ * the person hear it; no carrier starts on battery. */
+const powerWatch: { state: PowerState | null; onBatterySince: number | null; told: Set<string>; lastAt: number } = { state: null, onBatterySince: null, told: new Set(), lastAt: 0 };
+async function checkPower(): Promise<void> {
+  if (!DESKTOP_MANAGED || process.env.VITEST || process.platform !== "darwin" || Date.now() - powerWatch.lastAt < 2 * 60_000) return;
+  powerWatch.lastAt = Date.now();
+  const power = parsePmsetBatt(await execCc("/usr/bin/pmset", ["-g", "batt"]));
+  powerWatch.state = power;
+  if (!power.onBattery) {
+    if (powerWatch.onBatterySince !== null) {
+      powerWatch.onBatterySince = null;
+      powerWatch.told.clear();
+      for (const item of autonomy.resolveOwnerPending({ key: "power:battery" })) refreshBotRow(item.botId);
+    }
+    return;
+  }
+  powerWatch.onBatterySince ??= Date.now();
+  const releaseRunning = (await psTable()).some((row) => isReleaseCommand(row.command));
+  const alert = batteryAlert({ power, onBatterySince: powerWatch.onBatterySince, now: Date.now(), releaseRunning, told: powerWatch.told });
+  if (!alert) return;
+  powerWatch.told.add(alert.level);
+  releaseAlertToChief(alert.text, `[Alerta do servidor: Mac na bateria] ${alert.text}`);
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  const desk = chief ? chiefDeskThread(chief) : null;
+  if (chief && desk && store.taskByThread(chief.id, desk)) {
+    autonomy.addOwnerPending(chief.id, desk, { title: `Ligue o Mac na tomada${power.percent !== null ? ` (${power.percent}%)` : ""}${releaseRunning ? " — release em curso" : ""}`, key: "power:battery" });
+    refreshBotRow(chief.id);
+  }
+}
+
+/** Why a carrier may not start now (the Mac on battery), or null. */
+function carrierPowerRefusal(text: string): string | null {
+  const power = powerWatch.state;
+  if (!power?.onBattery || !startsCarrier(text)) return null;
+  return `não inicio carrier com o Mac na bateria${power.percent !== null ? ` (${power.percent}%)` : ""}: se ele desligar no meio do deploy, a produção fica pela metade. Peça ao dono para ligar na tomada e mande de novo.`;
+}
+
 async function checkProductionRelease(): Promise<void> {
   if (!releaseWatch.state || Date.now() - releaseWatch.lastAt < 2 * 60_000) return;
   releaseWatch.lastAt = Date.now();
@@ -8277,6 +8315,7 @@ async function checkProductionRelease(): Promise<void> {
 
 async function autonomyTick(): Promise<void> {
   void checkProductionRelease().catch((error) => console.error(`[release] ${error instanceof Error ? error.message : String(error)}`));
+  void checkPower().catch((error) => console.error(`[power] ${error instanceof Error ? error.message : String(error)}`));
   void revalidateNeedsInputGoals().catch((error) => console.error(`[autonomy] needs-input check failed: ${error instanceof Error ? error.message : String(error)}`));
   void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
   try {
@@ -8985,6 +9024,8 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason });
     if (refusal) return { status: 409, body: { error: refusal } };
   }
+  const onBattery = carrierPowerRefusal(`${input.title}\n${input.brief}`);
+  if (onBattery) return { status: 409, body: { error: onBattery } };
   if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
     if (fromQueue) return { status: 409, body: { error: "busy" } };
     const priority = startPriority(`${input.title}\n${input.brief}`);
@@ -18023,6 +18064,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // A send that merges or publishes carries the repository's
           // corridor once (sessions started before it, or since it changed).
           const sendCorridor = repoCorridor(session.repo);
+          const onBattery = carrierPowerRefusal(scripts.text);
+          if (onBattery) return json(res, 409, { error: onBattery });
           const corridored = corridorForSend(session, sendCorridor, scripts.text);
           const sendWarning = sendCorridor ? hotfixWithReleaseScripts(scripts.text) : null;
           if (sendWarning) ccChip(session, "a mensagem junta hotfix com script de release — o corredor pede carriers separados", false);
