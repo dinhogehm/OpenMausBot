@@ -311,7 +311,7 @@ export interface ArchiveCleanupDeps {
 
 export interface ArchiveCleanup {
   /** Safe to remove, with the command a person runs (and a note when git may refuse it: submodules). */
-  candidates: Array<{ path: string; command: string; note?: string }>;
+  candidates: Array<{ path: string; command: string }>;
   /** What must stay, why, and — when one helps — a command (saving its commits in a branch). */
   kept: Array<{ path: string; why: string; command?: string }>;
 }
@@ -325,7 +325,7 @@ async function listEntries(deps: ArchiveCleanupDeps): Promise<Array<{ entry: Wor
   }
 }
 
-type Verdict = { ok: true; command: string; note?: string } | { ok: false; why: string; command?: string };
+type Verdict = { ok: true; command: string } | { ok: false; why: string; command?: string };
 
 /** Whether the worktree at `path` (canonical; `entry` as git lists it) may be
  * removed by a person, with the command; or why it must stay. Only reads. */
@@ -363,7 +363,7 @@ async function archiveVerdict(entry: WorktreeEntry, path: string, all: readonly 
   } catch (error) {
     return { ok: false, why: gitFailureLabel(error) };
   }
-  if (submodules) return { ok: true, command: remove, note: `contém submódulos: o git recusa remover assim; confira à mão${ownLock ? " (e não tire o lock antes)" : ""}` };
+  if (submodules) return { ok: false, why: `contém submódulos: o git recusa remover assim; confira à mão${ownLock ? " (e não tire o lock antes)" : ""}`, command: remove };
   return { ok: true, command: ownLock ? `git -C ${shellQuote(deps.repo)} worktree unlock ${shellQuote(entry.path)} && ${remove}` : remove };
 }
 
@@ -387,7 +387,7 @@ export async function planNestedWorktrees(parent: string, deps: ArchiveCleanupDe
       }
     }
     const verdict = await archiveVerdict(entry, path, all, deps, cwds);
-    if (verdict.ok) result.candidates.push({ path: entry.path, command: verdict.command, ...(verdict.note ? { note: verdict.note } : {}) });
+    if (verdict.ok) result.candidates.push({ path: entry.path, command: verdict.command });
     else result.kept.push({ path: entry.path, why: verdict.why, ...(verdict.command ? { command: verdict.command } : {}) });
   }
   return result;
@@ -404,7 +404,7 @@ export async function planArchivedWorktree(folder: string, deps: ArchiveCleanupD
   const found = listed?.find((item) => item.path === path);
   if (!listed || !found || found.path === listed[0]?.path) { result.kept.push({ path: folder, why: !listed ? "não conferida: git não listou as worktrees" : "não é uma worktree deste repositório" }); return result; }
   const verdict = await archiveVerdict(found.entry, path, listed.map((item) => item.path), deps, deps.processCwds.map(canon));
-  if (verdict.ok) result.candidates.push({ path: folder, command: verdict.command, ...(verdict.note ? { note: verdict.note } : {}) });
+  if (verdict.ok) result.candidates.push({ path: folder, command: verdict.command });
   else result.kept.push({ path: folder, why: verdict.why, ...(verdict.command ? { command: verdict.command } : {}) });
   return result;
 }
@@ -419,8 +419,10 @@ export function archiveCleanupNote(parent: string, result: ArchiveCleanup): { ch
   ].filter(Boolean).join(" ");
   const report = [
     `${chip} O servidor não remove worktrees.`,
-    result.candidates.length ? `Para remover (sem --force; confira antes):\n${result.candidates.map((item) => `${item.command}${item.note ? `   # ${item.note}` : ""}`).join("\n")}` : "",
-    ...result.kept.filter((item) => item.command).map((item) => `Para guardar os commits de ${name(item.path)} antes de qualquer remoção:\n${item.command}`),
+    result.candidates.length ? `Para remover (sem --force; confira antes):\n${result.candidates.map((item) => item.command).join("\n")}` : "",
+    ...result.kept.filter((item) => item.command).map((item) => (item.why.startsWith("commits fora")
+      ? `Para guardar os commits de ${name(item.path)} antes de qualquer remoção:\n${item.command}`
+      : `${name(item.path)} ${item.why}; só depois de conferir, sem tirar lock:\n${item.command}`)),
   ].filter(Boolean).join("\n");
   return { chip, report };
 }

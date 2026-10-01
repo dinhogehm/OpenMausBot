@@ -467,13 +467,16 @@ describe("worktrees already in production, with real git", () => {
       const deps = { repo, git: realGit(repo, calls), processCwds: [], processCommands: [], ownLockMarkers: ["cc-1a2b3c4d"] };
       const before = run(repo, "worktree", "list", "--porcelain");
       expect(await planArchivedWorktree(accented, deps, [])).toEqual({ candidates: [], kept: [{ path: accented, why: "bloqueada: gate da sessão de revisão (Eng)" }] });
+      // with submodules it stays among the KEPT (INSP-G r4 note 2), with the plain remove for after checking — never the unlock
       const plan = await planArchivedWorktree(withSub, deps, []);
-      expect(plan.candidates).toEqual([{ path: withSub, command: `git -C ${repo} worktree remove ${withSub}`, note: "contém submódulos: o git recusa remover assim; confira à mão (e não tire o lock antes)" }]);
-      expect(archiveCleanupNote(withSub, plan).report).not.toContain("unlock");
+      expect(plan).toEqual({ candidates: [], kept: [{ path: withSub, why: "contém submódulos: o git recusa remover assim; confira à mão (e não tire o lock antes)", command: `git -C ${repo} worktree remove ${withSub}` }] });
+      const report = archiveCleanupNote(repo, plan).report;
+      expect(report).not.toContain("unlock");
+      expect(report).not.toContain("Para remover (sem --force");
       expect(run(repo, "worktree", "list", "--porcelain")).toBe(before);
       expect(onlyReads(calls)).toBe(true);
       // the person's command, run as given: git refuses, and the lock is still there
-      expect(() => execFileSync("/bin/sh", ["-c", plan.candidates[0]!.command], { stdio: "pipe" })).toThrow();
+      expect(() => execFileSync("/bin/sh", ["-c", plan.kept[0]!.command!], { stdio: "pipe" })).toThrow();
       expect(run(repo, "worktree", "list", "--porcelain")).toBe(before);
     } finally {
       rmSync(root, { recursive: true, force: true });
