@@ -333,7 +333,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
-import { BG_JOB_MAX_MS, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
+import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, githubSlug, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, prsOfSession, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
@@ -8619,6 +8619,12 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     if (buffer) keep(buffer);
     const outcome = parseCcStream([...lines, ...(spawnError ? [spawnError] : []), ...stderr.split("\n").slice(-5)], { code, signal, timedOut });
     ccLedger.finishTurn(session, outcome);
+    // this turn was the resumption after a cut: at most one per cut in a row
+    const resumedAfterCut = session.resumedAfterCut === true;
+    if (resumedAfterCut) {
+      delete session.resumedAfterCut;
+      ccLedger.save();
+    }
     if (session.status === "stopped" || session.status === "archived") return;
     const next = session.status === "idle" ? takeFreshQueued(desktopWork, session) : null;
     if (next !== null) {
@@ -8636,18 +8642,28 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     // resumed when it ends instead of the CI running on with nobody to tell
     // (R8-resilience TO). Nothing is killed here.
     const cut = timedOut && session.status === "failed";
+    const limitMin = Math.round(ccTurnTimeoutMs / 60_000);
+    // cut again right after the server resumed it from a cut: a structural
+    // stall (a loop, a wait that never ends) — no second resumption, the Chief decides
+    if (cut && resumedAfterCut) {
+      ccChip(session, `turno cortado em ${limitMin} min duas vezes seguidas — o servidor não retoma de novo; o Chief decide`, false);
+      ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn was cut at the ${limitMin}-min limit twice in a row: the second turn was the server's resumption after the first cut. The server does not resume it again. Check whether it is stuck — a loop, a wait that never ends — then send it a message with cc_session_send, or stop it.)`);
+      return;
+    }
     if ((session.status === "idle" || cut) && tree && folder && folder.includes("/.claude/worktrees/")) {
-      void backgroundProcesses(folder, tree).then((left) => {
+      void backgroundProcesses(folder, tree).then((found) => {
+        // after a cut only a group of its own counts (the gate); the claude's own group (MCP servers) dies with it
+        const left = cut ? cutLeftovers(found, tree.rootPid) : found;
         if (!left.length || (session.status !== "idle" && !(cut && session.status === "failed"))) {
           ccReport(session, desktopReportFor(desktopWork, session));
           return;
         }
-        session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now() };
+        session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now(), ...(cut ? { afterCut: true as const } : {}) };
         ccLedger.save();
         ccChip(session, cut
-          ? `turno cortado em ${Math.round(ccTurnTimeoutMs / 60_000)} min com ${left.length} processo(s) ainda rodando — o servidor retoma a sessão quando terminarem`
+          ? `turno cortado em ${limitMin} min com ${left.length} processo(s) ainda rodando — o servidor retoma a sessão quando terminarem`
           : `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`);
-        ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ended with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.)`);
+        ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ${cut ? `was cut at the ${limitMin}-min limit` : "ended"} with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.${cut ? " One of them may be what stalled the turn; the server resumes it once at most — cut again, it waits for you." : ""})`);
       }).catch(() => ccReport(session, desktopReportFor(desktopWork, session)));
       return;
     }
@@ -8905,6 +8921,8 @@ async function watchBackgroundJobs(): Promise<void> {
     }
     if (ccLedger.runningCount() >= CC_MAX_RUNNING) continue;
     delete session.bgJob;
+    // the resumption after a cut: cut again, it is not resumed a second time
+    if (job.afterCut) session.resumedAfterCut = true;
     ccLedger.save();
     ccChip(session, "o processo em segundo plano terminou — sessão retomada");
     runCcTurn(session, prompt, false);

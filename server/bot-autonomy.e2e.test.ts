@@ -500,3 +500,89 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(JSON.parse(readFileSync(calls, "utf8").trim().split("\n")[1]!).argv.slice(0, 3)).toEqual(["-p", "--resume", ccLedger()[0].id]);
   }, { OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000" });
 }, 90_000);
+
+/** A fake claude for the cut tests: the first prompt's GATE:<ms> (a "ci:local"
+ * in a group of its own), MCP (a child in the claude's own group, working in
+ * the worktree, that dies 2 s after the claude) and HOLD:<ms> (outlasting the
+ * limit) are kept in a file and apply to every turn, the resumption too. */
+async function cutFake() {
+  const { chmodSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const tools = mkdtempSync(join(tmpdir(), "omb-fake-claude-cut2-"));
+  const fake = join(tools, "fake-claude.mjs");
+  const calls = join(tools, "calls.jsonl");
+  const directives = join(tools, "directives.txt");
+  writeFileSync(fake, `#!/usr/bin/env node
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
+const argv = process.argv.slice(2);
+const prompt = argv[argv.length - 1];
+let cwd = process.cwd();
+const w = argv.indexOf("-w");
+if (w >= 0) { cwd = join(cwd, ".claude", "worktrees", argv[w + 1]); mkdirSync(cwd, { recursive: true }); }
+appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv }) + "\\n");
+if (!existsSync(${JSON.stringify(directives)})) writeFileSync(${JSON.stringify(directives)}, prompt.split("\\n")[0]);
+const said = readFileSync(${JSON.stringify(directives)}, "utf8");
+if (/\\bMCP\\b/.test(said)) spawn(process.execPath, ["-e", "const p = process.ppid; setInterval(() => { try { process.kill(p, 0); } catch { setTimeout(() => process.exit(0), 2000); } }, 100)", "mcp-server"], { cwd, stdio: "ignore" }).unref();
+const gate = /GATE:(\\d+)/.exec(said);
+if (gate) spawn(process.execPath, ["-e", "setTimeout(() => {}, " + gate[1] + ")", "ci:local"], { cwd, detached: true, stdio: "ignore" }).unref();
+console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));
+const hold = /HOLD:(\\d+)/.exec(said);
+if (hold) await new Promise(r => setTimeout(r, Number(hold[1])));
+console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "did: " + prompt.split("\\n")[0].slice(0, 60), total_cost_usd: 0.01 }));
+`);
+  chmodSync(fake, 0o755);
+  return { fake, calls: () => (existsSync(calls) ? readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).length : 0) };
+}
+
+it("after a cut, the claude's own group (an MCP server dying with it) is not a background job (INSP-G r1 item 10)", async () => {
+  const { fake, calls } = await cutFake();
+  await fixture(async f => {
+    const { execFileSync } = await import("node:child_process");
+    const data = f.session.info.dataDir;
+    const repo = join(data, "repo");
+    execFileSync("git", ["init", "-q", repo]);
+    const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
+    f.save({ turns: [
+      { steps: [{ tool: "cc_session_start", arguments: { title: "#9997 trava com MCP", brief: "MCP HOLD:30000", repo, surface: "cli" } }], reply: "Started" },
+      { reply: "Cut" },
+    ] });
+    await f.send("Run it.");
+    await expect.poll(() => (existsSync(join(data, "cc-sessions.json")) ? ccLedger()[0]?.status : undefined), { timeout: 20_000 }).toBe("failed");
+    // the MCP child outlives the claude by 2 s: long enough to be seen, never followed
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+    expect(ccLedger()[0].bgJob).toBeUndefined();
+    expect((await f.chips()).some((chip: string) => chip.includes("turno cortado em"))).toBe(false);
+    expect(calls()).toBe(1);
+  }, { OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000" });
+}, 60_000);
+
+it("resumes a cut turn once: cut again right after, it is not resumed a second time (INSP-G r1 item 10)", async () => {
+  const { fake, calls } = await cutFake();
+  await fixture(async f => {
+    const { execFileSync } = await import("node:child_process");
+    const data = f.session.info.dataDir;
+    const repo = join(data, "repo");
+    execFileSync("git", ["init", "-q", repo]);
+    const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
+    f.save({ turns: [
+      { steps: [{ tool: "cc_session_start", arguments: { title: "#9996 trava estrutural", brief: "GATE:6000 HOLD:30000", repo, surface: "cli" } }], reply: "Started" },
+      { reply: "Cut once" },
+      { reply: "Cut twice" },
+      { reply: "spare" },
+    ] });
+    await f.send("Run the gate.");
+    // first cut: its gate (own group) is followed, the session resumed when it ends
+    await expect.poll(() => (existsSync(join(data, "cc-sessions.json")) ? ccLedger()[0]?.bgJob?.afterCut ?? false : false), { timeout: 20_000 }).toBe(true);
+    await expect.poll(() => calls(), { timeout: 40_000 }).toBe(2);
+    // the resumption is cut too, leaving another gate: no second resumption
+    await expect.poll(async () => (await f.chips()).some((chip: string) => chip.includes("duas vezes seguidas")), { timeout: 20_000 }).toBe(true);
+    expect(ccLedger()[0].bgJob).toBeUndefined();
+    expect(ccLedger()[0].resumedAfterCut).toBeUndefined();
+    // well past the second gate's end: still two turns
+    await new Promise((resolve) => setTimeout(resolve, 12_000));
+    expect(calls()).toBe(2);
+    expect(ccLedger()[0].bgJob).toBeUndefined();
+  }, { OMB_CC_BIN: fake, OMB_CC_TURN_TIMEOUT_MS: "3000" });
+}, 120_000);

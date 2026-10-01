@@ -9,7 +9,7 @@
 // so a PID the system reuses later is not mistaken for the job.
 import { execFile } from "node:child_process";
 
-export interface BgProcess { pid: number; cwd: string; command: string; start: string }
+export interface BgProcess { pid: number; cwd: string; command: string; start: string; pgid?: number }
 
 /** A session's background job: its processes and their start times (`ps -o lstart`). */
 export interface BgJob {
@@ -20,6 +20,16 @@ export interface BgJob {
   starts?: string[];
   /** All gone, but no slot was free to resume the session: retried next tick. */
   doneAt?: number;
+  /** Left by a turn cut at the time limit: its resumption may not be resumed again after another cut. */
+  afterCut?: true;
+}
+
+/** What a turn cut at the time limit leaves to follow: only processes in a
+ * group of their own (a gate: npm → local-ci). The claude's own group (its
+ * MCP servers, its tools) dies with it, and following it would resume the
+ * session for nothing (INSP-G r1 G2-a). */
+export function cutLeftovers(left: readonly BgProcess[], rootPid: number): BgProcess[] {
+  return left.filter((proc) => proc.pgid !== undefined && proc.pgid !== rootPid);
 }
 
 /** A job still running after this is reported to the owner, and no longer waited on. */
@@ -100,7 +110,7 @@ export function sessionLeftovers(folder: string, tree: TurnTree, rows: readonly 
   return rows
     .filter((row) => inFolder.has(row.pid) && row.pid !== tree.rootPid && !isInteractiveShell(row.command) && !isToolProcess(row.command))
     .filter((row) => tree.seen.get(row.pid) === row.start || (!tree.seen.has(row.pid) && tree.groups.has(row.pgid)))
-    .map((row) => ({ pid: row.pid, cwd: inFolder.get(row.pid)!, command: row.command.slice(0, 200), start: row.start }));
+    .map((row) => ({ pid: row.pid, cwd: inFolder.get(row.pid)!, command: row.command.slice(0, 200), start: row.start, pgid: row.pgid }));
 }
 
 const run = (file: string, args: string[]) => new Promise<string>((resolve) => {
