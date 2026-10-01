@@ -21,7 +21,9 @@
 // - nothing is dropped in silence: a broken file is kept aside and logged, a
 //   start whose conversation is gone goes to the bot's main one, and one
 //   that cannot open for a reason that may pass (the app's last folder)
-//   stays in its place and the bot hears why.
+//   stays in its place and the bot hears why — for up to START_RETRY_MAX_MS,
+//   then it leaves the queue and the bot hears that too; while it waits to
+//   retry it reserves no slot.
 import { readFileSync, renameSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 
@@ -47,6 +49,8 @@ export interface QueuedStart {
 export const START_QUEUE_MAX = 30;
 /** A start that could not open for a reason that may pass is tried again after this. */
 export const START_RETRY_MS = 5 * 60_000;
+/** A start still failing to open this long after it was queued leaves the queue (the bot hears it). */
+export const START_RETRY_MAX_MS = 24 * 3_600_000;
 
 const URGENT = /(?<![\p{L}\d])(?:P0|P1|hotfix|urgente?|urgent)(?![\p{L}\d])/iu;
 const REJECTED = /(?<![\p{L}])reprovad[oa]s?(?![\p{L}])/iu;
@@ -136,9 +140,21 @@ export class CcStartQueue {
     return [...this.items].sort((a, b) => a.priority - b.priority || a.at - b.at);
   }
 
-  /** P1s waiting: each keeps a slot from work that is not in the queue. */
-  urgentCount(): number {
-    return this.items.filter((item) => item.priority === 0).length;
+  /** P1s that could open now: each keeps a slot from work that is not in
+   * the queue. One waiting out a retry (a carrier on battery, the app's last
+   * folder) reserves nothing — it could not use the slot anyway. */
+  urgentCount(now = Date.now()): number {
+    return this.items.filter((item) => item.priority === 0 && (item.retryAt === undefined || item.retryAt <= now)).length;
+  }
+
+  /** Take out the starts that have been failing to open for longer than
+   * START_RETRY_MAX_MS: they are not tried forever. */
+  expire(now = Date.now()): QueuedStart[] {
+    const expired = this.items.filter((item) => item.lastReason !== undefined && now - item.at > START_RETRY_MAX_MS);
+    if (!expired.length) return [];
+    this.items = this.items.filter((item) => !expired.includes(item));
+    this.save();
+    return expired;
   }
 
   /** Queue a start: its place (1 = next) and id. The same start already
@@ -233,6 +249,14 @@ export interface DrainDeps {
 
 /** Open queued starts while there are free slots; the bot hears how each went. */
 export function drainStartQueue(queue: CcStartQueue, deps: DrainDeps): void {
+  for (const gone of queue.expire(deps.now())) {
+    const threadId = deps.threadOpen(gone.botId, gone.threadId) ? gone.threadId : deps.mainThread(gone.botId, gone.threadId);
+    const hours = Math.round(START_RETRY_MAX_MS / 3_600_000);
+    deps.log(`queued start "${gone.title}" (${gone.id}) of ${gone.botId} left the queue after ${hours} h failing to open: ${gone.lastReason}`);
+    if (!threadId || !deps.botExists(gone.botId)) continue;
+    deps.chip(threadId, `Fila de sessões: "${gone.title}" saiu da fila — não conseguiu abrir em ${hours} h (${(gone.lastReason ?? "").slice(0, 120)})`, false);
+    deps.report(gone.botId, threadId, `[Fila de sessões do Claude Code] "${gone.title}" (queue id ${gone.id}) left the queue: it could not open for ${hours} h — last reason: ${gone.lastReason}. It will NOT open by itself. If it still applies, fix the reason (or tell the owner) and start it again with cc_session_start.`);
+  }
   const tried = new Set<string>();
   while (deps.slotFree()) {
     const next = queue.take(deps.now(), tried);

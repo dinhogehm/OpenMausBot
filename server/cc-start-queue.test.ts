@@ -237,10 +237,42 @@ describe("opening queued starts", () => {
     expect(w.logs.some((line) => line.includes('"#9070 órfão" (g) dropped: its bot gone no longer exists'))).toBe(true);
   });
 
+  it("reserves no slot for a P1 waiting out a retry (a carrier on battery) (INSP-F r2 #3)", () => {
+    const w = world();
+    w.busy(3);
+    w.queue.add(item("carrier", "P1: carrier do release", 1));
+    expect(w.queue.urgentCount(w.now)).toBe(1);
+    expect(slotFreeForWork({ taken: w.ledger.slotsTaken(), urgentQueued: w.queue.urgentCount(w.now), max: MAX })).toBe(false);
+    // the drain tries it: on battery, back in its place until START_RETRY_MS
+    w.script(() => ({ status: 409, body: { error: "o Mac está na bateria; carrier não começa na bateria" }, retry: true }));
+    drainStartQueue(w.queue, w.deps);
+    expect(w.queue.ordered()[0]).toMatchObject({ id: "carrier", retryAt: w.now + START_RETRY_MS });
+    expect(w.queue.urgentCount(w.now)).toBe(0);
+    expect(slotFreeForWork({ taken: w.ledger.slotsTaken(), urgentQueued: w.queue.urgentCount(w.now), max: MAX })).toBe(true);
+    // its retry is due: it reserves again
+    expect(w.queue.urgentCount(w.now + START_RETRY_MS)).toBe(1);
+  });
+
+  it("takes a start that kept failing to open for over 24 h out of the queue, and the bot hears it (INSP-F r2 #3)", () => {
+    const w = world();
+    w.queue.add(item("stuck", "#9052 limpeza", w.now - 25 * 3_600_000));
+    w.queue.add(item("waiting", "#9060 outra", w.now - 25 * 3_600_000));
+    w.script((queued) => (queued.id === "stuck" ? { status: 409, body: { error: "a última pasta usada no app Claude é a worktree de outra sessão" }, retry: true } : { status: 409, body: { error: "busy" }, busy: true }));
+    drainStartQueue(w.queue, w.deps); // stuck: retry; waiting: busy, back in its place
+    expect(w.queue.ordered().map((each) => each.id)).toEqual(["stuck", "waiting"]);
+    w.advance(START_RETRY_MS);
+    drainStartQueue(w.queue, w.deps);
+    // only the one that kept failing leaves; one merely waiting for a slot stays
+    expect(w.queue.ordered().map((each) => each.id)).toEqual(["waiting"]);
+    expect(w.chips.find((chip) => chip.text.includes("saiu da fila"))).toEqual({ threadId: "t", text: 'Fila de sessões: "#9052 limpeza" saiu da fila — não conseguiu abrir em 24 h (a última pasta usada no app Claude é a worktree de outra sessão)', ok: false });
+    expect(w.reports.some((report) => report.botId === "chief" && report.text.includes("left the queue") && report.text.includes("will NOT open by itself"))).toBe(true);
+    expect(w.logs.some((line) => line.includes('"#9052 limpeza" (stuck)') && line.includes("left the queue after 24 h"))).toBe(true);
+  });
+
   it("keeps a start that cannot open for a reason that may pass in its place, and tells the bot once (INSP-F F3-g)", () => {
     const w = world();
-    w.queue.add(item("app", "#9052 limpeza", 1));
-    w.queue.add(item("cli", "#9060 outra", 2));
+    w.queue.add(item("app", "#9052 limpeza", w.now));
+    w.queue.add(item("cli", "#9060 outra", w.now + 1));
     w.script((queued) => (queued.id === "app" ? { status: 409, body: { error: "a última pasta usada no app Claude é a worktree de outra sessão" }, retry: true } : null));
     drainStartQueue(w.queue, w.deps);
     // the one behind it is not held back
