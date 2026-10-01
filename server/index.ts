@@ -341,7 +341,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
-import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, tagStuck, tagStuckCause } from "./release-watch.ts";
+import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, tagContainsRelease, tagStuck, tagStuckCause } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8230,16 +8230,23 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
   if (!released) return;
   const repo = join(homedir(), "Projetos", "nuria-platform");
   let tagSha: string | null = null;
-  let contains = false;
+  let contains: boolean | null = null;
   try {
     tagSha = parseLsRemoteTag(await execCc("git", ["-C", repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
-    if (tagSha) {
-      try {
-        await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", released, tagSha]);
-        contains = true;
-      } catch { contains = tagSha.startsWith(released) || released.startsWith(tagSha); }
-    }
   } catch { return; /* the tag could not be read: nothing to say */ }
+  if (tagSha && (tagSha.startsWith(released) || released.startsWith(tagSha))) contains = true;
+  else if (tagSha) {
+    // ls-remote does not fetch: both commits must be in this clone before merge-base can say "not contained"
+    const known = async (sha: string) => execCc("git", ["-C", repo, "cat-file", "-e", `${sha}^{commit}`]).then(() => true, () => false);
+    const [releasedKnown, tagKnown] = await Promise.all([known(released), known(tagSha)]);
+    let isAncestor: boolean | null = null;
+    if (releasedKnown && tagKnown) {
+      isAncestor = await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", released, tagSha])
+        .then(() => true, (error: unknown) => ((error as { code?: unknown }).code === 1 ? false : null));
+    }
+    contains = tagContainsRelease({ releasedKnown, tagKnown, isAncestor });
+    if (contains === null) console.log(`[release] tag ${PRODUCTION_TAG} at ${tagSha.slice(0, 9)} vs released ${released.slice(0, 9)}: not verifiable in ${repo} (commit missing here, or git failed) — no stuck-tag alert`);
+  }
   let releasedAt = Date.now();
   try { releasedAt = statSync(RELEASED_SHA_FILE).mtimeMs; } catch { return; }
   // the cause of THIS release only: its warning and the refusal just above it (stderr)

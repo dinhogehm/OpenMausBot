@@ -145,11 +145,20 @@ export function tagStuckCause(errTail: string, releasedSha: string): string | nu
   return `${warned}; o GitHub recusou o push da tag (${/GH013/.test(refusal) ? "GH013: regra de proteção do repositório" : "ref protegida"})`;
 }
 
+/** Whether the tag contains the release, as far as this clone can verify:
+ * `git ls-remote` does not fetch, so the tag's commit (or the released one)
+ * may be missing here, and then `merge-base` cannot tell — null, never a
+ * guess from sha prefixes (a tag ahead of the release would read "stuck"). */
+export function tagContainsRelease(input: { releasedKnown: boolean; tagKnown: boolean; isAncestor: boolean | null }): boolean | null {
+  return input.releasedKnown && input.tagKnown ? input.isAncestor : null;
+}
+
 /** Production runs `releasedSha` (released at `releasedAt`) and the tag is
- * not at it (nor past it) after TAG_STUCK_AFTER_MS: what to tell, else null. */
-export function tagStuck(input: { releasedSha: string; releasedAt: number; tagSha: string | null; tagContainsRelease: boolean; now: number; cause: string | null }): string | null {
+ * verifiably not at it (nor past it) after TAG_STUCK_AFTER_MS: what to tell,
+ * else null. `tagContainsRelease: null` (not verified) tells nothing. */
+export function tagStuck(input: { releasedSha: string; releasedAt: number; tagSha: string | null; tagContainsRelease: boolean | null; now: number; cause: string | null }): string | null {
   const released = input.releasedSha.trim();
-  if (!released || !input.tagSha || input.tagContainsRelease || input.now - input.releasedAt < TAG_STUCK_AFTER_MS) return null;
+  if (!released || !input.tagSha || input.tagContainsRelease !== false || input.now - input.releasedAt < TAG_STUCK_AFTER_MS) return null;
   const minutes = Math.round((input.now - input.releasedAt) / 60_000);
   return `Produção está no ar em ${released.slice(0, 9)} há ${minutes} min, mas a tag de produção continua em ${input.tagSha.slice(0, 9)}${input.cause ? ` (${input.cause})` : ""}: os vigias da tag não veem a entrega e nenhum cliente é avisado. Alguém precisa avançar a tag (ou corrigir o que a barrou).`;
 }

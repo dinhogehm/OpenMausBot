@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { haltedRelease, releaseFailureCause, releaseFailures, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagStuck, tagStuckCause } from "./release-watch.ts";
+import { haltedRelease, releaseFailureCause, releaseFailures, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagContainsRelease, tagStuck, tagStuckCause } from "./release-watch.ts";
 
 const log = [
   "Release production failed for b51648498 (exit 1)",
@@ -88,6 +88,20 @@ describe("after a release", () => {
     const far = ["remote: error: GH013: x", ...Array.from({ length: 50 }, (_, i) => `line ${i}`), `WARNING: production is live at ${B} but the certification tag was NOT advanced (exit 1)`].join("\n");
     expect(tagStuckCause(far, B)).toBe("o release avisou que a tag não avançou (exit 1)");
     expect(tagStuckCause(tail, "")).toBeNull();
+  });
+
+  // INSP-R r1 item 10: ls-remote does not fetch; a commit missing in the clone is no evidence
+  it("says nothing about the tag when the clone cannot verify it", () => {
+    const base = { releasedSha: "1bbd5c2a7f00", releasedAt: 0, tagSha: "90b3ef2a5aaa", now: 20 * 60_000, cause: null };
+    expect(tagContainsRelease({ releasedKnown: true, tagKnown: false, isAncestor: null })).toBeNull();
+    expect(tagContainsRelease({ releasedKnown: false, tagKnown: true, isAncestor: null })).toBeNull();
+    expect(tagContainsRelease({ releasedKnown: true, tagKnown: true, isAncestor: null })).toBeNull(); // git failed
+    expect(tagContainsRelease({ releasedKnown: true, tagKnown: true, isAncestor: false })).toBe(false);
+    expect(tagContainsRelease({ releasedKnown: true, tagKnown: true, isAncestor: true })).toBe(true);
+    // the tag ahead of the release, its commit not fetched here: no "stuck" text
+    expect(tagStuck({ ...base, tagContainsRelease: tagContainsRelease({ releasedKnown: true, tagKnown: false, isAncestor: null }) })).toBeNull();
+    expect(tagStuck({ ...base, tagContainsRelease: null })).toBeNull();
+    expect(tagStuck({ ...base, tagContainsRelease: false })).toContain("a tag de produção continua em 90b3ef2a5");
   });
 
   // INSP-R r1 item 8: the halt is the .sha file — the one the watcher reads — and nothing else
