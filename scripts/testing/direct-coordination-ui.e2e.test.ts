@@ -64,15 +64,15 @@ const enabled = process.env.OMB_UI_E2E === "1" || Boolean(resolveAgentBrowserBin
     writeFileSync(gateFile, "complete fixture work");
     await ui("wait-settle", "--timeout", "60");
     await expect.poll(snapshot, { timeout: 15_000 }).toContain("Engineer checked the fixture CSV export");
-    expect(await snapshot()).toContain("Sent to Engineer");
+    expect(await snapshot()).toContain("Enviado para Engineer");
     const state = await api("/api/bots");
     const parent = state.bots.find((bot: any) => bot.id === info.botId);
-    const receipt = parent.messages.find((message: any) => message.tool?.name === "Sent to Engineer");
+    const receipt = parent.messages.find((message: any) => message.tool?.name === "Enviado para Engineer");
     expect(receipt.threadRef.botId).toBe(lead.id);
     expect(receipt.threadRef.threadId).not.toBe(lead.threadId);
     const screenshot = info.logPath + ".direct-coordination.png";
     await ui("screenshot", "--out", screenshot);
-    await click("Sent to Engineer");
+    await click("Enviado para Engineer");
     await expect.poll(snapshot, { timeout: 15_000 }).toContain("CSV export checked in my separate task");
     const selected = (await api("/api/bots")).bots.find((bot: any) => bot.id === lead.id);
     expect(selected.threadId).toBe(receipt.threadRef.threadId);
