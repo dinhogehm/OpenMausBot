@@ -17,6 +17,24 @@ export interface WorktreeEntry {
   bare?: true;
 }
 
+/** A C-quoted git string ("sess\303\243o \"x\"") as text ("sessão "x""); anything else as is. */
+export function unquoteGit(value: string): string {
+  if (value.length < 2 || !value.startsWith("\"") || !value.endsWith("\"")) return value;
+  const bytes: number[] = [];
+  const simple: Record<string, number> = { n: 10, t: 9, r: 13, a: 7, b: 8, f: 12, v: 11, "\\": 92, "\"": 34 };
+  const body = value.slice(1, -1);
+  for (let i = 0; i < body.length; i++) {
+    const char = body[i]!;
+    if (char !== "\\") { bytes.push(...Buffer.from(char, "utf8")); continue; }
+    const octal = /^[0-3][0-7]{2}/.exec(body.slice(i + 1));
+    if (octal) { bytes.push(parseInt(octal[0], 8)); i += 3; continue; }
+    const next = body[i + 1];
+    if (next !== undefined && simple[next] !== undefined) { bytes.push(simple[next]!); i += 1; continue; }
+    bytes.push(92);
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
 /** `git worktree list --porcelain`, one entry per blank-line block. */
 export function parseWorktreeList(porcelain: string): WorktreeEntry[] {
   const entries: WorktreeEntry[] = [];
@@ -26,7 +44,8 @@ export function parseWorktreeList(porcelain: string): WorktreeEntry[] {
     if (!path) continue;
     const head = lines.find((line) => line.startsWith("HEAD "))?.slice("HEAD ".length);
     const branch = lines.find((line) => line.startsWith("branch "))?.slice("branch ".length).replace(/^refs\/heads\//, "");
-    const lockReason = lines.find((line) => line.startsWith("locked "))?.slice("locked ".length).trim();
+    const rawReason = lines.find((line) => line.startsWith("locked "))?.slice("locked ".length).trim();
+    const lockReason = rawReason ? unquoteGit(rawReason) : undefined;
     entries.push({
       path, ...(head ? { head } : {}), ...(branch ? { branch } : {}),
       locked: lines.some((line) => line === "locked" || line.startsWith("locked ")),
@@ -291,8 +310,8 @@ export interface ArchiveCleanupDeps {
 }
 
 export interface ArchiveCleanup {
-  /** Safe to remove, with the command a person runs. */
-  candidates: Array<{ path: string; command: string }>;
+  /** Safe to remove, with the command a person runs (and a note when git may refuse it: submodules). */
+  candidates: Array<{ path: string; command: string; note?: string }>;
   /** What must stay, why, and — when one helps — a command (saving its commits in a branch). */
   kept: Array<{ path: string; why: string; command?: string }>;
 }
@@ -306,7 +325,7 @@ async function listEntries(deps: ArchiveCleanupDeps): Promise<Array<{ entry: Wor
   }
 }
 
-type Verdict = { ok: true; command: string } | { ok: false; why: string; command?: string };
+type Verdict = { ok: true; command: string; note?: string } | { ok: false; why: string; command?: string };
 
 /** Whether the worktree at `path` (canonical; `entry` as git lists it) may be
  * removed by a person, with the command; or why it must stay. Only reads. */
@@ -336,6 +355,15 @@ async function archiveVerdict(entry: WorktreeEntry, path: string, all: readonly 
   const content = await contentBlocker(entry.path, deps.git);
   if (content) return { ok: false, why: content };
   const remove = removeCommand(deps.repo, entry.path);
+  // git refuses to remove a worktree with submodules — after an unlock that
+  // would leave it unlocked: only the remove, never chained to the unlock
+  let submodules = false;
+  try {
+    submodules = (await deps.git(["-C", entry.path, "ls-files", "--stage"])).split("\n").some((line) => line.startsWith("160000 "));
+  } catch (error) {
+    return { ok: false, why: gitFailureLabel(error) };
+  }
+  if (submodules) return { ok: true, command: remove, note: `contém submódulos: o git recusa remover assim; confira à mão${ownLock ? " (e não tire o lock antes)" : ""}` };
   return { ok: true, command: ownLock ? `git -C ${shellQuote(deps.repo)} worktree unlock ${shellQuote(entry.path)} && ${remove}` : remove };
 }
 
@@ -359,7 +387,7 @@ export async function planNestedWorktrees(parent: string, deps: ArchiveCleanupDe
       }
     }
     const verdict = await archiveVerdict(entry, path, all, deps, cwds);
-    if (verdict.ok) result.candidates.push({ path: entry.path, command: verdict.command });
+    if (verdict.ok) result.candidates.push({ path: entry.path, command: verdict.command, ...(verdict.note ? { note: verdict.note } : {}) });
     else result.kept.push({ path: entry.path, why: verdict.why, ...(verdict.command ? { command: verdict.command } : {}) });
   }
   return result;
@@ -376,7 +404,7 @@ export async function planArchivedWorktree(folder: string, deps: ArchiveCleanupD
   const found = listed?.find((item) => item.path === path);
   if (!listed || !found || found.path === listed[0]?.path) { result.kept.push({ path: folder, why: !listed ? "não conferida: git não listou as worktrees" : "não é uma worktree deste repositório" }); return result; }
   const verdict = await archiveVerdict(found.entry, path, listed.map((item) => item.path), deps, deps.processCwds.map(canon));
-  if (verdict.ok) result.candidates.push({ path: folder, command: verdict.command });
+  if (verdict.ok) result.candidates.push({ path: folder, command: verdict.command, ...(verdict.note ? { note: verdict.note } : {}) });
   else result.kept.push({ path: folder, why: verdict.why, ...(verdict.command ? { command: verdict.command } : {}) });
   return result;
 }
@@ -391,7 +419,7 @@ export function archiveCleanupNote(parent: string, result: ArchiveCleanup): { ch
   ].filter(Boolean).join(" ");
   const report = [
     `${chip} O servidor não remove worktrees.`,
-    result.candidates.length ? `Para remover (sem --force; confira antes):\n${result.candidates.map((item) => item.command).join("\n")}` : "",
+    result.candidates.length ? `Para remover (sem --force; confira antes):\n${result.candidates.map((item) => `${item.command}${item.note ? `   # ${item.note}` : ""}`).join("\n")}` : "",
     ...result.kept.filter((item) => item.command).map((item) => `Para guardar os commits de ${name(item.path)} antes de qualquer remoção:\n${item.command}`),
   ].filter(Boolean).join("\n");
   return { chip, report };

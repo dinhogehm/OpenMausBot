@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   archiveCleanupNote, codexRolloutFolders, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
-  releasedPlanLine, worktreeLastActivity, type ReleasedPlanDeps,
+  releasedPlanLine, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
 
 const parent = "/r/nuria-platform/.claude/worktrees/9286-lote";
@@ -433,4 +433,55 @@ describe("worktrees already in production, with real git", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("shows a lock's accented reason as text, and never chains unlock to the remove of a worktree with submodules (INSP-G r3 notes)", async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "omb-g12s-")));
+    try {
+      const sub = join(root, "lib");
+      mkdirSync(sub);
+      run(sub, "init", "-q", "-b", "main");
+      writeFileSync(join(sub, "l.txt"), "l\n");
+      run(sub, "add", ".");
+      run(sub, "commit", "-q", "-m", "l");
+      const repo = join(root, "nuria-platform");
+      mkdirSync(repo);
+      run(repo, "init", "-q", "-b", "main");
+      writeFileSync(join(repo, ".gitignore"), ".claude/*\n");
+      writeFileSync(join(repo, "a.txt"), "a\n");
+      run(repo, "add", ".");
+      run(repo, "commit", "-q", "-m", "a");
+      run(repo, "checkout", "-q", "-b", "with-sub");
+      run(repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "lib");
+      run(repo, "commit", "-q", "-m", "submódulo");
+      run(repo, "checkout", "-q", "main");
+      const withSub = join(repo, ".claude", "worktrees", "with-sub");
+      run(repo, "worktree", "add", "-q", withSub, "with-sub");
+      run(repo, "worktree", "lock", "--reason", "sessão cc-1a2b3c4d", withSub);
+      const accented = join(repo, ".claude", "worktrees", "accented");
+      run(repo, "worktree", "add", "-q", "--detach", accented, "main");
+      run(repo, "worktree", "lock", "--reason", "gate da sessão de revisão (Eng)", accented);
+      // git C-quotes it in the porcelain list
+      expect(run(repo, "worktree", "list", "--porcelain")).toContain("\\303\\243");
+
+      const calls: string[][] = [];
+      const deps = { repo, git: realGit(repo, calls), processCwds: [], processCommands: [], ownLockMarkers: ["cc-1a2b3c4d"] };
+      const before = run(repo, "worktree", "list", "--porcelain");
+      expect(await planArchivedWorktree(accented, deps, [])).toEqual({ candidates: [], kept: [{ path: accented, why: "bloqueada: gate da sessão de revisão (Eng)" }] });
+      const plan = await planArchivedWorktree(withSub, deps, []);
+      expect(plan.candidates).toEqual([{ path: withSub, command: `git -C ${repo} worktree remove ${withSub}`, note: "contém submódulos: o git recusa remover assim; confira à mão (e não tire o lock antes)" }]);
+      expect(archiveCleanupNote(withSub, plan).report).not.toContain("unlock");
+      expect(run(repo, "worktree", "list", "--porcelain")).toBe(before);
+      expect(onlyReads(calls)).toBe(true);
+      // the person's command, run as given: git refuses, and the lock is still there
+      expect(() => execFileSync("/bin/sh", ["-c", plan.candidates[0]!.command], { stdio: "pipe" })).toThrow();
+      expect(run(repo, "worktree", "list", "--porcelain")).toBe(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("decodes git's C-quoting", () => {
+    expect(unquoteGit("\"sess\\303\\243o \\\"x\\\"\\tok\"")).toBe("sessão \"x\"\tok");
+    expect(unquoteGit("gate #9278 em andamento")).toBe("gate #9278 em andamento");
+  });
 });
