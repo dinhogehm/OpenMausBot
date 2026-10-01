@@ -421,7 +421,7 @@ export class CcSessionLedger {
   }
 }
 
-export function ccSessionLine(session: CcSession): string {
+export function ccSessionLine(session: CcSession, app: { blocked?: string | null } = {}): string {
   const bits = [
     `${session.id} · "${session.title}" · ${session.status}${session.surface === "app" ? " · in the Claude app" : ""}`,
     `turns ${session.turns}, US$ ${session.costUsd.toFixed(2)}`,
@@ -431,6 +431,9 @@ export function ccSessionLine(session: CcSession): string {
     ...(!session.desktop?.sent && session.desktop?.lastSend && !session.desktop.lastSend.confirmed ? [`last message did NOT arrive (${new Date(session.desktop.lastSend.at).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" })})`] : []),
     ...(session.surface !== "app" ? ["CLI: not visible in the Claude app"] : []),
     ...(session.blockedOn ? [`BLOCKED — needs: ${session.blockedOn.slice(0, 200)}`] : []),
+    // the app's own summary says the session stopped for something
+    ...(app.blocked && !session.blockedOn ? [`BLOCKED in the app — needs: ${app.blocked.slice(0, 200)}`] : []),
+    ...(session.desktop?.draftSeen ? [`text nobody sent sits in its field ("${session.desktop.draftSeen.text.slice(0, 80)}"): the person was asked to send or clear it`] : []),
     ...(session.desktop?.archiveWhenResolved ? ["to be archived once it opens"] : []),
     ...(session.queued.length ? [`${session.queued.length} message(s) queued`] : []),
   ];

@@ -298,6 +298,11 @@ describe("what cc_session_list says about a session", () => {
     const ledger = new CcSessionLedger({ path, now: () => 0 });
     const app = ledger.create({ id: "a", ownerBotId: "b", ownerThreadId: "t", title: "#9298", repo: "/r", permissionMode: "auto", surface: "app", desktop: { marker: "M", turnsSeen: 0, lastSend: { at: Date.parse("2026-09-30T22:58:00Z"), confirmed: false } } });
     expect(ccSessionLine(app)).toContain("last message did NOT arrive (19:58)");
+    // blocked in the app (its own summary), and a draft left in its field
+    expect(ccSessionLine(app, { blocked: "aprovar o push da branch" })).toContain("BLOCKED in the app — needs: aprovar o push da branch");
+    expect(ccSessionLine(app)).not.toContain("BLOCKED");
+    app.desktop!.draftSeen = { text: "pode reescrever o corpo da PR", at: 0 };
+    expect(ccSessionLine(app)).toContain('text nobody sent sits in its field ("pode reescrever o corpo da PR")');
     const cli = ledger.create({ id: "c", ownerBotId: "b", ownerThreadId: "t", title: "lote", repo: "/r", permissionMode: "auto" });
     expect(ccSessionLine(cli)).toContain("CLI: not visible in the Claude app");
     cli.status = "archived";

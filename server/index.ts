@@ -305,6 +305,7 @@ import {
   lastAppRepo,
   liveWorktreeNames,
   readDesktopRecord,
+  recordBlocked,
   recordsUsingFolder,
   transcriptMentions,
   transcriptPath,
@@ -17775,7 +17776,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (detail && detail.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão" });
           return json(res, 200, {
             message: [
-              sessions.length ? sessions.map(ccSessionLine).join("\n") : "Você não gerencia nenhuma sessão do Claude Code.",
+              sessions.length ? sessions.map((session) => {
+                const record = session.surface === "app" && session.desktop?.localId && session.status !== "archived" ? readDesktopRecord(session.desktop.localId) : null;
+                return ccSessionLine(session, { blocked: record ? recordBlocked(record) : null });
+              }).join("\n") : "Você não gerencia nenhuma sessão do Claude Code.",
               ...(detail ? [`\nÚltimo relatório de ${detail.id}:\n${detail.lastReport ?? "(nenhum ainda)"}${detail.lastError ? `\nÚltimo problema: ${detail.lastError}` : ""}`] : []),
             ].join("\n"),
           });
