@@ -45,6 +45,7 @@ export const DESKTOP_SUMMARY_WAIT_MS = 60_000;
 export const DESKTOP_HELPER_MAX_TRIES = 3;
 /** Screens that did not show what was expected (unlocked, Claude in front) before giving up. */
 export const DESKTOP_MAX_MISSES = 5;
+export const DESKTOP_RENAME_MAX_MISSES = 3;
 export const DESKTOP_BACKOFF_BASE_MS = 30_000;
 export const DESKTOP_BACKOFF_MAX_MS = 10 * 60_000;
 /** After the Archive click, the app's record must say archived within this... */
@@ -204,6 +205,9 @@ export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason:
     return;
   }
   deps.ledger.save();
+  if (pending.kind === "rename") {
+    deps.ownerPending?.(session, { title: `Renomeie no app Claude a sessão "${session.title}" para "${pending.text}"`, ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}), key: `cc-rename:${session.id}` });
+  }
   const what = pending.kind === "archive" ? "archive" : "rename";
   deps.chip(session, pending.kind === "archive" ? "não foi possível arquivar no app — arquive à mão" : "não foi possível renomear no app", false);
   deps.report(session, `Claude Code session "${session.title}" (${session.id}): could not ${what} it in the Claude app — ${reason}. Nothing else changed; ${pending.kind === "archive" ? "ask the person to archive it by hand" : "the person may rename it by hand"}${link}.`);
@@ -592,7 +596,8 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     }
     if (step.miss) {
       pending.misses = (pending.misses ?? 0) + 1;
-      if (pending.misses >= DESKTOP_MAX_MISSES) {
+      // a rename is cosmetic: three misses and the person is asked instead (01/10: 29 silent tries)
+      if (pending.misses >= (pending.kind === "rename" ? DESKTOP_RENAME_MAX_MISSES : DESKTOP_MAX_MISSES)) {
         giveUpPending(deps, next, `could not ${actionLabel(pending.kind)} after ${pending.misses} tries with the screen unlocked and the Claude app in front: ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`);
         return;
       }

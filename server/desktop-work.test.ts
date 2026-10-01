@@ -9,6 +9,7 @@ import {
   DESKTOP_DRAFT_RECHECK_MS,
   DESKTOP_ARCHIVE_MAX_TRIES,
   DESKTOP_MAX_MISSES,
+  DESKTOP_RENAME_MAX_MISSES,
   DESKTOP_SEND_CONFIRM_MS,
   DESKTOP_SUMMARY_WAIT_MS,
   DESKTOP_SEND_MAX_DELIVERIES,
@@ -686,6 +687,26 @@ describe("an issue left without a live session", () => {
     expect(orphanedIssues(h.ledger.all(), h.now).map((session) => session.id)).toEqual(["a"]);
     ended.orphanCheckedAt = h.now;
     expect(orphanedIssues(h.ledger.all(), h.now)).toEqual([]);
+  });
+});
+
+describe("a rename that cannot be done", () => {
+  it("asks the person after three misses instead of trying 29 times", async () => {
+    const h = harness();
+    const pendings: { title: string; link?: string; key: string }[] = [];
+    h.deps.ownerPending = (_session, item) => pendings.push(item);
+    const session = h.opened("r");
+    h.transcripts.set("cli-r", { text: "brief", writtenAt: h.now, ended: true });
+    session.status = "idle";
+    session.desktop!.pending = { kind: "rename", text: "#8891 Inbox 503 diagnóstico", since: h.now, attempts: 0 };
+    for (let i = 0; i < DESKTOP_RENAME_MAX_MISSES; i += 1) {
+      h.results.push({ ok: false, reason: "the session menu showed no Rename item", retry: true, miss: true, touched: true });
+      await h.tick();
+      h.advance(11 * 60_000);
+    }
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(h.steps.rename).toHaveBeenCalledTimes(DESKTOP_RENAME_MAX_MISSES);
+    expect(pendings).toEqual([expect.objectContaining({ key: "cc-rename:r", title: expect.stringContaining('para "#8891 Inbox 503 diagnóstico"'), link: expect.stringContaining("claude://code/continue?session=") })]);
   });
 });
 

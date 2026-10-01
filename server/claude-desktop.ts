@@ -456,9 +456,17 @@ function sameTitle(lineText: string, title: string): boolean {
   return titleForms(lineText).some((shown) => shown === wanted || shown.startsWith(`${wanted} v `) || shown.startsWith(`${wanted} (`));
 }
 
+/** A session header: the title's start, or enough of its words, followed by
+ * the app's dropdown and folder ("… v (nuria-platform"). */
+export function isHeaderOf(line: OcrLine, title: string): boolean {
+  const text = line.text.trim();
+  if (!/\sv\s*\(|\(\s*[\w.-]+\s*$/.test(text) && !sidebarMatch(text, title)) return false;
+  return sidebarMatch(text, title) || headerNames([line], title);
+}
+
 type MenuItems = readonly string[];
 const ARCHIVE_ITEMS: MenuItems = ["Arquivar", "Archive"];
-const RENAME_ITEMS: MenuItems = ["Renomear", "Rename"];
+const RENAME_ITEMS: MenuItems = ["Renomear", "Rename", "Editar título", "Edit title", "Editar nome", "Edit name"];
 
 /**
  * One item of a session's menu. The session is opened by its own link and
@@ -475,41 +483,53 @@ async function sessionMenuAction(
   then?: (screen: Screen) => Promise<DesktopStep | null>,
 ): Promise<DesktopStep> {
   if (!/^local_[0-9a-f-]{36}$/.test(input.localId)) return { ok: false, reason: "invalid desktop session id", retry: false };
-  const isItem = (line: OcrLine) => items.includes(line.text.trim());
+  // the item as the app words it now ("Renomear", "Renomear sessão", "Rename chat"…)
+  const isItem = (line: OcrLine) => items.some((item) => line.text.trim() === item || line.text.trim().startsWith(`${item} `));
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.openUrl(`claude://code/continue?session=${input.localId}`));
     await driver.sleep(2_500);
     let stop = await guard(screen, "open session");
     if (stop) return stop;
     const screenLines = await driver.ocr();
-    const header = mainArea(screenLines).find((line) => line.y < 140 && sidebarMatch(line.text, input.title));
+    // The session was opened by its own id: its header is the line at the
+    // top that names it — matched by the start of the title or its words, at
+    // any x (with the app's sidebar folded the header starts at the left
+    // edge). On 01/10 "• Inbox 503 diagnóstico e recuperação v (nuria-platform"
+    // was on screen and the rename still said the session was not.
+    const header = screenLines.find((line) => line.y < 140 && isHeaderOf(line, input.title));
     const finish = async (): Promise<DesktopStep> => {
       const after = then ? await then(screen) : null;
       if (after) return after;
       await driver.sleep(1_000);
       return { ok: true };
     };
+    // what the menus showed, for a reason that says which items the app offers now
+    let menuSeen = "";
     if (header) {
       stop = await guard(screen, "header menu");
       if (stop) return stop;
       await act(screen, () => driver.click(header.x + 20, header.y + header.h / 2));
       await driver.sleep(800);
-      const item = (await driver.ocr()).find((line) => isItem(line) && line.y > header.y && line.y - header.y < 400);
+      const menu = (await driver.ocr()).filter((line) => line.y > header.y && line.y - header.y < 400);
+      const item = menu.find(isItem);
       stop = await guard(screen, `${verb} menu`);
       if (stop) return stop;
       if (item) {
         await act(screen, () => driver.click(item.x + item.w / 2, item.y + item.h / 2));
         return finish();
       }
+      menuSeen = seenText(menu, 10);
       await act(screen, () => driver.key(ESCAPE));
       await driver.sleep(300);
     }
     // Fallback: the sidebar entry. Titles repeat there ("Relatorio nightly"
     // fifteen times): act only on one unambiguous entry.
-    const sidebar = screenLines.filter((line) => line.x < SIDEBAR_MAX_X);
+    // (the header itself is not a sidebar entry, even with the sidebar folded)
+    const sidebar = screenLines.filter((line) => line.x < SIDEBAR_MAX_X && line !== header);
     const matches = sidebar.filter((line) => sidebarMatch(line.text, input.title));
     if (!matches.length) {
-      return { ok: false, reason: `"${input.title}" is neither in the open session's header menu nor visible in the app's sidebar`, retry: true, miss: true, touched: true, seen: seenText([...mainArea(screenLines).filter((line) => line.y < 140), ...sidebar]) };
+      const where = header ? `its header menu showed no ${items[1]} item${menuSeen ? ` (it showed: ${menuSeen})` : ""}` : "it is not in the open session's header";
+      return { ok: false, reason: `"${input.title}": ${where}, and it is not visible in the app's sidebar`, retry: true, miss: true, touched: true, seen: seenText([...screenLines.filter((line) => line.y < 140), ...sidebar]) };
     }
     const exact = matches.filter((line) => sameTitle(line.text, input.title));
     const entry = matches.length === 1 ? matches[0]! : exact.length === 1 ? exact[0]! : null;
@@ -520,12 +540,13 @@ async function sessionMenuAction(
     if (stop) return stop;
     await act(screen, () => driver.rightClick(entry.x + 30, entry.y + entry.h / 2));
     await driver.sleep(800);
-    const item = (await driver.ocr()).find((line) => isItem(line) && Math.abs(line.y - entry.y) < 400);
+    const menu = (await driver.ocr()).filter((line) => Math.abs(line.y - entry.y) < 400);
+    const item = menu.find(isItem);
     stop = await guard(screen, `${verb} menu`);
     if (stop) return stop; // the Claude app is not in front (or the person is back): no Escape into their app
     if (!item) {
       await act(screen, () => driver.key(ESCAPE));
-      return { ok: false, reason: `the session menu showed no ${items[1]} item`, retry: true, miss: true, touched: true };
+      return { ok: false, reason: `the session menu showed no ${items[1]} item`, retry: true, miss: true, touched: true, seen: seenText(menu, 10) };
     }
     await act(screen, () => driver.click(item.x + item.w / 2, item.y + item.h / 2));
     return finish();

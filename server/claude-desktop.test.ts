@@ -347,6 +347,24 @@ describe("archiveDesktopSession", () => {
     expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "rclick 130,508", "click 200,548"]);
   });
 
+  it("finds the opened session by its header at the left edge (sidebar folded) and the item as the app words it (01/10: rename 0 of ~12)", async () => {
+    // OCR of 14:12:32Z: the header at the window's left edge, a time stamp beside it
+    const top = { text: "• Inbox 503 diagnóstico e recuperação v (nuria-platform", x: 40, y: 57 };
+    const stamp = { text: "Qui. 1 de out. 11:12", x: 40, y: 30 };
+    const app = fakeApp({ screens: [[stamp, top], [stamp, top, { text: "Arquivar sessão", x: 60, y: 140 }]] });
+    expect(await archiveDesktopSession(app.driver, { localId, title: "Inbox 503 diagnóstico e recuperação" })).toEqual({ ok: true });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 60,65", "click 160,148"]);
+  });
+
+  it("matches the truncated sidebar entry, and says which items a menu without Rename showed", async () => {
+    const entry = { text: "• Inbox 503 diagnós", x: 24, y: 411 };
+    const app = fakeApp({ screens: [[entry], [entry, { text: "Fixar", x: 60, y: 440 }, { text: "Arquivar", x: 60, y: 470 }]] });
+    const step = await renameDesktopSession(app.driver, { localId, title: "Inbox 503 diagnóstico e recuperação", newTitle: "#8891 Inbox 503 diagnóstico" });
+    expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: "the session menu showed no Rename item", seen: expect.stringContaining("Fixar | Arquivar") });
+    expect(app.actions).toContain("rclick 54,419");
+    expect(app.actions.at(-1)).toBe("key 53");
+  });
+
   it("closes the menu instead of clicking blind when Arquivar is missing", async () => {
     const app = fakeApp({ screen: [{ text: "Teste modo app", x: 100 }, { text: "Fixar", x: 100 }] });
     expect(await archiveDesktopSession(app.driver, { localId, title: "Teste modo app" })).toMatchObject({ ok: false, retry: true });
