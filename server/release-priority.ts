@@ -20,8 +20,6 @@ export function releaseBlockedBy(logTail: string): { pid: number; waitedS: numbe
 }
 
 const RELEASE_COMMAND = /release-production|local-release|release-carrier|watch-production-release/;
-/** A process of the production release (or of a carrier). */
-export const isReleaseCommand = (command: string): boolean => RELEASE_COMMAND.test(command);
 const CI_COMMAND = /local-ci\.sh|ci:local/;
 
 /** What the server knows of a managed session's processes. */

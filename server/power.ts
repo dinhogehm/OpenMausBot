@@ -22,6 +22,27 @@ export function parsePmsetBatt(output: string): PowerState {
   return { onBattery, percent: charge ? Math.min(100, Number(charge[1])) : null };
 }
 
+// A release process, told by its executable and script, never by free text:
+// a `claude -p` carries its whole prompt in argv, and on 01/10 one said
+// "… depois ./scripts/release-carrier.sh --check e PARE" with no release
+// running (INSP-G r1 G1-a; the same anchoring as release-priority in lot R).
+const RELEASE_SCRIPT = String.raw`\S*(?:scripts/(?:\S+/)?(?:local-release|release-carrier|release-production)|watch-production-release)[\w.-]*`;
+/** The script run directly (`/x/scripts/local-release.sh …`). */
+const RELEASE_DIRECT = new RegExp(`^${RELEASE_SCRIPT}(?:\\s|$)`);
+/** The script run by a shell or node (`bash ./scripts/release-carrier.sh --execute`, `/bin/bash -e scripts/macos/release-production.sh`). */
+const RELEASE_VIA = new RegExp(`^(?:\\S*/)?(?:(?:ba|z|da)?sh|node)(?:\\s+-\\S+)*\\s+${RELEASE_SCRIPT}(?:\\s|$)`);
+/** `npm run release:local` (the title npm sets). */
+const RELEASE_NPM = /^(?:\S*\/)?npm(?:\s+-\S+)*\s+run(?:-script)?\s+release(?::\S*)?(?:\s|$)/;
+/** Claude Code: `claude …`, or node running its entry point. */
+const CLAUDE = /^(?:\S*\/)?claude(?:\s|$)|^(?:\S*\/)?node\s+\S*(?:\/@anthropic-ai\/claude-code\/|\/claude(?:\s|$))/;
+
+/** A process of a production release (or of a carrier), from `ps -o command`. */
+export function isReleaseProcess(command: string): boolean {
+  const cmd = command.trim();
+  if (CLAUDE.test(cmd)) return false;
+  return RELEASE_DIRECT.test(cmd) || RELEASE_VIA.test(cmd) || RELEASE_NPM.test(cmd);
+}
+
 /** On battery this long, or below LOW_PERCENT, the Chief hears it. */
 export const ON_BATTERY_ALERT_MS = 20 * 60_000;
 export const LOW_PERCENT = 30;

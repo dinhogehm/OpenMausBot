@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { batteryAlert, LOW_PERCENT, ON_BATTERY_ALERT_MS, parsePmsetBatt, startsCarrier } from "./power.ts";
+import { batteryAlert, isReleaseProcess, LOW_PERCENT, ON_BATTERY_ALERT_MS, parsePmsetBatt, startsCarrier } from "./power.ts";
 
 const onBattery = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=27525219)\t53%; discharging; 1:16 remaining present: true\n";
 const plugged = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=27525219)\t100%; charged; 0:00 remaining present: true\n";
@@ -25,6 +25,24 @@ describe("power", () => {
     expect(parsePmsetBatt("Now drawing from 'AC Power'\n -InternalBattery-0 (id=7340131)\t80%; AC attached; not charging present: true\n")).toEqual({ onBattery: false, percent: 80 });
     expect(parsePmsetBatt("Now drawing from 'Battery Power'\n -InternalBattery-0 (id=7340131)\t53%; discharging; (no estimate) present: true\n")).toEqual({ onBattery: true, percent: 53 });
     expect(parsePmsetBatt("")).toEqual({ onBattery: false, percent: null });
+  });
+
+  it("sees a release by its executable and script, never in a claude's prompt (INSP-G r1 item 6)", () => {
+    // the line of 01/10 (pid 91537): no release was running
+    const claudeLine = "claude -p --resume 29da943f-0000-4000-8000-000000000000 -- Conferi: head da #9330 bate com o gate. Agora `npm run pr:merge -- --pr 9330 --merge`, depois `./scripts/release-carrier.sh --check` e PARE";
+    expect(isReleaseProcess(claudeLine)).toBe(false);
+    expect(isReleaseProcess("node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js -p -- rode bash ./scripts/local-release.sh")).toBe(false);
+    expect(isReleaseProcess("/bin/zsh -c npm run ci:local && ./scripts/release-carrier.sh --check")).toBe(false);
+    expect(isReleaseProcess("grep release-carrier scripts/README.md")).toBe(false);
+    expect(isReleaseProcess("vim scripts/local-release.sh")).toBe(false);
+    for (const line of [
+      "bash ./scripts/local-release.sh --sha c88f99d6",
+      "/bin/bash ./scripts/release-carrier.sh --pr 9330 --execute",
+      "/bin/bash -e scripts/macos/release-production.sh",
+      "/Users/owner/Projetos/nuria-platform/scripts/local-release.sh",
+      "/bin/bash /Users/owner/.local/bin/watch-production-release.sh",
+      "npm run release:local",
+    ]) expect(isReleaseProcess(line), line).toBe(true);
   });
 
   it("tells the Chief after 20 min on battery, when low, and when critical — each once", () => {

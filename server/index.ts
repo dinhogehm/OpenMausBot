@@ -341,8 +341,8 @@ import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
-import { ciToStop, isReleaseCommand, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
-import { batteryAlert, parsePmsetBatt, startsCarrier, type PowerState } from "./power.ts";
+import { ciToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
+import { batteryAlert, isReleaseProcess, parsePmsetBatt, startsCarrier, type PowerState } from "./power.ts";
 import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, tagStuck, tagStuckCause } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -8269,7 +8269,7 @@ async function checkPower(): Promise<void> {
     return;
   }
   powerWatch.onBatterySince ??= Date.now();
-  const releaseRunning = (await psTable()).some((row) => isReleaseCommand(row.command));
+  const releaseRunning = (await psTable()).some((row) => isReleaseProcess(row.command));
   const alert = batteryAlert({ power, onBatterySince: powerWatch.onBatterySince, now: Date.now(), releaseRunning, told: powerWatch.told });
   if (!alert) return;
   powerWatch.told.add(alert.level);
