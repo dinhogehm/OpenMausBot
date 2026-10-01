@@ -24,6 +24,35 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const INSTALLATION_ID = UUID;
 const INSTALLATION_CREDENTIAL = /^omb_install_[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}$/;
 const DEFAULT_HEALTH_CACHE_MS = 30_000;
+const DEFAULT_AUTO_RETRY_BASE_MS = 10 * 60_000;
+const DEFAULT_AUTO_RETRY_MAX_MS = 6 * 60 * 60_000;
+const DEFAULT_ENDPOINT_CHECK_INTERVAL_MS = 15 * 60_000;
+const DEFAULT_FIRST_ENDPOINT_CHECK_MS = 2 * 60_000;
+
+/** Failures that clear up on their own: provider capacity, a transient
+ * service or network problem, or a server-side rate limit. Anything that
+ * needs the user (expired sign-in, computer limit) is never retried. */
+const AUTO_RETRY_CODES = new Set([
+  "endpoint_capacity",
+  "endpoint_unavailable",
+  "endpoint_busy",
+  "network_unavailable",
+  "control_plane_unavailable",
+  "internal_error",
+  "rate_limited",
+  "credential_rotation_rate_limited",
+]);
+
+/** Server endpoint states that mean this computer's saved connector token no
+ * longer has a working route behind it (or that its last reconcile failed),
+ * so the next reconcile must run instead of trusting the saved address. */
+const ENDPOINT_NEEDS_RECONCILE = new Set(["deleting", "deleted", "error"]);
+
+const defaultSetTimer = (callback, milliseconds) => {
+  const timer = setTimeout(callback, milliseconds);
+  timer.unref?.();
+  return timer;
+};
 
 const ownString = (document, field) =>
   typeof document?.[field] === "string" ? document[field] : "";
@@ -144,6 +173,7 @@ const FRIENDLY_MESSAGES = Object.freeze({
   installation_limit_reached: "This account has reached its computer limit. Remove an old computer and try again.",
   installation_exists: "This computer is already connected. Try again to recover it.",
   endpoint_busy: "The secure connection is still being prepared. Try again in a moment.",
+  endpoint_capacity: "Secure HTTPS links are temporarily full. Pair on this Wi-Fi or with Tailscale for now; we'll retry automatically.",
   endpoint_unavailable: "The secure connection service could not finish setup. Local Wi-Fi and Tailscale pairing still work. If this keeps happening, contact support with the error reference.",
   endpoint_cleanup_pending: "The secure connection is still being removed. Try signing out again shortly.",
   control_plane_unavailable: "Secure access is not available right now. Local pairing still works.",
@@ -200,6 +230,18 @@ export function createCompanionAccountService({
   companionIsOn = () => false,
   now = Date.now,
   healthCacheMs = DEFAULT_HEALTH_CACHE_MS,
+  // Background recovery is opt-in: the desktop app enables it, one-shot CLI
+  // commands do not. When on, retryable setup failures are retried with
+  // backoff, and a saved address whose server endpoint was removed (idle
+  // reclaim) is re-provisioned without a new sign-in.
+  autoRecover = false,
+  setTimer = defaultSetTimer,
+  clearTimer = clearTimeout,
+  random = Math.random,
+  autoRetryBaseMs = DEFAULT_AUTO_RETRY_BASE_MS,
+  autoRetryMaxMs = DEFAULT_AUTO_RETRY_MAX_MS,
+  endpointCheckIntervalMs = DEFAULT_ENDPOINT_CHECK_INTERVAL_MS,
+  firstEndpointCheckMs = DEFAULT_FIRST_ENDPOINT_CHECK_MS,
 } = {}) {
   const configured = Boolean(client);
   let healthy = false;
@@ -207,6 +249,11 @@ export function createCompanionAccountService({
   let healthProbe = null;
   let phase = null;
   let transition = Promise.resolve();
+  let autoRetryTimer = null;
+  let autoRetryAttempt = 0;
+  let watchdogTimer = null;
+  let lastEndpointCheck = null;
+  let disposed = false;
 
   const serialize = (work) => {
     const next = transition.then(work, work);
@@ -218,6 +265,40 @@ export function createCompanionAccountService({
   };
 
   const credentials = () => readCredentials?.() ?? {};
+
+  const cancelAutoRetry = () => {
+    if (autoRetryTimer !== null) clearTimer(autoRetryTimer);
+    autoRetryTimer = null;
+  };
+
+  const resetAutoRetry = () => {
+    cancelAutoRetry();
+    autoRetryAttempt = 0;
+  };
+
+  // Assigned below; scheduled retries go through the same serialized path
+  // as the Retry button.
+  let retryFromTimer = () => Promise.resolve();
+
+  /** Exponential backoff with jitter, never sooner than the server asked. */
+  const scheduleAutoRetry = (error) => {
+    if (!autoRecover || disposed || !configured) return;
+    if (!(error instanceof ControlPlaneError) || !AUTO_RETRY_CODES.has(error.code)) return;
+    const document = credentials();
+    if (!storedAccount(document) || companionAccountCleanupPending(document)) return;
+    cancelAutoRetry();
+    const backoff = Math.min(
+      autoRetryMaxMs,
+      autoRetryBaseMs * 2 ** Math.min(autoRetryAttempt, 20),
+    );
+    const jittered = Math.round(backoff * (0.8 + 0.4 * random()));
+    const delay = Math.min(autoRetryMaxMs, Math.max(jittered, error.retryAfterMs ?? 0));
+    autoRetryAttempt += 1;
+    autoRetryTimer = setTimer(() => {
+      autoRetryTimer = null;
+      void retryFromTimer().catch(() => {});
+    }, delay);
+  };
 
   const probeControlPlane = async ({ force = false } = {}) => {
     if (!configured) return false;
@@ -459,6 +540,7 @@ export function createCompanionAccountService({
       await client.revokeInstallation(accountToken, installation.installation.id).catch(() => {});
       throw error;
     }
+    resetAutoRetry();
     const connection = await activatePersistedEndpoint();
     phase = null;
     if (
@@ -564,6 +646,7 @@ export function createCompanionAccountService({
         email: authenticatedPersisted ? verified.user.email : previous?.email ?? email,
         expiredSessionIsSignedOut: authenticatedPersisted,
       });
+      if (authenticatedPersisted) scheduleAutoRetry(error);
       return settledState();
     }
   });
@@ -594,13 +677,67 @@ export function createCompanionAccountService({
       });
     } catch (error) {
       failAction(error, { email: account.email, expiredSessionIsSignedOut: true });
+      scheduleAutoRetry(error);
       return settledState();
     }
   };
 
   const retry = () => serialize(retryWork);
+  retryFromTimer = retry;
+
+  /** Re-provision only on a definitive server answer that the saved address
+   * has no working endpoint behind it. A network or service failure keeps
+   * the saved address and its connector exactly as they are. Returns the
+   * reconcile result, or null when nothing needed doing. */
+  const reconcileIfEndpointGone = async () => {
+    const document = credentials();
+    const account = storedAccount(document);
+    const access = managedCompanionTunnelAccess(document);
+    if (
+      !account ||
+      !access ||
+      !account.installationCredential ||
+      companionAccountCleanupPending(document) ||
+      typeof client.getEndpoint !== "function"
+    ) {
+      return null;
+    }
+    lastEndpointCheck = now();
+    let endpoint;
+    try {
+      endpoint = await client.getEndpoint(account.installationCredential);
+    } catch {
+      return null;
+    }
+    if (endpoint && endpoint.url === access.endpoint && !ENDPOINT_NEEDS_RECONCILE.has(endpoint.status)) {
+      return null;
+    }
+    return retryWork();
+  };
+
+  /** While the companion is on but its connector cannot come up, ask the
+   * control plane (cheaply, no provider calls) whether the endpoint still
+   * exists. This is how a computer whose idle tunnel was reclaimed while
+   * Remote access was off recovers once the user turns it back on. */
+  const watchdogTick = () => {
+    watchdogTimer = null;
+    if (disposed) return;
+    watchdogTimer = setTimer(watchdogTick, endpointCheckIntervalMs);
+    if (!companionIsOn() || autoRetryTimer !== null) return;
+    const connection = managedConnectionState?.() ?? {};
+    // Only a connector that keeps failing; "unavailable" is a missing binary.
+    if (!["retrying", "error"].includes(connection.status)) return;
+    if (lastEndpointCheck !== null && now() - lastEndpointCheck < endpointCheckIntervalMs) return;
+    void serialize(reconcileIfEndpointGone).catch(() => {});
+  };
+
+  const startWatchdog = () => {
+    if (!autoRecover || disposed || !configured || watchdogTimer !== null) return;
+    watchdogTimer = setTimer(watchdogTick, firstEndpointCheckMs);
+  };
 
   const signOut = () => serialize(async () => {
+    resetAutoRetry();
     if (!storedAccount(credentials())) {
       await clearAfterCleanup();
       return settledState();
@@ -627,14 +764,28 @@ export function createCompanionAccountService({
 
   const restore = () => serialize(async () => {
     if (!configured) return settledState();
+    startWatchdog();
     if (!(await probeControlPlane({ force: true }))) return settledState();
     if (companionAccountCleanupPending(credentials())) return retryWork();
     await ensureClientIdentity();
     const account = storedAccount(credentials());
     if (account && !managedCompanionTunnelAccess(credentials())) return retryWork();
+    // Only when Remote access is on this launch: checking in otherwise would
+    // mark an unused tunnel as recently seen and keep it from being reclaimed.
+    if (autoRecover && account && companionIsOn()) {
+      const reconciled = await reconcileIfEndpointGone();
+      if (reconciled) return reconciled;
+    }
     phase = null;
     return settledState();
   });
+
+  const dispose = () => {
+    disposed = true;
+    cancelAutoRetry();
+    if (watchdogTimer !== null) clearTimer(watchdogTimer);
+    watchdogTimer = null;
+  };
 
   return Object.freeze({
     state: async () => {
@@ -646,5 +797,6 @@ export function createCompanionAccountService({
     retry,
     signOut,
     restore,
+    dispose,
   });
 }

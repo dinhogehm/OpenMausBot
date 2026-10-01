@@ -941,6 +941,9 @@ function ensureCompanionAccountService() {
     stopManagedEndpoint: stopManagedCompanionEndpointLocally,
     managedConnectionState: publicManagedCompanionState,
     companionIsOn: () => companionDesiredThisLaunch,
+    // Retry capacity/transient setup failures with backoff, and re-provision a
+    // reclaimed endpoint behind the same address without a new sign-in.
+    autoRecover: true,
   });
   return companionAccountService;
 }

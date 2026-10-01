@@ -527,6 +527,7 @@ export async function containerComputerStatus(
   runner: CommandRunner = sh,
   platform: NodeJS.Platform = process.platform,
   target: LocalVmTarget = SHARED_LOCAL_VM_TARGET,
+  options: { probeDesktop?: boolean } = {},
 ): Promise<ContainerComputerStatus> {
   const status = emptyStatus(platform, target);
   const runtimeStatus = await containerRuntimeStatus(runner, platform);
@@ -632,7 +633,7 @@ export async function containerComputerStatus(
     // No container with this name.
   }
 
-  const canProbe =
+  const canProbe = options.probeDesktop !== false &&
     status.container === "running" &&
     status.imageMatches &&
     status.managed &&

@@ -27,6 +27,10 @@ vi.mock("./DesktopCapabilities", async (importOriginal) => ({
 }));
 vi.mock("@/lib/analytics", () => ({ track: vi.fn() }));
 vi.mock("@/lib/cloud-guest", () => ({ useCanWriteIn: () => fixture.canWrite }));
+vi.mock("./CitationUI", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./CitationUI")>(),
+  CitationSelectionToolbar: () => createElement("span", { "data-testid": "citation-toolbar" }),
+}));
 vi.mock("./ModelPicker", () => ({ ModelPicker: (props: ComponentProps<typeof ModelPicker>) => {
   fixture.model = props;
   return createElement("span", { "data-test-model-control": true });
@@ -48,6 +52,21 @@ const bot: Bot = {
 };
 
 describe("thread control placement", () => {
+  it("keeps the full thread picker accessible without the sidebar", () => {
+    const markup = renderToStaticMarkup(createElement(ChatView, { bot }));
+    expect(markup).toContain('aria-label="All threads"');
+    expect(markup).toContain('data-testid="chat-more"');
+  });
+
+  it("gives the editor its own row in a narrow chat", () => {
+    const markup = renderToStaticMarkup(createElement(ChatView, { bot }));
+    expect(markup).toContain("@container/composer");
+    const row = /data-composer-row="[^"]*" class="([^"]*)"/.exec(markup)!;
+    expect(row[1]).toContain("@max-[30rem]/composer:flex-wrap");
+    const editor = /class="mention-editor ([^"]*)"/.exec(markup)!;
+    expect(editor[1].split(" ")).toEqual(expect.arrayContaining(["min-w-0", "flex-1", "@max-[30rem]/composer:order-first", "@max-[30rem]/composer:basis-full"]));
+  });
+
   it("keeps the composer inert until the deleted thread's replacement transcript arrives", () => {
     const markup = renderToStaticMarkup(createElement(ChatView, { bot: { ...bot, awaitingThreadSnapshot: true } }));
     expect(markup).toMatch(/<textarea[^>]*disabled=""[^>]*aria-busy="true"/);
@@ -189,7 +208,7 @@ describe("thread control placement", () => {
     } }));
     // unicode-bidi does not inherit: setting it on the bubble leaves this
     // inner text block LTR. Keep the class directly on the node with prose.
-    expect(markup).toMatch(/<div class="chat-text[^"]*">(?:شغّل|שלום|مرحبا)/);
+    expect(markup).toMatch(/<div class="chat-text[^"]*"[^>]*>(?:شغّل|שלום|مرحبا)/);
     expect(markup).not.toMatch(/class="[^"]*chat-text[^"\n]*bg-bubble-user/);
   });
 
@@ -318,10 +337,12 @@ describe("a guest's composer on a Cloud home", () => {
     const refused = renderToStaticMarkup(createElement(ChatView, { bot }));
     expect(refused).toContain('data-testid="cloud-guest-composer"');
     expect(refused).not.toContain("<textarea");
+    expect(refused).not.toContain('data-testid="citation-toolbar"');
     fixture.canWrite = true;
     const allowed = renderToStaticMarkup(createElement(ChatView, { bot }));
     expect(allowed).not.toContain('data-testid="cloud-guest-composer"');
     expect(allowed).toContain("<textarea");
+    expect(allowed).toContain('data-testid="citation-toolbar"');
     fixture.canWrite = null;
   });
 });

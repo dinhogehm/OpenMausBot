@@ -27,6 +27,9 @@ export interface SidebarMenuItem {
   disabled?: boolean;
   /** draw a hairline above this item — the Grok-style trailing group */
   separatorBefore?: boolean;
+  /** a small caps label above this item, naming the group it starts (the
+   * chat menu's "Share" over the two export actions) */
+  heading?: string;
   /** rendered at the trailing edge (a spinner, a status dot) */
   trailing?: React.ReactNode;
   /** the menu normally closes on select; an item that reports progress in
@@ -47,8 +50,13 @@ export function SidebarPopoverMenu({
   items,
   ariaLabel,
   openOnHover = false,
+  placement = "above",
   renderTrigger,
 }: {
+  /** "above" stretches over the trigger's width and opens upward (the
+   * sidebar's bottom menus); "below" hangs a fixed-width sheet under the
+   * trigger's right edge (a header icon). */
+  placement?: "above" | "below";
   /** `data-tour` id for the trigger button */
   tourId?: string;
   items: SidebarMenuItem[];
@@ -155,13 +163,15 @@ export function SidebarPopoverMenu({
           aria-label={ariaLabel}
           {...motion.exitProps}
           className={cn(
-            "absolute bottom-full left-0 right-0 z-40 mb-1 overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/50",
+            "absolute z-40 overflow-hidden rounded-xl border border-hairline/50 bg-menu py-1.5 shadow-2xl shadow-black/50",
+            placement === "below" ? "top-full right-0 mt-1 w-72 max-w-[calc(100vw-2rem)]" : "bottom-full left-0 right-0 mb-1",
             motion.className,
           )}
         >
           {items.map((item) => (
             <div key={item.key}>
               {item.separatorBefore && <div className="my-1.5 h-px bg-hairline/50" />}
+              {item.heading && <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-secondary">{item.heading}</div>}
               <button
                 type="button"
                 role="menuitem"

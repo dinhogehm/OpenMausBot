@@ -132,15 +132,71 @@ describe("control-plane migrations and health", () => {
     expect(endpointColumns.results.map((column) => column.name)).toEqual(expect.arrayContaining([
       "cleanup_attempts",
       "last_cleanup_attempt_at",
+      "reclaim_requested_at",
     ]));
+    const capacityRows = await env.DB.prepare("SELECT id, scan_page FROM managed_endpoint_capacity")
+      .all<{ id: number; scan_page: number }>();
+    expect(capacityRows.results).toEqual([{ id: 1, scan_page: 1 }]);
   });
 
   it("serves a no-store health response without CORS wildcards", async () => {
     const response = await call("/healthz");
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, service: "openmausbot-control-plane" });
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      service: "openmausbot-control-plane",
+      capacity: {
+        status: "unknown",
+        checkedAt: null,
+        tunnels: { used: null, limit: 1000 },
+        dnsRecords: { used: null, limit: 1000 },
+        providerRejectedAt: null,
+        reclaim: { mode: "on", pending: 0 },
+      },
+    });
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("validates capacity tuning variables and keeps safe defaults when they are absent", () => {
+    const base = { ...env } as Record<string, unknown>;
+    for (const name of [
+      "OMB_TUNNEL_LIMIT",
+      "OMB_DNS_RECORD_LIMIT",
+      "OMB_TUNNEL_RECLAIM",
+      "OMB_TUNNEL_OFFLINE_RECLAIM_DAYS",
+      "OMB_CLEANUP_SWEEP_LIMIT",
+    ]) {
+      Reflect.deleteProperty(base, name);
+    }
+    expect(readConfig(base as unknown as Env).capacity).toEqual({
+      cleanupSweepLimit: 20,
+      dnsRecordLimit: 1000,
+      offlineReclaimMs: 21 * 24 * 60 * 60 * 1_000,
+      reclaimMode: "observe",
+      tunnelLimit: 1000,
+    });
+    const withVars = (vars: Record<string, string>) => ({ ...base, ...vars }) as unknown as Env;
+    expect(readConfig(withVars({
+      OMB_TUNNEL_LIMIT: "2500",
+      OMB_TUNNEL_RECLAIM: "observe",
+      OMB_TUNNEL_OFFLINE_RECLAIM_DAYS: "30",
+      OMB_CLEANUP_SWEEP_LIMIT: "4",
+    })).capacity).toMatchObject({
+      cleanupSweepLimit: 4,
+      offlineReclaimMs: 30 * 24 * 60 * 60 * 1_000,
+      reclaimMode: "observe",
+      tunnelLimit: 2500,
+    });
+    // Reclaim can never be configured to treat a tunnel offline for less than
+    // a week as idle, and the sweep cannot outgrow its subrequest budget. A bad
+    // value falls back to the default instead of taking sign-in down, and a bad
+    // reclaim mode only observes.
+    expect(readConfig(withVars({ OMB_TUNNEL_OFFLINE_RECLAIM_DAYS: "6" })).capacity.offlineReclaimMs).toBe(21 * 24 * 60 * 60 * 1_000);
+    expect(readConfig(withVars({ OMB_CLEANUP_SWEEP_LIMIT: "51" })).capacity.cleanupSweepLimit).toBe(20);
+    expect(readConfig(withVars({ OMB_TUNNEL_LIMIT: "1e3" })).capacity.tunnelLimit).toBe(1000);
+    expect(readConfig(withVars({ OMB_TUNNEL_RECLAIM: "yes" })).capacity.reclaimMode).toBe("observe");
+    expect(readConfig(withVars({ OMB_TUNNEL_RECLAIM: "on" })).capacity.reclaimMode).toBe("on");
   });
 
   it("reports an unhealthy deployment without exposing invalid configuration", async () => {
@@ -154,6 +210,11 @@ describe("control-plane migrations and health", () => {
       CLOUDFLARE_ZONE_ID: env.CLOUDFLARE_ZONE_ID,
       COMPANION_HOST_SUFFIX: env.COMPANION_HOST_SUFFIX,
       CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+      OMB_TUNNEL_LIMIT: env.OMB_TUNNEL_LIMIT,
+      OMB_DNS_RECORD_LIMIT: env.OMB_DNS_RECORD_LIMIT,
+      OMB_TUNNEL_RECLAIM: env.OMB_TUNNEL_RECLAIM,
+      OMB_TUNNEL_OFFLINE_RECLAIM_DAYS: env.OMB_TUNNEL_OFFLINE_RECLAIM_DAYS,
+      OMB_CLEANUP_SWEEP_LIMIT: env.OMB_CLEANUP_SWEEP_LIMIT,
       BETTER_AUTH_SECRET: "too-short",
     };
     const request = new Request(`${BASE_URL}/healthz`);
