@@ -408,7 +408,7 @@ import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerC
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
 import { CcStartQueue, priorityLabel, startPriority } from "./cc-start-queue.ts";
-import { codexRolloutFolders, planReleasedWorktrees, releasedPlanLine, removeNestedWorktrees, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, planReleasedWorktrees, releasedPlanLine, removeArchivedWorktree, removeNestedWorktrees, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -8724,11 +8724,7 @@ const desktopWork: DesktopWorkDeps = {
   folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
   log: (line) => console.log(`[claude-desktop] ${line}`),
   onArchived: (session) => {
-    const nested = cleanNestedWorktrees(session);
-    if (nested) ccChip(session, nested, !nested.includes("Mantidas"));
-    if (!session.desktop?.removeWorktree) return;
-    const note = removeSessionWorktree(session);
-    if (note) ccChip(session, note, !note.startsWith("A worktree foi mantida"));
+    void cleanArchivedWorktrees(session, session.desktop?.removeWorktree === true).catch((error) => console.warn(`[worktrees] archive cleanup of ${session.id} failed: ${error instanceof Error ? error.message : String(error)}`));
   },
 };
 
@@ -8859,30 +8855,44 @@ async function cleanReleasedWorktrees(): Promise<void> {
   }
 }
 
-/** Merged worktrees the session left inside its own folder (server/nested-worktrees.ts). */
-function cleanNestedWorktrees(session: CcSession): string {
-  if (!session.cwd || !existsSync(session.cwd)) return "";
-  return removeNestedWorktrees(session.cwd, (args) => String(execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } })));
-}
-
-function removeSessionWorktree(session: CcSession): string {
-  if (!session.cwd || !session.cwd.includes("/.claude/worktrees/")) return "";
-  if (!existsSync(session.cwd)) return `A worktree ${session.cwd} já não existia.`;
+/** An archived session's worktrees (G12, server/nested-worktrees.ts): the
+ * merged ones it left inside its folder and — `removeOwn` — its own, each
+ * removed only when nothing can be lost; the bot hears what stayed, why,
+ * and the command a person may run. Async: it waits for the session's own
+ * claude to exit (its cwd would keep the worktree "in use"), and git never
+ * blocks the server. */
+async function cleanArchivedWorktrees(session: CcSession, removeOwn: boolean): Promise<void> {
+  const folder = session.cwd;
+  if (!folder || !existsSync(folder)) {
+    if (removeOwn && folder?.includes("/.claude/worktrees/")) ccChip(session, `A worktree ${folder} já não existia.`);
+    return;
+  }
+  for (let waited = 0; ccProcesses.has(session.id) && waited < 15_000; waited += 250) await new Promise((resolve) => setTimeout(resolve, 250));
+  const [cwds, rows] = await Promise.all([allProcessCwds(), psTable()]);
+  if (!cwds || !rows.length) {
+    ccChip(session, "worktrees não conferidas (sem a lista de processos): nada foi removido", false);
+    return;
+  }
+  const deps = {
+    repo: session.repo,
+    git: (args: string[]) => gitAsync(["-C", session.repo, ...args]),
+    processCwds: cwds,
+    processCommands: rows.map((row) => row.command),
+    foldersInUse: foldersInUse().filter((path) => canonPath(path) !== canonPath(folder)),
+    canon: canonPath,
+  };
+  const nested = await removeNestedWorktrees(folder, deps);
   // The app reuses worktrees of archived sessions for new ones: never remove
   // one that another live session (ours or the app's) works in.
-  const others = [
-    ...ccLedger.all().filter((other) => other.id !== session.id && other.cwd === session.cwd && other.status !== "archived").map((other) => `"${other.title}"`),
-    ...recordsUsingFolder(session.cwd, session.desktop?.localId).map((record) => `"${record.title ?? record.sessionId}" (app)`),
-  ];
-  if (others.length) return `A worktree foi mantida: ${session.cwd} está em uso por ${others.join(", ")}.`;
-  try {
-    const git = (...args: string[]) => execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } });
-    try { git("worktree", "unlock", session.cwd); } catch { /* not locked */ }
-    git("worktree", "remove", session.cwd);
-    return `Worktree ${session.cwd} removida.`;
-  } catch (error) {
-    return `A worktree foi mantida: ${error instanceof Error ? error.message.split("\n").slice(-2).join(" ") : String(error)}`;
-  }
+  const users = removeOwn && folder.includes("/.claude/worktrees/") ? [
+    ...ccLedger.all().filter((other) => other.id !== session.id && other.cwd === folder && other.status !== "archived").map((other) => `"${other.title}"`),
+    ...recordsUsingFolder(folder, session.desktop?.localId).map((record) => `"${record.title ?? record.sessionId}" (app)`),
+  ] : [];
+  const own = removeOwn && folder.includes("/.claude/worktrees/") ? await removeArchivedWorktree(folder, deps, users) : { removed: [], kept: [] };
+  const { chip, report } = archiveCleanupNote(folder, { removed: [...nested.removed, ...own.removed], kept: [...nested.kept, ...own.kept] });
+  if (!chip) return;
+  ccChip(session, chip, !nested.kept.length && !own.kept.length);
+  if (nested.kept.length || own.kept.length) ccReport(session, `[Arquivamento de "${session.title}" (${session.id}): worktrees] ${report}`);
 }
 
 /** Headless sessions whose turn ended with a background job: resume each
@@ -18346,10 +18356,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
           }
           ccLedger.setStatus(session, action === "stop" ? "stopped" : "archived");
-          const nestedNote = action === "archive" ? cleanNestedWorktrees(session) : "";
-          const worktreeNote = [nestedNote, action === "archive" && body.removeWorktree === true ? removeSessionWorktree(session) : ""].filter(Boolean).join(" ");
-          ccChip(session, action === "stop" ? "parada" : `arquivada${worktreeNote ? " (worktree tratada)" : ""}`);
-          return json(res, 200, { message: `${action === "stop" ? "Parada; cc_session_send a retoma depois." : "Arquivada."}${worktreeNote ? ` ${worktreeNote}` : ""}${archiveNote}` });
+          if (action === "archive") {
+            void cleanArchivedWorktrees(session, body.removeWorktree === true).catch((error) => console.warn(`[worktrees] archive cleanup of ${session.id} failed: ${error instanceof Error ? error.message : String(error)}`));
+          }
+          ccChip(session, action === "stop" ? "parada" : "arquivada");
+          const worktreeNote = action === "archive" && session.cwd ? " As worktrees dela são conferidas agora: só sai a que não tem nada a perder (sem outra worktree dentro, processo, mudança ou arquivo ignorado que não se refaz); o que ficar chega como chip e relatório, com o comando para uma pessoa rodar." : "";
+          return json(res, 200, { message: `${action === "stop" ? "Parada; cc_session_send a retoma depois." : "Arquivada."}${worktreeNote}${archiveNote}` });
         }
         return json(res, 400, { error: "action deve ser start, send, list, stop ou archive" });
       }

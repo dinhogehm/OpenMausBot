@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  codexRolloutFolders, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
+  archiveCleanupNote, codexRolloutFolders, isDisposableIgnored, removeArchivedWorktree, nestedWorktrees, parseWorktreeList, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
   releasedPlanLine, removeNestedWorktrees, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
 
@@ -27,26 +27,35 @@ describe("worktrees a session left inside its own", () => {
     expect(nestedWorktrees(entries, parent).map((entry) => entry.path.split("/").pop())).toEqual(["g9278", "c9322", "wt9278", "g9330"]);
   });
 
-  it("removes the merged, unlocked and clean ones and names the rest", () => {
+  it("removes the merged ones with nothing to lose and names the rest, with the command (G12)", async () => {
     const calls: string[] = [];
-    const git = (args: string[]) => {
+    const git = async (args: string[]) => {
       calls.push(args.join(" "));
       if (args[0] === "worktree" && args[1] === "list") return porcelain;
       if (args[0] === "merge-base" && args[2] === "c30") throw new Error("not ancestor");
-      if (args[0] === "worktree" && args[1] === "remove" && args[2]!.endsWith("/c9322")) throw new Error("contains modified files");
+      if (args[0] === "-C" && args[1]!.endsWith("/c9322") && args.includes("status")) return "?? novo.txt\n";
       return "";
     };
-    expect(removeNestedWorktrees(parent, git)).toBe(
-      "Worktrees internas removidas (já mergeadas): g9278. Mantidas: c9322 (tem mudanças locais), wt9278 (bloqueada), g9330 (não está em origin/main).",
-    );
+    const result = await removeNestedWorktrees(parent, { repo: "/r/nuria-platform", git, processCwds: [], processCommands: [] });
+    expect(result.removed).toEqual([`${parent}/g9278`]);
+    // deepest (longest path) first
+    expect(result.kept).toEqual([
+      { path: `${parent}/wt9278`, why: "bloqueada" },
+      { path: `${parent}/c9322`, why: "tem mudanças locais", command: `git -C /r/nuria-platform worktree remove ${parent}/c9322` },
+      { path: `${parent}/g9330`, why: "não está em origin/main" },
+    ]);
+    expect(archiveCleanupNote(parent, result).chip).toBe("Worktrees removidas: g9278. Mantidas: wt9278 (bloqueada), c9322 (tem mudanças locais), g9330 (não está em origin/main).");
+    expect(archiveCleanupNote(parent, result).report).toContain(`git -C /r/nuria-platform worktree remove ${parent}/c9322`);
     // never forced, never the session's own worktree
     expect(calls.some((call) => call.includes("--force"))).toBe(false);
     expect(calls).not.toContain(`worktree remove ${parent}`);
   });
 
-  it("says nothing when there are none, or git cannot list them", () => {
-    expect(removeNestedWorktrees(parent, () => "worktree /r/nuria-platform\nHEAD aaa")).toBe("");
-    expect(removeNestedWorktrees(parent, () => { throw new Error("not a repo"); })).toBe("");
+  it("says nothing when there are none, or git cannot list them", async () => {
+    const deps = (git: (args: string[]) => Promise<string>) => ({ repo: "/r/nuria-platform", git, processCwds: [], processCommands: [] });
+    expect(await removeNestedWorktrees(parent, deps(async () => "worktree /r/nuria-platform\nHEAD aaa"))).toEqual({ removed: [], kept: [] });
+    expect(await removeNestedWorktrees(parent, deps(async () => { throw new Error("not a repo"); }))).toEqual({ removed: [], kept: [] });
+    expect(archiveCleanupNote(parent, { removed: [], kept: [] })).toEqual({ chip: "", report: "" });
   });
 });
 
@@ -302,6 +311,88 @@ describe("worktrees already in production, with real git", () => {
       // why the parent is never offered: git removes it, without --force, nested worktree and uncommitted work included
       execFileSync("git", ["-C", repo, "worktree", "remove", parentWt], { stdio: "pipe" });
       expect(existsSync(join(child, "novo.txt"))).toBe(false);
+    } finally {
+      busyProc.kill?.();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("on archive removes only what has nothing to lose, and never the session's worktree with work inside (G12)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "omb-g12-"));
+    const repo = join(root, "nuria-platform");
+    const busyProc: { kill?: () => void } = {};
+    try {
+      mkdirSync(repo);
+      run(repo, "init", "-q", "-b", "main");
+      writeFileSync(join(repo, ".gitignore"), ".worktrees/\n.claude/*\nnode_modules/\n.env.local\n");
+      writeFileSync(join(repo, "a.txt"), "a\n");
+      run(repo, "add", ".");
+      run(repo, "commit", "-q", "-m", "a");
+      const head = run(repo, "rev-parse", "HEAD");
+      const add = (path: string) => { run(repo, "worktree", "add", "-q", "--detach", path, head); return path; };
+      const session = add(join(repo, ".claude", "worktrees", "session"));
+      const n = (name: string) => join(session, ".worktrees", name);
+      const clean = add(n("merged-clean"));
+      mkdirSync(join(clean, "node_modules"));
+      writeFileSync(join(clean, "node_modules", "x.js"), "x\n");
+      const env = add(n("merged-env"));
+      writeFileSync(join(env, ".env.local"), "TOKEN=placeholder\n");
+      const dirty = add(n("merged-dirty"));
+      writeFileSync(join(dirty, "novo.txt"), "trabalho\n");
+      const parentWt = add(n("merged-parent"));
+      const grandchild = add(join(parentWt, ".worktrees", "grandchild"));
+      writeFileSync(join(grandchild, "novo.txt"), "trabalho não commitado\n");
+      const busy = add(n("merged-busy"));
+      const used = add(n("merged-used"));
+      mkdirSync(join(used, "sub"));
+      const ahead = add(n("unmerged"));
+      writeFileSync(join(ahead, "b.txt"), "b\n");
+      run(ahead, "add", "b.txt");
+      run(ahead, "commit", "-q", "-m", "b");
+
+      const sleeper = spawn("sleep", ["60"], { cwd: busy, stdio: "ignore" });
+      busyProc.kill = () => sleeper.kill();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const lsof = String(execFileSync("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn", "-p", String(sleeper.pid)]));
+      const calls: string[][] = [];
+      const deps = {
+        repo,
+        git: realGit(repo, calls),
+        processCwds: lsof.split("\n").filter((line) => line.startsWith("n")).map((line) => line.slice(1)),
+        processCommands: [],
+        foldersInUse: [join(used, "sub"), repo, "/"],
+        canon: (path: string) => { try { return realpathSync(path); } catch { return path; } },
+      };
+      const nested = await removeNestedWorktrees(session, deps, "main");
+      const name = (path: string) => path.split("/").pop();
+      expect(nested.removed.map(name)).toEqual(["merged-clean"]);
+      expect(Object.fromEntries(nested.kept.map((item) => [name(item.path), item.why]))).toEqual({
+        "grandchild": "tem mudanças locais",
+        "merged-parent": "contém outra worktree",
+        "merged-env": "tem arquivos ignorados: .env.local",
+        "merged-dirty": "tem mudanças locais",
+        "merged-busy": "em uso por processo",
+        "merged-used": "em uso por outra sessão",
+        "unmerged": "não está em main",
+      });
+      // the session's own worktree still holds nested worktrees: it stays, with the command
+      const own = await removeArchivedWorktree(session, deps, []);
+      expect(own).toEqual({ removed: [], kept: [{ path: session, why: "contém outra worktree", command: `git -C ${repo} worktree remove ${session}` }] });
+      expect(calls.some((args) => args.includes("--force"))).toBe(false);
+      for (const path of [join(grandchild, "novo.txt"), join(env, ".env.local"), join(dirty, "novo.txt"), busy, join(used, "sub"), ahead]) expect(existsSync(path), path).toBe(true);
+      expect(existsSync(clean)).toBe(false);
+
+      // a session worktree with only a .env.local stays; a clean, locked one goes (its lock lifted only then)
+      const envOnly = add(join(repo, ".claude", "worktrees", "env-only"));
+      writeFileSync(join(envOnly, ".env.local"), "TOKEN=placeholder\n");
+      expect((await removeArchivedWorktree(envOnly, deps, [])).kept[0]!.why).toBe("tem arquivos ignorados: .env.local");
+      expect(existsSync(join(envOnly, ".env.local"))).toBe(true);
+      const lockedClean = add(join(repo, ".claude", "worktrees", "locked-clean"));
+      run(repo, "worktree", "lock", lockedClean);
+      expect((await removeArchivedWorktree(lockedClean, deps, [])).removed).toEqual([lockedClean]);
+      expect(existsSync(lockedClean)).toBe(false);
+      // another live session in it: kept without asking git anything
+      expect((await removeArchivedWorktree(envOnly, deps, ["\"#9331\" (app)"])).kept[0]!.why).toBe("em uso por \"#9331\" (app)");
     } finally {
       busyProc.kill?.();
       rmSync(root, { recursive: true, force: true });
