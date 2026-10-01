@@ -8057,15 +8057,24 @@ function chiefDeskThread(chief: BotRecord, except?: string): string {
 /** The conversation the owner named for talking to them was closed,
  * archived or deleted: it is forgotten as theirs, and the conversation that
  * now gets what was meant for them says so (INSP-F F2-b). */
-function ownerThreadGone(botId: string, threadId: string, why: string, alreadyForgotten = false): void {
+function ownerThreadGone(botId: string, threadId: string, why: string): void {
   const title = store.taskByThread(botId, threadId)?.title;
-  if (!alreadyForgotten && !sharedState.forgetOwnerThread(botId, threadId)) return;
+  if (!sharedState.forgetOwnerThread(botId, threadId)) return;
   const bot = store.bot(botId);
   if (!bot) return;
-  const next = [bot.chiefOfStaff ? chiefDeskThread(bot, threadId) : null, bot.threadId].find((candidate) => candidate && candidate !== threadId && openThreadOf(botId, candidate));
+  const next = mainThreadOf(botId, threadId);
   console.log(`[shared-state] ${bot.name}: the conversation with the owner (${threadId}) was ${why}; ${next ? `now ${next}` : "no open conversation left"}`);
   if (!next) return;
   store.appendMessage(next, { role: "bot", kind: "activity", tool: { name: chipText(`a conversa com o dono${title ? ` ("${title}")` : ""} foi ${why}; os avisos vêm para cá`, 240), ok: false } });
+}
+
+/** A bot's main conversation other than `except`, still open: its desk
+ * (deskThread: the named one, the pin, where the owner wrote last, the
+ * oldest), else the one selected in the UI. */
+function mainThreadOf(botId: string, except?: string): string | null {
+  const bot = store.bot(botId);
+  if (!bot) return null;
+  return [chiefDeskThread(bot, except), bot.threadId].find((candidate) => candidate && candidate !== except && openThreadOf(botId, candidate)) ?? null;
 }
 
 /** Automation that keeps failing on its own (a standing watch, a routine):
@@ -9205,11 +9214,7 @@ function drainCcStartQueue(): void {
     slotFree: () => ccLedger.slotsTaken() < CC_MAX_RUNNING,
     botExists: (botId) => Boolean(store.bot(botId)),
     threadOpen: (botId, threadId) => openThreadOf(botId, threadId),
-    mainThread: (botId, except) => {
-      const bot = store.bot(botId);
-      if (!bot) return null;
-      return [bot.chiefOfStaff ? chiefDeskThread(bot, except) : null, bot.threadId].find((candidate) => candidate && candidate !== except && openThreadOf(botId, candidate)) ?? null;
-    },
+    mainThread: (botId, except) => mainThreadOf(botId, except),
     start: (item, threadId, replyThreadId) => {
       const bot = store.bot(item.botId);
       return bot ? startCcSession(bot, threadId, replyThreadId, item.body, true) : { status: 404, body: { error: "o bot não existe mais" } };
@@ -9227,12 +9232,9 @@ function openThreadOf(botId: string, threadId: string | null | undefined): boole
 }
 
 /** Where a bot hears what concerns a conversation that may be gone: that
- * one while open, else its desk (the Chief's) or its main conversation. */
+ * one while open, else its main conversation (mainThreadOf). */
 function liveThreadFor(botId: string, threadId: string): string | null {
-  if (openThreadOf(botId, threadId)) return threadId;
-  const bot = store.bot(botId);
-  if (!bot) return null;
-  return [bot.chiefOfStaff ? chiefDeskThread(bot) : null, bot.threadId].find((candidate) => candidate && candidate !== threadId && openThreadOf(botId, candidate)) ?? null;
+  return openThreadOf(botId, threadId) ? threadId : mainThreadOf(botId, threadId);
 }
 
 /** A session archived in the Claude app by someone, not by the server: its

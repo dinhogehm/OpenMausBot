@@ -576,3 +576,20 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(after.some((chip: string) => chip.includes('"#9907 a cancelar" abriu'))).toBe(false);
   }, { OMB_CC_BIN: fake });
 }, 120_000);
+
+it("forgets the conversation the owner named when it is archived, and the next one says the warnings come there now (INSP-F F2-b)", () => fixture(async f => {
+  f.save({ turns: [{ reply: "Oi" }, { reply: "Combinado, falo com você só aqui" }] });
+  const threadA = f.bot.activeTaskId;
+  await f.send("Oi, tudo certo por aqui?");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  const created = await f.api(`/api/bots/${f.bot.id}/tasks`, { title: "Esteira" });
+  const threadB = created.task.threadId as string;
+  await runControlOmb(["send", "--bot", f.bot.id, "--task", threadB, "--text", "Use só a conversa da esteira para falar comigo."], { env: { OPENMAUSBOT_URL: f.session.info.url } });
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  const sharedState = () => JSON.parse(readFileSync(join(f.session.info.dataDir, "bots", f.bot.id, "shared-state.json"), "utf8"));
+  await expect.poll(() => sharedState().ownerThread?.threadId, { timeout: 10_000 }).toBe(threadB);
+  await f.api(`/api/bots/${f.bot.id}/tasks/${threadB}`, { archivedAt: Date.now() }, "PATCH");
+  const chipsOf = async (threadId: string) => ((await f.api(`/api/threads/${threadId}/messages`, undefined, "GET")).messages as any[]).filter((message: any) => message.kind === "activity").map((message: any) => String(message.tool?.name ?? ""));
+  await expect.poll(() => chipsOf(threadA), { timeout: 10_000 }).toContain('a conversa com o dono ("Esteira") foi arquivada; os avisos vêm para cá');
+  expect(sharedState().ownerThread).toBeUndefined();
+}), 60_000);
