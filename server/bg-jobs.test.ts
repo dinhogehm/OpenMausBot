@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bgJobOverdueReport, bgJobResumePrompt, isInteractiveShell, isToolProcess, jobAliveIn, leftoversIn, newTurnTree, noteDescendants, parseLsofCwd, parsePsTable, pidAlive, sessionLeftovers } from "./bg-jobs.ts";
+import { bgJobOverdueReport, bgJobResumePrompt, cutLeftovers, isInteractiveShell, isToolProcess, jobAliveIn, leftoversIn, newTurnTree, noteDescendants, parseLsofCwd, parsePsTable, pidAlive, sessionLeftovers } from "./bg-jobs.ts";
 
 describe("background jobs of a headless session", () => {
   it("reads lsof's cwd listing and keeps the processes inside the session's worktree", () => {
@@ -74,5 +74,14 @@ describe("background jobs of a headless session", () => {
     expect(report).toContain("still running after 3 h");
     expect(report).toContain("no longer waits");
     expect(report).not.toContain("no watch needed");
+  });
+
+  it("after a cut follows only processes in a group of their own, never the claude's group", () => {
+    const left = [
+      { pid: 601, cwd: "/w", command: "node mcp-server", start: "s", pgid: 500 },
+      { pid: 610, cwd: "/w", command: "bash ./scripts/local-ci.sh --profile full", start: "s", pgid: 610 },
+      { pid: 620, cwd: "/w", command: "old record", start: "s" },
+    ];
+    expect(cutLeftovers(left, 500).map((proc) => proc.pid)).toEqual([610]);
   });
 });

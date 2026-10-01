@@ -6,7 +6,7 @@
 import { BOOT_CLOUD_SECRETS } from "./cloud-secrets-boot.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, realpathSync, rmSync, mkdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -338,7 +338,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
-import { BG_JOB_MAX_MS, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
+import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, githubSlug, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
 import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
@@ -347,8 +347,8 @@ import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
-import { isReleaseCommand, type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
-import { batteryAlert, parsePmsetBatt, startsCarrier, type PowerState } from "./power.ts";
+import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
+import { carrierIntent, isReleaseProcess, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
 import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -414,7 +414,7 @@ import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerC
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { removeNestedWorktrees, removeReleasedWorktrees } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -8368,8 +8368,8 @@ async function revalidateNeedsInputGoals(): Promise<void> {
  * desktop app runs reads this Mac's release logs, every 2 min. */
 const releaseWatch = { state: DESKTOP_MANAGED && !process.env.VITEST ? new ReleaseWatchState(join(DATA_DIR, "release-watch.json")) : null, lastAt: 0, quiet: new Set<string>() };
 /** A release alert on the Chief's desk: a red chip and a report. */
-function releaseAlertToChief(text: string, report: string): void {
-  console.warn(`[release] ${text}`);
+function releaseAlertToChief(text: string, report: string, logPrefix = "release"): void {
+  console.warn(`[${logPrefix}] ${text}`);
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   const desk = chief ? chiefDeskThread(chief) : null;
   if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
@@ -8466,39 +8466,44 @@ async function resolveTagAdvancePendings(repo: string, tagSha: string | null, re
 
 /** The Mac's power (server/power.ts): on battery long or low, the Chief and
  * the person hear it; no carrier starts on battery. */
-const powerWatch: { state: PowerState | null; onBatterySince: number | null; told: Set<string>; lastAt: number } = { state: null, onBatterySince: null, told: new Set(), lastAt: 0 };
+const POWER_WATCH_FILE = join(DATA_DIR, "power-watch.json");
+const powerWatch: { state: PowerState | null; watch: PowerWatchState | null; lastAt: number } = { state: null, watch: null, lastAt: 0 };
 async function checkPower(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || process.platform !== "darwin" || Date.now() - powerWatch.lastAt < 2 * 60_000) return;
   powerWatch.lastAt = Date.now();
-  const power = parsePmsetBatt(await execCc("/usr/bin/pmset", ["-g", "batt"]));
+  const output = await execCc("/usr/bin/pmset", ["-g", "batt"]).catch(() => "");
+  if (!output.trim()) return; // pmset failed: nothing known, nothing said or resolved
+  const power = parsePmsetBatt(output);
   powerWatch.state = power;
-  if (!power.onBattery) {
-    if (powerWatch.onBatterySince !== null) {
-      powerWatch.onBatterySince = null;
-      powerWatch.told.clear();
-      for (const item of autonomy.resolveOwnerPending({ key: "power:battery" })) refreshBotRow(item.botId);
-    }
-    return;
+  powerWatch.watch ??= readPowerWatch(existsSync(POWER_WATCH_FILE) ? readFileSync(POWER_WATCH_FILE, "utf8") : null);
+  const releaseRunning = power.onBattery && (await psTable()).some((row) => isReleaseProcess(row.command));
+  const step = powerStep(powerWatch.watch, power, Date.now(), releaseRunning);
+  powerWatch.watch = step.watch;
+  if (step.changed) {
+    try { writeFileSync(POWER_WATCH_FILE, JSON.stringify(step.watch)); } catch { /* memory still holds it */ }
   }
-  powerWatch.onBatterySince ??= Date.now();
-  const releaseRunning = (await psTable()).some((row) => isReleaseCommand(row.command));
-  const alert = batteryAlert({ power, onBatterySince: powerWatch.onBatterySince, now: Date.now(), releaseRunning, told: powerWatch.told });
+  if (step.resolvePending) for (const item of autonomy.resolveOwnerPending({ key: POWER_PENDING_KEY })) refreshBotRow(item.botId);
+  const alert = step.alert;
   if (!alert) return;
-  powerWatch.told.add(alert.level);
-  releaseAlertToChief(alert.text, `[Alerta do servidor: Mac na bateria] ${alert.text}`);
+  releaseAlertToChief(alert.text, `[Alerta do servidor: Mac na bateria] ${alert.text}`, "power");
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   const desk = chief ? chiefDeskThread(chief) : null;
   if (chief && desk && store.taskByThread(chief.id, desk)) {
-    autonomy.addOwnerPending(chief.id, desk, { title: `Ligue o Mac na tomada${power.percent !== null ? ` (${power.percent}%)` : ""}${releaseRunning ? " — release em curso" : ""}`, key: "power:battery" });
+    autonomy.addOwnerPending(chief.id, desk, { title: alert.pendingTitle, key: POWER_PENDING_KEY });
     refreshBotRow(chief.id);
   }
 }
 
-/** Why a carrier may not start now (the Mac on battery), or null. */
-function carrierPowerRefusal(text: string): string | null {
+/** On battery: an order to run a carrier is refused; a mere mention of one
+ * (a failed run to investigate) goes through with a note for the session. */
+function carrierPowerCheck(text: string): { refusal: string } | { note: string } | null {
   const power = powerWatch.state;
-  if (!power?.onBattery || !startsCarrier(text)) return null;
-  return `não inicio carrier com o Mac na bateria${power.percent !== null ? ` (${power.percent}%)` : ""}: se ele desligar no meio do deploy, a produção fica pela metade. Peça ao dono para ligar na tomada e mande de novo.`;
+  if (!power?.onBattery) return null;
+  const intent = carrierIntent(text);
+  const charge = power.percent !== null ? ` (${power.percent}%)` : "";
+  if (intent === "order") return { refusal: `não inicio carrier com o Mac na bateria${charge}: se ele desligar no meio do deploy, a produção fica pela metade. Peça ao dono para ligar na tomada e mande de novo.` };
+  if (intent === "mention") return { note: `[Nota do servidor: Mac na bateria${charge}: não rode carrier até voltar à tomada.]` };
+  return null;
 }
 
 async function checkProductionRelease(): Promise<void> {
@@ -8848,6 +8853,12 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     if (buffer) keep(buffer);
     const outcome = parseCcStream([...lines, ...(spawnError ? [spawnError] : []), ...stderr.split("\n").slice(-5)], { code, signal, timedOut });
     ccLedger.finishTurn(session, outcome);
+    // this turn was the resumption after a cut: at most one per cut in a row
+    const resumedAfterCut = session.resumedAfterCut === true;
+    if (resumedAfterCut) {
+      delete session.resumedAfterCut;
+      ccLedger.save();
+    }
     if (session.status === "stopped" || session.status === "archived") return;
     const next = session.status === "idle" ? takeFreshQueued(desktopWork, session) : null;
     if (next !== null) {
@@ -8865,18 +8876,28 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     // resumed when it ends instead of the CI running on with nobody to tell
     // (R8-resilience TO). Nothing is killed here.
     const cut = timedOut && session.status === "failed";
+    const limitMin = Math.round(ccTurnTimeoutMs / 60_000);
+    // cut again right after the server resumed it from a cut: a structural
+    // stall (a loop, a wait that never ends) — no second resumption, the Chief decides
+    if (cut && resumedAfterCut) {
+      ccChip(session, `turno cortado em ${limitMin} min duas vezes seguidas — o servidor não retoma de novo; o Chief decide`, false);
+      ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn was cut at the ${limitMin}-min limit twice in a row: the second turn was the server's resumption after the first cut. The server does not resume it again. Check whether it is stuck — a loop, a wait that never ends — then send it a message with cc_session_send, or stop it.)`);
+      return;
+    }
     if ((session.status === "idle" || cut) && tree && folder && folder.includes("/.claude/worktrees/")) {
-      void backgroundProcesses(folder, tree).then((left) => {
+      void backgroundProcesses(folder, tree).then((found) => {
+        // after a cut only a group of its own counts (the gate); the claude's own group (MCP servers) dies with it
+        const left = cut ? cutLeftovers(found, tree.rootPid) : found;
         if (!left.length || (session.status !== "idle" && !(cut && session.status === "failed"))) {
           ccReport(session, desktopReportFor(desktopWork, session));
           return;
         }
-        session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now() };
+        session.bgJob = { pids: left.map((proc) => proc.pid), commands: left.map((proc) => proc.command), starts: left.map((proc) => proc.start), since: Date.now(), ...(cut ? { afterCut: true as const } : {}) };
         ccLedger.save();
         ccChip(session, cut
-          ? `turno cortado em ${Math.round(ccTurnTimeoutMs / 60_000)} min com ${left.length} processo(s) ainda rodando — o servidor retoma a sessão quando terminarem`
+          ? `turno cortado em ${limitMin} min com ${left.length} processo(s) ainda rodando — o servidor retoma a sessão quando terminarem`
           : `terminou o turno com ${left.length} processo(s) rodando em segundo plano — o servidor retoma a sessão quando terminarem`);
-        ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ended with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.)`);
+        ccReport(session, `${desktopReportFor(desktopWork, session)}\n(Its turn ${cut ? `was cut at the ${limitMin}-min limit` : "ended"} with process(es) still running in its worktree: ${left.map((proc) => `PID ${proc.pid} ${proc.command.slice(0, 80)}`).join("; ")}. The server resumes the session with a new turn when they finish, and tells you if they are still running after ${Math.round(BG_JOB_MAX_MS / 3_600_000)} h.${cut ? " One of them may be what stalled the turn; the server resumes it once at most — cut again, it waits for you." : ""})`);
       }).catch(() => ccReport(session, desktopReportFor(desktopWork, session)));
       return;
     }
@@ -8937,11 +8958,7 @@ const desktopWork: DesktopWorkDeps = {
   folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
   log: (line) => console.log(`[claude-desktop] ${line}`),
   onArchived: (session) => {
-    const nested = cleanNestedWorktrees(session);
-    if (nested) ccChip(session, nested, !nested.includes("Mantidas"));
-    if (!session.desktop?.removeWorktree) return;
-    const note = removeSessionWorktree(session);
-    if (note) ccChip(session, note, !note.startsWith("A worktree foi mantida"));
+    void reportArchivedWorktrees(session, session.desktop?.removeWorktree === true).catch((error) => console.warn(`[worktrees] archive report of ${session.id} failed: ${error instanceof Error ? error.message : String(error)}`));
   },
 };
 
@@ -8960,72 +8977,152 @@ function repoBaseBranch(repo: string): string {
 }
 
 /** Worktrees whose work is already in the production tag, in the
- * repositories the sessions use: removed every 6 h when not in use, not
- * locked and clean (never --force), and the Chief gets the list (R8 G3). */
-const releasedCleanup = { lastAt: 0, running: false };
+ * repositories the sessions use: every 6 h the Chief gets the ones a person
+ * may remove, with the command, and those kept and why — only when that
+ * changed. The server removes none (R8 G3, server/nested-worktrees.ts). */
+const releasedCleanup: { lastAt: number; running: boolean; lastKey: Map<string, string> } = { lastAt: 0, running: false, lastKey: new Map() };
+/** `git` with git's stderr on the error, async, with a timeout. */
+const gitAsync = (args: string[]) => new Promise<string>((resolve, reject) => {
+  execFileCc("git", args, { timeout: 120_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath(), GIT_OPTIONAL_LOCKS: "0" } }, (error, stdout, stderr) => {
+    if (error) reject(Object.assign(error, { stderr: String(stderr ?? "") }));
+    else resolve(String(stdout));
+  });
+});
+/** Every process's cwd (`lsof -a -d cwd -Fpn`), or null when it cannot be read. */
+const allProcessCwds = () => new Promise<string[] | null>((resolve) => {
+  execFileCc("/usr/sbin/lsof", ["-a", "-d", "cwd", "-Fpn"], { timeout: 60_000, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } }, (_error, stdout) => {
+    // lsof exits 1 when it could not read another user's process: the output still counts
+    const found = parseLsofCwd(String(stdout ?? ""));
+    resolve(found.length ? found.map((proc) => proc.cwd) : null);
+  });
+});
+/** Codex sessions of the last week: the folders they work in (`session_meta.cwd`). */
+function recentCodexFolders(now: number): string[] {
+  const root = join(homedir(), ".codex", "sessions");
+  const folders = new Set<string>();
+  const walk = (dir: string, depth: number) => {
+    let names: string[];
+    try { names = readdirSync(dir); } catch { return; }
+    for (const name of names) {
+      const path = join(dir, name);
+      if (depth < 3) { walk(path, depth + 1); continue; }
+      if (!name.endsWith(".jsonl")) continue;
+      try {
+        if (now - statSync(path).mtimeMs > 7 * 86_400_000) continue;
+        for (const folder of codexRolloutFolders(readHead(path, 256 * 1024))) folders.add(folder);
+      } catch { /* unreadable: skipped */ }
+    }
+  };
+  walk(root, 0);
+  return [...folders];
+}
+function readHead(path: string, bytes: number): string {
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(bytes);
+    return buffer.subarray(0, readSync(fd, buffer, 0, bytes, 0)).toString("utf8");
+  } finally { closeSync(fd); }
+}
+/** Folders agents work in: our sessions, the app's sessions, every bot's
+ * open conversation (its folder or its task-workspace), rooms, Codex. */
+function foldersInUse(): string[] {
+  const folders: string[] = ccLedger.all().filter((session) => session.status !== "archived" && session.cwd).map((session) => session.cwd!);
+  if (process.platform === "darwin") folders.push(...liveRecordFolders());
+  for (const bot of store.bots) {
+    if (bot.cwd) folders.push(bot.cwd);
+    for (const task of store.tasks(bot.id)) {
+      if (task.archivedAt) continue;
+      if (typeof task.cwd === "string") folders.push(task.cwd);
+      folders.push(join(TASK_WORKSPACES_DIR, bot.id, task.threadId));
+    }
+  }
+  for (const group of store.groups ?? []) {
+    if (group.cwd) folders.push(group.cwd);
+    if (group.pinnedCwd) folders.push(group.pinnedCwd);
+  }
+  folders.push(...recentCodexFolders(Date.now()));
+  return folders;
+}
+const canonPath = (path: string) => { try { return realpathSync(path); } catch { return path; } };
 async function cleanReleasedWorktrees(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || releasedCleanup.running || Date.now() - releasedCleanup.lastAt < 6 * 3_600_000) return;
   releasedCleanup.running = true;
   releasedCleanup.lastAt = Date.now();
   try {
-    const sessions = ccLedger.all();
-    const inUse = new Set<string>([
-      ...sessions.filter((session) => session.status !== "archived" && session.cwd).map((session) => session.cwd!),
-      ...(process.platform === "darwin" ? liveRecordFolders() : []),
-    ]);
+    // without every process's cwd and argv nothing can be judged in use: no report
+    const [cwds, rows] = await Promise.all([allProcessCwds(), psTable()]);
+    if (!cwds || !rows.length) return;
+    const inUse = foldersInUse();
     const lines: string[] = [];
-    for (const repo of new Set(sessions.map((session) => session.repo))) {
-      const git = (args: string[]) => String(execFileSyncCc("git", ["-C", repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } }));
+    for (const repo of new Set(ccLedger.all().map((session) => session.repo))) {
+      const git = (args: string[]) => gitAsync(["-C", repo, ...args]);
       let tagSha: string | null = null;
       try {
         tagSha = parseLsRemoteTag(await execCc("git", ["-C", repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
-        if (tagSha) git(["cat-file", "-e", `${tagSha}^{commit}`]);
+        if (tagSha) await git(["cat-file", "-e", `${tagSha}^{commit}`]);
       } catch { continue; } // no tag, or its commit is not fetched here: nothing can be judged
       if (!tagSha) continue;
-      const { removed, kept } = removeReleasedWorktrees(repo, tagSha, git, inUse);
-      if (removed.length || kept.length) {
-        console.log(`[worktrees] ${repo}: removed ${removed.length} already in ${PRODUCTION_TAG} (${removed.join(", ")}); kept ${kept.join(", ") || "none"}`);
-        lines.push(`${basename(repo)}: ${removed.length} removida(s)${kept.length ? `; mantidas: ${kept.map((path) => basename(path.split(" (")[0]!) + ` (${path.split(" (")[1]}`).join(", ")}` : ""}`);
-      }
+      const plan = await planReleasedWorktrees(repo, tagSha, {
+        git, inUse, processCwds: cwds, processCommands: rows.map((row) => row.command), now: Date.now(), canon: canonPath,
+        lastActivity: (path) => worktreeLastActivity(path, { readFile: (file) => readFileSync(file, "utf8"), mtime: (file) => { try { return statSync(file).mtimeMs; } catch { return null; } } }),
+      });
+      const { line, key } = releasedPlanLine(basename(repo), plan, releasedCleanup.lastKey.get(repo));
+      releasedCleanup.lastKey.set(repo, key);
+      if (!line) continue;
+      console.log(`[worktrees] ${repo}: ${plan.candidates.length} in ${PRODUCTION_TAG} may be removed (${plan.candidates.map((candidate) => candidate.path).join(", ") || "none"}); kept ${plan.kept.join(", ") || "none"}`);
+      lines.push(line);
+      if (plan.candidates.length) lines.push(`Para remover (sem --force; confira antes): ${plan.candidates.map((candidate) => candidate.command).join(" ; ")}`);
     }
     if (!lines.length) return;
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
     const desk = chief ? chiefDeskThread(chief) : null;
     if (chief && desk && store.taskByThread(chief.id, desk)) {
-      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Worktrees já em produção limpas — ${lines.join(" · ")}`, 240), ok: true } });
+      const text = `Worktrees já em produção — ${lines[0]}${lines.length > 1 ? " …" : ""}`;
+      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: true } });
+      autonomy.addReport(chief.id, desk, `[Servidor: worktrees já em produção] O servidor não remove worktrees; estas podem ser removidas por uma pessoa, depois de conferir:\n${lines.join("\n")}`);
     }
   } finally {
     releasedCleanup.running = false;
   }
 }
 
-/** Merged worktrees the session left inside its own folder (server/nested-worktrees.ts). */
-function cleanNestedWorktrees(session: CcSession): string {
-  if (!session.cwd || !existsSync(session.cwd)) return "";
-  return removeNestedWorktrees(session.cwd, (args) => String(execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } })));
-}
-
-/** `git worktree remove` without --force: a worktree with uncommitted
- * changes is kept. Only a session's own .claude/worktrees folder. Returns
- * what happened, for the chip and the tool result. */
-function removeSessionWorktree(session: CcSession): string {
-  if (!session.cwd || !session.cwd.includes("/.claude/worktrees/")) return "";
-  if (!existsSync(session.cwd)) return `A worktree ${session.cwd} já não existia.`;
-  // The app reuses worktrees of archived sessions for new ones: never remove
-  // one that another live session (ours or the app's) works in.
-  const others = [
-    ...ccLedger.all().filter((other) => other.id !== session.id && other.cwd === session.cwd && other.status !== "archived").map((other) => `"${other.title}"`),
-    ...recordsUsingFolder(session.cwd, session.desktop?.localId).map((record) => `"${record.title ?? record.sessionId}" (app)`),
-  ];
-  if (others.length) return `A worktree foi mantida: ${session.cwd} está em uso por ${others.join(", ")}.`;
-  try {
-    const git = (...args: string[]) => execFileSyncCc("git", ["-C", session.repo, ...args], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } });
-    try { git("worktree", "unlock", session.cwd); } catch { /* not locked */ }
-    git("worktree", "remove", session.cwd);
-    return `Worktree ${session.cwd} removida.`;
-  } catch (error) {
-    return `A worktree foi mantida: ${error instanceof Error ? error.message.split("\n").slice(-2).join(" ") : String(error)}`;
+/** An archived session's worktrees (G12, server/nested-worktrees.ts): the
+ * merged ones it left inside its folder and — `includeOwn` — its own. The
+ * server removes none: the bot gets the ones a person may remove, with the
+ * command, and the ones that stay and why. Async: it waits for the
+ * session's own claude to exit (its cwd would keep the worktree "in use"). */
+async function reportArchivedWorktrees(session: CcSession, includeOwn: boolean): Promise<void> {
+  const folder = session.cwd;
+  if (!folder || !existsSync(folder)) {
+    if (includeOwn && folder?.includes("/.claude/worktrees/")) ccChip(session, `A worktree ${folder} já não existia.`);
+    return;
   }
+  for (let waited = 0; ccProcesses.has(session.id) && waited < 15_000; waited += 250) await new Promise((resolve) => setTimeout(resolve, 250));
+  const [cwds, rows] = await Promise.all([allProcessCwds(), psTable()]);
+  if (!cwds || !rows.length) {
+    ccChip(session, "worktrees não conferidas (sem a lista de processos)", false);
+    return;
+  }
+  const deps = {
+    repo: session.repo,
+    git: (args: string[]) => gitAsync(["-C", session.repo, ...args]),
+    processCwds: cwds,
+    processCommands: rows.map((row) => row.command),
+    foldersInUse: foldersInUse().filter((path) => canonPath(path) !== canonPath(folder)),
+    ownLockMarkers: [session.id, ...(session.desktop?.localId ? [session.desktop.localId] : [])],
+    canon: canonPath,
+  };
+  const nested = await planNestedWorktrees(folder, deps);
+  // The app reuses worktrees of archived sessions for new ones: never offer
+  // one that another live session (ours or the app's) works in.
+  const own = includeOwn && folder.includes("/.claude/worktrees/") ? await planArchivedWorktree(folder, deps, [
+    ...ccLedger.all().filter((other) => other.id !== session.id && other.cwd === folder && other.status !== "archived").map((other) => `"${other.title}"`),
+    ...recordsUsingFolder(folder, session.desktop?.localId).map((record) => `"${record.title ?? record.sessionId}" (app)`),
+  ]) : { candidates: [], kept: [] };
+  const { chip, report } = archiveCleanupNote(folder, { candidates: [...nested.candidates, ...own.candidates], kept: [...nested.kept, ...own.kept] });
+  if (!chip) return;
+  ccChip(session, chip, !nested.kept.length && !own.kept.length);
+  ccReport(session, `[Arquivamento de "${session.title}" (${session.id}): worktrees] ${report}`);
 }
 
 /** Headless sessions whose turn ended with a background job: resume each
@@ -9065,6 +9162,8 @@ async function watchBackgroundJobs(): Promise<void> {
     // a P1 waiting in the start queue gets its slot first
     if (!ccSlotFreeForWork()) continue;
     delete session.bgJob;
+    // the resumption after a cut: cut again, it is not resumed a second time
+    if (job.afterCut) session.resumedAfterCut = true;
     ccLedger.save();
     ccChip(session, "o processo em segundo plano terminou — sessão retomada");
     runCcTurn(session, prompt, false);
@@ -9332,9 +9431,10 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason });
     if (refusal) return { status: 409, body: { error: refusal } };
   }
-  // on battery a carrier does not start; from the queue it keeps its place until the Mac is plugged in
-  const onBattery = carrierPowerRefusal(`${input.title}\n${input.brief}`);
-  if (onBattery) return { status: 409, body: { error: onBattery }, retry: fromQueue };
+  // on battery only a carrier ORDER is refused; from the queue it keeps its place until the Mac is plugged in
+  const onBattery = carrierPowerCheck(`${input.title}\n${input.brief}`);
+  if (onBattery && "refusal" in onBattery) return { status: 409, body: { error: onBattery.refusal }, retry: fromQueue };
+  if (onBattery) input.brief = `${input.brief}\n\n${onBattery.note}`;
   const taken = ccLedger.slotsTaken();
   const gate = startGate({ fromQueue, queued: ccStartQueue.ordered().length, taken, max: CC_MAX_RUNNING });
   if (gate === "busy") return { status: 409, body: { error: "busy" }, busy: true };
@@ -18474,12 +18574,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // A send that merges or publishes carries the repository's
           // corridor once (sessions started before it, or since it changed).
           const sendCorridor = repoCorridor(session.repo);
-          const onBattery = carrierPowerRefusal(scripts.text);
-          if (onBattery) return json(res, 409, { error: onBattery });
+          const onBattery = carrierPowerCheck(scripts.text);
+          if (onBattery && "refusal" in onBattery) return json(res, 409, { error: onBattery.refusal });
           const corridored = corridorForSend(session, sendCorridor, scripts.text);
           const sendWarning = sendCorridor ? hotfixWithReleaseScripts(scripts.text) : null;
           if (sendWarning) ccChip(session, "a mensagem junta hotfix com script de release — o corredor pede carriers separados", false);
-          const message = corridored.text;
+          const message = onBattery ? `${corridored.text}\n\n${onBattery.note}` : corridored.text;
           // The order came from this conversation: its report comes back here.
           // Only once the order is accepted — a refused one moves nothing.
           const claim = () => {
@@ -18614,7 +18714,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           desktop.pending = { kind: "archive", text: "", since: Date.now(), attempts: 0 };
           ccLedger.save();
           ccChip(session, "na fila para ser arquivada no app Claude");
-          return json(res, 200, { message: `Na fila: ela é arquivada no app Claude assim que o Mac estiver livre, e o servidor confere no registro do app que arquivou${desktop.removeWorktree ? "; só então a worktree é removida (se não tiver alterações pendentes)" : ""}.` });
+          return json(res, 200, { message: `Na fila: ela é arquivada no app Claude assim que o Mac estiver livre, e o servidor confere no registro do app que arquivou${desktop.removeWorktree ? "; só então a worktree é conferida e você recebe o comando para uma pessoa removê-la, se não houver nada a perder (o servidor não remove)" : ""}.` });
         }
         if (action === "stop" || action === "archive") {
           // messages still queued for it leave with it: the owner hears which
@@ -18628,10 +18728,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
           }
           ccLedger.setStatus(session, action === "stop" ? "stopped" : "archived");
-          const nestedNote = action === "archive" ? cleanNestedWorktrees(session) : "";
-          const worktreeNote = [nestedNote, action === "archive" && body.removeWorktree === true ? removeSessionWorktree(session) : ""].filter(Boolean).join(" ");
-          ccChip(session, action === "stop" ? "parada" : `arquivada${worktreeNote ? " (worktree tratada)" : ""}`);
-          return json(res, 200, { message: `${action === "stop" ? "Parada; cc_session_send a retoma depois." : "Arquivada."}${worktreeNote ? ` ${worktreeNote}` : ""}${archiveNote}` });
+          if (action === "archive") {
+            void reportArchivedWorktrees(session, body.removeWorktree === true).catch((error) => console.warn(`[worktrees] archive report of ${session.id} failed: ${error instanceof Error ? error.message : String(error)}`));
+          }
+          ccChip(session, action === "stop" ? "parada" : "arquivada");
+          const worktreeNote = action === "archive" && session.cwd ? " As worktrees dela são conferidas agora; o servidor não remove nenhuma: as que uma pessoa pode remover chegam como chip e relatório, com o comando, e as que ficam, com o motivo." : "";
+          return json(res, 200, { message: `${action === "stop" ? "Parada; cc_session_send a retoma depois." : "Arquivada."}${worktreeNote}${archiveNote}` });
         }
         return json(res, 400, { error: "action deve ser start, send, list, stop ou archive" });
       }

@@ -81,6 +81,9 @@ export interface CcSession {
   /** CLI: processes its last turn left running in its worktree; the server
    * resumes it when they are gone. */
   bgJob?: BgJob;
+  /** Its running turn is the resumption after a turn cut at the time limit:
+   * if this one is cut too, the server does not resume it again. */
+  resumedAfterCut?: true;
   /** Its local CI was stopped so a production release could run: resume
    * it once the production tag moves past `fromSha`. */
   resumeAfterTag?: { fromSha: string | null; at: number; message: string };
@@ -147,7 +150,7 @@ export interface CcDesktopState {
   archiveHandedOver?: boolean;
   /** The permission mode the app really runs it in (read from its record). */
   permissionMode?: string;
-  /** Remove its worktree once the app confirms it archived (remove_worktree). */
+  /** Once the app confirms it archived, report whether its own worktree may be removed (remove_worktree); the server never removes it. */
   removeWorktree?: boolean;
   /** The issue number the session is about ("9311"), from its title or brief. */
   issue?: string;
