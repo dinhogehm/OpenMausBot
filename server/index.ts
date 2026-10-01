@@ -304,6 +304,7 @@ import {
   newMarker,
   lastAppRepo,
   liveWorktreeNames,
+  lastAppWorktreeFolder,
   readDesktopRecord,
   recordBlocked,
   recordsUsingFolder,
@@ -8592,7 +8593,8 @@ const desktopWork: DesktopWorkDeps = {
   },
   hookDecision: (sessionId) => lastHookDecision(DUAL_DECISIONS_LOG, sessionId),
   hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
-  liveWorktrees: () => liveWorktreeNames(),
+  liveWorktrees: () => liveWorktreeNames(undefined, true),
+  baseBranch: (session) => repoBaseBranch(session.repo),
   folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
   log: (line) => console.log(`[claude-desktop] ${line}`),
   onArchived: (session) => {
@@ -8611,6 +8613,16 @@ if (process.platform === "darwin") reviveScreenFailures(desktopWork);
 /** `git worktree remove` without --force: a worktree with uncommitted
  * changes is kept. Only a session's own .claude/worktrees folder. Returns
  * what happened, for the chip and the tool result. */
+/** The branch origin/HEAD points to ("main"), what a new app session must show. */
+function repoBaseBranch(repo: string): string {
+  try {
+    const ref = String(execFileSyncCc("git", ["-C", repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], { stdio: "pipe", env: { ...process.env, PATH: augmentedPath() } })).trim();
+    return ref.replace(/^origin\//, "") || "main";
+  } catch {
+    return "main";
+  }
+}
+
 /** Merged worktrees the session left inside its own folder (server/nested-worktrees.ts). */
 function cleanNestedWorktrees(session: CcSession): string {
   if (!session.cwd || !existsSync(session.cwd)) return "";
@@ -17820,6 +17832,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             const lastRepo = lastAppRepo();
             if (lastRepo && lastRepo !== input.repo) {
               return json(res, 409, { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` });
+            }
+            const lastWorktree = lastAppWorktreeFolder();
+            if (lastWorktree) {
+              return json(res, 409, { error: `não abri: a última pasta usada no app Claude é ${lastWorktree.folder}, a worktree de outra sessão${lastWorktree.title ? ` ("${lastWorktree.title}")` : ""}, e o app abriria a sessão nova lá (foi o que aconteceu em 6 de 7 creates em 01/10). Peça ao dono para abrir no app uma sessão na raiz de ${basename(input.repo)} (branch principal, worktree ligada) e fechá-la sem enviar; depois tente de novo. Se não der para esperar, use surface "cli" com cli_reason.` });
             }
             const appId = randomUUID();
             const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });

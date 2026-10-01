@@ -128,9 +128,14 @@ describe("backoff and the queue", () => {
 describe("opening a session", () => {
   it("create → record → finished turn → queued message goes in next", async () => {
     const h = harness();
+    const logs: string[] = [];
+    h.deps.log = (line) => logs.push(line);
     const session = h.appSession("a");
     session.desktop!.pending = { kind: "create", text: "[OMBA] brief", since: h.now, attempts: 0 };
     await h.tick();
+    // "sent" when the brief left the field; "adopted" only once the app's record shows up
+    expect(logs.some((line) => line.startsWith("create sent (brief left the field): session a"))).toBe(true);
+    expect(logs.some((line) => line.startsWith("create adopted"))).toBe(false);
     expect(session.desktop).toMatchObject({ sentAt: h.now });
     expect(session.desktop!.pending).toBeUndefined();
     expect(h.chips.at(-1)?.text).toBe("brief enviado no app Claude");
@@ -142,6 +147,7 @@ describe("opening a session", () => {
     followDesktopSessions(h.deps);
     expect(session.desktop).toMatchObject({ localId: LOCAL, cliSessionId: "cli-a", permissionMode: "bypassPermissions" });
     expect(session.worktree).toBe("helpdesk-f30521");
+    expect(logs.some((line) => line.startsWith(`create adopted: session a is ${LOCAL}`) && line.includes("(worktree helpdesk-f30521)"))).toBe(true);
     expect(h.chips.at(-1)?.text).toBe("aberta no app Claude");
 
     h.ledger.enqueue(session, "now open the PR");

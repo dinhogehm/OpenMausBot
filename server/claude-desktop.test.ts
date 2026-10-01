@@ -12,6 +12,8 @@ import {
   transcriptOpenQuestion,
   createDesktopSession,
   reusedWorktreeChip,
+  notRepoRoot,
+  lastAppWorktreeFolder,
   DESKTOP_BRIEF_NOTE,
   DESKTOP_MESSAGE_NOTE,
   findDesktopSession,
@@ -129,6 +131,27 @@ describe("createDesktopSession", () => {
     }
     // "main" is the repository's own branch: it goes on
     expect(reusedWorktreeChip([{ text: "nuria-platform main", x: 0, y: 800, w: 100, h: 16 }], ["fix-9298-stage-time-rule-572720"])).toBeNull();
+  });
+
+  it("types nothing unless the new session is in the repository's root on its base branch (01/10: 6 of 7 in another folder)", async () => {
+    // what the chips showed when the app reused the folder of an archived
+    // session: its detached HEAD, or its own fix/… branch without the folder's suffix
+    for (const chip of ["1bbd5c2a7", "fix/9326-guard-previous-commit", "HEAD", "develop"]) {
+      const app = fakeApp({ screens: [OPEN_SESSION, [{ text: "Local", x: 100 }, "nuria-platform", chip, "worktree"]] });
+      const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", baseBranch: "main" });
+      expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("not in the root of nuria-platform") });
+      expect(app.actions).toEqual(["activate", "menu new session"]);
+    }
+    expect(notRepoRoot([{ text: "nuria-platform main", x: 0, y: 800, w: 100, h: 16 }, { text: "worktree", x: 0, y: 830, w: 60, h: 16 }], "main")).toBeNull();
+    expect(notRepoRoot([{ text: "nuria-platform", x: 0, y: 800, w: 100, h: 16 }], "main")).toContain("does not show the base branch");
+  });
+
+  it("counts a create only when the brief left the field after Return", async () => {
+    const stuck = [{ text: "Local", x: 100 }, "nuria-platform", "main", "worktree", { text: "[OMBX] brief da #9319", x: 505 }];
+    const app = fakeApp({ screens: [OPEN_SESSION, REPO_SCREEN, stuck] });
+    expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "[OMBX] brief da #9319" }))
+      .toMatchObject({ ok: false, retry: true, reason: expect.stringContaining("stayed in the new session's field") });
+    expect(app.actions.at(-1)).toBe("key 36");
   });
 
   it("treats a new session opened in another folder as a miss to retry, not a failure", async () => {
@@ -557,5 +580,20 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     expect(recordsUsingFolder("/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", "local_b", root, true).map((record) => record.sessionId)).toEqual(["local_c"]);
     // the live sessions' worktrees (an archived one does not count)
     expect(liveWorktreeNames(root)).toEqual(["teste-modo-app-70ca2f"]);
+    expect(liveWorktreeNames(root, true)).toEqual(["teste-modo-app-70ca2f", "teste-modo-app-70ca2f"]);
+  });
+
+  it("knows when the app's last picked folder is another session's worktree (worktreeName null)", () => {
+    const records = join(root, "org", "acct");
+    mkdirSync(records, { recursive: true });
+    const write = (id: string, extra: object) => writeFileSync(join(records, `${id}.json`), JSON.stringify({ sessionId: id, cliSessionId: `c-${id}`, ...extra }));
+    write("local_a", { createdAt: 1, cwd: "/Users/o/Projetos/nuria-platform" });
+    expect(lastAppWorktreeFolder(root)).toBeNull();
+    // the app made its own worktree for this one: New Session starts from the root
+    write("local_b", { createdAt: 2, cwd: "/Users/o/Projetos/nuria-platform/.claude/worktrees/x-1a2b3c", worktreeName: "x-1a2b3c" });
+    expect(lastAppWorktreeFolder(root)).toBeNull();
+    // 01/10: the newest session opened in the folder of the archived #9298 one
+    write("local_c", { createdAt: 3, cwd: "/Users/o/Projetos/nuria-platform/.claude/worktrees/fix-9298-stage-time-rule-572720", worktreeName: null, title: "9319 F4-1 contrato" });
+    expect(lastAppWorktreeFolder(root)).toEqual({ folder: "/Users/o/Projetos/nuria-platform/.claude/worktrees/fix-9298-stage-time-rule-572720", title: "9319 F4-1 contrato" });
   });
 });

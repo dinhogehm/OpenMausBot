@@ -233,12 +233,30 @@ export function reusedWorktreeChip(lines: OcrLine[], liveNames: readonly string[
   return null;
 }
 
+/** Why the new session's chips do not show the repository's own root
+ * (its base branch): a branch of other work ("fix/9326-…", "claude/…"), a
+ * detached HEAD (a bare sha, "HEAD") or no base branch at all. On 01/10, 6
+ * of 7 creates opened in the folder of an archived session, on a detached
+ * HEAD or its "fix/…" branch (R8-dispatch D1). null when it is the root. */
+export function notRepoRoot(lines: OcrLine[], baseBranch = "main"): string | null {
+  const words = lines.flatMap((line) => line.text.split(/\s+/)).map((raw) => raw.replace(/^[([•·"']+|[)\],;:"'•·…]+$/g, "")).filter(Boolean);
+  const base = baseBranch.toLowerCase();
+  const other = words.find((word) => {
+    const lower = word.toLowerCase();
+    if (lower === base) return false;
+    return /^[\w.-]+\/[\w./-]+$/.test(lower) || /^[0-9a-f]{7,40}$/.test(lower) || lower === "head" || lower.startsWith("detached");
+  });
+  if (other) return `it shows ${other}, not ${baseBranch}`;
+  if (!words.some((word) => word.toLowerCase() === base)) return `it does not show the base branch ${baseBranch}`;
+  return null;
+}
+
 /**
  * New session in the Claude app for `repoName`, brief pasted and sent.
  * The app opens a new session in the last folder used; if that is not the
  * repository (or the worktree option is not there), stop and retry later.
  */
-export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[] }): Promise<DesktopStep> {
+export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string }): Promise<DesktopStep> {
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.activateClaude());
     await driver.sleep(700);
@@ -250,8 +268,9 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     // on in it (New Session again would leave the same screen, read as a miss).
     const open = emptyNewSession(before, size, input.repoName);
     const reused = (lines: OcrLine[]) => {
-      const branch = reusedWorktreeChip(lines.filter((line) => line.y > size.h * 0.55), input.liveWorktrees);
-      return branch ? { ok: false as const, reason: `the new session would open on another session's worktree (${branch}); nothing was typed. Pick the repository's own folder in the app (main), or archive that session`, retry: true, miss: true, touched: true, seen: branch } : null;
+      const bottom = lines.filter((line) => line.y > size.h * 0.55);
+      const why = reusedWorktreeChip(bottom, input.liveWorktrees) ? `it shows ${reusedWorktreeChip(bottom, input.liveWorktrees)}, another session's worktree` : notRepoRoot(bottom, input.baseBranch);
+      return why ? { ok: false as const, reason: `the new session is not in the root of ${input.repoName} (${why}); nothing was typed. In the Claude app, open one session in ${input.repoName} itself (branch ${input.baseBranch ?? "main"}, worktree on) and close it without sending, then this create runs`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } : null;
     };
     if (open) {
       const refusal = reused(before);
@@ -260,7 +279,7 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       if (stop) return stop;
       await act(screen, () => driver.click(open.x + 20, open.y + open.h / 2));
       await driver.sleep(300);
-      return typeBrief(screen, input.text);
+      return typeBrief(screen, input.text, size);
     }
     await act(screen, () => driver.menuNewSession());
     await driver.sleep(2_500);
@@ -281,12 +300,12 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     const refusal = reused(lines);
     if (refusal) return refusal;
-    return typeBrief(screen, input.text);
+    return typeBrief(screen, input.text, size);
   });
 }
 
 /** Paste the brief into the new session's field, type the note, send. */
-async function typeBrief(screen: Screen, text: string): Promise<DesktopStep> {
+async function typeBrief(screen: Screen, text: string, size: { h: number }): Promise<DesktopStep> {
   const { driver } = screen;
   let stop = await guard(screen, "paste");
   if (stop) return stop;
@@ -301,6 +320,14 @@ async function typeBrief(screen: Screen, text: string): Promise<DesktopStep> {
   stop = await guard(screen, "send");
   if (stop) return stop;
   await act(screen, () => driver.key(RETURN));
+  // Sent only when the brief left the field: the new-session screen (its
+  // field with the brief, the worktree option) gone. On 01/10 one "create
+  // ok" lost its brief and nothing said so for 5 minutes (R8-dispatch D5).
+  await driver.sleep(1_500);
+  const after = mainArea(await driver.ocr()).filter((line) => line.y > size.h * 0.55);
+  if (showsPrefix(after, textPrefix(text)) && findLine(after, /worktree/i)) {
+    return { ok: false, reason: "the brief stayed in the new session's field after Return", retry: true, touched: true, seen: seenText(after.slice(-8)) };
+  }
   return { ok: true };
 }
 
@@ -689,12 +716,28 @@ export function lastAppRepo(dir = DESKTOP_SESSIONS_DIR): string | undefined {
   return newest ? repoOf(newest) : undefined;
 }
 
-/** Worktree names of the app's sessions that are not archived. */
-export function liveWorktreeNames(dir = DESKTOP_SESSIONS_DIR): string[] {
+/** The app's last picked folder when it is another session's worktree: the
+ * newest work session sits in a worktree the app did not make for it
+ * (`worktreeName` null), so New Session would open there again (01/10: 6 of
+ * 7 creates). null when the last folder is a repository root. */
+export function lastAppWorktreeFolder(dir = DESKTOP_SESSIONS_DIR): { folder: string; title?: string } | null {
+  let newest: DesktopRecord | null = null;
+  for (const file of recordFiles(dir)) {
+    const record = readRecord(file);
+    if (record && !notPickedFolder(record) && (record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
+  }
+  const folder = newest?.cwd;
+  if (!newest || !folder || newest.worktreeName || !/\/\.(?:claude\/)?worktrees\//.test(folder)) return null;
+  return { folder, ...(newest.title ? { title: newest.title } : {}) };
+}
+
+/** Worktree names of the app's sessions (archived ones too with `includeArchived`:
+ * the app reopens the folder of an archived session as well). */
+export function liveWorktreeNames(dir = DESKTOP_SESSIONS_DIR, includeArchived = false): string[] {
   const names: string[] = [];
   for (const file of recordFiles(dir)) {
     const record = readRecord(file);
-    if (!record || record.isArchived) continue;
+    if (!record || (record.isArchived && !includeArchived)) continue;
     const name = record.worktreeName ?? (record.worktreePath ?? record.cwd ?? "").split("/.claude/worktrees/")[1];
     if (name) names.push(name);
   }

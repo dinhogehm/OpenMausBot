@@ -85,6 +85,8 @@ export interface DesktopWorkDeps {
   resolveOwnerPending?: (key: string) => void;
   /** Worktree names of the app's live sessions: a new session must not open on one. */
   liveWorktrees?: () => string[];
+  /** The repository's base branch ("main"): a new session must open on it. */
+  baseBranch?: (session: CcSession) => string;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
   hookDecision?: (sessionId: string) => string | null;
   /** The command the review hook last denied or asked about for a session id. */
@@ -237,6 +239,7 @@ const actionLabel = (kind: CcDesktopPending["kind"]) =>
 /** The app's record of a session we opened: adopt its ids, mode and folder. */
 function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopRecord): boolean {
   const desktop = session.desktop!;
+  deps.log?.(`create adopted: session ${session.id} is ${record.sessionId} in ${record.cwd ?? "?"}${record.worktreeName ? ` (worktree ${record.worktreeName})` : " (no worktree of its own)"}`);
   desktop.localId = record.sessionId;
   desktop.cliSessionId = record.cliSessionId;
   if (record.cwd) session.cwd = record.cwd;
@@ -535,7 +538,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     if (pending.kind === "create") {
       pending.triedAt = deps.now();
       deps.ledger.save();
-      step = await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [] });
+      step = await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main" });
     } else {
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;
@@ -547,7 +550,8 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
           : await (steps.send ?? sendToDesktopSession)(driver, { ...target, text: pending.text });
     }
     const at = deps.now();
-    deps.log?.(`${pending.kind} ${step.ok ? "ok" : step.retry ? "stopped" : "gave up"}: session ${next.id}${step.ok ? "" : ` — ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}${step.touched ? " (touched the screen)" : ""}`}`);
+    // a create is "sent" here (the brief left the field); "adopted" comes when the app's record shows up
+    deps.log?.(`${pending.kind} ${step.ok ? (pending.kind === "create" ? "sent (brief left the field)" : "ok") : step.retry ? "stopped" : "gave up"}: session ${next.id}${step.ok ? "" : ` — ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}${step.touched ? " (touched the screen)" : ""}`}`);
     if (step.ok) {
       if (pending.kind === "send" || pending.kind === "rename") clearDraft(deps, next);
       if (pending.kind === "archive") {
