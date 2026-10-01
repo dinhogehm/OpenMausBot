@@ -1308,7 +1308,7 @@ export function ChatView({ bot: profile }: { bot: Bot }) {
             </span>
           )}
           {bot.busy && <WorkingDots className="text-ink-secondary" />}
-          {!bot.busy && bot.waitingForTeammates && <span className="truncate text-[12px] text-ink-secondary" role="status">Teammates working</span>}
+          {!bot.busy && bot.waitingForTeammates && <span className="truncate text-[12px] text-ink-secondary" role="status">{t("chat.teammatesWorking")}</span>}
         </div>
         <div
           data-chathead-controls

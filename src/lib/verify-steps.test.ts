@@ -256,6 +256,18 @@ describe("runSummary", () => {
     expect(runSummary(runSteps([claude(PUSH, true), claude("npm publish", false)])).label).toBe("2 steps · 1 failed");
   });
 
+  it("says one failure and one verified step in the singular in pt-BR", async () => {
+    const { setLocale } = await import("@/lib/i18n");
+    setLocale("pt-br");
+    try {
+      expect(runSummary(runSteps([claude(PUSH, true), claude("npm publish", false)])).label).toBe("2 passos · 1 falhou");
+      expect(runSummary(runSteps([claude(DOCTOR, true)])).label).toBe("1 passo · 1 verificado");
+      expect(runSummary(runSteps([claude("npm publish", false), claude("npm publish --tag x", false)])).label).toContain("2 falharam");
+    } finally {
+      setLocale("en");
+    }
+  });
+
   it("counts a settled dry run as neither passed nor failed", () => {
     const steps = runSteps([claude(`${DOCTOR} --dry-run`, true), claude(`${SEND} --dry-run`, false), claude(`${PRESS} --dry-run`)]);
     expect(runSummary(steps)).toEqual({

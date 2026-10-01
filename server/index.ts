@@ -18283,7 +18283,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
                 const recipient = store.bot(target.botId)!;
                 store.appendMessage(address.threadId, { role: "bot", kind: "activity",
                   from: { botId: internalSender.id, name: internalSender.name, color: internalSender.color },
-                  tool: { name: "Sent to " + recipient.name + (destination && destination.id !== source?.id ? " · " + destination.name : ""), ok: true },
+                  tool: { name: "Enviado para " + recipient.name + (destination && destination.id !== source?.id ? " · " + destination.name : ""), ok: true },
                   ...(destination ? { comm: { groupId: destination.id, threadId: node.threadId, withBotId: recipient.id, withName: recipient.name, withColor: recipient.color } }
                     : { threadRef: { botId: recipient.id, threadId: node.threadId, title: store.taskByThread(recipient.id, node.threadId)!.title } }),
                 });

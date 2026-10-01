@@ -306,8 +306,8 @@ export function runSummary(steps: RunStep[]): {
   }
   const label = [
     counts.total === 1 ? t("chat.verify.stepsOne") : t("chat.verify.stepsMany", { count: counts.total }),
-    counts.verified > 0 && t("chat.verify.verifiedCount", { count: counts.verified }),
-    counts.failed > 0 && t("chat.verify.failed", { count: counts.failed }),
+    counts.verified === 1 ? t("chat.verify.verifiedOne") : counts.verified > 1 && t("chat.verify.verifiedCount", { count: counts.verified }),
+    counts.failed === 1 ? t("chat.verify.failedOne") : counts.failed > 1 && t("chat.verify.failed", { count: counts.failed }),
     counts.running > 0 && t("chat.verify.running", { count: counts.running }),
     counts.dryRuns === 1 ? t("chat.verify.dryRunOne") : counts.dryRuns > 1 && t("chat.verify.dryRunMany", { count: counts.dryRuns }),
   ].filter(Boolean).join(" · ");

@@ -89,7 +89,7 @@ it("coordinates a lead and its specialist from ordinary chat, returns to Clive, 
   expect((await f.api("/api/bots")).groups).toEqual([]);
   expect(await f.messages(f.lead.activeTaskId)).toEqual(originalLead);
   expect(await f.messages(f.specialist.activeTaskId)).toEqual(originalSpecialist);
-  const receipt = (await f.messages(f.chief.activeTaskId)).find((message: any) => message.tool?.name === "Sent to Engineering lead");
+  const receipt = (await f.messages(f.chief.activeTaskId)).find((message: any) => message.tool?.name === "Enviado para Engineering lead");
   expect(receipt.threadRef).toMatchObject({ botId: f.lead.id, threadId: f.nodes().find((node: any) => node.botId === f.lead.id).threadId });
   expect(receipt.threadRef.threadId).not.toBe(f.lead.activeTaskId);
   expect((await f.messages(f.chief.activeTaskId)).some((message: any) => message.text === "The requested CSV export is implemented and verified")).toBe(true);
@@ -494,7 +494,7 @@ it("deduplicates a repeated direct request without creating extra recipient task
   expect(f.nodes().filter((node: any) => node.botId === f.lead.id)).toHaveLength(1);
   const lead = (await f.api("/api/bots")).bots.find((bot: any) => bot.id === f.lead.id);
   expect(lead.tasks).toHaveLength(2);
-  expect((await f.messages(f.chief.activeTaskId)).filter((message: any) => message.tool?.name === "Sent to Engineering lead")).toHaveLength(1);
+  expect((await f.messages(f.chief.activeTaskId)).filter((message: any) => message.tool?.name === "Enviado para Engineering lead")).toHaveLength(1);
 }), 45_000);
 
 it("dispatches to a spare recipient thread without waiting for unrelated work", () => fixture(async f => {

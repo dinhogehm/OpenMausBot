@@ -139,7 +139,7 @@ describe("independent bot tasks through the isolated control surface", () => {
     writeFileSync(modelFile(models[0], "gate"), "finish");
     await expect.poll(async () => {
       const current = (await api("GET", "/api/bots")).body.bots.find((bot: any) => bot.id === chief.id);
-      return current.messages.filter((message: any) => message.tool?.name === "Sent to Mailbox Peer").length;
+      return current.messages.filter((message: any) => message.tool?.name === "Enviado para Mailbox Peer").length;
     }).toBe(1);
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     const peerNow = (await api("GET", "/api/bots")).body.bots.find((bot: any) => bot.id === peer.id);

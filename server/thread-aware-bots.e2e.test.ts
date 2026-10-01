@@ -385,7 +385,7 @@ describe("coordinate_bots on a teammate", () => {
       }
       const chips = (await messages(pm.threadId)).filter((message) => message.threadRef);
       expect(chips.map((chip) => [chip.tool.name, chip.threadRef.botId, chip.threadRef.threadId])).toEqual(
-        opened.map((thread) => ["Sent to Quinn", qa.id, thread.threadId]),
+        opened.map((thread) => ["Enviado para Quinn", qa.id, thread.threadId]),
       );
       // Ending the source admits only as many independent threads as fit.
       // Hold every admitted turn so both parallelism and queueing are observable.
