@@ -643,7 +643,8 @@ describe("the app's real screen (OCR fixture)", () => {
 
   it("keeps the person's draft: cursor to the end, one probe key, the draft stays, the key is taken back and nothing is sent", async () => {
     const probed = swap(R7_SESSION, { [R7_FIELD]: `${R7_FIELD}.` });
-    const app = fakeApp({ screens: [R7_SESSION, probed] });
+    // reads: opened, the field again before the key, then after it (the last screen stays)
+    const app = fakeApp({ screens: [R7_SESSION, R7_SESSION, probed] });
     expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim, reescreva o corpo", title: "Automação inatividade não dispara", repoName: "nuria-platform" }))
       .toMatchObject({ ok: false, retry: true, draft: R7_FIELD, reason: expect.stringContaining("rascunho") });
     expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 567,852.5", "key 125+cmd", "type .", "key 51"]);
@@ -653,7 +654,7 @@ describe("the app's real screen (OCR fixture)", () => {
     // the cursor did not reach the end and the "." split a word ("po.de…"):
     // the old check (its first 24 letters gone, so "a suggestion") would have pasted over the draft
     for (const after of [swap(R7_SESSION, { [R7_FIELD]: "po.de reescrever o corpo da PR com a seção de riscos" }), [], R7_SESSION.filter((line) => line.y < 700)]) {
-      const app = fakeApp({ screens: [R7_SESSION, after] });
+      const app = fakeApp({ screens: [R7_SESSION, R7_SESSION, after] });
       expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim", title: "Automação inatividade não dispara", repoName: "nuria-platform" }))
         .toMatchObject({ ok: false, draft: R7_FIELD });
       expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
@@ -664,7 +665,7 @@ describe("the app's real screen (OCR fixture)", () => {
   it("owns up to a \".\" left in the draft when it must stop before taking it back (INSP-D A1)", async () => {
     // fronts: step start, open, click field, cursor, probe, then another app at "undo probe"
     const probed = swap(R7_SESSION, { [R7_FIELD]: `${R7_FIELD}.` });
-    const app = fakeApp({ screens: [R7_SESSION, probed], fronts: [CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, TERMINAL] });
+    const app = fakeApp({ screens: [R7_SESSION, R7_SESSION, probed], fronts: [CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, TERMINAL] });
     const step = await sendToDesktopSession(app.driver, { localId, text: "Pode sim", title: "Automação inatividade não dispara", repoName: "nuria-platform" });
     expect(step).toMatchObject({ ok: false, retry: true, draft: R7_FIELD, leftProbe: true, reason: expect.stringContaining('deixei um "." no fim dele') });
     expect(app.actions).not.toContain("key 51");
@@ -674,13 +675,34 @@ describe("the app's real screen (OCR fixture)", () => {
   it("sends over the app's suggested reply once it gave way to the probe key (36300f35: \"qual o status do gate da #9330?\")", async () => {
     const title = "Guarda de release sem commit anterior";
     const field = "qual o status do gate da #9330?";
-    const app = fakeApp({ screens: [S36300F35, swap(S36300F35, { [field]: "." }), swap(S36300F35, { [field]: "Siga com o gate da #9330 agora" }), swap(S36300F35, { [field]: "Responder…" })] });
+    // reads: opened, again before the key, two after it, the typed message, after Return
+    const app = fakeApp({ screens: [S36300F35, S36300F35, swap(S36300F35, { [field]: "." }), swap(S36300F35, { [field]: "." }), swap(S36300F35, { [field]: "Siga com o gate da #9330 agora" }), swap(S36300F35, { [field]: "Responder…" })] });
     expect(await sendToDesktopSession(app.driver, { localId, text: "Siga com o gate da #9330 agora", title, repoName: "nuria-platform" }))
       .toEqual({ ok: true, suggestion: field });
     expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 567,852.5", "key 125+cmd", "type .", "paste(all) Siga com o gate da #9330 agora", "key 36"]);
     // Vision may not read a lone "." at all: an empty field, the rest of the composer unchanged, is the same proof
-    const unread = fakeApp({ screens: [S36300F35, swap(S36300F35, { [field]: null }), swap(S36300F35, { [field]: "Siga" }), swap(S36300F35, { [field]: "Responder…" })] });
+    const unread = fakeApp({ screens: [S36300F35, S36300F35, swap(S36300F35, { [field]: null }), swap(S36300F35, { [field]: null }), swap(S36300F35, { [field]: "Siga" }), swap(S36300F35, { [field]: "Responder…" })] });
     expect(await sendToDesktopSession(unread.driver, { localId, text: "Siga", title, repoName: "nuria-platform" })).toEqual({ ok: true, suggestion: field });
+    // the probe read alone as "·" is the same proof
+    const dot = fakeApp({ screens: [S36300F35, S36300F35, swap(S36300F35, { [field]: "·" }), swap(S36300F35, { [field]: "·" }), swap(S36300F35, { [field]: "Siga" }), swap(S36300F35, { [field]: "Responder…" })] });
+    expect(await sendToDesktopSession(dot.driver, { localId, text: "Siga", title, repoName: "nuria-platform" })).toEqual({ ok: true, suggestion: field });
+  });
+
+  it("takes an empty field for proof only when two readings after the key agree, and the field read the same twice before it (INSP-D B2)", async () => {
+    const title = "Automação inatividade não dispara";
+    const without = swap(R7_SESSION, { [R7_FIELD]: null });
+    const withDot = swap(R7_SESSION, { [R7_FIELD]: `${R7_FIELD}.` });
+    // one reading skipped the draft's line, the next shows it: a draft, never pasted over
+    for (const after of [[without, withDot], [withDot, without]]) {
+      const app = fakeApp({ screens: [R7_SESSION, R7_SESSION, ...after, withDot] });
+      expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim", title, repoName: "nuria-platform" })).toMatchObject({ ok: false, draft: R7_FIELD });
+      expect(app.actions.at(-1)).toBe("key 51");
+      expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+    }
+    // the field read differently before the key: nothing is typed at all
+    const unsteady = fakeApp({ screens: [R7_SESSION, swap(R7_SESSION, { [R7_FIELD]: "pode reescrever o corpo da PR" })] });
+    expect(await sendToDesktopSession(unsteady.driver, { localId, text: "Pode sim", title, repoName: "nuria-platform" })).toMatchObject({ ok: false, miss: true, reason: expect.stringContaining("read differently twice") });
+    expect(unsteady.actions.some((action) => action.startsWith("type") || action.startsWith("key") || action.startsWith("paste"))).toBe(false);
   });
 
   it("sends into the session whose header carries a status dot (8378b26a)", async () => {
@@ -747,7 +769,7 @@ describe("the session's own menu, in its header", () => {
   const composerOf = (text: string | null) => swap(R7_SESSION.filter((line) => line.y > 700), { [R7_FIELD]: text });
 
   it("does not rename while the message field holds a proven draft: a mistaken paste would land on it", async () => {
-    const app = fakeApp({ screens: [[header, ...composerOf(R7_FIELD)], [header, ...composerOf(`${R7_FIELD}.`)]] });
+    const app = fakeApp({ screens: [[header, ...composerOf(R7_FIELD)], [header, ...composerOf(R7_FIELD)], [header, ...composerOf(`${R7_FIELD}.`)]] });
     expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket", repoName: "nuria-platform" }))
       .toMatchObject({ ok: false, retry: true, draft: R7_FIELD });
     // the probe key was taken back; no menu, no paste, no Return
@@ -759,7 +781,9 @@ describe("the session's own menu, in its header", () => {
     const app = fakeApp({
       screens: [
         [header, ...suggestion], // opened
-        [header, ...composerOf(".")], // the suggestion gave way to the probe
+        [header, ...suggestion], // the field read again before the key
+        [header, ...composerOf(".")], // the suggestion gave way to the probe…
+        [header, ...composerOf(".")], // …in both readings
         [header, ...suggestion], // after taking the probe back the app shows its suggestion again
         [header, { text: "Renomear", x: 520, y: 110 }, ...suggestion], // the header's menu
         [field, ...suggestion], // the rename field
@@ -772,6 +796,22 @@ describe("the session's own menu, in its header", () => {
       `open claude://code/continue?session=${localId}`, "click 567,852.5", "key 125+cmd", "type .", "key 51",
       "click 520,65", "click 620,118", "paste(all) #9305 Fila errada ao criar ticket", "key 36",
     ]);
+  });
+
+  it("checks the header before touching the field: another session on screen gets no click and no key (INSP-D B3)", async () => {
+    // a stale link left another session open, with the app's suggestion in its field
+    const other = { text: "• Automação inatividade não dispara v (nuria-platform", x: 502, y: 23, w: 466, h: 21 };
+    const app = fakeApp({ screens: [[other, ...composerOf(R7_FIELD)]] });
+    expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket", repoName: "nuria-platform" }))
+      .toMatchObject({ ok: false, miss: true, reason: expect.stringContaining("is not the one on screen"), seen: expect.stringContaining("Automação inatividade") });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`]);
+  });
+
+  it("counts text that showed up after the menu opened as a miss, so three of them reach the person (INSP-D B5)", async () => {
+    const app = fakeApp({ screens: [[header, composer], [header, { text: "Renomear", x: 520, y: 110 }, composer], [field, ...composerOf("texto que apareceu depois")]] });
+    expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 x", repoName: "nuria-platform" }))
+      .toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("was not there before the menu opened") });
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
   });
 
   it("sees a rename menu still open by the same rule as its items (\"Renomear sessão\"), and types nothing (INSP-D A5)", async () => {
