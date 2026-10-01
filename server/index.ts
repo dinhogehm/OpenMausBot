@@ -336,7 +336,7 @@ import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, githubSlug, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
-import { checkArchivedOutside, notAPullRequest } from "./archived-outside.ts";
+import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
@@ -9252,24 +9252,7 @@ async function watchArchivedOutside(): Promise<void> {
       now: () => Date.now(),
       save: () => ccLedger.save(),
       slugOf: async (session) => githubSlug((await execCc("git", ["-C", session.repo, "remote", "get-url", "origin"])).trim()),
-      prState: async (number, slug) => {
-        try {
-          const view = JSON.parse(await execCc("gh", ["pr", "view", String(number), "--repo", slug, "--json", "state"])) as { state?: string };
-          return view.state === "OPEN" || view.state === "CLOSED" || view.state === "MERGED" ? view.state : "CLOSED";
-        } catch (error) {
-          if (notAPullRequest(error)) return "NOT_PR";
-          throw error;
-        }
-      },
-      openPrs: async (by, slug) => {
-        const filter = "issue" in by ? ["--search", by.issue] : ["--head", by.branch];
-        const list = JSON.parse(await execCc("gh", ["pr", "list", "--repo", slug, "--state", "open", ...filter, "--json", "number", "--limit", "10"])) as Array<{ number?: number }>;
-        return list.map((pr) => pr.number).filter((number): number is number => typeof number === "number");
-      },
-      branchOf: async (cwd) => {
-        const branch = (await execCc("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"])).trim();
-        return branch || null;
-      },
+      ...githubLookups(execCc),
       chip: (session, text, ok) => {
         const threadId = where(session);
         if (threadId) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Claude Code "${session.title.slice(0, 60)}": ${text}`, 240), ok } });

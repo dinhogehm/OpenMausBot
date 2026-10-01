@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { ARCHIVED_OUTSIDE_MAX_TRIES, ARCHIVED_OUTSIDE_PER_PASS, ARCHIVED_OUTSIDE_RETRY_MS, checkArchivedOutside, notAPullRequest, type ArchivedOutsideDeps, type OwnerPendingItem, type PrState } from "./archived-outside.ts";
+import { execFile } from "node:child_process";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ARCHIVED_OUTSIDE_MAX_TRIES, ARCHIVED_OUTSIDE_PER_PASS, ARCHIVED_OUTSIDE_RETRY_MS, checkArchivedOutside, githubLookups, notAPullRequest, prOfIssue, type ArchivedOutsideDeps, type FoundPr, type OwnerPendingItem, type PrState } from "./archived-outside.ts";
 import type { CcSession } from "./cc-sessions.ts";
 
 const SLUG = "owner/platform";
@@ -33,7 +37,9 @@ const ffd6ee1a = (): CcSession => ({
 }) as CcSession;
 
 /** gh as it answers: `gh pr view 9319` fails with "Could not resolve to a PullRequest". */
-function fakeGithub(over: Partial<{ down: (session: string) => boolean; byIssue: Record<string, number[]>; byBranch: Record<string, number[]>; states: Record<number, PrState>; branches: Record<string, string> }> = {}) {
+const PR_9328: FoundPr = { number: 9328, title: "Contrato do reconciliador (#9319)", headRefName: "fix/9319-reconciler-contract" };
+
+function fakeGithub(over: Partial<{ down: (session: string) => boolean; byIssue: Record<string, FoundPr[]>; byBranch: Record<string, number[]>; states: Record<number, PrState>; branches: Record<string, string> }> = {}) {
   let now = 1790861000000;
   const calls: string[] = [];
   const chips: Array<{ id: string; text: string; ok: boolean }> = [];
@@ -55,7 +61,7 @@ function fakeGithub(over: Partial<{ down: (session: string) => boolean; byIssue:
     openPrs: async (by) => {
       calls.push("issue" in by ? `list issue ${by.issue}` : `list head ${by.branch}`);
       if (down()) throw new Error("gh: connect: network is unreachable");
-      return "issue" in by ? (over.byIssue ?? { 9319: [9328] })[by.issue] ?? [] : (over.byBranch ?? {})[by.branch] ?? [];
+      return "issue" in by ? (over.byIssue ?? { 9319: [PR_9328] })[by.issue] ?? [] : ((over.byBranch ?? {})[by.branch] ?? []).map((number) => ({ number }));
     },
     branchOf: async (cwd) => (over.branches ?? {})[cwd] ?? null,
     chip: (session, text, ok) => { chips.push({ id: session.id, text, ok }); },
@@ -133,5 +139,103 @@ describe("a session archived in the app by someone (INSP-F F1)", () => {
     expect(session.archivedOutsideCheckedAt).toBeDefined();
     expect(gh.chips).toEqual([]);
     expect(gh.reports).toEqual([]);
+  });
+});
+
+/** The three real cases of 01/10 the r2 inspection ran `gh pr list --search`
+ * on (redacted titles and ids): the search finds PRs that only cite the
+ * issue, and PRs another session still alive carries on. */
+describe("PRs the issue search finds that are not left without a session (INSP-F r2 #2)", () => {
+  // #9332 is the PR of #9052: its title and branch name 9052; its body cites 9307
+  const PR_9332: FoundPr = { number: 9332, title: "Exportação do relatório (#9052)", headRefName: "feat/9052-report-export" };
+  const PR_9330: FoundPr = { number: 9330, title: "Gate do reconciliador (#9326)", headRefName: "fix/9326-reconciler-gate" };
+  const archivedFor = (id: string, issue: string): CcSession => ({ ...ffd6ee1a(), id, title: `${issue} sessão anterior`, desktop: { ...ffd6ee1a().desktop!, issue }, lastReport: "Parei aqui." });
+  const live = (id: string, issue: string, extra: Partial<CcSession> = {}): CcSession => ({ ...ffd6ee1a(), id, title: `${issue} sessão viva`, status: "idle", desktop: { ...ffd6ee1a().desktop!, issue }, lastReport: "", archivedOutsideAt: undefined, archivedAt: undefined, ...extra }) as CcSession;
+
+  it("issue 9307 → #9332 (a PR of #9052 that only cites 9307): no warning", async () => {
+    const gh = fakeGithub({ byIssue: { 9307: [PR_9332] } });
+    const session = archivedFor("b7df2f12-0000-4000-8000-000000000000", "9307");
+    await checkArchivedOutside([session], gh.deps);
+    expect(session.archivedOutsideCheckedAt).toBeDefined();
+    expect(gh.chips).toEqual([]);
+    expect(gh.reports).toEqual([]);
+    expect(gh.pending).toEqual([]);
+  });
+
+  it("issue 9052 → #9332, carried by the live session that reports it: \"segue com a sessão\", no warning", async () => {
+    const gh = fakeGithub({ byIssue: { 9052: [PR_9332] } });
+    const archived = archivedFor("93001904-0000-4000-8000-000000000000", "9052");
+    const carrier = live("35787b0f-0000-4000-8000-000000000000", "9099", { lastReport: "PR #9332 com o gate verde, esperando o merge." });
+    await checkArchivedOutside([archived, carrier], gh.deps);
+    expect(gh.chips).toEqual([{ id: archived.id, text: 'a PR #9332 segue com a sessão "9099 sessão viva" (35787b0f)', ok: true }]);
+    expect(gh.chips.some((chip) => chip.text.includes("ficou sem sessão"))).toBe(false);
+    expect(gh.reports).toEqual([]);
+    expect(gh.pending).toEqual([]);
+  });
+
+  it("issue 9326 → #9330, with a live session on the same issue: \"segue com a sessão\", no warning", async () => {
+    const gh = fakeGithub({ byIssue: { 9326: [PR_9330] } });
+    const archived = archivedFor("36300f35-0000-4000-8000-000000000000", "9326");
+    const carrier = live("29da943f-0000-4000-8000-000000000000", "9326", { title: "9326 gate da PR 9330", status: "running" });
+    await checkArchivedOutside([archived, carrier], gh.deps);
+    expect(gh.chips.map((chip) => chip.text)).toEqual(['a PR #9330 segue com a sessão "9326 gate da PR 9330" (29da943f)']);
+    expect(gh.reports).toEqual([]);
+    expect(gh.pending).toEqual([]);
+    // the same PR with that session archived too: left without a session
+    const alone = fakeGithub({ byIssue: { 9326: [PR_9330] } });
+    const again = archivedFor("36300f35-0000-4000-8000-000000000001", "9326");
+    await checkArchivedOutside([again, { ...carrier, status: "archived" }], alone.deps);
+    expect(alone.chips.map((chip) => chip.text)).toEqual(["PR #9330 ficou sem sessão: https://github.com/owner/platform/pull/9330"]);
+  });
+
+  it("keeps a searched PR only when its title or branch names the issue", () => {
+    expect(prOfIssue(PR_9332, "9307")).toBe(false);
+    expect(prOfIssue(PR_9332, "9052")).toBe(true);
+    expect(prOfIssue({ number: 9400, title: "Ajuste", headRefName: "fix/9052-x" }, "9052")).toBe(true);
+    expect(prOfIssue({ number: 9400, title: "Corrige #90521" }, "9052")).toBe(false);
+    expect(prOfIssue({ number: 9052, title: "#9052" }, "9052")).toBe(false);
+  });
+
+  it("words a failed session the person archived as such, never as \"sem pedido do OMB\" (INSP-F r2 #4)", async () => {
+    const gh = fakeGithub();
+    const session = { ...ffd6ee1a(), archivedAfterFailure: true };
+    await checkArchivedOutside([session], gh.deps);
+    expect(gh.chips.map((chip) => chip.text)).toEqual(["PR #9328 ficou sem sessão: https://github.com/owner/platform/pull/9328"]);
+    expect(gh.reports[0]!.text).toContain("foi arquivada no app Claude depois de falhar");
+    expect(gh.reports[0]!.text).not.toContain("sem pedido do OMB");
+    expect(gh.pending[0]!.item.title).toContain("falhou e foi arquivada no app");
+  });
+});
+
+describe("the gh adapter over a real execFile (INSP-F r2 #5)", () => {
+  it("reads gh's real \"Could not resolve to a PullRequest\" (exit 1, stderr) as not a PR, and other failures as unknown", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-fake-gh-"));
+    try {
+      const gh = join(dir, "gh");
+      // what gh 2.x prints for `gh pr view <issue number>`, and a network failure
+      writeFileSync(gh, `#!/bin/sh
+if [ "$2" = "list" ]; then echo '[{"number":9328,"title":"Contrato (#9319)","headRefName":"fix/9319-x"},{"bogus":true}]'; exit 0; fi
+case "$3" in
+  9319) echo "GraphQL: Could not resolve to a PullRequest with the number of 9319. (repository.pullRequest)" >&2; exit 1 ;;
+  9328) echo '{"state":"OPEN"}' ;;
+  9331) echo '{"state":"DRAFT_UNKNOWN"}' ;;
+  *) echo "error connecting to api.github.com" >&2; exit 1 ;;
+esac
+`);
+      chmodSync(gh, 0o755);
+      // the server's execCc: execFile, reject with execFile's own error
+      const exec = (file: string, args: string[]) => new Promise<string>((resolve, reject) => {
+        execFile(file === "gh" ? gh : file, args, { timeout: 30_000 }, (error, stdout) => (error ? reject(error) : resolve(String(stdout))));
+      });
+      const lookups = githubLookups(exec);
+      expect(await lookups.prState(9319, SLUG)).toBe("NOT_PR");
+      expect(await lookups.prState(9328, SLUG)).toBe("OPEN");
+      await expect(lookups.prState(7777, SLUG)).rejects.toThrow(/error connecting/);
+      // an answer it does not know is not taken for "closed": tried again
+      await expect(lookups.prState(9331, SLUG)).rejects.toThrow(/unexpected state/);
+      expect(await lookups.openPrs({ issue: "9319" }, SLUG)).toEqual([{ number: 9328, title: "Contrato (#9319)", headRefName: "fix/9319-x" }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

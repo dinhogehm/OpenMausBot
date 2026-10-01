@@ -93,6 +93,9 @@ export interface CcSession {
   failedAgingReportedAt?: number;
   /** Archived in the Claude app by someone, not through cc_session_archive. */
   archivedOutsideAt?: number;
+  /** Archived in the app by the person after it failed: expected (no "por
+   * fora"), but its PRs are still checked, since nobody else did. */
+  archivedAfterFailure?: boolean;
   /** Its PRs were checked after that (left without a session, or not). */
   archivedOutsideCheckedAt?: number;
   /** Checks that could not reach GitHub, and when the last one was tried. */
