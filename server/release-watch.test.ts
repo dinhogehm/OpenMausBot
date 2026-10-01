@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { haltedRelease, haltStillMatters, releaseFailureCause, releaseFailures, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagContainsRelease, tagStuck, tagStuckCause } from "./release-watch.ts";
+import { haltedRelease, haltStillMatters, releaseFailureCause, releaseFailures, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 const log = [
   "Release production failed for b51648498 (exit 1)",
@@ -111,7 +111,21 @@ describe("after a release", () => {
     const cause = tagStuckCause(real, sha);
     expect(cause).toContain("GH013");
     expect(cause).not.toContain("ref protegida");
-    expect(cause).toBe(`o release avisou que a tag não avançou (exit 1); o GitHub recusou o push da tag (GH013: regra de proteção do repositório). Para avançar à mão: git tag -f nuria-production-deployed ${sha} && git push --force-with-lease=refs/tags/nuria-production-deployed origin refs/tags/nuria-production-deployed:refs/tags/nuria-production-deployed`);
+    expect(cause).toBe("o release avisou que a tag não avançou (exit 1); o GitHub recusou o push da tag (GH013: regra de proteção do repositório)");
+    // INSP-R r3 item 2: the force push is the owner's — kept for the log and the owner's pending list,
+    // never in what the Chief (a bot with tools) reads
+    const manual = tagManualAdvance(real, sha);
+    expect(manual).toBe(`git tag -f nuria-production-deployed ${sha} && git push --force-with-lease=refs/tags/nuria-production-deployed origin refs/tags/nuria-production-deployed:refs/tags/nuria-production-deployed`);
+    expect(tagManualAdvance(real, "c88f99d62")).toBeNull();
+    const text = tagStuck({ releasedSha: sha, releasedAt: 0, tagSha: "90b3ef2a5aaa", tagContainsRelease: false, now: 20 * 60_000, cause });
+    const report = tagStuckReport(text!, Boolean(manual));
+    expect(report).toContain("GH013");
+    expect(report).toContain("ação do dono (ou de quem tem bypass do ruleset do repositório); bots não executam");
+    expect(`${text}\n${report}`).not.toMatch(/--force|git tag -f|git push/);
+    expect(text).not.toMatch(/Alguém precisa/);
+    const title = tagAdvancePendingTitle(sha);
+    expect(title.length).toBeLessThanOrEqual(200);
+    expect(title).toContain("só o dono ou quem tem bypass");
     // only the protected-ref line: said as such
     expect(tagStuckCause(real.split("\n").slice(1).join("\n"), sha)).toContain("(ref protegida)");
   });

@@ -150,14 +150,9 @@ const TAG_CAUSE_WINDOW = 40;
  * never a refusal from an earlier release (01/10: the GH013 of 1bbd5c2a7
  * stays in the tail for days). Null when this release left no warning. */
 export function tagStuckCause(errTail: string, releasedSha: string): string | null {
-  const released = releasedSha.trim();
-  if (!released) return null;
-  const lines = errTail.split("\n").map((line) => line.replace(ANSI_COLOUR, "").trim()).filter(Boolean);
-  const at = lines.findLastIndex((line) => {
-    const sha = TAG_NOT_ADVANCED.exec(line)?.[1];
-    return Boolean(sha && (sha.startsWith(released) || released.startsWith(sha)));
-  });
-  if (at < 0) return null;
+  const found = releaseWarning(errTail, releasedSha);
+  if (!found) return null;
+  const { lines, at } = found;
   // the whole window up to the previous release's end: GitHub prints GH013
   // first and "- Cannot update this protected ref." closer to the warning
   const refusals: string[] = [];
@@ -167,10 +162,40 @@ export function tagStuckCause(errTail: string, releasedSha: string): string | nu
   const exit = /\(exit (\d+)\)/.exec(lines[at]!)?.[1];
   const parts = [`o release avisou que a tag não avançou${exit ? ` (exit ${exit})` : ""}`];
   if (refusals.length) parts.push(`o GitHub recusou o push da tag (${refusals.some((line) => /GH013/.test(line)) ? "GH013: regra de proteção do repositório" : "ref protegida"})`);
-  // the release prints the manual advance right after its warning ("Advance it manually:" + the command)
-  const manual = lines.slice(at + 1, at + 4).find((line) => /^git tag -f nuria-production-deployed [0-9a-f]{7,40}\b/.test(line));
-  const text = parts.join("; ");
-  return manual ? `${text}. Para avançar à mão: ${manual.slice(0, 400)}` : text;
+  return parts.join("; ");
+}
+
+/** The released sha's "production is live at … NOT advanced" warning in the err log's tail, if any. */
+function releaseWarning(errTail: string, releasedSha: string): { lines: string[]; at: number } | null {
+  const released = releasedSha.trim();
+  if (!released) return null;
+  const lines = errTail.split("\n").map((line) => line.replace(ANSI_COLOUR, "").trim()).filter(Boolean);
+  const at = lines.findLastIndex((line) => {
+    const sha = TAG_NOT_ADVANCED.exec(line)?.[1];
+    return Boolean(sha && (sha.startsWith(released) || released.startsWith(sha)));
+  });
+  return at < 0 ? null : { lines, at };
+}
+
+/** The manual advance the release printed after its warning ("Advance it
+ * manually:" + `git tag -f … && git push --force-with-lease …`). A force push
+ * past the ruleset: the OWNER's action (or whoever holds the bypass), never a
+ * bot's — it goes to the server log and to the owner's pending list, never
+ * into a report a bot acts on. */
+export function tagManualAdvance(errTail: string, releasedSha: string): string | null {
+  const found = releaseWarning(errTail, releasedSha);
+  if (!found) return null;
+  return found.lines.slice(found.at + 1, found.at + 4).find((line) => /^git tag -f nuria-production-deployed [0-9a-f]{7,40}\b/.test(line))?.slice(0, 400) ?? null;
+}
+
+/** The Chief's report for a stuck tag: what happened and who acts — no command to run. */
+export function tagStuckReport(text: string, manualAdvancePrinted: boolean): string {
+  return `[Alerta do servidor: tag de produção parada] ${text}\nAvançar a tag é ação do dono (ou de quem tem bypass do ruleset do repositório); bots não executam esse avanço nem force-push.${manualAdvancePrinted ? " O release deixou o comando exato no log do servidor e na pendência do dono." : ""} Avise o dono; até a tag andar, confirme entregas a clientes pelo commit em produção, não pela tag.`;
+}
+
+/** The owner's pending item for a stuck tag (OWNER_PENDING_TITLE_MAX = 200). */
+export function tagAdvancePendingTitle(releasedSha: string): string {
+  return `Avançar a tag de produção para ${releasedSha.trim().slice(0, 9)} (barrada pelo ruleset; só o dono ou quem tem bypass, comando no log do servidor)`;
 }
 
 /** Whether the tag contains the release, as far as this clone can verify:
@@ -188,7 +213,7 @@ export function tagStuck(input: { releasedSha: string; releasedAt: number; tagSh
   const released = input.releasedSha.trim();
   if (!released || !input.tagSha || input.tagContainsRelease !== false || input.now - input.releasedAt < TAG_STUCK_AFTER_MS) return null;
   const minutes = Math.round((input.now - input.releasedAt) / 60_000);
-  return `Produção está no ar em ${released.slice(0, 9)} há ${minutes} min, mas a tag de produção continua em ${input.tagSha.slice(0, 9)}${input.cause ? ` (${input.cause})` : ""}: os vigias da tag não veem a entrega e nenhum cliente é avisado. Alguém precisa avançar a tag (ou corrigir o que a barrou).`;
+  return `Produção está no ar em ${released.slice(0, 9)} há ${minutes} min, mas a tag de produção continua em ${input.tagSha.slice(0, 9)}${input.cause ? ` (${input.cause})` : ""}: os vigias da tag não veem a entrega e nenhum cliente é avisado. O dono (ou quem tem bypass do ruleset) precisa avançar a tag, ou corrigir o que a barrou.`;
 }
 
 const COMMIT_SHA = /^[0-9a-f]{7,40}$/;

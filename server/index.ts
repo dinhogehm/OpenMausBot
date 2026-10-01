@@ -341,7 +341,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
-import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, haltStillMatters, tagContainsRelease, tagStuck, tagStuckCause } from "./release-watch.ts";
+import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8266,7 +8266,13 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
   const cause = tagStuckCause(readTail(RELEASE_ERR_LOG, 128 * 1024), released);
   const text = tagStuck({ releasedSha: released, releasedAt, tagSha, tagContainsRelease: contains, now: Date.now(), cause });
   if (text && state.once(`tag:${released}`)) {
-    releaseAlertToChief(text, `[Alerta do servidor: tag de produção parada] ${text}\nLogs: ${RELEASE_OUT_LOG} e ${RELEASE_ERR_LOG}. Avise o dono; até a tag andar, confirme entregas a clientes pelo commit em produção, não pela tag.`);
+    // the force push past the ruleset is the owner's: the command goes to the log and the owner's pending list, never to a bot's report
+    const manual = tagManualAdvance(readTail(RELEASE_ERR_LOG, 128 * 1024), released);
+    console.warn(`[release] tag ${PRODUCTION_TAG} stuck at ${tagSha?.slice(0, 9)} while production runs ${released.slice(0, 9)}; manual advance (owner only, needs the ruleset bypass): ${manual ?? "(not printed by the release)"}`);
+    releaseAlertToChief(text, `${tagStuckReport(text, Boolean(manual))}\nLogs: ${RELEASE_OUT_LOG} e ${RELEASE_ERR_LOG}.`);
+    const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+    const desk = chief ? chiefDeskThread(chief) : null;
+    if (chief && desk && store.taskByThread(chief.id, desk)) autonomy.addOwnerPending(chief.id, desk, { title: tagAdvancePendingTitle(released), key: `tag-advance:${released}` });
   }
 }
 
