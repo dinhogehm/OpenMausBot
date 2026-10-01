@@ -60,7 +60,7 @@ export interface DesktopDriver {
 /** `miss`: the screen did not show what was expected (folder, worktree,
  * session) although it was unlocked and Claude was in front. `touched`: the
  * step acted on the screen before stopping, so a retry should back off. */
-export type DesktopStep = { ok: true; replaced?: string } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string };
+export type DesktopStep = { ok: true } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -299,9 +299,13 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     const composer = findComposer(lines, size);
     if (!composer) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y > size.h / 2).slice(-8)) };
     const field = composer.line;
-    // Text already in the field (a suggested reply, or a draft nobody sent)
-    // is replaced, not appended to; the caller reports what it was.
-    const existing = composer.text;
+    // Text in the field may be the person's own unsent draft: it is never
+    // overwritten. OCR cannot tell an app suggestion from a draft safely
+    // (same place, colour lost), so any text there stops the send; the
+    // caller asks the person and tries again later.
+    if (composer.text !== null) {
+      return { ok: false, reason: `há texto não enviado no campo desta sessão ("${composer.text.slice(0, 120)}"); não sobrescrevi`, retry: true, touched: true, draft: composer.text.slice(0, 500) };
+    }
     // What is near the field (it grows upwards as text goes in).
     const nearField = (all: OcrLine[]) => mainArea(all).filter((line) => line.y > Math.max(size.h / 2, field.y - 200));
     stop = await guard(screen, "click field");
@@ -322,9 +326,8 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     const typed = nearField(await driver.ocr());
     // In the field: its first words show, or at least the placeholder (or the
     // text that was there) gave way.
-    const oldStays = existing !== null && showsPrefix(typed, textPrefix(existing));
-    if (!showsPrefix(typed, prefix) && (typed.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim())) || oldStays)) {
-      return { ok: false, reason: existing !== null ? `the field already held text ("${existing.slice(0, 80)}") and the message did not replace it` : "the message did not appear in the session's field", retry: true, touched: true, ...(existing !== null ? { seen: existing.slice(0, 200) } : {}) };
+    if (!showsPrefix(typed, prefix) && typed.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim()))) {
+      return { ok: false, reason: "the message did not appear in the session's field", retry: true, touched: true };
     }
     stop = await guard(screen, "send");
     if (stop) return stop;
@@ -334,7 +337,7 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (!after.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim())) && showsPrefix(after, prefix)) {
       return { ok: false, reason: "the message stayed in the field after Return", retry: true, touched: true };
     }
-    return existing !== null ? { ok: true, replaced: existing } : { ok: true };
+    return { ok: true };
   });
 }
 
@@ -342,8 +345,8 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
 const COMPOSER_BAR = /^(Automático|Automatic|Auto|Pedir aprova[çc][ãa]o|Ask|Plan|Planejar|Bypass\b.*|Aceitar edi[çc][õo]es|Accept edits)$|\b(Opus|Sonnet|Haiku|Fable)\s*\d/i;
 
 /** The session's message field, found as a person would: its placeholder
- * when it is empty, else the line right above the mode/model bar — where a
- * suggested reply or an unsent draft sits ("pode reescrever o corpo…").
+ * when it is empty, else the line right above the mode/model bar — where an
+ * unsent draft sits ("pode reescrever o corpo…"), never overwritten.
  * `text` is what was in it then (null when it showed the placeholder). */
 export function findComposer(lines: OcrLine[], size: { h: number }): { line: OcrLine; text: string | null } | null {
   const lower = lines.filter((line) => line.y > size.h / 2);
@@ -500,6 +503,12 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
       const now = fieldOf(lines);
       return Boolean(now && fieldBefore && now.text === fieldBefore.text);
     };
+    // a draft in the message field: a title pasted by mistake would land
+    // on it, and clearing that would take the draft too
+    if (fieldBefore?.text) {
+      await act(screen, () => driver.key(ESCAPE));
+      return { ok: false, reason: `há texto não enviado no campo desta sessão ("${fieldBefore.text.slice(0, 120)}"); não renomeei para não arriscar o rascunho`, retry: true, touched: true, draft: fieldBefore.text.slice(0, 500) };
+    }
     const menuOpen = opened.some((line) => RENAME_ITEMS.includes(line.text.trim()));
     if (menuOpen || !upper(opened).some((line) => sidebarMatch(line.text, input.title)) || !composerEmpty(opened)) {
       await act(screen, () => driver.key(ESCAPE));
@@ -515,7 +524,7 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
       // it went into the message field: take it out again, never send it
       await act(screen, () => driver.key(KEY_A, true));
       await act(screen, () => driver.key(BACKSPACE));
-      return { ok: false, reason: `the new title went into the message field instead of a rename field; it was cleared and not sent${fieldBefore?.text ? ` (the field had held: "${fieldBefore.text.slice(0, 120)}")` : ""}`, retry: false, touched: true };
+      return { ok: false, reason: "the new title went into the message field instead of a rename field; it was cleared and not sent", retry: false, touched: true };
     }
     if (!showsPrefix(upper(typed), prefix)) {
       await act(screen, () => driver.key(ESCAPE));

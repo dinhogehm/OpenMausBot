@@ -8568,6 +8568,14 @@ const desktopWork: DesktopWorkDeps = {
   repoName: (session) => basename(session.repo),
   chip: ccChip,
   report: ccReport,
+  ownerPending: (session, item) => {
+    if (!store.taskByThread(session.ownerBotId, session.ownerThreadId)) return;
+    autonomy.addOwnerPending(session.ownerBotId, session.ownerThreadId, item);
+    refreshBotRow(session.ownerBotId);
+  },
+  resolveOwnerPending: (key) => {
+    for (const item of autonomy.resolveOwnerPending({ key })) refreshBotRow(item.botId);
+  },
   hookDecision: (sessionId) => lastHookDecision(DUAL_DECISIONS_LOG, sessionId),
   hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
   folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),

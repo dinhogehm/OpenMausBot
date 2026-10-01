@@ -407,22 +407,16 @@ describe("the app's real screen (OCR fixture)", () => {
     expect(findComposer([{ x: 547, y: 300, w: 200, h: 16, text: "conversation text" }], { h: 900 })).toBeNull();
   });
 
-  it("replaces what the field held, sends, and says what it replaced", async () => {
+  it("never types over text in the field (maybe the person's draft): stops before touching it, and names it", async () => {
     const strip = { text: "#9317 nuria-platform fix/9298", x: 520, y: 732 };
     const bar = { text: "Automático", x: 578, y: 830 };
     const model = { text: "Opus 5.5", x: 1140, y: 830 };
-    const suggestion = { text: "pode reescrever o corpo da PR com a seção de riscos", x: 505, y: 788 };
-    const typed = { ...suggestion, text: "Pode sim, reescreva o corpo" };
-    const sent = { text: "Responder…", x: 505, y: 788 };
-    const app = fakeApp({ screens: [[header, strip, suggestion, bar, model], [header, strip, typed, bar, model], [header, strip, sent, bar, model]] });
+    const draft = { text: "pode reescrever o corpo da PR com a seção de riscos", x: 505, y: 788 };
+    const app = fakeApp({ screens: [[header, strip, draft, bar, model]] });
     expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim, reescreva o corpo", title: "Chat ticket agent/client labels bug" }))
-      .toEqual({ ok: true, replaced: "pode reescrever o corpo da PR com a seção de riscos" });
-    expect(app.actions).toContain("paste(all) Pode sim, reescreva o corpo");
-    // the old text stayed: not sent, and the reason names it
-    const stuck = fakeApp({ screens: [[header, strip, suggestion, bar, model], [header, strip, suggestion, bar, model]] });
-    expect(await sendToDesktopSession(stuck.driver, { localId, text: "Pode sim", title: "Chat ticket agent/client labels bug" }))
-      .toMatchObject({ ok: false, reason: expect.stringContaining("already held text"), seen: expect.stringContaining("pode reescrever") });
-    expect(stuck.actions).not.toContain("key 36");
+      .toMatchObject({ ok: false, retry: true, draft: "pode reescrever o corpo da PR com a seção de riscos", reason: expect.stringContaining("texto não enviado") });
+    // opened the session, and nothing else: no click in the field, no paste, no Return
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`]);
   });
 
   it("sends into the session whose header carries a status dot (8378b26a)", async () => {
@@ -483,6 +477,15 @@ describe("the session's own menu, in its header", () => {
     expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket" })).toMatchObject({ ok: false, retry: false, reason: expect.stringContaining("cleared and not sent") });
     expect(app.actions).not.toContain("key 36");
     expect(app.actions.slice(-2)).toEqual(["key 0+cmd", "key 51"]);
+  });
+
+  it("does not rename while the message field holds a draft: a mistaken paste would land on it", async () => {
+    const draft = { text: "pode reescrever o corpo da PR", x: 505, y: 788 };
+    const bar = { text: "Automático", x: 578, y: 830 };
+    const app = fakeApp({ screens: [[header, draft, bar], [header, { text: "Renomear", x: 520, y: 110 }, draft, bar], [field, draft, bar]] });
+    expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket" }))
+      .toMatchObject({ ok: false, retry: true, draft: "pode reescrever o corpo da PR" });
+    expect(app.actions.some((action) => action.startsWith("paste") || action === "key 36" || action === "key 51")).toBe(false);
   });
 
   it("falls back to the sidebar when the header menu has no such item", async () => {

@@ -80,6 +80,9 @@ export interface DesktopWorkDeps {
   chip: (session: CcSession, text: string, ok?: boolean) => void;
   /** Hand a report to the owning bot (and the thread the last order came from). */
   report: (session: CcSession, text: string) => void;
+  /** Put an item in "Precisa de você" (owner_pending) for the session's owner, or resolve it by key. */
+  ownerPending?: (session: CcSession, item: { title: string; link?: string; key: string }) => void;
+  resolveOwnerPending?: (key: string) => void;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
   hookDecision?: (sessionId: string) => string | null;
   /** The command the review hook last denied or asked about for a session id. */
@@ -544,6 +547,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     const at = deps.now();
     deps.log?.(`${pending.kind} ${step.ok ? "ok" : step.retry ? "stopped" : "gave up"}: session ${next.id}${step.ok ? "" : ` — ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}${step.touched ? " (touched the screen)" : ""}`}`);
     if (step.ok) {
+      if (pending.kind === "send" || pending.kind === "rename") clearDraft(deps, next);
       if (pending.kind === "archive") {
         // Only the app's record says it worked; followDesktopSessions checks it.
         pending.verifyUntil = at + DESKTOP_ARCHIVE_CONFIRM_MS;
@@ -558,12 +562,6 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
         return;
       }
       delete desktop.pending;
-      // the field held text nobody sent (an app suggestion or a draft): it
-      // was replaced, and the owner hears exactly what it was
-      if (pending.kind === "send" && "replaced" in step && step.replaced) {
-        deps.chip(next, `o campo da sessão tinha um texto não enviado, substituído pela mensagem: “${step.replaced.slice(0, 80)}”`, false);
-        deps.report(next, `Claude Code session "${next.title}" (${next.id}): its message field already held text nobody sent — "${step.replaced.slice(0, 300)}" (an app suggestion, or a draft the person left there). It was replaced by your message. If it was the person's draft, tell them what it said.`);
-      }
       if (pending.kind === "create") desktop.sentAt = at;
       else {
         desktop.sent = { text: pending.text, at, userFrameAt, deliveries: (pending.deliveries ?? 0) + 1 };
@@ -574,6 +572,10 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       next.progressAt = at;
       deps.ledger.save();
       deps.chip(next, pending.kind === "create" ? "brief enviado no app Claude" : "mensagem digitada no app Claude (conferindo se chegou)");
+      return;
+    }
+    if (step.draft !== undefined) {
+      holdForDraft(deps, next, step.draft, at);
       return;
     }
     if (!step.retry) {
@@ -606,6 +608,35 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
   } finally {
     state.busy = false;
   }
+}
+
+/** How long a message waits before the field is looked at again, while the person's draft is in it. */
+export const DESKTOP_DRAFT_RECHECK_MS = 20 * 60_000;
+const draftKey = (session: CcSession) => `cc-draft:${session.id}`;
+
+/** The session's field holds text nobody sent: maybe the person's draft. It
+ * is never overwritten — the message waits, and the person is asked (once
+ * per draft) in "Precisa de você", with the link to the session. */
+function holdForDraft(deps: DesktopWorkDeps, session: CcSession, draft: string, at: number): void {
+  const desktop = session.desktop!;
+  const pending = desktop.pending!;
+  pending.lastReason = `há texto não enviado no campo da sessão: "${draft.slice(0, 120)}"`;
+  pending.nextAttemptAt = at + DESKTOP_DRAFT_RECHECK_MS;
+  const seen = desktop.draftSeen?.text === draft;
+  desktop.draftSeen = { text: draft, at: seen ? desktop.draftSeen!.at : at };
+  deps.ledger.save();
+  if (seen) return;
+  const link = desktop.localId ? `claude://code/continue?session=${desktop.localId}` : undefined;
+  deps.chip(session, `há texto não enviado no campo desta sessão — não sobrescrevi; ${pending.kind === "rename" ? "o novo título" : "a mensagem"} espera: “${draft.slice(0, 80)}”`, false);
+  deps.ownerPending?.(session, { title: `Texto não enviado no campo da sessão "${session.title}": envie ou apague (“${draft.slice(0, 60)}”)`, ...(link ? { link } : {}), key: draftKey(session) });
+  deps.report(session, `Claude Code session "${session.title}" (${session.id}): its message field holds text nobody sent — "${draft.slice(0, 300)}". It may be the person's own draft, so nothing was typed over it; your ${pending.kind === "send" ? "message" : pending.kind} waits and is tried again every ${DESKTOP_DRAFT_RECHECK_MS / 60_000} min. The person was asked in "Precisa de você" to send or clear it${link ? ` (${link})` : ""}. Do not ask them to type your message for you.`);
+}
+
+/** The field was free again: the draft item is settled. */
+function clearDraft(deps: DesktopWorkDeps, session: CcSession): void {
+  if (!session.desktop?.draftSeen) return;
+  delete session.desktop.draftSeen;
+  deps.resolveOwnerPending?.(draftKey(session));
 }
 
 /** Running sessions (app or CLI) with no sign of work: report them and

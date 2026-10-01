@@ -6,6 +6,7 @@ import {
   CC_STALL_MS,
   CC_STALL_REMIND_MS,
   DESKTOP_ARCHIVE_CONFIRM_MS,
+  DESKTOP_DRAFT_RECHECK_MS,
   DESKTOP_ARCHIVE_MAX_TRIES,
   DESKTOP_MAX_MISSES,
   DESKTOP_SEND_CONFIRM_MS,
@@ -683,14 +684,36 @@ describe("an issue left without a live session", () => {
 });
 
 describe("a field that already held text", () => {
-  it("tells the owner what the send replaced", async () => {
+  it("keeps the message, asks the person once in \"Precisa de você\", and settles it when the field is free", async () => {
     const h = harness();
+    const pendings: { title: string; link?: string; key: string }[] = [];
+    const resolved: string[] = [];
+    h.deps.ownerPending = (_session, item) => pendings.push(item);
+    h.deps.resolveOwnerPending = (key) => resolved.push(key);
     const session = h.opened("a");
     session.status = "idle";
     session.desktop!.pending = { kind: "send", text: "Pode sim", since: h.now, attempts: 0 };
-    h.results.push({ ok: true, replaced: "pode reescrever o corpo da PR com a seção de riscos" });
+    const draft = "pode reescrever o corpo da PR com a seção de riscos";
+    h.results.push({ ok: false, reason: "há texto não enviado", retry: true, touched: true, draft });
     await h.tick();
-    expect(h.chips.some((chip) => chip.text.includes("substituído pela mensagem"))).toBe(true);
-    expect(h.reports.at(-1)!.text).toContain('"pode reescrever o corpo da PR com a seção de riscos"');
+    expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "Pode sim", attempts: 0 });
+    expect(session.desktop!.pending!.nextAttemptAt).toBe(h.now + DESKTOP_DRAFT_RECHECK_MS);
+    expect(pendings).toEqual([expect.objectContaining({ key: "cc-draft:a", link: expect.stringContaining("claude://code/continue?session=") })]);
+    expect(pendings[0]!.title).toContain(draft.slice(0, 40));
+    expect(h.chips.some((chip) => chip.text.includes("não sobrescrevi"))).toBe(true);
+    expect(h.reports.at(-1)!.text).toContain(`"${draft}"`);
+    // the same draft later: no second item, no second report
+    const reports = h.reports.length;
+    h.advance(DESKTOP_DRAFT_RECHECK_MS);
+    h.results.push({ ok: false, reason: "há texto não enviado", retry: true, touched: true, draft });
+    await h.tick();
+    expect(pendings).toHaveLength(1);
+    expect(h.reports).toHaveLength(reports);
+    // the person cleared it: the message goes, the item is settled
+    h.advance(DESKTOP_DRAFT_RECHECK_MS);
+    h.results.push({ ok: true });
+    await h.tick();
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(resolved).toEqual(["cc-draft:a"]);
   });
 });
