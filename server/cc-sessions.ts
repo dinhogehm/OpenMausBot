@@ -139,7 +139,7 @@ export interface CcDesktopState {
   archiveWhenResolved?: boolean;
   /** The permission mode the app really runs it in (read from its record). */
   permissionMode?: string;
-  /** Remove its worktree once the app confirms it archived (remove_worktree). */
+  /** Once the app confirms it archived, report whether its own worktree may be removed (remove_worktree); the server never removes it. */
   removeWorktree?: boolean;
   /** The issue number the session is about ("9311"), from its title or brief. */
   issue?: string;

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  archiveCleanupNote, codexRolloutFolders, isDisposableIgnored, removeArchivedWorktree, nestedWorktrees, parseWorktreeList, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
-  releasedPlanLine, removeNestedWorktrees, worktreeLastActivity, type ReleasedPlanDeps,
+  archiveCleanupNote, codexRolloutFolders, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
+  releasedPlanLine, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
 
 const parent = "/r/nuria-platform/.claude/worktrees/9286-lote";
@@ -27,35 +27,41 @@ describe("worktrees a session left inside its own", () => {
     expect(nestedWorktrees(entries, parent).map((entry) => entry.path.split("/").pop())).toEqual(["g9278", "c9322", "wt9278", "g9330"]);
   });
 
-  it("removes the merged ones with nothing to lose and names the rest, with the command (G12)", async () => {
-    const calls: string[] = [];
+  it("plans, on archive, the merged ones with nothing to lose and names the rest — it removes nothing (G12)", async () => {
+    const calls: string[][] = [];
     const git = async (args: string[]) => {
-      calls.push(args.join(" "));
+      calls.push(args);
       if (args[0] === "worktree" && args[1] === "list") return porcelain;
       if (args[0] === "merge-base" && args[2] === "c30") throw new Error("not ancestor");
+      if (args[0] === "for-each-ref") return "refs/heads/x\n";
       if (args[0] === "-C" && args[1]!.endsWith("/c9322") && args.includes("status")) return "?? novo.txt\n";
       return "";
     };
-    const result = await removeNestedWorktrees(parent, { repo: "/r/nuria-platform", git, processCwds: [], processCommands: [] });
-    expect(result.removed).toEqual([`${parent}/g9278`]);
+    const result = await planNestedWorktrees(parent, { repo: "/r/nuria-platform", git, processCwds: [], processCommands: [] });
+    expect(result.candidates).toEqual([{ path: `${parent}/g9278`, command: `git -C /r/nuria-platform worktree remove ${parent}/g9278` }]);
     // deepest (longest path) first
     expect(result.kept).toEqual([
-      { path: `${parent}/wt9278`, why: "bloqueada" },
-      { path: `${parent}/c9322`, why: "tem mudanças locais", command: `git -C /r/nuria-platform worktree remove ${parent}/c9322` },
+      { path: `${parent}/wt9278`, why: "bloqueada (sem motivo)" },
+      { path: `${parent}/c9322`, why: "tem mudanças locais" },
       { path: `${parent}/g9330`, why: "não está em origin/main" },
     ]);
-    expect(archiveCleanupNote(parent, result).chip).toBe("Worktrees removidas: g9278. Mantidas: wt9278 (bloqueada), c9322 (tem mudanças locais), g9330 (não está em origin/main).");
-    expect(archiveCleanupNote(parent, result).report).toContain(`git -C /r/nuria-platform worktree remove ${parent}/c9322`);
-    // never forced, never the session's own worktree
-    expect(calls.some((call) => call.includes("--force"))).toBe(false);
-    expect(calls).not.toContain(`worktree remove ${parent}`);
+    const note = archiveCleanupNote(parent, result);
+    expect(note.chip).toBe("Worktrees que podem ser removidas: g9278. Mantidas: wt9278 (bloqueada (sem motivo)), c9322 (tem mudanças locais), g9330 (não está em origin/main).");
+    expect(note.report).toContain(`Para remover (sem --force; confira antes):\ngit -C /r/nuria-platform worktree remove ${parent}/g9278`);
+    expect(note.report).toContain("O servidor não remove worktrees.");
+    expect(onlyReads(calls)).toBe(true);
   });
 
   it("says nothing when there are none, or git cannot list them", async () => {
     const deps = (git: (args: string[]) => Promise<string>) => ({ repo: "/r/nuria-platform", git, processCwds: [], processCommands: [] });
-    expect(await removeNestedWorktrees(parent, deps(async () => "worktree /r/nuria-platform\nHEAD aaa"))).toEqual({ removed: [], kept: [] });
-    expect(await removeNestedWorktrees(parent, deps(async () => { throw new Error("not a repo"); }))).toEqual({ removed: [], kept: [] });
-    expect(archiveCleanupNote(parent, { removed: [], kept: [] })).toEqual({ chip: "", report: "" });
+    expect(await planNestedWorktrees(parent, deps(async () => "worktree /r/nuria-platform\nHEAD aaa"))).toEqual({ candidates: [], kept: [] });
+    expect(await planNestedWorktrees(parent, deps(async () => { throw new Error("not a repo"); }))).toEqual({ candidates: [], kept: [] });
+    expect(archiveCleanupNote(parent, { candidates: [], kept: [] })).toEqual({ chip: "", report: "" });
+  });
+
+  it("keeps a lock's reason", () => {
+    expect(parseWorktreeList("worktree /r/p\nHEAD a\n\nworktree /r/p/w\nHEAD b\ndetached\nlocked gate #9278 em andamento (Eng PRODEV)")[1])
+      .toEqual({ path: "/r/p/w", head: "b", locked: true, lockReason: "gate #9278 em andamento (Eng PRODEV)" });
   });
 });
 
@@ -198,6 +204,11 @@ describe("worktrees already in production (R8 G3): a plan a person runs", () => 
     expect(first.line).toBe("nuria-platform: nenhuma pode ser removida; mantidas: odd (não conferida: '/r/p/w/odd' is a main working tree), dirty (tem mudanças locais)");
     // the same pass 6 h later: nothing to say
     expect(releasedPlanLine("nuria-platform", plan, first.key).line).toBeNull();
+    // the same paths with other reasons (the real fix-9298 flipped between passes): nothing to say (INSP-G r2 item 6)
+    const flipped = { ...plan, kept: ["/r/p/w/odd (em uso por processo)", "/r/p/w/dirty (usada há menos de 24 h)"] };
+    expect(releasedPlanLine("nuria-platform", flipped, first.key).line).toBeNull();
+    // a path that leaves the kept list: said again
+    expect(releasedPlanLine("nuria-platform", { ...plan, kept: [plan.kept[0]!] }, first.key).line).not.toBeNull();
     // a new candidate: said again
     expect(releasedPlanLine("nuria-platform", { ...plan, candidates: [{ path: "/r/p/w/old", command: "x" }] }, first.key).line).toContain("1 pode(m) ser removida(s) (old)");
   });
@@ -317,8 +328,9 @@ describe("worktrees already in production, with real git", () => {
     }
   }, 30_000);
 
-  it("on archive removes only what has nothing to lose, and never the session's worktree with work inside (G12)", async () => {
-    const root = mkdtempSync(join(tmpdir(), "omb-g12-"));
+  it("on archive removes NOTHING: it offers only what has nothing to lose — not a detached HEAD's own commits, not another agent's lock (G12, INSP-G r2 1–3)", async () => {
+    // canonical paths (as git records them), so the commands can be compared whole
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "omb-g12-")));
     const repo = join(root, "nuria-platform");
     const busyProc: { kill?: () => void } = {};
     try {
@@ -363,9 +375,26 @@ describe("worktrees already in production, with real git", () => {
         foldersInUse: [join(used, "sub"), repo, "/"],
         canon: (path: string) => { try { return realpathSync(path); } catch { return path; } },
       };
-      const nested = await removeNestedWorktrees(session, deps, "main");
+      // the session's own worktrees of the inspector's r2 cases
+      const own = (name: string) => add(join(repo, ".claude", "worktrees", name));
+      const detached = own("detached-commit");
+      writeFileSync(join(detached, "c.txt"), "c\n");
+      run(detached, "add", "c.txt");
+      run(detached, "commit", "-q", "-m", "c (só nesta HEAD destacada)");
+      const orphan = run(detached, "rev-parse", "HEAD");
+      const otherLock = own("other-lock");
+      run(repo, "worktree", "lock", "--reason", "gate #9278 em andamento (Eng PRODEV)", otherLock);
+      const ownLock = own("own-lock");
+      run(repo, "worktree", "lock", "--reason", "claude session cc-1a2b3c4d", ownLock);
+      const envOnly = own("env-only");
+      writeFileSync(join(envOnly, ".env.local"), "TOKEN=placeholder\n");
+
+      const snapshot = () => [run(repo, "worktree", "list", "--porcelain"), run(repo, "for-each-ref")].join("\n--\n");
+      const before = snapshot();
+      const archiveDeps = { ...deps, ownLockMarkers: ["cc-1a2b3c4d"] };
+      const nested = await planNestedWorktrees(session, archiveDeps, "main");
       const name = (path: string) => path.split("/").pop();
-      expect(nested.removed.map(name)).toEqual(["merged-clean"]);
+      expect(nested.candidates).toEqual([{ path: clean, command: `git -C ${repo} worktree remove ${clean}` }]);
       expect(Object.fromEntries(nested.kept.map((item) => [name(item.path), item.why]))).toEqual({
         "grandchild": "tem mudanças locais",
         "merged-parent": "contém outra worktree",
@@ -375,24 +404,30 @@ describe("worktrees already in production, with real git", () => {
         "merged-used": "em uso por outra sessão",
         "unmerged": "não está em main",
       });
-      // the session's own worktree still holds nested worktrees: it stays, with the command
-      const own = await removeArchivedWorktree(session, deps, []);
-      expect(own).toEqual({ removed: [], kept: [{ path: session, why: "contém outra worktree", command: `git -C ${repo} worktree remove ${session}` }] });
-      expect(calls.some((args) => args.includes("--force"))).toBe(false);
-      for (const path of [join(grandchild, "novo.txt"), join(env, ".env.local"), join(dirty, "novo.txt"), busy, join(used, "sub"), ahead]) expect(existsSync(path), path).toBe(true);
-      expect(existsSync(clean)).toBe(false);
+      const plan = async (folder: string, users: string[] = []) => planArchivedWorktree(folder, archiveDeps, users);
+      // the session's own worktree still holds nested worktrees
+      expect(await plan(session)).toEqual({ candidates: [], kept: [{ path: session, why: "contém outra worktree" }] });
+      // r2 case 1: a detached HEAD whose commit is in no ref stays, with the command that saves it
+      expect(await plan(detached)).toEqual({ candidates: [], kept: [{ path: detached, why: "commits fora de qualquer branch", command: `git -C ${detached} branch salvo/detached-commit HEAD` }] });
+      // r2 case 2: another agent's lock stays, with no command
+      expect(await plan(otherLock)).toEqual({ candidates: [], kept: [{ path: otherLock, why: "bloqueada: gate #9278 em andamento (Eng PRODEV)" }] });
+      // a lock this session set: offered, the unlock in the person's command
+      expect(await plan(ownLock)).toEqual({ candidates: [{ path: ownLock, command: `git -C ${repo} worktree unlock ${ownLock} && git -C ${repo} worktree remove ${ownLock}` }], kept: [] });
+      expect((await plan(envOnly)).kept[0]!.why).toBe("tem arquivos ignorados: .env.local");
+      expect((await plan(envOnly, ["\"#9331\" (app)"])).kept[0]!.why).toBe("em uso por \"#9331\" (app)");
 
-      // a session worktree with only a .env.local stays; a clean, locked one goes (its lock lifted only then)
-      const envOnly = add(join(repo, ".claude", "worktrees", "env-only"));
-      writeFileSync(join(envOnly, ".env.local"), "TOKEN=placeholder\n");
-      expect((await removeArchivedWorktree(envOnly, deps, [])).kept[0]!.why).toBe("tem arquivos ignorados: .env.local");
-      expect(existsSync(join(envOnly, ".env.local"))).toBe(true);
-      const lockedClean = add(join(repo, ".claude", "worktrees", "locked-clean"));
-      run(repo, "worktree", "lock", lockedClean);
-      expect((await removeArchivedWorktree(lockedClean, deps, [])).removed).toEqual([lockedClean]);
-      expect(existsSync(lockedClean)).toBe(false);
-      // another live session in it: kept without asking git anything
-      expect((await removeArchivedWorktree(envOnly, deps, ["\"#9331\" (app)"])).kept[0]!.why).toBe("em uso por \"#9331\" (app)");
+      // NOTHING was removed, unlocked or pruned, and every ref is as it was
+      expect(snapshot()).toBe(before);
+      expect(onlyReads(calls)).toBe(true);
+      for (const path of [clean, join(grandchild, "novo.txt"), join(env, ".env.local"), join(dirty, "novo.txt"), busy, join(used, "sub"), ahead, detached, otherLock, ownLock, join(envOnly, ".env.local")]) expect(existsSync(path), path).toBe(true);
+      expect(run(repo, "worktree", "list", "--porcelain")).toContain(`locked gate #9278 em andamento (Eng PRODEV)`);
+      expect(run(repo, "cat-file", "-t", orphan)).toBe("commit");
+
+      // the person saves the detached commits with the command given: then the worktree may go
+      const save = (await plan(detached)).kept[0]!.command!;
+      execFileSync("/bin/sh", ["-c", save], { stdio: "pipe" });
+      expect((await plan(detached)).candidates.map((item) => item.path)).toEqual([detached]);
+      expect(run(repo, "branch", "--contains", orphan)).toContain("salvo/detached-commit");
     } finally {
       busyProc.kill?.();
       rmSync(root, { recursive: true, force: true });

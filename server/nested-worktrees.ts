@@ -1,16 +1,16 @@
 // A batch session makes worktrees of its own inside its folder (g9278,
 // c9322…) and leaves them behind when it is archived: dozens of GiB of
-// merged branches nobody will open again. Archiving a session removes the
-// ones with nothing to lose (G12, below): merged into origin/main, not
-// locked, nothing inside them, no process, clean, no ignored file that
-// cannot be rebuilt; never --force. Any other is kept and named, with the
-// command a person may run.
+// merged branches nobody will open again. Nothing here removes a worktree:
+// the server only plans — on archive (G12) and every 6 h for the ones
+// already in production (G3) — and a person runs the commands it reports.
 
 export interface WorktreeEntry {
   path: string;
   head?: string;
   branch?: string;
   locked: boolean;
+  /** Why it is locked (`git worktree lock --reason`), when given. */
+  lockReason?: string;
   /** git's "prunable": its folder is gone. */
   prunable?: true;
   /** The repository itself (a bare repo has no work tree). */
@@ -26,9 +26,11 @@ export function parseWorktreeList(porcelain: string): WorktreeEntry[] {
     if (!path) continue;
     const head = lines.find((line) => line.startsWith("HEAD "))?.slice("HEAD ".length);
     const branch = lines.find((line) => line.startsWith("branch "))?.slice("branch ".length).replace(/^refs\/heads\//, "");
+    const lockReason = lines.find((line) => line.startsWith("locked "))?.slice("locked ".length).trim();
     entries.push({
       path, ...(head ? { head } : {}), ...(branch ? { branch } : {}),
       locked: lines.some((line) => line === "locked" || line.startsWith("locked ")),
+      ...(lockReason ? { lockReason } : {}),
       ...(lines.some((line) => line === "prunable" || line.startsWith("prunable ")) ? { prunable: true as const } : {}),
       ...(lines.includes("bare") ? { bare: true as const } : {}),
     });
@@ -243,10 +245,13 @@ export function codexRolloutFolders(head: string): string[] {
 }
 
 /** The Chief's line for one repository's pass, or null when it says nothing
- * new (same candidates and same kept list as `previousKey`). `key` is what
- * to remember for the next pass. */
+ * new: the same paths as candidates and as kept as `previousKey`. Only the
+ * paths count — a kept worktree's reason flips between passes ("em uso por
+ * processo", "usada há menos de 24 h"…) and is no news (INSP-G r2 item 6).
+ * `key` is what to remember for the next pass. */
 export function releasedPlanLine(repoName: string, plan: ReleasedPlan, previousKey: string | undefined): { line: string | null; key: string } {
-  const key = [...plan.candidates.map((candidate) => `+${candidate.path}`), ...plan.kept].sort().join("\n");
+  const keptPath = (item: string) => { const at = item.indexOf(" ("); return at < 0 ? item : item.slice(0, at); };
+  const key = [...plan.candidates.map((candidate) => `+${candidate.path}`), ...plan.kept.map((item) => `=${keptPath(item)}`)].sort().join("\n");
   if (key === (previousKey ?? "") || !plan.candidates.length && !plan.kept.length) return { line: null, key };
   const name = (item: string) => {
     const at = item.indexOf(" (");
@@ -257,28 +262,38 @@ export function releasedPlanLine(repoName: string, plan: ReleasedPlan, previousK
   return { line: `${repoName}: ${candidates}${plan.kept.length ? `; mantidas: ${plan.kept.map(name).join(", ")}` : ""}`, key };
 }
 
-// ── On archive (G12): the same safety as the plan above ─────────────────
-// Archiving a session removes the worktrees it left inside its folder (and,
-// when asked, its own worktree) only when nothing can be lost: no other
-// worktree inside, no process in it, no local change, no ignored file that
-// cannot be rebuilt (.env.local…), and — nested ones — merged. Anything else
-// stays, and the bot hears what stayed, why, and the command a person runs.
-// Never --force.
+// ── On archive (G12): a report, never a removal ─────────────────────────
+// Archiving a session lists the worktrees it left inside its folder (and,
+// when asked, its own worktree) that a person may remove, each with the
+// command, and the ones that must stay and why. The server removes, unlocks
+// or prunes nothing (INSP-G r2: a removal lost a detached HEAD's commits and
+// went past another agent's lock). A worktree is offered only when nothing
+// can be lost:
+// - its HEAD is in some ref (branch, remote branch or tag): a detached HEAD
+//   with commits of its own would lose them — the report gives the command
+//   that saves them in a branch first;
+// - not locked, unless the lock's reason names this very session;
+// - no other worktree inside, no process in it, no other agent's folder in
+//   it, no local change, no ignored file that cannot be rebuilt;
+// - nested ones: merged.
 
 export interface ArchiveCleanupDeps {
   repo: string;
-  /** `git <args>` in the repository; rejects with git's `stderr`. */
+  /** `git <args>` in the repository, read-only commands; rejects with git's `stderr`. */
   git: (args: string[]) => Promise<string>;
   processCwds: readonly string[];
   processCommands: readonly string[];
   /** Folders other agents work in (sessions, bots, Codex): one inside a worktree keeps it. */
   foldersInUse?: readonly string[];
+  /** What a lock set for this very session names (its id): only such a lock does not keep it. */
+  ownLockMarkers?: readonly string[];
   canon?: (path: string) => string;
 }
 
 export interface ArchiveCleanup {
-  removed: string[];
-  /** What stayed, why, and (when it exists) the command a person may run after checking. */
+  /** Safe to remove, with the command a person runs. */
+  candidates: Array<{ path: string; command: string }>;
+  /** What must stay, why, and — when one helps — a command (saving its commits in a branch). */
   kept: Array<{ path: string; why: string; command?: string }>;
 }
 
@@ -291,19 +306,42 @@ async function listEntries(deps: ArchiveCleanupDeps): Promise<Array<{ entry: Wor
   }
 }
 
-/** Why the worktree at `path` (canonical; `entry` as git lists it) may not be removed, or null. */
-async function archiveBlocker(entry: WorktreeEntry, path: string, all: readonly string[], deps: ArchiveCleanupDeps, cwds: readonly string[]): Promise<string | null> {
-  if (holdsAnother(path, all)) return "contém outra worktree";
-  if (entry.prunable) return "pasta já não existe";
-  if (usedByProcess([path, entry.path], cwds, deps.processCommands)) return "em uso por processo";
+type Verdict = { ok: true; command: string } | { ok: false; why: string; command?: string };
+
+/** Whether the worktree at `path` (canonical; `entry` as git lists it) may be
+ * removed by a person, with the command; or why it must stay. Only reads. */
+async function archiveVerdict(entry: WorktreeEntry, path: string, all: readonly string[], deps: ArchiveCleanupDeps, cwds: readonly string[]): Promise<Verdict> {
+  if (holdsAnother(path, all)) return { ok: false, why: "contém outra worktree" };
+  if (entry.prunable) return { ok: false, why: "pasta já não existe" };
+  if (!entry.head) return { ok: false, why: "sem commit" };
+  let ownLock = false;
+  if (entry.locked) {
+    const reason = entry.lockReason ?? "";
+    ownLock = reason !== "" && (deps.ownLockMarkers ?? []).some((marker) => marker.length >= 6 && reason.includes(marker));
+    if (!ownLock) return { ok: false, why: reason ? `bloqueada: ${reason.slice(0, 80)}` : "bloqueada (sem motivo)" };
+  }
+  if (usedByProcess([path, entry.path], cwds, deps.processCommands)) return { ok: false, why: "em uso por processo" };
   const canon = (folder: string) => trimSlash(deps.canon ? deps.canon(folder) : folder);
-  if ((deps.foldersInUse ?? []).some((folder) => isInside(canon(folder), path))) return "em uso por outra sessão";
-  return contentBlocker(entry.path, deps.git);
+  if ((deps.foldersInUse ?? []).some((folder) => isInside(canon(folder), path))) return { ok: false, why: "em uso por outra sessão" };
+  // its commits must live on in some ref once the folder is gone (a detached HEAD's would not)
+  try {
+    const refs = await deps.git(["for-each-ref", "--count=1", "--contains", entry.head, "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"]);
+    if (!refs.trim()) {
+      const name = path.split("/").pop() ?? "worktree";
+      return { ok: false, why: "commits fora de qualquer branch", command: `git -C ${shellQuote(entry.path)} branch ${shellQuote(`salvo/${name}`)} HEAD` };
+    }
+  } catch (error) {
+    return { ok: false, why: gitFailureLabel(error) };
+  }
+  const content = await contentBlocker(entry.path, deps.git);
+  if (content) return { ok: false, why: content };
+  const remove = removeCommand(deps.repo, entry.path);
+  return { ok: true, command: ownLock ? `git -C ${shellQuote(deps.repo)} worktree unlock ${shellQuote(entry.path)} && ${remove}` : remove };
 }
 
-/** Remove the merged worktrees nested in `parent` that hold nothing to lose (deepest first). */
-export async function removeNestedWorktrees(parent: string, deps: ArchiveCleanupDeps, mainRef = "origin/main"): Promise<ArchiveCleanup> {
-  const result: ArchiveCleanup = { removed: [], kept: [] };
+/** The merged worktrees nested in `parent` a person may remove (deepest first), and those that stay. */
+export async function planNestedWorktrees(parent: string, deps: ArchiveCleanupDeps, mainRef = "origin/main"): Promise<ArchiveCleanup> {
+  const result: ArchiveCleanup = { candidates: [], kept: [] };
   const canon = (path: string) => trimSlash(deps.canon ? deps.canon(path) : path);
   const listed = await listEntries(deps);
   if (!listed) return result;
@@ -312,61 +350,49 @@ export async function removeNestedWorktrees(parent: string, deps: ArchiveCleanup
   const cwds = deps.processCwds.map(canon);
   const nested = listed.filter(({ path }) => path !== root && isInside(path, root)).sort((a, b) => b.path.length - a.path.length);
   for (const { entry, path } of nested) {
-    const keep = (why: string, command = true) => { result.kept.push({ path: entry.path, why, ...(command ? { command: removeCommand(deps.repo, entry.path) } : {}) }); };
-    if (entry.locked) { keep("bloqueada", false); continue; }
-    if (!entry.head) { keep("sem commit", false); continue; }
-    try {
-      await deps.git(["merge-base", "--is-ancestor", entry.head, mainRef]);
-    } catch {
-      keep(`não está em ${mainRef}`, false);
-      continue;
+    if (entry.head) {
+      try {
+        await deps.git(["merge-base", "--is-ancestor", entry.head, mainRef]);
+      } catch {
+        result.kept.push({ path: entry.path, why: `não está em ${mainRef}` });
+        continue;
+      }
     }
-    const blocker = await archiveBlocker(entry, path, all, deps, cwds);
-    if (blocker) { keep(blocker, blocker !== "pasta já não existe"); continue; }
-    try {
-      await deps.git(["worktree", "remove", entry.path]); // never --force
-      result.removed.push(entry.path);
-    } catch (error) {
-      keep(gitFailureLabel(error, "não removida"));
-    }
+    const verdict = await archiveVerdict(entry, path, all, deps, cwds);
+    if (verdict.ok) result.candidates.push({ path: entry.path, command: verdict.command });
+    else result.kept.push({ path: entry.path, why: verdict.why, ...(verdict.command ? { command: verdict.command } : {}) });
   }
   return result;
 }
 
-/** Remove the archived session's own worktree, when nothing can be lost and
- * no other session (`users`) works in it. Its lock, set for the session, is lifted only then. */
-export async function removeArchivedWorktree(folder: string, deps: ArchiveCleanupDeps, users: readonly string[]): Promise<ArchiveCleanup> {
-  const result: ArchiveCleanup = { removed: [], kept: [] };
-  const command = removeCommand(deps.repo, folder);
+/** Whether a person may remove the archived session's own worktree, with the
+ * command; never when another session (`users`) works in it. */
+export async function planArchivedWorktree(folder: string, deps: ArchiveCleanupDeps, users: readonly string[]): Promise<ArchiveCleanup> {
+  const result: ArchiveCleanup = { candidates: [], kept: [] };
   if (users.length) { result.kept.push({ path: folder, why: `em uso por ${users.join(", ")}` }); return result; }
   const canon = (path: string) => trimSlash(deps.canon ? deps.canon(path) : path);
   const listed = await listEntries(deps);
   const path = canon(folder);
   const found = listed?.find((item) => item.path === path);
   if (!listed || !found || found.path === listed[0]?.path) { result.kept.push({ path: folder, why: !listed ? "não conferida: git não listou as worktrees" : "não é uma worktree deste repositório" }); return result; }
-  const blocker = await archiveBlocker(found.entry, path, listed.map((item) => item.path), deps, deps.processCwds.map(canon));
-  if (blocker) { result.kept.push({ path: folder, why: blocker, ...(blocker === "pasta já não existe" ? {} : { command }) }); return result; }
-  try {
-    if (found.entry.locked) await deps.git(["worktree", "unlock", found.entry.path]);
-    await deps.git(["worktree", "remove", found.entry.path]); // never --force
-    result.removed.push(folder);
-  } catch (error) {
-    result.kept.push({ path: folder, why: gitFailureLabel(error, "não removida"), command });
-  }
+  const verdict = await archiveVerdict(found.entry, path, listed.map((item) => item.path), deps, deps.processCwds.map(canon));
+  if (verdict.ok) result.candidates.push({ path: folder, command: verdict.command });
+  else result.kept.push({ path: folder, why: verdict.why, ...(verdict.command ? { command: verdict.command } : {}) });
   return result;
 }
 
-/** The bot's chip and report for an archive's cleanup ("" when nothing happened). */
+/** The bot's chip and report for an archive's plan ("" when there is nothing). */
 export function archiveCleanupNote(parent: string, result: ArchiveCleanup): { chip: string; report: string } {
-  if (!result.removed.length && !result.kept.length) return { chip: "", report: "" };
+  if (!result.candidates.length && !result.kept.length) return { chip: "", report: "" };
   const name = (path: string) => (path.startsWith(`${parent}/`) ? path.slice(parent.length + 1) : path);
   const chip = [
-    result.removed.length ? `Worktrees removidas: ${result.removed.map(name).join(", ")}.` : "",
+    result.candidates.length ? `Worktrees que podem ser removidas: ${result.candidates.map((item) => name(item.path)).join(", ")}.` : "",
     result.kept.length ? `Mantidas: ${result.kept.map((item) => `${name(item.path)} (${item.why})`).join(", ")}.` : "",
   ].filter(Boolean).join(" ");
-  const commands = result.kept.filter((item) => item.command).map((item) => item.command!);
-  const report = result.kept.length
-    ? `${chip}\nNada foi removido à força. Se, depois de conferir, uma pessoa quiser remover as mantidas:\n${commands.join("\n") || "(nenhuma tem comando: confira à mão)"}`
-    : chip;
+  const report = [
+    `${chip} O servidor não remove worktrees.`,
+    result.candidates.length ? `Para remover (sem --force; confira antes):\n${result.candidates.map((item) => item.command).join("\n")}` : "",
+    ...result.kept.filter((item) => item.command).map((item) => `Para guardar os commits de ${name(item.path)} antes de qualquer remoção:\n${item.command}`),
+  ].filter(Boolean).join("\n");
   return { chip, report };
 }
