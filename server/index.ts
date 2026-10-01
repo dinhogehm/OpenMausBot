@@ -405,6 +405,7 @@ import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerC
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { selfWriteOf } from "./watch-echo.ts";
 import { removeNestedWorktrees } from "./nested-worktrees.ts";
+import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
 import {
@@ -25253,3 +25254,8 @@ const gracefulShutdown = createGracefulShutdown({
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, gracefulShutdown);
 }
+// Test and verification servers only: shut down when the launcher is gone.
+exitWithParent(process.env.OMB_EXIT_WITH_PARENT, () => {
+  console.warn("[server] the process that launched this server is gone; shutting down");
+  gracefulShutdown();
+});

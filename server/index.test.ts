@@ -1054,6 +1054,7 @@ beforeAll(async () => {
       USERPROFILE: home,
       OMB_PORT: String(PORT),
       OMB_WEBHOOK_PORT: String(WEBHOOK_PORT),
+      OMB_EXIT_WITH_PARENT: String(process.pid),
       OMB_EXTRA_PATH: fakeDockerDir,
       OMB_BOX_API: `http://127.0.0.1:${boatStubPort}`,
       OMB_COMPOSIO_API: `http://127.0.0.1:${boatStubPort}/api/v3.1`,

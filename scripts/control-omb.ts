@@ -371,6 +371,8 @@ export function verificationServerEnvironment(parentEnv: NodeJS.ProcessEnv, data
     // shell's PATH, so a developer's own `codex` (or any engine CLI) becomes
     // an "available" engine that CI never has (#2035).
     OMB_TEST_SEALED_PATH: "1",
+    // the server goes away with whoever launched it (a killed test worker)
+    OMB_EXIT_WITH_PARENT: String(process.pid),
   });
   // The fake engine's own knobs (mode, replies, tool calls) are the one thing
   // a caller may script into the child: FAKE_CLAUDE_* crosses, nothing else.
