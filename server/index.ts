@@ -7935,7 +7935,11 @@ function autonomyTurnBlocked(botId: string, threadId: string, intake = false): b
 // the same bot never read the same sources at the same time.
 const intakeLock = new IntakeLock((botId, threadId) => threadBusy(botId, threadId) || autonomyDispatching.has(threadId));
 const intakeBusyElsewhere = (botId: string, threadId?: string) => intakeLock.busyElsewhere(botId, threadId);
-const noteIntakeTurn = (botId: string, threadId: string) => intakeLock.note(botId, threadId);
+/** The intake turn starts; a wait behind another conversation is logged with its length. */
+const noteIntakeTurn = (botId: string, threadId: string, waiter = threadId) => {
+  const wait = intakeLock.note(botId, threadId, waiter);
+  if (wait) console.log(`[intake] ${waiter === threadId ? threadId : `${waiter} (${threadId})`} of ${botId} ran after waiting ${Math.round(wait.ms / 1000)} s behind ${wait.behind}`);
+};
 const settleIntakeTurn = (threadId: string) => intakeLock.settle(threadId);
 /** The bot reads Chat, spreadsheet or issues through a standing watch. */
 const readsIntake = (botId: string) => store.tasks(botId).some((task) => autonomy.standingsFor(task.threadId).length > 0);
@@ -7949,6 +7953,11 @@ function logIntakeWait(line: string): void {
   intakeWaitLogged.set(line, at);
   if (intakeWaitLogged.size > 200) intakeWaitLogged.clear();
   console.log(`[intake] ${line}`);
+}
+/** `waiter` of this bot is held back by the intake lock: logged (who, behind whom) and timed. */
+function holdIntake(botId: string, waiter: string, what: string): void {
+  intakeLock.noteWait(botId, waiter);
+  logIntakeWait(`${what} of ${botId} waits behind ${intakeLock.holder(botId) ?? "?"} (the bot's other intake turn)`);
 }
 
 /** true = the turn started; false = not now (busy, or it failed and said so). */
@@ -8242,7 +8251,7 @@ async function autonomyTick(): Promise<void> {
     // A due wake waits for the thread to be free; it is never dropped for it.
     // a watch is intake work: it waits for the bot's other intake turn
     if (autonomyTurnBlocked(wake.botId, wake.threadId, Boolean(wake.watch))) {
-      if (wake.watch && intakeBusyElsewhere(wake.botId, wake.threadId)) logIntakeWait(`wake ${wake.watch.label ?? watchLabel(wake.watch.command)} in ${wake.threadId} waits for the bot's other intake turn`);
+      if (wake.watch && intakeBusyElsewhere(wake.botId, wake.threadId)) holdIntake(wake.botId, wake.threadId, `wake ${wake.watch.label ?? watchLabel(wake.watch.command)} in ${wake.threadId}`);
       continue;
     }
     if (!autonomy.isCurrent(wake)) continue;
@@ -9970,8 +9979,10 @@ async function startTurn(
   if (botAtThreadCapacity(botId)) {
     throw Object.assign(new Error(`this bot has reached its limit of ${maxConcurrentBotThreads(cfg)} parallel threads — wait for one to finish`), { status: 409, code: "thread_limit" });
   }
-  if (opts?.peerAsk && !intakeLock.admitPeer(botId, threadId, opts.peerAsk.botId, readsIntake(botId))) {
-    logIntakeWait(`message from ${opts.peerAsk.name} to ${botId} in ${threadId} waits for the bot's other intake turn`);
+  const askerName = opts?.peerAsk?.name;
+  if (opts?.peerAsk && !intakeLock.admitPeer(botId, threadId, opts.peerAsk.botId, readsIntake(botId),
+    (wait) => console.log(`[intake] message from ${askerName} in ${threadId} of ${botId} ran after waiting ${Math.round(wait.ms / 1000)} s behind ${wait.behind}`))) {
+    logIntakeWait(`message from ${opts.peerAsk.name} to ${botId} in ${threadId} waits behind ${intakeLock.holder(botId) ?? "?"} (the bot's other intake turn)`);
     throw Object.assign(new Error("this bot is handling its intake in another conversation — wait for it to finish"), { status: 409, code: "thread_busy" });
   }
   // Steering is never a cancel. A message sent while teammates are working
@@ -11482,7 +11493,7 @@ routines = new RoutineManager({
   // a routine run waits while the bot's intake turn (a watch) runs elsewhere
   botState: (botId) => {
     if (!intakeBusyElsewhere(botId)) return unattendedDispatchState(botId);
-    logIntakeWait(`routine of ${botId} deferred: the bot's intake turn is running`);
+    holdIntake(botId, "routine", "routine");
     return "busy";
   },
   goalState: (groupId, coordinatorBotId) => {
@@ -11543,7 +11554,7 @@ routines = new RoutineManager({
     }
   },
   startTurn: async (botId, threadId, prompt, runOn, triggerSource, onDispatchError) => {
-    noteIntakeTurn(botId, threadId);
+    noteIntakeTurn(botId, threadId, "routine");
     try {
       await startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, onDispatchError: (message) => {
         settleIntakeTurn(threadId);

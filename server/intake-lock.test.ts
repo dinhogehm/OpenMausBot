@@ -20,6 +20,28 @@ describe("one intake turn per bot", () => {
     expect(lock.busyElsewhere("monitor", "vigia-chat")).toBe(false);
   });
 
+  it("says who waited behind whom, and for how long, when the waiter runs", () => {
+    let now = 1_000;
+    const busy = new Set<string>(["vigia-chat"]);
+    const lock = new IntakeLock((_botId, threadId) => busy.has(threadId), () => now);
+    lock.note("monitor", "vigia-chat");
+    // the issues watch is held, twice: the first wait counts
+    lock.noteWait("monitor", "vigia-issues");
+    now += 20_000;
+    lock.noteWait("monitor", "vigia-issues");
+    lock.noteWait("monitor", "routine");
+    expect(lock.holder("monitor")).toBe("vigia-chat");
+    busy.delete("vigia-chat");
+    lock.settle("vigia-chat");
+    now += 19_000;
+    expect(lock.note("monitor", "vigia-issues")).toEqual({ behind: "vigia-chat", ms: 39_000 });
+    // asked again, it is gone; the routine runs in its results thread, under its own name
+    expect(lock.note("monitor", "vigia-issues")).toBeNull();
+    expect(lock.note("monitor", "results-1", "routine")).toEqual({ behind: "vigia-chat", ms: 19_000 });
+    // a turn that never waited says nothing
+    expect(lock.note("chief", "c1")).toBeNull();
+  });
+
   it("makes a teammate's message to a watcher bot wait for its intake turn, and hold the lock while it runs", () => {
     const busy = new Set<string>();
     const lock = new IntakeLock((_botId, threadId) => busy.has(threadId));
