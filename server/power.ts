@@ -141,8 +141,13 @@ const CARRIER_FILLER = String.raw`(?:o|a|os|as|um|uma|ess[ea]|est[ea]|aquel[ea]|
 const ORDER_BEFORE = new RegExp(String.raw`(?<![\p{L}\p{N}_/-])${CARRIER_VERB}(?:\s*[:\-–—])?(?:\s+${CARRIER_FILLER}){0,3}\s+(?:release-)?carrier\b`, "giu");
 /** The carrier, then the order: "Agora o carrier: execute", "carrier da #9330 liberado, pode rodar". */
 const ORDER_AFTER = /\bcarrier\b[^:,;]{0,40}[:,]\s*(?:pode\s+|j[áa]\s+)?(rod\w*|execut\w*|solt\w*|dispar\w*|public\w*|mand\w*|run|go)\b/giu;
-/** The script with --execute at the start of a clause (or right after an order verb or a shell). */
-const ORDER_SCRIPT = new RegExp(String.raw`^\s*(?:(?:agora|ent[ãa]o|pode)\s+)?(?:(${CARRIER_VERB})\s+)?(?:(?:\S*/)?(?:ba|z)?sh\s+)?\S*release-carrier(?:\.sh)?\b[^\n]*?\s--execute\b`, "iu");
+/** The script and, after it, --execute with only flags (and their values)
+ * between: anywhere in a clause ("cd ~/x && ./scripts/release-carrier.sh
+ * --label hotfix --execute", "Pode seguir: …"). Not `grep --execute
+ * release-carrier.sh`, nor "leia release-carrier.sh e explique o --execute". */
+const SCRIPT_EXECUTE = /\S*release-carrier(?:\.sh)?\b`?(?:\s+--?[\w-]+(?:=\S+|\s+(?!-)[^\s`]+)?)*?\s+--execute\b/giu;
+/** An order verb as a word. */
+const ORDER_VERB = new RegExp(String.raw`(?<![\p{L}\p{N}_/-])${CARRIER_VERB}(?![\p{L}\p{N}_])`, "iu");
 /** The /cpd skill (it ends in the carrier) at the start of a clause. */
 const ORDER_CPD = /^\s*(?:(?:agora|ent[ãa]o|pode)\s+)?(?:(faz|fa[çc]a|fazer|rod\w*|execut\w*|mand\w*|dispar\w*|solt\w*|lan[çc]\w*|run)\s+)?(?:o\s+)?\/?cpd\b/iu;
 /** The carrier or /cpd is talked about. */
@@ -152,8 +157,10 @@ const MENTION = /\b(?:release-)?carrier\b|(?:^|\s)\/?cpd\b/iu;
  * falhou ontem", "o /cpd de ontem falhou"); a verb plus the carrier is an
  * order whatever else the clause says ("Rode o carrier e confira o log"). */
 const ABOUT = /\b(?:falh\w*|quebr\w*|trav\w*|erro|errou|logs?|ontem|investig\w*|vej[ao]|veja|confir\w*|analis\w*|testes?|tests?|revis[ãa]o|review|failed|fails?|error|why)\b|por\s*qu[eê]/iu;
-/** A negation up to three words before the order ("não rode", "Não é para rodar"), but not "não esqueça de". */
-const NEGATED = /(?:\bn[ãa]o|\bnunca|\bjamais|\bdon'?t|\bdo\s+not|\bnever)\s+(?!(?:se\s+)?(?:esque[çc]a|deixe|precisa)\b)(?:\S+\s+){0,3}$/iu;
+/** A negation up to three words before the order ("não rode", "Não é para rodar", "Nada de rodar"), but not "não esqueça de". */
+const NEGATED = /(?:\bn[ãa]o|\bnunca|\bjamais|\bnada\s+de|\bsem|\bdon'?t|\bdo\s+not|\bnever)\s+(?!(?:se\s+)?(?:esque[çc]a|deixe|precisa)\b)(?:\S+\s+){0,3}$/iu;
+/** "como rodar o carrier", "how to run the carrier": an explanation, not an order. */
+const EXPLAINED = /\b(?:como|how\s+to)\s+$/iu;
 
 /** What a message says about the carrier: an "order" to run it, a "mention", or null. */
 export function carrierIntent(text: string): "order" | "mention" | null {
@@ -164,18 +171,21 @@ export function carrierIntent(text: string): "order" | "mention" | null {
     mention = true;
     const about = ABOUT.test(clause);
     // a negation counts only within its comma-part: "não precisa esperar, rode o carrier" is an order
-    const negated = (at: number) => NEGATED.test(clause.slice(0, at).split(",").pop()!);
+    const partBefore = (at: number) => clause.slice(0, at).split(",").pop()!;
+    const negated = (at: number) => NEGATED.test(partBefore(at)) || EXPLAINED.test(partBefore(at));
     const starts = [0, ...[...clause.matchAll(/,/g)].map((match) => match.index! + 1)];
-    // a script or /cpd at the start of a comma-part: an order with a verb, or with no talk "about" it
-    const cited = starts.filter((at) => {
-      const part = clause.slice(at);
-      const found = ORDER_SCRIPT.exec(part) ?? ORDER_CPD.exec(part);
+    // the script with --execute, anywhere: an order with an order verb before it in its part, or with no talk "about" it
+    const scripts = [...clause.matchAll(SCRIPT_EXECUTE)].map((match) => match.index!).filter((at) => ORDER_VERB.test(partBefore(at)) || !about);
+    // /cpd at the start of a comma-part: the same
+    const cpd = starts.filter((at) => {
+      const found = ORDER_CPD.exec(clause.slice(at));
       return found !== null && (found[1] !== undefined || !about);
     });
     const orders = [
       ...[...clause.matchAll(ORDER_BEFORE)].map((match) => match.index!),
       ...[...clause.matchAll(ORDER_AFTER)].map((match) => match.index! + match[0].lastIndexOf(match[1]!)),
-      ...cited.map((at) => at + (clause.slice(at).length - clause.slice(at).trimStart().length)),
+      ...scripts,
+      ...cpd.map((at) => at + (clause.slice(at).length - clause.slice(at).trimStart().length)),
     ];
     if (orders.some((at) => !negated(at))) return "order";
   }

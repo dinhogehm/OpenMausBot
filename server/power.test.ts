@@ -199,4 +199,33 @@ describe("power", () => {
     expect(carrierIntent("release-carrier.sh --execute falhou ontem com GH013, investigue")).toBe("mention");
     expect(carrierIntent("o /cpd de ontem falhou, veja o log")).toBe("mention");
   });
+
+  it("the script with --execute is an order anywhere in the clause (INSP-G r4: the 11 wordings and the 24 new phrases)", () => {
+    const script = "./scripts/release-carrier.sh --execute --label hotfix";
+    const wordings = [
+      `\`${script}\``, `Rode no nuria-platform: \`${script}\``, `Rode:\n${script}`, `Pode seguir: ${script}`, `Próximo passo é ${script}`,
+      `cd ~/Projetos/nuria-platform && ${script}`, `Com a #9330 mergeada, ${script}`, `Rode \`${script}\` e mande o resultado`,
+      `Execute agora \`${script}\``, `Rode o comando \`${script}\``, `Depois do merge rode ${script}`,
+    ];
+    for (const text of wordings) expect(carrierIntent(text), text).toBe("order");
+    const phrases: Array<[string, "order" | "mention"]> = [
+      ["Veja o log do CI e, se verde, rode o carrier", "order"], ["Investigue a falha e depois solte o carrier", "order"],
+      ["Testes verdes: pode rodar o carrier", "order"], ["Confirmado no log; agora rode o carrier da #9330", "order"],
+      ["Depois do merge, execute o carrier com --label hotfix", "order"], ["Rode a release (carrier) da #9330", "mention"],
+      ["Rode release-carrier.sh --label hotfix --execute e depois veja o log", "order"], ["cd ~/Projetos/nuria-platform && ./scripts/release-carrier.sh --execute --label x", "order"],
+      ["Faça o /cpd da #9330 e confira a produção", "order"], ["libera o carrier e confere a planilha", "order"],
+      ["Por que o carrier de ontem demorou? Veja o log", "mention"], ["O carrier rodou ontem às 14h, confira se publicou", "mention"],
+      ["Rodaram o carrier duas vezes ontem; investigue", "mention"], ["revise o PR que muda o release-carrier.sh", "mention"],
+      ["escreva testes para o carrier", "mention"], ["documente como rodar o carrier no README", "mention"],
+      ["o carrier da #9327 já publicou?", "mention"], ["veja o log do carrier", "mention"],
+      ["grep -n --execute scripts/release-carrier.sh", "mention"], ["leia release-carrier.sh e explique o --execute", "mention"],
+      ["status do carrier, por favor", "mention"], ["Não rode o carrier; investigue o log", "mention"],
+      ["Nada de rodar o carrier hoje", "mention"], ["Sem carrier por enquanto, só o PR", "mention"],
+    ];
+    expect(phrases).toHaveLength(24);
+    for (const [text, want] of phrases) expect(carrierIntent(text), text).toBe(want);
+    // still a mention: the script cited in talk about a failure, or negated
+    expect(carrierIntent("release-carrier.sh --execute falhou ontem com GH013, investigue")).toBe("mention");
+    expect(carrierIntent("não rode ./scripts/release-carrier.sh --execute; só o --check")).toBe("mention");
+  });
 });
