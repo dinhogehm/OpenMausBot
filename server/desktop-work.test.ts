@@ -30,6 +30,7 @@ import {
   watchStalledSessions,
   type DesktopWorkDeps,
 } from "./desktop-work.ts";
+import { checkArchivedOutside } from "./archived-outside.ts";
 
 const LOCAL = "local_9d56adfd-0000-4000-8000-000000000000";
 const WORKTREE = "/Users/o/Projetos/nuria-platform/.claude/worktrees/helpdesk-f30521";
@@ -437,17 +438,47 @@ describe("archiving", () => {
     expect(h.reports).toHaveLength(reports);
   });
 
-  it("is not \"behind the server's back\" for a failed session the owner was told to see to in the app (INSP-F F1-b)", () => {
+  it("is not \"behind the server's back\" for a failed session, but its open PR is still found (INSP-F F1-b, r2 #4)", async () => {
     const h = harness();
     const session = h.opened("h");
-    failDesktopSession(h.deps, session, "Archive was clicked 3 times in the Claude app, but the app never marked the session archived; archive it by hand there");
+    session.desktop!.issue = "9319";
+    failDesktopSession(h.deps, session, "the gate stopped halfway: the session hit an error");
     const reports = h.reports.length;
+    // the person archives it in the app
     h.records.get(LOCAL)!.isArchived = true;
     followDesktopSessions(h.deps);
     expect(session.status).toBe("archived");
-    expect(session.archivedOutsideAt).toBeUndefined();
     expect(h.chips.at(-1)).toEqual({ id: "h", text: "arquivada no app Claude", ok: true });
     expect(h.reports).toHaveLength(reports);
+    // nobody checked its PRs (no cc_session_archive): the watcher does
+    expect(session.archivedOutsideAt).toBe(h.now);
+    expect(session.archivedAfterFailure).toBe(true);
+    await checkArchivedOutside(h.ledger.all(), {
+      now: () => h.now,
+      save: () => {},
+      slugOf: async () => "owner/platform",
+      prState: async () => "CLOSED",
+      openPrs: async (by) => ("issue" in by && by.issue === "9319" ? [{ number: 9328, title: "Contrato do reconciliador (#9319)", headRefName: "fix/9319-reconciler-contract" }] : []),
+      branchOf: async () => null,
+      chip: (s, text, ok) => h.deps.chip(s, text, ok),
+      report: (s, text) => h.deps.report(s, text),
+      ownerPending: () => {},
+    });
+    const texts = h.chips.filter((chip) => chip.id === "h").map((chip) => chip.text);
+    expect(texts).toContain("PR #9328 ficou sem sessão: https://github.com/owner/platform/pull/9328");
+    expect(texts.some((text) => text.includes("sem pedido do OMB"))).toBe(false);
+    expect(h.reports.at(-1)!.text).toContain("depois de falhar");
+  });
+
+  it("does not check again a session the server itself archived through cc_session_archive after giving up (archiveHandedOver)", () => {
+    const h = harness();
+    const session = h.opened("i");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "archive", text: "", since: h.now, attempts: 0 };
+    giveUpPending(h.deps, session, "the window could not be brought to the front");
+    h.records.get(LOCAL)!.isArchived = true;
+    followDesktopSessions(h.deps);
+    expect(session.archivedOutsideAt).toBeUndefined();
   });
 });
 

@@ -322,11 +322,20 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       // owner must hear it (its PR may be left without a session). Asked
       // for: an archive on its way, one handed to the person ("arquive à
       // mão"), or a failed session the owner was told to see to in the app.
-      const ordered = desktop.pending?.kind === "archive" || Boolean(desktop.archiveWhenResolved) || Boolean(desktop.archiveHandedOver) || session.status === "failed";
+      // Those that went through cc_session_archive passed archiveBlockers;
+      // a failed one did not: its PRs are still checked (archived-outside.ts).
+      const failed = session.status === "failed";
+      const ordered = desktop.pending?.kind === "archive" || Boolean(desktop.archiveWhenResolved) || Boolean(desktop.archiveHandedOver) || failed;
       delete desktop.pending;
       deps.ledger.setStatus(session, "archived");
-      if (ordered) deps.chip(session, "arquivada no app Claude");
-      else {
+      if (ordered) {
+        if (failed && !desktop.archiveHandedOver) {
+          session.archivedOutsideAt = now;
+          session.archivedAfterFailure = true;
+          deps.ledger.save();
+        }
+        deps.chip(session, "arquivada no app Claude");
+      } else {
         session.archivedOutsideAt = now;
         deps.ledger.save();
         deps.chip(session, "arquivada no app Claude por alguém, sem pedido do OMB", false);
