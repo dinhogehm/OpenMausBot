@@ -410,7 +410,7 @@ import type { ProviderInstance } from "./contracts.ts";
 import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-selection.ts";
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
-import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
+import { botMarkPattern, botSlug, selfWriteOf, urlOfToolCall, vmWriteOf } from "./watch-echo.ts";
 import { CcStartQueue, priorityLabel, startPriority } from "./cc-start-queue.ts";
 import { removeNestedWorktrees, removeReleasedWorktrees } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
@@ -8042,11 +8042,14 @@ function autonomyTurnBlocked(botId: string, threadId: string, intake = false): b
 // the same bot never read the same sources at the same time.
 const intakeLock = new IntakeLock((botId, threadId) => threadBusy(botId, threadId) || autonomyDispatching.has(threadId));
 const intakeBusyElsewhere = (botId: string, threadId?: string) => intakeLock.busyElsewhere(botId, threadId);
-/** The intake turn starts; a wait behind another conversation is logged with its length. */
-const noteIntakeTurn = (botId: string, threadId: string, waiter = threadId) => {
-  const wait = intakeLock.note(botId, threadId, waiter);
-  if (wait) console.log(`[intake] ${waiter === threadId ? threadId : `${waiter} (${threadId})`} of ${botId} ran after waiting ${Math.round(wait.ms / 1000)} s behind ${wait.behind}`);
-};
+/** The intake turn in `threadId` holds the lock (before it is dispatched). */
+const noteIntakeTurn = (botId: string, threadId: string) => intakeLock.note(botId, threadId);
+/** Its turn really started: a wait behind another conversation is logged —
+ * bot, what waited (a watch's label, a routine), where it runs, how long. */
+function intakeTurnStarted(botId: string, threadId: string, waiter: string, what: string): void {
+  const wait = intakeLock.takeWait(botId, waiter);
+  if (wait) console.log(`[intake] ${what} of ${store.bot(botId)?.name ?? botId} in ${threadId} ran after waiting ${Math.round(wait.ms / 1000)} s behind ${wait.behind}`);
+}
 const settleIntakeTurn = (threadId: string) => intakeLock.settle(threadId);
 /** The bot reads Chat, spreadsheet or issues through a standing watch. */
 const readsIntake = (botId: string) => store.tasks(botId).some((task) => autonomy.standingsFor(task.threadId).length > 0);
@@ -8184,7 +8187,16 @@ async function runDueWatches(): Promise<void> {
     const watch = wake.watch!;
     const result = await runWatchCommand(watch.argv, { cwd: watchCwd(wake.botId, wake.threadId), path: augmentedPath(), ignore: watch.ignore });
     const owner = store.bot(wake.botId);
-    autonomy.recordWatchRun(wake, { ...result, matched: result.ok && watchMatches(result.output, watch.until), ...(owner ? { ownMark: botMarkPattern(owner.name) } : {}) });
+    const echoBefore = watch.echoAt;
+    autonomy.recordWatchRun(wake, { ...result, matched: result.ok && watchMatches(result.output, watch.until), ...(owner ? { ownMark: botMarkPattern(owner.name, botSlug(owner.name)) } : {}) });
+    // every echo let pass is said: in server.log, and with a chip where the watch runs
+    if (watch.echo && watch.echoAt !== echoBefore) {
+      const label = watch.label ?? watchLabel(watch.command);
+      console.log(`[watch-echo] ${label} in ${wake.threadId} of ${owner?.name ?? wake.botId}: ${watch.echo.lines} line(s) taken as its own write (${watch.echo.reasons.join("; ")}): ${watch.echo.sample}`);
+      if (store.taskByThread(wake.botId, wake.threadId)) {
+        store.appendMessage(wake.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Vigia ${label}: a mudança era sua (${watch.echo.reasons[0]}), não acordei — ${watch.echo.sample}`, 240), ok: true } });
+      }
+    }
   }));
   // Rows show each watch's last run and failures: refresh the bots that ran one.
   for (const botId of new Set(watches.map((wake) => wake.botId))) refreshBotRow(botId);
@@ -8463,6 +8475,7 @@ async function autonomyTick(): Promise<void> {
     const failing = standing && wake.watch!.trigger === "failing" && wake.watch!.lastTrigger !== "failing" ? `${wake.watch!.failures}` : null;
     const outcome = await dispatchAutonomyTurn(wake.botId, wake.threadId, chip, prompt);
     if (outcome !== "started") settleIntakeTurn(wake.threadId);
+    else if (wake.watch) intakeTurnStarted(wake.botId, wake.threadId, wake.threadId, `watch ${wake.watch.label ?? watchLabel(wake.watch.command)}`);
     if (standing) {
       // Busy: it stays due and fires next tick. Otherwise (started or not) it re-arms.
       if (outcome === "busy") continue;
@@ -8527,6 +8540,22 @@ if (ccLedger.interruptedOnLoad.length) {
 reportResumptionToChief();
 retireWorkOfClosedThreads();
 renameResultsThreads();
+warnArmedIgnores();
+
+/** Standing watches armed before the warning existed, with an `ignore` that
+ * swallows lines a person changed: said once in their conversation. */
+function warnArmedIgnores(): void {
+  for (const wake of autonomy.standingWatches()) {
+    const watch = wake.watch!;
+    if (watch.ignoreWarnedAt !== undefined || !store.taskByThread(wake.botId, wake.threadId)) continue;
+    const warnings = watchIgnoreWarnings(watch.ignore, watch.command);
+    if (!warnings.length) continue;
+    autonomy.markIgnoreWarned(wake);
+    const label = watch.label ?? watchLabel(watch.command);
+    store.appendMessage(wake.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Vigia ${label}: o ignore pode esconder mudanças de pessoas`, 200), ok: false } });
+    autonomy.addReport(wake.botId, wake.threadId, `[Aviso do servidor sobre o vigia permanente "${label}"] ${warnings.join(" ")} Para trocar, arme de novo o vigia (wake_when, mesmo label) sem o ignore ou com ele ancorado.`);
+  }
+}
 
 /** Routine results threads made before they were titled in pt-BR. */
 function renameResultsThreads(): void {
@@ -9728,12 +9757,33 @@ bus.subscribe((event: RuntimeEvent) => {
 
 // A watcher bot's own comment, post or spreadsheet note is remembered for
 // a while, so its watch does not wake it on that echo (server/watch-echo.ts).
+// Writes through the VM's computer count too: the page it last opened
+// (a spreadsheet, the Chat) and the text it then typed or pasted there.
+const vmOpenUrl = new Map<string, string>();
 bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
-  if (event.type !== "item.started" || event.itemType !== "tool" || !event.summary) return;
-  const write = selfWriteOf(event.summary, Date.now());
-  const bot = write ? store.botByThread(event.threadId) : undefined;
-  if (write && bot) autonomy.noteSelfWrite(bot.id, write);
+  if (event.type !== "item.started" || event.itemType !== "tool") return;
+  const bot = store.botByThread(event.threadId);
+  if (!bot) return;
+  const tool = event.title ?? "";
+  if (event.summary) {
+    // the whole command when the preview has it (the summary stops at 200 characters)
+    let command = event.summary;
+    try {
+      const parsed = JSON.parse(event.input ?? "") as { command?: unknown };
+      if (typeof parsed.command === "string") command = parsed.command;
+    } catch { /* the summary it is */ }
+    const write = selfWriteOf(command, Date.now());
+    if (write) autonomy.noteSelfWrite(bot.id, write);
+    return;
+  }
+  const url = urlOfToolCall(tool, event.input);
+  if (url) {
+    vmOpenUrl.set(event.threadId, url);
+    if (vmOpenUrl.size > 500) vmOpenUrl.clear();
+  }
+  const write = vmWriteOf(tool, event.input, vmOpenUrl.get(event.threadId) ?? null, Date.now());
+  if (write) autonomy.noteSelfWrite(bot.id, write);
 });
 
 // Drain queued delegations for a source thread after its turn settles.
@@ -10362,7 +10412,7 @@ async function startTurn(
   }
   const askerName = opts?.peerAsk?.name;
   if (opts?.peerAsk && !intakeLock.admitPeer(botId, threadId, opts.peerAsk.botId, readsIntake(botId),
-    (wait) => console.log(`[intake] message from ${askerName} in ${threadId} of ${botId} ran after waiting ${Math.round(wait.ms / 1000)} s behind ${wait.behind}`))) {
+    (wait) => console.log(`[intake] message from ${askerName} to ${store.bot(botId)?.name ?? botId} in ${threadId} was admitted after waiting ${Math.round(wait.ms / 1000)} s behind ${wait.behind}`))) {
     logIntakeWait(`message from ${opts.peerAsk.name} to ${botId} in ${threadId} waits behind ${intakeLock.holder(botId) ?? "?"} (the bot's other intake turn)`);
     throw Object.assign(new Error("this bot is handling its intake in another conversation — wait for it to finish"), { status: 409, code: "thread_busy" });
   }
@@ -11873,9 +11923,9 @@ routines = new RoutineManager({
     [...delegationWatch.values()].some((watch) => watch.sourceThreadId === threadId) ||
     pendingDelegationWakes.has(threadId),
   // a routine run waits while the bot's intake turn (a watch) runs elsewhere
-  botState: (botId) => {
+  botState: (botId, routineId) => {
     if (!intakeBusyElsewhere(botId)) return unattendedDispatchState(botId);
-    holdIntake(botId, "routine", "routine");
+    holdIntake(botId, `routine:${routineId ?? "?"}`, `routine ${routineId ?? "?"}`);
     return "busy";
   },
   goalState: (groupId, coordinatorBotId) => {
@@ -11935,13 +11985,14 @@ routines = new RoutineManager({
       handoffs.forget(threadId);
     }
   },
-  startTurn: async (botId, threadId, prompt, runOn, triggerSource, onDispatchError) => {
-    noteIntakeTurn(botId, threadId, "routine");
+  startTurn: async (botId, threadId, prompt, runOn, triggerSource, onDispatchError, routineId) => {
+    noteIntakeTurn(botId, threadId);
     try {
       await startTurn(botId, prompt, { threadId, runOn, automationSource: triggerSource, onDispatchError: (message) => {
         settleIntakeTurn(threadId);
         onDispatchError?.(message);
       } });
+      intakeTurnStarted(botId, threadId, `routine:${routineId ?? "?"}`, `routine ${routineId ?? "?"}`);
     } catch (error) {
       settleIntakeTurn(threadId);
       throw error;
@@ -18071,6 +18122,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             const label = parseStandingLabel(body.label);
             if (label === null) return json(res, 400, { error: "label inválido: 1 a 40 letras, dígitos, espaços ou . _ # : -" });
             const cancelled = autonomy.cancelStanding(threadId, label);
+            intakeLock.dropWaits(threadId);
             if (cancelled) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Vigia permanente${cancelled.watch?.label ? ` "${cancelled.watch.label}"` : ""} desligado — ${watchLabel(cancelled.watch!.command)}`, ok: false } });
             const others = autonomy.standingsFor(threadId).map((wake) => wake.watch?.label ?? "default");
             return json(res, 200, { message: `${cancelled ? `Vigia permanente "${label}" desligado.` : `Não havia vigia permanente "${label}" nesta conversa.`}${others.length ? ` Continuam armados: ${others.join(", ")}.` : ""}` });
@@ -18087,6 +18139,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           }
           if (body.cancel === true) {
             const cancelled = autonomy.cancelWake(threadId);
+            intakeLock.dropWaits(threadId);
             return json(res, 200, { message: cancelled ? `${cancelled.watch ? "Vigia" : "Despertador"} cancelado.` : "Não havia despertador nem vigia pendente nesta conversa." });
           }
           if (body.command !== undefined) {
@@ -18111,7 +18164,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
               const where = [...new Set(elsewhere.map((wake) => `"${store.taskByThread(bot.id, wake.threadId)?.title ?? wake.threadId}" (${wake.threadId})`))].join(", ");
               return json(res, 409, { error: `você já tem um vigia com este mesmo comando em outra conversa: ${where}. Não armei outro. Para trazê-lo para esta conversa, chame wake_when de novo com move: true (o de lá é desligado); ou acompanhe por lá.` });
             }
-            const warnings = [...watchCommandWarnings(String(body.command)), ...watchIgnoreWarnings(input.ignore)];
+            const warnings = [...watchCommandWarnings(String(body.command)), ...watchIgnoreWarnings(input.ignore, String(body.command))];
             if (input.standing) {
               const armed = autonomy.standingsFor(threadId);
               const label = input.label ?? STANDING_DEFAULT_LABEL;

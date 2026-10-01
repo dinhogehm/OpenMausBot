@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { selfWriteOf } from "./watch-echo.ts";
+import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
 import {
   BotAutonomy,
   GOAL_DEFAULT_MAX_TURNS,
@@ -273,11 +273,11 @@ describe("standing watches", () => {
 
   it("with until, fires on each new matching output, not on every run while it matches", () => {
     const autonomy = make();
-    const watch = autonomy.setWatch("bot", "t1", { ...chat, until: "Pedro" });
-    expect(autonomy.recordWatchRun(watch, { ok: true, output: "Pedro: oi", fingerprint: "f2", matched: true })).toBe("matched");
+    const watch = autonomy.setWatch("bot", "t1", { ...chat, until: "Beltrano" });
+    expect(autonomy.recordWatchRun(watch, { ok: true, output: "Beltrano: oi", fingerprint: "f2", matched: true })).toBe("matched");
     autonomy.rearmStanding(watch);
-    expect(autonomy.recordWatchRun(watch, { ok: true, output: "Pedro: oi", fingerprint: "f2", matched: true })).toBeNull();
-    expect(autonomy.recordWatchRun(watch, { ok: true, output: "Pedro: oi\nPedro: e aí?", fingerprint: "f3", matched: true })).toBe("matched");
+    expect(autonomy.recordWatchRun(watch, { ok: true, output: "Beltrano: oi", fingerprint: "f2", matched: true })).toBeNull();
+    expect(autonomy.recordWatchRun(watch, { ok: true, output: "Beltrano: oi\nBeltrano: e aí?", fingerprint: "f3", matched: true })).toBe("matched");
   });
 
   it("re-arms after failing too, remembering it failed", () => {
@@ -445,7 +445,7 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
 
   it("flags a standing watch whose unchanged output only shows items over a day old, once until it changes", () => {
     const autonomy = make();
-    const old = "2026-03-16T19:19:20Z Cezar Boa!\n2026-03-31T10:00:00Z Marluce ok";
+    const old = "2026-03-16T19:19:20Z Tício Boa!\n2026-03-31T10:00:00Z Sicrana ok";
     const wake = autonomy.setWatch("bot", "t1", { ...base, command: "gog chat messages list spaces/X --plain", label: "chat", baseline: old, baselineFingerprint: "f1" });
     now += 2 * 3_600_000;
     autonomy.recordWatchRun(wake, { ok: true, output: old, matched: false, fingerprint: "f1" });
@@ -454,7 +454,7 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     expect(autonomy.staleWatches()).toEqual([wake]);
     autonomy.markWatchStaleAlerted(wake);
     expect(autonomy.staleWatches()).toEqual([]);
-    const fresh = autonomy.setWatch("bot", "t2", { ...base, command: "gog x", label: "chat", baseline: `${new Date(now).toISOString()} Pedro`, baselineFingerprint: "f2" });
+    const fresh = autonomy.setWatch("bot", "t2", { ...base, command: "gog x", label: "chat", baseline: `${new Date(now).toISOString()} Beltrano`, baselineFingerprint: "f2" });
     now += 4 * 3_600_000;
     expect(autonomy.staleWatches()).not.toContain(fresh);
   });
@@ -465,16 +465,16 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     const wake = autonomy.setWatch("bot", "t1", { ...base, command: "curl https://docs.google.com/x", label: "planilha", baseline: "linha 0", baselineFingerprint: "a" });
     autonomy.recordWatchRun(wake, { ok: true, output: "linha 0", matched: false, fingerprint: "a", truncated: true, lines: rows });
     now += 60_000;
-    autonomy.recordWatchRun(wake, { ok: true, output: "linha 0", matched: false, fingerprint: "b", truncated: true, lines: [...rows, "linha 5 — Pedro, nova"] });
+    autonomy.recordWatchRun(wake, { ok: true, output: "linha 0", matched: false, fingerprint: "b", truncated: true, lines: [...rows, "linha 5 — Beltrano, nova"] });
     expect(wake.watch!.trigger).toBe("changed");
     const prompt = wakePrompt(wake, null, now);
-    expect(prompt).toContain("Lines new or changed since the run before (1):\nlinha 5 — Pedro, nova");
+    expect(prompt).toContain("Lines new or changed since the run before (1):\nlinha 5 — Beltrano, nova");
   });
 
   it("takes the bot's own comment as the new baseline instead of waking it", () => {
     const autonomy = make();
     // a watch on the comments of #9307: one line per comment
-    const old = "9307\tdaiane\tO login ainda falha\t2026-09-30T20:00:00Z";
+    const old = "9307\tfulana\tO login ainda falha\t2026-09-30T20:00:00Z";
     const mine = "9307\tmonitor\tPublicado em produção, pode testar\t2026-10-01T08:37:20Z";
     const wake = autonomy.setWatch("bot", "t1", { ...base, command: "gh api repos/o/r/issues/9307/comments", argv: ["gh", "api", "repos/o/r/issues/9307/comments"], standing: true, label: "issues", baseline: old, baselineFingerprint: "a" });
     autonomy.recordWatchRun(wake, { ok: true, output: old, matched: false, fingerprint: "a", lines: [old] });
@@ -483,9 +483,42 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     expect(autonomy.recordWatchRun(wake, { ok: true, output: `${old}\n${mine}`, matched: false, fingerprint: "b", lines: [old, mine] })).toBeNull();
     expect(wake.watch!.echoAt).toBe(now);
     // a person on the same issue two minutes later: it wakes the bot
-    const human = "9307\tdaiane\tTestei e continua com erro\t2026-10-01T08:39:20Z";
+    const human = "9307\tfulana\tTestei e continua com erro\t2026-10-01T08:39:20Z";
     now += 2 * 60_000;
     expect(autonomy.recordWatchRun(wake, { ok: true, output: `${old}\n${mine}\n${human}`, matched: false, fingerprint: "c", lines: [old, mine, human] })).toBe("changed");
+  });
+
+  it("judges an echo against the whole run before, not the 20 000 characters kept to show (INSP-E A1, real gog --plain output)", () => {
+    // the real spreadsheet watch: ~108 000 characters, line 422 (row 178) far past the cut
+    const sheet = readFileSync(new URL("./testing/fixtures/gog-sheets-plain.txt", import.meta.url), "utf8").trim().split("\n");
+    const row = sheet.findLastIndex((line) => line.startsWith("  Oqvnflfa  Neewdoa    Pendente"));
+    const ownMark = botMarkPattern("Monitor Chat Atendimento", "monitor-chat-atendimento");
+    const run = (lines: string[], fingerprint: string) => ({ ok: true, output: lines.join("\n").slice(0, 20_000), truncated: true, matched: false, fingerprint, lines, linesComplete: true, ownMark });
+    const autonomy = make();
+    const wake = autonomy.setWatch("monitor", "thread-planilha", { ...base, command: "gog sheets get SHEET_ID Atendimento!A1:H400 --plain", argv: ["gog", "sheets", "get", "SHEET_ID", "Atendimento!A1:H400", "--plain"], label: "planilha", baseline: "x", baselineFingerprint: "a" });
+    autonomy.recordWatchRun(wake, run(sheet, "a"));
+    // the bot's note after its mark: an echo, said with why
+    now += 60_000;
+    const noted = sheet.map((line, i) => (i === row ? `${line} · 01/10 16:10 BRT: sessão aberta` : line));
+    expect(autonomy.recordWatchRun(wake, run(noted, "b"))).toBeNull();
+    expect(wake.watch!.echo).toMatchObject({ at: now, lines: 1, reasons: ["só o texto depois da marca mudou"], sample: expect.stringContaining("Oqvnflfa") });
+    // the client's "Reprovado" in that same row: it wakes the bot
+    now += 60_000;
+    const reproved = noted.map((line, i) => (i === row ? line.replace("Pendente    Atendimento", "Pendente    Reprovado  Atendimento") : line));
+    expect(autonomy.recordWatchRun(wake, run(reproved, "c"))).toBe("changed");
+  });
+
+  it("knows no echo right after a restart: the run before is not known in full", () => {
+    const lines = ["[Monitor Chat Atendimento] nota", "  Fulana  Dono    Pendente    Algo"];
+    const ownMark = botMarkPattern("Monitor Chat Atendimento");
+    const first = make();
+    const wake = first.setWatch("monitor", "t1", { ...base, command: "gog sheets get x --plain", argv: ["gog", "sheets", "get", "x", "--plain"], label: "planilha", baseline: "x", baselineFingerprint: "a" });
+    first.recordWatchRun(wake, { ok: true, output: lines.join("\n"), matched: false, fingerprint: "a", lines, ownMark });
+    // the server restarts: the same watch, its line hashes on disk, its lines not
+    const restarted = make();
+    const again = restarted.standingFor("t1", "planilha")!;
+    const more = [...lines, "[Monitor Chat Atendimento] outra nota"];
+    expect(restarted.recordWatchRun(again, { ok: true, output: more.join("\n"), matched: false, fingerprint: "b", lines: more, ownMark })).toBe("changed");
   });
 
   it("finds the same command already watched by this bot in another conversation", () => {
@@ -615,13 +648,13 @@ describe("promises with a deadline", () => {
 
 describe("chips", () => {
   it("names what a watch looks at instead of the raw command, and cuts on a word", () => {
-    expect(watchLabel("gh pr view 9300 -R dinhogehm/nuria-platform --json state")).toBe("PR #9300");
+    expect(watchLabel("gh pr view 9300 -R example-org/example-repo --json state")).toBe("PR #9300");
     expect(watchLabel("gh issue view 9298 --json comments")).toBe("issue #9298");
-    expect(watchLabel("gog chat messages list spaces/AAQA4TXnzJ4 --plain")).toBe("Chat");
+    expect(watchLabel("gog chat messages list spaces/AAAAexample --plain")).toBe("Chat");
     expect(watchLabel("gog sheets get 163U0 'Atendimento!A1:I200'")).toBe("Planilha");
     expect(watchLabel("git ls-remote origin refs/tags/nuria-production-deployed")).toBe("tag nuria-production-deployed");
     expect(watchLabel("curl -sL https://docs.google.com/spreadsheets/d/x/export?format=csv")).toBe("docs.google.com");
-    expect(chipText("confira `gh pr checks` e avise o Osvaldo sobre o resultado final do merge", 40)).toBe("confira gh pr checks e avise o Osvaldo…");
+    expect(chipText("confira `gh pr checks` e avise o Dono sobre o resultado final do merge", 40)).toBe("confira gh pr checks e avise o Dono…");
     expect(chipText("curto", 40)).toBe("curto");
   });
 
@@ -645,8 +678,8 @@ describe("reports", () => {
 
 describe("a goal waiting on the person about a PR", () => {
   it("reads the PRs its question cites, and closes it when the question is moot", () => {
-    expect(prsCited("GO para mergear a PR #9303? https://github.com/dinhogehm/nuria-platform/pull/9286 e pull request 9290")).toEqual([
-      { number: 9286, slug: "dinhogehm/nuria-platform" }, { number: 9303 }, { number: 9290 },
+    expect(prsCited("GO para mergear a PR #9303? https://github.com/example-org/example-repo/pull/9286 e pull request 9290")).toEqual([
+      { number: 9286, slug: "example-org/example-repo" }, { number: 9303 }, { number: 9290 },
     ]);
     expect(prsCited("nada aqui #12")).toEqual([]);
     const autonomy = make();
@@ -680,11 +713,11 @@ describe("a bot waiting on the person's answer", () => {
 
 describe("a watch that ignores the bot's own lines", () => {
   it("keeps ignore on the watch", () => {
-    const input = parseWatchInput({ reason: "x", standing: true, label: "chat", ignore: "\\tOsvaldo Gehm\\t" });
-    expect(input).toMatchObject({ ok: true, ignore: "\\tOsvaldo Gehm\\t" });
-    const wake = make().setWatch("bot", "t1", { argv: ["gog"], command: "gog chat", everyMinutes: 3, maxMinutes: 60, reason: "x", baseline: "b", standing: true, ignore: "Osvaldo" });
-    expect(make().standingFor("t1")?.watch?.ignore).toBe("Osvaldo");
-    expect(wake.watch?.ignore).toBe("Osvaldo");
+    const input = parseWatchInput({ reason: "x", standing: true, label: "chat", ignore: "\\tDono Exemplo\\t" });
+    expect(input).toMatchObject({ ok: true, ignore: "\\tDono Exemplo\\t" });
+    const wake = make().setWatch("bot", "t1", { argv: ["gog"], command: "gog chat", everyMinutes: 3, maxMinutes: 60, reason: "x", baseline: "b", standing: true, ignore: "Dono" });
+    expect(make().standingFor("t1")?.watch?.ignore).toBe("Dono");
+    expect(wake.watch?.ignore).toBe("Dono");
   });
 });
 
@@ -739,8 +772,8 @@ describe("a standing watch's note", () => {
     const wake = autonomy.setWatch("bot", "t1", { command: "git ls-remote origin", argv: ["git", "ls-remote", "origin"], everyMinutes: 15, maxMinutes: 120, reason: "pedir ao QA o #8891", baseline: "90b3ef2a5", standing: true, label: "prod" });
     const due = wake.dueAt;
     now += 3 * 3_600_000;
-    expect(autonomy.updateStandingReason("t1", "prod", "avisar a Daiane quando a #9307 entrar")).toBe(wake);
-    expect(wake.reason).toBe("avisar a Daiane quando a #9307 entrar");
+    expect(autonomy.updateStandingReason("t1", "prod", "avisar a Fulana quando a #9307 entrar")).toBe(wake);
+    expect(wake.reason).toBe("avisar a Fulana quando a #9307 entrar");
     expect(wake.watch!.reasonAt).toBe(now);
     expect(wake.watch!.baseline).toBe("90b3ef2a5");
     expect(wake.dueAt).toBe(due);

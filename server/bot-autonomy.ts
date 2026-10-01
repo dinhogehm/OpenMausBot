@@ -101,6 +101,10 @@ export interface WakeWatch {
   staleAlertedAt?: number;
   /** The last change it let pass as the bot's own write (server/watch-echo.ts). */
   echoAt?: number;
+  /** That change: how many lines, why each was the bot's, the first one. */
+  echo?: { at: number; lines: number; reasons: string[]; sample: string };
+  /** An unanchored `ignore` was pointed out in its conversation. */
+  ignoreWarnedAt?: number;
 }
 
 export interface BotWake {
@@ -321,6 +325,8 @@ export class BotAutonomy {
   private ownerPending: OwnerPending[] = [];
   /** The bot's recent writes to watched sources, per bot (not persisted). */
   private selfWrites = new Map<string, SelfWrite[]>();
+  /** Each watch's complete output lines of its last run (not persisted: after a restart nothing is an echo). */
+  private lastLines = new Map<string, string[]>();
   /** Leases a restart cut off, as found on load. */
   readonly recoveredOnLoad: RecoveredLease[] = [];
   private readonly path: string | null;
@@ -463,13 +469,17 @@ export class BotAutonomy {
 
   /** Record one run; the wake becomes due now if the watch triggered. The
    * caller decides changed/matched (it owns the matching rule). */
-  recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean; fingerprint?: string; truncated?: boolean; lines?: string[]; ownMark?: RegExp }): WatchTrigger | null {
+  recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean; fingerprint?: string; truncated?: boolean; lines?: string[]; linesComplete?: boolean; ownMark?: RegExp }): WatchTrigger | null {
     const watch = wake.watch;
     if (!watch || this.wakes.get(wakeKey(wake)) !== wake || watch.trigger) return null;
     watch.lastRunAt = this.now();
     watch.runs += 1;
-    // the rows as they were, to tell the bot's marked note from a person's edit in the same row
-    const previous = (watch.lastOutput ?? "").split("\n");
+    // The whole output of the run before (not lastOutput, cut at 20 000
+    // characters): what an echo is judged against. Unknown — after a
+    // restart, or a run past WATCH_LINES_MAX — means no echo.
+    const previous = this.lastLines.get(wakeKey(wake)) ?? null;
+    if (result.ok && result.lines && result.linesComplete !== false) this.lastLines.set(wakeKey(wake), result.lines);
+    else if (result.ok) this.lastLines.delete(wakeKey(wake));
     watch.lastOutput = result.output;
     let fresh: string[] = [];
     if (result.ok && result.lines) {
@@ -508,9 +518,14 @@ export class BotAutonomy {
       else if (!watch.until && changed) trigger = "changed";
       // the change is only the bot's own comment, post or note: take it as
       // the new baseline without waking the bot
-      if (trigger === "changed" && isEcho(fresh, watchKindOf(watch.argv), this.selfWrites.get(wake.botId) ?? [], this.now(), { ...(result.ownMark ? { mark: result.ownMark } : {}), previous })) {
+      const echo = trigger === "changed" && result.lines
+        ? isEcho(fresh, watchKindOf(watch.argv), this.selfWrites.get(wake.botId) ?? [], this.now(), { ...(result.ownMark ? { mark: result.ownMark } : {}), previous: result.linesComplete === false ? null : previous, current: result.lines })
+        : null;
+      if (echo?.echo) {
         trigger = null;
         watch.echoAt = this.now();
+        // said where the bot and the person see it (server.log and a chip)
+        watch.echo = { at: this.now(), lines: fresh.length, reasons: [...new Set(echo.reasons)], sample: fresh[0]!.trim().slice(0, 120) };
         watch.baseline = result.output;
         if (result.fingerprint) watch.baselineFingerprint = result.fingerprint;
       }
@@ -574,6 +589,18 @@ export class BotAutonomy {
     wake.dueAt = at + (watch.maxMs ?? WATCH_DEFAULT_MAX_MINUTES * this.minuteMs);
     this.save();
     return wake;
+  }
+
+  /** Every standing watch, of every conversation. */
+  standingWatches(): BotWake[] {
+    return [...this.wakes.values()].filter((wake) => wake.watch?.standing);
+  }
+
+  /** Its `ignore` was pointed out (once). */
+  markIgnoreWarned(wake: BotWake): void {
+    if (!wake.watch) return;
+    wake.watch.ignoreWarnedAt = this.now();
+    this.save();
   }
 
   /** A new note for a standing watch, keeping its baseline and schedule. */
