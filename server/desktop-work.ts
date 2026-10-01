@@ -663,13 +663,23 @@ const draftKey = (session: CcSession) => `cc-draft:${session.id}`;
 function holdForDraft(deps: DesktopWorkDeps, session: CcSession, draft: string, at: number, leftProbe = false): void {
   const desktop = session.desktop!;
   const pending = desktop.pending!;
+  // The next try reads the draft WITH the "." we left ("texto."): still our
+  // dot, so the item keeps saying so instead of becoming a plain "send or
+  // clear it" (INSP-D B4).
+  const prev = desktop.draftSeen;
+  // (once the person took the dot out, the draft is a plain draft again)
+  const ourDot = !leftProbe && prev?.leftProbe === true && draft === `${prev.text}.`;
+  if (ourDot) {
+    leftProbe = true;
+    draft = prev!.text;
+  }
   pending.lastReason = `há texto não enviado no campo da sessão: "${draft.slice(0, 40)}…"${leftProbe ? ' (ficou um "." no fim dele)' : ""}`;
   pending.nextAttemptAt = at + DESKTOP_DRAFT_RECHECK_MS;
-  const seen = desktop.draftSeen?.text === draft;
-  desktop.draftSeen = { text: draft, at: seen ? desktop.draftSeen!.at : at };
+  const seen = prev?.text === draft && (prev.leftProbe === true) === leftProbe;
+  desktop.draftSeen = { text: draft, at: seen ? prev!.at : at, ...(leftProbe ? { leftProbe: true } : {}) };
   deps.ledger.save();
-  // a "." left in the person's draft is said every time: it is ours to own up to
-  if (seen && !leftProbe) return;
+  // a "." just left in the person's draft is said at once, even for a draft already reported
+  if (seen) return;
   const link = desktop.localId ? `claude://code/continue?session=${desktop.localId}` : undefined;
   deps.chip(session, `há texto não enviado no campo desta sessão — não sobrescrevi; ${pending.kind === "rename" ? "o novo título" : "a mensagem"} espera: “${draft.slice(0, 80)}”${leftProbe ? ' — ficou um "." no fim dele' : ""}`, false);
   deps.ownerPending?.(session, { title: leftProbe ? `Rascunho na sessão "${session.title}": deixei um "." no fim dele — apague-o (“${draft.slice(0, 40)}”)` : `Texto não enviado no campo da sessão "${session.title}": envie ou apague (“${draft.slice(0, 60)}”)`, ...(link ? { link } : {}), key: draftKey(session) });

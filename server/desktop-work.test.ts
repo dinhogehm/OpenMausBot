@@ -814,6 +814,36 @@ describe("a field that already held text", () => {
     expect(pendings[0]!.title).toContain('deixei um "." no fim dele');
     expect(h.reports.at(-1)!.text).toContain('the test "." stayed at the end of their draft');
     expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "Pode sim" });
+    // 20 min later the field reads the draft WITH our dot; the probe takes its own dot back
+    // and returns "texto." — the item must keep saying the dot is ours (INSP-D B4)
+    h.advance(DESKTOP_DRAFT_RECHECK_MS);
+    h.results.push({ ok: false, reason: "há texto não enviado", retry: true, touched: true, draft: `${draft}.` });
+    await h.tick();
+    expect(pendings.every((item) => item.title.includes('deixei um "." no fim dele'))).toBe(true);
+    expect(session.desktop!.draftSeen).toMatchObject({ text: draft, leftProbe: true });
+    // the person took the dot out but did not send: now it is a plain draft again
+    h.advance(DESKTOP_DRAFT_RECHECK_MS);
+    h.results.push({ ok: false, reason: "há texto não enviado", retry: true, touched: true, draft });
+    await h.tick();
+    expect(pendings.at(-1)!.title).toContain("Texto não enviado");
+  });
+
+  it("asks the person to rename by hand after three \"text that was not there\" waits (INSP-D B5)", async () => {
+    const h = harness();
+    const pendings: { title: string; link?: string; key: string }[] = [];
+    h.deps.ownerPending = (_session, item) => pendings.push(item);
+    const session = h.opened("w", { title: "Fila errada ao criar ticket" });
+    session.desktop!.renameTried = true;
+    h.transcripts.set("cli-w", { text: "brief", writtenAt: h.now, ended: true });
+    session.status = "idle";
+    session.desktop!.pending = { kind: "rename", text: "#9305 Fila errada ao criar ticket", since: h.now, attempts: 0 };
+    for (let i = 0; i < DESKTOP_RENAME_MAX_MISSES; i += 1) {
+      h.results.push({ ok: false, reason: "the message field holds text that was not there before the menu opened; nothing was typed, the rename waits", retry: true, miss: true, touched: true });
+      await h.tick();
+      h.advance(11 * 60_000);
+    }
+    expect(session.desktop!.pending).toBeUndefined();
+    expect(pendings).toEqual([expect.objectContaining({ key: "cc-rename:w" })]);
   });
 
   it("keeps the message, asks the person once in \"Precisa de você\", and settles it when the field is free", async () => {

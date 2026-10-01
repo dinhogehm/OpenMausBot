@@ -151,7 +151,7 @@ export interface CcDesktopState {
   /** Our latest message typed into the app, and whether its transcript showed it. */
   lastSend?: { at: number; confirmed: boolean };
   /** Text found in the session's field and left alone (maybe the person's draft). */
-  draftSeen?: { text: string; at: number };
+  draftSeen?: { text: string; at: number; leftProbe?: boolean };
   /** A finished turn whose app summary was still the previous turn's: wait a little for it. */
   turnWaitSince?: number;
 }
