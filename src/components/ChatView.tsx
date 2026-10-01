@@ -1296,6 +1296,9 @@ export function ChatView({ bot: profile }: { bot: Bot }) {
             }}
             onActivate={() => dispatch({ type: "toggleSettings", open: true })}
             showEditButton
+            // the name has first claim on the row: badges and status give way
+            // before it does (R8-visual N4: "Ch…" beside "Teammat…")
+            wrapperClassName="min-w-[min(9rem,45%)] shrink-0"
             className="truncate text-[15px] font-semibold text-ink"
             inputClassName="max-w-[220px] rounded bg-inset px-1.5 py-0.5 text-[15px] font-semibold"
           />
@@ -1303,12 +1306,12 @@ export function ChatView({ bot: profile }: { bot: Bot }) {
             // One line, never shrinking with the name (it wrapped "Chief / of /
             // Staff", #1871); folds to the crown like the chips beside it do,
             // so the name keeps the room.
-            <span title={t("chat.chiefOfStaff")} className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-accent/12 px-2 py-0.5 text-[11px] font-medium text-accent @max-4xl/chathead:px-1.5">
-              <Crown size={11} aria-hidden="true" /> <span className="@max-4xl/chathead:sr-only">{t("chat.chiefOfStaff")}</span>
+            <span title={t("chat.chiefOfStaff")} className={cn("flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-accent/12 px-2 py-0.5 text-[11px] font-medium text-accent @max-4xl/chathead:px-1.5", (bot.busy || bot.waitingForTeammates) && "px-1.5")}>
+              <Crown size={11} aria-hidden="true" /> <span className={cn("@max-4xl/chathead:sr-only", (bot.busy || bot.waitingForTeammates) && "sr-only")}>{t("chat.chiefOfStaff")}</span>
             </span>
           )}
           {bot.busy && <WorkingDots className="text-ink-secondary" />}
-          {!bot.busy && bot.waitingForTeammates && <span className="truncate text-[12px] text-ink-secondary" role="status">{t("chat.teammatesWorking")}</span>}
+          {!bot.busy && bot.waitingForTeammates && <span className="min-w-0 shrink truncate text-[12px] text-ink-secondary" role="status" title={t("chat.teammatesWorking")}>{t("chat.teammatesWorking")}</span>}
         </div>
         <div
           data-chathead-controls

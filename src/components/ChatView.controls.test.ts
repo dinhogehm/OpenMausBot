@@ -220,6 +220,19 @@ describe("thread control placement", () => {
     expect(badge[2].split(" ")).toContain("@max-4xl/chathead:sr-only");
   });
 
+  it("gives the bot's name the first claim on the header while it works (R8: \"Ch…\")", () => {
+    const working = { ...bot, busy: true, chiefOfStaff: true, tasks: bot.tasks!.map((task) => ({ ...task, busy: true, activity: "working" as const })) };
+    const markup = renderToStaticMarkup(createElement(ChatView, { bot: working }));
+    // the name group keeps a minimum width and does not shrink
+    const group = /<span class="([^"]*min-w-\[min\(9rem,45%\)\][^"]*)">/.exec(markup)!;
+    expect(group[1].split(" ")).toContain("shrink-0");
+    // the badge folds to the crown, the label stays for screen readers
+    const label = /<span class="([^"]*)">Chief of Staff<\/span>/.exec(markup)!;
+    expect(label[1].split(" ")).toContain("sr-only");
+    const waiting = renderToStaticMarkup(createElement(ChatView, { bot: { ...bot, busy: false, tasks: bot.tasks!.map((task) => ({ ...task, waitingForTeammates: true })) } }));
+    expect(waiting).toMatch(/<span class="min-w-0 shrink truncate text-\[12px\] text-ink-secondary" role="status"/);
+  });
+
   it("keeps the selected thread's model in the header and permissions inside the composer pill", () => {
     const markup = renderToStaticMarkup(createElement(ChatView, { bot }));
     expect(markup.match(/data-test-model-control/g)).toHaveLength(1);

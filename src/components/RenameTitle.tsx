@@ -17,6 +17,7 @@ export function RenameTitle({
   className,
   inputClassName,
   showValueInTooltip = false,
+  wrapperClassName,
 }: {
   value: string;
   onCommit: (next: string) => void;
@@ -29,6 +30,8 @@ export function RenameTitle({
   inputClassName?: string;
   /** Put the whole value in the tooltip, for rows that truncate it. */
   showValueInTooltip?: boolean;
+  /** With showEditButton: classes for the name-and-pencil group (its share of a row). */
+  wrapperClassName?: string;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -86,7 +89,7 @@ export function RenameTitle({
 
   if (showEditButton) {
     return (
-      <span className="flex min-w-0 items-center gap-0.5">
+      <span className={cn("flex min-w-0 items-center gap-0.5", wrapperClassName)}>
         {onActivate ? (
           <button
             type="button"
