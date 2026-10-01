@@ -60,7 +60,10 @@ export interface DesktopDriver {
 /** `miss`: the screen did not show what was expected (folder, worktree,
  * session) although it was unlocked and Claude was in front. `touched`: the
  * step acted on the screen before stopping, so a retry should back off. */
-export type DesktopStep = { ok: true; suggestion?: string } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string };
+export type DesktopStep = { ok: true; suggestion?: string } | DesktopStop;
+/** `draft`: text nobody sent sits in the field (never typed over);
+ * `leftProbe`: the probe "." stayed at its end (the person came back first). */
+export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -76,6 +79,8 @@ const BACKSPACE = 51;
 /** The one character typed to tell an app suggestion from a draft. */
 const SUGGESTION_PROBE = ".";
 const KEY_A = 0;
+/** With Command: to the end of the text, whatever line the click landed on. */
+const DOWN_ARROW = 125;
 
 export function parseOcr(text: string): OcrLine[] {
   const lines: OcrLine[] = [];
@@ -129,7 +134,7 @@ async function act(screen: Screen, action: () => Promise<void>): Promise<void> {
   screen.quietSince = Date.now();
 }
 
-async function guard(screen: Screen, step: string): Promise<DesktopStep | null> {
+async function guard(screen: Screen, step: string): Promise<DesktopStop | null> {
   const before = Date.now();
   const idle = await screen.driver.idleSeconds();
   if (before - idle * 1_000 > screen.quietSince + HUMAN_SLACK_MS) {
@@ -336,7 +341,7 @@ async function typeBrief(screen: Screen, text: string, size: { h: number }): Pro
  * session's title must be on screen, the text must show up in its field,
  * and the field must empty after Return; otherwise the step is retried.
  */
-export async function sendToDesktopSession(driver: DesktopDriver, input: { localId: string; text: string; title?: string }): Promise<DesktopStep> {
+export async function sendToDesktopSession(driver: DesktopDriver, input: { localId: string; text: string; title?: string; repoName?: string }): Promise<DesktopStep> {
   if (!/^local_[0-9a-f-]{36}$/.test(input.localId)) return { ok: false, reason: "invalid desktop session id", retry: false };
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.openUrl(`claude://code/continue?session=${input.localId}`));
@@ -348,7 +353,7 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (input.title && !lines.some((line) => sidebarMatch(line.text, input.title!)) && !headerNames(lines.filter((line) => line.y < 140), input.title)) {
       return { ok: false, reason: `the session "${input.title}" is not the one on screen`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 140)) };
     }
-    const composer = findComposer(lines, size);
+    const composer = findComposer(lines, size, input.repoName);
     if (!composer) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y > size.h / 2).slice(-8)) };
     const field = composer.line;
     // What is near the field (it grows upwards as text goes in).
@@ -357,26 +362,15 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (stop) return stop;
     await act(screen, () => driver.click(field.x + 20, field.y + field.h / 2));
     await driver.sleep(300);
-    // Text in the field is either the app's suggested reply (shown in the
-    // field until the first keystroke) or the person's own unsent draft.
-    // OCR sees no colour, so one character tells them apart: a suggestion
-    // gives way to it, a draft keeps its words. A draft is never typed
-    // over — the character is taken back and the caller asks the person.
-    if (composer.text !== null) {
-      stop = await guard(screen, "probe field");
-      if (stop) return stop;
-      await act(screen, () => driver.typeText(SUGGESTION_PROBE));
-      await driver.sleep(400);
-      const probed = nearField(await driver.ocr());
-      if (showsPrefix(probed, textPrefix(composer.text))) {
-        stop = await guard(screen, "undo probe");
-        if (stop) return stop;
-        await act(screen, () => driver.key(BACKSPACE));
-        return { ok: false, reason: `há texto não enviado no campo desta sessão ("${composer.text.slice(0, 120)}"): é rascunho (continuou depois de uma tecla); não sobrescrevi`, retry: true, touched: true, draft: composer.text.slice(0, 500) };
-      }
+    // A lone "." is the probe of an earlier try that stopped right after it
+    // (the suggestion had given way): ours to replace. Any other text is
+    // probed — a draft is never typed over (see probeField).
+    if (composer.text !== null && composer.text !== SUGGESTION_PROBE) {
+      const probe = await probeField(screen, { ...composer, text: composer.text }, lines, size, input.repoName);
+      if (probe.kind !== "suggestion") return probe.step;
     }
     stop = await guard(screen, "paste");
-    if (stop) return stop;
+    if (stop) return composer.text !== null ? { ...stop, reason: `${stop.reason}; the app's suggestion had given way to a "." in the field` } : stop;
     await act(screen, () => driver.paste(input.text, true));
     await driver.sleep(500);
     if (input.text.length > DESKTOP_NOTE_AFTER_CHARS) {
@@ -400,29 +394,95 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (!after.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim())) && showsPrefix(after, prefix)) {
       return { ok: false, reason: "the message stayed in the field after Return", retry: true, touched: true };
     }
-    return composer.text !== null ? { ok: true, suggestion: composer.text.slice(0, 300) } : { ok: true };
+    return composer.text !== null && composer.text !== SUGGESTION_PROBE ? { ok: true, suggestion: composer.text.slice(0, 300) } : { ok: true };
   });
 }
 
-/** The bar under the message field: the mode ("Automático") and the model ("Opus 5.5"). */
-const COMPOSER_BAR = /(?:^|\s)(Automático|Automatic|Auto|Pedir aprova[çc][ãa]o|Ask|Plan|Planejar|Bypass\b.*|Aceitar edi[çc][õo]es|Accept edits)$|\b(Opus|Sonnet|Haiku|Fable)\s*\d/i;
+/** The mode under the message field, as the whole OCR line: at most three
+ * short icon tokens before it ("+ O v Ignorar permissões", "+ Q v
+ * Automático" — the real bar), never a sentence that ends in "plan". */
+export const COMPOSER_MODE = /^(?:\+\s*)?(?:\S{1,2}\s+){0,3}(Automático|Automatic|Auto|Pedir aprova[çc][ãa]o|Ask|Plan|Planejar|Ignorar permiss[õo]es|Bypass permissions|Aceitar edi[çc][õo]es|Accept edits)$/i;
+/** The field's text starts where the mode bar starts (x 547 against 543 on
+ * the real screen); the branch strip and the diff/CI chips do not. */
+const COMPOSER_COLUMN_SLACK = 40;
+/** Buttons and chips of the PR strip above the field: never a field to click. */
+const STRIP_OR_BUTTON = /^(?:(?:Criar|Create|Ver|View|Abrir|Open|Revisar|Review) PR|Mesclar(?: PR)?|Merge(?: PR)?)$|^\S{0,2}\s*#\d+$|[+]\d+\s*-\s*\d+|^\W*CI\b|^[Xx×]$/;
+
+/** The PR strip's "repo branch" line ("nuria-platform fix/9326-…"): it names the repository. */
+function stripLine(text: string, repoName?: string): boolean {
+  if (STRIP_OR_BUTTON.test(text)) return true;
+  return Boolean(repoName) && /\S\/\S/.test(text) && showsFolder([{ x: 0, y: 0, w: 0, h: 0, text }], repoName!);
+}
 
 /** The session's message field, found as a person would: its placeholder
- * when it is empty, else the line right above the mode/model bar — where an
- * unsent draft sits ("pode reescrever o corpo…"), never overwritten.
- * `text` is what was in it then (null when it showed the placeholder). */
-export function findComposer(lines: OcrLine[], size: { h: number }): { line: OcrLine; text: string | null } | null {
+ * when it is empty, else the line right above the mode bar, in its column —
+ * where an unsent draft sits ("pode reescrever o corpo…"), never
+ * overwritten. When that closest line is a button or the PR strip ("Criar
+ * PR", "+114 - 4") there is no field to click: null. `text` is what was in
+ * it then (null when it showed the placeholder); `bar` is the mode line. */
+export function findComposer(lines: OcrLine[], size: { h: number }, repoName?: string): { line: OcrLine; text: string | null; bar?: OcrLine } | null {
   const lower = lines.filter((line) => line.y > size.h / 2);
   const empty = lower.find((line) => COMPOSER_PLACEHOLDER.test(line.text.trim()));
   if (empty) return { line: empty, text: null };
-  const bar = lower.filter((line) => COMPOSER_BAR.test(line.text.trim())).sort((a, b) => a.y - b.y)[0];
+  // the lowest mode line: the composer is at the bottom, the conversation above it
+  const bar = lower.filter((line) => COMPOSER_MODE.test(line.text.trim())).sort((a, b) => b.y - a.y)[0];
   if (!bar) return null;
   const above = lower
-    .filter((line) => line.y < bar.y - 4 && bar.y - line.y <= 90 && line.text.trim())
-    // the PR/branch strip above the field is not the field
-    .filter((line) => !/^#\d+\b|[+]\d+\s*-\d+|\bCI\b|^\S+\s+[\w.-]+\/\S+$/.test(line.text.trim()))
+    .filter((line) => line.y < bar.y - 4 && bar.y - line.y <= 90 && line.text.trim() && Math.abs(line.x - bar.x) <= COMPOSER_COLUMN_SLACK)
     .sort((a, b) => b.y - a.y)[0];
-  return above ? { line: above, text: above.text.trim() } : null;
+  if (!above || stripLine(above.text.trim(), repoName)) return null;
+  return { line: above, text: above.text.trim(), bar };
+}
+
+/** The field emptied while the rest of the composer stayed put: the mode bar
+ * where it was, nothing in the field's column above it, and the other lower
+ * lines still there (a screen being redrawn is not an empty field). */
+function fieldEmptied(before: OcrLine[], after: OcrLine[], field: OcrLine, bar: OcrLine, size: { h: number }): boolean {
+  const lower = (lines: OcrLine[]) => lines.filter((line) => line.y > size.h / 2);
+  const barNow = lower(after).find((line) => COMPOSER_MODE.test(line.text.trim()) && Math.abs(line.y - bar.y) <= 6);
+  if (!barNow) return false;
+  const inField = lower(after).some((line) => line.y < barNow.y - 4 && barNow.y - line.y <= 90 && line.text.trim() && Math.abs(line.x - barNow.x) <= COMPOSER_COLUMN_SLACK && !stripLine(line.text.trim()));
+  if (inField) return false;
+  const rest = lower(before).filter((line) => line !== field);
+  const seen = new Set(lower(after).map((line) => normalize(line.text)));
+  return rest.length > 0 && rest.filter((line) => seen.has(normalize(line.text))).length / rest.length >= 0.8;
+}
+
+type Probe = { kind: "suggestion" } | { kind: "draft"; step: DesktopStep } | { kind: "stop"; step: DesktopStep };
+
+/**
+ * Text in the field is either the app's suggested reply (shown there until
+ * the first keystroke) or the person's own unsent draft. OCR sees no colour,
+ * so one character tells them apart — with the cursor at the END of the
+ * text first (a click lands a few letters in, and a probe there would split
+ * a word: "po.de reescrever…"). It is a suggestion only on positive proof:
+ * the field, read again, shows just the probe character, or the placeholder,
+ * or is visibly empty with the composer otherwise unchanged. Anything else —
+ * the text still there, changed, unreadable — is a draft: the character is
+ * taken back, and if the person comes back before that, the draft is
+ * returned saying a "." was left at its end.
+ */
+async function probeField(screen: Screen, composer: { line: OcrLine; text: string; bar?: OcrLine }, before: OcrLine[], size: { h: number }, repoName?: string): Promise<Probe> {
+  const { driver } = screen;
+  const draftStep = (reason: string): DesktopStop => ({ ok: false, reason, retry: true, touched: true, draft: composer.text.slice(0, 500) });
+  let stop = await guard(screen, "cursor to end");
+  if (stop) return { kind: "stop", step: stop };
+  await act(screen, () => driver.key(DOWN_ARROW, true));
+  stop = await guard(screen, "probe field");
+  if (stop) return { kind: "stop", step: stop };
+  await act(screen, () => driver.typeText(SUGGESTION_PROBE));
+  await driver.sleep(400);
+  const probed = mainArea(await driver.ocr());
+  const now = findComposer(probed, size, repoName);
+  const gaveWay = (now !== null && (now.text === null || now.text === SUGGESTION_PROBE))
+    || (now === null && composer.bar !== undefined && fieldEmptied(before, probed, composer.line, composer.bar, size));
+  if (gaveWay) return { kind: "suggestion" };
+  stop = await guard(screen, "undo probe");
+  if (stop) {
+    return { kind: "draft", step: { ...draftStep(`${stop.reason}; há texto não enviado no campo desta sessão ("${composer.text.slice(0, 40)}…") e deixei um "." no fim dele, que não consegui apagar`), human: stop.human, leftProbe: true } };
+  }
+  await act(screen, () => driver.key(BACKSPACE));
+  return { kind: "draft", step: draftStep(`há texto não enviado no campo desta sessão ("${composer.text.slice(0, 40)}…"): é rascunho (não cedeu a uma tecla no fim dele); não sobrescrevi`) };
 }
 
 /** Normalised title prefix the sidebar shows (it truncates long titles). */

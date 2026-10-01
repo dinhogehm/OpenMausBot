@@ -14,6 +14,7 @@ import {
   reusedWorktreeChip,
   notRepoRoot,
   lastAppWorktreeFolder,
+  COMPOSER_MODE,
   DESKTOP_BRIEF_NOTE,
   DESKTOP_MESSAGE_NOTE,
   findDesktopSession,
@@ -40,25 +41,26 @@ import {
 beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); });
 afterEach(() => { vi.useRealTimers(); });
 
-type ScreenLine = string | { text: string; x?: number; y?: number };
+type ScreenLine = string | { text: string; x?: number; y?: number; w?: number; h?: number };
 
 /** A fake Claude app: records what the automation did to the screen. Each
  * OCR call shows the next screen (the last one stays); a plain string is a
  * line of the main area, `{ x }` places it (x < 450 is the sidebar). */
-function fakeApp(opts: { idle?: number | number[]; fronts?: string[]; screen?: ScreenLine[]; screens?: ScreenLine[][]; locked?: boolean } = {}) {
+function fakeApp(opts: { idle?: number | number[]; fronts?: string[]; screen?: ScreenLine[]; screens?: ScreenLine[][]; locked?: boolean; size?: { w: number; h: number } } = {}) {
   const actions: string[] = [];
   const fronts = [...(opts.fronts ?? [])];
   const idles = Array.isArray(opts.idle) ? [...opts.idle] : [opts.idle ?? 120];
   const toLines = (screen: ScreenLine[]): OcrLine[] => screen.map((line, i) => {
     const spec = typeof line === "string" ? { text: line } : line;
-    return { x: spec.x ?? 600, y: spec.y ?? 500 + i * 20, w: 200, h: 16, text: spec.text };
+    return { x: spec.x ?? 600, y: spec.y ?? 500 + i * 20, w: spec.w ?? 200, h: spec.h ?? 16, text: spec.text };
   });
   const screens = (opts.screens ?? [opts.screen ?? []]).map(toLines);
   const driver: DesktopDriver = {
     idleSeconds: async () => (idles.length > 1 ? idles.shift()! : idles[0]!),
     frontmost: async () => (fronts.length > 1 ? fronts.shift()! : fronts[0] ?? CLAUDE_BUNDLE_ID),
     locked: async () => opts.locked ?? false,
-    screenSize: async () => ({ w: 1_440, h: 900 }),
+    // the captures' screen (the real fixtures' coordinates are in it)
+    screenSize: async () => opts.size ?? { w: 1_470, h: 923 },
     ocr: async () => (screens.length > 1 ? screens.shift()! : screens[0]!),
     click: async (x, y) => { actions.push(`click ${x},${y}`); },
     rightClick: async (x, y) => { actions.push(`rclick ${x},${y}`); },
@@ -75,14 +77,107 @@ function fakeApp(opts: { idle?: number | number[]; fronts?: string[]; screen?: S
   return { driver, actions };
 }
 
-const REPO_SCREEN = [{ text: "Local", x: 100 }, "nuria-platform", "main", "worktree"];
+// ── Real screens ─────────────────────────────────────────────────────────
+// What the helper's OCR reads on the audit captures: the same Vision call
+// (accurate, pt-BR + en-US) run on the PNG, coordinates in points (2940×1846
+// px captures of a 1470×923-point screen). Main area only (x > 450). Nothing
+// below is retyped or tidied: "gº main" is the branch icon read as "gº",
+// "v worktree" the checkbox read as "v", "+ Q v Automático" the bar's icons.
+type Real = { x: number; y: number; w: number; h: number; text: string };
+const REAL_SIZE = { w: 1_470, h: 923 };
+
+/** R8-visual-claude-1.png (01/10): a new session in the root of
+ * nuria-platform — whose checkout was a detached HEAD while the
+ * branch chip read "main". */
+const R8_NEW_SESSION: Real[] = [
+  { x: 1355, y: 25, w: 88, h: 16, text: "Novidades" },
+  { x: 566, y: 75, w: 348, h: 30, text: "Bem-vindo de volta, Fulano" },
+  { x: 530, y: 171, w: 66, h: 15, text: "Sessões" },
+  { x: 543, y: 218, w: 797, h: 22, text: "• Requer entrada Organizar o catálogo de serviços inter... W... exemplo/nuria-platform há 5 meses" },
+  { x: 540, y: 788, w: 71, h: 16, text: "• Local" },
+  { x: 660, y: 788, w: 118, h: 17, text: "nuria-platform" },
+  { x: 801, y: 786, w: 68, h: 17, text: "gº main" },
+  { x: 885, y: 788, w: 92, h: 15, text: "v worktree" },
+  { x: 547, y: 839, w: 366, h: 25, text: "Descreva uma tarefa ou faça uma pergunta" },
+  { x: 545, y: 889, w: 222, h: 17, text: "+ O v Ignorar permissões" },
+  { x: 1231, y: 888, w: 66, h: 18, text: "Opus 5.5" },
+  { x: 1314, y: 889, w: 49, h: 17, text: "Médio" },
+];
+
+/** R7-dispatch-claude-1.png: the session "Automação inatividade não
+ * dispara", the app's suggested reply in its field, the PR strip above it. */
+const R7_SESSION: Real[] = [
+  { x: 502, y: 23, w: 466, h: 21, text: "• Automação inatividade não dispara v (nuria-platform" },
+  { x: 1346, y: 26, w: 17, h: 17, text: "E" },
+  { x: 547, y: 60, w: 865, h: 19, text: "1. Falta a seção de riscos. Não há menção aos =30 avisos e =7 fechamentos no ambiente A, nem à" },
+  { x: 575, y: 85, w: 677, h: 19, text: "revisão única em todos os ambientes com 200 itens por regra por execução." },
+  { x: 545, y: 109, w: 831, h: 33, text: "2. Ela contradiz os números de risco. Diz que \"os itens parados já foram zerados à mão pela" },
+  { x: 575, y: 141, w: 823, h: 24, text: "equipe\". Se for verdade, o disparo de =30/=7 no primeiro minuto não acontece mais no ambiente A. A" },
+  { x: 575, y: 169, w: 812, h: 21, text: "revisão continua valendo para os outros ambientes. Não conferi essa afirmação em produção." },
+  { x: 547, y: 198, w: 842, h: 24, text: "3. A descrição do teste está errada. Diz \"casos novos para item antigo com e sem data_de_entrada" },
+  { x: 577, y: 224, w: 814, h: 21, text: "em cada modo\". O que existe é um teste com banco real só para a regra de tempo na etapa, com" },
+  { x: 575, y: 252, w: 797, h: 24, text: "três itens: antigo movido há 10 dias dispara, antigo sem data_de_entrada não dispara," },
+  { x: 575, y: 278, w: 825, h: 24, text: "antigo movido há 1 dia ainda não dispara. Há também uma asserção a mais num teste de horário" },
+  { x: 577, y: 303, w: 840, h: 22, text: "comercial que já existia. O modo decorrido contado da entrada na etapa não é testado diretamente." },
+  { x: 547, y: 335, w: 863, h: 19, text: "4. A validação registrada é menor que a real. Cita só o pre-push (4 arquivos, 57 testes). Localmente," },
+  { x: 577, y: 361, w: 812, h: 21, text: "depois do merge com main, a suíte inteira do módulo passou (332 arquivos, 3728 testes), com" },
+  { x: 581, y: 389, w: 188, h: 17, text: "tsc e eslint limpos." },
+  { x: 545, y: 417, w: 786, h: 24, text: "5. Usa \"Closes #1234\" em vez de \"Fixes #1234\". O efeito é o mesmo, a issue fecha no merge." },
+  { x: 530, y: 472, w: 427, h: 20, text: "Decisão para você: posso reescrever o corpo com" },
+  { x: 961, y: 474, w: 30, h: 19, text: "gh" },
+  { x: 994, y: 472, w: 412, h: 22, text: "pr edit 1234, acrescentando a seção de riscos" },
+  { x: 528, y: 498, w: 889, h: 24, text: "e corrigindo a descrição do teste. Antes preciso saber se a informação de que a equipe já zerou os itens" },
+  { x: 530, y: 523, w: 831, h: 19, text: "à mão vale. Ela define se o risco no ambiente A fica \"~30 avisos e =7 fechamentos\" ou \"nenhum" },
+  { x: 528, y: 551, w: 786, h: 24, text: "parado; só a revisão nos demais ambientes\". Não mexi no texto de uma PR que não abri." },
+  { x: 530, y: 592, w: 171, h: 15, text: "Não rodei ci: local" },
+  { x: 709, y: 594, w: 38, h: 13, text: "nem" },
+  { x: 754, y: 592, w: 647, h: 19, text: "pr: merge, não fiz merge, e o revisor não negou nenhum comando nesta rodada." },
+  { x: 1429, y: 26, w: 11, h: 15, text: ":" },
+  { x: 538, y: 782, w: 83, h: 20, text: "8 #9317" },
+  { x: 652, y: 782, w: 487, h: 19, text: "nuria-platform fix/9298-regra-tempo-etapa-migrados" },
+  { x: 547, y: 842, w: 453, h: 21, text: "pode reescrever o corpo da PR com a seção de riscos" },
+  { x: 543, y: 889, w: 169, h: 19, text: "+ Q v Automático" },
+  { x: 1207, y: 782, w: 71, h: 15, text: "+196 - 5" },
+  { x: 1303, y: 782, w: 53, h: 15, text: "• CI V" },
+  { x: 1382, y: 784, w: 13, h: 13, text: "X" },
+  { x: 1231, y: 891, w: 66, h: 15, text: "Opus 5.5" },
+  { x: 1316, y: 891, w: 47, h: 13, text: "Médio" },
+];
+const R7_FIELD = "pode reescrever o corpo da PR com a seção de riscos";
+
+/** The same screen with some lines' text changed (null drops the line):
+ * how the server.log's real readings ("the screen showed: …", which keep the
+ * text and order but not the coordinates) are put back on the real layout. */
+function swap(screen: Real[], changes: Record<string, string | null>): Real[] {
+  return screen.flatMap((line) => (line.text in changes ? (changes[line.text] === null ? [] : [{ ...line, text: changes[line.text]! }]) : [line]));
+}
+
+/** server.log 01/10, sends to 36300f35 ("Guarda de release sem commit
+ * anterior"), "field not found" 4 times: "nuria-platform
+ * fix/9326-guard-previous-commit | qual o status do gate da #9330? | + O v
+ * Ignorar permissões | +114 - 4 | • CI | X | Opus 5.5 | Médio" — the last 8
+ * lower lines, in the very order and layout of R7 (whose last 8 are the same
+ * kinds of line). The header is the app's title for that session. */
+const S36300F35 = swap(R7_SESSION, {
+  "• Automação inatividade não dispara v (nuria-platform": "• Guarda de release sem commit anterior v (nuria-platform",
+  "8 #9317": null,
+  "nuria-platform fix/9298-regra-tempo-etapa-migrados": "nuria-platform fix/9326-guard-previous-commit",
+  [R7_FIELD]: "qual o status do gate da #9330?",
+  "+ Q v Automático": "+ O v Ignorar permissões",
+  "+196 - 5": "+114 - 4",
+  "• CI V": "• CI",
+});
+
+const REPO_SCREEN = R8_NEW_SESSION;
 /** The session that was open before New Session: another screen entirely. */
-const OPEN_SESSION = [{ text: "• Automação inatividade não dispara v (nuria-platform", y: 60 }, { text: "Os represados saem sozinhos depois do deploy?", y: 150 }];
+const OPEN_SESSION = R7_SESSION;
+/** A session's screen once the brief went in (the composer's bar, no new-session chips). */
+const AFTER_SEND = R7_SESSION;
 const TERMINAL = "com.apple.Terminal";
 
 describe("createDesktopSession", () => {
   it("opens a new session in the repository, pastes the brief with a note of its own and sends it", async () => {
-    const app = fakeApp({ screens: [OPEN_SESSION, REPO_SCREEN] });
+    const app = fakeApp({ screens: [OPEN_SESSION, REPO_SCREEN, AFTER_SEND] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "[OMBX] brief" })).toEqual({ ok: true });
     expect(app.actions).toEqual(["activate", "menu new session", "paste(all) [OMBX] brief", `type  ${DESKTOP_BRIEF_NOTE}`, "key 36"]);
   });
@@ -168,7 +263,7 @@ describe("createDesktopSession", () => {
   });
 
   it("goes on in the empty new session an earlier try already opened, without New Session again", async () => {
-    const empty = [{ text: "Bem-vindo de volta, Osvaldo", y: 120 }, { text: "Local", y: 720 }, { text: "nuria-platform", x: 900, y: 720 }, { text: "main", x: 1_100, y: 720 }, { text: "worktree", x: 1_200, y: 720 }, { text: "Descreva uma tarefa ou faça uma pergunta", y: 780 }];
+    const empty = [{ text: "Bem-vindo de volta, Fulano", y: 120 }, { text: "Local", y: 720 }, { text: "nuria-platform", x: 900, y: 720 }, { text: "main", x: 1_100, y: 720 }, { text: "worktree", x: 1_200, y: 720 }, { text: "Descreva uma tarefa ou faça uma pergunta", y: 780 }];
     const app = fakeApp({ screens: [empty] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "#9311 brief" })).toEqual({ ok: true });
     expect(app.actions).toEqual(["activate", "click 620,788", "paste(all) #9311 brief", `type  ${DESKTOP_BRIEF_NOTE}`, "key 36"]);
@@ -404,10 +499,10 @@ describe("archiveDesktopSession", () => {
 // letter, the folder chip and branch on one line, the header's dropdown and
 // folder after the title.
 describe("the app's real screen (OCR fixture)", () => {
-  const localId = "local_63607854-a958-43e0-b2bc-ac77b4a92b4d";
+  const localId = "local_0a000008-a958-43e0-b2bc-ac77b4a92b4d";
   const sidebar = [
     { text: "i Merge e deploy de PRs abertos", x: 21, y: 172 },
-    { text: "• Atendimento reaberto bugs", x: 24, y: 304 },
+    { text: "• Reabertura com defeitos", x: 24, y: 304 },
     { text: "• Chat ticket agent/client labels bug", x: 24, y: 338 },
     { text: "• Fila errada ao criar ticket", x: 24, y: 411 },
     { text: "• Automação inatividade não dispara", x: 24, y: 447 },
@@ -420,7 +515,7 @@ describe("the app's real screen (OCR fixture)", () => {
     expect(sidebarMatch("• Fila errada ao criar ticket", "Fila errada ao criar ticket")).toBe(true);
     expect(sidebarMatch("i Merge e deploy de PRs abertos", "Merge e deploy de PRs abertos")).toBe(true);
     expect(sidebarMatch(header.text, "Chat ticket agent/client labels bug")).toBe(true);
-    expect(sidebarMatch("• Atendimento reaberto bugs", "Fila errada ao criar ticket")).toBe(false);
+    expect(sidebarMatch("• Reabertura com defeitos", "Fila errada ao criar ticket")).toBe(false);
   });
 
   it("finds the folder as a word of the chip line", () => {
@@ -436,7 +531,7 @@ describe("the app's real screen (OCR fixture)", () => {
     expect(headerNames(at("• Chat ticket agent/cli… v (nuria-platform"), "Chat ticket agent/client labels bug")).toBe(true);
     expect(headerNames(at("oG 9311 Chat no ticket mostra Agente e… v (nuria-platform"), "9311 Chat no ticket mostra Agente e Cliente trocados")).toBe(true);
     expect(headerNames(at("• Fila errada ao criar ticket v (nuria-platform"), "Chat ticket agent/client labels bug")).toBe(false);
-    expect(headerNames(at("• Atendimento reaberto bugs"), "Automação inatividade não dispara")).toBe(false);
+    expect(headerNames(at("• Reabertura com defeitos"), "Automação inatividade não dispara")).toBe(false);
   });
 
   it("says what the header showed when the session on screen is another one", async () => {
@@ -447,47 +542,98 @@ describe("the app's real screen (OCR fixture)", () => {
     expect(await sendToDesktopSession(noField.driver, { localId, text: "x", title: "Chat ticket agent/client labels bug" })).toMatchObject({ ok: false, seen: expect.stringContaining("fix/9311") });
   });
 
-  it("finds the field above the mode/model bar when it holds a suggestion or a draft (R7: 1 of 9 sends)", () => {
-    // OCR of the R7 capture: PR strip, the field with the app's suggested reply, the bar under it
-    const screen = [
-      { x: 520, y: 732, w: 600, h: 16, text: "#9317 nuria-platform fix/9298-regra-tempo-etapa-migrados" },
-      { x: 1110, y: 732, w: 60, h: 16, text: "+196 -5" },
-      { x: 505, y: 788, w: 420, h: 16, text: "pode reescrever o corpo da PR com a seção de riscos" },
-      { x: 578, y: 830, w: 80, h: 16, text: "Automático" },
-      { x: 1140, y: 830, w: 70, h: 16, text: "Opus 5.5" },
+  it("finds the field above the mode bar, in its column, on the real screen (R7 capture)", () => {
+    expect(findComposer(R7_SESSION, REAL_SIZE, "nuria-platform")).toMatchObject({ text: R7_FIELD, line: { x: 547, y: 842 }, bar: { text: "+ Q v Automático" } });
+    expect(findComposer(S36300F35, REAL_SIZE, "nuria-platform")).toMatchObject({ text: "qual o status do gate da #9330?" });
+    expect(findComposer([{ x: 547, y: 875, w: 200, h: 16, text: "Digite / para comandos" }], REAL_SIZE)).toMatchObject({ text: null });
+    expect(findComposer([{ x: 547, y: 300, w: 200, h: 16, text: "conversation text" }], REAL_SIZE)).toBeNull();
+  });
+
+  it("reads the real mode bar \"+ O v Ignorar permissões\" (3 of 4 sessions on 01/10), and no sentence of the conversation as a bar (INSP-D A4)", () => {
+    expect(COMPOSER_MODE.test("+ O v Ignorar permissões")).toBe(true);
+    expect(COMPOSER_MODE.test("+ Q v Automático")).toBe(true);
+    expect(COMPOSER_MODE.test("+ Q • Automático")).toBe(true);
+    expect(COMPOSER_MODE.test("Automático")).toBe(true);
+    expect(COMPOSER_MODE.test("Rodei com o modo Bypass permissions para rodar")).toBe(false);
+    expect(COMPOSER_MODE.test("segue o plan")).toBe(false);
+    expect(COMPOSER_MODE.test("pode deixar no auto")).toBe(false);
+    // a conversation line ending like a mode, below the text, is not the bar:
+    // the field stays the line right above the real bar
+    const tricky = [...R7_SESSION.filter((line) => line.y < 700), { x: 530, y: 700, w: 600, h: 19, text: "Rodei tudo com o modo Bypass permissions" }, ...R7_SESSION.filter((line) => line.y >= 700)];
+    expect(findComposer(tricky, REAL_SIZE, "nuria-platform")).toMatchObject({ text: R7_FIELD });
+    // server.log 01/10 (ffd6ee1a… "Pode implementar o item 1 no front | + O v Ignorar permissões | Opus"):
+    // before, no bar was found ("field not found"); now the field is
+    const logged = swap(R7_SESSION, { [R7_FIELD]: "Pode implementar o item 1 no front", "+ Q v Automático": "+ O v Ignorar permissões", "Opus 5.5": "Opus" });
+    expect(findComposer(logged, REAL_SIZE, "nuria-platform")).toMatchObject({ text: "Pode implementar o item 1 no front" });
+  });
+
+  it("never takes a button or the PR strip for the field: the real \"Criar PR\" screen clicks nothing (INSP-D A1/A4)", async () => {
+    // server.log 01/10: "+114 - 4 | Criar PR | +114 - 4 | • CI | X | X | Opus 5.5 | Médio" — no field, no mode bar
+    const criarPr = [
+      ...S36300F35.filter((line) => line.y < 700),
+      { x: 1207, y: 782, w: 71, h: 15, text: "+114 - 4" },
+      { x: 1100, y: 782, w: 70, h: 15, text: "Criar PR" },
+      { x: 1207, y: 782, w: 71, h: 15, text: "+114 - 4" },
+      { x: 1303, y: 782, w: 53, h: 15, text: "• CI" },
+      { x: 1382, y: 784, w: 13, h: 13, text: "X" },
+      { x: 1395, y: 784, w: 13, h: 13, text: "X" },
+      { x: 1231, y: 891, w: 66, h: 15, text: "Opus 5.5" },
+      { x: 1316, y: 891, w: 47, h: 13, text: "Médio" },
     ];
-    expect(findComposer(screen, { h: 900 })).toMatchObject({ text: "pode reescrever o corpo da PR com a seção de riscos", line: { y: 788 } });
-    expect(findComposer([{ x: 547, y: 875, w: 200, h: 16, text: "Digite / para comandos" }], { h: 900 })).toMatchObject({ text: null });
-    expect(findComposer([{ x: 547, y: 300, w: 200, h: 16, text: "conversation text" }], { h: 900 })).toBeNull();
+    const app = fakeApp({ screen: criarPr });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "Siga", title: "Guarda de release sem commit anterior" })).toMatchObject({ ok: false, miss: true, reason: expect.stringContaining("field was not found") });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`]);
+    // even right above the mode bar, in the field's column, a button is not a field
+    const buttonInColumn = swap(S36300F35, { "qual o status do gate da #9330?": "Criar PR" });
+    expect(findComposer(buttonInColumn, REAL_SIZE, "nuria-platform")).toBeNull();
+    // the strip's chips, read with spaces ("+114 - 4") or without ("+114-4"), never
+    for (const chip of ["+114 - 4", "+114-4", "• CI", "8 #9317", "nuria-platform fix/9326-guard-previous-commit"]) {
+      expect(findComposer(swap(S36300F35, { "qual o status do gate da #9330?": chip }), REAL_SIZE, "nuria-platform")).toBeNull();
+    }
+    // but a short draft with a path is the person's text, still the field
+    expect(findComposer(swap(S36300F35, { "qual o status do gate da #9330?": "veja server/index.ts" }), REAL_SIZE, "nuria-platform")).toMatchObject({ text: "veja server/index.ts" });
   });
 
-  it("keeps the person's draft: one probe key, the draft stays, the key is taken back and nothing is sent", async () => {
-    const strip = { text: "#9317 nuria-platform fix/9298", x: 520, y: 732 };
-    const bar = { text: "Automático", x: 578, y: 830 };
-    const model = { text: "Opus 5.5", x: 1140, y: 830 };
-    const draft = { text: "pode reescrever o corpo da PR com a seção de riscos", x: 505, y: 788 };
-    const probed = { ...draft, text: "pode reescrever o corpo da PR com a seção de riscos." };
-    const app = fakeApp({ screens: [[header, strip, draft, bar, model], [header, strip, probed, bar, model]] });
-    expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim, reescreva o corpo", title: "Chat ticket agent/client labels bug" }))
-      .toMatchObject({ ok: false, retry: true, draft: "pode reescrever o corpo da PR com a seção de riscos", reason: expect.stringContaining("rascunho") });
-    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 525,796", "type .", "key 51"]);
+  it("keeps the person's draft: cursor to the end, one probe key, the draft stays, the key is taken back and nothing is sent", async () => {
+    const probed = swap(R7_SESSION, { [R7_FIELD]: `${R7_FIELD}.` });
+    const app = fakeApp({ screens: [R7_SESSION, probed] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim, reescreva o corpo", title: "Automação inatividade não dispara", repoName: "nuria-platform" }))
+      .toMatchObject({ ok: false, retry: true, draft: R7_FIELD, reason: expect.stringContaining("rascunho") });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 567,852.5", "key 125+cmd", "type .", "key 51"]);
   });
 
-  it("sends over the app's suggested reply: it gives way to the probe key (36300f35, R8: \"qual o status do gate da #9330?\")", async () => {
-    // OCR of the session on 01/10 (send 1 of 6): branch strip, the suggestion, the mode/model bar
-    const strip = { text: "nuria-platform fix/9326-guard-previous-commit", x: 520, y: 732 };
-    const bar = { text: "+ O v Automático", x: 560, y: 830 };
-    const model = { text: "Opus 5.5", x: 1140, y: 830 };
-    const suggestion = { text: "qual o status do gate da #9330?", x: 505, y: 788 };
-    const probed = { ...suggestion, text: "." };
-    const typed = { ...suggestion, text: "Siga com o gate da #9330 agora" };
-    const sent = { text: "Responder…", x: 505, y: 788 };
-    const title = "Post-release-guard PREVIOUS_COMMIT vazio";
-    const top = { text: `• ${title} v (nuria-platform`, x: 520, y: 57 };
-    const app = fakeApp({ screens: [[top, strip, suggestion, bar, model], [top, strip, probed, bar, model], [top, strip, typed, bar, model], [top, strip, sent, bar, model]] });
-    expect(await sendToDesktopSession(app.driver, { localId, text: "Siga com o gate da #9330 agora", title }))
-      .toEqual({ ok: true, suggestion: "qual o status do gate da #9330?" });
-    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 525,796", "type .", "paste(all) Siga com o gate da #9330 agora", "key 36"]);
+  it("calls it a draft unless the field positively gave way: probe mid-word, or an unreadable screen, never overwrite it (INSP-D A1)", async () => {
+    // the cursor did not reach the end and the "." split a word ("po.de…"):
+    // the old check (its first 24 letters gone, so "a suggestion") would have pasted over the draft
+    for (const after of [swap(R7_SESSION, { [R7_FIELD]: "po.de reescrever o corpo da PR com a seção de riscos" }), [], R7_SESSION.filter((line) => line.y < 700)]) {
+      const app = fakeApp({ screens: [R7_SESSION, after] });
+      expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim", title: "Automação inatividade não dispara", repoName: "nuria-platform" }))
+        .toMatchObject({ ok: false, draft: R7_FIELD });
+      expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+      expect(app.actions.at(-1)).toBe("key 51");
+    }
+  });
+
+  it("owns up to a \".\" left in the draft when it must stop before taking it back (INSP-D A1)", async () => {
+    // fronts: step start, open, click field, cursor, probe, then another app at "undo probe"
+    const probed = swap(R7_SESSION, { [R7_FIELD]: `${R7_FIELD}.` });
+    const app = fakeApp({ screens: [R7_SESSION, probed], fronts: [CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, CLAUDE_BUNDLE_ID, TERMINAL] });
+    const step = await sendToDesktopSession(app.driver, { localId, text: "Pode sim", title: "Automação inatividade não dispara", repoName: "nuria-platform" });
+    expect(step).toMatchObject({ ok: false, retry: true, draft: R7_FIELD, leftProbe: true, reason: expect.stringContaining('deixei um "." no fim dele') });
+    expect(app.actions).not.toContain("key 51");
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+  });
+
+  it("sends over the app's suggested reply once it gave way to the probe key (36300f35: \"qual o status do gate da #9330?\")", async () => {
+    const title = "Guarda de release sem commit anterior";
+    const field = "qual o status do gate da #9330?";
+    const app = fakeApp({ screens: [S36300F35, swap(S36300F35, { [field]: "." }), swap(S36300F35, { [field]: "Siga com o gate da #9330 agora" }), swap(S36300F35, { [field]: "Responder…" })] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "Siga com o gate da #9330 agora", title, repoName: "nuria-platform" }))
+      .toEqual({ ok: true, suggestion: field });
+    expect(app.actions).toEqual([`open claude://code/continue?session=${localId}`, "click 567,852.5", "key 125+cmd", "type .", "paste(all) Siga com o gate da #9330 agora", "key 36"]);
+    // Vision may not read a lone "." at all: an empty field, the rest of the composer unchanged, is the same proof
+    const unread = fakeApp({ screens: [S36300F35, swap(S36300F35, { [field]: null }), swap(S36300F35, { [field]: "Siga" }), swap(S36300F35, { [field]: "Responder…" })] });
+    expect(await sendToDesktopSession(unread.driver, { localId, text: "Siga", title, repoName: "nuria-platform" })).toEqual({ ok: true, suggestion: field });
   });
 
   it("sends into the session whose header carries a status dot (8378b26a)", async () => {
@@ -551,8 +697,9 @@ describe("the session's own menu, in its header", () => {
   });
 
   it("does not rename while the message field holds a draft: a mistaken paste would land on it", async () => {
-    const draft = { text: "pode reescrever o corpo da PR", x: 505, y: 788 };
-    const bar = { text: "Automático", x: 578, y: 830 };
+    // the field and the mode bar where the real screen has them (R7): the field starts in the bar's column
+    const draft = { text: "pode reescrever o corpo da PR", x: 547, y: 842 };
+    const bar = { text: "+ Q v Automático", x: 543, y: 889 };
     const app = fakeApp({ screens: [[header, draft, bar], [header, { text: "Renomear", x: 520, y: 110 }, draft, bar], [field, draft, bar]] });
     expect(await renameDesktopSession(app.driver, { localId, title: "Fila errada ao criar ticket", newTitle: "#9305 Fila errada ao criar ticket" }))
       .toMatchObject({ ok: false, retry: true, draft: "pode reescrever o corpo da PR" });

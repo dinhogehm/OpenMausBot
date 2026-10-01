@@ -29,7 +29,7 @@ import {
   type DesktopWorkDeps,
 } from "./desktop-work.ts";
 
-const LOCAL = "local_9d56adfd-0000-4000-8000-000000000000";
+const LOCAL = "local_0a000004-0000-4000-8000-000000000000";
 const WORKTREE = "/Users/o/Projetos/nuria-platform/.claude/worktrees/helpdesk-f30521";
 
 /** The ledger, the app's records and transcripts, and a scripted screen. */
