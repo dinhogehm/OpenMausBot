@@ -103,6 +103,19 @@ it("speaks to the owner in the one conversation they named, and shows there what
   await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith('Dito ao dono em "Outra conversa"') && chip.includes("publico o carrier agora?")), { timeout: 10_000 }).toBe(true);
 }), 60_000);
 
+it("says so when a new goal replaces one still open in the conversation", () => fixture(async f => {
+  f.save({ turns: [
+    { steps: [
+      { tool: "goal_start", arguments: { goal: "Mergear a #9314 depois do lote", max_turns: 3 } },
+      { tool: "goal_start", arguments: { goal: "Publicar o carrier #9325", max_turns: 3 } },
+    ], reply: "Objetivo trocado" },
+  ] });
+  await f.send("Troque o objetivo.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  expect(toolResult(f.turns()[0], "goal_start")).toContain('O objetivo anterior desta conversa ("Mergear a #9314 depois do lote") foi substituído');
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Objetivo anterior substituído") && chip.includes("#9314")), { timeout: 10_000 }).toBe(true);
+}), 60_000);
+
 it("keeps giving a goal turns until the bot ends it, then goes quiet", () => fixture(async f => {
   f.save({ turns: [
     { steps: [{ tool: "goal_start", arguments: { goal: "SHIP_9195 to production", max_turns: 5 } }], reply: "Goal accepted" },

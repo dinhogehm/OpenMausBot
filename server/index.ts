@@ -325,7 +325,7 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
@@ -8740,6 +8740,36 @@ async function resumeSessionsAfterTag(): Promise<void> {
   }
 }
 
+/** A session idle for hours with its PR still open is often waiting for a
+ * word its owner promised ("fico parado até o seu aviso"): the owner hears
+ * it, with the PR's state, once a day. */
+const idleWatch = { running: false, lastAt: 0 };
+async function watchIdleSessionsWithOpenPrs(): Promise<void> {
+  if (idleWatch.running || Date.now() - idleWatch.lastAt < 10 * 60_000) return;
+  idleWatch.running = true;
+  idleWatch.lastAt = Date.now();
+  try {
+    for (const { session, prs } of idleWithOpenPrs(ccLedger.all(), Date.now()).slice(0, 3)) {
+      const states: string[] = [];
+      for (const number of prs.slice(0, 3)) {
+        try {
+          const view = JSON.parse(await execCc("gh", ["pr", "view", String(number), "--repo", session.delivery!.slug!, "--json", "state,mergeStateStatus"])) as { state?: string; mergeStateStatus?: string };
+          if (view.state === "OPEN") states.push(`PR #${number} aberta${view.mergeStateStatus ? ` (${view.mergeStateStatus})` : ""}`);
+        } catch { /* gh unavailable: next pass */ }
+      }
+      session.idleReportedAt = Date.now();
+      ccLedger.save();
+      if (!states.length) continue;
+      const hours = Math.round((Date.now() - session.lastActivityAt) / 3_600_000);
+      const last = (session.lastReport ?? "").trim().split("\n").filter(Boolean).at(-1) ?? "";
+      ccChip(session, `parada há ${hours} h com ${states.join(", ")} — esperando um aviso?`, false);
+      ccReport(session, `Claude Code session "${session.title}" (${session.id}) has been idle for ${hours} h with ${states.join(", ")}. It may be waiting for a word from you${last ? ` — its last report ends: "${last.slice(0, 240)}"` : ""}. Resume it with cc_session_send, put its PR back in the queue, or tell the owner why it stopped.`);
+    }
+  } finally {
+    idleWatch.running = false;
+  }
+}
+
 /** A P1/hotfix issue whose sessions all ended while the issue is still open:
  * nobody is on it. Checked once per ended session (gh issue view), then the
  * Chief and the session's owner hear about it. */
@@ -8795,6 +8825,7 @@ async function runDesktopWork(): Promise<void> {
   await watchBackgroundJobs();
   watchDelivery();
   void preemptCiForRelease().catch((error) => console.error(`[release-priority] ${error instanceof Error ? error.message : String(error)}`));
+  void watchIdleSessionsWithOpenPrs().catch((error) => console.error(`[cc-sessions] idle check failed: ${error instanceof Error ? error.message : String(error)}`));
   void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
   if (process.platform !== "darwin") return;
   await runDesktopWorkFlow(desktopWork, desktopState);
@@ -17525,9 +17556,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (body.action === "start") {
           const input = parseGoalInput(body);
           if (!input.ok) return json(res, 400, { error: input.error });
+          // a goal that was still open here is replaced: said, never silent
+          const previous = autonomy.goalFor(threadId);
+          const replaced = previous && (previous.status === "active" || previous.status === "needs-input") ? previous : null;
           const goal = autonomy.startGoal(bot.id, threadId, input);
+          if (replaced) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Objetivo anterior substituído (estava ${replaced.status === "active" ? "ativo" : "esperando você"}): ${replaced.goal}`, 240), ok: false } });
           store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Modo objetivo ligado — ${chipText(goal.goal, 140)}`, ok: true } });
-          return json(res, 200, { message: goalStartedAck(goal) });
+          return json(res, 200, { message: `${replaced ? `O objetivo anterior desta conversa ("${chipText(replaced.goal, 160)}") foi substituído por este — se ele ainda vale, diga isso à pessoa. ` : ""}${goalStartedAck(goal)}` });
         }
         if (body.action === "end") {
           const input = parseGoalEndInput(body);
@@ -17744,11 +17779,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (desktop.localId && active) {
             return json(res, 409, { error: "a sessão está no meio de um turno; arquive depois do relatório (ou peça à pessoa para pará-la no app)" });
           }
-          const dropped = session.queued.length + (desktop.pending?.kind === "send" ? 1 : 0);
+          const droppedTexts = [...session.queued.map((item) => item.text), ...(desktop.pending?.kind === "send" ? [desktop.pending.text] : [])];
+          const dropped = droppedTexts.length;
           session.queued = [];
           if (desktop.pending?.kind === "send") delete desktop.pending;
           delete desktop.sent;
-          if (dropped) ccChip(session, `${dropped} mensagem(ns) da fila descartada(s) ao arquivar`, false);
+          if (dropped) {
+            ccChip(session, `${dropped} mensagem(ns) da fila descartada(s) ao arquivar`, false);
+            ccReport(session, `Claude Code session "${session.title}" (${session.id}) is being archived with ${dropped} message(s) that never reached it; they were NOT delivered:\n${droppedTexts.map((text) => `- ${text.split("\n")[0]!.slice(0, 200)}`).join("\n")}`);
+          }
           // Its worktree goes only after the app's record confirms the archive.
           if (body.removeWorktree === true) desktop.removeWorktree = true;
           if (opening) {
@@ -17763,6 +17802,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           return json(res, 200, { message: `Na fila: ela é arquivada no app Claude assim que o Mac estiver livre, e o servidor confere no registro do app que arquivou${desktop.removeWorktree ? "; só então a worktree é removida (se não tiver alterações pendentes)" : ""}.` });
         }
         if (action === "stop" || action === "archive") {
+          // messages still queued for it leave with it: the owner hears which
+          if (session.queued.length) {
+            ccReport(session, `Claude Code session "${session.title}" (${session.id}) was ${action === "stop" ? "stopped" : "archived"} with ${session.queued.length} message(s) still queued for it; they were NOT delivered:\n${session.queued.map((item) => `- ${item.text.split("\n")[0]!.slice(0, 200)}`).join("\n")}`);
+            ccChip(session, `${session.queued.length} mensagem(ns) da fila descartada(s) ao ${action === "stop" ? "parar" : "arquivar"}`, false);
+          }
           const child = ccProcesses.get(session.id);
           if (child) {
             child.kill("SIGTERM");

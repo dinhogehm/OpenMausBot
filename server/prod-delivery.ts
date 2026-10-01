@@ -267,3 +267,19 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
   }
   return { blockers, unknown };
 }
+
+/** A session idle this long with a PR of it still open may be waiting for
+ * a word nobody sends ("fico parado até o seu aviso"). */
+export const IDLE_WITH_PR_MS = 6 * 3_600_000;
+const IDLE_REPORT_EVERY_MS = 24 * 3_600_000;
+
+/** Sessions idle past IDLE_WITH_PR_MS with known PRs not yet merged or
+ * closed, not reported in the last day, oldest first. */
+export function idleWithOpenPrs<T extends DeliverySession & { lastActivityAt: number; idleReportedAt?: number }>(sessions: readonly T[], now: number): Array<{ session: T; prs: number[] }> {
+  return sessions
+    .filter((session) => session.status === "idle" && now - session.lastActivityAt >= IDLE_WITH_PR_MS)
+    .filter((session) => session.idleReportedAt === undefined || now - session.idleReportedAt >= IDLE_REPORT_EVERY_MS)
+    .map((session) => ({ session, prs: Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.state !== "merged" && pr.state !== "closed").map((pr) => pr.number) }))
+    .filter((item) => item.prs.length > 0 && item.session.delivery?.slug)
+    .sort((a, b) => a.session.lastActivityAt - b.session.lastActivityAt);
+}
