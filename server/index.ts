@@ -306,6 +306,7 @@ import {
   liveWorktreeNames,
   liveRecordFolders,
   lastAppWorktreeFolder,
+  reusedFolderRefusal,
   readDesktopRecord,
   recordBlocked,
   recordsUsingFolder,
@@ -9084,7 +9085,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     }
     const lastWorktree = lastAppWorktreeFolder();
     if (lastWorktree) {
-      return { status: 409, body: { error: `não abri: a última pasta usada no app Claude é ${lastWorktree.folder}, a worktree de outra sessão${lastWorktree.title ? ` ("${lastWorktree.title}")` : ""}, e o app abriria a sessão nova lá (foi o que aconteceu em 6 de 7 creates em 01/10). Peça ao dono para abrir no app uma sessão na raiz de ${basename(input.repo)} (branch principal, worktree ligada) e fechá-la sem enviar; depois tente de novo. Se não der para esperar, use surface "cli" com cli_reason.` } };
+      return { status: 409, body: { error: reusedFolderRefusal(lastWorktree, basename(input.repo), fromQueue) } };
     }
     const appId = randomUUID();
     const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });

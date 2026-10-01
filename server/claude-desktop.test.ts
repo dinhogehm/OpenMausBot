@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ import {
   reusedWorktreeChip,
   notRepoRoot,
   lastAppWorktreeFolder,
+  reusedFolderRefusal,
   COMPOSER_MODE,
   isHeaderOf,
   DESKTOP_BRIEF_NOTE,
@@ -822,17 +823,55 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     expect(liveWorktreeNames(root, true)).toEqual(["teste-modo-app-70ca2f", "teste-modo-app-70ca2f"]);
   });
 
-  it("knows when the app's last picked folder is another session's worktree (worktreeName null)", () => {
+  it("answers the start with the 409 that says what the person does, each earlier session once, and what happens to a queued start (INSP-D B1/B6)", () => {
+    // what lastAppWorktreeFolder() returned on the real records (01/10 ~16h)
+    const real = {
+      folder: "/Users/o/Projetos/nuria-platform/.claude/worktrees/reabertura-defeitos-496989",
+      title: "Guarda de release sem commit anterior",
+      earlier: ["Prazo de reabertura ajustável", "Prazo de reabertura ajustável", "Reabertura com defeitos"],
+    };
+    const direct = reusedFolderRefusal(real, "nuria-platform");
+    expect(direct).toContain('pasta que já era de "Prazo de reabertura ajustável", "Reabertura com defeitos".');
+    expect(direct.match(/Prazo de reabertura/g)).toHaveLength(1);
+    expect(direct).toContain("enviar nela uma mensagem curta");
+    expect(direct).not.toMatch(/6 de 7|sem enviar;|fechá-la/);
+    expect(direct).toContain("Então tente de novo.");
+    // the start that waited in the queue: the bot hears it was dropped and must start again
+    const queued = reusedFolderRefusal(real, "nuria-platform", true);
+    expect(queued).toContain("saiu da fila de sessões e foi descartado");
+    expect(queued).toContain("chame cc_session_start de novo");
+    // both ways in (the tool call and the queue) go through startCcSession with this text
+    const index = readFileSync(join(import.meta.dirname, "index.ts"), "utf8");
+    expect(index).toContain("reusedFolderRefusal(lastWorktree, basename(input.repo), fromQueue)");
+    expect(index).toContain("startCcSession(bot, next.threadId, reply, next.body, true)");
+    expect(index).not.toMatch(/6 de 7 creates|fechá-la sem enviar/);
+  });
+
+  it("knows the app is reusing worktrees only when the newest session's folder was used before it — worktreeName says nothing (INSP-D A2)", () => {
     const records = join(root, "org", "acct");
     mkdirSync(records, { recursive: true });
     const write = (id: string, extra: object) => writeFileSync(join(records, `${id}.json`), JSON.stringify({ sessionId: id, cliSessionId: `c-${id}`, ...extra }));
-    write("local_a", { createdAt: 1, cwd: "/Users/o/Projetos/nuria-platform" });
+    const wt = (name: string) => `/Users/o/Projetos/nuria-platform/.claude/worktrees/${name}`;
+    write("local_a", { createdAt: Date.parse("2026-09-30T10:00:00Z"), cwd: "/Users/o/Projetos/nuria-platform" });
     expect(lastAppWorktreeFolder(root)).toBeNull();
-    // the app made its own worktree for this one: New Session starts from the root
-    write("local_b", { createdAt: 2, cwd: "/Users/o/Projetos/nuria-platform/.claude/worktrees/x-1a2b3c", worktreeName: "x-1a2b3c" });
+    // as the app's records really are: a session the app gave a worktree of
+    // its own, ARCHIVED — the app drops worktreeName on archive (folder =
+    // branch name, worktreeName null, like local_0a000001): no 409
+    write("local_0a000001", { createdAt: Date.parse("2026-09-30T11:00:00Z"), cwd: wt("suporte-indisponivel-deb42b"), worktreeName: null, isArchived: true, title: "Suporte indisponível" });
     expect(lastAppWorktreeFolder(root)).toBeNull();
-    // 01/10: the newest session opened in the folder of the archived #9298 one
-    write("local_c", { createdAt: 3, cwd: "/Users/o/Projetos/nuria-platform/.claude/worktrees/fix-9298-stage-time-rule-572720", worktreeName: null, title: "9319 F4-1 contrato" });
-    expect(lastAppWorktreeFolder(root)).toEqual({ folder: "/Users/o/Projetos/nuria-platform/.claude/worktrees/fix-9298-stage-time-rule-572720", title: "9319 F4-1 contrato" });
+    // the same, live, with its name: no 409
+    write("local_b", { createdAt: Date.parse("2026-09-30T12:00:00Z"), cwd: wt("x-1a2b3c"), worktreeName: "x-1a2b3c" });
+    expect(lastAppWorktreeFolder(root)).toBeNull();
+    // 01/10 12:53Z: local_0a000003 opened in the folder local_0a000002 (archived) had: 409
+    write("local_0a000002", { createdAt: Date.parse("2026-09-30T15:45:29Z"), cwd: wt("fix-9298-stage-time-rule-572720"), worktreeName: null, isArchived: true, title: "Automação inatividade não dispara" });
+    write("local_0a000003", { createdAt: Date.parse("2026-10-01T12:53:23Z"), cwd: wt("fix-9298-stage-time-rule-572720"), worktreeName: null, isArchived: true, title: "Contrato de esquema unificado" });
+    expect(lastAppWorktreeFolder(root)).toEqual({ folder: wt("fix-9298-stage-time-rule-572720"), title: "Contrato de esquema unificado", earlier: ["Automação inatividade não dispara"] });
+    // reuse WITH worktreeName filled (local_0a000005 in the folder of local_0a000004): caught too
+    write("local_0a000004", { createdAt: Date.parse("2026-09-29T22:35:00Z"), cwd: wt("suporte-inatividade-f30521"), isArchived: true, title: "Inatividade do suporte" });
+    write("local_0a000005", { createdAt: Date.parse("2026-10-01T12:54:03Z"), cwd: wt("suporte-inatividade-f30521"), worktreeName: "suporte-inatividade-f30521", title: "Gerenciador OpenMausBot" });
+    expect(lastAppWorktreeFolder(root)).toMatchObject({ title: "Gerenciador OpenMausBot", earlier: ["Inatividade do suporte"] });
+    // the person then starts (and sends in) a session at the root, worktree on: the app makes a fresh worktree — unblocked, archived or not
+    write("local_root", { createdAt: Date.parse("2026-10-01T15:00:00Z"), cwd: wt("tarefa-nova-9a8b7c"), worktreeName: null, isArchived: true, title: "ok" });
+    expect(lastAppWorktreeFolder(root)).toBeNull();
   });
 });

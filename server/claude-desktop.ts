@@ -889,19 +889,28 @@ export function lastAppRepo(dir = DESKTOP_SESSIONS_DIR): string | undefined {
   return newest ? repoOf(newest) : undefined;
 }
 
-/** The app's last picked folder when it is another session's worktree: the
- * newest work session sits in a worktree the app did not make for it
- * (`worktreeName` null), so New Session would open there again (01/10: 6 of
- * 7 creates). null when the last folder is a repository root. */
-export function lastAppWorktreeFolder(dir = DESKTOP_SESSIONS_DIR): { folder: string; title?: string } | null {
-  let newest: DesktopRecord | null = null;
+/** The app is reusing worktrees: its newest work session opened in a
+ * worktree folder that an OLDER session (archived ones included) had used
+ * already — the app's last picked folder is that worktree, and New Session
+ * would open there again. null when the newest session is in a repository
+ * root or in a worktree of its own (no one used the folder before it).
+ *
+ * `worktreeName` says nothing here: the app drops it when a session is
+ * archived (163 of 179 archived worktree sessions on 01/10 have it null,
+ * the ones it created right included), and a reused folder can carry it
+ * (local_0a000005 in the folder of local_0a000004). */
+export function lastAppWorktreeFolder(dir = DESKTOP_SESSIONS_DIR): { folder: string; title?: string; earlier: string[] } | null {
+  const records: DesktopRecord[] = [];
   for (const file of recordFiles(dir)) {
     const record = readRecord(file);
-    if (record && !notPickedFolder(record) && (record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
+    if (record) records.push(record);
   }
-  const folder = newest?.cwd;
-  if (!newest || !folder || newest.worktreeName || !/\/\.(?:claude\/)?worktrees\//.test(folder)) return null;
-  return { folder, ...(newest.title ? { title: newest.title } : {}) };
+  const newest = records.filter((record) => !notPickedFolder(record)).sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))[0];
+  const folder = newest ? newest.worktreePath ?? newest.cwd : undefined;
+  if (!newest || !folder || !/\/\.(?:claude\/)?worktrees\//.test(folder)) return null;
+  const earlier = records.filter((record) => record.sessionId !== newest.sessionId && (record.cwd === folder || record.worktreePath === folder) && (record.createdAt ?? 0) < (newest.createdAt ?? 0));
+  if (!earlier.length) return null;
+  return { folder, ...(newest.title ? { title: newest.title } : {}), earlier: earlier.map((record) => record.title ?? record.sessionId) };
 }
 
 /** Folders the app's sessions not archived work in (their cwd and worktree). */
@@ -914,6 +923,20 @@ export function liveRecordFolders(dir = DESKTOP_SESSIONS_DIR): string[] {
     if (record.worktreePath) folders.add(record.worktreePath);
   }
   return [...folders];
+}
+
+/** What cc_session_start answers (409) while the app is reusing worktrees.
+ * `fromQueue`: the start waited in the session queue and is dropped here —
+ * the bot must start it again once the person fixed the app's folder. */
+export function reusedFolderRefusal(last: { folder: string; title?: string; earlier: string[] }, repoName: string, fromQueue = false): string {
+  const earlier = [...new Set(last.earlier)].slice(0, 3).map((title) => `"${title}"`).join(", ");
+  return [
+    `não abri: a sessão mais recente do app Claude${last.title ? ` ("${last.title}")` : ""} abriu em ${last.folder}, pasta que já era de ${earlier}. O app está reaproveitando worktrees e abriria a sessão nova lá também.`,
+    `Peça ao dono para iniciar no app uma sessão nova na raiz de ${repoName} (pasta ${repoName}, worktree ligada) e enviar nela uma mensagem curta: o app só grava a sessão depois do primeiro envio, então abrir e fechar sem enviar não muda nada. Depois ela pode ser arquivada.`,
+    fromQueue
+      ? `Este pedido saiu da fila de sessões e foi descartado (não volta para a fila): quando o dono confirmar, chame cc_session_start de novo. Se não der para esperar, use surface "cli" com cli_reason.`
+      : `Então tente de novo. Se não der para esperar, use surface "cli" com cli_reason.`,
+  ].join(" ");
 }
 
 /** Worktree names of the app's sessions (archived ones too with `includeArchived`:
