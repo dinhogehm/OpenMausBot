@@ -1141,6 +1141,12 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
       if (r.error) return { text: `Não foi possível cancelar ${standing ? "o vigia permanente" : "o vigia"}: ${String(r.error)}`, isError: true };
       return { text: String(r.message ?? (standing ? "Vigia permanente desligado." : "Vigia cancelado.")) };
     }
+    if (args.update_reason === true) {
+      if (typeof args.reason !== "string" || !args.reason.trim()) return { text: "update_reason needs reason: the current note for the standing watch.", isError: true };
+      const r = await api("/api/internal/wake", { method: "POST", body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, updateReason: true, reason: args.reason, ...(typeof args.label === "string" ? { label: args.label } : {}) }) });
+      if (r.error) return { text: `Não foi possível atualizar o motivo: ${String(r.error)}`, isError: true };
+      return { text: String(r.message ?? "Motivo atualizado.") };
+    }
     if (typeof args.command !== "string" || !args.command.trim() || typeof args.reason !== "string" || !args.reason.trim()) {
       return { text: "wake_when needs command (a read-only gh, git or curl command) and reason (what to do when it fires).", isError: true };
     }

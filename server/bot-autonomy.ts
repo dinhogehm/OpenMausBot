@@ -574,6 +574,16 @@ export class BotAutonomy {
     return wake;
   }
 
+  /** A new note for a standing watch, keeping its baseline and schedule. */
+  updateStandingReason(threadId: string, label: string, reason: string): BotWake | null {
+    const wake = this.standingFor(threadId, label);
+    if (!wake?.watch) return null;
+    wake.reason = reason.slice(0, WAKE_REASON_MAX);
+    wake.watch.reasonAt = this.now();
+    this.save();
+    return wake;
+  }
+
   /** Is this still the wake kept for its conversation (not replaced or cancelled)? */
   isCurrent(wake: BotWake): boolean {
     return this.wakes.get(wakeKey(wake)) === wake;
@@ -1058,7 +1068,7 @@ export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, rem
     ...watchLines(wake),
     // a standing watch's note was written when it was set: it can be stale by now
     wake.watch?.standing && wake.watch.reasonAt !== undefined && now - wake.watch.reasonAt >= 3_600_000
-      ? `Your note for this moment, written ${minutesLabel(now - wake.watch.reasonAt)} ago — check it still holds before acting on it; if not, re-arm this watch (same label) with a current reason: ${wake.reason}`
+      ? `Your note for this moment, written ${minutesLabel(now - wake.watch.reasonAt)} ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${wake.reason}`
       : `Your note for this moment: ${wake.reason}`,
     ...(goal && goal.status === "active"
       ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`, ...GOAL_RULES]

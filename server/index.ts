@@ -8226,6 +8226,13 @@ async function autonomyTick(): Promise<void> {
       autonomy.forgetThread(wake.threadId);
       continue;
     }
+    // A standing watch whose time limit ran out with nothing seen renews on
+    // its own: a turn that only says "nothing changed" is not worth it, and a
+    // watch looking at the wrong page is caught by staleWatches instead.
+    if (wake.watch?.standing && !wake.watch.trigger) {
+      autonomy.rearmStanding(wake);
+      continue;
+    }
     // A due wake waits for the thread to be free; it is never dropped for it.
     // a watch is intake work: it waits for the bot's other intake turn
     if (autonomyTurnBlocked(wake.botId, wake.threadId, Boolean(wake.watch))) {
@@ -17617,6 +17624,16 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             if (cancelled) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Vigia permanente${cancelled.watch?.label ? ` "${cancelled.watch.label}"` : ""} desligado — ${watchLabel(cancelled.watch!.command)}`, ok: false } });
             const others = autonomy.standingsFor(threadId).map((wake) => wake.watch?.label ?? "default");
             return json(res, 200, { message: `${cancelled ? `Vigia permanente "${label}" desligado.` : `Não havia vigia permanente "${label}" nesta conversa.`}${others.length ? ` Continuam armados: ${others.join(", ")}.` : ""}` });
+          }
+          if (body.updateReason === true) {
+            const label = parseStandingLabel(body.label);
+            if (label === null) return json(res, 400, { error: "label inválido: 1 a 40 letras, dígitos, espaços ou . _ # : -" });
+            const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+            if (!reason) return json(res, 400, { error: "reason é obrigatório: o que fazer quando ele disparar, agora" });
+            const updated = autonomy.updateStandingReason(threadId, label, reason);
+            if (!updated) return json(res, 404, { error: `não há vigia permanente "${label}" nesta conversa` });
+            store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Motivo do vigia "${label}" atualizado — ${updated.reason}`, 240), ok: true } });
+            return json(res, 200, { message: `Motivo do vigia permanente "${label}" atualizado; ele continua armado com a mesma base.` });
           }
           if (body.cancel === true) {
             const cancelled = autonomy.cancelWake(threadId);

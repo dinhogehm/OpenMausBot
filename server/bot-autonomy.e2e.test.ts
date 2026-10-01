@@ -425,3 +425,27 @@ it("lists what waits on the person in \"Precisa de você\" until the bot or the 
   expect(await pending()).toEqual([]);
   await expect.poll(async () => (await f.chips()).some((chip: string) => chip === "Resolvido pela pessoa: Aprovar o carrier da #9315"), { timeout: 10_000 }).toBe(true);
 }), 60_000);
+
+it("renews a standing watch whose time limit ran out with nothing seen, without a turn, and takes a new note in place", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const repo = join(f.session.info.dataDir, "renewed-repo");
+  execFileSync("git", ["init", "-q", repo]);
+  execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "first"]);
+  const command = `git -C ${repo} log --format=%s -1`;
+  f.save({ turns: [
+    { steps: [
+      { tool: "wake_when", arguments: { command, reason: "OLD note", every_minutes: 1, max_minutes: 5, standing: true, label: "repo" } },
+      { tool: "wake_when", arguments: { reason: "NEW note", update_reason: true, label: "repo" } },
+    ], reply: "Watching" },
+  ] });
+  await f.send("Watch the repo.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  expect(toolResult(f.turns()[0], "wake_when")).toContain("atualizado");
+  const standing = () => f.ledger().wakes.find((wake: any) => wake.watch?.label === "repo");
+  const firstDue = standing().dueAt;
+  // five "minutes" (1 s) pass with nothing new: renewed, no turn
+  await expect.poll(() => standing()?.dueAt > firstDue, { timeout: 10_000 }).toBe(true);
+  expect(f.turns()).toHaveLength(1);
+  expect(standing().reason).toBe("NEW note");
+  expect(standing().watch.fired ?? 0).toBe(0);
+}), 60_000);

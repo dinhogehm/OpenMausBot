@@ -190,6 +190,9 @@ export function watchCommandWarnings(command: string): string[] {
   if (/^gog\b(?:\s+\S+)*?\s+chat\s+messages\s+list\b/.test(command.trim()) && !/--order[=\s]+["']?createTime desc/i.test(command)) {
     warnings.push('gog lista as mensagens em ordem crescente (as mais antigas primeiro): mensagens novas não mudam a saída e o vigia não as vê. Use --max 10 --order "createTime desc".');
   }
+  if (/^gog\b/.test(command.trim()) && /(?:^|\s)--json\b/.test(command)) {
+    warnings.push("gog --json traz um nextPageToken que muda a cada execução; o servidor o ignora ao comparar, mas --plain é mais curto e mais fácil de ler.");
+  }
   if (/^gh\s+issue\s+list\b/.test(command.trim()) && !/sort:updated/.test(command)) {
     warnings.push('gh issue list ordena pelas criadas mais recentemente: uma issue antiga que muda fica fora. Para ver atualizações, use --search "sort:updated-desc".');
   }
@@ -206,8 +209,13 @@ export function newestStamp(text: string): number | null {
   return newest;
 }
 
+/** Page tokens change on every run of the same listing (gog --json): not a change. */
+export function withoutPageTokens(text: string): string {
+  return text.replace(/"(?:next)?[pP]age_?[tT]oken"\s*:\s*"[^"]*",?/g, "");
+}
+
 export function fingerprintOf(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
+  return createHash("sha256").update(withoutPageTokens(text)).digest("hex");
 }
 
 /** A watch's `ignore`: lines it matches (case-insensitive regex, else text)
@@ -250,7 +258,8 @@ export function runWatchCommand(argv: string[], opts: { cwd: string; path: strin
         const out = String(stdout ?? "").trim();
         // ignored lines (the bot's own posts) never make it "changed"
         const skip = ignoreMatcher(opts.ignore);
-        const counted = skip ? out.split("\n").filter((line) => !skip(line)) : out.split("\n");
+        const counted = (skip ? out.split("\n").filter((line) => !skip(line)) : out.split("\n"))
+          .filter((line) => !/^\s*"(?:next)?[pP]age_?[tT]oken"\s*:/.test(line));
         resolve({ ok: true, output: text, fingerprint: fingerprintOf(skip ? counted.join("\n") : out), truncated: full.length > text.length, lines: counted.slice(0, WATCH_LINES_MAX) });
       },
     );

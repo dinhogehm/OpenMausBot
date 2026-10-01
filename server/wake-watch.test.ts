@@ -107,6 +107,7 @@ describe("what a watch will not see", () => {
     expect(watchCommandWarnings("gh issue list --state all --limit 30 --json number,updatedAt")[0]).toContain("sort:updated-desc");
     expect(watchCommandWarnings('gh issue list --search "sort:updated-desc" --limit 40')).toEqual([]);
     expect(watchCommandWarnings("gh pr view 9300")).toEqual([]);
+    expect(watchCommandWarnings('gog chat messages list spaces/X --json --max 2 --order "createTime desc"')[0]).toContain("nextPageToken");
   });
 
   it("finds the newest time stamp in an output", () => {
@@ -131,5 +132,14 @@ describe("echo of the bot's own posts", () => {
   it("warns about gog's oldest-first list with global flags before the command", () => {
     expect(watchCommandWarnings("gog --account o@x.com chat messages list spaces/X --plain")).toHaveLength(1);
     expect(watchCommandWarnings('gog --account o@x.com chat messages list spaces/X --order "createTime desc"')).toEqual([]);
+  });
+});
+
+describe("page tokens", () => {
+  it("do not make two runs of the same listing differ", () => {
+    const a = '{\n  "messages": [{"text": "oi"}],\n  "nextPageToken": "f136f334f0c9"\n}';
+    const b = '{\n  "messages": [{"text": "oi"}],\n  "nextPageToken": "c6f1c2084887"\n}';
+    expect(fingerprintOf(a)).toBe(fingerprintOf(b));
+    expect(fingerprintOf(a)).not.toBe(fingerprintOf(a.replace("oi", "olá")));
   });
 });

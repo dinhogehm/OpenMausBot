@@ -731,3 +731,18 @@ describe("what waits on the person", () => {
     expect(autonomy.ownerPendingOf("chief")).toEqual([]);
   });
 });
+
+describe("a standing watch's note", () => {
+  it("changes in place, keeping its baseline and schedule", () => {
+    const autonomy = make();
+    const wake = autonomy.setWatch("bot", "t1", { command: "git ls-remote origin", argv: ["git", "ls-remote", "origin"], everyMinutes: 15, maxMinutes: 120, reason: "pedir ao QA o #8891", baseline: "90b3ef2a5", standing: true, label: "prod" });
+    const due = wake.dueAt;
+    now += 3 * 3_600_000;
+    expect(autonomy.updateStandingReason("t1", "prod", "avisar a Daiane quando a #9307 entrar")).toBe(wake);
+    expect(wake.reason).toBe("avisar a Daiane quando a #9307 entrar");
+    expect(wake.watch!.reasonAt).toBe(now);
+    expect(wake.watch!.baseline).toBe("90b3ef2a5");
+    expect(wake.dueAt).toBe(due);
+    expect(autonomy.updateStandingReason("t1", "chat", "x")).toBeNull();
+  });
+});
