@@ -342,7 +342,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { ciToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
-import { isReleaseProcess, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, startsCarrier, type PowerState, type PowerWatchState } from "./power.ts";
+import { carrierIntent, isReleaseProcess, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
 import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, tagStuck, tagStuckCause } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -8282,11 +8282,16 @@ async function checkPower(): Promise<void> {
   }
 }
 
-/** Why a carrier may not start now (the Mac on battery), or null. */
-function carrierPowerRefusal(text: string): string | null {
+/** On battery: an order to run a carrier is refused; a mere mention of one
+ * (a failed run to investigate) goes through with a note for the session. */
+function carrierPowerCheck(text: string): { refusal: string } | { note: string } | null {
   const power = powerWatch.state;
-  if (!power?.onBattery || !startsCarrier(text)) return null;
-  return `não inicio carrier com o Mac na bateria${power.percent !== null ? ` (${power.percent}%)` : ""}: se ele desligar no meio do deploy, a produção fica pela metade. Peça ao dono para ligar na tomada e mande de novo.`;
+  if (!power?.onBattery) return null;
+  const intent = carrierIntent(text);
+  const charge = power.percent !== null ? ` (${power.percent}%)` : "";
+  if (intent === "order") return { refusal: `não inicio carrier com o Mac na bateria${charge}: se ele desligar no meio do deploy, a produção fica pela metade. Peça ao dono para ligar na tomada e mande de novo.` };
+  if (intent === "mention") return { note: `[Nota do servidor: Mac na bateria${charge}: não rode carrier até voltar à tomada.]` };
+  return null;
 }
 
 async function checkProductionRelease(): Promise<void> {
@@ -9163,8 +9168,9 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason });
     if (refusal) return { status: 409, body: { error: refusal } };
   }
-  const onBattery = carrierPowerRefusal(`${input.title}\n${input.brief}`);
-  if (onBattery) return { status: 409, body: { error: onBattery } };
+  const onBattery = carrierPowerCheck(`${input.title}\n${input.brief}`);
+  if (onBattery && "refusal" in onBattery) return { status: 409, body: { error: onBattery.refusal } };
+  if (onBattery) input.brief = `${input.brief}\n\n${onBattery.note}`;
   if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
     if (fromQueue) return { status: 409, body: { error: "busy" } };
     const priority = startPriority(`${input.title}\n${input.brief}`);
@@ -18204,12 +18210,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // A send that merges or publishes carries the repository's
           // corridor once (sessions started before it, or since it changed).
           const sendCorridor = repoCorridor(session.repo);
-          const onBattery = carrierPowerRefusal(scripts.text);
-          if (onBattery) return json(res, 409, { error: onBattery });
+          const onBattery = carrierPowerCheck(scripts.text);
+          if (onBattery && "refusal" in onBattery) return json(res, 409, { error: onBattery.refusal });
           const corridored = corridorForSend(session, sendCorridor, scripts.text);
           const sendWarning = sendCorridor ? hotfixWithReleaseScripts(scripts.text) : null;
           if (sendWarning) ccChip(session, "a mensagem junta hotfix com script de release — o corredor pede carriers separados", false);
-          const message = corridored.text;
+          const message = onBattery ? `${corridored.text}\n\n${onBattery.note}` : corridored.text;
           // The order came from this conversation: its report comes back here.
           // Only once the order is accepted — a refused one moves nothing.
           const claim = () => {

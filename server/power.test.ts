@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { batteryAlert, isReleaseProcess, LOW_PERCENT, ON_BATTERY_ALERT_MS, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, startsCarrier } from "./power.ts";
+import { batteryAlert, carrierIntent, isReleaseProcess, LOW_PERCENT, ON_BATTERY_ALERT_MS, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, startsCarrier } from "./power.ts";
 
 const onBattery = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=27525219)\t53%; discharging; 1:16 remaining present: true\n";
 const plugged = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=27525219)\t100%; charged; 0:00 remaining present: true\n";
@@ -47,6 +47,25 @@ describe("power", () => {
       "/bin/bash /Users/owner/.local/bin/watch-production-release.sh",
       "npm run release:local",
     ]) expect(isReleaseProcess(line), line).toBe(true);
+  });
+
+  it("sees a release behind caffeinate, timeout or sh -c, never a claude's (INSP-G r2 item 5)", () => {
+    for (const line of [
+      "caffeinate -i ./scripts/local-release.sh",
+      "/usr/bin/caffeinate -dims bash scripts/macos/release-production.sh",
+      "timeout 3600 bash scripts/local-release.sh",
+      "/bin/sh -c npm run release:local",
+      "bash -lc \"./scripts/release-carrier.sh --execute\"",
+      "/bin/zsh -c ./scripts/release-carrier.sh --execute",
+      "node /opt/homebrew/bin/npm run release:local",
+    ]) expect(isReleaseProcess(line), line).toBe(true);
+    for (const line of [
+      "claude -p -- rode ./scripts/release-carrier.sh --execute",
+      "caffeinate -i claude -p -- rode ./scripts/local-release.sh",
+      "/bin/zsh -c npm run ci:local && ./scripts/release-carrier.sh --check",
+      "timeout 60 grep release-carrier scripts/README.md",
+      "caffeinate -dims",
+    ]) expect(isReleaseProcess(line), line).toBe(false);
   });
 
   it("tells the Chief after 20 min on battery, when low, and when critical — each once", () => {
@@ -133,5 +152,27 @@ describe("power", () => {
     ];
     for (const text of starts) expect(startsCarrier(text), text).toBe(true);
     for (const text of passes) expect(startsCarrier(text), text).toBe(false);
+  });
+
+  it("refuses only an order; a mention passes with the battery note (INSP-G r2 item 4, the inspector's 31 phrases)", () => {
+    const order: string[] = [
+      "roda o carrier da #9330", "manda o carrier", "dispare o carrier agora", "faz o /cpd", "cpd da #9330",
+      "bash scripts/release-carrier.sh --label hotfix --execute", "./scripts/release-carrier.sh --pr 9330 --execute", "./scripts/release-carrier.sh --execute --label x",
+      "solta o carrier", "executa o carrier", "rodar carrier", "Publicar: carrier da #9315",
+      "pode rodar o carrier da #9330 agora", "segue com o carrier", "vai de carrier", "manda ver no carrier",
+      "Pode publicar via carrier", "Agora o carrier: execute.", "carrier da #9330 liberado, pode rodar",
+      "não esqueça de rodar o carrier", "não precisa esperar, rode o carrier",
+    ];
+    const mention: string[] = [
+      "nao rode o carrier ainda, so o --check", "rode ./scripts/release-carrier.sh --check e PARE",
+      "execute os testes do release-carrier.sh", "inicie a revisao do PR que mexe no carrier",
+      "run the unit tests for carrier parsing", "Rode ci:local no head; depois o carrier fica com o Chief",
+      "o /cpd de ontem falhou, veja o log", "Não é para rodar o carrier", "confira se o carrier anterior publicou",
+      "release-carrier.sh --execute falhou ontem com GH013, investigue",
+    ];
+    expect(order.length + mention.length).toBe(31);
+    for (const text of order) expect(carrierIntent(text), text).toBe("order");
+    for (const text of mention) expect(carrierIntent(text), text).toBe("mention");
+    expect(carrierIntent("rode os testes de novo")).toBeNull();
   });
 });

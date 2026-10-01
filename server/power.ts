@@ -31,16 +31,24 @@ const RELEASE_SCRIPT = String.raw`\S*(?:scripts/(?:\S+/)?(?:local-release|releas
 const RELEASE_DIRECT = new RegExp(`^${RELEASE_SCRIPT}(?:\\s|$)`);
 /** The script run by a shell or node (`bash ./scripts/release-carrier.sh --execute`, `/bin/bash -e scripts/macos/release-production.sh`). */
 const RELEASE_VIA = new RegExp(`^(?:\\S*/)?(?:(?:ba|z|da)?sh|node)(?:\\s+-\\S+)*\\s+${RELEASE_SCRIPT}(?:\\s|$)`);
-/** `npm run release:local` (the title npm sets). */
-const RELEASE_NPM = /^(?:\S*\/)?npm(?:\s+-\S+)*\s+run(?:-script)?\s+release(?::\S*)?(?:\s|$)/;
+/** `npm run release:local` (the title npm sets), or node running npm. */
+const RELEASE_NPM = /^(?:(?:\S*\/)?node\s+)?(?:\S*\/)?npm(?:-cli\.js)?(?:\s+-\S+)*\s+run(?:-script)?\s+release(?::\S*)?(?:\s|$)/;
 /** Claude Code: `claude …`, or node running its entry point. */
 const CLAUDE = /^(?:\S*\/)?claude(?:\s|$)|^(?:\S*\/)?node\s+\S*(?:\/@anthropic-ai\/claude-code\/|\/claude(?:\s|$))/;
+/** What may run the release without being it: `caffeinate -i`, `timeout 3600`, `sh -c "…"` (`bash -lc`). */
+const WRAPPER = /^(?:(?:\S*\/)?caffeinate(?:\s+-\S+)*\s+|(?:\S*\/)?timeout(?:\s+-\S+)*\s+\S+\s+|(?:\S*\/)?(?:ba|z|da)?sh(?:\s+-(?!\S*c)\S+)*\s+-\S*c\S*\s+["']?)/;
 
 /** A process of a production release (or of a carrier), from `ps -o command`. */
 export function isReleaseProcess(command: string): boolean {
-  const cmd = command.trim();
-  if (CLAUDE.test(cmd)) return false;
-  return RELEASE_DIRECT.test(cmd) || RELEASE_VIA.test(cmd) || RELEASE_NPM.test(cmd);
+  let cmd = command.trim();
+  for (let hops = 0; hops < 4; hops++) {
+    if (CLAUDE.test(cmd)) return false;
+    if (RELEASE_DIRECT.test(cmd) || RELEASE_VIA.test(cmd) || RELEASE_NPM.test(cmd)) return true;
+    const wrapper = WRAPPER.exec(cmd);
+    if (!wrapper) return false;
+    cmd = cmd.slice(wrapper[0].length).trim();
+  }
+  return false;
 }
 
 /** On battery this long, or below LOW_PERCENT, the Chief hears it. */
@@ -122,22 +130,50 @@ export function powerStep(watch: PowerWatchState, power: PowerState, now: number
 // carrier (its tests, a review, a PR), nor across a clause ("Rode ci:local;
 // depois o carrier fica com o Chief"). This only advises: the real gate on
 // battery belongs in release-carrier.sh --execute itself (nuria-platform, R8 BAT).
-const CARRIER_VERB = String.raw`(?:rod(?:a|e|ar)|execut(?:a|e|ar)|mand(?:a|e|ar)|solt(?:a|e|ar)|dispar(?:a|e|ar)|public(?:a|ar)|publique|inici(?:a|e|ar)|lan[çc](?:a|e|ar)|faz|fa[çc]a|fazer|run|start|publish|kick\s+off)`;
-const CARRIER_FILLER = String.raw`(?:o|a|os|as|um|uma|ess[ea]|est[ea]|aquel[ea]|seu|sua|teu|tua|meu|minha|nosso|nossa|the|an|this|that|our|your|j[áa]|agora|logo)`;
-const CARRIER_ORDER = new RegExp(String.raw`(?<![\p{L}\p{N}_-])${CARRIER_VERB}(?:\s*[:\-–—])?(?:\s+${CARRIER_FILLER}){0,2}\s+(?:release-)?carrier\b`, "giu");
-const CARRIER_EXECUTE = /\S*release-carrier(?:\.sh)?\b[^\n]*?\s--execute\b/gi;
-const CPD = /(?:^|\s)(\/?cpd)\b/gi;
-const NEGATED = /(?:\bn[ãa]o|\bnunca|\bjamais|\bdon'?t|\bdo\s+not|\bnever)\s+(?:\S+\s+)?$/i;
+//
+// Only an ORDER is refused (INSP-G r2 item 4). A mere mention — the carrier
+// that failed yesterday, "investigue", "veja o log", "não é para rodar" —
+// passes, with a note that the Mac is on battery: on battery the Chief must
+// still be able to send a session to investigate a failed carrier.
+const CARRIER_VERB = String.raw`(?:rod(?:a|e|ar)|execut(?:a|e|ar)|mand(?:a|e|ar)|solt(?:a|e|ar)|dispar(?:a|e|ar)|public(?:a|ar)|publique|inici(?:a|e|ar)|lan[çc](?:a|e|ar)|lance|faz|fa[çc]a|fazer|segu(?:e|ir)|siga|vai|v[áa]|run|start|publish|kick\s+off|go)`;
+const CARRIER_FILLER = String.raw`(?:o|a|os|as|um|uma|ess[ea]|est[ea]|aquel[ea]|seu|sua|teu|tua|meu|minha|nosso|nossa|com|de|do|da|no|na|em|via|pelo|pela|ver|j[áa]|agora|logo|the|an|this|that|our|your|with)`;
+/** Verb, then at most three small words, then the carrier: "roda o carrier", "manda ver no carrier", "Publicar: carrier". */
+const ORDER_BEFORE = new RegExp(String.raw`(?<![\p{L}\p{N}_/-])${CARRIER_VERB}(?:\s*[:\-–—])?(?:\s+${CARRIER_FILLER}){0,3}\s+(?:release-)?carrier\b`, "giu");
+/** The carrier, then the order: "Agora o carrier: execute", "carrier da #9330 liberado, pode rodar". */
+const ORDER_AFTER = /\bcarrier\b[^:,;]{0,40}[:,]\s*(?:pode\s+|j[áa]\s+)?(rod\w*|execut\w*|solt\w*|dispar\w*|public\w*|mand\w*|run|go)\b/giu;
+/** The script with --execute at the start of a clause (or right after an order verb or a shell). */
+const ORDER_SCRIPT = new RegExp(String.raw`^\s*(?:(?:agora|ent[ãa]o|pode)\s+)?(?:${CARRIER_VERB}\s+)?(?:(?:\S*/)?(?:ba|z)?sh\s+)?\S*release-carrier(?:\.sh)?\b[^\n]*?\s--execute\b`, "iu");
+/** The /cpd skill (it ends in the carrier) at the start of a clause. */
+const ORDER_CPD = /^\s*(?:(?:agora|ent[ãa]o|pode)\s+)?(?:(?:faz|fa[çc]a|fazer|rod\w*|execut\w*|mand\w*|run)\s+)?(?:o\s+)?\/?cpd\b/iu;
+/** The carrier or /cpd is talked about. */
+const MENTION = /\b(?:release-)?carrier\b|(?:^|\s)\/?cpd\b/iu;
+/** Talk about a past run, a failure, its tests or a review: never an order to run it. */
+const ABOUT = /\b(?:falh\w*|quebr\w*|trav\w*|erro|errou|logs?|ontem|investig\w*|vej[ao]|veja|confir\w*|analis\w*|testes?|tests?|revis[ãa]o|review|failed|fails?|error|why)\b|por\s*qu[eê]/iu;
+/** A negation up to three words before the order ("não rode", "Não é para rodar"), but not "não esqueça de". */
+const NEGATED = /(?:\bn[ãa]o|\bnunca|\bjamais|\bdon'?t|\bdo\s+not|\bnever)\s+(?!(?:se\s+)?(?:esque[çc]a|deixe|precisa)\b)(?:\S+\s+){0,3}$/iu;
 
-export function startsCarrier(text: string): boolean {
+/** What a message says about the carrier: an "order" to run it, a "mention", or null. */
+export function carrierIntent(text: string): "order" | "mention" | null {
+  let mention = false;
   // clauses: a ";" or a sentence end closes one (not the dot of "release-carrier.sh")
   for (const clause of text.split(/;|\n|[.!?](?=\s|$)/)) {
-    for (const pattern of [CARRIER_EXECUTE, CARRIER_ORDER, CPD]) {
-      for (const match of clause.matchAll(pattern)) {
-        const at = match.index! + (pattern === CPD ? match[0].indexOf(match[1]!) : 0);
-        if (!NEGATED.test(clause.slice(0, at))) return true;
-      }
-    }
+    if (!MENTION.test(clause)) continue;
+    mention = true;
+    if (ABOUT.test(clause)) continue;
+    // a negation counts only within its comma-part: "não precisa esperar, rode o carrier" is an order
+    const negated = (at: number) => NEGATED.test(clause.slice(0, at).split(",").pop()!);
+    const starts = [0, ...[...clause.matchAll(/,/g)].map((match) => match.index! + 1)];
+    const orders = [
+      ...[...clause.matchAll(ORDER_BEFORE)].map((match) => match.index!),
+      ...[...clause.matchAll(ORDER_AFTER)].map((match) => match.index! + match[0].lastIndexOf(match[1]!)),
+      ...starts.filter((at) => ORDER_SCRIPT.test(clause.slice(at)) || ORDER_CPD.test(clause.slice(at))).map((at) => at + (clause.slice(at).length - clause.slice(at).trimStart().length)),
+    ];
+    if (orders.some((at) => !negated(at))) return "order";
   }
-  return false;
+  return mention ? "mention" : null;
+}
+
+/** A message or brief that orders a carrier run. */
+export function startsCarrier(text: string): boolean {
+  return carrierIntent(text) === "order";
 }
