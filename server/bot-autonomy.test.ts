@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
 import {
   BotAutonomy,
+  SEEN_CHAT_MAX,
   GOAL_DEFAULT_MAX_TURNS,
   GOAL_MIN_TURN_GAP_MS,
   goalContinuationPrompt,
@@ -557,6 +558,34 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     const clientText = chat.map((line) => line.split("\t")[3] ?? "").find((text) => text.length > 100)!;
     expect(autonomy.noteVmClipboard("monitor", clientText)).toBe(false);
     expect(run(message("nWv3", "Karntf Fhqxr", clientText))).toBe("changed");
+  });
+
+  it("knows a message seen in the last 24 h, out of the list now, as a copy, not the bot's post (INSP-E r5 2)", () => {
+    const autonomy = make();
+    const wake = autonomy.setWatch("monitor", "thread-chat", { ...base, command: "gog chat messages list spaces/AAAAexample --max 10 --plain", argv: ["gog", "chat", "messages", "list", "spaces/AAAAexample", "--max", "10", "--plain"], label: "chat", baseline: "x", baselineFingerprint: "a" });
+    const message = (n: number, text: string) => `spaces/AAAAexample/messages/m${n}.m${n}\tKarntf Fhqxr\t2026-10-01T10:${String(n).padStart(2, "0")}:00.000000Z\t${text}`;
+    const clientText = "o atendimento caiu de novo às 10h e a cliente não recebeu a resposta do bot";
+    let lines = ["RESOURCE\tSENDER\tTIME\tTEXT", message(0, clientText), ...Array.from({ length: 9 }, (_, i) => message(i + 1, `mensagem antiga ${i}`))];
+    autonomy.recordWatchRun(wake, { ok: true, output: lines.join("\n"), matched: false, fingerprint: "f0", lines });
+    // ten new messages: the client's leaves the list of the last 10
+    for (let n = 10; n < 20; n += 1) {
+      now += 60_000;
+      lines = [lines[0]!, message(n, `mensagem nova ${n}`), ...lines.slice(1, 10)];
+      autonomy.recordWatchRun(wake, { ok: true, output: lines.join("\n"), matched: false, fingerprint: `f${n}`, lines });
+      if (wake.watch!.trigger) autonomy.rearmStanding(wake);
+    }
+    expect(lines.some((line) => line.includes(clientText))).toBe(false);
+    // the bot copies it (to quote it in an issue): not its post
+    expect(autonomy.noteVmClipboard("monitor", clientText)).toBe(false);
+    // the client sends it again: it wakes the bot
+    now += 60_000;
+    lines = [lines[0]!, message(30, clientText), ...lines.slice(1, 10)];
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: lines.join("\n"), matched: false, fingerprint: "f30", lines })).toBe("changed");
+    // and the memory stays bounded
+    const many = Array.from({ length: SEEN_CHAT_MAX + 50 }, (_, i) => message(i, `texto único número ${i} para encher a memória`));
+    autonomy.rearmStanding(wake);
+    autonomy.recordWatchRun(wake, { ok: true, output: "x", matched: false, fingerprint: "big", lines: many });
+    expect(autonomy.seenChatCount("monitor")).toBe(SEEN_CHAT_MAX);
   });
 
   it("keeps no Chat post from the VM while a Chat watch has no output of its own yet (restart, first run) (INSP-E r4 3)", () => {

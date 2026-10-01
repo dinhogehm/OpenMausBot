@@ -29,7 +29,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { languageReminder } from "./reply-language.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
-import { chatTexts, ECHO_WINDOW_MS, isEcho, vmChatPostOf, vmSheetNoteOf, watchKindOf, type SelfWrite } from "./watch-echo.ts";
+import { chatTexts, ECHO_WINDOW_MS, isEcho, normalize, vmChatPostOf, vmSheetNoteOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
+/** How long, and how many, message starts a bot keeps as seen in its Chat watches. */
+export const SEEN_CHAT_MS = 24 * 3_600_000;
+export const SEEN_CHAT_MAX = 2_000;
 
 export const WAKE_MIN_MINUTES = 1;
 export const WAKE_MAX_MINUTES = 1_440;
@@ -327,6 +330,8 @@ export class BotAutonomy {
   private selfWrites = new Map<string, SelfWrite[]>();
   /** Each watch's complete output lines of its last run (not persisted: after a restart nothing is an echo). */
   private lastLines = new Map<string, string[]>();
+  /** Per bot, the start of each message its Chat watches showed, and when (insertion order = age). */
+  private seenChat = new Map<string, Map<string, number>>();
   /** Leases a restart cut off, as found on load. */
   readonly recoveredOnLoad: RecoveredLease[] = [];
   private readonly path: string | null;
@@ -489,6 +494,7 @@ export class BotAutonomy {
     if (result.ok && result.lines && result.linesComplete !== false) this.lastLines.set(wakeKey(wake), result.lines);
     else if (result.ok) this.lastLines.delete(wakeKey(wake));
     watch.lastOutput = result.output;
+    if (result.ok && result.lines && watchKindOf(watch.argv) === "chat") this.noteChatSeen(wake.botId, result.lines);
     let fresh: string[] = [];
     if (result.ok && result.lines) {
       // what is new since the run before, past the cut the bot reads
@@ -557,6 +563,29 @@ export class BotAutonomy {
     this.selfWrites.set(botId, [...kept, write].slice(-20));
   }
 
+  /** The start of every message a bot's Chat watches showed (40 characters,
+   * @mentions aside): a text pasted later that starts the same is a copy,
+   * not a post, even once the message scrolled out of the list. Kept 24 h,
+   * at most SEEN_CHAT_MAX per bot, in memory. */
+  private noteChatSeen(botId: string, lines: readonly string[]): void {
+    const at = this.now();
+    const seen = this.seenChat.get(botId) ?? new Map<string, number>();
+    for (const text of chatTexts(lines)) {
+      const start = normalize(withoutLeadingMentions(text)).slice(0, 40);
+      if (!start) continue;
+      seen.delete(start);
+      seen.set(start, at);
+    }
+    for (const [start, when] of seen) if (at - when > SEEN_CHAT_MS) seen.delete(start);
+    while (seen.size > SEEN_CHAT_MAX) seen.delete(seen.keys().next().value!);
+    this.seenChat.set(botId, seen);
+  }
+
+  /** How many message starts a bot keeps as seen (for tests). */
+  seenChatCount(botId: string): number {
+    return this.seenChat.get(botId)?.size ?? 0;
+  }
+
   /** Text the bot put on the VM's clipboard: kept as its Chat post only when
    * it is one (server/watch-echo.ts vmChatPostOf), checked against what its
    * Chat watches last showed. True when kept. */
@@ -571,7 +600,8 @@ export class BotAutonomy {
     // to tell it from a copied message (none after a restart: in doubt, not kept)
     const chatWatches = [...this.wakes.entries()].filter(([, wake]) => wake.botId === botId && wake.watch && watchKindOf(wake.watch.argv) === "chat");
     if (!chatWatches.length || chatWatches.some(([key]) => !this.lastLines.has(key))) return false;
-    const shown = chatWatches.flatMap(([key]) => chatTexts(this.lastLines.get(key)!));
+    // what its Chat watches show now, and every message they showed in the last 24 h
+    const shown = [...chatWatches.flatMap(([key]) => chatTexts(this.lastLines.get(key)!)), ...(this.seenChat.get(botId)?.keys() ?? [])];
     const write = vmChatPostOf(text, this.now(), shown);
     if (write) this.noteSelfWrite(botId, write);
     return write !== null;

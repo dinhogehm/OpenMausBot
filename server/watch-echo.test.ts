@@ -93,8 +93,17 @@ describe("the real spreadsheet output (gog --plain, no tabs)", () => {
     expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [edited] }))).toBe(false);
   });
 
-  it("takes a new continuation line that starts with its mark as its own", () => {
-    expect(sheetEcho(edit(SHEET, { 401: [SHEET[401]!, `[${MONITOR}] 01/10 16:20 BRT: cliente avisada no fio.`] }))).toBe(true);
+  it("takes a new line with the mark only when it is a note the bot wrote, once (INSP-E r5 1)", () => {
+    const note = `[${MONITOR}] 01/10 16:20 BRT: cliente avisada no fio.`;
+    // pasted as a new line of the cell ("\n[Monitor…] …")
+    expect(sheetEcho(edit(SHEET, { 401: [SHEET[401]!, note] }), pasted(`\n${note}`))).toBe(true);
+    // the first line of a note that breaks over lines
+    expect(sheetEcho(edit(SHEET, { 401: [SHEET[401]!, `[${MONITOR}] 01/10 16:20 BRT: cliente avisada`] }), pasted(`\n${note}`))).toBe(true);
+    // a person copying the bot's note to another row: no note on record, it wakes
+    const copy = SHEET[ROW_178]!.slice(SHEET[ROW_178]!.indexOf(`[${MONITOR}]`));
+    expect(sheetEcho(edit(SHEET, { 401: [SHEET[401]!, copy] }), [])).toBe(false);
+    // the same note pasted once, appearing on two new lines: the second is not the bot's
+    expect(sheetEcho(edit(SHEET, { 401: [SHEET[401]!, note], [ROW_180]: [SHEET[ROW_180]!, note] }), pasted(`\n${note}`))).toBe(false);
   });
 
   it("never takes a new line with the mark in the middle and no line before it", () => {

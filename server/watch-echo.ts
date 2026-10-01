@@ -14,8 +14,9 @@
 //   whatever separators the note has inside. Anything else added (a word
 //   after it, with or without a separator), or any edit inside the old
 //   text, is a person's;
-// - a line that is new and starts with the bot's mark (a continuation line
-//   of its note), or — on an issue — a new comment whose body ends with it
+// - a line that is new and is a note the bot wrote (pasted or set with gog
+//   sheets, as above), or the first line of one — never just any line that
+//   starts with its mark — or, on an issue, a new comment whose body ends with it
 //   (the bot signs its comments `<!-- bot:<slug> -->`);
 // - in a row whose note grew as above in the same run, exactly one field
 //   before the mark changed to a value the bot itself wrote with `gog
@@ -300,7 +301,14 @@ export function isEcho(
       continue;
     }
     if (mark && startsWithMark(line, mark)) {
-      reasons.push("linha nova com a marca do bot");
+      // a new line with the mark: a note the bot wrote (or its first line), each used once
+      const text = normalize(line);
+      const isSpent = (write: SelfWrite, note: string) => notesUsed.some((use) => use.write === write && use.note === note);
+      const note = recent.flatMap((write) => (write.notes ?? []).map((each) => ({ write, note: each })))
+        .find(({ write, note: each }) => startsWithMark(each, mark) && !isSpent(write, each) && (each === text || each.startsWith(`${text} `)));
+      if (!note) return NOT_ECHO;
+      notesUsed.push(note);
+      reasons.push("linha nova com a nota que o bot escreveu");
       continue;
     }
     // a new comment the bot signed: its body ends with this bot's own mark
