@@ -473,18 +473,19 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
 
   it("takes the bot's own comment as the new baseline instead of waking it", () => {
     const autonomy = make();
-    const list = "9307\tOPEN\tL173\t2026-09-30T20:00:00Z";
-    const bumped = "9307\tOPEN\tL173\t2026-10-01T08:37:20Z";
-    const wake = autonomy.setWatch("bot", "t1", { ...base, command: "gh issue list", argv: ["gh", "issue", "list"], standing: true, label: "issues", baseline: list, baselineFingerprint: "a" });
-    autonomy.recordWatchRun(wake, { ok: true, output: list, matched: false, fingerprint: "a", lines: [list] });
-    autonomy.noteSelfWrite("bot", selfWriteOf("gh issue comment 9307 --body feito", now)!);
+    // a watch on the comments of #9307: one line per comment
+    const old = "9307\tdaiane\tO login ainda falha\t2026-09-30T20:00:00Z";
+    const mine = "9307\tmonitor\tPublicado em produção, pode testar\t2026-10-01T08:37:20Z";
+    const wake = autonomy.setWatch("bot", "t1", { ...base, command: "gh api repos/o/r/issues/9307/comments", argv: ["gh", "api", "repos/o/r/issues/9307/comments"], standing: true, label: "issues", baseline: old, baselineFingerprint: "a" });
+    autonomy.recordWatchRun(wake, { ok: true, output: old, matched: false, fingerprint: "a", lines: [old] });
+    autonomy.noteSelfWrite("bot", selfWriteOf('gh issue comment 9307 --body "Publicado em produção, pode testar"', now)!);
     now += 60_000;
-    expect(autonomy.recordWatchRun(wake, { ok: true, output: bumped, matched: false, fingerprint: "b", lines: [bumped] })).toBeNull();
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: `${old}\n${mine}`, matched: false, fingerprint: "b", lines: [old, mine] })).toBeNull();
     expect(wake.watch!.echoAt).toBe(now);
-    // a client's issue next: it wakes the bot as before
-    const client = "9311\tOPEN\tMarluce\t2026-10-01T08:40:00Z";
-    now += 60_000;
-    expect(autonomy.recordWatchRun(wake, { ok: true, output: `${client}\n${bumped}`, matched: false, fingerprint: "c", lines: [client, bumped] })).toBe("changed");
+    // a person on the same issue two minutes later: it wakes the bot
+    const human = "9307\tdaiane\tTestei e continua com erro\t2026-10-01T08:39:20Z";
+    now += 2 * 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: `${old}\n${mine}\n${human}`, matched: false, fingerprint: "c", lines: [old, mine, human] })).toBe("changed");
   });
 
   it("finds the same command already watched by this bot in another conversation", () => {

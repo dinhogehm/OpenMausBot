@@ -182,6 +182,13 @@ export function lineHash(line: string): string {
   return createHash("sha1").update(line).digest("hex").slice(0, 10);
 }
 
+/** An `ignore` drops whole lines: unanchored, it also drops a line where a
+ * person changed another cell ("Reprovado" in the row the bot annotated). */
+export function watchIgnoreWarnings(ignore: string | undefined): string[] {
+  if (!ignore || ignore.startsWith("^")) return [];
+  return [`ignore "${ignore}" descarta a linha inteira em que casar — numa linha que também tem Status ou Validação, uma mudança da pessoa some junto. Ancore no começo da linha (ex.: ^\\[Seu Nome\\]); mudanças só nas células com a sua marca já não acordam você.`];
+}
+
 /** What a watch command will not see the way the bot hopes: said in the
  * tool result, the watch is still armed. */
 export function watchCommandWarnings(command: string): string[] {

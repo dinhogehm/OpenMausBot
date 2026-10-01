@@ -831,7 +831,7 @@
           "ignore": {
             "type": "string",
             "maxLength": 200,
-            "description": "Optional: lines matching this (case-insensitive regex or text) do not count as a change — e.g. your own posts' sender, so your replies do not wake you."
+            "description": "Optional: whole lines matching this (case-insensitive regex or text) do not count as a change. Anchor it (^\\[Your Name\\]) so a row that also holds a person's cell still wakes you; changes only in cells with your mark ([Your Name], <!-- bot:… -->) never wake you anyway."
           },
           "move": {
             "type": "boolean",

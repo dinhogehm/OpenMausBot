@@ -273,7 +273,7 @@ import {
   wakeFiredChip,
   watchLabel,
 } from "./bot-autonomy.ts";
-import { parseWatchCommand, runWatchCommand, watchCommandWarnings, watchMatches } from "./wake-watch.ts";
+import { parseWatchCommand, runWatchCommand, watchCommandWarnings, watchIgnoreWarnings, watchMatches } from "./wake-watch.ts";
 import {
   CC_MAX_RUNNING,
   CC_TURN_TIMEOUT_MS,
@@ -404,7 +404,7 @@ import type { ProviderInstance } from "./contracts.ts";
 import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-selection.ts";
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
-import { selfWriteOf } from "./watch-echo.ts";
+import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
 import { removeNestedWorktrees } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
@@ -8062,7 +8062,8 @@ async function runDueWatches(): Promise<void> {
     if (!store.taskByThread(wake.botId, wake.threadId)) return;
     const watch = wake.watch!;
     const result = await runWatchCommand(watch.argv, { cwd: watchCwd(wake.botId, wake.threadId), path: augmentedPath(), ignore: watch.ignore });
-    autonomy.recordWatchRun(wake, { ...result, matched: result.ok && watchMatches(result.output, watch.until) });
+    const owner = store.bot(wake.botId);
+    autonomy.recordWatchRun(wake, { ...result, matched: result.ok && watchMatches(result.output, watch.until), ...(owner ? { ownMark: botMarkPattern(owner.name) } : {}) });
   }));
   // Rows show each watch's last run and failures: refresh the bots that ran one.
   for (const botId of new Set(watches.map((wake) => wake.botId))) refreshBotRow(botId);
@@ -17681,7 +17682,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
               const where = [...new Set(elsewhere.map((wake) => `"${store.taskByThread(bot.id, wake.threadId)?.title ?? wake.threadId}" (${wake.threadId})`))].join(", ");
               return json(res, 409, { error: `você já tem um vigia com este mesmo comando em outra conversa: ${where}. Não armei outro. Para trazê-lo para esta conversa, chame wake_when de novo com move: true (o de lá é desligado); ou acompanhe por lá.` });
             }
-            const warnings = watchCommandWarnings(String(body.command));
+            const warnings = [...watchCommandWarnings(String(body.command)), ...watchIgnoreWarnings(input.ignore)];
             if (input.standing) {
               const armed = autonomy.standingsFor(threadId);
               const label = input.label ?? STANDING_DEFAULT_LABEL;

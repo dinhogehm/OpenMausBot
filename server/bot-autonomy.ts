@@ -463,11 +463,13 @@ export class BotAutonomy {
 
   /** Record one run; the wake becomes due now if the watch triggered. The
    * caller decides changed/matched (it owns the matching rule). */
-  recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean; fingerprint?: string; truncated?: boolean; lines?: string[] }): WatchTrigger | null {
+  recordWatchRun(wake: BotWake, result: { ok: boolean; output: string; matched: boolean; fingerprint?: string; truncated?: boolean; lines?: string[]; ownMark?: RegExp }): WatchTrigger | null {
     const watch = wake.watch;
     if (!watch || this.wakes.get(wakeKey(wake)) !== wake || watch.trigger) return null;
     watch.lastRunAt = this.now();
     watch.runs += 1;
+    // the rows as they were, to tell the bot's marked note from a person's edit in the same row
+    const previous = (watch.lastOutput ?? "").split("\n");
     watch.lastOutput = result.output;
     let fresh: string[] = [];
     if (result.ok && result.lines) {
@@ -506,7 +508,7 @@ export class BotAutonomy {
       else if (!watch.until && changed) trigger = "changed";
       // the change is only the bot's own comment, post or note: take it as
       // the new baseline without waking the bot
-      if (trigger === "changed" && isEcho(fresh, watchKindOf(watch.argv), this.selfWrites.get(wake.botId) ?? [], this.now())) {
+      if (trigger === "changed" && isEcho(fresh, watchKindOf(watch.argv), this.selfWrites.get(wake.botId) ?? [], this.now(), { ...(result.ownMark ? { mark: result.ownMark } : {}), previous })) {
         trigger = null;
         watch.echoAt = this.now();
         watch.baseline = result.output;

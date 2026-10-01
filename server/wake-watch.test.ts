@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fingerprintOf, ignoreMatcher, newestStamp, parseWatchCommand, watchCommandWarnings, WATCH_READABLE_DIRS, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
+import { fingerprintOf, ignoreMatcher, newestStamp, parseWatchCommand, watchCommandWarnings, watchIgnoreWarnings, WATCH_READABLE_DIRS, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
 
 describe("parseWatchCommand", () => {
   it.each([
@@ -83,6 +83,17 @@ describe("change detection on the whole output", () => {
     expect(a.output).toContain("Next page: --page abc");
     expect(a.fingerprint).toBe(b.fingerprint);
     expect(a.fingerprint).toBe(fingerprintOf("same messages"));
+  });
+
+  it("with an anchored ignore, a \"Reprovado\" in the row the bot annotated still counts; an unanchored one is warned about", async () => {
+    const rows = (validation: string) => `178\tPatrícia\tPublicado\t${validation}\t[Monitor Chat Atendimento] Issue #9331\n[Monitor Chat Atendimento] continuação da nota`;
+    const run = (validation: string) => runWatchCommand([process.execPath, "-e", "process.stdout.write(process.argv[1])", rows(validation)], { cwd: process.cwd(), path: process.env.PATH ?? "", ignore: "^\\[Monitor Chat Atendimento\\]" });
+    const [before, after] = await Promise.all([run(""), run("Reprovado")]);
+    expect(before.fingerprint).not.toBe(after.fingerprint);
+    expect(after.lines).toEqual([rows("Reprovado").split("\n")[0]]);
+    expect(watchIgnoreWarnings("\\[Monitor Chat Atendimento\\]")[0]).toContain("Ancore no começo da linha");
+    expect(watchIgnoreWarnings("^\\[Monitor Chat Atendimento\\]")).toEqual([]);
+    expect(watchIgnoreWarnings(undefined)).toEqual([]);
   });
 });
 
