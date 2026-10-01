@@ -188,6 +188,27 @@ describe("PRs the issue search finds that are not left without a session (INSP-F
     expect(alone.chips.map((chip) => chip.text)).toEqual(["PR #9330 ficou sem sessão: https://github.com/owner/platform/pull/9330"]);
   });
 
+  it("a PR carried only by a stopped (or failed) session is left without a session (INSP-F r3 #2)", async () => {
+    for (const status of ["stopped", "failed"] as const) {
+      const gh = fakeGithub({ byIssue: { 9326: [PR_9330] } });
+      const archived = archivedFor(`36300f35-0000-4000-8000-00000000000${status.length}`, "9326");
+      const halted = live("29da943f-0000-4000-8000-000000000000", "9326", { title: "9326 gate da PR 9330", status, lastReport: "PR #9330 esperando o gate" });
+      await checkArchivedOutside([archived, halted], gh.deps);
+      expect(gh.chips).toEqual([{ id: archived.id, text: "PR #9330 ficou sem sessão: https://github.com/owner/platform/pull/9330", ok: false }]);
+      expect(gh.pending).toHaveLength(1);
+    }
+  });
+
+  it("a running CLI session on the same issue, known only by the number in its title, carries the PR on (INSP-F r3 #2)", async () => {
+    const gh = fakeGithub({ byIssue: { 9326: [PR_9330] } });
+    const archived = archivedFor("36300f35-0000-4000-8000-000000000009", "9326");
+    const cli = { ...live("c11e0000-0000-4000-8000-000000000000", "9326", { title: "9326 F4-2 gate", status: "running", surface: "cli" }), desktop: undefined } as CcSession;
+    await checkArchivedOutside([archived, cli], gh.deps);
+    expect(gh.chips).toEqual([{ id: archived.id, text: 'a PR #9330 segue com a sessão "9326 F4-2 gate" (c11e0000)', ok: true }]);
+    expect(gh.reports).toEqual([]);
+    expect(gh.pending).toEqual([]);
+  });
+
   it("keeps a searched PR only when its title or branch names the issue", () => {
     expect(prOfIssue(PR_9332, "9307")).toBe(false);
     expect(prOfIssue(PR_9332, "9052")).toBe(true);

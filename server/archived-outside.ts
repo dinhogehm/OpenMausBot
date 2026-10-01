@@ -21,6 +21,7 @@
 // conferir"; sessions are taken least-recently-tried first, so a few that
 // keep failing never hold back the others.
 import type { CcSession } from "./cc-sessions.ts";
+import { issueNumber } from "./desktop-work.ts";
 import { notAPullRequest, prsOfSession } from "./prod-delivery.ts";
 
 export { notAPullRequest };
@@ -110,10 +111,15 @@ export function prOfIssue(pr: FoundPr, issue: string): boolean {
  * one working on the same issue in the same repository. Archiving and
  * reopening a session for an issue is the common case. */
 export function liveOwnerOf(number: number, viaIssue: string | null, session: CcSession, sessions: readonly CcSession[], slug: string): CcSession | null {
-  return sessions.find((other) => other.id !== session.id && other.status !== "archived" && other.repo === session.repo && (
-    prsOfSession(other, slug).includes(number) || (viaIssue !== null && other.desktop?.issue === viaIssue)
+  // only a session that may still work counts: stopped, failed or archived ones carry nothing on
+  return sessions.find((other) => other.id !== session.id && LIVE.has(other.status) && other.repo === session.repo && (
+    prsOfSession(other, slug).includes(number)
+    // an app session knows its issue; a CLI one names it in its title
+    || (viaIssue !== null && (other.desktop?.issue ?? issueNumber(other.title)) === viaIssue)
   )) ?? null;
 }
+
+const LIVE = new Set<string>(["running", "idle", "stalled"]);
 
 /** One session: its open PRs (and how each was found), and the numbers GitHub could not answer for. */
 async function openPrsOf(session: CcSession, slug: string, deps: ArchivedOutsideDeps): Promise<{ open: Map<number, string | null>; unknown: number[]; lookupFailed: boolean }> {
