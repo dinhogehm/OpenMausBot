@@ -286,6 +286,7 @@ import {
   parseCcStartInput,
   repoCorridor,
   cliSurfaceRefusal,
+  hotfixWithReleaseScripts,
   corridorForSend,
   corridorVersionOf,
   repoPackageManager,
@@ -17769,6 +17770,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando neste computador; espere uma relatar, ou pare uma` });
           }
           const corridor = repoCorridor(input.repo);
+          const mixWarning = corridor ? hotfixWithReleaseScripts(`${input.title}\n${input.brief}`) : null;
           const cliReason = typeof body.cliReason === "string" ? body.cliReason.trim().slice(0, 300) : "";
           if (body.surface === "cli") {
             const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason });
@@ -17793,7 +17795,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             ccLedger.save();
             ccChip(session, "na fila para abrir no app Claude quando o Mac estiver livre");
             const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", input.model ? "model" : ""].filter(Boolean);
-            return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
+            return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
           }
           const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
           if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
@@ -17802,7 +17804,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           runCcTurn(session, input.brief, true);
           ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
           if (cliReason) ccChip(session, `sessão CLI, não visível no app Claude — motivo: ${cliReason}`);
-          return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
+          return json(res, 200, { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
         }
         const session = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
         if (!session || session.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão — chame cc_session_list" });
@@ -17812,7 +17814,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (session.status === "archived") return json(res, 409, { error: "essa sessão está arquivada; comece outra" });
           // A send that merges or publishes carries the repository's
           // corridor once (sessions started before it, or since it changed).
-          const corridored = corridorForSend(session, repoCorridor(session.repo), scripts.text);
+          const sendCorridor = repoCorridor(session.repo);
+          const corridored = corridorForSend(session, sendCorridor, scripts.text);
+          const sendWarning = sendCorridor ? hotfixWithReleaseScripts(scripts.text) : null;
+          if (sendWarning) ccChip(session, "a mensagem junta hotfix com script de release — o corredor pede carriers separados", false);
           const message = corridored.text;
           // The order came from this conversation: its report comes back here.
           // Only once the order is accepted — a refused one moves nothing.
@@ -17849,19 +17854,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             claim();
             if (session.status === "running" || desktop?.pending || desktop?.sent) {
               const position = ccLedger.enqueue(session, message);
-              return json(res, 200, { message: `A sessão está ocupada; sua mensagem entrou na fila (#${position}) e vai para o app Claude depois deste turno. Encerre o turno agora.` });
+              return json(res, 200, { message: `A sessão está ocupada; sua mensagem entrou na fila (#${position}) e vai para o app Claude depois deste turno. Encerre o turno agora.${sendWarning ? ` ${sendWarning}` : ""}` });
             }
             session.desktop!.pending = { kind: "send", text: message, since: Date.now(), attempts: 0 };
             session.status = "running";
             ccLedger.save();
             ccChip(session, "mensagem na fila para o app Claude");
-            return json(res, 200, { message: `Na fila: vai para a sessão no app Claude assim que o Mac estiver livre, e o servidor confere que chegou; o próximo relatório volta aqui. Encerre o turno agora.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
+            return json(res, 200, { message: `Na fila: vai para a sessão no app Claude assim que o Mac estiver livre, e o servidor confere que chegou; o próximo relatório volta aqui. Encerre o turno agora.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}${sendWarning ? ` ${sendWarning}` : ""}` });
           }
           // A stalled run may still be alive: never start a second one beside it.
           if (session.status === "running" || (session.status === "stalled" && ccProcesses.has(session.id))) {
             claim();
             const position = ccLedger.enqueue(session, message);
-            return json(res, 200, { message: `A sessão está no meio de um turno; sua mensagem entrou na fila (#${position}) e roda assim que este turno terminar. Encerre o turno agora.` });
+            return json(res, 200, { message: `A sessão está no meio de um turno; sua mensagem entrou na fila (#${position}) e roda assim que este turno terminar. Encerre o turno agora.${sendWarning ? ` ${sendWarning}` : ""}` });
           }
           if (ccLedger.runningCount() >= CC_MAX_RUNNING) {
             return json(res, 409, { error: `já há ${CC_MAX_RUNNING} sessões do Claude Code rodando; tente de novo depois que uma relatar` });
@@ -17869,7 +17874,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           claim();
           runCcTurn(session, message, session.turns === 0);
           ccChip(session, "mensagem enviada");
-          return json(res, 200, { message: `Enviada. A sessão está trabalhando; o relatório volta aqui como um novo turno. Encerre o turno agora.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` });
+          return json(res, 200, { message: `Enviada. A sessão está trabalhando; o relatório volta aqui como um novo turno. Encerre o turno agora.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}${sendWarning ? ` ${sendWarning}` : ""}` });
         }
         if (session.surface === "app" && action === "stop") {
           // Nothing on the screen is touched: the server stops waiting for it,

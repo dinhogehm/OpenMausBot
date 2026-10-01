@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, cliSurfaceRefusal, corridorForSend, corridorVersionOf, issueTitle, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, hotfixWithReleaseScripts, cliSurfaceRefusal, corridorForSend, corridorVersionOf, issueTitle, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -237,6 +237,13 @@ describe("a repository's corridor", () => {
     expect(cliSurfaceRefusal({ ...shipping, reason: "o envio no app está falhando" })).toBeNull();
     expect(cliSurfaceRefusal({ ...shipping, corridor: "" })).toBeNull();
     expect(cliSurfaceRefusal({ corridor: "x", title: "limpar worktrees", brief: "apague pastas mergeadas antigas? não, só liste" })).toBeNull();
+  });
+
+  it("warns when a batch puts a hotfix with a release-script change", () => {
+    expect(hotfixWithReleaseScripts("Carrier: hotfix #9278 + #9289 (muda scripts/local-release.sh)")).toContain("scripts/local-release.sh");
+    expect(hotfixWithReleaseScripts("Inclua o P1 #9278 junto com a #9290 (watch-production-release.sh)")).toContain("watch-production-release.sh");
+    expect(hotfixWithReleaseScripts("hotfix #9278 sozinho no carrier")).toBeNull();
+    expect(hotfixWithReleaseScripts("#9290 muda scripts/local-release.sh")).toBeNull();
   });
 
   it("names the issues a title opens with", () => {

@@ -681,6 +681,15 @@ export function shipsWork(text: string): boolean {
   return /\b(?:merge|mergear|mergeie|publica\w*|publish\w*|publique|carrier|release|deploy\w*|produção|production|pr:merge)\b/i.test(text);
 }
 
+/** A hotfix/P1 and a release-script change in the same batch text: the
+ * corridor says they ship in separate carriers. A warning, not a refusal —
+ * an explicit order of the owner ("NESTA ORDEM") prevails (PLANO-10 D6). */
+export function hotfixWithReleaseScripts(text: string): string | null {
+  if (!/\b(?:hotfix|P0|P1)\b/i.test(text)) return null;
+  const script = /\b(?:scripts\/[\w.-]*release[\w.-]*|local-release(?:\.sh)?|watch-production-release(?:\.sh)?|release-carrier(?:\.sh)?)\b/i.exec(text);
+  return script ? `Atenção: este texto junta hotfix/P1 com mudança de script de release (${script[0]}). Pelo corredor, o hotfix sai num carrier próprio, antes, e os scripts de release num carrier separado, depois — a menos que o dono tenha ordenado esta ordem explicitamente; nesse caso, diga isso no relatório.` : null;
+}
+
 /** Why a headless session of shipping work is refused without a reason:
  * the person follows merges and releases in the app. null when allowed. */
 export function cliSurfaceRefusal(input: { corridor: string; title: string; brief: string; reason?: string }): string | null {
