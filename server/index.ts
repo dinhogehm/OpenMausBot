@@ -8285,9 +8285,9 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
  * command they point to would move the production tag back. */
 async function resolveTagAdvancePendings(repo: string, tagSha: string | null, released: string, releasedContained: boolean | null): Promise<void> {
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
-  const desk = chief ? chiefDeskThread(chief) : null;
-  if (!chief || !desk || !tagSha) return;
-  const open = autonomy.ownerPendingFor(desk).map((item) => item.key ?? "").filter((key) => key.startsWith("tag-advance:"));
+  if (!chief || !tagSha) return;
+  // by bot, not by the current desk: the desk can change, and the item would be left behind
+  const open = autonomy.ownerPendingOf(chief.id).map((item) => item.key ?? "").filter((key) => key.startsWith("tag-advance:"));
   if (!open.length) return;
   const contained = new Map<string, boolean | null>();
   for (const key of open) {

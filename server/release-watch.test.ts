@@ -149,6 +149,14 @@ describe("after a release", () => {
     expect(done).toEqual([`tag-advance:${X}`]);
     for (const key of done) autonomy.resolveOwnerPending({ key });
     expect(open()).toEqual(["desktop:abc"]);
+    // INSP-R r5: an item made on another of the Chief's conversations (the desk changed) closes too:
+    // the server reads them by bot (ownerPendingOf), as here
+    autonomy.addOwnerPending("chief", "old-desk", { title: tagAdvancePendingTitle(Y), key: `tag-advance:${Y}` });
+    const byBot = () => autonomy.ownerPendingOf("chief").map((item) => item.key ?? "").filter((key) => key.startsWith("tag-advance:"));
+    expect(byBot()).toEqual([`tag-advance:${Y}`]);
+    for (const key of tagAdvanceToResolve(byBot(), Y, () => null)) autonomy.resolveOwnerPending({ key });
+    expect(byBot()).toEqual([]);
+    expect(autonomy.ownerPendingFor("old-desk")).toEqual([]);
   });
 
   // INSP-R r1 item 10: ls-remote does not fetch; a commit missing in the clone is no evidence
