@@ -29,7 +29,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { languageReminder } from "./reply-language.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
-import { chatTexts, ECHO_WINDOW_MS, isEcho, vmChatPostOf, watchKindOf, type SelfWrite } from "./watch-echo.ts";
+import { chatTexts, ECHO_WINDOW_MS, isEcho, vmChatPostOf, vmSheetNoteOf, watchKindOf, type SelfWrite } from "./watch-echo.ts";
 
 export const WAKE_MIN_MINUTES = 1;
 export const WAKE_MAX_MINUTES = 1_440;
@@ -560,10 +560,18 @@ export class BotAutonomy {
   /** Text the bot put on the VM's clipboard: kept as its Chat post only when
    * it is one (server/watch-echo.ts vmChatPostOf), checked against what its
    * Chat watches last showed. True when kept. */
-  noteVmClipboard(botId: string, text: string): boolean {
-    const shown = [...this.wakes.entries()]
-      .filter(([, wake]) => wake.botId === botId && wake.watch && watchKindOf(wake.watch.argv) === "chat")
-      .flatMap(([key]) => chatTexts(this.lastLines.get(key) ?? []));
+  noteVmClipboard(botId: string, text: string, mark?: RegExp): boolean {
+    // a note for the spreadsheet: it starts with the bot's own mark
+    const note = mark ? vmSheetNoteOf(text, this.now(), mark) : null;
+    if (note) {
+      this.noteSelfWrite(botId, note);
+      return true;
+    }
+    // a Chat post: only when every Chat watch of the bot has its last output
+    // to tell it from a copied message (none after a restart: in doubt, not kept)
+    const chatWatches = [...this.wakes.entries()].filter(([, wake]) => wake.botId === botId && wake.watch && watchKindOf(wake.watch.argv) === "chat");
+    if (!chatWatches.length || chatWatches.some(([key]) => !this.lastLines.has(key))) return false;
+    const shown = chatWatches.flatMap(([key]) => chatTexts(this.lastLines.get(key)!));
     const write = vmChatPostOf(text, this.now(), shown);
     if (write) this.noteSelfWrite(botId, write);
     return write !== null;

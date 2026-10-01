@@ -497,11 +497,13 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     const autonomy = make();
     const wake = autonomy.setWatch("monitor", "thread-planilha", { ...base, command: "gog sheets get SHEET_ID Atendimento!A1:H400 --plain", argv: ["gog", "sheets", "get", "SHEET_ID", "Atendimento!A1:H400", "--plain"], label: "planilha", baseline: "x", baselineFingerprint: "a" });
     autonomy.recordWatchRun(wake, run(sheet, "a"));
-    // the bot's note after its mark: an echo, said with why
+    // the bot's note, pasted through the VM, after its mark: an echo, said with why
     now += 60_000;
-    const noted = sheet.map((line, i) => (i === row ? `${line} | [Monitor Chat Atendimento] 01/10 16:10 BRT: sessão aberta` : line));
+    const note = " | [Monitor Chat Atendimento] 01/10 16:10 BRT: sessão aberta";
+    expect(autonomy.noteVmClipboard("monitor", note, ownMark)).toBe(true);
+    const noted = sheet.map((line, i) => (i === row ? `${line}${note}` : line));
     expect(autonomy.recordWatchRun(wake, run(noted, "b"))).toBeNull();
-    expect(wake.watch!.echo).toMatchObject({ at: now, lines: 1, reasons: ["nota do bot acrescentada com a marca"], sample: expect.stringContaining("Oqvnflfa") });
+    expect(wake.watch!.echo).toMatchObject({ at: now, lines: 1, reasons: ["nota que o bot escreveu, acrescentada igual"], sample: expect.stringContaining("Oqvnflfa") });
     // the client's "Reprovado" in that same row: it wakes the bot
     now += 60_000;
     const reproved = noted.map((line, i) => (i === row ? line.replace("Pendente    Atendimento", "Pendente    Reprovado  Atendimento") : line));
@@ -546,10 +548,22 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     // (b) someone else calling the same person: it wakes
     expect(run(message("nWv2", "Karntf Fhqxr", "@Fulana de Tal da Silva você viu o erro de novo?"))).toBe("changed");
     autonomy.rearmStanding(wake);
+    // (b2) a person pasting the bot's post and adding to it: the message is not the post, it wakes (INSP-E r4 1)
+    const body2 = "para testar: abra um atendimento novo e responda pelo widget do chat";
+    expect(autonomy.noteVmClipboard("monitor", body2)).toBe(true);
+    expect(run(message("nWv4", "Karntf Fhqxr", `@Karntf Fhqxr ${body2} fiz isso e não funcionou`))).toBe("changed");
+    autonomy.rearmStanding(wake);
     // (c) the bot copies a client's message (to quote it in an issue), the client sends it again: it wakes
     const clientText = chat.map((line) => line.split("\t")[3] ?? "").find((text) => text.length > 100)!;
     expect(autonomy.noteVmClipboard("monitor", clientText)).toBe(false);
     expect(run(message("nWv3", "Karntf Fhqxr", clientText))).toBe("changed");
+  });
+
+  it("keeps no Chat post from the VM while a Chat watch has no output of its own yet (restart, first run) (INSP-E r4 3)", () => {
+    const autonomy = make();
+    autonomy.setWatch("monitor", "thread-chat", { ...base, command: "gog chat messages list spaces/AAAAexample --plain", argv: ["gog", "chat", "messages", "list", "spaces/AAAAexample", "--plain"], label: "chat", baseline: "x", baselineFingerprint: "a" });
+    const clientText = "o atendimento caiu de novo às 10h e a cliente não recebeu a resposta do bot";
+    expect(autonomy.noteVmClipboard("monitor", clientText)).toBe(false);
   });
 
   it("lets go of a one-shot watch's kept lines when it is handed to its turn (INSP-E r3 3)", () => {

@@ -9663,7 +9663,7 @@ bus.subscribe((event: RuntimeEvent) => {
   if (/(?:^|__)clipboard_write$/.test(event.title ?? "")) {
     try {
       const { text } = JSON.parse(event.input ?? "") as { text?: unknown };
-      if (typeof text === "string") autonomy.noteVmClipboard(bot.id, text);
+      if (typeof text === "string") autonomy.noteVmClipboard(bot.id, text, botMarkPattern(bot.name, botSlug(bot.name)));
     } catch { /* a preview that is not JSON: nothing kept */ }
     return;
   }

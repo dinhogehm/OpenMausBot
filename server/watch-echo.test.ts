@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { botMarkPattern, botSlug, chatTexts, isEcho, selfWriteOf, vmChatPostOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
+import { botMarkPattern, botSlug, chatTexts, isEcho, selfWriteOf, vmChatPostOf, vmSheetNoteOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
 
 // The real outputs of the Monitor's watches on 01/10, words pseudonymised
 // (same length, same case, same word → same pseudonym; spacing, tabs, line
@@ -44,27 +44,43 @@ describe("the real spreadsheet output (gog --plain, no tabs)", () => {
   // the real convention: notes chained in the same cell, " | [Monitor Chat Atendimento] …"
   const NOTE = ` | [${MONITOR}] 01/10 16:10 BRT: sessão aberta`;
   const STARTS_WITH_MARK = SHEET.findIndex((line) => line.startsWith(`[${MONITOR}] `) && line.includes(` | [${MONITOR}] `));
+  /** Notes the bot put on the VM's clipboard to paste (a fresh record each time: using one spends it). */
+  const pasted = (...notes: string[]) => notes.map((note) => vmSheetNoteOf(note, 1_000, mark)!);
 
-  it("takes a note grown by a new note of the bot, chained with its mark, as its own (INSP-E r2 1)", () => {
+  it("takes a line grown by exactly the note the bot pasted (clipboard_write) as its own; a marked note it did not write wakes (INSP-E r4 2)", () => {
     expect(STARTS_WITH_MARK).toBeGreaterThan(0);
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}`] }))).toBe(true);
-    expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [`${SHEET[STARTS_WITH_MARK]}${NOTE}`] }))).toBe(true);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}`] }), pasted(NOTE))).toBe(true);
+    expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [`${SHEET[STARTS_WITH_MARK]}${NOTE}`] }), pasted(NOTE))).toBe(true);
+    // the mark, but no such note on record (someone wrote it by hand)
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}`] }), [])).toBe(false);
+    // a note set with gog sheets counts the same
+    const gog = selfWriteOf(`gog sheets update SHEET_ID 'Atendimento!H178' --values-json '[["[${MONITOR}] 01/10 16:10 BRT: sessão aberta"]]'`, 1_000)!;
+    expect(gog.notes).toEqual([`[${MONITOR.toLowerCase()}] 01/10 16:10 brt: sessão aberta`]);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}`] }), [gog])).toBe(true);
+  });
+
+  it("takes the real note with \"—\" and \";\" inside when it is exactly the pasted text; one word more of a person wakes (INSP-E r4 2)", () => {
+    const real = ` | [${MONITOR}] Issue #2800 OPEN — https://example.com/issues/2800; sessão aberta`;
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${real}`] }), pasted(real))).toBe(true);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${real} Dono: confirmar`] }), pasted(real))).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${real}. Dono: confirmar`] }), pasted(real))).toBe(false);
   });
 
   it("wakes the bot when a person adds after the bot's new note in the same run; two notes of the bot are its own (INSP-E r3 1)", () => {
     const NOTE2 = ` | [${MONITOR}] 01/10 16:12 BRT: cliente avisada`;
     const person = " | Dono: cliente disse que ainda falha";
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}${person}`] }))).toBe(false);
-    expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [`${SHEET[STARTS_WITH_MARK]}${NOTE}${person}`] }))).toBe(false);
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}${NOTE2}`] }))).toBe(true);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}${person}`] }), pasted(NOTE))).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [STARTS_WITH_MARK]: [`${SHEET[STARTS_WITH_MARK]}${NOTE}${person}`] }), pasted(NOTE))).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}${NOTE2}`] }), pasted(NOTE, NOTE2))).toBe(true);
     // the same with the other separators notes are chained with
     for (const separator of [" · ", "; ", " — "]) {
-      expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}${separator}Dono: ainda falha`] }))).toBe(false);
+      expect(sheetEcho(edit(SHEET, { [ROW_178]: [`${SHEET[ROW_178]}${NOTE}${separator}Dono: ainda falha`] }), pasted(NOTE))).toBe(false);
     }
     // and in a Status the bot set: its note grows, then a person's text
     const write = selfWriteOf(`gog sheets update SHEET_ID 'Atendimento!E178' --values-json '[["Fazendo"]]'`, 1_000)!;
-    const fazendo = `${SHEET[ROW_178]!.replace("Pendente    ", "Fazendo     ")} | [${MONITOR}] Status → Fazendo${person}`;
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo] }), [write])).toBe(false);
+    const status = ` | [${MONITOR}] Status → Fazendo`;
+    const fazendo = `${SHEET[ROW_178]!.replace("Pendente    ", "Fazendo     ")}${status}${person}`;
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo] }), [write, ...pasted(status)])).toBe(false);
   });
 
   it("wakes the bot when a person adds to its note, or edits inside it (INSP-E r2 B1)", () => {
@@ -100,14 +116,14 @@ describe("the real spreadsheet output (gog --plain, no tabs)", () => {
     // (i) the value written, but no note of the bot in that row: a person could have set it
     expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178)] }), [write()])).toBe(false);
     // (ii) with the note "Status → Fazendo" chained in the same run: the bot's
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178, ` | [${MONITOR}] Status → Fazendo`)] }), [write()])).toBe(true);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178, ` | [${MONITOR}] Status → Fazendo`)] }), [write(), ...pasted(` | [${MONITOR}] Status → Fazendo`)])).toBe(true);
     // one write explains one row: the second is a person's
-    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178, ` | [${MONITOR}] Status → Fazendo`)], [ROW_180]: [fazendo(ROW_180, ` | [${MONITOR}] Status → Fazendo`)] }), [write()])).toBe(false);
+    expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178, ` | [${MONITOR}] Status → Fazendo`)], [ROW_180]: [fazendo(ROW_180, ` | [${MONITOR}] Status → Fazendo`)] }), [write(), ...pasted(` | [${MONITOR}] Status → Fazendo`, ` | [${MONITOR}] Status → Fazendo`)])).toBe(false);
     expect(sheetEcho(edit(SHEET, { [ROW_178]: [fazendo(ROW_178, ` | [${MONITOR}] Status → Fazendo`)] }), [])).toBe(false);
     // (iii) Validado → Reprovado is the requester's, even with a note and a value on record
     const validated = SHEET[ROW_178]!.replace("Pendente    Atendimento", "Publicado   Validado   Atendimento");
     const reproved = `${validated.replace("Validado ", "Reprovado")}${NOTE}`;
-    const recorded: SelfWrite = { at: 1_000, kind: "sheets", marks: [], values: ["reprovado"], via: "shell" };
+    const recorded: SelfWrite = { at: 1_000, kind: "sheets", marks: [], values: ["reprovado"], notes: [NOTE.slice(3).toLowerCase()], via: "shell" };
     expect(isEcho([reproved], "sheets", [recorded], 2_000, { mark, previous: edit(SHEET, { [ROW_178]: [validated] }), current: edit(SHEET, { [ROW_178]: [reproved] }) }).echo).toBe(false);
     expect(selfWriteOf(`gog sheets update SHEET_ID 'Atendimento!F178' --values-json '[["Reprovado"]]'`, 1)).toBeNull();
     // a Status changed in a row whose line has no mark (the mark is on a continuation line): it wakes, as before
@@ -171,6 +187,11 @@ describe("the real Chat output (gog --plain, TSV)", () => {
     // the text of a message already in the watch: the bot copied it (to quote it in an issue), it did not post it
     const copied = CHAT.find((line) => (line.split("\t")[3] ?? "").length > 100)!.split("\t")[3]!;
     expect(vmChatPostOf(copied, 1, chatTexts(CHAT))).toBeNull();
+    // a --json watch: the "text" value with its escapes undone, so a quoted message is seen as a copy (INSP-E r4 3)
+    const quoted = 'ela disse "não chegou nada" e o atendimento foi encerrado às 10h';
+    const json = [`    "text": ${JSON.stringify(quoted)},`];
+    expect(chatTexts(json)).toEqual([quoted]);
+    expect(vmChatPostOf(quoted, 1, chatTexts(json))).toBeNull();
   });
 });
 

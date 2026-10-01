@@ -6,19 +6,23 @@
 // The rule above all others: IN DOUBT, WAKE. A person's line must never be
 // taken for the bot's. So a change is the bot's only when one of these holds,
 // line by line, against the complete output of the run before:
-// - a line that was there grew, and what was added starts — after spaces
-//   and a separator (" | ", "·", ";", "—") — with this bot's own mark
-//   (`[<Bot name>]`, `<!-- bot:<its slug> -->`). That is how its notes are
-//   chained in the Observações cell (`… | [Monitor Chat Atendimento] …`).
-//   Anything else added, or any edit inside the old text, is a person's;
+// - a line that was there grew, and what was added is EXACTLY a note the bot
+//   just wrote (or several, one after another): a text starting with its
+//   own mark (`[<Bot name>]`, `<!-- bot:<its slug> -->`) that it put on the
+//   VM's clipboard or set with `gog sheets`. That is how its notes are
+//   chained in the Observações cell (`… | [Monitor Chat Atendimento] …`),
+//   whatever separators the note has inside. Anything else added (a word
+//   after it, with or without a separator), or any edit inside the old
+//   text, is a person's;
 // - a line that is new and starts with the bot's mark (a continuation line
 //   of its note), or — on an issue — a new comment whose body ends with it
 //   (the bot signs its comments `<!-- bot:<slug> -->`);
 // - in a row whose note grew as above in the same run, exactly one field
 //   before the mark changed to a value the bot itself wrote with `gog
 //   sheets` (its "Publicado"), never Validado/Reprovado (the requester's);
-// - in the Chat, the message TEXT, leading @mentions removed, starts with
-//   what the bot posted with `gog chat`;
+// - in the Chat, the message TEXT, leading @mentions removed, IS what the
+//   bot posted (`gog chat`, or pasted through the VM), trailing spaces and
+//   punctuation aside;
 // - on an issue, the comment's text ends with the end of the body the bot
 //   sent with `gh` (words only: no URL, #number or hash; never the issue
 //   number alone).
@@ -27,14 +31,17 @@
 // that scrolled off; else it is a change too. Without the complete run
 // before (after a restart, or past WATCH_LINES_MAX), nothing is an echo.
 //
-// Writes through the VM's computer: only one narrow case is recognised —
-// the body of a Chat post the bot put on the clipboard (`clipboard_write`)
-// to paste it: 40+ characters, not a URL, and not already the text of a
-// message in the bot's Chat watch (copying a client's message to quote it
-// elsewhere is not a post). It matches a new message whose text, @mentions
-// aside, starts with it. Nothing assumes which page is open. Everything else
-// typed through the VM (a URL, a mention, a search, a Status in the
-// spreadsheet) is not recognised and wakes the bot (INSP-E r2 B3, r3 4).
+// Writes through the VM's computer: only what the bot puts on the clipboard
+// (`clipboard_write`) to paste is recognised, in two narrow cases —
+// - a text starting with its own mark (after a separator): a note for the
+//   spreadsheet, matched only as the exact text added to a line;
+// - a Chat post: 40+ characters without the @mentions, not a URL, and not
+//   already the text of a message in the bot's Chat watches (copying a
+//   client's message to quote it elsewhere is not a post; and without those
+//   watches' last output — after a restart — nothing is kept). It matches a
+//   message whose whole text, @mentions aside, is it.
+// Nothing assumes which page is open. Everything else typed through the VM
+// (a URL, a mention, a search, a Status) is not recognised and wakes the bot.
 
 export type WatchKind = "issues" | "chat" | "sheets";
 
@@ -45,6 +52,10 @@ export interface SelfWrite {
   marks: string[];
   /** Short values it set (a spreadsheet's "Publicado"), each good for one line. */
   values?: string[];
+  /** Notes it wrote for the spreadsheet, starting with its mark (normalised), each good once. */
+  notes?: string[];
+  /** A Chat post's whole text, @mentions aside (normalised): matched only whole. */
+  body?: string;
   via: "shell" | "vm";
 }
 
@@ -135,12 +146,15 @@ export function selfWriteOf(command: string, at: number): SelfWrite | null {
   if (program === "gog") {
     if (args.includes("chat") && args.some((arg) => GOG_CHAT_WRITES.has(arg.toLowerCase()))) {
       const text = flagValue(bare, ["--text", "-t", "--message"]);
-      const start = text ? normalize(withoutLeadingMentions(text)).slice(0, TEXT_MARK_MAX) : "";
-      return start.length >= MIN_TEXT_MARK ? { at, kind: "chat", marks: [start], via: "shell" } : null;
+      const body = text ? normalize(withoutLeadingMentions(text)) : "";
+      return body.length >= MIN_TEXT_MARK ? { at, kind: "chat", marks: [body.slice(0, TEXT_MARK_MAX)], body, via: "shell" } : null;
     }
     if (args.includes("sheets") && args.some((arg) => GOG_SHEETS_WRITES.has(arg.toLowerCase()))) {
-      const values = jsonStrings(bare).map(normalize).filter((value) => value && value.length <= VALUE_MAX && !NEVER_BOT_VALUES.has(value));
-      return values.length ? { at, kind: "sheets", marks: [], values, via: "shell" } : null;
+      const strings = jsonStrings(bare).map(normalize).filter(Boolean);
+      // a marked text is a note (matched whole, against the bot's own mark); the rest short values
+      const notes = strings.filter((value) => /^(?:\[|<!--)/.test(value));
+      const values = strings.filter((value) => !notes.includes(value) && value.length <= VALUE_MAX && !NEVER_BOT_VALUES.has(value));
+      return values.length || notes.length ? { at, kind: "sheets", marks: [], ...(values.length ? { values } : {}), ...(notes.length ? { notes } : {}), via: "shell" } : null;
     }
   }
   return null;
@@ -155,12 +169,29 @@ export function vmChatPostOf(clipboard: string, at: number, shown: readonly stri
   if (body.length < TEXT_MARK_MAX) return null;
   const start = body.slice(0, TEXT_MARK_MAX);
   if (shown.some((text) => normalize(withoutLeadingMentions(text)).includes(start))) return null;
-  return { at, kind: "chat", marks: [start], via: "vm" };
+  return { at, kind: "chat", marks: [start], body, via: "vm" };
+}
+
+/** A note for the spreadsheet the bot put on the VM's clipboard: a text that
+ * starts (after spaces and a separator) with its own mark. */
+export function vmSheetNoteOf(clipboard: string, at: number, mark: RegExp): SelfWrite | null {
+  const note = normalize(clipboard.replace(/^[\s|·;—,-]+/, ""));
+  if (!note || !startsWithMark(note, mark)) return null;
+  return { at, kind: "sheets", marks: [], notes: [note], via: "vm" };
 }
 
 /** The TEXT column of a Chat watch's lines (gog chat messages list --plain);
- * a line of another shape (--json) counts whole. */
-export const chatTexts = (lines: readonly string[]): string[] => lines.map((line) => line.split("\t")[3] ?? line).filter(Boolean);
+ * a `"text": "…"` line of --json, its value with the escapes undone; any
+ * other line whole. */
+export const chatTexts = (lines: readonly string[]): string[] => lines.map((line) => {
+  const tsv = line.split("\t")[3];
+  if (tsv !== undefined) return tsv;
+  const json = /"(?:text|formattedText|argumentText)"\s*:\s*("(?:[^"\\]|\\.)*")/.exec(line)?.[1];
+  if (json) {
+    try { return JSON.parse(json) as string; } catch { /* the line as it is */ }
+  }
+  return line;
+}).filter(Boolean);
 
 /** What a watch command reads, for matching it with the bot's writes. */
 export function watchKindOf(argv: readonly string[]): WatchKind | null {
@@ -192,15 +223,30 @@ export function botSlug(botName: string): string {
 }
 
 const startsWithMark = (text: string, mark: RegExp): boolean => (mark.exec(text)?.index ?? -1) === text.length - text.trimStart().length;
-/** Everything added after `old` is the bot's: every segment of it (split on
- * the separators notes are chained with: " | ", "·", ";", "—") starts with
- * the bot's mark. A person's " | Dono: …" after the bot's new note is not
- * the bot's, and neither is a note of the bot with one of those separators
- * inside it (in doubt, wake). */
-const addedWithMark = (added: string, mark: RegExp): boolean => {
-  const segments = added.split(/\s*(?:\||·|;|—)\s*/).map((segment) => segment.trim()).filter(Boolean);
-  return segments.length > 0 && segments.every((segment) => startsWithMark(segment, mark));
-};
+const SEPARATORS = /^[\s|·;—,-]+/;
+type NoteUse = { write: SelfWrite; note: string };
+
+/** What was added to a line is exactly notes the bot just wrote (each one
+ * starting with its own mark, recent and not yet used), one after another,
+ * with only spaces and separators between them. Anything else in it — a
+ * person's " | Dono: …" or a word with no separator after the note — and it
+ * is not the bot's. The notes it took, or null. */
+function addedNotes(added: string, mark: RegExp, recent: readonly SelfWrite[], spent: readonly NoteUse[]): NoteUse[] | null {
+  let rest = normalize(added.replace(SEPARATORS, ""));
+  const used: NoteUse[] = [];
+  while (rest) {
+    const isSpent = (write: SelfWrite, note: string) => [...spent, ...used].some((use) => use.write === write && use.note === note);
+    const next = recent.flatMap((write) => (write.notes ?? []).map((note) => ({ write, note })))
+      .filter(({ write, note }) => startsWithMark(note, mark) && !isSpent(write, note))
+      // the note fills the rest, or is followed by a separator
+      .filter(({ note }) => rest === note || (rest.startsWith(note) && rest.slice(note.length) !== rest.slice(note.length).replace(SEPARATORS, "")))
+      .sort((a, b) => b.note.length - a.note.length)[0];
+    if (!next) return null;
+    used.push(next);
+    rest = rest.slice(next.note.length).replace(SEPARATORS, "");
+  }
+  return used.length ? used : null;
+}
 const markAt = (line: string, mark: RegExp): number => mark.exec(line)?.index ?? -1;
 const endsWithMark = (line: string, mark: RegExp): boolean => {
   const end = line.trimEnd().length;
@@ -239,15 +285,18 @@ export function isEcho(
     else removed.push({ line, used: false });
   }
   const spent: Array<{ write: SelfWrite; value: string }> = [];
+  const notesUsed: NoteUse[] = [];
   const reasons: string[] = [];
   const mark = own.mark;
   for (const line of freshLines) {
     // a line that was there and grew
     const grownFrom = removed.find((old) => !old.used && old.line.length < line.length && line.startsWith(old.line));
     if (grownFrom) {
-      if (!mark || !addedWithMark(line.slice(grownFrom.line.length), mark)) return NOT_ECHO;
+      const notes = mark ? addedNotes(line.slice(grownFrom.line.length), mark, recent, notesUsed) : null;
+      if (!notes) return NOT_ECHO;
+      notesUsed.push(...notes);
       grownFrom.used = true;
-      reasons.push("nota do bot acrescentada com a marca");
+      reasons.push("nota que o bot escreveu, acrescentada igual");
       continue;
     }
     if (mark && startsWithMark(line, mark)) {
@@ -268,26 +317,29 @@ export function isEcho(
         if (oldAt < 0) return null;
         const after = line.slice(at);
         const oldAfter = old.line.slice(oldAt);
-        if (!(after.length > oldAfter.length && after.startsWith(oldAfter) && addedWithMark(after.slice(oldAfter.length), mark))) return null;
+        if (!(after.length > oldAfter.length && after.startsWith(oldAfter))) return null;
+        const notes = addedNotes(after.slice(oldAfter.length), mark, recent, notesUsed);
+        if (!notes) return null;
         const now_ = fields(line.slice(0, at));
         const then = fields(old.line.slice(0, oldAt));
         if (now_.length !== then.length) return null;
         const changed = now_.filter((field, i) => field !== then[i]);
         if (changed.length !== 1 || NEVER_BOT_VALUES.has(changed[0]!)) return null;
         const write = recent.find((each) => each.values?.includes(changed[0]!) && !spent.some((use) => use.write === each && use.value === changed[0]));
-        return write ? { old, write, value: changed[0]! } : null;
+        return write ? { old, write, value: changed[0]!, notes } : null;
       }).find(Boolean);
       if (!set) return NOT_ECHO;
       set.old.used = true;
+      notesUsed.push(...set.notes);
       spent.push({ write: set.write, value: set.value });
       reasons.push(`valor "${set.value}" escrito pelo bot, com a nota dele na mesma linha`);
       continue;
     }
     // the text the bot just wrote
     if (kind === "chat") {
-      const text = normalize(withoutLeadingMentions(line.split("\t")[3] ?? ""));
-      // a short text of the bot is its whole post: equal, never a prefix of someone else's
-      const carried = recent.find((write) => write.marks.some((textMark) => (textMark.length < TEXT_MARK_MAX ? text === textMark : text.startsWith(textMark))));
+      // the whole message is the bot's post (trailing spaces and punctuation aside): never a prefix
+      const text = trimEnd(normalize(withoutLeadingMentions(line.split("\t")[3] ?? "")));
+      const carried = recent.find((write) => write.body !== undefined && text === trimEnd(write.body));
       if (!carried) return NOT_ECHO;
       reasons.push(`post do bot ("${carried.marks[0]!.slice(0, 40)}")`);
       continue;
@@ -307,7 +359,11 @@ export function isEcho(
   // scrolled off the end (a spreadsheet's rows never scroll)
   const tail = new Set(kind === "chat" || kind === "issues" ? own.previous.slice(-freshLines.length) : []);
   if (removed.some((old) => !old.used && !tail.has(old.line))) return NOT_ECHO;
-  // the values used are spent: they do not explain another line later
+  // the values and notes used are spent: they do not explain another line later
   for (const use of spent) use.write.values = use.write.values?.filter((value, i, all) => !(value === use.value && all.indexOf(value) === i));
+  for (const use of notesUsed) use.write.notes = use.write.notes?.filter((note, i, all) => !(note === use.note && all.indexOf(note) === i));
   return { echo: true, reasons };
 }
+
+/** Trailing spaces and punctuation off ("pode testar!" = "pode testar"). */
+const trimEnd = (text: string): string => text.replace(/[\s.!?…,;:]+$/u, "");
