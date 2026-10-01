@@ -91,6 +91,10 @@ export interface CcSession {
   /** When it failed, and when the owner was told it stayed failed a day. */
   failedAt?: number;
   failedAgingReportedAt?: number;
+  /** Archived in the Claude app by someone, not through cc_session_archive. */
+  archivedOutsideAt?: number;
+  /** Its PRs were checked after that (left without a session, or not). */
+  archivedOutsideCheckedAt?: number;
   /** Its PRs on the way to production (server/prod-delivery.ts). */
   delivery?: CcDelivery;
 }

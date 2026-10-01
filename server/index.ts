@@ -334,7 +334,7 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, githubSlug, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, prsOfSession, watchProductionDelivery } from "./prod-delivery.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
@@ -8946,6 +8946,45 @@ async function watchIdleSessionsWithOpenPrs(): Promise<void> {
   }
 }
 
+/** A session archived in the Claude app by someone, not by the server: its
+ * PRs still open are left without a session. The owner hears which, and the
+ * person gets a "Precisa de você" item (R8-followup F1: ffd6ee1a / #9328). */
+const archivedOutsideWatch = { running: false };
+async function watchArchivedOutside(): Promise<void> {
+  if (archivedOutsideWatch.running) return;
+  archivedOutsideWatch.running = true;
+  try {
+    for (const session of ccLedger.all().filter((each) => each.archivedOutsideAt !== undefined && each.archivedOutsideCheckedAt === undefined).slice(0, 3)) {
+      let slug = session.delivery?.slug ?? null;
+      if (!slug) {
+        try { slug = githubSlug((await execCc("git", ["-C", session.repo, "remote", "get-url", "origin"])).trim()); } catch { /* not a GitHub repository */ }
+      }
+      const open: number[] = [];
+      let unknown = false;
+      for (const number of prsOfSession(session, slug).slice(0, 5)) {
+        try {
+          const view = JSON.parse(await execCc("gh", ["pr", "view", String(number), ...(slug ? ["--repo", slug] : []), "--json", "state"], session.repo)) as { state?: string };
+          if (view.state === "OPEN") open.push(number);
+        } catch { unknown = true; }
+      }
+      if (unknown && !open.length) continue; // gh unavailable: next pass
+      session.archivedOutsideCheckedAt = Date.now();
+      ccLedger.save();
+      if (!open.length) continue;
+      const prs = open.map((number) => `#${number}`).join(", ");
+      const text = `PR ${prs} ficou sem sessão: "${session.title}" foi arquivada no app Claude por fora do OMB`;
+      ccChip(session, text, false);
+      ccReport(session, `${text}. Open PR(s) ${prs} have nobody working on them now. Start a session for them (cc_session_start), hand them to someone, or close them — and tell the owner which.`);
+      if (store.taskByThread(session.ownerBotId, session.ownerThreadId)) {
+        autonomy.addOwnerPending(session.ownerBotId, session.ownerThreadId, { title: `${text} — decida quem segue`, ...(slug ? { link: `https://github.com/${slug}/pull/${open[0]}` } : {}), key: `cc-orphan-pr:${session.id}` });
+        refreshBotRow(session.ownerBotId);
+      }
+    }
+  } finally {
+    archivedOutsideWatch.running = false;
+  }
+}
+
 /** A P1/hotfix issue whose sessions all ended while the issue is still open:
  * nobody is on it. Checked once per ended session (gh issue view), then the
  * Chief and the session's owner hear about it. */
@@ -9002,6 +9041,7 @@ async function runDesktopWork(): Promise<void> {
   watchDelivery();
   void preemptCiForRelease().catch((error) => console.error(`[release-priority] ${error instanceof Error ? error.message : String(error)}`));
   void watchIdleSessionsWithOpenPrs().catch((error) => console.error(`[cc-sessions] idle check failed: ${error instanceof Error ? error.message : String(error)}`));
+  void watchArchivedOutside().catch((error) => console.error(`[cc-sessions] archived-outside check failed: ${error instanceof Error ? error.message : String(error)}`));
   void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
   if (process.platform !== "darwin") return;
   await runDesktopWorkFlow(desktopWork, desktopState);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveBlockers, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
+import { archiveBlockers, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
 
 const SLUG = "dinhogehm/nuria-platform";
 const TAG = "c".repeat(40);
@@ -52,6 +52,9 @@ describe("delivery in production", () => {
     expect(prLinks("Mergeei as PRs #9329 e #9330; a issue #9326 segue aberta", SLUG).map((link) => link.number)).toEqual([9329, 9330]);
     expect(prLinks("PRs #9315, #9316 and #9317 are in the carrier", SLUG).map((link) => link.number)).toEqual([9315, 9316, 9317]);
     expect(prLinks("PR #9328/#9330 com gate verde", SLUG).map((link) => link.number)).toEqual([9328, 9330]);
+    // what a session archived in the app may have left open: its open deliveries and the PRs its report names
+    expect(prsOfSession({ lastReport: "Abri a PR #9328 (F4-1).", delivery: { slug: SLUG, prs: { "9330": { number: 9330, url: "", state: "open" }, "9329": { number: 9329, url: "", state: "merged" } } } as unknown as CcDelivery }, SLUG).sort()).toEqual([9328, 9330]);
+    expect(prsOfSession({ lastReport: "PR #9328" }, null)).toEqual([]);
     expect(parseLsRemoteTag(`aaa\trefs/tags/x\nbbb\trefs/tags/x^{}\n`, "x")).toBe("bbb");
     expect(parseLsRemoteTag(`aaa\trefs/tags/x\n`, "x")).toBe("aaa");
     expect(parseLsRemoteTag("", "x")).toBeNull();

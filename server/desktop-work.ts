@@ -316,9 +316,18 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       deps.ledger.save();
     }
     if (record.isArchived) {
+      // archived by someone in the app, not by an order to the server: the
+      // owner must hear it (its PR may be left without a session)
+      const ordered = desktop.pending?.kind === "archive" || Boolean(desktop.archiveWhenResolved);
       delete desktop.pending;
       deps.ledger.setStatus(session, "archived");
-      deps.chip(session, "arquivada no app Claude");
+      if (ordered) deps.chip(session, "arquivada no app Claude");
+      else {
+        session.archivedOutsideAt = now;
+        deps.ledger.save();
+        deps.chip(session, "arquivada no app Claude por fora do OMB (ninguém pediu pelo cc_session_archive)", false);
+        deps.report(session, `Claude Code session "${session.title}" (${session.id}) was archived in the Claude app by someone, not through cc_session_archive. Whatever it was still doing stopped there. The server checks whether a PR of it is still open and tells you; meanwhile check its last report (cc_session_list with its id) and decide who carries the work on.`);
+      }
       deps.onArchived?.(session);
       continue;
     }

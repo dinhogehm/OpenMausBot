@@ -279,6 +279,15 @@ const IDLE_REPORT_EVERY_MS = 24 * 3_600_000;
 
 /** Sessions idle past IDLE_WITH_PR_MS with known PRs not yet merged or
  * closed, not reported in the last day, oldest first. */
+/** The PRs a session may have left behind: those it delivered and are not
+ * merged or closed, and those its last report names. */
+export function prsOfSession(session: Pick<DeliverySession, "delivery"> & { lastReport?: string }, slug: string | null): number[] {
+  return [...new Set([
+    ...Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.state !== "merged" && pr.state !== "closed").map((pr) => pr.number),
+    ...(slug ? prLinks(session.lastReport ?? "", slug).map((link) => link.number) : []),
+  ])];
+}
+
 export function idleWithOpenPrs<T extends DeliverySession & { lastActivityAt: number; idleReportedAt?: number }>(sessions: readonly T[], now: number): Array<{ session: T; prs: number[] }> {
   return sessions
     .filter((session) => session.status === "idle" && now - session.lastActivityAt >= IDLE_WITH_PR_MS)

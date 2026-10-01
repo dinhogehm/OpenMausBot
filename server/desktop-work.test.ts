@@ -396,6 +396,20 @@ describe("archiving", () => {
     expect(session.status).toBe("archived");
     expect(session.desktop!.pending).toBeUndefined();
     expect(archived).toEqual(["a"]);
+    expect(session.archivedOutsideAt).toBeUndefined();
+    expect(h.chips.at(-1)?.text).toBe("arquivada no app Claude");
+  });
+
+  it("tells the owner when someone archived it in the app, not the server (ffd6ee1a, #9328)", () => {
+    const h = harness();
+    const session = h.opened("f");
+    session.status = "idle";
+    h.records.get(LOCAL)!.isArchived = true;
+    followDesktopSessions(h.deps);
+    expect(session.status).toBe("archived");
+    expect(session.archivedOutsideAt).toBe(h.now);
+    expect(h.chips.at(-1)).toMatchObject({ text: expect.stringContaining("por fora do OMB"), ok: false });
+    expect(h.reports.at(-1)!.text).toContain("not through cc_session_archive");
   });
 });
 
