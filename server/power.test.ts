@@ -1,5 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { batteryAlert, isReleaseProcess, LOW_PERCENT, ON_BATTERY_ALERT_MS, parsePmsetBatt, startsCarrier } from "./power.ts";
+import { BotAutonomy } from "./bot-autonomy.ts";
+import { batteryAlert, isReleaseProcess, LOW_PERCENT, ON_BATTERY_ALERT_MS, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, startsCarrier } from "./power.ts";
 
 const onBattery = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=27525219)\t53%; discharging; 1:16 remaining present: true\n";
 const plugged = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=27525219)\t100%; charged; 0:00 remaining present: true\n";
@@ -58,6 +62,38 @@ describe("power", () => {
     told.add(low.level);
     expect(batteryAlert({ ...base, power: { onBattery: true, percent: 12 }, now: 1 })!.text).toContain("PARAR");
     expect(batteryAlert({ ...base, power: { onBattery: false, percent: 12 }, now: 1 })).toBeNull();
+  });
+
+  it("resolves \"Ligue o Mac na tomada\" on AC even after a restart forgot the discharge (INSP-G r1 item 7)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-power-"));
+    try {
+      const autonomy = new BotAutonomy({ path: join(dir, "bot-autonomy.json"), now: () => 1_000 });
+      autonomy.addOwnerPending("chief", "desk", { title: "Ligue o Mac na tomada (24%)", key: POWER_PENDING_KEY });
+      // the server restarts (memory empty), the Mac is back on AC
+      const restarted = new BotAutonomy({ path: join(dir, "bot-autonomy.json"), now: () => 2_000 });
+      expect(restarted.ownerPendingFor("desk")).toHaveLength(1);
+      const step = powerStep(readPowerWatch(null), parsePmsetBatt(plugged), 2_000, false);
+      expect(step.resolvePending).toBe(true);
+      expect(step.alert).toBeNull();
+      if (step.resolvePending) restarted.resolveOwnerPending({ key: POWER_PENDING_KEY });
+      expect(restarted.ownerPendingFor("desk")).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the discharge across a restart, and logs the battery alert as [power] (items 7 and 11)", () => {
+    let watch = readPowerWatch(null);
+    const first = powerStep(watch, { onBattery: true, percent: 80 }, 0, false);
+    expect(first).toMatchObject({ changed: true, resolvePending: false, alert: null });
+    // a restart: what was saved comes back, the 20 min keep counting from the first reading
+    watch = readPowerWatch(JSON.stringify(first.watch));
+    const long = powerStep(watch, { onBattery: true, percent: 80 }, ON_BATTERY_ALERT_MS, true);
+    expect(long.alert).toMatchObject({ level: "battery", pendingTitle: "Ligue o Mac na tomada (80%) — release em curso" });
+    expect(long.alert!.log).toMatch(/^\[power\] O Mac está na bateria há 20 min/);
+    // told once, also after another restart
+    expect(powerStep(readPowerWatch(JSON.stringify(long.watch)), { onBattery: true, percent: 80 }, ON_BATTERY_ALERT_MS * 2, true).alert).toBeNull();
+    expect(readPowerWatch("{broken")).toEqual({ onBatterySince: null, told: [] });
   });
 
   it("knows a message that starts a carrier", () => {

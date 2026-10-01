@@ -69,6 +69,51 @@ export function batteryAlert(input: { power: PowerState; onBatterySince: number 
   return null;
 }
 
+/** What the server remembers of the current discharge (kept on disk, so a
+ * restart on battery neither repeats a level nor restarts the 20 min). */
+export interface PowerWatchState {
+  onBatterySince: number | null;
+  told: string[];
+}
+export const POWER_PENDING_KEY = "power:battery";
+export const emptyPowerWatch = (): PowerWatchState => ({ onBatterySince: null, told: [] });
+
+/** A saved PowerWatchState, or an empty one when it is missing or unreadable. */
+export function readPowerWatch(json: string | null): PowerWatchState {
+  try {
+    const value = JSON.parse(json ?? "") as Partial<PowerWatchState>;
+    return {
+      onBatterySince: typeof value.onBatterySince === "number" ? value.onBatterySince : null,
+      told: Array.isArray(value.told) ? value.told.filter((level): level is string => typeof level === "string") : [],
+    };
+  } catch {
+    return emptyPowerWatch();
+  }
+}
+
+/** One reading of `pmset`: the next state, whether the "Ligue o Mac na
+ * tomada" item must be resolved, and the alert to give, if any. On AC the
+ * item is always resolved — after a restart the memory of the discharge may
+ * be gone while the item, saved, is still there (INSP-G r1 G1-b). */
+export function powerStep(watch: PowerWatchState, power: PowerState, now: number, releaseRunning: boolean): {
+  watch: PowerWatchState;
+  changed: boolean;
+  resolvePending: boolean;
+  alert: { level: string; text: string; log: string; pendingTitle: string } | null;
+} {
+  if (!power.onBattery) {
+    const changed = watch.onBatterySince !== null || watch.told.length > 0;
+    return { watch: emptyPowerWatch(), changed, resolvePending: true, alert: null };
+  }
+  const onBatterySince = watch.onBatterySince ?? now;
+  const found = batteryAlert({ power, onBatterySince, now, releaseRunning, told: new Set(watch.told) });
+  const next = { onBatterySince, told: found ? [...watch.told, found.level] : watch.told };
+  const changed = watch.onBatterySince !== onBatterySince || next.told.length !== watch.told.length;
+  if (!found) return { watch: next, changed, resolvePending: false, alert: null };
+  const pendingTitle = `Ligue o Mac na tomada${power.percent !== null ? ` (${power.percent}%)` : ""}${releaseRunning ? " — release em curso" : ""}`;
+  return { watch: next, changed, resolvePending: false, alert: { ...found, log: `[power] ${found.text}`, pendingTitle } };
+}
+
 /** A message or brief that starts a release carrier. */
 export function startsCarrier(text: string): boolean {
   return /release-carrier(?:\.sh)?\s+--execute|\b(?:rode|rodar|execute|executar|publique|publicar|inicie|iniciar|solte|soltar|run|start|publish)\b[^.?!\n]{0,40}\bcarrier\b/i.test(text);

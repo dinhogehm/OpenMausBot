@@ -6,7 +6,7 @@
 import { BOOT_CLOUD_SECRETS } from "./cloud-secrets-boot.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, mkdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -342,7 +342,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { ciToStop, ownerSession, releaseBlockedBy, RELEASE_WAIT_BEFORE_PREEMPT_S } from "./release-priority.ts";
-import { batteryAlert, isReleaseProcess, parsePmsetBatt, startsCarrier, type PowerState } from "./power.ts";
+import { isReleaseProcess, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, startsCarrier, type PowerState, type PowerWatchState } from "./power.ts";
 import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, tagStuck, tagStuckCause } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -8209,8 +8209,8 @@ async function revalidateNeedsInputGoals(): Promise<void> {
  * desktop app runs reads this Mac's release logs, every 2 min. */
 const releaseWatch = { state: DESKTOP_MANAGED && !process.env.VITEST ? new ReleaseWatchState(join(DATA_DIR, "release-watch.json")) : null, lastAt: 0 };
 /** A release alert on the Chief's desk: a red chip and a report. */
-function releaseAlertToChief(text: string, report: string): void {
-  console.warn(`[release] ${text}`);
+function releaseAlertToChief(text: string, report: string, logPrefix = "release"): void {
+  console.warn(`[${logPrefix}] ${text}`);
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   const desk = chief ? chiefDeskThread(chief) : null;
   if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
@@ -8254,30 +8254,30 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
 
 /** The Mac's power (server/power.ts): on battery long or low, the Chief and
  * the person hear it; no carrier starts on battery. */
-const powerWatch: { state: PowerState | null; onBatterySince: number | null; told: Set<string>; lastAt: number } = { state: null, onBatterySince: null, told: new Set(), lastAt: 0 };
+const POWER_WATCH_FILE = join(DATA_DIR, "power-watch.json");
+const powerWatch: { state: PowerState | null; watch: PowerWatchState | null; lastAt: number } = { state: null, watch: null, lastAt: 0 };
 async function checkPower(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || process.platform !== "darwin" || Date.now() - powerWatch.lastAt < 2 * 60_000) return;
   powerWatch.lastAt = Date.now();
-  const power = parsePmsetBatt(await execCc("/usr/bin/pmset", ["-g", "batt"]));
+  const output = await execCc("/usr/bin/pmset", ["-g", "batt"]).catch(() => "");
+  if (!output.trim()) return; // pmset failed: nothing known, nothing said or resolved
+  const power = parsePmsetBatt(output);
   powerWatch.state = power;
-  if (!power.onBattery) {
-    if (powerWatch.onBatterySince !== null) {
-      powerWatch.onBatterySince = null;
-      powerWatch.told.clear();
-      for (const item of autonomy.resolveOwnerPending({ key: "power:battery" })) refreshBotRow(item.botId);
-    }
-    return;
+  powerWatch.watch ??= readPowerWatch(existsSync(POWER_WATCH_FILE) ? readFileSync(POWER_WATCH_FILE, "utf8") : null);
+  const releaseRunning = power.onBattery && (await psTable()).some((row) => isReleaseProcess(row.command));
+  const step = powerStep(powerWatch.watch, power, Date.now(), releaseRunning);
+  powerWatch.watch = step.watch;
+  if (step.changed) {
+    try { writeFileSync(POWER_WATCH_FILE, JSON.stringify(step.watch)); } catch { /* memory still holds it */ }
   }
-  powerWatch.onBatterySince ??= Date.now();
-  const releaseRunning = (await psTable()).some((row) => isReleaseProcess(row.command));
-  const alert = batteryAlert({ power, onBatterySince: powerWatch.onBatterySince, now: Date.now(), releaseRunning, told: powerWatch.told });
+  if (step.resolvePending) for (const item of autonomy.resolveOwnerPending({ key: POWER_PENDING_KEY })) refreshBotRow(item.botId);
+  const alert = step.alert;
   if (!alert) return;
-  powerWatch.told.add(alert.level);
-  releaseAlertToChief(alert.text, `[Alerta do servidor: Mac na bateria] ${alert.text}`);
+  releaseAlertToChief(alert.text, `[Alerta do servidor: Mac na bateria] ${alert.text}`, "power");
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   const desk = chief ? chiefDeskThread(chief) : null;
   if (chief && desk && store.taskByThread(chief.id, desk)) {
-    autonomy.addOwnerPending(chief.id, desk, { title: `Ligue o Mac na tomada${power.percent !== null ? ` (${power.percent}%)` : ""}${releaseRunning ? " — release em curso" : ""}`, key: "power:battery" });
+    autonomy.addOwnerPending(chief.id, desk, { title: alert.pendingTitle, key: POWER_PENDING_KEY });
     refreshBotRow(chief.id);
   }
 }
