@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { selfWriteOf } from "./watch-echo.ts";
 import {
   BotAutonomy,
   GOAL_DEFAULT_MAX_TURNS,
@@ -468,6 +469,22 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     expect(wake.watch!.trigger).toBe("changed");
     const prompt = wakePrompt(wake, null, now);
     expect(prompt).toContain("Lines new or changed since the run before (1):\nlinha 5 — Pedro, nova");
+  });
+
+  it("takes the bot's own comment as the new baseline instead of waking it", () => {
+    const autonomy = make();
+    const list = "9307\tOPEN\tL173\t2026-09-30T20:00:00Z";
+    const bumped = "9307\tOPEN\tL173\t2026-10-01T08:37:20Z";
+    const wake = autonomy.setWatch("bot", "t1", { ...base, command: "gh issue list", argv: ["gh", "issue", "list"], standing: true, label: "issues", baseline: list, baselineFingerprint: "a" });
+    autonomy.recordWatchRun(wake, { ok: true, output: list, matched: false, fingerprint: "a", lines: [list] });
+    autonomy.noteSelfWrite("bot", selfWriteOf("gh issue comment 9307 --body feito", now)!);
+    now += 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: bumped, matched: false, fingerprint: "b", lines: [bumped] })).toBeNull();
+    expect(wake.watch!.echoAt).toBe(now);
+    // a client's issue next: it wakes the bot as before
+    const client = "9311\tOPEN\tMarluce\t2026-10-01T08:40:00Z";
+    now += 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: `${client}\n${bumped}`, matched: false, fingerprint: "c", lines: [client, bumped] })).toBe("changed");
   });
 
   it("finds the same command already watched by this bot in another conversation", () => {

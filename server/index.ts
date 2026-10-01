@@ -396,6 +396,7 @@ import type { ProviderInstance } from "./contracts.ts";
 import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-selection.ts";
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
+import { selfWriteOf } from "./watch-echo.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
 import {
@@ -9277,6 +9278,16 @@ bus.subscribe((event: RuntimeEvent) => {
     kind: "activity",
     tool: { name: `Same call repeated ${threshold}× — ${tool}: ${args.slice(0, 80)}${args.length > 80 ? "…" : ""} — it may be stuck`, ok: false },
   });
+});
+
+// A watcher bot's own comment, post or spreadsheet note is remembered for
+// a while, so its watch does not wake it on that echo (server/watch-echo.ts).
+bus.subscribe((event: RuntimeEvent) => {
+  if (shouldIgnoreProviderEvent(event)) return;
+  if (event.type !== "item.started" || event.itemType !== "tool" || !event.summary) return;
+  const write = selfWriteOf(event.summary, Date.now());
+  const bot = write ? store.botByThread(event.threadId) : undefined;
+  if (write && bot) autonomy.noteSelfWrite(bot.id, write);
 });
 
 // Drain queued delegations for a source thread after its turn settles.

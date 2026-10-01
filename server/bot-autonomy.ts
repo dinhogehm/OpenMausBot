@@ -29,6 +29,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { languageReminder } from "./reply-language.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
+import { ECHO_WINDOW_MS, isEcho, watchKindOf, type SelfWrite } from "./watch-echo.ts";
 
 export const WAKE_MIN_MINUTES = 1;
 export const WAKE_MAX_MINUTES = 1_440;
@@ -98,6 +99,8 @@ export interface WakeWatch {
    * unchanging output was reported. */
   changedAt?: number;
   staleAlertedAt?: number;
+  /** The last change it let pass as the bot's own write (server/watch-echo.ts). */
+  echoAt?: number;
 }
 
 export interface BotWake {
@@ -295,6 +298,8 @@ export class BotAutonomy {
   private inFlight: InFlight[] = [];
   private standingLost = new Map<string, StandingLost>();
   private promises: BotPromise[] = [];
+  /** The bot's recent writes to watched sources, per bot (not persisted). */
+  private selfWrites = new Map<string, SelfWrite[]>();
   /** Leases a restart cut off, as found on load. */
   readonly recoveredOnLoad: RecoveredLease[] = [];
   private readonly path: string | null;
@@ -440,12 +445,13 @@ export class BotAutonomy {
     watch.lastRunAt = this.now();
     watch.runs += 1;
     watch.lastOutput = result.output;
+    let fresh: string[] = [];
     if (result.ok && result.lines) {
       // what is new since the run before, past the cut the bot reads
       const hashes = result.lines.map(lineHash);
       if (watch.lineHashes) {
         const seen = new Set(watch.lineHashes);
-        const fresh = result.lines.filter((_, i) => !seen.has(hashes[i]!));
+        fresh = result.lines.filter((_, i) => !seen.has(hashes[i]!));
         if (fresh.length) watch.newLines = clipLines(fresh, 8_000);
       }
       watch.lineHashes = hashes.slice(0, 5_000);
@@ -474,6 +480,14 @@ export class BotAutonomy {
       // A standing watch fires on a match only when it is a new output, not on every run while it matches.
       if (result.matched && (!watch.standing || changed)) trigger = "matched";
       else if (!watch.until && changed) trigger = "changed";
+      // the change is only the bot's own comment, post or note: take it as
+      // the new baseline without waking the bot
+      if (trigger === "changed" && isEcho(fresh, watchKindOf(watch.argv), this.selfWrites.get(wake.botId) ?? [], this.now())) {
+        trigger = null;
+        watch.echoAt = this.now();
+        watch.baseline = result.output;
+        if (result.fingerprint) watch.baselineFingerprint = result.fingerprint;
+      }
       if (result.fingerprint) watch.lastFingerprint = result.fingerprint;
     }
     if (trigger) {
@@ -483,6 +497,13 @@ export class BotAutonomy {
     }
     this.save();
     return trigger;
+  }
+
+  /** A write the bot just made to a source its watches may read. */
+  noteSelfWrite(botId: string, write: SelfWrite): void {
+    const at = this.now();
+    const kept = (this.selfWrites.get(botId) ?? []).filter((item) => at - item.at <= ECHO_WINDOW_MS);
+    this.selfWrites.set(botId, [...kept, write].slice(-20));
   }
 
   /** Standing watches whose output has not changed for `afterMs` and whose
