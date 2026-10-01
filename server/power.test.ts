@@ -224,6 +224,9 @@ describe("power", () => {
     ];
     expect(phrases).toHaveLength(24);
     for (const [text, want] of phrases) expect(carrierIntent(text), text).toBe(want);
+    // "sem" / "nada de" negate only the verb right after them; a colon closes the part (INSP-G r5)
+    for (const text of ["Pode seguir sem pressa: rode o carrier", "sem mais delongas rode o carrier", "Tudo verde, sem pendências: solte o carrier", "Sem bloqueio no gate rode o carrier"]) expect(carrierIntent(text), text).toBe("order");
+    for (const text of ["Nada de rodar o carrier hoje", "Sem rodar o carrier até eu mandar", `explique como rodar ${script}`]) expect(carrierIntent(text), text).toBe("mention");
     // still a mention: the script cited in talk about a failure, or negated
     expect(carrierIntent("release-carrier.sh --execute falhou ontem com GH013, investigue")).toBe("mention");
     expect(carrierIntent("não rode ./scripts/release-carrier.sh --execute; só o --check")).toBe("mention");

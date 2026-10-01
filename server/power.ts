@@ -157,10 +157,12 @@ const MENTION = /\b(?:release-)?carrier\b|(?:^|\s)\/?cpd\b/iu;
  * falhou ontem", "o /cpd de ontem falhou"); a verb plus the carrier is an
  * order whatever else the clause says ("Rode o carrier e confira o log"). */
 const ABOUT = /\b(?:falh\w*|quebr\w*|trav\w*|erro|errou|logs?|ontem|investig\w*|vej[ao]|veja|confir\w*|analis\w*|testes?|tests?|revis[ãa]o|review|failed|fails?|error|why)\b|por\s*qu[eê]/iu;
-/** A negation up to three words before the order ("não rode", "Não é para rodar", "Nada de rodar"), but not "não esqueça de". */
-const NEGATED = /(?:\bn[ãa]o|\bnunca|\bjamais|\bnada\s+de|\bsem|\bdon'?t|\bdo\s+not|\bnever)\s+(?!(?:se\s+)?(?:esque[çc]a|deixe|precisa)\b)(?:\S+\s+){0,3}$/iu;
-/** "como rodar o carrier", "how to run the carrier": an explanation, not an order. */
-const EXPLAINED = /\b(?:como|how\s+to)\s+$/iu;
+/** A negation up to three words before the order ("não rode", "Não é para rodar"), but not "não esqueça de". */
+const NEGATED = /(?:\bn[ãa]o|\bnunca|\bjamais|\bdon'?t|\bdo\s+not|\bnever)\s+(?!(?:se\s+)?(?:esque[çc]a|deixe|precisa)\b)(?:\S+\s+){0,3}$/iu;
+/** "sem" / "nada de" negate only the verb right after them ("Nada de rodar", "Sem rodar"), not "sem pressa: rode". */
+const NEGATED_NEAR = /(?:\bsem|\bnada\s+de)\s+$/iu;
+/** "como rodar o carrier", "explique como rodar <script>": an explanation, not an order. */
+const EXPLAINED = /\b(?:como|how\s+to)\s+(?:\S+\s+)?$/iu;
 
 /** What a message says about the carrier: an "order" to run it, a "mention", or null. */
 export function carrierIntent(text: string): "order" | "mention" | null {
@@ -171,8 +173,9 @@ export function carrierIntent(text: string): "order" | "mention" | null {
     mention = true;
     const about = ABOUT.test(clause);
     // a negation counts only within its comma-part: "não precisa esperar, rode o carrier" is an order
-    const partBefore = (at: number) => clause.slice(0, at).split(",").pop()!;
-    const negated = (at: number) => NEGATED.test(partBefore(at)) || EXPLAINED.test(partBefore(at));
+    // the part a negation or a verb belongs to ends at a comma or a colon ("sem pendências: solte o carrier")
+    const partBefore = (at: number) => clause.slice(0, at).split(/[,:]/).pop()!;
+    const negated = (at: number) => [NEGATED, NEGATED_NEAR, EXPLAINED].some((pattern) => pattern.test(partBefore(at)));
     const starts = [0, ...[...clause.matchAll(/,/g)].map((match) => match.index! + 1)];
     // the script with --execute, anywhere: an order with an order verb before it in its part, or with no talk "about" it
     const scripts = [...clause.matchAll(SCRIPT_EXECUTE)].map((match) => match.index!).filter((at) => ORDER_VERB.test(partBefore(at)) || !about);
