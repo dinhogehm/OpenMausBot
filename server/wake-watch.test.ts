@@ -1,18 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { fingerprintOf, ignoreMatcher, newestStamp, parseWatchCommand, watchCommandWarnings, watchIgnoreWarnings, WATCH_READABLE_DIRS, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
+import { fingerprintOf, ignoreMatcher, newestStamp, parseWatchCommand, watchCommandWarnings, watchIgnoreWarnings, topAlternatives, WATCH_READABLE_DIRS, runWatchCommand, splitWords, WATCH_OUTPUT_MAX, watchMatches } from "./wake-watch.ts";
 
 describe("parseWatchCommand", () => {
   it.each([
-    "gh pr view 9286 -R dinhogehm/nuria-platform --json state,statusCheckRollup",
+    "gh pr view 9286 -R example-org/example-repo --json state,statusCheckRollup",
     `gh pr view 9286 --json statusCheckRollup --jq '.statusCheckRollup[] | .conclusion'`,
     "gh run list -R o/r --limit 1 --json status,conclusion",
     "gh api repos/o/r/commits/main/status",
     "git ls-remote origin refs/heads/main",
     "git -C /tmp/repo log --oneline -1",
     "curl -sS -f https://app.nuria.run/health",
-    "gog chat messages list spaces/AAQA4TXnzJ4 --json --no-input",
-    "gog --account osvaldo@x.com chat spaces get spaces/AAQA4TXnzJ4 --json",
-    "gog sheets get 163U0o9RWFKqikUNsJu6T3tG1rP_3Mn3STZ1W6uYMDPQ Atendimento!A1:I400 --json",
+    "gog chat messages list spaces/AAAAexample --json --no-input",
+    "gog --account owner@example.com chat spaces get spaces/AAAAexample --json",
+    "gog sheets get SHEET_ID Atendimento!A1:I400 --json",
   ])("accepts the read %s", (command) => {
     expect(parseWatchCommand(command).ok).toBe(true);
   });
@@ -86,14 +86,35 @@ describe("change detection on the whole output", () => {
   });
 
   it("with an anchored ignore, a \"Reprovado\" in the row the bot annotated still counts; an unanchored one is warned about", async () => {
-    const rows = (validation: string) => `178\tPatrícia\tPublicado\t${validation}\t[Monitor Chat Atendimento] Issue #9331\n[Monitor Chat Atendimento] continuação da nota`;
+    const rows = (validation: string) => `178\tCicrana\tPublicado\t${validation}\t[Monitor Chat Atendimento] Issue #9331\n[Monitor Chat Atendimento] continuação da nota`;
     const run = (validation: string) => runWatchCommand([process.execPath, "-e", "process.stdout.write(process.argv[1])", rows(validation)], { cwd: process.cwd(), path: process.env.PATH ?? "", ignore: "^\\[Monitor Chat Atendimento\\]" });
     const [before, after] = await Promise.all([run(""), run("Reprovado")]);
     expect(before.fingerprint).not.toBe(after.fingerprint);
     expect(after.lines).toEqual([rows("Reprovado").split("\n")[0]]);
-    expect(watchIgnoreWarnings("\\[Monitor Chat Atendimento\\]")[0]).toContain("Ancore no começo da linha");
+    expect(watchIgnoreWarnings("\\[Monitor Chat Atendimento\\]")[0]).toContain("Ancore cada alternativa no começo da linha");
     expect(watchIgnoreWarnings("^\\[Monitor Chat Atendimento\\]")).toEqual([]);
     expect(watchIgnoreWarnings(undefined)).toEqual([]);
+  });
+
+  it("checks every top-level alternative of an ignore, and says the truth for each kind of watch (INSP-E 7)", () => {
+    expect(topAlternatives("^\\[A\\]|B")).toEqual(["^\\[A\\]", "B"]);
+    expect(topAlternatives("^(a|b)|^[|]c")).toEqual(["^(a|b)", "^[|]c"]);
+    expect(watchIgnoreWarnings("^\\[A\\]|B")).not.toEqual([]);
+    expect(watchIgnoreWarnings("^\\[A\\]|^<!-- bot:a -->")).toEqual([]);
+    // the real planilha watch's ignore: a warning, with no promise about "cells"
+    const sheet = watchIgnoreWarnings("\\[(Monitor Chat Atendimento|Monitor)\\]", "gog sheets get SHEET_ID Atendimento!A1:H400 --plain")[0]!;
+    expect(sheet).toContain("Reprovado");
+    expect(sheet).not.toContain("células");
+    // a Chat watch ignoring the account the bot posts with: it hides the person's own messages too
+    const chat = watchIgnoreWarnings("Dono Exemplo", 'gog chat messages list spaces/AAQ --json --max 5')[0]!;
+    expect(chat).toContain("a própria pessoa escreve");
+    expect(chat).not.toContain("Status");
+  });
+
+  it("warns that a list with the issue's update time wakes the bot for each of its own comments (INSP-E 8)", () => {
+    expect(watchCommandWarnings("gh issue list --state open --json number,title,updatedAt --search \"sort:updated-desc\"").join(" ")).toContain("cada comentário seu acorda você uma vez");
+    expect(watchCommandWarnings("gh api repos/o/r/issues?state=all --jq '.[] | \"\\(.number) \\(.updated_at)\"'").join(" ")).toContain("cada comentário seu acorda você uma vez");
+    expect(watchCommandWarnings("gh api repos/o/r/issues/comments --jq '.[] | select(.body | contains(\"bot:\") | not) | .body'")).toEqual([]);
   });
 });
 
@@ -113,7 +134,7 @@ describe("local status files", () => {
 
 describe("what a watch will not see", () => {
   it("warns about gog's oldest-first chat list and gh's created-order issue list", () => {
-    expect(watchCommandWarnings("gog chat messages list spaces/AAQA4TXnzJ4 --plain")[0]).toContain('--order "createTime desc"');
+    expect(watchCommandWarnings("gog chat messages list spaces/AAAAexample --plain")[0]).toContain('--order "createTime desc"');
     expect(watchCommandWarnings('gog chat messages list spaces/X --plain --max 10 --order "createTime desc"')).toEqual([]);
     expect(watchCommandWarnings("gh issue list --state all --limit 30 --json number,updatedAt")[0]).toContain("sort:updated-desc");
     expect(watchCommandWarnings('gh issue list --search "sort:updated-desc" --limit 40')).toEqual([]);
@@ -122,19 +143,19 @@ describe("what a watch will not see", () => {
   });
 
   it("finds the newest time stamp in an output", () => {
-    expect(newestStamp("2026-03-16T19:19:20Z Cezar\n2026-03-31T10:00:00Z x")).toBe(Date.parse("2026-03-31T10:00:00Z"));
+    expect(newestStamp("2026-03-16T19:19:20Z Tício\n2026-03-31T10:00:00Z x")).toBe(Date.parse("2026-03-31T10:00:00Z"));
     expect(newestStamp("nothing dated")).toBeNull();
   });
 });
 
 describe("echo of the bot's own posts", () => {
   it("leaves ignored lines out of what decides a change", async () => {
-    const run = (text: string) => runWatchCommand(["printf", text], { cwd: process.cwd(), path: process.env.PATH ?? "", ignore: "\\tOsvaldo Gehm\\t" });
-    const before = await run("2026-09-30T18:10:00Z\\tDaiane\\terro no envio\\n");
-    const echo = await run("2026-09-30T18:15:34Z\\tOsvaldo Gehm\\tRecebido, Daiane\\n2026-09-30T18:10:00Z\\tDaiane\\terro no envio\\n");
-    const client = await run("2026-09-30T18:20:00Z\\tPedro\\tnovo relato\\n2026-09-30T18:15:34Z\\tOsvaldo Gehm\\tRecebido, Daiane\\n2026-09-30T18:10:00Z\\tDaiane\\terro no envio\\n");
+    const run = (text: string) => runWatchCommand(["printf", text], { cwd: process.cwd(), path: process.env.PATH ?? "", ignore: "\\tDono Exemplo\\t" });
+    const before = await run("2026-09-30T18:10:00Z\\tFulana\\terro no envio\\n");
+    const echo = await run("2026-09-30T18:15:34Z\\tDono Exemplo\\tRecebido, Fulana\\n2026-09-30T18:10:00Z\\tFulana\\terro no envio\\n");
+    const client = await run("2026-09-30T18:20:00Z\\tBeltrano\\tnovo relato\\n2026-09-30T18:15:34Z\\tDono Exemplo\\tRecebido, Fulana\\n2026-09-30T18:10:00Z\\tFulana\\terro no envio\\n");
     expect(echo.fingerprint).toBe(before.fingerprint);
-    expect(echo.output).toContain("Osvaldo Gehm");
+    expect(echo.output).toContain("Dono Exemplo");
     expect(client.fingerprint).not.toBe(before.fingerprint);
     expect(ignoreMatcher("[unclosed")!("a [unclosed b")).toBe(true);
     expect(ignoreMatcher(undefined)).toBeNull();

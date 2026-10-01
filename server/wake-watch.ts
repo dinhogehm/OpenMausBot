@@ -173,6 +173,8 @@ export interface WatchRunResult {
   truncated?: boolean;
   /** stdout's lines (up to WATCH_LINES_MAX), to tell the bot what changed past the cut. */
   lines?: string[];
+  /** `lines` holds every line of stdout (false past WATCH_LINES_MAX). */
+  linesComplete?: boolean;
 }
 
 export const WATCH_LINES_MAX = 20_000;
@@ -182,11 +184,45 @@ export function lineHash(line: string): string {
   return createHash("sha1").update(line).digest("hex").slice(0, 10);
 }
 
-/** An `ignore` drops whole lines: unanchored, it also drops a line where a
- * person changed another cell ("Reprovado" in the row the bot annotated). */
-export function watchIgnoreWarnings(ignore: string | undefined): string[] {
-  if (!ignore || ignore.startsWith("^")) return [];
-  return [`ignore "${ignore}" descarta a linha inteira em que casar — numa linha que também tem Status ou Validação, uma mudança da pessoa some junto. Ancore no começo da linha (ex.: ^\\[Seu Nome\\]); mudanças só nas células com a sua marca já não acordam você.`];
+/** The top-level alternatives of a regex source: `^a|b` → ["^a", "b"]. */
+export function topAlternatives(source: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let inClass = false;
+  let current = "";
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i]!;
+    if (char === "\\") {
+      current += char + (source[i + 1] ?? "");
+      i += 1;
+      continue;
+    }
+    if (inClass) { if (char === "]") inClass = false; }
+    else if (char === "[") inClass = true;
+    else if (char === "(") depth += 1;
+    else if (char === ")") depth -= 1;
+    else if (char === "|" && depth === 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  return [...parts, current];
+}
+
+/** An `ignore` drops every whole line it matches anywhere, with whatever a
+ * person changed in that same line. Each alternative must be anchored at
+ * the line's start, so it takes only the lines that begin with the bot's
+ * mark. For a Chat watch, ignoring the sender also drops what the person
+ * writes from that same account. */
+export function watchIgnoreWarnings(ignore: string | undefined, command = ""): string[] {
+  if (!ignore) return [];
+  if (/^gog\b(?:\s+\S+)*?\s+chat\b/.test(command.trim())) {
+    return [`ignore "${ignore}" descarta toda mensagem que casar — se for o remetente da conta que você usa, também as que a própria pessoa escreve com essa conta. O servidor já reconhece o que você posta (gog chat ou pela VM) e não acorda você por isso; prefira o vigia sem ignore.`];
+  }
+  if (topAlternatives(ignore).every((alternative) => alternative.trimStart().startsWith("^"))) return [];
+  return [`ignore "${ignore}" descarta a linha inteira em que casar em qualquer ponto, junto com o que uma pessoa tiver mudado nessa mesma linha (um "Reprovado", uma troca de Status). Ancore cada alternativa no começo da linha (ex.: ^\\[Seu Nome\\]) para pegar só as linhas que começam com a sua marca.`];
 }
 
 /** What a watch command will not see the way the bot hopes: said in the
@@ -202,6 +238,11 @@ export function watchCommandWarnings(command: string): string[] {
   }
   if (/^gh\s+issue\s+list\b/.test(command.trim()) && !/sort:updated/.test(command)) {
     warnings.push('gh issue list ordena pelas criadas mais recentemente: uma issue antiga que muda fica fora. Para ver atualizações, use --search "sort:updated-desc".');
+  }
+  // a line with the issue's update time changes with ANY comment, yours too:
+  // it wakes you once for each of your own comments
+  if (/^gh\s+(?:issue\s+list|api\s+\S*issues)\b/.test(command.trim()) && /updatedAt|updated_at/.test(command)) {
+    warnings.push("Esta lista mostra a hora de atualização da issue: qualquer comentário, inclusive o seu, muda a linha, e o servidor não tem como saber que foi você — cada comentário seu acorda você uma vez. Para acompanhar comentários sem esse eco, vigie os comentários (gh api …/issues/comments) filtrando os que têm a sua marca no --jq.");
   }
   return warnings;
 }
@@ -267,7 +308,7 @@ export function runWatchCommand(argv: string[], opts: { cwd: string; path: strin
         const skip = ignoreMatcher(opts.ignore);
         const counted = (skip ? out.split("\n").filter((line) => !skip(line)) : out.split("\n"))
           .filter((line) => !/^\s*"(?:next)?[pP]age_?[tT]oken"\s*:/.test(line));
-        resolve({ ok: true, output: text, fingerprint: fingerprintOf(skip ? counted.join("\n") : out), truncated: full.length > text.length, lines: counted.slice(0, WATCH_LINES_MAX) });
+        resolve({ ok: true, output: text, fingerprint: fingerprintOf(skip ? counted.join("\n") : out), truncated: full.length > text.length, lines: counted.slice(0, WATCH_LINES_MAX), linesComplete: counted.length <= WATCH_LINES_MAX });
       },
     );
   });
