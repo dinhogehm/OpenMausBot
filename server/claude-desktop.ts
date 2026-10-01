@@ -216,12 +216,27 @@ export function emptyNewSession(lines: OcrLine[], size: { h: number }, repoName:
   return field;
 }
 
+/** The new session's chip names a session's own branch ("claude/…", or a
+ * live session's worktree): the app is about to reuse that worktree, and
+ * the brief would start work in another session's folder. */
+export function reusedWorktreeChip(lines: OcrLine[], liveNames: readonly string[] = []): string | null {
+  const names = new Set(liveNames.map((name) => name.toLowerCase()).filter((name) => name.length >= 6));
+  for (const line of lines) {
+    for (const raw of line.text.split(/\s+/)) {
+      const word = raw.replace(/^[([•·"']+|[)\],;:"'•·]+$/g, "");
+      const lower = word.toLowerCase();
+      if (/^claude\/[\w.-]+$/.test(lower) || names.has(lower) || names.has(lower.split("/").pop() ?? "")) return word;
+    }
+  }
+  return null;
+}
+
 /**
  * New session in the Claude app for `repoName`, brief pasted and sent.
  * The app opens a new session in the last folder used; if that is not the
  * repository (or the worktree option is not there), stop and retry later.
  */
-export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string }): Promise<DesktopStep> {
+export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[] }): Promise<DesktopStep> {
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.activateClaude());
     await driver.sleep(700);
@@ -232,7 +247,13 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     // An earlier try already opened the new session and stopped there: go
     // on in it (New Session again would leave the same screen, read as a miss).
     const open = emptyNewSession(before, size, input.repoName);
+    const reused = (lines: OcrLine[]) => {
+      const branch = reusedWorktreeChip(lines.filter((line) => line.y > size.h * 0.55), input.liveWorktrees);
+      return branch ? { ok: false as const, reason: `the new session would open on another session's worktree (${branch}); nothing was typed. Pick the repository's own folder in the app (main), or archive that session`, retry: true, miss: true, touched: true, seen: branch } : null;
+    };
     if (open) {
+      const refusal = reused(before);
+      if (refusal) return refusal;
       stop = await guard(screen, "empty session field");
       if (stop) return stop;
       await act(screen, () => driver.click(open.x + 20, open.y + open.h / 2));
@@ -256,6 +277,8 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       return { ok: false, reason: `the new session did not open in ${input.repoName} (the app reuses the last folder picked in it; open one session there by hand once)`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     }
     if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+    const refusal = reused(lines);
+    if (refusal) return refusal;
     return typeBrief(screen, input.text);
   });
 }
@@ -651,6 +674,18 @@ export function lastAppRepo(dir = DESKTOP_SESSIONS_DIR): string | undefined {
     if (record && !notPickedFolder(record) && (record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
   }
   return newest ? repoOf(newest) : undefined;
+}
+
+/** Worktree names of the app's sessions that are not archived. */
+export function liveWorktreeNames(dir = DESKTOP_SESSIONS_DIR): string[] {
+  const names: string[] = [];
+  for (const file of recordFiles(dir)) {
+    const record = readRecord(file);
+    if (!record || record.isArchived) continue;
+    const name = record.worktreeName ?? (record.worktreePath ?? record.cwd ?? "").split("/.claude/worktrees/")[1];
+    if (name) names.push(name);
+  }
+  return names;
 }
 
 /** App sessions, not archived (or archived too), working in `folder` (the app reuses worktrees). */

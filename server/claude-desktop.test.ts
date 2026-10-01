@@ -6,10 +6,12 @@ import {
   archiveDesktopSession,
   CLAUDE_BUNDLE_ID,
   lastAppRepo,
+  liveWorktreeNames,
   recordsUsingFolder,
   renameDesktopSession,
   transcriptOpenQuestion,
   createDesktopSession,
+  reusedWorktreeChip,
   DESKTOP_BRIEF_NOTE,
   DESKTOP_MESSAGE_NOTE,
   findDesktopSession,
@@ -116,6 +118,17 @@ describe("createDesktopSession", () => {
     const app = fakeApp({ fronts: [TERMINAL, CLAUDE_BUNDLE_ID], screens: [OPEN_SESSION, REPO_SCREEN] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x" })).toEqual({ ok: true });
     expect(app.actions.at(-1)).toBe(`restore ${TERMINAL}`);
+  });
+
+  it("types nothing when the new session's chip shows another session's branch (the app would reuse its worktree)", async () => {
+    for (const chip of ["claude/fix-9298-stage-time-rule-572720", "fix-9298-stage-time-rule-572720"]) {
+      const app = fakeApp({ screens: [OPEN_SESSION, [{ text: "Local", x: 100 }, "nuria-platform", chip, "worktree"]] });
+      const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", liveWorktrees: ["fix-9298-stage-time-rule-572720"] });
+      expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("another session's worktree") });
+      expect(app.actions).toEqual(["activate", "menu new session"]);
+    }
+    // "main" is the repository's own branch: it goes on
+    expect(reusedWorktreeChip([{ text: "nuria-platform main", x: 0, y: 800, w: 100, h: 16 }], ["fix-9298-stage-time-rule-572720"])).toBeNull();
   });
 
   it("treats a new session opened in another folder as a miss to retry, not a failure", async () => {
@@ -525,5 +538,7 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     expect(recordsUsingFolder("/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", "local_c", root).map((record) => record.sessionId)).toEqual(["local_b"]);
     expect(recordsUsingFolder("/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", "local_b", root)).toEqual([]);
     expect(recordsUsingFolder("/Users/o/Projetos/nuria-platform/.claude/worktrees/teste-modo-app-70ca2f", "local_b", root, true).map((record) => record.sessionId)).toEqual(["local_c"]);
+    // the live sessions' worktrees (an archived one does not count)
+    expect(liveWorktreeNames(root)).toEqual(["teste-modo-app-70ca2f"]);
   });
 });

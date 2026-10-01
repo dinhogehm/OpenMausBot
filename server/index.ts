@@ -302,6 +302,7 @@ import {
   macDesktopDriver,
   newMarker,
   lastAppRepo,
+  liveWorktreeNames,
   readDesktopRecord,
   recordsUsingFolder,
   transcriptMentions,
@@ -8578,6 +8579,7 @@ const desktopWork: DesktopWorkDeps = {
   },
   hookDecision: (sessionId) => lastHookDecision(DUAL_DECISIONS_LOG, sessionId),
   hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
+  liveWorktrees: () => liveWorktreeNames(),
   folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
   log: (line) => console.log(`[claude-desktop] ${line}`),
   onArchived: (session) => {

@@ -83,6 +83,8 @@ export interface DesktopWorkDeps {
   /** Put an item in "Precisa de você" (owner_pending) for the session's owner, or resolve it by key. */
   ownerPending?: (session: CcSession, item: { title: string; link?: string; key: string }) => void;
   resolveOwnerPending?: (key: string) => void;
+  /** Worktree names of the app's live sessions: a new session must not open on one. */
+  liveWorktrees?: () => string[];
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
   hookDecision?: (sessionId: string) => string | null;
   /** The command the review hook last denied or asked about for a session id. */
@@ -533,7 +535,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     if (pending.kind === "create") {
       pending.triedAt = deps.now();
       deps.ledger.save();
-      step = await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text });
+      step = await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [] });
     } else {
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;
