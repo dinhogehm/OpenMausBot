@@ -164,3 +164,197 @@ export function ciToStop(pid: number, rows: readonly PsRow[], guard: StopGuard):
   const pids = targets.map((row) => row.pid);
   return whole ? { kind: "group", pgid: root.pgid, root, pids } : { kind: "tree", pids, root };
 }
+
+// ── is it really that CI that holds the release? ─────────────────────────
+// The log line can be old (the release died waiting; the server restarted)
+// and its pid reused. admission-control.sh is the source of truth: the lease
+// (~/.nuria/admission/lease/{owner.pid,kind}) and the release's intent
+// (~/.nuria/admission/intents/<release pid>, holding its label).
+
+export interface AdmissionLease { ownerPid: string; kind: string }
+export interface ReleaseIntent { pid: number; label: string }
+export type Blocked = NonNullable<ReturnType<typeof releaseBlockedBy>>;
+
+/** Whether the lease and the intents confirm the log: a live release intent
+ * with the log's label, and the lease held by that very ci-full pid, alive.
+ * `waiting: false` means no release waits at all (an old log line). */
+export function leaseConfirms(lease: AdmissionLease | null, intents: readonly ReleaseIntent[], blocked: Blocked, alive: (pid: number) => boolean): { ok: true; releasePid: number } | { ok: false; waiting: boolean; reason: string } {
+  const intent = intents.find((each) => each.label.trim() === blocked.label && alive(each.pid));
+  if (!intent) return { ok: false, waiting: false, reason: `nenhum release espera de fato: não há intenção viva de ${blocked.label} em admission/intents` };
+  if (!lease) return { ok: false, waiting: true, reason: "o lease do admission não pôde ser lido" };
+  const owner = lease.ownerPid.trim();
+  if (owner !== String(blocked.pid)) return { ok: false, waiting: true, reason: `o lease é de ${owner ? `outro processo (${owner})` : "ninguém"}, não do ci-full:${blocked.pid} que o log cita` };
+  if (lease.kind.trim() !== "ci-full") return { ok: false, waiting: true, reason: `o lease não é de um ci-full (kind=${lease.kind.trim() || "vazio"})` };
+  if (!alive(blocked.pid)) return { ok: false, waiting: true, reason: `o ci-full:${blocked.pid} já terminou; o admission recupera o lease sozinho` };
+  return { ok: true, releasePid: intent.pid };
+}
+
+/** Why the target may have changed between the read that chose it and the
+ * read right before the signal (a pid reused, the CI gone, a new group), or
+ * null when it is the same: same kind, root and group, and the same start
+ * time for the lease pid, the root and every pid seen in both reads. */
+export function targetDrift(first: CiStop, second: CiStop | null, before: readonly PsRow[], after: readonly PsRow[], leasePid: number): string | null {
+  if (first.kind === "refuse") return first.reason;
+  if (!second) return "a segunda leitura da tabela de processos veio vazia";
+  if (second.kind === "refuse") return `na segunda leitura, ${second.reason}`;
+  if (second.kind !== first.kind || second.root.pid !== first.root.pid || (first.kind === "group" && second.kind === "group" && first.pgid !== second.pgid)) return "o alvo mudou entre as duas leituras";
+  const startOf = (rows: readonly PsRow[], pid: number) => rows.find((row) => row.pid === pid)?.start;
+  for (const pid of new Set([leasePid, first.root.pid, ...first.pids.filter((each) => second.pids.includes(each))])) {
+    if (startOf(before, pid) !== startOf(after, pid)) return `o processo ${pid} mudou de horário de início entre as duas leituras (pid reusado)`;
+  }
+  return null;
+}
+
+/** A CI named for a person: the script and its profile, never the raw argv. */
+export function ciLabel(command: string): string {
+  const cmd = command.trim();
+  if (CI_SCRIPT.test(cmd)) {
+    const profile = /\s--profile[\s=]+([\w-]+)/.exec(cmd)?.[1];
+    return profile ? `local-ci.sh --profile ${profile}` : "local-ci.sh";
+  }
+  return CI_NPM.test(cmd) ? "npm run ci:local" : "processo não reconhecido";
+}
+
+const homePath = (path: string, home: string) => (home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path);
+
+// ── one decision per waiting release and CI ──────────────────────────────
+
+/** Ticks a release may stay undecided (ps empty, lease moving, target
+ * changing between reads) before the Chief hears the server did nothing. */
+export const PREEMPT_RETRY_LIMIT = 3;
+/** How long after the signal the lease must be free for the stop to count. */
+export const PREEMPT_VERIFY_AFTER_MS = 15_000;
+
+export interface PreemptState {
+  /** `<label>#<pid>` decided: acted on, or told. Never decided twice. */
+  handled: Set<string>;
+  /** Undecided ticks per `<label>#<pid>`. */
+  retries: Map<string, number>;
+}
+
+export type ManagedSession = ManagedSessionProcs & { title: string };
+export type CiTarget = Exclude<CiStop, { kind: "refuse" }>;
+
+/** Everything the decision touches, injected: the server passes the real
+ * files, ps, lsof and process.kill; tests pass fixtures and a fake kill. */
+export interface PreemptEnv {
+  outLogTail: () => string;
+  /** The lease, or null when there is none (or it cannot be read). */
+  readLease: () => AdmissionLease | null;
+  /** The release intents, or null when the folder cannot be read. */
+  readIntents: () => ReleaseIntent[] | null;
+  ps: () => Promise<PsRow[]>;
+  cwdOf: (pid: number) => Promise<string | null>;
+  sessions: () => ManagedSession[];
+  guard: (rows: readonly PsRow[]) => StopGuard;
+  kill: (pid: number, signal: "SIGTERM") => void;
+  sleep: (ms: number) => Promise<void>;
+  alertChief: (text: string, report: string) => void;
+  /** The CI was stopped and its lease is free: tell the session, resume it later. */
+  stopped: (event: { session: ManagedSession; blocked: Blocked; target: CiTarget }) => void | Promise<void>;
+  log: (line: string) => void;
+  home?: string;
+  verifyAfterMs?: number;
+}
+
+export type PreemptOutcome = "idle" | "stale" | "retry" | "not-managed" | "refused" | "kill-failed" | "survived" | "stopped";
+
+const REPORT_TAIL = "\nO detalhe técnico (pids, grupo, comando) está no log do servidor, nas linhas [release-priority].";
+
+/** A release waiting over RELEASE_WAIT_BEFORE_PREEMPT_S behind a full CI:
+ * stop that CI when it is a managed session's and it is safe; otherwise tell
+ * the Chief, once, why nothing was done. Success is claimed only when, after
+ * `verifyAfterMs`, the CI no longer holds the lease. */
+export async function preemptCiForRelease(env: PreemptEnv, state: PreemptState): Promise<PreemptOutcome> {
+  const blocked = releaseBlockedBy(env.outLogTail());
+  if (!blocked || blocked.waitedS < RELEASE_WAIT_BEFORE_PREEMPT_S) return "idle";
+  const key = `${blocked.label}#${blocked.pid}`;
+  if (state.handled.has(key)) return "idle";
+  const minutes = Math.max(1, Math.round(blocked.waitedS / 60));
+  const waits = `O release de produção (${blocked.label}) espera há ${minutes} min`;
+  const settle = () => {
+    state.handled.add(key);
+    state.retries.delete(key);
+  };
+  const tell = (title: string, text: string) => env.alertChief(text, `[Alerta do servidor: ${title}] ${text}${REPORT_TAIL}`);
+  const notYet = (why: string): PreemptOutcome => {
+    const tries = (state.retries.get(key) ?? 0) + 1;
+    state.retries.set(key, tries);
+    env.log(`[release-priority] undecided (${tries}/${PREEMPT_RETRY_LIMIT}): release ${blocked.label} waited ${blocked.waitedS}s on ci-full:${blocked.pid} — ${why}`);
+    if (tries < PREEMPT_RETRY_LIMIT) return "retry";
+    settle();
+    tell("release esperando atrás de CI", `${waits} atrás do ci-full:${blocked.pid} e o servidor não conseguiu confirmar que pode interrompê-lo (${why}): nada foi interrompido. Veja quem roda esse ci:local, ou deixe o release esperar.`);
+    return "retry";
+  };
+
+  const rows = await env.ps();
+  if (!rows.length) return notYet("a tabela de processos veio vazia");
+  const intents = env.readIntents();
+  if (!intents) return notYet("a pasta de intenções do admission não pôde ser lida");
+  const alive = (pid: number) => rows.some((row) => row.pid === pid);
+  const lease = leaseConfirms(env.readLease(), intents, blocked, alive);
+  if (!lease.ok) {
+    if (lease.waiting) return notYet(lease.reason);
+    settle();
+    env.log(`[release-priority] nothing to do: the log says ${blocked.label} waits on ci-full:${blocked.pid}, but ${lease.reason}`);
+    return "stale";
+  }
+  const lockRow = rows.find((row) => row.pid === blocked.pid)!;
+  const cwd = await env.cwdOf(blocked.pid);
+  const sessions = env.sessions();
+  const owner = ciOwner(blocked.pid, rows, (pid) => (pid === blocked.pid ? cwd : null), sessions);
+  const what = `${ciLabel(lockRow.command)}, em ${cwd ? homePath(cwd, env.home ?? "") : "pasta desconhecida"}`;
+  const lockSeen = `ci-full:${blocked.pid} "${lockRow.command.slice(0, 160)}" pgid ${lockRow.pgid} start "${lockRow.start}"`;
+  const session = owner.kind === "session" ? sessions.find((each) => each.sessionId === owner.sessionId) : undefined;
+  if (!session) {
+    settle();
+    env.log(`[release-priority] leave alone: release ${blocked.label} (${blocked.waitedS}s) waits on ${lockSeen}, cwd ${cwd ?? "?"} — ${owner.kind === "owner" ? `the owner's (terminal ${owner.terminal.pid} "${owner.terminal.command.slice(0, 60)}")` : "not a managed session's"}`);
+    tell("release esperando atrás de CI", owner.kind === "owner"
+      ? `${waits} atrás de um ci:local do dono (${what}), rodado num terminal: o servidor não o interrompe; só o dono pode interrompê-lo, ou o release espera.`
+      : `${waits} atrás de um ci:local que não é de sessão gerenciada (${what}): o servidor não o interrompe; só quem o rodou pode interrompê-lo, ou o release espera.`);
+    return "not-managed";
+  }
+  const stop = ciToStop(blocked.pid, rows, env.guard(rows));
+  if (stop.kind === "refuse") {
+    settle();
+    env.log(`[release-priority] leave alone: ${lockSeen} of session ${session.sessionId} — ${stop.detail}`);
+    tell("release esperando atrás de CI", refusalText(blocked, session.title, stop.reason));
+    return "refused";
+  }
+  // right before the signal: the same processes, with the same start times
+  const rows2 = await env.ps();
+  const again = rows2.length ? ciToStop(blocked.pid, rows2, env.guard(rows2)) : null;
+  const drift = targetDrift(stop, again, rows, rows2, blocked.pid);
+  if (drift || !again || again.kind === "refuse") return notYet(drift ?? "o alvo mudou entre as duas leituras");
+  settle();
+  const target = again;
+  const where = target.kind === "group" ? `group ${target.pgid}` : `tree ${target.pids.join(",")} (its group ${target.root.pgid} also holds other processes)`;
+  try {
+    if (target.kind === "group") env.kill(-target.pgid, "SIGTERM");
+    else for (const pid of target.pids) { try { env.kill(pid, "SIGTERM"); } catch { /* already gone */ } }
+  } catch (error) {
+    env.log(`[release-priority] could not signal ${where}: ${error instanceof Error ? error.message : String(error)}`);
+    tell("release esperando atrás de CI", `O servidor tentou interromper o ci:local da sessão "${session.title}" para liberar o release de produção (${blocked.label}), que espera há ${minutes} min, e o sinal falhou: nada foi interrompido. Interrompa esse ci:local na sessão, ou deixe o release esperar.`);
+    return "kill-failed";
+  }
+  const verifyMs = env.verifyAfterMs ?? PREEMPT_VERIFY_AFTER_MS;
+  env.log(`[release-priority] SIGTERM to ${where}: ${lockSeen} of session ${session.sessionId}, CI root ${target.root.pid} "${target.root.command.slice(0, 120)}", release ${blocked.label} waited ${blocked.waitedS}s; checking the lease in ${Math.round(verifyMs / 1000)}s`);
+  await env.sleep(verifyMs);
+  const after = env.readLease();
+  const rows3 = await env.ps();
+  const ciAlive = !rows3.length || rows3.some((row) => row.pid === blocked.pid && row.start === lockRow.start);
+  const stillHeld = after !== null && after.ownerPid.trim() === String(blocked.pid) && ciAlive;
+  if (stillHeld) {
+    env.log(`[release-priority] NOT freed: ${Math.round(verifyMs / 1000)}s after SIGTERM to ${where}, ci-full:${blocked.pid} still holds the lease${rows3.length ? "" : " (ps read nothing)"}`);
+    tell("release continua bloqueado", `O servidor mandou interromper o ci:local da sessão "${session.title}" para liberar o release de produção (${blocked.label}), mas ${Math.round(verifyMs / 1000)} s depois ele ainda segura o lease: não consegui liberar o release. Interrompa esse ci:local na sessão (processo ${blocked.pid}), ou deixe o release esperar.`);
+    return "survived";
+  }
+  env.log(`[release-priority] stopped ${where}: ci-full:${blocked.pid} no longer holds the lease (owner now ${after?.ownerPid.trim() || "none"}${ciAlive ? "" : ", the CI is gone"}); release ${blocked.label} can go`);
+  await env.stopped({ session, blocked, target });
+  return "stopped";
+}
+
+/** The Chief's alert when the server refuses to stop a session's CI: pt-BR, no argv. */
+export function refusalText(blocked: Blocked, title: string, reason: string): string {
+  return `O release de produção (${blocked.label}) espera há ${Math.max(1, Math.round(blocked.waitedS / 60))} min atrás do ci:local da sessão "${title}" e o servidor NÃO o interrompeu: ${reason}. Interrompa esse ci:local na sessão, ou deixe o release esperar.`;
+}
