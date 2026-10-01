@@ -681,3 +681,16 @@ describe("an issue left without a live session", () => {
     expect(orphanedIssues(h.ledger.all(), h.now)).toEqual([]);
   });
 });
+
+describe("a field that already held text", () => {
+  it("tells the owner what the send replaced", async () => {
+    const h = harness();
+    const session = h.opened("a");
+    session.status = "idle";
+    session.desktop!.pending = { kind: "send", text: "Pode sim", since: h.now, attempts: 0 };
+    h.results.push({ ok: true, replaced: "pode reescrever o corpo da PR com a seção de riscos" });
+    await h.tick();
+    expect(h.chips.some((chip) => chip.text.includes("substituído pela mensagem"))).toBe(true);
+    expect(h.reports.at(-1)!.text).toContain('"pode reescrever o corpo da PR com a seção de riscos"');
+  });
+});

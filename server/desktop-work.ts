@@ -557,6 +557,12 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
         return;
       }
       delete desktop.pending;
+      // the field held text nobody sent (an app suggestion or a draft): it
+      // was replaced, and the owner hears exactly what it was
+      if (pending.kind === "send" && "replaced" in step && step.replaced) {
+        deps.chip(next, `o campo da sessão tinha um texto não enviado, substituído pela mensagem: “${step.replaced.slice(0, 80)}”`, false);
+        deps.report(next, `Claude Code session "${next.title}" (${next.id}): its message field already held text nobody sent — "${step.replaced.slice(0, 300)}" (an app suggestion, or a draft the person left there). It was replaced by your message. If it was the person's draft, tell them what it said.`);
+      }
       if (pending.kind === "create") desktop.sentAt = at;
       else {
         desktop.sent = { text: pending.text, at, userFrameAt, deliveries: (pending.deliveries ?? 0) + 1 };

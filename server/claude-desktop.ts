@@ -60,7 +60,7 @@ export interface DesktopDriver {
 /** `miss`: the screen did not show what was expected (folder, worktree,
  * session) although it was unlocked and Claude was in front. `touched`: the
  * step acted on the screen before stopping, so a retry should back off. */
-export type DesktopStep = { ok: true } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string };
+export type DesktopStep = { ok: true; replaced?: string } | { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -296,8 +296,12 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (input.title && !lines.some((line) => sidebarMatch(line.text, input.title!)) && !headerNames(lines.filter((line) => line.y < 140), input.title)) {
       return { ok: false, reason: `the session "${input.title}" is not the one on screen`, retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y < 140)) };
     }
-    const field = lines.find((line) => line.y > size.h / 2 && COMPOSER_PLACEHOLDER.test(line.text.trim()));
-    if (!field) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y > size.h / 2).slice(-8)) };
+    const composer = findComposer(lines, size);
+    if (!composer) return { ok: false, reason: "the session's message field was not found", retry: true, miss: true, touched: true, seen: seenText(lines.filter((line) => line.y > size.h / 2).slice(-8)) };
+    const field = composer.line;
+    // Text already in the field (a suggested reply, or a draft nobody sent)
+    // is replaced, not appended to; the caller reports what it was.
+    const existing = composer.text;
     // What is near the field (it grows upwards as text goes in).
     const nearField = (all: OcrLine[]) => mainArea(all).filter((line) => line.y > Math.max(size.h / 2, field.y - 200));
     stop = await guard(screen, "click field");
@@ -316,9 +320,11 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     }
     const prefix = textPrefix(input.text);
     const typed = nearField(await driver.ocr());
-    // In the field: its first words show, or at least the placeholder gave way.
-    if (!showsPrefix(typed, prefix) && typed.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim()))) {
-      return { ok: false, reason: "the message did not appear in the session's field", retry: true, touched: true };
+    // In the field: its first words show, or at least the placeholder (or the
+    // text that was there) gave way.
+    const oldStays = existing !== null && showsPrefix(typed, textPrefix(existing));
+    if (!showsPrefix(typed, prefix) && (typed.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim())) || oldStays)) {
+      return { ok: false, reason: existing !== null ? `the field already held text ("${existing.slice(0, 80)}") and the message did not replace it` : "the message did not appear in the session's field", retry: true, touched: true, ...(existing !== null ? { seen: existing.slice(0, 200) } : {}) };
     }
     stop = await guard(screen, "send");
     if (stop) return stop;
@@ -328,8 +334,29 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
     if (!after.some((line) => COMPOSER_PLACEHOLDER.test(line.text.trim())) && showsPrefix(after, prefix)) {
       return { ok: false, reason: "the message stayed in the field after Return", retry: true, touched: true };
     }
-    return { ok: true };
+    return existing !== null ? { ok: true, replaced: existing } : { ok: true };
   });
+}
+
+/** The bar under the message field: the mode ("Automático") and the model ("Opus 5.5"). */
+const COMPOSER_BAR = /^(Automático|Automatic|Auto|Pedir aprova[çc][ãa]o|Ask|Plan|Planejar|Bypass\b.*|Aceitar edi[çc][õo]es|Accept edits)$|\b(Opus|Sonnet|Haiku|Fable)\s*\d/i;
+
+/** The session's message field, found as a person would: its placeholder
+ * when it is empty, else the line right above the mode/model bar — where a
+ * suggested reply or an unsent draft sits ("pode reescrever o corpo…").
+ * `text` is what was in it then (null when it showed the placeholder). */
+export function findComposer(lines: OcrLine[], size: { h: number }): { line: OcrLine; text: string | null } | null {
+  const lower = lines.filter((line) => line.y > size.h / 2);
+  const empty = lower.find((line) => COMPOSER_PLACEHOLDER.test(line.text.trim()));
+  if (empty) return { line: empty, text: null };
+  const bar = lower.filter((line) => COMPOSER_BAR.test(line.text.trim())).sort((a, b) => a.y - b.y)[0];
+  if (!bar) return null;
+  const above = lower
+    .filter((line) => line.y < bar.y - 4 && bar.y - line.y <= 90 && line.text.trim())
+    // the PR/branch strip above the field is not the field
+    .filter((line) => !/^#\d+\b|[+]\d+\s*-\d+|\bCI\b/.test(line.text.trim()))
+    .sort((a, b) => b.y - a.y)[0];
+  return above ? { line: above, text: above.text.trim() } : null;
 }
 
 /** Normalised title prefix the sidebar shows (it truncates long titles). */
@@ -459,8 +486,20 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
     if (stop) return stop;
     const size = await driver.screenSize();
     const upper = (lines: OcrLine[]) => lines.filter((line) => line.y < size.h / 2);
-    const composerEmpty = (lines: OcrLine[]) => mainArea(lines).some((line) => line.y > size.h / 2 && (COMPOSER_PLACEHOLDER.test(line.text.trim()) || NEW_SESSION_PLACEHOLDER.test(line.text.trim())));
+    // The message field as it was before anything was pasted: empty, or
+    // holding a suggestion/draft. Unchanged afterwards = nothing went into it.
+    const fieldOf = (lines: OcrLine[]) => {
+      const main = mainArea(lines);
+      if (main.some((line) => line.y > size.h / 2 && NEW_SESSION_PLACEHOLDER.test(line.text.trim()))) return { text: null as string | null };
+      const composer = findComposer(main, size);
+      return composer ? { text: composer.text } : null;
+    };
     const opened = await driver.ocr();
+    const fieldBefore = fieldOf(opened);
+    const composerEmpty = (lines: OcrLine[]) => {
+      const now = fieldOf(lines);
+      return Boolean(now && fieldBefore && now.text === fieldBefore.text);
+    };
     const menuOpen = opened.some((line) => RENAME_ITEMS.includes(line.text.trim()));
     if (menuOpen || !upper(opened).some((line) => sidebarMatch(line.text, input.title)) || !composerEmpty(opened)) {
       await act(screen, () => driver.key(ESCAPE));
@@ -476,7 +515,7 @@ export async function renameDesktopSession(driver: DesktopDriver, input: { local
       // it went into the message field: take it out again, never send it
       await act(screen, () => driver.key(KEY_A, true));
       await act(screen, () => driver.key(BACKSPACE));
-      return { ok: false, reason: "the new title went into the message field instead of a rename field; it was cleared and not sent", retry: false, touched: true };
+      return { ok: false, reason: `the new title went into the message field instead of a rename field; it was cleared and not sent${fieldBefore?.text ? ` (the field had held: "${fieldBefore.text.slice(0, 120)}")` : ""}`, retry: false, touched: true };
     }
     if (!showsPrefix(upper(typed), prefix)) {
       await act(screen, () => driver.key(ESCAPE));

@@ -13,6 +13,7 @@ import {
   DESKTOP_BRIEF_NOTE,
   DESKTOP_MESSAGE_NOTE,
   findDesktopSession,
+  findComposer,
   headerNames,
   lastAssistantText,
   newMarker,
@@ -390,6 +391,38 @@ describe("the app's real screen (OCR fixture)", () => {
     expect(await sendToDesktopSession(app.driver, { localId, text: "x", title: "Chat ticket agent/client labels bug" })).toMatchObject({ ok: false, miss: true, seen: expect.stringContaining("Fila errada") });
     const noField = fakeApp({ screens: [[header, chip]] });
     expect(await sendToDesktopSession(noField.driver, { localId, text: "x", title: "Chat ticket agent/client labels bug" })).toMatchObject({ ok: false, seen: expect.stringContaining("fix/9311") });
+  });
+
+  it("finds the field above the mode/model bar when it holds a suggestion or a draft (R7: 1 of 9 sends)", () => {
+    // OCR of the R7 capture: PR strip, the field with the app's suggested reply, the bar under it
+    const screen = [
+      { x: 520, y: 732, w: 600, h: 16, text: "#9317 nuria-platform fix/9298-regra-tempo-etapa-migrados" },
+      { x: 1110, y: 732, w: 60, h: 16, text: "+196 -5" },
+      { x: 505, y: 788, w: 420, h: 16, text: "pode reescrever o corpo da PR com a seção de riscos" },
+      { x: 578, y: 830, w: 80, h: 16, text: "Automático" },
+      { x: 1140, y: 830, w: 70, h: 16, text: "Opus 5.5" },
+    ];
+    expect(findComposer(screen, { h: 900 })).toMatchObject({ text: "pode reescrever o corpo da PR com a seção de riscos", line: { y: 788 } });
+    expect(findComposer([{ x: 547, y: 875, w: 200, h: 16, text: "Digite / para comandos" }], { h: 900 })).toMatchObject({ text: null });
+    expect(findComposer([{ x: 547, y: 300, w: 200, h: 16, text: "conversation text" }], { h: 900 })).toBeNull();
+  });
+
+  it("replaces what the field held, sends, and says what it replaced", async () => {
+    const strip = { text: "#9317 nuria-platform fix/9298", x: 520, y: 732 };
+    const bar = { text: "Automático", x: 578, y: 830 };
+    const model = { text: "Opus 5.5", x: 1140, y: 830 };
+    const suggestion = { text: "pode reescrever o corpo da PR com a seção de riscos", x: 505, y: 788 };
+    const typed = { ...suggestion, text: "Pode sim, reescreva o corpo" };
+    const sent = { text: "Responder…", x: 505, y: 788 };
+    const app = fakeApp({ screens: [[header, strip, suggestion, bar, model], [header, strip, typed, bar, model], [header, strip, sent, bar, model]] });
+    expect(await sendToDesktopSession(app.driver, { localId, text: "Pode sim, reescreva o corpo", title: "Chat ticket agent/client labels bug" }))
+      .toEqual({ ok: true, replaced: "pode reescrever o corpo da PR com a seção de riscos" });
+    expect(app.actions).toContain("paste(all) Pode sim, reescreva o corpo");
+    // the old text stayed: not sent, and the reason names it
+    const stuck = fakeApp({ screens: [[header, strip, suggestion, bar, model], [header, strip, suggestion, bar, model]] });
+    expect(await sendToDesktopSession(stuck.driver, { localId, text: "Pode sim", title: "Chat ticket agent/client labels bug" }))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("already held text"), seen: expect.stringContaining("pode reescrever") });
+    expect(stuck.actions).not.toContain("key 36");
   });
 
   it("sends into the session whose header carries a status dot (8378b26a)", async () => {
