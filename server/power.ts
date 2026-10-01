@@ -11,10 +11,14 @@ export interface PowerState {
   percent: number | null;
 }
 
-/** `pmset -g batt`: "Now drawing from 'Battery Power'" and " -InternalBattery-0 (id=…)	53%; discharging; …". */
+/** `pmset -g batt`: "Now drawing from 'Battery Power'" and " -InternalBattery-0 (id=…)	53%; discharging; …".
+ * A no-break (UPS) counts as battery: "drawing from 'UPS Power'" means the
+ * wall is out, on a desktop Mac too. With a UPS line and the Mac's own
+ * battery, the charge is the Mac's (-InternalBattery-), not the UPS's. */
 export function parsePmsetBatt(output: string): PowerState {
-  const onBattery = /drawing from 'Battery Power'/i.test(output);
-  const charge = /\b(\d{1,3})%/.exec(output);
+  const onBattery = /drawing from '(?:Battery|UPS) Power'/i.test(output);
+  const internal = /^\s*-InternalBattery-[^\n]*?\b(\d{1,3})%/m.exec(output);
+  const charge = internal ?? /\b(\d{1,3})%/.exec(output);
   return { onBattery, percent: charge ? Math.min(100, Number(charge[1])) : null };
 }
 
