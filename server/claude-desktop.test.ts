@@ -213,14 +213,14 @@ describe("createDesktopSession", () => {
   });
 
   it("gives the front back to the app the person had open", async () => {
-    const app = fakeApp({ fronts: [TERMINAL, CLAUDE_BUNDLE_ID], screens: [OPEN_SESSION, REPO_SCREEN] });
+    const app = fakeApp({ fronts: [TERMINAL, CLAUDE_BUNDLE_ID], screens: [OPEN_SESSION, REPO_SCREEN, AFTER_SEND] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x" })).toEqual({ ok: true });
     expect(app.actions.at(-1)).toBe(`restore ${TERMINAL}`);
   });
 
   it("types nothing when the new session's chip shows another session's branch (the app would reuse its worktree)", async () => {
     for (const chip of ["claude/fix-9298-stage-time-rule-572720", "fix-9298-stage-time-rule-572720"]) {
-      const app = fakeApp({ screens: [OPEN_SESSION, [{ text: "Local", x: 100 }, "nuria-platform", chip, "worktree"]] });
+      const app = fakeApp({ screens: [OPEN_SESSION, swap(R8_NEW_SESSION, { "gº main": `gº ${chip}` })] });
       const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", liveWorktrees: ["fix-9298-stage-time-rule-572720"] });
       expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("another session's worktree") });
       expect(app.actions).toEqual(["activate", "menu new session"]);
@@ -229,29 +229,52 @@ describe("createDesktopSession", () => {
     expect(reusedWorktreeChip([{ text: "nuria-platform main", x: 0, y: 800, w: 100, h: 16 }], ["fix-9298-stage-time-rule-572720"])).toBeNull();
   });
 
-  it("types nothing unless the new session is in the repository's root on its base branch (01/10: 6 of 7 in another folder)", async () => {
-    // what the chips showed when the app reused the folder of an archived
-    // session: its detached HEAD, or its own fix/… branch without the folder's suffix
-    for (const chip of ["1bbd5c2a7", "fix/9326-guard-previous-commit", "HEAD", "develop"]) {
-      const app = fakeApp({ screens: [OPEN_SESSION, [{ text: "Local", x: 100 }, "nuria-platform", chip, "worktree"]] });
+  it("types nothing when the branch chip shows other work: a detached sha, a fix/… branch, HEAD, another base", async () => {
+    // the chips this guard refuses (a reused folder MAY show them; the one
+    // real capture of a new session shows "main" even on a detached root,
+    // so the 409 and the adoption check are what stop folder reuse)
+    for (const chip of ["gº 1bbd5c2a7", "gº fix/9326-guard-previous-commit", "gº HEAD", "gº develop"]) {
+      const app = fakeApp({ screens: [OPEN_SESSION, swap(R8_NEW_SESSION, { "gº main": chip })] });
       const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", baseBranch: "main" });
       expect(step).toMatchObject({ ok: false, retry: true, miss: true, reason: expect.stringContaining("not in the root of nuria-platform") });
+      expect(step).toMatchObject({ reason: expect.stringContaining("send it a short message") });
       expect(app.actions).toEqual(["activate", "menu new session"]);
     }
-    expect(notRepoRoot([{ text: "nuria-platform main", x: 0, y: 800, w: 100, h: 16 }, { text: "worktree", x: 0, y: 830, w: 60, h: 16 }], "main")).toBeNull();
-    expect(notRepoRoot([{ text: "nuria-platform", x: 0, y: 800, w: 100, h: 16 }], "main")).toContain("does not show the base branch");
   });
 
-  it("counts a create only when the brief left the field after Return", async () => {
-    const stuck = [{ text: "Local", x: 100 }, "nuria-platform", "main", "worktree", { text: "[OMBX] brief da #9319", x: 505 }];
+  it("reads the branch only in the row of chips: the real root screen passes, and the Sessões list, dates and origin/main never refuse it (INSP-D A3)", () => {
+    expect(notRepoRoot(R8_NEW_SESSION, "main")).toBeNull();
+    // the Sessões list grows down into the lower half when there are many sessions
+    const listLow = [...R8_NEW_SESSION, { x: 543, y: 600, w: 797, h: 22, text: "• Requer entrada Organizar o catálogo de serviços inter... W... exemplo/nuria-platform há 5 meses" }];
+    expect(notRepoRoot(listLow, "main")).toBeNull();
+    expect(notRepoRoot([...R8_NEW_SESSION, { x: 1100, y: 600, w: 60, h: 16, text: "01/10 e/ou acabada" }], "main")).toBeNull();
+    expect(notRepoRoot(swap(R8_NEW_SESSION, { "gº main": "gº origin/main" }), "main")).toBeNull();
+    // the chip row itself still counts
+    expect(notRepoRoot(swap(R8_NEW_SESSION, { "gº main": "gº 1bbd5c2a7" }), "main")).toBe("it shows 1bbd5c2a7, not main");
+    expect(notRepoRoot(swap(R8_NEW_SESSION, { "gº main": "gº" }), "main")).toContain("does not show the base branch");
+  });
+
+  it("counts a create only on proof that the new session's screen is gone after Return", async () => {
+    // the brief still in the field, the chips still there
+    const stuck = swap(R8_NEW_SESSION, { "Descreva uma tarefa ou faça uma pergunta": "[OMBX] brief da #9319" });
     const app = fakeApp({ screens: [OPEN_SESSION, REPO_SCREEN, stuck] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "[OMBX] brief da #9319" }))
-      .toMatchObject({ ok: false, retry: true, reason: expect.stringContaining("stayed in the new session's field") });
+      .toMatchObject({ ok: false, retry: true, reason: expect.stringContaining("did not leave the new session's screen") });
     expect(app.actions.at(-1)).toBe("key 36");
+    // a long brief the app folded into a pasted block: its words are not on
+    // screen, the chips are — still not sent (INSP-D A8)
+    const folded = swap(R8_NEW_SESSION, { "Descreva uma tarefa ou faça uma pergunta": "Texto colado" });
+    const foldedApp = fakeApp({ screens: [OPEN_SESSION, REPO_SCREEN, folded] });
+    expect(await createDesktopSession(foldedApp.driver, { repoName: "nuria-platform", text: `[OMBX] brief ${"x".repeat(2_000)}` }))
+      .toMatchObject({ ok: false, reason: expect.stringContaining("did not leave the new session's screen") });
+    // an OCR that read nothing proves nothing
+    const blind = fakeApp({ screens: [OPEN_SESSION, REPO_SCREEN, []] });
+    expect(await createDesktopSession(blind.driver, { repoName: "nuria-platform", text: "brief" }))
+      .toMatchObject({ ok: false, retry: true, reason: expect.stringContaining("could not read the screen after Return") });
   });
 
   it("treats a new session opened in another folder as a miss to retry, not a failure", async () => {
-    const app = fakeApp({ screens: [OPEN_SESSION, [{ text: "Local", x: 100 }, "soph-ia", "main", "worktree"]] });
+    const app = fakeApp({ screens: [OPEN_SESSION, swap(R8_NEW_SESSION, { "nuria-platform": "soph-ia" })] });
     const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x" });
     expect(step).toMatchObject({ ok: false, retry: true, miss: true });
     expect(app.actions).toEqual(["activate", "menu new session"]);
@@ -264,12 +287,11 @@ describe("createDesktopSession", () => {
   });
 
   it("goes on in the empty new session an earlier try already opened, without New Session again", async () => {
-    const empty = [{ text: "Bem-vindo de volta, Fulano", y: 120 }, { text: "Local", y: 720 }, { text: "nuria-platform", x: 900, y: 720 }, { text: "main", x: 1_100, y: 720 }, { text: "worktree", x: 1_200, y: 720 }, { text: "Descreva uma tarefa ou faça uma pergunta", y: 780 }];
-    const app = fakeApp({ screens: [empty] });
+    const app = fakeApp({ screens: [R8_NEW_SESSION, AFTER_SEND] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "#9311 brief" })).toEqual({ ok: true });
-    expect(app.actions).toEqual(["activate", "click 620,788", "paste(all) #9311 brief", `type  ${DESKTOP_BRIEF_NOTE}`, "key 36"]);
+    expect(app.actions).toEqual(["activate", "click 567,851.5", "paste(all) #9311 brief", `type  ${DESKTOP_BRIEF_NOTE}`, "key 36"]);
     // an empty session in another folder is not ours to fill
-    const other = fakeApp({ screens: [empty.map((line) => line.text === "nuria-platform" ? { ...line, text: "soph-ia" } : line), REPO_SCREEN] });
+    const other = fakeApp({ screens: [swap(R8_NEW_SESSION, { "nuria-platform": "soph-ia" }), REPO_SCREEN] });
     await createDesktopSession(other.driver, { repoName: "nuria-platform", text: "x" });
     expect(other.actions[1]).toBe("menu new session");
   });
@@ -673,7 +695,7 @@ describe("the app's real screen (OCR fixture)", () => {
   });
 
   it("opens a new session whose folder chip reads with its branch (c30a1f34)", async () => {
-    const app = fakeApp({ screens: [[header, { text: "Texto da conversa anterior", x: 547, y: 300 }], [{ text: "nuria-platform main", x: 547, y: 815 }, { text: "worktree", x: 700, y: 815 }]] });
+    const app = fakeApp({ screens: [[header, { text: "Texto da conversa anterior", x: 547, y: 300 }], [{ text: "nuria-platform main", x: 547, y: 815 }, { text: "worktree", x: 700, y: 815 }], AFTER_SEND] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "#9307 brief" })).toEqual({ ok: true });
   });
 

@@ -238,22 +238,47 @@ export function reusedWorktreeChip(lines: OcrLine[], liveNames: readonly string[
   return null;
 }
 
-/** Why the new session's chips do not show the repository's own root
- * (its base branch): a branch of other work ("fix/9326-…", "claude/…"), a
- * detached HEAD (a bare sha, "HEAD") or no base branch at all. On 01/10, 6
- * of 7 creates opened in the folder of an archived session, on a detached
- * HEAD or its "fix/…" branch (R8-dispatch D1). null when it is the root. */
+/** The new session's row of chips — "• Local | nuria-platform | gº main |
+ * v worktree" on the real screen (R8, 01/10), all within a few points of
+ * the same y — found by its worktree option. Nothing else on the screen
+ * (the "Sessões" list, a date, a conversation) is a chip. */
+export function chipRow(lines: OcrLine[]): OcrLine[] {
+  const option = lines.filter((line) => /\bworktree\b/i.test(line.text)).sort((a, b) => b.y - a.y)[0];
+  return option ? lines.filter((line) => Math.abs(line.y - option.y) <= 12) : [];
+}
+
+/** Why the new session's chips do not show the repository's own root (its
+ * base branch): a branch of other work ("fix/9326-…", "claude/…"), a
+ * detached HEAD (a bare sha, "HEAD") or no base branch at all. null when the
+ * branch chip shows the base ("main", "origin/main").
+ *
+ * What this does NOT cover: the branch chip is the base the new worktree
+ * starts from, not the folder's checkout — on 01/10 the root of
+ * nuria-platform was on a detached HEAD and the chip still read "main"
+ * (R8-visual-claude-1). No capture exists of a new session in a reused
+ * folder, so it may well read "main" there too. The guards that count for
+ * folder reuse are the server's 409 (lastAppWorktreeFolder) before the
+ * screen is touched, and reusedWorktree when the session is adopted. */
 export function notRepoRoot(lines: OcrLine[], baseBranch = "main"): string | null {
-  const words = lines.flatMap((line) => line.text.split(/\s+/)).map((raw) => raw.replace(/^[([•·"']+|[)\],;:"'•·…]+$/g, "")).filter(Boolean);
+  const words = chipRow(lines).flatMap((line) => line.text.split(/\s+/)).map((raw) => raw.replace(/^[([•·"']+|[)\],;:"'•·…]+$/g, "")).filter(Boolean);
   const base = baseBranch.toLowerCase();
+  const isBase = (lower: string) => lower === base || lower === `origin/${base}`;
   const other = words.find((word) => {
     const lower = word.toLowerCase();
-    if (lower === base) return false;
-    return /^[\w.-]+\/[\w./-]+$/.test(lower) || /^[0-9a-f]{7,40}$/.test(lower) || lower === "head" || lower.startsWith("detached");
+    if (isBase(lower) || /^\d{1,2}\/\d{1,2}(?:\/\d{2,4})?$/.test(lower)) return false;
+    return /^[\w.-]+\/[\w./-]+$/.test(lower) || (/^[0-9a-f]{7,40}$/.test(lower) && /\d/.test(lower)) || lower === "head" || lower.startsWith("detached");
   });
   if (other) return `it shows ${other}, not ${baseBranch}`;
-  if (!words.some((word) => word.toLowerCase() === base)) return `it does not show the base branch ${baseBranch}`;
+  if (!words.some((word) => isBase(word.toLowerCase()))) return `it does not show the base branch ${baseBranch}`;
   return null;
+}
+
+/** The new session's own screen still up: its placeholder, or its row of
+ * chips (Local or the folder, with the worktree option). */
+function newSessionScreen(lines: OcrLine[], repoName: string): boolean {
+  if (lines.some((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()))) return true;
+  const row = chipRow(lines);
+  return row.length >= 2 && (row.some((line) => /^\W*Local$/i.test(line.text.trim())) || showsFolder(row, repoName));
 }
 
 /**
@@ -274,8 +299,9 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     const open = emptyNewSession(before, size, input.repoName);
     const reused = (lines: OcrLine[]) => {
       const bottom = lines.filter((line) => line.y > size.h * 0.55);
-      const why = reusedWorktreeChip(bottom, input.liveWorktrees) ? `it shows ${reusedWorktreeChip(bottom, input.liveWorktrees)}, another session's worktree` : notRepoRoot(bottom, input.baseBranch);
-      return why ? { ok: false as const, reason: `the new session is not in the root of ${input.repoName} (${why}); nothing was typed. In the Claude app, open one session in ${input.repoName} itself (branch ${input.baseBranch ?? "main"}, worktree on) and close it without sending, then this create runs`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } : null;
+      const chip = reusedWorktreeChip(chipRow(bottom), input.liveWorktrees);
+      const why = chip ? `it shows ${chip}, another session's worktree` : notRepoRoot(bottom, input.baseBranch);
+      return why ? { ok: false as const, reason: `the new session is not in the root of ${input.repoName} (${why}); nothing was typed. ${ROOT_SESSION_HOWTO(input.repoName, input.baseBranch ?? "main")}`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } : null;
     };
     if (open) {
       const refusal = reused(before);
@@ -284,7 +310,7 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       if (stop) return stop;
       await act(screen, () => driver.click(open.x + 20, open.y + open.h / 2));
       await driver.sleep(300);
-      return typeBrief(screen, input.text, size);
+      return typeBrief(screen, input.text, size, input.repoName);
     }
     await act(screen, () => driver.menuNewSession());
     await driver.sleep(2_500);
@@ -305,12 +331,20 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     const refusal = reused(lines);
     if (refusal) return refusal;
-    return typeBrief(screen, input.text, size);
+    return typeBrief(screen, input.text, size, input.repoName);
   });
 }
 
+/** What the person does so New Session opens in the repository's root
+ * again. A session must SEND something to exist: of the app's 390 records
+ * on 01/10 none is of a session closed without a message (every one has a
+ * title, which the app takes from the first message), so "open one and
+ * close it" leaves the app's last folder where it was. */
+export const ROOT_SESSION_HOWTO = (repoName: string, baseBranch: string) =>
+  `In the Claude app, start one new session in ${repoName} itself (folder ${repoName}, branch ${baseBranch}, worktree on) and send it a short message — the app records a session only once something is sent; it may be archived afterwards. Then this create runs`;
+
 /** Paste the brief into the new session's field, type the note, send. */
-async function typeBrief(screen: Screen, text: string, size: { h: number }): Promise<DesktopStep> {
+async function typeBrief(screen: Screen, text: string, size: { h: number }, repoName: string): Promise<DesktopStep> {
   const { driver } = screen;
   let stop = await guard(screen, "paste");
   if (stop) return stop;
@@ -325,13 +359,19 @@ async function typeBrief(screen: Screen, text: string, size: { h: number }): Pro
   stop = await guard(screen, "send");
   if (stop) return stop;
   await act(screen, () => driver.key(RETURN));
-  // Sent only when the brief left the field: the new-session screen (its
-  // field with the brief, the worktree option) gone. On 01/10 one "create
-  // ok" lost its brief and nothing said so for 5 minutes (R8-dispatch D5).
+  // Sent only on positive proof that the new-session screen is gone: no
+  // placeholder and no row of chips (Local | repo | worktree), with the
+  // composer's bar read (an empty or half-drawn OCR proves nothing). The
+  // brief's own words are not looked for: the app may fold a long brief
+  // into a pasted block that does not show them. On 01/10 one "create ok"
+  // lost its brief and nothing said so for 5 minutes (R8-dispatch D5).
   await driver.sleep(1_500);
   const after = mainArea(await driver.ocr()).filter((line) => line.y > size.h * 0.55);
-  if (showsPrefix(after, textPrefix(text)) && findLine(after, /worktree/i)) {
-    return { ok: false, reason: "the brief stayed in the new session's field after Return", retry: true, touched: true, seen: seenText(after.slice(-8)) };
+  if (newSessionScreen(after, repoName)) {
+    return { ok: false, reason: "the brief did not leave the new session's screen after Return (its field or chips are still there)", retry: true, touched: true, seen: seenText(after.slice(-8)) };
+  }
+  if (!after.some((line) => COMPOSER_MODE.test(line.text.trim()) || COMPOSER_MODEL.test(line.text.trim()) || COMPOSER_PLACEHOLDER.test(line.text.trim()))) {
+    return { ok: false, reason: "could not read the screen after Return to confirm the brief left the new session's field", retry: true, touched: true, seen: seenText(after.slice(-8)) };
   }
   return { ok: true };
 }
@@ -402,6 +442,8 @@ export async function sendToDesktopSession(driver: DesktopDriver, input: { local
  * short icon tokens before it ("+ O v Ignorar permissões", "+ Q v
  * Automático" — the real bar), never a sentence that ends in "plan". */
 export const COMPOSER_MODE = /^(?:\+\s*)?(?:\S{1,2}\s+){0,3}(Automático|Automatic|Auto|Pedir aprova[çc][ãa]o|Ask|Plan|Planejar|Ignorar permiss[õo]es|Bypass permissions|Aceitar edi[çc][õo]es|Accept edits)$/i;
+/** The model on the right of that bar ("Opus 5.5", cut to "Opus" at times). */
+const COMPOSER_MODEL = /^(Opus|Sonnet|Haiku|Fable)(\s*\d[\d.]*)?$/i;
 /** The field's text starts where the mode bar starts (x 547 against 543 on
  * the real screen); the branch strip and the diff/CI chips do not. */
 const COMPOSER_COLUMN_SLACK = 40;
