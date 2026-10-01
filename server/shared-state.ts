@@ -90,18 +90,20 @@ export class SharedState {
 
   /** The prompt block for a turn in `threadId`: the other conversations'
    * records and the person's orders (all of them), newest first, cut to
-   * SHARED_STATE_MAX_BYTES. `work` lines (sessions, PRs) come from the caller. */
-  render(botId: string, threadId: string, now: number, work: string[] = []): string {
+   * SHARED_STATE_MAX_BYTES. `work` lines (sessions, PRs) come from the caller;
+   * `include`, when given, keeps only the conversations (and their orders) it accepts. */
+  render(botId: string, threadId: string, now: number, work: string[] = [], include?: (threadId: string) => boolean): string {
     const state = this.state(botId);
-    const others = state.threads.filter((known) => known.threadId !== threadId);
-    if (!others.length && !state.orders.length && !work.length) return "";
+    const others = state.threads.filter((known) => known.threadId !== threadId && (!include || include(known.threadId)));
+    const orders = include ? state.orders.filter((order) => include(order.threadId)) : state.orders;
+    if (!others.length && !orders.length && !work.length) return "";
     const when = (at: number) => new Date(at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
-    const newest = Math.max(0, ...others.map((known) => known.at), ...state.orders.map((order) => order.at));
+    const newest = Math.max(0, ...others.map((known) => known.at), ...orders.map((order) => order.at));
     const head = `\n\nEstado das suas outras conversas (atualizado ${when(newest || now)}). The same bot speaks in all of them: what was decided or ordered in one holds in the others.\n`;
     const lines: string[] = [];
-    if (state.orders.length) {
+    if (orders.length) {
       lines.push("Ordens do dono em vigor (valem em todas as conversas):");
-      for (const order of state.orders) lines.push(`- ${order.text} (${when(order.at)})`);
+      for (const order of orders) lines.push(`- ${order.text} (${when(order.at)})`);
     }
     if (work.length) {
       lines.push("Trabalho em andamento:");

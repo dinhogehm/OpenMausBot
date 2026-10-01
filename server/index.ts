@@ -8817,7 +8817,7 @@ function sharedStatePrompt(botId: string, threadId: string): string {
     .filter((session) => session.ownerBotId === botId && session.status !== "archived")
     .slice(-6)
     .map((session) => `sessão Claude Code "${session.title}" (${session.status}${session.delivery ? `, PRs ${Object.keys(session.delivery.prs).map((n) => `#${n}`).join(" ")}` : ""})`);
-  return sharedState.render(botId, threadId, Date.now(), work);
+  return sharedState.render(botId, threadId, Date.now(), work, recentWorkFilter().include);
 }
 
 /** A turn finished: its conversation's record for the others, and the
@@ -8826,6 +8826,9 @@ function recordSharedState(threadId: string): void {
   const bot = store.botByThread(threadId);
   const task = bot ? store.taskByThread(bot.id, threadId) : null;
   if (!bot || !task || store.groupByThread(threadId)) return;
+  // On a Cloud home only the owner's own conversations are shared, like the
+  // recent-work brief: one a guest left behind is never the owner's.
+  if (CLOUD_HOME && !cloudOwnerOnlyThread(threadId)) { sharedState.forgetThread(bot.id, threadId); return; }
   const messages = store.messagesFor(threadId);
   const lastReply = messages.findLast((message) => message.role === "bot" && message.kind === "text" && !message.from);
   const goal = autonomy.goalFor(threadId);

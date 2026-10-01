@@ -36,6 +36,17 @@ describe("what a bot's conversations know about each other", () => {
     expect(block.match(/Sempre avise o Chief/g)).toHaveLength(1);
   });
 
+  it("leaves out the conversations, and their orders, that the caller does not include", () => {
+    const state = new SharedState(null);
+    state.record("b", { threadId: "mine", title: "Mine", at: 1, decision: "OWNER-SAID" }, [{ threadId: "mine", at: 1, text: "Sempre avise o Chief." }]);
+    state.record("b", { threadId: "guest", title: "Guest's", at: 2, decision: "GUEST-SAID" }, [{ threadId: "guest", at: 2, text: "Nunca publique sem GO." }]);
+    const block = state.render("b", "now", 3, [], (threadId) => threadId !== "guest");
+    expect(block).toContain("OWNER-SAID");
+    expect(block).toContain("Sempre avise o Chief.");
+    expect(block).not.toMatch(/GUEST-SAID|Guest's|Nunca publique/);
+    expect(state.render("b", "now", 3, [], () => false)).toBe("");
+  });
+
   it("tells an order from an ordinary request", () => {
     expect(isOwnerOrder("Não rode o ci:local agora")).toBe(true);
     expect(isOwnerOrder("A partir de agora, publique só com GO")).toBe(true);
