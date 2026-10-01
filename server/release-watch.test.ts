@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { haltedRelease, haltStillMatters, releaseFailureCause, releaseFailures, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { BotAutonomy } from "./bot-autonomy.ts";
+import { haltedRelease, haltStillMatters, releaseFailureCause, releaseFailures, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 const log = [
   "Release production failed for b51648498 (exit 1)",
@@ -128,6 +129,26 @@ describe("after a release", () => {
     expect(title).toContain("só o dono ou quem tem bypass");
     // only the protected-ref line: said as such
     expect(tagStuckCause(real.split("\n").slice(1).join("\n"), sha)).toContain("(ref protegida)");
+  });
+
+  // INSP-R r4: an open "advance the tag to X" after the tag reached X would move the tag BACK
+  it("closes the owner's 'advance the tag' item once the tag contains its commit", () => {
+    const X = "1bbd5c2a72a2ed67bc5a6a0d163f3ac2df576e44";
+    const Y = "c88f99d62000000000000000000000000000000a";
+    const autonomy = new BotAutonomy({ path: null });
+    autonomy.addOwnerPending("chief", "desk", { title: tagAdvancePendingTitle(X), key: `tag-advance:${X}` });
+    autonomy.addOwnerPending("chief", "desk", { title: "outra coisa", key: "desktop:abc" });
+    const open = () => autonomy.ownerPendingFor("desk").map((item) => item.key ?? "");
+    // the tag still behind X: stays open
+    expect(tagAdvanceToResolve(open(), "90b3ef2a5aaa", () => false)).toEqual([]);
+    expect(tagAdvanceToResolve(open(), "90b3ef2a5aaa", () => null)).toEqual([]); // not verifiable: kept
+    expect(tagAdvanceToResolve(open(), null, () => true)).toEqual([]);
+    // advanced by hand to X (same commit), or past it by a later release Y that contains X
+    expect(tagAdvanceToResolve(open(), X, () => null)).toEqual([`tag-advance:${X}`]);
+    const done = tagAdvanceToResolve(open(), Y, (sha) => sha === X);
+    expect(done).toEqual([`tag-advance:${X}`]);
+    for (const key of done) autonomy.resolveOwnerPending({ key });
+    expect(open()).toEqual(["desktop:abc"]);
   });
 
   // INSP-R r1 item 10: ls-remote does not fetch; a commit missing in the clone is no evidence

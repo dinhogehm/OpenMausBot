@@ -341,7 +341,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
-import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8260,6 +8260,7 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
     contains = tagContainsRelease({ releasedKnown, tagKnown, isAncestor });
     if (contains === null && !releaseWatch.quiet.has(`tag:${tagSha}:${released}`) && releaseWatch.quiet.add(`tag:${tagSha}:${released}`)) console.log(`[release] tag ${PRODUCTION_TAG} at ${tagSha.slice(0, 9)} vs released ${released.slice(0, 9)}: not verifiable in ${repo} (commit missing here, or git failed) — no stuck-tag alert`);
   }
+  await resolveTagAdvancePendings(repo, tagSha, released, contains);
   let releasedAt = Date.now();
   try { releasedAt = statSync(RELEASED_SHA_FILE).mtimeMs; } catch { return; }
   // the cause of THIS release only: its warning and the refusal just above it (stderr)
@@ -8272,7 +8273,32 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
     releaseAlertToChief(text, `${tagStuckReport(text, Boolean(manual))}\nLogs: ${RELEASE_OUT_LOG} e ${RELEASE_ERR_LOG}.`);
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
     const desk = chief ? chiefDeskThread(chief) : null;
-    if (chief && desk && store.taskByThread(chief.id, desk)) autonomy.addOwnerPending(chief.id, desk, { title: tagAdvancePendingTitle(released), key: `tag-advance:${released}` });
+    if (chief && desk && store.taskByThread(chief.id, desk)) {
+      autonomy.addOwnerPending(chief.id, desk, { title: tagAdvancePendingTitle(released), key: `tag-advance:${released}` });
+      refreshBotRow(chief.id);
+    }
+  }
+}
+
+/** The owner's "advance the tag" items close by themselves once the tag
+ * contains their commit (by hand or by a later release): left open, the
+ * command they point to would move the production tag back. */
+async function resolveTagAdvancePendings(repo: string, tagSha: string | null, released: string, releasedContained: boolean | null): Promise<void> {
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  const desk = chief ? chiefDeskThread(chief) : null;
+  if (!chief || !desk || !tagSha) return;
+  const open = autonomy.ownerPendingFor(desk).map((item) => item.key ?? "").filter((key) => key.startsWith("tag-advance:"));
+  if (!open.length) return;
+  const contained = new Map<string, boolean | null>();
+  for (const key of open) {
+    const sha = key.slice("tag-advance:".length);
+    if (released && (sha.startsWith(released) || released.startsWith(sha))) contained.set(sha, releasedContained);
+    else contained.set(sha, await execCc("git", ["-C", repo, "merge-base", "--is-ancestor", sha, tagSha]).then(() => true, () => null));
+  }
+  const done = tagAdvanceToResolve(open, tagSha, (sha) => contained.get(sha) ?? null);
+  for (const key of done) {
+    for (const item of autonomy.resolveOwnerPending({ key })) refreshBotRow(item.botId);
+    console.log(`[release] tag ${PRODUCTION_TAG} at ${tagSha.slice(0, 9)} contains ${key.slice("tag-advance:".length, "tag-advance:".length + 9)}: the owner's "advance the tag" item is closed`);
   }
 }
 

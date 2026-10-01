@@ -193,6 +193,19 @@ export function tagStuckReport(text: string, manualAdvancePrinted: boolean): str
   return `[Alerta do servidor: tag de produção parada] ${text}\nAvançar a tag é ação do dono (ou de quem tem bypass do ruleset do repositório); bots não executam esse avanço nem force-push.${manualAdvancePrinted ? " O release deixou o comando exato no log do servidor e na pendência do dono." : ""} Avise o dono; até a tag andar, confirme entregas a clientes pelo commit em produção, não pela tag.`;
 }
 
+/** The owner's "advance the tag" items to close: once the tag contains their
+ * commit (advanced by hand, or by a later release), following them would move
+ * the production tag BACK. `contained` says, per sha, whether the tag contains
+ * it (null = not verifiable: kept open). A sha equal to the tag's is contained. */
+export function tagAdvanceToResolve(openKeys: readonly string[], tagSha: string | null, contained: (sha: string) => boolean | null): string[] {
+  if (!tagSha) return [];
+  return openKeys.filter((key) => {
+    const sha = /^tag-advance:([0-9a-f]{7,40})$/.exec(key)?.[1];
+    if (!sha) return false;
+    return sameCommit(sha, tagSha) || contained(sha) === true;
+  });
+}
+
 /** The owner's pending item for a stuck tag (OWNER_PENDING_TITLE_MAX = 200). */
 export function tagAdvancePendingTitle(releasedSha: string): string {
   return `Avançar a tag de produção para ${releasedSha.trim().slice(0, 9)} (barrada pelo ruleset; só o dono ou quem tem bypass, comando no log do servidor)`;
