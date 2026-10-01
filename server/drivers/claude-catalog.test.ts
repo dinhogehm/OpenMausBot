@@ -72,11 +72,12 @@ describe("readClaudeModelCatalog", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "settings.json"),
-      JSON.stringify({ extraModels: [{ id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" }, "omlx::local-qwen"] }),
+      // newer than every static row (claude-sonnet-5-5 is one of them now)
+      JSON.stringify({ extraModels: [{ id: "claude-opus-6", label: "Claude Opus 6" }, "omlx::local-qwen"] }),
     );
 
     expect(readClaudeModelCatalog({ HOME: home }).options.slice(STATIC_CLAUDE_MODELS.options.length)).toEqual([
-      { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
+      { id: "claude-opus-6", label: "Claude Opus 6" },
       { id: "omlx::local-qwen", label: "omlx::local-qwen", custom: true },
     ]);
   });
