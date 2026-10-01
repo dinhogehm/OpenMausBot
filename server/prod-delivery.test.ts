@@ -48,6 +48,10 @@ describe("delivery in production", () => {
     expect(githubSlug("git@github.com:dinhogehm/nuria-platform")).toBe(SLUG);
     expect(githubSlug("https://notgithub.com/a/b.git")).toBeNull();
     expect(prLinks("Merged PR #9315 and pull request #9316; issue #9295 stays open", SLUG).map((link) => link.number)).toEqual([9315, 9316]);
+    // lists after one "PRs" (R8-followup F5), and still no bare issue numbers
+    expect(prLinks("Mergeei as PRs #9329 e #9330; a issue #9326 segue aberta", SLUG).map((link) => link.number)).toEqual([9329, 9330]);
+    expect(prLinks("PRs #9315, #9316 and #9317 are in the carrier", SLUG).map((link) => link.number)).toEqual([9315, 9316, 9317]);
+    expect(prLinks("PR #9328/#9330 com gate verde", SLUG).map((link) => link.number)).toEqual([9328, 9330]);
     expect(parseLsRemoteTag(`aaa\trefs/tags/x\nbbb\trefs/tags/x^{}\n`, "x")).toBe("bbb");
     expect(parseLsRemoteTag(`aaa\trefs/tags/x\n`, "x")).toBe("aaa");
     expect(parseLsRemoteTag("", "x")).toBeNull();

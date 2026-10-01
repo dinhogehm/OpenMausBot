@@ -54,10 +54,14 @@ export function prLinks(text: string, slug: string): Array<{ url: string; number
     const number = Number(match[2]);
     if (!found.has(number)) found.set(number, `https://github.com/${match[1]}/pull/${number}`);
   }
-  // sessions often report a PR only as "PR #9315" (a bare "#N" may be an issue, so it is not taken)
-  for (const match of text.matchAll(/\b(?:PR|pull request)\s*#(\d{2,6})\b/gi)) {
-    const number = Number(match[1]);
-    if (!found.has(number)) found.set(number, `https://github.com/${slug}/pull/${number}`);
+  // sessions often report a PR only as "PR #9315", or a list: "PRs #9329 e
+  // #9330", "PRs #1, #2 and #3", "PR #1/#2" (a bare "#N" may be an issue, so
+  // only numbers in a run that starts with PR count)
+  for (const match of text.matchAll(/\b(?:PRs?|pull requests?)\s*(#\d{2,6}(?:\s*(?:,|\/|&|\be\b|\band\b)\s*#\d{2,6})*)/gi)) {
+    for (const each of match[1]!.matchAll(/#(\d{2,6})/g)) {
+      const number = Number(each[1]);
+      if (!found.has(number)) found.set(number, `https://github.com/${slug}/pull/${number}`);
+    }
   }
   return [...found].map(([number, url]) => ({ url, number }));
 }
