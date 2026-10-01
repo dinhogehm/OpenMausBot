@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
 import {
   BotAutonomy,
+  SEEN_CHAT_MAX,
   GOAL_DEFAULT_MAX_TURNS,
   GOAL_MIN_TURN_GAP_MS,
   goalContinuationPrompt,
@@ -473,9 +474,9 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
 
   it("takes the bot's own comment as the new baseline instead of waking it", () => {
     const autonomy = make();
-    // a watch on the comments of #9307: one line per comment
-    const old = "9307\tfulana\tO login ainda falha\t2026-09-30T20:00:00Z";
-    const mine = "9307\tmonitor\tPublicado em produção, pode testar\t2026-10-01T08:37:20Z";
+    // a watch on the comments of #9307, as its --jq prints them: "#N login id: <end of the body>"
+    const old = "#9307 fulana 4400: O login ainda falha";
+    const mine = "#9307 bot-user 4401: Publicado em produção, pode testar";
     const wake = autonomy.setWatch("bot", "t1", { ...base, command: "gh api repos/o/r/issues/9307/comments", argv: ["gh", "api", "repos/o/r/issues/9307/comments"], standing: true, label: "issues", baseline: old, baselineFingerprint: "a" });
     autonomy.recordWatchRun(wake, { ok: true, output: old, matched: false, fingerprint: "a", lines: [old] });
     autonomy.noteSelfWrite("bot", selfWriteOf('gh issue comment 9307 --body "Publicado em produção, pode testar"', now)!);
@@ -483,7 +484,7 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     expect(autonomy.recordWatchRun(wake, { ok: true, output: `${old}\n${mine}`, matched: false, fingerprint: "b", lines: [old, mine] })).toBeNull();
     expect(wake.watch!.echoAt).toBe(now);
     // a person on the same issue two minutes later: it wakes the bot
-    const human = "9307\tfulana\tTestei e continua com erro\t2026-10-01T08:39:20Z";
+    const human = "#9307 fulana 4402: Testei e continua com erro";
     now += 2 * 60_000;
     expect(autonomy.recordWatchRun(wake, { ok: true, output: `${old}\n${mine}\n${human}`, matched: false, fingerprint: "c", lines: [old, mine, human] })).toBe("changed");
   });
@@ -497,11 +498,13 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     const autonomy = make();
     const wake = autonomy.setWatch("monitor", "thread-planilha", { ...base, command: "gog sheets get SHEET_ID Atendimento!A1:H400 --plain", argv: ["gog", "sheets", "get", "SHEET_ID", "Atendimento!A1:H400", "--plain"], label: "planilha", baseline: "x", baselineFingerprint: "a" });
     autonomy.recordWatchRun(wake, run(sheet, "a"));
-    // the bot's note after its mark: an echo, said with why
+    // the bot's note, pasted through the VM, after its mark: an echo, said with why
     now += 60_000;
-    const noted = sheet.map((line, i) => (i === row ? `${line} · 01/10 16:10 BRT: sessão aberta` : line));
+    const note = " | [Monitor Chat Atendimento] 01/10 16:10 BRT: sessão aberta";
+    expect(autonomy.noteVmClipboard("monitor", note, ownMark)).toBe(true);
+    const noted = sheet.map((line, i) => (i === row ? `${line}${note}` : line));
     expect(autonomy.recordWatchRun(wake, run(noted, "b"))).toBeNull();
-    expect(wake.watch!.echo).toMatchObject({ at: now, lines: 1, reasons: ["só o texto depois da marca mudou"], sample: expect.stringContaining("Oqvnflfa") });
+    expect(wake.watch!.echo).toMatchObject({ at: now, lines: 1, reasons: ["nota que o bot escreveu, acrescentada igual"], sample: expect.stringContaining("Oqvnflfa") });
     // the client's "Reprovado" in that same row: it wakes the bot
     now += 60_000;
     const reproved = noted.map((line, i) => (i === row ? line.replace("Pendente    Atendimento", "Pendente    Reprovado  Atendimento") : line));
@@ -519,6 +522,110 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     const again = restarted.standingFor("t1", "planilha")!;
     const more = [...lines, "[Monitor Chat Atendimento] outra nota"];
     expect(restarted.recordWatchRun(again, { ok: true, output: more.join("\n"), matched: false, fingerprint: "b", lines: more, ownMark })).toBe("changed");
+  });
+
+  it("follows the real VM sequence of a Chat post: the pasted body is the bot's, a mention or a URL is not, a copied client message is not (INSP-E r3 4)", () => {
+    // the real Chat watch output (TSV, newest first), redacted
+    const chat = readFileSync(new URL("./testing/fixtures/gog-chat-plain.txt", import.meta.url), "utf8").trim().split("\n");
+    const message = (id: string, sender: string, text: string) => `spaces/GSMW4KYdbE4/messages/${id}.${id}\t${sender}\t2026-10-01T13:34:00.000000Z\t${text}`;
+    const ownMark = botMarkPattern("Monitor Chat Atendimento", "monitor-chat-atendimento");
+    const autonomy = make();
+    const wake = autonomy.setWatch("monitor", "thread-chat", { ...base, command: "gog chat messages list spaces/AAAAexample --max 10 --order \"createTime desc\" --plain", argv: ["gog", "chat", "messages", "list", "spaces/AAAAexample", "--max", "10", "--order", "createTime desc", "--plain"], label: "chat", baseline: "x", baselineFingerprint: "a" });
+    let shown = chat;
+    let fingerprint = 0;
+    const run = (...news: string[]) => {
+      shown = [shown[0]!, ...news, ...shown.slice(1, -news.length)];
+      now += 60_000;
+      return autonomy.recordWatchRun(wake, { ok: true, output: shown.join("\n"), matched: false, fingerprint: `f${fingerprint++}`, lines: shown, ownMark });
+    };
+    autonomy.recordWatchRun(wake, { ok: true, output: chat.join("\n"), matched: false, fingerprint: "a", lines: chat, ownMark });
+    // the recorded calls: clipboard_write URL → hotkey → type_text "@Fulana de Tal" → clipboard_write body → press_key
+    expect(autonomy.noteVmClipboard("monitor", "https://mail.google.com/chat/u/0/#chat/space/AAAAexample\n")).toBe(false);
+    const body = "saiu hoje à tarde a correção do atendimento reaberto, pode testar e me avise";
+    expect(autonomy.noteVmClipboard("monitor", body)).toBe(true);
+    // (a) the message as the Chat shows it, the mention expanded: the bot's
+    expect(run(message("nWv1", "Neewdoa Ocex", `@Fulana de Tal da Silva ${body}`))).toBeNull();
+    expect(wake.watch!.echo?.reasons).toEqual([`post do bot ("${body.slice(0, 40)}")`]);
+    // (b) someone else calling the same person: it wakes
+    expect(run(message("nWv2", "Karntf Fhqxr", "@Fulana de Tal da Silva você viu o erro de novo?"))).toBe("changed");
+    autonomy.rearmStanding(wake);
+    // (b2) a person pasting the bot's post and adding to it: the message is not the post, it wakes (INSP-E r4 1)
+    const body2 = "para testar: abra um atendimento novo e responda pelo widget do chat";
+    expect(autonomy.noteVmClipboard("monitor", body2)).toBe(true);
+    expect(run(message("nWv4", "Karntf Fhqxr", `@Karntf Fhqxr ${body2} fiz isso e não funcionou`))).toBe("changed");
+    autonomy.rearmStanding(wake);
+    // (c) the bot copies a client's message (to quote it in an issue), the client sends it again: it wakes
+    const clientText = chat.map((line) => line.split("\t")[3] ?? "").find((text) => text.length > 100)!;
+    expect(autonomy.noteVmClipboard("monitor", clientText)).toBe(false);
+    expect(run(message("nWv3", "Karntf Fhqxr", clientText))).toBe("changed");
+  });
+
+  it("knows a message seen in the last 24 h, out of the list now, as a copy, not the bot's post (INSP-E r5 2)", () => {
+    const autonomy = make();
+    const wake = autonomy.setWatch("monitor", "thread-chat", { ...base, command: "gog chat messages list spaces/AAAAexample --max 10 --plain", argv: ["gog", "chat", "messages", "list", "spaces/AAAAexample", "--max", "10", "--plain"], label: "chat", baseline: "x", baselineFingerprint: "a" });
+    const message = (n: number, text: string) => `spaces/AAAAexample/messages/m${n}.m${n}\tKarntf Fhqxr\t2026-10-01T10:${String(n).padStart(2, "0")}:00.000000Z\t${text}`;
+    const clientText = "o atendimento caiu de novo às 10h e a cliente não recebeu a resposta do bot";
+    let lines = ["RESOURCE\tSENDER\tTIME\tTEXT", message(0, clientText), ...Array.from({ length: 9 }, (_, i) => message(i + 1, `mensagem antiga ${i}`))];
+    autonomy.recordWatchRun(wake, { ok: true, output: lines.join("\n"), matched: false, fingerprint: "f0", lines });
+    // ten new messages: the client's leaves the list of the last 10
+    for (let n = 10; n < 20; n += 1) {
+      now += 60_000;
+      lines = [lines[0]!, message(n, `mensagem nova ${n}`), ...lines.slice(1, 10)];
+      autonomy.recordWatchRun(wake, { ok: true, output: lines.join("\n"), matched: false, fingerprint: `f${n}`, lines });
+      if (wake.watch!.trigger) autonomy.rearmStanding(wake);
+    }
+    expect(lines.some((line) => line.includes(clientText))).toBe(false);
+    // the bot copies it (to quote it in an issue): not its post
+    expect(autonomy.noteVmClipboard("monitor", clientText)).toBe(false);
+    // the client sends it again: it wakes the bot
+    now += 60_000;
+    lines = [lines[0]!, message(30, clientText), ...lines.slice(1, 10)];
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: lines.join("\n"), matched: false, fingerprint: "f30", lines })).toBe("changed");
+    // and the memory stays bounded
+    const many = Array.from({ length: SEEN_CHAT_MAX + 50 }, (_, i) => message(i, `texto único número ${i} para encher a memória`));
+    autonomy.rearmStanding(wake);
+    autonomy.recordWatchRun(wake, { ok: true, output: "x", matched: false, fingerprint: "big", lines: many });
+    expect(autonomy.seenChatCount("monitor")).toBe(SEEN_CHAT_MAX);
+  });
+
+  it("keeps no Chat post from the VM while a Chat watch has no output of its own yet (restart, first run) (INSP-E r4 3)", () => {
+    const autonomy = make();
+    autonomy.setWatch("monitor", "thread-chat", { ...base, command: "gog chat messages list spaces/AAAAexample --plain", argv: ["gog", "chat", "messages", "list", "spaces/AAAAexample", "--plain"], label: "chat", baseline: "x", baselineFingerprint: "a" });
+    const clientText = "o atendimento caiu de novo às 10h e a cliente não recebeu a resposta do bot";
+    expect(autonomy.noteVmClipboard("monitor", clientText)).toBe(false);
+  });
+
+  it("lets go of a one-shot watch's kept lines when it is handed to its turn (INSP-E r3 3)", () => {
+    const autonomy = make();
+    const once = autonomy.setWatch("bot", "t9", { ...base, standing: false, command: "gh pr view 1", baseline: "x", baselineFingerprint: "a" });
+    autonomy.recordWatchRun(once, { ok: true, output: "OPEN", matched: false, fingerprint: "a", lines: ["OPEN"] });
+    expect(autonomy.keptLineSets()).toBe(1);
+    // out of time, nothing changed: leased to its turn
+    autonomy.leaseWake(once);
+    expect(autonomy.keptLineSets()).toBe(0);
+  });
+
+  it("lets go of a watch's kept lines when it is cancelled, replaced or fires once (INSP-E r2 5)", () => {
+    const autonomy = make();
+    const lines = ["linha 1", "linha 2"];
+    const run = (wake: ReturnType<typeof autonomy.setWatch>, output: string[], fingerprint: string) =>
+      autonomy.recordWatchRun(wake, { ok: true, output: output.join("\n"), matched: false, fingerprint, lines: output });
+    const standing = autonomy.setWatch("bot", "t1", { ...base, command: "gog sheets get x --plain", label: "planilha", baseline: "x", baselineFingerprint: "a" });
+    run(standing, lines, "a");
+    const once = autonomy.setWatch("bot", "t2", { ...base, standing: false, command: "gh pr view 1", baseline: "x", baselineFingerprint: "a" });
+    run(once, lines, "a");
+    expect(autonomy.keptLineSets()).toBe(2);
+    // the one-shot watch fires: used up
+    now += 60_000;
+    expect(run(once, [...lines, "linha 3"], "b")).toBe("changed");
+    expect(autonomy.keptLineSets()).toBe(1);
+    // replaced, then cancelled
+    const replaced = autonomy.setWatch("bot", "t1", { ...base, command: "gog sheets get x --plain", label: "planilha", baseline: "x", baselineFingerprint: "a" });
+    expect(autonomy.keptLineSets()).toBe(0);
+    run(replaced, lines, "a");
+    expect(autonomy.keptLineSets()).toBe(1);
+    autonomy.cancelStanding("t1", "planilha");
+    expect(autonomy.keptLineSets()).toBe(0);
   });
 
   it("finds the same command already watched by this bot in another conversation", () => {

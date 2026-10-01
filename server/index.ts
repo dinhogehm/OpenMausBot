@@ -410,7 +410,7 @@ import type { ProviderInstance } from "./contracts.ts";
 import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-selection.ts";
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
-import { botMarkPattern, botSlug, selfWriteOf, urlOfToolCall, vmWriteOf } from "./watch-echo.ts";
+import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { CcStartQueue, priorityLabel, startPriority } from "./cc-start-queue.ts";
 import { removeNestedWorktrees, removeReleasedWorktrees } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
@@ -9757,32 +9757,28 @@ bus.subscribe((event: RuntimeEvent) => {
 
 // A watcher bot's own comment, post or spreadsheet note is remembered for
 // a while, so its watch does not wake it on that echo (server/watch-echo.ts).
-// Writes through the VM's computer count too: the page it last opened
-// (a spreadsheet, the Chat) and the text it then typed or pasted there.
-const vmOpenUrl = new Map<string, string>();
+// Shell commands (gh, gog) count, and of the VM's computer only the Chat
+// post put on its clipboard to paste (server/watch-echo.ts vmChatPostOf).
 bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
   if (event.type !== "item.started" || event.itemType !== "tool") return;
   const bot = store.botByThread(event.threadId);
   if (!bot) return;
-  const tool = event.title ?? "";
-  if (event.summary) {
-    // the whole command when the preview has it (the summary stops at 200 characters)
-    let command = event.summary;
+  if (/(?:^|__)clipboard_write$/.test(event.title ?? "")) {
     try {
-      const parsed = JSON.parse(event.input ?? "") as { command?: unknown };
-      if (typeof parsed.command === "string") command = parsed.command;
-    } catch { /* the summary it is */ }
-    const write = selfWriteOf(command, Date.now());
-    if (write) autonomy.noteSelfWrite(bot.id, write);
+      const { text } = JSON.parse(event.input ?? "") as { text?: unknown };
+      if (typeof text === "string") autonomy.noteVmClipboard(bot.id, text, botMarkPattern(bot.name, botSlug(bot.name)));
+    } catch { /* a preview that is not JSON: nothing kept */ }
     return;
   }
-  const url = urlOfToolCall(tool, event.input);
-  if (url) {
-    vmOpenUrl.set(event.threadId, url);
-    if (vmOpenUrl.size > 500) vmOpenUrl.clear();
-  }
-  const write = vmWriteOf(tool, event.input, vmOpenUrl.get(event.threadId) ?? null, Date.now());
+  if (!event.summary) return;
+  // the whole command when the preview has it (the summary stops at 200 characters)
+  let command = event.summary;
+  try {
+    const parsed = JSON.parse(event.input ?? "") as { command?: unknown };
+    if (typeof parsed.command === "string") command = parsed.command;
+  } catch { /* the summary it is */ }
+  const write = selfWriteOf(command, Date.now());
   if (write) autonomy.noteSelfWrite(bot.id, write);
 });
 
