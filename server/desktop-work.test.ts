@@ -24,6 +24,7 @@ import {
   ageFailedSessions,
   uniqueSessionTitle,
   pickDesktopPending,
+  renameAskTitle,
   runDesktopWork,
   watchStalledSessions,
   type DesktopWorkDeps,
@@ -720,7 +721,52 @@ describe("a rename that cannot be done", () => {
     }
     expect(session.desktop!.pending).toBeUndefined();
     expect(h.steps.rename).toHaveBeenCalledTimes(DESKTOP_RENAME_MAX_MISSES);
-    expect(pendings).toEqual([expect.objectContaining({ key: "cc-rename:r", title: expect.stringContaining('para "#8891 Inbox 503 diagnóstico"'), link: expect.stringContaining("claude://code/continue?session=") })]);
+    expect(pendings).toEqual([expect.objectContaining({ key: "cc-rename:r", title: expect.stringContaining('→ "#8891 Inbox 503 diagnóstico"'), link: expect.stringContaining("claude://code/continue?session=") })]);
+  });
+
+  it("names the session by the app's title, short, and settles the item when the person renames it by hand or it is archived (INSP-D A6)", async () => {
+    const h = harness();
+    const pendings: { title: string; link?: string; key: string }[] = [];
+    const resolved: string[] = [];
+    h.deps.ownerPending = (_session, item) => pendings.push(item);
+    h.deps.resolveOwnerPending = (key) => resolved.push(key);
+    // e25edbb6 on 01/10: our title and the app's differ
+    const session = h.opened("e", { title: "Inbox 503 diagnóstico e recuperação" });
+    session.title = "8891 inbox 503 diagnóstico encerrar e recuperação";
+    session.desktop!.issue = "8891";
+    session.desktop!.renameTried = true;
+    h.transcripts.set("cli-e", { text: "brief", writtenAt: h.now, ended: true });
+    session.status = "idle";
+    session.desktop!.pending = { kind: "rename", text: "#8891 Inbox 503 diagnóstico e recuperação", since: h.now, attempts: 0 };
+    for (let i = 0; i < DESKTOP_RENAME_MAX_MISSES; i += 1) {
+      h.results.push({ ok: false, reason: "the session menu showed no Rename item", retry: true, miss: true, touched: true });
+      await h.tick();
+      h.advance(11 * 60_000);
+    }
+    expect(pendings).toHaveLength(1);
+    expect(pendings[0]!.title).toBe('Renomear no app: "Inbox 503 diagnóstico e recuperação" → "#8891 Inbox 503 diagnóstico e recuperação"');
+    expect(pendings[0]!.title).not.toContain("encerrar");
+    // long titles are cut, each with "…": the line stays short and the new title's number stays in it
+    const long = renameAskTitle("Uma sessão com um título bem mais comprido do que cabe na linha", "#9999 Uma sessão com um título bem mais comprido do que cabe na linha");
+    expect(long).toBe('Renomear no app: "Uma sessão com um título bem mais c…" → "#9999 Uma sessão com um título bem mais com…"');
+    // not yet renamed: nothing settles
+    followDesktopSessions(h.deps);
+    expect(resolved).toEqual([]);
+    // the person renamed it by hand in the app
+    h.records.set(LOCAL, { ...h.records.get(LOCAL)!, title: "#8891 Inbox 503 diagnóstico e recuperação" });
+    followDesktopSessions(h.deps);
+    expect(resolved).toEqual(["cc-rename:e"]);
+    followDesktopSessions(h.deps);
+    expect(resolved).toEqual(["cc-rename:e"]);
+    // archived without being renamed: settled too
+    const other = harness();
+    const settled: string[] = [];
+    other.deps.resolveOwnerPending = (key) => settled.push(key);
+    const archived = other.opened("f", { title: "Outra" });
+    archived.desktop!.renameAsked = true;
+    other.records.set(LOCAL, { ...other.records.get(LOCAL)!, isArchived: true });
+    followDesktopSessions(other.deps);
+    expect(settled).toEqual(["cc-rename:f"]);
   });
 });
 

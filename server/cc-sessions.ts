@@ -142,6 +142,8 @@ export interface CcDesktopState {
   issue?: string;
   /** A rename to "#NNNN …" was already tried (it is tried once). */
   renameTried?: boolean;
+  /** The person was asked (owner_pending) to rename it by hand: resolved once the app's title has "#NNNN", or on archive. */
+  renameAsked?: boolean;
   /** tool_use id of the open question already reported to the owner. */
   questionReported?: string;
   /** Its folder was found missing (reported once). */

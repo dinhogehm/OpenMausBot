@@ -180,6 +180,15 @@ export function reportFor(deps: DesktopWorkDeps, session: CcSession): string {
   return ccReportForOwner(session, { hookDecision: id && deps.hookDecision ? deps.hookDecision(id) : null });
 }
 
+const renameKey = (session: CcSession) => `cc-rename:${session.id}`;
+
+/** "Precisa de você" shows one line: the app's title (what the person finds
+ * in the app's sidebar) and the new one, short. */
+export function renameAskTitle(appTitle: string, newTitle: string): string {
+  const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
+  return `Renomear no app: "${cut(appTitle, 36)}" → "${cut(newTitle, 44)}"`;
+}
+
 /** A screen action that cannot be done. Only a create that never opened
  * fails the session; a message that could not be typed, or an archive or
  * rename the screen would not allow, fails just that action — the session
@@ -204,10 +213,13 @@ export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason:
     deps.report(session, `Claude Code session "${session.title}" (${session.id}): your message was NOT delivered — ${reason}. The session itself is fine and idle in the app${link}; send it again with cc_session_send later, or tell the person. Undelivered message: "${pending.text.slice(0, 300)}"`);
     return;
   }
-  deps.ledger.save();
   if (pending.kind === "rename") {
-    deps.ownerPending?.(session, { title: `Renomeie no app Claude a sessão "${session.title}" para "${pending.text}"`, ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}), key: `cc-rename:${session.id}` });
+    // The title the person sees in the app (not our ledger's), and the new one, essentials first.
+    const appTitle = (desktop.localId ? deps.readRecord(desktop.localId)?.title : undefined) ?? session.title;
+    desktop.renameAsked = true;
+    deps.ownerPending?.(session, { title: renameAskTitle(appTitle, pending.text), ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}), key: renameKey(session) });
   }
+  deps.ledger.save();
   const what = pending.kind === "archive" ? "archive" : "rename";
   deps.chip(session, pending.kind === "archive" ? "não foi possível arquivar no app — arquive à mão" : "não foi possível renomear no app", false);
   deps.report(session, `Claude Code session "${session.title}" (${session.id}): could not ${what} it in the Claude app — ${reason}. Nothing else changed; ${pending.kind === "archive" ? "ask the person to archive it by hand" : "the person may rename it by hand"}${link}.`);
@@ -314,6 +326,13 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
     if (record.permissionMode && record.permissionMode !== desktop.permissionMode) {
       desktop.permissionMode = record.permissionMode;
       deps.ledger.save();
+    }
+    // The person renamed it by hand (the app's title has "#NNNN"), or it was
+    // archived: the "rename it" item is settled.
+    if (desktop.renameAsked && (record.isArchived || (desktop.issue && record.title?.includes(`#${desktop.issue}`)))) {
+      delete desktop.renameAsked;
+      deps.ledger.save();
+      deps.resolveOwnerPending?.(renameKey(session));
     }
     if (record.isArchived) {
       // archived by someone in the app, not by an order to the server: the
