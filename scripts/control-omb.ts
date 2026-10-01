@@ -390,6 +390,9 @@ export function verificationServerEnvironment(parentEnv: NodeJS.ProcessEnv, data
   for (const key of ["OMB_AUTONOMY_MINUTE_MS", "OMB_AUTONOMY_TICK_MS", "OMB_AUTONOMY_TURN_GAP_MS", "OMB_CC_BIN"]) {
     if (parentEnv[key]) childEnv[key] = parentEnv[key];
   }
+  // The sealed PATH finds no git; a test whose watches or Claude Code
+  // sessions need it grants that one directory by name.
+  if (parentEnv.OMB_TEST_GRANT_PATH) childEnv.OMB_EXTRA_PATH = parentEnv.OMB_TEST_GRANT_PATH;
   return childEnv;
 }
 

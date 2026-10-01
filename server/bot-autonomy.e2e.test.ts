@@ -4,10 +4,15 @@ import { expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb } from "../scripts/control-omb.ts";
 import { request } from "../scripts/mcp-server.ts";
 
+/** The system's git, not a package manager's bin: the fixture's PATH is
+ * sealed off this machine's CLIs, and watches and sessions run git. */
+const GIT_DIR = ["/usr/bin", "/bin"].find((dir) => existsSync(join(dir, "git"))) ?? "";
+
 /** One scripted bot on an isolated server, with minutes shrunk to 200 ms. */
 async function fixture(test: (f: any) => Promise<void>, extraEnv: Record<string, string> = {}) {
   const session = await launchVerificationServer({
     ...process.env,
+    OMB_TEST_GRANT_PATH: GIT_DIR,
     OMB_AUTONOMY_MINUTE_MS: "200",
     OMB_AUTONOMY_TICK_MS: "100",
     OMB_AUTONOMY_TURN_GAP_MS: "50",

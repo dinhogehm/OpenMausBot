@@ -267,6 +267,10 @@ it("the person's Mac, lent through the real connector, is usable by the owner's 
   const ownRetimed = await routineFor("Owner retimed");
   expect((await api("PATCH", `/api/routines/${ownRetimed}`, { token: owner, body: { schedule: { type: "interval", everyMinutes: 30, anchorAt: Date.now() + 60_000 } } })).status).toBe(200);
   expect(await sees(await run(ownRetimed))).toBe(1);
+  // One intake turn per bot (server/intake-lock.ts): the routine's earlier run
+  // still holds its bot, so it ends before the routine runs again.
+  const earlier = (await api("GET", "/api/routines", { token: owner })).body.runs.find((entry: any) => entry.routineId === rewritten && entry.status === "running");
+  expect((await api("POST", `/api/bots/${earlier.botId}/interrupt`, { token: owner, body: { threadId: earlier.threadId } })).status).toBe(200);
   // The owner rewriting it themselves makes it theirs again.
   expect((await api("PATCH", `/api/routines/${rewritten}`, { token: owner, body: { prompt: "Read plan.md from my Mac again." } })).status).toBe(200);
   expect(await sees(await run(rewritten))).toBe(1);
