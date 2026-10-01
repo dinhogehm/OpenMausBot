@@ -131,14 +131,39 @@ export function tagStuck(input: { releasedSha: string; releasedAt: number; tagSh
   return `Produção está no ar em ${released.slice(0, 9)} há ${minutes} min, mas a tag de produção continua em ${input.tagSha.slice(0, 9)}${input.cause ? ` (${input.cause})` : ""}: os vigias da tag não veem a entrega e nenhum cliente é avisado. Alguém precisa avançar a tag (ou corrigir o que a barrou).`;
 }
 
-/** The watcher's halt of a tip, from its escalation file or its halted files; null when none. */
+const COMMIT_SHA = /^[0-9a-f]{7,40}$/;
+/** The watcher's reason codes, said in pt-BR (unknown codes are kept as they are). */
+const HALT_REASONS: Record<string, string> = {
+  "content-failure-limit": "limite de falhas de conteúdo atingido",
+};
+
+/** The watcher's halt of a tip, or null when none. The halt exists if and
+ * only if halted-production-release.sha holds a commit sha: that is the one
+ * file the watcher reads to decide (watch-production-release.sh), and the one
+ * the alert tells to remove for a retry — the escalation JSON stays behind
+ * after that `rm`, so it never makes a halt by itself; it only adds the
+ * failure count and the last failure when its sha is the same commit.
+ * Without a .reason (the post-deploy halts, exit 20/21/23, write none) the
+ * reason is the post-deploy check. */
 export function haltedRelease(input: { escalationJson: string; haltedSha: string; haltedReason: string }): { sha: string; reason: string; failures?: number; lastFailure?: string } | null {
+  const sha = input.haltedSha.trim();
+  if (!COMMIT_SHA.test(sha)) return null;
+  let escalation: { reason?: string; failures?: number; lastFailure?: string } = {};
   try {
-    const raw = JSON.parse(input.escalationJson) as { kind?: string; sha?: string; reason?: string; failures?: number; last_failure?: string };
-    if (raw.kind === "production-release-halted" && typeof raw.sha === "string" && raw.sha) {
-      return { sha: raw.sha, reason: raw.reason ?? "unknown", ...(typeof raw.failures === "number" ? { failures: raw.failures } : {}), ...(raw.last_failure ? { lastFailure: raw.last_failure } : {}) };
+    const raw = JSON.parse(input.escalationJson) as { kind?: unknown; sha?: unknown; reason?: unknown; failures?: unknown; last_failure?: unknown };
+    if (raw.kind === "production-release-halted" && typeof raw.sha === "string" && COMMIT_SHA.test(raw.sha) && (raw.sha.startsWith(sha) || sha.startsWith(raw.sha))) {
+      escalation = {
+        ...(typeof raw.reason === "string" && raw.reason.trim() ? { reason: raw.reason.trim() } : {}),
+        ...(typeof raw.failures === "number" ? { failures: raw.failures } : {}),
+        ...(typeof raw.last_failure === "string" && raw.last_failure.trim() ? { lastFailure: raw.last_failure.trim().slice(0, 300) } : {}),
+      };
     }
   } catch { /* no escalation file, or not readable as one */ }
-  const sha = input.haltedSha.trim();
-  return sha ? { sha, reason: input.haltedReason.trim() || "unknown" } : null;
+  const code = input.haltedReason.trim().split("\n")[0]!.trim().slice(0, 200) || escalation.reason || "";
+  return {
+    sha,
+    reason: code ? HALT_REASONS[code] ?? code : "checagem pós-deploy",
+    ...(escalation.failures !== undefined ? { failures: escalation.failures } : {}),
+    ...(escalation.lastFailure ? { lastFailure: escalation.lastFailure } : {}),
+  };
 }

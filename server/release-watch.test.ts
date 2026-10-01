@@ -66,11 +66,20 @@ describe("after a release", () => {
     expect(tagStuckCause("Release production completed for abc")).toBeNull();
   });
 
-  it("reads the watcher's halt from its escalation file (#9328), or from its halted files", () => {
+  // INSP-R r1 item 8: the halt is the .sha file — the one the watcher reads — and nothing else
+  it("reads the watcher's halt from halted-production-release.sha; the escalation JSON (#9328) only adds detail for the same commit", () => {
     const json = '{"to":"chief","kind":"production-release-halted","reason":"content-failure-limit","sha":"2995ef215","failures":3,"limit":3,"last_failure":"reconcile 0608","at":"2026-10-01T12:00:00Z"}';
-    expect(haltedRelease({ escalationJson: json, haltedSha: "", haltedReason: "" })).toEqual({ sha: "2995ef215", reason: "content-failure-limit", failures: 3, lastFailure: "reconcile 0608" });
-    expect(haltedRelease({ escalationJson: "", haltedSha: "c88f99d62\n", haltedReason: "" })).toEqual({ sha: "c88f99d62", reason: "unknown" });
-    expect(haltedRelease({ escalationJson: "not json", haltedSha: "", haltedReason: "" })).toBeNull();
+    expect(haltedRelease({ escalationJson: json, haltedSha: "2995ef215\n", haltedReason: "" })).toEqual({ sha: "2995ef215", reason: "limite de falhas de conteúdo atingido", failures: 3, lastFailure: "reconcile 0608" });
+    expect(haltedRelease({ escalationJson: json, haltedSha: "2995ef215fc784ea87387cb1550c1a733aba4dc5", haltedReason: "content-failure-limit\n" })).toMatchObject({ sha: "2995ef215fc784ea87387cb1550c1a733aba4dc5", failures: 3 });
+    // the owner ran `rm halted-production-release.sha` to retry: the JSON left behind is no halt
+    expect(haltedRelease({ escalationJson: json, haltedSha: "", haltedReason: "" })).toBeNull();
+    // the JSON of another commit: only the .sha's own sha and reason
+    expect(haltedRelease({ escalationJson: json, haltedSha: "c88f99d62", haltedReason: "post-deploy-health" })).toEqual({ sha: "c88f99d62", reason: "post-deploy-health" });
+    // no .reason (post-deploy halts, exit 20/21/23, on main today): the post-deploy check
+    expect(haltedRelease({ escalationJson: "", haltedSha: "c88f99d62\n", haltedReason: "" })).toEqual({ sha: "c88f99d62", reason: "checagem pós-deploy" });
+    // a .sha that is not a commit sha is no halt
+    for (const junk of ["not-a-sha", "c88f", "C88F99D62", "c88f99d62 extra", "zzzzzzzzz"]) expect(haltedRelease({ escalationJson: json, haltedSha: junk, haltedReason: "" })).toBeNull();
+    expect(haltedRelease({ escalationJson: "not json", haltedSha: "c88f99d62", haltedReason: "" })).toEqual({ sha: "c88f99d62", reason: "checagem pós-deploy" });
   });
 
   it("tells each stuck tag or halt once, across restarts", () => {
