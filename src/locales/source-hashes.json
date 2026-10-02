@@ -9887,7 +9887,8 @@
       "desktopViewer.keyTab": "90ddf1963abb36c9921ce7f1ac9cbd94c9176d13e57c418d3d3c20ce44291c1c",
       "desktopViewer.keyEscape": "52f878edb34fa14fa5597bf7dc55b084cd69c03df673f913988a79b1600148d3",
       "desktopViewer.keyCtrlAltDel": "e52d2732802deb5c3c30b51bf0fdc62cc4a1da8937a32a8801367ab32c811903",
-      "needsYou.openLink": "758942844e8bd89753c6e3db0e89eb730d1a830b183c12fdae48e98706e4c500"
+      "needsYou.openLink": "758942844e8bd89753c6e3db0e89eb730d1a830b183c12fdae48e98706e4c500",
+      "needsYou.copy": "f145f4e05a8133685845a495da8e0cfd9830346c892979abbcb5e55188ff503d"
     },
     "zh": {
       "noEngines.title": "77a6e0966b7323ceae6973abb581b31d52263bb0ec8249e2b1c1b7ae1e586f04",

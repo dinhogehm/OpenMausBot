@@ -464,7 +464,7 @@ it.runIf(process.platform === "darwin")("decides a headless session of a client'
   await f.send("Tente no outro repositório.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
   expect(toolResult(f.turns()[1], "cc_session_start")).toContain("iniciada na própria worktree");
-  expect(await f.chips()).toContain('Claude Code "9058 Chat entra com aviso no Widget": sessão CLI, não visível no app Claude — motivo: o app Claude não abre sessão neste repositório agora (outra pasta, ou sem app neste Mac) (o bot disse: Esteira 24/7 gerida pelo Chief)');
+  expect(await f.chips()).toContain("Sessão 9058 no terminal, fora do app: o app Claude não abre sessão neste repositório agora (outra pasta, ou sem app neste Mac) (o bot disse: Esteira 24/7 gerida pelo Chief)");
 }, { OMB_CC_BIN: "/usr/bin/true" }), 60_000);
 
 // The app's own records (under the fixture's HOME) say it reuses a worktree:
@@ -493,7 +493,7 @@ it.runIf(process.platform === "darwin")("asks the owner ONCE to unblock the app 
   expect(results).toHaveLength(4);
   // the client's issue: the app is blocked, so it runs headless — the server knows why, and the owner was asked
   expect(results[0]).toContain("iniciada na própria worktree");
-  expect(await f.chips()).toContain('Claude Code "9058 Chat entra com aviso no Widget": sessão CLI, não visível no app Claude — motivo: o app Claude está reaproveitando worktrees (409 de pasta reaproveitada)');
+  expect(await f.chips()).toContain("Sessão 9058 no terminal, fora do app: o app Claude está reaproveitando worktrees (409 de pasta reaproveitada)");
   // the app path: the 409, pointing at the one item
   expect(results[1]).toContain("não abri: a sessão mais recente do app Claude");
   expect(results[2]).toContain('O pedido ao dono já está em "Precisa de você" (o1)');

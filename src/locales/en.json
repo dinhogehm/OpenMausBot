@@ -889,6 +889,7 @@
   "needsYou.due": "by {due}",
   "needsYou.resolve": "Mark done: {title}",
   "needsYou.openLink": "Open: {title}",
+  "needsYou.copy": "Copy the command: {command}",
   "chat.digestTools": "Tools: {tools}",
   "chat.digestToolFailed": "{name} ×{count} ({failed} failed)",
   "chat.digestToolsMore": "+{count} more",

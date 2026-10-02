@@ -15,6 +15,8 @@ export interface NeedsYouItem {
   pendingId?: string;
   due?: string;
   link?: string;
+  /** The exact command to act on it, copied with one click (never run). */
+  command?: string;
 }
 
 export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
@@ -26,7 +28,7 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
       if (task.routineRunId || task.archivedAt) continue;
       // listed by the bot (or the server): one row each, until resolved
       for (const pending of task.ownerPending ?? []) {
-        items.push({ botId: bot.id, botName: bot.name, threadId: task.threadId, title: pending.title, since: pending.since, approval: false, pendingId: pending.id, ...(pending.due ? { due: pending.due } : {}), ...(pending.link ? { link: pending.link } : {}) });
+        items.push({ botId: bot.id, botName: bot.name, threadId: task.threadId, title: pending.title, since: pending.since, approval: false, pendingId: pending.id, ...(pending.due ? { due: pending.due } : {}), ...(pending.link ? { link: pending.link } : {}), ...(pending.command ? { command: pending.command } : {}) });
       }
       const approval = task.activity === "waiting-on-you";
       if (!approval && task.goalNeedsInput !== true) continue;

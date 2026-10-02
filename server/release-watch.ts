@@ -131,11 +131,12 @@ export function releaseRetryText(input: { halted: boolean; cycleMs: number | nul
 
 /** The owner's one item for a release in a loop: the exact command the
  * installed watcher respects (OWNER_PENDING_TITLE_MAX = 200). */
-export function releaseLoopPending(input: { short: string; full: string | null; count: number }): { title: string; key: string } {
+export function releaseLoopPending(input: { short: string; full: string | null; count: number }): { title: string; key: string; command: string } {
   const command = input.full
     ? `echo ${input.full} > ~/.nuria/declined-production-release.sha`
     : `git -C ~/Projetos/nuria-platform rev-parse ${input.short} > ~/.nuria/declined-production-release.sha`;
-  return { title: `Recusar o release em laço de ${input.short.slice(0, 9)} (${input.count} falhas iguais): ${command}`, key: `release-loop:${input.short.slice(0, 9)}` };
+  // the title is what shows in two lines of "Precisa de você"; the command is copied with its own button (INSP-H r1 #8)
+  return { title: `Recusar o release em laço de ${input.short.slice(0, 9)} (${input.count} falhas iguais) — copie o comando`, key: `release-loop:${input.short.slice(0, 9)}`, command };
 }
 
 /** The owner's items about refusing a looping release (the server's, keyed,
@@ -443,11 +444,28 @@ export function releaseAttentionDue(attention: ReleaseAttention, input: { now: n
   return !(released && sameCommit(released, attention.sha));
 }
 
+/** A machine failure in two words, from the release's last error. */
+function machineHint(lastFailure: string): string {
+  if (/publickey|ssh|git@|could not read from remote|permission denied/i.test(lastFailure)) return "ssh/git";
+  if (/npm (?:ci|install)|EINTEGRITY|ENOTFOUND|registry/i.test(lastFailure)) return "npm";
+  if (/lock|admission|ADMISSION/i.test(lastFailure)) return "lock preso";
+  if (/disk|ENOSPC|no space/i.test(lastFailure)) return "disco cheio";
+  return "";
+}
+
+/** A release that keeps failing on one commit, as the chip opens: which, how often, why in short. */
+export function releaseFailedText(sha: string, count: number, cause: string | null): string {
+  const why = nothingToPublish(cause) ? "sem alvo de runtime" : cause ? cause.replace(/\s+/g, " ").slice(0, 60) : "";
+  return `Release ${sha.slice(0, 9)} falhou ${count}× seguidas${why ? ` (${why})` : ""} — não está em produção; a tag de produção não andou.`;
+}
+
 /** The chip and the Chief's report for an escalation, in pt-BR: why, and what to do. */
 export function releaseAttentionAlert(attention: ReleaseAttention, logs: { err: string }): { text: string; report: string } {
   const short = attention.sha.slice(0, 9);
   const last = attention.lastFailure?.slice(0, 160).replace(/[.\s]+$/, "");
-  const text = `O release de produção de ${short} ${attention.reasonPt}${last ? ` — último erro: ${last}` : ""}. Não parou: o watcher tenta de novo sozinho.`;
+  // what the owner sees first (a chip shows ~55 characters): whose fault, and that it retries (INSP-H r1 #8)
+  const hint = attention.reason === "signal" ? "processo morto por sinal" : machineHint(attention.lastFailure ?? "");
+  const text = `Release ${short}: falha da máquina${hint ? ` (${hint})` : ""}, não do commit — o watcher tenta de novo. O release ${attention.reasonPt}${last ? `; último erro: ${last}` : ""}.`;
   const todo = attention.reason === "signal"
     ? "descubra o que matou o processo (reinício do Mac, falta de memória, alguém parou o release)"
     : "corrija a máquina (chave ssh/acesso ao git, npm ci, um lock de admissão preso)";

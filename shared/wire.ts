@@ -144,6 +144,8 @@ export interface WireOwnerPending {
   since: number;
   due?: string;
   link?: string;
+  /** A command the person runs to act on it (copied with one click, never run). */
+  command?: string;
 }
 
 export interface WireTask {

@@ -68,15 +68,15 @@ it("reads the owner's channel order back at boot and sends the boot report and t
     const state = JSON.parse(readFileSync(stateFile, "utf8"));
     expect(state.orders.map((each: any) => each.text).join("\n")).toContain("é o único canal comigo");
     expect(readFileSync(logPath, "utf8")).toContain(`the conversation with the owner is ${esteira}`);
-    await expect.poll(async () => (await chips(esteira)).some((chip) => chip.startsWith("Conversa com o dono: esta (ordem de ")), { timeout: 10_000 }).toBe(true);
+    await expect.poll(async () => (await chips(esteira)).some((chip) => chip.startsWith("Canal do dono: esta conversa (ordem de ")), { timeout: 10_000 }).toBe(true);
     // the boot report goes there, not to where the owner wrote last
     await expect.poll(async () => (await chips(esteira)).some((chip) => chip.startsWith("Servidor reiniciado:")), { timeout: 10_000 }).toBe(true);
     expect((await chips(billing)).some((chip) => chip.startsWith("Servidor reiniciado:"))).toBe(false);
     // the sessions report there from now on, and the conversation they came from is told
     const sessions = JSON.parse(readFileSync(join(dataDir, "cc-sessions.json"), "utf8")).sessions as any[];
     expect(sessions.map((each) => [each.id, each.ownerThreadId])).toEqual([["cc-idle", esteira], ["cc-cut", esteira]]);
-    expect((await chips(esteira)).some((chip) => chip.startsWith("2 sessão(ões) do Claude Code passaram a relatar aqui (ordem do dono de "))).toBe(true);
-    expect((await chips(billing)).filter((chip) => chip.endsWith("os relatórios passam para a conversa com o dono"))).toHaveLength(2);
+    expect((await chips(esteira)).some((chip) => chip.startsWith("2 sessões passam a relatar aqui (ordem do dono de "))).toBe(true);
+    expect((await chips(billing)).filter((chip) => chip.endsWith("os relatórios agora vão para o canal do dono"))).toHaveLength(2);
 
     // a second boot reads the same order and changes nothing
     await waitForExit(restarted, { signal: "SIGTERM" });
@@ -87,7 +87,7 @@ it("reads the owner's channel order back at boot and sends the boot report and t
     closeSync(again);
     await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
     await new Promise((resolve) => setTimeout(resolve, 1_000));
-    expect((await chips(esteira)).filter((chip) => chip.startsWith("Conversa com o dono: esta"))).toHaveLength(1);
+    expect((await chips(esteira)).filter((chip) => chip.startsWith("Canal do dono: esta conversa"))).toHaveLength(1);
   } finally {
     await waitForExit(restarted, { signal: "SIGTERM" });
     await fixture.close();

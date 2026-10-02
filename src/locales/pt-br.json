@@ -813,6 +813,7 @@
   "needsYou.due": "até {due}",
   "needsYou.resolve": "Marcar como resolvido: {title}",
   "needsYou.openLink": "Abrir: {title}",
+  "needsYou.copy": "Copiar o comando: {command}",
   "chat.digestTools": "Ferramentas: {tools}",
   "chat.digestToolFailed": "{name} ×{count} ({failed} com falha)",
   "chat.digestToolsMore": "+{count} outras",

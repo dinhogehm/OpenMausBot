@@ -353,10 +353,11 @@ import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
+import { ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
-import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8574,13 +8575,14 @@ async function checkProductionRelease(): Promise<void> {
     loopItem = autonomy.ownerPendingOf(chief.id).find((item) => item.key === loopKey) ?? null;
   }
   if (!told) return;
-  const text = `O release de produção falhou ${failed.count} vezes no mesmo commit ${failed.sha}${cause ? ` (último motivo: ${cause})` : ""}, e a tag de produção não se moveu: o que vinha nele não está em produção.`;
+  // the chip opens with the essential (INSP-H r1 #8); the full cause goes in the report
+  const text = releaseFailedText(failed.sha, failed.count, cause);
   // after the watcher's halt it does not retry: never say it does; and never "every 2 min" (R9-release #7)
   const retries = releaseRetryText({ halted: isHalted, cycleMs: releaseWatch.state.cycleMs(failed.sha), nothingToPublish: nothingToPublish(cause) });
   const ownerItem = loopItem
-    ? ` O dono já tem UM item em "Precisa de você" para recusar este commit (${loopItem.id}): ${loopItem.title}. Cite ${loopItem.id}; não abra outro item para este laço nem proponha o arquivo halted-production-release.sha (é a trava da checagem pós-deploy: escrito à mão, faz o servidor relatar um halt que não houve) nem desligar o LaunchAgent.`
+    ? ` O dono já tem UM item em "Precisa de você" para recusar este commit (${loopItem.id}): ${loopItem.title}${loopItem.command ? ` (comando, com botão de copiar no item: ${loopItem.command})` : ""}. Cite ${loopItem.id}; não abra outro item para este laço nem proponha o arquivo halted-production-release.sha (é a trava da checagem pós-deploy: escrito à mão, faz o servidor relatar um halt que não houve) nem desligar o LaunchAgent.`
     : "";
-  releaseAlertToChief(text, `[Alerta do servidor: release de produção falhando] ${text}\nLogs: ${RELEASE_ERR_LOG} e ${RELEASE_OUT_LOG}. ${retries}${ownerItem} Veja se é carga da máquina (CI concorrente, timeouts) ou falha real, avise quem precisa (SRE/Delivery, o dono) e não dê a entrega como feita ao cliente.`);
+  releaseAlertToChief(text, `[Alerta do servidor: release de produção falhando] ${text}${cause ? ` Último motivo: ${cause}.` : ""}\nLogs: ${RELEASE_ERR_LOG} e ${RELEASE_OUT_LOG}. ${retries}${ownerItem} Veja se é carga da máquina (CI concorrente, timeouts) ou falha real, avise quem precisa (SRE/Delivery, o dono) e não dê a entrega como feita ao cliente.`);
 }
 
 /** The owner's "refuse the looping release" items whose commit is no longer
@@ -8733,17 +8735,20 @@ function backfillClaimedPrs(): void {
   }
 }
 // A restart cut these turns off: tell each owner, or nobody would ever resume them.
+// (the Chief's desk gets one summary of all of them: no chip twice there)
+const bootDesk = (() => {
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  return chief ? chiefDeskThread(chief) : null;
+})();
 if (ccLedger.interruptedOnLoad.length) {
   for (const session of ccLedger.interruptedOnLoad) {
-    ccChip(session, `interrompida: o servidor reiniciou no meio do turno ${session.turns}${session.lastError?.includes("did not survive") ? " e o processo claude não sobreviveu" : ""} — retome com cc_session_send`, false);
+    ccChipShort(session, sessionChips.interrupted(session.title, session.turns), false, bootDesk);
     ccReport(session, ccReportForOwner(session));
   }
   ccLedger.save();
 }
 // ...and these went on working: followed to the end of their turn (followSurvivingSessions)
-for (const session of ccLedger.survivedOnLoad) {
-  ccChip(session, `o servidor reiniciou e o processo claude (PID ${session.proc?.pid}) seguiu rodando: acompanho até o fim do turno ${session.turns}`);
-}
+for (const session of ccLedger.survivedOnLoad) ccChipShort(session, sessionChips.survived(session.title, session.turns), true, bootDesk);
 if (ccLedger.survivedOnLoad.length) ccLedger.save();
 reportResumptionToChief();
 retireWorkOfClosedThreads();
@@ -8819,7 +8824,7 @@ function reportResumptionToChief(): void {
     ...(survived.length ? ["Sessões do Claude Code cujo processo claude seguiu rodando (o servidor acompanha até o fim do turno e o relatório chega como de costume; NÃO retome nem mande outra mensagem para elas agora):", ...survived.map((session) => `- "${session.title}" (${session.id}, PID ${session.proc?.pid}) de ${name(session.ownerBotId)}`)] : []),
     "Confira o que ficou pendente e retome o que for preciso.",
   ].join("\n");
-  store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Servidor reiniciado: ${rerun.length} retomado(s), ${asked.length} para confirmar, ${sessions.length} sessão(ões) interrompida(s)${survived.length ? `, ${survived.length} seguindo (processo vivo)` : ""}`, 200), ok: asked.length === 0 && sessions.length === 0 } });
+  store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(serverRestartedChip({ interrupted: sessions.length, survived: survived.length, rerun: rerun.length, asked: asked.length }), 200), ok: asked.length === 0 && sessions.length === 0 } });
   autonomy.addReport(chief.id, desk, text);
 }
 const ccProcesses = new Map<string, CcChildProcess>();
@@ -8888,13 +8893,13 @@ function moveWorkToOwnerThread(botId: string, ownerThreadId: string, why: string
     if (session.replyThreadId === ownerThreadId) delete session.replyThreadId;
     moved.push(session);
     if (store.taskByThread(botId, from)) {
-      store.appendMessage(from, { role: "bot", kind: "activity", tool: { name: chipText(`Claude Code "${session.title.slice(0, 60)}": os relatórios passam para a conversa com o dono`, 240), ok: true }, threadRef: { botId, threadId: ownerThreadId, title: store.taskByThread(botId, ownerThreadId)?.title ?? "conversa com o dono" } });
+      store.appendMessage(from, { role: "bot", kind: "activity", tool: { name: chipText(sessionChips.movedAway(session.title), 240), ok: true }, threadRef: { botId, threadId: ownerThreadId, title: store.taskByThread(botId, ownerThreadId)?.title ?? "conversa com o dono" } });
     }
   }
   if (!moved.length) return;
   ccLedger.save();
   const list = moved.map((session) => `"${session.title}" (${session.id.slice(0, 8)}, ${session.status})`).join(", ");
-  store.appendMessage(ownerThreadId, { role: "bot", kind: "activity", tool: { name: chipText(`${moved.length} sessão(ões) do Claude Code passaram a relatar aqui (${why}): ${list}`, 240), ok: true } });
+  store.appendMessage(ownerThreadId, { role: "bot", kind: "activity", tool: { name: chipText(sessionChips.movedHere(moved.map((session) => session.title), why), 240), ok: true } });
   console.log(`[shared-state] ${store.bot(botId)?.name ?? botId}: ${moved.length} session(s) now report to the conversation with the owner (${ownerThreadId}): ${list}`);
   refreshBotRow(botId);
 }
@@ -8921,7 +8926,7 @@ function adoptOwnerChannels(): void {
       if (!sharedState.adoptChannelOrder(bot.id, found.order, { threadId: found.target, title: task.title })) continue;
       const when = new Date(found.order.at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
       console.log(`[shared-state] ${bot.name}: the conversation with the owner is ${found.target} (their channel order of ${new Date(found.order.at).toISOString()}, read back from the history)`);
-      store.appendMessage(found.target, { role: "bot", kind: "activity", tool: { name: chipText(`Conversa com o dono: esta (ordem de ${when} relida do histórico) — avisos, relatórios e pendências vêm para cá`, 240), ok: true } });
+      store.appendMessage(found.target, { role: "bot", kind: "activity", tool: { name: chipText(ownerChannelChip(when), 240), ok: true } });
       moveWorkToOwnerThread(bot.id, found.target, `ordem do dono de ${when}`);
     } catch (error) {
       console.error(`[shared-state] ${bot.name}: could not read back the owner's channel order: ${error instanceof Error ? error.message : String(error)}`);
@@ -8934,6 +8939,17 @@ function ccChip(session: CcSession, text: string, ok = true): void {
     store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: `Claude Code "${session.title.slice(0, 60)}": ${text}`, ok } });
   }
   // the owner's row carries the session's state (failed, stalled, question)
+  refreshBotRow(session.ownerBotId);
+}
+
+/** A chip of the server's own about a session, short and in the owner's
+ * words (server/owner-chips.ts), in its conversations — but not in `skip`
+ * (the Chief's desk when its summary already says it, INSP-H r1 #10). */
+function ccChipShort(session: CcSession, text: string, ok = true, skip?: string | null): void {
+  for (const threadId of ccThreads(session)) {
+    if (threadId === skip) continue;
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok } });
+  }
   refreshBotRow(session.ownerBotId);
 }
 
@@ -9395,7 +9411,7 @@ threadSignals = (threadId) => {
     .filter((session) => session.ownerThreadId === threadId && session.status !== "archived")
     .map((session): WireCcSession => ({ sessionId: session.id, title: session.title, status: session.status as WireCcSession["status"], surface: session.surface === "app" ? "app" : "cli" }));
   const ownerPending = autonomy.ownerPendingFor(threadId).map((item): WireOwnerPending => ({
-    id: item.id, title: item.title, since: item.createdAt, ...(item.due ? { due: item.due } : {}), ...(item.link ? { link: item.link } : {}),
+    id: item.id, title: item.title, since: item.createdAt, ...(item.due ? { due: item.due } : {}), ...(item.link ? { link: item.link } : {}), ...(item.command ? { command: item.command } : {}),
   }));
   return {
     ...(watches.length ? { watches } : {}),
@@ -9447,7 +9463,7 @@ function noteClaimedPrs(session: CcSession, text: string): void {
   session.claimedPrs = [...new Set([...(session.claimedPrs ?? []), ...claimed])];
   if (session.delivery?.notOwned) session.delivery.notOwned = session.delivery.notOwned.filter((number) => !claimed.includes(number));
   ccLedger.save();
-  ccChip(session, `assumiu ${claimed.map((number) => `a PR #${number}`).join(", ")} (por ordem explícita)`);
+  ccChipShort(session, sessionChips.claimed(session.title, claimed));
 }
 
 /** Send a message to a session the way cc_session_send would, from the
@@ -9711,7 +9727,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   runCcTurn(session, input.brief, true);
   ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
   noteClaimedPrs(session, input.brief);
-  if (cliOnRecord) ccChip(session, `sessão CLI, não visível no app Claude — motivo: ${cliOnRecord}${cliReason && cliReason !== cliOnRecord ? ` (o bot disse: ${chipText(cliReason, 80)})` : ""}`);
+  if (cliOnRecord) ccChipShort(session, sessionChips.cli(session.title, `${cliOnRecord}${cliReason && cliReason !== cliOnRecord ? ` (o bot disse: ${chipText(cliReason, 80)})` : ""}`));
   return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
 }
 
@@ -9930,7 +9946,7 @@ function followSurvivingSessions(): void {
       runCcTurn(session, next, false);
       continue;
     }
-    ccChip(session, ended ? `terminou o turno ${session.turns} (acompanhado depois do reinício do servidor)` : `parou com um problema — o processo claude que sobreviveu ao reinício terminou sem fechar o turno ${session.turns}`, ended);
+    ccChipShort(session, ended ? sessionChips.followedEnded(session.title, session.turns) : sessionChips.followedCut(session.title, session.turns), ended);
     ccReport(session, desktopReportFor(desktopWork, session));
   }
 }
@@ -19070,7 +19086,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             // the claude that outlived a restart, in its own group (detached): stopped with what it started
             const pid = session.proc.pid;
             try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ } }
-            ccChip(session, `processo claude ${pid} (sobrevivente do reinício) encerrado`, true);
+            ccChipShort(session, sessionChips.survivorStopped(session.title), true);
           }
           ccLedger.setStatus(session, action === "stop" ? "stopped" : "archived");
           if (action === "archive") {

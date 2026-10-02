@@ -77,4 +77,33 @@ describe("what needs the person, from every bot", () => {
     findButton(element)!.props.onClick();
     expect(opened).toEqual([link]);
   });
+
+  it("gives the release-loop item a short title and a button that copies its exact command (INSP-H r1 #8)", () => {
+    const command = "echo cb015584a35296ec89b2dbaf2c54373e6f93b826 > ~/.nuria/declined-production-release.sha";
+    const title = "Recusar o release em laço de cb015584a (5 falhas iguais) — copie o comando";
+    const listed = [bot("chief", "Chief of Staff", [task("c0", "Main", { ownerPending: [{ id: "o9", title, since: now - 60_000, command }] })])];
+    const items = needsYouItems(listed);
+    expect(items).toEqual([expect.objectContaining({ pendingId: "o9", command })]);
+    const copied: string[] = [];
+    const element = SidebarNeedsYou({ items, density: "comfortable", now, onJump: () => {}, onResolve: () => {}, onCopy: (text) => copied.push(text) });
+    const html = renderToStaticMarkup(element!);
+    const escaped = command.replaceAll(">", "&gt;");
+    expect(html).toContain(`data-needs-you-copy="${escaped}"`);
+    expect(html).toContain(`aria-label="Copiar o comando: ${escaped}"`);
+    // the title, as shown, ends before the command: it fits the two lines
+    expect(html).toContain(`>${title}</span>`);
+    const findCopy = (node: unknown): { props: { onClick: () => void } } | null => {
+      if (!node || typeof node !== "object") return null;
+      const el = node as { props?: Record<string, unknown> };
+      if (el.props?.["data-needs-you-copy"] === command) return el as { props: { onClick: () => void } };
+      const children = el.props?.children;
+      for (const child of Array.isArray(children) ? children.flat(Infinity) : [children]) {
+        const found = findCopy(child);
+        if (found) return found;
+      }
+      return null;
+    };
+    findCopy(element)!.props.onClick();
+    expect(copied).toEqual([command]);
+  });
 });

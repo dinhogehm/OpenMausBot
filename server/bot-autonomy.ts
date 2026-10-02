@@ -200,6 +200,8 @@ export interface OwnerPending {
   due?: string;
   /** Where to act on it (a PR, a claude:// session link). */
   link?: string;
+  /** The exact command the person runs to act on it (copied in "Precisa de você"). */
+  command?: string;
   /** Set by the server for its own items, so it can resolve them itself. */
   key?: string;
   /** Ids of equivalent items folded into this one (still resolvable by them). */
@@ -823,7 +825,7 @@ export class BotAutonomy {
    * for anything else the existing item comes back untouched, flagged
    * `duplicate`, so the bot is told "já existe o5" instead of the person
    * getting a second item for the same action. */
-  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string }): OwnerPending & { duplicate?: true } {
+  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string }): OwnerPending & { duplicate?: true } {
     const title = input.title.replace(/\s+/g, " ").trim().slice(0, OWNER_PENDING_TITLE_MAX);
     const here = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
     const elsewhere = this.ownerPending.find((open) => open.botId === botId && !here(open) && sameOwnerPending(open, { ...input, title }));
@@ -840,6 +842,7 @@ export class BotAutonomy {
       id: existing?.id ?? `o${n}`, botId, threadId, title, createdAt: existing?.createdAt ?? this.now(),
       ...(input.due?.trim() ? { due: input.due.trim().slice(0, 80) } : existing?.due ? { due: existing.due } : {}),
       ...(input.link?.trim() ? { link: input.link.trim().slice(0, 500) } : existing?.link ? { link: existing.link } : {}),
+      ...(input.command?.trim() ? { command: input.command.trim().slice(0, 500) } : existing?.command ? { command: existing.command } : {}),
       ...(input.key ? { key: input.key } : {}),
       ...(existing?.aliases?.length ? { aliases: existing.aliases } : {}),
     };

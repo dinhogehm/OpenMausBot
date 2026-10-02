@@ -92,13 +92,13 @@ export function batteryAlert(input: { power: PowerState; onBatterySince: number 
   if (power.percent === null) {
     // a no-break: no charge to compare, only the time without the wall
     if (minutes === null || input.now - input.onBatterySince! < UNKNOWN_CHARGE_ALERT_MS || input.told.has("low")) return null;
-    return { level: "low", text: `O Mac está sem energia da tomada${since} (no-break, carga desconhecida)${running}. Ligue na tomada: o Chief não manda carrier assim, mas ${WATCHER_IGNORES_BATTERY}.` };
+    return { level: "low", text: `Sem tomada (no-break): ligue o Mac na tomada. Está sem energia da tomada${since}, carga desconhecida${running}; o Chief não manda carrier assim, mas ${WATCHER_IGNORES_BATTERY}.` };
   }
   if (power.percent < criticalPercent(minPercent) && !input.told.has("critical")) {
-    return { level: "critical", text: `O Mac está na bateria${since} e quase sem carga (${power.percent}%)${running}. Se ele desligar no meio de um deploy, a produção fica pela metade: ligue na tomada já, ou peça PARAR — ${WATCHER_IGNORES_BATTERY}.` };
+    return { level: "critical", text: `Bateria em ${power.percent}%, quase no fim: ligue o Mac na tomada já. Está na bateria${since}${running}; se desligar no meio de um deploy, a produção fica pela metade — ligue ou peça PARAR: ${WATCHER_IGNORES_BATTERY}.` };
   }
   if (!input.told.has("low") && !input.told.has("critical")) {
-    return { level: "low", text: `O Mac está na bateria${since} com ${power.percent}%, abaixo do seu limite de ${minPercent}%${running}. Ligue na tomada: o Chief não manda carrier abaixo de ${minPercent}%, mas ${WATCHER_IGNORES_BATTERY}.` };
+    return { level: "low", text: `Bateria em ${power.percent}% (seu limite: ${minPercent}%): ligue o Mac na tomada. Está na bateria${since}${running}; o Chief não manda carrier abaixo de ${minPercent}%, mas ${WATCHER_IGNORES_BATTERY}.` };
   }
   return null;
 }

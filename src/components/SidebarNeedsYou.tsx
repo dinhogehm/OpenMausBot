@@ -1,4 +1,4 @@
-import { Check, CircleAlert, ExternalLink, ListTodo, ShieldQuestion } from "lucide-react";
+import { Check, CircleAlert, Copy, ExternalLink, ListTodo, ShieldQuestion } from "lucide-react";
 import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
@@ -9,7 +9,7 @@ import type { SidebarDensity } from "@/lib/sidebar-preferences";
 /** The top of the sidebar: what waits on the person, from every bot, with
  * how long it has waited — one place to answer from. Absent when nothing
  * waits. Each row jumps to its conversation. */
-export function SidebarNeedsYou({ items, density, now, onJump, onResolve, onOpenLink = (url) => void openExternalLink(url) }: {
+export function SidebarNeedsYou({ items, density, now, onJump, onResolve, onOpenLink = (url) => void openExternalLink(url), onCopy = (text) => void navigator.clipboard?.writeText(text).catch(() => {}) }: {
   items: NeedsYouItem[];
   density: SidebarDensity;
   now?: number;
@@ -18,6 +18,8 @@ export function SidebarNeedsYou({ items, density, now, onJump, onResolve, onOpen
   onResolve?: (item: NeedsYouItem) => void;
   /** Open an owner_pending item's link (a PR, a session in the Claude app). */
   onOpenLink?: (url: string) => void;
+  /** Copy an owner_pending item's command (the person runs it; nothing here runs it). */
+  onCopy?: (text: string) => void;
 }) {
   if (!items.length || density === "icons") return null;
   const compact = density === "compact";
@@ -56,6 +58,18 @@ export function SidebarNeedsYou({ items, density, now, onJump, onResolve, onOpen
                 </span>
                 <span className="shrink-0 text-[10.5px] tabular-nums text-ink-secondary">{item.due ?? age}</span>
               </button>
+              {item.pendingId && item.command && (
+                <button
+                  type="button"
+                  data-needs-you-copy={item.command}
+                  aria-label={t("needsYou.copy", { command: item.command })}
+                  title={t("needsYou.copy", { command: item.command })}
+                  onClick={() => onCopy(item.command!)}
+                  className="flex size-6 shrink-0 items-center justify-center rounded text-ink-secondary hover:bg-raised hover:text-ink"
+                >
+                  <Copy size={12} aria-hidden="true" />
+                </button>
+              )}
               {item.pendingId && item.link && (
                 <button
                   type="button"

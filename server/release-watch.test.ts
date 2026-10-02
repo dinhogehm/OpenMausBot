@@ -266,7 +266,7 @@ describe("a release that needs attention without being halted (H9)", () => {
     expect(attention).toMatchObject({ sha: FULL, reason: "fast-failure", lastFailure: "git@github.com: Permission denied (publickey).", at: "2026-10-01T23:58:12Z", key: "attention:cb015584a352:fast-failure:2026-10-01T23:58:12Z" });
     expect(releaseAttentionDue(attention, { now, releasedSha: "a9e4b93ca" })).toBe(true);
     const alert = releaseAttentionAlert(attention, { err: "/x/production-release.err.log" });
-    expect(alert.text).toBe("O release de produção de cb015584a falhou antes da CI ou sem veredito dela (git/ssh, npm ci, lock de admissão): é a máquina, não o commit — último erro: git@github.com: Permission denied (publickey). Não parou: o watcher tenta de novo sozinho.");
+    expect(alert.text).toBe("Release cb015584a: falha da máquina (ssh/git), não do commit — o watcher tenta de novo. O release falhou antes da CI ou sem veredito dela (git/ssh, npm ci, lock de admissão): é a máquina, não o commit; último erro: git@github.com: Permission denied (publickey).");
     expect(alert.report).toContain("[Alerta do servidor: release de produção pede atenção]");
     expect(alert.report).toContain("O que fazer: veja /x/production-release.err.log perto de 2026-10-01T23:58:12Z e corrija a máquina (chave ssh/acesso ao git, npm ci, um lock de admissão preso)");
     expect(alert.report).toContain("não proponha recusá-lo nem o arquivo halted");
@@ -430,11 +430,12 @@ describe("a release in a loop", () => {
     expect(fullReleaseSha(out, "cb015584a")).toBe(FULL);
     expect(fullReleaseSha(out, "2995ef215")).toBeNull();
     const item = releaseLoopPending({ short: "cb015584a", full: FULL, count: 4 });
-    expect(item).toEqual({ key: "release-loop:cb015584a", title: `Recusar o release em laço de cb015584a (4 falhas iguais): echo ${FULL} > ~/.nuria/declined-production-release.sha` });
-    expect(item.title.length).toBeLessThanOrEqual(200);
-    expect(item.title).not.toMatch(/halted/);
-    // the full sha not in the tail: a command that writes it, still the declined file
-    expect(releaseLoopPending({ short: "cb015584a", full: null, count: 3 }).title).toContain("git -C ~/Projetos/nuria-platform rev-parse cb015584a > ~/.nuria/declined-production-release.sha");
+    // the title fits two lines of "Precisa de você"; the command is copied with its own button (INSP-H r1 #8)
+    expect(item).toEqual({ key: "release-loop:cb015584a", title: "Recusar o release em laço de cb015584a (4 falhas iguais) — copie o comando", command: `echo ${FULL} > ~/.nuria/declined-production-release.sha` });
+    expect(item.title.length).toBeLessThanOrEqual(80);
+    expect(`${item.title} ${item.command}`).not.toMatch(/halted/);
+    // the full sha unknown: a command that writes it, still the declined file
+    expect(releaseLoopPending({ short: "cb015584a", full: null, count: 3 }).command).toBe("git -C ~/Projetos/nuria-platform rev-parse cb015584a > ~/.nuria/declined-production-release.sha");
     expect(nothingToPublish("Local CI failed at tests")).toBe(false);
   });
 
@@ -445,7 +446,7 @@ describe("a release in a loop", () => {
       const o7 = autonomy.addOwnerPending("chief", "ade82a65", { title: "Autorizar pausar o watcher de produção no cb015584a (arquivo halted)", link: "https://github.com/o/r/pull/9341" });
       const loop = releaseLoopPending({ short: "cb015584a", full: FULL, count: 3 });
       const item = autonomy.addOwnerPending("chief", "dbb9f1cf", loop);
-      expect(item).toMatchObject({ id: o7.id, threadId: "dbb9f1cf", key: loop.key, title: loop.title, link: "https://github.com/o/r/pull/9341" });
+      expect(item).toMatchObject({ id: o7.id, threadId: "dbb9f1cf", key: loop.key, title: loop.title, command: loop.command, link: "https://github.com/o/r/pull/9341" });
       expect(autonomy.ownerPendingOf("chief")).toHaveLength(1);
       // the bot asking again is told it exists
       expect(autonomy.addOwnerPending("chief", "3e55c0fd", { title: "Parar o LaunchAgent? laço no cb015584a" })).toMatchObject({ id: o7.id, duplicate: true });
