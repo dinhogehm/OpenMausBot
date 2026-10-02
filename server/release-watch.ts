@@ -416,8 +416,9 @@ export function tagAdvanceToResolve(openKeys: readonly string[], tagSha: string 
 }
 
 /** The owner's pending item for a stuck tag (OWNER_PENDING_TITLE_MAX = 200). */
-export function tagAdvancePendingTitle(releasedSha: string): string {
-  return `Avançar a tag de produção para ${releasedSha.trim().slice(0, 9)} (barrada pelo ruleset; só o dono ou quem tem bypass, comando no log do servidor)`;
+export function tagAdvancePendingTitle(releasedSha: string, commandInItem = false): string {
+  // where the command is: in the item's first step when the release printed it (INSP-J r1 #11)
+  return `Avançar a tag de produção para ${releasedSha.trim().slice(0, 9)} (barrada pelo ruleset; só o dono ou quem tem bypass, comando ${commandInItem ? "no passo 1" : "no log do servidor"})`;
 }
 
 /** The whole item for a stuck tag, born practical (R10-visual N13): why it
@@ -426,7 +427,7 @@ export function tagAdvancePendingTitle(releasedSha: string): string {
 export function tagAdvancePending(releasedSha: string, manual: string | null): { title: string; key: string; why: string; steps: Array<{ text: string; command?: string }>; command?: string } {
   const sha = releasedSha.trim();
   return {
-    title: tagAdvancePendingTitle(sha),
+    title: tagAdvancePendingTitle(sha, Boolean(manual)),
     key: `tag-advance:${sha}`,
     why: `Produção já roda o ${sha.slice(0, 9)}, mas a tag nuria-production-deployed não andou: os vigias da tag não veem a entrega e nenhum cliente é avisado até ela andar.`,
     steps: [

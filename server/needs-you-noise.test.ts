@@ -111,6 +111,9 @@ describe("the items the server creates come with why, steps and options", () => 
     practical(tag);
     expect(tag).toMatchObject({ key: `tag-advance:${FULL}`, command: manual });
     expect(tag.steps[0]).toMatchObject({ command: manual });
+    // the title says where the command is (INSP-J r1 #11)
+    expect(tag.title).toContain("comando no passo 1");
+    expect(tagAdvancePending(FULL, null).title).toContain("comando no log do servidor");
     // without the printed advance: no command invented, the log is named
     const blind = tagAdvancePending(FULL, null);
     expect(blind.command).toBeUndefined();
