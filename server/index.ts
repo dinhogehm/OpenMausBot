@@ -355,7 +355,7 @@ import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
-import { ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
+import { appUnblockTitle, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
@@ -9770,7 +9770,7 @@ function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string): s
   if (!store.taskByThread(bot.id, thread)) return null;
   const name = basename(repo);
   const item = autonomy.addOwnerPending(bot.id, thread, {
-    title: `Destravar o app Claude (pasta reaproveitada): abra no app uma sessão nova na raiz de ${name} e envie nela uma mensagem curta — até lá, as sessões vão para o terminal, invisíveis no app`,
+    title: appUnblockTitle(name),
     key: `${APP_UNBLOCK_KEY}${name}`,
   });
   refreshBotRow(bot.id);

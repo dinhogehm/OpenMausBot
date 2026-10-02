@@ -80,7 +80,7 @@ describe("what needs the person, from every bot", () => {
 
   it("gives the release-loop item a short title and a button that copies its exact command (INSP-H r1 #8)", () => {
     const command = "echo cb015584a35296ec89b2dbaf2c54373e6f93b826 > ~/.nuria/declined-production-release.sha";
-    const title = "Recusar o release em laço de cb015584a (5 falhas iguais) — copie o comando";
+    const title = "Recusar cb015584a (laço, 5×): copie o comando de recusa";
     const listed = [bot("chief", "Chief of Staff", [task("c0", "Main", { ownerPending: [{ id: "o9", title, since: now - 60_000, command }] })])];
     const items = needsYouItems(listed);
     expect(items).toEqual([expect.objectContaining({ pendingId: "o9", command })]);

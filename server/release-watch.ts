@@ -136,7 +136,8 @@ export function releaseLoopPending(input: { short: string; full: string | null; 
     ? `echo ${input.full} > ~/.nuria/declined-production-release.sha`
     : `git -C ~/Projetos/nuria-platform rev-parse ${input.short} > ~/.nuria/declined-production-release.sha`;
   // the title is what shows in two lines of "Precisa de você"; the command is copied with its own button (INSP-H r1 #8)
-  return { title: `Recusar o release em laço de ${input.short.slice(0, 9)} (${input.count} falhas iguais) — copie o comando`, key: `release-loop:${input.short.slice(0, 9)}`, command };
+  // the commit and the verb first: the person sees which commit before copying (INSP-H r2 #6)
+  return { title: `Recusar ${input.short.slice(0, 9)} (laço, ${input.count}×): copie o comando de recusa`, key: `release-loop:${input.short.slice(0, 9)}`, command };
 }
 
 /** The owner's items about refusing a looping release (the server's, keyed,
@@ -454,8 +455,20 @@ function machineHint(lastFailure: string): string {
 }
 
 /** A release that keeps failing on one commit, as the chip opens: which, how often, why in short. */
+/** The release's own cause, said short and in pt-BR for a chip (the full one goes in the report). */
+export function releaseCausePt(cause: string | null): string {
+  if (!cause) return "";
+  if (nothingToPublish(cause)) return "sem alvo de runtime";
+  if (/Release snapshot changed/i.test(cause)) return "snapshot mudou durante o release";
+  if (/ADMISSION_TIMEOUT/.test(cause)) return "tempo de espera na fila esgotou";
+  const step = /Local CI failed at\s+(\S+)/i.exec(cause)?.[1];
+  if (step) return `CI local falhou em ${step}`;
+  if (/migration/i.test(cause)) return "migration reprovou";
+  return cause.replace(/\s+/g, " ").slice(0, 60);
+}
+
 export function releaseFailedText(sha: string, count: number, cause: string | null): string {
-  const why = nothingToPublish(cause) ? "sem alvo de runtime" : cause ? cause.replace(/\s+/g, " ").slice(0, 60) : "";
+  const why = releaseCausePt(cause);
   return `Release ${sha.slice(0, 9)} falhou ${count}× seguidas${why ? ` (${why})` : ""} — não está em produção; a tag de produção não andou.`;
 }
 

@@ -44,7 +44,7 @@ it("after a restart, re-runs a cut-off wake once, reports it and the cut-off ses
 
     const chips = async (threadId: string) => ((await api(`/api/threads/${threadId}/messages`, undefined, "GET")).messages as any[])
       .filter((message) => message.kind === "activity").map((message) => String(message.tool?.name ?? ""));
-    await expect.poll(async () => (await chips(chief.activeTaskId)).some((chip) => chip === "Servidor reiniciado: 1 sessão interrompida (retomar), 1 turno retomado"), { timeout: 15_000 }).toBe(true);
+    await expect.poll(async () => (await chips(chief.activeTaskId)).some((chip) => chip === "Servidor reiniciado: 1 sessão interrompida (o Chief retoma), 1 turno retomado"), { timeout: 15_000 }).toBe(true);
     // the wake ran again, once, and its lease is settled
     await expect.poll(async () => (await chips(worker.activeTaskId)).filter((chip) => chip.includes("RETOMAR_9315")).length, { timeout: 15_000 }).toBe(1);
     await expect.poll(() => JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")).inFlight ?? [], { timeout: 15_000 }).toEqual([]);
@@ -117,12 +117,12 @@ it("after a restart, follows the sessions whose claude survived to the end of th
     const chips = async (threadId: string) => ((await api(`/api/threads/${threadId}/messages`, undefined, "GET")).messages as any[])
       .filter((message) => message.kind === "activity").map((message) => String(message.tool?.name ?? ""));
     // the boot: one interrupted, two followed — none of them marked failed for being cut
-    await expect.poll(async () => (await chips(chief.activeTaskId)).filter((chip) => chip.startsWith("Servidor reiniciado")), { timeout: 15_000 }).toEqual(["Servidor reiniciado: 1 sessão interrompida (retomar), 2 sessões seguem rodando"]);
+    await expect.poll(async () => (await chips(chief.activeTaskId)).filter((chip) => chip.startsWith("Servidor reiniciado")), { timeout: 15_000 }).toEqual(["Servidor reiniciado: 1 sessão interrompida (o Chief retoma), 2 sessões seguem rodando"]);
     expect(ledger()[ids.died]).toMatchObject({ status: "failed", lastError: expect.stringContaining(`its claude (PID ${died.pid}) did not survive`) });
     expect(ledger()[ids.finishing]).toMatchObject({ status: "running", proc: { pid: finishing.pid } });
     expect(ledger()[ids.cut]).toMatchObject({ status: "running", proc: { pid: cut.pid } });
     expect((await chips(worker.activeTaskId)).filter((chip) => chip === "Sessão 9315 seguiu rodando no reinício — acompanho o turno 2 até o fim")).toHaveLength(2);
-    expect((await chips(worker.activeTaskId)).some((chip) => chip === "Sessão 9315 interrompida no reinício — retome-a (o turno 2 não sobreviveu ao reinício)")).toBe(true);
+    expect((await chips(worker.activeTaskId)).some((chip) => chip === "Sessão 9315 interrompida no reinício — o Chief retoma (o turno 2 não sobreviveu ao reinício)")).toBe(true);
     // the stand-ins end: each turn ends as its transcript says, and the owner hears it
     await expect.poll(() => ledger()[ids.finishing].status, { timeout: 20_000 }).toBe("idle");
     expect(ledger()[ids.finishing]).toMatchObject({ lastReport: "PR #77 aberta, gate verde no head.", turns: 2 });
@@ -131,7 +131,7 @@ it("after a restart, follows the sessions whose claude survived to the end of th
     expect(ledger()[ids.cut].lastError).toContain("outlived the server restart, ended without finishing its turn");
     const after = await chips(worker.activeTaskId);
     expect(after.some((chip) => chip === "Sessão 9315 terminou o turno 2, acompanhado após o reinício")).toBe(true);
-    expect(after.some((chip) => chip.startsWith("Sessão 9315 parou sem fechar o turno 2 — retome-a"))).toBe(true);
+    expect(after.some((chip) => chip.startsWith("Sessão 9315 parou sem fechar o turno 2 — o Chief retoma"))).toBe(true);
     expect(readFileSync(logPath, "utf8")).toContain(`the claude that outlived the restart (PID ${finishing.pid}) is gone; turn 2 finished`);
   } finally {
     for (const child of standIns) child.kill("SIGKILL");
@@ -178,7 +178,7 @@ it("cuts a survivor at the turn limit, and says it once on the Chief's desk", as
     expect(desk.filter((chip) => chip.startsWith("Servidor reiniciado"))).toEqual(["Servidor reiniciado: 1 sessão segue rodando"]);
     // the summary says it there: no chip of its own beside it
     expect(desk.some((chip) => chip.startsWith("Sessão 9316 seguiu rodando"))).toBe(false);
-    expect(desk.some((chip) => chip.startsWith("Sessão 9316 cortada no limite de 1 min — retome-a"))).toBe(true);
+    expect(desk.some((chip) => chip.startsWith("Sessão 9316 cortada no limite de 1 min — o Chief retoma"))).toBe(true);
   } finally {
     standIn?.kill("SIGKILL");
     await waitForExit(restarted, { signal: "SIGTERM" });

@@ -434,7 +434,9 @@ describe("a release in a loop", () => {
     expect(fullReleaseSha(out, "2995ef215")).toBeNull();
     const item = releaseLoopPending({ short: "cb015584a", full: FULL, count: 4 });
     // the title fits two lines of "Precisa de você"; the command is copied with its own button (INSP-H r1 #8)
-    expect(item).toEqual({ key: "release-loop:cb015584a", title: "Recusar o release em laço de cb015584a (4 falhas iguais) — copie o comando", command: `echo ${FULL} > ~/.nuria/declined-production-release.sha` });
+    expect(item).toEqual({ key: "release-loop:cb015584a", title: "Recusar cb015584a (laço, 4×): copie o comando de recusa", command: `echo ${FULL} > ~/.nuria/declined-production-release.sha` });
+    // the commit and the verb within the first 40 characters (INSP-H r2 #6)
+    expect(item.title.slice(0, 40)).toMatch(/Recusar cb015584a/);
     expect(item.title.length).toBeLessThanOrEqual(80);
     expect(`${item.title} ${item.command}`).not.toMatch(/halted/);
     // the full sha unknown: a command that writes it, still the declined file

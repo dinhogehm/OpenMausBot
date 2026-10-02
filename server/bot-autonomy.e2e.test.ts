@@ -499,7 +499,7 @@ it.runIf(process.platform === "darwin")("asks the owner ONCE to unblock the app 
   expect(results[1]).toContain("não abri: a sessão mais recente do app Claude");
   expect(results[2]).toContain('O pedido ao dono já está em "Precisa de você" (o1)');
   // three starts, one item
-  expect(results[3].trim().split("\n")).toEqual([expect.stringMatching(/^o1: Destravar o app Claude \(pasta reaproveitada\): abra no app uma sessão nova na raiz de platform/)]);
+  expect(results[3].trim().split("\n")).toEqual([expect.stringMatching(/^o1: Abrir no app uma sessão na raiz de platform e enviar uma mensagem curta \(destrava o app/)]);
 }, { OMB_CC_BIN: "/usr/bin/true" }), 60_000);
 
 it("keeps one \"Precisa de você\" item for one action, whichever conversation asks again (R9-followup #3)", () => fixture(async f => {

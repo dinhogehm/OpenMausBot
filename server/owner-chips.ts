@@ -21,11 +21,12 @@ export function sessionLabel(title: string): string {
 }
 
 export const sessionChips = {
-  interrupted: (title: string, turn: number) => `${sessionLabel(title)} interrompida no reinício — retome-a (o turno ${turn} não sobreviveu ao reinício)`,
+  // who resumes is the Chief, not the owner reading it (INSP-H r2 #6)
+  interrupted: (title: string, turn: number) => `${sessionLabel(title)} interrompida no reinício — o Chief retoma (o turno ${turn} não sobreviveu ao reinício)`,
   survived: (title: string, turn: number) => `${sessionLabel(title)} seguiu rodando no reinício — acompanho o turno ${turn} até o fim`,
   followedEnded: (title: string, turn: number) => `${sessionLabel(title)} terminou o turno ${turn}, acompanhado após o reinício`,
-  followedCut: (title: string, turn: number) => `${sessionLabel(title)} parou sem fechar o turno ${turn} — retome-a (o processo que sobreviveu ao reinício terminou)`,
-  survivorLimit: (title: string, turn: number, minutes: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min — retome-a (turno ${turn}, acompanhado após o reinício)`,
+  followedCut: (title: string, turn: number) => `${sessionLabel(title)} parou sem fechar o turno ${turn} — o Chief retoma (o processo que sobreviveu ao reinício terminou)`,
+  survivorLimit: (title: string, turn: number, minutes: number) => `${sessionLabel(title)} cortada no limite de ${minutes} min — o Chief retoma (turno ${turn}, acompanhado após o reinício)`,
   survivorStopped: (title: string) => `${sessionLabel(title)} parada: o processo que seguia após o reinício foi encerrado`,
   movedHere: (titles: string[], why: string) => `${titles.length === 1 ? "1 sessão passa" : `${titles.length} sessões passam`} a relatar aqui (${why}): ${titles.map(sessionLabel).map((label) => label.replace(/^Sessão /, "")).join(", ")}`,
   movedAway: (title: string) => `${sessionLabel(title)}: os relatórios agora vão para o canal do dono`,
@@ -36,13 +37,16 @@ export const sessionChips = {
 /** The Chief's desk after a restart: what needs doing first (sessions to resume), then the rest. */
 export function serverRestartedChip(input: { interrupted: number; survived: number; rerun: number; asked: number }): string {
   const parts = [
-    input.interrupted ? `${plural(input.interrupted, "sessão interrompida", "sessões interrompidas")} (retomar)` : "",
+    input.interrupted ? `${plural(input.interrupted, "sessão interrompida", "sessões interrompidas")} (o Chief retoma)` : "",
     input.survived ? `${plural(input.survived, "sessão segue", "sessões seguem")} rodando` : "",
     input.asked ? `${plural(input.asked, "turno", "turnos")} para confirmar` : "",
     input.rerun ? `${plural(input.rerun, "turno retomado", "turnos retomados")}` : "",
   ].filter(Boolean);
   return `Servidor reiniciado: ${parts.join(", ") || "nada a retomar"}`;
 }
+
+/** The owner's item while the app reuses worktrees: the action first, as it shows in two lines (INSP-H r2 #6). */
+export const appUnblockTitle = (repoName: string) => `Abrir no app uma sessão na raiz de ${repoName} e enviar uma mensagem curta (destrava o app, que está reaproveitando worktrees; até lá as sessões vão para o terminal)`;
 
 /** The conversation with the owner, read back from their order. */
 export const ownerChannelChip = (when: string) => `Canal do dono: esta conversa (ordem de ${when}) — avisos, relatórios e pendências vêm para cá`;

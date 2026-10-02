@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { CHIP_VISIBLE, ownerChannelChip, plural, serverRestartedChip, sessionChips, sessionLabel } from "./owner-chips.ts";
+import { appUnblockTitle, CHIP_VISIBLE, ownerChannelChip, plural, serverRestartedChip, sessionChips, sessionLabel } from "./owner-chips.ts";
 import { batteryAlert } from "./power.ts";
-import { releaseAttention, releaseAttentionAlert, releaseFailedText } from "./release-watch.ts";
+import { releaseAttention, releaseAttentionAlert, releaseCausePt, releaseFailedText, releaseLoopPending } from "./release-watch.ts";
 
 // INSP-H r1 #8: a chip shows ~55 characters (ToolActivity truncates it).
 // Every chip of the lot says, in that much, what happened and what to do —
@@ -14,10 +14,10 @@ describe("what the owner reads on the lot's chips", () => {
   const signal = releaseAttention(JSON.stringify({ to: "chief", kind: "production-release-attention", reason: "signal", sha: "cb015584a35296ec89b2dbaf2c54373e6f93b826", failures: 1, limit: 0, last_failure: "exit 143", at: "2026-10-02T00:30:00Z" }))!;
   const battery = (percent: number | null, told: string[] = []) => batteryAlert({ power: { onBattery: true, percent }, onBatterySince: 0, now: 45 * 60_000, releaseRunning: true, told: new Set(told) })!.text;
   const chips: Array<[string, string, RegExp]> = [
-    ["interrupted", sessionChips.interrupted(TITLE, 2), /Sessão 9326 interrompida.*retome/],
+    ["interrupted", sessionChips.interrupted(TITLE, 2), /Sessão 9326 interrompida.*o Chief retoma/],
     ["survived", sessionChips.survived(TITLE, 2), /Sessão 9326 seguiu rodando/],
     ["followed, ended", sessionChips.followedEnded(TITLE, 2), /Sessão 9326 terminou o turno 2/],
-    ["followed, cut", sessionChips.followedCut(TITLE, 2), /Sessão 9326 parou.*retome/],
+    ["followed, cut", sessionChips.followedCut(TITLE, 2), /Sessão 9326 parou.*o Chief retoma/],
     ["survivor at the limit", sessionChips.survivorLimit(TITLE, 2, 90), /Sessão 9326 cortada no limite/],
     ["survivor stopped", sessionChips.survivorStopped(TITLE), /Sessão 9326 parada/],
     ["moved here", sessionChips.movedHere([TITLE, "9052 tempo de reabertura"], "canal do dono"), /2 sessões passam a relatar aqui/],
@@ -25,7 +25,8 @@ describe("what the owner reads on the lot's chips", () => {
     ["moved away", sessionChips.movedAway(TITLE), /Sessão 9326: os relatórios agora vão/],
     ["cli", sessionChips.cli(TITLE, "o app Claude está reaproveitando worktrees"), /Sessão 9326 no terminal, fora do app/],
     ["claimed", sessionChips.claimed(TITLE, [9328, 9341]), /Sessão 9326 assumiu as PRs #9328, #9341/],
-    ["server restarted", serverRestartedChip({ interrupted: 1, survived: 2, rerun: 1, asked: 0 }), /Servidor reiniciado: 1 sessão interrompida \(retomar\)/],
+    ["server restarted", serverRestartedChip({ interrupted: 1, survived: 2, rerun: 1, asked: 0 }), /Servidor reiniciado: 1 sessão interrompida \(o Chief/],
+    ["release snapshot", releaseFailedText("2995ef215", 3, "Release snapshot changed during validation"), /Release 2995ef215 falhou 3× seguidas \(snapshot mudou/],
     ["owner's channel", ownerChannelChip("01/10 09:49"), /Canal do dono: esta conversa/],
     ["release loop", releaseFailedText("cb015584a", 5, "Release de producao sem alvo de runtime"), /Release cb015584a falhou 5× seguidas/],
     ["machine failure", releaseAttentionAlert(attention, { err: "e" }).text, /Release cb015584a: falha da máquina \(ssh\/git\), não do/],
@@ -39,6 +40,15 @@ describe("what the owner reads on the lot's chips", () => {
     const visible = text.slice(0, CHIP_VISIBLE);
     expect(visible).toMatch(essential);
     expect(text).not.toMatch(JARGON);
+  });
+
+  it("opens the server's \"Precisa de você\" titles with the commit or the action (INSP-H r2 #6)", () => {
+    const loop = releaseLoopPending({ short: "cb015584a", full: null, count: 5 }).title;
+    expect(loop.slice(0, 40)).toBe("Recusar cb015584a (laço, 5×): copie o co");
+    // the server's own title for the reused folder (askOwnerToUnblockApp)
+    expect(appUnblockTitle("nuria-platform").slice(0, 40)).toMatch(/^Abrir no app uma sessão/);
+    expect(releaseCausePt("ADMISSION_TIMEOUT waiting for release lease")).toBe("tempo de espera na fila esgotou");
+    expect(releaseCausePt("Local CI failed at tests")).toBe("CI local falhou em tests");
   });
 
   it("names a session by its issue, and says plurals right", () => {
