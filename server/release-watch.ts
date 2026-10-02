@@ -140,13 +140,20 @@ export function fullReleaseSha(outTail: string, short: string): string | null {
  * lot P (nuria-platform #9342) the installed watcher halts a commit by itself on the 2nd
  * identical failure after the CI (lot T: same step and same failing tests), and on the
  * 1st tenant-drift failure; a different failure is tried again. */
-export function releaseRetryText(input: { halted: boolean; cycleMs: number | null; nothingToPublish: boolean }): string {
-  if (input.halted) return "O watcher PAROU de tentar este commit (halt): ele não tenta de novo este commit, e o próximo commit da main entra sozinho.";
+export function releaseRetryText(input: { halted: boolean; haltCode?: string; cycleMs: number | null; nothingToPublish: boolean }): string {
+  if (input.halted) {
+    // INSP-T r1 #5: after a post-deploy halt the next commit does NOT go by itself (latch, exit 23)
+    if (input.haltCode && input.haltCode !== "repeated-failure" && input.haltCode !== "content-failure-limit")
+      return "O watcher PAROU este commit na checagem de saúde pós-deploy: o próximo commit da main não sai sozinho enquanto a trava pós-deploy existir (o release recusa com exit 23 até o dono reconhecê-la).";
+    return "O watcher PAROU de tentar este commit (halt): não tenta de novo este commit, e um commit novo na main é tentado sozinho.";
+  }
   const cycle = input.cycleMs !== null
     ? `cada volta leva ~${Math.max(1, Math.round(input.cycleMs / 60_000))} min (medido aqui)`
     : "cada volta é uma validação completa (dezenas de minutos)";
   const why = input.nothingToPublish ? " Não há nada para publicar neste commit: nenhuma volta vai dar certo." : "";
-  return `O watcher recomeça este commit depois de uma falha e para sozinho (halt) quando a mesma falha se repete depois da CI (mesmo step, mesmos testes); falhas diferentes continuam sendo tentadas. ${cycle[0]!.toUpperCase()}${cycle.slice(1)}, e enquanto roda ele segura o lease de release, o que faz os gates das sessões esperarem.${why}`;
+  // INSP-T r1 #4: what "the same failure" means depends on the installed watcher (lot P: Smart
+  // Deploy's verdict only; lot T: step, package and tests), so it is not promised here
+  return `O watcher recomeça este commit depois de uma falha e para sozinho (halt) na 2ª falha seguida depois da CI que ele considere igual à anterior; aí o servidor avisa. ${cycle[0]!.toUpperCase()}${cycle.slice(1)}, e enquanto roda ele segura o lease de release, o que faz os gates das sessões esperarem.${why}`;
 }
 
 /** Production as it is right now, read in the same check that writes the alert (`git
@@ -605,6 +612,18 @@ const HALT_REASONS: Record<string, string> = {
   "repeated-failure": "a mesma falha 2× seguidas depois da CI",
 };
 
+/** What a "same failure twice" halt says about whose fault it is, from the escalation's last
+ * failure (INSP-T r1 #4): a named failing test twice is probably the commit; the same step
+ * failing without a named test (a worker timeout, an OOM, an unhandled error) may well be
+ * the machine; and a watcher older than lot T compares only Smart Deploy's generic verdict,
+ * so its "same" proves nothing about the cause. */
+export function repeatedFailureReading(lastFailure: string | undefined): string {
+  const last = lastFailure ?? "";
+  if (/Local CI failed at \S+; FAIL /.test(last)) return "Falhou igual duas vezes com o mesmo teste nomeado: é provavelmente do conteúdo do commit.";
+  if (/Local CI failed at /.test(last)) return "A mesma etapa falhou duas vezes sem teste nomeado (timeout de worker, falta de memória ou erro não tratado): pode ser carga da máquina, não do commit. Veja o log antes de culpar o commit.";
+  return "O watcher considera as duas falhas iguais, mas a versão instalada compara só o veredito genérico do Smart Deploy: confira no log se as duas tiveram a mesma causa antes de culpar o commit.";
+}
+
 /** The Chief's report for a watcher halt: what stopped, why, and the way out for THAT
  * reason. A repeated failure is undone only by removing both files — the halt alone makes
  * the same failure halt again at once (watch-production-release.sh, lot P); a fix that lands
@@ -612,11 +631,14 @@ const HALT_REASONS: Record<string, string> = {
 export function haltReport(halted: { sha: string; reasonCode: string; reason: string; failures?: number; lastFailure?: string }, files: { halted: string; escalation: string; lastFailure: string }): { text: string; report: string } {
   const short = halted.sha.slice(0, 9);
   const text = `O watcher de produção PAROU de tentar o commit ${short} (${halted.reason}${halted.failures ? `, ${halted.failures} falhas` : ""}): ele não tenta de novo este commit sozinho.`;
+  const retry = `Só para repetir ESTE commit é preciso apagar os dois arquivos: rm ${files.halted} ${files.lastFailure} — apagando só o primeiro, a mesma falha para o commit de novo na hora. Apagar é decisão do dono, não de bot.`;
   const way = halted.reasonCode === "repeated-failure"
-    ? `Falhou igual duas vezes (mesmo step e mesmos testes): é falha do conteúdo, não da máquina. A saída é a correção entrar na main com um carrier novo: o watcher publica o próximo commit da main sozinho, sem ninguém tocar em arquivos. Só para repetir ESTE commit (depois de corrigir a máquina, se a causa for ela) é preciso apagar os dois arquivos: rm ${files.halted} ${files.lastFailure} — apagando só o primeiro, a mesma falha para o commit de novo na hora. Apagar é decisão do dono, não de bot.`
+    ? `${repeatedFailureReading(halted.lastFailure)} Um commit novo na main (a correção num carrier) é tentado pelo watcher sozinho. ${retry}`
     : halted.reasonCode === "content-failure-limit"
-      ? `Drift de tenant: corrija o tenant (DBA) ou a migration; depois, para repetir este commit, o dono apaga ${files.halted}. Um commit novo na main é publicado sozinho.`
-      : `Descubra a causa (saúde pós-deploy), corrija ou decida com o dono; para tentar de novo o mesmo commit, o dono apaga ${files.halted}.`;
+      ? `Drift de tenant: corrija o tenant (DBA) ou a migration; depois, para repetir este commit, o dono apaga ${files.halted}. Um commit novo na main é tentado sozinho.`
+      // exit 20/21: a rollback, or an unhealthy release left in place, also latches production
+      // (post-release-guard): the next release is refused with exit 23 until the owner acknowledges
+      : `Checagem de saúde pós-deploy: produção pode ter voltado sozinha ou ter ficado com saúde ruim. O próximo commit da main NÃO sai sozinho enquanto a trava pós-deploy existir: o release recusa (exit 23) até a mudança ruim ser revertida ou corrigida na main e o dono reconhecer a trava (NURIA_POST_RELEASE_LATCH_ACK=<commit travado>). Para repetir este mesmo commit, o dono apaga ${files.halted}.`;
   return {
     text,
     report: `[Alerta do servidor: release de produção parado] ${text}${halted.lastFailure ? ` Última falha: ${halted.lastFailure}.` : ""}\n${way} Não peça ao dono para gravar declined-production-release.sha para este commit: o halt já o tirou da fila. Arquivos: ${files.escalation}, ${files.halted}.`,

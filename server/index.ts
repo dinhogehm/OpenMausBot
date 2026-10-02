@@ -8639,7 +8639,7 @@ async function checkProductionRelease(): Promise<void> {
   // the chip opens with the essential (INSP-H r1 #8); the full cause goes in the report
   const text = releaseFailedText(failed.sha, failed.count, cause);
   // after the watcher's halt it does not retry: never say it does; and never "every 2 min" (R9-release #7)
-  const retries = releaseRetryText({ halted: isHalted, cycleMs: releaseWatch.state.cycleMs(failed.sha), nothingToPublish: nothingToPublish(cause) });
+  const retries = releaseRetryText({ halted: isHalted, ...(isHalted && halted ? { haltCode: halted.reasonCode } : {}), cycleMs: releaseWatch.state.cycleMs(failed.sha), nothingToPublish: nothingToPublish(cause) });
   const ownerItem = loopItem
     ? ` O dono já tem UM item em "Precisa de você" para recusar este commit (${loopItem.id}): ${loopItem.title}${loopItem.command ? ` (comando, com botão de copiar no item: ${loopItem.command})` : ""}. Cite ${loopItem.id}; não abra outro item para este laço nem proponha o arquivo halted-production-release.sha (quem o escreve é o watcher, ao parar um commit: escrito à mão, faz o servidor relatar um halt que não houve) nem desligar o LaunchAgent.`
     : "";

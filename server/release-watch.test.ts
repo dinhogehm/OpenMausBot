@@ -202,12 +202,32 @@ describe("after a release", () => {
     expect(text).toBe("O watcher de produção PAROU de tentar o commit d5bb1f70b (a mesma falha 2× seguidas depois da CI, 2 falhas): ele não tenta de novo este commit sozinho.");
     expect(report).toContain("Última falha: Local CI failed at script-contracts; FAIL scripts/__tests__/unified-schema-tenant-reconcilers.test.ts.");
     expect(report).toContain("rm /h/.nuria/halted-production-release.sha /h/.nuria/last-failure-production-release");
-    expect(report).toContain("o watcher publica o próximo commit da main sozinho");
+    expect(report).toContain("Um commit novo na main (a correção num carrier) é tentado pelo watcher sozinho.");
+    expect(report).toContain("Falhou igual duas vezes com o mesmo teste nomeado: é provavelmente do conteúdo do commit.");
     expect(report).toContain("Não peça ao dono para gravar declined-production-release.sha");
     // the content halt keeps its own remedy, without the failure memory
     const drift = haltReport(haltedRelease({ escalationJson: "", haltedSha: "2995ef215", haltedReason: "content-failure-limit" })!, files);
     expect(drift.report).toContain("Drift de tenant");
     expect(drift.report).not.toContain("last-failure-production-release");
+  });
+
+  // INSP-T r1 #4: a halt may be the machine; and a lot P watcher's "same" proves nothing
+  it("a repeated-failure halt without a named test says it may be the machine, never that it is the content", () => {
+    const files = { halted: "/h/halted", escalation: "/h/esc", lastFailure: "/h/last" };
+    const flake = haltReport({ sha: "9dbb1dcdd", reasonCode: "repeated-failure", reason: "x", failures: 2, lastFailure: "Local CI failed at tests; Failed: @nuria/widget#test (timeout, unhandled)" }, files).report;
+    expect(flake).toContain("pode ser carga da máquina, não do commit");
+    expect(flake).not.toContain("do conteúdo do commit");
+    const lotP = haltReport({ sha: "9dbb1dcdd", reasonCode: "repeated-failure", reason: "x", failures: 2, lastFailure: "Bloqueado: validacao reprovada (CRITICAL/ERROR)." }, files).report;
+    expect(lotP).toContain("compara só o veredito genérico do Smart Deploy");
+    expect(lotP).not.toContain("do conteúdo do commit");
+  });
+
+  // INSP-T r1 #5: the post-deploy halt latches production; the next commit is refused (exit 23)
+  it("a post-deploy health halt never promises that the next commit goes by itself", () => {
+    const report = haltReport(haltedRelease({ escalationJson: "", haltedSha: "c88f99d62", haltedReason: "" })!, { halted: "/h/halted", escalation: "/h/esc", lastFailure: "/h/last" }).report;
+    expect(report).toContain("O próximo commit da main NÃO sai sozinho enquanto a trava pós-deploy existir");
+    expect(report).toContain("NURIA_POST_RELEASE_LATCH_ACK");
+    expect(report).not.toMatch(/tentado (pelo watcher )?sozinho/);
   });
 
   it("every release alert carries production as read now, and says so when it could not be read (R10-release #3)", () => {
@@ -436,10 +456,17 @@ describe("a release in a loop", () => {
       // kept across a restart
       expect(Math.round(new ReleaseWatchState(path).cycleMs("cb015584a")! / 60_000)).toBe(41);
       const text = releaseRetryText({ halted: false, cycleMs: state.cycleMs("cb015584a"), nothingToPublish: nothingToPublish(CAUSE) });
-      expect(text).toBe("O watcher recomeça este commit depois de uma falha e para sozinho (halt) quando a mesma falha se repete depois da CI (mesmo step, mesmos testes); falhas diferentes continuam sendo tentadas. Cada volta leva ~41 min (medido aqui), e enquanto roda ele segura o lease de release, o que faz os gates das sessões esperarem. Não há nada para publicar neste commit: nenhuma volta vai dar certo.");
-      expect(text).not.toMatch(/a cada 2 min|sem limite/);
+      expect(text).toBe("O watcher recomeça este commit depois de uma falha e para sozinho (halt) na 2ª falha seguida depois da CI que ele considere igual à anterior; aí o servidor avisa. Cada volta leva ~41 min (medido aqui), e enquanto roda ele segura o lease de release, o que faz os gates das sessões esperarem. Não há nada para publicar neste commit: nenhuma volta vai dar certo.");
+      // INSP-T r1 #4: nothing promised about what "the same" means (it depends on the installed watcher)
+      expect(text).not.toMatch(/a cada 2 min|sem limite|mesmo step|mesmos testes/);
       expect(releaseRetryText({ halted: false, cycleMs: null, nothingToPublish: false })).toContain("Cada volta é uma validação completa");
-      expect(releaseRetryText({ halted: true, cycleMs: 1, nothingToPublish: true })).toBe("O watcher PAROU de tentar este commit (halt): ele não tenta de novo este commit, e o próximo commit da main entra sozinho.");
+      expect(releaseRetryText({ halted: true, haltCode: "repeated-failure", cycleMs: 1, nothingToPublish: true })).toBe("O watcher PAROU de tentar este commit (halt): não tenta de novo este commit, e um commit novo na main é tentado sozinho.");
+      // INSP-T r1 #5: after a post-deploy halt the next commit does not go by itself (latch, exit 23)
+      for (const haltCode of ["post-release-health", "post-deploy-health"]) {
+        const latched = releaseRetryText({ halted: true, haltCode, cycleMs: 1, nothingToPublish: false });
+        expect(latched).toContain("o próximo commit da main não sai sozinho enquanto a trava pós-deploy existir");
+        expect(latched).not.toContain("tentado sozinho");
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
