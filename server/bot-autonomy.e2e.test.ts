@@ -333,7 +333,8 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     ] });
     // while it works, its conversation's row says it runs headless, out of the Claude app
     const rowSessions = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ccSessions ?? []);
-    await expect.poll(rowSessions, { timeout: 10_000 }).toEqual([expect.objectContaining({ sessionId: id, title: "#9999 teste", surface: "cli" })]);
+    // the bot typed "#9999 teste": the session is titled the owner's way, without "#" (H7)
+    await expect.poll(rowSessions, { timeout: 10_000 }).toEqual([expect.objectContaining({ sessionId: id, title: "9999 teste", surface: "cli" })]);
     await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
     await expect.poll(() => ccLedger()[0].status, { timeout: 10_000 }).toBe("archived");
     expect(await rowSessions()).toEqual([]);
@@ -401,7 +402,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
       { expectContextIncludes: ["did: BRIEF_A"], reply: "Report read in A" },
       { steps: [{ tool: "cc_session_send", arguments: { session_id: id, message: "ORDER_FROM_B" } }], reply: "Sent from B" },
       { expectContextIncludes: ["did: ORDER_FROM_B"], reply: "Report read in B" },
-      { expectContextIncludes: ["they report here from now on", "#9998 origem"], reply: "Taking #9998 over here" },
+      { expectContextIncludes: ["they report here from now on", "9998 origem"], reply: "Taking #9998 over here" },
     ] });
     await f.api(`/api/bots/${f.bot.id}/tasks/${threadB}`, {}, "DELETE");
     expect(ccLedger()[0].ownerThreadId).toBe(threadA);
@@ -551,10 +552,11 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(results[6]).toContain("entrou na fila de sessões (#3, prioridade normal");
     const queueId = /id ([0-9a-f]{8})\)/.exec(results[6])![1];
     expect(results[7]).toContain(`já estava na fila de sessões (#3, id ${queueId})`);
-    expect(results[8]).toContain('1. "#9906 queda do login" · prioridade P1');
-    expect(results[8]).toContain(`3. "#9907 a cancelar" · prioridade normal`);
+    // titled the owner's way, without "#" (H7), whatever the bot typed
+    expect(results[8]).toContain('1. "9906 queda do login" · prioridade P1');
+    expect(results[8]).toContain(`3. "9907 a cancelar" · prioridade normal`);
     const chips = await f.chips();
-    expect(chips).toContain('Fila de sessões: "#9906 queda do login" é a #1 (prioridade P1); abre sozinha quando uma vaga liberar');
+    expect(chips).toContain('Fila de sessões: "9906 queda do login" é a #1 (prioridade P1); abre sozinha quando uma vaga liberar');
     // the bot takes one out of the queue with its id, in its next turn (the
     // four sessions hold their slots for 6 s, so nothing else wakes it before)
     expect(f.turns()).toHaveLength(1);
@@ -564,16 +566,16 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
       ...Array.from({ length: 20 }, () => ({ reply: "ok" })),
     ] });
     await f.send("Tire a #9907 da fila.");
-    await expect.poll(async () => (await f.chips()).includes('Fila de sessões: "#9907 a cancelar" saiu da fila (cancelado)'), { timeout: 20_000 }).toBe(true);
+    await expect.poll(async () => (await f.chips()).includes('Fila de sessões: "9907 a cancelar" saiu da fila (cancelado)'), { timeout: 20_000 }).toBe(true);
     // the four free their slots: the P1 opens before the one that came first
     await expect.poll(() => readFileSync(calls, "utf8").trim().split("\n").length, { timeout: 30_000 }).toBe(6);
     const opened = readFileSync(calls, "utf8").trim().split("\n").map((line) => JSON.parse(line).first as string);
     // (a CLI session's first line is its brief)
     expect(opened.slice(4)).toEqual(["#9906 queda do login HOLD:100", "não use os scripts de hotfix HOLD:100"]);
     const after = await f.chips();
-    expect(after.indexOf('Fila de sessões: "#9906 queda do login" abriu')).toBeGreaterThan(-1);
-    expect(after.indexOf('Fila de sessões: "#9906 queda do login" abriu')).toBeLessThan(after.indexOf('Fila de sessões: "#9905 limpeza" abriu'));
-    expect(after.some((chip: string) => chip.includes('"#9907 a cancelar" abriu'))).toBe(false);
+    expect(after.indexOf('Fila de sessões: "9906 queda do login" abriu')).toBeGreaterThan(-1);
+    expect(after.indexOf('Fila de sessões: "9906 queda do login" abriu')).toBeLessThan(after.indexOf('Fila de sessões: "9905 limpeza" abriu'));
+    expect(after.some((chip: string) => chip.includes('"9907 a cancelar" abriu'))).toBe(false);
   }, { OMB_CC_BIN: fake });
 }, 120_000);
 
