@@ -3218,6 +3218,7 @@
   "needsYou.screen.awaitingSection": "Waiting for bots ({count})",
   "needsYou.screen.botSilentShort": "{name} did not answer",
   "needsYou.screen.changeAnswer": "Change answer",
+  "needsYou.screen.keepAnswer": "Keep my answer",
   "needsYou.time.today": "at {time}",
   "needsYou.time.otherDay": "on {date} at {time}",
   "needsYou.screen.history": "History",

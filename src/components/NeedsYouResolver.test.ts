@@ -385,6 +385,11 @@ describe("keys on the resolution screen", () => {
     expect(calls).toEqual(["changeAnswer:o12"]);
     const open = view({ items: answered, selectedKey: key, changingAnswer: key });
     expect(open.find("data-resolver-change-answer")).toBeUndefined();
+    // and folding back is one click (the container toggles it)
+    expect(open.html).toContain("Manter a resposta");
+    open.press("data-resolver-keep-answer");
+    expect(open.calls).toEqual(["changeAnswer:o12"]);
+    open.calls.length = 0;
     // the chosen decision is pressed and badged, distinct from a recommendation
     const inline = open.tree.filter((node) => node.props["data-placement"] === "inline" && "data-resolver-option" in node.props);
     expect(inline.map((node) => node.props["aria-pressed"])).toEqual([true, false]);

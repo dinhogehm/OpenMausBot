@@ -2952,6 +2952,7 @@
   "needsYou.screen.awaitingSection": "Aguardando bots ({count})",
   "needsYou.screen.botSilentShort": "{name} não respondeu",
   "needsYou.screen.changeAnswer": "Mudar resposta",
+  "needsYou.screen.keepAnswer": "Manter a resposta",
   "needsYou.time.today": "às {time}",
   "needsYou.time.otherDay": "em {date} às {time}",
   "needsYou.screen.history": "Histórico",

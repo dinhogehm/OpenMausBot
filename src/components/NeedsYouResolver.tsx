@@ -527,6 +527,13 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
               {t("needsYou.screen.changeAnswer")}
             </button>
           ) : null}
+          {awaiting && decisionsOpen ? (
+            // opened to change it: folding back is one click too (Escape does the same)
+            <button type="button" data-resolver-keep-answer="" onClick={() => props.onChangeAnswer(item)} className={cn(quietButton, "mr-auto")}>
+              <X size={14} aria-hidden="true" />
+              {t("needsYou.screen.keepAnswer")}
+            </button>
+          ) : null}
           {decisionsOpen ? (
             // short or narrow window: the decisions are in the item, after the steps — one tap away
             <button
@@ -966,7 +973,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onDecide={(item, option) => { setSwitching(null); setChangingAnswer(null); void run(`option:${option}`, () => onDecide(item, option), t("needsYou.screen.decidedWaiting", { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title })); }}
           switching={switching}
           changingAnswer={changingAnswer}
-          onChangeAnswer={(item) => setChangingAnswer(needsYouKey(item))}
+          onChangeAnswer={(item) => { const key = needsYouKey(item); setSwitching(null); setChangingAnswer((open) => (open === key ? null : key)); }}
           onAskSwitch={(item, option) => setSwitching({ key: needsYouKey(item), option })}
           onCancelSwitch={() => setSwitching(null)}
           onReply={reply}
