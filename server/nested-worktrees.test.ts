@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   archiveCleanupNote, codexRolloutFolders, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
-  releasedPlanLine, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
+  releasedPlanLine, releasedScopeLine, sizeLabel, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
 
 const parent = "/r/nuria-platform/.claude/worktrees/9286-lote";
@@ -201,7 +201,7 @@ describe("worktrees already in production (R8 G3): a plan a person runs", () => 
     const plan = await planReleasedWorktrees("/r/p", PROD, baseDeps(git));
     expect(plan.kept).toEqual(["/r/p/w/odd (não conferida: '/r/p/w/odd' is a main working tree)", "/r/p/w/dirty (tem mudanças locais)"]);
     const first = releasedPlanLine("nuria-platform", plan, undefined);
-    expect(first.line).toBe("nuria-platform: nenhuma pode ser removida; mantidas: odd (não conferida: '/r/p/w/odd' is a main working tree), dirty (tem mudanças locais)");
+    expect(first.line).toBe("nuria-platform: nenhuma das contidas na tag pode ser removida; mantidas: odd (não conferida: '/r/p/w/odd' is a main working tree), dirty (tem mudanças locais)");
     // the same pass 6 h later: nothing to say
     expect(releasedPlanLine("nuria-platform", plan, first.key).line).toBeNull();
     // the same paths with other reasons (the real fix-9298 flipped between passes): nothing to say (INSP-G r2 item 6)
@@ -210,7 +210,67 @@ describe("worktrees already in production (R8 G3): a plan a person runs", () => 
     // a path that leaves the kept list: said again
     expect(releasedPlanLine("nuria-platform", { ...plan, kept: [plan.kept[0]!] }, first.key).line).not.toBeNull();
     // a new candidate: said again
-    expect(releasedPlanLine("nuria-platform", { ...plan, candidates: [{ path: "/r/p/w/old", command: "x" }] }, first.key).line).toContain("1 pode(m) ser removida(s) (old)");
+    expect(releasedPlanLine("nuria-platform", { ...plan, candidates: [{ path: "/r/p/w/old", command: "x" }] }, first.key).line).toContain("1 das contidas na tag pode(m) ser removida(s) (old)");
+  });
+
+  // R10-resilience D, 02/10 (redacted paths, real names and ages): the boot
+  // report judged the 5 worktrees in the tag and said "0 may be removed"; the
+  // Chief told the owner twice that "nenhuma pode ser removida" while ~17 GB
+  // sat idle for 4–5 days outside the tag, in worktrees and task-workspaces.
+  it("says it judged only those in the tag, and lists — as information, with the command — the ones idle >72 h outside it", async () => {
+    const T = (iso: string) => Date.parse(iso);
+    const now = T("2026-10-02T16:39:20Z");
+    const root = "/Users/owner/Projetos/nuria-platform";
+    const w = (name: string) => `${root}/.claude/worktrees/${name}`;
+    const list = [
+      `worktree ${root}\nHEAD aaa`,
+      `worktree ${w("transfer-n2-sem-agente-824837")}\nHEAD 0001`,
+      `worktree ${w("nur-12-d1-overload-02e53e")}\nHEAD 0002`,
+      `worktree ${w("n2-ticket-distribution-bug-78843c")}\nHEAD 0003`,
+      `worktree ${w("9347-release-travado")}\nHEAD 0004`, // a live session: never listed
+      `worktree ${w("8204-sidebar")}\nHEAD 0005`, // outside the tag, touched today
+      `worktree ${w("fix-9298-in-tag")}\nHEAD 1bbd5c2a`,
+    ].join("\n\n");
+    const { git, calls } = fakeGit(list);
+    const idle: Record<string, number> = {
+      [w("transfer-n2-sem-agente-824837")]: T("2026-09-27T20:00:00Z"),
+      [w("nur-12-d1-overload-02e53e")]: T("2026-09-28T13:00:00Z"),
+      [w("n2-ticket-distribution-bug-78843c")]: T("2026-09-28T15:00:00Z"),
+      [w("9347-release-travado")]: T("2026-09-26T10:00:00Z"),
+      [w("8204-sidebar")]: now - 3_600_000,
+      [w("fix-9298-in-tag")]: now - 3 * DAY,
+    };
+    const plan = await planReleasedWorktrees(root, PROD, baseDeps(git, { now, inUse: [w("9347-release-travado")], lastActivity: (path) => idle[path] ?? null }));
+    expect(plan.scope).toEqual({ total: 6, inTag: 1 });
+    expect(plan.candidates.map((each) => each.path)).toEqual([w("fix-9298-in-tag")]);
+    expect(plan.stale?.map((each) => each.path)).toEqual([w("transfer-n2-sem-agente-824837"), w("nur-12-d1-overload-02e53e"), w("n2-ticket-distribution-bug-78843c")]);
+    expect(plan.stale?.[0]).toMatchObject({ kind: "worktree", command: `git -C ${root} worktree remove ${w("transfer-n2-sem-agente-824837")}` });
+    expect(releasedScopeLine("nuria-platform", plan, "nuria-production-deployed")).toBe("nuria-platform: avaliei para remoção só as worktrees já contidas na tag nuria-production-deployed (1 de 6); as outras 5 não foram avaliadas para remoção.");
+    expect(onlyReads(calls)).toBe(true);
+
+    // the task-workspaces: conversations no longer open, idle for days; an open one and a session's are never listed
+    const tw = (bot: string, thread: string) => `/Users/owner/.openmausbot/task-workspaces/${bot}/${thread}`;
+    const workspaces = staleTaskWorkspaces([
+      { path: tw("82feff85", "a1"), lastActivity: T("2026-09-28T12:00:00Z") },
+      { path: tw("82feff85", "a2"), lastActivity: T("2026-09-29T09:00:00Z") },
+      { path: tw("e9ba01c7", "70fa6c86"), lastActivity: T("2026-09-29T11:00:00Z") },
+      { path: tw("82feff85", "open"), lastActivity: T("2026-09-20T00:00:00Z") },
+      { path: tw("82feff85", "session"), lastActivity: T("2026-09-20T00:00:00Z") },
+      { path: tw("82feff85", "recent"), lastActivity: now - 3_600_000 },
+      { path: tw("82feff85", "unknown"), lastActivity: null },
+    ], { inUse: [tw("82feff85", "open"), `${tw("82feff85", "session")}/repo/.claude/worktrees/x`], now });
+    expect(workspaces.map((each) => each.path)).toEqual([tw("82feff85", "a1"), tw("82feff85", "a2"), tw("e9ba01c7", "70fa6c86")]);
+    expect(workspaces[0]!.command).toBe(`mv ${tw("82feff85", "a1")} ~/.Trash/`);
+
+    const sized = [...plan.stale!, ...workspaces].map((each, i) => ({ ...each, sizeKb: [3.0, 2.8, 2.8, 2.2, 2.2, 2.1][i]! * 1024 * 1024 }));
+    const told = staleFoldersReport(sized)!;
+    expect(told.chip).toBe("Disco: 6 pasta(s) parada(s) há mais de 72 h fora da tag, ~15,1 GB no total — informação para o dono, nada foi removido");
+    expect(told.report).toContain("Só informação: o servidor não removeu nada");
+    expect(told.report.split("\n")[1]).toBe(`- worktree ${w("transfer-n2-sem-agente-824837")} (3,0 GB, sem mudança desde 27/09): git -C ${root} worktree remove ${w("transfer-n2-sem-agente-824837")}`);
+    expect(told.report).toContain(`- task-workspace ${tw("e9ba01c7", "70fa6c86")} (2,1 GB, sem mudança desde 29/09): mv ${tw("e9ba01c7", "70fa6c86")} ~/.Trash/`);
+    for (const line of told.report.split("\n").filter((each) => each.startsWith("- "))) expect(line).not.toMatch(/--force|\brm\b/);
+    expect(sizeLabel(640 * 1024)).toBe("640 MB");
+    expect(staleFoldersReport([])).toBeNull();
   });
 
   it("treats as work every ignored file that cannot be rebuilt", () => {

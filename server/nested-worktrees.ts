@@ -162,7 +162,26 @@ export interface ReleasedPlan {
   candidates: Array<{ path: string; command: string }>;
   /** In production but not a candidate: "<path> (<why>)". */
   kept: string[];
+  /** What was judged: the worktrees listed (besides the main checkout) and
+   * those contained in the tag — the only ones judged for removal. */
+  scope?: { total: number; inTag: number };
+  /** Outside the tag, nobody in them, untouched for STALE_OUTSIDE_TAG_MS:
+   * told to a person as information, with the command; never removed. */
+  stale?: StaleFolder[];
 }
+
+/** A folder idle for days outside the tag: information for a person (R10-resilience D). */
+export interface StaleFolder {
+  path: string;
+  kind: "worktree" | "task-workspace";
+  idleSince: number;
+  /** What a person runs after checking (no --force; a task-workspace goes to the Trash, not rm). */
+  command: string;
+  sizeKb?: number | null;
+}
+
+/** How long a folder outside the tag must sit untouched before a person hears of it. */
+export const STALE_OUTSIDE_TAG_MS = 72 * 3_600_000;
 
 const shellQuote = (value: string) => (/^[\w./@%+=:,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`);
 
@@ -195,6 +214,8 @@ export async function planReleasedWorktrees(repo: string, releasedSha: string, d
   }
   const cwds = deps.processCwds.map(canon);
   const keep = (entry: WorktreeEntry, why: string) => { plan.kept.push(`${entry.path} (${why})`); };
+  let inTag = 0;
+  const stale: StaleFolder[] = [];
 
   for (const { entry, path } of worktrees) {
     if (!entry.head) continue;
@@ -202,8 +223,16 @@ export async function planReleasedWorktrees(repo: string, releasedSha: string, d
     try {
       await deps.git(["merge-base", "--is-ancestor", entry.head, releasedSha]);
     } catch {
-      continue; // not in production yet (or not known here)
+      // not in production yet (or not known here): never judged for removal —
+      // but one nobody touched for days is told, as information (R10-resilience D:
+      // ~17 GB idle for 4–5 days while the Chief said "nenhuma pode ser removida")
+      if (!holdsAnother(path, entries.map((other) => other.path)) && !entry.locked && !entry.prunable && !usedByProcess([path, entry.path], cwds, deps.processCommands)) {
+        const active = await deps.lastActivity(entry.path);
+        if (active !== null && deps.now - active > STALE_OUTSIDE_TAG_MS) stale.push({ path: entry.path, kind: "worktree", idleSince: active, command: removeCommand(repo, entry.path) });
+      }
+      continue;
     }
+    inTag += 1;
     if (holdsAnother(path, entries.map((other) => other.path))) { keep(entry, "contém outra worktree"); continue; }
     if (entry.locked) { keep(entry, "bloqueada"); continue; }
     if (entry.prunable) { keep(entry, "pasta já não existe"); continue; }
@@ -215,7 +244,55 @@ export async function planReleasedWorktrees(repo: string, releasedSha: string, d
     if (content) { keep(entry, content); continue; }
     plan.candidates.push({ path: entry.path, command: removeCommand(repo, entry.path) });
   }
+  plan.scope = { total: worktrees.length, inTag };
+  if (stale.length) plan.stale = stale;
   return plan;
+}
+
+/** The task-workspaces (task-workspaces/<bot>/<conversation>) idle past
+ * STALE_OUTSIDE_TAG_MS that no agent uses: no open conversation, no session
+ * inside, not already told as a worktree. Information for a person, with a
+ * command that moves to the Trash (undoable), never one that deletes. */
+export function staleTaskWorkspaces(folders: ReadonlyArray<{ path: string; lastActivity: number | null }>, input: { inUse: Iterable<string>; now: number; known?: readonly string[]; canon?: (path: string) => string }): StaleFolder[] {
+  const canon = (path: string) => trimSlash(input.canon ? input.canon(path) : path);
+  const used = [...input.inUse].filter(Boolean).map(canon);
+  const known = (input.known ?? []).map(canon);
+  return folders.flatMap((folder) => {
+    const path = canon(folder.path);
+    if (folder.lastActivity === null || input.now - folder.lastActivity <= STALE_OUTSIDE_TAG_MS) return [];
+    if (used.some((each) => isInside(each, path) || isInside(path, each))) return [];
+    if (known.some((each) => isInside(each, path) || isInside(path, each))) return [];
+    return [{ path: folder.path, kind: "task-workspace" as const, idleSince: folder.lastActivity, command: `mv ${shellQuote(folder.path)} ~/.Trash/` }];
+  });
+}
+
+/** A size for a person: "3,0 GB", "640 MB". */
+export function sizeLabel(kb: number): string {
+  if (kb >= 1024 * 1024) return `${(kb / 1024 / 1024).toFixed(1).replace(".", ",")} GB`;
+  return `${Math.max(1, Math.round(kb / 1024))} MB`;
+}
+
+/** What the server judged, said so a bot never reads "none may be removed"
+ * as "nothing on disk can go" (R10-resilience D). */
+export function releasedScopeLine(repoName: string, plan: ReleasedPlan, tag: string): string | null {
+  if (!plan.scope) return null;
+  const { total, inTag } = plan.scope;
+  return `${repoName}: avaliei para remoção só as worktrees já contidas na tag ${tag} (${inTag} de ${total}); as outras ${total - inTag} não foram avaliadas para remoção.`;
+}
+
+/** The idle folders outside the tag, biggest first, for a person: each with
+ * its size, since when, and the command; null when there are none. */
+export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "America/Sao_Paulo"): { chip: string; report: string } | null {
+  if (!stale.length) return null;
+  const sorted = [...stale].sort((a, b) => (b.sizeKb ?? -1) - (a.sizeKb ?? -1) || a.idleSince - b.idleSince);
+  const totalKb = sorted.reduce((sum, each) => sum + (each.sizeKb ?? 0), 0);
+  const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone, day: "2-digit", month: "2-digit" });
+  const lines = sorted.map((each) => `- ${each.kind === "worktree" ? "worktree" : "task-workspace"} ${each.path} (${each.sizeKb ? sizeLabel(each.sizeKb) : "tamanho não medido"}, sem mudança desde ${day(each.idleSince)}): ${each.command}`);
+  const total = totalKb ? `, ~${sizeLabel(totalKb)} no total` : "";
+  return {
+    chip: `Disco: ${sorted.length} pasta(s) parada(s) há mais de 72 h fora da tag${total} — informação para o dono, nada foi removido`,
+    report: `Paradas há mais de 72 h, fora da tag e sem ninguém nelas (${sorted.length}${total}). Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force; a task-workspace vai para a Lixeira.\n${lines.join("\n")}`,
+  };
 }
 
 /** The command a person runs to remove a worktree (never --force). */
@@ -277,7 +354,8 @@ export function releasedPlanLine(repoName: string, plan: ReleasedPlan, previousK
     const path = at < 0 ? item : item.slice(0, at);
     return `${path.split("/").pop()}${at < 0 ? "" : item.slice(at)}`;
   };
-  const candidates = plan.candidates.length ? `${plan.candidates.length} pode(m) ser removida(s) (${plan.candidates.map((candidate) => name(candidate.path)).join(", ")})` : "nenhuma pode ser removida";
+  // "of those in the tag": never read as "nothing on disk can go" (R10-resilience D)
+  const candidates = plan.candidates.length ? `${plan.candidates.length} das contidas na tag pode(m) ser removida(s) (${plan.candidates.map((candidate) => name(candidate.path)).join(", ")})` : "nenhuma das contidas na tag pode ser removida";
   return { line: `${repoName}: ${candidates}${plan.kept.length ? `; mantidas: ${plan.kept.map(name).join(", ")}` : ""}`, key };
 }
 

@@ -433,7 +433,7 @@ import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerC
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -9343,6 +9343,9 @@ async function cleanReleasedWorktrees(): Promise<void> {
     if (!cwds || !rows.length) return;
     const inUse = foldersInUse();
     const lines: string[] = [];
+    const mtime = (file: string) => { try { return statSync(file).mtimeMs; } catch { return null; } };
+    const activity = (path: string) => worktreeLastActivity(path, { readFile: (file) => readFileSync(file, "utf8"), mtime });
+    const stale: StaleFolder[] = [];
     for (const repo of new Set(ccLedger.all().map((session) => session.repo))) {
       const git = (args: string[]) => gitAsync(["-C", repo, ...args]);
       let tagSha: string | null = null;
@@ -9352,23 +9355,55 @@ async function cleanReleasedWorktrees(): Promise<void> {
       } catch { continue; } // no tag, or its commit is not fetched here: nothing can be judged
       if (!tagSha) continue;
       const plan = await planReleasedWorktrees(repo, tagSha, {
-        git, inUse, processCwds: cwds, processCommands: rows.map((row) => row.command), now: Date.now(), canon: canonPath,
-        lastActivity: (path) => worktreeLastActivity(path, { readFile: (file) => readFileSync(file, "utf8"), mtime: (file) => { try { return statSync(file).mtimeMs; } catch { return null; } } }),
+        git, inUse, processCwds: cwds, processCommands: rows.map((row) => row.command), now: Date.now(), canon: canonPath, lastActivity: activity,
       });
+      stale.push(...(plan.stale ?? []));
       const { line, key } = releasedPlanLine(basename(repo), plan, releasedCleanup.lastKey.get(repo));
       releasedCleanup.lastKey.set(repo, key);
       if (!line) continue;
-      console.log(`[worktrees] ${repo}: ${plan.candidates.length} in ${PRODUCTION_TAG} may be removed (${plan.candidates.map((candidate) => candidate.path).join(", ") || "none"}); kept ${plan.kept.join(", ") || "none"}`);
+      console.log(`[worktrees] ${repo}: judged only the ${plan.scope?.inTag ?? "?"} of ${plan.scope?.total ?? "?"} worktrees contained in ${PRODUCTION_TAG}: ${plan.candidates.length} may be removed (${plan.candidates.map((candidate) => candidate.path).join(", ") || "none"}); kept ${plan.kept.join(", ") || "none"}`);
+      // what was judged comes first: "nenhuma pode ser removida" is about those in the tag only (R10-resilience D)
+      const scope = releasedScopeLine(basename(repo), plan, PRODUCTION_TAG);
+      if (scope) lines.push(scope);
       lines.push(line);
       if (plan.candidates.length) lines.push(`Para remover (sem --force; confira antes): ${plan.candidates.map((candidate) => candidate.command).join(" ; ")}`);
     }
-    if (!lines.length) return;
+    // the task-workspaces of conversations no longer open, idle for days
+    const workspaces: Array<{ path: string; lastActivity: number | null }> = [];
+    try {
+      for (const bot of readdirSync(TASK_WORKSPACES_DIR)) {
+        const botDir = join(TASK_WORKSPACES_DIR, bot);
+        let threads: string[] = [];
+        try { threads = readdirSync(botDir); } catch { continue; }
+        for (const thread of threads) {
+          const path = join(botDir, thread);
+          const at = existsSync(join(path, ".git")) ? activity(path) ?? mtime(path) : mtime(path);
+          workspaces.push({ path, lastActivity: at });
+        }
+      }
+    } catch { /* no task-workspaces here */ }
+    stale.push(...staleTaskWorkspaces(workspaces, { inUse, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath }));
+    const staleKey = stale.map((each) => each.path).sort().join("\n");
+    const staleNews = staleKey !== (releasedCleanup.lastKey.get("\u0000stale") ?? "");
+    releasedCleanup.lastKey.set("\u0000stale", staleKey);
+    if (staleNews && stale.length) {
+      // sizes only for what is told (du is slow on GBs of node_modules), the biggest first in the report
+      for (const each of stale.slice(0, 20)) each.sizeKb = await execCc("/usr/bin/du", ["-sk", each.path]).then((out) => Number(/^(\d+)/.exec(out.trim())?.[1]) || null, () => null);
+      console.log(`[worktrees] idle >72 h outside ${PRODUCTION_TAG} (told as information, nothing removed): ${stale.map((each) => `${each.path} (${each.sizeKb ?? "?"} KB)`).join(", ")}`);
+    }
+    const staleTold = staleNews ? staleFoldersReport(stale) : null;
+    if (!lines.length && !staleTold) return;
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
     const desk = chief ? chiefDeskThread(chief) : null;
     if (chief && desk && store.taskByThread(chief.id, desk)) {
-      const text = `Worktrees já em produção — ${lines[0]}${lines.length > 1 ? " …" : ""}`;
-      store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: true } });
-      autonomy.addReport(chief.id, desk, `[Servidor: worktrees já em produção] O servidor não remove worktrees; estas podem ser removidas por uma pessoa, depois de conferir:\n${lines.join("\n")}`);
+      const plans = lines.filter((line) => !line.startsWith("Para remover") && !/: avaliei para remoção só/.test(line));
+      if (plans.length) store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Worktrees já em produção — ${plans[0]}${plans.length > 1 ? " …" : ""}`, 240), ok: true } });
+      if (staleTold) store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(staleTold.chip, 240), ok: true } });
+      const parts = [
+        ...(lines.length ? [`Worktrees já em produção — estas podem ser removidas por uma pessoa, depois de conferir:\n${lines.join("\n")}`] : []),
+        ...(staleTold ? [staleTold.report] : []),
+      ];
+      autonomy.addReport(chief.id, desk, `[Servidor: worktrees e disco] O servidor não remove nada. ${parts.join("\n\n")}\nAo falar com o dono, diga o escopo: "nenhuma pode ser removida" vale só para as contidas na tag; as paradas fora dela são decisão dele.`);
     }
   } finally {
     releasedCleanup.running = false;
