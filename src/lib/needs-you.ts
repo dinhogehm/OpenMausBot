@@ -133,6 +133,8 @@ export function dueAt(due: string | undefined, now = Date.now()): number | null 
     return at(new Date(year, Number(br[2]) - 1, Number(br[1])));
   }
   const today = new Date(now);
+  // "agora": due this very moment — first in "Prazo", never shown as overdue (INSP-J r1 #14)
+  if (/^\s*agora\b/.test(text)) return now;
   if (/\bamanha\b/.test(text)) return at(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1));
   // checked before "ontem": "anteontem" contains it
   if (/\banteontem\b/.test(text)) return at(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 2));

@@ -185,8 +185,10 @@ export function powerStep(watch: PowerWatchState, power: PowerState, now: number
 
 /** The owner's "plug the Mac in" item, born practical (R10-visual N13): why,
  * what to do, and that it closes by itself on the wall. */
-export function powerPendingDetails(releaseRunning: boolean): { why: string; steps: Array<{ text: string }>; options: Array<{ label: string; reply: string }> } {
+export function powerPendingDetails(releaseRunning: boolean): { due: string; why: string; steps: Array<{ text: string }>; options: Array<{ label: string; reply: string }> } {
   return {
+    // the most urgent item: first in "Prazo" (INSP-J r1 #14)
+    due: "agora",
     why: `Abaixo do seu limite de bateria, o Mac pode dormir ou desligar e matar no meio o que estiver rodando (CI, sessões dos bots${releaseRunning ? ", e o release de produção que está em curso" : ""}). ${WATCHER_IGNORES_BATTERY[0]!.toUpperCase()}${WATCHER_IGNORES_BATTERY.slice(1)}.`,
     steps: [
       { text: "Ligue o carregador no Mac (ou o no-break na tomada)." },
