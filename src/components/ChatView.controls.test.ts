@@ -316,6 +316,17 @@ describe("message timestamps", () => {
     expect(stamps[0]).not.toMatch(/opacity-0/);
     expect(stamps[0]).toMatch(/title="[^"]+"/);
     expect(stamps[0]).toMatch(/>today \d{1,2}:\d{2}/i);
+    // inside its bubble, at the corner — never after the actions, where it read as nobody's (R10-visual N10)
+    for (const [text, bubble] of [["Oi", "bg-bubble-user"], ["Olá", "bg-card"]] as const) {
+      const at = markup.indexOf(`>${text}<`);
+      const opened = markup.lastIndexOf(bubble, at);
+      const stamp = markup.indexOf("data-message-stamp", at);
+      const actions = markup.indexOf('data-testid="message-actions"', opened);
+      expect(opened).toBeGreaterThan(-1);
+      expect(stamp).toBeGreaterThan(at);
+      if (actions > opened) expect(stamp).toBeLessThan(actions);
+    }
+    expect(stamps[0]).toContain("text-right");
   });
 });
 // On an OMB Cloud home a guest writes only in conversations it opened: in

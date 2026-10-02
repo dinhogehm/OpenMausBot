@@ -3186,5 +3186,19 @@
   "desktopViewer.invalid": "This desktop link is invalid. Open it again from OpenMausBot.",
   "desktopViewer.keyTab": "Tab",
   "desktopViewer.keyEscape": "Esc",
-  "desktopViewer.keyCtrlAltDel": "Ctrl–Alt–Del"
+  "desktopViewer.keyCtrlAltDel": "Ctrl–Alt–Del",
+  "codeBlock.oneLine": "1 line",
+  "codeBlock.lines": "{count} lines",
+  "codeBlock.wrapOn": "Wrap long lines",
+  "codeBlock.wrapOff": "Disable line wrapping",
+  "codeBlock.wrap": "Wrap",
+  "codeBlock.unwrap": "Unwrap",
+  "codeBlock.saveHint": "Download snippet as file",
+  "codeBlock.save": "Save",
+  "codeBlock.copyHint": "Copy code",
+  "codeBlock.copyLabel": "Copy code to clipboard",
+  "codeBlock.copiedHint": "Copied to clipboard",
+  "codeBlock.copiedLabel": "Code copied to clipboard",
+  "codeBlock.copy": "Copy",
+  "codeBlock.copied": "Copied!"
 }

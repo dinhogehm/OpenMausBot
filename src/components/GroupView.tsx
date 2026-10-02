@@ -372,6 +372,12 @@ export const Transcript = memo(function Transcript({
                       {m.text ? <div data-citation-source={m.id} data-citation-owner-type="group" data-citation-owner={group.id} data-citation-thread={group.threadId}><ChatMarkdown text={m.text} mentionPeers={members} everyone={!group.dm} message={{ threadId: group.threadId, messageId: m.id }} /></div> : null}
                     </>
                   )}
+                  {/* inside the bubble, at its corner (R10-visual N10) */}
+                  {!sharesStamp(prev, m) && (
+                    <time dateTime={new Date(m.at).toISOString()} title={fullStamp(m.at)} data-message-stamp className="mt-1 block whitespace-nowrap text-right text-[11px] leading-none tabular-nums text-ink-tertiary">
+                      {messageStamp(m.at)}
+                    </time>
+                  )}
                 </div>
                 {!user && (
                   <>
@@ -386,11 +392,6 @@ export const Transcript = memo(function Transcript({
                     </button>
                     <PinToggle group={group} message={m} />
                   </>
-                )}
-                {!sharesStamp(prev, m) && (
-                  <time dateTime={new Date(m.at).toISOString()} title={fullStamp(m.at)} data-message-stamp className="self-end whitespace-nowrap pb-1 text-[11px] tabular-nums text-ink-tertiary">
-                    {messageStamp(m.at)}
-                  </time>
                 )}
               </div>
               {!user && m.routedBy && <RoutedByLine routedBy={m.routedBy} />}

@@ -602,11 +602,12 @@ export function hookLineCommand(line: string): string | null {
 }
 
 export function ccReportForOwner(session: CcSession, extra: { hookDecision?: string | null } = {}): string {
+  // the line the owner may read (a report quoted in their conversation): pt-BR (R10-visual N11)
   const head = session.status === "failed"
-    ? `Claude Code session "${session.title}" (${session.id}) stopped with a problem: ${session.lastError ?? "unknown error"}`
+    ? `A sessão Claude Code "${session.title}" (${session.id}) parou com um problema: ${session.lastError ?? "erro desconhecido"}`
     : session.blockedOn
-      ? `Claude Code session "${session.title}" (${session.id}) finished its turn ${session.turns} BLOCKED — it needs: ${session.blockedOn}`
-      : `Claude Code session "${session.title}" (${session.id}) finished its turn ${session.turns}.`;
+      ? `A sessão Claude Code "${session.title}" (${session.id}) terminou o turno ${session.turns} BLOQUEADA — precisa de: ${session.blockedOn}`
+      : `A sessão Claude Code "${session.title}" (${session.id}) terminou o turno ${session.turns}.`;
   return [
     head,
     ccModeLine(session),

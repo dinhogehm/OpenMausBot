@@ -2,6 +2,7 @@
  * Utilities for formatting and inspecting source code blocks rendered in chat.
  * Provides language display normalization, accurate line counting, and line count formatting.
  */
+import { t } from "./i18n";
 
 /** Known language identifier mappings for user-friendly display labels. */
 const KNOWN_LANGUAGES: Record<string, string> = {
@@ -146,7 +147,8 @@ export function countLines(code?: string | null): number {
  * ```
  */
 export function formatLineCount(count: number): string {
-  return count === 1 ? "1 line" : `${count} lines`;
+  // in the reader's language ("1 linha" in pt-BR: R10-visual N8)
+  return count === 1 ? t("codeBlock.oneLine") : t("codeBlock.lines", { count });
 }
 
 /** Known file extension mappings for language identifiers. */

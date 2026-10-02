@@ -539,6 +539,22 @@ function Bubble({
               ) : null}
             </MessageBoundary>
           )}
+          {/* always visible: when each message was sent, in the reader's words —
+              inside the bubble, at its corner; beside it, the hidden actions
+              pushed it away and it read as nobody's (R10-visual N10) */}
+          {!stampShared && (
+            <time
+              dateTime={new Date(message.at).toISOString()}
+              title={fullStamp(message.at)}
+              data-message-stamp
+              className={cn(
+                "mt-1 block whitespace-nowrap text-right text-[11px] leading-none tabular-nums text-ink-tertiary",
+                user && webhookView && "px-4 pb-2",
+              )}
+            >
+              {messageStamp(message.at)}
+            </time>
+          )}
         </div>
         {!user && (
           <MessageActions side="bot" forceOpen={viewRaw || speaking}>
@@ -582,20 +598,6 @@ function Bubble({
               {bot.pinnedMessageId === message.id ? <PinOff size={14} /> : <Pin size={14} />}
             </button>
           </MessageActions>
-        )}
-        {/* always visible: when each message was sent, in the reader's words */}
-        {!stampShared && (
-          <time
-            dateTime={new Date(message.at).toISOString()}
-            title={fullStamp(message.at)}
-            data-message-stamp
-            className={cn(
-              "self-end whitespace-nowrap pb-1 text-[11px] tabular-nums text-ink-tertiary",
-              user ? "order-first mr-2" : "ml-2",
-            )}
-          >
-            {messageStamp(message.at)}
-          </time>
         )}
       </div>
       {versions.length > 1 && (

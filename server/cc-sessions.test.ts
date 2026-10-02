@@ -152,7 +152,9 @@ describe("ledger", () => {
     expect(ccReportForOwner(app)).toContain("the app runs it as bypassPermissions");
     expect(ccReportForOwner(app, { hookDecision: "deny gh issue comment" })).toContain("Latest review-hook decision for this session (deny/ask preferred): deny gh issue comment");
     app.blockedOn = "approve the push";
-    expect(ccReportForOwner(app)).toContain("BLOCKED — it needs: approve the push");
+    expect(ccReportForOwner(app)).toContain("terminou o turno 0 BLOQUEADA — precisa de: approve the push");
+    expect(ccReportForOwner({ ...app, blockedOn: undefined, status: "failed", lastError: undefined } as typeof app)).toMatch(/^A sessão Claude Code ".*" \(22222222-.*\) parou com um problema: erro desconhecido/);
+    expect(ccReportForOwner({ ...app, blockedOn: undefined } as typeof app).split("\n")[0]).not.toMatch(/session|finished|stopped|BLOCKED/);
     expect(ccStallReport(app, 42)).toContain("no progress for 42 min");
   });
 });

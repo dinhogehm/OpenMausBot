@@ -328,8 +328,8 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     // Its report wakes the bot; it answers, then archives after the second report.
     f.save({ turns: [
       startTurn,
-      { expectContextIncludes: ["finished its turn 1", "did: BRIEF_ONE"], steps: [{ tool: "cc_session_send", arguments: { session_id: id, message: "FOLLOWUP_TWO" } }], reply: "Answered it" },
-      { expectContextIncludes: ["finished its turn 2", "did: FOLLOWUP_TWO"], steps: [{ tool: "cc_session_archive", arguments: { session_id: id } }], reply: "Archived it" },
+      { expectContextIncludes: ["terminou o turno 1", "did: BRIEF_ONE"], steps: [{ tool: "cc_session_send", arguments: { session_id: id, message: "FOLLOWUP_TWO" } }], reply: "Answered it" },
+      { expectContextIncludes: ["terminou o turno 2", "did: FOLLOWUP_TWO"], steps: [{ tool: "cc_session_archive", arguments: { session_id: id } }], reply: "Archived it" },
     ] });
     // while it works, its conversation's row says it runs headless, out of the Claude app
     const rowSessions = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ccSessions ?? []);

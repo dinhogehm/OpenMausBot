@@ -2920,5 +2920,19 @@
   "desktopViewer.invalid": "Este link do desktop é inválido. Abra de novo pelo OpenMausBot.",
   "desktopViewer.keyTab": "Tab",
   "desktopViewer.keyEscape": "Esc",
-  "desktopViewer.keyCtrlAltDel": "Ctrl–Alt–Del"
+  "desktopViewer.keyCtrlAltDel": "Ctrl–Alt–Del",
+  "codeBlock.oneLine": "1 linha",
+  "codeBlock.lines": "{count} linhas",
+  "codeBlock.wrapOn": "Quebrar linhas longas",
+  "codeBlock.wrapOff": "Desativar a quebra de linha",
+  "codeBlock.wrap": "Quebrar",
+  "codeBlock.unwrap": "Sem quebra",
+  "codeBlock.saveHint": "Baixar o trecho como arquivo",
+  "codeBlock.save": "Salvar",
+  "codeBlock.copyHint": "Copiar código",
+  "codeBlock.copyLabel": "Copiar o código para a área de transferência",
+  "codeBlock.copiedHint": "Copiado para a área de transferência",
+  "codeBlock.copiedLabel": "Código copiado para a área de transferência",
+  "codeBlock.copy": "Copiar",
+  "codeBlock.copied": "Copiado!"
 }

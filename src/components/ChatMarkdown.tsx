@@ -320,39 +320,39 @@ export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
                 ? "bg-accent/15 text-accent font-medium"
                 : "text-ink-secondary hover:bg-raised hover:text-ink"
             }`}
-            title={wrapLines ? "Disable line wrapping" : "Wrap long lines"}
-            aria-label={wrapLines ? "Disable line wrapping" : "Wrap long lines"}
+            title={wrapLines ? t("codeBlock.wrapOff") : t("codeBlock.wrapOn")}
+            aria-label={wrapLines ? t("codeBlock.wrapOff") : t("codeBlock.wrapOn")}
             aria-pressed={wrapLines}
           >
             <WrapText size={12} aria-hidden="true" />
-            <span className="hidden sm:inline">{wrapLines ? "Unwrap" : "Wrap"}</span>
+            <span className="hidden sm:inline">{wrapLines ? t("codeBlock.unwrap") : t("codeBlock.wrap")}</span>
           </button>
           <button
             type="button"
             onClick={download}
             className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-raised hover:text-ink transition-colors"
-            title="Download snippet as file"
-            aria-label="Download snippet as file"
+            title={t("codeBlock.saveHint")}
+            aria-label={t("codeBlock.saveHint")}
           >
             <Download size={12} aria-hidden="true" />
-            <span className="hidden sm:inline">Save</span>
+            <span className="hidden sm:inline">{t("codeBlock.save")}</span>
           </button>
           <button
             type="button"
             onClick={copy}
             className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-raised hover:text-ink transition-colors"
-            title={copied ? "Copied to clipboard" : "Copy code"}
-            aria-label={copied ? "Code copied to clipboard" : "Copy code to clipboard"}
+            title={copied ? t("codeBlock.copiedHint") : t("codeBlock.copyHint")}
+            aria-label={copied ? t("codeBlock.copiedLabel") : t("codeBlock.copyLabel")}
           >
             {copied ? (
               <>
                 <Check size={12} className="text-success" aria-hidden="true" />
-                <span className="text-success font-medium hidden sm:inline">Copied!</span>
+                <span className="text-success font-medium hidden sm:inline">{t("codeBlock.copied")}</span>
               </>
             ) : (
               <>
                 <Copy size={12} aria-hidden="true" />
-                <span className="hidden sm:inline">Copy</span>
+                <span className="hidden sm:inline">{t("codeBlock.copy")}</span>
               </>
             )}
           </button>
