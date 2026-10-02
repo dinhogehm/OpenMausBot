@@ -65,6 +65,16 @@ describe("message-db", () => {
     expect(toolCallsWith("cc_session_send").map((row) => JSON.parse(row.input).message)).toEqual(["oi", "assuma a PR #1"]);
   });
 
+  it("keeps the newest tool calls past the limit, so a recent hand-over is never lost (INSP-H r2 #7)", () => {
+    for (let i = 0; i < 2_001; i += 1) {
+      insertMessage("t", msg(`c${i}`, "", { role: "bot", kind: "activity", at: 1_000 + i, tool: { name: "mcp__agents__cc_session_send", input: JSON.stringify({ session_id: "s", message: i === 2_000 ? "assuma a PR #9328" : `passo ${i}` }) } } as Partial<Message>));
+    }
+    const calls = toolCallsWith("cc_session_send", 2_000);
+    expect(calls).toHaveLength(2_000);
+    expect(JSON.parse(calls.at(-1)!.input).message).toBe("assuma a PR #9328");
+    expect(JSON.parse(calls[0]!.input).message).toBe("passo 1");
+  });
+
   it("persists inserts, updates, and the active leaf across a reopen", () => {
     insertMessage("t1", msg("m1", "hello"));
     insertMessage("t1", msg("m2", "world"));
