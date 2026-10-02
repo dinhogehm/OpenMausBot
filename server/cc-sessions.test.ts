@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccProcAlive, processStartSync, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, technicalCliReason, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccProcAlive, processStartSync, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, recentAppFailure, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -264,49 +264,57 @@ describe("a repository's corridor", () => {
     expect(corridorForSend(old, "", "publique")).toEqual({ text: "publique" });
   });
 
-  it("refuses a headless session of merges and releases without a reason", () => {
-    const shipping = { corridor: "x", title: "#9286 #9303 Merge e publicação", brief: "merge e carrier" };
-    expect(cliSurfaceRefusal(shipping)).toContain("cli_reason");
-    expect(cliSurfaceRefusal({ ...shipping, reason: "o envio no app está falhando" })).toBeNull();
-    expect(cliSurfaceRefusal({ ...shipping, corridor: "" })).toBeNull();
-    expect(cliSurfaceRefusal({ corridor: "x", title: "limpar worktrees", brief: "apague pastas mergeadas antigas? não, só liste" })).toBeNull();
-  });
-
   // e47cf077 on 01/10 (redacted): an issue of a client (Atendimento sheet,
   // row 97), started headless with a policy for a reason (R9-dispatch R9-3)
   const CLIENT = { corridor: "x", title: "9058 Chat entra com aviso no Widget", brief: "Issue do cliente (planilha Atendimento, linha 97): o chat entra com aviso no Widget. Corrija e abra a PR." };
+  const SHIPPING = { corridor: "x", title: "9286 Merge e publicação", brief: "merge e carrier" };
   const POLICY = "Esteira 24/7 gerida pelo Chief; sessões em terminal não travam no app e o relatório volta para a conversa da esteira.";
 
-  it("refuses a generic reason: it must say what failed in the app, in 20+ characters", () => {
-    const shipping = { corridor: "x", title: "9286 Merge e publicação", brief: "merge e carrier" };
-    expect(cliSurfaceRefusal({ ...shipping, reason: POLICY })).toContain("cli_reason recusado");
-    expect(cliSurfaceRefusal({ ...shipping, reason: POLICY })).toContain("vale para qualquer brief");
-    expect(cliSurfaceRefusal({ ...shipping, reason: "app 409" })).toContain("pelo menos 20 caracteres");
+  it("decides a headless session by the app's state the server knows, never by the words of cli_reason (INSP-H r1 #6)", () => {
+    // the app available, no failure seen: refused, whatever is said — policies with failure words under a negation included
     for (const reason of [
-      "o app devolveu 409 de pasta reaproveitada no nuria-platform",
-      "o envio na sessão 36300f35 não chegou três vezes",
-      "Mac bloqueado há 40 min, a tela não abre o app",
-      "o app abre na outra pasta (OpenMausBot), não no nuria-platform",
-    ]) expect(cliSurfaceRefusal({ ...shipping, reason }), reason).toBeNull();
-    expect(technicalCliReason(POLICY)).toBe(false);
-    expect(technicalCliReason("Prefiro o terminal, é mais rápido e simples")).toBe(false);
-    expect(technicalCliReason(undefined)).toBe(false);
+      POLICY,
+      "Sessões no terminal nunca falham por tela bloqueada nem por 409",
+      "CLI é mais rápido e não dá timeout",
+      "Em CLI não há crash do app nem 409",
+      "",
+    ]) {
+      const decided = cliSurfaceRefusal({ ...SHIPPING, reason, app: "available" });
+      expect("refusal" in decided && decided.refusal, reason).toContain("não houve falha no app nas últimas 2 h");
+    }
+    expect(cliSurfaceRefusal({ ...CLIENT, reason: POLICY, app: "available" })).toMatchObject({ refusal: expect.stringContaining("é uma issue de cliente") });
+    // a failure the server saw: allowed, recorded as the server knows it
+    expect(cliSurfaceRefusal({ ...SHIPPING, app: "available", appFailure: "a mensagem digitada na sessão \"9326 gate\" não chegou (21:02)" })).toEqual({ onRecord: "falha recente no app: a mensagem digitada na sessão \"9326 gate\" não chegou (21:02)" });
+    // "O app Claude não suporta permission_mode bypass": options the app does not apply, really set
+    expect(cliSurfaceRefusal({ ...SHIPPING, app: "available", reason: "O app Claude não suporta permission_mode bypass", appIgnoredOptions: ["permission_mode"] })).toEqual({ onRecord: "o app não aplica permission_mode" });
+    // "O app está fechado agora" / blocked: the server knows it, no words needed
+    expect(cliSurfaceRefusal({ ...CLIENT, app: "unavailable" })).toEqual({ onRecord: expect.stringContaining("não abre sessão neste repositório") });
+    expect(cliSurfaceRefusal({ ...CLIENT, app: "blocked", reason: POLICY })).toEqual({ onRecord: "o app Claude está reaproveitando worktrees (409 de pasta reaproveitada)" });
+    // internal chores run headless
+    expect(cliSurfaceRefusal({ corridor: "x", title: "limpar worktrees", brief: "liste as pastas antigas", app: "available" })).toEqual({ onRecord: "tarefa interna" });
+    expect(cliSurfaceRefusal({ ...SHIPPING, corridor: "", app: "available", reason: "lote interno" })).toEqual({ onRecord: "lote interno" });
   });
 
-  it("sends a client's issue to the app while the app can take it; with the app blocked, only with a technical reason", () => {
+  it("knows a client's issue from who brought it, not from the word \"cliente\" (INSP-H r1 #6, real briefs redacted)", () => {
     expect(clientIssue(`${CLIENT.title}\n${CLIENT.brief}`)).toBe(true);
-    expect(clientIssue("limpar worktrees antigas do repositório")).toBe(false);
-    // the app can open it: no reason is enough, a client's issue goes there
-    expect(cliSurfaceRefusal({ ...CLIENT, app: "available", reason: "o app devolveu 409 de pasta reaproveitada ontem" })).toContain("issue de cliente vai no app");
-    // even an investigation that ships nothing, in any repository
-    expect(cliSurfaceRefusal({ ...CLIENT, corridor: "", brief: "Investigue o relato do cliente na linha 97 da planilha.", app: "available" })).toContain("issue de cliente vai no app");
-    // the app blocked by the reused folder (or unavailable): cli with a technical reason
-    expect(cliSurfaceRefusal({ ...CLIENT, app: "blocked" })).toContain("é uma issue de cliente");
-    expect(cliSurfaceRefusal({ ...CLIENT, app: "blocked", reason: POLICY })).toContain("cli_reason recusado");
-    expect(cliSurfaceRefusal({ ...CLIENT, app: "blocked", reason: "409 de pasta reaproveitada: o app abriria na worktree alheia" })).toBeNull();
-    expect(cliSurfaceRefusal({ ...CLIENT, app: "unavailable", reason: "o app abre na outra pasta, não no nuria-platform" })).toBeNull();
-    // an internal chore stays free to run headless
-    expect(cliSurfaceRefusal({ corridor: "x", title: "limpar worktrees", brief: "liste as pastas antigas", app: "available" })).toBeNull();
+    expect(clientIssue("Relato do Matheus (30/09): o e-mail que o cliente informou no chat não foi gravado.")).toBe(true);
+    expect(clientIssue("Quem pediu foi o Pedro, pelo atendimento.")).toBe(true);
+    expect(clientIssue("Contexto: https://chat.google.com/room/AAQA4TXnzJ4/x")).toBe(true);
+    // 9298 F4-0 (publishing; the client is told by the Monitor), the OMB rename, a technical "client"
+    expect(clientIssue("9298 F4-0 publicar e fechar ciclo\n4) Não avise o cliente: o Monitor Chat Atendimento avisa o Pedro no fio [x].")).toBe(false);
+    expect(clientIssue("OpenMausBot cc_session_rename\nExemplo: \"9311 Chat no ticket mostra Agente e Cliente\" virou \"Chat ticket agent/client labels bug\".")).toBe(false);
+    expect(clientIssue("Troque o client HTTP do gateway; o erro é do lado do cliente.")).toBe(false);
+    expect(clientIssue("o mesmo cliente entrou na fila e abriu o ATD-202609-0825")).toBe(false);
+  });
+
+  it("finds the app failures the server itself saw in the last 2 h", () => {
+    const now = Date.parse("2026-10-01T21:10:00-03:00");
+    const app = (id: string, desktop: Partial<CcSession["desktop"]>, extra: Partial<CcSession> = {}) => ({ id, ownerBotId: "b", ownerThreadId: "t", title: `9326 ${id}`, repo: "/p", worktree: "w", permissionMode: "auto", status: "idle", createdAt: 0, lastActivityAt: 0, turns: 1, costUsd: 0, queued: [], surface: "app", desktop: { marker: "m", turnsSeen: 0, ...desktop }, ...extra }) as CcSession;
+    expect(recentAppFailure([app("ok", { lastSend: { at: now - 60_000, confirmed: true } })], "/p", now)).toBeNull();
+    expect(recentAppFailure([app("old", { lastSend: { at: now - 3 * 3_600_000, confirmed: false } })], "/p", now)).toBeNull();
+    expect(recentAppFailure([app("sent", { lastSend: { at: now - 8 * 60_000, confirmed: false } })], "/p", now)).toBe("a mensagem digitada na sessão \"9326 sent\" não chegou (21:02)");
+    expect(recentAppFailure([app("open", { pending: { kind: "create", text: "x", since: now - 600_000, attempts: 3, triedAt: now - 300_000, lastReason: "the screen is locked" } })], "/p", now)).toBe("abrir \"9326 open\" no app falhou 3× (the screen is locked)");
+    expect(recentAppFailure([app("sent", { lastSend: { at: now - 8 * 60_000, confirmed: false } })], "/other", now)).toBeNull();
   });
 
   it("warns when a batch puts a hotfix with a release-script change", () => {

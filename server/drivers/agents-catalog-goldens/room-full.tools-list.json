@@ -880,7 +880,7 @@
           "cli_reason": {
             "type": "string",
             "maxLength": 300,
-            "description": "With cli, when the brief merges or publishes, or is a client's issue the app cannot take now: what technically fails in the app, concretely (20+ characters: the 409 of a reused folder, a send that did not arrive in session X). A policy that fits any brief is refused."
+            "description": "With cli: why, as you know it (recorded beside the server's own reason). The server decides by the app's state, not by these words: a brief that merges or publishes, or a client's issue, runs headless only while the app is blocked, cannot open this repository, failed in the last 2 h, or for options the app does not apply (permission_mode, model)."
           },
           "permission_mode": {
             "type": "string",

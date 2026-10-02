@@ -293,6 +293,7 @@ import {
   parseCcStartInput,
   repoCorridor,
   cliSurfaceRefusal,
+  recentAppFailure,
   issueTitle,
   clientIssue,
   type AppAvailability,
@@ -9643,13 +9644,17 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   const corridor = repoCorridor(input.repo);
   const mixWarning = corridor ? hotfixWithReleaseScripts(`${input.title}\n${input.brief}`) : null;
   const cliReason = typeof body.cliReason === "string" ? body.cliReason.trim().slice(0, 300) : "";
+  // why it runs headless, as the server knows it (recorded on its chip)
+  let cliOnRecord = cliReason;
   if (body.surface === "cli") {
-    // a client's issue goes to the app while it can take one; a reason must be technical (R9-dispatch R9-3)
+    // decided by the app's state the server knows, not by the words of cli_reason (R9-dispatch R9-3, INSP-H r1 #6)
     const app = appAvailability(input.repo);
     // the app blocked by the reused folder, with a client's work waiting: the owner is asked, once, to unblock it
     if (app === "blocked" && clientIssue(`${input.title}\n${input.brief}`)) askOwnerToUnblockApp(bot, threadId, input.repo);
-    const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app });
-    if (refusal) return { status: 409, body: { error: refusal } };
+    const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", typeof body.model === "string" ? "model" : ""].filter(Boolean);
+    const decided = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app, appFailure: app === "available" ? recentAppFailure(ccLedger.all(), input.repo, Date.now()) : null, appIgnoredOptions: ignored });
+    if ("refusal" in decided) return { status: 409, body: { error: decided.refusal } };
+    cliOnRecord = decided.onRecord;
   }
   // on battery only a carrier ORDER is refused; from the queue it keeps its place until the Mac is plugged in
   const onBattery = carrierPowerCheck(`${input.title}\n${input.brief}`);
@@ -9706,7 +9711,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   runCcTurn(session, input.brief, true);
   ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
   noteClaimedPrs(session, input.brief);
-  if (cliReason) ccChip(session, `sessão CLI, não visível no app Claude — motivo: ${cliReason}`);
+  if (cliOnRecord) ccChip(session, `sessão CLI, não visível no app Claude — motivo: ${cliOnRecord}${cliReason && cliReason !== cliOnRecord ? ` (o bot disse: ${chipText(cliReason, 80)})` : ""}`);
   return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
 }
 
