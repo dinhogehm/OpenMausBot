@@ -245,7 +245,7 @@ import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-g
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { openCodeProviderKeysAllowed, setOpenCodeProviderKeyPolicy } from "./drivers/acp/opencode-go.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
-import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, userTextMessagesWith } from "./message-db.ts";
+import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, toolCallsWith, userTextMessagesWith } from "./message-db.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, parseUntil, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
 import { chiefForBot, deskThread, OwnerWroteAt, ownerWrote, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
@@ -293,6 +293,7 @@ import {
   parseCcStartInput,
   repoCorridor,
   cliSurfaceRefusal,
+  issueTitle,
   clientIssue,
   type AppAvailability,
   hotfixWithReleaseScripts,
@@ -345,7 +346,7 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, claimedPrNumbers, githubSlug, idleWithOpenPrs, mergeStatePt, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, idleWithOpenPrs, mergeStatePt, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
 import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
@@ -8703,6 +8704,33 @@ const ccLedger = new CcSessionLedger({ path: join(DATA_DIR, "cc-sessions.json"),
 // The owner's last channel order, read back from the history before
 // anything is reported: what the boot says goes to the conversation they named.
 adoptOwnerChannels();
+backfillClaimedPrs();
+
+/** Once per session: the PRs its orders handed it before claimedPrs existed
+ * ("assuma a PR #9328", 01/10 18:13, to the 29da943f), read back from the
+ * bots' tool calls in messages.db (read only) — INSP-H r1 #1. */
+function backfillClaimedPrs(): void {
+  const pending = ccLedger.all().filter((session) => session.claimsReadAt === undefined);
+  if (!pending.length) return;
+  try {
+    const calls = [...toolCallsWith("cc_session_send"), ...toolCallsWith("cc_session_start")];
+    for (const session of pending) {
+      const sameTitle = (title: string) => {
+        const named = issueTitle(title.trim());
+        return session.title === named || session.title.startsWith(`${named} · `);
+      };
+      const claimed = claimsInToolCalls(calls, session.id, sameTitle);
+      session.claimsReadAt = Date.now();
+      if (!claimed.length) continue;
+      session.claimedPrs = [...new Set([...(session.claimedPrs ?? []), ...claimed])];
+      if (session.delivery?.notOwned) session.delivery.notOwned = session.delivery.notOwned.filter((number) => !claimed.includes(number));
+      console.log(`[cc-sessions] ${session.id}: PRs handed to it before, read back from the history: ${claimed.map((number) => `#${number}`).join(", ")}`);
+    }
+    ccLedger.save();
+  } catch (error) {
+    console.error(`[cc-sessions] could not read back the PRs handed to sessions: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 // A restart cut these turns off: tell each owner, or nobody would ever resume them.
 if (ccLedger.interruptedOnLoad.length) {
   for (const session of ccLedger.interruptedOnLoad) {

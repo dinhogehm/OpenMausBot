@@ -118,6 +118,8 @@ export interface CcSession {
   /** PRs it was told to take over ("assuma a PR #9328"): its own, though
    * their branch is not its worktree's (prod-delivery.ts claimedPrNumbers). */
   claimedPrs?: number[];
+  /** The orders it was given before claimedPrs existed were read back (once). */
+  claimsReadAt?: number;
 }
 
 export type CcSurface = "app" | "cli";

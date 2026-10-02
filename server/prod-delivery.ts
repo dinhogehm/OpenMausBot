@@ -30,8 +30,10 @@ export interface DeliveryPr {
   reportedAt?: number;
   /** Why it is this session's: its head branch is the session's ("branch"),
    * or the session was told to take it over ("explicit"). Unset: only named
-   * in a report — a candidate, not yet the session's (R9-followup #2). */
-  owned?: "branch" | "explicit";
+   * in a report — a candidate, not yet the session's (R9-followup #2).
+   * "legacy": recorded and found MERGED by a build before ownership existed
+   * — kept, so its delivery to production is still followed (INSP-H r1 #1). */
+  owned?: "branch" | "explicit" | "legacy";
 }
 
 export interface CcDelivery {
@@ -70,37 +72,107 @@ const NOT_A_WORK_BRANCH = new Set(["main", "master", "develop", "HEAD", ""]);
 /** The branches a session works on — its worktree's checkout and the branch
  * it pushed to (`git push -u origin HEAD:fix/…` sets the upstream) — and its
  * HEAD commit. Null when its worktree cannot be read (none yet, or gone). */
-export async function sessionBranches(session: Pick<DeliverySession, "cwd">, git: DeliveryDeps["git"]): Promise<{ names: string[]; head: string | null } | null> {
+/** The PRs handed to a session by the orders it was given before claimedPrs
+ * existed, read from the bots' tool calls in the history (cc_session_send
+ * to its id, or the cc_session_start that opened it, by its title): the
+ * real "assuma a PR #9328" of 18:13 to the 29da943f (INSP-H r1 #1). */
+export function claimsInToolCalls(calls: ReadonlyArray<{ tool: string; input: string }>, sessionId: string, startedAs: (title: string) => boolean): number[] {
+  const found = new Set<number>();
+  for (const call of calls) {
+    let input: Record<string, unknown>;
+    try {
+      input = JSON.parse(call.input) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const text = call.tool.endsWith("cc_session_send") && input.session_id === sessionId && typeof input.message === "string"
+      ? input.message
+      : call.tool.endsWith("cc_session_start") && typeof input.title === "string" && startedAs(input.title) && typeof input.brief === "string"
+        ? input.brief
+        : null;
+    if (text) for (const number of claimedPrNumbers(text)) found.add(number);
+  }
+  return [...found];
+}
+
+export interface SessionBranches { names: string[]; heads: string[] }
+
+/** `git worktree list --porcelain`: each worktree's path, branch and HEAD. */
+export function parseWorktreeList(output: string): Array<{ path: string; branch: string | null; head: string | null }> {
+  return output.split(/\n\s*\n/).map((block) => ({
+    path: /^worktree (.+)$/m.exec(block)?.[1]?.trim() ?? "",
+    branch: /^branch refs\/heads\/(.+)$/m.exec(block)?.[1]?.trim() ?? null,
+    head: /^HEAD ([0-9a-f]{40})$/m.exec(block)?.[1] ?? null,
+  })).filter((tree) => tree.path);
+}
+
+/** The branches checked out in a HEAD's reflog ("checkout: moving from A to B"). */
+export function reflogBranches(output: string): string[] {
+  return [...output.matchAll(/checkout: moving from (\S+) to (\S+)/g)].flatMap((match) => [match[1]!, match[2]!]).filter((name) => !/^[0-9a-f]{7,40}$/.test(name));
+}
+
+/** The branches a session works on and the commits at their heads:
+ * - its worktree's checkout and the branch it pushed to (`git push -u
+ *   origin HEAD:fix/…` sets the upstream);
+ * - the worktrees nested INSIDE its folder (`git worktree list`): on 01/10
+ *   the 29da943f sat on a detached HEAD and worked on #9328 and #9341 in
+ *   `.worktrees/9328` and `.worktrees/9340` (INSP-H r1 #1);
+ * - the branches its HEAD checked out (reflog).
+ * Null when its worktree cannot be read (none yet, or gone). */
+export async function sessionBranches(session: Pick<DeliverySession, "cwd">, git: DeliveryDeps["git"]): Promise<SessionBranches | null> {
   if (!session.cwd) return null;
-  const read = (args: string[]) => git(session.cwd!, args).then((out) => out.trim(), () => null);
-  const [local, upstream, head] = await Promise.all([
+  const cwd = session.cwd.replace(/\/+$/, "");
+  const read = (args: string[]) => git(cwd, args).then((out) => out.trim(), () => null);
+  const [local, upstream, head, trees, reflog] = await Promise.all([
     read(["rev-parse", "--abbrev-ref", "HEAD"]),
     read(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]),
     read(["rev-parse", "HEAD"]),
+    read(["worktree", "list", "--porcelain"]),
+    read(["reflog", "show", "--format=%gs", "-n", "200", "HEAD"]),
   ]);
   if (local === null && head === null) return null;
+  const nested = parseWorktreeList(trees ?? "").filter((tree) => tree.path.startsWith(`${cwd}/`));
   const pushed = upstream ? upstream.replace(/^[^/]+\//, "") : null;
-  const names = [...new Set([local, pushed].filter((name): name is string => name !== null && !NOT_A_WORK_BRANCH.has(name)))];
-  return { names, head: head && /^[0-9a-f]{40}$/.test(head) ? head : null };
+  const names = [...new Set([local, pushed, ...nested.map((tree) => tree.branch), ...reflogBranches(reflog ?? "")]
+    .filter((name): name is string => name !== null && !NOT_A_WORK_BRANCH.has(name)))];
+  const heads = [...new Set([head, ...nested.map((tree) => tree.head)].filter((sha): sha is string => sha !== null && /^[0-9a-f]{40}$/.test(sha)))];
+  return { names, heads };
 }
 
 /** Whether a PR is the session's, and why: told to take it over, or its
- * head is the session's branch (by name, or its very HEAD commit). A
- * mention in a report is never enough. */
-export function prOwnership(pr: { number: number; headRefName?: string; headRefOid?: string }, branches: { names: string[]; head: string | null } | null, claimed: readonly number[] = []): "branch" | "explicit" | null {
+ * head is one of the session's branches (by name, or by its very commit).
+ * A mention in a report is never enough. */
+export function prOwnership(pr: { number: number; headRefName?: string; headRefOid?: string }, branches: SessionBranches | null, claimed: readonly number[] = []): "branch" | "explicit" | null {
   if (claimed.includes(pr.number)) return "explicit";
   if (!branches) return null;
   if (pr.headRefName && branches.names.includes(pr.headRefName)) return "branch";
-  if (pr.headRefOid && branches.head && pr.headRefOid === branches.head) return "branch";
+  if (pr.headRefOid && branches.heads.includes(pr.headRefOid)) return "branch";
   return null;
 }
 
-/** The PRs an order hands to a session: "assuma a PR #9328", "assumir a
- * #9341", "fique com a PR #9314", "a PR #9328 é sua", "take over PR #9328". */
+/** The PRs an order HANDS to the session it is sent to: an imperative to
+ * it ("assuma a PR #9328", "assuma as PRs #9328 e #9341", "você assume a PR
+ * órfã https://…/pull/9289", "fique com a #9314") or "a PR #9328 é sua".
+ * Not under a negation ("não assuma"), not about someone else ("a 29da943f
+ * assume a PR #9328"), not a question ("a PR #9328 é sua?") (INSP-H r1 #7). */
 export function claimedPrNumbers(text: string): number[] {
   const found = new Set<number>();
-  for (const match of text.matchAll(/(?<![\p{L}])(?:assum[ae]\w*|assumir|fique com|fica com|pegue|toma conta d[ao]|take over|take ownership of)\s+(?:a\s+|o\s+|the\s+)?(?:PR|pull request)?\s*#(\d{2,6})\b/giu)) found.add(Number(match[1]));
-  for (const match of text.matchAll(/\b(?:PR|pull request)\s*#(\d{2,6})\s+(?:é|e|fica)\s+(?:sua|sua agora|com voc[êe])/giu)) found.add(Number(match[1]));
+  const numbersIn = (span: string) => [...span.matchAll(/(?<!issue\s{0,3})#(\d{2,6})\b|\/pull\/(\d{1,7})\b/giu)].map((match) => Number(match[1] ?? match[2]));
+  // sentences (a URL's dots are not an end), then clauses
+  for (const sentence of text.split(/(?<=[.!?])\s+|\n+/)) {
+    if (sentence.trim().endsWith("?")) continue;
+    for (const clause of sentence.split(/;\s*/)) {
+      const take = /(?<![\p{L}])(?:(?:voc[êe]s?\s+)?(?:assuma|assumam)|voc[êe] assume|voc[êe]s assumem|pode assumir|fique com|fiquem com|pegue|toma conta d[ao]|take over|take ownership of)(?![\p{L}])/iu.exec(clause);
+      if (take && !/(?<![\p{L}])(?:n[ãa]o|nunca|jamais)\s+(?:\S+\s+){0,1}$/iu.test(clause.slice(0, take.index))) {
+        // what it takes: the list right after the verb ("#9328 e a #9341"), not "… e rode o gate da #9330"
+        const span = clause.slice(take.index).split(/,\s+|\s+e\s+(?!(?:a|as|o|os|the)?\s*(?:PRs?\s*)?(?:#|https?:))/iu)[0]!;
+        for (const number of numbersIn(span)) found.add(number);
+      }
+      for (const match of clause.matchAll(/(?<![\p{L}])(?:PR|pull request)\s*#(\d{2,6})\s+(?:é|e|fica)\s+(?:sua|com voc[êe])(?![\p{L}])/giu)) {
+        if (!/(?<![\p{L}])(?:n[ãa]o|nunca)\s+$/iu.test(clause.slice(0, match.index).slice(-12))) found.add(Number(match[1]));
+      }
+    }
+  }
   return [...found];
 }
 
@@ -283,6 +355,11 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     let branches: Awaited<ReturnType<typeof sessionBranches>> | undefined;
     for (const pr of waiting) {
       if (!budget()) break;
+      // recorded and found merged before ownership existed (#9330 of 29da943f): still followed to production
+      if (pr.owned === undefined && pr.state === "merged" && pr.mergeSha) {
+        pr.owned = "legacy";
+        deps.save();
+      }
       if (pr.state !== "merged" || pr.owned === undefined) {
         if (pr.checkedAt !== undefined && now - pr.checkedAt < DELIVERY_CHECK_MS) continue;
         pr.checkedAt = now;

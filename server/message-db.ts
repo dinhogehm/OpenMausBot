@@ -530,6 +530,19 @@ export function userTextMessagesWith(threadIds: readonly string[], words: readon
   return out.sort((a, b) => b.message.at - a.message.at).slice(0, limit);
 }
 
+/** The bots' tool calls (activity messages) whose stored form contains
+ * `fragment` (a tool name), oldest first: the name and the raw input. Read
+ * once at boot to recover orders given before a field existed. */
+export function toolCallsWith(fragment: string, limit = 2_000): Array<{ threadId: string; tool: string; input: string }> {
+  const rows = db()
+    .prepare("SELECT thread_id, json FROM messages WHERE kind = 'activity' AND instr(json, ?) > 0 ORDER BY at LIMIT ?")
+    .all(fragment, limit) as Array<{ thread_id: string; json: string }>;
+  return rows.flatMap((row) => {
+    const tool = (rowToMessage(row) as { tool?: { name?: unknown; input?: unknown } }).tool;
+    return typeof tool?.name === "string" && typeof tool.input === "string" ? [{ threadId: row.thread_id, tool: tool.name, input: tool.input }] : [];
+  });
+}
+
 export function deleteThread(threadId: string): void {
   writeFollowups((connection) => {
     connection.prepare("DELETE FROM chat_followups WHERE thread_id = ?").run(threadId);

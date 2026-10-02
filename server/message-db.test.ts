@@ -21,7 +21,7 @@ import { closeMessageDb,
   recallMessages,
   searchMessages,
   setActiveLeaf,
-  updateMessage, describeMissingFts5, userTextMessagesWith } from "./message-db.ts";
+  updateMessage, describeMissingFts5, toolCallsWith, userTextMessagesWith } from "./message-db.ts";
 import { withPeerProvenance } from "./peer-provenance.ts";
 import { Store, type Message } from "./store.ts";
 import type { ModelSelection } from "./contracts.ts";
@@ -54,6 +54,15 @@ describe("message-db", () => {
     expect(userTextMessagesWith(["a", "b"], ["comigo", "canal", "conversa"], 10).map((row) => [row.threadId, row.message.id])).toEqual([["a", "a2"], ["b", "b1"], ["a", "a1"]]);
     expect(userTextMessagesWith(["a", "b"], ["comigo", "canal", "conversa"], 1).map((row) => row.message.id)).toEqual(["a2"]);
     expect(userTextMessagesWith([], ["comigo"], 10)).toEqual([]);
+  });
+
+  it("reads back the bots' tool calls by tool name, oldest first", () => {
+    const call = (id: string, name: string, input: string, at: number) => msg(id, "", { role: "bot", kind: "activity", at, tool: { name, input } } as Partial<Message>);
+    insertMessage("t", call("c2", "mcp__agents__cc_session_send", "{\"session_id\":\"s\",\"message\":\"assuma a PR #1\"}", 20));
+    insertMessage("t", call("c1", "mcp__agents__cc_session_send", "{\"session_id\":\"s\",\"message\":\"oi\"}", 10));
+    insertMessage("t", call("c3", "mcp__agents__wake_me", "{}", 30));
+    insertMessage("t", msg("u1", "cc_session_send no texto da pessoa"));
+    expect(toolCallsWith("cc_session_send").map((row) => JSON.parse(row.input).message)).toEqual(["oi", "assuma a PR #1"]);
   });
 
   it("persists inserts, updates, and the active leaf across a reopen", () => {

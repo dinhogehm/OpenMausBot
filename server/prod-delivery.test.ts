@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveBlockers, claimedPrNumbers, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, mergeStatePt, prOwnership, sessionBranches, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
+import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, mergeStatePt, prOwnership, sessionBranches, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
 
 const SLUG = "dinhogehm/nuria-platform";
 const TAG = "c".repeat(40);
@@ -9,9 +9,13 @@ const MERGE = "m".repeat(40);
 const WORKTREE = "/repo/.claude/worktrees/9311-fix-login-111111";
 const BRANCH = "fix/9311-login";
 const HEAD = "e".repeat(40);
-/** `git -C <worktree> rev-parse …` as git answers it, or null for other calls. */
+/** `git -C <worktree> …` as git answers it (rev-parse, no nested worktree,
+ * an empty reflog), or null for other calls. */
 const worktreeGit = (repo: string, args: string[]): string | null => {
-  if (repo !== WORKTREE || args[0] !== "rev-parse") return null;
+  if (repo !== WORKTREE) return null;
+  if (args[0] === "worktree") return `worktree /repo\nHEAD ${"a".repeat(40)}\nbranch refs/heads/main\n\nworktree ${WORKTREE}\nHEAD ${HEAD}\nbranch refs/heads/worktree-9311-fix-login-111111\n`;
+  if (args[0] === "reflog") return "";
+  if (args[0] !== "rev-parse") return null;
   if (args.includes("@{u}")) return `origin/${BRANCH}\n`;
   if (args.includes("--abbrev-ref")) return "worktree-9311-fix-login-111111\n";
   return `${HEAD}\n`;
@@ -254,11 +258,11 @@ describe("whose PR it is", () => {
 
   it("makes a PR the session's when it was handed over, or its head is the session's HEAD", async () => {
     expect(claimedPrNumbers("Assuma a PR #9328 e rode o gate.")).toEqual([9328]);
-    expect(claimedPrNumbers("assumir a #9341 agora")).toEqual([9341]);
+    expect(claimedPrNumbers("Assuma a PR #9328 e rode o gate da #9330.")).toEqual([9328]);
     expect(claimedPrNumbers("A PR #9314 é sua a partir de agora; fique com a PR #9330 também")).toEqual(expect.arrayContaining([9314, 9330]));
     expect(claimedPrNumbers("A trava está na PR #9328, que ainda não está em main.")).toEqual([]);
     expect(claimedPrNumbers("depende da #9328")).toEqual([]);
-    const branches = { names: [BRANCH], head: HEAD };
+    const branches = { names: [BRANCH], heads: [HEAD] };
     expect(prOwnership({ number: 1, headRefName: BRANCH }, branches)).toBe("branch");
     expect(prOwnership({ number: 1, headRefName: "other", headRefOid: HEAD }, branches)).toBe("branch");
     expect(prOwnership({ number: 1, headRefName: "other", headRefOid: "0".repeat(40) }, branches)).toBeNull();
@@ -274,11 +278,92 @@ describe("whose PR it is", () => {
 
   it("reads the branches of the session's worktree: its checkout and where it pushed, never main", async () => {
     const git: DeliveryDeps["git"] = async (repo, args) => worktreeGit(repo, args) ?? (() => { throw new Error("no"); })();
-    expect(await sessionBranches({ cwd: WORKTREE }, git)).toEqual({ names: ["worktree-9311-fix-login-111111", BRANCH], head: HEAD });
+    expect(await sessionBranches({ cwd: WORKTREE }, git)).toEqual({ names: ["worktree-9311-fix-login-111111", BRANCH], heads: [HEAD] });
     expect(await sessionBranches({}, git)).toBeNull();
     expect(await sessionBranches({ cwd: "/gone" }, git)).toBeNull();
     const onMain: DeliveryDeps["git"] = async (_repo, args) => (args.includes("@{u}") ? "origin/main\n" : args.includes("--abbrev-ref") ? "main\n" : `${HEAD}\n`);
-    expect(await sessionBranches({ cwd: WORKTREE }, onMain)).toEqual({ names: [], head: HEAD });
+    expect(await sessionBranches({ cwd: WORKTREE }, onMain)).toEqual({ names: [], heads: [HEAD] });
+  });
+
+  it("takes only the PRs an order hands to the session it is sent to (INSP-H r1 #7)", () => {
+    expect(claimedPrNumbers("Não assuma a PR #9328: ela é da 29da943f.")).toEqual([]);
+    expect(claimedPrNumbers("A 29da943f assume a PR #9328; você fica com o laudo.")).toEqual([]);
+    expect(claimedPrNumbers("a PR #9328 é sua? confirme")).toEqual([]);
+    expect(claimedPrNumbers("Assuma as PRs #9328 e #9341.")).toEqual([9328, 9341]);
+    expect(claimedPrNumbers("assuma a #9328 e a #9341 e rode o gate")).toEqual([9328, 9341]);
+    // the real wording of 29/09
+    expect(claimedPrNumbers("Você assume a PR órfã https://github.com/dinhogehm/nuria-platform/pull/9289 e leva até o merge.")).toEqual([9289]);
+  });
+
+  it("reads back the hand-overs given before claimedPrs existed, from the bots' tool calls", () => {
+    // the real cc_session_send of 01/10 18:13 to the 29da943f (redacted around the order)
+    const send = { tool: "mcp__agents__cc_session_send", input: JSON.stringify({ session_id: "29da943f-0579-4981-bb49-5c72ec842651", message: "Conferi: #9330 MERGED em [sha].\n4. Se algo falhar, PARE e me reporte a linha do log.\n5. Em seguida, sem fechar a sessão: assuma a PR #9328 (F4-1, head 73d0a998e, atrás da main). Atualize a branch e rode ci:local full." }) };
+    const other = { tool: "mcp__agents__cc_session_send", input: JSON.stringify({ session_id: "35787b0f-0000-4000-8000-000000000000", message: "A trava está na PR #9328; não assuma a #9328." }) };
+    const start = { tool: "mcp__agents__cc_session_start", input: JSON.stringify({ title: "#9341 watcher no-op", brief: "Assuma a PR #9341 e leve ao gate.", repo: "/p" }) };
+    const broken = { tool: "mcp__agents__cc_session_send", input: "{not json" };
+    expect(claimsInToolCalls([send, other, start, broken], "29da943f-0579-4981-bb49-5c72ec842651", () => false)).toEqual([9328]);
+    expect(claimsInToolCalls([send, other, start, broken], "35787b0f-0000-4000-8000-000000000000", () => false)).toEqual([]);
+    expect(claimsInToolCalls([start], "x", (title) => title === "#9341 watcher no-op")).toEqual([9341]);
+  });
+});
+
+// INSP-H r1 #1, the real 29da943f of 01/10 (redacted): its worktree on a
+// detached HEAD, its work in worktrees nested inside it — `.worktrees/9328`
+// (pr/9328, head = #9328's headRefOid) and `.worktrees/9340` (fix/9340 =
+// #9341) — #9330 recorded and found merged by the earlier build (waiting for
+// production), and the hand-over "assuma a PR #9328" of 18:13, before the lot.
+describe("the PRs of a session that works in nested worktrees", () => {
+  const CWD = "/p/.claude/worktrees/9330-gate-2a8f5c";
+  const DETACHED = "1bbd5c2a7".padEnd(40, "1");
+  const HEAD_9328 = "657376347".padEnd(40, "2");
+  const HEAD_9341 = "8f0c0ffee".padEnd(40, "3");
+  const nestedGit: DeliveryDeps["git"] = async (repo, args) => {
+    if (args[0] === "remote") return `git@github.com:${SLUG}.git\n`;
+    if (args[0] === "ls-remote") return `${TAG}\trefs/tags/nuria-production-deployed\n`;
+    if (repo !== CWD) throw new Error("no");
+    if (args[0] === "worktree") return [
+      `worktree /p\nHEAD ${"a".repeat(40)}\nbranch refs/heads/main`,
+      `worktree ${CWD}\nHEAD ${DETACHED}\ndetached`,
+      `worktree ${CWD}/.worktrees/9328\nHEAD ${HEAD_9328}\nbranch refs/heads/pr/9328`,
+      `worktree ${CWD}/.worktrees/9340\nHEAD ${HEAD_9341}\nbranch refs/heads/fix/9340`,
+      `worktree /p/.claude/worktrees/other-session\nHEAD ${"b".repeat(40)}\nbranch refs/heads/fix/9052-reabertura`,
+    ].join("\n\n");
+    if (args[0] === "reflog") return `checkout: moving from main to ${DETACHED}\ncommit: x`;
+    if (args.includes("@{u}")) throw new Error("no upstream");
+    if (args.includes("--abbrev-ref")) return "HEAD\n";
+    return `${DETACHED}\n`;
+  };
+  const views: Record<number, object> = {
+    9328: { state: "OPEN", mergeCommit: null, headRefName: "fix/9319-reconciler-contract", headRefOid: HEAD_9328 },
+    9341: { state: "OPEN", mergeCommit: null, headRefName: "fix/9340", headRefOid: HEAD_9341 },
+    9330: { state: "MERGED", mergeCommit: { oid: MERGE }, headRefName: "fix/9326-reconciler-gate", headRefOid: "c".repeat(40) },
+  };
+  const ghFor = async (args: string[]) => {
+    if (args[0] === "pr") return JSON.stringify(views[Number(args[2])]);
+    if (args[1]!.includes("/compare/")) return "behind\n";
+    throw new Error("unexpected");
+  };
+
+  it("keeps #9328 and #9341 (nested worktrees) and the legacy merged #9330; the #9052 session still does not own #9328", async () => {
+    expect(await sessionBranches({ cwd: CWD }, nestedGit)).toEqual({ names: ["pr/9328", "fix/9340"], heads: [DETACHED, HEAD_9328, HEAD_9341] });
+    const f = fakeDeps();
+    f.deps.git = nestedGit;
+    f.deps.gh = ghFor;
+    const s29 = { id: "29da943f", title: "9330 gate", repo: "/p", cwd: CWD, status: "idle", lastReport: "PR #9328 com gate; PR #9341 aberta; a PR #9330 já foi mergeada.", delivery: { slug: SLUG, prs: { "9330": { url: "u", number: 9330, state: "merged" as const, mergeSha: MERGE } } } as CcDelivery };
+    await watchProductionDelivery([s29], f.deps, newDeliveryCache());
+    expect(s29.delivery.prs["9328"]).toMatchObject({ owned: "branch", state: "open" });
+    expect(s29.delivery.prs["9341"]).toMatchObject({ owned: "branch", state: "open" });
+    // merged before ownership existed: kept, still waiting for production
+    expect(s29.delivery.prs["9330"]).toMatchObject({ owned: "legacy", state: "merged" });
+    expect(s29.delivery.prs["9330"]!.reportedAt).toBeUndefined();
+    expect(s29.delivery.notOwned ?? []).toEqual([]);
+    expect(prsOfSession(s29).sort()).toEqual([9328, 9341]);
+    expect((await archiveBlockers(s29, f.deps)).blockers.sort()).toEqual(["a PR #9328 ainda está aberta", "a PR #9330 foi mergeada mas ainda não está em nuria-production-deployed", "a PR #9341 ainda está aberta"]);
+    // the #9052 session, in its own worktree, still does not own #9328
+    const g = fakeDeps({ state: "OPEN", head: "fix/9319-reconciler-contract" });
+    const s52 = { ...session(), id: "35787b0f", lastReport: "A trava está na PR #9328, que ainda não está em main." };
+    await watchProductionDelivery([s52], g.deps, newDeliveryCache());
+    expect(s52.delivery!.notOwned).toEqual([9328]);
   });
 });
 
