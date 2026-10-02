@@ -7,7 +7,7 @@ import {
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import {
-  answerTime, awaitingBot, botSilent, chosenOption, decisionsInOrder, dueAt, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
+  answerNotDelivered, answerTime, awaitingBot, botSilent, chosenOption, decisionsInOrder, dueAt, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
   type NeedsYouItem, type NeedsYouSort,
 } from "@/lib/needs-you";
 
@@ -355,6 +355,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   const replyId = `needs-you-reply-${needsYouKey(item).replace(/[^\w-]/g, "-")}`;
   const awaiting = awaitingBot(item, now);
   const silent = botSilent(item, now);
+  const notDelivered = notDeliveredLine(item, now);
   // answered and waiting on the bot: the decisions fold behind "Mudar resposta" (INSP-J2 #2)
   const decisionsOpen = Boolean(item.options?.length) && (!awaiting || props.changingAnswer === needsYouKey(item));
   return (
@@ -426,6 +427,13 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
               </button>
             )}
           </div>
+        )}
+        {notDelivered && (
+          // the answer never reached the bot (cancelled, failed, lost in a restart): the item is the person's again (INSP-J2 r3 R2)
+          <p role="status" data-resolver-not-delivered="" className="mt-3 flex items-start gap-2 rounded-lg border border-danger/40 bg-panel px-3 py-2 text-[13px] text-ink">
+            <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />
+            <span>{notDelivered}</span>
+          </p>
         )}
         {/* what was answered comes first: it is what the person looks for when they come back (INSP-J2 #8) */}
         {item.history?.length ? <History item={item} now={now} /> : null}
@@ -539,7 +547,8 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
               {t("needsYou.screen.changeAnswer")}
             </button>
           ) : null}
-          {awaiting && decisionsOpen ? (
+          {awaiting && decisionsOpen && props.switching?.key !== needsYouKey(item) ? (
+            // hidden while the switch question is open: one "Manter" on screen at a time (INSP-J2 r3 R4)
             // opened to change it: folding back is one click too (Escape does the same)
             <button type="button" data-resolver-keep-answer="" onClick={() => props.onChangeAnswer(item)} className={cn(quietButton, "mr-auto")}>
               <X size={14} aria-hidden="true" />
@@ -601,7 +610,17 @@ export function awaitingLine(item: Pick<NeedsYouItem, "history" | "awaitingSince
   const line = last?.kind === "option" ? t("needsYou.screen.awaitingChose", { label: last.label ?? "", time, name })
     : last?.kind === "ask" ? t(last.label === "recommend" ? "needsYou.screen.awaitingAskedRecommend" : last.label === "remind" ? "needsYou.screen.awaitingReminded" : "needsYou.screen.awaitingAskedSteps", { name, time })
       : t("needsYou.screen.awaitingAnswered", { name, time });
-  return last?.queued ? `${line} ${t("needsYou.screen.awaitingQueued", { name })}` : line;
+  if (!last?.queued) return line;
+  // what is queued, said by its name: never two "respostas" meaning opposite things (INSP-J2 r3 R4)
+  return `${line} ${t(last.kind === "option" ? "needsYou.screen.awaitingQueuedChoice" : last.kind === "ask" ? "needsYou.screen.awaitingQueuedRequest" : "needsYou.screen.awaitingQueuedMessage", { name })}`;
+}
+
+/** The person's last answer never reached the bot: said, with why — the item is theirs again (INSP-J2 r3 R2). */
+export function notDeliveredLine(item: Pick<NeedsYouItem, "history" | "awaitingSince" | "botName">, now: number): string | null {
+  const failed = answerNotDelivered(item);
+  if (!failed) return null;
+  const values = { label: failed.label ?? "", time: answerTime(failed.at, now), name: item.botName, error: failed.error ?? "" };
+  return t(failed.kind === "option" ? "needsYou.screen.notDeliveredChoice" : failed.kind === "ask" ? "needsYou.screen.notDeliveredRequest" : "needsYou.screen.notDeliveredMessage", values);
 }
 
 /** What the person answered, oldest first, and whether it reached the bot (J18). */
@@ -616,7 +635,7 @@ function History({ item, now }: { item: NeedsYouItem; now: number }) {
             ? t("needsYou.history.option", { label: entry.label ?? "", time })
             : entry.kind === "text"
               ? t("needsYou.history.text", { text: entry.text.length > 140 ? `${entry.text.slice(0, 139)}…` : entry.text, time })
-              : t(entry.label === "recommend" ? "needsYou.history.askRecommend" : entry.label === "remind" ? "needsYou.history.remind" : "needsYou.history.askSteps", { time });
+              : t(entry.label === "recommend" ? "needsYou.history.askRecommend" : entry.label === "remind" ? "needsYou.history.remind" : "needsYou.history.askSteps", { time, name: item.botName });
           // sent: a check, said to a screen reader and on hover — not repeated in every line (r2 N8);
           // waiting its turn: "na fila" (r2 N9); not sent: said in full
           const sent = t("needsYou.history.delivered", { name: item.botName });

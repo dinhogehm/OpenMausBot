@@ -112,7 +112,7 @@ import { attentionJumpAction, AttentionThreadRows, crossBotAttentionThreads, Sid
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { SidebarNeedsYou } from "./SidebarNeedsYou";
 import { NeedsYouResolver } from "./NeedsYouResolver";
-import { needsYouItems, needsYouKey, nextAwaitingChange } from "@/lib/needs-you";
+import { needsYouItems, needsYouKey, nextAwaitingChange, startNeedsYouClock } from "@/lib/needs-you";
 import { decisionReply, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
 import { openExternalLink } from "@/lib/app-links";
 import { ShortcutHint } from "./ShortcutHint";
@@ -1955,15 +1955,14 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
   // disagree with it.
   const attention = crossBotAttentionThreads(state.bots, state.pendingQueued, undefined, state.groups);
   const needsYou = needsYouItems(state.bots);
-  // the clock "Precisa de você" counts with: it ticks exactly when an answered
-  // item's 2 h run out and it goes back to the person (INSP-J2 r2 N3)
+  // the clock "Precisa de você" counts with: every minute (ages, deadlines, the
+  // order shared with the resolution screen) and exactly when an answered
+  // item's 2 h run out (INSP-J2 r2 N3, r3 R1). Restarted when that moment moves.
   const [needsYouClock, setNeedsYouClock] = useState(() => Date.now());
+  const needsYouRef = useRef(needsYou);
+  needsYouRef.current = needsYou;
   const nextNeedsYouChange = nextAwaitingChange(needsYou, needsYouClock);
-  useEffect(() => {
-    if (nextNeedsYouChange === null) return;
-    const timer = setTimeout(() => setNeedsYouClock(Date.now()), Math.max(0, nextNeedsYouChange - Date.now()) + 50);
-    return () => clearTimeout(timer);
-  }, [nextNeedsYouChange]);
+  useEffect(() => startNeedsYouClock(() => needsYouRef.current, setNeedsYouClock), [nextNeedsYouChange]);
   // the resolution screen: open on one item (its key) or on the list (null)
   const [resolver, setResolver] = useState<{ open: boolean; key: string | null }>({ open: false, key: null });
   const pendingBotUndo = teamFeedback?.restoreBot;

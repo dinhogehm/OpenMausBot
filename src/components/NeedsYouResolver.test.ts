@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
-import { answerTime, dueAt, needsYouItems, needsYouKey, needsYouTitle, sortNeedsYou } from "@/lib/needs-you";
+import { answerTime, awaitingBot, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, sortNeedsYou } from "@/lib/needs-you";
 import { decisionReply } from "@/lib/needs-you-actions";
 import { awaitingLine, decisionNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
 
@@ -411,6 +411,12 @@ describe("keys on the resolution screen", () => {
     // INSP-J2 #10: the question takes the focus — on the safe answer, "Manter" (r2 N5)
     expect(confirm.find("data-resolver-switch-no")!.props.autoFocus).toBe(true);
     expect(confirm.find("data-resolver-switch-yes")!.props.autoFocus).toBeUndefined();
+    // r3 R4: one "Manter" on screen — the footer's "Manter a resposta" waits for the question to close
+    expect(confirm.find("data-resolver-keep-answer")).toBeUndefined();
+    expect(confirm.html).not.toContain("Manter a resposta");
+    // (the question is drawn in both places — inline and footer — and CSS shows one: one "Manter" each)
+    expect(confirm.html.match(/Manter/g)).toHaveLength(confirm.tree.filter((node) => "data-resolver-switch" in node.props).length);
+    expect(open.find("data-resolver-keep-answer")).toBeDefined();
     confirm.press("data-resolver-switch-yes");
     confirm.press("data-resolver-switch-no");
     expect(confirm.calls).toEqual(["decide:o12:1", "cancelSwitch"]);
@@ -466,6 +472,36 @@ describe("keys on the resolution screen", () => {
     expect(view({ items: list, selectedKey: key("o20") }).find("data-resolver-remind")).toBeUndefined();
   });
 
+  // INSP-J2 r3 R2 (redacted)
+  it("waits on the bot while the answer is queued, however long — no 'não respondeu', no 'Lembrar'", () => {
+    const at = now - 5 * 3_600_000;
+    const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o40", title: "Confirmar o teto do lote", since: now - 6 * 3_600_000, awaitingSince: at, history: [{ at, kind: "option", label: "Sim", text: "Sim.", delivered: false, queued: true }] },
+    ] })])]);
+    expect(awaitingBot(list[0]!, now)).toBe(true);
+    expect(botSilent(list[0]!, now)).toBe(false);
+    const { html, find } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
+    expect(find("data-resolver-remind")).toBeUndefined();
+    expect(html).not.toContain("não respondeu");
+    expect(html).toContain("Aguardando bots (1)");
+  });
+
+  it("gives the item back when the answer never arrived, saying why (R2)", () => {
+    const at = new Date(2026, 9, 2, 15, 10).getTime();
+    const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o41", title: "Confirmar o teto do lote", since: now - 6 * 3_600_000, options: [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }],
+        history: [{ at, kind: "option", label: "Sim", text: "Sim.", delivered: false, error: "cancelada na conversa antes de chegar ao bot" }] },
+    ] })])]);
+    const { html, tree } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
+    expect(html).toContain("1 item esperando você");
+    expect(tree.find((node) => "data-resolver-not-delivered" in node.props)).toBeDefined();
+    expect(html).toContain("Sua escolha “Sim” às 15:10 não foi entregue para Monitor Chat: cancelada na conversa antes de chegar ao bot. O item voltou para você.");
+    // the decisions are open again, nothing marked chosen
+    const inline = tree.filter((node) => node.props["data-placement"] === "inline" && "data-resolver-option" in node.props);
+    expect(inline).toHaveLength(2);
+    expect(inline.map((node) => node.props["aria-pressed"])).toEqual([undefined, undefined]);
+  });
+
   it("says a server item the choice closed is resolved, never 'aguardando' (N4)", () => {
     const item = { botName: "Chief of Staff", title: "Ligue o Mac na tomada", options: [{ label: "Vou deixar na bateria", reply: "Vou deixar." }] };
     expect(decisionNotice(item, 0, { resolved: 1 })).toBe("Enviado «Vou deixar na bateria» para Chief of Staff — Ligue o Mac na tomada. Item resolvido.");
@@ -480,7 +516,10 @@ describe("keys on the resolution screen", () => {
     expect(awaitingLine({ ...base, history: [{ at, kind: "ask", label: "recommend", text: "x", delivered: true }] }, now)).toBe("Você pediu a recomendação para Monitor Chat às 15:10: aguardando a resposta.");
     expect(awaitingLine({ ...base, history: [{ at, kind: "ask", label: "remind", text: "x", delivered: true }] }, now)).toBe("Você lembrou Monitor Chat às 15:10: aguardando a resposta.");
     expect(awaitingLine({ ...base, history: [{ at, kind: "option", label: "Sim", text: "Sim.", delivered: false, queued: true }] }, now))
-      .toBe("Você escolheu “Sim” às 15:10: aguardando Monitor Chat. O item se atualiza quando houver resposta. A resposta está na fila: Monitor Chat a recebe assim que terminar o que está fazendo.");
+      .toBe("Você escolheu “Sim” às 15:10: aguardando Monitor Chat. O item se atualiza quando houver resposta. Sua escolha está na fila: Monitor Chat a recebe assim que terminar o que está fazendo.");
+    // r3 R4: what is queued is named — a message, a request — never "a resposta" beside "houver resposta"
+    expect(awaitingLine({ ...base, history: [{ at, kind: "text", text: "E a planilha?", delivered: false, queued: true }] }, now)).toContain("Sua mensagem está na fila: Monitor Chat a recebe");
+    expect(awaitingLine({ ...base, history: [{ at, kind: "ask", label: "steps", text: "x", delivered: false, queued: true }] }, now)).toContain("Seu pedido está na fila: Monitor Chat o recebe");
     // in the history: a clock and "na fila para", not a check and "enviado"
     const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
       { id: "o30", title: "Confirmar o teto do lote", since: now - 3_600_000, options: [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }], awaitingSince: at,
@@ -489,7 +528,8 @@ describe("keys on the resolution screen", () => {
     const { html, tree } = view({ items: list, selectedKey: needsYouKey(list[0]!), changingAnswer: needsYouKey(list[0]!) });
     expect(tree.filter((node) => "data-history-state" in node.props).map((node) => node.props["data-history-state"])).toEqual(["queued", "delivered"]);
     expect(html).toContain("Você escolheu “Sim” às 15:10<span class=\"text-ink-secondary\"> — na fila para Monitor Chat</span>");
-    expect(html).toContain("Você lembrou o bot às 15:11");
+    // r3 R4: the bot by its name, like every other line
+    expect(html).toContain("Você lembrou Monitor Chat às 15:11");
     // a queued choice is still the person's choice: marked, and choosing it again sends nothing
     expect(tree.find((node) => node.props["data-placement"] === "inline" && node.props["data-resolver-option"] === 0)!.props["aria-pressed"]).toBe(true);
   });

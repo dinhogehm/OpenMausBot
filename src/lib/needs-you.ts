@@ -45,23 +45,60 @@ export interface NeedsYouItem {
  * person as "o bot não respondeu" (INSP-J2 #2). */
 export const AWAITING_MAX_MS = 2 * 3_600_000;
 
-/** Answered, and its bot still has time to rewrite or resolve it: not the person's. */
-export const awaitingBot = (item: Pick<NeedsYouItem, "awaitingSince">, now: number): boolean =>
-  item.awaitingSince !== undefined && now - item.awaitingSince < AWAITING_MAX_MS;
+type Awaitable = Pick<NeedsYouItem, "awaitingSince" | "history">;
 
-/** Answered, and the bot did nothing for AWAITING_MAX_MS: the person's again. */
-export const botSilent = (item: Pick<NeedsYouItem, "awaitingSince">, now: number): boolean =>
-  item.awaitingSince !== undefined && now - item.awaitingSince >= AWAITING_MAX_MS;
+/** The person's last answer still waits its turn in a busy conversation: the
+ * bot has not had it, so its 2 h have not started (INSP-J2 r3 R2). */
+export const answerQueued = (item: Awaitable): boolean =>
+  Boolean(item.history?.findLast((each) => each.delivered || each.queued)?.queued);
+
+/** Answered, and its bot still has time to rewrite or resolve it: not the person's. */
+export const awaitingBot = (item: Awaitable, now: number): boolean =>
+  item.awaitingSince !== undefined && (answerQueued(item) || now - item.awaitingSince < AWAITING_MAX_MS);
+
+/** Answered, and the bot did nothing for AWAITING_MAX_MS since it got it: the person's again. */
+export const botSilent = (item: Awaitable, now: number): boolean =>
+  item.awaitingSince !== undefined && !answerQueued(item) && now - item.awaitingSince >= AWAITING_MAX_MS;
+
+/** The person's last answer never reached the bot (cancelled, failed, lost):
+ * the item is theirs again, and the screen says why (INSP-J2 r3 R2). */
+export function answerNotDelivered(item: Awaitable): NonNullable<NeedsYouItem["history"]>[number] | null {
+  const last = item.history?.at(-1);
+  return item.awaitingSince === undefined && last && !last.delivered && !last.queued ? last : null;
+}
 
 /** What waits on the person (the count, the sidebar, the badge): not what waits on a bot. */
-export const waitingOnYou = <T extends Pick<NeedsYouItem, "awaitingSince">>(items: readonly T[], now: number): T[] => items.filter((item) => !awaitingBot(item, now));
+export const waitingOnYou = <T extends Awaitable>(items: readonly T[], now: number): T[] => items.filter((item) => !awaitingBot(item, now));
 
 /** When the next answered item goes back to the person (its bot's 2 h run
  * out), or null: the sidebar re-renders exactly then, not on the next
- * broadcast (INSP-J2 r2 N3). */
-export function nextAwaitingChange(items: ReadonlyArray<Pick<NeedsYouItem, "awaitingSince">>, now: number): number | null {
-  const due = items.flatMap((item) => (item.awaitingSince === undefined ? [] : [item.awaitingSince + AWAITING_MAX_MS])).filter((at) => at > now);
+ * broadcast (INSP-J2 r2 N3). A queued answer has no deadline yet. */
+export function nextAwaitingChange(items: ReadonlyArray<Awaitable>, now: number): number | null {
+  const due = items.flatMap((item) => (item.awaitingSince === undefined || answerQueued(item) ? [] : [item.awaitingSince + AWAITING_MAX_MS])).filter((at) => at > now);
   return due.length ? Math.min(...due) : null;
+}
+
+/** The sidebar's clock: every minute (ages, deadlines, the order "Prazo"
+ * shares with the resolution screen) and exactly when an answered item's
+ * 2 h run out (INSP-J2 r3 R1). How long until its next tick. */
+export const NEEDS_YOU_TICK_MS = 60_000;
+export function needsYouClockDelay(items: ReadonlyArray<Awaitable>, now: number): number {
+  const flip = nextAwaitingChange(items, now);
+  return Math.max(0, Math.min(NEEDS_YOU_TICK_MS, flip === null ? Infinity : flip - now + 1));
+}
+
+/** Runs the sidebar's clock: calls `tick` with the time at every tick,
+ * rescheduling from the items as they are then. Returns the stop. */
+export function startNeedsYouClock(items: () => ReadonlyArray<Awaitable>, tick: (now: number) => void, clock: () => number = Date.now): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = () => {
+    timer = setTimeout(() => {
+      tick(clock());
+      schedule();
+    }, needsYouClockDelay(items(), clock()));
+  };
+  schedule();
+  return () => clearTimeout(timer);
 }
 
 /** The option the person last chose, sent or waiting its turn (J18; r2 N9). */

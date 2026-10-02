@@ -1,9 +1,10 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
-import { AWAITING_MAX_MS, needsYouItems, nextAwaitingChange, waitingAge } from "@/lib/needs-you";
+import { AWAITING_MAX_MS, awaitingBot, needsYouItems, nextAwaitingChange, startNeedsYouClock, waitingAge } from "@/lib/needs-you";
+import { resolverSelection } from "./NeedsYouResolver";
 import { SidebarNeedsYou } from "./SidebarNeedsYou";
 
 const now = Date.parse("2026-09-30T21:00:00Z");
@@ -155,5 +156,52 @@ describe("what needs the person, from every bot", () => {
     const at = now - 30 * 60_000;
     expect(nextAwaitingChange([{ awaitingSince: at }, { awaitingSince: now - 5 * 3_600_000 }, {}], now)).toBe(at + AWAITING_MAX_MS);
     expect(nextAwaitingChange([{ awaitingSince: now - 5 * 3_600_000 }, {}], now)).toBeNull();
+  });
+
+  // INSP-J2 r3 R1: the app stays open all day — the sidebar's ages, deadlines and order must move
+  it("runs its clock every minute and exactly at an answered item's 2 h, with the resolution screen's order", () => {
+    vi.useFakeTimers();
+    try {
+      const mount = new Date(2026, 9, 2, 17, 30).getTime();
+      vi.setSystemTime(mount);
+      const listed = [bot("monitor", "Monitor Chat", [task("m0", "Vigia", { ownerPending: [
+        // arrives a minute after the sidebar mounted
+        { id: "o1", title: "Chegou agora", since: mount + 60_000 },
+        { id: "o2", title: "Antigo", since: mount - 26 * 3_600_000 },
+        { id: "o3", title: "Para hoje 18h", since: mount - 3_600_000, due: "hoje 18h" },
+        { id: "o4", title: "Para hoje 19h", since: mount - 2 * 3_600_000, due: "hoje 19h" },
+        // answered 1 h 59 min 30 s ago: back to the person in 30 s
+        { id: "o5", title: "Respondido", since: mount - 5 * 3_600_000, awaitingSince: mount - 2 * 3_600_000 + 30_000 },
+      ] })])];
+      const items = needsYouItems(listed);
+      let clock = Date.now();
+      const ticks: number[] = [];
+      const stop = startNeedsYouClock(() => items, (at) => { clock = at; ticks.push(at); });
+      const render = () => renderToStaticMarkup(SidebarNeedsYou({ items, density: "comfortable", now: clock, onOpen: () => {} })!);
+      const rows = (html: string) => [...html.matchAll(/class="line-clamp-2 break-words leading-snug">([^<]+)</g)].map((match) => match[1]);
+      expect(render()).not.toContain("Respondido");
+      // the 2 h run out at mount + 30 s: the tick comes then, not a minute later
+      vi.advanceTimersByTime(30_001);
+      expect(ticks).toEqual([mount + 30_001]);
+      expect(render()).toContain("Respondido");
+      // a minute later the new item's age moves off "agora"; after an hour, everything moved
+      vi.advanceTimersByTime(60 * 60_000);
+      expect(ticks.length).toBeGreaterThanOrEqual(60);
+      const html = render();
+      expect(html).toContain('aria-label="Ver como resolver: Chegou agora · Monitor Chat · esperando há 59 min"');
+      expect(html).toContain("esperando há 27 h");
+      // 18:30: "hoje 18h" is overdue now — in red — and "hoje 19h" is not
+      expect(html).toMatch(/text-danger">hoje 18h</);
+      expect(html).not.toMatch(/text-danger">hoje 19h</);
+      // the same order the resolution screen shows at that clock
+      const screen = resolverSelection({ items, botFilter: null, sort: "due", now: clock, selectedKey: null, fallbackIndex: 0 }).visible.filter((item) => !awaitingBot(item, clock));
+      expect(rows(html)).toEqual(screen.map((item) => item.title).slice(0, 6));
+      stop();
+      const before = ticks.length;
+      vi.advanceTimersByTime(10 * 60_000);
+      expect(ticks).toHaveLength(before);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
