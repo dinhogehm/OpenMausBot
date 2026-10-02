@@ -116,6 +116,21 @@ export function parseLsRemoteTag(output: string, tag: string): string | null {
   return direct;
 }
 
+/** GitHub's mergeStateStatus, said in pt-BR for a chip the owner reads;
+ * "" when there is nothing to say (UNKNOWN: GitHub has not computed it yet). */
+export function mergeStatePt(status: string | undefined): string {
+  switch ((status ?? "").toUpperCase()) {
+    case "CLEAN": return "pronta para merge";
+    case "HAS_HOOKS": return "pronta para merge";
+    case "BLOCKED": return "bloqueada pelas regras do repositório";
+    case "BEHIND": return "atrás da main";
+    case "DIRTY": return "com conflito";
+    case "UNSTABLE": return "com checks falhando";
+    case "DRAFT": return "rascunho";
+    default: return "";
+  }
+}
+
 /** "30/09 16:40" in the owner's time zone. */
 export function productionTime(iso: string): string {
   const at = new Date(iso);

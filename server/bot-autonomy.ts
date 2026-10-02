@@ -795,7 +795,9 @@ export class BotAutonomy {
     const title = input.title.replace(/\s+/g, " ").trim().slice(0, OWNER_PENDING_TITLE_MAX);
     const here = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
     const elsewhere = this.ownerPending.find((open) => open.botId === botId && !here(open) && sameOwnerPending(open, { ...input, title }));
-    if (elsewhere && !(input.key && elsewhere.key === input.key)) return { ...elsewhere, duplicate: true };
+    // a bot's second ask is that one; a server item takes the equivalent one
+    // over (its key, so the server can close it; its title, the exact remedy)
+    if (elsewhere && !input.key) return { ...elsewhere, duplicate: true };
     const same = (open: OwnerPending) => here(open) || open === elsewhere;
     const existing = this.ownerPending.find(same);
     const used = new Set(this.ownerPending.map((open) => open.id));
@@ -803,8 +805,8 @@ export class BotAutonomy {
     while (used.has(`o${n}`)) n += 1;
     const pending: OwnerPending = {
       id: existing?.id ?? `o${n}`, botId, threadId, title, createdAt: existing?.createdAt ?? this.now(),
-      ...(input.due?.trim() ? { due: input.due.trim().slice(0, 80) } : {}),
-      ...(input.link?.trim() ? { link: input.link.trim().slice(0, 500) } : {}),
+      ...(input.due?.trim() ? { due: input.due.trim().slice(0, 80) } : existing?.due ? { due: existing.due } : {}),
+      ...(input.link?.trim() ? { link: input.link.trim().slice(0, 500) } : existing?.link ? { link: existing.link } : {}),
       ...(input.key ? { key: input.key } : {}),
       ...(existing?.aliases?.length ? { aliases: existing.aliases } : {}),
     };

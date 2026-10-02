@@ -340,7 +340,7 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, githubSlug, idleWithOpenPrs, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, githubSlug, idleWithOpenPrs, mergeStatePt, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
 import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
@@ -349,7 +349,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
 import { carrierIntent, isReleaseProcess, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
-import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { DECLINED_SHA_FILE, fullReleaseSha, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopPending, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8512,23 +8512,61 @@ async function checkProductionRelease(): Promise<void> {
   const released = readTail(RELEASED_SHA_FILE, 200).trim();
   await checkReleaseAftermath(releaseWatch.state, released);
   const failed = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), released);
+  const sameSha = (a: string, b: string) => a.startsWith(b) || b.startsWith(a);
+  const halted = readHaltedRelease();
+  const declined = readTail(DECLINED_SHA_FILE, 200).trim();
+  const isHalted = Boolean(failed && halted && sameSha(halted.sha, failed.sha));
+  const isDeclined = Boolean(failed && /^[0-9a-f]{7,40}$/.test(declined) && sameSha(declined, failed.sha));
+  // the owner refused it, the watcher halted it, or it is no longer the commit failing: its item is done
+  settleReleaseLoopPendings(failed && !isHalted && !isDeclined ? failed.sha : null);
   if (!failed) return;
   // a later release that already contains the failed commit settles it
   if (released) {
     try {
       await execCc("git", ["-C", join(homedir(), "Projetos", "nuria-platform"), "merge-base", "--is-ancestor", failed.sha, released]);
+      settleReleaseLoopPendings(null);
       return;
     } catch { /* not an ancestor, or unknown here: alert */ }
   }
-  if (!releaseWatch.state.take(failed.sha, failed.count)) return;
-  const cause = releaseFailureCause(readTail(RELEASE_OUT_LOG, 512 * 1024));
+  const outTail = readTail(RELEASE_OUT_LOG, 512 * 1024);
+  const cause = releaseFailureCause(outTail);
+  releaseWatch.state.observe(failed.sha, failed.count, Date.now(), cause);
+  const told = releaseWatch.state.take(failed.sha, failed.count);
+  // the same commit failing the same way, again and again: ONE item for the
+  // owner, with the one command the installed watcher respects (never "halted")
+  const loop = !isHalted && !isDeclined && releaseLoopDue(releaseWatch.state.seenOf(failed.sha), failed.count)
+    ? releaseLoopPending({ short: failed.sha, full: fullReleaseSha(outTail, failed.sha), count: failed.count })
+    : null;
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  const desk = chief ? chiefDeskThread(chief) : null;
+  const loopOpen = Boolean(loop && chief && autonomy.ownerPendingOf(chief.id).some((item) => item.key === loop.key));
+  let loopItem: OwnerPending | null = null;
+  if (loop && chief && desk && store.taskByThread(chief.id, desk) && (told || !loopOpen)) {
+    loopItem = autonomy.addOwnerPending(chief.id, desk, loop);
+    refreshBotRow(chief.id);
+  }
+  if (!told) return;
   const text = `O release de produção falhou ${failed.count} vezes no mesmo commit ${failed.sha}${cause ? ` (último motivo: ${cause})` : ""}, e a tag de produção não se moveu: o que vinha nele não está em produção.`;
-  // after the watcher's halt it does not retry: never say it does
-  const halted = readHaltedRelease();
-  const retries = halted && (halted.sha.startsWith(failed.sha) || failed.sha.startsWith(halted.sha))
-    ? "O watcher PAROU de tentar este commit (halt): ele não sai sozinho."
-    : "O watcher tenta de novo sozinho a cada 2 min.";
-  releaseAlertToChief(text, `[Alerta do servidor: release de produção falhando] ${text}\nLogs: ${RELEASE_ERR_LOG} e ${RELEASE_OUT_LOG}. ${retries} Veja se é carga da máquina (CI concorrente, timeouts) ou falha real, avise quem precisa (SRE/Delivery, o dono) e não dê a entrega como feita ao cliente.`);
+  // after the watcher's halt it does not retry: never say it does; and never "every 2 min" (R9-release #7)
+  const retries = releaseRetryText({ halted: isHalted, cycleMs: releaseWatch.state.cycleMs(failed.sha), nothingToPublish: nothingToPublish(cause) });
+  const ownerItem = loopItem
+    ? ` O dono já tem UM item em "Precisa de você" para recusar este commit (${loopItem.id}): ${loopItem.title}. Cite ${loopItem.id}; não abra outro item para este laço nem proponha o arquivo halted-production-release.sha (é a trava da checagem pós-deploy: escrito à mão, faz o servidor relatar um halt que não houve) nem desligar o LaunchAgent.`
+    : "";
+  releaseAlertToChief(text, `[Alerta do servidor: release de produção falhando] ${text}\nLogs: ${RELEASE_ERR_LOG} e ${RELEASE_OUT_LOG}. ${retries}${ownerItem} Veja se é carga da máquina (CI concorrente, timeouts) ou falha real, avise quem precisa (SRE/Delivery, o dono) e não dê a entrega como feita ao cliente.`);
+}
+
+/** The owner's "refuse the looping release" items whose commit is no longer
+ * the one failing (`failing`: the commit still looping, or null) are done:
+ * refused, halted, released, or main moved on. */
+function settleReleaseLoopPendings(failing: string | null): void {
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  if (!chief) return;
+  for (const item of autonomy.ownerPendingOf(chief.id)) {
+    const sha = item.key?.startsWith("release-loop:") ? item.key.slice("release-loop:".length) : null;
+    if (!sha || (failing && (failing.startsWith(sha) || sha.startsWith(failing)))) continue;
+    for (const done of autonomy.resolveOwnerPending({ key: item.key! })) refreshBotRow(done.botId);
+    console.log(`[release] the loop on ${sha} is over (refused, halted, released or no longer failing): the owner's item ${item.id} is closed`);
+  }
 }
 
 async function autonomyTick(): Promise<void> {
@@ -9480,7 +9518,8 @@ async function watchIdleSessionsWithOpenPrs(): Promise<void> {
       for (const number of prs.slice(0, 3)) {
         try {
           const view = JSON.parse(await execCc("gh", ["pr", "view", String(number), "--repo", session.delivery!.slug!, "--json", "state,mergeStateStatus"])) as { state?: string; mergeStateStatus?: string };
-          if (view.state === "OPEN") states.push(`PR #${number} aberta${view.mergeStateStatus ? ` (${view.mergeStateStatus})` : ""}`);
+          // GitHub's own code ("UNKNOWN", "BLOCKED") said in pt-BR, never raw on the chip (R9-followup #5)
+          if (view.state === "OPEN") states.push(`PR #${number} aberta${mergeStatePt(view.mergeStateStatus) ? ` (${mergeStatePt(view.mergeStateStatus)})` : ""}`);
         } catch { /* gh unavailable: next pass */ }
       }
       session.idleReportedAt = Date.now();

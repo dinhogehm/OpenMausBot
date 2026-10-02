@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveBlockers, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
+import { archiveBlockers, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, mergeStatePt, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
 
 const SLUG = "dinhogehm/nuria-platform";
 const TAG = "c".repeat(40);
@@ -186,6 +186,17 @@ describe("a repository whose GitHub address cannot be read", () => {
     const { deps } = fakeDeps();
     deps.git = async () => "/local/path/not/github\n";
     expect(await archiveBlockers(session(), deps)).toEqual({ blockers: [], unknown: ["o repositório (não consegui ler o endereço do GitHub)"] });
+  });
+});
+
+describe("GitHub's merge state on a chip", () => {
+  it("is said in pt-BR, and \"UNKNOWN\" is not shown (R9-followup #5)", () => {
+    expect(mergeStatePt("UNKNOWN")).toBe("");
+    expect(mergeStatePt(undefined)).toBe("");
+    expect(mergeStatePt("BLOCKED")).toBe("bloqueada pelas regras do repositório");
+    expect(mergeStatePt("behind")).toBe("atrás da main");
+    expect(mergeStatePt("DIRTY")).toBe("com conflito");
+    expect(mergeStatePt("SOMETHING_NEW")).toBe("");
   });
 });
 

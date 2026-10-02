@@ -62,6 +62,76 @@ export function readTail(path: string, bytes: number): string {
   }
 }
 
+// ── a release that fails the same way on the same commit ─────────────────
+// On 01/10 the watcher retried cb015584a (a carrier with nothing to publish)
+// five times in ~3 h: each try is a whole validation (~41 min), and the next
+// starts right after the last fails — the LaunchAgent calls it every 2 min
+// only while it is not running. The server said "tenta de novo a cada 2 min",
+// and the Chief opened three items with three remedies, one of them the
+// "halted" file (R9-release #1, #7; R9-resilience LOOP).
+
+export interface ReleaseLoopSeen {
+  firstCount: number;
+  firstAt: number;
+  count: number;
+  at: number;
+  /** The distinct causes read when each new count was seen (the out log's
+   * tail only holds the last try's: ~42 k lines each). */
+  causes?: string[];
+}
+
+/** The same commit failed `RELEASE_LOOP_PENDING_AT` times or more, and every
+ * cause seen for it is the same: a loop, not bad luck. */
+export function releaseLoopDue(seen: ReleaseLoopSeen | undefined, count: number): boolean {
+  return count >= RELEASE_LOOP_PENDING_AT && (seen?.causes?.length ?? 0) <= 1;
+}
+
+/** One try of a looping release, from two counts seen: null until then. */
+export function releaseLoopCycleMs(seen: ReleaseLoopSeen | undefined): number | null {
+  if (!seen || seen.count <= seen.firstCount || seen.at <= seen.firstAt) return null;
+  return (seen.at - seen.firstAt) / (seen.count - seen.firstCount);
+}
+
+/** Failures of one commit before the owner gets the one item to refuse it. */
+export const RELEASE_LOOP_PENDING_AT = 3;
+/** The one file the installed watcher reads to stop offering a tip
+ * (watch-production-release.sh: DECLINED_FILE, compared with the full sha
+ * of origin/main). The "halted" file is the post-deploy health check's own
+ * stop: written by hand it makes the server report a halt that never happened. */
+export const DECLINED_SHA_FILE = join(homedir(), ".nuria", "declined-production-release.sha");
+
+/** The cause says there is nothing to publish (a carrier of scripts only):
+ * the try can never succeed, whatever is retried. */
+export function nothingToPublish(cause: string | null): boolean {
+  return Boolean(cause && /sem alvo de runtime|n[ãa]o publica nada|nothing to (?:publish|release)|no runtime target/i.test(cause));
+}
+
+/** The full sha of a failed short one, from the release's own admission
+ * line in the out log ("label=release:production:<40 hex>"). */
+export function fullReleaseSha(outTail: string, short: string): string | null {
+  const found = [...outTail.matchAll(/label=release:production:([0-9a-f]{40})\b/g)].map((match) => match[1]!).findLast((sha) => sha.startsWith(short));
+  return found ?? null;
+}
+
+/** How the watcher retries, said right: never "every 2 min". */
+export function releaseRetryText(input: { halted: boolean; cycleMs: number | null; nothingToPublish: boolean }): string {
+  if (input.halted) return "O watcher PAROU de tentar este commit (halt): ele não sai sozinho.";
+  const cycle = input.cycleMs !== null
+    ? `cada volta leva ~${Math.max(1, Math.round(input.cycleMs / 60_000))} min (medido aqui)`
+    : "cada volta é uma validação completa (dezenas de minutos)";
+  const why = input.nothingToPublish ? " Não há nada para publicar neste commit: nenhuma volta vai dar certo." : "";
+  return `O watcher recomeça este commit logo depois de cada falha, sem limite de tentativas: ${cycle}, e segura o lease de release o tempo todo, o que trava os gates das sessões.${why}`;
+}
+
+/** The owner's one item for a release in a loop: the exact command the
+ * installed watcher respects (OWNER_PENDING_TITLE_MAX = 200). */
+export function releaseLoopPending(input: { short: string; full: string | null; count: number }): { title: string; key: string } {
+  const command = input.full
+    ? `echo ${input.full} > ~/.nuria/declined-production-release.sha`
+    : `git -C ~/Projetos/nuria-platform rev-parse ${input.short} > ~/.nuria/declined-production-release.sha`;
+  return { title: `Recusar o release em laço de ${input.short.slice(0, 9)} (${input.count} falhas iguais): ${command}`, key: `release-loop:${input.short.slice(0, 9)}` };
+}
+
 /** Failures already told, per commit, kept across restarts. */
 export class ReleaseWatchState {
   private readonly path: string;
@@ -71,12 +141,15 @@ export class ReleaseWatchState {
   /** release-priority's decisions (`<label>#<pid>`): many, in a list of their
    * own so they never push a halt or a tag out of `told`. */
   private decided: string[] = [];
+  /** When each failure count of a commit was first seen here: the loop's real cycle. */
+  private seen: Record<string, ReleaseLoopSeen> = {};
 
   constructor(path: string) {
     this.path = path;
     try {
-      const raw = JSON.parse(readFileSync(path, "utf8")) as { alerted?: Record<string, number>; told?: string[]; decided?: string[] };
+      const raw = JSON.parse(readFileSync(path, "utf8")) as { alerted?: Record<string, number>; told?: string[]; decided?: string[]; seen?: Record<string, ReleaseLoopSeen> };
       this.alerted = raw.alerted ?? {};
+      this.seen = raw.seen ?? {};
       // decisions written to `told` by an earlier build move to their own list
       this.told = (raw.told ?? []).filter((key) => !key.startsWith("preempt:"));
       this.decided = [...(raw.decided ?? []), ...(raw.told ?? []).filter((key) => key.startsWith("preempt:")).map((key) => key.slice("preempt:".length))];
@@ -84,7 +157,30 @@ export class ReleaseWatchState {
   }
 
   private save(): void {
-    writeFileAtomic(this.path, `${JSON.stringify({ alerted: this.alerted, told: this.told, decided: this.decided }, null, 2)}\n`, { mode: 0o600 });
+    writeFileAtomic(this.path, `${JSON.stringify({ alerted: this.alerted, told: this.told, decided: this.decided, seen: this.seen }, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  /** Each check: the failure count of `sha` at `now`. Records when a new
+   * count is first seen (the server reads the log every 2 min, so a cycle is
+   * known to within that). */
+  observe(sha: string, count: number, now: number, cause: string | null = null): void {
+    const known = this.seen[sha];
+    if (known && count <= known.count) return;
+    const causes = [...new Set([...(known?.causes ?? []), ...(cause ? [cause] : [])])];
+    const next: ReleaseLoopSeen = known ? { ...known, count, at: now } : { firstCount: count, firstAt: now, count, at: now };
+    if (causes.length) next.causes = causes.slice(-5);
+    this.seen = { ...Object.fromEntries(Object.entries(this.seen).filter(([key]) => key !== sha).slice(-10)), [sha]: next };
+    this.save();
+  }
+
+  /** What was seen of `sha`'s failures here. */
+  seenOf(sha: string): ReleaseLoopSeen | undefined {
+    return this.seen[sha];
+  }
+
+  /** How long one try of `sha` takes, measured here; null until two counts were seen. */
+  cycleMs(sha: string): number | null {
+    return releaseLoopCycleMs(this.seen[sha]);
   }
 
   /** Whether release-priority already decided `key`. */

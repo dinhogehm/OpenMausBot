@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { haltedRelease, haltStillMatters, releaseFailureCause, releaseFailures, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { fullReleaseSha, haltedRelease, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopPending, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 const log = [
   "Release production failed for b51648498 (exit 1)",
@@ -250,5 +250,76 @@ describe("after a release", () => {
     expect(haltStillMatters({ haltedSha, releasedSha: "", releasedContainsHalt: null, releasedAtMs: null, haltedAtMs: null })).toBe(true);
     // there is no main-tip input any more: main moving cannot silence it
     expect(haltStillMatters.length).toBe(1);
+  });
+});
+
+// 01/10 (R9-release #1, #7; R9-resilience LOOP): the carrier cb015584a had
+// nothing to publish; each try was a whole validation (~41 min) and the next
+// began as the last failed. The alert said "a cada 2 min", and the Chief
+// opened three items, one of them proposing the "halted" file.
+describe("a release in a loop", () => {
+  const FULL = "cb015584a35296ec89b2dbaf2c54373e6f93b826";
+  const CAUSE = "Release de producao sem alvo de runtime (só scripts/ mudou desde a tag). Release abortado";
+
+  it("measures the real cycle from the counts it sees, and never says \"a cada 2 min\"", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-release-loop-"));
+    try {
+      const path = join(dir, "release-watch.json");
+      const state = new ReleaseWatchState(path);
+      const at = Date.parse("2026-10-01T21:58:00Z");
+      state.observe("cb015584a", 1, at, CAUSE);
+      expect(state.cycleMs("cb015584a")).toBeNull();
+      state.observe("cb015584a", 1, at + 120_000, CAUSE); // the same count, read again 2 min later
+      state.observe("cb015584a", 2, at + 41 * 60_000, CAUSE);
+      state.observe("cb015584a", 4, at + 123 * 60_000, CAUSE);
+      expect(Math.round(state.cycleMs("cb015584a")! / 60_000)).toBe(41);
+      // kept across a restart
+      expect(Math.round(new ReleaseWatchState(path).cycleMs("cb015584a")! / 60_000)).toBe(41);
+      const text = releaseRetryText({ halted: false, cycleMs: state.cycleMs("cb015584a"), nothingToPublish: nothingToPublish(CAUSE) });
+      expect(text).toBe("O watcher recomeça este commit logo depois de cada falha, sem limite de tentativas: cada volta leva ~41 min (medido aqui), e segura o lease de release o tempo todo, o que trava os gates das sessões. Não há nada para publicar neste commit: nenhuma volta vai dar certo.");
+      expect(text).not.toMatch(/a cada 2 min/);
+      expect(releaseRetryText({ halted: false, cycleMs: null, nothingToPublish: false })).toContain("cada volta é uma validação completa");
+      expect(releaseRetryText({ halted: true, cycleMs: 1, nothingToPublish: true })).toBe("O watcher PAROU de tentar este commit (halt): ele não sai sozinho.");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("asks the owner once, at 3 failures with the same cause, with the declined command and the full sha — never \"halted\"", () => {
+    const seen = (causes: string[]) => ({ firstCount: 1, firstAt: 0, count: 3, at: 1, causes });
+    expect(releaseLoopDue(seen([CAUSE]), 2)).toBe(false);
+    expect(releaseLoopDue(seen([CAUSE]), 3)).toBe(true);
+    // seen for the first time at 5 (a boot): the one cause read counts as the same
+    expect(releaseLoopDue(undefined, 5)).toBe(true);
+    // two different causes: bad luck (load, a timeout), not a loop
+    expect(releaseLoopDue(seen([CAUSE, "ADMISSION_TIMEOUT"]), 4)).toBe(false);
+    const out = `ADMISSION_GRANTED kind=release label=release:production:${FULL} pid=39238 waited=0s\n`;
+    expect(fullReleaseSha(out, "cb015584a")).toBe(FULL);
+    expect(fullReleaseSha(out, "2995ef215")).toBeNull();
+    const item = releaseLoopPending({ short: "cb015584a", full: FULL, count: 4 });
+    expect(item).toEqual({ key: "release-loop:cb015584a", title: `Recusar o release em laço de cb015584a (4 falhas iguais): echo ${FULL} > ~/.nuria/declined-production-release.sha` });
+    expect(item.title.length).toBeLessThanOrEqual(200);
+    expect(item.title).not.toMatch(/halted/);
+    // the full sha not in the tail: a command that writes it, still the declined file
+    expect(releaseLoopPending({ short: "cb015584a", full: null, count: 3 }).title).toContain("git -C ~/Projetos/nuria-platform rev-parse cb015584a > ~/.nuria/declined-production-release.sha");
+    expect(nothingToPublish("Local CI failed at tests")).toBe(false);
+  });
+
+  it("takes over the bot's own item for the same commit: one item, with the server's key and the right remedy", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-release-loop-"));
+    try {
+      const autonomy = new BotAutonomy({ path: join(dir, "bot-autonomy.json"), now: () => 5 });
+      const o7 = autonomy.addOwnerPending("chief", "ade82a65", { title: "Autorizar pausar o watcher de produção no cb015584a (arquivo halted)", link: "https://github.com/o/r/pull/9341" });
+      const loop = releaseLoopPending({ short: "cb015584a", full: FULL, count: 3 });
+      const item = autonomy.addOwnerPending("chief", "dbb9f1cf", loop);
+      expect(item).toMatchObject({ id: o7.id, threadId: "dbb9f1cf", key: loop.key, title: loop.title, link: "https://github.com/o/r/pull/9341" });
+      expect(autonomy.ownerPendingOf("chief")).toHaveLength(1);
+      // the bot asking again is told it exists
+      expect(autonomy.addOwnerPending("chief", "3e55c0fd", { title: "Parar o LaunchAgent? laço no cb015584a" })).toMatchObject({ id: o7.id, duplicate: true });
+      // the server closes it by key once the owner refused the commit
+      expect(autonomy.resolveOwnerPending({ key: loop.key }).map((each) => each.id)).toEqual([o7.id]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
