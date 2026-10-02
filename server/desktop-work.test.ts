@@ -17,6 +17,8 @@ import {
   ccSessionActive,
   desktopBackoffMs,
   desktopBriefText,
+  folderGuard,
+  WRONG_FOLDER_ANSWER,
   issueNumber,
   failDesktopSession,
   followDesktopSessions,
@@ -33,6 +35,7 @@ import {
   type DesktopWorkDeps,
 } from "./desktop-work.ts";
 import { checkArchivedOutside } from "./archived-outside.ts";
+import { sessionErrorPt } from "../shared/session-error-pt.ts";
 
 const LOCAL = "local_0a000004-0000-4000-8000-000000000000";
 const WORKTREE = "/Users/o/Projetos/nuria-platform/.claude/worktrees/helpdesk-f30521";
@@ -962,5 +965,92 @@ describe("a field that already held text", () => {
     await h.tick();
     expect(session.desktop!.pending).toBeUndefined();
     expect(resolved).toEqual(["cc-draft:a"]);
+  });
+});
+
+// R10-dispatch R10-1b, the real 01/10 09:53 sequence (redacted): the newest
+// session (dfd38bd1) sat in a worktree of its own, so the server let the
+// create through, and the new session (b021e901) landed in dfd38bd1's
+// folder. The server only learns the folder once the app's record appears —
+// after the brief went in — so the brief itself makes the session check its
+// folder first and stop untouched; the server keeps it failed for good.
+describe("a new session the app lands in a folder that is not its own", () => {
+  const REUSED = "/Users/o/Projetos/nuria-platform/.claude/worktrees/fix-9298-stage-time-rule-572720";
+
+  it("the brief opens with the folder check, dated by the brief's own time", () => {
+    const at = Date.parse("2026-10-01T12:53:00Z");
+    const text = desktopBriefText("9298 Regra de tempo", "OMBX", "Faça X", "", at);
+    const [title, marker, , step0] = text.split("\n");
+    expect(title).toBe("9298 Regra de tempo");
+    expect(marker).toBe("[OMBX]");
+    expect(step0).toMatch(/^Passo 0, antes de qualquer outra coisa/);
+    expect(text).toContain(`stat -f %B .\`. Se a pasta não estiver dentro de .claude/worktrees/, ou se o número do stat for menor que ${Math.floor(at / 1_000) - 120}`);
+    expect(text).toContain(`responda só "${WRONG_FOLDER_ANSWER}: <a saída do pwd>"`);
+    expect(text.indexOf("Passo 0")).toBeLessThan(text.indexOf("Faça X"));
+    // without a time (the CLI's own worktrees), no check
+    expect(desktopBriefText("9298 Regra de tempo", "OMBX", "Faça X")).not.toContain("Passo 0");
+    expect(folderGuard(at)).not.toMatch(/rm |checkout -|reset/);
+  });
+
+  it("09:53: lands in the folder of the session before it — failed at adoption, stays failed when its turn ends, is never revived nor sent to", async () => {
+    const h = harness();
+    h.deps.rootAnchor = () => ({ localId: "local_0a0000ff-0000-4000-8000-000000000000", title: "ok" });
+    const session = h.appSession("b021", { folderGuarded: true });
+    session.desktop!.issue = "9298";
+    session.desktop!.pending = { kind: "create", text: desktopBriefText("9298 Regra", "OMBB021", "Faça X", "", h.now), since: h.now, attempts: 0 };
+    await h.tick();
+    // the create went from the root session, with the folder check in the brief
+    expect(h.steps.create).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ anchor: { localId: "local_0a0000ff-0000-4000-8000-000000000000", title: "ok" }, text: expect.stringContaining("Passo 0") }));
+    // the app's record: dfd38bd1's folder, its worktree name and all
+    h.deps.folderUsers = (folder) => (folder === REUSED ? ["Automação inatividade não dispara"] : []);
+    h.byMarker.set("OMBB021", { sessionId: LOCAL, cliSessionId: "cli-b021", cwd: REUSED, worktreeName: "fix-9298-stage-time-rule-572720", createdAt: h.now + 5_000 });
+    h.advance(10_000);
+    followDesktopSessions(h.deps);
+    expect(session.status).toBe("failed");
+    expect(session.desktop!.wrongFolder).toBe(REUSED);
+    expect(session.lastError).toContain('"Automação inatividade não dispara" (app)');
+    expect(session.lastError).toContain(`answering "${WRONG_FOLDER_ANSWER}", without touching anything`);
+    expect(session.lastError).toContain("New sessions wait until the owner unblocks the app");
+    expect(sessionErrorPt(session.lastError!)).toBe("a sessão abriu numa worktree de outra sessão; o brief a mandou parar sem mexer em nada — confira no app");
+    const reports = h.reports.length;
+    // its one turn ends with the folder check's answer: still failed, no "terminou o turno"
+    h.records.set(LOCAL, { sessionId: LOCAL, cliSessionId: "cli-b021", cwd: REUSED, completedTurns: 1, latestUserFrameAt: h.now, lastActivityAt: h.now });
+    h.transcripts.set("cli-b021", { text: `brief\n${WRONG_FOLDER_ANSWER}: ${REUSED}`, writtenAt: h.now, ended: true });
+    h.advance(60_000);
+    followDesktopSessions(h.deps);
+    expect(session.status).toBe("failed");
+    expect(session.lastError).toContain("instead of a new worktree");
+    expect(session.lastReport).toBe(`${WRONG_FOLDER_ANSWER}: ${REUSED}`);
+    expect(h.reports).toHaveLength(reports);
+    expect(h.chips.some((chip) => chip.id === "b021" && chip.text.startsWith("terminou o turno"))).toBe(false);
+    // a restart does not bring it back as "a screen step that failed"
+    expect(reviveScreenFailures(h.deps)).toEqual([]);
+    // and a new start for the same issue is not sent to it
+    expect(liveSessionForIssue(h.ledger.all(), "/Users/o/Projetos/nuria-platform", "9298")).toBeNull();
+  });
+
+  it("the folder check's answer alone fails it, when adoption saw nothing wrong", () => {
+    const h = harness();
+    const session = h.opened("c", { worktreeName: "helpdesk-f30521" });
+    h.records.get(LOCAL)!.completedTurns = 1;
+    h.transcripts.set("cli-c", { text: `brief\n${WRONG_FOLDER_ANSWER}: ${WORKTREE}`, writtenAt: h.now, ended: true });
+    followDesktopSessions(h.deps);
+    expect(session.status).toBe("failed");
+    expect(session.desktop!.wrongFolder).toBe(WORKTREE);
+    expect(session.lastError).toContain("stopped at its folder check");
+    expect(sessionErrorPt(session.lastError!)).toContain("parou no passo 0");
+    expect(h.reports.at(-1)!.text).toContain("stopped at its folder check");
+  });
+
+  it("the root, without a worktree (the toggle left off): failed the same way, with the remedy that fits", () => {
+    const h = harness();
+    const session = h.appSession("d", { sentAt: h.now, folderGuarded: true });
+    h.byMarker.set("OMBD", { sessionId: LOCAL, cliSessionId: "cli-d", cwd: "/Users/o/Projetos/nuria-platform" });
+    followDesktopSessions(h.deps);
+    expect(session.status).toBe("failed");
+    expect(session.desktop!.wrongFolder).toBe("/Users/o/Projetos/nuria-platform");
+    expect(session.lastError).toContain("the worktree option off");
+    expect(session.lastError).toContain("New sessions wait until the owner turns the worktree back on");
+    expect(sessionErrorPt(session.lastError!)).toContain("a sessão abriu na raiz, sem worktree");
   });
 });

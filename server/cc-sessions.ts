@@ -219,6 +219,12 @@ export interface CcDesktopState {
   draftSeen?: { text: string; at: number; leftProbe?: boolean };
   /** A finished turn whose app summary was still the previous turn's: wait a little for it. */
   turnWaitSince?: number;
+  /** The app opened it in a folder that is not a new worktree of its own
+   * (another session's, or the root): failed for good — a finished turn,
+   * a restart or a message never bring it back (R10-dispatch R10-1). */
+  wrongFolder?: string;
+  /** Its brief opens with the folder check (desktop-work.ts folderGuard). */
+  folderGuarded?: boolean;
 }
 
 export interface CcDesktopPending {

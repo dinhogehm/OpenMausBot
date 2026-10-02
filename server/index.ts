@@ -341,7 +341,10 @@ import {
   liveWorktreeNames,
   liveRecordFolders,
   lastAppWorktreeFolder,
+  lastServerSessionInRoot,
   reusedFolderRefusal,
+  rootAnchorSession,
+  rootFolderRefusal,
   readDesktopRecord,
   recordBlocked,
   recordsUsingFolder,
@@ -377,7 +380,7 @@ import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
-import { APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
+import { APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appStillBlockedText, appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips, staleUnblockItem } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
 import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, type ReleaseIntent, releaseLabelSha, releaseOverdueText, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
@@ -9386,8 +9389,11 @@ async function getDesktopDriver(): Promise<DesktopDriver> {
   return desktopDriver;
 }
 
-function desktopBrief(session: CcSession, brief: string): string {
-  return desktopBriefText(session.title, session.desktop!.marker, brief, ccTurnFooter(session));
+/** The brief typed into the app: it opens with the folder check, since the
+ * app may land the new session in a folder that is not its own. */
+function desktopBrief(session: CcSession, brief: string, since = Date.now()): string {
+  session.desktop!.folderGuarded = true;
+  return desktopBriefText(session.title, session.desktop!.marker, brief, ccTurnFooter(session), since);
 }
 
 const DUAL_DECISIONS_LOG = join(homedir(), ".laya", "hooks", "dual-decisions.log");
@@ -9421,6 +9427,7 @@ const desktopWork: DesktopWorkDeps = {
   hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
   liveWorktrees: () => liveWorktreeNames(undefined, true),
   baseBranch: (session) => repoBaseBranch(session.repo),
+  rootAnchor: (session) => rootAnchorSession(session.repo),
   folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
   log: (line) => console.log(`[claude-desktop] ${line}`),
   onArchived: (session) => {
@@ -10057,11 +10064,12 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     if (lastRepo && lastRepo !== input.repo) {
       return { status: 409, body: { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` }, retry: fromQueue };
     }
-    const lastWorktree = lastAppWorktreeFolder();
-    if (lastWorktree) {
+    const block = appFolderBlock();
+    if (block) {
       // only the owner can unblock it: one item for them, however many starts hit this (R9-dispatch R9-2)
-      const asked = askOwnerToUnblockApp(bot, threadId, input.repo);
-      return { status: 409, body: { error: `${reusedFolderRefusal(lastWorktree, basename(input.repo), fromQueue)}${asked ? ` O pedido ao dono já está em "Precisa de você" (${asked}): não abra outro item para isso.` : ""}` }, retry: fromQueue };
+      const asked = askOwnerToUnblockApp(bot, threadId, input.repo, block.kind);
+      const refusal = block.kind === "reused" ? reusedFolderRefusal(block.last, basename(input.repo), fromQueue) : rootFolderRefusal(block.last, basename(input.repo), fromQueue);
+      return { status: 409, body: { error: `${refusal}${asked ? ` O pedido ao dono já está em "Precisa de você" (${asked}): não abra outro item para isso.` : ""}` }, retry: fromQueue };
     }
     const appId = randomUUID();
     const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
@@ -10095,7 +10103,7 @@ function appAvailability(repo: string): { state: AppAvailability; reason: string
   if (process.platform !== "darwin") return { state: "unavailable", reason: null };
   const lastRepo = lastAppRepo();
   if (!lastRepo || lastRepo !== repo) return { state: "unavailable", reason: null };
-  if (lastAppWorktreeFolder()) return { state: "blocked", reason: null };
+  if (appFolderBlock()) return { state: "blocked", reason: null };
   // the Mac locked, or a create stuck in the queue: the app opens nothing now (INSP-H r2 #2)
   const stalled = appStalledReason(ccLedger.all(), repo, screenWatch.lockedSince, Date.now());
   return stalled ? { state: "unavailable", reason: stalled } : { state: "available", reason: null };
@@ -10136,7 +10144,7 @@ const ownerDeclines = (() => {
 /** The app reuses worktrees, so the server will not create there: ONE item
  * in "Precisa de você" asks the owner to unblock it — the action that is
  * theirs alone. Its id, or null when no conversation of the bot can hold it. */
-function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string): string | null {
+function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string, kind: AppFolderBlock["kind"] = "reused"): string | null {
   const thread = ownerChannelOf(bot.id) ?? threadId;
   if (!store.taskByThread(bot.id, thread)) return null;
   const name = basename(repo);
@@ -10146,23 +10154,50 @@ function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string): s
     console.log(`[claude-desktop] the owner chose to keep ${name}'s sessions in the terminal until ${new Date(declinedUntil).toISOString()}: not asked again`);
     return null;
   }
-  const item = autonomy.addOwnerPending(bot.id, thread, { ...appUnblockPending(name), key: `${APP_UNBLOCK_KEY}${name}` });
+  const item = autonomy.addOwnerPending(bot.id, thread, { ...appUnblockPending(name, kind), key: `${APP_UNBLOCK_KEY}${name}` });
   refreshBotRow(bot.id);
   return item.id;
 }
 
+/** Why a New Session in the app would land in a wrong folder now: the
+ * newest session in a worktree others had used ("reused"), or the server's
+ * own last session in the root, without a worktree ("root"); null when the
+ * app may be used. */
+type AppFolderBlock = { kind: "reused"; last: NonNullable<ReturnType<typeof lastAppWorktreeFolder>> } | { kind: "root"; last: NonNullable<ReturnType<typeof lastServerSessionInRoot>> };
+function appFolderBlock(): AppFolderBlock | null {
+  const reused = lastAppWorktreeFolder();
+  if (reused) return { kind: "reused", last: reused };
+  const ours = new Set(ccLedger.all().flatMap((session) => session.desktop?.localId ? [session.desktop.localId] : []));
+  const root = lastServerSessionInRoot(ours);
+  return root ? { kind: "root", last: root } : null;
+}
+
 /** The "destravar o app" items close by themselves once the app no longer
- * opens new sessions in a reused worktree. */
+ * opens new sessions in a wrong folder. While it still does, an item that
+ * asks an older or other gesture (the legacy o8 had only a title, R10-2; or
+ * it asked "worktree off" and the server's session then landed in the
+ * root) is rewritten to the gesture that fits now, in place. */
 const appUnblockWatch = { lastAt: 0 };
 function settleAppUnblock(): void {
   if (process.platform !== "darwin" || Date.now() - appUnblockWatch.lastAt < 2 * 60_000) return;
   appUnblockWatch.lastAt = Date.now();
   const open = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)).filter((item) => item.key?.startsWith(APP_UNBLOCK_KEY));
-  if (!open.length || lastAppWorktreeFolder()) return;
+  if (!open.length) return;
+  const block = appFolderBlock();
+  if (block) {
+    for (const item of open) {
+      const want = staleUnblockItem(item, item.key!.slice(APP_UNBLOCK_KEY.length), block.kind);
+      if (!want) continue;
+      autonomy.addOwnerPending(item.botId, item.threadId, { ...want, key: item.key! });
+      refreshBotRow(item.botId);
+      console.log(`[claude-desktop] the owner's "destravar o app" item ${item.id} now asks the gesture for "${block.kind}"`);
+    }
+    return;
+  }
   for (const key of new Set(open.map((item) => item.key!))) {
     for (const done of autonomy.resolveOwnerPending({ key })) refreshBotRow(done.botId);
   }
-  console.log("[claude-desktop] the app no longer reuses a worktree for new sessions: the owner's \"destravar o app\" item is closed");
+  console.log("[claude-desktop] the app no longer opens new sessions in a wrong folder: the owner's \"destravar o app\" item is closed");
 }
 
 /** Open queued starts while there are free slots; the bot hears how each
@@ -19448,6 +19483,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             if (session.status === "failed" && !desktop?.localId) {
               return json(res, 409, { error: `essa sessão falhou (${(session.lastError ?? "erro desconhecido").slice(0, 300)}); veja no app Claude e depois comece outra com cc_session_start` });
             }
+            // one the app opened in a folder that is not its own never takes work (R10-dispatch R10-1b)
+            if (desktop?.wrongFolder) {
+              return json(res, 409, { error: `essa sessão abriu numa pasta que não é dela (${desktop.wrongFolder}) e parou sem mexer em nada; ela não recebe mensagens. Arquive-a com cc_session_archive e comece outra com cc_session_start quando o app destravar.` });
+            }
             if (session.status === "failed") {
               session.status = "idle";
               delete session.lastError;
@@ -22887,6 +22926,22 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const option = Number.isInteger(body.option) ? item.options?.[body.option as number] : undefined;
         if (!option) return json(res, 409, { error: "Esta decisão não existe mais: o bot reescreveu as opções. Confira e escolha de novo.", code: "options_changed" });
         if (typeof body.label !== "string" || body.label !== option.label) return json(res, 409, { error: `O bot reescreveu as opções deste item: "${String(body.label ?? "")}" não é mais a opção ${Number(body.option) + 1}. Confira e escolha de novo.`, code: "options_changed" });
+        // "Feito, conferir" is checked against the app's records before it
+        // is taken: still blocked, the item stays and the person reads why
+        // (R10-dispatch R10-2)
+        if (item.key?.startsWith(APP_UNBLOCK_KEY) && option.label === APP_UNBLOCK_CHECK_LABEL && process.platform === "darwin") {
+          const block = appFolderBlock();
+          if (block) {
+            const name = item.key.slice(APP_UNBLOCK_KEY.length);
+            // the item asks, from now on, the gesture that fits what the records show
+            const want = staleUnblockItem(item, name, block.kind);
+            if (want) {
+              autonomy.addOwnerPending(bot.id, item.threadId, { ...want, key: item.key });
+              refreshBotRow(bot.id);
+            }
+            return json(res, 409, { error: appStillBlockedText(block, name), code: "app_still_blocked" });
+          }
+        }
         // "seguir no terminal" is kept: the server does not recreate the item for 24 h (INSP-J r1 #8) — and it closes it
         const declined = Boolean(item.key?.startsWith(APP_UNBLOCK_KEY) && option.label === APP_UNBLOCK_DECLINE_LABEL);
         if (declined) ownerDeclines.set(item.key!, Date.now() + APP_UNBLOCK_DECLINE_MS);

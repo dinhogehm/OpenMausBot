@@ -88,6 +88,8 @@ export interface DesktopWorkDeps {
   liveWorktrees?: () => string[];
   /** The repository's base branch ("main"): a new session must open on it. */
   baseBranch?: (session: CcSession) => string;
+  /** A session of the app in the repository root to open before New Session (claude-desktop.ts rootAnchorSession). */
+  rootAnchor?: (session: CcSession) => { localId: string; title?: string } | null;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
   hookDecision?: (sessionId: string) => string | null;
   /** The command the review hook last denied or asked about for a session id. */
@@ -124,14 +126,39 @@ export function issueNumber(title: string, brief = ""): string | undefined {
  * the session from its opening words, and the number is what people look
  * for in the sidebar. The marker that finds the session again goes on its
  * own line below. */
-export function desktopBriefText(title: string, marker: string, brief: string, footer = ""): string {
+export function desktopBriefText(title: string, marker: string, brief: string, footer = "", folderSince?: number): string {
   const number = issueNumber(title, brief);
   const named = issueTitle(title);
   // One "NNNN" at the start, never twice ("9311 9311 Chat…"); a title that
   // already names its issue further in ("Chat #9311 …") is left as it is.
   const first = !number || titleOpensWithIssue(named, number) || new RegExp(`#${number}(?!\\d)`).test(named) ? named : `${number} ${named}`;
-  return `${first}\n[${marker}]\n\n${brief}${footer}`;
+  return `${first}\n[${marker}]\n\n${folderSince !== undefined ? `${folderGuard(folderSince)}\n\n` : ""}${brief}${footer}`;
 }
+
+/** What a session that landed in a wrong folder answers, and nothing else. */
+export const WRONG_FOLDER_ANSWER = "PASTA REAPROVEITADA";
+/** Slack under the brief's time for the folder's birth (same Mac, same clock). */
+const FOLDER_GUARD_SLACK_S = 120;
+
+/** The brief's first step: the app may land a new session in a worktree
+ * another session used (01/10 09:53, 02/10 10:07) or in the root, and the
+ * server only learns it when the app's record appears — after the brief
+ * went in. So the session checks its own folder before it touches
+ * anything: a worktree the app made for it is born after the brief was
+ * written; a reused one, or the root, is older. It then answers only
+ * WRONG_FOLDER_ANSWER and stops; the server fails it (adoptRecord, or the
+ * answer itself) and blocks the next creates (R10-dispatch R10-1b). */
+export function folderGuard(since: number): string {
+  const limit = Math.floor(since / 1_000) - FOLDER_GUARD_SLACK_S;
+  return [
+    "Passo 0, antes de qualquer outra coisa (não leia, edite, faça checkout nem rode mais nada antes dele): confira que esta sessão abriu numa worktree nova, só sua.",
+    `Rode \`pwd\` e \`stat -f %B .\`. Se a pasta não estiver dentro de .claude/worktrees/, ou se o número do stat for menor que ${limit} (a pasta já existia antes deste pedido: o app reaproveitou a worktree de outra sessão), pare aí: responda só "${WRONG_FOLDER_ANSWER}: <a saída do pwd>" e encerre o turno. O gerente cuida do resto.`,
+    "Se a pasta estiver em .claude/worktrees/ e o número for maior ou igual, siga com a tarefa abaixo.",
+  ].join("\n");
+}
+
+/** The session's own answer says it stopped at the folder check. */
+export const saidWrongFolder = (text: string) => text.trimStart().toUpperCase().startsWith(WRONG_FOLDER_ANSWER);
 
 /** Wait before retrying a screen action that touched the screen and stopped. */
 export function desktopBackoffMs(attempts: number): number {
@@ -276,13 +303,19 @@ function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopR
   if (record.permissionMode) desktop.permissionMode = record.permissionMode;
   session.progressAt = deps.now();
   deps.ledger.save();
+  // the brief's first step (folderGuard) has it stop untouched in either
+  // case; the session stays failed for good (wrongFolder), and the next
+  // creates meet the 409 (lastAppWorktreeFolder / lastServerSessionInRoot)
+  const guarded = desktop.folderGuarded ? ` — its brief told it to check its folder first and stop, answering "${WRONG_FOLDER_ANSWER}", without touching anything; confirm in the Claude app that it did.` : " — stop it in the Claude app now if it is still working.";
   if (!recordInWorktree(record)) {
-    failDesktopSession(deps, session, `the session opened outside a git worktree (in ${record.cwd ?? "an unknown folder"}), so it works on the main checkout — check it in the Claude app now and stop it there if needed`);
+    desktop.wrongFolder = record.cwd ?? "?";
+    failDesktopSession(deps, session, `the session opened outside a git worktree (in ${record.cwd ?? "an unknown folder"}), on the main checkout: the app opened it with the worktree option off${guarded} New sessions wait until the owner turns the worktree back on (the 409 says how); start the work again then`);
     return false;
   }
   const reused = reusedWorktree(deps, session, record);
   if (reused) {
-    failDesktopSession(deps, session, `the session opened in ${reused} instead of a new worktree of its own (${record.cwd}), so it would edit the same folder — stop it in the Claude app now and start the work again`);
+    desktop.wrongFolder = record.worktreePath ?? record.cwd ?? "?";
+    failDesktopSession(deps, session, `the session opened in ${reused} instead of a new worktree of its own (${record.cwd}), a folder another session had${guarded} New sessions wait until the owner unblocks the app (the 409 says how); start the work again then`);
     return false;
   }
   deps.chip(session, "aberta no app Claude");
@@ -487,6 +520,18 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       session.turns = turns;
       if (record.cwd) session.cwd = record.cwd;
       const said = transcript ? deps.lastText(transcript) : "";
+      // In a wrong folder it stays failed: a finished turn does not make it
+      // a session to work with (before, it went back to idle here and the
+      // bot read "terminou o turno 1"). Its own folder-check answer fails
+      // it too, if adoption did not catch the folder (R10-dispatch R10-1b).
+      if (desktop.wrongFolder || saidWrongFolder(said)) {
+        session.lastReport = said || session.lastReport || "(no text in its last reply)";
+        if (!desktop.wrongFolder) {
+          desktop.wrongFolder = record.worktreePath ?? record.cwd ?? "?";
+          failDesktopSession(deps, session, `the session stopped at its folder check: it opened in ${desktop.wrongFolder}, a folder that existed before its brief (a reused worktree or the root), and touched nothing. New sessions wait until the owner unblocks the app (the 409 says how); start the work again then`);
+        } else deps.ledger.save();
+        continue;
+      }
       session.lastReport = [said, record.prUrl ? `PR: ${record.prUrl}` : ""].filter(Boolean).join("\n\n") || "(no text in its last reply)";
       const blocked = recordBlocked(record);
       if (blocked) session.blockedOn = blocked;
@@ -595,7 +640,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     if (pending.kind === "create") {
       pending.triedAt = deps.now();
       deps.ledger.save();
-      step = await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main" });
+      step = await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null });
     } else {
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;
@@ -609,7 +654,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     }
     const at = deps.now();
     // a create is "sent" here (the brief left the field); "adopted" comes when the app's record shows up
-    const over = step.ok && step.suggestion ? ` (over app suggestion: "${step.suggestion.slice(0, 80)}")` : "";
+    const over = step.ok && step.suggestion ? ` (over app suggestion: "${step.suggestion.slice(0, 80)}")` : step.ok && step.note ? ` (${step.note})` : "";
     deps.log?.(`${pending.kind} ${step.ok ? (pending.kind === "create" ? "sent (brief left the field)" : "ok") : step.retry ? "stopped" : "gave up"}: session ${next.id}${over}${step.ok ? "" : ` — ${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}${step.touched ? " (touched the screen)" : ""}`}`);
     if (step.ok) {
       if (pending.kind === "send" || pending.kind === "rename") clearDraft(deps, next);
@@ -807,7 +852,8 @@ export function reviveScreenFailures(deps: Pick<DesktopWorkDeps, "ledger" | "rea
     const desktop = session.desktop;
     if (session.surface !== "app" || session.status !== "failed" || !desktop?.localId) continue;
     const reason = session.lastError ?? "";
-    if (!SCREEN_FAILURE.test(reason) || /outside a git worktree/i.test(reason)) continue;
+    // a session in a wrong folder is not a screen step that failed: it stays failed
+    if (!SCREEN_FAILURE.test(reason) || desktop.wrongFolder || /outside a git worktree|instead of a new worktree|stopped at its folder check/i.test(reason)) continue;
     const record = deps.readRecord(desktop.localId);
     if (!record || record.isArchived) continue;
     session.status = "idle";
@@ -829,6 +875,8 @@ export function liveSessionForIssue(sessions: readonly CcSession[], repo: string
     && session.status !== "archived" && session.status !== "stopped"
     // a create that never opened is not a session to send to
     && !(session.status === "failed" && session.surface === "app" && !session.desktop?.localId)
+    // nor one that landed in a wrong folder: it never takes work (R10-dispatch R10-1b)
+    && !session.desktop?.wrongFolder
     && (session.desktop?.issue ?? issueNumber(session.title)) === issue) ?? null;
 }
 

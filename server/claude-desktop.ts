@@ -60,7 +60,7 @@ export interface DesktopDriver {
 /** `miss`: the screen did not show what was expected (folder, worktree,
  * session) although it was unlocked and Claude was in front. `touched`: the
  * step acted on the screen before stopping, so a retry should back off. */
-export type DesktopStep = { ok: true; suggestion?: string } | DesktopStop;
+export type DesktopStep = { ok: true; suggestion?: string; note?: string } | DesktopStop;
 /** `draft`: text nobody sent sits in the field (never typed over);
  * `leftProbe`: the probe "." stayed at its end (the person came back first). */
 export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean };
@@ -290,14 +290,14 @@ function newSessionScreen(lines: OcrLine[], repoName: string): boolean {
  * The app opens a new session in the last folder used; if that is not the
  * repository (or the worktree option is not there), stop and retry later.
  */
-export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string }): Promise<DesktopStep> {
+export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string; anchor?: { localId: string; title?: string } | null }): Promise<DesktopStep> {
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.activateClaude());
     await driver.sleep(700);
     let stop = await guard(screen, "open");
     if (stop) return stop;
     const size = await driver.screenSize();
-    const before = mainArea(await driver.ocr());
+    let before = mainArea(await driver.ocr());
     // An earlier try already opened the new session and stopped there: go
     // on in it (New Session again would leave the same screen, read as a miss).
     const open = emptyNewSession(before, size, input.repoName);
@@ -315,6 +315,22 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       await act(screen, () => driver.click(open.x + 20, open.y + open.h / 2));
       await driver.sleep(300);
       return typeBrief(screen, input.text, size, input.repoName);
+    }
+    // New Session from a session in the repository root, never from a
+    // worktree session that happens to be on screen (R9-dispatch R9-1b: the
+    // reuse may be New Session inheriting the open session's worktree).
+    // Not seeing it is said in the log, and the create goes on as before:
+    // the brief's folder check and adoption still stop a wrong folder.
+    let note: string | undefined;
+    if (input.anchor && /^local_[0-9a-f-]{36}$/.test(input.anchor.localId)) {
+      await act(screen, () => driver.openUrl(`claude://code/continue?session=${input.anchor!.localId}`));
+      await driver.sleep(3_000);
+      stop = await guard(screen, "root session");
+      if (stop) return stop;
+      before = mainArea(await driver.ocr());
+      const title = input.anchor.title;
+      const shown = !title || before.some((line) => sidebarMatch(line.text, title)) || headerNames(before.filter((line) => line.y < 140), title);
+      note = shown ? `New Session from the root session ${input.anchor.localId}` : `the root session ${input.anchor.localId}${title ? ` ("${title.slice(0, 60)}")` : ""} did not show; New Session from whatever was on screen`;
     }
     await act(screen, () => driver.menuNewSession());
     await driver.sleep(2_500);
@@ -335,7 +351,8 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     if (!findLine(bottom, /worktree/i)) return { ok: false, reason: "the new session shows no worktree option", retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     const refusal = reused(lines);
     if (refusal) return refusal;
-    return typeBrief(screen, input.text, size, input.repoName);
+    const sent = await typeBrief(screen, input.text, size, input.repoName);
+    return sent.ok && note ? { ...sent, note } : sent;
   });
 }
 
@@ -345,7 +362,9 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
  * title, which the app takes from the first message), so "open one and
  * close it" leaves the app's last folder where it was. */
 export const ROOT_SESSION_HOWTO = (repoName: string, baseBranch: string) =>
-  `In the Claude app, start one new session in ${repoName} itself (folder ${repoName}, branch ${baseBranch}, worktree on) and send it a short message — the app records a session only once something is sent; it may be archived afterwards. Then this create runs`;
+  // the same gesture as the 409 and the owner's item: root, worktree OFF
+  // ("worktree on" landed in a reused folder on 02/10 10:07, R10-dispatch R10-1)
+  `In the Claude app, start one new session (File → New Session) in the root of ${repoName} (folder ${repoName}, branch ${baseBranch}, worktree OFF) and send it a short message — the app records a session only once something is sent; keep it, the server starts new sessions from it. Then this create runs`;
 
 /** Paste the brief into the new session's field, type the note, send. */
 async function typeBrief(screen: Screen, text: string, size: { h: number }, repoName: string): Promise<DesktopStep> {
@@ -836,6 +855,10 @@ export interface DesktopRecord {
   permissionMode?: string;
   worktreePath?: string;
   worktreeName?: string;
+  /** The folder picked when the session was started (the repository root
+   * for every record on this Mac, worktree sessions included): where the
+   * session landed (`cwd`) is the app's choice, not this one. */
+  originCwd?: string;
   /** The app's own summary of a turn: status_category "blocked" means it waits
    * on someone. It is written after the turn, and summarizes_uuid names the
    * assistant message it is about. */
@@ -937,15 +960,28 @@ export function lastAppRepo(dir = DESKTOP_SESSIONS_DIR): string | undefined {
 
 /** The app is reusing worktrees: its newest work session opened in a
  * worktree folder that an OLDER session (archived ones included) had used
- * already — the app's last picked folder is that worktree, and New Session
- * would open there again. null when the newest session is in a repository
- * root or in a worktree of its own (no one used the folder before it).
+ * already, and the next New Session with the worktree on may land in an
+ * old folder again. null when the newest session is in a repository root
+ * or in a worktree of its own (no one used the folder before it).
+ *
+ * The cause is NOT "the last picked folder is that worktree": the folder
+ * picked (`originCwd`) is the repository root in every record on this Mac
+ * (390/390 on 01/10, the reused ones included — R9-dispatch R9-1), and on
+ * 02/10 10:07 the owner's own session started from the root with the
+ * worktree on still landed in a folder four sessions had used
+ * (R10-dispatch R10-1). What the records do prove: a newest session in the
+ * ROOT (worktree off) makes this null, so that is the gesture asked of the
+ * owner. A new session can still land in an old folder after that (the
+ * first reuse, 01/10 09:53): the brief's first step stops it before it
+ * touches anything (desktop-work.ts folderGuard), adoption marks it failed,
+ * and this answers non-null again from that record on. `origin` is the
+ * folder that was picked, for the diagnosis.
  *
  * `worktreeName` says nothing here: the app drops it when a session is
  * archived (163 of 179 archived worktree sessions on 01/10 have it null,
  * the ones it created right included), and a reused folder can carry it
  * (local_0a000005 in the folder of local_0a000004). */
-export function lastAppWorktreeFolder(dir = DESKTOP_SESSIONS_DIR): { folder: string; title?: string; earlier: string[] } | null {
+export function lastAppWorktreeFolder(dir = DESKTOP_SESSIONS_DIR): { folder: string; title?: string; earlier: string[]; origin?: string } | null {
   const records: DesktopRecord[] = [];
   for (const file of recordFiles(dir)) {
     const record = readRecord(file);
@@ -956,7 +992,55 @@ export function lastAppWorktreeFolder(dir = DESKTOP_SESSIONS_DIR): { folder: str
   if (!newest || !folder || !/\/\.(?:claude\/)?worktrees\//.test(folder)) return null;
   const earlier = records.filter((record) => record.sessionId !== newest.sessionId && (record.cwd === folder || record.worktreePath === folder) && (record.createdAt ?? 0) < (newest.createdAt ?? 0));
   if (!earlier.length) return null;
-  return { folder, ...(newest.title ? { title: newest.title } : {}), earlier: earlier.map((record) => record.title ?? record.sessionId) };
+  return {
+    folder, ...(newest.title ? { title: newest.title } : {}), earlier: earlier.map((record) => record.title ?? record.sessionId),
+    ...(newest.originCwd && newest.originCwd !== folder ? { origin: newest.originCwd } : {}),
+  };
+}
+
+/** The app's newest work session is one the SERVER opened and it landed in
+ * the repository root, without a worktree: New Session came with the
+ * worktree option off (the owner's unblock gesture may leave it so), and
+ * every create would land there again. The person's own root session is
+ * not this (it is the gesture); only ours, by the local ids the ledger
+ * adopted. null otherwise. */
+export function lastServerSessionInRoot(serverLocalIds: ReadonlySet<string>, dir = DESKTOP_SESSIONS_DIR): { folder: string; title?: string } | null {
+  let newest: DesktopRecord | null = null;
+  for (const file of recordFiles(dir)) {
+    const record = readRecord(file);
+    if (record && !notPickedFolder(record) && (record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
+  }
+  if (!newest || !newest.cwd || recordInWorktree(newest) || !serverLocalIds.has(newest.sessionId)) return null;
+  return { folder: newest.cwd, ...(newest.title ? { title: newest.title } : {}) };
+}
+
+/** What cc_session_start answers (409) while the server's last session
+ * landed in the root (lastServerSessionInRoot). */
+export function rootFolderRefusal(last: { folder: string; title?: string }, repoName: string, fromQueue = false): string {
+  return [
+    `não abri: a última sessão que o servidor abriu no app Claude${last.title ? ` ("${last.title}")` : ""} caiu na raiz (${last.folder}), sem worktree própria — o app está abrindo sessões novas com a worktree desligada, e a próxima cairia lá também, mexendo direto no checkout principal.`,
+    `Peça ao dono para, no app, abrir Arquivo → Nova sessão na pasta ${repoName}, LIGAR a opção worktree e enviar uma mensagem curta: o app só grava a sessão depois do primeiro envio. Quando a sessão dele abrir numa worktree nova, o servidor volta a abrir sessões no app sozinho.`,
+    fromQueue
+      ? `Este pedido veio da fila de sessões e continua nela: o servidor tenta de novo sozinho a cada 5 min e desiste, com aviso, depois de 24 h falhando. Se não der para esperar, use surface "cli" com cli_reason.`
+      : `Então tente de novo. Se não der para esperar, use surface "cli" com cli_reason.`,
+  ].join(" ");
+}
+
+/** A session in the repository root the server can open before New
+ * Session, so the new session does not start from a worktree session that
+ * is on screen (the R9-dispatch hypothesis for the reuse: New Session with
+ * a worktree session open inherits its folder). The newest one not
+ * archived, in the root itself, not a scheduled run or scratch; null when
+ * there is none (the create then goes as before). */
+export function rootAnchorSession(repo: string, dir = DESKTOP_SESSIONS_DIR): { localId: string; title?: string } | null {
+  let newest: DesktopRecord | null = null;
+  for (const file of recordFiles(dir)) {
+    const record = readRecord(file);
+    if (!record || record.isArchived || notPickedFolder(record) || record.cwd !== repo || record.worktreePath) continue;
+    if (!/^local_[0-9a-f-]{36}$/.test(record.sessionId)) continue;
+    if ((record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
+  }
+  return newest ? { localId: newest.sessionId, ...(newest.title ? { title: newest.title } : {}) } : null;
 }
 
 /** Folders the app's sessions not archived work in (their cwd and worktree). */
@@ -974,14 +1058,14 @@ export function liveRecordFolders(dir = DESKTOP_SESSIONS_DIR): string[] {
 /** What cc_session_start answers (409) while the app is reusing worktrees.
  * `fromQueue`: the start waited in the session queue and is dropped here —
  * the bot must start it again once the person fixed the app's folder. */
-export function reusedFolderRefusal(last: { folder: string; title?: string; earlier: string[] }, repoName: string, fromQueue = false): string {
+export function reusedFolderRefusal(last: { folder: string; title?: string; earlier: string[]; origin?: string }, repoName: string, fromQueue = false): string {
   const earlier = [...new Set(last.earlier)].slice(0, 3).map((title) => `"${title}"`).join(", ");
   return [
-    `não abri: a sessão mais recente do app Claude${last.title ? ` ("${last.title}")` : ""} abriu em ${last.folder}, pasta que já era de ${earlier}. O app está reaproveitando worktrees e abriria a sessão nova lá também.`,
+    `não abri: a sessão mais recente do app Claude${last.title ? ` ("${last.title}")` : ""} abriu em ${last.folder}, pasta que já era de ${earlier}${last.origin ? `, embora a pasta escolhida ao abri-la fosse ${last.origin}` : ""}. O app está reaproveitando worktrees e abriria a sessão nova lá também.`,
     // the gesture the records prove: a newest session in the repository ROOT
     // (worktree off) ends the reuse (lastAppWorktreeFolder is null for it);
     // "worktree ligada" fell into a reused worktree again (R10-dispatch R10-1)
-    `Peça ao dono para iniciar no app uma sessão nova (Arquivo → Nova sessão) na raiz de ${repoName} (pasta ${repoName}, com a worktree DESLIGADA) e enviar nela uma mensagem curta: o app só grava a sessão depois do primeiro envio, então abrir e fechar sem enviar não muda nada. Depois ela pode ser arquivada.`,
+    `Peça ao dono para iniciar no app uma sessão nova (Arquivo → Nova sessão) na raiz de ${repoName} (pasta ${repoName}, com a worktree DESLIGADA) e enviar nela uma mensagem curta: o app só grava a sessão depois do primeiro envio, então abrir e fechar sem enviar não muda nada. Ela não precisa ser arquivada: o servidor parte dela para abrir as sessões novas.`,
     fromQueue
       ? `Este pedido veio da fila de sessões e continua nela: o servidor tenta de novo sozinho a cada 5 min e desiste, com aviso, depois de 24 h falhando. Se não der para esperar, use surface "cli" com cli_reason.`
       : `Então tente de novo. Se não der para esperar, use surface "cli" com cli_reason.`,
