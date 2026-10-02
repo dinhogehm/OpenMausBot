@@ -434,6 +434,57 @@ it("lists what waits on the person in \"Precisa de você\" until the bot or the 
   await expect.poll(async () => (await f.chips()).some((chip: string) => chip === "Resolvido pela pessoa: Aprovar o carrier da #9315"), { timeout: 10_000 }).toBe(true);
 }), 60_000);
 
+it("refuses a headless session of a client's issue with a policy for a reason, and takes it with a technical one (R9-dispatch R9-3)", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const repo = join(f.session.info.dataDir, "client-repo");
+  execFileSync("git", ["init", "-q", repo]);
+  const start = (cli_reason: string) => ({ tool: "cc_session_start", arguments: { title: "9058 Chat entra com aviso no Widget", brief: "Issue do cliente (planilha Atendimento, linha 97): investigue e relate. HOLD:100", repo, surface: "cli", cli_reason } });
+  f.save({ turns: [
+    { steps: [start("Esteira 24/7 gerida pelo Chief; sessões em terminal não travam no app.")], reply: "Recusado." },
+    { steps: [start("o app abre na outra pasta (OpenMausBot), não neste repositório")], reply: "Aberta." },
+    ...Array.from({ length: 5 }, () => ({ reply: "ok" })),
+  ] });
+  await f.send("Abra a sessão da 9058.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  expect(toolResult(f.turns()[0], "cc_session_start")).toContain("cli_reason recusado");
+  expect(existsSync(join(f.session.info.dataDir, "cc-sessions.json")) ? JSON.parse(readFileSync(join(f.session.info.dataDir, "cc-sessions.json"), "utf8")).sessions : []).toEqual([]);
+  await f.send("Tente de novo com o motivo real.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  expect(toolResult(f.turns()[1], "cc_session_start")).toContain("iniciada na própria worktree");
+  expect(await f.chips()).toContain('Claude Code "9058 Chat entra com aviso no Widget": sessão CLI, não visível no app Claude — motivo: o app abre na outra pasta (OpenMausBot), não neste repositório');
+}, { OMB_CC_BIN: "/usr/bin/true" }), 60_000);
+
+// The app's own records (under the fixture's HOME) say it reuses a worktree:
+// the newest session opened in a folder an older one had (the 409 of 01/10).
+it.runIf(process.platform === "darwin")("asks the owner ONCE to unblock the app while it reuses a worktree, whatever hits the 409 (R9-dispatch R9-2)", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdirSync } = await import("node:fs");
+  const data = f.session.info.dataDir;
+  const repo = join(data, "platform");
+  execFileSync("git", ["init", "-q", repo]);
+  const records = join(data, "Library", "Application Support", "Claude", "claude-code-sessions", "org", "acct");
+  mkdirSync(records, { recursive: true });
+  const folder = join(repo, ".claude", "worktrees", "reabertura-496989");
+  const record = (id: string, at: string, title: string) => writeFileSync(join(records, `${id}.json`), JSON.stringify({ sessionId: id, cliSessionId: `c-${id}`, createdAt: Date.parse(at), cwd: folder, title, isArchived: true }));
+  record("local_old", "2026-10-01T12:00:00Z", "Reabertura com defeitos");
+  record("local_new", "2026-10-01T16:00:00Z", "Guarda de release");
+  const clientStart = { tool: "cc_session_start", arguments: { title: "9058 Chat entra com aviso no Widget", brief: "Issue do cliente (planilha Atendimento, linha 97): investigue.", repo, surface: "cli" }, expectError: true };
+  f.save({ turns: [
+    { steps: [clientStart, clientStart, { tool: "cc_session_start", arguments: { title: "9300 limpeza", brief: "liste as pastas antigas", repo }, expectError: true }, { tool: "owner_pending", arguments: { action: "list" } }], reply: "Bloqueado." },
+  ] });
+  await f.send("Abra a sessão da 9058.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  const results = f.turns()[0].evidence.filter((entry: any) => entry.step?.tool).map((entry: any) => String(entry.response?.result?.content?.[0]?.text ?? entry.response?.error?.message ?? ""));
+  expect(results).toHaveLength(4);
+  // the client's issue: the app is blocked, so cli needs a technical reason; the owner was asked
+  expect(results[0]).toContain("é uma issue de cliente");
+  // the app path: the 409, pointing at the one item
+  expect(results[2]).toContain("não abri: a sessão mais recente do app Claude");
+  expect(results[2]).toContain('O pedido ao dono já está em "Precisa de você" (o1)');
+  // three starts, one item
+  expect(results[3].trim().split("\n")).toEqual([expect.stringMatching(/^o1: Destravar o app Claude \(pasta reaproveitada\): abra no app uma sessão nova na raiz de platform/)]);
+}), 60_000);
+
 it("keeps one \"Precisa de você\" item for one action, whichever conversation asks again (R9-followup #3)", () => fixture(async f => {
   f.save({ turns: [
     { steps: [{ tool: "owner_pending", arguments: { action: "add", title: "Parar o laço do release no cb015584a: echo <sha> > ~/.nuria/declined-production-release.sha" } }], reply: "Anotado." },

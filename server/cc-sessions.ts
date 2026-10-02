@@ -803,11 +803,53 @@ export function hotfixWithReleaseScripts(text: string): string | null {
   return script ? `Atenção: este texto junta hotfix/P1 com mudança de script de release (${script[0]}). Pelo corredor, o hotfix sai num carrier próprio, antes, e os scripts de release num carrier separado, depois — a menos que o dono tenha ordenado esta ordem explicitamente; nesse caso, diga isso no relatório.` : null;
 }
 
-/** Why a headless session of shipping work is refused without a reason:
- * the person follows merges and releases in the app. null when allowed. */
-export function cliSurfaceRefusal(input: { corridor: string; title: string; brief: string; reason?: string }): string | null {
-  if (!input.corridor || input.reason?.trim() || !shipsWork(`${input.title}\n${input.brief}`)) return null;
-  return "este brief faz merge ou publicação num repositório com gate e carrier, e uma sessão cli fica invisível para a pessoa no app Claude. Use surface \"app\", ou repita com cli_reason dizendo por que precisa ser cli (ex.: o envio no app está falhando).";
+/** A cli_reason shorter than this says nothing. */
+export const CLI_REASON_MIN = 20;
+// What makes a reason technical: something that failed or is blocked in the
+// app, said concretely. "Esteira 24/7 gerida pelo Chief; sessões em terminal
+// não travam no app…" (e47cf077, 01/10, an issue of a client) holds for any
+// brief: it is a policy, and the owner has not decided it (R9-dispatch R9-3).
+const TECHNICAL_REASON = /(?<![\p{L}\p{N}])(?:409|4\d\d|5\d\d)(?![\p{L}\p{N}])|falh(?:ou|aram|ando|a ao|a no|a na|a de)|deu erro|erro (?:de|no|na|ao|do|da)|n[ãa]o (?:abriu|abre|chegou|chega|entregou|entrega|enviou|envia|carregou|carrega|aparece|apareceu|respondeu|responde|renomeou|confirmou)|pasta reaproveitada|worktree (?:alheia|reaproveitada|de outra)|tela (?:bloqueada|travada|desligada)|mac (?:bloqueado|travado|sem tela|dormindo|na bateria)|travou|travad[oa] (?:em|no|na|h[áa])|timeout|crash|indispon[ií]vel|fora do ar|sem (?:acesso|tela)|app (?:fechado|caiu|n[ãa]o (?:est[áa] aberto|abre|instalado))|outra pasta|outro reposit[óo]rio|failed|failing|error|refused|timed out|not delivered|unavailable|reused folder/iu;
+
+/** A reason for a headless session that names what is technically in the
+ * way of the app (a 409, a send that did not arrive, a locked screen) — not a
+ * policy that would fit any brief. */
+export function technicalCliReason(reason: string | undefined): boolean {
+  const text = (reason ?? "").replace(/\s+/g, " ").trim();
+  return text.length >= CLI_REASON_MIN && TECHNICAL_REASON.test(text);
+}
+
+/** A brief about a client's issue (the owner follows those in the app): a
+ * client, the Atendimento spreadsheet, the clients' Chat, a ticket. */
+export function clientIssue(text: string): boolean {
+  return /(?<![\p{L}])(?:clientes?|customers?|client)(?![\p{L}])|planilha (?:de )?atendimento|linha \d+ da planilha|chat\.google\.com|relatad[oa] (?:pel[oa]|por)|reportad[oa] (?:pel[oa]|por)|ticket d[oe] cliente/iu.test(text);
+}
+
+/** Whether the Claude app can take a new session for the repository now:
+ * "available"; "blocked" by the reused-folder 409 (the owner must act);
+ * "unavailable" (not this Mac, no app, or it opens another repository). */
+export type AppAvailability = "available" | "blocked" | "unavailable";
+
+/** Why a headless session is refused, or null when allowed. A client's issue
+ * goes to the app while the app can take it; shipping work in a repository
+ * with gate and carrier, or a client's issue the app cannot take now, needs
+ * a technical cli_reason (CLI_REASON_MIN+ characters, saying what failed). */
+export function cliSurfaceRefusal(input: { corridor: string; title: string; brief: string; reason?: string; app?: AppAvailability }): string | null {
+  const text = `${input.title}\n${input.brief}`;
+  const client = clientIssue(text);
+  const ships = Boolean(input.corridor) && shipsWork(text);
+  if (!client && !ships) return null;
+  if (client && input.app === "available") {
+    return "este brief é de uma issue de cliente, e o app Claude pode abrir a sessão agora: issue de cliente vai no app, onde o dono acompanha. Use surface \"app\" (o padrão).";
+  }
+  const why = client ? "é uma issue de cliente, que o dono acompanha no app Claude" : "faz merge ou publicação num repositório com gate e carrier";
+  if (!input.reason?.trim()) {
+    return `este brief ${why}, e uma sessão cli fica invisível para a pessoa no app Claude. Use surface "app", ou repita com cli_reason dizendo o motivo técnico (ex.: o 409 de pasta reaproveitada, um envio que não chegou na sessão X).`;
+  }
+  if (!technicalCliReason(input.reason)) {
+    return `cli_reason recusado: "${input.reason.trim().slice(0, 120)}" não diz o que falhou no app — vale para qualquer brief. Este brief ${why}: dê um motivo técnico concreto de pelo menos ${CLI_REASON_MIN} caracteres (o 409 de pasta reaproveitada, um envio que não chegou na sessão X, o Mac bloqueado há N min), ou use surface "app".`;
+  }
+  return null;
 }
 
 export const corridorVersionOf = (corridor: string): string => createHash("sha256").update(corridor).digest("hex").slice(0, 12);

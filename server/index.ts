@@ -293,6 +293,8 @@ import {
   parseCcStartInput,
   repoCorridor,
   cliSurfaceRefusal,
+  clientIssue,
+  type AppAvailability,
   hotfixWithReleaseScripts,
   corridorForSend,
   corridorVersionOf,
@@ -9602,7 +9604,11 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   const mixWarning = corridor ? hotfixWithReleaseScripts(`${input.title}\n${input.brief}`) : null;
   const cliReason = typeof body.cliReason === "string" ? body.cliReason.trim().slice(0, 300) : "";
   if (body.surface === "cli") {
-    const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason });
+    // a client's issue goes to the app while it can take one; a reason must be technical (R9-dispatch R9-3)
+    const app = appAvailability(input.repo);
+    // the app blocked by the reused folder, with a client's work waiting: the owner is asked, once, to unblock it
+    if (app === "blocked" && clientIssue(`${input.title}\n${input.brief}`)) askOwnerToUnblockApp(bot, threadId, input.repo);
+    const refusal = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app });
     if (refusal) return { status: 409, body: { error: refusal } };
   }
   // on battery only a carrier ORDER is refused; from the queue it keeps its place until the Mac is plugged in
@@ -9635,7 +9641,9 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     }
     const lastWorktree = lastAppWorktreeFolder();
     if (lastWorktree) {
-      return { status: 409, body: { error: reusedFolderRefusal(lastWorktree, basename(input.repo), fromQueue) }, retry: fromQueue };
+      // only the owner can unblock it: one item for them, however many starts hit this (R9-dispatch R9-2)
+      const asked = askOwnerToUnblockApp(bot, threadId, input.repo);
+      return { status: 409, body: { error: `${reusedFolderRefusal(lastWorktree, basename(input.repo), fromQueue)}${asked ? ` O pedido ao dono já está em "Precisa de você" (${asked}): não abra outro item para isso.` : ""}` }, retry: fromQueue };
     }
     const appId = randomUUID();
     const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
@@ -9660,6 +9668,47 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   noteClaimedPrs(session, input.brief);
   if (cliReason) ccChip(session, `sessão CLI, não visível no app Claude — motivo: ${cliReason}`);
   return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
+}
+
+/** Whether the Claude app can take a new session in `repo` now: not on this
+ * Mac or opening another repository ("unavailable"), held by the
+ * reused-folder 409 ("blocked"), else "available". */
+function appAvailability(repo: string): AppAvailability {
+  if (process.platform !== "darwin") return "unavailable";
+  const lastRepo = lastAppRepo();
+  if (!lastRepo || lastRepo !== repo) return "unavailable";
+  return lastAppWorktreeFolder() ? "blocked" : "available";
+}
+
+const APP_UNBLOCK_KEY = "app-reused-folder:";
+
+/** The app reuses worktrees, so the server will not create there: ONE item
+ * in "Precisa de você" asks the owner to unblock it — the action that is
+ * theirs alone. Its id, or null when no conversation of the bot can hold it. */
+function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string): string | null {
+  const thread = ownerChannelOf(bot.id) ?? threadId;
+  if (!store.taskByThread(bot.id, thread)) return null;
+  const name = basename(repo);
+  const item = autonomy.addOwnerPending(bot.id, thread, {
+    title: `Destravar o app Claude (pasta reaproveitada): abra no app uma sessão nova na raiz de ${name} e envie nela uma mensagem curta — até lá, as sessões vão para o terminal, invisíveis no app`,
+    key: `${APP_UNBLOCK_KEY}${name}`,
+  });
+  refreshBotRow(bot.id);
+  return item.id;
+}
+
+/** The "destravar o app" items close by themselves once the app no longer
+ * opens new sessions in a reused worktree. */
+const appUnblockWatch = { lastAt: 0 };
+function settleAppUnblock(): void {
+  if (process.platform !== "darwin" || Date.now() - appUnblockWatch.lastAt < 2 * 60_000) return;
+  appUnblockWatch.lastAt = Date.now();
+  const open = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)).filter((item) => item.key?.startsWith(APP_UNBLOCK_KEY));
+  if (!open.length || lastAppWorktreeFolder()) return;
+  for (const key of new Set(open.map((item) => item.key!))) {
+    for (const done of autonomy.resolveOwnerPending({ key })) refreshBotRow(done.botId);
+  }
+  console.log("[claude-desktop] the app no longer reuses a worktree for new sessions: the owner's \"destravar o app\" item is closed");
 }
 
 /** Open queued starts while there are free slots; the bot hears how each
@@ -9854,6 +9903,7 @@ async function runDesktopWork(): Promise<void> {
   void cleanReleasedWorktrees().catch((error) => console.error(`[worktrees] cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
   void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
   if (process.platform !== "darwin") return;
+  settleAppUnblock();
   await runDesktopWorkFlow(desktopWork, desktopState);
 }
 
