@@ -98,6 +98,9 @@ describe("Markdown", () => {
     expect(markdown.indexOf("1. Produção: 3 entregas")).toBeLessThan(markdown.indexOf("## Indicadores"));
     expect(markdown).toContain("| Entregas em produção | 3 | s/ fonte | sem base comparável |");
     expect(markdown).toContain("| PRs mergeadas (sem carriers) | 3 | 0 | +3 |");
+    // the usage ledger starts on 28/09, after the previous period began: not a "+3 vs 0"
+    expect(markdown).toContain("| Turnos dos bots | 3 | s/ registro | sem base comparável |");
+    expect(markdown).toContain("| Horas ativas dos bots | 30 min | s/ registro | sem base comparável |");
     expect(markdown).toContain("| 30/09 | 1 | 1 | 1 | 1 | 1 | 0 | 1 |");
     expect(markdown).toContain("| 28/09 | s/ fonte | s/ fonte | 0 | 0 | 0 | s/ fonte | 0 |");
     expect(markdown).toContain("| 01/10/2026 10:00 | `ccccccccc` | em produção | #3 | #102 |");
