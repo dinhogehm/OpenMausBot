@@ -56,9 +56,17 @@ export const botSilent = (item: Pick<NeedsYouItem, "awaitingSince">, now: number
 /** What waits on the person (the count, the sidebar, the badge): not what waits on a bot. */
 export const waitingOnYou = <T extends Pick<NeedsYouItem, "awaitingSince">>(items: readonly T[], now: number): T[] => items.filter((item) => !awaitingBot(item, now));
 
-/** The option the person last chose and that reached the bot, if any (J18). */
+/** When the next answered item goes back to the person (its bot's 2 h run
+ * out), or null: the sidebar re-renders exactly then, not on the next
+ * broadcast (INSP-J2 r2 N3). */
+export function nextAwaitingChange(items: ReadonlyArray<Pick<NeedsYouItem, "awaitingSince">>, now: number): number | null {
+  const due = items.flatMap((item) => (item.awaitingSince === undefined ? [] : [item.awaitingSince + AWAITING_MAX_MS])).filter((at) => at > now);
+  return due.length ? Math.min(...due) : null;
+}
+
+/** The option the person last chose, sent or waiting its turn (J18; r2 N9). */
 export function chosenOption(item: Pick<NeedsYouItem, "history">): string | null {
-  return item.history?.findLast((each) => each.kind === "option" && each.delivered)?.label ?? null;
+  return item.history?.findLast((each) => each.kind === "option" && (each.delivered || each.queued))?.label ?? null;
 }
 
 /** "16:07" today, "02/10 16:07" another day: when an answer was given. */

@@ -112,8 +112,8 @@ import { attentionJumpAction, AttentionThreadRows, crossBotAttentionThreads, Sid
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { SidebarNeedsYou } from "./SidebarNeedsYou";
 import { NeedsYouResolver } from "./NeedsYouResolver";
-import { needsYouItems, needsYouKey } from "@/lib/needs-you";
-import { decisionReply, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
+import { needsYouItems, needsYouKey, nextAwaitingChange } from "@/lib/needs-you";
+import { decisionReply, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
 import { openExternalLink } from "@/lib/app-links";
 import { ShortcutHint } from "./ShortcutHint";
 import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
@@ -1955,6 +1955,15 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
   // disagree with it.
   const attention = crossBotAttentionThreads(state.bots, state.pendingQueued, undefined, state.groups);
   const needsYou = needsYouItems(state.bots);
+  // the clock "Precisa de você" counts with: it ticks exactly when an answered
+  // item's 2 h run out and it goes back to the person (INSP-J2 r2 N3)
+  const [needsYouClock, setNeedsYouClock] = useState(() => Date.now());
+  const nextNeedsYouChange = nextAwaitingChange(needsYou, needsYouClock);
+  useEffect(() => {
+    if (nextNeedsYouChange === null) return;
+    const timer = setTimeout(() => setNeedsYouClock(Date.now()), Math.max(0, nextNeedsYouChange - Date.now()) + 50);
+    return () => clearTimeout(timer);
+  }, [nextNeedsYouChange]);
   // the resolution screen: open on one item (its key) or on the list (null)
   const [resolver, setResolver] = useState<{ open: boolean; key: string | null }>({ open: false, key: null });
   const pendingBotUndo = teamFeedback?.restoreBot;
@@ -2185,6 +2194,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
 
       <SidebarNeedsYou
         items={needsYou}
+        now={needsYouClock}
         density={density}
         onOpen={(item) => setResolver({ open: true, key: item ? needsYouKey(item) : null })}
         onResolve={(item) => {
@@ -2211,6 +2221,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
           // an approval or a question in the conversation: the answer is an ordinary message there, awaited
           : sendToConversation(item, text, dispatch)}
         onResolve={resolveOwnerPending}
+        onRemind={remindOwnerPending}
       />
 
       {attentionPinned && density !== "icons" && (

@@ -42,6 +42,13 @@ export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendin
   return { resolved: Number(receipt?.resolved ?? 0) };
 }
 
+/** "Lembrar <bot>" (INSP-J2 r2 N3): the server reminds the bot, as itself. */
+export async function remindOwnerPending(item: NeedsYouItem): Promise<{ deduped: boolean }> {
+  if (!item.pendingId) return { deduped: false };
+  const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/remind`, { method: "POST" });
+  return { deduped: receipt?.deduped === true };
+}
+
 export async function resolveOwnerPending(item: NeedsYouItem): Promise<void> {
   if (!item.pendingId) return;
   await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/resolve`, { method: "POST" });

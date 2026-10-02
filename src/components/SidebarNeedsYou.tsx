@@ -1,8 +1,8 @@
-import { Check, ChevronRight, CircleAlert, Copy, ExternalLink, ListChecks, ListTodo, ShieldQuestion } from "lucide-react";
+import { Check, ChevronRight, CircleAlert, Clock, Copy, ExternalLink, ListChecks, ListTodo, ShieldQuestion } from "lucide-react";
 import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { botSilent, dueAt, sortNeedsYou, waitingAge, waitingOnYou, type NeedsYouItem } from "@/lib/needs-you";
+import { awaitingBot, botSilent, dueAt, sortNeedsYou, waitingAge, waitingOnYou, type NeedsYouItem } from "@/lib/needs-you";
 import type { SidebarDensity } from "@/lib/sidebar-preferences";
 
 /** Rows shown in the sidebar before "Ver todos": the rest is one click away, on the resolution screen. */
@@ -28,11 +28,28 @@ export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, o
   const clock = now ?? Date.now();
   // what waits on the person only: an item answered and waiting on its bot is out of the count and the list (INSP-J2 #2)
   const items = waitingOnYou(all, clock);
-  if (!items.length || density === "icons") return null;
+  // …and what waits on the bots stays one click away: a quiet line, no alert count (INSP-J2 r2 N2)
+  const awaiting = sortNeedsYou(all.filter((item) => awaitingBot(item, clock)), "due", clock);
+  if ((!items.length && !awaiting.length) || density === "icons") return null;
   const compact = density === "compact";
+  const awaitingRow = awaiting.length ? (
+    <button
+      type="button"
+      data-needs-you-awaiting=""
+      aria-label={t("needsYou.awaitingRowAria", { count: awaiting.length })}
+      onClick={() => onOpen(awaiting[0]!)}
+      className={cn("mx-2 flex w-[calc(100%-1rem)] items-center gap-1.5 rounded-md px-2.5 py-1 text-left text-[11.5px] text-ink-secondary outline-none hover:bg-raised/60 hover:text-ink focus-visible:ring-1 focus-visible:ring-accent/60", compact ? "mb-1.5" : "mb-2")}
+    >
+      <Clock size={compact ? 11 : 12} aria-hidden="true" className="shrink-0" />
+      <span className="min-w-0 flex-1 truncate">{t("needsYou.awaitingRow", { count: awaiting.length })}</span>
+      <ChevronRight size={12} aria-hidden="true" className="shrink-0" />
+    </button>
+  ) : null;
+  if (!items.length) return awaitingRow;
   // the same order as the resolution screen opens in: what falls due first (INSP-I r1 #8)
   const shown = sortNeedsYou(items, "due", clock).slice(0, NEEDS_YOU_SIDEBAR_ROWS);
   return (
+    <>
     <section
       data-testid="sidebar-needs-you"
       aria-label={t("needsYou.aria", { count: items.length })}
@@ -130,5 +147,7 @@ export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, o
         <ChevronRight size={13} aria-hidden="true" className="shrink-0" />
       </button>
     </section>
+    {awaitingRow}
+    </>
   );
 }

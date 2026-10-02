@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import {
-  ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock, Copy, ExternalLink, Inbox,
+  ArrowLeft, BellRing, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock, Copy, ExternalLink, Inbox,
   ListChecks, ListTodo, Loader2, MessageSquare, Send, ShieldQuestion, Sparkles, X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
@@ -39,7 +39,7 @@ export function linkLabel(url: string): string {
   }
 }
 
-export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | `option:${number}`;
+export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | "remind" | `option:${number}`;
 
 export interface NeedsYouResolverViewProps {
   items: NeedsYouItem[];
@@ -73,6 +73,8 @@ export interface NeedsYouResolverViewProps {
   onReply: (item: NeedsYouItem) => void;
   onAskSteps: (item: NeedsYouItem) => void;
   onAskRecommend: (item: NeedsYouItem) => void;
+  /** "Lembrar <bot>": an answered item its bot let go silent (INSP-J2 r2 N3). */
+  onRemind: (item: NeedsYouItem) => void;
   /** Another decision than the one already chosen: asked to confirm first (J18). */
   switching?: { key: string; option: number } | null;
   onAskSwitch: (item: NeedsYouItem, option: number) => void;
@@ -411,10 +413,19 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
         )}
         {silent && (
           // the bot did nothing for 2 h: the item is the person's again (INSP-J2 #2)
-          <p role="status" data-resolver-silent="" className="mt-3 flex items-start gap-2 rounded-lg border border-warning/60 bg-panel px-3 py-2 text-[13px] text-ink">
-            <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-warning" />
-            <span>{t("needsYou.screen.botSilent", { name: item.botName, age: waitingAge(item.awaitingSince!, now) })}</span>
-          </p>
+          <div data-resolver-silent="" className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-warning/60 bg-panel px-3 py-2 text-[13px] text-ink">
+            <p role="status" className="flex min-w-0 flex-1 basis-60 items-start gap-2">
+              <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-warning" />
+              <span>{t("needsYou.screen.botSilent", { name: item.botName, age: waitingAge(item.awaitingSince!, now) })}</span>
+            </p>
+            {/* the obvious next step: remind the bot — as the server, never in the person's words (INSP-J2 r2 N3) */}
+            {pending && (
+              <button type="button" data-resolver-remind="" disabled={working} onClick={() => props.onRemind(item)} className={cn(strongButton, "py-1.5 text-[12.5px]")}>
+                {busy === "remind" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <BellRing size={14} aria-hidden="true" />}
+                {t("needsYou.screen.remind", { name: item.botName })}
+              </button>
+            )}
+          </div>
         )}
         {/* what was answered comes first: it is what the person looks for when they come back (INSP-J2 #8) */}
         {item.history?.length ? <History item={item} now={now} /> : null}
@@ -514,8 +525,9 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           </div>
         )}
         {decisionsOpen ? (
-          // compact: at most ~40% of the window, scrolling inside (INSP-J2 #8)
-          <div className={cn("mb-3 max-h-[40vh] overflow-y-auto", layout.roomy)}>
+          // compact: at most ~40% of the window, scrolling inside (INSP-J2 #8); the
+          // padding keeps the rings (chosen, focus: 2 px + 2 px offset) inside the clip (r2 N1)
+          <div className={cn("-mx-1 -mt-1 mb-2 max-h-[40vh] overflow-y-auto p-1", layout.roomy)}>
             <Decisions {...props} placement="footer" />
           </div>
         ) : null}
@@ -562,6 +574,14 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   );
 }
 
+/** What the screen says after a decision (INSP-J2 r2 N4): a server item the
+ * choice closed is resolved — never "aguardando" a bot that waits on nothing. */
+export function decisionNotice(item: Pick<NeedsYouItem, "options" | "botName" | "title">, option: number, result: unknown): string {
+  const values = { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title };
+  const resolved = Number((result as { resolved?: unknown } | undefined)?.resolved ?? 0) > 0;
+  return t(resolved ? "needsYou.screen.decided" : "needsYou.screen.decidedWaiting", values);
+}
+
 /** What Escape undoes, innermost first (INSP-J2 #10): a switch being
  * confirmed, then a "Mudar resposta" left open, then (narrow window) the item
  * back to the list — and only then the screen closes. */
@@ -571,13 +591,17 @@ export function resolverEscape(state: { switching: boolean; changingAnswer: bool
   return state.narrowDetail ? "list" : "close";
 }
 
-/** The "aguardando" line, with what the person actually did last (INSP-J2 #9). */
-function awaitingLine(item: NeedsYouItem, now: number): string {
-  const last = item.history?.findLast((each) => each.delivered);
+/** The "aguardando" line, with what the person actually did last (INSP-J2 #9)
+ * — what was asked, when it was a request (r2 N8) — and, when it still waits
+ * its turn, that it is queued (r2 N9). */
+export function awaitingLine(item: Pick<NeedsYouItem, "history" | "awaitingSince" | "botName">, now: number): string {
+  const last = item.history?.findLast((each) => each.delivered || each.queued);
   const time = answerTime(last?.at ?? item.awaitingSince!, now);
-  if (last?.kind === "option") return t("needsYou.screen.awaitingChose", { label: last.label ?? "", time, name: item.botName });
-  if (last?.kind === "ask") return t("needsYou.screen.awaitingAsked", { name: item.botName, time });
-  return t("needsYou.screen.awaitingAnswered", { name: item.botName, time });
+  const name = item.botName;
+  const line = last?.kind === "option" ? t("needsYou.screen.awaitingChose", { label: last.label ?? "", time, name })
+    : last?.kind === "ask" ? t(last.label === "recommend" ? "needsYou.screen.awaitingAskedRecommend" : last.label === "remind" ? "needsYou.screen.awaitingReminded" : "needsYou.screen.awaitingAskedSteps", { name, time })
+      : t("needsYou.screen.awaitingAnswered", { name, time });
+  return last?.queued ? `${line} ${t("needsYou.screen.awaitingQueued", { name })}` : line;
 }
 
 /** What the person answered, oldest first, and whether it reached the bot (J18). */
@@ -592,17 +616,26 @@ function History({ item, now }: { item: NeedsYouItem; now: number }) {
             ? t("needsYou.history.option", { label: entry.label ?? "", time })
             : entry.kind === "text"
               ? t("needsYou.history.text", { text: entry.text.length > 140 ? `${entry.text.slice(0, 139)}…` : entry.text, time })
-              : t(entry.label === "recommend" ? "needsYou.history.askRecommend" : "needsYou.history.askSteps", { time });
+              : t(entry.label === "recommend" ? "needsYou.history.askRecommend" : entry.label === "remind" ? "needsYou.history.remind" : "needsYou.history.askSteps", { time });
+          // sent: a check, said to a screen reader and on hover — not repeated in every line (r2 N8);
+          // waiting its turn: "na fila" (r2 N9); not sent: said in full
+          const sent = t("needsYou.history.delivered", { name: item.botName });
           return (
-            <li key={`${entry.at}-${n}`} className="flex items-start gap-2 text-[13px] leading-relaxed text-ink">
+            <li key={`${entry.at}-${n}`} data-history-state={entry.delivered ? "delivered" : entry.queued ? "queued" : "failed"} title={entry.delivered ? sent : undefined} className="flex items-start gap-2 text-[13px] leading-relaxed text-ink">
               {entry.delivered
                 ? <Check size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-success" />
-                : <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />}
+                : entry.queued
+                  ? <Clock size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-ink-secondary" />
+                  : <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />}
               <span className="min-w-0 break-words">
                 {what}
-                <span className={entry.delivered ? "text-ink-secondary" : "font-medium text-danger"}>
-                  {" — "}{entry.delivered ? t("needsYou.history.delivered", { name: item.botName }) : t("needsYou.history.notDelivered", { error: entry.error ?? "" })}
-                </span>
+                {entry.delivered
+                  ? <span className="sr-only">{` — ${sent}`}</span>
+                  : (
+                    <span className={entry.queued ? "text-ink-secondary" : "font-medium text-danger"}>
+                      {" — "}{entry.queued ? t("needsYou.history.queued", { name: item.botName }) : t("needsYou.history.notDelivered", { error: entry.error ?? "" })}
+                    </span>
+                  )}
               </span>
             </li>
           );
@@ -650,10 +683,11 @@ function Decisions(props: NeedsYouResolverViewProps & { item: NeedsYouItem; plac
       {switching && chosen && (
         <div role="alertdialog" aria-labelledby={`needs-you-switch-${placement}`} data-resolver-switch="" className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-warning/50 bg-panel px-3 py-2">
           <p id={`needs-you-switch-${placement}`} className="min-w-0 flex-1 text-[13px] text-ink">{t("needsYou.screen.switchAsk", { from: chosen, to: switching.label })}</p>
-          {/* the question takes the focus (INSP-J2 #10); Esc cancels it, not the whole screen */}
+          {/* the question takes the focus (INSP-J2 #10) on the safe answer: an Enter by mistake
+              keeps the choice; "Trocar" is one Tab away (r2 N5). Esc cancels it, not the whole screen */}
+          <button type="button" data-resolver-switch-yes="" disabled={busy !== null} onClick={() => props.onDecide(item, props.switching!.option)} className={cn(strongButton, "py-1.5")}>{t("needsYou.screen.switchYes")}</button>
           {/* oxlint-disable-next-line jsx-a11y/no-autofocus */}
-          <button type="button" autoFocus data-resolver-switch-yes="" disabled={busy !== null} onClick={() => props.onDecide(item, props.switching!.option)} className={cn(strongButton, "py-1.5")}>{t("needsYou.screen.switchYes")}</button>
-          <button type="button" data-resolver-switch-no="" onClick={props.onCancelSwitch} className={quietButton}>{t("needsYou.screen.switchNo", { from: chosen })}</button>
+          <button type="button" autoFocus data-resolver-switch-no="" onClick={props.onCancelSwitch} className={quietButton}>{t("needsYou.screen.switchNo", { from: chosen })}</button>
         </div>
       )}
       {/* the footer: a compact 2-column grid (INSP-J2 #8); inline: one column, everything whole */}
@@ -700,7 +734,7 @@ function Decisions(props: NeedsYouResolverViewProps & { item: NeedsYouItem; plac
                 {option.recommended && option.why && (
                   <span className={cn("mt-0.5 block text-[12.5px] font-medium leading-snug", look.sends, !inline && "line-clamp-2")}>{option.why}</span>
                 )}
-                <span id={`needs-you-option-${placement}-${n}`} className={cn("mt-0.5 block text-[12px] leading-snug", look.sends, inline ? "break-words" : "line-clamp-1")}>
+                <span id={`needs-you-option-${placement}-${n}`} className={cn("mt-0.5 block text-[12px] leading-snug", look.sends, inline ? "break-words" : "line-clamp-2")}>
                   {option.recommended && option.why ? <span className="sr-only">{option.why}. </span> : null}
                   {t("needsYou.screen.sends", { reply: option.reply })}
                 </span>
@@ -765,7 +799,7 @@ export const STEPS_ASK_AGAIN_AFTER_MS = 15 * 60_000;
 /** The resolution screen: portalled over the app, focus held inside and
  * given back on close, keys handled, every action awaited with its own
  * loading and error state. */
-export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onResolve }: {
+export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onRemind, onResolve }: {
   open: boolean;
   items: NeedsYouItem[];
   initialKey?: string | null;
@@ -779,6 +813,8 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   onAskSteps: (item: NeedsYouItem) => Promise<unknown>;
   /** Asks the bot which decision it recommends (an item with 2+ decisions and none marked). */
   onAskRecommend?: (item: NeedsYouItem) => Promise<unknown>;
+  /** Reminds the bot of an answered item it let go silent; `deduped` when one is already on its way. */
+  onRemind?: (item: NeedsYouItem) => Promise<{ deduped: boolean }>;
   onResolve: (item: NeedsYouItem) => Promise<unknown>;
 }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialKey ?? null);
@@ -855,15 +891,15 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     if (next) select(needsYouKey(next));
   };
 
-  const run = async (kind: Exclude<ResolverBusy, null>, action: () => Promise<unknown>, done: string) => {
+  const run = async (kind: Exclude<ResolverBusy, null>, action: () => Promise<unknown>, done: string | ((result: unknown) => string)) => {
     if (busy) return;
     setBusy(kind);
     setError(null);
     setNotice(null);
     setFallbackIndex(selection.index);
     try {
-      await action();
-      setNotice(done);
+      const result = await action();
+      setNotice(typeof done === "function" ? done(result) : done);
     } catch (cause) {
       setError(cause instanceof Error && cause.message ? cause.message : t("needsYou.screen.failed"));
     } finally {
@@ -970,7 +1006,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
             }, () => setError(t("needsYou.screen.copyFailed")));
           }}
           onOpenLink={onOpenLink}
-          onDecide={(item, option) => { setSwitching(null); setChangingAnswer(null); void run(`option:${option}`, () => onDecide(item, option), t("needsYou.screen.decidedWaiting", { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title })); }}
+          onDecide={(item, option) => { setSwitching(null); setChangingAnswer(null); void run(`option:${option}`, () => onDecide(item, option), (result) => decisionNotice(item, option, result)); }}
           switching={switching}
           changingAnswer={changingAnswer}
           onChangeAnswer={(item) => { const key = needsYouKey(item); setSwitching(null); setChangingAnswer((open) => (open === key ? null : key)); }}
@@ -980,6 +1016,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onAskSteps={(item) => void run("steps", () => onAskSteps(item), t("needsYou.screen.askedSteps", { name: item.botName, title: item.title }))}
           onAskRecommend={(item) => void run("recommend", () => (onAskRecommend ?? (async () => undefined))(item), t("needsYou.screen.askedRecommend", { name: item.botName, title: item.title }))}
           onResolve={(item) => void run("resolve", () => onResolve(item), t("needsYou.screen.resolved", { title: item.title }))}
+          onRemind={(item) => void run("remind", () => (onRemind ?? (async () => ({ deduped: false })))(item), (result) => t((result as { deduped?: boolean } | undefined)?.deduped ? "needsYou.screen.remindDeduped" : "needsYou.screen.reminded", { name: item.botName, title: item.title }))}
           onOpenConversation={onOpenConversation}
           onDismissError={() => setError(null)}
           onDismissNotice={() => setNotice(null)}

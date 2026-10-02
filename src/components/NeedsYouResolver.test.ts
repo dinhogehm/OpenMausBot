@@ -5,7 +5,7 @@ import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
 import { answerTime, dueAt, needsYouItems, needsYouKey, needsYouTitle, sortNeedsYou } from "@/lib/needs-you";
 import { decisionReply } from "@/lib/needs-you-actions";
-import { linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
+import { awaitingLine, decisionNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
 
 // Invented bots and items: no client data.
 const now = new Date(2026, 9, 2, 15, 40).getTime();
@@ -51,7 +51,7 @@ function view(overrides: Partial<NeedsYouResolverViewProps> = {}) {
     onDecide: (item, n) => calls.push(`decide:${item.pendingId}:${n}`), onReply: (item) => calls.push(`reply:${item.pendingId ?? item.threadId}`),
     onAskSteps: (item) => calls.push(`steps:${item.pendingId}`), onAskRecommend: (item) => calls.push(`recommend:${item.pendingId}`), onResolve: (item) => calls.push(`resolve:${item.pendingId}`),
     onAskSwitch: (item, n) => calls.push(`switch:${item.pendingId}:${n}`), onCancelSwitch: () => calls.push("cancelSwitch"),
-    onChangeAnswer: (item) => calls.push(`changeAnswer:${item.pendingId}`),
+    onChangeAnswer: (item) => calls.push(`changeAnswer:${item.pendingId}`), onRemind: (item) => calls.push(`remind:${item.pendingId}`),
     onOpenConversation: (item) => calls.push(`conversation:${item.threadId}`), onDismissError: () => calls.push("dismiss"),
     ...overrides,
   };
@@ -161,8 +161,12 @@ describe("the resolution screen (I1)", () => {
     expect(decisions.map((node) => `${node.props["data-placement"]}:${node.props["data-resolver-option"]}`)).toEqual(["inline:0", "inline:1", "footer:0", "footer:1"]);
     // the two places are complementary: footer on a roomy window, inline otherwise
     const holders = tree.filter((node) => node.type === "div" && typeof node.props.className === "string" && /\[@media\((?:max|min)-height:76[01]px\)\]:hidden/.test(node.props.className as string));
-    // INSP-J2 #8: the footer is compact — at most 40% of the window, scrolling inside, in 2 columns
-    expect(holders.map((node) => node.props.className)).toEqual(["mt-6 sm:[@media(min-height:761px)]:hidden", "mb-3 max-h-[40vh] overflow-y-auto max-sm:hidden [@media(max-height:760px)]:hidden"]);
+    // INSP-J2 #8: the footer is compact — at most 40% of the window, scrolling inside, in 2 columns;
+    // r2 N1: padded by the rings' reach (2 px ring + 2 px offset = p-1), so the clip never cuts them
+    expect(holders.map((node) => node.props.className)).toEqual(["mt-6 sm:[@media(min-height:761px)]:hidden", "-mx-1 -mt-1 mb-2 max-h-[40vh] overflow-y-auto p-1 max-sm:hidden [@media(max-height:760px)]:hidden"]);
+    for (const node of decisions) expect(String(node.props.className)).toMatch(/focus-visible:ring-2 .*focus-visible:ring-offset-2/);
+    // r2 N6: what a footer decision sends shows in up to 2 lines (whole inline)
+    expect(String(tree.find((node) => node.props.id === "needs-you-option-footer-0")!.props.className)).toContain("line-clamp-2");
     const grids = tree.filter((node) => node.type === "div" && typeof node.props.className === "string" && (node.props.className as string).startsWith("grid gap-2 "));
     expect(grids.map((node) => node.props.className)).toEqual(["grid gap-2 grid-cols-1", "grid gap-2 grid-cols-2"]);
     // and what scrolls under it fades instead of being cut mid-line
@@ -377,7 +381,8 @@ describe("keys on the resolution screen", () => {
     // the history, with what reached the bot and what did not — above the why and the steps (INSP-J2 #8)
     expect(html).toContain("Histórico");
     expect(html.indexOf("Histórico")).toBeLessThan(html.indexOf("Por que importa"));
-    expect(html).toMatch(/Você escolheu “Já colei” às \d{2}:\d{2}<span[^>]*> — enviado para Monitor Chat Atendimento/);
+    // sent: a check, the words for a screen reader and on hover only — not repeated in every line (r2 N8)
+    expect(html).toMatch(/title="enviado para Monitor Chat Atendimento"[^>]*>.*Você escolheu “Já colei” às \d{2}:\d{2}<span class="sr-only"> — enviado para Monitor Chat Atendimento/);
     expect(html).toContain("— não enviado: o bot está ocupado");
     // INSP-J2 #2: answered, the decisions fold behind "Mudar resposta"
     expect(tree.find((node) => "data-resolver-option" in node.props)).toBeUndefined();
@@ -403,8 +408,9 @@ describe("keys on the resolution screen", () => {
     expect(open.calls).toEqual(["switch:o12:1"]);
     const confirm = view({ items: answered, selectedKey: key, changingAnswer: key, switching: { key, option: 1 } });
     expect(confirm.html).toContain("Você já escolheu “Já colei”. Trocar para “Cole você”?");
-    // INSP-J2 #10: the question takes the focus
-    expect(confirm.find("data-resolver-switch-yes")!.props.autoFocus).toBe(true);
+    // INSP-J2 #10: the question takes the focus — on the safe answer, "Manter" (r2 N5)
+    expect(confirm.find("data-resolver-switch-no")!.props.autoFocus).toBe(true);
+    expect(confirm.find("data-resolver-switch-yes")!.props.autoFocus).toBeUndefined();
     confirm.press("data-resolver-switch-yes");
     confirm.press("data-resolver-switch-no");
     expect(confirm.calls).toEqual(["decide:o12:1", "cancelSwitch"]);
@@ -442,6 +448,50 @@ describe("keys on the resolution screen", () => {
     expect(resolverEscape({ switching: false, changingAnswer: true, narrowDetail: true })).toBe("foldAnswer");
     expect(resolverEscape({ switching: false, changingAnswer: false, narrowDetail: true })).toBe("list");
     expect(resolverEscape({ switching: false, changingAnswer: false, narrowDetail: false })).toBe("close");
+  });
+
+  // INSP-J2 r2 (the owner's items of 02/10, redacted)
+  it("offers 'Lembrar <bot>' on an item its bot let go silent, and only there (N3)", () => {
+    const options = [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }];
+    const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o22", title: "Aprovar o envio do relatório", since: now - 6 * 3_600_000, options, awaitingSince: now - 3 * 3_600_000, history: [{ at: now - 3 * 3_600_000, kind: "text", text: "Pode enviar.", delivered: true }] },
+      { id: "o20", title: "Liberar a planilha de agosto", since: now - 5 * 3_600_000, awaitingSince: now - 30 * 60_000, history: [{ at: now - 30 * 60_000, kind: "text", text: "Liberei.", delivered: true }] },
+    ] })])]);
+    const key = (id: string) => needsYouKey(list.find((item) => item.pendingId === id)!);
+    const silent = view({ items: list, selectedKey: key("o22") });
+    expect(silent.html).toContain("Lembrar Monitor Chat");
+    silent.press("data-resolver-remind");
+    expect(silent.calls).toEqual(["remind:o22"]);
+    expect(view({ items: list, selectedKey: key("o22"), busy: "remind" }).html).toMatch(/data-resolver-remind=""[^>]*disabled/);
+    expect(view({ items: list, selectedKey: key("o20") }).find("data-resolver-remind")).toBeUndefined();
+  });
+
+  it("says a server item the choice closed is resolved, never 'aguardando' (N4)", () => {
+    const item = { botName: "Chief of Staff", title: "Ligue o Mac na tomada", options: [{ label: "Vou deixar na bateria", reply: "Vou deixar." }] };
+    expect(decisionNotice(item, 0, { resolved: 1 })).toBe("Enviado «Vou deixar na bateria» para Chief of Staff — Ligue o Mac na tomada. Item resolvido.");
+    expect(decisionNotice(item, 0, { resolved: 0 })).toBe("Enviado «Vou deixar na bateria» para Chief of Staff — Ligue o Mac na tomada. Aguardando Chief of Staff.");
+    expect(decisionNotice(item, 0, undefined)).toContain("Aguardando Chief of Staff.");
+  });
+
+  it("says what was asked, and 'na fila' apart from 'enviado' (N8, N9)", () => {
+    const at = new Date(2026, 9, 2, 15, 10).getTime();
+    const base = { botName: "Monitor Chat", awaitingSince: at };
+    expect(awaitingLine({ ...base, history: [{ at, kind: "ask", label: "steps", text: "x", delivered: true }] }, now)).toBe("Você pediu o passo a passo para Monitor Chat às 15:10: aguardando a resposta.");
+    expect(awaitingLine({ ...base, history: [{ at, kind: "ask", label: "recommend", text: "x", delivered: true }] }, now)).toBe("Você pediu a recomendação para Monitor Chat às 15:10: aguardando a resposta.");
+    expect(awaitingLine({ ...base, history: [{ at, kind: "ask", label: "remind", text: "x", delivered: true }] }, now)).toBe("Você lembrou Monitor Chat às 15:10: aguardando a resposta.");
+    expect(awaitingLine({ ...base, history: [{ at, kind: "option", label: "Sim", text: "Sim.", delivered: false, queued: true }] }, now))
+      .toBe("Você escolheu “Sim” às 15:10: aguardando Monitor Chat. O item se atualiza quando houver resposta. A resposta está na fila: Monitor Chat a recebe assim que terminar o que está fazendo.");
+    // in the history: a clock and "na fila para", not a check and "enviado"
+    const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o30", title: "Confirmar o teto do lote", since: now - 3_600_000, options: [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }], awaitingSince: at,
+        history: [{ at, kind: "option", label: "Sim", text: "Sim.", delivered: false, queued: true }, { at: at + 60_000, kind: "ask", label: "remind", text: "x", delivered: true }] },
+    ] })])]);
+    const { html, tree } = view({ items: list, selectedKey: needsYouKey(list[0]!), changingAnswer: needsYouKey(list[0]!) });
+    expect(tree.filter((node) => "data-history-state" in node.props).map((node) => node.props["data-history-state"])).toEqual(["queued", "delivered"]);
+    expect(html).toContain("Você escolheu “Sim” às 15:10<span class=\"text-ink-secondary\"> — na fila para Monitor Chat</span>");
+    expect(html).toContain("Você lembrou o bot às 15:11");
+    // a queued choice is still the person's choice: marked, and choosing it again sends nothing
+    expect(tree.find((node) => node.props["data-placement"] === "inline" && node.props["data-resolver-option"] === 0)!.props["aria-pressed"]).toBe(true);
   });
 
   it("says when: 'às HH:MM' today, 'em DD/MM às HH:MM' another day, with the year in another one (INSP-J2 #11)", () => {

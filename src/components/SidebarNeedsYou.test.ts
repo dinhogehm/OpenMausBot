@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
-import { needsYouItems, waitingAge } from "@/lib/needs-you";
+import { AWAITING_MAX_MS, needsYouItems, nextAwaitingChange, waitingAge } from "@/lib/needs-you";
 import { SidebarNeedsYou } from "./SidebarNeedsYou";
 
 const now = Date.parse("2026-09-30T21:00:00Z");
@@ -134,8 +134,26 @@ describe("what needs the person, from every bot", () => {
     expect(html).toContain('aria-label="2 itens precisam de você"');
     expect(html).not.toContain("Liberar a planilha");
     expect(html).toContain("Monitor Chat não respondeu");
-    // all answered and still in time: nothing waits on the person
+    // and the one waiting on its bot is a quiet line under the block, not in its count (r2 N2)
+    expect(html.match(/data-needs-you-awaiting=""/g)).toHaveLength(1);
+    expect(html).toContain(">Aguardando bots (1)<");
+    // all answered and still in time: nothing waits on the person — no alert block, but the
+    // way in to "Mudar resposta" or "Marcar como resolvido" stays (INSP-J2 r2 N2)
     const answered = [bot("monitor", "Monitor Chat", [task("m0", "Vigia", { ownerPending: [{ id: "o1", title: "Liberar a planilha", since: now - 60_000, awaitingSince: now - 60_000 }] })])];
-    expect(SidebarNeedsYou({ items: needsYouItems(answered), density: "comfortable", now, onOpen: () => {} })).toBeNull();
+    const opened: Array<string | null> = [];
+    const quiet = SidebarNeedsYou({ items: needsYouItems(answered), density: "comfortable", now, onOpen: (item) => opened.push(item?.pendingId ?? null) })!;
+    const quietHtml = renderToStaticMarkup(quiet);
+    expect(quietHtml).not.toContain("sidebar-needs-you");
+    expect(quietHtml).not.toContain("text-warning");
+    expect(quietHtml).toContain('aria-label="Abrir o que aguarda os bots (1)"');
+    (quiet.props as { onClick: () => void }).onClick();
+    expect(opened).toEqual(["o1"]);
+    expect(SidebarNeedsYou({ items: needsYouItems(answered), density: "icons", now, onOpen: () => {} })).toBeNull();
+  });
+
+  it("knows when the next answered item goes back to the person, so the sidebar re-renders right then (INSP-J2 r2 N3)", () => {
+    const at = now - 30 * 60_000;
+    expect(nextAwaitingChange([{ awaitingSince: at }, { awaitingSince: now - 5 * 3_600_000 }, {}], now)).toBe(at + AWAITING_MAX_MS);
+    expect(nextAwaitingChange([{ awaitingSince: now - 5 * 3_600_000 }, {}], now)).toBeNull();
   });
 });
