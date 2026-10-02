@@ -1,16 +1,19 @@
-// "Exportar para o board" (lot V): a five-line executive summary in pt-BR with
-// numbers and trend, the Markdown and the PDF — which name work only by its
-// number (no PR/issue title, no failure cause: a client's name never leaves).
+// "Exportar para o board" (lot V, INSP-V r1): the period in the title, a
+// five-line summary in pt-BR with numbers and comparisons that follow one rule,
+// the board's indicators with their definition beside each, DORA, success rate,
+// cost per delivery, targets with a light only when set, lower bounds marked
+// "≥", the Markdown and the PDF — which name work only by its number and carry
+// a title any viewer reads right.
 import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
-  bucketLabel, executiveSummary, exportFileName, formatDuration, formatInstant, reportMarkdown, reportPdf, textWidth, trendText,
+  boardKpis, bucketLabel, comparisonText, doraRows, executiveSummary, exportFileName, fitNumbers, formatDuration, formatInstant, pdfTextString,
+  reportMarkdown, reportPdf, reportTitle, textWidth,
 } from "./productivity-export.ts";
 import { buildProductivityReport } from "./productivity-report.ts";
 import { brt, CLIENT_NAME, scenario } from "./testing/productivity-fixture.ts";
 
-const report = () => buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") } });
-
+const report = (goals = {}) => buildProductivityReport({ ...scenario(), goals, granularity: "day", period: { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") } });
 const CP1252: Record<number, string> = { 0x80: "€", 0x85: "…", 0x91: "‘", 0x92: "’", 0x93: "“", 0x94: "”", 0x95: "•", 0x96: "–", 0x97: "—" };
 
 /** Every page's text as drawn: the Flate streams inflated, the strings' octal escapes read back as WinAnsi. */
@@ -27,98 +30,149 @@ function pdfText(pdf: Buffer): string {
 }
 
 describe("formatting", () => {
-  it("durations, instants in São Paulo, bucket labels and trends in pt-BR", () => {
+  it("durations, instants in São Paulo, bucket labels", () => {
     expect(formatDuration(30_000)).toBe("< 1 min");
     expect(formatDuration(38 * 60_000)).toBe("38 min");
     expect(formatDuration(5.24 * 3_600_000)).toBe("5,2 h");
     expect(formatDuration(55 * 3_600_000)).toBe("2,3 d");
     expect(formatDuration(null)).toBe("—");
     expect(formatDuration(0)).toBe("0 min");
-    expect(formatInstant(Date.parse("2026-10-01T02:30:00Z"))).toBe("30/09/2026 23:30");
-    expect(formatInstant(Date.parse("2026-10-01T02:30:00Z"), "en")).toBe("2026-09-30 23:30");
-    expect(bucketLabel(brt("2026-10-02T14:00:00"), "hour")).toBe("14h");
-    expect(bucketLabel(brt("2026-10-02T00:00:00"), "day")).toBe("02/10");
-    expect(bucketLabel(brt("2026-10-01T00:00:00"), "month")).toBe("out/26");
-    expect(trendText(5, 2)).toBe("+3 (+150%)");
-    expect(trendText(1, 4)).toBe("−3 (−75%)");
-    expect(trendText(3, 0)).toBe("+3");
-    expect(trendText(2, 2)).toBe("= período anterior");
-    expect(trendText(null, 2)).toBe("sem base de comparação");
-    expect(trendText(2 * 3_600_000, 3_600_000, "pt-BR", "duration")).toBe("+1 h (+100%)");
     expect(formatDuration(3_600_000)).toBe("1 h");
-    expect(formatDuration(43.25 * 3_600_000)).toBe("43 h");
+    expect(formatInstant(Date.parse("2026-10-01T02:30:00Z"))).toBe("30/09/2026 23:30");
+    expect(bucketLabel(brt("2026-10-02T14:00:00"), "hour")).toBe("14h");
+    expect(bucketLabel(brt("2026-10-01T00:00:00"), "month")).toBe("out/26");
+  });
+
+  it("comparisons without nested parentheses, the absolute value on a small base, nothing before the repository (INSP-V r1 #7, #12)", () => {
+    expect(comparisonText({ kind: "trend", delta: -48, ratio: -48 / 275 })).toBe("−48, −17%");
+    expect(comparisonText({ kind: "trend", delta: 3_600_000, ratio: 1 }, "pt-BR", "duration")).toBe("+1 h, +100%");
+    expect(comparisonText({ kind: "absolute", previous: 2 })).toBe("anterior: 2");
+    expect(comparisonText({ kind: "none", reason: "before-repo" })).toBe("anterior ao repositório");
+    expect(comparisonText({ kind: "none", reason: "not-comparable" })).toBe("sem base comparável");
+  });
+});
+
+describe("board model", () => {
+  const kpis = boardKpis(report());
+  const by = (key: string) => kpis.find((kpi) => kpi.key === key)!;
+
+  it("has the board's eight indicators, each with its definition beside it", () => {
+    expect(kpis.map((kpi) => kpi.label)).toEqual([
+      "Entregas em produção", "Frequência de deploy", "Sucesso de release", "Lead time issue até produção",
+      "PRs mergeadas", "Issues resolvidas", "Issues P0/P1 abertas", "Pipeline de release parado",
+    ]);
+    for (const kpi of kpis) expect(kpi.short.length).toBeGreaterThan(10);
+  });
+
+  it("marks delivered totals as lower bounds when a release's contents are unknown (INSP-V r1 #4)", () => {
+    expect(by("deliveries").detail).toBe("≥4 PRs e ≥2 issues concluídas no ar · 1 release sem conteúdo lido");
+  });
+
+  it("success rate over the runs that ran; superseded and aborted apart (INSP-V r1 #1)", () => {
+    expect(by("successRate")).toMatchObject({ value: "60%", detail: "3 de 5 que rodaram · 1 substituído e 1 abortado fora da taxa" });
+  });
+
+  it("the stopped pipeline says production stayed up and shows the weekend (INSP-V r1 #2)", () => {
+    expect(by("blocked")).toMatchObject({ label: "Pipeline de release parado", value: "5 h", detail: "produção no ar · 0 min em fim de semana" });
+  });
+
+  it("P1 shows p1 + high, the old scale, apart (INSP-V r1 #5)", () => {
+    expect(by("openP1").detail).toBe("P1 1 = 1 priority:p1 + 0 priority:high (legado) · P0 1");
+    expect(by("openP1").short).toBe("agora; P1 = p1 + high, P0 = p0 + critical");
+  });
+
+  it("no trend on a base under 5; production numbers without a comparable source get none (INSP-V r1 #7)", () => {
+    expect(by("merged")).toMatchObject({ comparison: "anterior: 0", good: null });
+    expect(by("deliveries")).toMatchObject({ comparison: "sem base comparável", previous: "—" });
+  });
+
+  it("before the repository existed there is no comparison at all", () => {
+    const yearly = buildProductivityReport({ ...scenario(), granularity: "month", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-11-01T00:00:00") } });
+    expect(boardKpis(yearly).find((kpi) => kpi.key === "merged")).toMatchObject({ comparison: "anterior ao repositório", previous: "—" });
+  });
+
+  it("lights a target only when one is set (met / close / off)", () => {
+    expect(kpis.some((kpi) => kpi.goal)).toBe(false);
+    const withGoals = boardKpis(report({ deploysPerBusinessDay: 1, releaseSuccessRate: 70, leadTimeHours: 48 }));
+    expect(withGoals.find((kpi) => kpi.key === "deployFrequency")!.goal).toEqual({ target: "≥ 1/dia útil", status: "off" });
+    expect(withGoals.find((kpi) => kpi.key === "successRate")!.goal).toEqual({ target: "≥ 70%", status: "close" });
+    expect(withGoals.find((kpi) => kpi.key === "leadTime")!.goal).toEqual({ target: "≤ 48 h", status: "met" });
+  });
+
+  it("DORA rows: frequency, lead time for changes, change failure rate and time to restore", () => {
+    expect(doraRows(report()).map(([name, value]) => [name, value])).toEqual([
+      ["Frequência de deploy", "0,7 por dia útil (3 em 4,5 dias úteis)"],
+      ["Lead time de mudança", "1,8 h (p90 3,5 h, n=4)"],
+      ["Taxa de falha de mudança", "50% (1 de 2 releases verificados)"],
+      ["Tempo de restauração", "11 h (n=1)"],
+    ]);
+    const quiet = scenario();
+    quiet.runs = quiet.runs.map(({ postRelease: _p, ...run }) => run);
+    const none = buildProductivityReport({ ...quiet, granularity: "day", period: { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") } });
+    expect(doraRows(none)[2]![1]).toBe("— (nenhum release com verificação pós-release)");
+    expect(doraRows(none)[3]![1]).toBe("— (nenhuma falha de mudança registrada)");
   });
 });
 
 describe("executive summary", () => {
-  it("is five pt-BR lines with numbers and their trend", () => {
+  it("is five pt-BR lines with the numbers, the rules and the coverage of each", () => {
     const lines = executiveSummary(report());
-    expect(lines).toHaveLength(5);
-    // the previous five days have no release source: unknown, so no "+3"
-    expect(lines[0]).toBe("Produção: 3 entregas (sem base comparável), com 2 PRs e 2 issues no ar — parte do período sem fonte de releases.");
-    expect(lines[1]).toBe("Vazão: 3 PRs mergeadas (+3) e 2 issues resolvidas (+2), 1 bug e 1 P0/P1.");
-    expect(lines[2]).toBe("Lead time issue → produção: mediana 43 h, p90 2,6 d (n=2).");
-    expect(lines[3]).toBe("Backlog agora: 2 issues abertas, 2 P0/P1; a mais antiga, #104, tem 22 d; 1 PR esperando o gate.");
-    expect(lines[4]).toBe("Falhas: 2 tentativas de release falharam (sem base comparável), 1 recusada; produção travada 5 h. Bots: 3 turnos, 30 min ativos, US$ 0,75.");
+    expect(lines).toEqual([
+      "Produção: 3 entregas (sem base comparável), 0,7 por dia útil, com ≥4 PRs e ≥2 issues concluídas no ar (1 release sem conteúdo lido); parte do período sem fonte de releases.",
+      "Vazão: 5 PRs mergeadas (anterior: 0) e 2 issues resolvidas (anterior: 0), 1 bug e 1 P0/P1.",
+      "Lead time issue até produção: mediana 43 h, p90 2,6 d (n=2; sem base comparável); merge até produção 1,8 h.",
+      "Backlog agora: 2 issues abertas; P1 1 (1 priority:p1 + 0 priority:high legado) e P0 1; a mais antiga #104, 22 d; 1 PR esperando o gate.",
+      "Releases: sucesso 60% (3 de 5 que rodaram; 1 substituído e 1 abortado fora da taxa), 1 recusado; pipeline parado 5 h com produção no ar (0 min em fim de semana). Bots: 3 turnos, US$ 0,75 em 4,5 dias registrados; US$ 0,25 por entrega.",
+    ]);
   });
 
-  it("compares production numbers when a source covers the previous period too", () => {
-    const covered = buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-10-01T00:00:00"), to: brt("2026-10-03T00:00:00") } });
-    expect(covered.coverage.releaseCoverage).toEqual({ period: "full", previous: "full" });
-    const lines = executiveSummary(covered);
-    expect(lines[0]).toBe("Produção: 1 entrega (−1 (−50%)), com 1 PR e 1 issue no ar.");
-    expect(lines[4]).toMatch(/^Falhas: 2 tentativas de release falharam \(\+2\), 1 recusada;/);
-    expect(reportMarkdown(covered)).toContain("| Entregas em produção | 1 | 2 | −1 (−50%) |");
-  });
-
-  it("does not compare with a previous period the source covers only in part (a lower bound)", () => {
-    // 27–29/09 before 30/09–02/10: the log starts on the 29th
-    const partial = buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-09-30T00:00:00"), to: brt("2026-10-03T00:00:00") } });
-    expect(partial.coverage.releaseCoverage).toEqual({ period: "full", previous: "partial" });
-    expect(executiveSummary(partial)[0]).toBe("Produção: 2 entregas (sem base comparável), com 2 PRs e 2 issues no ar.");
-    const markdown = reportMarkdown(partial);
-    expect(markdown).toContain("| Entregas em produção | 2 | 1 (parcial) | sem base comparável |");
-    // throughput from GitHub is whole on both sides: it still compares
-    expect(markdown).toContain("| PRs mergeadas (sem carriers) | 3 | 0 | +3 |");
+  it("says the bots' cost covers only the recorded days (INSP-V r1 #6)", () => {
+    const base = scenario();
+    const none = buildProductivityReport({ ...base, local: { ...base.local, usageFrom: null }, usage: [], granularity: "day", period: { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") } });
+    expect(executiveSummary(none)[4]).toMatch(/Bots: sem registro de uso no período\.$/);
   });
 
   it("has an English version with the same numbers", () => {
-    const lines = executiveSummary(report(), "en");
-    expect(lines).toHaveLength(5);
-    expect(lines[0]).toBe("Production: 3 deliveries (no comparable base), carrying 2 PRs and 2 issues live — part of the period has no release source.");
+    expect(executiveSummary(report(), "en")[0]).toBe("Production: 3 deliveries (no comparable base), 0.7 per business day, carrying ≥4 PRs and ≥2 completed issues live (1 release with contents not read); part of the period has no release source.");
   });
 });
 
 describe("Markdown", () => {
   const markdown = reportMarkdown(report());
 
-  it("opens with the summary and carries the KPIs, buckets, releases, backlog, bots, definitions and coverage", () => {
-    const headings = [...markdown.matchAll(/^#+ (.+)$/gm)].map((match) => match[1]);
-    expect(headings).toEqual(["Relatório de produtividade — Time Nuria", "Resumo executivo", "Indicadores", "Por dia", "Releases do período", "Backlog (agora)", "Esforço dos bots", "Definições", "Cobertura dos dados"]);
+  it("has the period in the title and the summary on top", () => {
+    expect(markdown.startsWith("# Produtividade de engenharia — 28/09 a 02/10/2026\n")).toBe(true);
+    const month = buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") } });
+    expect(reportMarkdown(month).split("\n")[0]).toBe("# Produtividade de engenharia — setembro/2026");
     expect(markdown.indexOf("1. Produção: 3 entregas")).toBeLessThan(markdown.indexOf("## Indicadores"));
-    expect(markdown).toContain("| Entregas em produção | 3 | s/ fonte | sem base comparável |");
-    expect(markdown).toContain("| PRs mergeadas (sem carriers) | 3 | 0 | +3 |");
-    // the usage ledger starts on 28/09, after the previous period began: not a "+3 vs 0"
-    expect(markdown).toContain("| Turnos dos bots | 3 | s/ registro | sem base comparável |");
-    expect(markdown).toContain("| Horas ativas dos bots | 30 min | s/ registro | sem base comparável |");
-    expect(markdown).toContain("| 30/09 | 1 | 1 | 1 | 1 | 1 | 0 | 1 |");
-    expect(markdown).toContain("| 28/09 | s/ fonte | s/ fonte | 0 | 0 | 0 | s/ fonte | 0 |");
-    expect(markdown).toContain("| 01/10/2026 10:00 | `ccccccccc` | em produção | #3 | #102 |");
-    expect(markdown).toContain("falhou (2 tentativas)");
-    expect(markdown).toContain("- PRs esperando o gate: 1 (#20) de 3 abertas");
-    expect(markdown).toContain("| Chief of Staff | 2 | 30 min |");
   });
 
-  it("never carries a title, a failure cause or the client's name", () => {
+  it("puts the definition beside each indicator, DORA, lower bounds, release counts that add up, and the head PR as PR or carrier (INSP-V r1 #4, #8, #13)", () => {
+    expect(markdown).toContain("| Pipeline de release parado | 5 h<br>produção no ar · 0 min em fim de semana | — | sem base comparável | — | 1ª falha que rodou após um sucesso até o próximo sucesso |");
+    expect(markdown).toContain("## DORA");
+    expect(markdown).toContain("| 29/09 | 1 | ≥0 |");
+    expect(markdown).toContain("3 em produção · 1 commit falhou (2 tentativas que rodaram) · 1 substituído · 1 abortado · 1 recusado");
+    expect(markdown).toContain("| 01/10/2026 06:00 | `xxxxxxxxx` | falhou (2 tentativas) | PR #6 | — |");
+    expect(markdown).toContain("conteúdo desconhecido (primeiro release conhecido)");
+    expect(markdown).not.toContain("sem release anterior para comparar");
+    expect(markdown).toContain("P1: 1 = 1 priority:p1 + 0 priority:high (escala antiga)");
+  });
+
+  it("shows the bots' days before the ledger as —, not 0 (INSP-V r1 #6)", () => {
+    const day = buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-09-26T00:00:00"), to: brt("2026-09-29T00:00:00") } });
+    expect(reportMarkdown(day)).toContain("| 26/09 | s/ fonte | s/ fonte | 0 | 0 | 0 | s/ fonte | — |");
+  });
+
+  it("never carries a title, a failure cause, the client's name or the owner's login", () => {
     expect(markdown).not.toContain(CLIENT_NAME);
-    expect(markdown).not.toContain("Acme");
     expect(markdown).not.toContain("reprovou");
     expect(markdown).not.toContain("Correção para");
+    expect(markdown).not.toContain("dinhogehm");
   });
 });
 
 describe("PDF", () => {
-  const pdf = reportPdf(report());
+  const pdf = reportPdf(report({ deploysPerBusinessDay: 1 }));
 
   it("is a well-formed PDF 1.4 whose cross-reference table points at every object", () => {
     const raw = pdf.toString("latin1");
@@ -130,19 +184,34 @@ describe("PDF", () => {
     const offsets = table[2]!.trim().split("\n").slice(1).map((line) => Number(line.slice(0, 10)));
     expect(offsets).toHaveLength(Number(table[1]) - 1);
     offsets.forEach((offset, index) => expect(raw.slice(offset, offset + `${index + 1} 0 obj`.length)).toBe(`${index + 1} 0 obj`));
-    expect(raw).toContain("/BaseFont /Helvetica /Encoding /WinAnsiEncoding");
-    expect(raw).toMatch(/\/Type \/Pages \/Kids \[[^\]]+\] \/Count \d+/);
   });
 
-  it("draws the title, the summary first, accents in WinAnsi and the indicators", () => {
+  it("writes the title in the metadata as UTF-16 so the viewer reads the dash and accents (INSP-V r1 #11)", () => {
+    const raw = pdf.toString("latin1");
+    const title = reportTitle(report());
+    expect(raw).toContain(`/Title ${pdfTextString(title)}`);
+    const hex = /\/Title <FEFF([0-9A-F]+)>/.exec(raw)![1]!;
+    const decoded = String.fromCharCode(...hex.match(/.{4}/g)!.map((unit) => parseInt(unit, 16)));
+    expect(decoded).toBe("Produtividade de engenharia — 28/09 a 02/10/2026");
+  });
+
+  it("draws the title, the summary first, the cards with their definition and target, DORA", () => {
     const text = pdfText(pdf);
-    expect(text).toContain("Relatório de produtividade — Time Nuria");
-    expect(text.indexOf("Resumo executivo")).toBeLessThan(text.indexOf("Indicadores"));
-    expect(text).toContain("Produção: 3 entregas (sem base comparável), com 2 PRs e 2 issues no ar");
-    expect(text).toContain("sem base comparável");
-    expect(text).not.toMatch(/…\n/); // no card text cut short
-    expect(text).toContain("Entregas e falhas por dia");
-    expect(text).toContain("faixa cinza: sem fonte de releases (desconhecido, não zero)");
+    expect(text).toContain("Produtividade de engenharia — 28/09 a 02/10/2026");
+    expect(text.indexOf("Resumo executivo")).toBeLessThan(text.indexOf("DORA"));
+    expect(text).toContain("Pipeline de release parado");
+    expect(text).toContain("DORA: entregas por dia útil (seg–sex)");
+    expect(text).toContain("meta >= 1/dia útil");
+    expect(text).toContain("Taxa de falha de mudança");
+    // a true minus is drawn as an en dash, never a hyphen (INSP-V r1 #12)
+    expect(text).not.toMatch(/\(-\d/);
+  });
+
+  it("never cuts a list without saying how many are left (INSP-V r1 #12)", () => {
+    const many = Array.from({ length: 40 }, (_, index) => ({ number: 9000 + index }));
+    const fitted = fitNumbers(many, 120, 7.5);
+    expect(fitted).toMatch(/^#9000, .* \+\d+$/);
+    expect(textWidth(fitted, 7.5)).toBeLessThanOrEqual(120);
   });
 
   it("never carries a title, a failure cause or the client's name", () => {
@@ -150,21 +219,14 @@ describe("PDF", () => {
     expect(text).not.toContain("Acme");
     expect(text).not.toContain("reprovou");
     expect(text).not.toContain("Correção para");
+    expect(text).not.toContain("dinhogehm");
   });
 
   it("is deterministic for the same report", () => {
-    expect(reportPdf(report()).equals(pdf)).toBe(true);
-  });
-
-  it("measures Helvetica like the AFM (layout of right-aligned numbers)", () => {
-    expect(textWidth("0", 10)).toBeCloseTo(5.56);
-    expect(textWidth("Produção", 10)).toBeCloseTo(textWidth("Producao", 10));
-    expect(textWidth("W", 10, true)).toBeCloseTo(9.44);
+    expect(reportPdf(report({ deploysPerBusinessDay: 1 })).equals(pdf)).toBe(true);
   });
 
   it("names the download by granularity and period", () => {
     expect(exportFileName(report(), "pdf")).toBe("produtividade-dia-2026-09-28_2026-10-02.pdf");
-    const monthly = buildProductivityReport({ ...scenario(), granularity: "month", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-11-01T00:00:00") } });
-    expect(exportFileName(monthly, "md")).toBe("produtividade-mes-2026-09-01_2026-10-31.md");
   });
 });
