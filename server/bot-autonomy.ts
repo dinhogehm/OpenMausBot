@@ -985,6 +985,10 @@ export class BotAutonomy {
       }
       into.aliases = [...new Set([...(into.aliases ?? []), item.id, ...(item.aliases ?? [])])];
       if (!into.link && item.link) into.link = item.link;
+      // and the practical part one of them had (why, steps, options)
+      if (!into.why && item.why) into.why = item.why;
+      if (!into.steps?.length && item.steps?.length) into.steps = item.steps;
+      if (!into.options?.length && item.options?.length) into.options = item.options;
       // a server item's key (and its exact remedy) survives: else the server could never close it (INSP-H r1 #3)
       if (!into.key && item.key) {
         into.key = item.key;

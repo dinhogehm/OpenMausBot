@@ -1116,6 +1116,18 @@ describe("what waits on the person", () => {
     expect(sameOwnerPending({ title: "Ligue o Mac na tomada" }, { title: "x", key: "power:battery" })).toBe(true);
   });
 
+  it("keeps the why, steps and options of a folded item on the one that stays", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      wakes: [], goals: [], inFlight: [],
+      ownerPending: [
+        { id: "o7", botId: "chief", threadId: "ade82a65", title: ITEMS[2]!.title, createdAt: 1_000 },
+        { id: "o8", botId: "chief", threadId: "3e55c0fd", title: ITEMS[3]!.title, createdAt: 2_000, why: "O release está parado.", steps: [{ text: "Grave a recusa", command: "echo x" }], options: [{ label: "Recusar", reply: "pode recusar" }] },
+      ],
+    }));
+    const [only] = make().ownerPendingOf("chief");
+    expect(only).toMatchObject({ id: "o7", aliases: ["o8"], why: "O release está parado.", steps: [{ text: "Grave a recusa", command: "echo x" }], options: [{ label: "Recusar", reply: "pode recusar" }] });
+  });
+
   it("never gives a new item an id still answered as an alias, and keeps the server's key when folding (INSP-H r1 #3)", () => {
     writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
       wakes: [], goals: [], inFlight: [],
