@@ -320,7 +320,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     execFileSync("git", ["init", "-q", repo]);
     const ccLedger = () => JSON.parse(readFileSync(join(data, "cc-sessions.json"), "utf8")).sessions;
     const callLog = () => readFileSync(calls, "utf8").trim().split("\n").map(line => JSON.parse(line));
-    const startTurn = { steps: [{ tool: "cc_session_start", arguments: { title: "#9999 teste", brief: "BRIEF_ONE HOLD:2500", repo, surface: "cli" } }], reply: "Session started" };
+    const startTurn = { steps: [{ tool: "cc_session_start", arguments: { title: "#9999 teste", brief: "BRIEF_ONE HOLD:4000", repo, surface: "cli" } }], reply: "Session started" };
     f.save({ turns: [startTurn] });
     await f.send("Open a Claude Code session for #9999.");
     await expect.poll(() => (existsSync(join(data, "cc-sessions.json")) ? ccLedger().length : 0), { timeout: 20_000 }).toBe(1);
@@ -335,6 +335,8 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     const rowSessions = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ccSessions ?? []);
     // the bot typed "#9999 teste": the session is titled the owner's way, without "#" (H7)
     await expect.poll(rowSessions, { timeout: 10_000 }).toEqual([expect.objectContaining({ sessionId: id, title: "9999 teste", surface: "cli" })]);
+    // the running turn's claude is on the ledger with its start time (a restart can tell if it survived)
+    await expect.poll(() => ccLedger()[0].proc?.lstart ?? "", { timeout: 3_000 }).toMatch(/\d{4}$/);
     await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
     await expect.poll(() => ccLedger()[0].status, { timeout: 10_000 }).toBe("archived");
     expect(await rowSessions()).toEqual([]);
@@ -345,6 +347,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
     expect(second.argv.slice(0, 3)).toEqual(["-p", "--resume", id]);
     expect(realpathSync(second.cwd)).toBe(realpathSync(join(repo, ".claude", "worktrees", ccLedger()[0].worktree)));
     expect(ccLedger()[0]).toMatchObject({ turns: 2, costUsd: 0.02 });
+    expect(ccLedger()[0].proc).toBeUndefined();
     const chips = await f.chips();
     expect(chips.some((chip: string) => chip.includes("terminou o turno 1"))).toBe(true);
     expect(chips.some((chip: string) => chip.includes("arquivada"))).toBe(true);

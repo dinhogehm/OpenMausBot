@@ -12,6 +12,7 @@
 //
 // This file is state, argv and stream parsing only. server/index.ts owns the
 // processes, the routes and the wake-ups.
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
@@ -78,6 +79,14 @@ export interface CcSession {
   stallReports?: number;
   /** What the session said it needs when its last turn ended blocked. */
   blockedOn?: string;
+  /** CLI: the `claude` of its running turn (pid and `ps -o lstart`), so a
+   * restart can tell whether that process survived (R9-resilience RS-PID). */
+  proc?: CcProc;
+  /** CLI: its turn's claude survived a server restart; the server follows
+   * it (alive, transcript) until it ends, instead of marking it failed. */
+  survivedRestartAt?: number;
+  /** Its turn was cut off by a restart that its claude did not survive. */
+  interruptedAt?: number;
   /** CLI: processes its last turn left running in its worktree; the server
    * resumes it when they are gone. */
   bgJob?: BgJob;
@@ -109,6 +118,33 @@ export interface CcSession {
 }
 
 export type CcSurface = "app" | "cli";
+
+/** A process as `ps` knows it: the pid, and its start time (`ps -o lstart=`),
+ * so a pid reused by another program is never taken for it. */
+export interface CcProc { pid: number; lstart: string }
+
+/** `ps` by its path (the server's PATH may be bare) in the C locale, so a
+ * start time read now compares with one read at spawn. */
+export const PS_BIN = "/bin/ps";
+export const PS_ENV = { LC_ALL: "C", LANG: "C" };
+const sameStart = (a: string, b: string) => a.replace(/\s+/g, " ").trim() === b.replace(/\s+/g, " ").trim();
+
+/** A process's start time (`ps -o lstart=`), or null when there is no such process. */
+export function processStartSync(pid: number): string | null {
+  try {
+    return execFileSync(PS_BIN, ["-o", "lstart=", "-p", String(pid)], { stdio: ["ignore", "pipe", "ignore"], timeout: 5_000, env: { ...process.env, ...PS_ENV } }).toString().trim() || null;
+  } catch {
+    return null; // no such process
+  }
+}
+
+/** Whether `proc` is still the same running process: its pid exists and
+ * started at the same time. Synchronous (the ledger loads synchronously). */
+export function ccProcAlive(proc: CcProc): boolean {
+  if (!Number.isInteger(proc.pid) || proc.pid <= 1 || !proc.lstart) return false;
+  const start = processStartSync(proc.pid);
+  return start !== null && sameStart(start, proc.lstart);
+}
 
 /** A message waiting for a session's turn to end, and when it was queued. */
 export interface CcQueued { text: string; at: number }
@@ -293,14 +329,18 @@ export class CcSessionLedger {
   private sessions = new Map<string, CcSession>();
   /** Sessions whose turn was cut off by a restart; their owners must hear it. */
   readonly interruptedOnLoad: CcSession[] = [];
+  /** Sessions whose turn's claude survived the restart: followed, not failed. */
+  readonly survivedOnLoad: CcSession[] = [];
   private readonly path: string | null;
   private readonly now: () => number;
+  private readonly procAlive: (proc: CcProc) => boolean;
 
   // plain field assignments, not parameter properties — the server runs
   // under Node's type-stripping, which cannot transform the latter
-  constructor(opts: { path: string | null; now?: () => number }) {
+  constructor(opts: { path: string | null; now?: () => number; procAlive?: (proc: CcProc) => boolean }) {
     this.path = opts.path;
     this.now = opts.now ?? Date.now;
+    this.procAlive = opts.procAlive ?? (() => false);
     this.load();
   }
 
@@ -310,11 +350,23 @@ export class CcSessionLedger {
       const raw = JSON.parse(readFileSync(this.path, "utf8")) as { sessions?: CcSession[] };
       for (const session of raw.sessions ?? []) {
         if (!session || typeof session.id !== "string") continue;
-        // A run cannot survive a server restart: it was lost mid-turn.
+        // A turn running when the server stopped: its claude runs in a group
+        // of its own and may have outlived the server (an app quit, not a
+        // shutdown). Alive and the same process: followed until it ends.
+        // Gone: the turn was lost — interrupted, and its owner hears it.
         if ((session.status === "running" || session.status === "stalled") && session.surface !== "app") {
-          session.status = "failed";
-          session.lastError = "the server restarted (the computer was shut down or the app quit) while this turn was running; resume it with cc_session_send";
-          this.interruptedOnLoad.push(session);
+          if (session.proc && this.procAlive(session.proc)) {
+            session.survivedRestartAt = this.now();
+            this.survivedOnLoad.push(session);
+          } else {
+            session.status = "failed";
+            session.failedAt = this.now();
+            session.interruptedAt = this.now();
+            session.lastError = `interrupted: the server restarted (the computer was shut down or the app quit) while this turn was running${session.proc ? `, and its claude (PID ${session.proc.pid}) did not survive` : ""}; resume it with cc_session_send`;
+            delete session.proc;
+            delete session.survivedRestartAt;
+            this.interruptedOnLoad.push(session);
+          }
         }
         // Reported as stalled before the "stalled" status existed, and no
         // progress since: it is stalled, already told once.
@@ -398,10 +450,21 @@ export class CcSessionLedger {
     session.progressAt = session.lastActivityAt;
     delete session.lastError;
     delete session.blockedOn;
+    delete session.proc;
+    delete session.survivedRestartAt;
+    delete session.interruptedAt;
+    this.save();
+  }
+
+  /** The claude of its running turn, once `ps` told its start time. */
+  setProc(session: CcSession, proc: CcProc): void {
+    session.proc = { pid: proc.pid, lstart: proc.lstart.trim() };
     this.save();
   }
 
   finishTurn(session: CcSession, outcome: CcTurnOutcome): void {
+    delete session.proc;
+    delete session.survivedRestartAt;
     if (outcome.cwd) session.cwd = outcome.cwd;
     session.costUsd = Math.round((session.costUsd + outcome.costUsd) * 10_000) / 10_000;
     session.lastActivityAt = this.now();
@@ -444,6 +507,9 @@ export class CcSessionLedger {
     session.status = status;
     session.queued = [];
     session.lastActivityAt = this.now();
+    // a claude followed after a restart is no longer followed (the caller stopped it)
+    delete session.survivedRestartAt;
+    delete session.proc;
     if (status === "archived") {
       session.archivedAt = this.now();
       // an archived session has nothing left to fix: an old error only misleads

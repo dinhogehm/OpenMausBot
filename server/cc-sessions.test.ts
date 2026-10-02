@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, hotfixWithReleaseScripts, cliSurfaceRefusal, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccProcAlive, processStartSync, hotfixWithReleaseScripts, cliSurfaceRefusal, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -68,6 +68,39 @@ describe("ledger", () => {
     // The server saves right after telling the owners, so it is reported once.
     reloaded.save();
     expect(ledger().interruptedOnLoad).toEqual([]);
+  });
+
+  it("follows a turn whose claude outlived the restart, and marks interrupted the one whose claude died (R9-resilience RS-PID)", () => {
+    const first = ledger();
+    const alive = first.create({ ...base, id: "aaaaaaaa-0000-4000-8000-000000000001" });
+    const dead = first.create({ ...base, id: "bbbbbbbb-0000-4000-8000-000000000002" });
+    const unknown = first.create({ ...base, id: "cccccccc-0000-4000-8000-000000000003" });
+    for (const session of [alive, dead, unknown]) first.markRunning(session);
+    first.setProc(alive, { pid: 4242, lstart: "Thu Oct  1 21:00:00 2026\n" });
+    first.setProc(dead, { pid: 4343, lstart: "Thu Oct  1 21:00:00 2026" });
+    // the pid 4343 is alive but started later: another program, not this claude
+    const ps = new Map([[4242, "Thu Oct  1 21:00:00 2026"], [4343, "Thu Oct  1 21:30:00 2026"]]);
+    const reloaded = new CcSessionLedger({ path: join(dir, "cc.json"), now: () => 99, procAlive: (proc) => ps.get(proc.pid) === proc.lstart });
+    expect(reloaded.survivedOnLoad.map((session) => session.id)).toEqual([alive.id]);
+    expect(reloaded.get(alive.id)).toMatchObject({ status: "running", survivedRestartAt: 99, proc: { pid: 4242, lstart: "Thu Oct  1 21:00:00 2026" } });
+    expect(reloaded.interruptedOnLoad.map((session) => session.id)).toEqual([dead.id, unknown.id]);
+    expect(reloaded.get(dead.id)).toMatchObject({ status: "failed", interruptedAt: 99, failedAt: 99, lastError: expect.stringContaining("interrupted: the server restarted") });
+    expect(reloaded.get(dead.id)!.lastError).toContain("its claude (PID 4343) did not survive");
+    expect(reloaded.get(dead.id)!.proc).toBeUndefined();
+    expect(reloaded.get(unknown.id)!.lastError).not.toContain("PID");
+    // the survivor's turn ends like any other: nothing left of the restart on it
+    const survivor = reloaded.get(alive.id)!;
+    reloaded.finishTurn(survivor, { ok: true, report: "PR #1 aberta", costUsd: 0 });
+    expect(survivor).toMatchObject({ status: "idle", lastReport: "PR #1 aberta" });
+    expect(survivor.proc).toBeUndefined();
+    expect(survivor.survivedRestartAt).toBeUndefined();
+    // a ledger without a way to check processes (tests, older callers) fails them as before
+    first.markRunning(first.get(alive.id)!);
+    expect(ledger().interruptedOnLoad.map((session) => session.id)).toContain(alive.id);
+    // the real check: this test process is alive with its own start time; a made-up one is not
+    expect(ccProcAlive({ pid: process.pid, lstart: processStartSync(process.pid)! })).toBe(true);
+    expect(ccProcAlive({ pid: process.pid, lstart: "Mon Jan  1 00:00:00 1990" })).toBe(false);
+    expect(ccProcAlive({ pid: 0, lstart: "x" })).toBe(false);
   });
 
   it("keeps a stopped session stopped when its run exits late", () => {

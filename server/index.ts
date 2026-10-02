@@ -282,6 +282,9 @@ import {
   CC_MAX_RUNNING,
   CC_TURN_TIMEOUT_MS,
   CcSessionLedger,
+  ccProcAlive,
+  PS_BIN,
+  PS_ENV,
   ccReportForOwner,
   ccSessionLine,
   ccTurnArgs,
@@ -8681,15 +8684,24 @@ async function autonomyTick(): Promise<void> {
 const sharedState = new SharedState(join(DATA_DIR, "bots"));
 
 // ── Claude Code sessions a bot manages (server/cc-sessions.ts) ─────────
-const ccLedger = new CcSessionLedger({ path: join(DATA_DIR, "cc-sessions.json") });
+// a turn's claude that outlived the server is followed, not marked failed (R9-resilience RS-PID)
+const ccLedger = new CcSessionLedger({ path: join(DATA_DIR, "cc-sessions.json"), procAlive: ccProcAlive });
 // The owner's last channel order, read back from the history before
 // anything is reported: what the boot says goes to the conversation they named.
 adoptOwnerChannels();
 // A restart cut these turns off: tell each owner, or nobody would ever resume them.
 if (ccLedger.interruptedOnLoad.length) {
-  for (const session of ccLedger.interruptedOnLoad) ccReport(session, ccReportForOwner(session));
+  for (const session of ccLedger.interruptedOnLoad) {
+    ccChip(session, `interrompida: o servidor reiniciou no meio do turno ${session.turns}${session.lastError?.includes("did not survive") ? " e o processo claude não sobreviveu" : ""} — retome com cc_session_send`, false);
+    ccReport(session, ccReportForOwner(session));
+  }
   ccLedger.save();
 }
+// ...and these went on working: followed to the end of their turn (followSurvivingSessions)
+for (const session of ccLedger.survivedOnLoad) {
+  ccChip(session, `o servidor reiniciou e o processo claude (PID ${session.proc?.pid}) seguiu rodando: acompanho até o fim do turno ${session.turns}`);
+}
+if (ccLedger.survivedOnLoad.length) ccLedger.save();
 reportResumptionToChief();
 retireWorkOfClosedThreads();
 renameResultsThreads();
@@ -8747,7 +8759,8 @@ function retireWorkOfClosedThreads(): void {
 function reportResumptionToChief(): void {
   const leases = autonomy.recoveredOnLoad;
   const sessions = ccLedger.interruptedOnLoad;
-  if (!leases.length && !sessions.length) return;
+  const survived = ccLedger.survivedOnLoad;
+  if (!leases.length && !sessions.length && !survived.length) return;
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   const desk = chief ? chiefDeskThread(chief) : null;
   if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
@@ -8759,10 +8772,11 @@ function reportResumptionToChief(): void {
     "[Relatório de retomada — o servidor reiniciou]",
     ...(rerun.length ? ["Reenviado automaticamente (turnos cortados pelo restart, retomados como devidos):", ...rerun.map((lease) => `- ${name(lease.botId)} · ${lease.kind === "wake" ? "despertador/vigia" : "relatórios"} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what}`)] : []),
     ...(asked.length ? ["NÃO repetido (mais de 6 h; o bot foi perguntado se ainda vale):", ...asked.map((lease) => `- ${name(lease.botId)} · ${lease.kind} de ${when(lease.startedAt)} (conversa ${lease.threadId}): ${lease.what}`)] : []),
-    ...(sessions.length ? ["Sessões do Claude Code cujo turno foi cortado (o dono de cada uma recebeu o relatório):", ...sessions.map((session) => `- "${session.title}" (${session.id}) de ${name(session.ownerBotId)}`)] : []),
+    ...(sessions.length ? ["Sessões do Claude Code interrompidas (o turno foi cortado e o processo claude não sobreviveu; o dono de cada uma recebeu o relatório):", ...sessions.map((session) => `- "${session.title}" (${session.id}) de ${name(session.ownerBotId)}`)] : []),
+    ...(survived.length ? ["Sessões do Claude Code cujo processo claude seguiu rodando (o servidor acompanha até o fim do turno e o relatório chega como de costume; NÃO retome nem mande outra mensagem para elas agora):", ...survived.map((session) => `- "${session.title}" (${session.id}, PID ${session.proc?.pid}) de ${name(session.ownerBotId)}`)] : []),
     "Confira o que ficou pendente e retome o que for preciso.",
   ].join("\n");
-  store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Servidor reiniciado: ${rerun.length} retomado(s), ${asked.length} para confirmar, ${sessions.length} sessão(ões) cortada(s)`, 200), ok: asked.length === 0 } });
+  store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Servidor reiniciado: ${rerun.length} retomado(s), ${asked.length} para confirmar, ${sessions.length} sessão(ões) interrompida(s)${survived.length ? `, ${survived.length} seguindo (processo vivo)` : ""}`, 200), ok: asked.length === 0 && sessions.length === 0 } });
   autonomy.addReport(chief.id, desk, text);
 }
 const ccProcesses = new Map<string, CcChildProcess>();
@@ -8949,6 +8963,15 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
     return;
   }
   ccProcesses.set(session.id, child);
+  // its pid and start time on the ledger: after a restart the server can
+  // tell whether this very process is still at work (R9-resilience RS-PID)
+  if (child.pid && process.platform !== "win32") {
+    const pid = child.pid;
+    execFileCc(PS_BIN, ["-o", "lstart=", "-p", String(pid)], { timeout: 5_000, env: { ...process.env, ...PS_ENV } }, (error, stdout) => {
+      // gone already (error): nothing to follow
+      if (!error && ccProcesses.get(session.id) === child && String(stdout).trim()) ccLedger.setProc(session, { pid, lstart: String(stdout) });
+    });
+  }
   // The process tree under this turn's claude, sampled as it works: its
   // background job is what is left of it when the turn ends.
   const tree: TurnTree | null = child.pid ? newTurnTree(child.pid) : null;
@@ -9755,7 +9778,57 @@ function watchDelivery(): void {
     .finally(() => { delivery.running = false; });
 }
 
+/** Headless sessions whose claude outlived a server restart: nothing reads
+ * its output any more, so it is followed by its process (same pid, same
+ * start time) and its transcript. While it lives, its transcript's writes
+ * are its progress; once it is gone, its turn ends as the transcript says —
+ * finished (the last answer is its report) or cut short — and the owner
+ * hears it like any other turn's end. */
+const survivorWatch = { lastAt: 0 };
+function followSurvivingSessions(): void {
+  if (Date.now() - survivorWatch.lastAt < 10_000) return;
+  survivorWatch.lastAt = Date.now();
+  for (const session of ccLedger.all()) {
+    if (session.survivedRestartAt === undefined || ccProcesses.has(session.id)) continue;
+    if (session.status !== "running" && session.status !== "stalled") {
+      delete session.survivedRestartAt;
+      delete session.proc;
+      ccLedger.save();
+      continue;
+    }
+    const transcript = transcriptPath({ cliSessionId: session.id });
+    if (session.proc && ccProcAlive(session.proc)) {
+      const wrote = transcript ? transcriptWrittenAt(transcript) : null;
+      const progress = Math.max(session.survivedRestartAt, wrote ?? 0);
+      if ((session.progressAt ?? 0) < progress) {
+        session.progressAt = progress;
+        if (session.status === "stalled") session.status = "running";
+        ccLedger.save();
+      }
+      continue;
+    }
+    const ended = transcript !== null && transcriptTurnEnded(transcript);
+    const report = transcript ? lastAssistantText(transcript) : "";
+    const pid = session.proc?.pid;
+    ccLedger.finishTurn(session, ended
+      ? { ok: true, report, costUsd: 0 }
+      : { ok: false, report, costUsd: 0, error: `its claude (PID ${pid ?? "?"}), which outlived the server restart, ended without finishing its turn (no turn end in its transcript); resume it with cc_session_send` });
+    console.log(`[cc-sessions] ${session.id}: the claude that outlived the restart (PID ${pid}) is gone; turn ${session.turns} ${ended ? "finished" : "cut short"}`);
+    // finishTurn moved it on (TypeScript still sees the status checked above)
+    const after = session.status as CcSession["status"];
+    const next = after === "idle" ? takeFreshQueued(desktopWork, session) : null;
+    if (next !== null) {
+      ccChip(session, "a mensagem da fila está rodando agora");
+      runCcTurn(session, next, false);
+      continue;
+    }
+    ccChip(session, ended ? `terminou o turno ${session.turns} (acompanhado depois do reinício do servidor)` : `parou com um problema — o processo claude que sobreviveu ao reinício terminou sem fechar o turno ${session.turns}`, ended);
+    ccReport(session, desktopReportFor(desktopWork, session));
+  }
+}
+
 async function runDesktopWork(): Promise<void> {
+  followSurvivingSessions();
   watchStalledSessions(desktopWork);
   ageFailedSessions(desktopWork);
   await watchBackgroundJobs();
@@ -18879,6 +18952,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (child) {
             child.kill("SIGTERM");
             setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
+          } else if (session.survivedRestartAt !== undefined && session.proc && ccProcAlive(session.proc)) {
+            // the claude that outlived a restart, in its own group (detached): stopped with what it started
+            const pid = session.proc.pid;
+            try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ } }
+            ccChip(session, `processo claude ${pid} (sobrevivente do reinício) encerrado`, true);
           }
           ccLedger.setStatus(session, action === "stop" ? "stopped" : "archived");
           if (action === "archive") {
