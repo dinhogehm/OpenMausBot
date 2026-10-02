@@ -95,7 +95,10 @@ const quietButton = "inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-
 // the accent, deepened a quarter toward black: white text on it clears 4.5:1
 // in every skin (on Midnight's #1084fe itself it is 3.6:1 — INSP-I r1 #12)
 const strongButton = "inline-flex items-center justify-center gap-1.5 rounded-lg bg-[color-mix(in_srgb,var(--color-accent)_74%,black)] px-3.5 py-2 text-[13px] font-medium text-white outline-none hover:bg-[color-mix(in_srgb,var(--color-accent)_66%,black)] focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:pointer-events-none disabled:opacity-40";
-const sectionHeading = "text-[11.5px] font-semibold uppercase tracking-wide text-ink-secondary";
+// overdue: the danger color on the panel itself, ringed — a tint under it
+// drops below 4.5:1 on a selected (raised) row (INSP-I r1 #12)
+const OVERDUE = "border-danger/50 bg-panel font-semibold text-danger";
+const sectionHeading ="text-[11.5px] font-semibold uppercase tracking-wide text-ink-secondary";
 /** Where the decisions sit: in the fixed footer on a roomy window; on a short
  * or narrow one, in the scrolling item after the steps (INSP-I r1 #5). */
 const ROOMY = "max-sm:hidden [@media(max-height:760px)]:hidden";
@@ -204,7 +207,7 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                           </span>
                         </span>
                         {each.due && (
-                          <span className={cn("mt-0.5 max-w-[96px] shrink-0 truncate rounded-full px-1.5 py-px text-[11px]", overdue ? "bg-danger/8 font-semibold text-danger" : "bg-inset font-medium text-ink-secondary")}>
+                          <span className={cn("mt-0.5 max-w-[96px] shrink-0 truncate rounded-full border px-1.5 py-px text-[11px]", overdue ? OVERDUE : "border-transparent bg-inset font-medium text-ink-secondary")}>
                             {each.due}
                           </span>
                         )}
@@ -242,7 +245,7 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
       )}
 
       {/* what was just done, over everything: it names its item, which may have left the screen (INSP-I r1 #9) */}
-      <div role="status" aria-live="polite" className="pointer-events-none absolute inset-x-0 bottom-3 z-10 flex justify-center px-4">
+      <div role="status" aria-live="polite" className="pointer-events-none absolute inset-x-0 top-[64px] z-10 flex justify-center px-4 sm:top-[70px]">
         {props.notice ? (
           <p data-resolver-notice="" className="pointer-events-auto flex max-w-[560px] items-start gap-2 rounded-xl border border-success/30 bg-card px-3.5 py-2.5 text-[13px] leading-snug text-ink shadow-xl">
             <CircleCheck size={15} aria-hidden="true" className="mt-px shrink-0 text-success" />
@@ -320,7 +323,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
         {(item.due || item.link) && (
           <div className="mt-3 flex flex-wrap items-center gap-2">
             {item.due && (
-              <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px]", overdue ? "bg-danger/8 font-semibold text-danger" : "bg-inset font-medium text-ink-secondary")}>
+              <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px]", overdue ? OVERDUE : "border-transparent bg-inset font-medium text-ink-secondary")}>
                 <Clock size={13} aria-hidden="true" />
                 {t(overdue ? "needsYou.screen.overdue" : "needsYou.screen.due", { due: item.due })}
               </span>
@@ -431,6 +434,18 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           </div>
         ) : null}
         <div className="flex flex-wrap items-center justify-end gap-1.5">
+          {item.options?.length ? (
+            // short or narrow window: the decisions are in the item, after the steps — one tap away
+            <button
+              type="button"
+              data-resolver-jump=""
+              onClick={() => document.getElementById("needs-you-decide-inline")?.scrollIntoView({ block: "start", behavior: "smooth" })}
+              className={cn(strongButton, "mr-auto py-1.5", CRAMPED)}
+            >
+              <ListChecks size={14} aria-hidden="true" />
+              {t("needsYou.screen.jumpToDecisions", { count: item.options.length })}
+            </button>
+          ) : null}
           <button type="button" data-resolver-conversation="" onClick={() => props.onOpenConversation(item)} className={quietButton}>
             <MessageSquare size={14} aria-hidden="true" />
             {t("needsYou.screen.openConversation")}

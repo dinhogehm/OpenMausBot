@@ -148,8 +148,12 @@ describe("the resolution screen (I1)", () => {
     const decisions = tree.filter((node) => "data-resolver-option" in node.props);
     expect(decisions.map((node) => `${node.props["data-placement"]}:${node.props["data-resolver-option"]}`)).toEqual(["inline:0", "inline:1", "footer:0", "footer:1"]);
     // the two places are complementary: footer on a roomy window, inline otherwise
-    const holders = tree.filter((node) => typeof node.props.className === "string" && /\[@media\((?:max|min)-height:76[01]px\)\]:hidden/.test(node.props.className as string));
+    const holders = tree.filter((node) => node.type === "div" && typeof node.props.className === "string" && /\[@media\((?:max|min)-height:76[01]px\)\]:hidden/.test(node.props.className as string));
     expect(holders.map((node) => node.props.className)).toEqual(["mt-6 sm:[@media(min-height:761px)]:hidden", "mb-3 max-sm:hidden [@media(max-height:760px)]:hidden"]);
+    // on a cramped window the footer offers to jump to them
+    const jump = tree.find((node) => "data-resolver-jump" in node.props)!;
+    expect(String(jump.props.className)).toContain("sm:[@media(min-height:761px)]:hidden");
+    expect(Children.toArray(jump.props.children).join("")).toContain("Ver as 2 decisões");
     // every decision button looks the same, and says what it sends (whole, inline)
     expect(new Set(decisions.map((node) => node.props.className)).size).toBe(1);
     const inlineReply = tree.find((node) => node.props.id === "needs-you-option-inline-0")!;

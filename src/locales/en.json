@@ -938,6 +938,7 @@
   "needsYou.screen.copyStep": "Copy the command of step {number}",
   "needsYou.screen.openStep": "Open {what} (step {number})",
   "needsYou.screen.dismissNotice": "Dismiss the notice",
+  "needsYou.screen.jumpToDecisions": "See the {count} decisions",
   "needsYou.screen.copied": "Copied",
   "needsYou.screen.copyFailed": "Couldn’t copy. Select the command and copy it by hand.",
   "needsYou.screen.replyLabel": "Your answer",

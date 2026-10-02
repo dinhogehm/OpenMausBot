@@ -862,6 +862,7 @@
   "needsYou.screen.copyStep": "Copiar o comando do passo {number}",
   "needsYou.screen.openStep": "Abrir {what} (passo {number})",
   "needsYou.screen.dismissNotice": "Fechar o aviso",
+  "needsYou.screen.jumpToDecisions": "Ver as {count} decisões",
   "needsYou.screen.copied": "Copiado",
   "needsYou.screen.copyFailed": "Não deu para copiar. Selecione o comando e copie à mão.",
   "needsYou.screen.replyLabel": "Sua resposta",

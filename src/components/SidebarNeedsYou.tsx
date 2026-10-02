@@ -48,38 +48,47 @@ export function SidebarNeedsYou({ items, density, now, onOpen, onResolve, onOpen
           const overdue = at !== null && at < clock;
           const label = [t("needsYou.item", { title: item.title, name: item.botName, age }), item.due ? t("needsYou.due", { due: item.due }) : ""].filter(Boolean).join(" · ");
           const Icon = item.approval ? ShieldQuestion : item.options?.length ? ListChecks : item.pendingId ? ListTodo : CircleAlert;
+          const copy = Boolean(item.pendingId && item.command && !item.steps?.length);
+          const link = Boolean(item.pendingId && item.link);
+          const resolve = Boolean(item.pendingId && onResolve);
+          const actions = Number(copy) + Number(link) + Number(resolve);
           return (
-            <li key={`${item.botId}-${item.threadId}-${item.pendingId ?? ""}`} className="group flex items-center">
+            <li key={`${item.botId}-${item.threadId}-${item.pendingId ?? ""}`} className="relative">
               <button
                 type="button"
                 data-needs-you-row={item.threadId}
                 aria-label={t("needsYou.openItem", { label })}
                 title={label}
                 onClick={() => onOpen(item)}
-                className="flex min-w-0 flex-1 items-start gap-2 px-2.5 py-1.5 text-left text-[12px] text-ink outline-none hover:bg-raised/60 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
+                className="flex w-full min-w-0 items-start gap-2 px-2.5 py-1.5 text-left text-[12px] text-ink outline-none hover:bg-raised/60 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
               >
                 <Icon size={13} aria-hidden="true" className="mt-px shrink-0 text-warning" />
                 <span className="min-w-0 flex-1">
-                  {/* the essential first, in up to two lines: never only a mention */}
-                  {/* no "block" here: it would undo line-clamp's -webkit-box (INSP-I r1 #7) */}
+                  {/* the title has the row's whole width, in up to two lines (no "block": it
+                      would undo line-clamp's -webkit-box — INSP-I r1 #7) */}
                   <span className="line-clamp-2 break-words leading-snug">{item.title}</span>
-                  <span className="block truncate text-[10.5px] text-ink-secondary">{item.botName}</span>
+                  {/* who and when on the second line; the row's buttons sit at its end */}
+                  <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-ink-secondary" style={{ paddingRight: actions * 24 }}>
+                    <span className="min-w-0 truncate">{item.botName}</span>
+                    <span aria-hidden="true">·</span>
+                    <span className={cn("shrink-0 tabular-nums", overdue && "font-semibold text-danger")}>{item.due ?? age}</span>
+                  </span>
                 </span>
-                <span className={cn("mt-px max-w-[72px] shrink-0 truncate text-[10.5px] tabular-nums", overdue ? "font-medium text-danger" : "text-ink-secondary")}>{item.due ?? age}</span>
               </button>
-              {item.pendingId && item.command && !item.steps?.length && (
+              {actions > 0 && <span className="absolute bottom-1 right-1.5 flex items-center">
+              {copy && (
                 <button
                   type="button"
                   data-needs-you-copy={item.command}
-                  aria-label={t("needsYou.copy", { command: item.command })}
-                  title={t("needsYou.copy", { command: item.command })}
+                  aria-label={t("needsYou.copy", { command: item.command! })}
+                  title={t("needsYou.copy", { command: item.command! })}
                   onClick={() => onCopy(item.command!)}
                   className="flex size-6 shrink-0 items-center justify-center rounded text-ink-secondary hover:bg-raised hover:text-ink"
                 >
                   <Copy size={12} aria-hidden="true" />
                 </button>
               )}
-              {item.pendingId && item.link && (
+              {link && (
                 <button
                   type="button"
                   data-needs-you-link={item.link}
@@ -91,17 +100,18 @@ export function SidebarNeedsYou({ items, density, now, onOpen, onResolve, onOpen
                   <ExternalLink size={12} aria-hidden="true" />
                 </button>
               )}
-              {item.pendingId && onResolve && (
+              {resolve && (
                 <button
                   type="button"
                   aria-label={t("needsYou.resolve", { title: item.title })}
                   title={t("needsYou.resolve", { title: item.title })}
-                  onClick={() => onResolve(item)}
-                  className="mr-1.5 flex size-6 shrink-0 items-center justify-center rounded text-ink-secondary hover:bg-raised hover:text-ink"
+                  onClick={() => onResolve!(item)}
+                  className="flex size-6 shrink-0 items-center justify-center rounded text-ink-secondary hover:bg-raised hover:text-ink"
                 >
                   <Check size={12} aria-hidden="true" />
                 </button>
               )}
+              </span>}
             </li>
           );
         })}
