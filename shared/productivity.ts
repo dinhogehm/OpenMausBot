@@ -331,6 +331,9 @@ export interface ReportCoverage {
   githubDeployments: { from: number | null; to: number | null };
   /** Instants with no release source at all inside the period (gaps ≥ 1 day). */
   releaseGaps: Array<{ from: number; to: number }>;
+  /** How much of the period, and of the previous one, a release source covers:
+   * production numbers are compared only when the previous period has one. */
+  releaseCoverage: { period: "full" | "partial" | "none"; previous: "full" | "partial" | "none" };
   github: { syncedAt: number | null; complete: boolean; issues: number; prs: number };
   usage: { from: number | null };
   digests: { from: number | null };

@@ -409,6 +409,7 @@ export function buildProductivityReport(input: ReportInputs): ProductivityReport
     releaseLog: { from: input.logCoverage.from, to: input.logCoverage.to },
     githubDeployments: { from: deployed.length ? Math.min(...deployed) : null, to: deployed.length ? Math.max(...deployed) : null },
     releaseGaps: gapsIn(spans, period.from, Math.min(period.to, now), DAY_MS),
+    releaseCoverage: { period: coverageOf(spans, period.from, Math.min(period.to, now)), previous: coverageOf(spans, previous.from, Math.min(previous.to, now)) },
     github: { syncedAt: input.github.syncedAt, complete: input.github.prWalk.complete && input.github.issueWalk.complete, issues: Object.keys(input.github.issues).length, prs: Object.keys(input.github.prs).length },
     usage: { from: input.local.usageFrom },
     digests: { from: input.local.digestsFrom },

@@ -97,22 +97,25 @@ export function executiveSummary(report: ProductivityReport, lang: SummaryLang =
   const active = k.activeMs > 0 ? formatDuration(k.activeMs, lang) : "0 min";
   const resolved = k.closedIssues - k.closedNotPlanned;
   const previousResolved = p.closedIssues - p.closedNotPlanned;
-  const leadTrend = k.leadIssueToProd.n && p.leadIssueToProd.n;
+  // production numbers of a previous period no release source covers are unknown, not zero
+  const noPrevious = report.coverage.releaseCoverage?.previous === "none";
+  const rp = (value: number) => (noPrevious ? null : value);
+  const leadTrend = k.leadIssueToProd.n && p.leadIssueToProd.n && !noPrevious;
   if (pt) {
     return [
-      `Produção: ${n(k.deliveries, "entrega", "entregas")} (${trendText(k.deliveries, p.deliveries)}), com ${n(k.deliveredPrs, "PR", "PRs")} e ${n(k.deliveredIssues, "issue", "issues")} no ar${coverageNote}.`,
+      `Produção: ${n(k.deliveries, "entrega", "entregas")} (${trendText(k.deliveries, rp(p.deliveries))}), com ${n(k.deliveredPrs, "PR", "PRs")} e ${n(k.deliveredIssues, "issue", "issues")} no ar${coverageNote}.`,
       `Vazão: ${n(k.mergedPrs, "PR mergeada", "PRs mergeadas")} (${trendText(k.mergedPrs, p.mergedPrs)}) e ${n(resolved, "issue resolvida", "issues resolvidas")} (${trendText(resolved, previousResolved)}), ${n(k.closedByType.bug, "bug", "bugs")} e ${formatNumber(k.closedByPriority.p0 + k.closedByPriority.p1)} P0/P1.`,
       `Lead time issue → produção: ${lead(k.leadIssueToProd, lang)}${leadTrend ? `; mediana ${trendText(k.leadIssueToProd.median, p.leadIssueToProd.median, lang, "duration")}` : ""}.`,
       `Backlog agora: ${n(b.openIssues, "issue aberta", "issues abertas")}, ${formatNumber(b.openP0 + b.openP1)} P0/P1${oldest}; ${n(b.prsAwaitingGate, "PR esperando", "PRs esperando")} o gate.`,
-      `Falhas: ${n(k.failedReleases, "tentativa de release falhou", "tentativas de release falharam")} (${trendText(k.failedReleases, p.failedReleases)}), ${n(k.declinedReleases, "recusada", "recusadas")}; produção travada ${blocked}. Bots: ${n(k.turns, "turno", "turnos")}, ${active} ativos${k.costUsd !== null ? `, ${formatMoney(k.costUsd)}` : ""}.`,
+      `Falhas: ${n(k.failedReleases, "tentativa de release falhou", "tentativas de release falharam")} (${trendText(k.failedReleases, rp(p.failedReleases))}), ${n(k.declinedReleases, "recusada", "recusadas")}; produção travada ${blocked}. Bots: ${n(k.turns, "turno", "turnos")}, ${active} ativos${k.costUsd !== null ? `, ${formatMoney(k.costUsd)}` : ""}.`,
     ];
   }
   return [
-    `Production: ${n(k.deliveries, "delivery", "deliveries")} (${trendText(k.deliveries, p.deliveries, lang)}), carrying ${n(k.deliveredPrs, "PR", "PRs")} and ${n(k.deliveredIssues, "issue", "issues")} live${coverageNote}.`,
+    `Production: ${n(k.deliveries, "delivery", "deliveries")} (${trendText(k.deliveries, rp(p.deliveries), lang)}), carrying ${n(k.deliveredPrs, "PR", "PRs")} and ${n(k.deliveredIssues, "issue", "issues")} live${coverageNote}.`,
     `Throughput: ${n(k.mergedPrs, "PR merged", "PRs merged")} (${trendText(k.mergedPrs, p.mergedPrs, lang)}) and ${n(resolved, "issue resolved", "issues resolved")} (${trendText(resolved, previousResolved, lang)}), ${n(k.closedByType.bug, "bug", "bugs")} and ${formatNumber(k.closedByPriority.p0 + k.closedByPriority.p1, lang)} P0/P1.`,
     `Lead time issue → production: ${lead(k.leadIssueToProd, lang)}${leadTrend ? `; median ${trendText(k.leadIssueToProd.median, p.leadIssueToProd.median, lang, "duration")}` : ""}.`,
     `Backlog now: ${n(b.openIssues, "open issue", "open issues")}, ${formatNumber(b.openP0 + b.openP1, lang)} P0/P1${oldest}; ${n(b.prsAwaitingGate, "PR waiting", "PRs waiting")} for the gate.`,
-    `Failures: ${n(k.failedReleases, "release attempt failed", "release attempts failed")} (${trendText(k.failedReleases, p.failedReleases, lang)}), ${formatNumber(k.declinedReleases, lang)} declined; production blocked ${blocked}. Bots: ${n(k.turns, "turn", "turns")}, ${active} active${k.costUsd !== null ? `, ${formatMoney(k.costUsd, lang)}` : ""}.`,
+    `Failures: ${n(k.failedReleases, "release attempt failed", "release attempts failed")} (${trendText(k.failedReleases, rp(p.failedReleases), lang)}), ${formatNumber(k.declinedReleases, lang)} declined; production blocked ${blocked}. Bots: ${n(k.turns, "turn", "turns")}, ${active} active${k.costUsd !== null ? `, ${formatMoney(k.costUsd, lang)}` : ""}.`,
   ];
 }
 
@@ -138,26 +141,33 @@ const nums = (items: ReadonlyArray<{ number: number }>, max = 30) => items.lengt
   ? `${items.slice(0, max).map((item) => `#${item.number}`).join(", ")}${items.length > max ? ` +${items.length - max}` : ""}`
   : "—";
 
-function kpiRows(k: ReportKpis, p: ReportKpis): Array<[string, string, string, string]> {
-  const row = (name: string, current: number, previous: number): [string, string, string, string] => [name, formatNumber(current), formatNumber(previous), trendText(current, previous)];
-  const leadRow = (name: string, current: Distribution, previous: Distribution): [string, string, string, string] =>
-    [name, current.n ? `${formatDuration(current.median)} / ${formatDuration(current.p90)}` : "—", previous.n ? `${formatDuration(previous.median)} / ${formatDuration(previous.p90)}` : "—", trendText(current.median, previous.median, "pt-BR", "duration")];
+/** The indicators table. `noPrevious`: no release source covers the previous
+ * period, so its production numbers are unknown — shown as such, never as 0. */
+function kpiRows(k: ReportKpis, p: ReportKpis, noPrevious = false): Array<[string, string, string, string]> {
+  const UNKNOWN = "s/ fonte";
+  const NO_BASE = "sem base de comparação";
+  const row = (name: string, current: number, previous: number, release = false): [string, string, string, string] =>
+    release && noPrevious ? [name, formatNumber(current), UNKNOWN, NO_BASE] : [name, formatNumber(current), formatNumber(previous), trendText(current, previous)];
+  const leadRow = (name: string, current: Distribution, previous: Distribution, release = false): [string, string, string, string] =>
+    [name, current.n ? `${formatDuration(current.median)} / ${formatDuration(current.p90)}` : "—", release && noPrevious ? UNKNOWN : previous.n ? `${formatDuration(previous.median)} / ${formatDuration(previous.p90)}` : "—", release && noPrevious ? NO_BASE : trendText(current.median, previous.median, "pt-BR", "duration")];
   return [
-    row("Entregas em produção", k.deliveries, p.deliveries),
-    row("PRs entregues em produção", k.deliveredPrs, p.deliveredPrs),
-    row("Issues entregues em produção", k.deliveredIssues, p.deliveredIssues),
+    row("Entregas em produção", k.deliveries, p.deliveries, true),
+    row("PRs entregues em produção", k.deliveredPrs, p.deliveredPrs, true),
+    row("Issues entregues em produção", k.deliveredIssues, p.deliveredIssues, true),
     row("PRs mergeadas (sem carriers)", k.mergedPrs, p.mergedPrs),
     row("Issues fechadas", k.closedIssues, p.closedIssues),
+    row("· resolvidas (concluídas)", k.closedIssues - k.closedNotPlanned, p.closedIssues - p.closedNotPlanned),
+    row("· não planejadas ou duplicadas", k.closedNotPlanned, p.closedNotPlanned),
     row("· bugs", k.closedByType.bug, p.closedByType.bug),
     row("· melhorias", k.closedByType.improvement, p.closedByType.improvement),
     row("· P0/P1", k.closedByPriority.p0 + k.closedByPriority.p1, p.closedByPriority.p0 + p.closedByPriority.p1),
     row("· P2", k.closedByPriority.p2, p.closedByPriority.p2),
-    leadRow("Lead time issue → produção (mediana / p90)", k.leadIssueToProd, p.leadIssueToProd),
-    leadRow("Lead time issue → merge (mediana / p90)", k.leadIssueToMerge, p.leadIssueToMerge),
-    leadRow("Lead time merge → produção (mediana / p90)", k.leadMergeToProd, p.leadMergeToProd),
-    row("Releases falhados (tentativas)", k.failedReleases, p.failedReleases),
-    row("Releases recusados", k.declinedReleases, p.declinedReleases),
-    [ "Produção travada", formatDuration(k.blockedMs), formatDuration(p.blockedMs), trendText(k.blockedMs, p.blockedMs, "pt-BR", "duration")],
+    leadRow("Lead time issue → produção (mediana / p90)", k.leadIssueToProd, p.leadIssueToProd, true),
+    leadRow("Lead time issue → merge (mediana / p90)", k.leadIssueToMerge, p.leadIssueToMerge, true),
+    leadRow("Lead time merge → produção (mediana / p90)", k.leadMergeToProd, p.leadMergeToProd, true),
+    row("Releases falhados (tentativas)", k.failedReleases, p.failedReleases, true),
+    row("Releases recusados", k.declinedReleases, p.declinedReleases, true),
+    noPrevious ? ["Produção travada", formatDuration(k.blockedMs), UNKNOWN, NO_BASE] : ["Produção travada", formatDuration(k.blockedMs), formatDuration(p.blockedMs), trendText(k.blockedMs, p.blockedMs, "pt-BR", "duration")],
     row("Issues abertas ao fim", k.openIssuesAtEnd, p.openIssuesAtEnd),
     row("Turnos dos bots", k.turns, p.turns),
     [ "Horas ativas dos bots", formatDuration(k.activeMs), formatDuration(p.activeMs), trendText(k.activeMs, p.activeMs, "pt-BR", "duration")],
@@ -193,7 +203,7 @@ export function reportMarkdown(report: ProductivityReport): string {
   lines.push("## Resumo executivo", "");
   executiveSummary(report).forEach((line, index) => lines.push(`${index + 1}. ${line}`));
   lines.push("", "## Indicadores", "", "| Métrica | Período | Anterior | Variação |", "|---|---:|---:|---|");
-  for (const [name, current, previous, change] of kpiRows(report.kpis, report.previousKpis)) lines.push(`| ${md(name)} | ${current} | ${previous} | ${change} |`);
+  for (const [name, current, previous, change] of kpiRows(report.kpis, report.previousKpis, report.coverage.releaseCoverage?.previous === "none")) lines.push(`| ${md(name)} | ${current} | ${previous} | ${change} |`);
   lines.push("", `## Por ${granularityName(g, "pt-BR")}`, "", "| Período | Entregas | PRs entregues | PRs mergeadas | Issues fechadas | Bugs fechados | Falhas | Turnos dos bots |", "|---|---:|---:|---:|---:|---:|---:|---:|");
   for (const bucket of report.buckets) {
     const known = bucket.releaseCoverage !== "none";
@@ -514,15 +524,24 @@ export function reportPdf(report: ProductivityReport): Buffer {
   });
   doc.y += summaryHeight + 14;
   // KPI cards: 4 per row
+  const noPrevious = report.coverage.releaseCoverage?.previous === "none";
+  /** A card's trend line and whether it is good news (null: neither, or nothing to compare). */
+  const moved = (current: number | null, previous: number | null, better: "up" | "down", options: { release?: boolean; kind?: "count" | "duration" } = {}) => {
+    if (options.release && noPrevious) return { change: "anterior sem fonte", good: null };
+    const change = trendText(current, previous, "pt-BR", options.kind ?? "count");
+    const good = current === null || previous === null || current === previous ? null : better === "up" ? current > previous : current < previous;
+    return { change, good };
+  };
+  const resolved = k.closedIssues - k.closedNotPlanned;
   const cards: Array<{ label: string; value: string; change: string; good: boolean | null }> = [
-    { label: "Entregas em produção", value: formatNumber(k.deliveries), change: trendText(k.deliveries, p.deliveries), good: k.deliveries === p.deliveries ? null : k.deliveries > p.deliveries },
-    { label: "PRs entregues", value: formatNumber(k.deliveredPrs), change: trendText(k.deliveredPrs, p.deliveredPrs), good: k.deliveredPrs === p.deliveredPrs ? null : k.deliveredPrs > p.deliveredPrs },
-    { label: "PRs mergeadas", value: formatNumber(k.mergedPrs), change: trendText(k.mergedPrs, p.mergedPrs), good: k.mergedPrs === p.mergedPrs ? null : k.mergedPrs > p.mergedPrs },
-    { label: "Issues fechadas", value: formatNumber(k.closedIssues), change: trendText(k.closedIssues, p.closedIssues), good: k.closedIssues === p.closedIssues ? null : k.closedIssues > p.closedIssues },
-    { label: "Lead time issue → prod. (mediana)", value: formatDuration(k.leadIssueToProd.median), change: trendText(k.leadIssueToProd.median, p.leadIssueToProd.median, "pt-BR", "duration"), good: k.leadIssueToProd.median === null || p.leadIssueToProd.median === null || k.leadIssueToProd.median === p.leadIssueToProd.median ? null : k.leadIssueToProd.median < p.leadIssueToProd.median },
-    { label: "Issues abertas / P0-P1", value: `${formatNumber(report.backlog.openIssues)} / ${formatNumber(report.backlog.openP0 + report.backlog.openP1)}`, change: `${formatNumber(report.backlog.prsAwaitingGate)} PRs esperando o gate`, good: null },
-    { label: "Releases falhados", value: formatNumber(k.failedReleases), change: trendText(k.failedReleases, p.failedReleases), good: k.failedReleases === p.failedReleases ? null : k.failedReleases < p.failedReleases },
-    { label: "Produção travada", value: formatDuration(k.blockedMs) === "—" ? "0 h" : formatDuration(k.blockedMs), change: trendText(k.blockedMs, p.blockedMs, "pt-BR", "duration"), good: k.blockedMs === p.blockedMs ? null : k.blockedMs < p.blockedMs },
+    { label: "Entregas em produção", value: formatNumber(k.deliveries), ...moved(k.deliveries, p.deliveries, "up", { release: true }) },
+    { label: "PRs entregues em produção", value: formatNumber(k.deliveredPrs), ...moved(k.deliveredPrs, p.deliveredPrs, "up", { release: true }) },
+    { label: "PRs mergeadas", value: formatNumber(k.mergedPrs), ...moved(k.mergedPrs, p.mergedPrs, "up") },
+    { label: "Issues resolvidas", value: formatNumber(resolved), ...moved(resolved, p.closedIssues - p.closedNotPlanned, "up") },
+    { label: "Lead time (mediana)", value: formatDuration(k.leadIssueToProd.median), ...moved(k.leadIssueToProd.median, p.leadIssueToProd.median, "down", { release: true, kind: "duration" }) },
+    { label: "Issues abertas / P0-P1", value: `${formatNumber(report.backlog.openIssues)} / ${formatNumber(report.backlog.openP0 + report.backlog.openP1)}`, change: `${formatNumber(report.backlog.prsAwaitingGate)} ${report.backlog.prsAwaitingGate === 1 ? "PR esperando" : "PRs esperando"} o gate`, good: null },
+    { label: "Releases falhados", value: formatNumber(k.failedReleases), ...moved(k.failedReleases, p.failedReleases, "down", { release: true }) },
+    { label: "Produção travada", value: k.blockedMs > 0 ? formatDuration(k.blockedMs) : "0 h", ...moved(k.blockedMs, p.blockedMs, "down", { release: true, kind: "duration" }) },
   ];
   const gap = 8;
   const cardWidth = (contentWidth - gap * 3) / 4;
@@ -556,7 +575,7 @@ export function reportPdf(report: ProductivityReport): Buffer {
   heading(doc, "Indicadores");
   table(doc, {
     columns: [{ label: "Métrica", width: contentWidth * 0.46 }, { label: "Período", width: contentWidth * 0.17, align: "right" }, { label: "Anterior", width: contentWidth * 0.17, align: "right" }, { label: "Variação", width: contentWidth * 0.2 }],
-    rows: kpiRows(k, p),
+    rows: kpiRows(k, p, noPrevious),
   });
   // releases
   heading(doc, "Releases do período");
@@ -579,7 +598,7 @@ export function reportPdf(report: ProductivityReport): Buffer {
   if (!report.bots.length) { doc.text(doc.margin, doc.y + 8, "Sem atividade registrada dos bots no período.", { size: 9, color: MUTED }); doc.y += 20; }
   else {
     table(doc, {
-      columns: [{ label: "Bot", width: contentWidth * 0.3 }, { label: "Turnos", width: contentWidth * 0.12, align: "right" }, { label: "Horas ativas", width: contentWidth * 0.15, align: "right" }, { label: "Custo", width: contentWidth * 0.15, align: "right" }, { label: "Precisa de você (abertos / resolvidos)", width: contentWidth * 0.28, align: "right" }],
+      columns: [{ label: "Bot", width: contentWidth * 0.24 }, { label: "Turnos", width: contentWidth * 0.12, align: "right" }, { label: "Horas ativas", width: contentWidth * 0.14, align: "right" }, { label: "Custo", width: contentWidth * 0.14, align: "right" }, { label: "Precisa de você (abertos/resolvidos)", width: contentWidth * 0.36, align: "right" }],
       rows: report.bots.map((bot) => [bot.name, formatNumber(bot.turns), formatDuration(bot.timedTurns ? bot.activeMs : null), formatMoney(bot.costUsd), `${bot.needsYouOpened} / ${bot.needsYouResolved}`]),
     });
   }
