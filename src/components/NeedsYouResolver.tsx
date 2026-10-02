@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import {
-  ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Clock, Copy, ExternalLink, Inbox,
-  ListChecks, Loader2, MessageSquare, Send, ShieldQuestion, Sparkles, X,
+  ArrowLeft, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock, Copy, ExternalLink, Inbox,
+  ListChecks, ListTodo, Loader2, MessageSquare, Send, ShieldQuestion, Sparkles, X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
@@ -12,21 +12,22 @@ import {
 } from "@/lib/needs-you";
 
 /** What a key press does on the resolution screen. Text fields keep their
- * keys (only ⌘/Ctrl+Enter sends); elsewhere ↑/↓ (or k/j) walk the items, r
- * goes to the reply, Escape closes. Decisions have no shortcut on purpose:
- * one stray key must never answer a bot. */
-export type ResolverKeyAction = "close" | "prev" | "next" | "send" | "focusReply" | null;
+ * keys: ⌘/Ctrl+Enter sends and Escape only leaves the field. Elsewhere ↑/↓
+ * (or k/j) walk the items, r goes to the reply, Escape closes. Decisions
+ * have no shortcut on purpose: one stray key must never answer a bot. */
+export type ResolverKeyAction = "close" | "leaveField" | "prev" | "next" | "send" | "focusReply" | null;
 export function resolverKeyAction(event: { key: string; metaKey?: boolean; ctrlKey?: boolean; altKey?: boolean; inField: boolean }): ResolverKeyAction {
-  if (event.key === "Escape") return "close";
+  if (event.key === "Escape") return event.inField ? "leaveField" : "close";
   if (event.inField) return event.key === "Enter" && (event.metaKey || event.ctrlKey) ? "send" : null;
   if (event.metaKey || event.ctrlKey || event.altKey) return null;
-  if (event.key === "ArrowDown" || event.key === "j") return "next";
-  if (event.key === "ArrowUp" || event.key === "k") return "prev";
-  if (event.key === "r") return "focusReply";
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (key === "ArrowDown" || key === "j") return "next";
+  if (key === "ArrowUp" || key === "k") return "prev";
+  if (key === "r") return "focusReply";
   return null;
 }
 
-/** What a link opens, said plainly: "PR #12", "issue #40", "sessão no Claude", or the host. */
+/** What a link opens, said plainly: "a PR #12", "a issue #40", "a sessão no Claude", or the host. */
 export function linkLabel(url: string): string {
   const github = /github\.com\/[^/]+\/[^/]+\/(pull|issues)\/(\d+)/i.exec(url);
   if (github) return t(github[1]!.toLowerCase() === "pull" ? "needsYou.link.pr" : "needsYou.link.issue", { number: github[2]! });
@@ -54,6 +55,7 @@ export interface NeedsYouResolverViewProps {
   resolveOnSend: boolean;
   busy: ResolverBusy;
   error: string | null;
+  /** What was just done, naming its item (the screen may show another one by now). */
   notice: string | null;
   copied: string | null;
   replyRef?: RefObject<HTMLTextAreaElement | null>;
@@ -73,6 +75,7 @@ export interface NeedsYouResolverViewProps {
   onResolve: (item: NeedsYouItem) => void;
   onOpenConversation: (item: NeedsYouItem) => void;
   onDismissError: () => void;
+  onDismissNotice?: () => void;
 }
 
 /** The visible list (filtered by bot, sorted) and the item on screen. */
@@ -84,9 +87,19 @@ export function resolverSelection(props: Pick<NeedsYouResolverViewProps, "items"
   return { visible, index, item: visible[index] ?? null };
 }
 
+/** The row's DOM id, for focus to follow the selection. */
+export const resolverRowId = (key: string) => `needs-you-row-${key.replace(/[^\w-]/g, "-")}`;
+
 const iconButton = "flex size-8 shrink-0 items-center justify-center rounded-lg text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus disabled:pointer-events-none disabled:opacity-35";
 const quietButton = "inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13px] text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus disabled:pointer-events-none disabled:opacity-40";
-const strongButton = "inline-flex items-center justify-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-accent-ink outline-none hover:brightness-110 focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:pointer-events-none disabled:opacity-40";
+// the accent, deepened a quarter toward black: white text on it clears 4.5:1
+// in every skin (on Midnight's #1084fe itself it is 3.6:1 — INSP-I r1 #12)
+const strongButton = "inline-flex items-center justify-center gap-1.5 rounded-lg bg-[color-mix(in_srgb,var(--color-accent)_74%,black)] px-3.5 py-2 text-[13px] font-medium text-white outline-none hover:bg-[color-mix(in_srgb,var(--color-accent)_66%,black)] focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:pointer-events-none disabled:opacity-40";
+const sectionHeading = "text-[11.5px] font-semibold uppercase tracking-wide text-ink-secondary";
+/** Where the decisions sit: in the fixed footer on a roomy window; on a short
+ * or narrow one, in the scrolling item after the steps (INSP-I r1 #5). */
+const ROOMY = "max-sm:hidden [@media(max-height:760px)]:hidden";
+const CRAMPED = "sm:[@media(min-height:761px)]:hidden";
 
 /** The resolution screen itself, without portal, focus or key handling —
  * every value and handler comes in as props, so it renders to static markup
@@ -103,9 +116,9 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
       aria-labelledby="needs-you-resolver-title"
       data-testid="needs-you-resolver"
       tabIndex={-1}
-      className="flex h-[min(760px,calc(100dvh-2rem))] w-full max-w-[1040px] flex-col overflow-hidden rounded-2xl border border-hairline/60 bg-panel text-ink shadow-2xl outline-none"
+      className="relative flex h-[min(760px,calc(100dvh-1rem))] w-full max-w-[1040px] flex-col overflow-hidden rounded-2xl border border-hairline/60 bg-panel text-ink shadow-2xl outline-none"
     >
-      <header className="flex items-center gap-2.5 border-b border-hairline/50 px-4 py-3 sm:px-5">
+      <header className="flex items-center gap-2.5 border-b border-hairline/50 px-4 py-2.5 sm:px-5 sm:py-3">
         <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-warning/12 text-warning" aria-hidden="true">
           <CircleAlert size={17} />
         </span>
@@ -142,13 +155,13 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                 </select>
                 <ChevronDown size={14} aria-hidden="true" className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-ink-secondary" />
               </label>
-              <div role="radiogroup" aria-label={t("needsYou.screen.sortLabel")} className="flex shrink-0 rounded-lg border border-hairline/60 bg-inset p-0.5">
+              {/* two toggle buttons, not a radio group: Tab reaches each, Enter/Space picks (INSP-I r1 #11a) */}
+              <div role="group" aria-label={t("needsYou.screen.sortLabel")} className="flex shrink-0 rounded-lg border border-hairline/60 bg-inset p-0.5">
                 {(["due", "age"] as const).map((sort) => (
                   <button
                     key={sort}
                     type="button"
-                    role="radio"
-                    aria-checked={props.sort === sort}
+                    aria-pressed={props.sort === sort}
                     data-sort={sort}
                     onClick={() => props.onSort(sort)}
                     className={cn("rounded-md px-2.5 py-1 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-focus", props.sort === sort ? "bg-raised font-medium text-ink shadow-sm" : "text-ink-secondary hover:text-ink")}
@@ -164,13 +177,16 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                   const key = needsYouKey(each);
                   const selected = position === index;
                   const overdue = isOverdue(each, now);
-                  const Icon = each.approval ? ShieldQuestion : each.options?.length ? ListChecks : each.pendingId ? MessageSquare : CircleAlert;
+                  const Icon = each.approval ? ShieldQuestion : each.options?.length ? ListChecks : each.pendingId ? ListTodo : CircleAlert;
                   return (
                     <li key={key} className="px-1.5">
                       <button
                         type="button"
+                        id={resolverRowId(key)}
                         data-resolver-row={key}
                         aria-current={selected ? "true" : undefined}
+                        // one tab stop for the whole list: the selected row; arrows walk the rest (INSP-I r1 #11c)
+                        tabIndex={selected ? 0 : -1}
                         onClick={() => props.onSelect(key)}
                         className={cn(
                           "relative flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus",
@@ -188,7 +204,7 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                           </span>
                         </span>
                         {each.due && (
-                          <span className={cn("mt-0.5 max-w-[92px] shrink-0 truncate rounded-full px-1.5 py-px text-[10.5px] font-medium", overdue ? "bg-danger/12 text-danger" : "bg-inset text-ink-secondary")}>
+                          <span className={cn("mt-0.5 max-w-[96px] shrink-0 truncate rounded-full px-1.5 py-px text-[11px]", overdue ? "bg-danger/8 font-semibold text-danger" : "bg-inset font-medium text-ink-secondary")}>
                             {each.due}
                           </span>
                         )}
@@ -203,12 +219,12 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                 <button type="button" onClick={() => props.onFilter(null)} className={quietButton}>{t("needsYou.screen.showAll")}</button>
               </div>
             )}
-            <p className="hidden border-t border-hairline/40 px-3 py-2 text-[11px] text-ink-tertiary md:block">{t("needsYou.screen.keys")}</p>
+            <p className="hidden border-t border-hairline/40 px-3 py-2 text-[11px] text-ink-secondary md:block">{t("needsYou.screen.keys")}</p>
           </nav>
 
           {/* the item on screen */}
           <section
-            aria-label={item ? item.title : t("needsYou.title")}
+            aria-labelledby="needs-you-item-title"
             className={cn("min-h-0 min-w-0 flex-1 flex-col md:flex", pane === "detail" ? "flex" : "hidden")}
           >
             {item ? (
@@ -224,6 +240,21 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
           </section>
         </div>
       )}
+
+      {/* what was just done, over everything: it names its item, which may have left the screen (INSP-I r1 #9) */}
+      <div role="status" aria-live="polite" className="pointer-events-none absolute inset-x-0 bottom-3 z-10 flex justify-center px-4">
+        {props.notice ? (
+          <p data-resolver-notice="" className="pointer-events-auto flex max-w-[560px] items-start gap-2 rounded-xl border border-success/30 bg-card px-3.5 py-2.5 text-[13px] leading-snug text-ink shadow-xl">
+            <CircleCheck size={15} aria-hidden="true" className="mt-px shrink-0 text-success" />
+            <span className="min-w-0 flex-1 break-words">{props.notice}</span>
+            {props.onDismissNotice && (
+              <button type="button" aria-label={t("needsYou.screen.dismissNotice")} onClick={props.onDismissNotice} className="-mr-1 shrink-0 rounded p-0.5 text-ink-secondary hover:text-ink">
+                <X size={14} aria-hidden="true" />
+              </button>
+            )}
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -245,12 +276,15 @@ function EmptyState() {
   );
 }
 
+const sameText = (a: string, b: string) => a.replace(/\W+/g, " ").trim().toLowerCase() === b.replace(/\W+/g, " ").trim().toLowerCase();
+
 function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; position: number; total: number; prevKey: string | null; nextKey: string | null }) {
   const { item, now, busy, position, total, prevKey, nextKey } = props;
   const steps = needsYouSteps(item);
   const overdue = isOverdue(item, now);
   const pending = Boolean(item.pendingId);
-  const why = item.why ?? (item.approval ? t("needsYou.why.approval", { name: item.botName }) : !pending ? t("needsYou.why.question", { name: item.botName }) : "");
+  // a real reason only: no filler, and never the title said twice (INSP-I r1 #2/#18)
+  const why = item.why && !sameText(item.why, item.title) ? item.why : item.approval ? t("needsYou.why.approval", { name: item.botName }) : "";
   const working = busy !== null;
   const replyId = `needs-you-reply-${needsYouKey(item).replace(/[^\w-]/g, "-")}`;
   return (
@@ -261,7 +295,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           {t("needsYou.screen.back")}
         </button>
         <span className="flex-1" />
-        <span className="px-1 text-[12px] tabular-nums text-ink-secondary" aria-live="polite">{t("needsYou.screen.position", { position: position + 1, total })}</span>
+        <span className="px-1 text-[12px] tabular-nums text-ink-secondary">{t("needsYou.screen.position", { position: position + 1, total })}</span>
         <button type="button" aria-label={t("needsYou.screen.prev")} title={t("needsYou.screen.prev")} data-resolver-prev="" disabled={!prevKey} onClick={() => prevKey && props.onSelect(prevKey)} className={iconButton}>
           <ChevronLeft size={17} aria-hidden="true" />
         </button>
@@ -270,25 +304,23 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-6 pt-5 sm:px-7">
-        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-ink-secondary">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4 sm:px-7 sm:pt-5">
+        <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12.5px] text-ink-secondary">
           <span><span className="font-medium text-ink">{item.botName}</span> {t("needsYou.screen.askedAgo", { age: waitingAge(item.since, now) })}</span>
           {item.threadTitle && item.threadTitle !== item.title && (
-            <>
-              <span aria-hidden="true">·</span>
-              <span className="min-w-0 max-w-full truncate">{t("needsYou.screen.inThread", { title: item.threadTitle })}</span>
-            </>
+            // the separator travels with what it introduces: never alone at a line's end (INSP-I r1 #19)
+            <span className="min-w-0 max-w-full truncate"><span aria-hidden="true">· </span>{t("needsYou.screen.inThread", { title: item.threadTitle })}</span>
           )}
         </p>
-        <h2 className="mt-2 break-words text-[19px] font-semibold leading-snug text-ink sm:text-[21px]">{item.title}</h2>
-        {/* a title that only named who was rewritten from the ask: say what the bot wrote */}
-        {pending && item.rawTitle?.trim().startsWith("@") && (
-          <p className="mt-1 break-words text-[12px] text-ink-tertiary">{t("needsYou.screen.botWrote", { title: item.rawTitle })}</p>
+        <h2 id="needs-you-item-title" className="mt-1.5 break-words text-[18px] font-semibold leading-snug text-ink sm:mt-2 sm:text-[21px]">{item.title}</h2>
+        {/* a title that only named someone was set aside: say what the bot wrote */}
+        {pending && item.rawTitle && (
+          <p className="mt-1 break-words text-[12px] text-ink-secondary">{t("needsYou.screen.botWrote", { title: item.rawTitle })}</p>
         )}
         {(item.due || item.link) && (
           <div className="mt-3 flex flex-wrap items-center gap-2">
             {item.due && (
-              <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium", overdue ? "bg-danger/12 text-danger" : "bg-inset text-ink-secondary")}>
+              <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px]", overdue ? "bg-danger/8 font-semibold text-danger" : "bg-inset font-medium text-ink-secondary")}>
                 <Clock size={13} aria-hidden="true" />
                 {t(overdue ? "needsYou.screen.overdue" : "needsYou.screen.due", { due: item.due })}
               </span>
@@ -303,14 +335,14 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
         )}
 
         {why && (
-          <section className="mt-6" aria-labelledby="needs-you-why">
-            <h3 id="needs-you-why" className="text-[11.5px] font-semibold uppercase tracking-wide text-ink-tertiary">{t("needsYou.screen.why")}</h3>
+          <section className="mt-5 sm:mt-6" aria-labelledby="needs-you-why">
+            <h3 id="needs-you-why" className={sectionHeading}>{t("needsYou.screen.why")}</h3>
             <p className="mt-1.5 max-w-[68ch] text-[14px] leading-relaxed text-ink">{why}</p>
           </section>
         )}
 
-        <section className="mt-6" aria-labelledby="needs-you-steps">
-          <h3 id="needs-you-steps" className="text-[11.5px] font-semibold uppercase tracking-wide text-ink-tertiary">{t("needsYou.screen.steps")}</h3>
+        <section className="mt-5 sm:mt-6" aria-labelledby="needs-you-steps">
+          <h3 id="needs-you-steps" className={sectionHeading}>{t("needsYou.screen.steps")}</h3>
           {steps.length ? (
             <ol className="mt-2.5 flex flex-col gap-3">
               {steps.map((step, n) => (
@@ -320,21 +352,21 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
                     <p className="text-[14px] leading-relaxed text-ink"><span className="sr-only">{t("needsYou.screen.stepNumber", { number: n + 1 })} </span>{step.text}</p>
                     {step.command && (
                       <div className="mt-2 flex items-start gap-2 rounded-lg border border-hairline/60 bg-inset py-2 pl-3 pr-1.5">
-                        <code className="min-w-0 flex-1 whitespace-pre-wrap py-0.5 [overflow-wrap:anywhere] font-mono text-[12.5px] leading-relaxed text-ink">{step.command}</code>
+                        <code className="min-w-0 flex-1 whitespace-pre-wrap py-0.5 font-mono text-[12.5px] leading-relaxed text-ink [overflow-wrap:anywhere]">{step.command}</code>
                         <button
                           type="button"
                           data-resolver-copy={step.command}
-                          aria-label={t("needsYou.copy", { command: step.command })}
+                          aria-label={t("needsYou.screen.copyStep", { number: n + 1 })}
                           onClick={() => props.onCopy(step.command!)}
                           className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus"
                         >
                           {props.copied === step.command ? <Check size={13} aria-hidden="true" className="text-success" /> : <Copy size={13} aria-hidden="true" />}
-                          {props.copied === step.command ? t("needsYou.screen.copied") : t("needsYou.screen.copy")}
+                          <span aria-hidden="true">{props.copied === step.command ? t("needsYou.screen.copied") : t("needsYou.screen.copy")}</span>
                         </button>
                       </div>
                     )}
                     {step.link && (
-                      <button type="button" data-resolver-link={step.link} onClick={() => props.onOpenLink(step.link!)} title={step.link} className="mt-1.5 inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 -ml-1.5 text-[13px] text-accent-text outline-none hover:bg-raised focus-visible:ring-2 focus-visible:ring-focus">
+                      <button type="button" data-resolver-link={step.link} aria-label={t("needsYou.screen.openStep", { what: linkLabel(step.link), number: n + 1 })} onClick={() => props.onOpenLink(step.link!)} title={step.link} className="-ml-1.5 mt-1.5 inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] text-accent-text outline-none hover:bg-raised focus-visible:ring-2 focus-visible:ring-focus">
                         <ExternalLink size={13} aria-hidden="true" />
                         {t("needsYou.screen.open", { what: linkLabel(step.link) })}
                       </button>
@@ -348,9 +380,15 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           )}
         </section>
 
-        <section className="mt-7" aria-labelledby={`${replyId}-label`}>
-          <label id={`${replyId}-label`} htmlFor={replyId} className="text-[11.5px] font-semibold uppercase tracking-wide text-ink-tertiary">
-            {t("needsYou.screen.replyLabel", { name: item.botName })}
+        {item.options?.length ? (
+          <div className={cn("mt-6", CRAMPED)}>
+            <Decisions {...props} placement="inline" />
+          </div>
+        ) : null}
+
+        <section className="mt-6 sm:mt-7" aria-labelledby={`${replyId}-label`}>
+          <label id={`${replyId}-label`} htmlFor={replyId} className={sectionHeading}>
+            {t("needsYou.screen.replyLabel")}
           </label>
           <div className="mt-2 rounded-xl border border-hairline/60 bg-inset focus-within:border-focus focus-within:ring-1 focus-within:ring-focus">
             <textarea
@@ -360,8 +398,8 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
               rows={3}
               disabled={working}
               onChange={(event) => props.onDraft(event.target.value)}
-              placeholder={t("needsYou.screen.replyPlaceholder")}
-              className="block w-full resize-none bg-transparent px-3 py-2.5 text-[13.5px] leading-relaxed text-ink outline-none placeholder:text-ink-tertiary"
+              placeholder={t("needsYou.screen.replyPlaceholder", { name: item.botName })}
+              className="block w-full resize-none bg-transparent px-3 py-2.5 text-[13.5px] leading-relaxed text-ink outline-none placeholder:text-ink-secondary"
             />
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-hairline/40 px-2 py-1.5">
               {pending ? (
@@ -379,7 +417,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
         </section>
       </div>
 
-      <footer className="border-t border-hairline/50 bg-panel px-4 py-3 sm:px-5">
+      <footer className="border-t border-hairline/50 bg-panel px-4 py-2.5 sm:px-5 sm:py-3">
         {props.error && (
           <div role="alert" className="mb-2.5 flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
             <CircleAlert size={14} aria-hidden="true" className="mt-px shrink-0" />
@@ -387,33 +425,9 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
             <button type="button" onClick={props.onDismissError} className="shrink-0 rounded px-1 text-[12px] underline-offset-2 hover:underline">{t("needsYou.screen.dismiss")}</button>
           </div>
         )}
-        <p aria-live="polite" className={cn("text-[12.5px] text-success", props.notice ? "mb-2.5" : "sr-only")}>{props.notice ?? ""}</p>
         {item.options?.length ? (
-          <div role="group" aria-label={t("needsYou.screen.decisions", { name: item.botName })} className="mb-3">
-            <p className="mb-1.5 text-[11.5px] font-semibold uppercase tracking-wide text-ink-tertiary">{t("needsYou.screen.decide")}</p>
-            <div className="grid gap-2 [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))] sm:[grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
-              {item.options.map((option, n) => (
-                <button
-                  key={option.label}
-                  type="button"
-                  data-resolver-option={n}
-                  disabled={working}
-                  aria-describedby={`needs-you-option-${n}`}
-                  title={t("needsYou.screen.sends", { reply: option.reply })}
-                  onClick={() => props.onDecide(item, n)}
-                  className={cn(
-                    "group flex min-w-0 flex-col items-start gap-0.5 rounded-xl border px-3 py-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50",
-                    n === 0 ? "border-accent/50 bg-accent/10 hover:bg-accent/15" : "border-hairline/60 hover:bg-raised",
-                  )}
-                >
-                  <span className="flex items-center gap-1.5 text-[13.5px] font-semibold text-ink">
-                    {busy === `option:${n}` && <Loader2 size={14} aria-hidden="true" className="animate-spin" />}
-                    {option.label}
-                  </span>
-                  <span id={`needs-you-option-${n}`} className="hidden text-[11.5px] leading-snug text-ink-secondary sm:line-clamp-2">{t("needsYou.screen.sends", { reply: option.reply })}</span>
-                </button>
-              ))}
-            </div>
+          <div className={cn("mb-3", ROOMY)}>
+            <Decisions {...props} placement="footer" />
           </div>
         ) : null}
         <div className="flex flex-wrap items-center justify-end gap-1.5">
@@ -433,6 +447,42 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   );
 }
 
+/** The bot's decisions, all alike (none pushed by its position — INSP-I r1
+ * #16), each saying what it sends. In the footer the reply is clipped to two
+ * lines (the button's title has it whole); inline it is shown whole. */
+function Decisions(props: NeedsYouResolverViewProps & { item: NeedsYouItem; placement: "footer" | "inline" }) {
+  const { item, busy, placement } = props;
+  const inline = placement === "inline";
+  return (
+    <div role="group" aria-labelledby={`needs-you-decide-${placement}`}>
+      <p id={`needs-you-decide-${placement}`} className={cn(sectionHeading, "mb-1.5")}>{t("needsYou.screen.decide")}</p>
+      <div className={cn("grid gap-2", inline ? "grid-cols-1" : "[grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]")}>
+        {item.options!.map((option, n) => (
+          <button
+            key={option.label}
+            type="button"
+            data-resolver-option={n}
+            data-placement={placement}
+            disabled={busy !== null}
+            aria-describedby={`needs-you-option-${placement}-${n}`}
+            title={t("needsYou.screen.sends", { reply: option.reply })}
+            onClick={() => props.onDecide(item, n)}
+            className="flex min-w-0 flex-col items-start gap-0.5 rounded-xl border border-hairline/70 bg-panel px-3 py-2 text-left outline-none hover:border-accent/60 hover:bg-raised focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50"
+          >
+            <span className="flex items-center gap-1.5 text-[13.5px] font-semibold text-ink">
+              {busy === `option:${n}` && <Loader2 size={14} aria-hidden="true" className="animate-spin" />}
+              {option.label}
+            </span>
+            <span id={`needs-you-option-${placement}-${n}`} className={cn("text-[12px] leading-snug text-ink-secondary", inline ? "break-words" : "line-clamp-2")}>
+              {t("needsYou.screen.sends", { reply: option.reply })}
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function NoSteps(props: NeedsYouResolverViewProps & { item: NeedsYouItem }) {
   const { item, busy, now } = props;
   if (!item.pendingId) {
@@ -447,11 +497,11 @@ function NoSteps(props: NeedsYouResolverViewProps & { item: NeedsYouItem }) {
     <div className="mt-2.5 rounded-xl border border-dashed border-hairline/80 px-4 py-3.5">
       <p className="flex items-start gap-2 text-[13.5px] leading-relaxed text-ink">
         <Sparkles size={15} aria-hidden="true" className="mt-0.5 shrink-0 text-accent-text" />
-        <span>{asked ? t("needsYou.steps.asked", { name: item.botName, age: waitingAge(asked, now) }) : t("needsYou.steps.none", { name: item.botName })}</span>
+        <span>{asked ? t("needsYou.steps.asked", { age: waitingAge(asked, now) }) : t("needsYou.steps.none", { name: item.botName })}</span>
       </p>
       <button type="button" data-resolver-ask-steps="" disabled={busy !== null} onClick={() => props.onAskSteps(item)} className={cn(asked ? quietButton : strongButton, "mt-3")}>
         {busy === "steps" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <ListChecks size={14} aria-hidden="true" />}
-        {t(asked ? "needsYou.steps.askAgain" : "needsYou.steps.ask", { name: item.botName })}
+        {t(asked ? "needsYou.steps.askAgain" : "needsYou.steps.ask")}
       </button>
     </div>
   );
@@ -489,6 +539,8 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   const dialogRef = useRef<HTMLDivElement>(null);
   const replyRef = useRef<HTMLTextAreaElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  /** The arrows moved the selection while focus was in the list: focus follows it. */
+  const followFocus = useRef(false);
   const now = fixedNow ?? tick;
 
   // opening on an item selects it; every open starts clean
@@ -507,10 +559,24 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     return () => clearInterval(timer);
   }, [open, fixedNow]);
 
+  // a notice says its piece and goes
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 7_000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
   const selection = resolverSelection({ items, botFilter, sort, now, selectedKey, fallbackIndex });
   const current = selection.item;
   const currentKey = current ? needsYouKey(current) : null;
   const draft = currentKey ? drafts[currentKey] ?? "" : "";
+
+  // the focused row follows the selection the arrows moved (INSP-I r1 #11b)
+  useEffect(() => {
+    if (!followFocus.current || !currentKey) return;
+    followFocus.current = false;
+    document.getElementById(resolverRowId(currentKey))?.focus();
+  }, [currentKey]);
 
   const select = (key: string) => {
     const position = selection.visible.findIndex((item) => needsYouKey(item) === key);
@@ -518,7 +584,6 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     setFallbackIndex(Math.max(position, 0));
     setPane("detail");
     setError(null);
-    setNotice(null);
     setResolveOnSend(false);
   };
   const step = (delta: number) => {
@@ -548,8 +613,9 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     const resolve = Boolean(item.pendingId) && resolveOnSend;
     void run("reply", async () => {
       await onReply(item, text, resolve);
+      // the draft goes only once the bot has it: a failed send keeps it
       setDrafts((all) => ({ ...all, [key]: "" }));
-    }, t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName }));
+    }, t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName, title: item.title }));
   };
 
   // focus: into the screen on open, kept inside while open, back to the opener on close
@@ -566,12 +632,16 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
 
   if (!open) return null;
 
+  const close = () => {
+    // a send in flight is seen through: closing now would hide its outcome
+    if (!busy) onClose();
+  };
+
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
     const inField = target.tagName === "TEXTAREA" || target.tagName === "INPUT" || target.tagName === "SELECT";
-    const action = resolverKeyAction({ key: event.key, metaKey: event.metaKey, ctrlKey: event.ctrlKey, altKey: event.altKey, inField });
     if (event.key === "Tab") {
-      const controls = [...(dialogRef.current?.querySelectorAll<HTMLElement>("button:not([disabled]), textarea:not([disabled]), select, input:not([disabled])") ?? [])].filter((each) => each.offsetParent !== null);
+      const controls = [...(dialogRef.current?.querySelectorAll<HTMLElement>("button:not([disabled]):not([tabindex='-1']), textarea:not([disabled]), select, input:not([disabled])") ?? [])].filter((each) => each.offsetParent !== null);
       if (!controls.length) return;
       const firstControl = controls[0]!;
       const lastControl = controls[controls.length - 1]!;
@@ -579,22 +649,27 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
       else if (!event.shiftKey && document.activeElement === lastControl) { event.preventDefault(); firstControl.focus(); }
       return;
     }
+    const action = resolverKeyAction({ key: event.key, metaKey: event.metaKey, ctrlKey: event.ctrlKey, altKey: event.altKey, inField });
     if (!action) return;
     event.preventDefault();
-    if (action === "close") {
+    if (action === "leaveField") {
+      // first Escape leaves the field (the draft stays); the next one closes (INSP-I r1 #11d)
+      dialogRef.current?.querySelector<HTMLElement>("[role='dialog']")?.focus();
+    } else if (action === "close") {
       // narrow screen: Escape steps back to the list first
       if (pane === "detail" && window.matchMedia?.("(max-width: 767px)").matches) setPane("list");
-      else onClose();
-    } else if (action === "next") step(1);
-    else if (action === "prev") step(-1);
-    else if (action === "focusReply") replyRef.current?.focus();
+      else close();
+    } else if (action === "next" || action === "prev") {
+      followFocus.current = Boolean(target.closest?.("[data-resolver-row]"));
+      step(action === "next" ? 1 : -1);
+    } else if (action === "focusReply") replyRef.current?.focus();
     else if (action === "send" && current) reply(current);
   };
 
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-2 animate-workspace-in sm:p-4"
-      onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}
+      onMouseDown={(event) => event.target === event.currentTarget && close()}
     >
       <div ref={dialogRef} onKeyDown={onKeyDown} className="flex w-full justify-center">
         <NeedsYouResolverView
@@ -617,7 +692,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onFilter={(botId) => { setBotFilter(botId); setFallbackIndex(0); }}
           onSort={setSort}
           onBack={() => setPane("list")}
-          onClose={onClose}
+          onClose={close}
           onDraft={(text) => currentKey && setDrafts((all) => ({ ...all, [currentKey]: text }))}
           onResolveOnSend={setResolveOnSend}
           onCopy={(text) => {
@@ -627,12 +702,13 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
             }, () => setError(t("needsYou.screen.copyFailed")));
           }}
           onOpenLink={onOpenLink}
-          onDecide={(item, option) => void run(`option:${option}`, () => onDecide(item, option), t("needsYou.screen.decided", { label: item.options?.[option]?.label ?? "", name: item.botName }))}
+          onDecide={(item, option) => void run(`option:${option}`, () => onDecide(item, option), t("needsYou.screen.decided", { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title }))}
           onReply={reply}
-          onAskSteps={(item) => void run("steps", () => onAskSteps(item), t("needsYou.screen.askedSteps", { name: item.botName }))}
-          onResolve={(item) => void run("resolve", () => onResolve(item), t("needsYou.screen.resolved"))}
+          onAskSteps={(item) => void run("steps", () => onAskSteps(item), t("needsYou.screen.askedSteps", { name: item.botName, title: item.title }))}
+          onResolve={(item) => void run("resolve", () => onResolve(item), t("needsYou.screen.resolved", { title: item.title }))}
           onOpenConversation={onOpenConversation}
           onDismissError={() => setError(null)}
+          onDismissNotice={() => setNotice(null)}
         />
       </div>
     </div>,

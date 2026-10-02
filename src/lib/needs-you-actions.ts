@@ -5,7 +5,29 @@
 import { api, type Action } from "@/state/store";
 import type { NeedsYouItem } from "@/lib/needs-you";
 
-export type OwnerPendingReply = { option: number } | { ask: "steps" } | { text: string; resolve: boolean };
+/** A decision carries the label the person saw with its position: the
+ * server refuses it (409) when the bot rewrote the options since. */
+export type OwnerPendingReply = { option: number; label: string } | { ask: "steps" } | { text: string; resolve: boolean };
+
+/** The decision at `option` as the screen shows it. */
+export function decisionReply(item: NeedsYouItem, option: number): OwnerPendingReply {
+  return { option, label: item.options?.[option]?.label ?? "" };
+}
+
+/** An answer to a question or an approval asked in a conversation: an
+ * ordinary message there, awaited — a failed send is an error on the
+ * screen and the draft stays (INSP-I r1 #10). */
+export async function sendToConversation(item: NeedsYouItem, text: string, dispatch: (action: Action) => void): Promise<void> {
+  const sendId = crypto.randomUUID();
+  const body = await api(`/api/bots/${encodeURIComponent(item.botId)}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ text, threadId: item.threadId, sendId }),
+  });
+  if (body?.message && typeof body.threadId === "string") dispatch({ type: "messageAdded", threadId: body.threadId, message: body.message });
+  if (body?.queued && typeof body.threadId === "string" && typeof body.queueId === "string") {
+    dispatch({ type: "pendingQueued", threadId: body.threadId, queueId: body.queueId, text, reason: body.reason === "capacity" || body.reason === "group-turn" ? body.reason : undefined });
+  }
+}
 
 export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendingReply, dispatch: (action: Action) => void): Promise<{ resolved: number }> {
   if (!item.pendingId) throw new Error("not an owner_pending item");

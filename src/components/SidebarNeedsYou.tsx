@@ -2,7 +2,7 @@ import { Check, ChevronRight, CircleAlert, Copy, ExternalLink, ListChecks, ListT
 import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { dueAt, waitingAge, type NeedsYouItem } from "@/lib/needs-you";
+import { dueAt, sortNeedsYou, waitingAge, type NeedsYouItem } from "@/lib/needs-you";
 import type { SidebarDensity } from "@/lib/sidebar-preferences";
 
 /** Rows shown in the sidebar before "Ver todos": the rest is one click away, on the resolution screen. */
@@ -27,8 +27,9 @@ export function SidebarNeedsYou({ items, density, now, onOpen, onResolve, onOpen
 }) {
   if (!items.length || density === "icons") return null;
   const compact = density === "compact";
-  const shown = items.slice(0, NEEDS_YOU_SIDEBAR_ROWS);
   const clock = now ?? Date.now();
+  // the same order as the resolution screen opens in: what falls due first (INSP-I r1 #8)
+  const shown = sortNeedsYou(items, "due", clock).slice(0, NEEDS_YOU_SIDEBAR_ROWS);
   return (
     <section
       data-testid="sidebar-needs-you"
@@ -60,7 +61,8 @@ export function SidebarNeedsYou({ items, density, now, onOpen, onResolve, onOpen
                 <Icon size={13} aria-hidden="true" className="mt-px shrink-0 text-warning" />
                 <span className="min-w-0 flex-1">
                   {/* the essential first, in up to two lines: never only a mention */}
-                  <span className="block line-clamp-2 break-words leading-snug">{item.title}</span>
+                  {/* no "block" here: it would undo line-clamp's -webkit-box (INSP-I r1 #7) */}
+                  <span className="line-clamp-2 break-words leading-snug">{item.title}</span>
                   <span className="block truncate text-[10.5px] text-ink-secondary">{item.botName}</span>
                 </span>
                 <span className={cn("mt-px max-w-[72px] shrink-0 truncate text-[10.5px] tabular-nums", overdue ? "font-medium text-danger" : "text-ink-secondary")}>{item.due ?? age}</span>

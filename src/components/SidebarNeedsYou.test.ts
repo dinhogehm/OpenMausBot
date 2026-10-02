@@ -106,4 +106,20 @@ describe("what needs the person, from every bot", () => {
     findCopy(element)!.props.onClick();
     expect(copied).toEqual([command]);
   });
+
+  it("orders rows like the resolution screen (overdue first), clamps titles to two real lines, and opens the screen (INSP-I r1 #7/#8/#15)", () => {
+    const listed = [bot("chief", "Chief of Staff", [task("c0", "Main", { ownerPending: [
+      { id: "o1", title: "Antigo sem prazo", since: now - 9 * 3_600_000 },
+      { id: "o2", title: "Vencido ontem", since: now - 60_000, due: "ontem 18h" },
+      { id: "o3", title: "Para hoje à noite", since: now - 2 * 60_000, due: "hoje 23h" },
+    ] })])];
+    const opened: Array<string | null> = [];
+    const element = SidebarNeedsYou({ items: needsYouItems(listed), density: "comfortable", now, onOpen: (item) => opened.push(item?.pendingId ?? null) });
+    const html = renderToStaticMarkup(element!);
+    expect([...html.matchAll(/class="line-clamp-2 break-words leading-snug">([^<]+)</g)].map((match) => match[1])).toEqual(["Vencido ontem", "Para hoje à noite", "Antigo sem prazo"]);
+    // "block" would undo the clamp's -webkit-box
+    expect(html).not.toMatch(/class="block line-clamp-2/);
+    expect(html).toContain(">Resolver os 3<");
+    expect(html).toMatch(/text-danger">ontem 18h</);
+  });
 });

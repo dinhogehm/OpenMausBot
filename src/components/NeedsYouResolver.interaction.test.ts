@@ -85,21 +85,47 @@ describe("the resolution screen, driven by keys and clicks", () => {
     // arrows typed in the reply stay in the reply
     render().key("ArrowDown", { target: { tagName: "TEXTAREA" } });
     expect(render().title).toBe("Aprovar o merge da PR #12");
+    // Escape in the reply leaves the field; it does not close (INSP-I r1 #11d)
+    render().key("Escape", { target: { tagName: "TEXTAREA" } });
+    expect(handlers.onClose).not.toHaveBeenCalled();
+    // an upper-case R goes to the reply too (the hint says "R")
+    expect(() => render().key("R")).not.toThrow();
     render().key("Escape");
     expect(handlers.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("sends a decision once, says it was sent, and shows the server's refusal when it fails", async () => {
-    const press = (option: number) => (render().all.find((node) => node.props["data-resolver-option"] === option)!.props.onClick as () => void)();
+  const press = (option: number) => (render().all.find((node) => node.props["data-resolver-option"] === option && node.props["data-placement"] === "footer")!.props.onClick as () => void)();
+  const notice = () => JSON.stringify(render().all.find((node) => "data-resolver-notice" in node.props)?.props.children ?? null);
+
+  it("sends a decision once and says which item it went to; a failure is an alert, never 'sent'", async () => {
     press(0);
     await flush();
     expect(handlers.onDecide).toHaveBeenCalledWith(expect.objectContaining({ pendingId: "o1" } satisfies Partial<NeedsYouItem>), 0);
-    expect(JSON.stringify(render().all.map((node) => node.props.children))).toContain("“Aprovar” enviado ao Chief of Staff. Item resolvido.");
-    handlers.onDecide.mockRejectedValueOnce(new Error("Este item já foi resolvido."));
+    expect(notice()).toContain("Enviado «Aprovar» para Chief of Staff — Aprovar o merge da PR #12. Item resolvido.");
+    handlers.onDecide.mockRejectedValueOnce(new Error("O bot reescreveu as opções deste item."));
     press(1);
     await flush();
     const alert = render().all.find((node) => node.props.role === "alert");
-    expect(JSON.stringify(alert?.props.children)).toContain("Este item já foi resolvido.");
+    expect(JSON.stringify(alert?.props.children)).toContain("O bot reescreveu as opções deste item.");
+    expect(notice()).toBe("null");
+  });
+
+  it("does not close while a send is in flight, and a failed reply keeps the draft", async () => {
+    let finish!: () => void;
+    handlers.onDecide.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    press(0);
+    await flush();
+    render().key("Escape");
+    expect(handlers.onClose).not.toHaveBeenCalled();
+    finish();
+    await flush();
+    const textarea = render().all.find((node) => node.type === "textarea")!;
+    (textarea.props.onChange as (event: unknown) => void)({ target: { value: "Pode seguir." } });
+    handlers.onReply.mockRejectedValueOnce(new Error("Não deu certo. Tente de novo."));
+    render().key("Enter", { ctrlKey: true, target: { tagName: "TEXTAREA" } });
+    await flush();
+    expect(render().all.find((node) => node.type === "textarea")!.props.value).toBe("Pode seguir.");
+    expect(notice()).toBe("null");
   });
 
   it("sends the reply with ⌘/Ctrl+Enter from the reply field", async () => {

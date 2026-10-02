@@ -113,7 +113,7 @@ import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { SidebarNeedsYou } from "./SidebarNeedsYou";
 import { NeedsYouResolver } from "./NeedsYouResolver";
 import { needsYouItems, needsYouKey } from "@/lib/needs-you";
-import { replyToOwnerPending, resolveOwnerPending } from "@/lib/needs-you-actions";
+import { decisionReply, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
 import { openExternalLink } from "@/lib/app-links";
 import { ShortcutHint } from "./ShortcutHint";
 import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
@@ -2203,15 +2203,12 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         }}
         onOpenLink={(url) => void openExternalLink(url)}
         onCopy={(text) => navigator.clipboard.writeText(text)}
-        onDecide={(item, option) => replyToOwnerPending(item, { option }, dispatch)}
+        onDecide={(item, option) => replyToOwnerPending(item, decisionReply(item, option), dispatch)}
         onAskSteps={(item) => replyToOwnerPending(item, { ask: "steps" }, dispatch)}
         onReply={(item, text, resolve) => item.pendingId
           ? replyToOwnerPending(item, { text, resolve }, dispatch)
-          // an approval or a question in the conversation: the answer is an ordinary message there
-          : new Promise<void>((resolve, reject) => {
-            dispatch({ type: "send", botId: item.botId, threadId: item.threadId, text, onError: () => reject(new Error(t("needsYou.screen.failed"))) });
-            setTimeout(resolve, 0);
-          })}
+          // an approval or a question in the conversation: the answer is an ordinary message there, awaited
+          : sendToConversation(item, text, dispatch)}
         onResolve={resolveOwnerPending}
       />
 

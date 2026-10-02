@@ -4,6 +4,7 @@
 import type { Bot, Task } from "@/state/store";
 import { t } from "@/lib/i18n";
 import type { WireOwnerPending } from "../../shared/wire";
+import { isMentionOnly, stripLeadingMentions } from "../../shared/owner-pending-title";
 
 export type NeedsYouStep = NonNullable<WireOwnerPending["steps"]>[number];
 export type NeedsYouOption = NonNullable<WireOwnerPending["options"]>[number];
@@ -34,19 +35,17 @@ export interface NeedsYouItem {
   stepsRequestedAt?: number;
 }
 
-const MENTION_ONLY = /^(?:\s*@[\p{L}\p{N}][\p{L}\p{N}_ .-]*)+$/u;
 const REFS_FIRST = /^((?:(?:PR|issue|sess[ãa]o)\s*)?#\d+(?:\s*(?:[/·,&+]|e)\s*(?:(?:PR|issue)\s*)?#\d+)*)\s*[:—–-]\s*(.+)$/iu;
 
-/** A title that reads in the panel: a title that only names who ("@Chief of
- * Staff") becomes what was asked (`ask`) or "Responder a <bot>"; a title
- * that starts with references ("#9052 / PR #9332: confirmar…") starts with
- * the action, references after it ("Confirmar… (#9052 / PR #9332)"). */
+/** A title that reads in the panel. The mentions it opens with are set
+ * aside by the server's rule ("@Osvaldo aprovar o deploy" → "Aprovar o
+ * deploy"); a title that is ONLY a mention becomes the bot's question
+ * (`ask`, never the item's "why") or "<bot> precisa de uma resposta sua".
+ * A title that starts with references ("#9052 / PR #9332: confirmar…")
+ * starts with the action, references after ("Confirmar… (#9052 / PR #9332)"). */
 export function needsYouTitle(title: string, opts: { ask?: string; botName: string; botNames?: readonly string[] }): string {
-  let rest = title.replace(/\s+/g, " ").trim();
-  for (const name of opts.botNames ?? []) {
-    if (name && rest.toLowerCase().startsWith(`@${name.toLowerCase()}`)) rest = rest.slice(name.length + 1).replace(/^[\s,:;–—-]+/, "");
-  }
-  if (!rest || MENTION_ONLY.test(rest) || !/\p{L}{3}/u.test(rest)) {
+  const rest = stripLeadingMentions(title, opts.botNames);
+  if (!/\p{L}{3}/u.test(rest)) {
     const ask = opts.ask?.trim();
     return ask ? ask : t("needsYou.answerBot", { name: opts.botName });
   }
@@ -68,9 +67,10 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
       if (task.routineRunId || task.archivedAt) continue;
       // listed by the bot (or the server): one row each, until resolved
       for (const pending of task.ownerPending ?? []) {
-        const title = needsYouTitle(pending.title, { ask: pending.why, botName: bot.name, botNames });
+        // never the "why" as the title: it is shown under it (INSP-I r1 #2)
+        const title = needsYouTitle(pending.title, { botName: bot.name, botNames });
         items.push({
-          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, ...(title !== pending.title ? { rawTitle: pending.title } : {}),
+          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, ...(isMentionOnly(pending.title, botNames) ? { rawTitle: pending.title } : {}),
           since: pending.since, approval: false, pendingId: pending.id,
           ...(pending.due ? { due: pending.due } : {}), ...(pending.link ? { link: pending.link } : {}), ...(pending.command ? { command: pending.command } : {}),
           ...(pending.why ? { why: pending.why } : {}), ...(pending.steps?.length ? { steps: pending.steps } : {}), ...(pending.options?.length ? { options: pending.options } : {}),
@@ -79,8 +79,10 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
       }
       const approval = task.activity === "waiting-on-you";
       if (!approval && task.goalNeedsInput !== true) continue;
-      const title = needsYouTitle(task.title, { ask: task.goalNeedsInputAsk, botName: bot.name, botNames });
-      items.push({ botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, ...(title !== task.title ? { rawTitle: task.title } : {}), since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval });
+      // the bot's question says what it waits for better than the conversation's title
+      const ask = task.goalNeedsInputAsk?.trim();
+      const title = ask || needsYouTitle(task.title, { botName: bot.name, botNames });
+      items.push({ botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval });
     }
   }
   return items.sort((a, b) => a.since - b.since);
@@ -129,6 +131,9 @@ export function dueAt(due: string | undefined, now = Date.now()): number | null 
   }
   const today = new Date(now);
   if (/\bamanha\b/.test(text)) return at(new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1));
+  // checked before "ontem": "anteontem" contains it
+  if (/\banteontem\b/.test(text)) return at(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 2));
+  if (/\bontem\b/.test(text)) return at(new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1));
   const weekday = WEEKDAYS.findIndex((name) => new RegExp(`\\b${name}\\b`).test(text));
   if (weekday >= 0) return at(new Date(today.getFullYear(), today.getMonth(), today.getDate() + ((weekday - today.getDay() + 7) % 7)));
   if (/\bhoje\b/.test(text) || hour) return at(new Date(today.getFullYear(), today.getMonth(), today.getDate()));
