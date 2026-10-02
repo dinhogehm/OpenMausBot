@@ -96,14 +96,16 @@ describe("a session archived in the app by someone (INSP-F F1)", () => {
     expect(gh.chips.map((chip) => chip.text)).toEqual(["PR #9328 ficou sem sessão: https://github.com/owner/platform/pull/9328"]);
   });
 
-  it("drops a number that is not a PR for good (\"Could not resolve to a PullRequest\") and settles on the real one", async () => {
-    const gh = fakeGithub({ byIssue: {} });
-    const session = { ...ffd6ee1a(), lastReport: "PR #9319 (issue) e a PR #9328 seguem", delivery: { prs: { 9319: { number: 9319, url: "", state: "open" as const } } } };
+  it("counts only the PRs that are its own (by its branch, or handed over), never one its report merely names (R9-followup #2)", async () => {
+    const gh = fakeGithub({ byIssue: {}, states: { 9328: "OPEN", 9341: "OPEN", 9319: "NOT_PR" } });
+    // its report names #9328 (another session's) and an issue; a candidate #9319 was never checked;
+    // #9341 was handed to it ("assuma a PR #9341")
+    const session = { ...ffd6ee1a(), lastReport: "PR #9319 (issue) e a PR #9328 seguem", claimedPrs: [9341], delivery: { prs: { 9319: { number: 9319, url: "", state: "open" as const } } } };
     await checkArchivedOutside([session], gh.deps);
-    expect(gh.calls).toEqual(["list issue 9319", "view 9319", "view 9328"]);
+    expect(gh.calls).toEqual(["list issue 9319", "view 9341"]);
     expect(session.archivedOutsideCheckedAt).toBeDefined();
     expect(session.archivedOutsideTries).toBeUndefined();
-    expect(gh.chips.map((chip) => chip.text)).toEqual(["PR #9328 ficou sem sessão: https://github.com/owner/platform/pull/9328"]);
+    expect(gh.chips.map((chip) => chip.text)).toEqual(["PR #9341 ficou sem sessão: https://github.com/owner/platform/pull/9341"]);
     expect(notAPullRequest(Object.assign(new Error("Command failed: gh pr view 9319"), { stderr: "GraphQL: Could not resolve to a PullRequest with the number of 9319." }))).toBe(true);
     expect(notAPullRequest(new Error("gh: connect: network is unreachable"))).toBe(false);
   });
@@ -162,15 +164,29 @@ describe("PRs the issue search finds that are not left without a session (INSP-F
     expect(gh.pending).toEqual([]);
   });
 
-  it("issue 9052 → #9332, carried by the live session that reports it: \"segue com a sessão\", no warning", async () => {
+  it("issue 9052 → #9332, carried by the live session whose PR it is: \"segue com a sessão\", no warning", async () => {
     const gh = fakeGithub({ byIssue: { 9052: [PR_9332] } });
     const archived = archivedFor("93001904-0000-4000-8000-000000000000", "9052");
-    const carrier = live("35787b0f-0000-4000-8000-000000000000", "9099", { lastReport: "PR #9332 com o gate verde, esperando o merge." });
+    const carrier = live("35787b0f-0000-4000-8000-000000000000", "9099", { lastReport: "PR #9332 com o gate verde, esperando o merge.", delivery: { prs: { 9332: { number: 9332, url: "", state: "open", owned: "branch" } } } });
     await checkArchivedOutside([archived, carrier], gh.deps);
     expect(gh.chips).toEqual([{ id: archived.id, text: 'a PR #9332 segue com a sessão "9099 sessão viva" (35787b0f)', ok: true }]);
     expect(gh.chips.some((chip) => chip.text.includes("ficou sem sessão"))).toBe(false);
     expect(gh.reports).toEqual([]);
     expect(gh.pending).toEqual([]);
+  });
+
+  it("issue 9319 → #9328: the live session of #9052 that only cites #9328 is not its owner — no false comfort (R9-followup #2)", async () => {
+    const gh = fakeGithub({ byIssue: { 9319: [PR_9328] } });
+    const archived = archivedFor("29da943f-0000-4000-8000-000000000000", "9319");
+    // its report: "A trava … está na PR #9328, que ainda não está em main"; the candidate was checked: another branch
+    const session9052 = live("35787b0f-0000-4000-8000-000000000000", "9052", { lastReport: "A trava que limitaria as tentativas está na PR #9328, que ainda não está em main.", delivery: { prs: { 9332: { number: 9332, url: "", state: "open", owned: "branch" } }, notOwned: [9328] } });
+    await checkArchivedOutside([archived, session9052], gh.deps);
+    expect(gh.chips.map((chip) => chip.text)).toEqual(["PR #9328 ficou sem sessão: https://github.com/owner/platform/pull/9328"]);
+    expect(gh.pending.map((each) => each.item.key)).toEqual([`cc-orphan-pr:${archived.id}:9328`]);
+    // handed over to it ("assuma a PR #9328"), it carries it on
+    const handed = fakeGithub({ byIssue: { 9319: [PR_9328] } });
+    await checkArchivedOutside([archivedFor("29da943f-0000-4000-8000-000000000001", "9319"), { ...session9052, claimedPrs: [9328] }], handed.deps);
+    expect(handed.chips.map((chip) => chip.text)).toEqual(['a PR #9328 segue com a sessão "9052 sessão viva" (35787b0f)']);
   });
 
   it("issue 9326 → #9330, with a live session on the same issue: \"segue com a sessão\", no warning", async () => {

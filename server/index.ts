@@ -343,7 +343,7 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, githubSlug, idleWithOpenPrs, mergeStatePt, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, claimedPrNumbers, githubSlug, idleWithOpenPrs, mergeStatePt, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
 import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
@@ -9395,6 +9395,18 @@ function retireThreadWork(botId: string, threadId: string, why: string): void {
   refreshBotRow(botId);
 }
 
+/** "Assuma a PR #9328" in an order to a session: that PR is its own from now
+ * on (prod-delivery.ts), though its branch is not the session's. Only an
+ * explicit hand-over; a PR the session's report names never is (R9-followup #2). */
+function noteClaimedPrs(session: CcSession, text: string): void {
+  const claimed = claimedPrNumbers(text);
+  if (!claimed.length) return;
+  session.claimedPrs = [...new Set([...(session.claimedPrs ?? []), ...claimed])];
+  if (session.delivery?.notOwned) session.delivery.notOwned = session.delivery.notOwned.filter((number) => !claimed.includes(number));
+  ccLedger.save();
+  ccChip(session, `assumiu ${claimed.map((number) => `a PR #${number}`).join(", ")} (por ordem explícita)`);
+}
+
 /** Send a message to a session the way cc_session_send would, from the
  * server: now if it is idle, else after its current turn. */
 function sendToSessionFromServer(session: CcSession, text: string): void {
@@ -9635,6 +9647,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     session.status = "running";
     ccLedger.save();
     ccChip(session, "na fila para abrir no app Claude quando o Mac estiver livre");
+    noteClaimedPrs(session, input.brief);
     const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", input.model ? "model" : ""].filter(Boolean);
     return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
   }
@@ -9644,6 +9657,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   ccLedger.save();
   runCcTurn(session, input.brief, true);
   ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
+  noteClaimedPrs(session, input.brief);
   if (cliReason) ccChip(session, `sessão CLI, não visível no app Claude — motivo: ${cliReason}`);
   return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") iniciada na própria worktree. Ela trabalha sozinha; quando parar, o relatório chega aqui como um novo turno.${mixWarning ? ` ${mixWarning}` : ""} Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
 }
@@ -9859,7 +9873,11 @@ function sharedStatePrompt(botId: string, threadId: string): string {
   const work = ccLedger.all()
     .filter((session) => session.ownerBotId === botId && session.status !== "archived")
     .slice(-6)
-    .map((session) => `sessão Claude Code "${session.title}" (${session.status}${session.delivery ? `, PRs ${Object.keys(session.delivery.prs).map((n) => `#${n}`).join(" ")}` : ""})`);
+    .map((session) => {
+      // its own PRs only: one its report merely names is another session's (R9-followup #2)
+      const own = Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.owned !== undefined).map((pr) => `#${pr.number}`);
+      return `sessão Claude Code "${session.title}" (${session.status}${own.length ? `, PRs ${own.join(" ")}` : ""})`;
+    });
   return sharedState.render(botId, threadId, Date.now(), work, recentWorkFilter().include);
 }
 
@@ -18813,6 +18831,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
               session.corridorVersion = corridored.version;
               ccLedger.save();
             }
+            noteClaimedPrs(session, scripts.text);
             const moved = threadId !== session.ownerThreadId;
             if (moved) session.ownerThreadId = threadId;
             const reportTo = replyThreadId === session.ownerThreadId ? undefined : replyThreadId;

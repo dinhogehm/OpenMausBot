@@ -115,6 +115,9 @@ export interface CcSession {
   archivedOutsideTriedAt?: number;
   /** Its PRs on the way to production (server/prod-delivery.ts). */
   delivery?: CcDelivery;
+  /** PRs it was told to take over ("assuma a PR #9328"): its own, though
+   * their branch is not its worktree's (prod-delivery.ts claimedPrNumbers). */
+  claimedPrs?: number[];
 }
 
 export type CcSurface = "app" | "cli";

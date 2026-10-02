@@ -28,6 +28,10 @@ export interface DeliveryPr {
   inProductionAt?: number;
   productionSince?: string;
   reportedAt?: number;
+  /** Why it is this session's: its head branch is the session's ("branch"),
+   * or the session was told to take it over ("explicit"). Unset: only named
+   * in a report — a candidate, not yet the session's (R9-followup #2). */
+  owned?: "branch" | "explicit";
 }
 
 export interface CcDelivery {
@@ -36,6 +40,8 @@ export interface CcDelivery {
   prs: Record<string, DeliveryPr>;
   /** Numbers a report named as PRs that GitHub says are not PRs (issues). */
   notPrs?: number[];
+  /** PRs a report named that are another session's (head on another branch). */
+  notOwned?: number[];
 }
 
 interface DeliverySession {
@@ -43,8 +49,59 @@ interface DeliverySession {
   title: string;
   repo: string;
   status: string;
+  /** Its worktree: whose branch says which PRs are its own. */
+  cwd?: string;
   lastReport?: string;
   delivery?: CcDelivery;
+  /** PRs the session was told to take over ("assuma a PR #9328"). */
+  claimedPrs?: number[];
+}
+
+// ── whose PR it is ───────────────────────────────────────────────────────
+// 01/10: the session of #9052 wrote "a trava … está na PR #9328, que ainda
+// não está em main", and #9328 (another session's) became its PR: its
+// archiving was held by it, its "em produção" would have gone to the wrong
+// conversation, and liveOwnerOf would have named it #9328's live owner
+// (R9-followup #2). A PR is a session's only by its head branch (the
+// worktree's branch or the branch it pushed to) or by an explicit hand-over.
+
+const NOT_A_WORK_BRANCH = new Set(["main", "master", "develop", "HEAD", ""]);
+
+/** The branches a session works on — its worktree's checkout and the branch
+ * it pushed to (`git push -u origin HEAD:fix/…` sets the upstream) — and its
+ * HEAD commit. Null when its worktree cannot be read (none yet, or gone). */
+export async function sessionBranches(session: Pick<DeliverySession, "cwd">, git: DeliveryDeps["git"]): Promise<{ names: string[]; head: string | null } | null> {
+  if (!session.cwd) return null;
+  const read = (args: string[]) => git(session.cwd!, args).then((out) => out.trim(), () => null);
+  const [local, upstream, head] = await Promise.all([
+    read(["rev-parse", "--abbrev-ref", "HEAD"]),
+    read(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]),
+    read(["rev-parse", "HEAD"]),
+  ]);
+  if (local === null && head === null) return null;
+  const pushed = upstream ? upstream.replace(/^[^/]+\//, "") : null;
+  const names = [...new Set([local, pushed].filter((name): name is string => name !== null && !NOT_A_WORK_BRANCH.has(name)))];
+  return { names, head: head && /^[0-9a-f]{40}$/.test(head) ? head : null };
+}
+
+/** Whether a PR is the session's, and why: told to take it over, or its
+ * head is the session's branch (by name, or its very HEAD commit). A
+ * mention in a report is never enough. */
+export function prOwnership(pr: { number: number; headRefName?: string; headRefOid?: string }, branches: { names: string[]; head: string | null } | null, claimed: readonly number[] = []): "branch" | "explicit" | null {
+  if (claimed.includes(pr.number)) return "explicit";
+  if (!branches) return null;
+  if (pr.headRefName && branches.names.includes(pr.headRefName)) return "branch";
+  if (pr.headRefOid && branches.head && pr.headRefOid === branches.head) return "branch";
+  return null;
+}
+
+/** The PRs an order hands to a session: "assuma a PR #9328", "assumir a
+ * #9341", "fique com a PR #9314", "a PR #9328 é sua", "take over PR #9328". */
+export function claimedPrNumbers(text: string): number[] {
+  const found = new Set<number>();
+  for (const match of text.matchAll(/(?<![\p{L}])(?:assum[ae]\w*|assumir|fique com|fica com|pegue|toma conta d[ao]|take over|take ownership of)\s+(?:a\s+|o\s+|the\s+)?(?:PR|pull request)?\s*#(\d{2,6})\b/giu)) found.add(Number(match[1]));
+  for (const match of text.matchAll(/\b(?:PR|pull request)\s*#(\d{2,6})\s+(?:é|e|fica)\s+(?:sua|sua agora|com voc[êe])/giu)) found.add(Number(match[1]));
+  return [...found];
 }
 
 /** PR links of `slug` ("owner/repo") in a text, by number. */
@@ -196,9 +253,16 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
       deps.save();
     }
     let added = false;
-    for (const link of prLinks(session.lastReport ?? "", delivery.slug)) {
-      if (delivery.prs[String(link.number)] || delivery.notPrs?.includes(link.number)) continue;
-      delivery.prs[String(link.number)] = { ...link };
+    // what the report names is a candidate; a PR handed over is the session's
+    for (const link of [...prLinks(session.lastReport ?? "", delivery.slug), ...(session.claimedPrs ?? []).map((number) => ({ number, url: `https://github.com/${delivery.slug}/pull/${number}` }))]) {
+      const known = delivery.prs[String(link.number)];
+      const claimed = session.claimedPrs?.includes(link.number) === true;
+      if (known) {
+        if (claimed && !known.owned) { known.owned = "explicit"; added = true; }
+        continue;
+      }
+      if (delivery.notPrs?.includes(link.number) || (delivery.notOwned?.includes(link.number) && !claimed)) continue;
+      delivery.prs[String(link.number)] = { ...link, ...(claimed ? { owned: "explicit" as const } : {}) };
       added = true;
     }
     if (added) deps.save();
@@ -216,13 +280,29 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     }
     if (!tag.sha) continue;
     const delivered: DeliveryPr[] = [];
+    let branches: Awaited<ReturnType<typeof sessionBranches>> | undefined;
     for (const pr of waiting) {
       if (!budget()) break;
-      if (pr.state !== "merged") {
+      if (pr.state !== "merged" || pr.owned === undefined) {
         if (pr.checkedAt !== undefined && now - pr.checkedAt < DELIVERY_CHECK_MS) continue;
         pr.checkedAt = now;
         try {
-          const view = JSON.parse(await gh(["pr", "view", String(pr.number), "--repo", delivery.slug, "--json", "state,mergeCommit"])) as { state?: string; mergeCommit?: { oid?: string } | null };
+          const view = JSON.parse(await gh(["pr", "view", String(pr.number), "--repo", delivery.slug, "--json", "state,mergeCommit,headRefName,headRefOid"])) as { state?: string; mergeCommit?: { oid?: string } | null; headRefName?: string; headRefOid?: string };
+          if (pr.owned === undefined) {
+            branches ??= await sessionBranches(session, deps.git);
+            const owner = prOwnership({ number: pr.number, ...view }, branches, session.claimedPrs);
+            if (!owner) {
+              // named in its report, but another branch's: never this session's (unless handed over later)
+              if (branches) {
+                delete delivery.prs[String(pr.number)];
+                delivery.notOwned = [...new Set([...(delivery.notOwned ?? []), pr.number])];
+              }
+              // its worktree cannot be read now: a candidate still, looked at again later
+              deps.save();
+              continue;
+            }
+            pr.owned = owner;
+          }
           if (view.state === "MERGED" && view.mergeCommit?.oid) {
             pr.state = "merged";
             pr.mergeSha = view.mergeCommit.oid;
@@ -238,7 +318,7 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
           /* else gh unavailable: next time */
         }
         deps.save();
-        if (pr.state !== "merged") continue;
+        if (pr.state !== "merged" || pr.owned === undefined) continue;
       }
       const key = `${delivery.slug}:${pr.mergeSha}...${tag.sha}`;
       let contained = cache.contains.get(key);
@@ -286,15 +366,26 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
   if (!slug) return { blockers, unknown: ["o repositório (não consegui ler o endereço do GitHub)"] };
   const numbers = new Map<number, DeliveryPr | undefined>();
   for (const pr of Object.values(session.delivery?.prs ?? {})) numbers.set(pr.number, pr);
-  for (const link of prLinks(session.lastReport ?? "", slug)) if (!numbers.has(link.number) && !session.delivery?.notPrs?.includes(link.number)) numbers.set(link.number, undefined);
+  for (const number of session.claimedPrs ?? []) if (!numbers.has(number)) numbers.set(number, undefined);
+  for (const link of prLinks(session.lastReport ?? "", slug)) if (!numbers.has(link.number) && !session.delivery?.notPrs?.includes(link.number) && !session.delivery?.notOwned?.includes(link.number)) numbers.set(link.number, undefined);
   let tagSha: string | null | undefined;
+  let branches: Awaited<ReturnType<typeof sessionBranches>> | undefined;
   for (const [number, known] of [...numbers].slice(0, 6)) {
     if (known?.reportedAt !== undefined || known?.state === "closed") continue;
-    let state = known?.state === "merged" ? "MERGED" : "";
+    const owned = known?.owned ?? (session.claimedPrs?.includes(number) ? "explicit" : undefined);
+    let state = known?.state === "merged" && owned ? "MERGED" : "";
     let mergeSha = known?.mergeSha;
     if (!state) {
       try {
-        const view = JSON.parse(await deps.gh(["pr", "view", String(number), "--repo", slug, "--json", "state,mergeCommit"])) as { state?: string; mergeCommit?: { oid?: string } | null };
+        const view = JSON.parse(await deps.gh(["pr", "view", String(number), "--repo", slug, "--json", "state,mergeCommit,headRefName,headRefOid"])) as { state?: string; mergeCommit?: { oid?: string } | null; headRefName?: string; headRefOid?: string };
+        // only the session's own PRs hold it: one its report merely names is another's (R9-followup #2)
+        if (!owned) {
+          branches ??= await sessionBranches(session, deps.git);
+          if (!prOwnership({ number, ...view }, branches)) {
+            if (!branches && view.state !== "CLOSED") unknown.push(`PR #${number} (sem a worktree da sessão para conferir se é dela)`);
+            continue;
+          }
+        }
         state = view.state ?? "";
         mergeSha = view.mergeCommit?.oid ?? undefined;
       } catch (error) {
@@ -329,25 +420,27 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
 export const IDLE_WITH_PR_MS = 6 * 3_600_000;
 const IDLE_REPORT_EVERY_MS = 24 * 3_600_000;
 
-/** The PRs a session may have left behind: those it delivered and are not
- * merged or closed, and those its last report names. Only candidates: a
- * number may still be an issue ("Could not resolve to a PullRequest"), and
- * the PRs only GitHub knows (by its issue, by its branch) are looked up by
- * the caller (archived-outside.ts). */
-export function prsOfSession(session: Pick<DeliverySession, "delivery"> & { lastReport?: string }, slug: string | null): number[] {
-  return [...new Set([
-    ...Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.state !== "merged" && pr.state !== "closed").map((pr) => pr.number),
-    ...(slug ? prLinks(session.lastReport ?? "", slug).map((link) => link.number) : []),
-  ])];
+/** A session's own PRs (by its branch, or handed to it), not merged or closed. */
+export function ownPrs(session: Pick<DeliverySession, "delivery">): DeliveryPr[] {
+  return Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.owned !== undefined && pr.state !== "merged" && pr.state !== "closed");
 }
 
-/** Sessions idle past IDLE_WITH_PR_MS with known PRs not yet merged or
+/** The PRs a session may have left behind: its own (by branch, or handed
+ * over) not merged or closed. A PR its report only names is not one of
+ * them: "segue com a sessão X" for a PR X merely cited was the false
+ * comfort of R9-followup #2. The PRs only GitHub knows (by its issue, by its
+ * branch) are looked up by the caller (archived-outside.ts). */
+export function prsOfSession(session: Pick<DeliverySession, "delivery" | "claimedPrs">): number[] {
+  return [...new Set([...ownPrs(session).map((pr) => pr.number), ...(session.claimedPrs ?? [])])];
+}
+
+/** Sessions idle past IDLE_WITH_PR_MS with their own PRs not yet merged or
  * closed, not reported in the last day, oldest first. */
 export function idleWithOpenPrs<T extends DeliverySession & { lastActivityAt: number; idleReportedAt?: number }>(sessions: readonly T[], now: number): Array<{ session: T; prs: number[] }> {
   return sessions
     .filter((session) => session.status === "idle" && now - session.lastActivityAt >= IDLE_WITH_PR_MS)
     .filter((session) => session.idleReportedAt === undefined || now - session.idleReportedAt >= IDLE_REPORT_EVERY_MS)
-    .map((session) => ({ session, prs: Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.state !== "merged" && pr.state !== "closed").map((pr) => pr.number) }))
+    .map((session) => ({ session, prs: ownPrs(session).map((pr) => pr.number) }))
     .filter((item) => item.prs.length > 0 && item.session.delivery?.slug)
     .sort((a, b) => a.session.lastActivityAt - b.session.lastActivityAt);
 }

@@ -106,14 +106,15 @@ export function prOfIssue(pr: FoundPr, issue: string): boolean {
   return pr.number !== Number(issue) && (named.test(pr.title ?? "") || named.test(pr.headRefName ?? ""));
 }
 
-/** The live session (not archived) that carries a PR on: one whose
- * delivered or reported PRs include it, or — for a PR found by the issue —
- * one working on the same issue in the same repository. Archiving and
- * reopening a session for an issue is the common case. */
-export function liveOwnerOf(number: number, viaIssue: string | null, session: CcSession, sessions: readonly CcSession[], slug: string): CcSession | null {
+/** The live session (not archived) that carries a PR on: one whose own PRs
+ * (by its branch, or handed to it) include it — never one whose report only
+ * names it (R9-followup #2) — or, for a PR found by the issue, one working
+ * on the same issue in the same repository. Archiving and reopening a
+ * session for an issue is the common case. */
+export function liveOwnerOf(number: number, viaIssue: string | null, session: CcSession, sessions: readonly CcSession[]): CcSession | null {
   // only a session that may still work counts: stopped, failed or archived ones carry nothing on
   return sessions.find((other) => other.id !== session.id && LIVE.has(other.status) && other.repo === session.repo && (
-    prsOfSession(other, slug).includes(number)
+    prsOfSession(other).includes(number)
     // an app session knows its issue; a CLI one names it in its title
     || (viaIssue !== null && (other.desktop?.issue ?? issueNumber(other.title)) === viaIssue)
   )) ?? null;
@@ -141,7 +142,7 @@ async function openPrsOf(session: CcSession, slug: string, deps: ArchivedOutside
       } catch { lookupFailed = true; }
     }
   }
-  for (const number of prsOfSession(session, slug).filter((each) => !open.has(each)).slice(0, MAX_CANDIDATES)) {
+  for (const number of prsOfSession(session).filter((each) => !open.has(each)).slice(0, MAX_CANDIDATES)) {
     try {
       const state = await deps.prState(number, slug);
       if (state === "OPEN") open.set(number, null);
@@ -180,7 +181,7 @@ export async function checkArchivedOutside(sessions: readonly CcSession[], deps:
     const orphans: number[] = [];
     const carried: Array<{ number: number; by: CcSession }> = [];
     for (const [number, viaIssue] of [...found.open].sort((a, b) => a[0] - b[0])) {
-      const by = slug ? liveOwnerOf(number, viaIssue, session, sessions, slug) : null;
+      const by = slug ? liveOwnerOf(number, viaIssue, session, sessions) : null;
       if (by) carried.push({ number, by });
       else orphans.push(number);
     }

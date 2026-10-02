@@ -1,11 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { archiveBlockers, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, mergeStatePt, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
+import { archiveBlockers, claimedPrNumbers, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, mergeStatePt, prOwnership, sessionBranches, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
 
 const SLUG = "dinhogehm/nuria-platform";
 const TAG = "c".repeat(40);
 const MERGE = "m".repeat(40);
 
-function fakeDeps(over: Partial<{ state: string; compare: string; tag: string | null }> = {}) {
+/** The session's worktree: checked out on a local branch, pushed to fix/9311-login. */
+const WORKTREE = "/repo/.claude/worktrees/9311-fix-login-111111";
+const BRANCH = "fix/9311-login";
+const HEAD = "e".repeat(40);
+/** `git -C <worktree> rev-parse …` as git answers it, or null for other calls. */
+const worktreeGit = (repo: string, args: string[]): string | null => {
+  if (repo !== WORKTREE || args[0] !== "rev-parse") return null;
+  if (args.includes("@{u}")) return `origin/${BRANCH}\n`;
+  if (args.includes("--abbrev-ref")) return "worktree-9311-fix-login-111111\n";
+  return `${HEAD}\n`;
+};
+
+function fakeDeps(over: Partial<{ state: string; compare: string; tag: string | null; head: string }> = {}) {
   const calls: string[][] = [];
   const reports: string[] = [];
   const chips: string[] = [];
@@ -14,13 +26,15 @@ function fakeDeps(over: Partial<{ state: string; compare: string; tag: string | 
     now: () => now,
     gh: async (args) => {
       calls.push(args);
-      if (args[0] === "pr") return JSON.stringify({ state: over.state ?? "MERGED", mergeCommit: { oid: MERGE } });
+      if (args[0] === "pr") return JSON.stringify({ state: over.state ?? "MERGED", mergeCommit: { oid: MERGE }, headRefName: over.head ?? BRANCH, headRefOid: "f".repeat(40) });
       if (args[1]!.includes("/compare/")) return `${over.compare ?? "ahead"}\n`;
       if (args[1]!.includes("/commits/")) return "2026-09-30T19:40:00Z\n";
       throw new Error("unexpected");
     },
-    git: async (_repo, args) => {
+    git: async (repo, args) => {
       if (args[0] === "remote") return `git@github.com:${SLUG}.git\n`;
+      const own = worktreeGit(repo, args);
+      if (own !== null) return own;
       calls.push(["git", ...args]);
       const tag = over.tag === undefined ? TAG : over.tag;
       return tag ? `abc123\trefs/tags/nuria-production-deployed\n${tag}\trefs/tags/nuria-production-deployed^{}\n` : "";
@@ -32,7 +46,7 @@ function fakeDeps(over: Partial<{ state: string; compare: string; tag: string | 
   return { deps, calls, reports, chips, advance: (ms: number) => { now += ms; } };
 }
 
-const session = (): { id: string; title: string; repo: string; status: string; lastReport: string; delivery?: CcDelivery } => ({ id: "s1", title: "#9311 fix login", repo: "/repo", status: "idle", lastReport: `Done. PR: https://github.com/${SLUG}/pull/9400 (depends on https://github.com/other/repo/pull/5)` });
+const session = (): { id: string; title: string; repo: string; cwd: string; status: string; lastReport: string; delivery?: CcDelivery; claimedPrs?: number[] } => ({ id: "s1", title: "9311 fix login", repo: "/repo", cwd: WORKTREE, status: "idle", lastReport: `Done. PR: https://github.com/${SLUG}/pull/9400 (depends on https://github.com/other/repo/pull/5)` });
 
 describe("delivery in production", () => {
   it("reads PR links of the session's own repository, origin slugs and the peeled tag", () => {
@@ -67,9 +81,12 @@ describe("delivery in production", () => {
     expect(numbers("Abri a PR #9328 para a issue #9319")).toEqual([9328]);
     expect(numbers("PRs #9329 e #9330")).toEqual([9329, 9330]);
     expect(numbers("PRs #9329 & #9330 mergeadas. A issue #9326 segue aberta")).toEqual([9329, 9330]);
-    // what a session archived in the app may have left open: its open deliveries and the PRs its report names
-    expect(prsOfSession({ lastReport: "Abri a PR #9328 (F4-1).", delivery: { slug: SLUG, prs: { "9330": { number: 9330, url: "", state: "open" }, "9329": { number: 9329, url: "", state: "merged" } } } as unknown as CcDelivery }, SLUG).sort()).toEqual([9328, 9330]);
-    expect(prsOfSession({ lastReport: "PR #9328" }, null)).toEqual([]);
+    // what a session may have left open: its OWN open PRs (by branch, or handed over),
+    // never one its report only names, nor a candidate not yet checked (R9-followup #2)
+    const prs = { "9330": { number: 9330, url: "", state: "open", owned: "branch" }, "9329": { number: 9329, url: "", state: "merged", owned: "branch" }, "9328": { number: 9328, url: "", state: "open" } };
+    expect(prsOfSession({ delivery: { slug: SLUG, prs } as unknown as CcDelivery }).sort()).toEqual([9330]);
+    expect(prsOfSession({ delivery: { slug: SLUG, prs } as unknown as CcDelivery, claimedPrs: [9341] }).sort()).toEqual([9330, 9341]);
+    expect(prsOfSession({})).toEqual([]);
     expect(parseLsRemoteTag(`aaa\trefs/tags/x\nbbb\trefs/tags/x^{}\n`, "x")).toBe("bbb");
     expect(parseLsRemoteTag(`aaa\trefs/tags/x\n`, "x")).toBe("aaa");
     expect(parseLsRemoteTag("", "x")).toBeNull();
@@ -143,11 +160,11 @@ describe("archiving before delivery", () => {
   /** gh as execFile hands it over: exit 1, the GraphQL message on stderr and in the message. */
   const notPr = (number: number) => Object.assign(new Error(`Command failed: gh pr view ${number} --repo ${SLUG} --json state,mergeCommit\nGraphQL: Could not resolve to a PullRequest with the number of ${number}. (repository.pullRequest)\n`), { code: 1, stderr: `GraphQL: Could not resolve to a PullRequest with the number of ${number}. (repository.pullRequest)\n` });
   const listReport = { ...session(), lastReport: "PRs #9329 e #9330 fecham a issue #9326. A #9329 já foi mergeada." };
-  const ghByNumber = (states: Record<number, string>) => async (args: string[]) => {
+  const ghByNumber = (states: Record<number, string>, heads: Record<number, string> = {}) => async (args: string[]) => {
     if (args[0] === "pr") {
       const number = Number(args[2]);
       if (!(number in states)) throw notPr(number);
-      return JSON.stringify({ state: states[number], mergeCommit: states[number] === "MERGED" ? { oid: MERGE } : null });
+      return JSON.stringify({ state: states[number], mergeCommit: states[number] === "MERGED" ? { oid: MERGE } : null, headRefName: heads[number] ?? BRANCH, headRefOid: "f".repeat(40) });
     }
     if (args[1]!.includes("/compare/")) return "ahead\n";
     throw new Error("unexpected");
@@ -189,6 +206,82 @@ describe("a repository whose GitHub address cannot be read", () => {
   });
 });
 
+// R9-followup #2, the real case redacted: the session of #9052 (its PR #9332 on
+// its own branch) reported "A trava que limitaria as tentativas … está na PR
+// #9328, que ainda não está em main" — and #9328, another session's, became
+// its PR: its archiving held, its "em produção" in the wrong conversation, a
+// false live owner.
+describe("whose PR it is", () => {
+  const REPORT_9052 = `PR #9332 aberta com o gate verde. A trava que limitaria as tentativas do watcher está na PR #9328, que ainda não está em main.`;
+  const s9052 = () => ({ ...session(), id: "35787b0f", title: "9052 tempo de reabertura", lastReport: REPORT_9052 });
+  const heads = { 9332: BRANCH, 9328: "fix/9319-reconciler-contract" };
+
+  it("does not make a PR the session only cites its own, and never asks again", async () => {
+    const f = fakeDeps();
+    f.deps.gh = async (args) => {
+      if (args[0] === "pr") {
+        const number = Number(args[2]);
+        return JSON.stringify({ state: "OPEN", mergeCommit: null, headRefName: heads[number as 9332 | 9328], headRefOid: "f".repeat(40) });
+      }
+      throw new Error("unexpected");
+    };
+    const s = s9052();
+    await watchProductionDelivery([s], f.deps, newDeliveryCache());
+    expect(Object.values(s.delivery!.prs)).toEqual([expect.objectContaining({ number: 9332, owned: "branch", state: "open" })]);
+    expect(s.delivery!.notOwned).toEqual([9328]);
+    expect(prsOfSession(s)).toEqual([9332]);
+    // a later pass does not bring #9328 back, nor ask GitHub about it
+    f.advance(DELIVERY_CHECK_MS + 1);
+    const asked: string[] = [];
+    const gh = f.deps.gh;
+    f.deps.gh = async (args) => { asked.push(args.join(" ")); return gh(args); };
+    await watchProductionDelivery([s], f.deps, newDeliveryCache());
+    expect(asked.some((call) => call.includes("view 9328"))).toBe(false);
+    // archiving is held by its own open PR only
+    expect(await archiveBlockers(s, f.deps)).toEqual({ blockers: ["a PR #9332 ainda está aberta"], unknown: [] });
+  });
+
+  it("archives a session whose only cited PR is another's, and says so when its worktree cannot be read", async () => {
+    const f = fakeDeps({ state: "OPEN", head: "fix/9319-reconciler-contract" });
+    const cites = { ...s9052(), lastReport: "Nada meu aberto. A trava está na PR #9328, que ainda não está em main." };
+    expect(await archiveBlockers(cites, f.deps)).toEqual({ blockers: [], unknown: [] });
+    // no worktree to read: not counted as its own, and not silently "nothing holds it"
+    expect(await archiveBlockers({ ...cites, cwd: undefined as unknown as string }, f.deps)).toEqual({ blockers: [], unknown: ["PR #9328 (sem a worktree da sessão para conferir se é dela)"] });
+    // pushed with `git push -u origin HEAD:fix/…`: the branch it pushed to is its own
+    const pushed = fakeDeps({ state: "OPEN" });
+    expect((await archiveBlockers({ ...session(), lastReport: "PR #9400 aberta." }, pushed.deps)).blockers).toEqual(["a PR #9400 ainda está aberta"]);
+  });
+
+  it("makes a PR the session's when it was handed over, or its head is the session's HEAD", async () => {
+    expect(claimedPrNumbers("Assuma a PR #9328 e rode o gate.")).toEqual([9328]);
+    expect(claimedPrNumbers("assumir a #9341 agora")).toEqual([9341]);
+    expect(claimedPrNumbers("A PR #9314 é sua a partir de agora; fique com a PR #9330 também")).toEqual(expect.arrayContaining([9314, 9330]));
+    expect(claimedPrNumbers("A trava está na PR #9328, que ainda não está em main.")).toEqual([]);
+    expect(claimedPrNumbers("depende da #9328")).toEqual([]);
+    const branches = { names: [BRANCH], head: HEAD };
+    expect(prOwnership({ number: 1, headRefName: BRANCH }, branches)).toBe("branch");
+    expect(prOwnership({ number: 1, headRefName: "other", headRefOid: HEAD }, branches)).toBe("branch");
+    expect(prOwnership({ number: 1, headRefName: "other", headRefOid: "0".repeat(40) }, branches)).toBeNull();
+    expect(prOwnership({ number: 1, headRefName: "other" }, null, [1])).toBe("explicit");
+    expect(prOwnership({ number: 1, headRefName: BRANCH }, null)).toBeNull();
+    // handed over: its own without asking GitHub whose branch it is
+    const f = fakeDeps({ state: "OPEN", head: "fix/9319-reconciler-contract" });
+    const s = { ...s9052(), claimedPrs: [9328] };
+    await watchProductionDelivery([s], f.deps, newDeliveryCache());
+    expect(s.delivery!.prs["9328"]).toMatchObject({ owned: "explicit", state: "open" });
+    expect(prsOfSession(s)).toEqual(expect.arrayContaining([9328]));
+  });
+
+  it("reads the branches of the session's worktree: its checkout and where it pushed, never main", async () => {
+    const git: DeliveryDeps["git"] = async (repo, args) => worktreeGit(repo, args) ?? (() => { throw new Error("no"); })();
+    expect(await sessionBranches({ cwd: WORKTREE }, git)).toEqual({ names: ["worktree-9311-fix-login-111111", BRANCH], head: HEAD });
+    expect(await sessionBranches({}, git)).toBeNull();
+    expect(await sessionBranches({ cwd: "/gone" }, git)).toBeNull();
+    const onMain: DeliveryDeps["git"] = async (_repo, args) => (args.includes("@{u}") ? "origin/main\n" : args.includes("--abbrev-ref") ? "main\n" : `${HEAD}\n`);
+    expect(await sessionBranches({ cwd: WORKTREE }, onMain)).toEqual({ names: [], head: HEAD });
+  });
+});
+
 describe("GitHub's merge state on a chip", () => {
   it("is said in pt-BR, and \"UNKNOWN\" is not shown (R9-followup #5)", () => {
     expect(mergeStatePt("UNKNOWN")).toBe("");
@@ -201,14 +294,16 @@ describe("GitHub's merge state on a chip", () => {
 });
 
 describe("a session idle with its PR still open", () => {
-  it("is picked after hours idle with a PR not merged or closed, once a day", () => {
+  it("is picked after hours idle with a PR of its own not merged or closed, once a day", () => {
     const now = 100 * 3_600_000;
-    const make = (id: string, extra: object) => ({ id, title: id, repo: "/r", status: "idle", lastActivityAt: now - IDLE_WITH_PR_MS - 1, delivery: { slug: SLUG, prs: { "9314": { url: "u", number: 9314, state: "open" as const } } }, ...extra });
+    const make = (id: string, extra: object) => ({ id, title: id, repo: "/r", status: "idle", lastActivityAt: now - IDLE_WITH_PR_MS - 1, delivery: { slug: SLUG, prs: { "9314": { url: "u", number: 9314, state: "open" as const, owned: "branch" as const } } }, ...extra });
     const waiting = make("c01aae76", {});
-    const merged = make("m", { delivery: { slug: SLUG, prs: { "9315": { url: "u", number: 9315, state: "merged" as const } } } });
+    const merged = make("m", { delivery: { slug: SLUG, prs: { "9315": { url: "u", number: 9315, state: "merged" as const, owned: "branch" as const } } } });
     const busy = make("b", { status: "running" });
     const fresh = make("f", { lastActivityAt: now - 60_000 });
     const told = make("t", { idleReportedAt: now - 3_600_000 });
-    expect(idleWithOpenPrs([waiting, merged, busy, fresh, told], now)).toEqual([{ session: waiting, prs: [9314] }]);
+    // a PR its report only named (never checked as its own) does not count
+    const cited = make("c", { delivery: { slug: SLUG, prs: { "9328": { url: "u", number: 9328, state: "open" as const } } } });
+    expect(idleWithOpenPrs([waiting, merged, busy, fresh, told, cited], now)).toEqual([{ session: waiting, prs: [9314] }]);
   });
 });
