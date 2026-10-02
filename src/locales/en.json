@@ -3318,6 +3318,7 @@
   "report.table.period": "Period",
   "report.table.of": "Numbers: {chart}",
   "report.releases.table": "Releases table",
+  "report.releases.tagManual": "live, but the tag was moved by hand",
   "report.bots.table": "Bots' effort table",
   "report.releases.title": "Releases in the period",
   "report.releases.count": "{released} in production · {failed} failed · {declined} declined",

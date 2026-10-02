@@ -10,8 +10,9 @@ import { previousPeriod, type Granularity, type ProductivityReport, type ReportP
 import { writeFileAtomic } from "./atomic.ts";
 import { emptyGhCache, execGh, RateLimited, syncCompares, syncGithub, type GhCache, type GhRunner, type SyncProgress } from "./productivity-github.ts";
 import { emptyNeedsYouLog, mergeNeedsYou, type NeedsYouLog } from "./productivity-local.ts";
+import { readFile } from "node:fs/promises";
 import {
-  emptyReleaseLogState, feedReleaseLogFile, fileSignature, finishReleaseLog, sameSignature,
+  applyLiveWithoutTag, emptyReleaseLogState, feedReleaseLogFile, fileSignature, finishReleaseLog, liveWithoutTagShas, sameSignature,
   type DeclineEvent, type FileSignature, type ReleaseLogState, type ReleaseRun,
 } from "./productivity-release-log.ts";
 import { buildProductivityReport, releasePairs, type UsageLike } from "./productivity-report.ts";
@@ -27,7 +28,8 @@ export interface CollectorDeps {
   dataDir: string;
   gh?: GhRunner;
   now?: () => number;
-  logs: { gz: string; out: string };
+  /** The watcher's out log (and its rotated .gz) and its err log (read for "live without the tag"). */
+  logs: { gz: string; out: string; err?: string };
   ownerPending: () => { open: readonly PendingLike[]; resolved: readonly ResolvedLike[] };
   botNames: () => ReadonlyMap<string, string>;
   usage: (range: { from: Date; to: Date }) => readonly UsageLike[];
@@ -43,6 +45,8 @@ interface ReleaseHistory {
   runs: Record<string, ReleaseRun>;
   declines: Record<string, DeclineEvent>;
   coverage: { from: number | null; to: number | null };
+  /** Commits the err log says went live without the tag advancing. */
+  liveWithoutTag?: string[];
 }
 
 const emptyHistory = (): ReleaseHistory => ({ version: 1, runs: {}, declines: {}, coverage: { from: null, to: null } });
@@ -68,6 +72,7 @@ export class ProductivityCollector {
   /** Parser state after the rotated .gz, so the live file is replayed on top of it. */
   private gzParsed: { signature: FileSignature; state: ReleaseLogState } | null = null;
   private outSignature: FileSignature | null = null;
+  private errSignature: FileSignature | null = null;
   private inflight: Promise<void> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private sync: ReportSyncState = { state: "idle", lastSyncAt: null, lastAttemptAt: null, nextSyncAt: null, error: null, rateLimit: null };
@@ -141,12 +146,18 @@ export class ProductivityCollector {
     } else if (!gz) {
       this.gzParsed = null;
     }
-    if (out && sameSignature(out, this.outSignature) && this.gzParsed?.signature && sameSignature(gz, this.gzParsed.signature)) return;
+    const err = this.deps.logs.err ? fileSignature(this.deps.logs.err) : null;
+    if (out && sameSignature(out, this.outSignature) && sameSignature(err, this.errSignature) && this.gzParsed?.signature && sameSignature(gz, this.gzParsed.signature)) return;
     const state: ReleaseLogState = this.gzParsed ? structuredClone(this.gzParsed.state) : emptyReleaseLogState();
     if (out) await feedReleaseLogFile(state, out.path);
     const parsed = finishReleaseLog(state, { endOfStream: true });
-    const runs = { ...this.history.runs };
-    for (const run of parsed.runs) runs[run.key] = run;
+    // deploys that went live while the tag push was refused (err log only), kept across its truncation
+    const liveWithoutTag = new Set(this.history.liveWithoutTag ?? []);
+    if (err) for (const sha of liveWithoutTagShas(await readFile(err.path, "utf8"))) liveWithoutTag.add(sha);
+    const parsedKeys = new Set(parsed.runs.map((run) => run.key));
+    const merged = [...Object.values(this.history.runs).filter((run) => !parsedKeys.has(run.key)), ...parsed.runs];
+    const runs: Record<string, ReleaseRun> = {};
+    for (const run of applyLiveWithoutTag(merged, liveWithoutTag)) runs[run.key] = run;
     // a run seen running before and gone from the files now (rotated away mid-run) is not left running
     for (const [key, run] of Object.entries(runs)) {
       if (run.outcome === "running" && !parsed.runs.some((each) => each.key === key)) runs[key] = { ...run, outcome: "failed", interrupted: true };
@@ -155,8 +166,9 @@ export class ProductivityCollector {
     for (const decline of parsed.declines) if (!declines[decline.sha]) declines[decline.sha] = decline;
     const from = [this.history.coverage.from, parsed.from].filter((value): value is number => value !== null);
     const to = [this.history.coverage.to, parsed.to].filter((value): value is number => value !== null);
-    this.history = { version: 1, runs, declines, coverage: { from: from.length ? Math.min(...from) : null, to: to.length ? Math.max(...to) : null } };
+    this.history = { version: 1, runs, declines, coverage: { from: from.length ? Math.min(...from) : null, to: to.length ? Math.max(...to) : null }, liveWithoutTag: [...liveWithoutTag] };
     this.outSignature = out;
+    this.errSignature = err;
     this.save("releases.json", this.history);
   }
 

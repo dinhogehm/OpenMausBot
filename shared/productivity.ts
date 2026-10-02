@@ -294,6 +294,8 @@ export interface ReportRelease {
   firstAt?: number;
   /** The carrier PR that published it. */
   carrierPr?: number;
+  /** Went live, but the watcher could not advance the tag (moved by hand later). */
+  tagNotAdvanced?: boolean;
 }
 
 export interface ReportBacklog {

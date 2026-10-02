@@ -8050,7 +8050,7 @@ const autonomyDispatching = new Set<string>();
 const productivityEnabled = process.env.OMB_PRODUCTIVITY === "1" || (process.env.OMB_PRODUCTIVITY !== "0" && existsSync(join(homedir(), ".nuria")));
 const productivity = new ProductivityCollector({
   dataDir: DATA_DIR,
-  logs: { gz: `${RELEASE_OUT_LOG}.1.gz`, out: RELEASE_OUT_LOG },
+  logs: { gz: `${RELEASE_OUT_LOG}.1.gz`, out: RELEASE_OUT_LOG, err: RELEASE_ERR_LOG },
   ownerPending: () => ({ open: autonomy.allOwnerPending(), resolved: autonomy.resolvedOwnerPendingOf() }),
   botNames: () => new Map(store.bots.map((bot) => [bot.id, bot.name])),
   usage: (range) => readUsage(DATA_DIR, range),

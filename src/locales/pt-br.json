@@ -3052,6 +3052,7 @@
   "report.table.period": "Período",
   "report.table.of": "Números: {chart}",
   "report.releases.table": "Tabela de releases",
+  "report.releases.tagManual": "no ar, mas a tag foi movida à mão",
   "report.bots.table": "Tabela do esforço dos bots",
   "report.releases.title": "Releases do período",
   "report.releases.count": "{released} em produção · {failed} falhados · {declined} recusados",

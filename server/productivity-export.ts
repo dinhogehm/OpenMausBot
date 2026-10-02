@@ -223,7 +223,7 @@ export function reportMarkdown(report: ProductivityReport): string {
   else {
     lines.push("| Quando | Commit | Resultado | PRs | Issues |", "|---|---|---|---|---|");
     for (const release of report.releases) {
-      const what = release.outcome === "failed" && (release.attempts ?? 1) > 1 ? `${outcomeText(release.outcome)} (${release.attempts} tentativas)` : outcomeText(release.outcome);
+      const what = release.outcome === "failed" && (release.attempts ?? 1) > 1 ? `${outcomeText(release.outcome)} (${release.attempts} tentativas)` : release.tagNotAdvanced ? `${outcomeText(release.outcome)} (tag movida à mão)` : outcomeText(release.outcome);
       const prs = release.outcome === "released" ? (release.contentUnknown ? "conteúdo não conhecido" : nums(release.prs.filter((pr) => !pr.carrier))) : release.carrierPr ? `carrier #${release.carrierPr}` : "—";
       lines.push(`| ${formatInstant(release.at)} | \`${release.sha.slice(0, 9)}\` | ${what} | ${prs} | ${release.outcome === "released" ? nums(release.issues) : "—"} |`);
     }
@@ -596,12 +596,17 @@ export function reportPdf(report: ProductivityReport): Buffer {
       rows: report.releases.map((release) => [
         formatInstant(release.at),
         release.sha.slice(0, 9),
-        release.outcome === "failed" && (release.attempts ?? 1) > 1 ? `falhou (${release.attempts}x)` : outcomeText(release.outcome),
+        release.outcome === "failed" && (release.attempts ?? 1) > 1 ? `falhou (${release.attempts}x)` : release.tagNotAdvanced ? "em produção*" : outcomeText(release.outcome),
         release.outcome === "released" ? (release.contentUnknown ? "não conhecido" : nums(release.prs.filter((pr) => !pr.carrier), 12)) : release.carrierPr ? `carrier #${release.carrierPr}` : "—",
         release.outcome === "released" ? nums(release.issues, 10) : "—",
       ]),
       size: 7.5,
     });
+    if (report.releases.some((release) => release.tagNotAdvanced)) {
+      doc.ensure(14);
+      doc.text(doc.margin, doc.y, "* no ar, mas o watcher não conseguiu avançar a tag de produção; ela foi movida à mão depois.", { size: 7.5, color: MUTED });
+      doc.y += 14;
+    }
   }
   // bots
   heading(doc, "Esforço dos bots");

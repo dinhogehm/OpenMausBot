@@ -273,6 +273,7 @@ function ReleaseRow({ release }: { release: ReportRelease }) {
         <td className="px-3 py-2">
           <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[11.5px] font-medium", OUTCOME_STYLE[release.outcome])}>{outcome}</span>
           {release.outcome === "failed" && (release.attempts ?? 1) > 1 && <span className="ml-1.5 text-[12px] text-ink-secondary">{t("report.releases.attempts", { count: String(release.attempts) })}</span>}
+          {release.tagNotAdvanced && <span className="mt-0.5 block text-[12px] text-ink-secondary">{t("report.releases.tagManual")}</span>}
         </td>
         <td className="px-3 py-2 text-ink">
           {release.outcome === "released"

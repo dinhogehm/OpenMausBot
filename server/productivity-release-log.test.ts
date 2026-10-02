@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import { afterAll, describe, expect, it } from "vitest";
 import {
-  clockAfter, clockNear, emptyReleaseLogState, feedReleaseLogFile, finishReleaseLog, parseReleaseLogText, pushReleaseLogLine,
+  applyLiveWithoutTag, clockAfter, clockNear, emptyReleaseLogState, liveWithoutTagShas, feedReleaseLogFile, finishReleaseLog, parseReleaseLogText, pushReleaseLogLine,
 } from "./productivity-release-log.ts";
 import { removeTempDir } from "./testing/cleanup.ts";
 
@@ -104,6 +104,29 @@ describe("release log, edge cases", () => {
     pushReleaseLogLine(state, "ADMISSION_RELEASED kind=release pid=4");
     const [run] = finishReleaseLog(state).runs;
     expect(run).toMatchObject({ outcome: "released", timeSource: "log", endedAt: Date.parse("2026-10-02T10:00:50Z") });
+  });
+
+  it("a deploy that went live while the tag push was refused is a delivery, dated by its deploy (real case 1bbd5c2a7)", () => {
+    const sha = "1bbd5c2a72a2ed67bc5a6a0d163f3ac2df576e44";
+    const parsed = parseReleaseLogText([
+      `ADMISSION_INTENT kind=release label=release:production:${sha} pid=19470`,
+      "[12:19:27] build",
+      `**Data:** 2026-10-01T13:01:27Z | **Branch:**  | **Commit:** 1bbd5c2a7 | **Duracao:** 300s`,
+      "[OK] Concluido! (10568s)",
+      "ADMISSION_RELEASED kind=release pid=19470",
+    ].join("\n"));
+    expect(parsed.runs[0]).toMatchObject({ outcome: "failed", deployedAt: Date.parse("2026-10-01T13:01:27Z") - 300_000 + 10_568_000 });
+    const err = [
+      " ! [remote rejected]     nuria-production-deployed -> nuria-production-deployed (push declined due to repository rule violations)",
+      `WARNING: production is live at ${sha} but the certification tag was NOT advanced (exit 1)`,
+    ].join("\n");
+    expect(liveWithoutTagShas(err)).toEqual([sha]);
+    const [run] = applyLiveWithoutTag(parsed.runs, liveWithoutTagShas(err));
+    expect(run).toMatchObject({ outcome: "released", tagNotAdvanced: true, endedAt: parsed.runs[0]!.deployedAt });
+    expect(run!.cause).toBeUndefined();
+    // a run that never finished its deploy stays a failure
+    const unfinished = parseReleaseLogText(`ADMISSION_INTENT kind=release label=release:production:${sha} pid=1\nADMISSION_RELEASED kind=release pid=1`);
+    expect(applyLiveWithoutTag(unfinished.runs, [sha])[0]!.outcome).toBe("failed");
   });
 
   it("a certification for another commit does not release this run", () => {

@@ -46,6 +46,7 @@ export interface ReleaseEvent {
   at: number;
   timeSource: ReportRelease["timeSource"];
   carrierPr?: number;
+  tagNotAdvanced?: boolean;
   baseSha?: string;
   prs: GhPr[];
   issues: GhIssue[];
@@ -103,8 +104,10 @@ export function releasePairs(input: Pick<ReportInputs, "runs" | "github" | "logC
   return pairs.reverse(); // newest first: the recent releases matter most
 }
 
-function successfulReleases(runs: readonly ReleaseRun[]): Array<{ sha: string; at: number; timeSource: ReleaseEvent["timeSource"]; carrierPr?: number }> {
-  const bySha = new Map<string, { sha: string; at: number; timeSource: ReleaseEvent["timeSource"]; carrierPr?: number }>();
+type Success = { sha: string; at: number; timeSource: ReleaseEvent["timeSource"]; carrierPr?: number; tagNotAdvanced?: boolean };
+
+function successfulReleases(runs: readonly ReleaseRun[]): Success[] {
+  const bySha = new Map<string, Success>();
   for (const run of runs) {
     if (run.outcome !== "released" || run.endedAt === null) continue;
     const known = bySha.get(run.sha);
@@ -113,7 +116,7 @@ function successfulReleases(runs: readonly ReleaseRun[]): Array<{ sha: string; a
     const better = !known || (knownFromGithub && !run.origin) || (knownFromGithub === Boolean(run.origin) && run.endedAt < known.at);
     if (!better) continue;
     const timeSource: ReleaseEvent["timeSource"] = run.origin ? "github-deployment" : run.timeSource === "log" ? "log" : "log-clock";
-    bySha.set(run.sha, { sha: run.sha, at: run.endedAt, timeSource, ...(run.carrierPr ? { carrierPr: run.carrierPr } : {}) });
+    bySha.set(run.sha, { sha: run.sha, at: run.endedAt, timeSource, ...(run.carrierPr ? { carrierPr: run.carrierPr } : {}), ...(run.tagNotAdvanced ? { tagNotAdvanced: true } : {}) });
   }
   return [...bySha.values()].sort((a, b) => a.at - b.at);
 }
@@ -283,6 +286,7 @@ function releaseRows(input: ReportInputs, timeline: Timeline, from: number, to: 
     outcome: "released" as const,
     ...(release.baseSha ? { baseSha: release.baseSha } : {}),
     ...(release.carrierPr ? { carrierPr: release.carrierPr } : {}),
+    ...(release.tagNotAdvanced ? { tagNotAdvanced: true } : {}),
     prs: release.prs.map((pr) => ({ number: pr.number, title: pr.title, kind: "pr" as const, ...(isCarrier(pr) ? { carrier: true } : {}) })),
     issues: release.issues.map(item),
     ...(release.contentUnknown ? { contentUnknown: true } : {}),

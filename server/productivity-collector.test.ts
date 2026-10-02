@@ -114,6 +114,28 @@ describe("collector", () => {
     expect(Object.keys(saved.runs).sort()).toEqual([`${a}:1`, `${b}:2`]);
   });
 
+  it("reads the err log for deploys that went live without the tag, and remembers them after the err log is cleared", async () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, "logs"));
+    const sha = "c".repeat(40);
+    writeFileSync(join(dir, "logs", "out.log"), RUN(sha, 7, "2026-10-01T13:01:27Z", false));
+    writeFileSync(join(dir, "logs", "err.log"), `WARNING: production is live at ${sha} but the certification tag was NOT advanced (exit 1)\n`);
+    const make = () => new ProductivityCollector({
+      dataDir: dir, gh: quietGh(), now: () => brt("2026-10-02T12:00:00"),
+      logs: { gz: join(dir, "logs", "out.log.1.gz"), out: join(dir, "logs", "out.log"), err: join(dir, "logs", "err.log") },
+      ownerPending: () => ({ open: [], resolved: [] }), botNames: () => new Map(), usage: () => [], digests: () => [], oldestDigestAt: () => null, usageFrom: () => null,
+    });
+    const first = make();
+    await first.refreshLogs();
+    const period = presetPeriod("month", 1, brt("2026-10-02T12:00:00"));
+    expect(first.report("month", period).kpis).toMatchObject({ deliveries: 1, failedReleases: 0 });
+    expect(first.report("month", period).releases[0]).toMatchObject({ outcome: "released", tagNotAdvanced: true });
+    writeFileSync(join(dir, "logs", "err.log"), "");
+    const second = make();
+    await second.refreshLogs();
+    expect(second.report("month", period).kpis.deliveries).toBe(1);
+  });
+
   it("a failed sync says why and keeps what it had", async () => {
     const dir = freshDir();
     const broken = collector(dir, quietGh({ fail: "gh: To get started with GitHub CLI, please run: gh auth login" }));

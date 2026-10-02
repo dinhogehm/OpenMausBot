@@ -45,6 +45,35 @@ export interface ReleaseRun {
   interrupted?: boolean;
   /** Not from the log: a production deployment GitHub recorded (the Actions era). */
   origin?: "github-deployment";
+  /** The deploy finished (review date − duration + "Concluido"), certified or not. */
+  deployedAt?: number;
+  /** Live in production, but the watcher could not advance the tag (it was moved by hand later). */
+  tagNotAdvanced?: true;
+}
+
+const LIVE_WITHOUT_TAG = /production is live at ([0-9a-f]{40}) but the certification tag was NOT advanced/g;
+
+/** The watcher's err log says when a deploy went live but the tag push was
+ * refused ("WARNING: production is live at <sha> but the certification tag
+ * was NOT advanced"): that run is a delivery, not a failure — the code is in
+ * production. Its last finished attempt of that commit becomes released,
+ * dated by its own deploy end. */
+export function liveWithoutTagShas(errText: string): string[] {
+  return [...new Set([...errText.matchAll(LIVE_WITHOUT_TAG)].map((match) => match[1]!))];
+}
+
+export function applyLiveWithoutTag(runs: readonly ReleaseRun[], shas: Iterable<string>): ReleaseRun[] {
+  const live = new Set(shas);
+  if (!live.size) return [...runs];
+  const out = [...runs];
+  for (const sha of live) {
+    if (out.some((run) => run.sha === sha && run.outcome === "released")) continue;
+    const index = out.map((run, at) => ({ run, at })).filter(({ run }) => run.sha === sha && run.outcome === "failed" && run.deployedAt !== undefined).at(-1)?.at;
+    if (index === undefined) continue;
+    const { cause: _cause, ...run } = out[index]!;
+    out[index] = { ...run, outcome: "released", endedAt: run.deployedAt!, tagNotAdvanced: true };
+  }
+  return out;
 }
 
 export interface DeclineEvent {
@@ -265,9 +294,12 @@ export function finishReleaseLog(state: ReleaseLogState, options: { endOfStream?
     }
     let endedAt = lastSeen;
     let outcome: RunOutcome = raw.certified ? "released" : raw.noop ? "noop" : "failed";
-    if (raw.certified && raw.dataAt !== null && raw.dataDuration !== null && raw.concluded !== null) {
-      // the deploy's START_TIME is the review's date minus its duration
-      endedAt = Math.max(raw.dataAt, raw.dataAt - raw.dataDuration * 1000 + raw.concluded * 1000);
+    // the deploy's START_TIME is the review's date minus its duration
+    const deployedAt = raw.dataAt !== null && raw.dataDuration !== null && raw.concluded !== null
+      ? Math.max(raw.dataAt, raw.dataAt - raw.dataDuration * 1000 + raw.concluded * 1000)
+      : null;
+    if (raw.certified && deployedAt !== null) {
+      endedAt = deployedAt;
     } else if (raw.certified && source === "log") {
       source = "log-clock";
     }
@@ -284,6 +316,7 @@ export function finishReleaseLog(state: ReleaseLogState, options: { endOfStream?
       ...(cause ? { cause: releaseCauseKey(cause).slice(0, 240) } : {}),
       ...(raw.carrierPr ? { carrierPr: raw.carrierPr } : {}),
       ...(!raw.closed && outcome !== "running" ? { interrupted: true } : {}),
+      ...(deployedAt !== null ? { deployedAt } : {}),
     });
     note(startedAt);
     note(endedAt);
