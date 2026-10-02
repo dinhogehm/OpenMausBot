@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePsTable, type PsRow } from "./bg-jobs.ts";
-import { type AdmissionLease, ciLabel, ciOwner, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, releaseBlockedBy, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, targetDrift } from "./release-priority.ts";
+import { type AdmissionLease, ciLabel, ciOwner, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, releaseBlockedBy, type ReleaseIntent, releaseLabelSha, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
 import { releaseFailures, releaseInLoop } from "./release-watch.ts";
 
 const log = [
@@ -527,5 +527,33 @@ describe("a release in a loop never takes a session's CI (02/10, d5bb1f70b)", ()
     expect(resumeAfterRelease({ fromSha: "09d832f4bfa4", at: 0, message: "A tag andou" }, { ...now, failures: releaseFailures(errLog(9), "") })).toBeNull();
     // another commit failing is not this release ending
     expect(resumeAfterRelease(wait, { ...now, failures: { sha: "2995ef215", count: 7 } })).toBeNull();
+  });
+
+  // INSP-J r1 #2: 9b50cdf7 and a59760a2 were parked by fc0326c3 with no
+  // releaseSha; d5bb1f70b was refused at 13:49 and the tag never moved.
+  // The server log's own SIGTERM line names the release (redacted argv).
+  it("migrates a wait an earlier build parked, from the server log, and never parks a session for good", () => {
+    const sid = "9b50cdf7-731b-49b6-b74f-26bd8572dd17";
+    const line = (at: string, session: string, label: string) => `[${at}] [out] [release-priority] SIGTERM to group 8095: ci-full:8154 "bash ./scripts/local-ci.sh --profile full" pgid 8095 start "Fri Oct 2 11:37:46 2026" of session ${session}, CI root 8095 "/bin/zsh -c source … && eval 'npm run ci:local'", release ${label} waited 120s; checking the lease in 15s`;
+    const log = [
+      line("2026-10-02T11:17:28.321Z", "a59760a2-addf-442c-a46f-bbeb48300c31", LOOP_LABEL),
+      "[2026-10-02T12:00:00.000Z] [out] [release] something else",
+      line("2026-10-02T14:36:27.124Z", sid, "release:production:c88f99d62"),
+      line("2026-10-02T15:17:52.423Z", sid, LOOP_LABEL),
+    ].join("\n");
+    expect(stoppedReleaseFromLog(log, sid)).toBe(FULL);
+    expect(stoppedReleaseFromLog(log, "a59760a2-addf-442c-a46f-bbeb48300c31")).toBe(FULL);
+    expect(stoppedReleaseFromLog(log, "29da943f-0000")).toBeNull();
+    // the legacy wait, migrated, meets the refusal: back to work
+    const legacy = { fromSha: "09d832f4bfa4", at: Date.parse("2026-10-02T15:17:52Z"), message: "A tag andou" };
+    const now = { tagSha: "09d832f4bfa4", failures: releaseFailures(errLog(11), "09d832f4bfa4"), declined: `${FULL}\n`, halted: null, at: Date.parse("2026-10-02T16:40:00Z") };
+    expect(resumeAfterRelease(legacy, now)).toBeNull();
+    expect(resumeAfterRelease({ ...legacy, releaseSha: stoppedReleaseFromLog(log, sid)!, failuresAtStop: 0 }, now)).toContain("foi recusado pelo dono e não vai sair");
+    // the release stopped being the candidate (main moved on) without failing: at most RESUME_AFTER_MAX_MS
+    const quiet = { ...now, declined: "", failures: { sha: "1a2b3c4d5", count: 1 } };
+    const parked = { ...legacy, releaseSha: FULL, failuresAtStop: 11 };
+    expect(resumeAfterRelease(parked, { ...quiet, at: legacy.at + RESUME_AFTER_MAX_MS - 60_000 })).toBeNull();
+    expect(resumeAfterRelease(parked, { ...quiet, at: legacy.at + RESUME_AFTER_MAX_MS })).toBe("O release de produção do d5bb1f70b, que tomou a vez do seu ci:local, não saiu em 3 h e a tag não andou: relance o seu ci:local agora (npm run ci:local) e siga de onde parou.");
+    expect(resumeAfterRelease(legacy, { ...quiet, at: legacy.at + RESUME_AFTER_MAX_MS })).toContain("não saiu em 3 h");
   });
 });

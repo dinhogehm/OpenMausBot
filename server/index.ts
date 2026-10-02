@@ -366,7 +366,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, saidToOwner } from "./owner-channel.ts";
-import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease } from "./release-priority.ts";
+import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
@@ -9713,7 +9713,17 @@ async function resumeSessionsAfterTag(): Promise<void> {
     } catch { /* the tag unread: the release's own end still gives the CI back */ }
     // the release that took the CI's place failing again, refused or halted gives it back too (R10-resilience PRIO-LOOP)
     const failures = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), readTail(RELEASED_SHA_FILE, 200).trim());
-    const message = resumeAfterRelease(wait, { tagSha: sha, failures, declined: readTail(DECLINED_SHA_FILE, 200).trim(), halted: readHaltedRelease()?.sha ?? null });
+    // a wait an earlier build recorded names no release: the server log's own SIGTERM line does (INSP-J r1 #2)
+    if (!wait.releaseSha) {
+      const fromLog = SERVER_LOG_FILES.map((file) => stoppedReleaseFromLog(readTail(file, 4 * 1024 * 1024), session.id)).find(Boolean);
+      if (fromLog) {
+        wait.releaseSha = fromLog;
+        wait.failuresAtStop = 0;
+        ccLedger.save();
+        console.log(`[release-priority] session ${session.id}: its parked CI gave way to ${fromLog.slice(0, 9)} (from the server log)`);
+      }
+    }
+    const message = resumeAfterRelease(wait, { tagSha: sha, failures, declined: readTail(DECLINED_SHA_FILE, 200).trim(), halted: readHaltedRelease()?.sha ?? null, at: Date.now() });
     if (!message) continue;
     delete session.resumeAfterTag;
     ccLedger.save();
@@ -9723,6 +9733,9 @@ async function resumeSessionsAfterTag(): Promise<void> {
     sendToSessionFromServer(session, message);
   }
 }
+
+/** Where the desktop app writes this server's output (electron/main.mjs: app.getPath("logs")/server.log). */
+const SERVER_LOG_FILES = process.platform === "darwin" ? ["openmausbot", "OpenMausBot"].map((name) => join(homedir(), "Library", "Logs", name, "server.log")) : [];
 
 /** The release in `label` is in a loop: why, or null (release-watch's releaseInLoop on this Mac's files). */
 function releaseLoopingNow(label: string): string | null {

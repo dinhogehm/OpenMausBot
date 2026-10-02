@@ -443,14 +443,32 @@ export interface ResumeWait {
   failuresAtStop?: number;
 }
 
+/** The longest a session waits for the release that took its CI. */
+export const RESUME_AFTER_MAX_MS = 3 * 3_600_000;
+
+/** The commit of the release a session's CI last gave way to, from the
+ * server log's own line ("[release-priority] SIGTERM to … of session <id>, …
+ * release release:production:<sha> waited …"): what a wait recorded by an
+ * earlier build (no releaseSha) is migrated with. Null when the log does not say. */
+export function stoppedReleaseFromLog(log: string, sessionId: string): string | null {
+  const line = log.split("\n").findLast((each) => each.includes("[release-priority] SIGTERM to ") && each.includes(`of session ${sessionId}`));
+  const label = line ? /, release (release:[\w-]+:[0-9a-f]{7,40}) waited \d+s/.exec(line)?.[1] : undefined;
+  return label ? releaseLabelSha(label) : null;
+}
+
 /** What the session hears now, or null while it still waits: the tag moved
  * (the release went through), or THAT release failed again, was refused by
  * the owner or halted — the tag will not move for it, and waiting on the tag
  * left two sessions parked for hours (R10-resilience PRIO-LOOP: a59760a2 and
  * 9b50cdf7, resumeAfterTag from 09d832f4b while d5bb1f70b kept failing). */
-export function resumeAfterRelease(wait: ResumeWait, now: { tagSha: string | null; failures: { sha: string; count: number } | null; declined: string; halted: string | null }): string | null {
+export function resumeAfterRelease(wait: ResumeWait, now: { tagSha: string | null; failures: { sha: string; count: number } | null; declined: string; halted: string | null; at?: number }): string | null {
   if (now.tagSha && now.tagSha !== wait.fromSha) return wait.message;
   const sha = wait.releaseSha;
+  // never parked for good: the release may have stopped being the candidate
+  // (main moved on) without failing, being refused or halted (INSP-J r1 #2)
+  if (now.at !== undefined && now.at - wait.at >= RESUME_AFTER_MAX_MS) {
+    return `O release de produção${sha ? ` do ${sha.slice(0, 9)}` : ""}, que tomou a vez do seu ci:local, não saiu em ${Math.round(RESUME_AFTER_MAX_MS / 3_600_000)} h e a tag não andou: relance o seu ci:local agora (npm run ci:local) e siga de onde parou.`;
+  }
   if (!sha) return null;
   const same = (other: string | null | undefined) => Boolean(other && /^[0-9a-f]{7,40}$/.test(other.trim()) && (other.trim().startsWith(sha) || sha.startsWith(other.trim())));
   const relaunch = "relance o seu ci:local agora (npm run ci:local) e siga de onde parou; o servidor não interrompe mais CI de sessão por esse commit enquanto ele estiver em laço.";
