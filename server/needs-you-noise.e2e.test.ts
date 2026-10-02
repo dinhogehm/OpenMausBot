@@ -223,6 +223,9 @@ it("checks the power before closing, tells 'na fila' from 'enviado', and reminds
         awaitingSince: at, history: [{ at, kind: "option", label: "Já colei", text: "Já colei os comentários.", by: "owner", delivered: false, queued: true, queueId: "lost-in-restart" }] },
       { id: "o15", botId: chief.id, threadId: thread, title: "Aprovar o envio do relatório", createdAt: at, ...practical,
         awaitingSince: at, history: [{ at, kind: "ask", label: "remind", text: "Lembrete enviado pelo OpenMausBot.", by: "owner", delivered: false, queued: true }] },
+      // INSP-J2 r4 A4: the person's choice still in the queue (a report's queued entry carries no queue id)
+      { id: "o16", botId: chief.id, threadId: thread, title: "Confirmar o teto do lote", createdAt: at, ...practical,
+        awaitingSince: at, history: [{ at, kind: "option", label: "Já colei", text: "Já colei os comentários.", by: "owner", delivered: false, queued: true }] },
       { id: "o3", botId: chief.id, threadId: thread, title: "Ligue o Mac na tomada (17%, abaixo do seu limite de 20%)", key: "power:battery", createdAt: at, why: "w", steps: [{ text: "s" }],
         options: [{ label: "Liguei na tomada", reply: "Liguei o Mac na tomada.", recommended: true, why: "x" }, { label: "Vou deixar na bateria", reply: "Vou deixar." }] },
       { id: "o12", botId: chief.id, threadId: thread, title: "Colar os dois comentários nas issues #NNNN e #MMMM", createdAt: at, ...practical,
@@ -255,8 +258,9 @@ it("checks the power before closing, tells 'na fila' from 'enviado', and reminds
     expect(first).toMatchObject({ status: 202, body: { ok: true, deduped: false } });
     const again = await raw(`/api/bots/${chief.id}/owner-pending/o12/remind`, {});
     expect(again.status === 409 || again.body.deduped === true).toBe(true);
-    // an item not silent cannot be reminded
-    expect((await raw(`/api/bots/${chief.id}/owner-pending/o13/remind`, {})).status).toBe(409);
+    // an item not silent cannot be reminded; one whose answer is still queued says so (r4 A4)
+    expect((await raw(`/api/bots/${chief.id}/owner-pending/o13/remind`, {})).body).toMatchObject({ code: "not_silent" });
+    expect(await raw(`/api/bots/${chief.id}/owner-pending/o16/remind`, {})).toMatchObject({ status: 409, body: { code: "answer_queued", error: expect.stringContaining("Sua resposta ainda está na fila: Chief of Staff a recebe") } });
     // the reminder reaches the bot as a report: "na fila", then "enviado"
     await expect.poll(async () => (await pending(chief.id)).find((item) => item.id === "o12").history.filter((entry: any) => entry.label === "remind").map((entry: any) => [entry.delivered, entry.queued ?? false]), { timeout: 30_000, interval: 300 }).toEqual([[true, false]]);
     // "enviado" is set when the turn starts; the engine writes its prompt right after

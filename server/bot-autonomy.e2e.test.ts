@@ -487,6 +487,9 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
   expect(JSON.stringify(f.turns()[1].evidence.map((entry: any) => entry.response?.result?.content?.[0]?.text ?? ""))).toContain("title só com menção");
   await expect.poll(async () => (await pending())[0]?.options?.[0]?.label, { timeout: 10_000 }).toBe("Recusar");
+  // the rewrite is dated on the wire: the screen drops an older "não foi entregue" by it (INSP-J2 r4 A2)
+  expect((await pending())[0].updatedAt).toBeGreaterThan((await pending())[0].since);
+  expect((await pending())[1].updatedAt).toBeUndefined();
   const before = (await userLines()).length;
   // the click on "Aprovar" (position 0 when it was seen) is refused: position 0 is now "Recusar"
   await expect(f.api(`/api/bots/${f.bot.id}/owner-pending/o1/reply`, { option: 0, label: "Aprovar" })).rejects.toThrow(/reescreveu as opções/);

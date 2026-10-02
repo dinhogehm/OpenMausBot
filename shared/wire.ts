@@ -161,6 +161,8 @@ export interface WireOwnerPending {
   history?: Array<{ at: number; kind: "option" | "text" | "ask"; label?: string; text: string; delivered: boolean; queued?: true; error?: string }>;
   /** The person's last answer reached the bot; it has not updated nor resolved the item since. */
   awaitingSince?: number;
+  /** When the bot last rewrote it (owner_pending update). */
+  updatedAt?: number;
 }
 
 export interface WireTask {

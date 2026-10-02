@@ -1363,13 +1363,14 @@ export class BotAutonomy {
   /** The person reminds the bot of an answered item it let go silent
    * (INSP-J2 r2 N3): one system report, never twice while one waits to be
    * read; the item waits on the bot again. null when it is not silent. */
-  remindOwnerPending(botId: string, id: string, threadId: string): { item: OwnerPending; deduped: boolean } | null {
+  remindOwnerPending(botId: string, id: string, threadId: string): { item: OwnerPending; deduped: boolean } | "queued" | null {
     const item = this.ownerPendingById(botId, id);
     if (!item || item.awaitingSince === undefined) return null;
     const waiting = this.reports.get(threadId)?.items.some((text) => text.startsWith(`${REMIND_REPORT_PREFIX} ${item.id} `)) ?? false;
     if (waiting) return { item, deduped: true };
-    // the person's answer still waits its turn: the bot has not had it yet, nothing to remind (INSP-J2 r3 R2)
-    if (item.history?.findLast((entry) => entry.delivered || entry.queued)?.queued) return null;
+    // the person's answer still waits its turn: the bot has not had it yet, and a
+    // reminder would not pass it in the queue — said so (INSP-J2 r3 R2, r4 A4)
+    if (item.history?.findLast((entry) => entry.delivered || entry.queued)?.queued) return "queued";
     const now = this.now();
     if (now - item.awaitingSince < OWNER_PENDING_AWAIT_MS) return null;
     this.addReport(botId, threadId, ownerPendingRemindReport(item, now));

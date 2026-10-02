@@ -1069,8 +1069,8 @@ describe("queued answers, reminders and who sees the audit (INSP-J2 r2 N3, N7, N
     now += 30 * 60_000;
     expect(autonomy.remindOwnerPending("monitor", item.id, "m1")).toBeNull();
     now += OWNER_PENDING_AWAIT_MS;
-    const first = autonomy.remindOwnerPending("monitor", item.id, "m1")!;
-    expect(first.deduped).toBe(false);
+    const first = autonomy.remindOwnerPending("monitor", item.id, "m1");
+    expect(first).toMatchObject({ deduped: false });
     const report = autonomy.takeReports("m1")!.items;
     autonomy.restoreReports({ botId: "monitor", threadId: "m1", items: report });
     expect(report).toHaveLength(1);
@@ -1094,19 +1094,19 @@ describe("queued answers, reminders and who sees the audit (INSP-J2 r2 N3, N7, N
     const item = add(autonomy, "Confirmar o teto do lote");
     const queuedAt = now;
     autonomy.recordOwnerPendingAnswer("monitor", item.id, { kind: "option", label: "Já colei", text: "Já colei.", delivered: false, queued: true, queueId: "q1" });
-    // waiting its turn: nothing to remind, however long the bot is busy
+    // waiting its turn: nothing to remind, however long the bot is busy — and said by its reason (r4 A4)
     now += 3 * 3_600_000;
-    expect(autonomy.remindOwnerPending("monitor", item.id, "m1")).toBeNull();
+    expect(autonomy.remindOwnerPending("monitor", item.id, "m1")).toBe("queued");
     // delivered 3 h later: the bot's time starts now
     autonomy.settleOwnerPendingQueued((_item, entry) => entry.queueId === "q1", { delivered: true });
     expect(autonomy.ownerPendingById("monitor", item.id)!.awaitingSince).toBe(queuedAt + 3 * 3_600_000);
     // a later answer cancelled in the conversation: the item is the person's again, with why
     now += 60_000;
     autonomy.recordOwnerPendingAnswer("monitor", item.id, { kind: "text", text: "E a planilha?", delivered: false, queued: true, queueId: "q2" });
-    autonomy.settleOwnerPendingQueued((_item, entry) => entry.queueId === "q2", { error: "cancelada na conversa antes de chegar ao bot" });
+    autonomy.settleOwnerPendingQueued((_item, entry) => entry.queueId === "q2", { error: "cancelamento na conversa antes de chegar ao bot" });
     const back = autonomy.ownerPendingById("monitor", item.id)!;
     expect(back.awaitingSince).toBeUndefined();
-    expect(back.history!.at(-1)).toMatchObject({ delivered: false, error: "cancelada na conversa antes de chegar ao bot" });
+    expect(back.history!.at(-1)).toMatchObject({ delivered: false, error: "cancelamento na conversa antes de chegar ao bot" });
     // an older entry settled late does not move the wait of a newer answer
     autonomy.recordOwnerPendingAnswer("monitor", item.id, { kind: "text", text: "a", delivered: false, queued: true, queueId: "q3" });
     autonomy.recordOwnerPendingAnswer("monitor", item.id, { kind: "text", text: "b", delivered: true });

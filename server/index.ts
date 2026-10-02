@@ -9636,6 +9636,8 @@ threadSignals = (threadId) => {
     ...(item.recommendRequestedAt ? { recommendRequestedAt: item.recommendRequestedAt } : {}),
     ...(item.history?.length ? { history: item.history.map(({ at, kind, label, text, delivered, queued, error }) => ({ at, kind, ...(label ? { label } : {}), text, delivered, ...(queued ? { queued } : {}), ...(error ? { error } : {}) })) } : {}),
     ...(item.awaitingSince ? { awaitingSince: item.awaitingSince } : {}),
+    // when the bot last rewrote it: an older "não foi entregue" is over then (INSP-J2 r4 A2)
+    ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
   }));
   return {
     ...(watches.length ? { watches } : {}),
@@ -10906,8 +10908,9 @@ function settleReminders(botId: string, reports: readonly string[], outcome: { d
 
 /** Why a queued answer never reached its bot, as its history says it (INSP-J2 r3 R3). */
 const QUEUE_DROP_REASON: Record<SteerDropReason, string> = {
-  cancelled: "cancelada na conversa antes de chegar ao bot",
-  deleted: "a conversa ou o bot foi apagado antes de a resposta chegar",
+  // neutral: read after "Sua escolha", "Sua mensagem" and "Seu pedido" alike (INSP-J2 r4 A3)
+  cancelled: "cancelamento na conversa antes de chegar ao bot",
+  deleted: "a conversa ou o bot foi apagado antes da entrega",
 };
 onSteeredDropped((queueIds, reason) => settleQueuedAnswers(queueIds, { error: QUEUE_DROP_REASON[reason] }));
 
@@ -22733,6 +22736,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const target = ownerTurnThread(bot.id, item.threadId);
       if (!store.taskByThread(bot.id, target)) return json(res, 409, { error: "A conversa de origem deste item não existe mais. Marque-o como resolvido." });
       const reminded = autonomy.remindOwnerPending(bot.id, item.id, target);
+      // why not, by its real reason: the answer still in the queue is not the bot's silence (INSP-J2 r4 A4)
+      if (reminded === "queued") return json(res, 409, { error: `Sua resposta ainda está na fila: ${bot.name} a recebe assim que terminar o que está fazendo. Um lembrete não passaria na frente.`, code: "answer_queued" });
       if (!reminded) return json(res, 409, { error: `${bot.name} ainda tem tempo para responder a este item.`, code: "not_silent" });
       refreshBotRow(bot.id);
       return json(res, 202, { ok: true, deduped: reminded.deduped, threadId: target });
