@@ -121,7 +121,8 @@
      light skins that leaves little room below the secondary ink, so there
      size carries the hierarchy. Measured by pnpm check:contrast. */
   --color-ink-tertiary: #fcfcfc90;
-  --color-accent: #1084fe;
+  /* #1084fe darkened → white on it 4.67:1 (it was 3.65:1); still 4.3:1 on the app */
+  --color-accent: #0d72e0;
   --color-accent-border: #459ffe;
   /* the ring a keyboard user follows; sits on the accent so focus reads as
      "the app is talking to you", not as a browser default */
@@ -179,8 +180,8 @@
   --color-ink: #fcfcfc;
   --color-ink-secondary: #fcfcfc99;
   --color-ink-tertiary: #fcfcfc90;
-  --color-accent: #1084fe;
-  --color-accent-border: #459ffe;
+  --color-accent: #0d72e0;        /* #1084fe darkened → white on it 4.67:1 (was 3.65:1) */
+  --color-accent-border: #459ffe; /* the original tone lives on as the border */
   --color-accent-text: #7fc0ff;
   --color-accent-ink: #ffffff;
   --color-bubble-user: #5a5a5a;

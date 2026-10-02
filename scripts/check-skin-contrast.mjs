@@ -148,10 +148,10 @@ const PAIRS = [
 ];
 
 const skins = parseSkins(css);
-// Midnight faithfully keeps two upstream contrast gaps. They may improve, but
-// must not get worse; every other below-target pair is a regression.
+// Midnight keeps one upstream contrast gap. It may improve, but must not get
+// worse; every other below-target pair is a regression. (Its accent was the
+// second gap, closed by lot I: white on the accent now clears 4.5:1.)
 const BASELINE_FLOORS = new Map([
-  ["midnight|--color-accent-ink|--color-accent", 3.65],
   ["midnight|--color-danger-ink|--color-danger", 3.10],
 ]);
 const BASELINE_DRIFT = 0.01;

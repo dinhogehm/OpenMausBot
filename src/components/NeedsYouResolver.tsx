@@ -92,9 +92,9 @@ export const resolverRowId = (key: string) => `needs-you-row-${key.replace(/[^\w
 
 const iconButton = "flex size-8 shrink-0 items-center justify-center rounded-lg text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus disabled:pointer-events-none disabled:opacity-35";
 const quietButton = "inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13px] text-ink-secondary outline-none hover:bg-raised hover:text-ink focus-visible:ring-2 focus-visible:ring-focus disabled:pointer-events-none disabled:opacity-40";
-// the accent, deepened a quarter toward black: white text on it clears 4.5:1
-// in every skin (on Midnight's #1084fe itself it is 3.6:1 — INSP-I r1 #12)
-const strongButton = "inline-flex items-center justify-center gap-1.5 rounded-lg bg-[color-mix(in_srgb,var(--color-accent)_74%,black)] px-3.5 py-2 text-[13px] font-medium text-white outline-none hover:bg-[color-mix(in_srgb,var(--color-accent)_66%,black)] focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:pointer-events-none disabled:opacity-40";
+// the app's primary button: the skin's accent and its ink (every skin clears
+// 4.5:1 there — pnpm check:contrast; Midnight's accent was fixed for it)
+const strongButton = "inline-flex items-center justify-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-accent-ink outline-none hover:brightness-110 focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-panel disabled:pointer-events-none disabled:opacity-40";
 // overdue: the danger color on the panel itself, ringed — a tint under it
 // drops below 4.5:1 on a selected (raised) row (INSP-I r1 #12)
 const OVERDUE = "border-danger/50 bg-panel font-semibold text-danger";
@@ -103,6 +103,22 @@ const sectionHeading ="text-[11.5px] font-semibold uppercase tracking-wide text-
  * or narrow one, in the scrolling item after the steps (INSP-I r1 #5). */
 const ROOMY = "max-sm:hidden [@media(max-height:760px)]:hidden";
 const CRAMPED = "sm:[@media(min-height:761px)]:hidden";
+/** More than two decisions take a third of a laptop screen (1366×768): below
+ * 900px of height they go into the item too (INSP-I r2 #4). */
+const ROOMY_MANY = "max-sm:hidden [@media(max-height:899px)]:hidden";
+const CRAMPED_MANY = "sm:[@media(min-height:900px)]:hidden";
+const placement = (options: number) => (options > 2 ? { roomy: ROOMY_MANY, cramped: CRAMPED_MANY } : { roomy: ROOMY, cramped: CRAMPED });
+
+/** "Ver as N decisões": scroll only the item (never the dialog or the page)
+ * to the decisions, and put focus on the first one (INSP-I r2 #2). */
+function jumpToDecisions() {
+  const scroller = document.getElementById("needs-you-item-scroll");
+  const target = document.getElementById("needs-you-decide-inline");
+  if (!scroller || !target) return;
+  const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 8;
+  scroller.scrollTo({ top, behavior: "smooth" });
+  scroller.querySelector<HTMLElement>("[data-placement='inline'][data-resolver-option='0']")?.focus({ preventScroll: true });
+}
 
 /** The resolution screen itself, without portal, focus or key handling —
  * every value and handler comes in as props, so it renders to static markup
@@ -244,20 +260,31 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
         </div>
       )}
 
-      {/* what was just done, over everything: it names its item, which may have left the screen (INSP-I r1 #9) */}
-      <div role="status" aria-live="polite" className="pointer-events-none absolute inset-x-0 top-[64px] z-10 flex justify-center px-4 sm:top-[70px]">
-        {props.notice ? (
-          <p data-resolver-notice="" className="pointer-events-auto flex max-w-[560px] items-start gap-2 rounded-xl border border-success/30 bg-card px-3.5 py-2.5 text-[13px] leading-snug text-ink shadow-xl">
-            <CircleCheck size={15} aria-hidden="true" className="mt-px shrink-0 text-success" />
-            <span className="min-w-0 flex-1 break-words">{props.notice}</span>
-            {props.onDismissNotice && (
-              <button type="button" aria-label={t("needsYou.screen.dismissNotice")} onClick={props.onDismissNotice} className="-mr-1 shrink-0 rounded p-0.5 text-ink-secondary hover:text-ink">
-                <X size={14} aria-hidden="true" />
-              </button>
-            )}
-          </p>
-        ) : null}
-      </div>
+      {/* nothing left on screen to anchor to: the last notice sits under the empty state */}
+      {!items.length && <div className="px-4 pb-4"><Notice {...props} /></div>}
+    </div>
+  );
+}
+
+/** What was just done, naming its item (which may have left the screen —
+ * INSP-I r1 #9). In the flow of the item's footer, above its buttons: it
+ * never covers a control or the next title, and takes at most two lines,
+ * the whole text in its tooltip (INSP-I r2 #3). The live region is always
+ * there, so a screen reader hears each notice. */
+function Notice(props: Pick<NeedsYouResolverViewProps, "notice" | "onDismissNotice">) {
+  return (
+    <div role="status" aria-live="polite">
+      {props.notice ? (
+        <p data-resolver-notice="" title={props.notice} className="mb-2.5 flex items-start gap-2 rounded-lg border border-success/30 bg-success/8 px-3 py-2 text-[12.5px] leading-snug text-ink">
+          <CircleCheck size={14} aria-hidden="true" className="mt-px shrink-0 text-success" />
+          <span className="line-clamp-2 min-w-0 flex-1 break-words">{props.notice}</span>
+          {props.onDismissNotice && (
+            <button type="button" aria-label={t("needsYou.screen.dismissNotice")} onClick={props.onDismissNotice} className="-mr-1 shrink-0 rounded p-0.5 text-ink-secondary hover:text-ink">
+              <X size={14} aria-hidden="true" />
+            </button>
+          )}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -289,7 +316,8 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   // a real reason only: no filler, and never the title said twice (INSP-I r1 #2/#18)
   const why = item.why && !sameText(item.why, item.title) ? item.why : item.approval ? t("needsYou.why.approval", { name: item.botName }) : "";
   const working = busy !== null;
-  const replyId = `needs-you-reply-${needsYouKey(item).replace(/[^\w-]/g, "-")}`;
+  const layout = placement(item.options?.length ?? 0);
+  const replyId =`needs-you-reply-${needsYouKey(item).replace(/[^\w-]/g, "-")}`;
   return (
     <>
       <div className="flex items-center gap-1 border-b border-hairline/40 px-2 py-1.5 sm:px-3">
@@ -307,7 +335,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4 sm:px-7 sm:pt-5">
+      <div id="needs-you-item-scroll" className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4 sm:px-7 sm:pt-5">
         <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12.5px] text-ink-secondary">
           <span><span className="font-medium text-ink">{item.botName}</span> {t("needsYou.screen.askedAgo", { age: waitingAge(item.since, now) })}</span>
           {item.threadTitle && item.threadTitle !== item.title && (
@@ -316,7 +344,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           )}
         </p>
         <h2 id="needs-you-item-title" className="mt-1.5 break-words text-[18px] font-semibold leading-snug text-ink sm:mt-2 sm:text-[21px]">{item.title}</h2>
-        {/* a title that only named someone was set aside: say what the bot wrote */}
+        {/* the panel reworded the title (a mention set aside, references moved): what the bot wrote, as written */}
         {pending && item.rawTitle && (
           <p className="mt-1 break-words text-[12px] text-ink-secondary">{t("needsYou.screen.botWrote", { title: item.rawTitle })}</p>
         )}
@@ -384,7 +412,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
         </section>
 
         {item.options?.length ? (
-          <div className={cn("mt-6", CRAMPED)}>
+          <div className={cn("mt-6", layout.cramped)}>
             <Decisions {...props} placement="inline" />
           </div>
         ) : null}
@@ -421,6 +449,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
       </div>
 
       <footer className="border-t border-hairline/50 bg-panel px-4 py-2.5 sm:px-5 sm:py-3">
+        <Notice {...props} />
         {props.error && (
           <div role="alert" className="mb-2.5 flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
             <CircleAlert size={14} aria-hidden="true" className="mt-px shrink-0" />
@@ -429,7 +458,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           </div>
         )}
         {item.options?.length ? (
-          <div className={cn("mb-3", ROOMY)}>
+          <div className={cn("mb-3", layout.roomy)}>
             <Decisions {...props} placement="footer" />
           </div>
         ) : null}
@@ -439,8 +468,8 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
             <button
               type="button"
               data-resolver-jump=""
-              onClick={() => document.getElementById("needs-you-decide-inline")?.scrollIntoView({ block: "start", behavior: "smooth" })}
-              className={cn(strongButton, "mr-auto py-1.5", CRAMPED)}
+              onClick={jumpToDecisions}
+              className={cn(strongButton, "mr-auto py-1.5", layout.cramped)}
             >
               <ListChecks size={14} aria-hidden="true" />
               {t("needsYou.screen.jumpToDecisions", { count: item.options.length })}
@@ -668,8 +697,10 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     if (!action) return;
     event.preventDefault();
     if (action === "leaveField") {
-      // first Escape leaves the field (the draft stays); the next one closes (INSP-I r1 #11d)
-      dialogRef.current?.querySelector<HTMLElement>("[role='dialog']")?.focus();
+      // first Escape leaves the field (the draft stays); the next one closes (INSP-I r1 #11d).
+      // Focus lands somewhere it shows: the selected row, else Close (INSP-I r2 #5)
+      const row = dialogRef.current?.querySelector<HTMLElement>("[data-resolver-row][aria-current='true']");
+      (row && row.offsetParent !== null ? row : closeRef.current)?.focus();
     } else if (action === "close") {
       // narrow screen: Escape steps back to the list first
       if (pane === "detail" && window.matchMedia?.("(max-width: 767px)").matches) setPane("list");
