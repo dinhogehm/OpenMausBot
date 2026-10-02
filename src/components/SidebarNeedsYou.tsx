@@ -39,7 +39,8 @@ export function SidebarNeedsYou({ items, density, now, onOpen, onResolve, onOpen
       <h2 className="flex items-center gap-1.5 px-2.5 pb-1 pt-1.5 text-[11.5px] font-semibold text-warning">
         <CircleAlert size={compact ? 11 : 12} aria-hidden="true" className="shrink-0" />
         <span className="min-w-0 flex-1 truncate">{t("needsYou.title")}</span>
-        <span className="rounded-full bg-warning/15 px-1.5 text-[10.5px] font-medium tabular-nums" aria-hidden="true">{items.length}</span>
+        {/* ringed, not tinted: the warning ink on a warning tint drops to 4.2:1 on light skins */}
+        <span className="rounded-full border border-warning/40 px-1.5 text-[10.5px] font-semibold tabular-nums" aria-hidden="true">{items.length}</span>
       </h2>
       <ul className="max-h-64 overflow-y-auto pb-0.5">
         {shown.map((item) => {
