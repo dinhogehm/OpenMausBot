@@ -27,6 +27,7 @@
 // promised wake nor forgets a running goal.
 import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
+import { leadingVocative } from "./owner-channel.ts";
 import { languageReminder } from "./reply-language.ts";
 import { stripLeadingMentions } from "../shared/owner-pending-title.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
@@ -1605,8 +1606,11 @@ export function ownerAskText(text: string, max = 200, knownNames: readonly strin
     .map((each) => stripLeadingMentions(each, knownNames))
     .filter((each) => /\p{L}{3}/u.test(each));
   const found = sentences.findLast((each) => each.endsWith("?")) ?? sentences.find((each) => OWNER_ASK.test(each)) ?? sentences[0] ?? "";
+  // the vocative is who, not what ("Osvaldo, a sessão da #9058…": R10-visual N12c)
+  const vocative = leadingVocative(found);
+  const said = vocative ? found.replace(/^[\s*_>"'“-]*[^,]+,\s*/u, "") : found;
   // a sentence that followed the mention starts lower-case ("@Chief, preciso…"): a title starts upper-case
-  const pick = found.charAt(0).toLocaleUpperCase("pt-BR") + found.slice(1);
+  const pick = said.charAt(0).toLocaleUpperCase("pt-BR") + said.slice(1);
   if (pick.length <= max) return pick;
   const cut = pick.slice(0, max - 1);
   const space = cut.lastIndexOf(" ");
@@ -1619,6 +1623,29 @@ export function ownerAsk(messages: ReadonlyArray<{ role: string; kind: string; t
   if (at === null) return null;
   const message = messages.find((each) => each.at === at && each.role === "bot" && each.kind === "text" && !each.from);
   return message?.text ? ownerAskText(message.text, 200, knownNames) || null : null;
+}
+
+/** Words that ask for the person without saying for what. */
+const ASK_FILLER = new Set(["preciso", "precisa", "precisamos", "você", "voce", "vocês", "sua", "seu", "suas", "seus", "ajuda", "favor", "por", "uma", "um", "agora", "aqui", "isso", "olhar", "ver", "atenção", "atencao", "urgente", "dono"]);
+
+/** A bot's ask that says nothing of its own, so its own line in "Precisa de
+ * você" would only be noise (R10-visual N12: 4 of 17 rows): it points at the
+ * panel itself ("O pedido continua na sua lista 'Precisa de você' (o15)"),
+ * at another item ("O Monitor abriu a pendência o6"), or asks with no
+ * content ("Preciso de você"). `itemIds`: the ids and aliases of the open
+ * items — an id among them means the item says it. */
+export function echoAsk(text: string, itemIds: readonly string[] = []): boolean {
+  const plain = text.replace(/[*_`~]+/g, "").replace(/\s+/g, " ").trim();
+  if (!plain) return true;
+  // the panel by its name, as a place: quoted, or "na sua lista / no painel / em Precisa de você"
+  if (/["'“«‘]\s*Precisa de voc[êe]\s*["'”»’]/i.test(plain) || /\b(?:lista|painel|tela|aba|em|no seu|na sua|no)\s+Precisa de voc[êe]\b/i.test(plain)) return true;
+  // another item by its id
+  if (/\b(?:pend[êe]ncias?|itens?|pedidos?)\s+o\d+\b/i.test(plain) || /\(o\d+\)/.test(plain)) return true;
+  const ids = new Set(itemIds.map((id) => id.toLowerCase()));
+  if ((plain.match(/\bo\d+\b/gi) ?? []).some((id) => ids.has(id.toLowerCase()))) return true;
+  // nothing asked: under two words that say something
+  const words = plain.toLowerCase().replace(/^[^,]{1,30},\s*/u, "").split(/[^\p{L}\p{N}#]+/u).filter((word) => word.length >= 3 && !ASK_FILLER.has(word));
+  return words.length < 2;
 }
 
 /** What the bot reads, in the item's conversation, when the person answers

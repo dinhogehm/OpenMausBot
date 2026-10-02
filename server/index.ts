@@ -261,6 +261,7 @@ import {
   parsePromiseInput,
   prsCited,
   lastQuestionAt,
+  echoAsk,
   ownerAskAt,
   ownerAsk,
   ownerAskText,
@@ -362,12 +363,12 @@ import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
-import { appUnblockTitle, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
+import { appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, saidToOwner } from "./owner-channel.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease } from "./release-priority.ts";
-import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
-import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
+import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8034,11 +8035,34 @@ const autonomy = new BotAutonomy({
   turnGapMs: autonomyTestMs("OMB_AUTONOMY_TURN_GAP_MS"),
 });
 const autonomyDispatching = new Set<string>();
+/** What a conversation's own line in "Precisa de você" asks, raw (the goal's
+ * detail, or the bot's reply that waits on the person); null when none. */
+function threadOwnerAskRaw(threadId: string): string | null {
+  const goal = autonomy.goalFor(threadId);
+  if (goal?.status === "needs-input") return goal.detail ?? "";
+  const at = ownerAskAt(store.messagesFor(threadId), Date.now());
+  if (at === null) return null;
+  return store.messagesFor(threadId).find((each) => each.at === at && each.role === "bot" && each.kind === "text" && !each.from)?.text ?? "";
+}
+/** The conversation's own line is not shown when it says nothing of its own
+ * (R10-visual N12): its conversation already holds a structured item (the
+ * item IS the ask), or its ask only echoes the panel or another item, or is
+ * empty ("Preciso de você"). */
+function threadAskIsNoise(threadId: string, botId: string): boolean {
+  if (autonomy.ownerPendingOf(botId).some((item) => item.threadId === threadId)) return true;
+  const raw = threadOwnerAskRaw(threadId);
+  if (raw === null) return false;
+  const names = store.bots.map((bot) => bot.name);
+  const ids = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id).flatMap((item) => [item.id, ...(item.aliases ?? [])]));
+  // the sentence the panel would show is what the person reads
+  return echoAsk(ownerAskText(raw, 400, names), ids);
+}
 goalNeedsInputForThread = (threadId) => {
+  const owner = store.botByThread(threadId);
+  if (owner && threadAskIsNoise(threadId, owner.id)) return null;
   const goal = autonomy.goalFor(threadId);
   if (goal?.status === "needs-input") return goal.finishedAt ?? goal.startedAt;
   // the bot ended its last reply asking the person something: that waits on them too
-  const owner = store.botByThread(threadId);
   if (!owner || threadBusy(owner.id, threadId)) return null;
   return ownerAskAt(store.messagesFor(threadId), Date.now());
 };
@@ -8473,7 +8497,7 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
     const desk = chief ? chiefDeskThread(chief) : null;
     if (chief && desk && store.taskByThread(chief.id, desk)) {
-      autonomy.addOwnerPending(chief.id, desk, { title: tagAdvancePendingTitle(released), key: `tag-advance:${released}` });
+      autonomy.addOwnerPending(chief.id, desk, tagAdvancePending(released, manual));
       refreshBotRow(chief.id);
     }
   }
@@ -8531,7 +8555,7 @@ async function checkPower(): Promise<void> {
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   const desk = chief ? chiefDeskThread(chief) : null;
   if (chief && desk && store.taskByThread(chief.id, desk)) {
-    autonomy.addOwnerPending(chief.id, desk, { title: alert.pendingTitle, key: POWER_PENDING_KEY });
+    autonomy.addOwnerPending(chief.id, desk, { title: alert.pendingTitle, key: POWER_PENDING_KEY, ...powerPendingDetails(releaseRunning) });
     refreshBotRow(chief.id);
   }
 }
@@ -9838,10 +9862,7 @@ function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string): s
   const thread = ownerChannelOf(bot.id) ?? threadId;
   if (!store.taskByThread(bot.id, thread)) return null;
   const name = basename(repo);
-  const item = autonomy.addOwnerPending(bot.id, thread, {
-    title: appUnblockTitle(name),
-    key: `${APP_UNBLOCK_KEY}${name}`,
-  });
+  const item = autonomy.addOwnerPending(bot.id, thread, { ...appUnblockPending(name), key: `${APP_UNBLOCK_KEY}${name}` });
   refreshBotRow(bot.id);
   return item.id;
 }

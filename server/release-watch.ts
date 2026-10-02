@@ -397,6 +397,25 @@ export function tagAdvancePendingTitle(releasedSha: string): string {
   return `Avançar a tag de produção para ${releasedSha.trim().slice(0, 9)} (barrada pelo ruleset; só o dono ou quem tem bypass, comando no log do servidor)`;
 }
 
+/** The whole item for a stuck tag, born practical (R10-visual N13): why it
+ * matters, the manual advance the release printed (the owner's, never a
+ * bot's: it is a force push past the ruleset) and that it closes itself. */
+export function tagAdvancePending(releasedSha: string, manual: string | null): { title: string; key: string; why: string; steps: Array<{ text: string; command?: string }>; command?: string } {
+  const sha = releasedSha.trim();
+  return {
+    title: tagAdvancePendingTitle(sha),
+    key: `tag-advance:${sha}`,
+    why: `Produção já roda o ${sha.slice(0, 9)}, mas a tag nuria-production-deployed não andou: os vigias da tag não veem a entrega e nenhum cliente é avisado até ela andar.`,
+    steps: [
+      manual
+        ? { text: "No Terminal, dentro do clone de nuria-platform e com uma conta que tem bypass do ruleset, rode o avanço que o release imprimiu:", command: manual }
+        : { text: `Com uma conta que tem bypass do ruleset, avance a tag nuria-production-deployed para ${sha.slice(0, 9)} (o comando exato está no log do servidor, linha [release] … manual advance).` },
+      { text: "Pronto: o servidor vê a tag contendo o commit e fecha este item sozinho; os vigias avisam as entregas." },
+    ],
+    ...(manual ? { command: manual } : {}),
+  };
+}
+
 /** Whether the tag contains the release, as far as this clone can verify:
  * `git ls-remote` does not fetch, so the tag's commit (or the released one)
  * may be missing here, and then `merge-base` cannot tell — null, never a

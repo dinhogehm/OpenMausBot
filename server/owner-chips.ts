@@ -48,5 +48,23 @@ export function serverRestartedChip(input: { interrupted: number; survived: numb
 /** The owner's item while the app reuses worktrees: the action first, as it shows in two lines (INSP-H r2 #6). */
 export const appUnblockTitle = (repoName: string) => `Abrir no app uma sessão na raiz de ${repoName} e enviar uma mensagem curta (destrava o app, que está reaproveitando worktrees; até lá as sessões vão para o terminal)`;
 
+/** The owner's item to unblock the app, born practical: why it matters, the
+ * steps in the Claude app, and the two answers (R10-visual N13: the server's
+ * own o8 had only a title, so "Resolver" showed nothing to do). */
+export const appUnblockPending = (repoName: string) => ({
+  title: appUnblockTitle(repoName),
+  why: `O app Claude está reaproveitando worktrees de ${repoName}, então o servidor não cria sessões nele: até você destravar, as sessões dos bots rodam no terminal, sem aparecer no app.`,
+  steps: [
+    { text: "Abra o app Claude e comece uma sessão nova de código (Novo → Code)." },
+    { text: `Escolha como pasta a raiz do repositório ${repoName} (não uma worktree dentro de .claude/worktrees).` },
+    { text: "Envie uma mensagem curta, por exemplo \"ok\", e espere a resposta." },
+    { text: "Pronto: o servidor percebe que o app voltou a criar sessões e fecha este item sozinho." },
+  ],
+  options: [
+    { label: "Feito", reply: `Abri no app uma sessão na raiz de ${repoName} e enviei uma mensagem. Confira se o app voltou a aceitar sessões novas.` },
+    { label: "Deixar no terminal", reply: `Deixe as sessões de ${repoName} no terminal por enquanto; não precisa me lembrar disso de novo.` },
+  ],
+});
+
 /** The conversation with the owner, read back from their order. */
 export const ownerChannelChip = (when: string) => `Canal do dono: esta conversa (ordem de ${when}) — avisos, relatórios e pendências vêm para cá`;

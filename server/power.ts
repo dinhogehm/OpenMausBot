@@ -183,6 +183,19 @@ export function powerStep(watch: PowerWatchState, power: PowerState, now: number
   return { watch: next, changed, resolvePending: false, alert: { ...found, log: `[power] ${found.text}`, pendingTitle } };
 }
 
+/** The owner's "plug the Mac in" item, born practical (R10-visual N13): why,
+ * what to do, and that it closes by itself on the wall. */
+export function powerPendingDetails(releaseRunning: boolean): { why: string; steps: Array<{ text: string }>; options: Array<{ label: string; reply: string }> } {
+  return {
+    why: `Abaixo do seu limite de bateria, o Mac pode dormir ou desligar e matar no meio o que estiver rodando (CI, sessões dos bots${releaseRunning ? ", e o release de produção que está em curso" : ""}). ${WATCHER_IGNORES_BATTERY[0]!.toUpperCase()}${WATCHER_IGNORES_BATTERY.slice(1)}.`,
+    steps: [
+      { text: "Ligue o carregador no Mac (ou o no-break na tomada)." },
+      { text: "Pronto: o servidor vê a tomada e fecha este item sozinho." },
+    ],
+    options: [{ label: "Vou deixar na bateria", reply: "Vou deixar o Mac na bateria por enquanto. Não comece nada longo (CI, carrier) até eu ligar na tomada." }],
+  };
+}
+
 /** On battery below the owner's limit: an order to run a carrier is refused;
  * a mere mention of one passes with a note. Above the limit: nothing. */
 export function carrierBatteryCheck(power: PowerState | null, intent: "order" | "mention" | null, minPercent: number): { refusal: string } | { note: string } | null {
