@@ -364,6 +364,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { appUnblockTitle, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
+import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, saidToOwner } from "./owner-channel.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
@@ -8101,13 +8102,14 @@ function holdIntake(botId: string, waiter: string, what: string): void {
 }
 
 /** true = the turn started; false = not now (busy, or it failed and said so). */
-async function dispatchAutonomyTurn(botId: string, threadId: string, chip: string, prompt: string): Promise<"started" | "busy" | "failed"> {
+async function dispatchAutonomyTurn(botId: string, threadId: string, chip: string, prompt: string, from?: { botId: string; threadId: string; title: string }): Promise<"started" | "busy" | "failed"> {
   autonomyDispatching.add(threadId);
   try {
     // A turn can fail after dispatch (the VM, docker or the engine gave up):
     // no turn.completed follows, so the lease is returned here.
     await startTurn(botId, prompt, { threadId, cardContinuation: true, unattended: true, onDispatchError: (message) => autonomyDispatchFailed(botId, threadId, message) });
-    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chip, ok: true } });
+    // woken here from another conversation (a standing watch in the channel): the chip links to it
+    store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: from ? chipText(`${chip} (conversa "${from.title.slice(0, 50)}")`, 240) : chip, ok: true }, ...(from ? { threadRef: from } : {}) });
     return "started";
   } catch (error) {
     if (isTurnAdmissionBlocked(error)) return "busy";
@@ -8643,27 +8645,40 @@ async function autonomyTick(): Promise<void> {
       autonomy.rearmStanding(wake);
       continue;
     }
+    // A standing watch is not used up by firing; a plain wake or watch is.
+    const standing = wake.watch?.standing === true;
+    // A standing watch fires in the conversation the owner named, when there
+    // is one: the bot tells the owner what it saw from there (R10-followup #1:
+    // the Chief's 'main'/'prod' watches had it writing to the owner elsewhere).
+    // A plain wake is the bot's own reminder and stays (it is leased there).
+    const turnThread = standing ? ownerTurnThread(wake.botId, wake.threadId) : wake.threadId;
+    const routed = turnThread !== wake.threadId;
+    if (routed && !store.taskByThread(wake.botId, turnThread)) continue;
     // A due wake waits for the thread to be free; it is never dropped for it.
     // a watch is intake work: it waits for the bot's other intake turn
-    if (autonomyTurnBlocked(wake.botId, wake.threadId, Boolean(wake.watch))) {
-      if (wake.watch && intakeBusyElsewhere(wake.botId, wake.threadId)) holdIntake(wake.botId, wake.threadId, `wake ${wake.watch.label ?? watchLabel(wake.watch.command)} in ${wake.threadId}`);
+    if (autonomyTurnBlocked(wake.botId, turnThread, Boolean(wake.watch))) {
+      if (wake.watch && intakeBusyElsewhere(wake.botId, turnThread)) holdIntake(wake.botId, wake.threadId, `wake ${wake.watch.label ?? watchLabel(wake.watch.command)} in ${turnThread}`);
       continue;
     }
     if (!autonomy.isCurrent(wake)) continue;
-    if (wake.watch) noteIntakeTurn(wake.botId, wake.threadId);
-    // A standing watch is not used up by firing; a plain wake or watch is.
-    const standing = wake.watch?.standing === true;
+    if (wake.watch) noteIntakeTurn(wake.botId, turnThread);
     // Leased, not dropped: on disk until the turn completes, so a restart
     // in between gives it back (bot-autonomy.ts, inFlight).
     if (!standing) autonomy.leaseWake(wake);
     const goal = autonomy.goalFor(wake.threadId);
-    const prompt = wakePrompt(wake, goal, Date.now(), languageReminder(cfg.language));
+    const fromTitle = store.taskByThread(wake.botId, wake.threadId)?.title ?? wake.threadId.slice(0, 8);
+    const basePrompt = wakePrompt(wake, goal, Date.now(), languageReminder(cfg.language));
+    const prompt = routed ? `${routedWakeNote({ fromTitle, fromThread: wake.threadId, ...(wake.watch?.label ? { label: wake.watch.label } : {}) })}\n\n${basePrompt}` : basePrompt;
     const chip = wakeFiredChip(wake);
     // Raised once when it starts failing, not on every firing while it stays broken.
     const failing = standing && wake.watch!.trigger === "failing" && wake.watch!.lastTrigger !== "failing" ? `${wake.watch!.failures}` : null;
-    const outcome = await dispatchAutonomyTurn(wake.botId, wake.threadId, chip, prompt);
-    if (outcome !== "started") settleIntakeTurn(wake.threadId);
-    else if (wake.watch) intakeTurnStarted(wake.botId, wake.threadId, wake.threadId, `watch ${wake.watch.label ?? watchLabel(wake.watch.command)}`);
+    const outcome = await dispatchAutonomyTurn(wake.botId, turnThread, chip, prompt, routed ? { botId: wake.botId, threadId: wake.threadId, title: fromTitle } : undefined);
+    if (routed && outcome === "started") {
+      // where the watch lives, a pointer to where the bot answers
+      store.appendMessage(wake.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`${chip} — respondo na conversa com o dono`, 240), ok: true }, threadRef: { botId: wake.botId, threadId: turnThread, title: store.taskByThread(wake.botId, turnThread)?.title ?? "conversa com o dono" } });
+    }
+    if (outcome !== "started") settleIntakeTurn(turnThread);
+    else if (wake.watch) intakeTurnStarted(wake.botId, turnThread, wake.threadId, `watch ${wake.watch.label ?? watchLabel(wake.watch.command)}`);
     if (standing) {
       // Busy: it stays due and fires next tick. Otherwise (started or not) it re-arms.
       if (outcome === "busy") continue;
@@ -8893,10 +8908,13 @@ function ownerChannelOf(botId: string): string | null {
  * conversations 3 s apart (R9-followup #1). A session whose own conversation
  * runs a goal reports there: that goal is waiting for it. */
 function sessionReportThread(session: CcSession): string {
-  const owner = ownerChannelOf(session.ownerBotId);
-  if (!owner || owner === session.ownerThreadId) return session.ownerThreadId;
-  if (autonomy.goalFor(session.ownerThreadId)?.status === "active") return session.ownerThreadId;
-  return owner;
+  return ownerTurnThread(session.ownerBotId, session.ownerThreadId);
+}
+
+/** Where a turn woken on the owner's behalf from `from` runs: the owner's
+ * channel when there is one (owner-channel.ts), unless `from` runs a goal. */
+function ownerTurnThread(botId: string, from: string): string {
+  return channelTurnThread({ channel: ownerChannelOf(botId), from, goalActive: autonomy.goalFor(from)?.status === "active" });
 }
 
 /** The owner named a conversation: the Claude Code sessions their bot runs
@@ -8951,6 +8969,13 @@ function adoptOwnerChannels(): void {
     } catch (error) {
       console.error(`[shared-state] ${bot.name}: could not read back the owner's channel order: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+  // a channel already on record (set by an earlier build) moved nothing then:
+  // the sessions still tied to older conversations move now — idempotent,
+  // a session already in the channel is left as it is (R10-followup #2)
+  for (const bot of store.bots) {
+    const channel = ownerChannelOf(bot.id);
+    if (channel) moveWorkToOwnerThread(bot.id, channel, "o canal com o dono já estava definido");
   }
 }
 
@@ -10107,11 +10132,15 @@ function recordSharedState(threadId: string): void {
   const owner = sharedState.ownerThread(bot.id);
   // a new conversation with the owner: the sessions report there from now on
   if (owner && owner.threadId !== ownerBefore) moveWorkToOwnerThread(bot.id, owner.threadId, "o dono definiu esta conversa como o canal com ele");
-  const ownerName = cfg.profile?.name?.trim().split(/\s+/)[0];
   if (owner && owner.threadId !== threadId && store.taskByThread(bot.id, owner.threadId) && lastReply?.text) {
-    const toOwner = Boolean(asked) || /\b(decis[ãa]o (?:sua|para voc[êe])|preciso (?:de )?(?:uma )?(?:decis[ãa]o|resposta)|continua(?:m)? com voc[êe])\b/i.test(lastReply.text)
-      || Boolean(ownerName && new RegExp(`^\\W*${ownerName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(lastReply.text));
-    if (toOwner) {
+    // the owner's name: the profile's, else the one the bot calls them by in the channel (R10-followup #1: no profile name on this Mac)
+    const ownerName = ownerFirstName({
+      profileName: cfg.profile?.name,
+      aboutMe: cfg.profile?.aboutMe,
+      channelReplies: store.messagesFor(owner.threadId).filter((message) => message.role === "bot" && message.kind === "text" && !message.from).slice(-60).map((message) => message.text ?? ""),
+      botNames: store.bots.map((each) => each.name),
+    });
+    if (saidToOwner(lastReply.text, { asked: Boolean(asked), ownerName })) {
       store.appendMessage(owner.threadId, {
         role: "bot",
         kind: "activity",
@@ -22475,19 +22504,28 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       } catch (error) {
         return json(res, 409, { error: error instanceof Error ? error.message : String(error), code: "spend_cap" });
       }
+      // with a channel named by the owner, the answer wakes the bot there,
+      // saying which item and conversation it is about — the bot's reply
+      // reaches the owner where they read (R10-followup #1)
+      const target = ownerTurnThread(bot.id, item.threadId);
+      if (target !== item.threadId) {
+        const notThere = cloudGuestSendRefusal(auth, target);
+        if (notThere) return json(res, 403, { error: notThere });
+        text = routedReplyText(text, item, store.taskByThread(bot.id, item.threadId)?.title ?? item.threadId.slice(0, 8));
+      }
       if (body.ask === "steps") {
         // the person's words in the conversation; the tool call the bot must
         // make rides only in its prompt, as a note — never as the person's
         // speech (INSP-I r1 #6). Queued, then drained: it runs now when the
         // conversation is free, or after the running turn.
         const prompt = promptWithReply(`${text}\n\n${ownerPendingStepsRequestNote(item)}`, undefined, cfg.profile?.name?.trim() || "User");
-        queueSteeredMessage(bot.id, item.threadId, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
+        queueSteeredMessage(bot.id, target, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
         autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
         refreshBotRow(bot.id);
         drainQueuedSends();
-        return json(res, 202, { ok: true, threadId: item.threadId, resolved: 0 });
+        return json(res, 202, { ok: true, threadId: target, resolved: 0 });
       }
-      const receipt = await startOrQueueDirectMessage(bot.id, item.threadId, text, undefined, undefined, messageSender(auth), usageTriggerFor(auth));
+      const receipt = await startOrQueueDirectMessage(bot.id, target, text, undefined, undefined, messageSender(auth), usageTriggerFor(auth));
       const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id }) : [];
       refreshBotRow(bot.id);
       // the text rides along: a queued answer is shown queued in the conversation

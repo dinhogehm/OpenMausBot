@@ -94,6 +94,91 @@ it("reads the owner's channel order back at boot and sends the boot report and t
   }
 }, 90_000);
 
+// R10-followup #1 and #2, as on 02/10 with the build fc0326c3: the channel
+// (52417e4a) was on record since 21:31 of 01/10, yet the Chief's standing
+// watches 'main' and 'prod' lived in another conversation (dbb9f1cf) and
+// woke it there; the owner's answers from "Precisa de você" went to the
+// items' old conversations; the sessions stayed tied to them (the move ran
+// only when the channel CHANGED); and the mirror "Dito ao dono" keyed on a
+// profile name that was empty on that Mac. Redacted: the owner is "Renata",
+// the PR is #NNNN, the conversations are made here.
+it("with a channel on record: the boot moves the sessions, a standing watch and an answer from 'Precisa de você' wake the bot in the channel, and the mirror needs no profile name", async () => {
+  const reply = "Renata, a main andou: entrou a PR #NNNN; a sessão segue no gate.";
+  const parentEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50", FAKE_CLAUDE_REPLIES: JSON.stringify(Array.from({ length: 12 }, () => reply)) };
+  const fixture = await launchVerificationServer(parentEnv);
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+  let restarted: ChildProcess | undefined;
+  try {
+    const chief = (await runControlOmb(["new-bot", "--name", "Chief of Staff", "--url", url]) as any).bot;
+    await api(`/api/bots/${chief.id}`, { chiefOfStaff: true }, "PATCH");
+    const canal = (await api(`/api/bots/${chief.id}/tasks`, { title: "Canal com o dono" })).task.threadId as string;
+    const vigias = (await api(`/api/bots/${chief.id}/tasks`, { title: "Vigias da esteira" })).task.threadId as string;
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+
+    const at = Date.now() - 16 * 3_600_000;
+    // the channel, recorded by an earlier build: no order in this history to adopt again
+    writeFileSync(join(dataDir, "bots", chief.id, "shared-state.json"), JSON.stringify({ threads: [], orders: [], ownerThread: { threadId: canal, title: "Canal com o dono", at } }));
+    // two sessions still tied to the old conversation (e47cf077, c38a865a on 02/10)
+    const session = (id: string) => ({
+      id, ownerBotId: chief.id, ownerThreadId: vigias, title: `9334 ${id}`, repo: dataDir, worktree: `9334-${id}`,
+      permissionMode: "auto", status: "idle", surface: "cli", createdAt: at, lastActivityAt: at, turns: 1, costUsd: 0, queued: [],
+    });
+    writeFileSync(join(dataDir, "cc-sessions.json"), JSON.stringify({ sessions: [session("cc-a"), session("cc-b")] }));
+    // the standing watch 'main' in the old conversation, its change seen and due now; and an item of the owner opened there
+    const now = Date.now();
+    const watch = { command: "git ls-remote origin refs/heads/main", argv: ["git", "ls-remote", "origin", "refs/heads/main"], everyMs: 3_600_000, baseline: "aaa\trefs/heads/main", lastOutput: "bbb\trefs/heads/main", lastRunAt: now, runs: 3, failures: 0, trigger: "changed", standing: true, label: "main", maxMs: 6 * 3_600_000, fired: 2, reasonAt: at };
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({
+      wakes: [{ botId: chief.id, threadId: vigias, dueAt: now - 1_000, reason: "Main andou: conferir qual PR entrou e informar o dono", createdAt: at, watch }],
+      goals: [], reports: [], inFlight: [],
+      ownerPending: [{ id: "o3", botId: chief.id, threadId: vigias, title: "Decidir se a sessão da 9334 espera o release", createdAt: at, options: [{ label: "Esperar", reply: "Espere o release e me avise." }] }],
+    }));
+
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment(parentEnv, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(async () => {
+      if (restarted?.exitCode !== null) throw new Error(readFileSync(logPath, "utf8"));
+      return fetch(url + "/api/health").then((r) => r.ok).catch(() => false);
+    }, { timeout: 15_000, interval: 150 }).toBe(true);
+    const messages = async (threadId: string) => (await api(`/api/threads/${threadId}/messages`, undefined, "GET")).messages as any[];
+    const chips = async (threadId: string) => (await messages(threadId)).filter((message) => message.kind === "activity");
+    const texts = async (threadId: string, role: string) => (await messages(threadId)).filter((message) => message.kind === "text" && message.role === role).map((message) => String(message.text ?? ""));
+
+    // #2: the sessions move to the channel at boot, once, with the chip in each conversation
+    await expect.poll(() => JSON.parse(readFileSync(join(dataDir, "cc-sessions.json"), "utf8")).sessions.map((each: any) => each.ownerThreadId), { timeout: 10_000 }).toEqual([canal, canal]);
+    expect((await chips(canal)).some((chip) => String(chip.tool?.name).startsWith("2 sessões passam a relatar aqui (o canal com o dono já estava definido)"))).toBe(true);
+    expect((await chips(vigias)).filter((chip) => String(chip.tool?.name).endsWith("os relatórios agora vão para o canal do dono"))).toHaveLength(2);
+
+    // #1: the standing watch wakes the Chief in the channel, citing where it lives; the old conversation points there
+    await expect.poll(async () => (await texts(canal, "bot")).includes(reply), { timeout: 20_000 }).toBe(true);
+    const fired = (await chips(canal)).find((chip) => String(chip.tool?.name).startsWith("Vigia permanente \"main\" disparou"));
+    expect(fired?.tool?.name).toContain("(conversa \"Vigias da esteira\")");
+    expect(fired?.threadRef).toMatchObject({ threadId: vigias });
+    expect(await texts(vigias, "bot")).toEqual([]);
+    const pointer = (await chips(vigias)).find((chip) => String(chip.tool?.name).endsWith("respondo na conversa com o dono"));
+    expect(pointer?.threadRef).toMatchObject({ threadId: canal });
+    expect(readFileSync(join(dataDir, "fake-claude-dump.json"), "utf8")).toContain("Quem disparou foi o vigia permanente \\\"main\\\" da conversa \\\"Vigias da esteira\\\"");
+
+    // #1: the owner's decision from "Precisa de você" on o3 (opened in the old conversation) wakes the Chief in the channel
+    await api(`/api/bots/${chief.id}/owner-pending/o3/reply`, { option: 0, label: "Esperar" });
+    await expect.poll(async () => (await texts(canal, "user")).some((text) => text.startsWith("Sobre \"Decidir se a sessão da 9334 espera o release\" (o3): Espere o release e me avise.") && text.includes("(Pendência o3, aberta na conversa \"Vigias da esteira\"")), { timeout: 15_000 }).toBe(true);
+    expect(await texts(vigias, "user")).toEqual([]);
+
+    // #1: the mirror, with no profile name — the Chief calls the owner "Renata" in the channel; it says so elsewhere and it shows here
+    const config = existsSync(join(dataDir, "config.json")) ? JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")) : {};
+    expect(config.profile?.name ?? "").toBe("");
+    await expect.poll(async () => (await texts(canal, "bot")).filter((text) => text === reply).length, { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
+    await runControlOmb(["send", "--bot", chief.id, "--task", vigias, "--text", "O que entrou na main?"], { env: { OPENMAUSBOT_URL: url } });
+    await expect.poll(async () => (await chips(canal)).some((chip) => String(chip.tool?.name).startsWith("Dito ao dono em \"Vigias da esteira\": a main andou")), { timeout: 20_000 }).toBe(true);
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 120_000);
+
 // INSP-H r1 #2: "Mande só o link da PR aqui." in a side conversation is a
 // request, not the owner's channel: nothing is recorded as the conversation
 // with the owner, and no session moves.
