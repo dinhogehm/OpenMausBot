@@ -24,7 +24,12 @@ import { createInterface } from "node:readline";
 import { createGunzip } from "node:zlib";
 import { releaseCauseKey, releaseFailureCause } from "./release-watch.ts";
 
-export type RunOutcome = "released" | "failed" | "noop" | "running";
+/** released: the tag advanced (or went live without it); failed: the run EXECUTED
+ * (CI or deploy steps ran) and ended without releasing; superseded: it never ran —
+ * the watcher moved on to a newer tip, or the run left the admission queue;
+ * aborted: it stopped before running anything (a stale lock, a smart-deploy that
+ * could not start) — neither of the last two is a failure of the commit. */
+export type RunOutcome = "released" | "failed" | "superseded" | "aborted" | "noop" | "running";
 export type RunTimeSource = "log" | "log-clock" | "neighbor";
 
 export interface ReleaseRun {
@@ -39,8 +44,11 @@ export interface ReleaseRun {
   timeSource: RunTimeSource;
   /** Failure: the run's own verdict, with paths, times and pids removed. */
   cause?: string;
-  /** The carrier PR the watcher announced for this tip ("Merge pull request #N"). */
-  carrierPr?: number;
+  /** The PR whose merge is the released tip ("HEAD=<sha> Merge pull request #N") —
+   * a release carrier only when GitHub says so (the report checks). */
+  headPr?: number;
+  /** The post-release health verdict (POST_RELEASE_RESULT=…): healthy, rolled_back… */
+  postRelease?: string;
   /** The run never logged its end (killed, or the watcher restarted). */
   interrupted?: boolean;
   /** Not from the log: a production deployment GitHub recorded (the Actions era). */
@@ -105,7 +113,8 @@ interface RawRun {
   certified: boolean;
   closed: boolean;
   noop: boolean;
-  carrierPr?: number;
+  headPr?: number;
+  postRelease?: string;
   tail: string[];
 }
 
@@ -135,6 +144,7 @@ const CERTIFIED = /^Certification tag nuria-production-deployed advanced to ([0-
 const CARRIER = /^HEAD=([0-9a-f]{7,40}) Merge pull request #(\d+)/;
 const DECLINED = /^Operator (?:already )?declined (?:release for )?([0-9a-f]{7,40})/;
 const NOOP = /^Release of ([0-9a-f]{7,40}) is a no-op/;
+const POST_RELEASE = /^POST_RELEASE_RESULT=([a-z_]+)/;
 const TAIL_LINES = 160;
 const DAY_S = 86_400;
 
@@ -167,7 +177,7 @@ export function pushReleaseLogLine(state: ReleaseLogState, raw: string): void {
       state.open = {
         seq: state.seq++, sha, pid: Number(intent[2]), firstClock: null, lastClock: null, anchors: [],
         dataAt: null, dataDuration: null, concluded: null, certified: false, closed: false, noop: false,
-        ...(carrier ? { carrierPr: carrier } : {}), tail: [],
+        ...(carrier ? { headPr: carrier } : {}), tail: [],
       };
       return;
     }
@@ -212,6 +222,8 @@ export function pushReleaseLogLine(state: ReleaseLogState, raw: string): void {
   if (concluded) { run.concluded = Number(concluded[1]); return; }
   const certified = CERTIFIED.exec(line);
   if (certified) { if (certified[1] === run.sha) run.certified = true; return; }
+  const post = POST_RELEASE.exec(line);
+  if (post) { run.postRelease = post[1]!; return; }
   const text = line.trim();
   if (!text || text.startsWith("│") || text.startsWith("✓")) return;
   run.tail.push(text.slice(0, 400));
@@ -304,7 +316,15 @@ export function finishReleaseLog(state: ReleaseLogState, options: { endOfStream?
       source = "log-clock";
     }
     if (!raw.closed && !raw.certified && options.endOfStream && state.open === raw) outcome = "running";
-    const cause = outcome === "failed" ? releaseFailureCause(raw.tail.join("\n")) : null;
+    // a failure is a run that RAN: a CI step, a dated report or a deploy
+    const executed = raw.firstClock !== null || raw.anchors.length > 0 || raw.concluded !== null;
+    let cause = outcome === "failed" ? releaseFailureCause(raw.tail.join("\n")) : null;
+    if (outcome === "failed" && !executed) {
+      // stopped before anything ran: an abort with its own verdict, or a run
+      // the watcher dropped (a newer tip, the admission queue) with none
+      outcome = cause ? "aborted" : "superseded";
+      if (outcome === "superseded") cause = null;
+    }
     runs.push({
       key: `${raw.sha}:${raw.pid}`,
       sha: raw.sha,
@@ -314,7 +334,8 @@ export function finishReleaseLog(state: ReleaseLogState, options: { endOfStream?
       endedAt,
       timeSource: source,
       ...(cause ? { cause: releaseCauseKey(cause).slice(0, 240) } : {}),
-      ...(raw.carrierPr ? { carrierPr: raw.carrierPr } : {}),
+      ...(raw.headPr ? { headPr: raw.headPr } : {}),
+      ...(raw.postRelease ? { postRelease: raw.postRelease } : {}),
       ...(!raw.closed && outcome !== "running" ? { interrupted: true } : {}),
       ...(deployedAt !== null ? { deployedAt } : {}),
     });

@@ -21,18 +21,40 @@ afterAll(() => removeTempDir(temp));
 
 describe("release log runs (real excerpt)", () => {
   const result = parseReleaseLogText(text, { endOfStream: true });
-  const runs = result.runs.map((run) => ({ sha: run.sha.slice(0, 9), pid: run.pid, outcome: run.outcome, timeSource: run.timeSource, startedAt: iso(run.startedAt), endedAt: iso(run.endedAt), cause: run.cause, carrierPr: run.carrierPr }));
+  const runs = result.runs.map((run) => ({ sha: run.sha.slice(0, 9), pid: run.pid, outcome: run.outcome, timeSource: run.timeSource, startedAt: iso(run.startedAt), endedAt: iso(run.endedAt), cause: run.cause, headPr: run.headPr }));
 
-  it("reads every attempt in order, with its carrier PR", () => {
-    expect(runs.map((run) => `${run.sha}:${run.pid}:${run.outcome}:${run.carrierPr}`)).toEqual([
+  it("reads every attempt in order, with the PR whose merge is the released commit", () => {
+    expect(runs.map((run) => `${run.sha}:${run.pid}:${run.outcome}:${run.headPr}`)).toEqual([
       "f50b70a3d:83261:failed:8983",
-      "f50b70a3d:76716:failed:8983",
+      "f50b70a3d:76716:aborted:8983",
       "f50b70a3d:86574:released:8983",
       "3f99428bf:6552:failed:8989",
       "a76a5aa0c:51819:released:8990",
+      "94eedf2b4:8849:superseded:8998",
       "cb015584a:91010:failed:9339",
       "9dbb1dcdd:56366:running:9360",
     ]);
+  });
+
+  it("a failure is a run that RAN; one that stopped before running is aborted, one the watcher dropped is superseded (INSP-V r1 #1)", () => {
+    // f50b70a3d pid 76716: stale lock, "Nao foi possivel inicializar smart-deploy" in 0 s — no CI step
+    expect(runs[1]).toMatchObject({ outcome: "aborted", cause: "Nao foi possivel inicializar smart-deploy" });
+    // 94eedf2b4 (17/09): admitted, released by admission, and the watcher went on to f54fc9d9e — it never ran
+    expect(runs[5]).toMatchObject({ outcome: "superseded" });
+    expect(runs[5]!.cause).toBeUndefined();
+    // the ones that ran and did not release stay failures
+    expect(runs.filter((run) => run.outcome === "failed").map((run) => run.pid)).toEqual([83261, 6552, 91010]);
+  });
+
+  it("reads the post-release health verdict of a run", () => {
+    const parsed = parseReleaseLogText([
+      "ADMISSION_INTENT kind=release label=release:production:7777777777777777777777777777777777777777 pid=7",
+      "  2026-10-02T04:04:52.321Z LH:status Generating results...",
+      "POST_RELEASE_RESULT=rolled_back exit=3 record=/tmp/x/result.env",
+      "Certification tag nuria-production-deployed advanced to 7777777777777777777777777777777777777777",
+      "ADMISSION_RELEASED kind=release pid=7",
+    ].join("\n"));
+    expect(parsed.runs[0]).toMatchObject({ outcome: "released", postRelease: "rolled_back" });
   });
 
   it("dates a release by the deploy's end: review date − its duration + the deploy's total", () => {
@@ -45,15 +67,14 @@ describe("release log runs (real excerpt)", () => {
     expect(runs[0]).toMatchObject({ timeSource: "log-clock", startedAt: "2026-09-17T01:33:57.000Z", endedAt: "2026-09-17T01:52:31.000Z" });
     expect(runs[1]).toMatchObject({ timeSource: "neighbor", startedAt: "2026-09-17T01:52:31.000Z", endedAt: "2026-09-17T01:52:31.000Z" });
     // after the 22:02 failure, a 23:40 clock is the same evening
-    expect(runs[6]).toMatchObject({ timeSource: "log-clock", startedAt: "2026-09-17T23:40:02.000Z" });
+    expect(runs[7]).toMatchObject({ timeSource: "log-clock", startedAt: "2026-09-17T23:40:02.000Z" });
   });
 
   it("keeps each failure's own verdict without paths, hashes or times", () => {
     expect(runs[0]!.cause).toBe("Local CI failed at smart-deploy");
-    expect(runs[1]!.cause).toBe("Nao foi possivel inicializar smart-deploy");
     expect(runs[3]!.cause).toBe("Integridade do snapshot Git: drift detectado em imediatamente antes da mutacao remota de deploy");
-    expect(runs[5]!.cause).toBe("Release de producao sem alvo de runtime: nenhum Worker, web ou widget mudou desde o recibo");
-    expect(runs[5]!.endedAt).toBe("2026-09-17T22:02:49.000Z");
+    expect(runs[6]!.cause).toBe("Release de producao sem alvo de runtime: nenhum Worker, web ou widget mudou desde o recibo");
+    expect(runs[6]!.endedAt).toBe("2026-09-17T22:02:49.000Z");
   });
 
   it("ignores the workspaces' test output (its fixed clocks are not the release's)", () => {
@@ -125,13 +146,14 @@ describe("release log, edge cases", () => {
     expect(run).toMatchObject({ outcome: "released", tagNotAdvanced: true, endedAt: parsed.runs[0]!.deployedAt });
     expect(run!.cause).toBeUndefined();
     // a run that never finished its deploy stays a failure
-    const unfinished = parseReleaseLogText(`ADMISSION_INTENT kind=release label=release:production:${sha} pid=1\nADMISSION_RELEASED kind=release pid=1`);
+    const unfinished = parseReleaseLogText(`ADMISSION_INTENT kind=release label=release:production:${sha} pid=1\n[10:00:00] build\nADMISSION_RELEASED kind=release pid=1`);
     expect(applyLiveWithoutTag(unfinished.runs, [sha])[0]!.outcome).toBe("failed");
   });
 
   it("a certification for another commit does not release this run", () => {
     const result = parseReleaseLogText([
       "ADMISSION_INTENT kind=release label=release:production:5555555555555555555555555555555555555555 pid=5",
+      "[10:00:00] build",
       "Certification tag nuria-production-deployed advanced to 6666666666666666666666666666666666666666",
       "ADMISSION_RELEASED kind=release pid=5",
     ].join("\n"));

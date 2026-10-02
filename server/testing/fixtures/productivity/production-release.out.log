@@ -86,6 +86,13 @@ Certification tag nuria-production-deployed advanced to a76a5aa0c72868462320e04c
 Release production completed for a76a5aa0c72868462320e04c16174383b18cd69e
 ADMISSION_RELEASED kind=release pid=51819
 Release production completed for a76a5aa0c
+NURIA_RELEASE_AUTO enabled — releasing 94eedf2b4
+HEAD=94eedf2b4 Merge pull request #8998 from dinhogehm/fix/8981-widget-otp-copy
+ADMISSION_INTENT kind=release label=release:production:94eedf2b4f55aff704c9a9b3722e421348e903d8 pid=8849
+ADMISSION_GRANTED kind=release label=release:production:94eedf2b4f55aff704c9a9b3722e421348e903d8 pid=8849 waited=0s
+ADMISSION_LOAD_WAIT label=release:production load1=1.88 threshold=12.00 ncpu=10 clear=1/3 waited=0s
+ADMISSION_LOAD_CLEAR label=release:production load1=1.59 threshold=12.00 ncpu=10 waited=30s
+ADMISSION_RELEASED kind=release pid=8849
 NURIA_RELEASE_AUTO enabled — releasing cb015584a
 HEAD=cb015584a Merge pull request #9339 from dinhogehm/chore/release-carrier-f4-2-post-release-guard
 ADMISSION_INTENT kind=release label=release:production:cb015584a7d0e01b6a4b0d2c66b4d6e5a8f91c37 pid=91010
