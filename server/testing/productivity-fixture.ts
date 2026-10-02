@@ -40,13 +40,18 @@ export function fixtureGithub(): GhCache {
   const prs = [
     pull(1, "2026-09-30T20:00:00", { closes: [101] }),
     pull(2, "2026-09-30T20:30:00", { head: "chore/release-carrier-1" }),
-    pull(3, "2026-10-01T08:00:00", { head: "fix/102-melhoria" }), // linked by its branch only
+    pull(3, "2026-10-01T08:00:00", { head: "fix/102-melhoria", refs: [102] }), // "Refs #102" in its body
     pull(4, "2026-10-01T12:00:00"), // merged after the last release: not in production yet
     pull(5, "2026-10-01T12:30:00", { base: "develop" }), // not main: not counted
+    // an epic's slice: names open issue #104 explicitly and in its branch — still not delivered (open)
+    pull(6, "2026-10-01T08:30:00", { head: "perf/104-epico", refs: [104] }),
+    // a branch that names #103 (not planned) and nothing else: no reference, nothing delivered
+    pull(7, "2026-10-01T08:40:00", { head: "fix/103-tentativa" }),
   ];
   for (const each of prs) github.prs[String(each.number)] = each;
   github.compares[`${sha("a")}...${sha("b")}`] = ["m1", "m2"];
-  github.compares[`${sha("b")}...${sha("c")}`] = ["m3"];
+  github.compares[`${sha("b")}...${sha("c")}`] = ["m3", "m6", "m7"];
+  github.repoCreatedAt = brt("2026-08-15T00:00:00");
   github.openPrs = [
     { number: 20, title: `Esperando ${CLIENT_NAME}`, createdAt: brt("2026-10-01T09:00:00"), draft: false, base: "main", headSha: "h", gate: "missing", gateAt: null },
     { number: 21, title: "Verde", createdAt: brt("2026-10-01T09:00:00"), draft: false, base: "main", headSha: "h", gate: "success", gateAt: null },
@@ -62,10 +67,14 @@ export function fixtureGithub(): GhCache {
 export function fixtureRuns(): ReleaseRun[] {
   return [
     run("a1", "released", "2026-09-29T12:00:00"),
-    run("b1", "released", "2026-09-30T23:30:00", { carrierPr: 2 }), // 02:30Z on Oct 1st: still September here
-    run("x1", "failed", "2026-10-01T05:00:00", { cause: `Tenant ${CLIENT_NAME} reprovou a migration` }),
+    // 02:30Z on Oct 1st: still September here; its post-release check rolled it back
+    run("b1", "released", "2026-09-30T23:30:00", { headPr: 2, postRelease: "rolled_back" }),
+    run("x1", "failed", "2026-10-01T05:00:00", { cause: `Tenant ${CLIENT_NAME} reprovou a migration`, headPr: 6 }),
     run("x2", "failed", "2026-10-01T06:00:00", { sha: sha("x"), cause: "Local CI failed at tests" }),
-    run("c1", "released", "2026-10-01T10:00:00"),
+    // dropped before running: neither is a failure, neither stops the pipeline
+    run("s1", "superseded", "2026-10-01T06:30:00", { timeSource: "neighbor" }),
+    run("z1", "aborted", "2026-10-01T06:40:00", { timeSource: "neighbor", cause: "Nao foi possivel inicializar smart-deploy" }),
+    run("c1", "released", "2026-10-01T10:00:00", { postRelease: "healthy" }),
     run("d1", "running", "2026-10-02T11:00:00"),
   ];
 }

@@ -3,12 +3,25 @@
 // ranges), the release log's runs and refusals, and the bots' local data.
 // Every boundary is São Paulo's (shared/productivity.ts). Nothing here reads
 // a file or the network, so tests drive it with fixtures.
+//
+// Rules the board relies on (INSP-V r1):
+//  - a failure is a run that RAN and did not release; superseded and aborted
+//    runs are counted apart and stay out of the success rate;
+//  - an issue is delivered only when a PR names it explicitly (GitHub's link,
+//    or Closes/Fixes/Resolves/Refs #N in the body or the merge commit) AND it
+//    is closed — never by a number in a branch name, never while open;
+//  - what is unknown is never summed as zero: releases without contents make
+//    the delivered totals lower bounds; buckets before the usage ledger are null.
+//
+// Performance: everything the buckets need is indexed once (times sorted,
+// prefix sums), so a bucket costs two binary searches, not a scan of every
+// PR and issue (a year by day over the real cache: a few ms).
 import {
-  bucketKey, bucketStarts, distribution, ISSUE_PRIORITIES, ISSUE_TYPES, nextBucket, previousPeriod, PRODUCTION_REPO, REPORT_TZ,
+  bucketKey, bucketStart, bucketStarts, distribution, ISSUE_PRIORITIES, ISSUE_TYPES, nextBucket, previousPeriod, PRODUCTION_REPO, REPORT_TZ, zonedParts,
   type Granularity, type IssuePriority, type IssueType, type ProductivityReport, type ReportBacklog, type ReportBotEffort,
-  type ReportBucket, type ReportCoverage, type ReportKpis, type ReportPeriod, type ReportRelease, type ReportReleaseItem, type ReportSyncState,
+  type ReportBucket, type ReportCoverage, type ReportGoals, type ReportKpis, type ReportPeriod, type ReportRelease, type ReportReleaseItem, type ReportSyncState,
 } from "../shared/productivity.ts";
-import { branchIssueNumbers, isCarrier, issuePriority, issueType, type GhCache, type GhIssue, type GhPr } from "./productivity-github.ts";
+import { isCarrier, issuePriority, issueType, type GhCache, type GhIssue, type GhPr } from "./productivity-github.ts";
 import type { DeclineEvent, ReleaseRun } from "./productivity-release-log.ts";
 import { ownerResponseMs, type NeedsYouRecord } from "./productivity-local.ts";
 
@@ -38,6 +51,7 @@ export interface ReportInputs {
   botNames: ReadonlyMap<string, string>;
   local: { usageFrom: number | null; digestsFrom: number | null; needsYouFrom: number | null };
   sync: ReportSyncState;
+  goals?: ReportGoals;
 }
 
 /** A successful release, from the log or from a GitHub deployment. */
@@ -45,12 +59,14 @@ export interface ReleaseEvent {
   sha: string;
   at: number;
   timeSource: ReportRelease["timeSource"];
-  carrierPr?: number;
+  headPr?: number;
   tagNotAdvanced?: boolean;
+  postRelease?: string;
   baseSha?: string;
   prs: GhPr[];
   issues: GhIssue[];
   contentUnknown: boolean;
+  contentUnknownReason?: "first" | "gap" | "pending";
 }
 
 export interface Timeline {
@@ -59,21 +75,27 @@ export interface Timeline {
   prDelivered: Map<number, number>;
   /** Issue number → when it first reached production, and through which PR. */
   issueDelivered: Map<number, { at: number; pr: GhPr }>;
-  /** Intervals production was blocked (first failure after a success → next success). */
+  /** Release pipeline stopped (first failure that ran after a success → next success). */
   blocked: Array<{ from: number; to: number }>;
 }
 
-/** The issues a merged PR delivers: what GitHub says it closes, plus the
- * issue numbers its branch names, when those are issues of the repo. */
+const notPlanned = (issue: GhIssue) => issue.stateReason === "NOT_PLANNED" || issue.stateReason === "DUPLICATE";
+
+/** The issues a merged PR delivers: those it names explicitly (GitHub's
+ * closing link, or Closes/Fixes/Resolves/Refs #N in its body or merge
+ * commit) that are closed as done. An open issue is never "delivered". */
 export function issuesOfPr(pr: GhPr, issues: Record<string, GhIssue>): GhIssue[] {
-  const numbers = new Set([...pr.closes, ...branchIssueNumbers(pr.head)]);
-  return [...numbers].map((number) => issues[String(number)]).filter((issue): issue is GhIssue => Boolean(issue));
+  const numbers = new Set([...pr.closes, ...(pr.refs ?? [])]);
+  return [...numbers]
+    .map((number) => issues[String(number)])
+    .filter((issue): issue is GhIssue => Boolean(issue) && issue!.state === "CLOSED" && !notPlanned(issue!));
 }
 
 /** The log's runs plus the production deployments GitHub recorded before
  * the local release existed, as runs of the same shape. */
 export function allRuns(input: Pick<ReportInputs, "runs" | "github">): ReleaseRun[] {
   const fromGithub: ReleaseRun[] = input.github.deployments.flatMap((deployment): ReleaseRun[] => {
+    if (deployment.creator?.endsWith("[bot]")) return [];
     const at = deployment.successAt ?? deployment.failedAt ?? null;
     if (at === null) return [];
     return [{
@@ -104,7 +126,7 @@ export function releasePairs(input: Pick<ReportInputs, "runs" | "github" | "logC
   return pairs.reverse(); // newest first: the recent releases matter most
 }
 
-type Success = { sha: string; at: number; timeSource: ReleaseEvent["timeSource"]; carrierPr?: number; tagNotAdvanced?: boolean };
+type Success = { sha: string; at: number; timeSource: ReleaseEvent["timeSource"]; headPr?: number; tagNotAdvanced?: boolean; postRelease?: string };
 
 function successfulReleases(runs: readonly ReleaseRun[]): Success[] {
   const bySha = new Map<string, Success>();
@@ -116,7 +138,12 @@ function successfulReleases(runs: readonly ReleaseRun[]): Success[] {
     const better = !known || (knownFromGithub && !run.origin) || (knownFromGithub === Boolean(run.origin) && run.endedAt < known.at);
     if (!better) continue;
     const timeSource: ReleaseEvent["timeSource"] = run.origin ? "github-deployment" : run.timeSource === "log" ? "log" : "log-clock";
-    bySha.set(run.sha, { sha: run.sha, at: run.endedAt, timeSource, ...(run.carrierPr ? { carrierPr: run.carrierPr } : {}), ...(run.tagNotAdvanced ? { tagNotAdvanced: true } : {}) });
+    bySha.set(run.sha, {
+      sha: run.sha, at: run.endedAt, timeSource,
+      ...(run.headPr ? { headPr: run.headPr } : {}),
+      ...(run.tagNotAdvanced ? { tagNotAdvanced: true } : {}),
+      ...(run.postRelease ? { postRelease: run.postRelease } : {}),
+    });
   }
   return [...bySha.values()].sort((a, b) => a.at - b.at);
 }
@@ -133,7 +160,8 @@ export function buildTimeline(input: Pick<ReportInputs, "runs" | "github" | "now
   const spans = releaseSourceSpans(input);
   events.forEach((event, index) => {
     const previous = index > 0 ? events[index - 1]! : undefined;
-    const base = previous && contiguous(spans, previous.at, event.at) ? previous.sha : undefined;
+    const joined = previous && contiguous(spans, previous.at, event.at);
+    const base = joined ? previous!.sha : undefined;
     const commits = base ? github.compares[`${base}...${event.sha}`] : undefined;
     const prs = (commits ?? []).map((sha) => byMergeSha.get(sha)).filter((pr): pr is GhPr => Boolean(pr)).sort((a, b) => a.number - b.number);
     const issueMap = new Map<number, GhIssue>();
@@ -145,9 +173,14 @@ export function buildTimeline(input: Pick<ReportInputs, "runs" | "github" | "now
         if (!issueDelivered.has(issue.number)) issueDelivered.set(issue.number, { at: event.at, pr });
       }
     }
-    releases.push({ ...event, ...(base ? { baseSha: base } : {}), prs, issues: [...issueMap.values()].sort((a, b) => a.number - b.number), contentUnknown: !commits });
+    const reason = commits ? undefined : !previous ? "first" : !joined ? "gap" : "pending";
+    releases.push({
+      ...event, ...(base ? { baseSha: base } : {}), prs,
+      issues: [...issueMap.values()].sort((a, b) => a.number - b.number),
+      contentUnknown: !commits, ...(reason ? { contentUnknownReason: reason } : {}),
+    });
   });
-  // production blocked: from the first failure after a success to the next success
+  // pipeline stopped: from the first failure that RAN after a success to the next success
   const attempts = runs
     .filter((run) => (run.outcome === "released" || run.outcome === "failed") && run.endedAt !== null)
     .map((run) => ({ at: run.endedAt!, ok: run.outcome === "released" }))
@@ -162,30 +195,137 @@ export function buildTimeline(input: Pick<ReportInputs, "runs" | "github" | "now
   return { releases, prDelivered, issueDelivered, blocked };
 }
 
+// ── the index: every time sorted once, counted by binary search ────────────
+
+/** Sorted times with an optional value each, and prefix sums of the values. */
+class Series {
+  readonly times: number[];
+  private readonly sums: number[];
+  constructor(entries: Array<[number, number]>) {
+    entries.sort((a, b) => a[0] - b[0]);
+    this.times = entries.map((entry) => entry[0]);
+    this.sums = [0];
+    for (const [, value] of entries) this.sums.push(this.sums.at(-1)! + value);
+  }
+  private lower(at: number): number {
+    let lo = 0;
+    let hi = this.times.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.times[mid]! < at) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  }
+  count(from: number, to: number): number { return this.lower(to) - this.lower(from); }
+  sum(from: number, to: number): number { return this.sums[this.lower(to)]! - this.sums[this.lower(from)]!; }
+  /** Index range [a, b) of the entries in [from, to). */
+  range(from: number, to: number): [number, number] { return [this.lower(from), this.lower(to)]; }
+}
+
+const series = (times: Array<number | null | undefined>) => new Series(times.filter((at): at is number => typeof at === "number").map((at) => [at, 1]));
+const isChangeFailure = (verdict: string | undefined) => Boolean(verdict && /rolled_back|rollback|unhealthy/.test(verdict));
+const isConclusive = (verdict: string | undefined) => Boolean(verdict && !/inconclusive/.test(verdict));
+
+interface ReportIndex {
+  timeline: Timeline;
+  runs: ReleaseRun[];
+  releases: Series; // value: delivered non-carrier PRs first shipped there
+  releaseList: ReleaseEvent[];
+  unknownContent: Series;
+  failures: Series;
+  superseded: Series;
+  aborted: Series;
+  declines: Series;
+  merged: Series;
+  carriers: Series;
+  closed: Series;
+  closedBugs: Series;
+  created: Series;
+  closedAll: Series;
+  usage: Series; // value: cost
+  usageTurns: Series;
+  digests: Series; // value: duration
+  timedDigests: Series;
+  needsOpened: Series;
+  needsResolved: Series;
+}
+
+function buildIndex(input: ReportInputs): ReportIndex {
+  const { github } = input;
+  const timeline = buildTimeline(input);
+  const runs = allRuns(input);
+  const deliveredNonCarrier = new Map<number, number>(); // release at → count
+  for (const [number, at] of timeline.prDelivered) {
+    const pr = github.prs[String(number)];
+    if (pr && !isCarrier(pr)) deliveredNonCarrier.set(at, (deliveredNonCarrier.get(at) ?? 0) + 1);
+  }
+  const issues = Object.values(github.issues);
+  const prs = Object.values(github.prs).filter((pr) => pr.mergedAt !== null && pr.base === "main");
+  const usageTimes = input.usage.map((row) => [Date.parse(row.at), row.costUsd ?? 0] as [number, number]).filter(([at]) => Number.isFinite(at));
+  return {
+    timeline,
+    runs,
+    releases: new Series(timeline.releases.map((release) => [release.at, deliveredNonCarrier.get(release.at) ?? 0])),
+    releaseList: timeline.releases,
+    unknownContent: series(timeline.releases.filter((release) => release.contentUnknown).map((release) => release.at)),
+    failures: series(runs.filter((run) => run.outcome === "failed").map((run) => run.endedAt)),
+    superseded: series(runs.filter((run) => run.outcome === "superseded").map((run) => run.endedAt)),
+    aborted: series(runs.filter((run) => run.outcome === "aborted").map((run) => run.endedAt)),
+    declines: series([...new Map(input.declines.map((decline) => [decline.sha, decline.at])).values()]),
+    merged: series(prs.filter((pr) => !isCarrier(pr)).map((pr) => pr.mergedAt)),
+    carriers: series(prs.filter(isCarrier).map((pr) => pr.mergedAt)),
+    closed: series(issues.map((issue) => issue.closedAt)),
+    closedBugs: series(issues.filter((issue) => !notPlanned(issue) && issueType(issue.labels) === "bug").map((issue) => issue.closedAt)),
+    created: series(issues.map((issue) => issue.createdAt)),
+    closedAll: series(issues.map((issue) => issue.closedAt)),
+    usage: new Series(usageTimes),
+    usageTurns: new Series(usageTimes.map(([at]) => [at, 1])),
+    digests: new Series(input.digests.filter((digest) => digest.durationMs !== null).map((digest) => [digest.at, digest.durationMs!])),
+    timedDigests: series(input.digests.filter((digest) => digest.durationMs !== null).map((digest) => digest.at)),
+    needsOpened: series(input.needsYou.map((item) => item.createdAt)),
+    needsResolved: series(input.needsYou.map((item) => item.resolvedAt)),
+  };
+}
+
 const overlap = (a: { from: number; to: number }, from: number, to: number) => Math.max(0, Math.min(a.to, to) - Math.max(a.from, from));
 const within = (at: number | null | undefined, from: number, to: number): at is number => typeof at === "number" && at >= from && at < to;
 const zeroByType = (): Record<IssueType, number> => Object.fromEntries(ISSUE_TYPES.map((type) => [type, 0])) as Record<IssueType, number>;
 const zeroByPriority = (): Record<IssuePriority, number> => Object.fromEntries(ISSUE_PRIORITIES.map((priority) => [priority, 0])) as Record<IssuePriority, number>;
-const isMainMerge = (pr: GhPr) => pr.mergedAt !== null && pr.base === "main";
-const isOpenAt = (issue: GhIssue, at: number) => issue.createdAt < at && (issue.closedAt === null || issue.closedAt >= at);
-const notPlanned = (issue: GhIssue) => issue.stateReason === "NOT_PLANNED" || issue.stateReason === "DUPLICATE";
+const openAt = (index: ReportIndex, at: number) => index.created.count(-Infinity, at) - index.closedAll.count(-Infinity, at);
 
-export function kpisFor(input: ReportInputs, timeline: Timeline, from: number, to: number): ReportKpis {
-  const { github } = input;
-  const issues = Object.values(github.issues);
-  const prs = Object.values(github.prs);
-  const releases = timeline.releases.filter((release) => within(release.at, from, to));
-  const deliveredPrs = new Set<number>();
-  for (const [number, at] of timeline.prDelivered) {
-    const pr = github.prs[String(number)];
-    if (pr && !isCarrier(pr) && within(at, from, to)) deliveredPrs.add(number);
+/** Milliseconds of [from, to) that fall on a Saturday or Sunday in São Paulo. */
+export function weekendMs(from: number, to: number): number {
+  let total = 0;
+  for (let day = bucketStartDay(from); day < to; day = nextBucket(day, "day")) {
+    const weekday = zonedParts(day + 12 * 3_600_000).weekday;
+    if (weekday === 0 || weekday === 6) total += overlap({ from: day, to: nextBucket(day, "day") }, from, to);
   }
-  const deliveredIssues = [...timeline.issueDelivered].filter(([, delivery]) => within(delivery.at, from, to));
-  const merged = prs.filter((pr) => isMainMerge(pr) && within(pr.mergedAt, from, to));
-  const closed = issues.filter((issue) => within(issue.closedAt, from, to));
+  return total;
+}
+const bucketStartDay = (at: number) => bucketStart(at, "day");
+
+/** Business days (Mon–Fri, São Paulo) of [from, min(to, now)), fractional for the current one. */
+export function businessDays(from: number, to: number): number {
+  let total = 0;
+  for (let day = bucketStartDay(from); day < to; day = nextBucket(day, "day")) {
+    const weekday = zonedParts(day + 12 * 3_600_000).weekday;
+    if (weekday === 0 || weekday === 6) continue;
+    const end = nextBucket(day, "day");
+    total += overlap({ from: day, to: end }, from, to) / (end - day);
+  }
+  return Math.round(total * 100) / 100;
+}
+
+export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, to: number): ReportKpis {
+  const { github } = input;
+  const end = Math.min(to, input.now);
+  const releases = index.releaseList.filter((release) => within(release.at, from, to));
+  const deliveredPrs = [...index.timeline.prDelivered].filter(([number, at]) => within(at, from, to) && !isCarrier(github.prs[String(number)]!));
+  const deliveredIssues = [...index.timeline.issueDelivered].filter(([, delivery]) => within(delivery.at, from, to));
+  const closedIssues = Object.values(github.issues).filter((issue) => within(issue.closedAt, from, to));
   const closedByType = zeroByType();
   const closedByPriority = zeroByPriority();
-  for (const issue of closed) {
+  for (const issue of closedIssues) {
     if (notPlanned(issue)) continue;
     closedByType[issueType(issue.labels)] += 1;
     closedByPriority[issuePriority(issue.labels)] += 1;
@@ -197,46 +337,70 @@ export function kpisFor(input: ReportInputs, timeline: Timeline, from: number, t
     leadIssueToProd.push(Math.max(0, delivery.at - issue.createdAt));
     if (delivery.pr.mergedAt !== null) leadIssueToMerge.push(Math.max(0, delivery.pr.mergedAt - issue.createdAt));
   }
-  const leadMergeToProd = [...deliveredPrs].map((number) => {
-    const pr = github.prs[String(number)]!;
-    return Math.max(0, timeline.prDelivered.get(number)! - (pr.mergedAt ?? 0));
-  });
-  const failed = allRuns(input).filter((run) => run.outcome === "failed" && within(run.endedAt, from, to)).length;
-  const declined = new Set(input.declines.filter((decline) => within(decline.at, from, to)).map((decline) => decline.sha)).size;
-  const blockedMs = timeline.blocked.reduce((sum, interval) => sum + overlap(interval, from, Math.min(to, input.now)), 0);
-  const end = Math.min(to, input.now);
-  const openAtEnd = issues.filter((issue) => isOpenAt(issue, end));
-  // bots
+  const leadMergeToProd = deliveredPrs.map(([number, at]) => Math.max(0, at - (github.prs[String(number)]!.mergedAt ?? 0)));
+  const failed = index.failures.count(from, to);
+  const blockedMs = index.timeline.blocked.reduce((sum, interval) => sum + overlap(interval, from, end), 0);
+  const blockedWeekendMs = index.timeline.blocked.reduce((sum, interval) => {
+    const a = Math.max(interval.from, from);
+    const b = Math.min(interval.to, end);
+    return b > a ? sum + weekendMs(a, b) : sum;
+  }, 0);
+  // DORA
+  const days = businessDays(from, end);
+  const checked = releases.filter((release) => isConclusive(release.postRelease));
+  const failedChanges = checked.filter((release) => isChangeFailure(release.postRelease));
+  const restores = failedChanges.map((release) => {
+    const next = index.releaseList.find((later) => later.at > release.at && isConclusive(later.postRelease) && !isChangeFailure(later.postRelease));
+    return next ? next.at - release.at : null;
+  }).filter((value): value is number => value !== null);
+  // bots, only where the usage ledger exists
+  const usageFrom = input.local.usageFrom;
+  const usageWindow = usageFrom === null ? null : { from: Math.max(from, usageFrom), to: end };
   const usage = input.usage.filter((row) => within(Date.parse(row.at), from, to));
   const priced = usage.filter((row) => row.costUsd !== null);
-  const digests = input.digests.filter((digest) => within(digest.at, from, to));
+  const costUsd = priced.length ? Math.round(priced.reduce((sum, row) => sum + row.costUsd!, 0) * 100) / 100 : null;
+  const deliveriesInUsageDays = usageWindow && usageWindow.to > usageWindow.from ? index.releases.count(usageWindow.from, usageWindow.to) : 0;
   const opened = input.needsYou.filter((item) => within(item.createdAt, from, to));
   const responses = opened.map(ownerResponseMs).filter((value): value is number => value !== null);
+  const openAtEnd = Object.values(github.issues).filter((issue) => issue.createdAt < end && (issue.closedAt === null || issue.closedAt >= end));
   return {
     deliveries: releases.length,
-    deliveredPrs: deliveredPrs.size,
+    deliveredPrs: deliveredPrs.length,
     deliveredIssues: deliveredIssues.length,
-    mergedPrs: merged.filter((pr) => !isCarrier(pr)).length,
-    carrierPrs: merged.filter(isCarrier).length,
-    closedIssues: closed.length,
-    closedNotPlanned: closed.filter(notPlanned).length,
+    unknownContentReleases: index.unknownContent.count(from, to),
+    mergedPrs: index.merged.count(from, to),
+    carrierPrs: index.carriers.count(from, to),
+    closedIssues: closedIssues.length,
+    closedNotPlanned: closedIssues.filter(notPlanned).length,
     closedByType,
     closedByPriority,
     leadIssueToProd: distribution(leadIssueToProd),
     leadIssueToMerge: distribution(leadIssueToMerge),
     leadMergeToProd: distribution(leadMergeToProd),
     failedReleases: failed,
-    declinedReleases: declined,
+    supersededReleases: index.superseded.count(from, to),
+    abortedReleases: index.aborted.count(from, to),
+    releaseSuccessRate: releases.length + failed ? releases.length / (releases.length + failed) : null,
+    declinedReleases: index.declines.count(from, to),
     blockedMs,
+    blockedWeekendMs,
+    deploysPerBusinessDay: days > 0 ? Math.round((releases.length / days) * 100) / 100 : null,
+    businessDays: days,
+    changeFailures: failedChanges.length,
+    checkedReleases: checked.length,
+    timeToRestore: distribution(restores),
     openIssuesAtEnd: openAtEnd.length,
     openP1AtEnd: openAtEnd.filter((issue) => ["p0", "p1"].includes(issuePriority(issue.labels))).length,
     turns: usage.length,
-    activeMs: digests.reduce((sum, digest) => sum + (digest.durationMs ?? 0), 0),
-    timedTurns: digests.filter((digest) => digest.durationMs !== null).length,
+    activeMs: index.digests.sum(from, to),
+    timedTurns: index.timedDigests.count(from, to),
     inputTokens: usage.reduce((sum, row) => sum + row.input, 0),
     outputTokens: usage.reduce((sum, row) => sum + row.output, 0),
     cachedTokens: usage.reduce((sum, row) => sum + (row.cachedInput ?? 0), 0),
-    costUsd: priced.length ? Math.round(priced.reduce((sum, row) => sum + row.costUsd!, 0) * 100) / 100 : null,
+    costUsd,
+    usageDays: usageWindow && usageWindow.to > usageWindow.from ? Math.round(((usageWindow.to - usageWindow.from) / DAY_MS) * 10) / 10 : 0,
+    costPerDelivery: costUsd !== null && deliveriesInUsageDays > 0 ? Math.round((costUsd / deliveriesInUsageDays) * 100) / 100 : null,
+    deliveriesInUsageDays,
     needsYouOpened: opened.length,
     needsYouResolved: input.needsYou.filter((item) => within(item.resolvedAt, from, to)).length,
     ownerResponse: distribution(responses),
@@ -244,7 +408,7 @@ export function kpisFor(input: ReportInputs, timeline: Timeline, from: number, t
 }
 
 const deploymentTimes = (github: GhCache): number[] =>
-  github.deployments.map((deployment) => deployment.successAt ?? deployment.failedAt ?? null).filter((at): at is number => at !== null);
+  github.deployments.filter((deployment) => !deployment.creator?.endsWith("[bot]")).map((deployment) => deployment.successAt ?? deployment.failedAt ?? null).filter((at): at is number => at !== null);
 
 /** Where a release source exists: the GitHub deployments' span and the log's
  * (live up to now). Everything else in the period is a gap. */
@@ -277,32 +441,41 @@ function coverageOf(spans: Array<{ from: number; to: number }>, from: number, to
   return covered > 0 ? "partial" : "none";
 }
 
-function releaseRows(input: ReportInputs, timeline: Timeline, from: number, to: number): ReportRelease[] {
+function releaseRows(input: ReportInputs, index: ReportIndex, from: number, to: number): ReportRelease[] {
+  const { github } = input;
   const item = (issue: GhIssue): ReportReleaseItem => ({ number: issue.number, title: issue.title, kind: "issue", type: issueType(issue.labels), priority: issuePriority(issue.labels) });
-  const rows: ReportRelease[] = timeline.releases.filter((release) => within(release.at, from, to)).map((release) => ({
+  const head = (number: number | undefined) => {
+    if (!number) return {};
+    const pr = github.prs[String(number)];
+    return { headPr: number, ...(pr && isCarrier(pr) ? { headPrIsCarrier: true } : {}) };
+  };
+  const rows: ReportRelease[] = index.releaseList.filter((release) => within(release.at, from, to)).map((release) => ({
     sha: release.sha,
     at: release.at,
     timeSource: release.timeSource,
     outcome: "released" as const,
     ...(release.baseSha ? { baseSha: release.baseSha } : {}),
-    ...(release.carrierPr ? { carrierPr: release.carrierPr } : {}),
+    ...head(release.headPr),
     ...(release.tagNotAdvanced ? { tagNotAdvanced: true } : {}),
+    ...(release.postRelease ? { postRelease: release.postRelease } : {}),
     prs: release.prs.map((pr) => ({ number: pr.number, title: pr.title, kind: "pr" as const, ...(isCarrier(pr) ? { carrier: true } : {}) })),
     issues: release.issues.map(item),
-    ...(release.contentUnknown ? { contentUnknown: true } : {}),
+    ...(release.contentUnknown ? { contentUnknown: true, contentUnknownReason: release.contentUnknownReason } : {}),
   }));
-  // failures of the same commit in a row are one row
-  const failures = allRuns(input).filter((run) => run.outcome === "failed" && run.endedAt !== null).sort((a, b) => a.endedAt! - b.endedAt!);
-  let group: { sha: string; first: number; last: number; attempts: number; cause?: string; carrierPr?: number; timeSource: ReportRelease["timeSource"] } | null = null;
+  // runs of the same commit and the same kind in a row are one row
+  const runs = index.runs.filter((run) => ["failed", "superseded", "aborted"].includes(run.outcome) && run.endedAt !== null).sort((a, b) => a.endedAt! - b.endedAt!);
+  type Group = { sha: string; outcome: "failed" | "superseded" | "aborted"; first: number; last: number; attempts: number; cause?: string; headPr?: number; timeSource: ReportRelease["timeSource"] };
+  let group: Group | null = null;
+  const sourceOf = (run: ReleaseRun): ReportRelease["timeSource"] => run.origin ? "github-deployment" : run.timeSource === "log" ? "log" : "log-clock";
   const flush = () => {
     if (group && within(group.last, from, to)) {
-      rows.push({ sha: group.sha, at: group.last, firstAt: group.first, attempts: group.attempts, timeSource: group.timeSource, outcome: "failed", ...(group.cause ? { cause: group.cause } : {}), ...(group.carrierPr ? { carrierPr: group.carrierPr } : {}), prs: [], issues: [] });
+      rows.push({ sha: group.sha, at: group.last, firstAt: group.first, attempts: group.attempts, timeSource: group.timeSource, outcome: group.outcome, ...(group.cause ? { cause: group.cause } : {}), ...head(group.headPr), prs: [], issues: [] });
     }
     group = null;
   };
-  const sourceOf = (run: ReleaseRun): ReportRelease["timeSource"] => run.origin ? "github-deployment" : run.timeSource === "log" ? "log" : "log-clock";
-  for (const run of failures) {
-    if (group && group.sha === run.sha) {
+  for (const run of runs) {
+    const outcome = run.outcome as Group["outcome"];
+    if (group && group.sha === run.sha && group.outcome === outcome) {
       group.last = run.endedAt!;
       group.attempts += 1;
       if (run.cause) group.cause = run.cause;
@@ -310,7 +483,7 @@ function releaseRows(input: ReportInputs, timeline: Timeline, from: number, to: 
       continue;
     }
     flush();
-    group = { sha: run.sha, first: run.endedAt!, last: run.endedAt!, attempts: 1, ...(run.cause ? { cause: run.cause } : {}), ...(run.carrierPr ? { carrierPr: run.carrierPr } : {}), timeSource: sourceOf(run) };
+    group = { sha: run.sha, outcome, first: run.endedAt!, last: run.endedAt!, attempts: 1, ...(run.cause ? { cause: run.cause } : {}), ...(run.headPr ? { headPr: run.headPr } : {}), timeSource: sourceOf(run) };
   }
   flush();
   const seen = new Set<string>();
@@ -321,12 +494,13 @@ function releaseRows(input: ReportInputs, timeline: Timeline, from: number, to: 
     rows.push({ sha: full, at: decline.at, timeSource: "log-clock", outcome: "declined", prs: [], issues: [] });
   }
   // newest first; at the same instant a refusal follows the failure it answers
-  const rank = { released: 0, failed: 1, declined: 2 } as const;
+  const rank = { released: 0, superseded: 1, aborted: 2, failed: 3, declined: 4 } as const;
   return rows.sort((a, b) => b.at - a.at || rank[b.outcome] - rank[a.outcome]);
 }
 
 function backlogOf(input: ReportInputs): ReportBacklog {
   const open = Object.values(input.github.issues).filter((issue) => issue.state === "OPEN");
+  const has = (issue: GhIssue, label: string) => issue.labels.some((each) => each.toLowerCase() === label);
   const oldest = open.slice().sort((a, b) => a.createdAt - b.createdAt)[0];
   const p1 = open.filter((issue) => issuePriority(issue.labels) === "p1");
   const p0 = open.filter((issue) => issuePriority(issue.labels) === "p0");
@@ -336,6 +510,8 @@ function backlogOf(input: ReportInputs): ReportBacklog {
     openIssues: open.length,
     openP1: p1.length,
     openP0: p0.length,
+    openP1Split: { current: p1.filter((issue) => has(issue, "priority:p1")).length, legacy: p1.filter((issue) => !has(issue, "priority:p1")).length },
+    openP0Split: { current: p0.filter((issue) => has(issue, "priority:p0")).length, legacy: p0.filter((issue) => !has(issue, "priority:p0")).length },
     oldestOpen: oldest ? { number: oldest.number, createdAt: oldest.createdAt, priority: issuePriority(oldest.labels) } : null,
     oldestOpenP1: oldestP1 ? { number: oldestP1.number, createdAt: oldestP1.createdAt } : null,
     prsAwaitingGate: waiting.length,
@@ -377,44 +553,52 @@ function botsOf(input: ReportInputs, from: number, to: number): ReportBotEffort[
   return [...bots.values()].sort((a, b) => b.turns - a.turns || b.activeMs - a.activeMs || a.name.localeCompare(b.name));
 }
 
+const localCoverageOf = (since: number | null, from: number, to: number): ReportBucket["usageCoverage"] =>
+  since === null || since >= to ? "none" : since <= from ? "full" : "partial";
+
 export function buildProductivityReport(input: ReportInputs): ProductivityReport {
   const { granularity, period, now } = input;
-  const timeline = buildTimeline(input);
+  const index = buildIndex(input);
   const previous = previousPeriod(period, granularity);
   const spans = releaseSourceSpans(input);
   const starts = bucketStarts(period.from, period.to, granularity);
   const buckets: ReportBucket[] = starts.map((start) => {
     const end = nextBucket(start, granularity);
-    const kpis = kpisFor(input, timeline, start, end);
+    const usageCoverage = localCoverageOf(input.local.usageFrom, start, Math.min(end, now));
+    const needsCoverage = localCoverageOf(input.local.needsYouFrom, start, Math.min(end, now));
+    const local = usageCoverage !== "none" && start < now;
+    const cost = index.usage.sum(start, end);
     return {
       key: bucketKey(start, granularity),
       start,
       end,
-      deliveries: kpis.deliveries,
-      deliveredPrs: kpis.deliveredPrs,
-      mergedPrs: kpis.mergedPrs,
-      closedIssues: kpis.closedIssues,
-      closedBugs: kpis.closedByType.bug,
-      failedReleases: kpis.failedReleases,
-      blockedMs: kpis.blockedMs,
-      openIssuesAtEnd: kpis.openIssuesAtEnd,
-      turns: kpis.turns,
-      activeMs: kpis.activeMs,
-      costUsd: kpis.costUsd,
-      needsYouOpened: kpis.needsYouOpened,
-      needsYouResolved: kpis.needsYouResolved,
+      deliveries: index.releases.count(start, end),
+      deliveredPrs: index.releases.sum(start, end),
+      unknownContentReleases: index.unknownContent.count(start, end),
+      mergedPrs: index.merged.count(start, end),
+      closedIssues: index.closed.count(start, end),
+      closedBugs: index.closedBugs.count(start, end),
+      failedReleases: index.failures.count(start, end),
+      blockedMs: index.timeline.blocked.reduce((sum, interval) => sum + overlap(interval, start, Math.min(end, now)), 0),
+      openIssuesAtEnd: openAt(index, Math.min(end, now)),
+      turns: local ? index.usageTurns.count(start, end) : null,
+      activeMs: local ? index.digests.sum(start, end) : null,
+      costUsd: local ? Math.round(cost * 100) / 100 : null,
+      needsYouOpened: needsCoverage !== "none" && start < now ? index.needsOpened.count(start, end) : null,
+      needsYouResolved: needsCoverage !== "none" && start < now ? index.needsResolved.count(start, end) : null,
       releaseCoverage: start >= now ? "none" : coverageOf(spans, start, Math.min(end, now)),
+      usageCoverage,
     };
   });
   const logged = input.runs.filter((run) => run.outcome === "released");
-  const latest = timeline.releases.at(-1);
+  const latest = index.releaseList.at(-1);
   const deployed = deploymentTimes(input.github);
   const coverage: ReportCoverage = {
     releaseLog: { from: input.logCoverage.from, to: input.logCoverage.to },
     githubDeployments: { from: deployed.length ? Math.min(...deployed) : null, to: deployed.length ? Math.max(...deployed) : null },
     releaseGaps: gapsIn(spans, period.from, Math.min(period.to, now), DAY_MS),
     releaseCoverage: { period: coverageOf(spans, period.from, Math.min(period.to, now)), previous: coverageOf(spans, previous.from, Math.min(previous.to, now)) },
-    github: { syncedAt: input.github.syncedAt, complete: input.github.prWalk.complete && input.github.issueWalk.complete, issues: Object.keys(input.github.issues).length, prs: Object.keys(input.github.prs).length },
+    github: { syncedAt: input.github.syncedAt, complete: input.github.prWalk.complete && input.github.issueWalk.complete, issues: Object.keys(input.github.issues).length, prs: Object.keys(input.github.prs).length, repoCreatedAt: input.github.repoCreatedAt ?? null },
     usage: { from: input.local.usageFrom },
     digests: { from: input.local.digestsFrom },
     needsYou: { from: input.local.needsYouFrom },
@@ -425,20 +609,21 @@ export function buildProductivityReport(input: ReportInputs): ProductivityReport
     },
   };
   return {
-    version: 1,
+    version: 2,
     generatedAt: now,
     timezone: REPORT_TZ,
     repo: PRODUCTION_REPO,
     granularity,
     period,
     previous,
-    kpis: kpisFor(input, timeline, period.from, period.to),
-    previousKpis: kpisFor(input, timeline, previous.from, previous.to),
+    kpis: kpisFor(input, index, period.from, period.to),
+    previousKpis: kpisFor(input, index, previous.from, previous.to),
     buckets,
-    releases: releaseRows(input, timeline, period.from, period.to),
+    releases: releaseRows(input, index, period.from, period.to),
     backlog: backlogOf(input),
     bots: botsOf(input, period.from, period.to),
     coverage,
     sync: input.sync,
+    goals: input.goals ?? {},
   };
 }
