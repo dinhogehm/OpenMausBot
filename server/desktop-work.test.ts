@@ -495,7 +495,7 @@ describe("following turns", () => {
     followDesktopSessions(h.deps);
     expect(session.blockedOn).toBe("the hook denied gh issue comment");
     expect(h.chips.at(-1)).toMatchObject({ ok: false });
-    expect(h.reports[0]!.text).toContain("BLOCKED");
+    expect(h.reports[0]!.text).toContain("BLOQUEADA");
   });
 
   it("marks a session without progress stalled: reported once, no longer active, back to running on any progress", () => {
