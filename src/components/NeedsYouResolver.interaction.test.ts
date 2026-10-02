@@ -101,7 +101,8 @@ describe("the resolution screen, driven by keys and clicks", () => {
     press(0);
     await flush();
     expect(handlers.onDecide).toHaveBeenCalledWith(expect.objectContaining({ pendingId: "o1" } satisfies Partial<NeedsYouItem>), 0);
-    expect(notice()).toContain("Enviado «Aprovar» para Chief of Staff — Aprovar o merge da PR #12. Item resolvido.");
+    // J18: a decision no longer closes the item — it waits on the bot
+    expect(notice()).toContain("Enviado «Aprovar» para Chief of Staff — Aprovar o merge da PR #12. Aguardando Chief of Staff.");
     handlers.onDecide.mockRejectedValueOnce(new Error("O bot reescreveu as opções deste item."));
     press(1);
     await flush();

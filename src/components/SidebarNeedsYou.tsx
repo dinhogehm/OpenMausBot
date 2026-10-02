@@ -70,7 +70,8 @@ export function SidebarNeedsYou({ items, density, now, onOpen, onResolve, onOpen
                   <span className="line-clamp-2 break-words leading-snug">{item.title}</span>
                   {/* who and when on the second line; the row's buttons sit at its end */}
                   <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-ink-secondary" style={{ paddingRight: actions * 24 }}>
-                    <span className="min-w-0 truncate">{item.botName}</span>
+                    {/* answered: the item waits on the bot now (J18) */}
+                    <span className="min-w-0 truncate">{item.awaitingSince ? t("needsYou.screen.awaiting", { name: item.botName }) : item.botName}</span>
                     <span aria-hidden="true">·</span>
                     <span className={cn("shrink-0 tabular-nums", overdue && "font-semibold text-danger")}>{item.due ?? age}</span>
                   </span>

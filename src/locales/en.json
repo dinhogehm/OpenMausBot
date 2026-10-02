@@ -3209,5 +3209,21 @@
   "needsYou.screen.recommendAsked": "Recommendation asked {age} ago",
   "needsYou.screen.askedRecommend": "Recommendation asked from {name} — {title}.",
   "needsYou.steps.asking": "Asking {name} for the steps… This item updates here as soon as they arrive.",
-  "needsYou.steps.noAnswer": "{name} was asked for the steps {age} ago and has not answered yet."
+  "needsYou.steps.noAnswer": "{name} was asked for the steps {age} ago and has not answered yet.",
+  "needsYou.screen.decidedWaiting": "Sent “{label}” to {name} — {title}. Waiting for {name}.",
+  "needsYou.screen.awaiting": "Waiting for {name}",
+  "needsYou.screen.awaitingSince": "You answered at {time}: waiting for {name}. This item updates when they answer.",
+  "needsYou.screen.history": "History",
+  "needsYou.history.option": "You chose “{label}” at {time}",
+  "needsYou.history.text": "You answered at {time}: “{text}”",
+  "needsYou.history.askSteps": "You asked for the steps at {time}",
+  "needsYou.history.askRecommend": "You asked for a recommendation at {time}",
+  "needsYou.history.delivered": "sent to {name}",
+  "needsYou.history.notDelivered": "not sent: {error}",
+  "needsYou.screen.chosen": "Chosen",
+  "needsYou.screen.chosenWord": "chosen",
+  "needsYou.screen.recommendedWord": "recommended",
+  "needsYou.screen.switchAsk": "You already chose “{from}”. Switch to “{to}”?",
+  "needsYou.screen.switchYes": "Switch",
+  "needsYou.screen.switchNo": "Keep “{from}”"
 }

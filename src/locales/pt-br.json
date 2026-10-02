@@ -2943,5 +2943,21 @@
   "needsYou.screen.recommendAsked": "Recomendação pedida há {age}",
   "needsYou.screen.askedRecommend": "Recomendação pedida para {name} — {title}.",
   "needsYou.steps.asking": "Pedindo o passo a passo ao {name}… O item se atualiza aqui assim que ele chegar.",
-  "needsYou.steps.noAnswer": "O passo a passo foi pedido ao {name} há {age} e ele ainda não respondeu."
+  "needsYou.steps.noAnswer": "O passo a passo foi pedido ao {name} há {age} e ele ainda não respondeu.",
+  "needsYou.screen.decidedWaiting": "Enviado «{label}» para {name} — {title}. Aguardando {name}.",
+  "needsYou.screen.awaiting": "Aguardando {name}",
+  "needsYou.screen.awaitingSince": "Você respondeu às {time}: aguardando {name}. O item se atualiza quando ele responder.",
+  "needsYou.screen.history": "Histórico",
+  "needsYou.history.option": "Você escolheu “{label}” às {time}",
+  "needsYou.history.text": "Você respondeu às {time}: “{text}”",
+  "needsYou.history.askSteps": "Você pediu o passo a passo às {time}",
+  "needsYou.history.askRecommend": "Você pediu a recomendação às {time}",
+  "needsYou.history.delivered": "enviado ao {name}",
+  "needsYou.history.notDelivered": "não enviado: {error}",
+  "needsYou.screen.chosen": "Escolhido",
+  "needsYou.screen.chosenWord": "escolhida",
+  "needsYou.screen.recommendedWord": "recomendada",
+  "needsYou.screen.switchAsk": "Você já escolheu “{from}”. Trocar para “{to}”?",
+  "needsYou.screen.switchYes": "Trocar",
+  "needsYou.screen.switchNo": "Manter “{from}”"
 }

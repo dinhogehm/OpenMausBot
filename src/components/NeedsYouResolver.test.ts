@@ -50,6 +50,7 @@ function view(overrides: Partial<NeedsYouResolverViewProps> = {}) {
     onResolveOnSend: (value) => calls.push(`resolveOnSend:${value}`), onCopy: (text) => calls.push(`copy:${text}`), onOpenLink: (url) => calls.push(`link:${url}`),
     onDecide: (item, n) => calls.push(`decide:${item.pendingId}:${n}`), onReply: (item) => calls.push(`reply:${item.pendingId ?? item.threadId}`),
     onAskSteps: (item) => calls.push(`steps:${item.pendingId}`), onAskRecommend: (item) => calls.push(`recommend:${item.pendingId}`), onResolve: (item) => calls.push(`resolve:${item.pendingId}`),
+    onAskSwitch: (item, n) => calls.push(`switch:${item.pendingId}:${n}`), onCancelSwitch: () => calls.push("cancelSwitch"),
     onOpenConversation: (item) => calls.push(`conversation:${item.threadId}`), onDismissError: () => calls.push("dismiss"),
     ...overrides,
   };
@@ -333,6 +334,45 @@ describe("keys on the resolution screen", () => {
     // asked already: said with how long ago
     const asked = needsYouItems(bots).map((item) => (item.pendingId === "o1" ? { ...item, recommendRequestedAt: now - 3 * 60_000 } : item));
     expect(view({ items: asked, selectedKey: keyOf("o1") }).html).toContain("Recomendação pedida há 3 min");
+  });
+
+  // J18 (the owner, 02/10): after choosing "Já colei" on o12 the screen
+  // showed nothing of it. Redacted: issue numbers, times.
+  it("shows what the person chose and answered, marks the chosen decision, waits on the bot, and asks before switching", () => {
+    const at = now - 33 * 60_000;
+    const options = [{ label: "Já colei", reply: "Já colei os comentários; pode resolver." }, { label: "Cole você", reply: "Tente colar de novo." }];
+    const answered = needsYouItems([bot("monitor", "Monitor Chat Atendimento", [task("dc", "Atendimento", { ownerPending: [{
+      id: "o12", title: "Colar os dois comentários dos avisos nas issues #NNNN e #MMMM", since: now - 3 * 3_600_000, why: "O Jev barrou.", steps: [{ text: "Cole os comentários" }], options,
+      awaitingSince: at, history: [
+        { at: at - 6 * 60_000, kind: "text", text: "Autorizo repetir os comentários.", delivered: true },
+        { at, kind: "option", label: "Já colei", text: "Já colei os comentários; pode resolver.", delivered: true },
+        { at: at + 60_000, kind: "text", text: "E a planilha?", delivered: false, error: "o bot está ocupado" },
+      ],
+    }] })])]);
+    const key = needsYouKey(answered[0]!);
+    const { html, tree, press, calls } = view({ items: answered, selectedKey: key });
+    // in the list and in the item: it waits on the bot now
+    expect(tree.find((node) => "data-resolver-awaiting" in node.props)).toBeDefined();
+    expect(html).toContain("Aguardando Monitor Chat Atendimento");
+    expect(html).toMatch(/Você respondeu às \d{2}:\d{2}: aguardando Monitor Chat Atendimento\./);
+    // the history, with what reached the bot and what did not
+    expect(html).toContain("Histórico");
+    expect(html).toMatch(/Você escolheu “Já colei” às \d{2}:\d{2}<span[^>]*> — enviado ao Monitor Chat Atendimento/);
+    expect(html).toContain("— não enviado: o bot está ocupado");
+    // the chosen decision is pressed and badged, distinct from a recommendation
+    const inline = tree.filter((node) => node.props["data-placement"] === "inline" && "data-resolver-option" in node.props);
+    expect(inline.map((node) => node.props["aria-pressed"])).toEqual([true, false]);
+    expect(inline[0]!.props["aria-label"]).toBe("Já colei, escolhida");
+    expect(String(inline[0]!.props.className)).toContain("ring-ink");
+    expect(html).toContain("Escolhido");
+    // choosing another one asks first
+    press("data-resolver-option", 1);
+    expect(calls).toEqual(["switch:o12:1"]);
+    const confirm = view({ items: answered, selectedKey: key, switching: { key, option: 1 } });
+    expect(confirm.html).toContain("Você já escolheu “Já colei”. Trocar para “Cole você”?");
+    confirm.press("data-resolver-switch-yes");
+    confirm.press("data-resolver-switch-no");
+    expect(confirm.calls).toEqual(["decide:o12:1", "cancelSwitch"]);
   });
 
   it("names links the way the person reads them", () => {

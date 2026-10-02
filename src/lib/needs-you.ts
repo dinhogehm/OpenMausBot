@@ -35,6 +35,23 @@ export interface NeedsYouItem {
   stepsRequestedAt?: number;
   /** The person asked the bot which decision it recommends; no update yet. */
   recommendRequestedAt?: number;
+  /** What the person answered, in order (J18). */
+  history?: NonNullable<WireOwnerPending["history"]>;
+  /** The person's last answer reached the bot, which has not updated nor resolved the item since. */
+  awaitingSince?: number;
+}
+
+/** The option the person last chose and that reached the bot, if any (J18). */
+export function chosenOption(item: Pick<NeedsYouItem, "history">): string | null {
+  return item.history?.findLast((each) => each.kind === "option" && each.delivered)?.label ?? null;
+}
+
+/** "16:07" today, "02/10 16:07" another day: when an answer was given. */
+export function answerTime(at: number, now = Date.now()): string {
+  const day = new Date(at);
+  const today = new Date(now);
+  const time = day.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+  return day.toDateString() === today.toDateString() ? time : `${day.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} ${time}`;
 }
 
 /** The decisions in the order they are shown, each with its index in the
@@ -93,6 +110,8 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
           ...(pending.why ? { why: pending.why } : {}), ...(pending.steps?.length ? { steps: pending.steps } : {}), ...(pending.options?.length ? { options: pending.options } : {}),
           ...(pending.stepsRequestedAt ? { stepsRequestedAt: pending.stepsRequestedAt } : {}),
           ...(pending.recommendRequestedAt ? { recommendRequestedAt: pending.recommendRequestedAt } : {}),
+          ...(pending.history?.length ? { history: pending.history } : {}),
+          ...(pending.awaitingSince ? { awaitingSince: pending.awaitingSince } : {}),
         });
       }
       const approval = task.activity === "waiting-on-you";

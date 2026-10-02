@@ -7,7 +7,7 @@ import {
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import {
-  decisionsInOrder, dueAt, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
+  answerTime, chosenOption, decisionsInOrder, dueAt, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
   type NeedsYouItem, type NeedsYouSort,
 } from "@/lib/needs-you";
 
@@ -73,6 +73,10 @@ export interface NeedsYouResolverViewProps {
   onReply: (item: NeedsYouItem) => void;
   onAskSteps: (item: NeedsYouItem) => void;
   onAskRecommend: (item: NeedsYouItem) => void;
+  /** Another decision than the one already chosen: asked to confirm first (J18). */
+  switching?: { key: string; option: number } | null;
+  onAskSwitch: (item: NeedsYouItem, option: number) => void;
+  onCancelSwitch: () => void;
   onResolve: (item: NeedsYouItem) => void;
   onOpenConversation: (item: NeedsYouItem) => void;
   onDismissError: () => void;
@@ -222,6 +226,13 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                             <span aria-hidden="true">·</span>
                             <span className="shrink-0 tabular-nums">{waitingAge(each.since, now)}</span>
                           </span>
+                          {/* answered: now it waits on the bot, not on the person (J18) */}
+                          {each.awaitingSince && (
+                            <span data-resolver-awaiting="" className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-hairline/70 px-1.5 py-px text-[11px] font-medium text-ink-secondary">
+                              <Clock size={11} aria-hidden="true" />
+                              <span className="truncate">{t("needsYou.screen.awaiting", { name: each.botName })}</span>
+                            </span>
+                          )}
                         </span>
                         {each.due && (
                           <span className={cn("mt-0.5 max-w-[96px] shrink-0 truncate rounded-full border px-1.5 py-px text-[11px]", overdue ? OVERDUE : "border-transparent bg-inset font-medium text-ink-secondary")}>
@@ -366,6 +377,14 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           </div>
         )}
 
+        {item.awaitingSince && (
+          // the person answered: the ball is with the bot until it rewrites or resolves the item (J18)
+          <p role="status" data-resolver-awaiting-detail="" className="mt-3 inline-flex items-start gap-2 rounded-lg border border-hairline/70 bg-inset px-3 py-2 text-[13px] text-ink">
+            <Clock size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-ink-secondary" />
+            <span>{t("needsYou.screen.awaitingSince", { name: item.botName, time: answerTime(item.awaitingSince, now) })}</span>
+          </p>
+        )}
+
         {why && (
           <section className="mt-5 sm:mt-6" aria-labelledby="needs-you-why">
             <h3 id="needs-you-why" className={sectionHeading}>{t("needsYou.screen.why")}</h3>
@@ -417,6 +436,8 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
             <Decisions {...props} placement="inline" />
           </div>
         ) : null}
+
+        {item.history?.length ? <History item={item} now={now} /> : null}
 
         <section className="mt-6 sm:mt-7" aria-labelledby={`${replyId}-label`}>
           <label id={`${replyId}-label`} htmlFor={replyId} className={sectionHeading}>
@@ -492,6 +513,38 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   );
 }
 
+/** What the person answered, oldest first, and whether it reached the bot (J18). */
+function History({ item, now }: { item: NeedsYouItem; now: number }) {
+  return (
+    <section className="mt-6 sm:mt-7" aria-labelledby="needs-you-history" data-resolver-history="">
+      <h3 id="needs-you-history" className={sectionHeading}>{t("needsYou.screen.history")}</h3>
+      <ol className="mt-2 flex flex-col gap-1.5">
+        {item.history!.map((entry, n) => {
+          const time = answerTime(entry.at, now);
+          const what = entry.kind === "option"
+            ? t("needsYou.history.option", { label: entry.label ?? "", time })
+            : entry.kind === "text"
+              ? t("needsYou.history.text", { text: entry.text.length > 140 ? `${entry.text.slice(0, 139)}…` : entry.text, time })
+              : t(entry.label === "recommend" ? "needsYou.history.askRecommend" : "needsYou.history.askSteps", { time });
+          return (
+            <li key={`${entry.at}-${n}`} className="flex items-start gap-2 text-[13px] leading-relaxed text-ink">
+              {entry.delivered
+                ? <Check size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-success" />
+                : <CircleAlert size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-danger" />}
+              <span className="min-w-0 break-words">
+                {what}
+                <span className={entry.delivered ? "text-ink-secondary" : "font-medium text-danger"}>
+                  {" — "}{entry.delivered ? t("needsYou.history.delivered", { name: item.botName }) : t("needsYou.history.notDelivered", { error: entry.error ?? "" })}
+                </span>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
 /** How a decision is drawn (J15): the recommended one — or the first, when
  * the bot recommended none — filled with the accent; the others outlined in
  * the accent over a light wash of it; a decline or postponement outlined in
@@ -520,12 +573,24 @@ function Decisions(props: NeedsYouResolverViewProps & { item: NeedsYouItem; plac
   const inline = placement === "inline";
   const options = item.options!;
   const recommended = options.some((option) => option.recommended);
+  // what the person already chose (J18): marked, and another choice asks first
+  const chosen = chosenOption(item);
+  const switching = props.switching && props.switching.key === needsYouKey(item) ? options[props.switching.option] : undefined;
   return (
     <div role="group" aria-labelledby={`needs-you-decide-${placement}`}>
       <p id={`needs-you-decide-${placement}`} className={cn(sectionHeading, "mb-1.5")}>{t("needsYou.screen.decide")}</p>
+      {switching && chosen && (
+        <div role="alertdialog" aria-labelledby={`needs-you-switch-${placement}`} data-resolver-switch="" className="mb-2 flex flex-wrap items-center gap-2 rounded-xl border border-warning/50 bg-panel px-3 py-2">
+          <p id={`needs-you-switch-${placement}`} className="min-w-0 flex-1 text-[13px] text-ink">{t("needsYou.screen.switchAsk", { from: chosen, to: switching.label })}</p>
+          <button type="button" data-resolver-switch-yes="" disabled={busy !== null} onClick={() => props.onDecide(item, props.switching!.option)} className={cn(strongButton, "py-1.5")}>{t("needsYou.screen.switchYes")}</button>
+          <button type="button" data-resolver-switch-no="" onClick={props.onCancelSwitch} className={quietButton}>{t("needsYou.screen.switchNo", { from: chosen })}</button>
+        </div>
+      )}
       <div className={cn("grid gap-2", inline ? "grid-cols-1" : "[grid-template-columns:repeat(auto-fit,minmax(200px,1fr))]")}>
         {decisionsInOrder(options).map(({ option, index: n }) => {
           const look = DECISION_LOOK[decisionLook(option, n, options)];
+          const isChosen = chosen === option.label;
+          const name = [option.label, option.recommended ? t("needsYou.screen.recommendedWord") : "", isChosen ? t("needsYou.screen.chosenWord") : ""].filter(Boolean).join(", ");
           return (
             <button
               key={option.label}
@@ -534,12 +599,15 @@ function Decisions(props: NeedsYouResolverViewProps & { item: NeedsYouItem; plac
               data-placement={placement}
               data-look={decisionLook(option, n, options)}
               {...(option.recommended ? { "data-recommended": "" } : {})}
+              {...(isChosen ? { "data-chosen": "" } : {})}
+              {...(chosen ? { "aria-pressed": isChosen } : {})}
               disabled={busy !== null}
-              aria-label={option.recommended ? t("needsYou.screen.recommendedLabel", { label: option.label }) : option.label}
+              aria-label={name}
               aria-describedby={`needs-you-option-${placement}-${n}`}
               title={t("needsYou.screen.sends", { reply: option.reply })}
-              onClick={() => props.onDecide(item, n)}
-              className={cn(DECISION_BASE, look.button)}
+              onClick={() => (chosen && !isChosen ? props.onAskSwitch(item, n) : props.onDecide(item, n))}
+              // the chosen one: ringed in the ink and badged "Escolhido" — distinct from the recommended fill
+              className={cn(DECISION_BASE, look.button, isChosen && "ring-2 ring-ink ring-offset-2 ring-offset-panel")}
             >
               <span className="min-w-0 flex-1">
                 <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -548,6 +616,12 @@ function Decisions(props: NeedsYouResolverViewProps & { item: NeedsYouItem; plac
                     <span aria-hidden="true" className="inline-flex items-center gap-1 rounded-full border border-current px-1.5 py-px text-[10.5px] font-semibold uppercase tracking-wide text-accent-ink">
                       <Sparkles size={10} aria-hidden="true" />
                       {t("needsYou.screen.recommended")}
+                    </span>
+                  )}
+                  {isChosen && (
+                    <span aria-hidden="true" data-resolver-chosen-badge="" className={cn("inline-flex items-center gap-1 rounded-full border border-current px-1.5 py-px text-[10.5px] font-semibold uppercase tracking-wide", look.label)}>
+                      <Check size={10} aria-hidden="true" />
+                      {t("needsYou.screen.chosen")}
                     </span>
                   )}
                 </span>
@@ -643,6 +717,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [resolveOnSend, setResolveOnSend] = useState(false);
   const [busy, setBusy] = useState<ResolverBusy>(null);
+  const [switching, setSwitching] = useState<{ key: string; option: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -815,7 +890,10 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
             }, () => setError(t("needsYou.screen.copyFailed")));
           }}
           onOpenLink={onOpenLink}
-          onDecide={(item, option) => void run(`option:${option}`, () => onDecide(item, option), t("needsYou.screen.decided", { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title }))}
+          onDecide={(item, option) => { setSwitching(null); void run(`option:${option}`, () => onDecide(item, option), t("needsYou.screen.decidedWaiting", { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title })); }}
+          switching={switching}
+          onAskSwitch={(item, option) => setSwitching({ key: needsYouKey(item), option })}
+          onCancelSwitch={() => setSwitching(null)}
           onReply={reply}
           onAskSteps={(item) => void run("steps", () => onAskSteps(item), t("needsYou.screen.askedSteps", { name: item.botName, title: item.title }))}
           onAskRecommend={(item) => void run("recommend", () => (onAskRecommend ?? (async () => undefined))(item), t("needsYou.screen.askedRecommend", { name: item.botName, title: item.title }))}
