@@ -108,8 +108,9 @@ export function batteryAlert(input: { power: PowerState; onBatterySince: number 
 export interface PowerWatchState {
   onBatterySince: number | null;
   told: string[];
-  /** onBatterySince was read from `pmset -g log` (when the Mac left the
-   * wall), not set when this server first saw the battery. */
+  /** `pmset -g log` was already read for this discharge (it dated
+   * onBatterySince, or had nothing to say): the 8 MB log, ~6 s of CPU, is
+   * read once per discharge, not every 2 min (INSP-H r1 #9). */
   sinceFromLog?: boolean;
 }
 export const POWER_PENDING_KEY = "power:battery";
@@ -131,9 +132,11 @@ export function readPowerWatch(json: string | null): PowerWatchState {
 
 /** When the Mac last left the wall, from `pmset -g log`: the first "Using
  * Batt" after the last "Using AC" ("2026-10-01 20:41:30 -0300 Assertions …
- * Using Batt(Charge: 100)"). With no "Using AC" left in the log, its first
- * "Using Batt" (a lower bound). Null when the log shows no battery, or the
- * Mac is back on AC by the log. */
+ * Using Batt(Charge: 100)"). The log writes these lines only at its own
+ * events (assertion summaries), so the time is an UPPER bound of the
+ * unplugging: on 01/10 it says AC at 17:55 and battery at 20:41 — the Mac
+ * left the wall somewhere in those 2h46, at 20:41 at the latest. Null when
+ * the log shows no battery, or the Mac is back on AC by the log. */
 export function lastUnplugAt(pmsetLog: string, now: number): number | null {
   const events: Array<{ at: number; battery: boolean }> = [];
   for (const line of pmsetLog.split("\n")) {
@@ -147,13 +150,18 @@ export function lastUnplugAt(pmsetLog: string, now: number): number | null {
   return events.slice(lastAc + 1).find((event) => event.battery)?.at ?? null;
 }
 
+/** Whether this check reads `pmset -g log`: on battery, once per discharge. */
+export function shouldReadPmsetLog(watch: PowerWatchState, power: PowerState): boolean {
+  return power.onBattery && !watch.sinceFromLog;
+}
+
 /** One reading of `pmset`: the next state, whether the "Ligue o Mac na
  * tomada" item must be resolved, and the alert to give, if any. On AC, or
  * back above the owner's limit, the item is resolved — after a restart the
  * memory of the discharge may be gone while the item, saved, is still there
  * (INSP-G r1 G1-b). `unpluggedAt` (from `pmset -g log`) dates the discharge
  * from when the Mac left the wall, not from this server's first look. */
-export function powerStep(watch: PowerWatchState, power: PowerState, now: number, releaseRunning: boolean, opts: { minPercent?: number; unpluggedAt?: number | null } = {}): {
+export function powerStep(watch: PowerWatchState, power: PowerState, now: number, releaseRunning: boolean, opts: { minPercent?: number; unpluggedAt?: number | null; logRead?: boolean } = {}): {
   watch: PowerWatchState;
   changed: boolean;
   resolvePending: boolean;
@@ -168,7 +176,7 @@ export function powerStep(watch: PowerWatchState, power: PowerState, now: number
   const onBatterySince = unplugged !== null ? Math.min(unplugged, watch.onBatterySince ?? unplugged) : watch.onBatterySince ?? now;
   const below = belowBatteryLimit(power, minPercent);
   const found = batteryAlert({ power, onBatterySince, now, releaseRunning, told: new Set(watch.told), minPercent });
-  const next: PowerWatchState = { onBatterySince, told: found ? [...watch.told, found.level] : watch.told, ...(watch.sinceFromLog || unplugged !== null ? { sinceFromLog: true } : {}) };
+  const next: PowerWatchState = { onBatterySince, told: found ? [...watch.told, found.level] : watch.told, ...(watch.sinceFromLog || unplugged !== null || opts.logRead ? { sinceFromLog: true } : {}) };
   const changed = watch.onBatterySince !== onBatterySince || next.told.length !== watch.told.length || next.sinceFromLog !== watch.sinceFromLog;
   if (!found) return { watch: next, changed, resolvePending: !below, alert: null };
   const pendingTitle = `Ligue o Mac na tomada (${power.percent !== null ? `${power.percent}%, abaixo do seu limite de ${minPercent}%` : "no-break, sem tomada"})${releaseRunning ? " — release em curso" : ""}`;

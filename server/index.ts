@@ -356,7 +356,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
-import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
+import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -8494,11 +8494,10 @@ async function checkPower(): Promise<void> {
   powerWatch.watch ??= readPowerWatch(existsSync(POWER_WATCH_FILE) ? readFileSync(POWER_WATCH_FILE, "utf8") : null);
   const releaseRunning = power.onBattery && (await psTable()).some((row) => isReleaseProcess(row.command));
   // the discharge counts from when the Mac left the wall (pmset's own log),
-  // not from this server's first look: read once per discharge (R9-resilience BAT-T0)
-  const unpluggedAt = power.onBattery && !powerWatch.watch.sinceFromLog
-    ? lastUnplugAt(await execPmsetLog().catch(() => ""), Date.now())
-    : null;
-  const step = powerStep(powerWatch.watch, power, Date.now(), releaseRunning, { minPercent: batteryMinPercent(cfg.power?.batteryMinPercent), unpluggedAt });
+  // not from this server's first look: read ONCE per discharge, found or not (R9-resilience BAT-T0, INSP-H r1 #9)
+  const logRead = shouldReadPmsetLog(powerWatch.watch, power);
+  const unpluggedAt = logRead ? lastUnplugAt(await execPmsetLog().catch(() => ""), Date.now()) : null;
+  const step = powerStep(powerWatch.watch, power, Date.now(), releaseRunning, { minPercent: batteryMinPercent(cfg.power?.batteryMinPercent), unpluggedAt, logRead });
   powerWatch.watch = step.watch;
   if (step.changed) {
     try { writeFileSync(POWER_WATCH_FILE, JSON.stringify(step.watch)); } catch { /* memory still holds it */ }

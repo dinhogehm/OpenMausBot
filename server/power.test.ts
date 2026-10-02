@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { batteryAlert, batteryMinPercent, carrierBatteryCheck, carrierIntent, DEFAULT_BATTERY_MIN_PERCENT, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, startsCarrier, UNKNOWN_CHARGE_ALERT_MS } from "./power.ts";
+import { batteryAlert, batteryMinPercent, carrierBatteryCheck, carrierIntent, DEFAULT_BATTERY_MIN_PERCENT, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, shouldReadPmsetLog, startsCarrier, UNKNOWN_CHARGE_ALERT_MS } from "./power.ts";
 
 const onBattery = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=27525219)\t53%; discharging; 1:16 remaining present: true\n";
 const plugged = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=27525219)\t100%; charged; 0:00 remaining present: true\n";
@@ -157,6 +157,28 @@ describe("power", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("reads pmset -g log once per discharge, even when it has nothing to say (INSP-H r1 #9)", () => {
+    // on battery, the log without a "Using Batt" after its last AC: read once, then not again
+    let watch = readPowerWatch(null);
+    const battery = { onBattery: true, percent: 70 };
+    let reads = 0;
+    const check = (now: number) => {
+      const logRead = shouldReadPmsetLog(watch, battery);
+      if (logRead) reads += 1;
+      const unpluggedAt = logRead ? lastUnplugAt("2026-10-01 17:55:03 -0300 Assertions Summary- Using AC(Charge: 100)", now) : null;
+      watch = powerStep(watch, battery, now, false, { unpluggedAt, logRead }).watch;
+    };
+    for (let minute = 0; minute < 30; minute += 2) check(minute * 60_000);
+    expect(reads).toBe(1);
+    // across a restart too; a new discharge reads it again
+    watch = readPowerWatch(JSON.stringify(watch));
+    check(40 * 60_000);
+    expect(reads).toBe(1);
+    watch = powerStep(watch, { onBattery: false, percent: 90 }, 50 * 60_000, false).watch;
+    check(60 * 60_000);
+    expect(reads).toBe(2);
   });
 
   it("keeps the discharge across a restart, and logs the battery alert as [power] (items 7 and 11)", () => {
