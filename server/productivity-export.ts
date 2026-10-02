@@ -8,7 +8,7 @@
 // WinAnsi, one Flate stream per page): no dependency, deterministic output.
 import { deflateSync } from "node:zlib";
 import {
-  releaseComparable, REPORT_TZ, trend, zonedParts,
+  localComparable, releaseComparable, REPORT_TZ, trend, zonedParts,
   type Distribution, type Granularity, type ProductivityReport, type ReportBucket, type ReportKpis,
 } from "../shared/productivity.ts";
 
@@ -26,7 +26,8 @@ export function formatNumber(value: number, lang: SummaryLang = "pt-BR", digits 
 export function formatDuration(ms: number | null, lang: SummaryLang = "pt-BR"): string {
   if (ms === null || !Number.isFinite(ms)) return "—";
   const minutes = ms / 60_000;
-  if (minutes < 1) return lang === "pt-BR" ? "< 1 min" : "< 1 min";
+  if (ms <= 0) return "0 min";
+  if (minutes < 1) return "< 1 min";
   if (minutes < 60) return `${formatNumber(Math.round(minutes), lang)} min`;
   // one decimal below 10 ("5,2 h"), none when it is whole ("1 h") or the number is big ("43 h")
   const short = (value: number) => new Intl.NumberFormat(lang, { maximumFractionDigits: value < 10 ? 1 : 0 }).format(value);
@@ -147,7 +148,7 @@ const nums = (items: ReadonlyArray<{ number: number }>, max = 30) => items.lengt
  * covers both periods completely; otherwise the previous value is shown as
  * partial (a lower bound) or unknown, and there is no trend — never a "+N"
  * against a number that is not whole. */
-function kpiRows(k: ReportKpis, p: ReportKpis, coverage: ProductivityReport["coverage"]["releaseCoverage"]): Array<[string, string, string, string]> {
+function kpiRows(k: ReportKpis, p: ReportKpis, coverage: ProductivityReport["coverage"]["releaseCoverage"], local: { usage: boolean; needsYou: boolean }): Array<[string, string, string, string]> {
   const comparable = coverage.period === "full" && coverage.previous === "full";
   const NO_BASE = "sem base comparável";
   const previousText = (value: string) => (coverage.previous === "none" ? "s/ fonte" : coverage.previous === "partial" ? `${value} (parcial)` : value);
@@ -178,12 +179,26 @@ function kpiRows(k: ReportKpis, p: ReportKpis, coverage: ProductivityReport["cov
     row("Releases recusados", k.declinedReleases, p.declinedReleases, true),
     noPrevious ? ["Produção travada", formatDuration(k.blockedMs), UNKNOWN, NO_BASE] : ["Produção travada", formatDuration(k.blockedMs), formatDuration(p.blockedMs), trendText(k.blockedMs, p.blockedMs, "pt-BR", "duration")],
     row("Issues abertas ao fim", k.openIssuesAtEnd, p.openIssuesAtEnd),
-    row("Turnos dos bots", k.turns, p.turns),
-    [ "Horas ativas dos bots", formatDuration(k.activeMs), formatDuration(p.activeMs), trendText(k.activeMs, p.activeMs, "pt-BR", "duration")],
-    [ "Custo dos bots (US$)", formatMoney(k.costUsd), formatMoney(p.costUsd), k.costUsd !== null && p.costUsd !== null ? trendText(Math.round(k.costUsd), Math.round(p.costUsd)) : "—"],
-    row("\"Precisa de você\" abertos", k.needsYouOpened, p.needsYouOpened),
-    row("\"Precisa de você\" resolvidos", k.needsYouResolved, p.needsYouResolved),
-    leadRow("Resposta do dono (mediana / p90)", k.ownerResponse, p.ownerResponse),
+    ...botRows(k, p, local),
+  ];
+}
+
+/** The bots' rows: compared only when this machine recorded the whole previous
+ * period; the active time is unknown (not zero) without a timed turn. */
+function botRows(k: ReportKpis, p: ReportKpis, local: { usage: boolean; needsYou: boolean }): Array<[string, string, string, string]> {
+  const NOT_RECORDED = "s/ registro";
+  const NO_BASE = "sem base comparável";
+  const active = (kpis: ReportKpis) => (kpis.timedTurns ? formatDuration(kpis.activeMs) : "—");
+  const count = (name: string, current: number, previous: number, comparable: boolean): [string, string, string, string] =>
+    comparable ? [name, formatNumber(current), formatNumber(previous), trendText(current, previous)] : [name, formatNumber(current), NOT_RECORDED, NO_BASE];
+  const owner = (d: Distribution) => (d.n ? `${formatDuration(d.median)} / ${formatDuration(d.p90)}` : "—");
+  return [
+    count("Turnos dos bots", k.turns, p.turns, local.usage),
+    ["Horas ativas dos bots", active(k), local.usage ? active(p) : NOT_RECORDED, local.usage && k.timedTurns && p.timedTurns ? trendText(k.activeMs, p.activeMs, "pt-BR", "duration") : NO_BASE],
+    ["Custo dos bots (US$)", formatMoney(k.costUsd), local.usage ? formatMoney(p.costUsd) : NOT_RECORDED, local.usage && k.costUsd !== null && p.costUsd !== null ? trendText(Math.round(k.costUsd), Math.round(p.costUsd)) : NO_BASE],
+    count("\"Precisa de você\" abertos", k.needsYouOpened, p.needsYouOpened, local.needsYou),
+    count("\"Precisa de você\" resolvidos", k.needsYouResolved, p.needsYouResolved, local.needsYou),
+    ["Resposta do dono (mediana / p90)", owner(k.ownerResponse), local.needsYou ? owner(p.ownerResponse) : NOT_RECORDED, local.needsYou ? trendText(k.ownerResponse.median, p.ownerResponse.median, "pt-BR", "duration") : NO_BASE],
   ];
 }
 
@@ -212,7 +227,7 @@ export function reportMarkdown(report: ProductivityReport): string {
   lines.push("## Resumo executivo", "");
   executiveSummary(report).forEach((line, index) => lines.push(`${index + 1}. ${line}`));
   lines.push("", "## Indicadores", "", "| Métrica | Período | Anterior | Variação |", "|---|---:|---:|---|");
-  for (const [name, current, previous, change] of kpiRows(report.kpis, report.previousKpis, report.coverage.releaseCoverage)) lines.push(`| ${md(name)} | ${current} | ${previous} | ${change} |`);
+  for (const [name, current, previous, change] of kpiRows(report.kpis, report.previousKpis, report.coverage.releaseCoverage, localComparable(report))) lines.push(`| ${md(name)} | ${current} | ${previous} | ${change} |`);
   lines.push("", `## Por ${granularityName(g, "pt-BR")}`, "", "| Período | Entregas | PRs entregues | PRs mergeadas | Issues fechadas | Bugs fechados | Falhas | Turnos dos bots |", "|---|---:|---:|---:|---:|---:|---:|---:|");
   for (const bucket of report.buckets) {
     const known = bucket.releaseCoverage !== "none";
@@ -585,7 +600,7 @@ export function reportPdf(report: ProductivityReport): Buffer {
   heading(doc, "Indicadores");
   table(doc, {
     columns: [{ label: "Métrica", width: contentWidth * 0.46 }, { label: "Período", width: contentWidth * 0.17, align: "right" }, { label: "Anterior", width: contentWidth * 0.17, align: "right" }, { label: "Variação", width: contentWidth * 0.2 }],
-    rows: kpiRows(k, p, report.coverage.releaseCoverage),
+    rows: kpiRows(k, p, report.coverage.releaseCoverage, localComparable(report)),
   });
   // releases
   heading(doc, "Releases do período");

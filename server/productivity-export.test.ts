@@ -33,6 +33,7 @@ describe("formatting", () => {
     expect(formatDuration(5.24 * 3_600_000)).toBe("5,2 h");
     expect(formatDuration(55 * 3_600_000)).toBe("2,3 d");
     expect(formatDuration(null)).toBe("—");
+    expect(formatDuration(0)).toBe("0 min");
     expect(formatInstant(Date.parse("2026-10-01T02:30:00Z"))).toBe("30/09/2026 23:30");
     expect(formatInstant(Date.parse("2026-10-01T02:30:00Z"), "en")).toBe("2026-09-30 23:30");
     expect(bucketLabel(brt("2026-10-02T14:00:00"), "hour")).toBe("14h");

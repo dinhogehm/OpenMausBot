@@ -385,6 +385,14 @@ export function releaseComparable(report: Pick<ProductivityReport, "coverage">):
   return Boolean(coverage) && coverage.period === "full" && coverage.previous === "full";
 }
 
+/** The bots' numbers compare only when this machine recorded them for the
+ * whole previous period (the usage ledger and the "Precisa de você" log both
+ * start on a day; before it, nothing is not zero). */
+export function localComparable(report: Pick<ProductivityReport, "coverage" | "previous">): { usage: boolean; needsYou: boolean } {
+  const since = (from: number | null) => from !== null && from <= report.previous.from;
+  return { usage: since(report.coverage.usage.from), needsYou: since(report.coverage.needsYou.from) };
+}
+
 /** How a KPI moved against the previous period: null when there is nothing to compare. */
 export function trend(current: number | null, previous: number | null): { delta: number; ratio: number | null } | null {
   if (current === null || previous === null) return null;
