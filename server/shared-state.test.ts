@@ -135,7 +135,12 @@ describe("one conversation with the owner, and the newest order wins", () => {
       "não fale com o cliente na thread dele",
       "devo falar com você só aqui?",
       "Veja a conversa da Daiane e me diga o que falta",
+      "Esta é a única conversa sobre o release, não abra outra.",
+      "não use a conversa do Monitor para isso",
+      "não mande o relatório na outra thread",
     ]) expect(isOwnerChannelOrder(request), request).toBe(false);
+    expect(isOwnerChannelOrder("A única conversa comigo é esta.")).toBe(true);
+    expect(isOwnerChannelOrder("não me mande nada na outra conversa")).toBe(true);
   });
 
   it("makes the conversation the order names the owner's, wherever it was given", () => {

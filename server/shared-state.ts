@@ -72,12 +72,16 @@ const POSITIVE = [
   // "só nesta conversa fale comigo", "só por aqui comigo"
   new RegExp(`${ONLY}\\s+(?:${HERE})[^.!?\\n]{0,30}${word("fale|falar|comigo")}`, "iu"),
   // "esta conversa (dbb9f1cf) é o único canal comigo", "o canal único comigo é a dbb9f1cf"
-  new RegExp(`${word("[úu]nico canal|canal [úu]nico|canal exclusivo|[úu]nica conversa|conversa [úu]nica")}`, "iu"),
+  new RegExp(`${word("[úu]nico canal|canal [úu]nico|canal exclusivo")}`, "iu"),
+  // "a única conversa comigo é esta" — but "a única conversa sobre o release" is no channel
+  new RegExp(`${word("[úu]nica conversa|conversa [úu]nica")}[^.!?\\n]{0,40}${word("comigo|com o dono|com voc[êe]")}|${word("comigo|com o dono")}[^.!?\\n]{0,40}${word("[úu]nica conversa|conversa [úu]nica")}`, "iu"),
   // "esta conversa é o canal comigo", "a dbb9f1cf passa a ser o canal com o dono"
   new RegExp(`(?:${HERE}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})[^.!?\\n]{0,30}${word("[ée]|ser[áa]|fica|passa a ser|vira")}\\s+(?:o|a|meu|minha)\\s+${word("canal|conversa")}[^.!?\\n]{0,20}${word("comigo|com o dono|com voc[êe]")}`, "iu"),
 ];
-/** "Não fale comigo na 6477b3f4", "não me escreva na outra conversa". */
-const NEGATIVE = new RegExp(`${word("n[ãa]o|nunca|jamais")}\\s+(?:me\\s+)?${SPEAK}(?:\\s+comigo)?\\s+(?:mais\\s+)?(?:n[ao]s?|em|pel[ao]s?|por|a|o|as|os)\\s+(?:outras?\\s+|antigas?\\s+)?(?:${word("conversas?|threads?")}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})`, "iu");
+/** "Não fale comigo na 6477b3f4", "não me escreva na outra conversa": about
+ * speaking to the owner ("me", "comigo") — "não use a conversa do Monitor"
+ * is about something else. */
+const NEGATIVE = new RegExp(`${word("n[ãa]o|nunca|jamais")}\\s+(?:me\\s+${SPEAK}|${SPEAK}\\s+comigo)\\s+(?:mais\\s+)?(?:nada\\s+)?(?:n[ao]s?|em|pel[ao]s?|por)\\s+(?:outras?\\s+|antigas?\\s+)?(?:${word("conversas?|threads?")}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})`, "iu");
 /** "fale comigo" needs "comigo"/"dono"/a conversation for the third and fourth forms to be about the channel. */
 const ABOUT_THE_OWNER = new RegExp(word("comigo|com o dono|com voc[êe]|conversa|thread|aqui"), "iu");
 
