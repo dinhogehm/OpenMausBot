@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { channelTurnThread, leadingVocative, ownerFirstName, routedReplyText, routedWakeNote, saidToOwner } from "./owner-channel.ts";
+import { channelTurnThread, leadingVocative, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
 
 // The Chief's real messages of 02/10 in the channel and outside it (R10-followup
 // #1), redacted: the owner is "Renata", PRs and clients are placeholders.
@@ -19,8 +19,27 @@ describe("the one conversation with the owner", () => {
   });
 
   it("says where the watch lives and which item an answer is about", () => {
-    expect(routedWakeNote({ fromTitle: "Vigias  da\nesteira", fromThread: "dbb9f1cf-0000", label: "main" })).toBe("[Nota do OpenMausBot] Quem disparou foi o vigia permanente \"main\" da conversa \"Vigias da esteira\" (dbb9f1cf). Você foi acordado aqui porque esta é a conversa que o dono definiu para falar com ele: responda aqui. O vigia continua morando naquela conversa (para mudar o motivo ou desligá-lo, faça-o lá ou arme-o de novo aqui, o que o move).");
+    expect(routedWakeNote({ fromTitle: "Vigias  da\nesteira", fromThread: "dbb9f1cf-0000", label: "main" })).toBe("[Nota do OpenMausBot] Quem disparou foi o vigia permanente \"main\" da conversa \"Vigias da esteira\" (dbb9f1cf). Você foi acordado aqui porque esta é a conversa que o dono definiu para falar com ele: responda aqui. O vigia continua naquela conversa e é lá que se muda o motivo dele ou se desliga; não arme outro igual aqui.");
+    // INSP-J r1 #5: never teach the gesture that makes a second watch
+    expect(routedWakeNote({ fromTitle: "x", fromThread: "y" })).not.toMatch(/arme-o de novo|o que o move/);
     expect(routedReplyText("Sobre \"X\" (o13): Pode fechar.", { id: "o13", threadId: "dc38193b-1111" }, "Atendimento")).toBe("Sobre \"X\" (o13): Pode fechar.\n\n(Pendência o13, aberta na conversa \"Atendimento\" (dc38193b); respondida pela tela \"Precisa de você\".)");
+  });
+
+  // INSP-J r1 #6: the real standing watches of 02/10 (ids redacted). Only the
+  // Chief's 'main'/'prod' (alone in dbb9f1cf) are the owner's news; the
+  // Monitor's 'chat' (clients) and its 'tag' (beside its intake watches) stay.
+  it("only the owner's kind of watch, from a conversation that is not intake, fires in the channel", () => {
+    const main = ["gh", "api", "repos/o/r/commits/main", "--jq", ".sha"];
+    const prod = ["gh", "api", "repos/o/r/git/ref/tags/nuria-production-deployed", "--jq", ".object.sha"];
+    const chat = ["gog", "chat", "messages", "list", "spaces/AAAAexample", "--max", "10", "--order", "createTime desc", "--plain"];
+    const issues = ["gh", "issue", "list", "-R", "o/r", "--state", "all", "--limit", "50"];
+    const sheet = ["gog", "sheets", "get", "SHEET_ID", "Atendimento!A1:G400", "--plain"];
+    expect(routesToChannel(main, [main, prod])).toBe(true);
+    expect(routesToChannel(prod, [main, prod])).toBe(true);
+    expect(routesToChannel(chat, [chat])).toBe(false);
+    expect(routesToChannel(prod, [prod, issues, sheet])).toBe(false);
+    expect(routesToChannel(["gh", "api", "repos/o/r/issues/9307/comments"], [])).toBe(false);
+    expect(routesToChannel(["curl", "-s", "https://docs.google.com/spreadsheets/d/X/export?format=csv"], [])).toBe(false);
   });
 
   it("knows the owner's name without a profile name: the vocative the bot uses in the channel", () => {

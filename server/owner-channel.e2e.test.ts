@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
@@ -104,7 +105,9 @@ it("reads the owner's channel order back at boot and sends the boot report and t
 // the PR is #NNNN, the conversations are made here.
 it("with a channel on record: the boot moves the sessions, a standing watch and an answer from 'Precisa de você' wake the bot in the channel, and the mirror needs no profile name", async () => {
   const reply = "Renata, a main andou: entrou a PR #NNNN; a sessão segue no gate.";
-  const parentEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50", FAKE_CLAUDE_REPLIES: JSON.stringify(Array.from({ length: 12 }, () => reply)) };
+  // every prompt the fake engine gets (the dump keeps only the first)
+  const prompts = join(tmpdir(), `omb-owner-channel-prompts-${process.pid}-${Date.now()}.jsonl`);
+  const parentEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50", FAKE_CLAUDE_REPLIES: JSON.stringify(Array.from({ length: 12 }, () => reply)), FAKE_CLAUDE_PROMPTS: prompts };
   const fixture = await launchVerificationServer(parentEnv);
   const { url, dataDir, logPath } = fixture.info;
   const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
@@ -114,6 +117,7 @@ it("with a channel on record: the boot moves the sessions, a standing watch and 
     await api(`/api/bots/${chief.id}`, { chiefOfStaff: true }, "PATCH");
     const canal = (await api(`/api/bots/${chief.id}/tasks`, { title: "Canal com o dono" })).task.threadId as string;
     const vigias = (await api(`/api/bots/${chief.id}/tasks`, { title: "Vigias da esteira" })).task.threadId as string;
+    const atendimento = (await api(`/api/bots/${chief.id}/tasks`, { title: "Atendimento" })).task.threadId as string;
     await waitForExit(fixture.child, { signal: "SIGTERM" });
 
     const at = Date.now() - 16 * 3_600_000;
@@ -129,7 +133,11 @@ it("with a channel on record: the boot moves the sessions, a standing watch and 
     const now = Date.now();
     const watch = { command: "git ls-remote origin refs/heads/main", argv: ["git", "ls-remote", "origin", "refs/heads/main"], everyMs: 3_600_000, baseline: "aaa\trefs/heads/main", lastOutput: "bbb\trefs/heads/main", lastRunAt: now, runs: 3, failures: 0, trigger: "changed", standing: true, label: "main", maxMs: 6 * 3_600_000, fired: 2, reasonAt: at };
     writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({
-      wakes: [{ botId: chief.id, threadId: vigias, dueAt: now - 1_000, reason: "Main andou: conferir qual PR entrou e informar o dono", createdAt: at, watch }],
+      wakes: [
+        { botId: chief.id, threadId: vigias, dueAt: now - 1_000, reason: "Main andou: conferir qual PR entrou e informar o dono", createdAt: at, watch },
+        // a watch on the clients' Chat (INSP-J r1 #6): its turn stays in its own conversation
+        { botId: chief.id, threadId: atendimento, dueAt: now - 500, reason: "Mensagem nova de cliente no Chat", createdAt: at, watch: { ...watch, command: "gog chat messages list spaces/AAAAexample --max 10 --plain", argv: ["gog", "chat", "messages", "list", "spaces/AAAAexample", "--max", "10", "--plain"], label: "chat" } },
+      ],
       goals: [], reports: [], inFlight: [],
       ownerPending: [{ id: "o3", botId: chief.id, threadId: vigias, title: "Decidir se a sessão da 9334 espera o release", createdAt: at, options: [{ label: "Esperar", reply: "Espere o release e me avise." }] }],
     }));
@@ -158,9 +166,13 @@ it("with a channel on record: the boot moves the sessions, a standing watch and 
     expect(fired?.tool?.name).toContain("(conversa \"Vigias da esteira\")");
     expect(fired?.threadRef).toMatchObject({ threadId: vigias });
     expect(await texts(vigias, "bot")).toEqual([]);
+    // the clients' Chat watch answers where it lives, never in the owner's channel
+    await expect.poll(async () => (await texts(atendimento, "bot")).length, { timeout: 20_000 }).toBeGreaterThan(0);
+    expect((await chips(canal)).some((chip) => String(chip.tool?.name).startsWith("Vigia permanente \"chat\""))).toBe(false);
     const pointer = (await chips(vigias)).find((chip) => String(chip.tool?.name).endsWith("respondo na conversa com o dono"));
     expect(pointer?.threadRef).toMatchObject({ threadId: canal });
-    expect(readFileSync(join(dataDir, "fake-claude-dump.json"), "utf8")).toContain("Quem disparou foi o vigia permanente \\\"main\\\" da conversa \\\"Vigias da esteira\\\"");
+    expect(readFileSync(prompts, "utf8")).toContain("Quem disparou foi o vigia permanente \\\"main\\\" da conversa \\\"Vigias da esteira\\\"");
+    expect(readFileSync(prompts, "utf8")).not.toContain("Quem disparou foi o vigia permanente \\\"chat\\\"");
 
     // #1: the owner's decision from "Precisa de você" on o3 (opened in the old conversation) wakes the Chief in the channel
     await api(`/api/bots/${chief.id}/owner-pending/o3/reply`, { option: 0, label: "Esperar" });

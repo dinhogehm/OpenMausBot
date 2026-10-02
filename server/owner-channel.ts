@@ -22,7 +22,29 @@ const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
  * which conversation holds the watch, and where the bot answers. */
 export function routedWakeNote(input: { fromTitle: string; fromThread: string; label?: string }): string {
   const watch = input.label ? `o vigia permanente "${oneLine(input.label).slice(0, 60)}"` : "um vigia permanente";
-  return `[Nota do OpenMausBot] Quem disparou foi ${watch} da conversa "${oneLine(input.fromTitle).slice(0, 80)}" (${input.fromThread.slice(0, 8)}). Você foi acordado aqui porque esta é a conversa que o dono definiu para falar com ele: responda aqui. O vigia continua morando naquela conversa (para mudar o motivo ou desligá-lo, faça-o lá ou arme-o de novo aqui, o que o move).`;
+  // never "arm it again here": a standing watch is keyed by conversation and
+  // label, so that would make two of it, each waking the bot (INSP-J r1 #5)
+  return `[Nota do OpenMausBot] Quem disparou foi ${watch} da conversa "${oneLine(input.fromTitle).slice(0, 80)}" (${input.fromThread.slice(0, 8)}). Você foi acordado aqui porque esta é a conversa que o dono definiu para falar com ele: responda aqui. O vigia continua naquela conversa e é lá que se muda o motivo dele ou se desliga; não arme outro igual aqui.`;
+}
+
+/** A watch over what clients send (a Chat space, the spreadsheet, the
+ * issues): its turn is intake work, done where it lives — never in the
+ * owner's channel, where "responda aqui" would answer clients there. */
+export function intakeWatch(argv: readonly string[]): boolean {
+  const [program, ...args] = argv;
+  const line = argv.join(" ");
+  if (program === "gog" && (args.includes("chat") || args.includes("sheets"))) return true;
+  if (/docs\.google\.com\/spreadsheets|sheets\.googleapis\.com|chat\.googleapis\.com/.test(line)) return true;
+  return program === "gh" && (args[0] === "issue" || /\/issues\b|\bissues\b/.test(args.slice(1).join(" ")));
+}
+
+/** A standing watch fires in the owner's channel only when it is the
+ * owner's kind of news (main, the production tag…) and its conversation
+ * is not an intake one (no Chat, spreadsheet or issues watch beside it):
+ * the Monitor's 'tag' watch lives with its Chat watch and tells clients
+ * (INSP-J r1 #6). */
+export function routesToChannel(argv: readonly string[], siblings: ReadonlyArray<readonly string[]>): boolean {
+  return !intakeWatch(argv) && !siblings.some(intakeWatch);
 }
 
 /** The person's answer from "Precisa de você", taken to the channel: it says

@@ -365,7 +365,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
-import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, saidToOwner } from "./owner-channel.ts";
+import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
@@ -8676,7 +8676,9 @@ async function autonomyTick(): Promise<void> {
     // is one: the bot tells the owner what it saw from there (R10-followup #1:
     // the Chief's 'main'/'prod' watches had it writing to the owner elsewhere).
     // A plain wake is the bot's own reminder and stays (it is leased there).
-    const turnThread = standing ? ownerTurnThread(wake.botId, wake.threadId) : wake.threadId;
+    // only the owner's kind of watch, from a conversation that is not intake (INSP-J r1 #6)
+    const ownerSide = standing && routesToChannel(wake.watch!.argv, autonomy.standingsFor(wake.threadId).map((each) => each.watch?.argv ?? []));
+    const turnThread = ownerSide ? ownerTurnThread(wake.botId, wake.threadId) : wake.threadId;
     const routed = turnThread !== wake.threadId;
     if (routed && !store.taskByThread(wake.botId, turnThread)) continue;
     // A due wake waits for the thread to be free; it is never dropped for it.
