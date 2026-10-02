@@ -417,7 +417,10 @@ describe("the PRs of a session that works in nested worktrees", () => {
     expect(asked.slice(before).some((args) => args[2] === "9328")).toBe(false);
   });
 
-  it("a \"legacy\" PR without proof gives no ownership: the worktree is gone and nothing handed it over", async () => {
+  // INSP-J r1 #9: a worktree that cannot be read (removed after the disk
+  // report, unmounted) proves nothing either way: the PR is not taken from
+  // the session for good, nor announced for it; asked again next pass
+  it("a \"legacy\" PR whose worktree cannot be read now is kept undecided — not announced, not dropped", async () => {
     const f = fakeDeps({ state: "MERGED", head: "fix/other" });
     const gone = { ...session(), id: "c38a865a", cwd: "/p/.claude/worktrees/removed", lastReport: "", delivery: { slug: SLUG, prs: { "9328": { url: "u", number: 9328, state: "merged" as const, mergeSha: MERGE, owned: "legacy" as const } } } as CcDelivery };
     f.deps.git = async (_repo, args) => {
@@ -425,8 +428,9 @@ describe("the PRs of a session that works in nested worktrees", () => {
       throw new Error("not a git repository");
     };
     await watchProductionDelivery([gone], f.deps, newDeliveryCache());
-    expect(gone.delivery.prs["9328"]).toBeUndefined();
-    expect(gone.delivery.notOwned).toEqual([9328]);
+    expect(gone.delivery.prs["9328"]).toMatchObject({ owned: "legacy" });
+    expect(gone.delivery.notOwned).toBeUndefined();
+    expect(f.chips).toEqual([]);
     // handed over explicitly, it stays
     const handed = { ...gone, claimedPrs: [9328], delivery: { slug: SLUG, prs: { "9328": { url: "u", number: 9328, state: "merged" as const, mergeSha: MERGE, owned: "legacy" as const } } } as CcDelivery };
     await watchProductionDelivery([handed], f.deps, newDeliveryCache());

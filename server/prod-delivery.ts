@@ -364,6 +364,8 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
         branches ??= await sessionBranches(session, deps.git);
         const owner = prOwnership({ number: pr.number, ...view }, branches, session.claimedPrs);
         if (owner) pr.owned = owner;
+        // its worktree cannot be read now (gone, unmounted): nothing is decided, asked again next pass (INSP-J r1 #9)
+        else if (!branches) continue;
         else {
           delete delivery.prs[String(pr.number)];
           delivery.notOwned = [...new Set([...(delivery.notOwned ?? []), pr.number])];
@@ -394,6 +396,8 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     const delivered: DeliveryPr[] = [];
     for (const pr of waiting) {
       if (!budget()) break;
+      // not yet proved the session's: neither followed nor announced until it is
+      if (pr.owned === "legacy") continue;
       if (pr.state !== "merged" || pr.owned === undefined) {
         if (pr.checkedAt !== undefined && now - pr.checkedAt < DELIVERY_CHECK_MS) continue;
         pr.checkedAt = now;
