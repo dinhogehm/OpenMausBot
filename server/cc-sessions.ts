@@ -860,7 +860,8 @@ export const APP_CREATE_STUCK_MS = 15 * 60_000;
  * A P1 at night must not wait for the owner to wake (INSP-H r2 #2). */
 export function appStalledReason(sessions: readonly CcSession[], repo: string, lockedSince: number | null, now: number): string | null {
   const minutes = (since: number) => Math.max(1, Math.round((now - since) / 60_000));
-  if (lockedSince !== null && lockedSince <= now) return `Mac bloqueado há ${minutes(lockedSince)} min: o app não abre sessão`;
+  // the same 15 min as a stuck queue: a minute of lock is the owner stepping away, not the night (INSP-H r3 #2)
+  if (lockedSince !== null && now - lockedSince >= APP_CREATE_STUCK_MS) return `Mac bloqueado há ${minutes(lockedSince)} min: o app não abre sessão`;
   const stuck = sessions
     .filter((session) => session.surface === "app" && session.repo === repo && session.status !== "archived" && session.desktop?.pending?.kind === "create" && now - session.desktop.pending.since >= APP_CREATE_STUCK_MS)
     .sort((a, b) => a.desktop!.pending!.since - b.desktop!.pending!.since)[0];

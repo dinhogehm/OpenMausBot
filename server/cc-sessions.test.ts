@@ -347,6 +347,9 @@ describe("a repository's corridor", () => {
     const now = Date.parse("2026-10-02T03:10:00-03:00");
     const creating = (since: number) => ({ id: "c", ownerBotId: "b", ownerThreadId: "t", title: "9058 Chat entra com aviso no Widget", repo: "/p", worktree: "w", permissionMode: "auto", status: "running", createdAt: since, lastActivityAt: since, turns: 0, costUsd: 0, queued: [], surface: "app", desktop: { marker: "m", turnsSeen: 0, pending: { kind: "create", text: "x", since, attempts: 0 } } }) as unknown as CcSession;
     expect(appStalledReason([], "/p", null, now)).toBeNull();
+    // locked for a moment is not the app unavailable; 15 min and more is (INSP-H r3 #2)
+    expect(appStalledReason([], "/p", now - 2 * 60_000, now)).toBeNull();
+    expect(appStalledReason([], "/p", now - 16 * 60_000, now)).toBe("Mac bloqueado há 16 min: o app não abre sessão");
     expect(appStalledReason([creating(now - 10 * 60_000)], "/p", null, now)).toBeNull();
     // a P1 at night: its create waits 20 min for an unlocked Mac, the screen is locked
     expect(appStalledReason([creating(now - 20 * 60_000)], "/p", now - 3 * 3_600_000, now)).toBe("Mac bloqueado há 180 min: o app não abre sessão");
