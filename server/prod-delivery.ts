@@ -95,7 +95,14 @@ export function claimsInToolCalls(calls: ReadonlyArray<{ tool: string; input: st
   return [...found];
 }
 
-export interface SessionBranches { names: string[]; heads: string[] }
+export interface SessionBranches {
+  names: string[];
+  heads: string[];
+  /** The number the session's worktree folder opens with ("9330-gate-2a8f5c"):
+   * the issue or the PR it was opened for. GitHub numbers issues and PRs in
+   * one sequence, so a PR with that number is the one it was opened for. */
+  folderNumber?: number;
+}
 
 /** `git worktree list --porcelain`: each worktree's path, branch and HEAD. */
 export function parseWorktreeList(output: string): Array<{ path: string; branch: string | null; head: string | null }> {
@@ -136,7 +143,8 @@ export async function sessionBranches(session: Pick<DeliverySession, "cwd">, git
   const names = [...new Set([local, pushed, ...nested.map((tree) => tree.branch), ...reflogBranches(reflog ?? "")]
     .filter((name): name is string => name !== null && !NOT_A_WORK_BRANCH.has(name)))];
   const heads = [...new Set([head, ...nested.map((tree) => tree.head)].filter((sha): sha is string => sha !== null && /^[0-9a-f]{40}$/.test(sha)))];
-  return { names, heads };
+  const folder = /^(\d{2,7})(?:\D|$)/.exec(cwd.split("/").at(-1) ?? "")?.[1];
+  return { names, heads, ...(folder ? { folderNumber: Number(folder) } : {}) };
 }
 
 /** Whether a PR is the session's, and why: told to take it over, or its
@@ -147,6 +155,8 @@ export function prOwnership(pr: { number: number; headRefName?: string; headRefO
   if (!branches) return null;
   if (pr.headRefName && branches.names.includes(pr.headRefName)) return "branch";
   if (pr.headRefOid && branches.heads.includes(pr.headRefOid)) return "branch";
+  // the worktree was made for this very PR ("9330-gate-…" gating #9330)
+  if (branches.folderNumber === pr.number) return "branch";
   return null;
 }
 
@@ -286,6 +296,8 @@ export interface DeliveryDeps {
   report(session: DeliverySession, text: string): void;
   chip(session: DeliverySession, text: string): void;
   save(): void;
+  /** A line for the server log (what changed and why). */
+  log?(line: string): void;
 }
 
 /** Lookups shared across passes: a repository's tag, a compare, a commit time. */
@@ -338,6 +350,34 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
       added = true;
     }
     if (added) deps.save();
+    let branches: Awaited<ReturnType<typeof sessionBranches>> | undefined;
+    // "legacy" (recorded merged before ownership existed) is proof of nothing:
+    // the real #9328 stayed the 9052 session's that way, holding its archive
+    // and due to announce "em produção" in its conversations (R10-followup
+    // #3). Each one is checked once by its head branch against the session's
+    // branches, worktrees and reflog; without that proof (or a hand-over) it
+    // is not the session's. GitHub unavailable: asked again next time.
+    for (const pr of Object.values(delivery.prs).filter((each) => each.owned === "legacy" || (each.owned === undefined && each.state === "merged"))) {
+      if (!budget()) break;
+      try {
+        const view = JSON.parse(await gh(["pr", "view", String(pr.number), "--repo", delivery.slug, "--json", "headRefName,headRefOid"])) as { headRefName?: string; headRefOid?: string };
+        branches ??= await sessionBranches(session, deps.git);
+        const owner = prOwnership({ number: pr.number, ...view }, branches, session.claimedPrs);
+        if (owner) pr.owned = owner;
+        else {
+          delete delivery.prs[String(pr.number)];
+          delivery.notOwned = [...new Set([...(delivery.notOwned ?? []), pr.number])];
+          deps.log?.(`[delivery] session ${session.id}: PR #${pr.number} (head ${view.headRefName ?? "?"}) was "legacy" and is not its own (${branches ? `branches: ${branches.names.join(", ") || "none"}` : "its worktree cannot be read"}): no longer followed for it`);
+        }
+        deps.save();
+      } catch (error) {
+        if (notAPullRequest(error)) {
+          delete delivery.prs[String(pr.number)];
+          delivery.notPrs = [...new Set([...(delivery.notPrs ?? []), pr.number])];
+          deps.save();
+        }
+      }
+    }
     const waiting = Object.values(delivery.prs).filter((pr) => pr.state !== "closed" && pr.reportedAt === undefined);
     if (!waiting.length) continue;
     // The production tag, read at most once per DELIVERY_CHECK_MS per repository.
@@ -352,14 +392,8 @@ export async function watchProductionDelivery(sessions: readonly DeliverySession
     }
     if (!tag.sha) continue;
     const delivered: DeliveryPr[] = [];
-    let branches: Awaited<ReturnType<typeof sessionBranches>> | undefined;
     for (const pr of waiting) {
       if (!budget()) break;
-      // recorded and found merged before ownership existed (#9330 of 29da943f): still followed to production
-      if (pr.owned === undefined && pr.state === "merged" && pr.mergeSha) {
-        pr.owned = "legacy";
-        deps.save();
-      }
       if (pr.state !== "merged" || pr.owned === undefined) {
         if (pr.checkedAt !== undefined && now - pr.checkedAt < DELIVERY_CHECK_MS) continue;
         pr.checkedAt = now;
@@ -449,7 +483,8 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
   let branches: Awaited<ReturnType<typeof sessionBranches>> | undefined;
   for (const [number, known] of [...numbers].slice(0, 6)) {
     if (known?.reportedAt !== undefined || known?.state === "closed") continue;
-    const owned = known?.owned ?? (session.claimedPrs?.includes(number) ? "explicit" : undefined);
+    // "legacy" proves nothing (R10-followup #3): checked by branch like any named PR
+    const owned = (known?.owned === "legacy" ? undefined : known?.owned) ?? (session.claimedPrs?.includes(number) ? "explicit" : undefined);
     let state = known?.state === "merged" && owned ? "MERGED" : "";
     let mergeSha = known?.mergeSha;
     if (!state) {

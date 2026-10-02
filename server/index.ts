@@ -9985,6 +9985,7 @@ function watchDelivery(): void {
     report: (session, text) => ccReport(session as CcSession, text),
     chip: (session, text) => ccChip(session as CcSession, text),
     save: () => ccLedger.save(),
+    log: (line) => console.log(line),
   }, deliveryCache)
     .catch((error) => console.error(`[delivery] ${error instanceof Error ? error.message : String(error)}`))
     .finally(() => { delivery.running = false; });
@@ -10087,7 +10088,7 @@ function sharedStatePrompt(botId: string, threadId: string): string {
     .slice(-6)
     .map((session) => {
       // its own PRs only: one its report merely names is another session's (R9-followup #2)
-      const own = Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.owned !== undefined).map((pr) => `#${pr.number}`);
+      const own = Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.owned !== undefined && pr.owned !== "legacy").map((pr) => `#${pr.number}`);
       return `sessão Claude Code "${session.title}" (${session.status}${own.length ? `, PRs ${own.join(" ")}` : ""})`;
     });
   return sharedState.render(botId, threadId, Date.now(), work, recentWorkFilter().include);

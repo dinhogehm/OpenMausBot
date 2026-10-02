@@ -278,11 +278,13 @@ describe("whose PR it is", () => {
 
   it("reads the branches of the session's worktree: its checkout and where it pushed, never main", async () => {
     const git: DeliveryDeps["git"] = async (repo, args) => worktreeGit(repo, args) ?? (() => { throw new Error("no"); })();
-    expect(await sessionBranches({ cwd: WORKTREE }, git)).toEqual({ names: ["worktree-9311-fix-login-111111", BRANCH], heads: [HEAD] });
+    expect(await sessionBranches({ cwd: WORKTREE }, git)).toEqual({ names: ["worktree-9311-fix-login-111111", BRANCH], heads: [HEAD], folderNumber: 9311 });
     expect(await sessionBranches({}, git)).toBeNull();
     expect(await sessionBranches({ cwd: "/gone" }, git)).toBeNull();
     const onMain: DeliveryDeps["git"] = async (_repo, args) => (args.includes("@{u}") ? "origin/main\n" : args.includes("--abbrev-ref") ? "main\n" : `${HEAD}\n`);
-    expect(await sessionBranches({ cwd: WORKTREE }, onMain)).toEqual({ names: [], heads: [HEAD] });
+    expect(await sessionBranches({ cwd: WORKTREE }, onMain)).toEqual({ names: [], heads: [HEAD], folderNumber: 9311 });
+    // a folder without a number says nothing
+    expect((await sessionBranches({ cwd: "/repo/.claude/worktrees/agent-a82712" }, onMain))?.folderNumber).toBeUndefined();
   });
 
   it("takes only the PRs an order hands to the session it is sent to (INSP-H r1 #7)", () => {
@@ -344,8 +346,8 @@ describe("the PRs of a session that works in nested worktrees", () => {
     throw new Error("unexpected");
   };
 
-  it("keeps #9328 and #9341 (nested worktrees) and the legacy merged #9330; the #9052 session still does not own #9328", async () => {
-    expect(await sessionBranches({ cwd: CWD }, nestedGit)).toEqual({ names: ["pr/9328", "fix/9340"], heads: [DETACHED, HEAD_9328, HEAD_9341] });
+  it("keeps #9328 and #9341 (nested worktrees) and #9330 (its worktree was made for it); the #9052 session still does not own #9328", async () => {
+    expect(await sessionBranches({ cwd: CWD }, nestedGit)).toEqual({ names: ["pr/9328", "fix/9340"], heads: [DETACHED, HEAD_9328, HEAD_9341], folderNumber: 9330 });
     const f = fakeDeps();
     f.deps.git = nestedGit;
     f.deps.gh = ghFor;
@@ -353,8 +355,8 @@ describe("the PRs of a session that works in nested worktrees", () => {
     await watchProductionDelivery([s29], f.deps, newDeliveryCache());
     expect(s29.delivery.prs["9328"]).toMatchObject({ owned: "branch", state: "open" });
     expect(s29.delivery.prs["9341"]).toMatchObject({ owned: "branch", state: "open" });
-    // merged before ownership existed: kept, still waiting for production
-    expect(s29.delivery.prs["9330"]).toMatchObject({ owned: "legacy", state: "merged" });
+    // merged before ownership existed: re-checked, and its worktree "9330-gate-…" is the proof — kept, still waiting for production
+    expect(s29.delivery.prs["9330"]).toMatchObject({ owned: "branch", state: "merged" });
     expect(s29.delivery.prs["9330"]!.reportedAt).toBeUndefined();
     expect(s29.delivery.notOwned ?? []).toEqual([]);
     expect(prsOfSession(s29).sort()).toEqual([9328, 9341]);
@@ -364,6 +366,71 @@ describe("the PRs of a session that works in nested worktrees", () => {
     const s52 = { ...session(), id: "35787b0f", lastReport: "A trava está na PR #9328, que ainda não está em main." };
     await watchProductionDelivery([s52], g.deps, newDeliveryCache());
     expect(s52.delivery!.notOwned).toEqual([9328]);
+  });
+
+  // R10-followup #3, the real 35787b0f of 02/10 (redacted): #9328 recorded
+  // as "legacy" (owned: legacy, state: merged) though its head is
+  // fix/9319-unified-schema-reconciler-contract and the session's worktree is
+  // 9052-tempo-de-reabertura-configuravel-35787b (its own PR: #9332). It held
+  // the archive ("a PR #9328 foi mergeada mas ainda não está em produção") and
+  // would have announced "em produção (PR #9328)" in its conversations.
+  it("re-checks a \"legacy\" PR by branch and worktree: not the session's, it no longer holds it nor is announced for it", async () => {
+    const WT = "/p/.claude/worktrees/9052-tempo-de-reabertura-configuravel-35787b";
+    const git: DeliveryDeps["git"] = async (repo, args) => {
+      if (args[0] === "remote") return `git@github.com:${SLUG}.git\n`;
+      if (args[0] === "ls-remote") return `${TAG}\trefs/tags/nuria-production-deployed\n`;
+      if (repo !== WT) throw new Error("no");
+      if (args[0] === "worktree") return `worktree /p\nHEAD ${"a".repeat(40)}\nbranch refs/heads/main\n\nworktree ${WT}\nHEAD ${"d".repeat(40)}\nbranch refs/heads/feat/9052-tempo-de-reabertura`;
+      if (args[0] === "reflog") return "checkout: moving from main to feat/9052-tempo-de-reabertura";
+      if (args.includes("@{u}")) return "origin/feat/9052-tempo-de-reabertura\n";
+      if (args.includes("--abbrev-ref")) return "feat/9052-tempo-de-reabertura\n";
+      return `${"d".repeat(40)}\n`;
+    };
+    const asked: string[][] = [];
+    const gh = async (args: string[]) => {
+      asked.push(args);
+      if (args[0] === "pr" && args[2] === "9328") return JSON.stringify({ state: "MERGED", mergeCommit: { oid: MERGE }, headRefName: "fix/9319-unified-schema-reconciler-contract", headRefOid: "e".repeat(40) });
+      if (args[0] === "pr" && args[2] === "9332") return JSON.stringify({ state: "MERGED", mergeCommit: { oid: "f".repeat(40) }, headRefName: "feat/9052-tempo-de-reabertura", headRefOid: "d".repeat(40) });
+      if (args[1]!.includes("/compare/")) return "ahead\n";
+      if (args[1]!.includes("/commits/")) return "2026-10-02T06:23:00Z\n";
+      throw new Error("unexpected");
+    };
+    const f = fakeDeps();
+    const logs: string[] = [];
+    Object.assign(f.deps, { git, gh, log: (line: string) => logs.push(line) });
+    const s52 = { id: "35787b0f", title: "9052 Tempo de reabertura", repo: "/p", cwd: WT, status: "idle", lastReport: "PR #9332 mergeada.", delivery: { slug: SLUG, prs: {
+      "9328": { url: "u", number: 9328, state: "merged" as const, mergeSha: MERGE, owned: "legacy" as const },
+      "9332": { url: "u", number: 9332, state: "merged" as const, mergeSha: "f".repeat(40), owned: "legacy" as const },
+    } } as CcDelivery };
+    // archiving: "legacy" is checked by branch like a mere mention, so #9328 no longer holds it
+    expect((await archiveBlockers({ ...s52, delivery: { ...s52.delivery, prs: { "9328": { ...s52.delivery.prs["9328"]!, owned: "legacy" as const } } } }, { gh: async () => JSON.stringify({ state: "MERGED", mergeCommit: { oid: MERGE }, headRefName: "fix/9319-unified-schema-reconciler-contract" }), git })).blockers).toEqual([]);
+    await watchProductionDelivery([s52], f.deps, newDeliveryCache());
+    // #9328: not its own, for good; #9332: its own by branch, announced
+    expect(s52.delivery.prs["9328"]).toBeUndefined();
+    expect(s52.delivery.notOwned).toEqual([9328]);
+    expect(s52.delivery.prs["9332"]).toMatchObject({ owned: "branch" });
+    expect(f.chips).toEqual([expect.stringMatching(/^em produção desde .* \(PR #9332\)$/)]);
+    expect(logs).toEqual(["[delivery] session 35787b0f: PR #9328 (head fix/9319-unified-schema-reconciler-contract) was \"legacy\" and is not its own (branches: feat/9052-tempo-de-reabertura): no longer followed for it"]);
+    // the next pass does not ask GitHub about #9328 again
+    const before = asked.length;
+    await watchProductionDelivery([s52], f.deps, newDeliveryCache());
+    expect(asked.slice(before).some((args) => args[2] === "9328")).toBe(false);
+  });
+
+  it("a \"legacy\" PR without proof gives no ownership: the worktree is gone and nothing handed it over", async () => {
+    const f = fakeDeps({ state: "MERGED", head: "fix/other" });
+    const gone = { ...session(), id: "c38a865a", cwd: "/p/.claude/worktrees/removed", lastReport: "", delivery: { slug: SLUG, prs: { "9328": { url: "u", number: 9328, state: "merged" as const, mergeSha: MERGE, owned: "legacy" as const } } } as CcDelivery };
+    f.deps.git = async (_repo, args) => {
+      if (args[0] === "ls-remote") return `${TAG}\trefs/tags/nuria-production-deployed\n`;
+      throw new Error("not a git repository");
+    };
+    await watchProductionDelivery([gone], f.deps, newDeliveryCache());
+    expect(gone.delivery.prs["9328"]).toBeUndefined();
+    expect(gone.delivery.notOwned).toEqual([9328]);
+    // handed over explicitly, it stays
+    const handed = { ...gone, claimedPrs: [9328], delivery: { slug: SLUG, prs: { "9328": { url: "u", number: 9328, state: "merged" as const, mergeSha: MERGE, owned: "legacy" as const } } } as CcDelivery };
+    await watchProductionDelivery([handed], f.deps, newDeliveryCache());
+    expect(handed.delivery.prs["9328"]).toMatchObject({ owned: "explicit" });
   });
 });
 
