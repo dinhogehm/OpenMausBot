@@ -35,6 +35,16 @@ import { chatTexts, ECHO_WINDOW_MS, isEcho, normalize, vmChatPostOf, vmSheetNote
 /** How long, and how many, message starts a bot keeps as seen in its Chat watches. */
 export const SEEN_CHAT_MS = 24 * 3_600_000;
 export const SEEN_CHAT_MAX = 2_000;
+/** Message starts kept on disk per bot (the newest), and the largest watch output kept as lines. */
+export const ECHO_SEEN_PERSIST_MAX = 1_000;
+export const ECHO_LINES_PERSIST_MAX = 40_000;
+
+/** The echo memory on disk (bot-autonomy.echo.json). */
+interface EchoMemory {
+  selfWrites: Record<string, SelfWrite[]>;
+  seenChat: Record<string, Array<[string, number]>>;
+  lastLines: Record<string, { fingerprint: string; lines: string[] }>;
+}
 
 export const WAKE_MIN_MINUTES = 1;
 export const WAKE_MAX_MINUTES = 1_440;
@@ -497,15 +507,19 @@ export class BotAutonomy {
   private standingLost = new Map<string, StandingLost>();
   private promises: BotPromise[] = [];
   private ownerPending: OwnerPending[] = [];
-  /** The bot's recent writes to watched sources, per bot (not persisted). */
+  /** The bot's recent writes to watched sources, per bot (kept across restarts: saveEcho). */
   private selfWrites = new Map<string, SelfWrite[]>();
-  /** Each watch's complete output lines of its last run (not persisted: after a restart nothing is an echo). */
+  /** Each watch's complete output lines of its last run (kept across restarts for that very output). */
   private lastLines = new Map<string, string[]>();
+  /** The fingerprint of the output each `lastLines` entry came from. */
+  private lastLinesPrint = new Map<string, string>();
   /** Per bot, the start of each message its Chat watches showed, and when (insertion order = age). */
   private seenChat = new Map<string, Map<string, number>>();
   /** Leases a restart cut off, as found on load. */
   readonly recoveredOnLoad: RecoveredLease[] = [];
   private readonly path: string | null;
+  /** The echo memory's own file, beside the ledger (null: in memory only). */
+  private readonly echoPath: string | null;
   private readonly now: () => number;
   private readonly minuteMs: number;
   private readonly turnGapMs: number;
@@ -515,10 +529,13 @@ export class BotAutonomy {
   // minuteMs/turnGapMs only shrink time for end-to-end tests.
   constructor(opts: { path: string | null; now?: () => number; minuteMs?: number; turnGapMs?: number }) {
     this.path = opts.path;
+    this.echoPath = opts.path ? opts.path.replace(/\.json$/, "") + ".echo.json" : null;
     this.now = opts.now ?? Date.now;
     this.minuteMs = opts.minuteMs ?? 60_000;
     this.turnGapMs = opts.turnGapMs ?? GOAL_MIN_TURN_GAP_MS;
     this.load();
+    // after the ledger: a watch's lines come back only while the watch does
+    this.loadEcho();
   }
 
   private load(): void {
@@ -664,8 +681,12 @@ export class BotAutonomy {
     // characters): what an echo is judged against. Unknown — after a
     // restart, or a run past WATCH_LINES_MAX — means no echo.
     const previous = this.lastLines.get(wakeKey(wake)) ?? null;
-    if (result.ok && result.lines && result.linesComplete !== false) this.lastLines.set(wakeKey(wake), result.lines);
-    else if (result.ok) this.lastLines.delete(wakeKey(wake));
+    if (result.ok && result.lines && result.linesComplete !== false) {
+      this.lastLines.set(wakeKey(wake), result.lines);
+      // which output these lines are: after a restart they count only for that very output
+      if (result.fingerprint) this.lastLinesPrint.set(wakeKey(wake), result.fingerprint);
+      else this.lastLinesPrint.delete(wakeKey(wake));
+    } else if (result.ok) this.lastLines.delete(wakeKey(wake));
     watch.lastOutput = result.output;
     if (result.ok && result.lines && watchKindOf(watch.argv) === "chat") this.noteChatSeen(wake.botId, result.lines);
     let fresh: string[] = [];
@@ -726,6 +747,7 @@ export class BotAutonomy {
       if (!watch.standing) this.lastLines.delete(wakeKey(wake));
     }
     this.save();
+    this.saveEcho();
     return trigger;
   }
 
@@ -734,6 +756,70 @@ export class BotAutonomy {
     const at = this.now();
     const kept = (this.selfWrites.get(botId) ?? []).filter((item) => at - item.at <= ECHO_WINDOW_MS);
     this.selfWrites.set(botId, [...kept, write].slice(-20));
+    this.saveEcho();
+  }
+
+  // ── the echo memory, across restarts (R10-intake: after the restart of
+  // 13:38 the bot's first post woke its watch once — the run before, its
+  // own writes and the messages seen were gone). Kept apart from the
+  // ledger, bounded: writes of the last ECHO_WINDOW_MS (≤ 20 per bot), the
+  // ECHO_SEEN_PERSIST_MAX newest message starts of the last 24 h per bot,
+  // and each live watch's last lines while they fit ECHO_LINES_PERSIST_MAX
+  // characters — taken back only for the very output they came from (its
+  // fingerprint), so a watch that ran elsewhere meanwhile is never compared
+  // with lines it did not see.
+
+  private loadEcho(): void {
+    if (!this.echoPath || !existsSync(this.echoPath)) return;
+    try {
+      const raw = JSON.parse(readFileSync(this.echoPath, "utf8")) as Partial<EchoMemory>;
+      const at = this.now();
+      for (const [botId, writes] of Object.entries(raw.selfWrites ?? {})) {
+        const kept = (Array.isArray(writes) ? writes : []).filter((write) => write && typeof write.at === "number" && typeof write.kind === "string" && Array.isArray(write.marks) && at - write.at <= ECHO_WINDOW_MS);
+        if (kept.length) this.selfWrites.set(botId, kept.slice(-20));
+      }
+      for (const [botId, starts] of Object.entries(raw.seenChat ?? {})) {
+        const seen = new Map<string, number>();
+        for (const pair of Array.isArray(starts) ? starts : []) {
+          if (Array.isArray(pair) && typeof pair[0] === "string" && typeof pair[1] === "number" && at - pair[1] <= SEEN_CHAT_MS) seen.set(pair[0].slice(0, 40), pair[1]);
+        }
+        if (seen.size) this.seenChat.set(botId, seen);
+      }
+      for (const [key, saved] of Object.entries(raw.lastLines ?? {})) {
+        const wake = this.wakes.get(key);
+        if (!wake?.watch || !saved || !Array.isArray(saved.lines) || typeof saved.fingerprint !== "string") continue;
+        if (wake.watch.lastFingerprint !== saved.fingerprint) continue;
+        this.lastLines.set(key, saved.lines.filter((line): line is string => typeof line === "string"));
+        this.lastLinesPrint.set(key, saved.fingerprint);
+      }
+    } catch (error) {
+      console.error(`[autonomy] ignoring unreadable ${this.echoPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private saveEcho(): void {
+    if (!this.echoPath) return;
+    const at = this.now();
+    const memory: EchoMemory = { selfWrites: {}, seenChat: {}, lastLines: {} };
+    for (const [botId, writes] of this.selfWrites) {
+      const kept = writes.filter((write) => at - write.at <= ECHO_WINDOW_MS);
+      if (kept.length) memory.selfWrites[botId] = kept.slice(-20);
+    }
+    for (const [botId, seen] of this.seenChat) {
+      const kept = [...seen].filter(([, when]) => at - when <= SEEN_CHAT_MS).slice(-ECHO_SEEN_PERSIST_MAX);
+      if (kept.length) memory.seenChat[botId] = kept;
+    }
+    for (const [key, lines] of this.lastLines) {
+      const fingerprint = this.lastLinesPrint.get(key);
+      if (!fingerprint || !this.wakes.has(key)) continue;
+      if (lines.reduce((sum, line) => sum + line.length + 1, 0) > ECHO_LINES_PERSIST_MAX) continue;
+      memory.lastLines[key] = { fingerprint, lines };
+    }
+    try {
+      writeFileAtomic(this.echoPath, `${JSON.stringify(memory)}\n`, { mode: 0o600 });
+    } catch (error) {
+      console.error(`[autonomy] could not save ${this.echoPath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /** The start of every message a bot's Chat watches showed (40 characters,

@@ -6,6 +6,7 @@ import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
 import { isMentionOnly, stripLeadingMentions } from "../shared/owner-pending-title.ts";
 import {
   BotAutonomy,
+  ECHO_SEEN_PERSIST_MAX,
   SEEN_CHAT_MAX,
   GOAL_DEFAULT_MAX_TURNS,
   GOAL_MIN_TURN_GAP_MS,
@@ -521,17 +522,82 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     expect(autonomy.recordWatchRun(wake, run(reproved, "c"))).toBe("changed");
   });
 
-  it("knows no echo right after a restart: the run before is not known in full", () => {
+  it("a restart keeps the run before, but a line nobody wrote still wakes", () => {
     const lines = ["[Monitor Chat Atendimento] nota", "  Fulana  Dono    Pendente    Algo"];
     const ownMark = botMarkPattern("Monitor Chat Atendimento");
     const first = make();
     const wake = first.setWatch("monitor", "t1", { ...base, command: "gog sheets get x --plain", argv: ["gog", "sheets", "get", "x", "--plain"], label: "planilha", baseline: "x", baselineFingerprint: "a" });
     first.recordWatchRun(wake, { ok: true, output: lines.join("\n"), matched: false, fingerprint: "a", lines, ownMark });
-    // the server restarts: the same watch, its line hashes on disk, its lines not
+    // the server restarts: the same watch, its lines back for that output; a note the bot did not write is no echo
     const restarted = make();
     const again = restarted.standingFor("t1", "planilha")!;
     const more = [...lines, "[Monitor Chat Atendimento] outra nota"];
     expect(restarted.recordWatchRun(again, { ok: true, output: more.join("\n"), matched: false, fingerprint: "b", lines: more, ownMark })).toBe("changed");
+  });
+
+  // R10-intake: the restart of 02/10 13:38 emptied the echo memory, so the
+  // bot's first post after it (the notice to a client in the Chat) would
+  // wake its own watch once. The memory now survives a restart, bounded.
+  it("remembers across a restart the bot's own post, the run before and the messages seen — bounded, and only for the same output", () => {
+    const chat = readFileSync(new URL("./testing/fixtures/gog-chat-plain.txt", import.meta.url), "utf8").trim().split("\n");
+    const message = (id: string, text: string) => `spaces/GSMW4KYdbE4/messages/${id}.${id}\tNeewdoa Ocex\t2026-10-02T16:59:17.000000Z\t${text}`;
+    const ownMark = botMarkPattern("Monitor Chat Atendimento", "monitor-chat-atendimento");
+    const argv = ["gog", "chat", "messages", "list", "spaces/AAAAexample", "--max", "10", "--order", "createTime desc", "--plain"];
+    const first = make();
+    const wake = first.setWatch("monitor", "thread-chat", { ...base, command: argv.join(" "), argv, standing: true, label: "chat", baseline: "x", baselineFingerprint: "a" });
+    first.recordWatchRun(wake, { ok: true, output: chat.join("\n"), matched: false, fingerprint: "f0", lines: chat, ownMark });
+    first.rearmStanding(wake);
+    // the notice the bot pastes through the VM, then the server restarts before the watch runs again
+    const body = "a causa foi encontrada e a correção está em andamento, ainda não publicada";
+    expect(first.noteVmClipboard("monitor", body)).toBe(true);
+    expect(first.seenChatCount("monitor")).toBeGreaterThan(0);
+    const restarted = make();
+    expect(restarted.seenChatCount("monitor")).toBe(first.seenChatCount("monitor"));
+    const again = restarted.standingFor("thread-chat", "chat")!;
+    now += 60_000;
+    const shown = [chat[0]!, message("nWv9", `@Fulana de Tal ${body}`), ...chat.slice(1, -1)];
+    expect(restarted.recordWatchRun(again, { ok: true, output: shown.join("\n"), matched: false, fingerprint: "f1", lines: shown, ownMark })).toBeNull();
+    expect(again.watch!.echo?.reasons).toEqual([`post do bot ("${body.slice(0, 40)}")`]);
+
+    // past the echo window the post is forgotten; and lines of another output never come back
+    const file = join(dir, "bot-autonomy.echo.json");
+    const saved = JSON.parse(readFileSync(file, "utf8"));
+    expect(Object.keys(saved.lastLines)).toHaveLength(1);
+    now += 16 * 60_000;
+    const later = make();
+    expect(JSON.parse(readFileSync(file, "utf8")).selfWrites.monitor).toHaveLength(1); // on disk until the next save
+    const watchLater = later.standingFor("thread-chat", "chat")!;
+    const human = [chat[0]!, message("nWva", body), ...shown.slice(1, -1)];
+    now += 60_000;
+    expect(later.recordWatchRun(watchLater, { ok: true, output: human.join("\n"), matched: false, fingerprint: "f2", lines: human, ownMark })).toBe("changed");
+    expect(JSON.parse(readFileSync(file, "utf8")).selfWrites).toEqual({});
+    // the watch ran elsewhere meanwhile (its fingerprint moved): its saved lines are not taken back
+    const ledger = JSON.parse(readFileSync(join(dir, "bot-autonomy.json"), "utf8"));
+    for (const each of ledger.wakes) if (each.watch) each.watch.lastFingerprint = "other";
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify(ledger));
+    const moved = make();
+    moved.noteSelfWrite("monitor", { at: now, kind: "chat", marks: ["x"], via: "shell" });
+    expect(JSON.parse(readFileSync(file, "utf8")).lastLines).toEqual({});
+  });
+
+  it("keeps the echo memory bounded on disk", () => {
+    const autonomy = make();
+    const argv = ["gog", "chat", "messages", "list", "spaces/AAAAexample", "--max", "10", "--plain"];
+    const wake = autonomy.setWatch("monitor", "thread-chat", { ...base, command: argv.join(" "), argv, standing: true, label: "chat", baseline: "x", baselineFingerprint: "a" });
+    const row = (n: number) => `spaces/AAAAexample/messages/m${n}.m${n}\tKarntf Fhqxr\t2026-10-01T10:00:00.000000Z\tmensagem número ${n} de um cliente com texto`;
+    // 1 500 distinct messages seen, a few runs
+    for (let run = 0; run < 3; run += 1) {
+      const lines = ["RESOURCE\tSENDER\tTIME\tTEXT", ...Array.from({ length: 500 }, (_, i) => row(run * 500 + i))];
+      now += 60_000;
+      autonomy.recordWatchRun(wake, { ok: true, output: lines.join("\n").slice(0, 20_000), matched: false, fingerprint: `g${run}`, lines });
+      autonomy.rearmStanding(wake);
+    }
+    for (let i = 0; i < 30; i += 1) autonomy.noteSelfWrite("monitor", { at: now, kind: "chat", marks: [`post ${i}`], via: "shell" });
+    const saved = JSON.parse(readFileSync(join(dir, "bot-autonomy.echo.json"), "utf8"));
+    expect(saved.seenChat.monitor.length).toBe(ECHO_SEEN_PERSIST_MAX);
+    expect(saved.selfWrites.monitor).toHaveLength(20);
+    // 500 lines of ~90 characters exceed ECHO_LINES_PERSIST_MAX: not written
+    expect(saved.lastLines).toEqual({});
   });
 
   it("follows the real VM sequence of a Chat post: the pasted body is the bot's, a mention or a URL is not, a copied client message is not (INSP-E r3 4)", () => {
