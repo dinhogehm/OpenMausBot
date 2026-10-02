@@ -51,6 +51,23 @@ export function releaseFailureCause(outTail: string): string | null {
   return named ? named.replace(/^\[ERROR\]\s*/, "").slice(0, 300) : null;
 }
 
+/** A cause as compared across tries: what failed, without what changes on
+ * every try — the log path ("Logs: /private/var/folders/…/nuria-smart-deploy.5RILoB/…"),
+ * any absolute path, time stamps, mktemp suffixes, pids. On 02/10 one failure
+ * (script-contracts) was kept as 5 "different" causes, so the loop was never
+ * one and the Chief was woken on every try (INSP-J r1 #1). */
+export function releaseCauseKey(cause: string): string {
+  return cause
+    .replace(/\s*\b(?:Logs?|Log file|See|Veja)\s*:\s*\S+/gi, "")
+    .replace(/(?:^|\s)(?:\/[\w.@+-]+)+\/?/g, " ")
+    .replace(/\b\d{8}T\d{6}Z?\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g, "")
+    .replace(/\bpids?[ =:]+\d+\b/gi, "")
+    .replace(/\b[0-9a-f]{12,40}\b/g, "")
+    .replace(/[\s.,;:-]+$/u, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function readTail(path: string, bytes: number): string {
   if (!existsSync(path)) return "";
   let fd: number | null = null;
@@ -239,7 +256,12 @@ export class ReleaseWatchState {
     try {
       const raw = JSON.parse(readFileSync(path, "utf8")) as { alerted?: Record<string, number>; told?: string[]; decided?: string[]; seen?: Record<string, ReleaseLoopSeen> };
       this.alerted = raw.alerted ?? {};
-      this.seen = raw.seen ?? {};
+      // causes saved by an earlier build kept the log path: the same failure read as many
+      this.seen = Object.fromEntries(Object.entries(raw.seen ?? {}).map(([sha, seen]) => {
+        const causes = [...new Set((seen.causes ?? []).map(releaseCauseKey).filter(Boolean))];
+        const { causes: _old, ...rest } = seen;
+        return [sha, causes.length ? { ...rest, causes } : rest];
+      }));
       // decisions written to `told` by an earlier build move to their own list
       this.told = (raw.told ?? []).filter((key) => !key.startsWith("preempt:"));
       this.decided = [...(raw.decided ?? []), ...(raw.told ?? []).filter((key) => key.startsWith("preempt:")).map((key) => key.slice("preempt:".length))];
@@ -256,7 +278,8 @@ export class ReleaseWatchState {
   observe(sha: string, count: number, now: number, cause: string | null = null): void {
     const known = this.seen[sha];
     if (known && count <= known.count) return;
-    const causes = [...new Set([...(known?.causes ?? []), ...(cause ? [cause] : [])])];
+    const key = cause ? releaseCauseKey(cause) : "";
+    const causes = [...new Set([...(known?.causes ?? []), ...(key ? [key] : [])])];
     const next: ReleaseLoopSeen = known ? { ...known, count, at: now } : { firstCount: count, firstAt: now, count, at: now };
     if (causes.length) next.causes = causes.slice(-5);
     this.seen = { ...Object.fromEntries(Object.entries(this.seen).filter(([key]) => key !== sha).slice(-10)), [sha]: next };

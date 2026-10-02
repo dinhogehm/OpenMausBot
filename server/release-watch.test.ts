@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
+import { releaseCauseKey, releaseInLoop } from "./release-watch.ts";
 import { ATTENTION_FILE_MAX_BYTES, ATTENTION_MAX_AGE_MS, fullReleaseSha, haltedRelease, readTail, releaseAttention, releaseAttentionAlert, releaseAttentionDue, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 const log = [
@@ -504,6 +505,41 @@ describe("a loop with the owner's item open: the item is refreshed, nobody is wo
       state.observe("d5bb1f70b", 11, T0 + 9 * CYCLE, "ADMISSION_TIMEOUT waiting for lease");
       const plan = releaseLoopPlan({ sha: "d5bb1f70b", count: 11, halted: false, declined: false, machine: false, told: state.take("d5bb1f70b", 11), itemOpen: true, state });
       expect(plan).toEqual({ loop: false, upsert: null, report: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // INSP-J r1 #1: the real release-watch.json of 02/10 kept the one failure
+  // of d5bb1f70b as 5 causes — each with its own log path (redacted folder).
+  const REAL_CAUSES = [
+    "5RILoB/release-ci-output/20261002T125749Z-release-d5bb1f70bea3-74689",
+    "iazcpu/release-ci-output/20261002T134623Z-release-d5bb1f70bea3-51813",
+    "DC4FUf/release-ci-output/20261002T143806Z-release-d5bb1f70bea3-8813",
+    "d4Z9Xl/release-ci-output/20261002T152130Z-release-d5bb1f70bea3-88013",
+    "u9pRC1/release-ci-output/20261002T162258Z-release-d5bb1f70bea3-49910",
+  ].map((tail) => `Local CI failed at script-contracts. Logs: /private/var/folders/xx/redacted/T/nuria-smart-deploy.${tail}`);
+
+  it("one failure is one cause, whatever log path each try printed — and the causes already saved are read that way", () => {
+    expect(new Set(REAL_CAUSES.map(releaseCauseKey))).toEqual(new Set(["Local CI failed at script-contracts"]));
+    // what still tells two failures apart stays
+    expect(releaseCauseKey("Tenant nuria-ws-01a0ed885c1a reprovou inspecao da migration 0608")).toContain("migration 0608");
+    expect(releaseCauseKey("ADMISSION_TIMEOUT waited=2700s pid=4411 at 2026-10-02T12:57:49Z")).toBe("ADMISSION_TIMEOUT waited=2700s at");
+    const dir = mkdtempSync(join(tmpdir(), "omb-loop-causes-"));
+    try {
+      const path = join(dir, "release-watch.json");
+      // the file as the fc0326c3 build left it
+      writeFileSync(path, JSON.stringify({ alerted: { d5bb1f70b: 10 }, told: ["loop-item:d5bb1f70b"], seen: { d5bb1f70b: { firstCount: 1, firstAt: T0, count: 10, at: T0 + 9 * CYCLE, causes: REAL_CAUSES } } }));
+      const state = new ReleaseWatchState(path);
+      expect(state.seenOf("d5bb1f70b")?.causes).toEqual(["Local CI failed at script-contracts"]);
+      // the 11th try, another log path: still one cause, still a loop
+      state.observe("d5bb1f70b", 11, T0 + 10 * CYCLE, REAL_CAUSES[4]!.replace("u9pRC1", "Zz9Q1a"));
+      expect(state.seenOf("d5bb1f70b")?.causes).toHaveLength(1);
+      expect(releaseLoopDue(state.seenOf("d5bb1f70b"), 11)).toBe(true);
+      const told = state.take("d5bb1f70b", 11);
+      expect(releaseLoopPlan({ sha: "d5bb1f70b", count: 11, halted: false, declined: false, machine: false, told, itemOpen: true, state })).toEqual({ loop: true, upsert: "refresh", report: false });
+      // the item closed ("Deixar tentar"): a session's CI is still left alone
+      expect(releaseInLoop({ sha: FULL, failures: { sha: "d5bb1f70b", count: 11 }, seen: state.seenOf("d5bb1f70b"), itemOpen: false, declined: "" })).toBe("o d5bb1f70b já falhou 11× seguidas pela mesma causa (CI local falhou em script-contracts)");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
