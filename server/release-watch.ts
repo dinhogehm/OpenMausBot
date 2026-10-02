@@ -9,6 +9,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } fro
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
+import { ownerPendingAction } from "./bot-autonomy.ts";
 
 export const RELEASE_ERR_LOG = join(homedir(), ".nuria", "logs", "production-release.err.log");
 export const RELEASE_OUT_LOG = join(homedir(), ".nuria", "logs", "production-release.out.log");
@@ -16,9 +17,14 @@ export const RELEASED_SHA_FILE = join(homedir(), ".nuria", "last-production-rele
 /** Failures of one commit before the Chief hears about it. */
 export const RELEASE_FAILURES_ALERT = 2;
 
-/** The commit that failed last, and how many times it failed, unless it was released since. */
+/** The commit that failed last, and how many times it failed, unless it was
+ * released since. Only failures of the release itself count: since lot P
+ * the watcher marks a failure of the MACHINE ("…(exit N), before or without
+ * a CI verdict: retried next poll" — git/ssh, npm ci, a lock, a signal),
+ * which says nothing about the commit and must never lead to "refuse the
+ * commit" (INSP-H r1 #4); production-release-attention.json tells it. */
 export function releaseFailures(errLog: string, releasedSha: string): { sha: string; count: number } | null {
-  const shas = [...errLog.matchAll(/Release production failed for ([0-9a-f]{7,40}) \(exit \d+\)/g)].map((match) => match[1]!);
+  const shas = [...errLog.matchAll(/^.*?Release production failed for ([0-9a-f]{7,40}) \(exit \d+\)(.*)$/gm)].filter((match) => !/before or without a CI verdict|halted/i.test(match[2]!)).map((match) => match[1]!);
   const last = shas.at(-1);
   if (!last) return null;
   const released = releasedSha.trim();
@@ -130,6 +136,42 @@ export function releaseLoopPending(input: { short: string; full: string | null; 
     ? `echo ${input.full} > ~/.nuria/declined-production-release.sha`
     : `git -C ~/Projetos/nuria-platform rev-parse ${input.short} > ~/.nuria/declined-production-release.sha`;
   return { title: `Recusar o release em laço de ${input.short.slice(0, 9)} (${input.count} falhas iguais): ${command}`, key: `release-loop:${input.short.slice(0, 9)}` };
+}
+
+/** The owner's items about refusing a looping release (the server's, keyed,
+ * and a bot's that ask the same — the real o7 "pausar o watcher… (arquivo
+ * halted)" has no key) whose commit is no longer the one looping:
+ * refused, halted, released, or main moved on (INSP-H r1 #5a). */
+export function releaseLoopItemsToClose<T extends { id: string; title: string; key?: string }>(items: readonly T[], looping: string | null): T[] {
+  return items.filter((item) => {
+    const action = ownerPendingAction(item);
+    if (action?.kind !== "release-loop" || !action.sha) return false;
+    return !looping || !(looping.startsWith(action.sha) || action.sha.startsWith(looping));
+  });
+}
+
+/** What one check does about a commit that keeps failing: whether it is a
+ * loop the owner should refuse, and whether the one item is created now.
+ * - a failure of the machine (attention.json for this very commit) is no
+ *   reason to refuse the commit (INSP-H r1 #4);
+ * - the item is created once per commit: resolved by the owner or a bot, it
+ *   is not created again on the next check (INSP-H r1 #5b); still open, it
+ *   is refreshed when a new failure is told. */
+export function releaseLoopPlan(input: {
+  sha: string;
+  count: number;
+  halted: boolean;
+  declined: boolean;
+  /** attention.json is about this commit and still news */
+  machine: boolean;
+  told: boolean;
+  itemOpen: boolean;
+  state: Pick<ReleaseWatchState, "seenOf" | "once">;
+}): { loop: boolean; upsert: "create" | "refresh" | null } {
+  const loop = !input.halted && !input.declined && !input.machine && releaseLoopDue(input.state.seenOf(input.sha), input.count);
+  if (!loop) return { loop, upsert: null };
+  if (input.itemOpen) return { loop, upsert: input.told ? "refresh" : null };
+  return { loop, upsert: input.state.once(`loop-item:${input.sha.slice(0, 9)}`) ? "create" : null };
 }
 
 /** Failures already told, per commit, kept across restarts. */

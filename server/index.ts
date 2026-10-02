@@ -354,7 +354,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
-import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopPending, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8553,17 +8553,23 @@ async function checkProductionRelease(): Promise<void> {
   releaseWatch.state.observe(failed.sha, failed.count, Date.now(), cause);
   const told = releaseWatch.state.take(failed.sha, failed.count);
   // the same commit failing the same way, again and again: ONE item for the
-  // owner, with the one command the installed watcher respects (never "halted")
-  const loop = !isHalted && !isDeclined && releaseLoopDue(releaseWatch.state.seenOf(failed.sha), failed.count)
-    ? releaseLoopPending({ short: failed.sha, full: fullReleaseSha(outTail, failed.sha), count: failed.count })
-    : null;
+  // owner, with the one command the installed watcher respects (never "halted");
+  // never when the watcher says it is the machine (attention.json, lot P)
+  const attention = releaseAttention(readTail(ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES + 1));
+  const machine = Boolean(attention && sameSha(attention.sha, failed.sha) && releaseAttentionDue(attention, { now: Date.now(), releasedSha: released }));
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   const desk = chief ? chiefDeskThread(chief) : null;
-  const loopOpen = Boolean(loop && chief && autonomy.ownerPendingOf(chief.id).some((item) => item.key === loop.key));
+  const loopKey = releaseLoopPending({ short: failed.sha, full: null, count: failed.count }).key;
+  const itemOpen = Boolean(chief && autonomy.ownerPendingOf(chief.id).some((item) => item.key === loopKey));
+  const plan = releaseLoopPlan({ sha: failed.sha, count: failed.count, halted: isHalted, declined: isDeclined, machine, told, itemOpen, state: releaseWatch.state });
   let loopItem: OwnerPending | null = null;
-  if (loop && chief && desk && store.taskByThread(chief.id, desk) && (told || !loopOpen)) {
-    loopItem = autonomy.addOwnerPending(chief.id, desk, loop);
+  if (plan.upsert && chief && desk && store.taskByThread(chief.id, desk)) {
+    // the full sha: git knows it (the release's own label sits MBs above the tail read here)
+    const full = await execCc("git", ["-C", join(homedir(), "Projetos", "nuria-platform"), "rev-parse", "--verify", `${failed.sha}^{commit}`]).then((out) => out.trim(), () => fullReleaseSha(outTail, failed.sha));
+    loopItem = autonomy.addOwnerPending(chief.id, desk, releaseLoopPending({ short: failed.sha, full: /^[0-9a-f]{40}$/.test(full ?? "") ? full : null, count: failed.count }));
     refreshBotRow(chief.id);
+  } else if (plan.loop && chief) {
+    loopItem = autonomy.ownerPendingOf(chief.id).find((item) => item.key === loopKey) ?? null;
   }
   if (!told) return;
   const text = `O release de produção falhou ${failed.count} vezes no mesmo commit ${failed.sha}${cause ? ` (último motivo: ${cause})` : ""}, e a tag de produção não se moveu: o que vinha nele não está em produção.`;
@@ -8579,13 +8585,12 @@ async function checkProductionRelease(): Promise<void> {
  * the one failing (`failing`: the commit still looping, or null) are done:
  * refused, halted, released, or main moved on. */
 function settleReleaseLoopPendings(failing: string | null): void {
-  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
-  if (!chief) return;
-  for (const item of autonomy.ownerPendingOf(chief.id)) {
-    const sha = item.key?.startsWith("release-loop:") ? item.key.slice("release-loop:".length) : null;
-    if (!sha || (failing && (failing.startsWith(sha) || sha.startsWith(failing)))) continue;
-    for (const done of autonomy.resolveOwnerPending({ key: item.key! })) refreshBotRow(done.botId);
-    console.log(`[release] the loop on ${sha} is over (refused, halted, released or no longer failing): the owner's item ${item.id} is closed`);
+  // every bot's items, keyed or not: the real o7 (keyless) asked to pause the watcher on a commit already refused
+  for (const bot of store.bots) {
+    for (const item of releaseLoopItemsToClose(autonomy.ownerPendingOf(bot.id), failing)) {
+      for (const done of autonomy.resolveOwnerPending({ botId: bot.id, id: item.id })) refreshBotRow(done.botId);
+      console.log(`[release] the loop is over (refused, halted, released or no longer failing): ${bot.name}'s item ${item.id} ("${item.title.slice(0, 80)}") is closed`);
+    }
   }
 }
 

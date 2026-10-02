@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { ATTENTION_FILE_MAX_BYTES, ATTENTION_MAX_AGE_MS, fullReleaseSha, haltedRelease, readTail, releaseAttention, releaseAttentionAlert, releaseAttentionDue, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopPending, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { ATTENTION_FILE_MAX_BYTES, ATTENTION_MAX_AGE_MS, fullReleaseSha, haltedRelease, readTail, releaseAttention, releaseAttentionAlert, releaseAttentionDue, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 const log = [
   "Release production failed for b51648498 (exit 1)",
@@ -319,6 +319,70 @@ describe("a release that needs attention without being halted (H9)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// INSP-H r1 #4/#5: a failure of the MACHINE is no reason to refuse the commit,
+// a refused commit closes every item about its loop (the real o7 had no key),
+// and an item the owner resolved is not created again on the next check.
+describe("a release loop against the machine's failures and the owner's answers", () => {
+  const FULL = "cb015584a35296ec89b2dbaf2c54373e6f93b826";
+  // the lot P watcher's line for a failure before the CI (git/ssh, npm ci, lock)
+  const fast = (sha: string) => `Release production failed for ${sha} (exit 128), before or without a CI verdict: retried next poll`;
+  const ATTENTION = JSON.stringify({ to: "chief", kind: "production-release-attention", reason: "fast-failure", sha: FULL, failures: 1, limit: 0, last_failure: "git@github.com: Permission denied (publickey).", at: "2026-10-02T00:30:00Z" });
+
+  it("does not count failures of the machine, and asks the owner nothing for them", () => {
+    const errLog = [fast("cb015584a"), "npm WARN x", fast("cb015584a"), fast("cb015584a")].join("\n");
+    expect(releaseFailures(errLog, "a9e4b93ca")).toBeNull();
+    // real failures before, machine failures after: only the real ones count
+    expect(releaseFailures(["Release production failed for cb015584a (exit 1)", fast("cb015584a"), fast("cb015584a")].join("\n"), "")).toEqual({ sha: "cb015584a", count: 1 });
+    // three real failures, but attention.json says the machine: no refusal item, only the machine alert
+    const dir = mkdtempSync(join(tmpdir(), "omb-loop-plan-"));
+    try {
+      const state = new ReleaseWatchState(join(dir, "w.json"));
+      state.observe("cb015584a", 3, 1, "Local CI failed at tests");
+      const attention = releaseAttention(ATTENTION)!;
+      const machine = releaseAttentionDue(attention, { now: Date.parse("2026-10-02T00:40:00Z"), releasedSha: "" });
+      expect(releaseLoopPlan({ sha: "cb015584a", count: 3, halted: false, declined: false, machine, told: true, itemOpen: false, state })).toEqual({ loop: false, upsert: null });
+      expect(releaseAttentionAlert(attention, { err: "e" }).report).toContain("não proponha recusá-lo");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates the item once per commit: resolved, it does not come back on the next checks", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-loop-plan-"));
+    try {
+      const state = new ReleaseWatchState(join(dir, "w.json"));
+      state.observe("cb015584a", 3, 1, "Release de producao sem alvo de runtime");
+      const base = { sha: "cb015584a", count: 3, halted: false, declined: false, machine: false, told: true, itemOpen: false, state };
+      expect(releaseLoopPlan(base)).toEqual({ loop: true, upsert: "create" });
+      // open: refreshed only when a new failure is told
+      expect(releaseLoopPlan({ ...base, itemOpen: true, told: false })).toEqual({ loop: true, upsert: null });
+      expect(releaseLoopPlan({ ...base, itemOpen: true, told: true })).toEqual({ loop: true, upsert: "refresh" });
+      // the owner resolved it: two more checks, nothing created — also after a restart
+      expect(releaseLoopPlan({ ...base, told: false })).toEqual({ loop: true, upsert: null });
+      expect(releaseLoopPlan({ ...base, told: true, count: 4, state: new ReleaseWatchState(join(dir, "w.json")) })).toEqual({ loop: true, upsert: null });
+      // refused or halted: no loop at all
+      expect(releaseLoopPlan({ ...base, declined: true }).loop).toBe(false);
+      expect(releaseLoopPlan({ ...base, halted: true }).loop).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("closes, once the commit is refused, every item about its loop — the keyless o7 too, not o1", () => {
+    const items = [
+      { id: "o1", title: "#9052 / PR #9332: confirmar padrão \"sem limite\" e decidir o timeout do pre-push", link: "https://github.com/o/r/pull/9332" },
+      { id: "o7", title: "Autorizar pausar o watcher de produção no cb015584a (arquivo halted) para a PR #9341 passar no gate", link: "https://github.com/o/r/pull/9341" },
+      { id: "o10", title: `Recusar o release em laço de cb015584a (5 falhas iguais): echo ${FULL} > ~/.nuria/declined-production-release.sha`, key: "release-loop:cb015584a" },
+      { id: "o11", title: "Revisar com o QA o diff do cb015584a" },
+    ];
+    // declined (the real declined-production-release.sha = cb015584a…): nothing loops any more
+    expect(releaseLoopItemsToClose(items, null).map((item) => item.id)).toEqual(["o7", "o10"]);
+    // still looping on it: nothing to close; looping on another commit: these are done
+    expect(releaseLoopItemsToClose(items, "cb015584a")).toEqual([]);
+    expect(releaseLoopItemsToClose(items, "2995ef215").map((item) => item.id)).toEqual(["o7", "o10"]);
   });
 });
 
