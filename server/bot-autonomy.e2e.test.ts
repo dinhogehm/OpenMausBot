@@ -431,6 +431,22 @@ it("lists what waits on the person in \"Precisa de você\" until the bot or the 
   await expect.poll(async () => (await f.chips()).some((chip: string) => chip === "Resolvido pela pessoa: Aprovar o carrier da #9315"), { timeout: 10_000 }).toBe(true);
 }), 60_000);
 
+it("keeps one \"Precisa de você\" item for one action, whichever conversation asks again (R9-followup #3)", () => fixture(async f => {
+  f.save({ turns: [
+    { steps: [{ tool: "owner_pending", arguments: { action: "add", title: "Parar o laço do release no cb015584a: echo <sha> > ~/.nuria/declined-production-release.sha" } }], reply: "Anotado." },
+    { steps: [{ tool: "owner_pending", arguments: { action: "add", title: "Autorizar pausar o watcher no cb015584a (arquivo halted)", link: "https://github.com/o/r/pull/9341" } }], reply: "Já estava." },
+  ] });
+  await f.send("O release está em laço.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  const other = await f.api(`/api/bots/${f.bot.id}/tasks`, { title: "Outra conversa" });
+  await runControlOmb(["send", "--bot", f.bot.id, "--task", other.task.threadId, "--text", "E o laço?"], { env: { OPENMAUSBOT_URL: f.session.info.url } });
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  expect(toolResult(f.turns()[1], "owner_pending")).toContain("Já existe em \"Precisa de você\" um item para isso: o1: Parar o laço do release no cb015584a");
+  expect(toolResult(f.turns()[1], "owner_pending")).toContain(`[conversa ${f.bot.activeTaskId}]`);
+  const pending = ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ownerPending ?? []);
+  expect(pending.map((item: any) => item.id)).toEqual(["o1"]);
+}), 60_000);
+
 it("renews a standing watch whose time limit ran out with nothing seen, without a turn, and takes a new note in place", () => fixture(async f => {
   const { execFileSync } = await import("node:child_process");
   const repo = join(f.session.info.dataDir, "renewed-repo");

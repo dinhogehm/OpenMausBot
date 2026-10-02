@@ -202,8 +202,32 @@ export interface OwnerPending {
   link?: string;
   /** Set by the server for its own items, so it can resolve them itself. */
   key?: string;
+  /** Ids of equivalent items folded into this one (still resolvable by them). */
+  aliases?: string[];
 }
 export const OWNER_PENDING_TITLE_MAX = 200;
+
+/** The commits an item's title names: 7–40 hex characters with a digit and a letter. */
+function commitsIn(title: string): string[] {
+  return [...title.matchAll(/(?<![0-9a-z])([0-9a-f]{7,40})(?![0-9a-z])/gi)].map((match) => match[1]!.toLowerCase()).filter((hex) => /\d/.test(hex) && /[a-f]/.test(hex));
+}
+const normalLink = (link: string) => link.trim().replace(/\/+$/, "").toLowerCase();
+const normalTitle = (title: string) => title.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9#]+/g, " ").trim();
+
+/** Two of a bot's items ask the person for the same thing (R9-followup #3,
+ * R9-release #1: three items, in three conversations, for one release loop):
+ * the same server key; else the same commit (one names it, so must the
+ * other — a PR link alone does not make "decide #9052's default" and "stop
+ * the release loop that blocks #9332" one item); else the same link; else
+ * the same title. */
+export function sameOwnerPending(a: { title: string; link?: string; key?: string }, b: { title: string; link?: string; key?: string }): boolean {
+  if (a.key && b.key) return a.key === b.key;
+  const shasA = commitsIn(a.title);
+  const shasB = commitsIn(b.title);
+  if (shasA.length || shasB.length) return shasA.some((x) => shasB.some((y) => x.startsWith(y) || y.startsWith(x)));
+  if (a.link && b.link) return normalLink(a.link) === normalLink(b.link);
+  return normalTitle(a.title) === normalTitle(b.title);
+}
 export const OWNER_PENDING_MAX_PER_THREAD = 10;
 
 export const PROMISE_TEXT_MAX = 300;
@@ -375,6 +399,7 @@ export class BotAutonomy {
       for (const pending of raw.ownerPending ?? []) {
         if (pending && typeof pending.id === "string" && typeof pending.threadId === "string" && typeof pending.botId === "string" && typeof pending.title === "string") this.ownerPending.push(pending);
       }
+      const folded = this.foldEquivalentPending();
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
       }
@@ -404,7 +429,8 @@ export class BotAutonomy {
         const current = this.reports.get(lease.threadId);
         this.reports.set(lease.threadId, { botId: lease.botId, threadId: lease.threadId, items: [INTERRUPTED_PREFIX, ...items, ...(current?.items ?? [])] });
       }
-      if (recovered) this.save();
+      // saved once the whole ledger is read: an earlier save would drop what is not loaded yet
+      if (recovered || folded) this.save();
     } catch (error) {
       console.error(`[autonomy] ignoring unreadable ${this.path}: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -759,10 +785,18 @@ export class BotAutonomy {
 
   // ── what waits on the person ───────────────────────────────────────────
 
-  /** Add (or refresh, same key or title in the conversation) one item. */
-  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string }): OwnerPending {
+  /** Add (or refresh, same key or title in the conversation) one item. An
+   * equivalent item of the same bot in ANY conversation (sameOwnerPending)
+   * is that one: a server item with the same key is refreshed where it is;
+   * for anything else the existing item comes back untouched, flagged
+   * `duplicate`, so the bot is told "já existe o5" instead of the person
+   * getting a second item for the same action. */
+  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string }): OwnerPending & { duplicate?: true } {
     const title = input.title.replace(/\s+/g, " ").trim().slice(0, OWNER_PENDING_TITLE_MAX);
-    const same = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
+    const here = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
+    const elsewhere = this.ownerPending.find((open) => open.botId === botId && !here(open) && sameOwnerPending(open, { ...input, title }));
+    if (elsewhere && !(input.key && elsewhere.key === input.key)) return { ...elsewhere, duplicate: true };
+    const same = (open: OwnerPending) => here(open) || open === elsewhere;
     const existing = this.ownerPending.find(same);
     const used = new Set(this.ownerPending.map((open) => open.id));
     let n = this.ownerPending.length + 1;
@@ -772,12 +806,36 @@ export class BotAutonomy {
       ...(input.due?.trim() ? { due: input.due.trim().slice(0, 80) } : {}),
       ...(input.link?.trim() ? { link: input.link.trim().slice(0, 500) } : {}),
       ...(input.key ? { key: input.key } : {}),
+      ...(existing?.aliases?.length ? { aliases: existing.aliases } : {}),
     };
+    // a server item (same key) found in another conversation follows the server to where it says it now
     this.ownerPending = [...this.ownerPending.filter((open) => !same(open)), pending];
     const mine = this.ownerPending.filter((open) => open.threadId === threadId);
     if (mine.length > OWNER_PENDING_MAX_PER_THREAD) this.ownerPending = this.ownerPending.filter((open) => open !== mine[0]);
     this.save();
     return pending;
+  }
+
+  /** Items saved before the dedupe (or by two conversations at once) that ask
+   * for the same thing become one: the oldest stays, with the others' ids as
+   * aliases (a bot resolving "o7" resolves it) and a link one of them had.
+   * True when any was folded (the caller saves). */
+  private foldEquivalentPending(): boolean {
+    const kept: OwnerPending[] = [];
+    let folded = false;
+    for (const item of [...this.ownerPending].sort((a, b) => a.createdAt - b.createdAt)) {
+      const into = kept.find((open) => open.botId === item.botId && sameOwnerPending(open, item));
+      if (!into) {
+        kept.push(item);
+        continue;
+      }
+      into.aliases = [...new Set([...(into.aliases ?? []), item.id, ...(item.aliases ?? [])])];
+      if (!into.link && item.link) into.link = item.link;
+      folded = true;
+      console.log(`[owner-pending] ${item.id} ("${item.title.slice(0, 80)}") is the same as ${into.id} ("${into.title.slice(0, 80)}"): folded into it`);
+    }
+    if (folded) this.ownerPending = this.ownerPending.filter((item) => kept.includes(item));
+    return folded;
   }
 
   /** Resolve one item of a bot by id, all of a conversation with "all", or a server item by key. */
@@ -786,7 +844,7 @@ export class BotAutonomy {
       (match.botId === undefined || open.botId === match.botId)
       && (match.key !== undefined ? open.key === match.key
         : match.id === "all" ? open.threadId === match.threadId
-          : open.id === match.id));
+          : open.id === match.id || Boolean(match.id && open.aliases?.includes(match.id))));
     if (!done.length) return [];
     this.ownerPending = this.ownerPending.filter((open) => !done.includes(open));
     this.save();

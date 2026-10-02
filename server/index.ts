@@ -18453,6 +18453,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const title = typeof body.title === "string" ? body.title.trim() : "";
           if (!title) return json(res, 400, { error: "title é obrigatório: o que a pessoa precisa fazer ou decidir" });
           const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}) });
+          if (item.duplicate) {
+            // one action, one item: the person never sees the same ask twice (R9-followup #3)
+            return json(res, 200, { message: `Já existe em "Precisa de você" um item para isso: ${line(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}. Não abri outro. Cite ${item.id} ao falar com o dono; se o pedido mudou, resolva ${item.id} (owner_pending resolve) e abra o novo.` });
+          }
           refreshBotRow(bot.id);
           return json(res, 200, { message: `Em "Precisa de você": ${line(item)}. Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
         }

@@ -22,6 +22,7 @@ import {
   chipText,
   parseStandingLabel,
   reportsPrompt,
+  sameOwnerPending,
   wakeChip,
   wakeFiredChip,
   watchLabel,
@@ -870,6 +871,66 @@ describe("what waits on the person", () => {
     expect(autonomy.resolveOwnerPending({ botId: "monitor", id: a.id })).toEqual([]);
     expect(autonomy.resolveOwnerPending({ botId: "chief", threadId: "c1", id: "all" })).toHaveLength(1);
     expect(autonomy.ownerPendingOf("chief")).toEqual([]);
+  });
+
+  // The Chief's items of 01/10 21:20 (bot-autonomy.json, redacted): one release
+  // loop asked for three times, in three conversations, with three remedies;
+  // o1 shares a PR link with o8 but asks something else (R9-followup #3).
+  const SHA = "cb015584a35296ec89b2dbaf2c54373e6f93b826";
+  const PR = (n: number) => `https://github.com/o/platform/pull/${n}`;
+  const ITEMS = [
+    { thread: "3e55c0fd", title: "#9052 / PR #9332: confirmar padrão \"sem limite\" e decidir o timeout do pre-push", link: PR(9332) },
+    { thread: "dbb9f1cf", title: `Parar o laço do watcher de release no topo cb015584a (sem alvo de runtime): echo ${SHA} > ~/.nuria/declined-production-release.sha` },
+    { thread: "ade82a65", title: "Autorizar pausar o watcher de produção no cb015584a (arquivo halted) para a PR #9341 passar no gate", link: PR(9341) },
+    { thread: "3e55c0fd", title: "Release automático em laço no cb015584a (só scripts) segura o lease e trava o gate da #9332: parar o LaunchAgent?", link: PR(9332) },
+  ];
+
+  it("keeps one item per action across the bot's conversations, and tells the bot which one exists", () => {
+    const autonomy = make();
+    const [o1, o2, o3, o4] = ITEMS.map((item) => { now += 60_000; return autonomy.addOwnerPending("chief", item.thread, { title: item.title, ...(item.link ? { link: item.link } : {}) }); });
+    expect([o1, o2].map((item) => item!.duplicate)).toEqual([undefined, undefined]);
+    // the same commit, elsewhere: the first item, untouched, flagged
+    expect(o3).toMatchObject({ id: o2!.id, threadId: "dbb9f1cf", duplicate: true });
+    expect(o4).toMatchObject({ id: o2!.id, duplicate: true });
+    expect(autonomy.ownerPendingOf("chief").map((item) => item.id)).toEqual([o1!.id, o2!.id]);
+    expect(autonomy.ownerPendingOf("chief")[1]!.title).toContain("declined-production-release.sha");
+    // the same link (no commit) or the same title elsewhere is the same ask too
+    expect(autonomy.addOwnerPending("chief", "dd9c5ece", { title: "Decidir o padrão da #9052", link: `${PR(9332)}/` })).toMatchObject({ id: o1!.id, duplicate: true });
+    expect(autonomy.addOwnerPending("chief", "dd9c5ece", { title: "  #9052 / PR #9332: confirmar padrão \"sem limite\" e decidir o timeout do pre-push " })).toMatchObject({ id: o1!.id, duplicate: true });
+    // another bot keeps its own
+    expect(autonomy.addOwnerPending("monitor", "dc38193b", { title: ITEMS[1]!.title }).duplicate).toBeUndefined();
+    // a server item with the same key follows the desk, keeping its id
+    const power = autonomy.addOwnerPending("chief", "dd9c5ece", { title: "Ligue o Mac na tomada (18%)", key: "power:battery" });
+    const moved = autonomy.addOwnerPending("chief", "dbb9f1cf", { title: "Ligue o Mac na tomada (12%)", key: "power:battery" });
+    expect(moved).toMatchObject({ id: power.id, threadId: "dbb9f1cf", title: "Ligue o Mac na tomada (12%)" });
+    expect(moved.duplicate).toBeUndefined();
+    expect(autonomy.ownerPendingOf("chief").filter((item) => item.key === "power:battery")).toHaveLength(1);
+  });
+
+  it("folds the equivalent items saved before into the oldest, still resolvable by their old ids", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      wakes: [], goals: [], inFlight: [],
+      ownerPending: ITEMS.map((item, i) => ({ id: `o${[1, 5, 7, 8][i]}`, botId: "chief", threadId: item.thread, title: item.title, createdAt: 1_000 + i, ...(item.link ? { link: item.link } : {}) })),
+    }));
+    const autonomy = make();
+    const open = autonomy.ownerPendingOf("chief");
+    expect(open.map((item) => [item.id, item.aliases ?? []])).toEqual([["o1", []], ["o5", ["o7", "o8"]]]);
+    // the survivor keeps its remedy (the declined file) and gains the link the others had
+    expect(open[1]).toMatchObject({ threadId: "dbb9f1cf", link: PR(9341) });
+    // saved folded: a second load finds nothing to fold
+    expect(JSON.parse(readFileSync(join(dir, "bot-autonomy.json"), "utf8")).ownerPending).toHaveLength(2);
+    // the bot that knew "o7" resolves the one item
+    expect(autonomy.resolveOwnerPending({ botId: "chief", id: "o7" }).map((item) => item.id)).toEqual(["o5"]);
+    expect(autonomy.ownerPendingOf("chief").map((item) => item.id)).toEqual(["o1"]);
+  });
+
+  it("tells the same commit, link or title apart from a different ask", () => {
+    expect(sameOwnerPending({ title: "Parar o laço no cb015584a" }, { title: `echo ${SHA} > x` })).toBe(true);
+    expect(sameOwnerPending({ title: "Parar o laço no cb015584a", link: PR(9332) }, { title: "Decidir a #9052", link: PR(9332) })).toBe(false);
+    expect(sameOwnerPending({ title: "Release 2995ef215 falhou" }, { title: "Release cb015584a falhou" })).toBe(false);
+    // decimal numbers (PRs, dates) are no commit
+    expect(sameOwnerPending({ title: "Aprovar 20261001 e #9332" }, { title: "Outro 20261001" })).toBe(false);
+    expect(sameOwnerPending({ title: "a", key: "tag-advance:abc1234" }, { title: "a", key: "tag-advance:def5678" })).toBe(false);
   });
 });
 
