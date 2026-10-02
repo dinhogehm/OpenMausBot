@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { botMarkPattern, selfWriteOf } from "./watch-echo.ts";
+import { isMentionOnly, stripLeadingMentions } from "../shared/owner-pending-title.ts";
 import {
   BotAutonomy,
   SEEN_CHAT_MAX,
@@ -20,6 +21,7 @@ import {
   ownerAskText,
   ownerPendingReplyText,
   ownerPendingStepsRequestText,
+  ownerPendingStepsRequestNote,
   parseOwnerPendingDetails,
   parseWakeInput,
   promiseOverdueReport,
@@ -929,10 +931,25 @@ describe("what waits on the person, made practical (lot I)", () => {
     const item = { id: "o3", title: "Aprovar o merge da PR #12" };
     expect(ownerPendingReplyText(item, " Aprovado: pode fazer o merge da #12. ", true)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Aprovado: pode fazer o merge da #12.\n\n(Marquei o3 como resolvido em \"Precisa de você\".)");
     expect(ownerPendingReplyText(item, "Espere a CI.", false)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Espere a CI.");
-    const ask = ownerPendingStepsRequestText(item);
-    expect(ask).toContain("owner_pending update, id o3");
-    expect(ask).toMatch(/why .* steps .* options/s);
-    expect(ask).toContain("Não abra outra pendência");
+    // what the person "says" is plain; the tool call is a note only the bot reads (INSP-I r1 #6)
+    expect(ownerPendingStepsRequestText(item)).toBe("Me mostre como resolver «Aprovar o merge da PR #12», passo a passo.");
+    expect(ownerPendingStepsRequestText(item)).not.toMatch(/owner_pending|why|steps|options/);
+    const note = ownerPendingStepsRequestNote(item);
+    expect(note).toContain("não escrita pela pessoa");
+    expect(note).toContain("owner_pending update, id o3");
+    expect(note).toMatch(/why .* steps .* options/s);
+    expect(note).toContain("Não abra outra pendência");
+  });
+
+  it("knows a title that only names someone, by the same rule in the server and the app (INSP-I r1 #1/#2)", () => {
+    expect(isMentionOnly("@Chief of Staff")).toBe(true);
+    expect(isMentionOnly("@Chief of Staff, @Monitor:")).toBe(true);
+    expect(isMentionOnly("  @Monitor Chat Atendimento  ")).toBe(true);
+    expect(isMentionOnly("@Osvaldo aprovar o deploy da versão 2.14 em produção")).toBe(false);
+    expect(stripLeadingMentions("@Osvaldo aprovar o deploy da versão 2.14")).toBe("aprovar o deploy da versão 2.14");
+    // a known name is taken off exactly: the capitalized verb after it stays
+    expect(stripLeadingMentions("@Monitor Chat Aprovar a fila", ["Monitor Chat"])).toBe("Aprovar a fila");
+    expect(isMentionOnly("Aprovar o carrier da #9315")).toBe(false);
   });
 
   it("titles an ask by what it asks, not by who: the last question, without a leading mention or markdown", () => {

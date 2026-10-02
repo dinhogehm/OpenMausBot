@@ -104,6 +104,9 @@ import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as boat from "./boat.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner, type TeamComputerRecord } from "./team-computers.ts";
+import { isMentionOnly } from "../shared/owner-pending-title.ts";
+/** owner_pending refuses a title that only names someone (INSP-I r1 #2): the person could not tell what to do. */
+const MENTION_ONLY_TITLE = "title só com menção (\"@Chief of Staff\") não diz o que fazer: comece pelo verbo, com o essencial (\"Aprovar o merge da PR #12\"). Quem pediu a pessoa já vê.";
 import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireCcAlert, type WireGroup, type WireOwnerPending, type WireCcSession, type WireTask } from "../shared/wire.ts";
 import type { TeamComputersPayload } from "../shared/team-computer.ts";
 import { boatCreateRecoverySnapshot, retireDeletedBoatCreate } from "./boat-create-idempotency.ts";
@@ -265,6 +268,7 @@ import {
   ownerAskText,
   ownerPendingReplyText,
   ownerPendingStepsRequestText,
+  ownerPendingStepsRequestNote,
   parseOwnerPendingDetails,
   NEEDS_INPUT_EXPIRE_MS,
   parseWakeInput,
@@ -18736,6 +18740,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (body.action === "add") {
           const title = typeof body.title === "string" ? body.title.trim() : "";
           if (!title) return json(res, 400, { error: "title é obrigatório: o que a pessoa precisa fazer ou decidir" });
+          if (isMentionOnly(title, store.bots.map((each) => each.name))) return json(res, 400, { error: MENTION_ONLY_TITLE });
           const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured });
           if (item.duplicate) {
             // one action, one item: the person never sees the same ask twice (R9-followup #3)
@@ -18751,6 +18756,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const patch = { ...(typeof body.title === "string" ? { title: body.title } : {}), ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured };
           if (!Object.keys(patch).length) return json(res, 400, { error: "nada para atualizar: mande title, due, link, why, steps ou options" });
           if (patch.title !== undefined && !patch.title.trim()) return json(res, 400, { error: "title não pode ficar vazio" });
+          if (patch.title !== undefined && isMentionOnly(patch.title, store.bots.map((each) => each.name))) return json(res, 400, { error: MENTION_ONLY_TITLE });
           const item = autonomy.updateOwnerPending(bot.id, id, patch);
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           refreshBotRow(bot.id);
@@ -22405,8 +22411,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         text = ownerPendingStepsRequestText(item);
         resolve = false;
       } else if (body.option !== undefined) {
+        // the decision the person SAW: its position and its label, so a bot
+        // that reordered or rewrote the options meanwhile never gets another
+        // answer than the one clicked (INSP-I r1 #3)
         const option = Number.isInteger(body.option) ? item.options?.[body.option as number] : undefined;
-        if (!option) return json(res, 400, { error: "Esta decisão não existe mais: o bot reescreveu o item. Escolha de novo." });
+        if (!option) return json(res, 409, { error: "Esta decisão não existe mais: o bot reescreveu as opções. Confira e escolha de novo.", code: "options_changed" });
+        if (typeof body.label !== "string" || body.label !== option.label) return json(res, 409, { error: `O bot reescreveu as opções deste item: "${String(body.label ?? "")}" não é mais a opção ${Number(body.option) + 1}. Confira e escolha de novo.`, code: "options_changed" });
         text = ownerPendingReplyText(item, option.reply, true);
         resolve = true;
       } else {
@@ -22420,8 +22430,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       } catch (error) {
         return json(res, 409, { error: error instanceof Error ? error.message : String(error), code: "spend_cap" });
       }
+      if (body.ask === "steps") {
+        // the person's words in the conversation; the tool call the bot must
+        // make rides only in its prompt, as a note — never as the person's
+        // speech (INSP-I r1 #6). Queued, then drained: it runs now when the
+        // conversation is free, or after the running turn.
+        const prompt = promptWithReply(`${text}\n\n${ownerPendingStepsRequestNote(item)}`, undefined, cfg.profile?.name?.trim() || "User");
+        queueSteeredMessage(bot.id, item.threadId, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
+        autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
+        refreshBotRow(bot.id);
+        drainQueuedSends();
+        return json(res, 202, { ok: true, threadId: item.threadId, resolved: 0 });
+      }
       const receipt = await startOrQueueDirectMessage(bot.id, item.threadId, text, undefined, undefined, messageSender(auth), usageTriggerFor(auth));
-      if (body.ask === "steps") autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
       const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id }) : [];
       refreshBotRow(bot.id);
       // the text rides along: a queued answer is shown queued in the conversation

@@ -28,6 +28,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { languageReminder } from "./reply-language.ts";
+import { LEADING_MENTIONS } from "../shared/owner-pending-title.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
 import { chatTexts, ECHO_WINDOW_MS, isEcho, normalize, vmChatPostOf, vmSheetNoteOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
 /** How long, and how many, message starts a bot keeps as seen in its Chat watches. */
@@ -1557,8 +1558,6 @@ export function ownerAskAt(messages: ReadonlyArray<{ role: string; kind: string;
   return null;
 }
 
-/** A leading "@Chief of Staff," / "@Monitor Chat Atendimento:" — who, not what. */
-const LEADING_MENTIONS = /^(?:@[\p{L}\p{N}][\p{L}\p{N}_-]*(?:\s+(?:of|de|do|da|dos|das)\s+[\p{L}\p{N}]+|\s+\p{Lu}[\p{L}\p{N}]*)*[,:]?\s*)+/u;
 
 /** What the bot asked, in one sentence the person can read in "Precisa de
  * você" instead of the conversation's title ("@Chief of Staff" says who, not
@@ -1603,10 +1602,14 @@ export function ownerPendingReplyText(item: Pick<OwnerPending, "id" | "title">, 
 }
 
 /** The person's request, from "Precisa de você", to rewrite an item that has
- * no steps: it names the exact tool call the bot answers with. */
-export function ownerPendingStepsRequestText(item: Pick<OwnerPending, "id" | "title">): string {
-  return [
-    `Sobre "${item.title}" (${item.id}): me mostre como resolver isso, passo a passo.`,
-    `Reescreva a pendência com owner_pending update, id ${item.id}: why (1–2 frases: por que importa e o que acontece se eu não fizer), steps (passos numerados e práticos, cada um com o comando exato em command ou o link em link quando houver) e options (as decisões, se for uma escolha: label curto como "Aprovar" e reply com a resposta que você deve receber). Não abra outra pendência.`,
-  ].join("\n");
+ * no steps — the words shown in the conversation as theirs (INSP-I r1 #6:
+ * plain, no tool names). */
+export function ownerPendingStepsRequestText(item: Pick<OwnerPending, "title">): string {
+  return `Me mostre como resolver «${item.title}», passo a passo.`;
+}
+
+/** What only the bot reads with that request (the turn's prompt, never the
+ * transcript): the exact tool call it answers with. */
+export function ownerPendingStepsRequestNote(item: Pick<OwnerPending, "id">): string {
+  return `[Nota do OpenMausBot, não escrita pela pessoa] A pessoa abriu a pendência ${item.id} em "Precisa de você" e pediu o passo a passo. Reescreva-a com owner_pending update, id ${item.id}: why (1–2 frases: por que importa e o que acontece se esperar), steps (passos numerados e práticos, cada um com o comando exato em command ou o link em link quando houver) e options (as decisões, se for uma escolha: label curto como "Aprovar" e reply com a resposta que você deve receber). Não abra outra pendência; responda à pessoa em uma frase.`;
 }
