@@ -33,6 +33,7 @@ import { CommandPalette } from "@/components/CommandPalette";
 import { KeyboardShortcutsModal } from "@/components/KeyboardShortcutsModal";
 import { LocalVmWorkspace } from "@/components/LocalVmWorkspace";
 import { TeamMapPage } from "@/components/TeamMapPage";
+import { ReportPage } from "@/components/ReportPage";
 import { setLocale } from "@/lib/i18n";
 import { shouldOpenKeyboardShortcuts } from "@/lib/keyboard-shortcuts";
 import { effectiveLanguage, useLanguageChoice } from "@/lib/language-preference";
@@ -95,7 +96,7 @@ function Shell({ viewer }: { viewer: WelcomeViewer | null }) {
   // the panel hands off to this and back)
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const previousViewRef = useRef(state.activeView);
-  const calendarOriginRef = useRef<"chat" | "team-map">("chat");
+  const calendarOriginRef = useRef<"chat" | "team-map" | "report">("chat");
   const group = state.groups.find((g) => g.id === state.selectedId);
   const bot = group ? undefined : (state.bots.find((b) => b.id === state.selectedId) ?? state.bots[0]);
   // A side panel beside the full sidebar leaves the default 1100px window a
@@ -207,6 +208,10 @@ function Shell({ viewer }: { viewer: WelcomeViewer | null }) {
       dispatch({ type: "showTeamMap" });
       return;
     }
+    if (calendarOriginRef.current === "report") {
+      dispatch({ type: "showReport" });
+      return;
+    }
     dispatch({ type: "select", id: state.selectedId });
   }, [dispatch, state.selectedId]);
   const openCalendarRoom = useCallback((id: string) => {
@@ -295,6 +300,8 @@ function Shell({ viewer }: { viewer: WelcomeViewer | null }) {
       />}
       {state.activeView === "team-map" ? (
         <TeamMapPage />
+      ) : state.activeView === "report" ? (
+        <ReportPage />
       ) : state.activeView === "routines" ? (
         <RoutinesPage onBack={closeCalendar} onOpenRoom={openCalendarRoom} />
       ) : !remoteClient && localVmWorkspaceBotId ? (

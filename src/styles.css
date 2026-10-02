@@ -1451,3 +1451,9 @@ button:disabled.bg-danger {
 ::highlight(omb-citation-source) {
   background-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
 }
+
+/* The report's "no release source here" swatch (lot V): the same hatch the
+   charts draw over buckets whose production numbers are unknown, not zero. */
+.report-nosource {
+  background: repeating-linear-gradient(45deg, var(--color-card) 0 2px, var(--color-hairline) 2px 4px);
+}

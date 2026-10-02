@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import {
   Activity,
   Archive,
+  BarChart3,
   BellDot,
   Bot as BotIcon,
   CalendarDays,
@@ -2382,6 +2383,18 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
             <span className={cn("flex-1 text-[14px]", density === "icons" && "hidden")}>{t("sidebar.nav.teamMap")}</span>
           </button>
           <button
+            onClick={() => dispatch({ type: "showReport" })}
+            aria-label={t("sidebar.nav.report")}
+            aria-current={state.activeView === "report" ? "page" : undefined}
+            title={t("sidebar.nav.report")}
+            className={cn(
+              "flex min-h-10 w-full items-center justify-center rounded-xl px-2 py-2 text-left transition-colors",
+              state.activeView === "report" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+            )}
+          >
+            <BarChart3 size={20} className={state.activeView === "report" ? "text-accent" : "text-ink-secondary"} />
+          </button>
+          <button
             data-tour="nav-automations"
             onClick={() => dispatch({ type: "showRoutines" })}
             aria-label={density === "icons" ? t("sidebar.nav.automations") : undefined}
@@ -2424,6 +2437,13 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
                 icon: <Network size={18} />,
                 active: state.activeView === "team-map",
                 onSelect: () => dispatch({ type: "showTeamMap" }),
+              },
+              {
+                key: "report",
+                label: t("sidebar.nav.report"),
+                icon: <BarChart3 size={18} />,
+                active: state.activeView === "report",
+                onSelect: () => dispatch({ type: "showReport" }),
               },
               {
                 key: "routines",
