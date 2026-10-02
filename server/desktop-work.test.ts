@@ -88,10 +88,14 @@ function harness() {
 }
 
 describe("the brief", () => {
-  it("opens with the title and its issue number, the marker on its own line", () => {
-    expect(desktopBriefText("automação inatividade não dispara", "OMBX", "Issue: https://github.com/o/r/issues/9298\nFaça X")).toBe("#9298 automação inatividade não dispara\n[OMBX]\n\nIssue: https://github.com/o/r/issues/9298\nFaça X");
-    expect(desktopBriefText("#9300 gate", "OMBY", "ver #9299", "\n\nfooter")).toBe("#9300 gate\n[OMBY]\n\nver #9299\n\nfooter");
+  it("opens with the issue number without \"#\" and the title, the marker on its own line (the owner's rule, R9-4)", () => {
+    expect(desktopBriefText("automação inatividade não dispara", "OMBX", "Issue: https://github.com/o/r/issues/9298\nFaça X")).toBe("9298 automação inatividade não dispara\n[OMBX]\n\nIssue: https://github.com/o/r/issues/9298\nFaça X");
+    expect(desktopBriefText("#9300 gate", "OMBY", "ver #9299", "\n\nfooter")).toBe("9300 gate\n[OMBY]\n\nver #9299\n\nfooter");
+    expect(desktopBriefText("9052 tempo de reabertura", "OMBW", "x").split("\n")[0]).toBe("9052 tempo de reabertura");
     expect(desktopBriefText("limpeza", "OMBZ", "sem número").split("\n")[0]).toBe("limpeza");
+    // the number the title opens with is the issue, not a "#" further in
+    expect(issueNumber("9295 rebase sobre a #9330")).toBe("9295");
+    expect(issueNumber("#9311 Chat labels")).toBe("9311");
   });
 });
 
@@ -639,22 +643,22 @@ describe("round 3: screen failures, questions, old queues, names", () => {
     expect(h.reports.filter((report) => report.text.includes("no longer exists"))).toHaveLength(1);
   });
 
-  it("renames a session to \"#NNNN …\" once, then delivers what was queued meanwhile", async () => {
+  it("renames a session to \"NNNN …\" (no \"#\", the owner's rule) once, then delivers what was queued meanwhile", async () => {
     const h = harness();
     const session = h.opened("a", { title: "Chat ticket agent/client labels bug" });
     session.status = "idle";
     session.desktop!.issue = "9311";
     followDesktopSessions(h.deps);
-    expect(session.desktop!.pending).toMatchObject({ kind: "rename", text: "#9311 Chat ticket agent/client labels bug" });
+    expect(session.desktop!.pending).toMatchObject({ kind: "rename", text: "9311 Chat ticket agent/client labels bug" });
     session.queued.push({ text: "siga com o PR", at: h.now });
     h.transcripts.get("cli-a")!.ended = true;
     await h.tick();
     expect(h.steps.rename).toHaveBeenCalled();
     // clicked, not yet confirmed: it counts once the app's record shows the title
     expect(h.chips.some((chip) => chip.text.startsWith("renomeada"))).toBe(false);
-    h.records.get(LOCAL)!.title = "#9311 Chat ticket agent/client labels bug";
+    h.records.get(LOCAL)!.title = "9311 Chat ticket agent/client labels bug";
     followDesktopSessions(h.deps);
-    expect(h.chips.some((chip) => chip.text.startsWith("renomeada no app: #9311"))).toBe(true);
+    expect(h.chips.some((chip) => chip.text.startsWith("renomeada no app: 9311"))).toBe(true);
     followDesktopSessions(h.deps);
     expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "siga com o PR" });
     followDesktopSessions(h.deps);
@@ -686,7 +690,9 @@ describe("round 3: screen failures, questions, old queues, names", () => {
   });
 
   it("never numbers the brief twice", () => {
-    expect(desktopBriefText("9311 Chat no ticket mostra Agente e Cliente", "OMBX", "x").split("\n")[0]).toBe("#9311 Chat no ticket mostra Agente e Cliente");
+    expect(desktopBriefText("9311 Chat no ticket mostra Agente e Cliente", "OMBX", "x").split("\n")[0]).toBe("9311 Chat no ticket mostra Agente e Cliente");
+    expect(desktopBriefText("#9311 9311 Chat", "OMBX", "x").split("\n")[0]).toBe("9311 Chat");
+    expect(desktopBriefText("Chat #9311 labels", "OMBX", "x").split("\n")[0]).toBe("Chat #9311 labels");
     expect(issueNumber("9307 9306 Atendimento reaberto")).toBe("9307");
   });
 });
@@ -806,14 +812,14 @@ describe("a rename that cannot be done", () => {
     session.desktop!.renameTried = true;
     h.transcripts.set("cli-e", { text: "brief", writtenAt: h.now, ended: true });
     session.status = "idle";
-    session.desktop!.pending = { kind: "rename", text: "#8891 Inbox 503 diagnóstico e recuperação", since: h.now, attempts: 0 };
+    session.desktop!.pending = { kind: "rename", text: "8891 Inbox 503 diagnóstico e recuperação", since: h.now, attempts: 0 };
     for (let i = 0; i < DESKTOP_RENAME_MAX_MISSES; i += 1) {
       h.results.push({ ok: false, reason: "the session menu showed no Rename item", retry: true, miss: true, touched: true });
       await h.tick();
       h.advance(11 * 60_000);
     }
     expect(pendings).toHaveLength(1);
-    expect(pendings[0]!.title).toBe('Renomear no app: "Inbox 503 diagnóstico e recuperação" → "#8891 Inbox 503 diagnóstico e recuperação"');
+    expect(pendings[0]!.title).toBe('Renomear no app: "Inbox 503 diagnóstico e recuperação" → "8891 Inbox 503 diagnóstico e recuperação"');
     expect(pendings[0]!.title).not.toContain("encerrar");
     // long titles are cut, each with "…": the line stays short and the new title's number stays in it
     const long = renameAskTitle("Uma sessão com um título bem mais comprido do que cabe na linha", "#9999 Uma sessão com um título bem mais comprido do que cabe na linha");
@@ -821,8 +827,12 @@ describe("a rename that cannot be done", () => {
     // not yet renamed: nothing settles
     followDesktopSessions(h.deps);
     expect(resolved).toEqual([]);
-    // the person renamed it by hand in the app
-    h.records.set(LOCAL, { ...h.records.get(LOCAL)!, title: "#8891 Inbox 503 diagnóstico e recuperação" });
+    // a title that only mentions the number further in is not the rename
+    h.records.set(LOCAL, { ...h.records.get(LOCAL)!, title: "Inbox 503 (ver 8891)" });
+    followDesktopSessions(h.deps);
+    expect(resolved).toEqual([]);
+    // the person renamed it by hand in the app, the owner's way: number first, no "#"
+    h.records.set(LOCAL, { ...h.records.get(LOCAL)!, title: "8891 Inbox 503 diagnóstico e recuperação" });
     followDesktopSessions(h.deps);
     expect(resolved).toEqual(["cc-rename:e"]);
     followDesktopSessions(h.deps);

@@ -154,9 +154,9 @@ export interface CcDesktopState {
   removeWorktree?: boolean;
   /** The issue number the session is about ("9311"), from its title or brief. */
   issue?: string;
-  /** A rename to "#NNNN …" was already tried (it is tried once). */
+  /** A rename to "NNNN …" was already tried (it is tried once). */
   renameTried?: boolean;
-  /** The person was asked (owner_pending) to rename it by hand: resolved once the app's title has "#NNNN", or on archive. */
+  /** The person was asked (owner_pending) to rename it by hand: resolved once the app's title opens with "NNNN", or on archive. */
   renameAsked?: boolean;
   /** tool_use id of the open question already reported to the owner. */
   questionReported?: string;
@@ -706,10 +706,18 @@ export function useRepoScripts(text: string, manager: ReturnType<typeof repoPack
   return { text: out, changed };
 }
 
-/** "9286 9303 Merge…" → "#9286 #9303 Merge…": a title that opens with
- * bare issue/PR numbers names them the way the app sidebar is searched. */
+/** "#9286 #9303 Merge…" → "9286 9303 Merge…": the owner's rule (the Chief's
+ * SOUL) is that a session's name opens with the number of its issue WITHOUT
+ * "#" — "9052 tempo de reabertura", never "#9052 …" (R9-dispatch R9-4). Only
+ * the numbers the title opens with lose it (each said once); a "#9330"
+ * further in stays. */
 export function issueTitle(title: string): string {
-  return title.replace(/^(?:\d{3,6}[\s,]+)*\d{3,6}(?=[\s,:—-]|$)/, (run) => run.replace(/\d{3,6}/g, "#$&"));
+  return title.replace(/^\s*(?:#?\d{3,6}[\s,]+)*#?\d{3,6}(?=[\s,:—-]|$)/, (run) => [...new Set(run.match(/\d{3,6}/g))].join(" "));
+}
+
+/** Whether an app title already opens with the issue number (with or without "#"). */
+export function titleOpensWithIssue(title: string, issue: string): boolean {
+  return new RegExp(`^\\s*#?${issue}(?!\\d)`).test(title);
 }
 
 /** The text merges, publishes or releases (or asks for it). */

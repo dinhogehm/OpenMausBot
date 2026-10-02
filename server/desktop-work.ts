@@ -14,7 +14,7 @@
 import { existsSync, statSync } from "node:fs";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import type { CcDesktopPending, CcSession, CcSessionLedger } from "./cc-sessions.ts";
-import { ccHeldQueueReport, ccReportForOwner, ccStallReport, type CcStallFacts } from "./cc-sessions.ts";
+import { ccHeldQueueReport, ccReportForOwner, ccStallReport, issueTitle, titleOpensWithIssue, type CcStallFacts } from "./cc-sessions.ts";
 export { CC_ACTIVE_MS, ccSessionActive } from "./cc-sessions.ts";
 import {
   archiveDesktopSession,
@@ -110,23 +110,26 @@ export interface DesktopWorkDeps {
   };
 }
 
-/** The brief as typed into the app. Its first line is the title with the
- * issue number ("#9298 …"): the app titles the session from its opening
- * words, and the number is what people look for in the sidebar. The marker
- * that finds the session again goes on its own line below. */
-/** The issue a session is about: "#9311" or a leading "9311" in its title,
- * else the first "#NNNN" or issue/PR link in its brief. */
+/** The issue a session is about: the number its title opens with ("9311 …",
+ * or "#9311 …" from before the owner's no-"#" rule), else a "#NNNN" further
+ * in its title, else the first "#NNNN" or issue/PR link in its brief. */
 export function issueNumber(title: string, brief = ""): string | undefined {
-  return /#(\d{3,6})\b/.exec(title)?.[1]
-    ?? /^\s*(\d{3,6})\b/.exec(title)?.[1]
+  return /^\s*#?(\d{3,6})\b/.exec(title)?.[1]
+    ?? /#(\d{3,6})\b/.exec(title)?.[1]
     ?? /(?:#|\/issues\/|\/pull\/)(\d{3,6})\b/.exec(brief)?.[1];
 }
 
+/** The brief as typed into the app. Its first line is the title opening with
+ * the issue number, without "#" ("9298 …", the owner's rule): the app titles
+ * the session from its opening words, and the number is what people look
+ * for in the sidebar. The marker that finds the session again goes on its
+ * own line below. */
 export function desktopBriefText(title: string, marker: string, brief: string, footer = ""): string {
   const number = issueNumber(title, brief);
-  // One "#NNNN" at the start, never twice ("#9311 9311 Chat…").
-  const bare = title.replace(/^\s*#?\d{3,6}\b\s*/, "");
-  const first = !number ? title : /#\d{3,6}\b/.test(title) && !/^\s*#\d/.test(title) ? title : `#${number} ${bare}`;
+  const named = issueTitle(title);
+  // One "NNNN" at the start, never twice ("9311 9311 Chat…"); a title that
+  // already names its issue further in ("Chat #9311 …") is left as it is.
+  const first = !number || titleOpensWithIssue(named, number) || new RegExp(`#${number}(?!\\d)`).test(named) ? named : `${number} ${named}`;
   return `${first}\n[${marker}]\n\n${brief}${footer}`;
 }
 
@@ -329,9 +332,9 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
       desktop.permissionMode = record.permissionMode;
       deps.ledger.save();
     }
-    // The person renamed it by hand (the app's title has "#NNNN"), or it was
-    // archived: the "rename it" item is settled.
-    if (desktop.renameAsked && (record.isArchived || (desktop.issue && record.title?.includes(`#${desktop.issue}`)))) {
+    // The person renamed it by hand (the app's title opens with "NNNN", with
+    // or without "#"), or it was archived: the "rename it" item is settled.
+    if (desktop.renameAsked && (record.isArchived || (desktop.issue && record.title && titleOpensWithIssue(record.title, desktop.issue)))) {
       delete desktop.renameAsked;
       deps.ledger.save();
       deps.resolveOwnerPending?.(renameKey(session));
@@ -389,11 +392,11 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
         deps.report(session, `Claude Code session "${session.title}" (${session.id}): the rename to "${renaming.text}" was tried in the Claude app, but the app's record still says "${record.title ?? "(no title)"}". It is not tried again; the person may rename it by hand (claude://code/continue?session=${desktop.localId}).`);
       }
     }
-    // The owner wants every session named "#NNNN …" in the app, and the app
-    // titles them itself: rename it once, the way a person would.
+    // The owner wants every session named "NNNN …" in the app (no "#"), and
+    // the app titles them itself: rename it once, the way a person would.
     if (desktop.issue && !desktop.renameTried && !desktop.pending && record.title && !record.title.includes(desktop.issue)) {
       desktop.renameTried = true;
-      desktop.pending = { kind: "rename", text: `#${desktop.issue} ${record.title}`, since: now, attempts: 0 };
+      desktop.pending = { kind: "rename", text: `${desktop.issue} ${record.title}`, since: now, attempts: 0 };
       deps.ledger.save();
     }
     const transcript = deps.transcriptOf(record.cliSessionId);

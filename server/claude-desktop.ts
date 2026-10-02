@@ -724,7 +724,7 @@ export async function archiveDesktopSession(driver: DesktopDriver, input: { loca
   return sessionMenuAction(driver, input, ARCHIVE_ITEMS, "archive");
 }
 
-/** Rename a session in the app ("#9311 Chat no ticket…"), from its own menu.
+/** Rename a session in the app ("9311 Chat no ticket…"), from its own menu.
  * Nothing is pasted unless the menu closed and the title is still on show
  * in the upper half (the edit field) with the message field untouched below;
  * Return is pressed only when the new title shows up there and the message

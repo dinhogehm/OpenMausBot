@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, hotfixWithReleaseScripts, cliSurfaceRefusal, corridorForSend, corridorVersionOf, issueTitle, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, hotfixWithReleaseScripts, cliSurfaceRefusal, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -246,11 +246,23 @@ describe("a repository's corridor", () => {
     expect(hotfixWithReleaseScripts("#9290 muda scripts/local-release.sh")).toBeNull();
   });
 
-  it("names the issues a title opens with", () => {
-    expect(issueTitle("9286 9303 9289 9290 Merge do lote")).toBe("#9286 #9303 #9289 #9290 Merge do lote");
-    expect(issueTitle("9298 automação inatividade")).toBe("#9298 automação inatividade");
-    expect(issueTitle("#9237 webauthn flaky")).toBe("#9237 webauthn flaky");
+  it("opens a title with its issue numbers without \"#\", the owner's rule (R9-dispatch R9-4)", () => {
+    expect(issueTitle("#9052 tempo de reabertura")).toBe("9052 tempo de reabertura");
+    expect(issueTitle("9052 tempo de reabertura")).toBe("9052 tempo de reabertura");
+    expect(issueTitle("#9286 #9303 9289 #9290 Merge do lote")).toBe("9286 9303 9289 9290 Merge do lote");
+    expect(issueTitle("  #9058: Chat entra com aviso no Widget")).toBe("9058: Chat entra com aviso no Widget");
+    // a number further in is the bot's own text: left as it is
+    expect(issueTitle("9295 rebase sobre a #9330")).toBe("9295 rebase sobre a #9330");
     expect(issueTitle("Lote 2026 de PRs")).toBe("Lote 2026 de PRs");
+    expect(titleOpensWithIssue("9311 Chat labels", "9311")).toBe(true);
+    expect(titleOpensWithIssue("#9311 Chat labels", "9311")).toBe(true);
+    expect(titleOpensWithIssue("93110 outra", "9311")).toBe(false);
+    expect(titleOpensWithIssue("Chat #9311", "9311")).toBe(false);
+  });
+
+  it("starts a session titled \"9052 …\" when the bot writes \"#9052 …\"", () => {
+    const input = parseCcStartInput({ title: "#9052 tempo de reabertura", brief: "x", repo: "/r" }, () => true);
+    expect(input.ok && input.title).toBe("9052 tempo de reabertura");
   });
 });
 

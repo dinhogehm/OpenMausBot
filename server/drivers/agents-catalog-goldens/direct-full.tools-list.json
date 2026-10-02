@@ -893,7 +893,7 @@
           "title": {
             "type": "string",
             "maxLength": 120,
-            "description": "Short name, e.g. \"#9237 webauthn flaky\"."
+            "description": "Short name opening with the issue number, without \"#\", e.g. \"9237 webauthn flaky\"."
           },
           "brief": {
             "type": "string",

@@ -647,7 +647,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
       type: "object",
       additionalProperties: false,
       properties: {
-        title: { type: "string", maxLength: 120, description: "Short name, e.g. \"#9237 webauthn flaky\"." },
+        title: { type: "string", maxLength: 120, description: "Short name opening with the issue number, without \"#\", e.g. \"9237 webauthn flaky\"." },
         brief: { type: "string", maxLength: 20_000, description: "The complete task: issue link, expected outcome, constraints, what to report." },
         repo: { type: "string", description: "Absolute path of the git repository, e.g. /Users/osvaldo/Projetos/nuria-platform." },
         surface: { type: "string", enum: ["app", "cli"], description: "Default app: the session opens in the Claude desktop app, where the person follows it (it waits for an idle Mac to open). cli: headless, nobody sees it — only for internal chores." },
