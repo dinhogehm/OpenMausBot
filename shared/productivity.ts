@@ -32,8 +32,8 @@ const partsFormat = new Intl.DateTimeFormat("en-US", {
 });
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
-/** The wall clock in São Paulo at an instant. */
-export function zonedParts(ms: number): ZonedParts {
+/** The wall clock as Intl gives it (the slow, authoritative path). */
+function intlParts(ms: number): ZonedParts {
   const parts: Record<string, string> = {};
   for (const part of partsFormat.formatToParts(new Date(ms))) parts[part.type] = part.value;
   return {
@@ -47,10 +47,37 @@ export function zonedParts(ms: number): ZonedParts {
   };
 }
 
+// São Paulo's offsets have always changed on whole hours: one Intl lookup per
+// absolute hour is exact, and the wall clock follows by arithmetic. A report
+// of a year by day touches ~400 hours instead of thousands of formatToParts.
+const offsetByHour = new Map<number, number>();
+
 /** São Paulo's offset from UTC at an instant, in ms (−3 h since 2019). */
 export function zonedOffsetMs(ms: number): number {
-  const p = zonedParts(ms);
-  return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - Math.floor(ms / 1000) * 1000;
+  const hour = Math.floor(ms / HOUR_MS);
+  let offset = offsetByHour.get(hour);
+  if (offset === undefined) {
+    const at = hour * HOUR_MS;
+    const p = intlParts(at);
+    offset = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - at;
+    if (offsetByHour.size > 100_000) offsetByHour.clear();
+    offsetByHour.set(hour, offset);
+  }
+  return offset;
+}
+
+/** The wall clock in São Paulo at an instant. */
+export function zonedParts(ms: number): ZonedParts {
+  const local = new Date(ms + zonedOffsetMs(ms));
+  return {
+    year: local.getUTCFullYear(),
+    month: local.getUTCMonth() + 1,
+    day: local.getUTCDate(),
+    hour: local.getUTCHours(),
+    minute: local.getUTCMinutes(),
+    second: local.getUTCSeconds(),
+    weekday: local.getUTCDay(),
+  };
 }
 
 /** The instant a São Paulo wall clock names. Month and day may overflow
@@ -65,27 +92,35 @@ export function zonedToUtc(year: number, month: number, day: number, hour = 0, m
 
 /** The bucket an instant falls in: the start of its São Paulo hour, day or month. */
 export function bucketStart(ms: number, granularity: Granularity): number {
+  // São Paulo's offsets have always been whole hours: an hour bucket is an
+  // absolute hour, so the hour repeated when daylight saving ended is two buckets
+  if (granularity === "hour") return Math.floor(ms / HOUR_MS) * HOUR_MS;
   const p = zonedParts(ms);
-  if (granularity === "hour") return zonedToUtc(p.year, p.month, p.day, p.hour);
   if (granularity === "day") return zonedToUtc(p.year, p.month, p.day);
   return zonedToUtc(p.year, p.month, 1);
 }
 
 /** The start of the bucket after the one starting at `start`. */
 export function nextBucket(start: number, granularity: Granularity): number {
+  if (granularity === "hour") return start + HOUR_MS;
   const p = zonedParts(start);
-  if (granularity === "hour") return zonedToUtc(p.year, p.month, p.day, p.hour + 1);
   if (granularity === "day") return zonedToUtc(p.year, p.month, p.day + 1);
   return zonedToUtc(p.year, p.month + 1, 1);
 }
 
 const pad = (value: number) => String(value).padStart(2, "0");
+const STANDARD_OFFSET_MS = -3 * HOUR_MS;
 
-/** A stable key for a bucket: 2026-10-02T13 / 2026-10-02 / 2026-10 (São Paulo). */
+/** A stable key for a bucket: 2026-10-02T13 / 2026-10-02 / 2026-10 (São Paulo).
+ * An hour under the old daylight-saving offset carries it ("2019-02-16T23-02"),
+ * so the repeated hour of the change back never collides with its twin. */
 export function bucketKey(ms: number, granularity: Granularity): string {
   const p = zonedParts(ms);
   const day = `${p.year}-${pad(p.month)}-${pad(p.day)}`;
-  if (granularity === "hour") return `${day}T${pad(p.hour)}`;
+  if (granularity === "hour") {
+    const offset = zonedOffsetMs(ms);
+    return offset === STANDARD_OFFSET_MS ? `${day}T${pad(p.hour)}` : `${day}T${pad(p.hour)}-${pad(Math.abs(offset) / HOUR_MS)}`;
+  }
   if (granularity === "day") return day;
   return `${p.year}-${pad(p.month)}`;
 }
@@ -115,8 +150,8 @@ export function presetPeriod(granularity: Granularity, count: number, now: numbe
 }
 
 export function previousBucket(start: number, granularity: Granularity): number {
+  if (granularity === "hour") return start - HOUR_MS;
   const p = zonedParts(start);
-  if (granularity === "hour") return zonedToUtc(p.year, p.month, p.day, p.hour - 1);
   if (granularity === "day") return zonedToUtc(p.year, p.month, p.day - 1);
   return zonedToUtc(p.year, p.month - 1, 1);
 }
@@ -221,13 +256,33 @@ export interface ReportKpis {
   leadIssueToMerge: Distribution;
   /** PR merged → in production, for PRs delivered in the period (ms). */
   leadMergeToProd: Distribution;
-  /** Release runs that ended without advancing the tag. */
+  /** Release runs that RAN (CI or deploy steps) and ended without advancing the tag. */
   failedReleases: number;
+  /** Runs the watcher dropped before they ran (a newer tip, the admission queue). Not failures. */
+  supersededReleases: number;
+  /** Runs that stopped before running anything (stale lock, smart-deploy could not start). Not failures. */
+  abortedReleases: number;
+  /** deliveries ÷ (deliveries + failures): how often a release that ran reached production; null without attempts. */
+  releaseSuccessRate: number | null;
   /** Distinct commits the operator declined to publish. */
   declinedReleases: number;
-  /** Time production was blocked: from the first failed release after a
-   * success until the next success, clipped to the period (ms). */
+  /** Release pipeline stopped (production stays up): from the first failure
+   * that RAN after a success until the next success, clipped to the period (ms). */
   blockedMs: number;
+  /** Of blockedMs, the part on Saturdays and Sundays (São Paulo). */
+  blockedWeekendMs: number;
+  /** Releases in the period whose contents are not known yet: delivered PRs and
+   * issues are then lower bounds ("≥N"). */
+  unknownContentReleases: number;
+  /** DORA — deliveries per business day (Mon–Fri, São Paulo) elapsed in the period. */
+  deploysPerBusinessDay: number | null;
+  businessDays: number;
+  /** DORA — change failure rate: releases whose post-release check rolled back
+   * or found production unhealthy ÷ releases with a conclusive check. */
+  changeFailures: number;
+  checkedReleases: number;
+  /** DORA — time to restore: a failed change → the next release with a healthy check. */
+  timeToRestore: Distribution;
   /** Open issues at the END of the period. */
   openIssuesAtEnd: number;
   /** Open P0/P1 issues at the end of the period (by today's labels). */
@@ -241,6 +296,11 @@ export interface ReportKpis {
   outputTokens: number;
   cachedTokens: number;
   costUsd: number | null;
+  /** Days of the period the usage ledger covers (turns, tokens, cost are for these days only). */
+  usageDays: number;
+  /** Bots' cost in the covered days ÷ deliveries in the same days; null without either. */
+  costPerDelivery: number | null;
+  deliveriesInUsageDays: number;
   needsYouOpened: number;
   needsYouResolved: number;
   /** Item opened → the owner's first answer (or the owner's resolution). */
@@ -253,20 +313,25 @@ export interface ReportBucket {
   end: number;
   deliveries: number;
   deliveredPrs: number;
+  /** Releases in the bucket with unknown contents (deliveredPrs is then a lower bound). */
+  unknownContentReleases: number;
   mergedPrs: number;
   closedIssues: number;
   closedBugs: number;
   failedReleases: number;
   blockedMs: number;
   openIssuesAtEnd: number;
-  turns: number;
-  activeMs: number;
+  /** Bots' numbers: null where the usage ledger did not exist yet ("—", not 0). */
+  turns: number | null;
+  activeMs: number | null;
   costUsd: number | null;
-  needsYouOpened: number;
-  needsYouResolved: number;
+  needsYouOpened: number | null;
+  needsYouResolved: number | null;
   /** How much of the bucket a release source covers: production numbers in
    * a bucket with "none" are unknown, not zero. */
   releaseCoverage: "full" | "partial" | "none";
+  /** How much of the bucket the bots' usage ledger covers. */
+  usageCoverage: "full" | "partial" | "none";
 }
 
 export interface ReportReleaseItem { number: number; title: string; kind: "pr" | "issue"; type?: IssueType; priority?: IssuePriority; carrier?: boolean }
@@ -280,20 +345,26 @@ export interface ReportRelease {
    * ("log-clock"), the time the state file was written ("state-file"), or a
    * GitHub deployment ("github-deployment"). */
   timeSource: "log" | "log-clock" | "state-file" | "github-deployment";
-  outcome: "released" | "failed" | "declined";
+  outcome: "released" | "failed" | "superseded" | "aborted" | "declined";
   /** For a failure: the run's own verdict line, without paths or times. */
   cause?: string;
   /** Previous released sha: the release contains the merges between both. */
   baseSha?: string;
   prs: ReportReleaseItem[];
   issues: ReportReleaseItem[];
-  /** The release content could not be read (no base, or GitHub failed). */
+  /** The release content is not known: why. "first" — no earlier release is
+   * known at all; "gap" — the earlier one is across a time no source covers;
+   * "pending" — both are known, the commits between them are not read yet. */
   contentUnknown?: boolean;
+  contentUnknownReason?: "first" | "gap" | "pending";
   /** Failures of one commit in a row are one row: how many tries, since when. */
   attempts?: number;
   firstAt?: number;
-  /** The carrier PR that published it. */
-  carrierPr?: number;
+  /** The PR whose merge is the released commit, and whether it is a release carrier. */
+  headPr?: number;
+  headPrIsCarrier?: boolean;
+  /** The post-release health verdict (healthy, rolled_back, …), when checked. */
+  postRelease?: string;
   /** Went live, but the watcher could not advance the tag (moved by hand later). */
   tagNotAdvanced?: boolean;
 }
@@ -301,8 +372,11 @@ export interface ReportRelease {
 export interface ReportBacklog {
   /** Now (the sync time), whatever the period. */
   openIssues: number;
+  /** P1 = priority:p1 + priority:high (the old scale); P0 = priority:p0 + priority:critical. */
   openP1: number;
   openP0: number;
+  openP1Split: { current: number; legacy: number };
+  openP0Split: { current: number; legacy: number };
   oldestOpen: { number: number; createdAt: number; priority: IssuePriority } | null;
   oldestOpenP1: { number: number; createdAt: number } | null;
   /** Open PRs into main (not drafts) whose head has no green nuria/local-merge-gate. */
@@ -336,7 +410,7 @@ export interface ReportCoverage {
   /** How much of the period, and of the previous one, a release source covers:
    * production numbers are compared only when the previous period has one. */
   releaseCoverage: { period: "full" | "partial" | "none"; previous: "full" | "partial" | "none" };
-  github: { syncedAt: number | null; complete: boolean; issues: number; prs: number };
+  github: { syncedAt: number | null; complete: boolean; issues: number; prs: number; repoCreatedAt: number | null };
   usage: { from: number | null };
   digests: { from: number | null };
   needsYou: { from: number | null };
@@ -355,7 +429,7 @@ export interface ReportSyncState {
 }
 
 export interface ProductivityReport {
-  version: 1;
+  version: 2;
   generatedAt: number;
   timezone: typeof REPORT_TZ;
   repo: typeof PRODUCTION_REPO;
@@ -375,6 +449,116 @@ export interface ProductivityReport {
   summary?: Record<"pt-BR" | "en", string[]>;
   /** False when this machine does not run the Nuria release (no ~/.nuria): nothing is collected. */
   enabled?: boolean;
+  /** The owner's targets; empty by default (no traffic light without a target). */
+  goals: ReportGoals;
+}
+
+// ── goals ───────────────────────────────────────────────────────────────────
+
+/** Targets the owner sets for the board. Every field optional: no target, no light. */
+export interface ReportGoals {
+  /** At least this many deliveries per business day. */
+  deploysPerBusinessDay?: number;
+  /** Lead time issue → production, median, at most this many hours. */
+  leadTimeHours?: number;
+  /** Release success rate at least this % (0–100). */
+  releaseSuccessRate?: number;
+  /** Change failure rate at most this % (0–100). */
+  changeFailureRate?: number;
+}
+
+export const GOAL_KEYS = ["deploysPerBusinessDay", "leadTimeHours", "releaseSuccessRate", "changeFailureRate"] as const;
+export type GoalKey = (typeof GOAL_KEYS)[number];
+const GOAL_HIGHER_IS_BETTER: Record<GoalKey, boolean> = { deploysPerBusinessDay: true, leadTimeHours: false, releaseSuccessRate: true, changeFailureRate: false };
+
+/** Only finite, non-negative numbers survive; percentages are kept within 0–100. */
+export function sanitizeGoals(raw: unknown): ReportGoals {
+  const goals: ReportGoals = {};
+  if (!raw || typeof raw !== "object") return goals;
+  for (const key of GOAL_KEYS) {
+    const value = (raw as Record<string, unknown>)[key];
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0) continue;
+    if ((key === "releaseSuccessRate" || key === "changeFailureRate") && value > 100) continue;
+    goals[key] = value;
+  }
+  return goals;
+}
+
+/** The light for a value against its target: met, close (within 20% of the
+ * target), or off. null when there is no target or no value. */
+export function goalStatus(key: GoalKey, value: number | null, goals: ReportGoals): "met" | "close" | "off" | null {
+  const target = goals[key];
+  if (target === undefined || value === null || !Number.isFinite(value)) return null;
+  const higher = GOAL_HIGHER_IS_BETTER[key];
+  if (higher ? value >= target : value <= target) return "met";
+  const slack = Math.max(Math.abs(target) * 0.2, 1e-9);
+  return (higher ? value >= target - slack : value <= target + slack) ? "close" : "off";
+}
+
+// ── comparisons (one rule for the screen, the PDF and the Markdown) ─────────
+
+/** Below this, a previous value is too small for a percentage or a trend arrow. */
+export const MIN_TREND_BASE = 5;
+/** Below this many samples, a median does not get a trend. */
+export const MIN_TREND_SAMPLES = 10;
+
+export type Comparison =
+  | { kind: "trend"; delta: number; ratio: number }
+  | { kind: "absolute"; previous: number }
+  | { kind: "none"; reason: "no-base" | "before-repo" | "not-comparable" };
+
+/** How a number may be compared with the previous period: a trend (delta and
+ * %), only the previous absolute value (base under MIN_TREND_BASE, or fewer
+ * than MIN_TREND_SAMPLES samples for a median), or nothing (no comparable
+ * source, or a previous period before the repository existed). */
+export function compareKpi(current: number | null, previous: number | null, options: { comparable?: boolean; beforeRepo?: boolean; samples?: { current: number; previous: number } } = {}): Comparison {
+  if (options.beforeRepo) return { kind: "none", reason: "before-repo" };
+  if (options.comparable === false) return { kind: "none", reason: "not-comparable" };
+  if (current === null || previous === null) return { kind: "none", reason: "no-base" };
+  if (options.samples && (options.samples.current < MIN_TREND_SAMPLES || options.samples.previous < MIN_TREND_SAMPLES)) return { kind: "absolute", previous };
+  if (Math.abs(previous) < MIN_TREND_BASE) return { kind: "absolute", previous };
+  return { kind: "trend", delta: current - previous, ratio: (current - previous) / previous };
+}
+
+/** The previous period started before the repository existed: no GitHub trend against it. */
+export function beforeRepo(report: Pick<ProductivityReport, "previous" | "coverage">): boolean {
+  const created = report.coverage.github.repoCreatedAt;
+  return created !== null && created !== undefined && report.previous.from < created;
+}
+
+// ── titles ──────────────────────────────────────────────────────────────────
+
+const MONTH_NAMES: Record<"pt-BR" | "en", string[]> = {
+  "pt-BR": ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"],
+  en: ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"],
+};
+
+/** The period in the title: "setembro/2026" for a whole calendar month (closed,
+ * or "até 02/10" when it is the current one), else "03/09 a 02/10/2026". */
+export function periodTitle(period: ReportPeriod, now: number, lang: "pt-BR" | "en" = "pt-BR"): string {
+  const start = zonedParts(period.from);
+  const last = zonedParts(Math.min(period.to, now) - 1);
+  const wholeMonths = bucketStart(period.from, "month") === period.from && bucketStart(period.to, "month") === period.to;
+  const p2 = (value: number) => String(value).padStart(2, "0");
+  const date = (p: ZonedParts, year = true) => (lang === "pt-BR" ? `${p2(p.day)}/${p2(p.month)}${year ? `/${p.year}` : ""}` : `${p.year}-${p2(p.month)}-${p2(p.day)}`);
+  if (wholeMonths && nextBucket(period.from, "month") === period.to) {
+    const name = `${MONTH_NAMES[lang][start.month - 1]}/${start.year}`;
+    if (period.to <= now) return name;
+    return lang === "pt-BR" ? `${name} (até ${date(last, false)})` : `${name} (through ${date(last)})`;
+  }
+  if (wholeMonths) {
+    const end = zonedParts(period.to - 1);
+    return `${MONTH_NAMES[lang][start.month - 1]}/${start.year} – ${MONTH_NAMES[lang][end.month - 1]}/${end.year}`;
+  }
+  if (start.year === last.year && start.month === last.month && start.day === last.day) return date(start);
+  return lang === "pt-BR" ? `${date(start, start.year !== last.year)} a ${date(last)}` : `${date(start)} to ${date(last)}`;
+}
+
+/** The last complete calendar month before `now`, as from/to (YYYY-MM). */
+export function closedMonth(now: number): { from: string; to: string } {
+  const p = zonedParts(bucketStart(now, "month") - 1);
+  const key = `${p.year}-${String(p.month).padStart(2, "0")}`;
+  return { from: key, to: key };
 }
 
 /** Production numbers (deliveries, failures, lead time, blocked time) are

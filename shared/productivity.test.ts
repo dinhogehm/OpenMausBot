@@ -1,8 +1,8 @@
 // São Paulo calendar and statistics behind the productivity report (lot V).
 import { describe, expect, it } from "vitest";
 import {
-  bucketKey, bucketStart, bucketStarts, distribution, nextBucket, parseReportBound, presetPeriod, previousPeriod, resolveReportPeriod,
-  zonedParts, zonedToUtc,
+  bucketKey, bucketStart, bucketStarts, closedMonth, compareKpi, distribution, goalStatus, nextBucket, parseReportBound, periodTitle, presetPeriod,
+  previousPeriod, resolveReportPeriod, sanitizeGoals, zonedParts, zonedToUtc,
 } from "./productivity.ts";
 
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -36,6 +36,55 @@ describe("São Paulo calendar", () => {
     // the 4th had no 00:00: it starts at 01:00 (−02), and lasts 23 hours
     expect(iso(days[1]!)).toBe("2018-11-04T03:00:00.000Z");
     expect(days[2]! - days[1]!).toBe(23 * 3_600_000);
+  });
+});
+
+describe("the hour repeated when daylight saving ended (16/02/2019 23h, INSP-V r1 #16)", () => {
+  it("is two buckets with two keys, an hour each", () => {
+    const hours = bucketStarts(Date.parse("2019-02-17T00:00:00Z"), Date.parse("2019-02-17T04:00:00Z"), "hour");
+    expect(hours.map((at) => bucketKey(at, "hour"))).toEqual(["2019-02-16T22-02", "2019-02-16T23-02", "2019-02-16T23", "2019-02-17T00"]);
+    expect(new Set(hours.map((at) => bucketKey(at, "hour"))).size).toBe(4);
+    expect(hours[2]! - hours[1]!).toBe(3_600_000);
+  });
+});
+
+describe("comparisons (INSP-V r1 #7)", () => {
+  it("a trend only on a comparable base of at least 5; the absolute value below; nothing before the repository", () => {
+    expect(compareKpi(8, 6)).toEqual({ kind: "trend", delta: 2, ratio: 2 / 6 });
+    expect(compareKpi(20, 1)).toEqual({ kind: "absolute", previous: 1 });
+    expect(compareKpi(3, 0)).toEqual({ kind: "absolute", previous: 0 });
+    expect(compareKpi(2868, 0, { beforeRepo: true })).toEqual({ kind: "none", reason: "before-repo" });
+    expect(compareKpi(27, 2, { comparable: false })).toEqual({ kind: "none", reason: "not-comparable" });
+    expect(compareKpi(null, 4)).toEqual({ kind: "none", reason: "no-base" });
+    // a median of 9 samples gets no trend, only the previous value
+    expect(compareKpi(30, 90, { samples: { current: 9, previous: 40 } })).toEqual({ kind: "absolute", previous: 90 });
+  });
+});
+
+describe("goals", () => {
+  it("keep only sane numbers and light only where a target exists", () => {
+    expect(sanitizeGoals({ deploysPerBusinessDay: 1, leadTimeHours: -2, releaseSuccessRate: 140, changeFailureRate: "x", other: 3 })).toEqual({ deploysPerBusinessDay: 1 });
+    expect(goalStatus("deploysPerBusinessDay", 1.2, { deploysPerBusinessDay: 1 })).toBe("met");
+    expect(goalStatus("deploysPerBusinessDay", 0.85, { deploysPerBusinessDay: 1 })).toBe("close");
+    expect(goalStatus("deploysPerBusinessDay", 0.4, { deploysPerBusinessDay: 1 })).toBe("off");
+    expect(goalStatus("leadTimeHours", 40, { leadTimeHours: 48 })).toBe("met");
+    expect(goalStatus("leadTimeHours", 70, { leadTimeHours: 48 })).toBe("off");
+    expect(goalStatus("leadTimeHours", 40, {})).toBeNull();
+    expect(goalStatus("leadTimeHours", null, { leadTimeHours: 48 })).toBeNull();
+  });
+});
+
+describe("titles", () => {
+  const now = brt("2026-10-02T17:40:00");
+  it("name a closed month, the current one so far, or a date range", () => {
+    expect(periodTitle({ from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") }, now)).toBe("setembro/2026");
+    expect(periodTitle({ from: brt("2026-10-01T00:00:00"), to: brt("2026-11-01T00:00:00") }, now)).toBe("outubro/2026 (até 02/10)");
+    expect(periodTitle(presetPeriod("day", 30, now), now)).toBe("03/09 a 02/10/2026");
+    expect(periodTitle({ from: brt("2026-09-17T00:00:00"), to: brt("2026-09-18T00:00:00") }, now)).toBe("17/09/2026");
+    expect(periodTitle({ from: brt("2025-11-01T00:00:00"), to: brt("2026-11-01T00:00:00") }, now)).toBe("novembro/2025 – outubro/2026");
+    expect(periodTitle({ from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") }, now, "en")).toBe("September/2026");
+    expect(closedMonth(now)).toEqual({ from: "2026-09", to: "2026-09" });
+    expect(closedMonth(brt("2026-01-05T10:00:00"))).toEqual({ from: "2025-12", to: "2025-12" });
   });
 });
 
