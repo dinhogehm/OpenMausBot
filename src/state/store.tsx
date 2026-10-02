@@ -283,6 +283,8 @@ export interface Task {
   /** Goal mode paused to ask the person: it needs them. */
   goalNeedsInput?: boolean;
   goalNeedsInputSince?: number;
+  /** What it asks, in one sentence (the title may only say who). */
+  goalNeedsInputAsk?: string;
   /** Watches running for this conversation (wake_when). */
   watches?: WireWatch[];
   /** It had a standing watch and has had none for a while. */

@@ -22424,7 +22424,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.ask === "steps") autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
       const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id }) : [];
       refreshBotRow(bot.id);
-      return json(res, 202, { ...receipt, resolved: done.length });
+      // the text rides along: a queued answer is shown queued in the conversation
+      return json(res, 202, { ...receipt, text, resolved: done.length });
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/command-allowlist(?:\/([\w-]+))?$/);
     if (m && ["GET", "POST", "DELETE"].includes(method)) {

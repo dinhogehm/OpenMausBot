@@ -111,7 +111,10 @@ import { botShowsUnread } from "@/lib/bot-unread";
 import { attentionJumpAction, AttentionThreadRows, crossBotAttentionThreads, SidebarBotActivity, sidebarBotActivityTasks } from "./SidebarBotActivity";
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { SidebarNeedsYou } from "./SidebarNeedsYou";
-import { needsYouItems } from "@/lib/needs-you";
+import { NeedsYouResolver } from "./NeedsYouResolver";
+import { needsYouItems, needsYouKey } from "@/lib/needs-you";
+import { replyToOwnerPending, resolveOwnerPending } from "@/lib/needs-you-actions";
+import { openExternalLink } from "@/lib/app-links";
 import { ShortcutHint } from "./ShortcutHint";
 import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
 import { ccAlertState } from "@/lib/thread-signals";
@@ -1952,6 +1955,8 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
   // disagree with it.
   const attention = crossBotAttentionThreads(state.bots, state.pendingQueued, undefined, state.groups);
   const needsYou = needsYouItems(state.bots);
+  // the resolution screen: open on one item (its key) or on the list (null)
+  const [resolver, setResolver] = useState<{ open: boolean; key: string | null }>({ open: false, key: null });
   const pendingBotUndo = teamFeedback?.restoreBot;
 
   return (
@@ -2181,11 +2186,33 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
       <SidebarNeedsYou
         items={needsYou}
         density={density}
-        onJump={(item) => dispatch({ type: "switchTask", botId: item.botId, threadId: item.threadId })}
+        onOpen={(item) => setResolver({ open: true, key: item ? needsYouKey(item) : null })}
         onResolve={(item) => {
-          void api(`/api/bots/${item.botId}/owner-pending/${item.pendingId}/resolve`, { method: "POST" })
+          void resolveOwnerPending(item)
             .catch((cause) => dispatch({ type: "error", message: cause instanceof Error ? cause.message : String(cause) }));
         }}
+      />
+      <NeedsYouResolver
+        open={resolver.open}
+        items={needsYou}
+        initialKey={resolver.key}
+        onClose={() => setResolver({ open: false, key: null })}
+        onOpenConversation={(item) => {
+          setResolver({ open: false, key: null });
+          dispatch({ type: "switchTask", botId: item.botId, threadId: item.threadId });
+        }}
+        onOpenLink={(url) => void openExternalLink(url)}
+        onCopy={(text) => navigator.clipboard.writeText(text)}
+        onDecide={(item, option) => replyToOwnerPending(item, { option }, dispatch)}
+        onAskSteps={(item) => replyToOwnerPending(item, { ask: "steps" }, dispatch)}
+        onReply={(item, text, resolve) => item.pendingId
+          ? replyToOwnerPending(item, { text, resolve }, dispatch)
+          // an approval or a question in the conversation: the answer is an ordinary message there
+          : new Promise<void>((resolve, reject) => {
+            dispatch({ type: "send", botId: item.botId, threadId: item.threadId, text, onError: () => reject(new Error(t("needsYou.screen.failed"))) });
+            setTimeout(resolve, 0);
+          })}
+        onResolve={resolveOwnerPending}
       />
 
       {attentionPinned && density !== "icons" && (
