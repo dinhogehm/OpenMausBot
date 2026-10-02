@@ -354,7 +354,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
-import { DECLINED_SHA_FILE, fullReleaseSha, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopPending, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopPending, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8402,6 +8402,13 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
     const haltedAtMs = mtime(HALTED_SHA_FILE);
     haltMatters = haltStillMatters({ haltedSha: halted.sha, releasedSha: released, releasedContainsHalt, releasedAtMs, haltedAtMs });
     if (!haltMatters && !releaseWatch.quiet.has(`halt:${halted.sha}`) && releaseWatch.quiet.add(`halt:${halted.sha}`)) console.log(`[release] halt of ${halted.sha.slice(0, 9)} left behind: a later release went through (${released.slice(0, 9)}, contains it: ${releasedContainsHalt}) — no alert`);
+  }
+  // the watcher's "needs attention" (lot P): a failure before the CI or a signal, not halted —
+  // told once per write (one per failure signature), to the conversation with the owner
+  const attention = releaseAttention(readTail(ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES + 1));
+  if (attention && releaseAttentionDue(attention, { now: Date.now(), releasedSha: released }) && state.once(attention.key)) {
+    const alert = releaseAttentionAlert(attention, { err: RELEASE_ERR_LOG });
+    releaseAlertToChief(alert.text, alert.report);
   }
   if (halted && haltMatters && state.once(`halt:${halted.sha}`)) {
     const text = `O watcher de produção PAROU de tentar o commit ${halted.sha.slice(0, 9)} (${halted.reason}${halted.failures ? `, ${halted.failures} falhas` : ""}): ele não sai sozinho; precisa de ação.`;

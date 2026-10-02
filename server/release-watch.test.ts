@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { fullReleaseSha, haltedRelease, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopPending, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { ATTENTION_FILE_MAX_BYTES, ATTENTION_MAX_AGE_MS, fullReleaseSha, haltedRelease, readTail, releaseAttention, releaseAttentionAlert, releaseAttentionDue, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopPending, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 const log = [
   "Release production failed for b51648498 (exit 1)",
@@ -250,6 +250,75 @@ describe("after a release", () => {
     expect(haltStillMatters({ haltedSha, releasedSha: "", releasedContainsHalt: null, releasedAtMs: null, haltedAtMs: null })).toBe(true);
     // there is no main-tip input any more: main moving cannot silence it
     expect(haltStillMatters.length).toBe(1);
+  });
+});
+
+// nuria-platform lot P: the watcher writes production-release-attention.json
+// (the format of escalate_to_chief, as in the fixture) once per signature of a
+// failure before the CI, or a release killed by a signal.
+describe("a release that needs attention without being halted (H9)", () => {
+  const FIXTURE = readFileSync(join(import.meta.dirname, "testing", "fixtures", "production-release-attention.json"), "utf8");
+  const FULL = "cb015584a35296ec89b2dbaf2c54373e6f93b826";
+  const now = Date.parse("2026-10-02T00:10:00Z");
+
+  it("reads the watcher's file and says, in pt-BR, why and what to do", () => {
+    const attention = releaseAttention(FIXTURE)!;
+    expect(attention).toMatchObject({ sha: FULL, reason: "fast-failure", lastFailure: "git@github.com: Permission denied (publickey).", at: "2026-10-01T23:58:12Z", key: "attention:cb015584a352:fast-failure:2026-10-01T23:58:12Z" });
+    expect(releaseAttentionDue(attention, { now, releasedSha: "a9e4b93ca" })).toBe(true);
+    const alert = releaseAttentionAlert(attention, { err: "/x/production-release.err.log" });
+    expect(alert.text).toBe("O release de produção de cb015584a falhou antes da CI ou sem veredito dela (git/ssh, npm ci, lock de admissão): é a máquina, não o commit — último erro: git@github.com: Permission denied (publickey). Não parou: o watcher tenta de novo sozinho.");
+    expect(alert.report).toContain("[Alerta do servidor: release de produção pede atenção]");
+    expect(alert.report).toContain("O que fazer: veja /x/production-release.err.log perto de 2026-10-01T23:58:12Z e corrija a máquina (chave ssh/acesso ao git, npm ci, um lock de admissão preso)");
+    expect(alert.report).toContain("não proponha recusá-lo nem o arquivo halted");
+    const signal = releaseAttention(JSON.stringify({ ...JSON.parse(FIXTURE), reason: "signal", last_failure: "exit 143" }))!;
+    expect(releaseAttentionAlert(signal, { err: "e" }).report).toContain("descubra o que matou o processo");
+  });
+
+  it("tells each write once: a new signature (another time) is news, the same file read again is not", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-attention-"));
+    try {
+      const state = new ReleaseWatchState(join(dir, "release-watch.json"));
+      const first = releaseAttention(FIXTURE)!;
+      expect(state.once(first.key)).toBe(true);
+      expect(new ReleaseWatchState(join(dir, "release-watch.json")).once(first.key)).toBe(false);
+      const next = releaseAttention(JSON.stringify({ ...JSON.parse(FIXTURE), last_failure: "npm ci: EINTEGRITY", at: "2026-10-02T00:40:00Z" }))!;
+      expect(next.key).not.toBe(first.key);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores a missing, empty, corrupt, too large, foreign, old or already released escalation", () => {
+    expect(releaseAttention("")).toBeNull();
+    expect(releaseAttention("{\"kind\":\"production-release-attention\",")).toBeNull();
+    expect(releaseAttention("[1,2]")).toBeNull();
+    expect(releaseAttention(JSON.stringify({ ...JSON.parse(FIXTURE), kind: "production-release-halted" }))).toBeNull();
+    expect(releaseAttention(JSON.stringify({ ...JSON.parse(FIXTURE), sha: "not-a-sha" }))).toBeNull();
+    expect(releaseAttention(`${FIXTURE}${" ".repeat(ATTENTION_FILE_MAX_BYTES)}`)).toBeNull();
+    // control characters and a huge last_failure are cut, never passed on
+    const noisy = releaseAttention(JSON.stringify({ ...JSON.parse(FIXTURE), last_failure: `erro\u0007\u001b[31m vermelho ${"x".repeat(1_000)}` }))!;
+    expect(noisy.lastFailure!.length).toBeLessThanOrEqual(300);
+    expect(noisy.lastFailure).not.toMatch(new RegExp(String.fromCharCode(27)));
+    // no time: still one key per content
+    expect(releaseAttention(JSON.stringify({ ...JSON.parse(FIXTURE), at: undefined }))!.key).toBe("attention:cb015584a352:fast-failure:git@github.com: Permission denied (publickey).");
+    const attention = releaseAttention(FIXTURE)!;
+    expect(releaseAttentionDue(attention, { now: now + ATTENTION_MAX_AGE_MS, releasedSha: "" })).toBe(false);
+    expect(releaseAttentionDue(attention, { now, releasedSha: `${FULL}\n` })).toBe(false);
+    expect(releaseAttentionDue(attention, { now, releasedSha: "cb015584a" })).toBe(false);
+  });
+
+  it("reads the real file robustly: missing, or larger than the limit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-attention-"));
+    try {
+      const file = join(dir, "production-release-attention.json");
+      expect(releaseAttention(readTail(file, ATTENTION_FILE_MAX_BYTES + 1))).toBeNull();
+      writeFileSync(file, FIXTURE);
+      expect(releaseAttention(readTail(file, ATTENTION_FILE_MAX_BYTES + 1))?.sha).toBe(FULL);
+      writeFileSync(file, `${"y".repeat(5 * ATTENTION_FILE_MAX_BYTES)}${FIXTURE}`);
+      expect(releaseAttention(readTail(file, ATTENTION_FILE_MAX_BYTES + 1))).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

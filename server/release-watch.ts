@@ -343,6 +343,78 @@ export function haltStillMatters(input: { haltedSha: string; releasedSha: string
   if (COMMIT_SHA.test(released) && !sameCommit(released, input.haltedSha) && input.releasedAtMs !== null && input.haltedAtMs !== null && input.releasedAtMs > input.haltedAtMs) return false;
   return true;
 }
+// ── a release that needs attention without being halted ─────────────────
+// nuria-platform lot P (watch-production-release.sh, escalate_to_chief): a
+// release that fails before its CI or without a verdict from it (git/ssh,
+// npm ci, a stale lock), or is killed by a signal, is not halted — the next
+// poll retries it — but the watcher writes, once per failure signature,
+// ~/.nuria/escalations/production-release-attention.json:
+// {"to":"chief","kind":"production-release-attention","reason":"fast-failure"|"signal",
+//  "sha":"<40 hex>","failures":1,"limit":0,"last_failure":"<text>","at":"<ISO Z>"}
+// A new signature rewrites it (another `at`), so `at` tells one write from the next.
+
+export const ATTENTION_ESCALATION_FILE = join(homedir(), ".nuria", "escalations", "production-release-attention.json");
+/** Larger than this, the file is not what the watcher writes (one line of JSON): ignored. */
+export const ATTENTION_FILE_MAX_BYTES = 16 * 1024;
+/** An escalation older than this is history, not news (a first boot after days). */
+export const ATTENTION_MAX_AGE_MS = 24 * 3_600_000;
+
+const ATTENTION_REASONS: Record<string, string> = {
+  "fast-failure": "falhou antes da CI ou sem veredito dela (git/ssh, npm ci, lock de admissão): é a máquina, não o commit",
+  signal: "foi morto por um sinal (reinício, falta de memória ou alguém parou o processo): é a máquina, não o commit",
+};
+
+// control characters, built from a string so none sits in a regex literal
+const CONTROL_CHARS = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]+`, "g");
+
+export interface ReleaseAttention { key: string; sha: string; reason: string; reasonPt: string; lastFailure: string | null; at: string | null; atMs: number | null }
+
+/** The watcher's "needs attention" escalation, or null when the file is
+ * missing, empty, corrupt, too large or of another kind. Free text from the
+ * release is cut and stripped of control characters. */
+export function releaseAttention(json: string): ReleaseAttention | null {
+  if (!json.trim() || Buffer.byteLength(json) > ATTENTION_FILE_MAX_BYTES) return null;
+  let raw: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    raw = parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (raw.kind !== "production-release-attention" || typeof raw.sha !== "string" || !COMMIT_SHA.test(raw.sha)) return null;
+  const clean = (value: unknown, max: number) => (typeof value === "string" ? value.replace(CONTROL_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, max) : "");
+  const reason = clean(raw.reason, 60) || "unknown";
+  const lastFailure = clean(raw.last_failure, 300) || null;
+  const at = clean(raw.at, 40) || null;
+  const atMs = at && Number.isFinite(Date.parse(at)) ? Date.parse(at) : null;
+  // one alert per write: the watcher writes once per failure signature, each with its own time
+  const stamp = at ?? `${lastFailure ?? ""}`.slice(0, 80);
+  return { key: `attention:${raw.sha.slice(0, 12)}:${reason}:${stamp}`, sha: raw.sha, reason, reasonPt: ATTENTION_REASONS[reason] ?? `pediu atenção (${reason})`, lastFailure, at, atMs };
+}
+
+/** Whether an escalation is news: not older than ATTENTION_MAX_AGE_MS, not of
+ * a commit already released (the released sha is it). */
+export function releaseAttentionDue(attention: ReleaseAttention, input: { now: number; releasedSha: string }): boolean {
+  if (attention.atMs !== null && input.now - attention.atMs > ATTENTION_MAX_AGE_MS) return false;
+  const released = input.releasedSha.trim();
+  return !(released && sameCommit(released, attention.sha));
+}
+
+/** The chip and the Chief's report for an escalation, in pt-BR: why, and what to do. */
+export function releaseAttentionAlert(attention: ReleaseAttention, logs: { err: string }): { text: string; report: string } {
+  const short = attention.sha.slice(0, 9);
+  const last = attention.lastFailure?.slice(0, 160).replace(/[.\s]+$/, "");
+  const text = `O release de produção de ${short} ${attention.reasonPt}${last ? ` — último erro: ${last}` : ""}. Não parou: o watcher tenta de novo sozinho.`;
+  const todo = attention.reason === "signal"
+    ? "descubra o que matou o processo (reinício do Mac, falta de memória, alguém parou o release)"
+    : "corrija a máquina (chave ssh/acesso ao git, npm ci, um lock de admissão preso)";
+  return {
+    text,
+    report: `[Alerta do servidor: release de produção pede atenção] ${text}\nO que fazer: veja ${logs.err}${attention.at ? ` perto de ${attention.at}` : ""} e ${todo}. O commit não está em causa: não proponha recusá-lo nem o arquivo halted por isso. O watcher não para este commit e tenta de novo no próximo ciclo; se a mesma falha voltar, ele avisa de novo só com outra assinatura. Avise o dono só se a correção depender dele. Arquivo: ${ATTENTION_ESCALATION_FILE}.`,
+  };
+}
+
 /** The watcher's reason codes, said in pt-BR (unknown codes are kept as they are). */
 const HALT_REASONS: Record<string, string> = {
   "content-failure-limit": "limite de falhas de conteúdo atingido",
