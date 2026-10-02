@@ -304,6 +304,44 @@ export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "Am
   };
 }
 
+/** How many idle folders a low-disk alert names: the biggest. */
+export const DISK_ALERT_FOLDERS_MAX = 5;
+
+/** The low-disk alert for the Chief. On 02/10 (6,3 GiB free) the old text,
+ * "Libere espaço (worktrees antigas, caches de build) ou avise a pessoa",
+ * had the Chief delete node_modules of 9 worktrees on its own and then tell
+ * the owner twice that "nenhuma worktree pode ser removida" — while ~17 GB
+ * sat idle outside the tag (R10-resilience D). The alert now carries what
+ * the server last measured, biggest first with the command, says nothing is
+ * removed by a bot without the owner's OK, and, when nothing was measured
+ * yet, that the in-tag report says nothing about the rest. */
+export function diskAlertText(
+  drop: { freeGiB: number; path: string; band: number },
+  stale: { at: number; folders: readonly StaleFolder[] } | null,
+  timeZone = "America/Sao_Paulo",
+  minKb = STALE_MIN_KB,
+): { chip: string; report: string } {
+  const head = `Pouco espaço em disco: ${String(drop.freeGiB).replace(".", ",")} GiB livres em ${drop.path} (abaixo de ${drop.band} GiB). Worktrees, CI local e builds podem falhar, e em zero o servidor para de gravar.`;
+  const rule = "Não remova nada por conta própria, nem node_modules: o que sai do disco é decisão do dono. Leve a ele o que ocupa espaço, com tamanho e comando, e espere o OK.";
+  const big = [...(stale?.folders ?? [])].filter((each) => (each.sizeKb ?? 0) >= minKb).sort((a, b) => (b.sizeKb ?? 0) - (a.sizeKb ?? 0));
+  if (!stale || !big.length) {
+    const unmeasured = stale
+      ? "Na última medição do servidor não havia pasta grande parada há mais de 72 h fora da tag: veja caches de build e o $TMPDIR (du -sh) e diga ao dono o que achou."
+      : "O servidor ainda não mediu as pastas paradas fora da tag (o relatório de worktrees sai a cada 6 h e avalia para remoção só as contidas na tag): não diga ao dono que nada pode ser removido; meça com du -sh e diga o que achou.";
+    return { chip: head, report: `${head} ${rule} ${unmeasured}` };
+  }
+  const totalKb = big.reduce((sum, each) => sum + (each.sizeKb ?? 0), 0);
+  const when = new Date(stale.at).toLocaleString("pt-BR", { timeZone, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const shown = big.slice(0, DISK_ALERT_FOLDERS_MAX);
+  const more = big.length - shown.length;
+  const lines = shown.map((each) => `- ${each.kind === "worktree" ? "worktree" : "task-workspace"} ${each.path} (${sizeLabel(each.sizeKb!)}): ${each.command}`);
+  const trash = shown.some((each) => each.kind === "task-workspace") ? " A task-workspace vai para a Lixeira: o espaço só volta ao esvaziar a Lixeira." : "";
+  return {
+    chip: `${head.replace(/\. Worktrees, CI local.*$/, "")} — ~${sizeLabel(totalKb)} em ${big.length} pasta(s) parada(s) fora da tag, para o dono decidir`,
+    report: `${head} ${rule} Medido pelo servidor em ${when}: ${big.length} pasta(s) parada(s) há mais de 72 h, fora da tag e sem ninguém nelas, ~${sizeLabel(totalKb)} no total — "nenhuma worktree pode ser removida" vale só para as contidas na tag, não para estas. As maiores${more ? ` (e mais ${more})` : ""}:\n${lines.join("\n")}\nOs comandos não usam --force; uma pessoa confere antes.${trash}`,
+  };
+}
+
 /** The command a person runs to remove a worktree (never --force). */
 export const removeCommand = (repo: string, path: string): string => `git -C ${shellQuote(repo)} worktree remove ${shellQuote(path)}`;
 

@@ -456,7 +456,7 @@ import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.t
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { citedRefs, parseRefState, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, STALE_OUTSIDE_TAG_MS, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, diskAlertText, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, STALE_OUTSIDE_TAG_MS, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -8405,12 +8405,13 @@ function checkDiskSpace(): void {
   if (!drops.length) return;
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   for (const drop of drops) {
-    const text = `Pouco espaço em disco: ${drop.freeGiB} GiB livres em ${drop.path} (abaixo de ${drop.band} GiB). Worktrees, CI local e builds podem falhar, e em zero o servidor para de gravar. Libere espaço (worktrees antigas, caches de build) ou avise a pessoa.`;
-    console.warn(`[disk] ${text}`);
+    // with what the worktree report last measured outside the tag, and no "free space" order to a bot (R10-resilience D)
+    const alert = diskAlertText(drop, releasedCleanup.lastStale);
+    console.warn(`[disk] ${alert.report.split("\n")[0]}`);
     const desk = chief ? chiefDeskThread(chief) : null;
     if (!chief || !desk || !store.taskByThread(chief.id, desk)) continue;
-    store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 200), ok: false } });
-    autonomy.addReport(chief.id, desk, `[Alerta do servidor] ${text}`);
+    store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(alert.chip, 200), ok: false } });
+    autonomy.addReport(chief.id, desk, `[Alerta do servidor] ${alert.report}`);
   }
 }
 
@@ -9509,7 +9510,7 @@ function repoBaseBranch(repo: string): string {
  * repositories the sessions use: every 6 h the Chief gets the ones a person
  * may remove, with the command, and those kept and why — only when that
  * changed. The server removes none (R8 G3, server/nested-worktrees.ts). */
-const releasedCleanup: { lastAt: number; running: boolean; lastKey: Map<string, string> } = { lastAt: 0, running: false, lastKey: new Map() };
+const releasedCleanup: { lastAt: number; running: boolean; lastKey: Map<string, string>; lastStale: { at: number; folders: StaleFolder[] } | null } = { lastAt: 0, running: false, lastKey: new Map(), lastStale: null };
 /** `git` with git's stderr on the error, async, with a timeout. */
 const gitAsync = (args: string[]) => new Promise<string>((resolve, reject) => {
   execFileCc("git", args, { timeout: 120_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath(), GIT_OPTIONAL_LOCKS: "0" } }, (error, stdout, stderr) => {
@@ -9647,8 +9648,10 @@ async function cleanReleasedWorktrees(): Promise<void> {
     if (staleNews && stale.length) {
       // every one measured (du, 2 min each at most), so the report orders by size, not by disk order (INSP-J r1 #7b)
       for (const each of stale) each.sizeKb = await duKb(each.path);
+      releasedCleanup.lastStale = { at: Date.now(), folders: stale };
       console.log(`[worktrees] idle >72 h outside ${PRODUCTION_TAG} (told as information, nothing removed): ${stale.map((each) => `${each.path} (${each.sizeKb ?? "?"} KB)`).join(", ")}`);
     }
+    if (!stale.length) releasedCleanup.lastStale = { at: Date.now(), folders: [] };
     const staleTold = staleNews ? staleFoldersReport(stale) : null;
     if (!lines.length && !staleTold) return;
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
