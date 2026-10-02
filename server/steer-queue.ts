@@ -190,6 +190,8 @@ export function drainSteeredMessages(
     excludeIds: string[],
     unattended: boolean,
     head: SteerQueueHead,
+    /** The drained items' queue ids (the 202's queueId): what waited is now on its way. */
+    queueIds: string[],
   ) => void | Promise<void>,
   isBlocked?: (botId: string, threadId: string) => boolean,
 ): void {
@@ -250,6 +252,7 @@ export function drainSteeredMessages(
       group.some((item) => item.unattended === true),
       // the first waiting line is the one that starts this turn
       { trigger: group[0].trigger, sender: group[0].sender, peerAsk: group[0].peerAsk },
+      ids,
     );
     void Promise.resolve(running).then(
       () => settleChatFollowups(ids, null),

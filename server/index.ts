@@ -277,7 +277,8 @@ import {
   type OwnerPendingStep,
   type OwnerPendingOption,
   practicalMissing,
-  RECOMMEND_MISSING,
+  REMIND_REPORT_PREFIX,
+  ownerPendingVisible,
   parseOwnerPendingDetails,
   NEEDS_INPUT_EXPIRE_MS,
   parseWakeInput,
@@ -377,7 +378,7 @@ import { APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appUnblockPending, o
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
-import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
+import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -8571,6 +8572,19 @@ async function checkPower(): Promise<void> {
   }
 }
 
+/** The Mac's power right now, for an answer that claims it (INSP-J2 r2 N4):
+ * null when unknown (not a Mac, pmset failed). OMB_TEST_PMSET_BATT stands in
+ * for `pmset -g batt` in the e2e tests. */
+async function readPowerNow(): Promise<PowerState | null> {
+  const fake = process.env.OMB_TEST_PMSET_BATT;
+  if (fake !== undefined) return fake.trim() ? parsePmsetBatt(fake) : null;
+  if (process.platform !== "darwin") return null;
+  const output = await execCc("/usr/bin/pmset", ["-g", "batt"]).catch(() => "");
+  if (!output.trim()) return null;
+  powerWatch.state = parsePmsetBatt(output);
+  return powerWatch.state;
+}
+
 /** `pmset -g log` (several MB): only the lines that say which power source was in use. */
 function execPmsetLog(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -8804,6 +8818,11 @@ async function autonomyTick(): Promise<void> {
     if (!taken) continue;
     const chip = taken.items.length === 1 ? "Chegou um relatório" : `Chegaram ${taken.items.length} relatórios`;
     const outcome = await dispatchAutonomyTurn(taken.botId, taken.threadId, chip, reportsPrompt(taken, autonomy.goalFor(taken.threadId), languageReminder(cfg.language)));
+    if (outcome === "started") {
+      // a reminder the person asked for reached the bot: "na fila" becomes "enviado" (INSP-J2 r2 N3/N9)
+      const reminded = new Set(taken.items.filter((text) => text.startsWith(REMIND_REPORT_PREFIX)).map((text) => text.slice(REMIND_REPORT_PREFIX.length).trim().split(" ")[0]));
+      if (reminded.size) for (const botId of autonomy.settleOwnerPendingQueued((item, entry) => item.botId === taken.botId && reminded.has(item.id) && entry.label === "remind", { delivered: true })) refreshBotRow(botId);
+    }
     if (outcome === "busy") autonomy.restoreReports(taken);
     else if (outcome === "failed") autonomy.settleInFlight(taken.threadId);
   }
@@ -9614,7 +9633,7 @@ threadSignals = (threadId) => {
     ...(item.why ? { why: item.why } : {}), ...(item.steps?.length ? { steps: item.steps } : {}), ...(item.options?.length ? { options: item.options } : {}),
     ...(item.stepsRequestedAt ? { stepsRequestedAt: item.stepsRequestedAt } : {}),
     ...(item.recommendRequestedAt ? { recommendRequestedAt: item.recommendRequestedAt } : {}),
-    ...(item.history?.length ? { history: item.history.map(({ at, kind, label, text, delivered, error }) => ({ at, kind, ...(label ? { label } : {}), text, delivered, ...(error ? { error } : {}) })) } : {}),
+    ...(item.history?.length ? { history: item.history.map(({ at, kind, label, text, delivered, queued, error }) => ({ at, kind, ...(label ? { label } : {}), text, delivered, ...(queued ? { queued } : {}), ...(error ? { error } : {}) })) } : {}),
     ...(item.awaitingSince ? { awaitingSince: item.awaitingSince } : {}),
   }));
   return {
@@ -10868,9 +10887,18 @@ bus.subscribe((event: RuntimeEvent) => {
   drainDelegationWakes();
 });
 
+/** A person's answer from "Precisa de você" that waited its turn: in the
+ * item's history it becomes "enviado" when the turn starts with it, "não
+ * enviado" when it could not (INSP-J2 r2 N9). */
+function settleQueuedAnswers(queueIds: readonly string[] | undefined, outcome: { delivered: true } | { error: string }): void {
+  if (!queueIds?.length) return;
+  const ids = new Set(queueIds);
+  for (const botId of autonomy.settleOwnerPendingQueued((_item, entry) => Boolean(entry.queueId && ids.has(entry.queueId)), outcome)) refreshBotRow(botId);
+}
+
 function drainQueuedSends() {
   if (!followupsReady) return;
-  drainSteeredMessages(store, (botId, threadId, prompt, userMessage, excludeIds, unattended, head) =>
+  drainSteeredMessages(store, (botId, threadId, prompt, userMessage, excludeIds, unattended, head, queueIds) =>
     // A plain attended turn — no automationSource, no comms depth: exactly
     // what typing the same words into an idle bot would run. Self-opened
     // work retains `unattended` and the message's bot-origin provenance
@@ -10883,7 +10911,7 @@ function drainQueuedSends() {
       void startTurn(botId, prompt, {
         threadId, userMessage, excludeMessageIds: excludeIds, unattended, onTurnSettled: resolve,
         trigger: queuedTurnTrigger(head),
-      }).catch((err) => {
+      }).then(() => settleQueuedAnswers(queueIds, { delivered: true }), (err) => {
         store.appendMessage(threadId, {
           role: "bot", kind: "activity",
           tool: {
@@ -10891,6 +10919,7 @@ function drainQueuedSends() {
             ok: false,
           },
         });
+        settleQueuedAnswers(queueIds, { error: err instanceof Error ? err.message : String(err) });
         resolve();
         // M2: only this group left the queue, and a turn that never
         // started publishes no completion to wake the groups behind it.
@@ -19001,8 +19030,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           item.steps?.length ? `${item.steps.length} passo${item.steps.length === 1 ? "" : "s"}` : "",
           item.options?.length ? `decisões: ${item.options.map((option) => option.label).join(" / ")}` : "",
         ].filter(Boolean).join("; ");
-        // 2+ decisions with none marked: the bot hears it (J16), the item is kept as sent
-        const recommendMissing = (item: OwnerPending) => ((item.options?.length ?? 0) >= 2 && !item.options!.some((option) => option.recommended) ? `${RECOMMEND_MISSING} ` : "");
         const details = parseOwnerPendingDetails({ why: body.why, steps: body.steps, options: body.options });
         if (!details.ok && (body.action === "add" || body.action === "update")) return json(res, 400, { error: details.error });
         const structured = details.ok ? { ...(details.why !== undefined ? { why: details.why } : {}), ...(details.steps !== undefined ? { steps: details.steps } : {}), ...(details.options !== undefined ? { options: details.options } : {}) } : {};
@@ -19020,7 +19047,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           }
           refreshBotRow(bot.id);
           const shape = practical(item);
-          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}. ${item.steps?.length ? "" : `Sem passos, a pessoa não sabe por onde começar: complete com owner_pending update id ${item.id} (why, steps, options). `}${recommendMissing(item)}Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
+          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}. Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
         }
         if (body.action === "update") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -19038,7 +19065,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           refreshBotRow(bot.id);
           const shape = practical(item);
-          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}. ${recommendMissing(item)}`.trim() });
+          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.` });
         }
         if (body.action === "resolve") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -22659,12 +22686,16 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (m && method === "GET") {
       const bot = store.bot(m[1]!);
       if (!bot) return json(res, 404, { error: "no such bot" });
-      return json(res, 200, { resolved: autonomy.resolvedOwnerPendingOf(bot.id).slice().reverse() });
+      // the same guest rule as answering: on a Cloud, a guest sees only what came from conversations it started (INSP-J2 r2 N7)
+      return json(res, 200, { resolved: ownerPendingVisible(autonomy.resolvedOwnerPendingOf(bot.id), (threadId) => cloudGuestSendRefusal(auth, threadId)).slice().reverse() });
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/resolve$/);
     if (m && method === "POST") {
       const bot = store.bot(m[1]!);
       if (!bot) return json(res, 404, { error: "no such bot" });
+      const open = autonomy.ownerPendingById(bot.id, m[2]!);
+      const notYours = open ? cloudGuestSendRefusal(auth, open.threadId) : null;
+      if (notYours) return json(res, 403, { error: notYours });
       const done = autonomy.resolveOwnerPending({ botId: bot.id, id: m[2]!, by: "owner" });
       // the bot reads it in that conversation: the person settled it
       for (const item of done) {
@@ -22672,6 +22703,24 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       refreshBotRow(bot.id);
       return json(res, 200, { resolved: done.length });
+    }
+    // "Lembrar <bot>": an answered item the bot let go silent for 2 h. The
+    // reminder is a system report (never the person's words), sent once while
+    // it waits to be read; the item waits on the bot again (INSP-J2 r2 N3).
+    m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/remind$/);
+    if (m && method === "POST") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const item = autonomy.ownerPendingById(bot.id, m[2]!);
+      if (!item) return json(res, 404, { error: "Este item já foi resolvido." });
+      const notYours = cloudGuestSendRefusal(auth, item.threadId);
+      if (notYours) return json(res, 403, { error: notYours });
+      const target = ownerTurnThread(bot.id, item.threadId);
+      if (!store.taskByThread(bot.id, target)) return json(res, 409, { error: "A conversa de origem deste item não existe mais. Marque-o como resolvido." });
+      const reminded = autonomy.remindOwnerPending(bot.id, item.id, target);
+      if (!reminded) return json(res, 409, { error: `${bot.name} ainda tem tempo para responder a este item.`, code: "not_silent" });
+      refreshBotRow(bot.id);
+      return json(res, 202, { ok: true, deduped: reminded.deduped, threadId: target });
     }
     // The person answers an item from "Precisa de você": a decision the bot
     // offered (options[n]), their own words, or a request for the steps. The
@@ -22719,6 +22768,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         resolve = declined || Boolean(item.key);
         text = ownerPendingReplyText(item, option.reply, resolve);
         answer = { kind: "option", label: option.label, text: option.reply };
+        // "Liguei na tomada" is checked, not believed: still on battery, the item stays open (INSP-J2 r2 N4)
+        if (item.key === POWER_PENDING_KEY && option.label === POWER_PLUGGED_LABEL) {
+          const refusal = pluggedInRefusal(await readPowerNow());
+          if (refusal) return json(res, 409, { error: refusal, code: "still_on_battery" });
+        }
       } else {
         const reply = typeof body.text === "string" ? body.text.trim() : "";
         if (!reply) return json(res, 400, { error: "Escreva a resposta ao bot." });
@@ -22751,12 +22805,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // conversation is free, or after the running turn.
         const note = body.ask === "recommend" ? ownerPendingRecommendNote(item) : ownerPendingStepsRequestNote(item);
         const prompt = promptWithReply(`${text}\n\n${note}`, undefined, cfg.profile?.name?.trim() || "User");
+        let asked: ReturnType<typeof queueSteeredMessage>;
         try {
-          queueSteeredMessage(bot.id, target, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
+          asked = queueSteeredMessage(bot.id, target, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
         } catch (error) {
           return ownerAnswerFailed(bot.id, item.id, answer, error);
         }
-        autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: true });
+        // in the queue, not yet with the bot: "na fila" until its turn starts (INSP-J2 r2 N9)
+        autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: false, queued: true, queueId: asked.id });
         if (body.ask === "recommend") autonomy.markOwnerPendingRecommendRequested(bot.id, item.id);
         else autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
         refreshBotRow(bot.id);
@@ -22774,7 +22830,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         } catch (error) {
           return ownerAnswerFailed(bot.id, item.id, answer, error);
         }
-        autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: true });
+        autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: false, queued: true, queueId: queued.id });
         refreshBotRow(bot.id);
         drainQueuedSends();
         return json(res, 202, { ok: true, queued: true, queueId: queued.id, threadId: target, text, resolved: 0 });
@@ -22786,7 +22842,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // never a silent failure: kept in the history as not delivered, and said on the screen (J18)
         return ownerAnswerFailed(bot.id, item.id, answer, error);
       }
-      autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: true });
+      autonomy.recordOwnerPendingAnswer(bot.id, item.id, "queueId" in receipt && receipt.queued ? { ...answer, delivered: false, queued: true, queueId: receipt.queueId } : { ...answer, delivered: true });
       const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id, by: "owner" }) : [];
       refreshBotRow(bot.id);
       // the text rides along: a queued answer is shown queued in the conversation
@@ -23971,6 +24027,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!cancelSteeredMessage(bot.id, queueId, bot.threadId)) {
         return json(res, 404, { error: "no such queued message" });
       }
+      // a "Precisa de você" answer cancelled before its turn: not sent, said so in its history
+      settleQueuedAnswers([queueId], { error: "cancelado antes de chegar ao bot" });
       return json(res, 200, { ok: true });
     }
 
@@ -24033,6 +24091,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         for (const message of messages) handoffs.steered(bot.threadId, steerTarget, instance?.instanceId, message.id);
         const queueIds = held.items.map((item) => item.messageId);
         settleHeldSteeredQueue(held);
+        // folded into the running turn: a "Precisa de você" answer among them reached the bot
+        settleQueuedAnswers(queueIds, { delivered: true });
         return json(res, 200, { ok: true, steered: true, threadId: bot.threadId, messages, queueIds });
       }
       if (steered === "indeterminate") {

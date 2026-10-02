@@ -22,6 +22,10 @@ import {
   ownerAskText,
   ownerPendingReplyText,
   ownerPendingAwaitNote,
+  ownerPendingRemindReport,
+  ownerPendingVisible,
+  OWNER_PENDING_AWAIT_MS,
+  REMIND_REPORT_PREFIX,
   ownerPendingStepsRequestText,
   ownerPendingStepsRequestNote,
   parseOwnerPendingDetails,
@@ -1026,6 +1030,75 @@ describe("the answers and the audit, robust and small (INSP-J2 #12, #13)", () =>
     expect(one.steps).toEqual([{ text: "s" }]);
     expect(one.options).toEqual([{ label: "Um", reply: "1" }, { label: "Dois", reply: "2", recommended: true, why: "melhor" }, { label: "Três", reply: "3" }]);
     expect(autonomy.ownerPendingById("chief", "o2")!.history).toEqual([{ at: 5, kind: "option", label: "Um", text: "1", by: "owner", delivered: true }]);
+  });
+});
+
+// INSP-J2 r2 (redacted from the owner's 02/10 items): "na fila" is not
+// "enviado", a silent bot can be reminded once, and a guest sees only its own.
+describe("queued answers, reminders and who sees the audit (INSP-J2 r2 N3, N7, N9)", () => {
+  const add = (autonomy: BotAutonomy, title: string) =>
+    autonomy.addOwnerPending("monitor", "m1", { title, why: "O Jev barrou.", steps: [{ text: "Cole os comentários" }], options: [{ label: "Já colei", reply: "Já colei.", recommended: true, why: "Está pronto." }, { label: "Cole você", reply: "Cole você." }] });
+
+  it("records a queued answer as 'na fila', and settles it as sent when its turn starts — or as not sent", () => {
+    const autonomy = make();
+    const item = add(autonomy, "Colar os dois comentários nas issues #NNNN e #MMMM");
+    autonomy.recordOwnerPendingAnswer("monitor", item.id, { kind: "option", label: "Já colei", text: "Já colei.", delivered: false, queued: true, queueId: "q1" });
+    const queued = autonomy.ownerPendingById("monitor", item.id)!;
+    // answered: it waits on the bot already, but nothing says it reached it
+    expect(queued.awaitingSince).toBe(now);
+    expect(queued.history).toEqual([expect.objectContaining({ delivered: false, queued: true, queueId: "q1" })]);
+    expect(autonomy.settleOwnerPendingQueued((_item, entry) => entry.queueId === "other", { delivered: true })).toEqual([]);
+    expect(autonomy.settleOwnerPendingQueued((_item, entry) => entry.queueId === "q1", { delivered: true })).toEqual(["monitor"]);
+    expect(autonomy.ownerPendingById("monitor", item.id)!.history).toEqual([{ at: now, by: "owner", kind: "option", label: "Já colei", text: "Já colei.", delivered: true }]);
+    // survives a restart as it was settled
+    expect(make().ownerPendingById("monitor", item.id)!.history![0]!.delivered).toBe(true);
+    // a decision that closed its item, then failed to start: the audit says so
+    autonomy.recordOwnerPendingAnswer("monitor", item.id, { kind: "text", text: "E a planilha?", delivered: false, queued: true, queueId: "q2" });
+    autonomy.resolveOwnerPending({ botId: "monitor", id: item.id, by: "owner" });
+    autonomy.settleOwnerPendingQueued((_item, entry) => entry.queueId === "q2", { error: "o turno não começou" });
+    expect(autonomy.resolvedOwnerPendingOf("monitor").at(-1)!.history!.at(-1)).toMatchObject({ delivered: false, error: "o turno não começou" });
+    expect(autonomy.resolvedOwnerPendingOf("monitor").at(-1)!.history!.at(-1)).not.toHaveProperty("queued");
+  });
+
+  it("reminds a silent bot once, as a system report, and the item waits on the bot again", () => {
+    const autonomy = make();
+    const item = add(autonomy, "Liberar a escrita na linha 97 da planilha");
+    // never answered, or answered 30 min ago: nothing to remind
+    expect(autonomy.remindOwnerPending("monitor", item.id, "m1")).toBeNull();
+    autonomy.recordOwnerPendingAnswer("monitor", item.id, { kind: "option", label: "Já colei", text: "Já colei.", delivered: true });
+    now += 30 * 60_000;
+    expect(autonomy.remindOwnerPending("monitor", item.id, "m1")).toBeNull();
+    now += OWNER_PENDING_AWAIT_MS;
+    const first = autonomy.remindOwnerPending("monitor", item.id, "m1")!;
+    expect(first.deduped).toBe(false);
+    const report = autonomy.takeReports("m1")!.items;
+    autonomy.restoreReports({ botId: "monitor", threadId: "m1", items: report });
+    expect(report).toHaveLength(1);
+    expect(report[0]).toMatch(new RegExp(`^\\${REMIND_REPORT_PREFIX.slice(0, -1)}\\] ${item.id} `));
+    expect(report[0]).toContain("a pessoa escolheu «Já colei» há 3 h");
+    expect(report[0]).toContain(`owner_pending resolve id ${item.id}`);
+    // the history says a reminder is on its way; the item waits on the bot again
+    const after = autonomy.ownerPendingById("monitor", item.id)!;
+    expect(after.history!.at(-1)).toMatchObject({ kind: "ask", label: "remind", delivered: false, queued: true });
+    expect(after.awaitingSince).toBe(now);
+    // pressed again while the report waits to be read: no second report, no second entry
+    now += OWNER_PENDING_AWAIT_MS;
+    expect(autonomy.remindOwnerPending("monitor", item.id, "m1")).toMatchObject({ deduped: true });
+    expect(autonomy.takeReports("m1")!.items).toHaveLength(1);
+    expect(autonomy.ownerPendingById("monitor", item.id)!.history!.filter((entry) => entry.label === "remind")).toHaveLength(1);
+  });
+
+  it("says the reminder in the server's voice, never as the person", () => {
+    const text = ownerPendingRemindReport({ id: "o7", title: "Aprovar o envio", awaitingSince: 0, history: [{ at: 0, kind: "text", text: "Pode enviar.", by: "owner", delivered: true }] }, 5 * 3_600_000);
+    expect(text.startsWith(REMIND_REPORT_PREFIX)).toBe(true);
+    expect(text).toContain("a pessoa respondeu há 5 h");
+    expect(text).not.toMatch(/\b(eu|me|meu|minha)\b/i);
+  });
+
+  it("shows a session only the items from conversations it may write in", () => {
+    const items = [{ id: "o1", threadId: "own" }, { id: "o2", threadId: "guest" }];
+    expect(ownerPendingVisible(items, () => null).map((item) => item.id)).toEqual(["o1", "o2"]);
+    expect(ownerPendingVisible(items, (threadId) => (threadId === "guest" ? null : "not yours")).map((item) => item.id)).toEqual(["o2"]);
   });
 });
 

@@ -157,7 +157,8 @@ export interface WireOwnerPending {
   /** The person asked the bot which decision it recommends, and it has not answered with an update yet. */
   recommendRequestedAt?: number;
   /** What the person answered, in order (J18). */
-  history?: Array<{ at: number; kind: "option" | "text" | "ask"; label?: string; text: string; delivered: boolean; error?: string }>;
+  /** `queued`: waiting its turn in a busy conversation — neither delivered nor failed yet (INSP-J2 r2 N9). */
+  history?: Array<{ at: number; kind: "option" | "text" | "ask"; label?: string; text: string; delivered: boolean; queued?: true; error?: string }>;
   /** The person's last answer reached the bot; it has not updated nor resolved the item since. */
   awaitingSince?: number;
 }

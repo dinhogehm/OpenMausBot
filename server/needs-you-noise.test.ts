@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { askCoveredByItem, echoAsk, ownerAskText, OWNER_PENDING_TITLE_MAX, ownerPendingRecommendNote, ownerPendingStepsAutoReport, parseOwnerPendingDetails, practicalMissing, RECOMMEND_MISSING } from "./bot-autonomy.ts";
+import { askCoveredByItem, echoAsk, ownerAskText, OWNER_PENDING_TITLE_MAX, ownerPendingRecommendNote, ownerPendingStepsAutoReport, parseOwnerPendingDetails, practicalMissing } from "./bot-autonomy.ts";
 import { availableTools, catalogProfileFromEnv } from "./drivers/agents-catalog.ts";
 import { reusedFolderRefusal } from "./claude-desktop.ts";
 import { APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appUnblockPending } from "./owner-chips.ts";
@@ -130,7 +130,8 @@ describe("the recommended decision", () => {
     // the tool asks for it
     const tool = availableTools(catalogProfileFromEnv({})).find((each) => each.name === "owner_pending")!;
     expect(tool.description).toContain("ALWAYS mark the one you recommend");
-    expect(RECOMMEND_MISSING).toContain("recommended: true e why");
+    // with 2+ options and none marked the call is refused (INSP-J2 #7): no after-the-fact note is left in the code (r2 N8)
+    expect(practicalMissing({ why: "x", steps: [{ text: "y" }], options: [{ label: "A" }, { label: "B" }] })).toContain("a recomendada");
     expect(ownerPendingRecommendNote({ id: "o9" })).toContain("recommended: true em UMA delas");
   });
 

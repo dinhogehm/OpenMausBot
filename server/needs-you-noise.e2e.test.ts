@@ -197,3 +197,67 @@ it("keeps the owner's 'seguir no terminal' on the unblock-the-app item for 24 h"
     await fixture.close();
   }
 }, 90_000);
+
+// INSP-J2 r2 (the owner's items of 02/10, redacted): "Liguei na tomada" with
+// the Mac still on battery, an answer that waits its turn shown as such,
+// and "Lembrar" on an item its bot let go silent.
+it("checks the power before closing, tells 'na fila' from 'enviado', and reminds a silent bot once as the server", async () => {
+  const prompts = join(tmpdir(), `omb-remind-${process.pid}-${Date.now()}.jsonl`);
+  const env = { ...process.env, OMB_TEST_PMSET_BATT: "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t17%; discharging; 0:40 remaining present: true\n", FAKE_CLAUDE_PROMPTS: prompts };
+  const fixture = await launchVerificationServer(env);
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+  const raw = (path: string, body: unknown) => fetch(url + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json() as any }));
+  const pending = async (botId: string) => ((await api("/api/bots", undefined, "GET")).bots as any[]).find((each) => each.id === botId).tasks.flatMap((task: any) => task.ownerPending ?? []) as any[];
+  let restarted: ChildProcess | undefined;
+  try {
+    const chief = (await runControlOmb(["new-bot", "--name", "Chief of Staff", "--url", url]) as any).bot;
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+    const thread = chief.activeTaskId ?? chief.threadId;
+    const at = Date.now() - 3 * 3_600_000;
+    const practical = { why: "O Jev barrou.", steps: [{ text: "Cole os comentários" }], options: [{ label: "Já colei", reply: "Já colei os comentários.", recommended: true, why: "Está pronto." }, { label: "Cole você", reply: "Tente colar de novo." }] };
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
+      { id: "o3", botId: chief.id, threadId: thread, title: "Ligue o Mac na tomada (17%, abaixo do seu limite de 20%)", key: "power:battery", createdAt: at, why: "w", steps: [{ text: "s" }],
+        options: [{ label: "Liguei na tomada", reply: "Liguei o Mac na tomada.", recommended: true, why: "x" }, { label: "Vou deixar na bateria", reply: "Vou deixar." }] },
+      { id: "o12", botId: chief.id, threadId: thread, title: "Colar os dois comentários nas issues #NNNN e #MMMM", createdAt: at, ...practical,
+        awaitingSince: at, history: [{ at, kind: "option", label: "Já colei", text: "Já colei os comentários.", by: "owner", delivered: true }] },
+      { id: "o13", botId: chief.id, threadId: thread, title: "Liberar a escrita na linha 97 da planilha", createdAt: at, ...practical },
+    ] }));
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment(env, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+
+    // N4: still on battery — the item stays open and says why
+    const plugged = await raw(`/api/bots/${chief.id}/owner-pending/o3/reply`, { option: 0, label: "Liguei na tomada" });
+    expect(plugged.status).toBe(409);
+    expect(plugged.body).toMatchObject({ code: "still_on_battery", error: expect.stringContaining("ainda está na bateria (17%)") });
+    expect((await pending(chief.id)).map((item) => item.id)).toContain("o3");
+
+    // N3: o12 went silent 3 h ago: one reminder, as the server; a second press while it waits adds nothing
+    const first = await raw(`/api/bots/${chief.id}/owner-pending/o12/remind`, {});
+    expect(first).toMatchObject({ status: 202, body: { ok: true, deduped: false } });
+    const again = await raw(`/api/bots/${chief.id}/owner-pending/o12/remind`, {});
+    expect(again.status === 409 || again.body.deduped === true).toBe(true);
+    // an item not silent cannot be reminded
+    expect((await raw(`/api/bots/${chief.id}/owner-pending/o13/remind`, {})).status).toBe(409);
+    // the reminder reaches the bot as a report: "na fila", then "enviado"
+    await expect.poll(async () => (await pending(chief.id)).find((item) => item.id === "o12").history.filter((entry: any) => entry.label === "remind").map((entry: any) => [entry.delivered, entry.queued ?? false]), { timeout: 30_000, interval: 300 }).toEqual([[true, false]]);
+    const prompt = readFileSync(prompts, "utf8");
+    expect(prompt.split("[Servidor: lembrete de pendência] o12 ").length - 1).toBe(1);
+    expect(prompt).toContain("a pessoa escolheu «Já colei» há 3 h");
+    // never in the person's voice: no user line in the conversation for it
+    const messages = (await api(`/api/threads/${thread}/messages`, undefined, "GET")).messages as any[];
+    expect(messages.filter((message) => message.role === "user" && /lembrete/i.test(message.text))).toEqual([]);
+
+    // N9: an answer is "na fila" until its turn starts, then "enviado" — never "enviado" on queueing alone
+    const answer = await raw(`/api/bots/${chief.id}/owner-pending/o13/reply`, { option: 0, label: "Já colei" });
+    expect(answer.status).toBe(202);
+    await expect.poll(async () => (await pending(chief.id)).find((item) => item.id === "o13").history.map((entry: any) => [entry.label, entry.delivered, entry.queued ?? false]), { timeout: 30_000, interval: 200 }).toEqual([["Já colei", true, false]]);
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 120_000);

@@ -243,14 +243,38 @@ export interface OwnerPending {
 export interface OwnerPendingAnswer {
   at: number;
   kind: "option" | "text" | "ask";
-  /** The option's label, or the ask ("steps", "recommend"). */
+  /** The option's label, or the ask ("steps", "recommend", "remind"). */
   label?: string;
   /** What reached the bot (the option's reply, the person's words, the ask). */
   text: string;
   by: "owner";
+  /** It reached the bot: its turn started with it. */
   delivered: boolean;
+  /** Waiting its turn (the conversation is busy): not delivered yet, not failed (INSP-J2 r2 N9). */
+  queued?: true;
+  /** The send queue's id, to settle it when it drains. */
+  queueId?: string;
   /** Why it did not reach the bot. */
   error?: string;
+}
+
+/** What of the items a session may see: those whose conversation it may
+ * write in (`refusal` is the guest rule: null when it may). INSP-J2 r2 N7. */
+export function ownerPendingVisible<T extends { threadId: string }>(items: readonly T[], refusal: (threadId: string) => string | null): T[] {
+  return items.filter((item) => refusal(item.threadId) === null);
+}
+
+/** An answered item waits on its bot this long; then it is the person's again (INSP-J2 #2). */
+export const OWNER_PENDING_AWAIT_MS = 2 * 3_600_000;
+/** The server's reminder to a bot that let an answered item go silent (INSP-J2 r2 N3). */
+export const REMIND_REPORT_PREFIX = "[Servidor: lembrete de pendência]";
+
+/** The reminder, as a system report: facts and the two tool calls, never in the person's voice. */
+export function ownerPendingRemindReport(item: Pick<OwnerPending, "id" | "title" | "awaitingSince" | "history">, now: number): string {
+  const last = item.history?.findLast((each) => each.delivered || each.queued);
+  const what = last?.kind === "option" ? `escolheu «${last.label ?? ""}»` : last?.kind === "ask" ? "pediu ajuda" : "respondeu";
+  const hours = Math.max(1, Math.round((now - (item.awaitingSince ?? now)) / 3_600_000));
+  return `${REMIND_REPORT_PREFIX} ${item.id} («${item.title}»): a pessoa ${what} há ${hours} h e o item segue em "Precisa de você" sem resposta sua. Faça o que foi pedido e feche com owner_pending resolve id ${item.id}, ou diga o que falta com owner_pending update id ${item.id}.`;
 }
 
 /** A settled item, as kept for audit (J18). */
@@ -406,9 +430,6 @@ export function ownerPendingStepsAutoReport(items: ReadonlyArray<Pick<OwnerPendi
   return `${STEPS_REPORT_PREFIX} Itens: ${items.map((item) => item.id).join(", ")}. O dono quer cada pendência com o passo a passo e, se for uma escolha, com a sua recomendação. Complete cada um com owner_pending update (why: 1–2 frases sobre por que importa; steps: passos práticos com o comando em command ou o link em link quando houver; options: UMA com recommended: true e why):\n${lines.join("\n")}\nSe um item não vale mais, resolva-o com owner_pending resolve. Não escreva ao dono só por isto.`;
 }
 
-/** What the bot hears when it offers 2+ decisions with none marked (J16). */
-export const RECOMMEND_MISSING = "Nenhuma opção está marcada como recomendada: com 2 ou mais decisões, marque a melhor com recommended: true e why (uma frase dizendo por que), com owner_pending update.";
-
 /** What only the bot reads when the person asks, from "Precisa de você",
  * which decision it recommends (the turn's prompt, never the transcript). */
 export function ownerPendingRecommendNote(item: Pick<OwnerPending, "id">): string {
@@ -439,7 +460,8 @@ function savedDetails(pending: OwnerPending): OwnerPending {
   const { why: _why, steps: _steps, options: _options, history, awaitingSince, ...base } = pending;
   // the person's answers, read back defensively: a hand-edited ledger must never break the screen
   const answers = Array.isArray(history)
-    ? history.filter((each): each is OwnerPendingAnswer => Boolean(each) && typeof each === "object" && typeof each.at === "number" && typeof each.text === "string" && (each.kind === "option" || each.kind === "text" || each.kind === "ask") && typeof each.delivered === "boolean").slice(-OWNER_PENDING_HISTORY_MAX)
+    ? history.filter((each): each is OwnerPendingAnswer => Boolean(each) && typeof each === "object" && typeof each.at === "number" && typeof each.text === "string" && (each.kind === "option" || each.kind === "text" || each.kind === "ask") && typeof each.delivered === "boolean")
+      .slice(-OWNER_PENDING_HISTORY_MAX)
     : [];
   const kept = { ...base, ...(answers.length ? { history: answers } : {}), ...(typeof awaitingSince === "number" && Number.isFinite(awaitingSince) ? { awaitingSince } : {}) };
   if (!details.ok) return kept;
@@ -1300,9 +1322,44 @@ export class BotAutonomy {
     const at = this.now();
     const entry: OwnerPendingAnswer = { at, by: "owner", ...answer, text: answer.text.slice(0, 500), ...(answer.error ? { error: answer.error.slice(0, 300) } : {}) };
     item.history = [...(item.history ?? []), entry].slice(-OWNER_PENDING_HISTORY_MAX);
-    if (answer.delivered) item.awaitingSince = at;
+    // answered (sent or waiting its turn): the item waits on the bot
+    if (answer.delivered || answer.queued) item.awaitingSince = at;
     this.save();
     return item;
+  }
+
+  /** Answers that were waiting their turn now reached the bot, or did not
+   * (INSP-J2 r2 N9): "na fila" becomes "enviado" when the turn starts with
+   * them, "não enviado" when it could not start. The bots touched. */
+  settleOwnerPendingQueued(match: (item: OwnerPending, entry: OwnerPendingAnswer) => boolean, outcome: { delivered: true } | { error: string }): string[] {
+    const touched = new Set<string>();
+    // a decision that closed its item may still be waiting its turn: the audit keeps its outcome too
+    for (const item of [...this.ownerPending, ...this.resolvedOwnerPending]) {
+      if (!item.history?.some((entry) => entry.queued && match(item, entry))) continue;
+      item.history = item.history.map((entry) => {
+        if (!entry.queued || !match(item, entry)) return entry;
+        const { queued: _queued, queueId: _queueId, ...rest } = entry;
+        return "error" in outcome ? { ...rest, delivered: false, error: outcome.error.slice(0, 300) } : { ...rest, delivered: true };
+      });
+      touched.add(item.botId);
+    }
+    if (touched.size) this.save();
+    return [...touched];
+  }
+
+  /** The person reminds the bot of an answered item it let go silent
+   * (INSP-J2 r2 N3): one system report, never twice while one waits to be
+   * read; the item waits on the bot again. null when it is not silent. */
+  remindOwnerPending(botId: string, id: string, threadId: string): { item: OwnerPending; deduped: boolean } | null {
+    const item = this.ownerPendingById(botId, id);
+    if (!item || item.awaitingSince === undefined) return null;
+    const waiting = this.reports.get(threadId)?.items.some((text) => text.startsWith(`${REMIND_REPORT_PREFIX} ${item.id} `)) ?? false;
+    if (waiting) return { item, deduped: true };
+    const now = this.now();
+    if (now - item.awaitingSince < OWNER_PENDING_AWAIT_MS) return null;
+    this.addReport(botId, threadId, ownerPendingRemindReport(item, now));
+    this.recordOwnerPendingAnswer(botId, item.id, { kind: "ask", label: "remind", text: "Lembrete enviado pelo OpenMausBot.", delivered: false, queued: true });
+    return { item, deduped: false };
   }
 
   /** One of a bot's items, by id or by an id folded into it. */

@@ -183,6 +183,17 @@ export function powerStep(watch: PowerWatchState, power: PowerState, now: number
   return { watch: next, changed, resolvePending: false, alert: { ...found, log: `[power] ${found.text}`, pendingTitle } };
 }
 
+/** The "plug the Mac in" item's own answer: the server checks it (INSP-J2 r2 N4). */
+export const POWER_PLUGGED_LABEL = "Liguei na tomada";
+
+/** Why "Liguei na tomada" cannot close the item yet, or null: still on
+ * battery, it stays open (closing it would silence the alert, given once
+ * per discharge). Unknown power (pmset failed, not a Mac): the person's word. */
+export function pluggedInRefusal(power: PowerState | null): string | null {
+  if (!power?.onBattery) return null;
+  return `O Mac ainda está na bateria${power.percent !== null ? ` (${power.percent}%)` : ""}. Ligue o carregador e escolha de novo; o item também fecha sozinho quando o servidor vir a tomada.`;
+}
+
 /** The owner's "plug the Mac in" item, born practical (R10-visual N13): why,
  * what to do, and that it closes by itself on the wall. */
 export function powerPendingDetails(releaseRunning: boolean): { due: string; why: string; steps: Array<{ text: string }>; options: Array<{ label: string; reply: string; recommended?: true; why?: string }> } {
@@ -195,7 +206,7 @@ export function powerPendingDetails(releaseRunning: boolean): { due: string; why
       { text: "Pronto: o servidor vê a tomada e fecha este item sozinho." },
     ],
     options: [
-      { label: "Liguei na tomada", reply: "Liguei o Mac na tomada.", recommended: true, why: "Na tomada nada longo morre no meio, e o servidor fecha este item sozinho." },
+      { label: POWER_PLUGGED_LABEL, reply: "Liguei o Mac na tomada.", recommended: true, why: "Na tomada nada longo morre no meio, e o servidor fecha este item sozinho." },
       { label: "Vou deixar na bateria", reply: "Vou deixar o Mac na bateria por enquanto. Não comece nada longo (CI, carrier) até eu ligar na tomada." },
     ],
   };

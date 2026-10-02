@@ -3,12 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { batteryAlert, batteryMinPercent, carrierBatteryCheck, carrierIntent, DEFAULT_BATTERY_MIN_PERCENT, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, shouldReadPmsetLog, startsCarrier, UNKNOWN_CHARGE_ALERT_MS } from "./power.ts";
+import { batteryAlert, batteryMinPercent, carrierBatteryCheck, carrierIntent, DEFAULT_BATTERY_MIN_PERCENT, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, startsCarrier, UNKNOWN_CHARGE_ALERT_MS } from "./power.ts";
 
 const onBattery = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=27525219)\t53%; discharging; 1:16 remaining present: true\n";
 const plugged = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=27525219)\t100%; charged; 0:00 remaining present: true\n";
 
 describe("power", () => {
+  it("checks 'Liguei na tomada' instead of believing it (INSP-J2 r2 N4)", () => {
+    expect(pluggedInRefusal(parsePmsetBatt(onBattery))).toBe("O Mac ainda está na bateria (53%). Ligue o carregador e escolha de novo; o item também fecha sozinho quando o servidor vir a tomada.");
+    expect(pluggedInRefusal(parsePmsetBatt(plugged))).toBeNull();
+    // unknown (pmset failed, not a Mac): the person's word stands
+    expect(pluggedInRefusal(null)).toBeNull();
+    expect(powerPendingDetails(false).options[0]!.label).toBe(POWER_PLUGGED_LABEL);
+  });
+
   it("reads pmset", () => {
     expect(parsePmsetBatt(onBattery)).toEqual({ onBattery: true, percent: 53 });
     expect(parsePmsetBatt(plugged)).toEqual({ onBattery: false, percent: 100 });
