@@ -433,7 +433,7 @@ import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerC
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, STALE_OUTSIDE_TAG_MS, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -9317,15 +9317,25 @@ function readHead(path: string, bytes: number): string {
 }
 /** Folders agents work in: our sessions, the app's sessions, every bot's
  * open conversation (its folder or its task-workspace), rooms, Codex. */
-function foldersInUse(): string[] {
+function foldersInUse(opts: { quietWorkspaces?: Map<string, string> } = {}): string[] {
   const folders: string[] = ccLedger.all().filter((session) => session.status !== "archived" && session.cwd).map((session) => session.cwd!);
   if (process.platform === "darwin") folders.push(...liveRecordFolders());
+  const now = Date.now();
+  const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });
   for (const bot of store.bots) {
     if (bot.cwd) folders.push(bot.cwd);
     for (const task of store.tasks(bot.id)) {
       if (task.archivedAt) continue;
       if (typeof task.cwd === "string") folders.push(task.cwd);
-      folders.push(join(TASK_WORKSPACES_DIR, bot.id, task.threadId));
+      const workspace = join(TASK_WORKSPACES_DIR, bot.id, task.threadId);
+      // for the disk report only: a closed conversation's workspace, or one
+      // quiet for 72 h and not running, is told as information (INSP-J r1 #7a)
+      if (opts.quietWorkspaces) {
+        const quietSince = task.updatedAt ?? task.createdAt;
+        if (task.closedBy) { opts.quietWorkspaces.set(workspace, `conversa "${task.title.slice(0, 40)}" fechada`); continue; }
+        if (!task.busy && !autonomy.goalFor(task.threadId) && now - quietSince > STALE_OUTSIDE_TAG_MS) { opts.quietWorkspaces.set(workspace, `conversa "${task.title.slice(0, 40)}" aberta, parada desde ${day(quietSince)}`); continue; }
+      }
+      folders.push(workspace);
     }
   }
   for (const group of store.groups ?? []) {
@@ -9336,6 +9346,10 @@ function foldersInUse(): string[] {
   return folders;
 }
 const canonPath = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+/** A folder's size in KB (`du -sk`, at most 2 min), or null. */
+const duKb = (path: string) => new Promise<number | null>((resolve) => {
+  execFileCc("/usr/bin/du", ["-sk", path], { timeout: 120_000, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve(error ? null : Number(/^(\d+)/.exec(String(stdout).trim())?.[1]) || null));
+});
 async function cleanReleasedWorktrees(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || releasedCleanup.running || Date.now() - releasedCleanup.lastAt < 6 * 3_600_000) return;
   releasedCleanup.running = true;
@@ -9345,6 +9359,9 @@ async function cleanReleasedWorktrees(): Promise<void> {
     const [cwds, rows] = await Promise.all([allProcessCwds(), psTable()]);
     if (!cwds || !rows.length) return;
     const inUse = foldersInUse();
+    // the idle task-workspaces are told with closed and quiet conversations too (information only)
+    const quietWorkspaces = new Map<string, string>();
+    const inUseForDisk = foldersInUse({ quietWorkspaces });
     const lines: string[] = [];
     const mtime = (file: string) => { try { return statSync(file).mtimeMs; } catch { return null; } };
     const activity = (path: string) => worktreeLastActivity(path, { readFile: (file) => readFileSync(file, "utf8"), mtime });
@@ -9372,7 +9389,7 @@ async function cleanReleasedWorktrees(): Promise<void> {
       if (plan.candidates.length) lines.push(`Para remover (sem --force; confira antes): ${plan.candidates.map((candidate) => candidate.command).join(" ; ")}`);
     }
     // the task-workspaces of conversations no longer open, idle for days
-    const workspaces: Array<{ path: string; lastActivity: number | null }> = [];
+    const workspaces: Array<{ path: string; lastActivity: number | null; note?: string }> = [];
     try {
       for (const bot of readdirSync(TASK_WORKSPACES_DIR)) {
         const botDir = join(TASK_WORKSPACES_DIR, bot);
@@ -9381,17 +9398,18 @@ async function cleanReleasedWorktrees(): Promise<void> {
         for (const thread of threads) {
           const path = join(botDir, thread);
           const at = existsSync(join(path, ".git")) ? activity(path) ?? mtime(path) : mtime(path);
-          workspaces.push({ path, lastActivity: at });
+          const note = quietWorkspaces.get(path);
+          workspaces.push({ path, lastActivity: at, ...(note ? { note } : {}) });
         }
       }
     } catch { /* no task-workspaces here */ }
-    stale.push(...staleTaskWorkspaces(workspaces, { inUse, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath }));
+    stale.push(...staleTaskWorkspaces(workspaces, { inUse: inUseForDisk, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath }));
     const staleKey = stale.map((each) => each.path).sort().join("\n");
     const staleNews = staleKey !== (releasedCleanup.lastKey.get("\u0000stale") ?? "");
     releasedCleanup.lastKey.set("\u0000stale", staleKey);
     if (staleNews && stale.length) {
-      // sizes only for what is told (du is slow on GBs of node_modules), the biggest first in the report
-      for (const each of stale.slice(0, 20)) each.sizeKb = await execCc("/usr/bin/du", ["-sk", each.path]).then((out) => Number(/^(\d+)/.exec(out.trim())?.[1]) || null, () => null);
+      // every one measured (du, 2 min each at most), so the report orders by size, not by disk order (INSP-J r1 #7b)
+      for (const each of stale) each.sizeKb = await duKb(each.path);
       console.log(`[worktrees] idle >72 h outside ${PRODUCTION_TAG} (told as information, nothing removed): ${stale.map((each) => `${each.path} (${each.sizeKb ?? "?"} KB)`).join(", ")}`);
     }
     const staleTold = staleNews ? staleFoldersReport(stale) : null;

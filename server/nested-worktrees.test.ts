@@ -250,9 +250,11 @@ describe("worktrees already in production (R8 G3): a plan a person runs", () => 
 
     // the task-workspaces: conversations no longer open, idle for days; an open one and a session's are never listed
     const tw = (bot: string, thread: string) => `/Users/owner/.openmausbot/task-workspaces/${bot}/${thread}`;
+    // INSP-J r1 #7a: the real 54118a8a (closed by the Lead on 29/09) and the quiet open ones
+    // come with whose they were; the server leaves them out of "in use" for this report only
     const workspaces = staleTaskWorkspaces([
-      { path: tw("82feff85", "a1"), lastActivity: T("2026-09-28T12:00:00Z") },
-      { path: tw("82feff85", "a2"), lastActivity: T("2026-09-29T09:00:00Z") },
+      { path: tw("82feff85", "a1"), lastActivity: T("2026-09-28T12:00:00Z"), note: "conversa \"Lead PRODEV\" fechada" },
+      { path: tw("82feff85", "a2"), lastActivity: T("2026-09-29T09:00:00Z"), note: "conversa \"Revisão\" aberta, parada desde 29/09" },
       { path: tw("e9ba01c7", "70fa6c86"), lastActivity: T("2026-09-29T11:00:00Z") },
       { path: tw("82feff85", "open"), lastActivity: T("2026-09-20T00:00:00Z") },
       { path: tw("82feff85", "session"), lastActivity: T("2026-09-20T00:00:00Z") },
@@ -262,12 +264,20 @@ describe("worktrees already in production (R8 G3): a plan a person runs", () => 
     expect(workspaces.map((each) => each.path)).toEqual([tw("82feff85", "a1"), tw("82feff85", "a2"), tw("e9ba01c7", "70fa6c86")]);
     expect(workspaces[0]!.command).toBe(`mv ${tw("82feff85", "a1")} ~/.Trash/`);
 
-    const sized = [...plan.stale!, ...workspaces].map((each, i) => ({ ...each, sizeKb: [3.0, 2.8, 2.8, 2.2, 2.2, 2.1][i]! * 1024 * 1024 }));
+    // measured in disk order (the 2,1 GB last), told biggest first; small ones counted, not listed (#7b, #7c)
+    const sizesGb = [3.0, 2.8, 2.8, 2.2, 2.2, 2.1];
+    const sized = [...[...plan.stale!, ...workspaces].map((each, i) => ({ ...each, sizeKb: sizesGb[i]! * 1024 * 1024 })), { path: tw("82feff85", "tiny"), kind: "task-workspace" as const, idleSince: T("2026-09-28T00:00:00Z"), command: "mv x ~/.Trash/", sizeKb: 900 }].reverse();
     const told = staleFoldersReport(sized)!;
-    expect(told.chip).toBe("Disco: 6 pasta(s) parada(s) há mais de 72 h fora da tag, ~15,1 GB no total — informação para o dono, nada foi removido");
+    expect(told.chip).toBe("Disco: 6 pasta(s) parada(s) há mais de 72 h fora da tag, ~15,1 GB — informação para o dono, nada foi removido");
     expect(told.report).toContain("Só informação: o servidor não removeu nada");
-    expect(told.report.split("\n")[1]).toBe(`- worktree ${w("transfer-n2-sem-agente-824837")} (3,0 GB, sem mudança desde 27/09): git -C ${root} worktree remove ${w("transfer-n2-sem-agente-824837")}`);
-    expect(told.report).toContain(`- task-workspace ${tw("e9ba01c7", "70fa6c86")} (2,1 GB, sem mudança desde 29/09): mv ${tw("e9ba01c7", "70fa6c86")} ~/.Trash/`);
+    expect(told.report).toContain("(e mais 1 pequena(s), abaixo de 200 MB, não listada(s))");
+    // the Trash gives the space back only when emptied (#7d)
+    expect(told.report).toContain("o espaço só volta ao esvaziar a Lixeira");
+    const listed = told.report.split("\n").filter((each) => each.startsWith("- "));
+    expect(listed[0]).toBe(`- worktree ${w("transfer-n2-sem-agente-824837")} (3,0 GB, sem mudança desde 27/09): git -C ${root} worktree remove ${w("transfer-n2-sem-agente-824837")}`);
+    expect(listed.at(-1)).toBe(`- task-workspace ${tw("e9ba01c7", "70fa6c86")} (2,1 GB, sem mudança desde 29/09): mv ${tw("e9ba01c7", "70fa6c86")} ~/.Trash/`);
+    expect(told.report).toContain(`- task-workspace (conversa "Lead PRODEV" fechada) ${tw("82feff85", "a1")} (2,2 GB`);
+    expect(told.report).not.toContain("tiny");
     for (const line of told.report.split("\n").filter((each) => each.startsWith("- "))) expect(line).not.toMatch(/--force|\brm\b/);
     expect(sizeLabel(640 * 1024)).toBe("640 MB");
     expect(staleFoldersReport([])).toBeNull();

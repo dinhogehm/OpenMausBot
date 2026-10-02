@@ -178,7 +178,12 @@ export interface StaleFolder {
   /** What a person runs after checking (no --force; a task-workspace goes to the Trash, not rm). */
   command: string;
   sizeKb?: number | null;
+  /** Whose it was, for a task-workspace ("conversa fechada", "conversa aberta, parada desde 29/09"). */
+  note?: string;
 }
+
+/** Smaller than this, an idle folder is counted, not listed. */
+export const STALE_MIN_KB = 200 * 1024;
 
 /** How long a folder outside the tag must sit untouched before a person hears of it. */
 export const STALE_OUTSIDE_TAG_MS = 72 * 3_600_000;
@@ -253,7 +258,7 @@ export async function planReleasedWorktrees(repo: string, releasedSha: string, d
  * STALE_OUTSIDE_TAG_MS that no agent uses: no open conversation, no session
  * inside, not already told as a worktree. Information for a person, with a
  * command that moves to the Trash (undoable), never one that deletes. */
-export function staleTaskWorkspaces(folders: ReadonlyArray<{ path: string; lastActivity: number | null }>, input: { inUse: Iterable<string>; now: number; known?: readonly string[]; canon?: (path: string) => string }): StaleFolder[] {
+export function staleTaskWorkspaces(folders: ReadonlyArray<{ path: string; lastActivity: number | null; note?: string }>, input: { inUse: Iterable<string>; now: number; known?: readonly string[]; canon?: (path: string) => string }): StaleFolder[] {
   const canon = (path: string) => trimSlash(input.canon ? input.canon(path) : path);
   const used = [...input.inUse].filter(Boolean).map(canon);
   const known = (input.known ?? []).map(canon);
@@ -262,7 +267,7 @@ export function staleTaskWorkspaces(folders: ReadonlyArray<{ path: string; lastA
     if (folder.lastActivity === null || input.now - folder.lastActivity <= STALE_OUTSIDE_TAG_MS) return [];
     if (used.some((each) => isInside(each, path) || isInside(path, each))) return [];
     if (known.some((each) => isInside(each, path) || isInside(path, each))) return [];
-    return [{ path: folder.path, kind: "task-workspace" as const, idleSince: folder.lastActivity, command: `mv ${shellQuote(folder.path)} ~/.Trash/` }];
+    return [{ path: folder.path, kind: "task-workspace" as const, idleSince: folder.lastActivity, command: `mv ${shellQuote(folder.path)} ~/.Trash/`, ...(folder.note ? { note: folder.note } : {}) }];
   });
 }
 
@@ -282,16 +287,20 @@ export function releasedScopeLine(repoName: string, plan: ReleasedPlan, tag: str
 
 /** The idle folders outside the tag, biggest first, for a person: each with
  * its size, since when, and the command; null when there are none. */
-export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "America/Sao_Paulo"): { chip: string; report: string } | null {
-  if (!stale.length) return null;
+export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "America/Sao_Paulo", minKb = STALE_MIN_KB): { chip: string; report: string } | null {
+  // the big ones are the news: biggest first, the small ones counted (INSP-J r1 #7)
   const sorted = [...stale].sort((a, b) => (b.sizeKb ?? -1) - (a.sizeKb ?? -1) || a.idleSince - b.idleSince);
-  const totalKb = sorted.reduce((sum, each) => sum + (each.sizeKb ?? 0), 0);
+  const shown = sorted.filter((each) => (each.sizeKb ?? 0) >= minKb);
+  const small = sorted.length - shown.length;
+  if (!shown.length) return null;
+  const totalKb = shown.reduce((sum, each) => sum + (each.sizeKb ?? 0), 0);
   const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone, day: "2-digit", month: "2-digit" });
-  const lines = sorted.map((each) => `- ${each.kind === "worktree" ? "worktree" : "task-workspace"} ${each.path} (${each.sizeKb ? sizeLabel(each.sizeKb) : "tamanho não medido"}, sem mudança desde ${day(each.idleSince)}): ${each.command}`);
-  const total = totalKb ? `, ~${sizeLabel(totalKb)} no total` : "";
+  const lines = shown.map((each) => `- ${each.kind === "worktree" ? "worktree" : `task-workspace${each.note ? ` (${each.note})` : ""}`} ${each.path} (${sizeLabel(each.sizeKb!)}, sem mudança desde ${day(each.idleSince)}): ${each.command}`);
+  const total = `~${sizeLabel(totalKb)}`;
+  const trash = shown.some((each) => each.kind === "task-workspace") ? " A task-workspace vai para a Lixeira: o espaço só volta ao esvaziar a Lixeira." : "";
   return {
-    chip: `Disco: ${sorted.length} pasta(s) parada(s) há mais de 72 h fora da tag${total} — informação para o dono, nada foi removido`,
-    report: `Paradas há mais de 72 h, fora da tag e sem ninguém nelas (${sorted.length}${total}). Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force; a task-workspace vai para a Lixeira.\n${lines.join("\n")}`,
+    chip: `Disco: ${shown.length} pasta(s) parada(s) há mais de 72 h fora da tag, ${total} — informação para o dono, nada foi removido`,
+    report: `Paradas há mais de 72 h, fora da tag e sem ninguém nelas: ${shown.length}, ${total} no total${small ? ` (e mais ${small} pequena(s), abaixo de ${sizeLabel(minKb)}, não listada(s))` : ""}. Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force.${trash}\n${lines.join("\n")}`,
   };
 }
 
