@@ -207,26 +207,58 @@ export interface OwnerPending {
 }
 export const OWNER_PENDING_TITLE_MAX = 200;
 
-/** The commits an item's title names: 7–40 hex characters with a digit and a letter. */
-function commitsIn(title: string): string[] {
-  return [...title.matchAll(/(?<![0-9a-z])([0-9a-f]{7,40})(?![0-9a-z])/gi)].map((match) => match[1]!.toLowerCase()).filter((hex) => /\d/.test(hex) && /[a-f]/.test(hex));
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+/** The commits an item's title names: 9–40 hex characters with a digit and
+ * a letter — not a conversation's id ("6477b3f4", 8 characters, or a whole
+ * uuid), which is no commit (INSP-H r1 #3). */
+export function commitsIn(title: string): string[] {
+  return [...title.replace(UUID, " ").matchAll(/(?<![0-9a-z])([0-9a-f]{9,40})(?![0-9a-z])/gi)].map((match) => match[1]!.toLowerCase()).filter((hex) => /\d/.test(hex) && /[a-f]/.test(hex));
 }
-const normalLink = (link: string) => link.trim().replace(/\/+$/, "").toLowerCase();
+const normalLink = (link: string) => link.trim().replace(/[#?].*$/, "").replace(/\/+$/, "").toLowerCase();
 const normalTitle = (title: string) => title.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9#]+/g, " ").trim();
+/** The words that carry a title's meaning (4+ letters, or a #number). */
+const titleWords = (title: string) => new Set(normalTitle(title).split(" ").filter((each) => each.length >= 4 || /^#\d+$/.test(each)));
+/** Two titles mostly about the same: at least 60% of the shorter one's words in the other. */
+function similarTitles(a: string, b: string): boolean {
+  const [small, large] = [titleWords(a), titleWords(b)].sort((x, y) => x.size - y.size);
+  if (!small!.size) return false;
+  return [...small!].filter((each) => large!.has(each)).length / small!.size >= 0.6;
+}
 
-/** Two of a bot's items ask the person for the same thing (R9-followup #3,
- * R9-release #1: three items, in three conversations, for one release loop):
- * the same server key; else the same commit (one names it, so must the
- * other — a PR link alone does not make "decide #9052's default" and "stop
- * the release loop that blocks #9332" one item); else the same link; else
- * the same title. */
+/** The ACTION an item asks for, when it is one the server knows by key:
+ * its own key, or — for a bot's item — the same action read from its title
+ * (refusing a looping release of a commit, advancing the tag to a commit,
+ * plugging the Mac in). Merely naming a commit is no action: "Revisar com
+ * o QA o diff do cb015584a" is not the release loop (INSP-H r1 #3). */
+export function ownerPendingAction(item: { title: string; key?: string }): { kind: string; sha?: string } | null {
+  if (item.key) {
+    const [kind, ...rest] = item.key.split(":");
+    return { kind: kind!, ...(rest.length ? { sha: rest.join(":").toLowerCase() } : {}) };
+  }
+  const sha = commitsIn(item.title)[0];
+  if (sha && /(?<![\p{L}])(?:la[çc]o|loop|watcher|launchagent|halted|declined|recus\w+ o release|parar o release|pausar o release)(?![\p{L}])/iu.test(item.title)) return { kind: "release-loop", sha };
+  if (sha && /avan[çc]ar a tag/iu.test(item.title)) return { kind: "tag-advance", sha };
+  if (/(?:ligu?e|ligar) o mac na tomada/iu.test(item.title)) return { kind: "power", sha: "battery" };
+  return null;
+}
+const HEX_SHA = /^[0-9a-f]{7,40}$/;
+/** The same action: same kind, and the same target (a commit by prefix, anything else exactly). */
+const sameAction = (a: { kind: string; sha?: string }, b: { kind: string; sha?: string }) =>
+  a.kind === b.kind && (a.sha !== undefined && b.sha !== undefined && HEX_SHA.test(a.sha) && HEX_SHA.test(b.sha) ? a.sha.startsWith(b.sha) || b.sha.startsWith(a.sha) : a.sha === b.sha);
+
+/** Two of a bot's items ask the person for the same thing (R9-followup #3:
+ * three items, in three conversations, for one release loop): the same
+ * action (server key, or the same action read from a title); else the same
+ * title; else the same link AND a similar title — "Aprovar o merge da PR
+ * #9332" and "#9052 / PR #9332: confirmar o padrão" share a link, not an
+ * ask (INSP-H r1 #3). */
 export function sameOwnerPending(a: { title: string; link?: string; key?: string }, b: { title: string; link?: string; key?: string }): boolean {
-  if (a.key && b.key) return a.key === b.key;
-  const shasA = commitsIn(a.title);
-  const shasB = commitsIn(b.title);
-  if (shasA.length || shasB.length) return shasA.some((x) => shasB.some((y) => x.startsWith(y) || y.startsWith(x)));
-  if (a.link && b.link) return normalLink(a.link) === normalLink(b.link);
-  return normalTitle(a.title) === normalTitle(b.title);
+  const actionA = ownerPendingAction(a);
+  const actionB = ownerPendingAction(b);
+  if (actionA && actionB) return sameAction(actionA, actionB);
+  if (a.key && b.key) return false;
+  if (normalTitle(a.title) === normalTitle(b.title)) return true;
+  return Boolean(a.link && b.link && normalLink(a.link) === normalLink(b.link) && similarTitles(a.title, b.title));
 }
 export const OWNER_PENDING_MAX_PER_THREAD = 10;
 
@@ -800,7 +832,8 @@ export class BotAutonomy {
     if (elsewhere && !input.key) return { ...elsewhere, duplicate: true };
     const same = (open: OwnerPending) => here(open) || open === elsewhere;
     const existing = this.ownerPending.find(same);
-    const used = new Set(this.ownerPending.map((open) => open.id));
+    // an id still answered as an alias is taken: "resolve o8" must never close two items (INSP-H r1 #3)
+    const used = new Set(this.ownerPending.flatMap((open) => [open.id, ...(open.aliases ?? [])]));
     let n = this.ownerPending.length + 1;
     while (used.has(`o${n}`)) n += 1;
     const pending: OwnerPending = {
@@ -833,6 +866,11 @@ export class BotAutonomy {
       }
       into.aliases = [...new Set([...(into.aliases ?? []), item.id, ...(item.aliases ?? [])])];
       if (!into.link && item.link) into.link = item.link;
+      // a server item's key (and its exact remedy) survives: else the server could never close it (INSP-H r1 #3)
+      if (!into.key && item.key) {
+        into.key = item.key;
+        into.title = item.title;
+      }
       folded = true;
       console.log(`[owner-pending] ${item.id} ("${item.title.slice(0, 80)}") is the same as ${into.id} ("${into.title.slice(0, 80)}"): folded into it`);
     }

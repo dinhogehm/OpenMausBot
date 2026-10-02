@@ -23,6 +23,7 @@ import {
   parseStandingLabel,
   reportsPrompt,
   sameOwnerPending,
+  commitsIn,
   wakeChip,
   wakeFiredChip,
   watchLabel,
@@ -924,13 +925,46 @@ describe("what waits on the person", () => {
     expect(autonomy.ownerPendingOf("chief").map((item) => item.id)).toEqual(["o1"]);
   });
 
-  it("tells the same commit, link or title apart from a different ask", () => {
-    expect(sameOwnerPending({ title: "Parar o laço no cb015584a" }, { title: `echo ${SHA} > x` })).toBe(true);
-    expect(sameOwnerPending({ title: "Parar o laço no cb015584a", link: PR(9332) }, { title: "Decidir a #9052", link: PR(9332) })).toBe(false);
-    expect(sameOwnerPending({ title: "Release 2995ef215 falhou" }, { title: "Release cb015584a falhou" })).toBe(false);
-    // decimal numbers (PRs, dates) are no commit
+  it("folds by the ACTION asked, never by a commit, a conversation id or a link alone (INSP-H r1 #3)", () => {
+    const loop = { title: `Recusar o release em laço de cb015584a (5 falhas iguais)`, key: "release-loop:cb015584a" };
+    // the real o5/o7/o8: one action, three wordings
+    for (const title of [ITEMS[1]!.title, ITEMS[2]!.title, ITEMS[3]!.title]) expect(sameOwnerPending(loop, { title }), title).toBe(true);
+    // naming the commit is not asking to refuse it
+    expect(sameOwnerPending(loop, { title: "Revisar com o QA o diff do cb015584a" })).toBe(false);
+    expect(sameOwnerPending({ title: ITEMS[1]!.title }, { title: "Revisar com o QA o diff do cb015584a" })).toBe(false);
+    // a conversation's id is no commit
+    expect(commitsIn("Fechar a conversa 6477b3f4")).toEqual([]);
+    expect(commitsIn("ver dbb9f1cf-5b8f-486d-9f6d-3167938cd65b")).toEqual([]);
+    expect(sameOwnerPending({ title: "Fechar a conversa 6477b3f4" }, { title: "Renomear a conversa 6477b3f4" })).toBe(false);
+    // the same link is not the same decision
+    expect(sameOwnerPending({ title: ITEMS[0]!.title, link: PR(9332) }, { title: "Aprovar o merge da PR #9332", link: PR(9332) })).toBe(false);
+    // different commits, different keys, decimal numbers
+    expect(sameOwnerPending({ title: "Parar o laço do release no 2995ef215" }, { title: "Parar o laço do release no cb015584a" })).toBe(false);
+    expect(sameOwnerPending({ title: "a", key: "tag-advance:abc123456" }, { title: "a", key: "tag-advance:def567890" })).toBe(false);
     expect(sameOwnerPending({ title: "Aprovar 20261001 e #9332" }, { title: "Outro 20261001" })).toBe(false);
-    expect(sameOwnerPending({ title: "a", key: "tag-advance:abc1234" }, { title: "a", key: "tag-advance:def5678" })).toBe(false);
+    expect(sameOwnerPending({ title: "Ligue o Mac na tomada" }, { title: "x", key: "power:battery" })).toBe(true);
+  });
+
+  it("never gives a new item an id still answered as an alias, and keeps the server's key when folding (INSP-H r1 #3)", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      wakes: [], goals: [], inFlight: [],
+      ownerPending: [
+        { id: "o7", botId: "chief", threadId: "ade82a65", title: ITEMS[2]!.title, createdAt: 1_000 },
+        { id: "o8", botId: "chief", threadId: "3e55c0fd", title: ITEMS[3]!.title, createdAt: 2_000 },
+        { id: "o9", botId: "chief", threadId: "dbb9f1cf", title: "Recusar o release em laço de cb015584a (3 falhas iguais): echo … > ~/.nuria/declined-production-release.sha", key: "release-loop:cb015584a", createdAt: 3_000 },
+      ],
+    }));
+    const autonomy = make();
+    const [only] = autonomy.ownerPendingOf("chief");
+    // the oldest id stays, with the server's key and remedy
+    expect(only).toMatchObject({ id: "o7", key: "release-loop:cb015584a", aliases: ["o8", "o9"] });
+    expect(only!.title).toContain("declined-production-release.sha");
+    expect(only!.title).not.toContain("halted");
+    // the server can still close it by its key
+    const fresh = autonomy.addOwnerPending("chief", "dd9c5ece", { title: "Decidir o destino da #9280" });
+    expect(["o7", "o8", "o9"]).not.toContain(fresh.id);
+    expect(autonomy.resolveOwnerPending({ botId: "chief", id: "o8" }).map((each) => each.id)).toEqual(["o7"]);
+    expect(autonomy.ownerPendingOf("chief").map((each) => each.id)).toEqual([fresh.id]);
   });
 });
 
