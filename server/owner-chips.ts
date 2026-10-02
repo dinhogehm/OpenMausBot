@@ -46,23 +46,31 @@ export function serverRestartedChip(input: { interrupted: number; survived: numb
 }
 
 /** The owner's item while the app reuses worktrees: the action first, as it shows in two lines (INSP-H r2 #6). */
-export const appUnblockTitle = (repoName: string) => `Abrir no app uma sessão na raiz de ${repoName} e enviar uma mensagem curta (destrava o app, que está reaproveitando worktrees; até lá as sessões vão para o terminal)`;
+export const appUnblockTitle = (repoName: string) => `Abrir no app uma sessão na raiz de ${repoName}, com a worktree desligada, e enviar uma mensagem curta (destrava o app, que está reaproveitando worktrees; até lá as sessões vão para o terminal)`;
+
+/** How long "seguir no terminal" holds: the server does not ask again before. */
+export const APP_UNBLOCK_DECLINE_MS = 24 * 3_600_000;
+export const APP_UNBLOCK_DECLINE_LABEL = "Seguir no terminal";
 
 /** The owner's item to unblock the app, born practical: why it matters, the
  * steps in the Claude app, and the two answers (R10-visual N13: the server's
- * own o8 had only a title, so "Resolver" showed nothing to do). */
+ * own o8 had only a title, so "Resolver" showed nothing to do). The gesture
+ * is the one the app's records prove (a newest session in the repository
+ * root, worktree OFF, ends the reuse), the same the 409 asks the bot for
+ * (claude-desktop.ts reusedFolderRefusal); "seguir no terminal" is kept by
+ * the server for 24 h, so the promise is true (INSP-J r1 #8). */
 export const appUnblockPending = (repoName: string) => ({
   title: appUnblockTitle(repoName),
   why: `O app Claude está reaproveitando worktrees de ${repoName}, então o servidor não cria sessões nele: até você destravar, as sessões dos bots rodam no terminal, sem aparecer no app.`,
   steps: [
-    { text: "Abra o app Claude e comece uma sessão nova de código (Novo → Code)." },
-    { text: `Escolha como pasta a raiz do repositório ${repoName} (não uma worktree dentro de .claude/worktrees).` },
-    { text: "Envie uma mensagem curta, por exemplo \"ok\", e espere a resposta." },
-    { text: "Pronto: o servidor percebe que o app voltou a criar sessões e fecha este item sozinho." },
+    { text: "Abra o app Claude e, no menu Arquivo, escolha Nova sessão." },
+    { text: `Escolha a pasta raiz do repositório ${repoName} e deixe a worktree DESLIGADA: a sessão tem de abrir na raiz, não numa pasta de .claude/worktrees.` },
+    { text: "Envie uma mensagem curta, por exemplo \"ok\", e espere a resposta: o app só grava a sessão depois do primeiro envio." },
+    { text: "Pronto: com a sessão mais nova na raiz, o servidor volta a abrir sessões no app e fecha este item sozinho. Depois você pode arquivar essa sessão." },
   ],
   options: [
-    { label: "Feito", reply: `Abri no app uma sessão na raiz de ${repoName} e enviei uma mensagem. Confira se o app voltou a aceitar sessões novas.` },
-    { label: "Deixar no terminal", reply: `Deixe as sessões de ${repoName} no terminal por enquanto; não precisa me lembrar disso de novo.` },
+    { label: "Feito, conferir", reply: `Abri no app uma sessão na raiz de ${repoName}, com a worktree desligada, e enviei uma mensagem. Confira se o app voltou a aceitar sessões novas.` },
+    { label: APP_UNBLOCK_DECLINE_LABEL, reply: `Não vou destravar o app agora: siga com as sessões de ${repoName} no terminal. O servidor não me pede isso de novo nas próximas 24 h.` },
   ],
 });
 

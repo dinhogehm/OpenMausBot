@@ -978,7 +978,10 @@ export function reusedFolderRefusal(last: { folder: string; title?: string; earl
   const earlier = [...new Set(last.earlier)].slice(0, 3).map((title) => `"${title}"`).join(", ");
   return [
     `não abri: a sessão mais recente do app Claude${last.title ? ` ("${last.title}")` : ""} abriu em ${last.folder}, pasta que já era de ${earlier}. O app está reaproveitando worktrees e abriria a sessão nova lá também.`,
-    `Peça ao dono para iniciar no app uma sessão nova na raiz de ${repoName} (pasta ${repoName}, worktree ligada) e enviar nela uma mensagem curta: o app só grava a sessão depois do primeiro envio, então abrir e fechar sem enviar não muda nada. Depois ela pode ser arquivada.`,
+    // the gesture the records prove: a newest session in the repository ROOT
+    // (worktree off) ends the reuse (lastAppWorktreeFolder is null for it);
+    // "worktree ligada" fell into a reused worktree again (R10-dispatch R10-1)
+    `Peça ao dono para iniciar no app uma sessão nova (Arquivo → Nova sessão) na raiz de ${repoName} (pasta ${repoName}, com a worktree DESLIGADA) e enviar nela uma mensagem curta: o app só grava a sessão depois do primeiro envio, então abrir e fechar sem enviar não muda nada. Depois ela pode ser arquivada.`,
     fromQueue
       ? `Este pedido veio da fila de sessões e continua nela: o servidor tenta de novo sozinho a cada 5 min e desiste, com aviso, depois de 24 h falhando. Se não der para esperar, use surface "cli" com cli_reason.`
       : `Então tente de novo. Se não der para esperar, use surface "cli" com cli_reason.`,

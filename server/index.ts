@@ -363,7 +363,7 @@ import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
-import { appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
+import { APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
@@ -9924,6 +9924,20 @@ async function watchScreenLock(): Promise<void> {
 
 const APP_UNBLOCK_KEY = "app-reused-folder:";
 
+/** What the owner declined from "Precisa de você", and until when (kept across restarts). */
+const ownerDeclines = (() => {
+  const path = join(DATA_DIR, "owner-declines.json");
+  let until: Record<string, number> = {};
+  try { until = JSON.parse(readFileSync(path, "utf8")) as Record<string, number>; } catch { /* none yet */ }
+  return {
+    until: (key: string) => (typeof until[key] === "number" ? until[key]! : 0),
+    set(key: string, at: number) {
+      until = { ...Object.fromEntries(Object.entries(until).filter(([, when]) => when > Date.now())), [key]: at };
+      try { writeFileAtomic(path, `${JSON.stringify(until)}\n`, { mode: 0o600 }); } catch (error) { console.error(`[owner-declines] ${error instanceof Error ? error.message : String(error)}`); }
+    },
+  };
+})();
+
 /** The app reuses worktrees, so the server will not create there: ONE item
  * in "Precisa de você" asks the owner to unblock it — the action that is
  * theirs alone. Its id, or null when no conversation of the bot can hold it. */
@@ -9931,6 +9945,12 @@ function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string): s
   const thread = ownerChannelOf(bot.id) ?? threadId;
   if (!store.taskByThread(bot.id, thread)) return null;
   const name = basename(repo);
+  // the owner chose "seguir no terminal": not asked again while that holds (INSP-J r1 #8)
+  const declinedUntil = ownerDeclines.until(`${APP_UNBLOCK_KEY}${name}`);
+  if (declinedUntil > Date.now()) {
+    console.log(`[claude-desktop] the owner chose to keep ${name}'s sessions in the terminal until ${new Date(declinedUntil).toISOString()}: not asked again`);
+    return null;
+  }
   const item = autonomy.addOwnerPending(bot.id, thread, { ...appUnblockPending(name), key: `${APP_UNBLOCK_KEY}${name}` });
   refreshBotRow(bot.id);
   return item.id;
@@ -22584,6 +22604,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (typeof body.label !== "string" || body.label !== option.label) return json(res, 409, { error: `O bot reescreveu as opções deste item: "${String(body.label ?? "")}" não é mais a opção ${Number(body.option) + 1}. Confira e escolha de novo.`, code: "options_changed" });
         text = ownerPendingReplyText(item, option.reply, true);
         resolve = true;
+        // "seguir no terminal" is kept: the server does not recreate the item for 24 h (INSP-J r1 #8)
+        if (item.key?.startsWith(APP_UNBLOCK_KEY) && option.label === APP_UNBLOCK_DECLINE_LABEL) ownerDeclines.set(item.key, Date.now() + APP_UNBLOCK_DECLINE_MS);
       } else {
         const reply = typeof body.text === "string" ? body.text.trim() : "";
         if (!reply) return json(res, 400, { error: "Escreva a resposta ao bot." });

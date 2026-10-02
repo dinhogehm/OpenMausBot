@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { askCoveredByItem, echoAsk, ownerAskText, OWNER_PENDING_TITLE_MAX } from "./bot-autonomy.ts";
-import { appUnblockPending } from "./owner-chips.ts";
+import { reusedFolderRefusal } from "./claude-desktop.ts";
+import { APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appUnblockPending } from "./owner-chips.ts";
 import { powerPendingDetails } from "./power.ts";
 import { releaseLoopPending, tagAdvancePending } from "./release-watch.ts";
 
@@ -89,7 +90,18 @@ describe("the items the server creates come with why, steps and options", () => 
     const item = appUnblockPending("nuria-platform");
     practical(item);
     expect(item.steps.map((step) => step.text).join("\n")).toContain("raiz do repositório nuria-platform");
-    expect(item.options.map((option) => option.label)).toEqual(["Feito", "Deixar no terminal"]);
+    expect(item.options.map((option) => option.label)).toEqual(["Feito, conferir", APP_UNBLOCK_DECLINE_LABEL]);
+    // INSP-J r1 #8: the same gesture as the 409 the bot reads — root, worktree OFF, File → New session
+    const steps = item.steps.map((step) => step.text).join("\n");
+    expect(steps).toContain("menu Arquivo, escolha Nova sessão");
+    expect(steps).toContain("deixe a worktree DESLIGADA");
+    const refusal = reusedFolderRefusal({ folder: "/r/.claude/worktrees/atendimento-reaberto-bugs-496989", earlier: ["a", "b"] }, "nuria-platform");
+    expect(refusal).toContain("com a worktree DESLIGADA");
+    expect(refusal).not.toContain("worktree ligada");
+    expect(item.title).toContain("com a worktree desligada");
+    // the decline promises only what the server keeps (24 h, owner-declines.json)
+    expect(item.options[1]!.reply).toContain("nas próximas 24 h");
+    expect(APP_UNBLOCK_DECLINE_MS).toBe(24 * 3_600_000);
   });
 
   it("a release in a loop, the stuck tag, the battery", () => {

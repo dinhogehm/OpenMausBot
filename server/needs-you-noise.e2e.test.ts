@@ -76,3 +76,34 @@ it("sends no conversation line for an echo, an empty ask or a conversation that 
     await fixture.close();
   }
 }, 90_000);
+
+// INSP-J r1 #8: "Deixar no terminal" answered "não precisa me lembrar disso
+// de novo", and the next blocked start recreated the item. The server now
+// keeps the choice for 24 h.
+it("keeps the owner's 'seguir no terminal' on the unblock-the-app item for 24 h", async () => {
+  const fixture = await launchVerificationServer({ ...process.env });
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+  let restarted: ChildProcess | undefined;
+  try {
+    const chief = (await runControlOmb(["new-bot", "--name", "Chief of Staff", "--url", url]) as any).bot;
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+    const item = { id: "o8", botId: chief.id, threadId: chief.activeTaskId ?? chief.threadId, title: "Abrir no app uma sessão na raiz de nuria-platform", key: "app-reused-folder:nuria-platform", createdAt: Date.now() - 3_600_000,
+      options: [{ label: "Feito, conferir", reply: "Abri." }, { label: "Seguir no terminal", reply: "Não vou destravar o app agora." }] };
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [item] }));
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment({ ...process.env }, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+    const before = Date.now();
+    const answer = await api(`/api/bots/${chief.id}/owner-pending/o8/reply`, { option: 1, label: "Seguir no terminal" });
+    expect(answer.resolved).toBe(1);
+    const declines = JSON.parse(readFileSync(join(dataDir, "owner-declines.json"), "utf8"));
+    expect(declines["app-reused-folder:nuria-platform"]).toBeGreaterThanOrEqual(before + 24 * 3_600_000 - 5_000);
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 90_000);
