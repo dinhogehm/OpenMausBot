@@ -593,7 +593,10 @@ describe("a loop with the owner's item open: the item is refreshed, nobody is wo
     expect(new Set(REAL_CAUSES.map(releaseCauseKey))).toEqual(new Set(["Local CI failed at script-contracts"]));
     // what still tells two failures apart stays
     expect(releaseCauseKey("Tenant nuria-ws-01a0ed885c1a reprovou inspecao da migration 0608")).toContain("migration 0608");
-    expect(releaseCauseKey("ADMISSION_TIMEOUT waited=2700s pid=4411 at 2026-10-02T12:57:49Z")).toBe("ADMISSION_TIMEOUT waited=2700s at");
+    expect(releaseCauseKey("ADMISSION_TIMEOUT waited=2700s pid=4411 at 2026-10-02T12:57:49Z")).toBe("ADMISSION_TIMEOUT waited");
+    // two tries that timed out on the lease after different waits are one cause (R10-resilience: waited=1060s live)
+    expect(releaseCauseKey("ADMISSION_TIMEOUT waited=1060s pid=70272")).toBe(releaseCauseKey("ADMISSION_TIMEOUT waited=2700s pid=4411 at 2026-10-02T12:57:49Z"));
+    expect(releaseCauseKey("Local CI failed at script-contracts")).toBe("Local CI failed at script-contracts");
     const dir = mkdtempSync(join(tmpdir(), "omb-loop-causes-"));
     try {
       const path = join(dir, "release-watch.json");

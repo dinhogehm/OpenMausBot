@@ -62,8 +62,12 @@ export function releaseCauseKey(cause: string): string {
     .replace(/(?:^|\s)(?:\/[\w.@+-]+)+\/?/g, " ")
     .replace(/\b\d{8}T\d{6}Z?\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g, "")
     .replace(/\bpids?[ =:]+\d+\b/gi, "")
+    // how long one try waited for the lease changes every try, the timeout does not
+    .replace(/\b(waited|elapsed|after)[=: ]+\d+(?:\.\d+)?\s*(?:ms|s|m|min)?\b/gi, "$1")
     .replace(/\b[0-9a-f]{12,40}\b/g, "")
     .replace(/[\s.,;:-]+$/u, "")
+    // a time stamp taken out leaves its preposition behind ("… at", "… às")
+    .replace(/\s+(?:at|on|em|às|as)$/iu, "")
     .replace(/\s+/g, " ")
     .trim();
 }
