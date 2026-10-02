@@ -482,6 +482,27 @@ export function workingGoalRunMessages(): Array<{ threadId: string; message: Mes
   return rows.map((row) => ({ threadId: row.thread_id, message: JSON.parse(row.json) as Message }));
 }
 
+/** How long each settled turn ran, by bot, from the turn digests in
+ * [from, to) — the productivity report's "active hours" (lot V). Reads two
+ * fields of the digest, never the message text. */
+export function digestTimings(from: number, to: number): Array<{ botId: string; at: number; durationMs: number | null }> {
+  const rows = db()
+    .prepare(
+      "SELECT at, json_extract(json, '$.digest.botId') AS bot_id, json_extract(json, '$.digest.durationMs') AS duration_ms " +
+      "FROM messages WHERE kind = 'digest' AND at >= ? AND at < ?",
+    )
+    .all(from, to) as Array<{ at: number; bot_id: unknown; duration_ms: unknown }>;
+  return rows.flatMap((row) => typeof row.bot_id === "string" && row.bot_id
+    ? [{ botId: row.bot_id, at: Number(row.at), durationMs: typeof row.duration_ms === "number" && Number.isFinite(row.duration_ms) && row.duration_ms >= 0 ? row.duration_ms : null }]
+    : []);
+}
+
+/** The oldest turn digest kept, for the report's coverage note. */
+export function oldestDigestAt(): number | null {
+  const row = db().prepare("SELECT MIN(at) AS at FROM messages WHERE kind = 'digest'").get() as { at: unknown } | undefined;
+  return typeof row?.at === "number" ? row.at : null;
+}
+
 export function setActiveLeaf(threadId: string, leafId: string | null): void {
   db()
     .prepare(
