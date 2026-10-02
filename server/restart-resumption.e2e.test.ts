@@ -140,6 +140,52 @@ it("after a restart, follows the sessions whose claude survived to the end of th
   }
 }, 90_000);
 
+// INSP-H r1 #10: a survivor past the turn limit is cut like any turn (it
+// never stays "running" for good), and on the Chief's desk the summary is
+// not doubled by the session's own chip.
+it("cuts a survivor at the turn limit, and says it once on the Chief's desk", async () => {
+  const parentEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50", OMB_CC_TURN_TIMEOUT_MS: "5000" };
+  const fixture = await launchVerificationServer(parentEnv);
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+  const { execFileSync } = await import("node:child_process");
+  let restarted: ChildProcess | undefined;
+  let standIn: ChildProcess | undefined;
+  try {
+    const chief = (await runControlOmb(["new-bot", "--name", "Chief", "--url", url]) as any).bot;
+    await api(`/api/bots/${chief.id}`, { chiefOfStaff: true }, "PATCH");
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+    standIn = spawn(process.execPath, ["-e", "setTimeout(() => {}, 120000)"], { detached: true, stdio: "ignore" });
+    const lstart = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(standIn.pid)], { env: { ...process.env, LC_ALL: "C", LANG: "C" } }).toString().trim();
+    const at = Date.now() - 60_000;
+    writeFileSync(join(dataDir, "cc-sessions.json"), JSON.stringify({ sessions: [{
+      id: "dddddddd-0000-4000-8000-0000000000d4", ownerBotId: chief.id, ownerThreadId: chief.activeTaskId, title: "9316 longo", repo: dataDir, worktree: "9316-longo",
+      permissionMode: "auto", status: "running", surface: "cli", createdAt: at, lastActivityAt: at, progressAt: at, turns: 3, costUsd: 0, queued: [], proc: { pid: standIn.pid, lstart },
+    }] }));
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment(parentEnv, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+    const chips = async (threadId: string) => ((await api(`/api/threads/${threadId}/messages`, undefined, "GET")).messages as any[])
+      .filter((message) => message.kind === "activity").map((message) => String(message.tool?.name ?? ""));
+    const ledger = () => JSON.parse(readFileSync(join(dataDir, "cc-sessions.json"), "utf8")).sessions[0];
+    await expect.poll(() => ledger().status, { timeout: 20_000 }).toBe("failed");
+    expect(ledger().lastError).toContain("was cut at the 1-min turn limit");
+    await expect.poll(() => standIn!.exitCode !== null || standIn!.signalCode !== null, { timeout: 10_000 }).toBe(true);
+    const desk = await chips(chief.activeTaskId);
+    expect(desk.filter((chip) => chip.startsWith("Servidor reiniciado"))).toEqual(["Servidor reiniciado: 1 sessão segue rodando"]);
+    // the summary says it there: no chip of its own beside it
+    expect(desk.some((chip) => chip.startsWith("Sessão 9316 seguiu rodando"))).toBe(false);
+    expect(desk.some((chip) => chip.startsWith("Sessão 9316 cortada no limite de 1 min — retome-a"))).toBe(true);
+  } finally {
+    standIn?.kill("SIGKILL");
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 90_000);
+
 it("tells a standing watch armed with an unanchored ignore, once, when the server starts (INSP-E 7)", async () => {
   const parentEnv = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50" };
   const fixture = await launchVerificationServer(parentEnv);

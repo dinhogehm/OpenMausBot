@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccProcAlive, processStartSync, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, recentAppFailure, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccProcAlive, processStartSync, survivorStep, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, recentAppFailure, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -101,6 +101,13 @@ describe("ledger", () => {
     expect(ccProcAlive({ pid: process.pid, lstart: processStartSync(process.pid)! })).toBe(true);
     expect(ccProcAlive({ pid: process.pid, lstart: "Mon Jan  1 00:00:00 1990" })).toBe(false);
     expect(ccProcAlive({ pid: 0, lstart: "x" })).toBe(false);
+  });
+
+  it("follows a survivor within the turn limit, cuts it past it, closes it once gone (INSP-H r1 #10)", () => {
+    const turnStart = { lastActivityAt: 1_000 };
+    expect(survivorStep(turnStart, true, 1_000 + 90 * 60_000, 90 * 60_000)).toBe("follow");
+    expect(survivorStep(turnStart, true, 1_000 + 90 * 60_000 + 1, 90 * 60_000)).toBe("limit");
+    expect(survivorStep(turnStart, false, 1_000 + 999 * 60_000, 90 * 60_000)).toBe("gone");
   });
 
   it("keeps a stopped session stopped when its run exits late", () => {

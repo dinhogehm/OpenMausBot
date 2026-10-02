@@ -128,6 +128,15 @@ export type CcSurface = "app" | "cli";
  * so a pid reused by another program is never taken for it. */
 export interface CcProc { pid: number; lstart: string }
 
+/** What to do with a turn whose claude outlived a restart: follow it while
+ * it lives within the turn limit (its turn began at lastActivityAt, as any
+ * turn's), cut it past the limit like any turn, or close it once its
+ * process is gone (INSP-H r1 #10). */
+export function survivorStep(session: Pick<CcSession, "lastActivityAt">, alive: boolean, now: number, limitMs: number): "follow" | "limit" | "gone" {
+  if (!alive) return "gone";
+  return now - session.lastActivityAt > limitMs ? "limit" : "follow";
+}
+
 /** `ps` by its path (the server's PATH may be bare) in the C locale, so a
  * start time read now compares with one read at spawn. */
 export const PS_BIN = "/bin/ps";

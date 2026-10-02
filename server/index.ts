@@ -283,6 +283,7 @@ import {
   CC_TURN_TIMEOUT_MS,
   CcSessionLedger,
   ccProcAlive,
+  survivorStep,
   PS_BIN,
   PS_ENV,
   ccReportForOwner,
@@ -9920,7 +9921,19 @@ function followSurvivingSessions(): void {
       continue;
     }
     const transcript = transcriptPath({ cliSessionId: session.id });
-    if (session.proc && ccProcAlive(session.proc)) {
+    const step = survivorStep(session, Boolean(session.proc && ccProcAlive(session.proc)), Date.now(), ccTurnTimeoutMs);
+    if (step === "limit" && session.proc) {
+      // past the turn limit like any turn: its group is stopped, the turn is cut and said (INSP-H r1 #10)
+      const pid = session.proc.pid;
+      try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch { /* gone meanwhile */ } }
+      const minutes = Math.max(1, Math.round(ccTurnTimeoutMs / 60_000));
+      ccLedger.finishTurn(session, { ok: false, report: transcript ? lastAssistantText(transcript) : "", costUsd: 0, error: `its turn, followed after the server restart, was cut at the ${minutes}-min turn limit (its claude, outliving the restart, was stopped); resume it with a new message if the work is not done` });
+      console.log(`[cc-sessions] ${session.id}: the claude that outlived the restart (PID ${pid}) passed the ${minutes}-min turn limit: stopped`);
+      ccChipShort(session, sessionChips.survivorLimit(session.title, session.turns, minutes), false);
+      ccReport(session, desktopReportFor(desktopWork, session));
+      continue;
+    }
+    if (step === "follow") {
       const wrote = transcript ? transcriptWrittenAt(transcript) : null;
       const progress = Math.max(session.survivedRestartAt, wrote ?? 0);
       if ((session.progressAt ?? 0) < progress) {
