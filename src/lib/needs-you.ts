@@ -39,6 +39,8 @@ export interface NeedsYouItem {
   history?: NonNullable<WireOwnerPending["history"]>;
   /** The person's last answer reached the bot, which has not updated nor resolved the item since. */
   awaitingSince?: number;
+  /** When the bot last rewrote it. */
+  updatedAt?: number;
 }
 
 /** How long an answered item waits on its bot before it comes back to the
@@ -48,33 +50,44 @@ export const AWAITING_MAX_MS = 2 * 3_600_000;
 type Awaitable = Pick<NeedsYouItem, "awaitingSince" | "history">;
 
 /** The person's last answer still waits its turn in a busy conversation: the
- * bot has not had it, so its 2 h have not started (INSP-J2 r3 R2). */
+ * bot has not had it (INSP-J2 r3 R2). */
 export const answerQueued = (item: Awaitable): boolean =>
   Boolean(item.history?.findLast((each) => each.delivered || each.queued)?.queued);
 
-/** Answered, and its bot still has time to rewrite or resolve it: not the person's. */
+/** Answered, and its bot still has time to rewrite or resolve it — or the
+ * answer waits its turn, within the same 2 h: not the person's. */
 export const awaitingBot = (item: Awaitable, now: number): boolean =>
-  item.awaitingSince !== undefined && (answerQueued(item) || now - item.awaitingSince < AWAITING_MAX_MS);
+  item.awaitingSince !== undefined && now - item.awaitingSince < AWAITING_MAX_MS;
 
 /** Answered, and the bot did nothing for AWAITING_MAX_MS since it got it: the person's again. */
 export const botSilent = (item: Awaitable, now: number): boolean =>
   item.awaitingSince !== undefined && !answerQueued(item) && now - item.awaitingSince >= AWAITING_MAX_MS;
 
+/** The answer sat in the queue for AWAITING_MAX_MS (the bot busy with
+ * something else): the person's again, with the conversation as the way in
+ * — a reminder would not pass it in the queue (INSP-J2 r4 A1). */
+export const answerStuck = (item: Awaitable, now: number): boolean =>
+  item.awaitingSince !== undefined && answerQueued(item) && now - item.awaitingSince >= AWAITING_MAX_MS;
+
 /** The person's last answer never reached the bot (cancelled, failed, lost):
- * the item is theirs again, and the screen says why (INSP-J2 r3 R2). */
-export function answerNotDelivered(item: Awaitable): NonNullable<NeedsYouItem["history"]>[number] | null {
+ * the item is theirs again, and the screen says why (INSP-J2 r3 R2) — until
+ * the bot rewrites the item, or the chosen decision no longer exists (r4 A2). */
+export function answerNotDelivered(item: Awaitable & Pick<NeedsYouItem, "updatedAt" | "options">): NonNullable<NeedsYouItem["history"]>[number] | null {
   const last = item.history?.at(-1);
-  return item.awaitingSince === undefined && last && !last.delivered && !last.queued ? last : null;
+  if (item.awaitingSince !== undefined || !last || last.delivered || last.queued) return null;
+  if (item.updatedAt !== undefined && item.updatedAt > last.at) return null;
+  if (last.kind === "option" && !item.options?.some((option) => option.label === last.label)) return null;
+  return last;
 }
 
 /** What waits on the person (the count, the sidebar, the badge): not what waits on a bot. */
 export const waitingOnYou = <T extends Awaitable>(items: readonly T[], now: number): T[] => items.filter((item) => !awaitingBot(item, now));
 
 /** When the next answered item goes back to the person (its bot's 2 h run
- * out), or null: the sidebar re-renders exactly then, not on the next
- * broadcast (INSP-J2 r2 N3). A queued answer has no deadline yet. */
+ * out, delivered or still queued), or null: the sidebar re-renders exactly
+ * then, not on the next broadcast (INSP-J2 r2 N3, r4 A1). */
 export function nextAwaitingChange(items: ReadonlyArray<Awaitable>, now: number): number | null {
-  const due = items.flatMap((item) => (item.awaitingSince === undefined || answerQueued(item) ? [] : [item.awaitingSince + AWAITING_MAX_MS])).filter((at) => at > now);
+  const due = items.flatMap((item) => (item.awaitingSince === undefined ? [] : [item.awaitingSince + AWAITING_MAX_MS])).filter((at) => at > now);
   return due.length ? Math.min(...due) : null;
 }
 
@@ -175,6 +188,7 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
           ...(pending.recommendRequestedAt ? { recommendRequestedAt: pending.recommendRequestedAt } : {}),
           ...(pending.history?.length ? { history: pending.history } : {}),
           ...(pending.awaitingSince ? { awaitingSince: pending.awaitingSince } : {}),
+          ...(pending.updatedAt ? { updatedAt: pending.updatedAt } : {}),
         });
       }
       const approval = task.activity === "waiting-on-you";

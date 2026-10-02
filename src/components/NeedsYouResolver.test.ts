@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
-import { answerTime, awaitingBot, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, sortNeedsYou } from "@/lib/needs-you";
+import { answerNotDelivered, answerStuck, answerTime, awaitingBot, AWAITING_MAX_MS, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, nextAwaitingChange, sortNeedsYou } from "@/lib/needs-you";
 import { decisionReply } from "@/lib/needs-you-actions";
 import { awaitingLine, decisionNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
 
@@ -383,7 +383,7 @@ describe("keys on the resolution screen", () => {
     expect(html.indexOf("Histórico")).toBeLessThan(html.indexOf("Por que importa"));
     // sent: a check, the words for a screen reader and on hover only — not repeated in every line (r2 N8)
     expect(html).toMatch(/title="enviado para Monitor Chat Atendimento"[^>]*>.*Você escolheu “Já colei” às \d{2}:\d{2}<span class="sr-only"> — enviado para Monitor Chat Atendimento/);
-    expect(html).toContain("— não enviado: o bot está ocupado");
+    expect(html).toContain('— <span title="o bot está ocupado">não enviado</span>');
     // INSP-J2 #2: answered, the decisions fold behind "Mudar resposta"
     expect(tree.find((node) => "data-resolver-option" in node.props)).toBeUndefined();
     press("data-resolver-change-answer");
@@ -473,8 +473,8 @@ describe("keys on the resolution screen", () => {
   });
 
   // INSP-J2 r3 R2 (redacted)
-  it("waits on the bot while the answer is queued, however long — no 'não respondeu', no 'Lembrar'", () => {
-    const at = now - 5 * 3_600_000;
+  it("waits on the bot while the answer is queued — within 2 h — with no 'não respondeu' and no 'Lembrar'", () => {
+    const at = now - 30 * 60_000;
     const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
       { id: "o40", title: "Confirmar o teto do lote", since: now - 6 * 3_600_000, awaitingSince: at, history: [{ at, kind: "option", label: "Sim", text: "Sim.", delivered: false, queued: true }] },
     ] })])]);
@@ -482,20 +482,72 @@ describe("keys on the resolution screen", () => {
     expect(botSilent(list[0]!, now)).toBe(false);
     const { html, find } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
     expect(find("data-resolver-remind")).toBeUndefined();
+    expect(find("data-resolver-stuck")).toBeUndefined();
     expect(html).not.toContain("não respondeu");
     expect(html).toContain("Aguardando bots (1)");
+  });
+
+  // INSP-J2 r4 A1 (redacted): the choice sat in the queue for 5 h with the bot in a long goal
+  it("after 2 h in the queue the item is the person's again: counted, 'na fila há 5 h', the conversation as the way in, no reminder", () => {
+    const at = now - 5 * 3_600_000;
+    const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o42", title: "Confirmar o teto do lote", since: now - 6 * 3_600_000, options: [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }], awaitingSince: at, history: [{ at, kind: "option", label: "Sim", text: "Sim.", delivered: false, queued: true }] },
+      { id: "o43", title: "Aprovar o envio", since: now - 6 * 3_600_000, awaitingSince: at, history: [{ at, kind: "text", text: "Pode enviar.", delivered: false, queued: true }] },
+    ] })])]);
+    expect(awaitingBot(list[0]!, now)).toBe(false);
+    expect(botSilent(list[0]!, now)).toBe(false);
+    expect(answerStuck(list[0]!, now)).toBe(true);
+    const { html, find, press, calls, tree } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
+    expect(html).toContain("2 itens esperando você");
+    expect(html).not.toContain("Aguardando bots");
+    expect(html).toContain("Sua escolha está na fila há 5 h: Monitor Chat está ocupado(a) com outra coisa.");
+    expect(find("data-resolver-remind")).toBeUndefined();
+    expect(html).not.toContain("não respondeu");
+    // "Abrir conversa" stands out in the banner and opens the conversation
+    expect(String(find("data-resolver-stuck-conversation")!.props.className)).toContain("bg-accent");
+    press("data-resolver-stuck-conversation");
+    expect(calls).toEqual(["conversation:m1"]);
+    // the row says so too, and the decisions are open again
+    expect(tree.filter((node) => "data-resolver-stuck-row" in node.props)).toHaveLength(2);
+    expect(html).toContain("Na fila há 5 h");
+    expect(tree.filter((node) => node.props["data-placement"] === "inline" && "data-resolver-option" in node.props)).toHaveLength(2);
+    expect(view({ items: list, selectedKey: needsYouKey(list[1]!) }).html).toContain("Sua mensagem está na fila há 5 h");
+    // the sidebar clock knows when a queued answer runs out too
+    expect(nextAwaitingChange([{ awaitingSince: now - 60_000, history: [{ at: now - 60_000, kind: "text", text: "x", delivered: false, queued: true }] }], now)).toBe(now - 60_000 + AWAITING_MAX_MS);
+  });
+
+  // INSP-J2 r4 A2
+  it("drops the 'não foi entregue' banner once the bot rewrote the item, or the chosen decision is gone", () => {
+    const at = now - 3_600_000;
+    const failed = { at, kind: "option" as const, label: "Sim", text: "Sim.", delivered: false, error: "cancelamento na conversa antes de chegar ao bot" };
+    const item = (extra: Record<string, unknown>) => needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o44", title: "Confirmar o teto do lote", since: now - 6 * 3_600_000, options: [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }], history: [failed], ...extra },
+    ] })])])[0]!;
+    expect(answerNotDelivered(item({}))).toBe(failed);
+    expect(answerNotDelivered(item({ updatedAt: at + 60_000 }))).toBeNull();
+    expect(answerNotDelivered(item({ updatedAt: at - 60_000 }))).toBe(failed);
+    expect(answerNotDelivered(item({ options: [{ label: "Talvez", reply: "Talvez." }, { label: "Não", reply: "Não." }] }))).toBeNull();
+    const rewritten = view({ items: [item({ updatedAt: at + 60_000 })], selectedKey: needsYouKey(item({})) });
+    expect(rewritten.find("data-resolver-not-delivered")).toBeUndefined();
+    // the history keeps the line, with the reason on hover only (r4 A3)
+    expect(rewritten.html).toContain('<span title="cancelamento na conversa antes de chegar ao bot">não enviado</span>');
+    expect(rewritten.html).not.toContain("não enviado: ");
   });
 
   it("gives the item back when the answer never arrived, saying why (R2)", () => {
     const at = new Date(2026, 9, 2, 15, 10).getTime();
     const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
       { id: "o41", title: "Confirmar o teto do lote", since: now - 6 * 3_600_000, options: [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }],
-        history: [{ at, kind: "option", label: "Sim", text: "Sim.", delivered: false, error: "cancelada na conversa antes de chegar ao bot" }] },
+        history: [{ at, kind: "option", label: "Sim", text: "Sim.", delivered: false, error: "cancelamento na conversa antes de chegar ao bot" }] },
     ] })])]);
     const { html, tree } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
     expect(html).toContain("1 item esperando você");
     expect(tree.find((node) => "data-resolver-not-delivered" in node.props)).toBeDefined();
-    expect(html).toContain("Sua escolha “Sim” às 15:10 não foi entregue para Monitor Chat: cancelada na conversa antes de chegar ao bot. O item voltou para você.");
+    // a neutral reason, read the same after "Sua escolha", "Sua mensagem" and "Seu pedido" (r4 A3)
+    expect(html).toContain("Sua escolha “Sim” às 15:10 não foi entregue para Monitor Chat: cancelamento na conversa antes de chegar ao bot. O item voltou para você.");
+    // said once: the history line carries only "não enviado"
+    expect(html.split("cancelamento na conversa").length - 1).toBe(2);
+    expect(html).toContain("— <span title=\"cancelamento na conversa antes de chegar ao bot\">não enviado</span>");
     // the decisions are open again, nothing marked chosen
     const inline = tree.filter((node) => node.props["data-placement"] === "inline" && "data-resolver-option" in node.props);
     expect(inline).toHaveLength(2);

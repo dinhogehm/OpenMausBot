@@ -7,7 +7,7 @@ import {
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import {
-  answerNotDelivered, answerTime, awaitingBot, botSilent, chosenOption, decisionsInOrder, dueAt, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
+  answerNotDelivered, answerStuck, answerTime, awaitingBot, botSilent, chosenOption, decisionsInOrder, dueAt, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
   type NeedsYouItem, type NeedsYouSort,
 } from "@/lib/needs-you";
 
@@ -256,6 +256,13 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                               <span className="truncate">{t("needsYou.screen.botSilentShort", { name: each.botName })}</span>
                             </span>
                           )}
+                          {/* the answer sat in the queue for 2 h: back with the person (INSP-J2 r4 A1) */}
+                          {answerStuck(each, now) && (
+                            <span data-resolver-stuck-row="" className="mt-1 inline-flex max-w-full items-center gap-1 rounded-full border border-warning/60 px-1.5 py-px text-[11px] font-medium text-ink">
+                              <Clock size={11} aria-hidden="true" className="text-warning" />
+                              <span className="truncate">{t("needsYou.screen.stuckShort", { age: waitingAge(each.awaitingSince!, now) })}</span>
+                            </span>
+                          )}
                         </span>
                         {each.due && (
                           <span className={cn("mt-0.5 max-w-[96px] shrink-0 truncate rounded-full border px-1.5 py-px text-[11px]", overdue ? OVERDUE : "border-transparent bg-inset font-medium text-ink-secondary")}>
@@ -355,6 +362,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   const replyId = `needs-you-reply-${needsYouKey(item).replace(/[^\w-]/g, "-")}`;
   const awaiting = awaitingBot(item, now);
   const silent = botSilent(item, now);
+  const stuck = answerStuck(item, now);
   const notDelivered = notDeliveredLine(item, now);
   // answered and waiting on the bot: the decisions fold behind "Mudar resposta" (INSP-J2 #2)
   const decisionsOpen = Boolean(item.options?.length) && (!awaiting || props.changingAnswer === needsYouKey(item));
@@ -426,6 +434,19 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
                 {t("needsYou.screen.remind", { name: item.botName })}
               </button>
             )}
+          </div>
+        )}
+        {stuck && (
+          // the answer sat in the queue for 2 h: the person's again, with the conversation as the way in — no reminder, it would not pass the queue (INSP-J2 r4 A1)
+          <div data-resolver-stuck="" className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-warning/60 bg-panel px-3 py-2 text-[13px] text-ink">
+            <p role="status" className="flex min-w-0 flex-1 basis-60 items-start gap-2">
+              <Clock size={14} aria-hidden="true" className="mt-0.5 shrink-0 text-warning" />
+              <span>{stuckLine(item, now)}</span>
+            </p>
+            <button type="button" data-resolver-stuck-conversation="" onClick={() => props.onOpenConversation(item)} className={cn(strongButton, "py-1.5 text-[12.5px]")}>
+              <MessageSquare size={14} aria-hidden="true" />
+              {t("needsYou.screen.openConversation")}
+            </button>
           </div>
         )}
         {notDelivered && (
@@ -615,6 +636,13 @@ export function awaitingLine(item: Pick<NeedsYouItem, "history" | "awaitingSince
   return `${line} ${t(last.kind === "option" ? "needsYou.screen.awaitingQueuedChoice" : last.kind === "ask" ? "needsYou.screen.awaitingQueuedRequest" : "needsYou.screen.awaitingQueuedMessage", { name })}`;
 }
 
+/** The answer has waited its turn for 2 h: what is queued, for how long, and that the bot is busy elsewhere (INSP-J2 r4 A1). */
+export function stuckLine(item: Pick<NeedsYouItem, "history" | "awaitingSince" | "botName">, now: number): string {
+  const last = item.history?.findLast((each) => each.delivered || each.queued);
+  const values = { age: waitingAge(item.awaitingSince ?? now, now), name: item.botName };
+  return t(last?.kind === "option" ? "needsYou.screen.stuckChoice" : last?.kind === "ask" ? "needsYou.screen.stuckRequest" : "needsYou.screen.stuckMessage", values);
+}
+
 /** The person's last answer never reached the bot: said, with why — the item is theirs again (INSP-J2 r3 R2). */
 export function notDeliveredLine(item: Pick<NeedsYouItem, "history" | "awaitingSince" | "botName">, now: number): string | null {
   const failed = answerNotDelivered(item);
@@ -652,7 +680,8 @@ function History({ item, now }: { item: NeedsYouItem; now: number }) {
                   ? <span className="sr-only">{` — ${sent}`}</span>
                   : (
                     <span className={entry.queued ? "text-ink-secondary" : "font-medium text-danger"}>
-                      {" — "}{entry.queued ? t("needsYou.history.queued", { name: item.botName }) : t("needsYou.history.notDelivered", { error: entry.error ?? "" })}
+                      {/* the reason lives in the banner above (and here on hover), not twice on screen (r4 A3) */}
+                      {" — "}{entry.queued ? t("needsYou.history.queued", { name: item.botName }) : <span title={entry.error}>{t("needsYou.history.notDelivered")}</span>}
                     </span>
                   )}
               </span>

@@ -135,6 +135,11 @@ describe("what needs the person, from every bot", () => {
     expect(html).toContain('aria-label="2 itens precisam de você"');
     expect(html).not.toContain("Liberar a planilha");
     expect(html).toContain("Monitor Chat não respondeu");
+    // a choice queued for 5 h is the person's again, said in the row (r4 A1)
+    const stuck = [bot("monitor", "Monitor Chat", [task("m0", "Vigia", { ownerPending: [{ id: "o4", title: "Confirmar o teto", since: now - 6 * 3_600_000, awaitingSince: now - 5 * 3_600_000, history: [{ at: now - 5 * 3_600_000, kind: "option", label: "Sim", text: "Sim.", delivered: false, queued: true }] }] })])];
+    const stuckHtml = renderToStaticMarkup(SidebarNeedsYou({ items: needsYouItems(stuck), density: "comfortable", now, onOpen: () => {} })!);
+    expect(stuckHtml).toContain('aria-label="1 itens precisam de você"');
+    expect(stuckHtml).toContain("Na fila há 5 h");
     // and the one waiting on its bot is a quiet line under the block, not in its count (r2 N2)
     expect(html.match(/data-needs-you-awaiting=""/g)).toHaveLength(1);
     expect(html).toContain(">Aguardando bots (1)<");

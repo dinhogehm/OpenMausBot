@@ -2,7 +2,7 @@ import { Check, ChevronRight, CircleAlert, Clock, Copy, ExternalLink, ListChecks
 import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { awaitingBot, botSilent, dueAt, sortNeedsYou, waitingAge, waitingOnYou, type NeedsYouItem } from "@/lib/needs-you";
+import { answerStuck, awaitingBot, botSilent, dueAt, sortNeedsYou, waitingAge, waitingOnYou, type NeedsYouItem } from "@/lib/needs-you";
 import type { SidebarDensity } from "@/lib/sidebar-preferences";
 
 /** Rows shown in the sidebar before "Ver todos": the rest is one click away, on the resolution screen. */
@@ -90,7 +90,7 @@ export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, o
                   {/* who and when on the second line; the row's buttons sit at its end */}
                   <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-ink-secondary" style={{ paddingRight: actions * 24 }}>
                     {/* answered: the item waits on the bot now (J18) */}
-                    <span className="min-w-0 truncate">{botSilent(item, clock) ? t("needsYou.screen.botSilentShort", { name: item.botName }) : item.botName}</span>
+                    <span className="min-w-0 truncate">{botSilent(item, clock) ? t("needsYou.screen.botSilentShort", { name: item.botName }) : answerStuck(item, clock) ? t("needsYou.screen.stuckShort", { age: waitingAge(item.awaitingSince!, clock) }) : item.botName}</span>
                     <span aria-hidden="true">·</span>
                     <span className={cn("shrink-0 tabular-nums", overdue && "font-semibold text-danger")}>{item.due ?? age}</span>
                   </span>
