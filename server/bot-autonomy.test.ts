@@ -24,6 +24,7 @@ import {
   reportsPrompt,
   sameOwnerPending,
   commitsIn,
+  ownerPendingAction,
   wakeChip,
   wakeFiredChip,
   watchLabel,
@@ -935,6 +936,38 @@ describe("what waits on the person", () => {
     expect(sameOwnerPending(loop, { title: "Conferir no watcher se o deploy do cb015584a terminou" })).toBe(false);
     expect(sameOwnerPending(loop, { title: "Decidir se paramos o release do cb015584a ou esperamos a #9341" })).toBe(true);
     expect(sameOwnerPending(loop, { title: "Liberar a PR #9341 para passar no gate do cb015584a" })).toBe(false);
+  });
+
+  it("joins the real o14 and o15 (one loop, two wordings), and keeps checks and negations apart (INSP-H r3 #1)", () => {
+    // the ledger of 02/10, redacted
+    const o14 = { title: "Recusar o release em laço de d5bb1f70b (5 falhas iguais) — copie o comando", key: "release-loop:d5bb1f70b" };
+    const o15 = { title: "Gravar a trava do release d5bb1f70b para destravar a PR #9348 (#9334/#9331 em produção)" };
+    expect(sameOwnerPending(o15, o14)).toBe(true);
+    for (const title of ["Travar o release d5bb1f70b", "Escrever o declined do d5bb1f70b"]) expect(sameOwnerPending({ title }, o14), title).toBe(true);
+    for (const title of ["Não parar o release d5bb1f70b ainda; esperar a #9348", "Conferir se o release do d5bb1f70b parou", "Seguir sem pausar o watcher no d5bb1f70b"]) {
+      expect(sameOwnerPending({ title }, o14), title).toBe(false);
+      expect(ownerPendingAction({ title }), title).toBeNull();
+    }
+    // the bot's item lands first; the server's, with its key, takes it over: one item, the bot's id
+    const autonomy = make();
+    const bots = autonomy.addOwnerPending("chief", "dbb9f1cf", o15);
+    const server = autonomy.addOwnerPending("chief", "dbb9f1cf", o14);
+    expect(server).toMatchObject({ id: bots.id, key: "release-loop:d5bb1f70b" });
+    expect(autonomy.ownerPendingOf("chief")).toHaveLength(1);
+  });
+
+  it("joins the owner's \"Abrir no app … raiz de <repo>\" with the server's unblock item (INSP-H r3 #3)", () => {
+    // the real o8 of 02/10 (redacted)
+    const o8 = "Abrir no app Claude uma sessão nova na raiz de nuria-platform e mandar uma mensagem curta (o app está reaproveitando a worktree [x] em sessões novas)";
+    expect(ownerPendingAction({ title: o8 })).toEqual({ kind: "app-reused-folder", sha: "nuria-platform" });
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], inFlight: [], ownerPending: [{ id: "o8", botId: "chief", threadId: "dbb9f1cf", title: o8, createdAt: 1 }] }));
+    const loaded = make();
+    // askOwnerToUnblockApp's own item (title from appUnblockTitle)
+    const server = loaded.addOwnerPending("chief", "dbb9f1cf", { title: "Abrir no app uma sessão na raiz de nuria-platform e enviar uma mensagem curta (destrava o app, que está reaproveitando worktrees; até lá as sessões vão para o terminal)", key: "app-reused-folder:nuria-platform" });
+    expect(server).toMatchObject({ id: "o8", key: "app-reused-folder:nuria-platform" });
+    expect(loaded.ownerPendingOf("chief")).toHaveLength(1);
+    // another repository is another item
+    expect(sameOwnerPending({ title: o8 }, { title: "x", key: "app-reused-folder:OpenMausBot" })).toBe(false);
     expect(sameOwnerPending({ title: ITEMS[1]!.title }, { title: "Revisar com o QA o diff do cb015584a" })).toBe(false);
     // a conversation's id is no commit
     expect(commitsIn("Fechar a conversa 6477b3f4")).toEqual([]);

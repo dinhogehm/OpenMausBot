@@ -242,8 +242,18 @@ export function ownerPendingAction(item: { title: string; key?: string }): { kin
   // "pausar", "recusar", "desligar"; not "para", the preposition) AND what is stopped
   // (release, watcher, loop, LaunchAgent) — "Conferir no watcher se o deploy terminou" asks
   // something else and must not be folded nor closed with the loop (INSP-H r2 #5)
-  const stopping = /(?<![\p{L}])(?:par(?:ar|amos|e|em|ou|ando)|paus\p{L}*|recus\p{L}*|deslig\p{L}*|interromp\p{L}*|halt\p{L}*|declin\p{L}*)(?![\p{L}])/iu.test(item.title);
-  if (sha && stopping && /(?<![\p{L}])(?:release|watcher|la[çc]o|loop|launchagent|carrier)(?![\p{L}])/iu.test(item.title)) return { kind: "release-loop", sha };
+  // INSP-H r3 #1: "travar" too ("Gravar a trava do release d5bb1f70b", the real o15), not
+  // "parou" (a check: "Conferir se o release parou"), and never under a negation
+  // ("Não parar o release ainda", "sem pausar o watcher")
+  const verbs = [...item.title.matchAll(/(?<![\p{L}])(?:par(?:ar|amos|e|em|ando)|paus\p{L}*|recus\p{L}*|deslig\p{L}*|interromp\p{L}*|halt\p{L}*|declin\p{L}*|trav(?:ar|e|em|amos|a)?)(?![\p{L}])/giu)];
+  const stopping = verbs.some((match) => !/(?<![\p{L}])(?:n[ãa]o|nem|sem)\s+(?:\S+\s+){0,2}$/iu.test(item.title.slice(0, match.index)));
+  // writing the refusal itself is stopping the release ("Escrever o declined do d5bb1f70b")
+  const writesRefusal = /(?<![\p{L}])(?:grav|escrev)\p{L}*\s+(?:a\s+trava|o\s+declined|a\s+recusa)(?![\p{L}])/iu.test(item.title);
+  if (sha && (writesRefusal || (stopping && /(?<![\p{L}])(?:release|watcher|la[çc]o|loop|launchagent|carrier)(?![\p{L}])/iu.test(item.title)))) return { kind: "release-loop", sha };
+  // INSP-H r3 #3: the owner opening a fresh session at the repository's root is the server's
+  // "destravar o app" item (app-reused-folder:<repo>)
+  const unblock = /(?<![\p{L}])abr\p{L}*\s+(?:no\s+app(?:\s+claude)?\s+)?(?:uma\s+)?sess[ãa]o[^.;]{0,40}?raiz\s+d[eo]\s+([\w.-]+)/iu.exec(item.title);
+  if (unblock) return { kind: "app-reused-folder", sha: unblock[1]!.replace(/[.,;:]+$/, "") };
   if (sha && /avan[çc]ar a tag/iu.test(item.title)) return { kind: "tag-advance", sha };
   if (/(?:ligu?e|ligar) o mac na tomada/iu.test(item.title)) return { kind: "power", sha: "battery" };
   return null;
