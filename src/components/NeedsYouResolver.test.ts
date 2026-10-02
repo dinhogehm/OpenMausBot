@@ -3,9 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
-import { dueAt, needsYouItems, needsYouKey, needsYouTitle, sortNeedsYou } from "@/lib/needs-you";
+import { answerTime, dueAt, needsYouItems, needsYouKey, needsYouTitle, sortNeedsYou } from "@/lib/needs-you";
 import { decisionReply } from "@/lib/needs-you-actions";
-import { linkLabel, NeedsYouResolverView, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
+import { linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
 
 // Invented bots and items: no client data.
 const now = new Date(2026, 9, 2, 15, 40).getTime();
@@ -51,6 +51,7 @@ function view(overrides: Partial<NeedsYouResolverViewProps> = {}) {
     onDecide: (item, n) => calls.push(`decide:${item.pendingId}:${n}`), onReply: (item) => calls.push(`reply:${item.pendingId ?? item.threadId}`),
     onAskSteps: (item) => calls.push(`steps:${item.pendingId}`), onAskRecommend: (item) => calls.push(`recommend:${item.pendingId}`), onResolve: (item) => calls.push(`resolve:${item.pendingId}`),
     onAskSwitch: (item, n) => calls.push(`switch:${item.pendingId}:${n}`), onCancelSwitch: () => calls.push("cancelSwitch"),
+    onChangeAnswer: (item) => calls.push(`changeAnswer:${item.pendingId}`),
     onOpenConversation: (item) => calls.push(`conversation:${item.threadId}`), onDismissError: () => calls.push("dismiss"),
     ...overrides,
   };
@@ -160,15 +161,20 @@ describe("the resolution screen (I1)", () => {
     expect(decisions.map((node) => `${node.props["data-placement"]}:${node.props["data-resolver-option"]}`)).toEqual(["inline:0", "inline:1", "footer:0", "footer:1"]);
     // the two places are complementary: footer on a roomy window, inline otherwise
     const holders = tree.filter((node) => node.type === "div" && typeof node.props.className === "string" && /\[@media\((?:max|min)-height:76[01]px\)\]:hidden/.test(node.props.className as string));
-    expect(holders.map((node) => node.props.className)).toEqual(["mt-6 sm:[@media(min-height:761px)]:hidden", "mb-3 max-sm:hidden [@media(max-height:760px)]:hidden"]);
+    // INSP-J2 #8: the footer is compact — at most 40% of the window, scrolling inside, in 2 columns
+    expect(holders.map((node) => node.props.className)).toEqual(["mt-6 sm:[@media(min-height:761px)]:hidden", "mb-3 max-h-[40vh] overflow-y-auto max-sm:hidden [@media(max-height:760px)]:hidden"]);
+    const grids = tree.filter((node) => node.type === "div" && typeof node.props.className === "string" && (node.props.className as string).startsWith("grid gap-2 "));
+    expect(grids.map((node) => node.props.className)).toEqual(["grid gap-2 grid-cols-1", "grid gap-2 grid-cols-2"]);
+    // and what scrolls under it fades instead of being cut mid-line
+    expect(tree.find((node) => "data-resolver-fade" in node.props)?.props.className).toContain("bg-gradient-to-t from-panel");
     // on a cramped window the footer offers to jump to them
     const jump = tree.find((node) => "data-resolver-jump" in node.props)!;
     expect(String(jump.props.className)).toContain("sm:[@media(min-height:761px)]:hidden");
     expect(Children.toArray(jump.props.children).join("")).toContain("Ver as 2 decisões");
-    // the owner's decision (J15, 02/10): decisions look like buttons — with no
-    // recommendation the first is filled with the accent, a refusal outlined
-    // neutral — and each says what it sends (whole, inline)
-    expect(decisions.map((node) => node.props["data-look"])).toEqual(["primary", "neutral", "primary", "neutral"]);
+    // decisions look like buttons (J15), but with no recommendation none is
+    // filled — all colored as buttons, the refusal neutral (INSP-J2 #1) —
+    // and each says what it sends (whole, inline)
+    expect(decisions.map((node) => node.props["data-look"])).toEqual(["secondary", "neutral", "secondary", "neutral"]);
     const inlineReply = tree.find((node) => node.props.id === "needs-you-option-inline-0")!;
     expect(String(inlineReply.props.className)).toContain("break-words");
     expect(String(inlineReply.props.className)).not.toContain("hidden");
@@ -224,12 +230,13 @@ describe("the resolution screen (I1)", () => {
     expect(fresh.calls).toEqual(["steps:o3"]);
     // J17: asked 4 min ago (by the person or by the server on its own): "pedindo…", no button
     const asked = view({ selectedKey: keyOf("o4") });
-    expect(asked.html).toContain("Pedindo o passo a passo ao Monitor Chat…");
+    expect(asked.html).toContain("Pedindo o passo a passo para Monitor Chat…");
     expect(asked.html).not.toContain("data-resolver-ask-steps");
     expect(asked.find("data-resolver-steps-asking")).toBeDefined();
     // no answer after 15 min: the button comes back as "Pedir de novo"
     const late = view({ selectedKey: keyOf("o4"), now: now + 12 * 60_000 });
-    expect(late.html).toContain("O passo a passo foi pedido ao Monitor Chat há 16 min e ele ainda não respondeu.");
+    // INSP-J2 #11: "para {name}", never "ao {name}" (a bot's name is not always masculine)
+    expect(late.html).toContain("O passo a passo foi pedido para Monitor Chat há 16 min e ainda não chegou.");
     expect(late.html).toContain("Pedir de novo");
     late.press("data-resolver-ask-steps");
     expect(late.calls).toEqual(["steps:o4"]);
@@ -314,7 +321,9 @@ describe("keys on the resolution screen", () => {
     expect(String(inline[0]!.props.className)).toMatch(/bg-accent .*text-accent-ink|text-accent-ink.*bg-accent /);
     expect(String(inline[1]!.props.className)).toContain("border-accent bg-accent/8");
     for (const node of inline) expect(String(node.props.className)).toMatch(/cursor-pointer.*focus-visible:ring-2|focus-visible:ring-2.*cursor-pointer/);
-    expect(html).toContain("Recomendado");
+    // the badge agrees with "opção/decisão" (INSP-J2 #11)
+    expect(html).toContain("Recomendada");
+    expect(html).not.toContain("Recomendado");
     expect(html).toContain("Destrava o gate hoje sem mexer no limite de ninguém.");
     // its "Envia" still reads, and the why reaches a screen reader with it
     const described = tree.find((node) => node.props.id === "needs-you-option-inline-1")!;
@@ -325,15 +334,22 @@ describe("keys on the resolution screen", () => {
     expect(tree.find((node) => "data-resolver-ask-recommend" in node.props)).toBeUndefined();
   });
 
-  it("an older item with 2+ decisions and none recommended: the first filled, a refusal neutral, and one quiet button asks the bot", () => {
+  it("an older item with 2+ decisions and none recommended: none filled, a refusal neutral, and a strong button asks the bot", () => {
     const { tree, press, calls, html } = view({ selectedKey: keyOf("o1") });
-    expect(tree.filter((node) => node.props["data-placement"] === "inline").map((node) => node.props["data-look"])).toEqual(["primary", "neutral"]);
-    expect(html).toContain("Pedir recomendação ao Chief of Staff");
+    // INSP-J2 #1: no recommendation, no fill — not the first by its position, never the refusal
+    const inline = tree.filter((node) => node.props["data-placement"] === "inline");
+    expect(inline.map((node) => node.props["data-look"])).toEqual(["secondary", "neutral"]);
+    for (const node of inline) expect(String(node.props.className)).not.toMatch(/(^| )bg-accent( |$)/);
+    expect(html).toContain("Pedir a recomendação de Chief of Staff");
+    // with nothing filled, asking is the way forward: it is the strong button
+    expect(String(tree.find((node) => "data-resolver-ask-recommend" in node.props)!.props.className)).toContain("bg-accent");
     press("data-resolver-ask-recommend");
     expect(calls).toContain("recommend:o1");
-    // asked already: said with how long ago
+    // asked already: said with how long ago, and the button goes quiet
     const asked = needsYouItems(bots).map((item) => (item.pendingId === "o1" ? { ...item, recommendRequestedAt: now - 3 * 60_000 } : item));
-    expect(view({ items: asked, selectedKey: keyOf("o1") }).html).toContain("Recomendação pedida há 3 min");
+    const again = view({ items: asked, selectedKey: keyOf("o1") });
+    expect(again.html).toContain("Recomendação pedida há 3 min");
+    expect(String(again.find("data-resolver-ask-recommend")?.props.className ?? "")).not.toContain("bg-accent ");
   });
 
   // J18 (the owner, 02/10): after choosing "Já colei" on o12 the screen
@@ -354,25 +370,80 @@ describe("keys on the resolution screen", () => {
     // in the list and in the item: it waits on the bot now
     expect(tree.find((node) => "data-resolver-awaiting" in node.props)).toBeDefined();
     expect(html).toContain("Aguardando Monitor Chat Atendimento");
-    expect(html).toMatch(/Você respondeu às \d{2}:\d{2}: aguardando Monitor Chat Atendimento\./);
-    // the history, with what reached the bot and what did not
+    // INSP-J2 #9: the banner says what was answered, set apart from the page
+    const banner = tree.find((node) => "data-resolver-awaiting-detail" in node.props)!;
+    expect(renderToStaticMarkup(banner as ReactElement)).toMatch(/Você escolheu “Já colei” às \d{2}:\d{2}: aguardando Monitor Chat Atendimento\./);
+    expect(String(banner.props.className)).toContain("border-accent/40");
+    // the history, with what reached the bot and what did not — above the why and the steps (INSP-J2 #8)
     expect(html).toContain("Histórico");
-    expect(html).toMatch(/Você escolheu “Já colei” às \d{2}:\d{2}<span[^>]*> — enviado ao Monitor Chat Atendimento/);
+    expect(html.indexOf("Histórico")).toBeLessThan(html.indexOf("Por que importa"));
+    expect(html).toMatch(/Você escolheu “Já colei” às \d{2}:\d{2}<span[^>]*> — enviado para Monitor Chat Atendimento/);
     expect(html).toContain("— não enviado: o bot está ocupado");
+    // INSP-J2 #2: answered, the decisions fold behind "Mudar resposta"
+    expect(tree.find((node) => "data-resolver-option" in node.props)).toBeUndefined();
+    press("data-resolver-change-answer");
+    expect(calls).toEqual(["changeAnswer:o12"]);
+    const open = view({ items: answered, selectedKey: key, changingAnswer: key });
+    expect(open.find("data-resolver-change-answer")).toBeUndefined();
     // the chosen decision is pressed and badged, distinct from a recommendation
-    const inline = tree.filter((node) => node.props["data-placement"] === "inline" && "data-resolver-option" in node.props);
+    const inline = open.tree.filter((node) => node.props["data-placement"] === "inline" && "data-resolver-option" in node.props);
     expect(inline.map((node) => node.props["aria-pressed"])).toEqual([true, false]);
     expect(inline[0]!.props["aria-label"]).toBe("Já colei, escolhida");
     expect(String(inline[0]!.props.className)).toContain("ring-ink");
-    expect(html).toContain("Escolhido");
-    // choosing another one asks first
-    press("data-resolver-option", 1);
-    expect(calls).toEqual(["switch:o12:1"]);
-    const confirm = view({ items: answered, selectedKey: key, switching: { key, option: 1 } });
+    expect(open.html).toContain("Escolhida");
+    expect(open.html).not.toContain("Escolhido");
+    // INSP-J2 #4: the chosen one again sends nothing; another one asks first
+    open.press("data-resolver-option", 0);
+    open.press("data-resolver-option", 1);
+    expect(open.calls).toEqual(["switch:o12:1"]);
+    const confirm = view({ items: answered, selectedKey: key, changingAnswer: key, switching: { key, option: 1 } });
     expect(confirm.html).toContain("Você já escolheu “Já colei”. Trocar para “Cole você”?");
+    // INSP-J2 #10: the question takes the focus
+    expect(confirm.find("data-resolver-switch-yes")!.props.autoFocus).toBe(true);
     confirm.press("data-resolver-switch-yes");
     confirm.press("data-resolver-switch-no");
     expect(confirm.calls).toEqual(["decide:o12:1", "cancelSwitch"]);
+  });
+
+  // INSP-J2 #2 (the owner, 02/10): an answered item stayed in "esperando
+  // você" though the ball was with the bot. Redacted.
+  it("puts answered items in 'Aguardando bots', out of the count, and back to the person after 2 h of silence", () => {
+    const options = [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }];
+    const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o20", title: "Liberar a planilha de agosto", since: now - 5 * 3_600_000, options, awaitingSince: now - 30 * 60_000, history: [{ at: now - 30 * 60_000, kind: "option", label: "Sim", text: "Sim.", delivered: true }] },
+      { id: "o21", title: "Confirmar o teto do lote", since: now - 4 * 3_600_000, why: "Trava o release." },
+      { id: "o22", title: "Aprovar o envio do relatório", since: now - 6 * 3_600_000, awaitingSince: now - 3 * 3_600_000, history: [{ at: now - 3 * 3_600_000, kind: "text", text: "Pode enviar.", delivered: true }] },
+    ] })])]);
+    const key = (id: string) => needsYouKey(list.find((item) => item.pendingId === id)!);
+    const { html, tree, title } = view({ items: list, selectedKey: key("o21") });
+    expect(title).toBe("Confirmar o teto do lote");
+    // the header counts what waits on the person: o21 and o22 (silent), not o20
+    expect(html).toContain("2 itens esperando você");
+    // the awaiting one is last, under its own heading with its own count
+    const rows = tree.filter((node) => "data-resolver-row" in node.props).map((node) => node.props["data-resolver-row"]);
+    expect(rows).toHaveLength(3);
+    expect(rows[2]).toBe(key("o20"));
+    expect(html).toContain("Aguardando bots (1)");
+    expect(html.indexOf("Aguardando bots (1)")).toBeLessThan(html.indexOf("Liberar a planilha de agosto"));
+    // silent for 2 h+: the person's again, said so in the list and in the item
+    expect(tree.find((node) => "data-resolver-silent-row" in node.props)).toBeDefined();
+    const silent = view({ items: list, selectedKey: key("o22") });
+    expect(silent.html).toContain("Sem resposta de Monitor Chat há 3 h: o item voltou para você.");
+    expect(silent.find("data-resolver-awaiting-detail")).toBeUndefined();
+  });
+
+  it("Escape undoes the innermost thing first: the switch question, then 'Mudar resposta', then the narrow item, then the screen (INSP-J2 #10)", () => {
+    expect(resolverEscape({ switching: true, changingAnswer: true, narrowDetail: true })).toBe("cancelSwitch");
+    expect(resolverEscape({ switching: false, changingAnswer: true, narrowDetail: true })).toBe("foldAnswer");
+    expect(resolverEscape({ switching: false, changingAnswer: false, narrowDetail: true })).toBe("list");
+    expect(resolverEscape({ switching: false, changingAnswer: false, narrowDetail: false })).toBe("close");
+  });
+
+  it("says when: 'às HH:MM' today, 'em DD/MM às HH:MM' another day, with the year in another one (INSP-J2 #11)", () => {
+    const today = new Date(2026, 9, 2, 16, 7).getTime();
+    expect(answerTime(new Date(2026, 9, 2, 9, 5).getTime(), today)).toBe("às 09:05");
+    expect(answerTime(new Date(2026, 8, 30, 16, 7).getTime(), today)).toBe("em 30/09 às 16:07");
+    expect(answerTime(new Date(2025, 11, 31, 23, 59).getTime(), today)).toBe("em 31/12/2025 às 23:59");
   });
 
   it("names links the way the person reads them", () => {

@@ -41,6 +41,21 @@ export interface NeedsYouItem {
   awaitingSince?: number;
 }
 
+/** How long an answered item waits on its bot before it comes back to the
+ * person as "o bot não respondeu" (INSP-J2 #2). */
+export const AWAITING_MAX_MS = 2 * 3_600_000;
+
+/** Answered, and its bot still has time to rewrite or resolve it: not the person's. */
+export const awaitingBot = (item: Pick<NeedsYouItem, "awaitingSince">, now: number): boolean =>
+  item.awaitingSince !== undefined && now - item.awaitingSince < AWAITING_MAX_MS;
+
+/** Answered, and the bot did nothing for AWAITING_MAX_MS: the person's again. */
+export const botSilent = (item: Pick<NeedsYouItem, "awaitingSince">, now: number): boolean =>
+  item.awaitingSince !== undefined && now - item.awaitingSince >= AWAITING_MAX_MS;
+
+/** What waits on the person (the count, the sidebar, the badge): not what waits on a bot. */
+export const waitingOnYou = <T extends Pick<NeedsYouItem, "awaitingSince">>(items: readonly T[], now: number): T[] => items.filter((item) => !awaitingBot(item, now));
+
 /** The option the person last chose and that reached the bot, if any (J18). */
 export function chosenOption(item: Pick<NeedsYouItem, "history">): string | null {
   return item.history?.findLast((each) => each.kind === "option" && each.delivered)?.label ?? null;
@@ -48,10 +63,13 @@ export function chosenOption(item: Pick<NeedsYouItem, "history">): string | null
 
 /** "16:07" today, "02/10 16:07" another day: when an answer was given. */
 export function answerTime(at: number, now = Date.now()): string {
+  // "às 16:07" today, "em 02/10 às 16:07" another day, with the year when it is another one (INSP-J2 #11)
   const day = new Date(at);
   const today = new Date(now);
   const time = day.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-  return day.toDateString() === today.toDateString() ? time : `${day.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" })} ${time}`;
+  if (day.toDateString() === today.toDateString()) return t("needsYou.time.today", { time });
+  const date = day.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", ...(day.getFullYear() !== today.getFullYear() ? { year: "numeric" as const } : {}) });
+  return t("needsYou.time.otherDay", { date, time });
 }
 
 /** The decisions in the order they are shown, each with its index in the

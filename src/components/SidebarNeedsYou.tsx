@@ -2,7 +2,7 @@ import { Check, ChevronRight, CircleAlert, Copy, ExternalLink, ListChecks, ListT
 import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { dueAt, sortNeedsYou, waitingAge, type NeedsYouItem } from "@/lib/needs-you";
+import { botSilent, dueAt, sortNeedsYou, waitingAge, waitingOnYou, type NeedsYouItem } from "@/lib/needs-you";
 import type { SidebarDensity } from "@/lib/sidebar-preferences";
 
 /** Rows shown in the sidebar before "Ver todos": the rest is one click away, on the resolution screen. */
@@ -12,7 +12,7 @@ export const NEEDS_YOU_SIDEBAR_ROWS = 6;
  * how long it has waited — one place to answer from. Absent when nothing
  * waits. Each row opens the resolution screen on that item; "Ver todos"
  * opens it on the whole list. */
-export function SidebarNeedsYou({ items, density, now, onOpen, onResolve, onOpenLink = (url) => void openExternalLink(url), onCopy = (text) => void navigator.clipboard?.writeText(text).catch(() => {}) }: {
+export function SidebarNeedsYou({ items: all, density, now, onOpen, onResolve, onOpenLink = (url) => void openExternalLink(url), onCopy = (text) => void navigator.clipboard?.writeText(text).catch(() => {}) }: {
   items: NeedsYouItem[];
   density: SidebarDensity;
   now?: number;
@@ -25,9 +25,11 @@ export function SidebarNeedsYou({ items, density, now, onOpen, onResolve, onOpen
   /** Copy an owner_pending item's command (the person runs it; nothing here runs it). */
   onCopy?: (text: string) => void;
 }) {
+  const clock = now ?? Date.now();
+  // what waits on the person only: an item answered and waiting on its bot is out of the count and the list (INSP-J2 #2)
+  const items = waitingOnYou(all, clock);
   if (!items.length || density === "icons") return null;
   const compact = density === "compact";
-  const clock = now ?? Date.now();
   // the same order as the resolution screen opens in: what falls due first (INSP-I r1 #8)
   const shown = sortNeedsYou(items, "due", clock).slice(0, NEEDS_YOU_SIDEBAR_ROWS);
   return (
@@ -71,7 +73,7 @@ export function SidebarNeedsYou({ items, density, now, onOpen, onResolve, onOpen
                   {/* who and when on the second line; the row's buttons sit at its end */}
                   <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-ink-secondary" style={{ paddingRight: actions * 24 }}>
                     {/* answered: the item waits on the bot now (J18) */}
-                    <span className="min-w-0 truncate">{item.awaitingSince ? t("needsYou.screen.awaiting", { name: item.botName }) : item.botName}</span>
+                    <span className="min-w-0 truncate">{botSilent(item, clock) ? t("needsYou.screen.botSilentShort", { name: item.botName }) : item.botName}</span>
                     <span aria-hidden="true">·</span>
                     <span className={cn("shrink-0 tabular-nums", overdue && "font-semibold text-danger")}>{item.due ?? age}</span>
                   </span>

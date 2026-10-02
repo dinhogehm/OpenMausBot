@@ -122,4 +122,20 @@ describe("what needs the person, from every bot", () => {
     expect(html).toContain(">Resolver os 3<");
     expect(html).toMatch(/text-danger">ontem 18h</);
   });
+
+  // INSP-J2 #2: what the person answered waits on its bot, not on them
+  it("leaves out what the person answered while its bot has time, and brings it back after 2 h of silence", () => {
+    const listed = [bot("monitor", "Monitor Chat", [task("m0", "Vigia", { ownerPending: [
+      { id: "o1", title: "Liberar a planilha", since: now - 5 * 3_600_000, awaitingSince: now - 20 * 60_000 },
+      { id: "o2", title: "Confirmar o teto", since: now - 4 * 3_600_000 },
+      { id: "o3", title: "Aprovar o envio", since: now - 6 * 3_600_000, awaitingSince: now - 3 * 3_600_000 },
+    ] })])];
+    const html = renderToStaticMarkup(SidebarNeedsYou({ items: needsYouItems(listed), density: "comfortable", now, onOpen: () => {} })!);
+    expect(html).toContain('aria-label="2 itens precisam de você"');
+    expect(html).not.toContain("Liberar a planilha");
+    expect(html).toContain("Monitor Chat não respondeu");
+    // all answered and still in time: nothing waits on the person
+    const answered = [bot("monitor", "Monitor Chat", [task("m0", "Vigia", { ownerPending: [{ id: "o1", title: "Liberar a planilha", since: now - 60_000, awaitingSince: now - 60_000 }] })])];
+    expect(SidebarNeedsYou({ items: needsYouItems(answered), density: "comfortable", now, onOpen: () => {} })).toBeNull();
+  });
 });
