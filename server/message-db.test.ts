@@ -21,7 +21,7 @@ import { closeMessageDb,
   recallMessages,
   searchMessages,
   setActiveLeaf,
-  updateMessage, describeMissingFts5 } from "./message-db.ts";
+  updateMessage, describeMissingFts5, userTextMessagesWith } from "./message-db.ts";
 import { withPeerProvenance } from "./peer-provenance.ts";
 import { Store, type Message } from "./store.ts";
 import type { ModelSelection } from "./contracts.ts";
@@ -42,6 +42,18 @@ describe("message-db", () => {
     closeMessageDb();
     rmSync(DATA_DIR, { recursive: true, force: true });
     mkdirSync(DATA_DIR, { recursive: true });
+  });
+
+  it("reads back people's text messages with a word, newest first, only from the threads asked", () => {
+    insertMessage("a", msg("a1", "Fale comigo só aqui", { at: 10 }));
+    insertMessage("a", msg("a2", "o CANAL é este", { at: 30 }));
+    insertMessage("a", msg("a3", "fale comigo depois", { role: "bot", at: 40 }));
+    insertMessage("b", msg("b1", "use só esta conversa", { at: 20 }));
+    insertMessage("c", msg("c1", "fale comigo na c", { at: 50 }));
+    insertMessage("a", msg("a4", "nada a ver", { at: 60 }));
+    expect(userTextMessagesWith(["a", "b"], ["comigo", "canal", "conversa"], 10).map((row) => [row.threadId, row.message.id])).toEqual([["a", "a2"], ["b", "b1"], ["a", "a1"]]);
+    expect(userTextMessagesWith(["a", "b"], ["comigo", "canal", "conversa"], 1).map((row) => row.message.id)).toEqual(["a2"]);
+    expect(userTextMessagesWith([], ["comigo"], 10)).toEqual([]);
   });
 
   it("persists inserts, updates, and the active leaf across a reopen", () => {

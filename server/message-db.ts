@@ -510,6 +510,26 @@ export function latestMessageAts(threadIds: readonly string[]): Map<string, numb
   return out;
 }
 
+/** Text messages people wrote in `threadIds` whose text contains one of
+ * `words` (case-insensitive), newest first, at most `limit`. A read of the
+ * history only — what the owner ordered long ago (the conversation they are
+ * spoken to in) is read back at boot without loading whole transcripts. */
+export function userTextMessagesWith(threadIds: readonly string[], words: readonly string[], limit: number): Array<{ threadId: string; message: Message }> {
+  const ids = [...new Set(threadIds.filter((id) => id.length > 0))];
+  if (!ids.length || !words.length || limit <= 0) return [];
+  const like = words.map(() => "LOWER(text) LIKE ?").join(" OR ");
+  const out: Array<{ threadId: string; message: Message }> = [];
+  const chunk = 400;
+  for (let i = 0; i < ids.length; i += chunk) {
+    const slice = ids.slice(i, i + chunk);
+    const rows = db()
+      .prepare(`SELECT thread_id, json FROM messages WHERE thread_id IN (${slice.map(() => "?").join(", ")}) AND role = 'user' AND kind = 'text' AND (${like}) ORDER BY at DESC LIMIT ?`)
+      .all(...slice, ...words.map((each) => `%${each.toLowerCase()}%`), limit) as Array<{ thread_id: string; json: string }>;
+    for (const row of rows) out.push({ threadId: row.thread_id, message: rowToMessage(row) });
+  }
+  return out.sort((a, b) => b.message.at - a.message.at).slice(0, limit);
+}
+
 export function deleteThread(threadId: string): void {
   writeFollowups((connection) => {
     connection.prepare("DELETE FROM chat_followups WHERE thread_id = ?").run(threadId);

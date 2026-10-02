@@ -26,7 +26,17 @@ export interface ThreadState {
   pending?: string;
 }
 
-export interface OwnerOrder { threadId: string; at: number; text: string }
+export interface OwnerOrder {
+  threadId: string;
+  at: number;
+  text: string;
+  /** For a channel order: the conversation it names, when the caller
+   * resolved it (a short id like "dbb9f1cf" against all the bot's
+   * conversations); else resolved here against the ones on record. */
+  channelThreadId?: string;
+  /** That conversation's title, when the caller knows it. */
+  channelTitle?: string;
+}
 
 /** The one conversation the person wants to be spoken to in. */
 export interface OwnerThread { threadId: string; title: string; at: number }
@@ -38,12 +48,109 @@ export function isOwnerOrder(text: string): boolean {
   return isOwnerChannelOrder(text) || /\b(n[ãa]o (?:rode|fa[çc]a|mexa|use|envie|mande|publique|mergeie|arquive|abra)|nunca|sempre|pare\b|parar\b|PARAR|proibido|regra|a partir de agora|de agora em diante|daqui pra frente|at[ée] segunda ordem|s[óo] (?:com|depois|quando))/i.test(text);
 }
 
-/** "Use só a conversa da esteira para falar comigo", "fale comigo só por aqui":
- * the person names the one conversation they are spoken to in. */
+// ── the owner's channel order ────────────────────────────────────────────
+// How the owner really says it (01/10 09:49, dbb9f1cf): "a partir de agora
+// esta conversa (dbb9f1cf) é o único canal comigo. Não fale comigo na
+// 6477b3f4 nem na ade82a65". The build of 21:05 knew only "use/fale … só …
+// conversa/aqui", missed that order, and the Chief's desk fell to wherever
+// the owner had written last (R9-followup #1). Accented words have no \b
+// around them in JS regexes: the edges are spelled out.
+const EDGE_BEFORE = "(?<![\\p{L}\\p{N}])";
+const EDGE_AFTER = "(?![\\p{L}\\p{N}])";
+const word = (alternatives: string) => `${EDGE_BEFORE}(?:${alternatives})${EDGE_AFTER}`;
+/** A conversation as people name it: its id's first 8 hex characters, or the whole id. */
+const THREAD_REF = "[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?";
+const THREAD_REF_IN = new RegExp(`${EDGE_BEFORE}(${THREAD_REF})${EDGE_AFTER}`, "giu");
+const ONLY = word("s[óo]|somente|apenas|exclusivamente");
+const PLACE = `(?:${word("conversa|thread|aqui")}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})`;
+const SPEAK = word("use|usa|usem|fale|falem|fala|escreva|escrevam|me avise|me chame|me procure|me responda|responda|mande|fique");
+/** This conversation, said of itself ("esta conversa", "aqui", "nesta"). */
+const HERE = word("esta conversa|essa conversa|nesta conversa|nessa conversa|desta conversa|por esta|por aqui|aqui|nesta|nessa|neste chat");
+const POSITIVE = [
+  // "use só esta conversa", "fale comigo só aqui", "fale comigo só na dbb9f1cf"
+  new RegExp(`${SPEAK}[^.!?\\n]{0,40}${ONLY}[^.!?\\n]{0,40}${PLACE}`, "iu"),
+  // "só nesta conversa fale comigo", "só por aqui comigo"
+  new RegExp(`${ONLY}\\s+(?:${HERE})[^.!?\\n]{0,30}${word("fale|falar|comigo")}`, "iu"),
+  // "esta conversa (dbb9f1cf) é o único canal comigo", "o canal único comigo é a dbb9f1cf"
+  new RegExp(`${word("[úu]nico canal|canal [úu]nico|canal exclusivo|[úu]nica conversa|conversa [úu]nica")}`, "iu"),
+  // "esta conversa é o canal comigo", "a dbb9f1cf passa a ser o canal com o dono"
+  new RegExp(`(?:${HERE}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})[^.!?\\n]{0,30}${word("[ée]|ser[áa]|fica|passa a ser|vira")}\\s+(?:o|a|meu|minha)\\s+${word("canal|conversa")}[^.!?\\n]{0,20}${word("comigo|com o dono|com voc[êe]")}`, "iu"),
+];
+/** "Não fale comigo na 6477b3f4", "não me escreva na outra conversa". */
+const NEGATIVE = new RegExp(`${word("n[ãa]o|nunca|jamais")}\\s+(?:me\\s+)?${SPEAK}(?:\\s+comigo)?\\s+(?:mais\\s+)?(?:n[ao]s?|em|pel[ao]s?|por|a|o|as|os)\\s+(?:outras?\\s+|antigas?\\s+)?(?:${word("conversas?|threads?")}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})`, "iu");
+/** "fale comigo" needs "comigo"/"dono"/a conversation for the third and fourth forms to be about the channel. */
+const ABOUT_THE_OWNER = new RegExp(word("comigo|com o dono|com voc[êe]|conversa|thread|aqui"), "iu");
+
+/** The sentences of a message that set the owner's channel: `positive` ones
+ * name where to speak to them, `negative` ones where not to. A question is
+ * not an order. */
+function channelSentences(text: string): { positive: string[]; negative: string[] } {
+  const sentences = text.replace(/<\/?pasted-text[^>]*>/g, " ").split(/(?<=[.!?\n])\s*/).map((sentence) => sentence.trim()).filter((sentence) => sentence && !sentence.endsWith("?"));
+  return {
+    positive: sentences.filter((sentence) => POSITIVE.some((pattern) => pattern.test(sentence)) && ABOUT_THE_OWNER.test(sentence) && !/^\s*n[ãa]o\b/i.test(sentence)),
+    negative: sentences.filter((sentence) => NEGATIVE.test(sentence)),
+  };
+}
+
+/** "Esta conversa (X) é o único canal comigo", "não fale comigo na X",
+ * "fale comigo só aqui/nesta conversa", "use só esta conversa": the person
+ * names the one conversation they are spoken to in. */
 export function isOwnerChannelOrder(text: string): boolean {
-  // accented words have no \b around them in JS regexes: spell the edges out
-  const only = "(?<![\\p{L}])(?:s[óo]|somente|apenas)(?![\\p{L}])";
-  return new RegExp(`(?<![\\p{L}])(?:use|usa|fale|falem|fala|escreva|me avise|me chame)(?![\\p{L}])[^.!?\\n]{0,40}${only}[^.!?\\n]{0,40}(?<![\\p{L}])(?:conversa|thread|aqui)(?![\\p{L}])|${only}\\s+(?:nesta|por esta|aqui|nessa)(?![\\p{L}])[^.!?\\n]{0,30}(?<![\\p{L}])(?:fale|falar|comigo)(?![\\p{L}])`, "iu").test(text);
+  const { positive, negative } = channelSentences(text);
+  return positive.length > 0 || negative.length > 0;
+}
+
+/** The conversation a channel order makes the owner's, given in `here`:
+ * the one a positive sentence names by id (resolved by `resolve`, a short
+ * id against the bot's conversations), else `here` when the sentence speaks
+ * of itself or names nothing ("use só esta conversa"); an order that only
+ * forbids others ("não fale comigo na 6477b3f4") makes `here` the one —
+ * unless it forbids `here` itself. Null when it names a conversation that
+ * cannot be resolved, or is no channel order. */
+export function channelOrderTarget(text: string, here: string, resolve: (ref: string) => string | null): string | null {
+  const { positive, negative } = channelSentences(text);
+  // the conversations a sentence names, apart from those it rules out ("não na X", "nem na Y", "exceto X")
+  const refsOf = (sentence: string) => {
+    const allowed: string[] = [];
+    const forbidden: string[] = [];
+    for (const match of sentence.matchAll(THREAD_REF_IN)) {
+      const before = sentence.slice(Math.max(0, match.index! - 30), match.index!);
+      (/(?<![\p{L}])(?:n[ãa]o|nem|exceto|menos|fora)(?![\p{L}])[^.!?;]*$/iu.test(before) ? forbidden : allowed).push(match[1]!.toLowerCase());
+    }
+    return { allowed, forbidden };
+  };
+  const isHere = (ref: string) => here.toLowerCase().startsWith(ref) || ref.startsWith(here.toLowerCase());
+  for (const sentence of positive) {
+    const { allowed } = refsOf(sentence);
+    if (!allowed.length) return here;
+    const named = allowed.map((ref) => (isHere(ref) ? here : resolve(ref))).find((threadId): threadId is string => Boolean(threadId));
+    if (named) return named;
+    // "esta conversa (abc12345) é o canal": an id that does not resolve, said of itself
+    if (new RegExp(HERE, "iu").test(sentence)) return here;
+  }
+  if (!negative.length) return null;
+  return negative.some((sentence) => [...sentence.matchAll(THREAD_REF_IN)].some((match) => isHere(match[1]!.toLowerCase()))) ? null : here;
+}
+
+/** Words every channel order has one of: the history is read through them. */
+export const CHANNEL_ORDER_WORDS = ["comigo", "canal", "conversa", "aqui", "thread"] as const;
+
+/** The owner's newest channel order among `messages` (theirs only, any
+ * order) and the conversation it makes theirs. Only the newest counts: an
+ * older order is never revived because the newest names a conversation
+ * that cannot be resolved (null then). */
+export function lastChannelOrder(messages: ReadonlyArray<{ threadId: string; at: number; text: string }>, resolve: (ref: string) => string | null): { order: OwnerOrder; target: string } | null {
+  const newest = [...messages].sort((a, b) => b.at - a.at).find((message) => isOwnerChannelOrder(message.text));
+  if (!newest) return null;
+  const target = channelOrderTarget(newest.text, newest.threadId, resolve);
+  return target ? { order: { threadId: newest.threadId, at: newest.at, text: newest.text, channelThreadId: target }, target } : null;
+}
+
+/** A conversation named by the start of its id ("dbb9f1cf"): the one of
+ * `threadIds` it opens, when exactly one does. */
+export function threadByRef(threadIds: readonly string[], ref: string): string | null {
+  const matches = threadIds.filter((threadId) => threadId.toLowerCase().startsWith(ref.toLowerCase()));
+  return matches.length === 1 ? matches[0]! : null;
 }
 
 /** What an order is about: the PRs/issues it names, else its first words.
@@ -108,17 +215,39 @@ export class SharedState {
     const state = this.state(botId);
     state.threads = [thread, ...state.threads.filter((known) => known.threadId !== thread.threadId)].slice(0, THREADS_MAX);
     for (const order of [...orders].sort((a, b) => a.at - b.at)) {
-      const text = oneLine(order.text, 240);
-      // a newer order on the same thing replaces the older, wherever it was given
-      const topic = orderTopic(text);
-      const older = state.orders.find((known) => known.text === text || orderTopic(known.text) === topic);
-      if (older && older.at > order.at) continue;
-      state.orders = [{ ...order, text }, ...state.orders.filter((known) => known !== older && known.text !== text)].slice(0, ORDERS_MAX);
-      if (isOwnerChannelOrder(text) && (!state.ownerThread || state.ownerThread.at <= order.at)) {
-        state.ownerThread = { threadId: order.threadId, title: thread.threadId === order.threadId ? thread.title : state.threads.find((known) => known.threadId === order.threadId)?.title ?? thread.title, at: order.at };
+      this.keepOrder(state, order);
+      // the channel is read from the whole message: the id it names may sit past the 240 kept
+      const target = order.channelThreadId ?? (isOwnerChannelOrder(order.text) ? channelOrderTarget(order.text, order.threadId, (ref) => threadByRef(state.threads.map((known) => known.threadId), ref)) : null);
+      if (target && (!state.ownerThread || state.ownerThread.at <= order.at)) {
+        state.ownerThread = { threadId: target, title: thread.threadId === target ? thread.title : order.channelTitle ?? state.threads.find((known) => known.threadId === target)?.title ?? target.slice(0, 8), at: order.at };
       }
     }
     this.save(botId, now);
+  }
+
+  /** An order in the list, one line; a newer order on the same thing
+   * replaces the older, wherever it was given. */
+  private keepOrder(state: BotState, order: OwnerOrder): void {
+    const text = oneLine(order.text.replace(/<\/?pasted-text[^>]*>/g, " "), 240);
+    const topic = orderTopic(text);
+    const older = state.orders.find((known) => known.text === text || orderTopic(known.text) === topic);
+    if (older && older.at > order.at) return;
+    state.orders = [{ threadId: order.threadId, at: order.at, text }, ...state.orders.filter((known) => known !== older && known.text !== text)].slice(0, ORDERS_MAX);
+  }
+
+  /** The owner's last channel order, read back from the history at boot
+   * (an order given before this build, or older than the last turns a
+   * record reads): `target` becomes the conversation with the owner unless
+   * a newer one is already on record. The order joins the standing orders.
+   * True when the conversation with the owner changed. */
+  adoptChannelOrder(botId: string, order: OwnerOrder, target: { threadId: string; title: string }, now = Date.now()): boolean {
+    const state = this.state(botId);
+    if (state.ownerThread && state.ownerThread.at >= order.at) return false;
+    this.keepOrder(state, order);
+    const changed = state.ownerThread?.threadId !== target.threadId;
+    state.ownerThread = { threadId: target.threadId, title: target.title, at: order.at };
+    this.save(botId, now);
+    return changed;
   }
 
   /** The conversation the person wants to be spoken to in, if they named one. */

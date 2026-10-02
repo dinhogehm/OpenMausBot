@@ -106,6 +106,17 @@ describe("deskThread", () => {
     expect(deskThread(tasks, "selected", (id) => id === "dbb9f1cf", "dbb9f1cf")).toBe("dbb9f1cf");
   });
 
+  it("never lets where the owner wrote last pass over the conversation they named (R9-followup #1)", () => {
+    // 01/10: the order of 09:49 named dbb9f1cf; at 19:53 the owner reported a bug in dd9c5ece
+    const tasks = [task("ade82a65", 1), task("dbb9f1cf", 2), task("dd9c5ece", 3)];
+    const wrote = (id: string) => ({ dbb9f1cf: 1_000, dd9c5ece: 9_000 } as Record<string, number>)[id] ?? null;
+    expect(deskThread(tasks, "selected", () => false, "dbb9f1cf", wrote)).toBe("dbb9f1cf");
+    // ...and pinned elsewhere does not either
+    expect(deskThread([...tasks, task("pin", 4, { pinned: true })], "selected", () => false, "dbb9f1cf", wrote)).toBe("dbb9f1cf");
+    // with no conversation named, the last one written in is the fallback
+    expect(deskThread(tasks, "selected", () => false, null, wrote)).toBe("dd9c5ece");
+  });
+
   /** The shape of the Chief's real state on 01/10 (redacted titles): 14 open
    * conversations, none pinned, ownerThread null in shared-state.json, the
    * oldest (ade82a65) a "New thread" nobody writes in, the owner's last

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, orderTopic, SHARED_STATE_MAX_BYTES, SharedState } from "./shared-state.ts";
+import { channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, orderTopic, SHARED_STATE_MAX_BYTES, SharedState, threadByRef } from "./shared-state.ts";
 
 describe("what a bot's conversations know about each other", () => {
   it("shows a fact from one conversation in the prompt of another, never in its own", () => {
@@ -101,6 +101,99 @@ describe("one conversation with the owner, and the newest order wins", () => {
     // an older order arriving late does not undo a newer one
     state.record("chief", { threadId: "a", title: "A", at: 4 }, [{ threadId: "a", at: 1, text: "Não mergeie a #9314 antes do lote." }]);
     expect(state.render("chief", "c", 5)).not.toContain("antes do lote");
+  });
+
+  // The owner's order of 01/10 09:49 in dbb9f1cf, as pasted (names and the
+  // work items redacted; the conversation ids are the real ones). The build
+  // of 21:05 did not recognize it, and the Chief's desk fell to dd9c5ece,
+  // where the owner had reported a bug at 19:53 (R9-followup #1).
+  const DBB = "dbb9f1cf-5b8f-486d-9f6d-3167938cd65b";
+  const ADE = "ade82a65-0000-4000-8000-000000000001";
+  const OLD = "6477b3f4-0000-4000-8000-000000000002";
+  const DD9 = "dd9c5ece-0000-4000-8000-000000000003";
+  const ORDER_0949 = "<pasted-text index=\"1\">\nChief, a partir de agora esta conversa (dbb9f1cf) é o único canal comigo. Não fale comigo na 6477b3f4 nem na ade82a65; mova para cá os vigias main e prod. Faça hoje, nesta ordem, e me reporte aqui em uma linha por item:\n\n1. Ponha a #NNNN (correção do [cliente]) de volta na fila e acorde a sessão [id]. Ela ficou 14 h parada sem aviso.\n2. Corrija o que você me disse às 05:10 sobre o release [sha].\n</pasted-text>";
+  const resolveAmong = (ids: string[]) => (ref: string) => ids.find((id) => id.startsWith(ref)) ?? null;
+
+  it("recognizes the owner's real channel orders, not their other requests (R9-followup #1)", () => {
+    for (const order of [
+      ORDER_0949,
+      "esta conversa é o canal único comigo",
+      "A partir de agora o único canal comigo é esta conversa.",
+      "Não fale comigo na ade82a65.",
+      "não me escreva nas outras conversas",
+      "fale comigo só aqui",
+      "Fale comigo só nesta conversa.",
+      "use só esta conversa",
+      "fale comigo só na dbb9f1cf",
+      "Use só a conversa da esteira para falar comigo",
+      "fale comigo só por aqui",
+    ]) expect(isOwnerChannelOrder(order), order).toBe(true);
+    for (const request of [
+      "Use só o gate local",
+      "fale comigo só pelo Chat do Google quando publicar",
+      "o único canal do cliente é a planilha",
+      "não fale com o cliente na thread dele",
+      "devo falar com você só aqui?",
+      "Veja a conversa da Daiane e me diga o que falta",
+    ]) expect(isOwnerChannelOrder(request), request).toBe(false);
+  });
+
+  it("makes the conversation the order names the owner's, wherever it was given", () => {
+    const ids = [DBB, ADE, OLD, DD9];
+    // given in dbb9f1cf, naming itself
+    expect(channelOrderTarget(ORDER_0949, DBB, resolveAmong(ids))).toBe(DBB);
+    // the same order pasted in another conversation still names dbb9f1cf
+    expect(channelOrderTarget(ORDER_0949, DD9, resolveAmong(ids))).toBe(DBB);
+    expect(channelOrderTarget("fale comigo só na dbb9f1cf", DD9, resolveAmong(ids))).toBe(DBB);
+    // only forbidding others: the conversation it was given in
+    expect(channelOrderTarget("Não fale comigo na 6477b3f4 nem na ade82a65.", DBB, resolveAmong(ids))).toBe(DBB);
+    expect(channelOrderTarget("Fale comigo só aqui, não na ade82a65.", DD9, resolveAmong(ids))).toBe(DD9);
+    // forbidding the very conversation it is given in names none
+    expect(channelOrderTarget("não fale comigo na ade82a65", ADE, resolveAmong(ids))).toBeNull();
+    // a conversation nobody knows is not guessed
+    expect(channelOrderTarget("fale comigo só na abcdef12", DD9, resolveAmong(ids))).toBeNull();
+    expect(channelOrderTarget("Veja a #9330", DD9, resolveAmong(ids))).toBeNull();
+  });
+
+  it("records the 09:49 order as the conversation with the owner, and its text without the paste marks", () => {
+    const state = new SharedState(null);
+    state.record("chief", { threadId: DD9, title: "Prioridade máxima", at: 5 });
+    state.record("chief", { threadId: DBB, title: "@Monitor", at: 10 }, [{ threadId: DBB, at: 10, text: ORDER_0949 }]);
+    expect(state.ownerThread("chief")).toMatchObject({ threadId: DBB, title: "@Monitor", at: 10 });
+    const elsewhere = state.render("chief", DD9, 20);
+    expect(elsewhere).toContain('Conversa com o dono: "@Monitor"');
+    expect(elsewhere).toContain("é o único canal comigo");
+    expect(elsewhere).not.toContain("pasted-text");
+    // where the owner writes next (a one-off bug report) does not move it
+    state.record("chief", { threadId: DD9, title: "Prioridade máxima", at: 30 }, [{ threadId: DD9, at: 30, text: "Nunca publique sem o gate verde." }]);
+    expect(state.ownerThread("chief")?.threadId).toBe(DBB);
+  });
+
+  it("reads the newest channel order back at boot, and never revives an older one (R9-followup #1)", () => {
+    const ids = [DBB, ADE, OLD, DD9];
+    const history = [
+      { threadId: ADE, at: 1, text: "fale comigo só aqui" },
+      { threadId: DBB, at: 2, text: ORDER_0949 },
+      { threadId: DD9, at: 3, text: "Prioridade máxima: destravar a esteira." },
+    ];
+    const found = lastChannelOrder(history, resolveAmong(ids));
+    expect(found).toMatchObject({ target: DBB, order: { threadId: DBB, at: 2, channelThreadId: DBB } });
+    // the newest names a conversation nobody knows: nothing, not the older ADE one
+    expect(lastChannelOrder([...history, { threadId: DD9, at: 4, text: "fale comigo só na abcdef12" }], resolveAmong(ids))).toBeNull();
+    expect(lastChannelOrder([{ threadId: DD9, at: 4, text: "Veja a #9330" }], resolveAmong(ids))).toBeNull();
+    expect(threadByRef(ids, "dbb9f1cf")).toBe(DBB);
+    expect(threadByRef([DBB, `${DBB.slice(0, 8)}-ffff`], "dbb9f1cf")).toBeNull();
+
+    const state = new SharedState(null);
+    expect(state.adoptChannelOrder("chief", found!.order, { threadId: DBB, title: "@Monitor" })).toBe(true);
+    expect(state.ownerThread("chief")).toMatchObject({ threadId: DBB, at: 2 });
+    expect(state.render("chief", DD9, 5)).toContain("Ordens do dono em vigor");
+    // read back again: nothing changes
+    expect(state.adoptChannelOrder("chief", found!.order, { threadId: DBB, title: "@Monitor" })).toBe(false);
+    // a newer order already on record wins over an older one read back
+    state.record("chief", { threadId: DD9, title: "Esteira", at: 50 }, [{ threadId: DD9, at: 50, text: "Use só esta conversa." }]);
+    expect(state.adoptChannelOrder("chief", found!.order, { threadId: DBB, title: "@Monitor" })).toBe(false);
+    expect(state.ownerThread("chief")?.threadId).toBe(DD9);
   });
 
   it("records what was decided, not the greeting", () => {

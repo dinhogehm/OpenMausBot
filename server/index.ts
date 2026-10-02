@@ -245,10 +245,10 @@ import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-g
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { openCodeProviderKeysAllowed, setOpenCodeProviderKeyPolicy } from "./drivers/acp/opencode-go.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
-import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing } from "./message-db.ts";
+import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, userTextMessagesWith } from "./message-db.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, parseUntil, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
-import { chiefForBot, deskThread, OwnerWroteAt, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
+import { chiefForBot, deskThread, OwnerWroteAt, ownerWrote, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
 import {
   BotAutonomy,
   GOAL_MAX_CONSECUTIVE_FAILURES,
@@ -346,7 +346,7 @@ import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
-import { decisionOf, firstSentence, isOwnerOrder, SharedState } from "./shared-state.ts";
+import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
 import { carrierIntent, isReleaseProcess, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
 import { HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
@@ -8631,8 +8631,14 @@ async function autonomyTick(): Promise<void> {
   }
 }
 
+// ── what a bot's conversations know about each other (server/shared-state.ts)
+const sharedState = new SharedState(join(DATA_DIR, "bots"));
+
 // ── Claude Code sessions a bot manages (server/cc-sessions.ts) ─────────
 const ccLedger = new CcSessionLedger({ path: join(DATA_DIR, "cc-sessions.json") });
+// The owner's last channel order, read back from the history before
+// anything is reported: what the boot says goes to the conversation they named.
+adoptOwnerChannels();
 // A restart cut these turns off: tell each owner, or nobody would ever resume them.
 if (ccLedger.interruptedOnLoad.length) {
   for (const session of ccLedger.interruptedOnLoad) ccReport(session, ccReportForOwner(session));
@@ -8733,11 +8739,91 @@ function ccIsGitRepo(path: string): boolean {
   }
 }
 
-/** The owning conversation, plus the thread the last order came from. */
+/** The owning conversation, plus the thread the last order came from, plus
+ * the conversation with the owner when the reports go there. */
 function ccThreads(session: CcSession): string[] {
   const threads = [session.ownerThreadId];
   if (session.replyThreadId && session.replyThreadId !== session.ownerThreadId) threads.push(session.replyThreadId);
+  const reportTo = sessionReportThread(session);
+  if (!threads.includes(reportTo)) threads.push(reportTo);
   return threads.filter((threadId) => store.taskByThread(session.ownerBotId, threadId));
+}
+
+/** The conversation the owner named for talking to them (shared-state), while open. */
+function ownerChannelOf(botId: string): string | null {
+  try {
+    const named = sharedState.ownerThread(botId)?.threadId ?? null;
+    return named && openThreadOf(botId, named) ? named : null;
+  } catch {
+    return null; // not set up yet (module load)
+  }
+}
+
+/** Where a session's report wakes its bot: the conversation the owner named,
+ * when there is one — the bot answers the owner from where it is woken, and
+ * reports woken elsewhere had the Chief writing to the owner in two
+ * conversations 3 s apart (R9-followup #1). A session whose own conversation
+ * runs a goal reports there: that goal is waiting for it. */
+function sessionReportThread(session: CcSession): string {
+  const owner = ownerChannelOf(session.ownerBotId);
+  if (!owner || owner === session.ownerThreadId) return session.ownerThreadId;
+  if (autonomy.goalFor(session.ownerThreadId)?.status === "active") return session.ownerThreadId;
+  return owner;
+}
+
+/** The owner named a conversation: the Claude Code sessions their bot runs
+ * from its other conversations report there from now on (not those of a
+ * conversation running a goal). Said once, with a chip in each. */
+function moveWorkToOwnerThread(botId: string, ownerThreadId: string, why: string): void {
+  if (!openThreadOf(botId, ownerThreadId)) return;
+  const moved: CcSession[] = [];
+  for (const session of ccLedger.all()) {
+    if (session.ownerBotId !== botId || session.status === "archived" || session.ownerThreadId === ownerThreadId) continue;
+    if (autonomy.goalFor(session.ownerThreadId)?.status === "active") continue;
+    const from = session.ownerThreadId;
+    session.ownerThreadId = ownerThreadId;
+    if (session.replyThreadId === ownerThreadId) delete session.replyThreadId;
+    moved.push(session);
+    if (store.taskByThread(botId, from)) {
+      store.appendMessage(from, { role: "bot", kind: "activity", tool: { name: chipText(`Claude Code "${session.title.slice(0, 60)}": os relatórios passam para a conversa com o dono`, 240), ok: true }, threadRef: { botId, threadId: ownerThreadId, title: store.taskByThread(botId, ownerThreadId)?.title ?? "conversa com o dono" } });
+    }
+  }
+  if (!moved.length) return;
+  ccLedger.save();
+  const list = moved.map((session) => `"${session.title}" (${session.id.slice(0, 8)}, ${session.status})`).join(", ");
+  store.appendMessage(ownerThreadId, { role: "bot", kind: "activity", tool: { name: chipText(`${moved.length} sessão(ões) do Claude Code passaram a relatar aqui (${why}): ${list}`, 240), ok: true } });
+  console.log(`[shared-state] ${store.bot(botId)?.name ?? botId}: ${moved.length} session(s) now report to the conversation with the owner (${ownerThreadId}): ${list}`);
+  refreshBotRow(botId);
+}
+
+/** At boot: each bot's last channel order, read back from the history
+ * (messages.db, read only). An order given before this build — or before
+ * the last turns a record reads — still names the conversation with the
+ * owner; where the owner wrote last never takes its place (R9-followup #1). */
+function adoptOwnerChannels(): void {
+  for (const bot of store.bots) {
+    try {
+      const tasks = store.tasks(bot.id).filter((task) => !CLOUD_HOME || cloudOwnerOnlyThread(task.threadId));
+      const ids = tasks.map((task) => task.threadId);
+      const rows = userTextMessagesWith(ids, CHANNEL_ORDER_WORDS, 200)
+        .filter((row) => ownerWrote(row.message) && !store.groupByThread(row.threadId))
+        .map((row) => ({ threadId: row.threadId, at: row.message.at, text: row.message.text ?? "" }));
+      const found = lastChannelOrder(rows, (ref) => threadByRef(ids, ref));
+      if (!found) continue;
+      const task = store.taskByThread(bot.id, found.target);
+      if (!task || !openThreadOf(bot.id, found.target)) {
+        console.log(`[shared-state] ${bot.name}: the owner's last channel order (${new Date(found.order.at).toISOString()}) names ${found.target}, which is no longer open — not adopted`);
+        continue;
+      }
+      if (!sharedState.adoptChannelOrder(bot.id, found.order, { threadId: found.target, title: task.title })) continue;
+      const when = new Date(found.order.at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+      console.log(`[shared-state] ${bot.name}: the conversation with the owner is ${found.target} (their channel order of ${new Date(found.order.at).toISOString()}, read back from the history)`);
+      store.appendMessage(found.target, { role: "bot", kind: "activity", tool: { name: chipText(`Conversa com o dono: esta (ordem de ${when} relida do histórico) — avisos, relatórios e pendências vêm para cá`, 240), ok: true } });
+      moveWorkToOwnerThread(bot.id, found.target, `ordem do dono de ${when}`);
+    } catch (error) {
+      console.error(`[shared-state] ${bot.name}: could not read back the owner's channel order: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 }
 
 function ccChip(session: CcSession, text: string, ok = true): void {
@@ -8748,9 +8834,13 @@ function ccChip(session: CcSession, text: string, ok = true): void {
   refreshBotRow(session.ownerBotId);
 }
 
-/** A session's report wakes its owner — and the thread that gave the order. */
+/** A session's report wakes its owner — in the conversation the owner named
+ * when there is one (sessionReportThread), else in its own conversation and
+ * the thread that gave the order. */
 function ccReport(session: CcSession, text: string): void {
-  autonomy.addReport(session.ownerBotId, session.ownerThreadId, text);
+  const to = sessionReportThread(session);
+  autonomy.addReport(session.ownerBotId, to, text);
+  if (to !== session.ownerThreadId || ownerChannelOf(session.ownerBotId)) return;
   if (session.replyThreadId && session.replyThreadId !== session.ownerThreadId && store.taskByThread(session.ownerBotId, session.replyThreadId)) {
     autonomy.addReport(session.ownerBotId, session.replyThreadId, text);
   }
@@ -8944,8 +9034,10 @@ const desktopWork: DesktopWorkDeps = {
   chip: ccChip,
   report: ccReport,
   ownerPending: (session, item) => {
-    if (!store.taskByThread(session.ownerBotId, session.ownerThreadId)) return;
-    autonomy.addOwnerPending(session.ownerBotId, session.ownerThreadId, item);
+    // in the conversation with the owner, where they were told to look
+    const threadId = sessionReportThread(session);
+    if (!store.taskByThread(session.ownerBotId, threadId)) return;
+    autonomy.addOwnerPending(session.ownerBotId, threadId, item);
     refreshBotRow(session.ownerBotId);
   },
   resolveOwnerPending: (key) => {
@@ -9537,7 +9629,8 @@ const archivedOutsideWatch = { running: false };
 async function watchArchivedOutside(): Promise<void> {
   if (archivedOutsideWatch.running) return;
   archivedOutsideWatch.running = true;
-  const where = (session: CcSession) => liveThreadFor(session.ownerBotId, session.ownerThreadId);
+  // the conversation with the owner first: an orphaned PR is the owner's to hear about there
+  const where = (session: CcSession) => ownerChannelOf(session.ownerBotId) ?? liveThreadFor(session.ownerBotId, session.ownerThreadId);
   try {
     await checkArchivedOutside(ccLedger.all(), {
       now: () => Date.now(),
@@ -9640,7 +9733,7 @@ setInterval(() => {
 }, AUTONOMY_TICK_MS).unref();
 
 // ── what a bot's conversations know about each other (server/shared-state.ts)
-const sharedState = new SharedState(join(DATA_DIR, "bots"));
+// (the store itself is set up next to ccLedger: the boot reports read it)
 
 function sharedStatePrompt(botId: string, threadId: string): string {
   const work = ccLedger.all()
@@ -9664,11 +9757,18 @@ function recordSharedState(threadId: string): void {
   const goal = autonomy.goalFor(threadId);
   const asked = lastQuestionAt(messages, Date.now()) !== null && lastReply ? firstSentence(lastReply.text?.split(/(?<=[.!])\s+/).at(-1) ?? "", 200) : "";
   const pending = goal?.status === "needs-input" ? firstSentence(goal.detail ?? "", 200) : asked;
+  // a channel order may name another conversation by its short id ("fale comigo só na dbb9f1cf")
+  const ids = store.tasks(bot.id).map((each) => each.threadId);
   const orders = messages
     .slice(-40)
-    .filter((message) => message.role === "user" && message.kind === "text" && !message.peerAsk && !message.from && isOwnerOrder(message.text ?? ""))
+    .filter((message) => ownerWrote(message) && isOwnerOrder(message.text ?? ""))
     .slice(-3)
-    .map((message) => ({ threadId, at: message.at, text: message.text ?? "" }));
+    .map((message) => {
+      const text = message.text ?? "";
+      const channel = isOwnerChannelOrder(text) ? channelOrderTarget(text, threadId, (ref) => threadByRef(ids, ref)) : null;
+      return { threadId, at: message.at, text, ...(channel ? { channelThreadId: channel, channelTitle: store.taskByThread(bot.id, channel)?.title ?? channel.slice(0, 8) } : {}) };
+    });
+  const ownerBefore = sharedState.ownerThread(bot.id)?.threadId ?? null;
   sharedState.record(bot.id, {
     threadId,
     title: task.title,
@@ -9680,6 +9780,8 @@ function recordSharedState(threadId: string): void {
   // to them anywhere else shows up there too, so nothing reaches them twice
   // or contradicting itself without their seeing both.
   const owner = sharedState.ownerThread(bot.id);
+  // a new conversation with the owner: the sessions report there from now on
+  if (owner && owner.threadId !== ownerBefore) moveWorkToOwnerThread(bot.id, owner.threadId, "o dono definiu esta conversa como o canal com ele");
   const ownerName = cfg.profile?.name?.trim().split(/\s+/)[0];
   if (owner && owner.threadId !== threadId && store.taskByThread(bot.id, owner.threadId) && lastReply?.text) {
     const toOwner = Boolean(asked) || /\b(decis[ãa]o (?:sua|para voc[êe])|preciso (?:de )?(?:uma )?(?:decis[ãa]o|resposta)|continua(?:m)? com voc[êe])\b/i.test(lastReply.text)
