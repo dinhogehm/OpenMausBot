@@ -24,6 +24,7 @@ it("sends no conversation line for an echo, an empty ask or a conversation that 
     const empty = await thread("@Chief of Staff");
     const withItem = await thread("Release em laço");
     const real = await thread("Sessão da 9058");
+    const channel = await thread("Canal com o dono");
     await waitForExit(fixture.child, { signal: "SIGTERM" });
 
     const at = Date.now() - 3_600_000;
@@ -33,15 +34,19 @@ it("sends no conversation line for an echo, an empty ask or a conversation that 
     for (const [threadId, reply] of [
       [echo, "Fiz o que dava. O pedido continua na sua lista 'Precisa de você' (o15)."],
       [empty, "Preciso de você"],
-      [withItem, "O release d5bb1f70b segue em laço. Recusa o commit? O comando está no item."],
+      [withItem, "Abri um item para você decidir o timeout. Fica 10 min ou sem limite?"],
       [real, "Renata, a sessão da #9058 está pronta, mas o timeout do pre-push depende de uma decisão sua: 10 min ou sem limite?"],
+      [channel, "Renata, a #9350 passou no gate e o QA aprovou. Mesclo?"],
     ] as const) {
       write(threadId, `${threadId}-u`, at, "user", "Como está?");
       write(threadId, `${threadId}-b`, at + 1_000, "bot", reply);
     }
     db.close();
     writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
-      { id: "o14", botId: chief.id, threadId: withItem, title: "Recusar d5bb1f70b (laço, 10×): copie o comando de recusa", key: "release-loop:d5bb1f70b", aliases: ["o15"], createdAt: at },
+      // the bot's item opened with its question, in the same turn
+      { id: "o14", botId: chief.id, threadId: withItem, title: "Decidir o timeout do pre-push", aliases: ["o15"], createdAt: at + 900 },
+      // the server's item in the channel since yesterday: unrelated to a new question there
+      { id: "o8", botId: chief.id, threadId: channel, title: "Abrir no app uma sessão na raiz de nuria-platform", key: "app-reused-folder:nuria-platform", createdAt: at - 16 * 3_600_000 },
     ] }));
 
     const log = openSync(logPath, "a", 0o600);
@@ -63,6 +68,9 @@ it("sends no conversation line for an echo, an empty ask or a conversation that 
     expect(tasks.get(withItem).ownerPending.map((item: any) => item.id)).toEqual(["o14"]);
     // the real one stays, its title without the vocative
     expect(tasks.get(real)).toMatchObject({ goalNeedsInput: true, goalNeedsInputAsk: "A sessão da #9058 está pronta, mas o timeout do pre-push depende de uma decisão sua: 10 min ou sem limite?" });
+    // the channel holds the server's o8, and its new short question still shows, with its context (INSP-J r1 #3/#4)
+    expect(tasks.get(channel)).toMatchObject({ goalNeedsInput: true, goalNeedsInputAsk: "A #9350 passou no gate e o QA aprovou. Mesclo?" });
+    expect(tasks.get(channel).ownerPending.map((item: any) => item.id)).toEqual(["o8"]);
   } finally {
     await waitForExit(restarted, { signal: "SIGTERM" });
     await fixture.close();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { echoAsk, ownerAskText, OWNER_PENDING_TITLE_MAX } from "./bot-autonomy.ts";
+import { askCoveredByItem, echoAsk, ownerAskText, OWNER_PENDING_TITLE_MAX } from "./bot-autonomy.ts";
 import { appUnblockPending } from "./owner-chips.ts";
 import { powerPendingDetails } from "./power.ts";
 import { releaseLoopPending, tagAdvancePending } from "./release-watch.ts";
@@ -25,12 +25,44 @@ describe("the lines of \"Precisa de você\" that say nothing of their own", () =
     expect([...ECHOES, REAL].filter((ask) => !echoAsk(ownerAskText(ask, 200, BOTS), OPEN_IDS))).toEqual([REAL]);
   });
 
+  // INSP-J r1 #4: short real questions and questions naming an item were hidden
+  it("a question is never an echo, short or naming an item; it carries the sentence before it", () => {
+    for (const ask of [
+      "Osvaldo, a #9350 passou no gate e o QA aprovou. Mesclo?",
+      "Confirma?",
+      "Quer que eu responda à cliente agora (o4)?",
+      "Preciso de você para decidir a pendência o3: pausar chats durante o aviso, sim ou não?",
+      "Posso fechar o o14 e liberar o gate da #9348?",
+    ]) expect(echoAsk(ownerAskText(ask, 200, BOTS), OPEN_IDS), ask).toBe(false);
+    expect(ownerAskText("Osvaldo, a #9350 passou no gate e o QA aprovou. Mesclo?", 200, BOTS)).toBe("A #9350 passou no gate e o QA aprovou. Mesclo?");
+    expect(ownerAskText("Confirma?", 200, BOTS)).toBe("Confirma?");
+    // a long question needs nothing before it
+    expect(ownerAskText("Fiz o deploy. Aviso os clientes da #9334 agora?", 200, BOTS)).toBe("Aviso os clientes da #9334 agora?");
+  });
+
   it("an item id counts only when it is an open item's; a real ask naming the panel in passing is no echo", () => {
-    expect(echoAsk("Posso fechar o o14 e liberar o gate da #9348?", OPEN_IDS)).toBe(true);
+    expect(echoAsk("Deixei para você o o14, com o comando.", OPEN_IDS)).toBe(true);
     expect(echoAsk("Posso liberar o gate da #9348 agora?", OPEN_IDS)).toBe(false);
     expect(echoAsk("Aprovo o deploy do helpdesk hoje às 18h?", [])).toBe(false);
     expect(echoAsk("Renata, preciso de você.", [])).toBe(true);
     expect(echoAsk("", [])).toBe(true);
+  });
+
+  // INSP-J r1 #3: the owner's channel (52417e4a) always holds a server item
+  // (o8, unblock the app); any line there was hidden, new questions too
+  it("a conversation holding an unrelated item still shows its new question; the bot's item for that very ask covers it", () => {
+    const at = Date.parse("2026-10-02T15:10:00Z");
+    const o8 = { id: "o8", threadId: "52417e4a", createdAt: Date.parse("2026-10-01T23:10:00Z"), key: "app-reused-folder:nuria-platform" };
+    const mesclo = { text: ownerAskText("Osvaldo, a #9350 passou no gate e o QA aprovou. Mesclo?", 400, BOTS), at };
+    expect(askCoveredByItem(mesclo, [o8], "52417e4a")).toBe(false);
+    // even a server item opened right now is not that question
+    expect(askCoveredByItem(mesclo, [{ ...o8, id: "o17", key: "power:battery", createdAt: at }], "52417e4a")).toBe(false);
+    // the bot opened an item with its question, in the same turn: one row
+    expect(askCoveredByItem(mesclo, [o8, { id: "o18", threadId: "52417e4a", createdAt: at - 20_000 }], "52417e4a")).toBe(true);
+    // an old item of the bot, about something else, does not
+    expect(askCoveredByItem(mesclo, [{ id: "o3", threadId: "52417e4a", createdAt: at - 20 * 3_600_000 }], "52417e4a")).toBe(false);
+    // an echo is covered whatever the conversation holds
+    expect(askCoveredByItem({ text: ownerAskText(ECHOES[1]!, 400, BOTS), at }, [], "dbb9f1cf")).toBe(true);
   });
 
   it("the vocative is who, not what: the title starts at the ask", () => {

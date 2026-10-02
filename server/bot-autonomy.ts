@@ -1691,7 +1691,11 @@ export function ownerAskText(text: string, max = 200, knownNames: readonly strin
     .split(/(?<=[.!?…])\s+|\n+/)
     .map((each) => stripLeadingMentions(each, knownNames))
     .filter((each) => /\p{L}{3}/u.test(each));
-  const found = sentences.findLast((each) => each.endsWith("?")) ?? sentences.find((each) => OWNER_ASK.test(each)) ?? sentences[0] ?? "";
+  const at = sentences.findLastIndex((each) => each.endsWith("?"));
+  const found = at >= 0
+    // a short question carries the sentence before it ("A #9350 passou no gate. Mesclo?": INSP-J r1 #4)
+    ? (usefulWords(sentences[at]!) < 2 && at > 0 ? `${sentences[at - 1]} ${sentences[at]}` : sentences[at]!)
+    : sentences.find((each) => OWNER_ASK.test(each)) ?? sentences[0] ?? "";
   // the vocative is who, not what ("Osvaldo, a sessão da #9058…": R10-visual N12c)
   const vocative = leadingVocative(found);
   const said = vocative ? found.replace(/^[\s*_>"'“-]*[^,]+,\s*/u, "") : found;
@@ -1725,13 +1729,31 @@ export function echoAsk(text: string, itemIds: readonly string[] = []): boolean 
   if (!plain) return true;
   // the panel by its name, as a place: quoted, or "na sua lista / no painel / em Precisa de você"
   if (/["'“«‘]\s*Precisa de voc[êe]\s*["'”»’]/i.test(plain) || /\b(?:lista|painel|tela|aba|em|no seu|na sua|no)\s+Precisa de voc[êe]\b/i.test(plain)) return true;
-  // another item by its id
+  // a question asks something of its own, even short ("Mesclo?", "Confirma?")
+  // or naming an item ("Quer que eu responda à cliente agora (o4)?"): never an echo (INSP-J r1 #4)
+  if (/\?\s*\)?\s*$/.test(plain)) return false;
+  // another item by its id, said and nothing asked ("O Monitor abriu a pendência o6.")
   if (/\b(?:pend[êe]ncias?|itens?|pedidos?)\s+o\d+\b/i.test(plain) || /\(o\d+\)/.test(plain)) return true;
   const ids = new Set(itemIds.map((id) => id.toLowerCase()));
   if ((plain.match(/\bo\d+\b/gi) ?? []).some((id) => ids.has(id.toLowerCase()))) return true;
   // nothing asked: under two words that say something
-  const words = plain.toLowerCase().replace(/^[^,]{1,30},\s*/u, "").split(/[^\p{L}\p{N}#]+/u).filter((word) => word.length >= 3 && !ASK_FILLER.has(word));
-  return words.length < 2;
+  return usefulWords(plain) < 2;
+}
+
+/** Words of an ask that say something (a vocative, "preciso de você" aside). */
+function usefulWords(text: string): number {
+  return text.toLowerCase().replace(/^[^,]{1,30},\s*/u, "").split(/[^\p{L}\p{N}#]+/u).filter((word) => word.length >= 3 && !ASK_FILLER.has(word)).length;
+}
+
+/** The ask is the very request of an item the person already has: it only
+ * echoes one (echoAsk), or the bot opened an item in this conversation in
+ * the same breath (a bot item, not the server's — those live in the
+ * owner's channel beside any new question). A conversation holding an
+ * unrelated item still shows its new question (INSP-J r1 #3). */
+export function askCoveredByItem(ask: { text: string; at: number }, items: ReadonlyArray<Pick<OwnerPending, "id" | "threadId" | "createdAt" | "key" | "aliases">>, threadId: string, windowMs = 10 * 60_000): boolean {
+  const ids = items.flatMap((item) => [item.id, ...(item.aliases ?? [])]);
+  if (echoAsk(ask.text, ids)) return true;
+  return items.some((item) => item.threadId === threadId && !item.key && Math.abs(item.createdAt - ask.at) <= windowMs);
 }
 
 /** What the bot reads, in the item's conversation, when the person answers

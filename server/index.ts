@@ -261,7 +261,7 @@ import {
   parsePromiseInput,
   prsCited,
   lastQuestionAt,
-  echoAsk,
+  askCoveredByItem,
   ownerAskAt,
   ownerAsk,
   ownerAskText,
@@ -8037,25 +8037,26 @@ const autonomy = new BotAutonomy({
 const autonomyDispatching = new Set<string>();
 /** What a conversation's own line in "Precisa de você" asks, raw (the goal's
  * detail, or the bot's reply that waits on the person); null when none. */
-function threadOwnerAskRaw(threadId: string): string | null {
+function threadOwnerAskRaw(threadId: string): { text: string; at: number } | null {
   const goal = autonomy.goalFor(threadId);
-  if (goal?.status === "needs-input") return goal.detail ?? "";
+  if (goal?.status === "needs-input") return { text: goal.detail ?? "", at: goal.finishedAt ?? goal.startedAt };
   const at = ownerAskAt(store.messagesFor(threadId), Date.now());
   if (at === null) return null;
-  return store.messagesFor(threadId).find((each) => each.at === at && each.role === "bot" && each.kind === "text" && !each.from)?.text ?? "";
+  return { text: store.messagesFor(threadId).find((each) => each.at === at && each.role === "bot" && each.kind === "text" && !each.from)?.text ?? "", at };
 }
 /** The conversation's own line is not shown when it says nothing of its own
- * (R10-visual N12): its conversation already holds a structured item (the
- * item IS the ask), or its ask only echoes the panel or another item, or is
- * empty ("Preciso de você"). */
+ * (R10-visual N12): its ask only echoes the panel or an item, is empty
+ * ("Preciso de você"), or is the very request of an item the bot opened
+ * with it — never merely because the conversation holds some other item
+ * (INSP-J r1 #3: the owner's channel always holds the server's). */
 function threadAskIsNoise(threadId: string, botId: string): boolean {
-  if (autonomy.ownerPendingOf(botId).some((item) => item.threadId === threadId)) return true;
   const raw = threadOwnerAskRaw(threadId);
   if (raw === null) return false;
   const names = store.bots.map((bot) => bot.name);
-  const ids = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id).flatMap((item) => [item.id, ...(item.aliases ?? [])]));
+  // every open item (an echo may name another bot's); "the same breath" counts only this bot's, in this conversation
+  const items = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)).filter((item) => item.threadId !== threadId || item.botId === botId);
   // the sentence the panel would show is what the person reads
-  return echoAsk(ownerAskText(raw, 400, names), ids);
+  return askCoveredByItem({ text: ownerAskText(raw.text, 400, names), at: raw.at }, items, threadId);
 }
 goalNeedsInputForThread = (threadId) => {
   const owner = store.botByThread(threadId);
