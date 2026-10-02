@@ -4,7 +4,7 @@
 import type { Bot, Task } from "@/state/store";
 import { t } from "@/lib/i18n";
 import type { WireOwnerPending } from "../../shared/wire";
-import { isMentionOnly, stripLeadingMentions } from "../../shared/owner-pending-title";
+import { stripLeadingMentions } from "../../shared/owner-pending-title";
 
 export type NeedsYouStep = NonNullable<WireOwnerPending["steps"]>[number];
 export type NeedsYouOption = NonNullable<WireOwnerPending["options"]>[number];
@@ -70,7 +70,9 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
         // never the "why" as the title: it is shown under it (INSP-I r1 #2)
         const title = needsYouTitle(pending.title, { botName: bot.name, botNames });
         items.push({
-          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, ...(isMentionOnly(pending.title, botNames) ? { rawTitle: pending.title } : {}),
+          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title,
+          // whenever the panel says it differently, what the bot wrote stays one line away (INSP-I r2 #1)
+          ...(title !== pending.title.replace(/\s+/g, " ").trim() ? { rawTitle: pending.title } : {}),
           since: pending.since, approval: false, pendingId: pending.id,
           ...(pending.due ? { due: pending.due } : {}), ...(pending.link ? { link: pending.link } : {}), ...(pending.command ? { command: pending.command } : {}),
           ...(pending.why ? { why: pending.why } : {}), ...(pending.steps?.length ? { steps: pending.steps } : {}), ...(pending.options?.length ? { options: pending.options } : {}),

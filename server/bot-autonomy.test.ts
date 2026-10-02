@@ -944,12 +944,28 @@ describe("what waits on the person, made practical (lot I)", () => {
   it("knows a title that only names someone, by the same rule in the server and the app (INSP-I r1 #1/#2)", () => {
     expect(isMentionOnly("@Chief of Staff")).toBe(true);
     expect(isMentionOnly("@Chief of Staff, @Monitor:")).toBe(true);
-    expect(isMentionOnly("  @Monitor Chat Atendimento  ")).toBe(true);
+    expect(isMentionOnly("  @Monitor Chat Atendimento  ", ["Monitor Chat Atendimento"])).toBe(true);
+    expect(isMentionOnly("@Monitor Chat Atendimento:")).toBe(true);
+    expect(isMentionOnly("@Osvaldo")).toBe(true);
     expect(isMentionOnly("@Osvaldo aprovar o deploy da versão 2.14 em produção")).toBe(false);
     expect(stripLeadingMentions("@Osvaldo aprovar o deploy da versão 2.14")).toBe("aprovar o deploy da versão 2.14");
     // a known name is taken off exactly: the capitalized verb after it stays
     expect(stripLeadingMentions("@Monitor Chat Aprovar a fila", ["Monitor Chat"])).toBe("Aprovar a fila");
     expect(isMentionOnly("Aprovar o carrier da #9315")).toBe(false);
+  });
+
+  it("an unknown @handle takes only itself: a capitalized verb after it is the title's first word (INSP-I r2 #1)", () => {
+    expect(stripLeadingMentions("@Osvaldo Aprovar o deploy da versão 2.14 em produção")).toBe("Aprovar o deploy da versão 2.14 em produção");
+    expect(stripLeadingMentions("@Ana Revisar o contrato de Maria")).toBe("Revisar o contrato de Maria");
+    expect(stripLeadingMentions("@time Financeiro Conferir NF")).toBe("Financeiro Conferir NF");
+    expect(stripLeadingMentions("@Osvaldo PR #12 aprovar")).toBe("PR #12 aprovar");
+    // the text shows where a name of several words ends: a connector, or closing punctuation
+    expect(stripLeadingMentions("@Chief of Staff Rodei tudo")).toBe("Rodei tudo");
+    expect(stripLeadingMentions("@Monitor Chat Atendimento: preciso da planilha")).toBe("preciso da planilha");
+    for (const title of ["@Osvaldo Aprovar o deploy da versão 2.14 em produção", "@Ana Revisar o contrato de Maria", "@time Financeiro Conferir NF", "@Osvaldo PR #12 aprovar"]) {
+      expect(isMentionOnly(title)).toBe(false);
+    }
+    expect(ownerAskText("@Chief of Staff, rodei a análise. Posso abrir a PR?", 200, ["Chief of Staff"])).toBe("Posso abrir a PR?");
   });
 
   it("titles an ask by what it asks, not by who: the last question, without a leading mention or markdown", () => {

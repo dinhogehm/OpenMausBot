@@ -28,7 +28,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { languageReminder } from "./reply-language.ts";
-import { LEADING_MENTIONS } from "../shared/owner-pending-title.ts";
+import { stripLeadingMentions } from "../shared/owner-pending-title.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
 import { chatTexts, ECHO_WINDOW_MS, isEcho, normalize, vmChatPostOf, vmSheetNoteOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
 /** How long, and how many, message starts a bot keeps as seen in its Chat watches. */
@@ -1564,7 +1564,7 @@ export function ownerAskAt(messages: ReadonlyArray<{ role: string; kind: string;
  * what): the last question of its reply, else the sentence that asks for
  * the person, else its first sentence. Markdown and a leading mention are
  * dropped; at most `max` characters, cut at a word. "" when nothing reads. */
-export function ownerAskText(text: string, max = 200): string {
+export function ownerAskText(text: string, max = 200, knownNames: readonly string[] = []): string {
   const plain = text
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/`([^`]*)`/g, "$1")
@@ -1574,7 +1574,7 @@ export function ownerAskText(text: string, max = 200): string {
     .replace(/\p{Extended_Pictographic}️?/gu, "");
   const sentences = plain
     .split(/(?<=[.!?…])\s+|\n+/)
-    .map((each) => each.replace(LEADING_MENTIONS, "").replace(/\s+/g, " ").trim())
+    .map((each) => stripLeadingMentions(each, knownNames))
     .filter((each) => /\p{L}{3}/u.test(each));
   const found = sentences.findLast((each) => each.endsWith("?")) ?? sentences.find((each) => OWNER_ASK.test(each)) ?? sentences[0] ?? "";
   // a sentence that followed the mention starts lower-case ("@Chief, preciso…"): a title starts upper-case
@@ -1586,11 +1586,11 @@ export function ownerAskText(text: string, max = 200): string {
 }
 
 /** The ask behind ownerAskAt: the bot's reply that waits on the person, as one sentence. */
-export function ownerAsk(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number; peerAsk?: unknown; from?: unknown }>, now: number, maxAgeMs = 48 * 3_600_000): string | null {
+export function ownerAsk(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number; peerAsk?: unknown; from?: unknown }>, now: number, maxAgeMs = 48 * 3_600_000, knownNames: readonly string[] = []): string | null {
   const at = ownerAskAt(messages, now, maxAgeMs);
   if (at === null) return null;
   const message = messages.find((each) => each.at === at && each.role === "bot" && each.kind === "text" && !each.from);
-  return message?.text ? ownerAskText(message.text) || null : null;
+  return message?.text ? ownerAskText(message.text, 200, knownNames) || null : null;
 }
 
 /** What the bot reads, in the item's conversation, when the person answers

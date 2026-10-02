@@ -3,26 +3,41 @@
 // deploy"; "@Chief of Staff" alone says nothing to do. One rule for the
 // server (which refuses a title that is only a mention) and the app (which
 // never shows one).
+//
+// A name of several words is only taken as a name when it is KNOWN (a bot's
+// name) or when the text shows where it ends: "@Chief of Staff, …" (a
+// connector right after the handle), "@Monitor Chat Atendimento: …" (closing
+// punctuation). Anything else keeps its words: in "@Osvaldo Aprovar o deploy"
+// the verb is the title's first word, never part of a name (INSP-I r2 #1).
 
-/** A leading "@Chief of Staff," / "@Monitor Chat Atendimento:" — who, not what. */
-export const LEADING_MENTIONS = /^(?:@[\p{L}\p{N}][\p{L}\p{N}_-]*(?:\s+(?:of|de|do|da|dos|das)\s+[\p{L}\p{N}]+|\s+\p{Lu}[\p{L}\p{N}]*)*[,:;–—-]?\s*)+/u;
+const HANDLE = /^@[\p{L}\p{N}][\p{L}\p{N}_.-]*/u;
+const AFTER = /^[\s,:;–—-]*/u;
+const CONNECTED = /^\s+(?:of|de|do|da|dos|das)\s+[\p{L}\p{N}]+/u;
+const CAPITALIZED_RUN = /^(?:\s+\p{Lu}[\p{L}\p{N}]*)+(?=\s*[,:;])/u;
 
 /** The text after the mentions it opens with. Known names (longest first)
- * are taken off exactly first, so a capitalized word right after a name
- * ("@Monitor Chat Aprovar…") is kept; then any other leading mention. */
+ * are taken off exactly; an unknown "@handle" takes only itself, plus a
+ * "of Staff" right after it, plus capitalized words that a ",", ":" or ";"
+ * closes. */
 export function stripLeadingMentions(text: string, knownNames: readonly string[] = []): string {
   let rest = text.replace(/\s+/g, " ").trim();
   const names = [...knownNames].filter(Boolean).sort((a, b) => b.length - a.length);
-  for (let changed = true; changed;) {
-    changed = false;
-    for (const name of names) {
-      if (rest.toLowerCase().startsWith(`@${name.toLowerCase()}`) && !/[\p{L}\p{N}]/u.test(rest.charAt(name.length + 1))) {
-        rest = rest.slice(name.length + 1).replace(/^[\s,:;–—-]+/, "");
-        changed = true;
-      }
+  for (;;) {
+    const known = names.find((name) => rest.toLowerCase().startsWith(`@${name.toLowerCase()}`) && !/[\p{L}\p{N}]/u.test(rest.charAt(name.length + 1)));
+    if (known) {
+      rest = rest.slice(known.length + 1).replace(AFTER, "");
+      continue;
     }
+    const handle = HANDLE.exec(rest);
+    if (!handle) break;
+    rest = rest.slice(handle[0].length);
+    const connected = CONNECTED.exec(rest);
+    if (connected) rest = rest.slice(connected[0].length);
+    const run = CAPITALIZED_RUN.exec(rest);
+    if (run) rest = rest.slice(run[0].length);
+    rest = rest.replace(AFTER, "");
   }
-  return rest.replace(LEADING_MENTIONS, "").trim();
+  return rest.trim();
 }
 
 /** Nothing to do is said: no word of three letters once the mentions are set aside. */

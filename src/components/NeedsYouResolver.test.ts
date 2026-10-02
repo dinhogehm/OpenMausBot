@@ -78,6 +78,9 @@ describe("titles that say what to do (I3, INSP-I r1 #1/#2)", () => {
     expect(needsYouTitle("@Osvaldo aprovar o deploy da versão 2.14 em produção", { botName: "Monitor Chat", botNames: names })).toBe("Aprovar o deploy da versão 2.14 em produção");
     expect(needsYouTitle("@Monitor Chat confira a fila", { botName: "Chief of Staff", botNames: names })).toBe("Confira a fila");
     expect(needsYouTitle("@Monitor Chat Aprovar a fila", { botName: "Chief of Staff", botNames: names })).toBe("Aprovar a fila");
+    expect(needsYouTitle("@Osvaldo Aprovar o deploy da versão 2.14", { botName: "x", botNames: names })).toBe("Aprovar o deploy da versão 2.14");
+    expect(needsYouTitle("@Ana Revisar o contrato de Maria", { botName: "x", botNames: names })).toBe("Revisar o contrato de Maria");
+    expect(needsYouTitle("@time Financeiro Conferir NF 4471", { botName: "x", botNames: names })).toBe("Financeiro Conferir NF 4471");
     expect(needsYouTitle("#9052 / PR #9332: confirmar padrão 'sem limite'", { botName: "x" })).toBe("Confirmar padrão 'sem limite' (#9052 / PR #9332)");
     expect(needsYouTitle("Aprovar o carrier da #9315", { botName: "x" })).toBe("Aprovar o carrier da #9315");
   });
@@ -90,7 +93,10 @@ describe("titles that say what to do (I3, INSP-I r1 #1/#2)", () => {
     const o4 = items.find((item) => item.pendingId === "o4")!;
     expect(o4).toMatchObject({ title: "Monitor Chat precisa de uma resposta sua", rawTitle: "@Chief of Staff" });
     expect(o4.title).not.toBe(o4.why);
-    expect(items.find((item) => item.pendingId === "o5")).not.toHaveProperty("rawTitle");
+    // reworded titles always keep what the bot wrote one line away (INSP-I r2 #1)
+    expect(items.find((item) => item.pendingId === "o5")).toMatchObject({ title: "Aprovar o deploy da versão 2.14 em produção", rawTitle: "@Osvaldo aprovar o deploy da versão 2.14 em produção" });
+    expect(items.find((item) => item.pendingId === "o3")).not.toHaveProperty("rawTitle");
+    expect(view({ selectedKey: keyOf("o5") }).html).toContain("O bot escreveu: @Osvaldo aprovar o deploy");
     expect(items.find((item) => item.threadId === "c2")?.title).toBe("Posso arquivar as 4 conversas antigas?");
     const shown = view({ selectedKey: keyOf("o4") });
     expect(shown.title).toBe("Monitor Chat precisa de uma resposta sua");

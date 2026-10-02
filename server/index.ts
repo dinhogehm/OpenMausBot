@@ -105,8 +105,6 @@ import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from 
 import * as boat from "./boat.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner, type TeamComputerRecord } from "./team-computers.ts";
 import { isMentionOnly } from "../shared/owner-pending-title.ts";
-/** owner_pending refuses a title that only names someone (INSP-I r1 #2): the person could not tell what to do. */
-const MENTION_ONLY_TITLE = "title só com menção (\"@Chief of Staff\") não diz o que fazer: comece pelo verbo, com o essencial (\"Aprovar o merge da PR #12\"). Quem pediu a pessoa já vê.";
 import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireCcAlert, type WireGroup, type WireOwnerPending, type WireCcSession, type WireTask } from "../shared/wire.ts";
 import type { TeamComputersPayload } from "../shared/team-computer.ts";
 import { boatCreateRecoverySnapshot, retireDeletedBoatCreate } from "./boat-create-idempotency.ts";
@@ -710,7 +708,9 @@ import { localDesktopTarget, localVmViewerStatus, viewerTargetId } from "./deskt
 import { createAntigravityLeftoverRoutes } from "./routes/antigravity-leftovers.ts";
 import { findAntigravityLeftovers, removeAntigravityLeftovers } from "./drivers/antigravity-temp.ts";
 
-const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
+/** owner_pending refuses a title that only names someone (INSP-I r1 #2): the person could not tell what to do. */
+const MENTION_ONLY_TITLE = "title só com menção (\"@Chief of Staff\") não diz o que fazer: comece pelo verbo, com o essencial (\"Aprovar o merge da PR #12\"). Quem pediu a pessoa já vê.";
+const PORT =Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
 const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
 // Behind a proxy or tunnel, the base URL senders should use (docs/self-hosting.md).
 const WEBHOOK_PUBLIC_URL = process.env.OMB_WEBHOOK_PUBLIC_URL || undefined;
@@ -8042,8 +8042,9 @@ goalNeedsInputForThread = (threadId) => {
 };
 goalNeedsInputAskForThread = (threadId) => {
   const goal = autonomy.goalFor(threadId);
-  if (goal?.status === "needs-input") return goal.detail ? ownerAskText(goal.detail) || null : null;
-  return ownerAsk(store.messagesFor(threadId), Date.now());
+  const names = store.bots.map((bot) => bot.name);
+  if (goal?.status === "needs-input") return goal.detail ? ownerAskText(goal.detail, 200, names) || null : null;
+  return ownerAsk(store.messagesFor(threadId), Date.now(), undefined, names);
 };
 const AUTONOMY_TICK_MS = autonomyTestMs("OMB_AUTONOMY_TICK_MS") ?? 10_000;
 /** Self-paced work due within this keeps the Mac awake (/api/routines/wake). */
