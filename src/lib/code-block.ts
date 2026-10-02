@@ -4,6 +4,12 @@
  */
 import { t } from "./i18n";
 
+/** Fence labels that mean "no language". */
+const PLAIN_TEXT = new Set(["text", "txt", "plain", "plaintext"]);
+
+/** A one-line block this long overflows a bubble: it starts wrapped (INSP-J r1 #10, R10-visual N8). */
+export const WRAP_ONE_LINE_OVER = 80;
+
 /** Known language identifier mappings for user-friendly display labels. */
 const KNOWN_LANGUAGES: Record<string, string> = {
   // JavaScript & TypeScript
@@ -100,10 +106,12 @@ const KNOWN_LANGUAGES: Record<string, string> = {
  */
 export function getLanguageDisplayName(lang?: string | null): string {
   if (!lang || !lang.trim()) {
-    return "Code";
+    return t("codeBlock.languageCode");
   }
 
   const normalized = lang.trim().toLowerCase();
+  // plain text is a word in the reader's language, not a language name (INSP-J r1 #10)
+  if (PLAIN_TEXT.has(normalized)) return t("codeBlock.languageText");
   if (Object.prototype.hasOwnProperty.call(KNOWN_LANGUAGES, normalized)) {
     return KNOWN_LANGUAGES[normalized] ?? normalized;
   }

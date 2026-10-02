@@ -3200,5 +3200,7 @@
   "codeBlock.copiedHint": "Copied to clipboard",
   "codeBlock.copiedLabel": "Code copied to clipboard",
   "codeBlock.copy": "Copy",
-  "codeBlock.copied": "Copied!"
+  "codeBlock.copied": "Copied!",
+  "codeBlock.languageCode": "Code",
+  "codeBlock.languageText": "Text"
 }

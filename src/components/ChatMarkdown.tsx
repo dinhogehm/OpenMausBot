@@ -29,6 +29,7 @@ import {
   formatLineCount,
   getLanguageDisplayName,
   getSnippetFileName,
+  WRAP_ONE_LINE_OVER,
 } from "../lib/code-block";
 import { repairMarkdownTables } from "../lib/markdown-tables";
 import { windowsPathDestinations } from "../../shared/markdown-windows-paths";
@@ -214,7 +215,8 @@ export interface CodeBlockProps {
 export function CodeBlock({ code, lang, streaming }: CodeBlockProps) {
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [wrapLines, setWrapLines] = useState(false);
+  // a single long line (a command to copy) starts wrapped: never cut at the bubble's edge
+  const [wrapLines, setWrapLines] = useState(() => countLines(code) === 1 && code.length > WRAP_ONE_LINE_OVER);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {

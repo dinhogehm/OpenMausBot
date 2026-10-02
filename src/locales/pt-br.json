@@ -2934,5 +2934,7 @@
   "codeBlock.copiedHint": "Copiado para a área de transferência",
   "codeBlock.copiedLabel": "Código copiado para a área de transferência",
   "codeBlock.copy": "Copiar",
-  "codeBlock.copied": "Copiado!"
+  "codeBlock.copied": "Copiado!",
+  "codeBlock.languageCode": "Código",
+  "codeBlock.languageText": "Texto"
 }

@@ -29,6 +29,22 @@ describe("a code block and a turn's digest, in pt-BR", () => {
     expect(many).toMatch(/>3 linhas<\/span>/);
   });
 
+  // INSP-J r1 #10: the real o14 command (one line, ~85 characters) was cut at
+  // the bubble's edge; "Text" stayed English
+  it("a single long line starts wrapped; a short one or several lines do not; plain text is 'Texto'", () => {
+    setLocale("pt-br");
+    const long = renderToStaticMarkup(createElement(CodeBlock, { code: "echo d5bb1f70bea397bdd937d02148c685e406985ba0 > ~/exemplo/declined-production-release.sha", lang: "text", streaming: false }));
+    expect(long).toContain('aria-pressed="true"');
+    expect(long).toContain(">Sem quebra</span>");
+    expect(long).toContain("whitespace-pre-wrap");
+    expect(long).toMatch(/title="Texto"[^>]*>Texto</);
+    const short = renderToStaticMarkup(createElement(CodeBlock, { code: "npm run ci:local", lang: "sh", streaming: false }));
+    expect(short).toContain('aria-pressed="false"');
+    const several = renderToStaticMarkup(createElement(CodeBlock, { code: `${"x".repeat(100)}\ny`, lang: "ts", streaming: false }));
+    expect(several).toContain('aria-pressed="false"');
+    expect(renderToStaticMarkup(createElement(CodeBlock, { code: "a", lang: "", streaming: false }))).toContain(">Código<");
+  });
+
   it("English stays English", () => {
     setLocale("en");
     const html = renderToStaticMarkup(createElement(CodeBlock, { code: "a\nb", lang: "ts", streaming: false }));
