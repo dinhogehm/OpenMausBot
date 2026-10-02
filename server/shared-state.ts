@@ -61,38 +61,49 @@ const word = (alternatives: string) => `${EDGE_BEFORE}(?:${alternatives})${EDGE_
 /** A conversation as people name it: its id's first 8 hex characters, or the whole id. */
 const THREAD_REF = "[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?";
 const THREAD_REF_IN = new RegExp(`${EDGE_BEFORE}(${THREAD_REF})${EDGE_AFTER}`, "giu");
-const ONLY = word("s[óo]|somente|apenas|exclusivamente");
-const PLACE = `(?:${word("conversa|thread|aqui")}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})`;
-const SPEAK = word("use|usa|usem|fale|falem|fala|escreva|escrevam|me avise|me chame|me procure|me responda|responda|mande|fique");
+// Every form must have the OWNER as the one spoken to, in the same clause
+// ("comigo", "me …", "com você", "com o dono"): "Mande só o link da PR
+// aqui", "Fique só aqui esperando o CI", "Use só a conversa do Monitor para
+// os alertas" and "o único canal de atendimento do cliente" are requests or
+// facts, not where the owner is spoken to (INSP-H r1 #2).
+const ONLY = new RegExp(word("s[óo]|somente|apenas|exclusivamente"), "iu");
+const PLACE = new RegExp(`${word("aqui|daqui|conversa|thread|neste chat")}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER}`, "iu");
+const SPEAK = "fale|falem|fala|falar|converse|conversem|conversar|escreva|escrevam|escrever|use|usa|usem|usar|mande|mandem|mandar|avise|avisem|avisar|chame|chamar|procure|procurar|responda|responder|encontre|fique";
+/** The owner as the one spoken to: "comigo", "com você", "com o dono", or "me" with a verb of speaking. */
+const OWNER_ADDRESSED = new RegExp(`${word("comigo|com voc[êe]|com o dono")}|${word("me")}\\s+(?:${SPEAK})${EDGE_AFTER}|${EDGE_BEFORE}(?:${SPEAK})-me${EDGE_AFTER}`, "iu");
+const SPEAKING = new RegExp(word(SPEAK), "iu");
 /** This conversation, said of itself ("esta conversa", "aqui", "nesta"). */
 const HERE = word("esta conversa|essa conversa|nesta conversa|nessa conversa|desta conversa|por esta|por aqui|aqui|nesta|nessa|neste chat");
-const POSITIVE = [
-  // "use só esta conversa", "fale comigo só aqui", "fale comigo só na dbb9f1cf"
-  new RegExp(`${SPEAK}[^.!?\\n]{0,40}${ONLY}[^.!?\\n]{0,40}${PLACE}`, "iu"),
-  // "só nesta conversa fale comigo", "só por aqui comigo"
-  new RegExp(`${ONLY}\\s+(?:${HERE})[^.!?\\n]{0,30}${word("fale|falar|comigo")}`, "iu"),
-  // "esta conversa (dbb9f1cf) é o único canal comigo", "o canal único comigo é a dbb9f1cf"
-  new RegExp(`${word("[úu]nico canal|canal [úu]nico|canal exclusivo")}`, "iu"),
-  // "a única conversa comigo é esta" — but "a única conversa sobre o release" is no channel
-  new RegExp(`${word("[úu]nica conversa|conversa [úu]nica")}[^.!?\\n]{0,40}${word("comigo|com o dono|com voc[êe]")}|${word("comigo|com o dono")}[^.!?\\n]{0,40}${word("[úu]nica conversa|conversa [úu]nica")}`, "iu"),
-  // "esta conversa é o canal comigo", "a dbb9f1cf passa a ser o canal com o dono"
-  new RegExp(`(?:${HERE}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})[^.!?\\n]{0,30}${word("[ée]|ser[áa]|fica|passa a ser|vira")}\\s+(?:o|a|meu|minha)\\s+${word("canal|conversa")}[^.!?\\n]{0,20}${word("comigo|com o dono|com voc[êe]")}`, "iu"),
-];
-/** "Não fale comigo na 6477b3f4", "não me escreva na outra conversa": about
- * speaking to the owner ("me", "comigo") — "não use a conversa do Monitor"
- * is about something else. */
-const NEGATIVE = new RegExp(`${word("n[ãa]o|nunca|jamais")}\\s+(?:me\\s+${SPEAK}|${SPEAK}\\s+comigo)\\s+(?:mais\\s+)?(?:nada\\s+)?(?:n[ao]s?|em|pel[ao]s?|por)\\s+(?:outras?\\s+|antigas?\\s+)?(?:${word("conversas?|threads?")}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})`, "iu");
-/** "fale comigo" needs "comigo"/"dono"/a conversation for the third and fourth forms to be about the channel. */
-const ABOUT_THE_OWNER = new RegExp(word("comigo|com o dono|com voc[êe]|conversa|thread|aqui"), "iu");
+/** "o único canal comigo", "a única conversa com o dono". */
+const ONLY_CHANNEL = new RegExp(word("[úu]nico canal|canal [úu]nico|canal exclusivo|[úu]nica conversa|conversa [úu]nica"), "iu");
+/** "esta conversa é o canal comigo", "a dbb9f1cf passa a ser o canal com o dono". */
+const IS_THE_CHANNEL = new RegExp(`(?:${HERE}|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})[^,;]{0,30}${word("[ée]|ser[áa]|fica|passa a ser|vira")}\\s+(?:o|a|meu|minha)\\s+${word("canal|conversa")}`, "iu");
+/** "Use só esta conversa." — the bare form, with nothing after but "para falar comigo". */
+const BARE_HERE = /^(?:a partir de agora\s+|daqui (?:pra|para a) frente\s+)?(?:use|usa|usem)\s+(?:s[óo]|somente|apenas)\s+(?:esta|essa)\s+conversa(?:\s+para\s+(?:falar|conversar)\s+comigo)?[\s.!]*$/iu;
+/** "Não fale comigo na 6477b3f4", "não me escreva nas outras conversas": the
+ * owner spoken to, and a conversation named by its id or as the other ones —
+ * "na thread do release, só quando terminar" is about timing, not the channel. */
+const NEGATIVE = new RegExp(`${word("n[ãa]o|nunca|jamais")}\\s+(?:me\\s+(?:${SPEAK})|(?:${SPEAK})\\s+comigo)${EDGE_AFTER}\\s+(?:mais\\s+)?(?:nada\\s+)?(?:n[ao]s?|em|pel[ao]s?|por)\\s+(?:(?:outras?|antigas?)\\s+${word("conversas?|threads?")}|${word("conversas?|threads?")}\\s+(?:antigas?|anteriores)|${EDGE_BEFORE}${THREAD_REF}${EDGE_AFTER})`, "iu");
 
-/** The sentences of a message that set the owner's channel: `positive` ones
+/** A clause that names where the owner is spoken to. */
+function positiveClause(clause: string): boolean {
+  if (/^\s*(?:n[ãa]o|nunca|jamais)(?![\p{L}])/iu.test(clause)) return false;
+  if (BARE_HERE.test(clause)) return true;
+  if (!OWNER_ADDRESSED.test(clause)) return false;
+  if (ONLY_CHANNEL.test(clause) || IS_THE_CHANNEL.test(clause)) return true;
+  return ONLY.test(clause) && PLACE.test(clause) && SPEAKING.test(clause);
+}
+
+/** The clauses of a message that set the owner's channel: `positive` ones
  * name where to speak to them, `negative` ones where not to. A question is
- * not an order. */
+ * not an order. A clause ends at a sentence end, a ";" or a ","
+ * ("Esse ticket é a única conversa com o cliente, comigo não"). */
 function channelSentences(text: string): { positive: string[]; negative: string[] } {
   const sentences = text.replace(/<\/?pasted-text[^>]*>/g, " ").split(/(?<=[.!?\n])\s*/).map((sentence) => sentence.trim()).filter((sentence) => sentence && !sentence.endsWith("?"));
+  const clauses = sentences.flatMap((sentence) => sentence.split(/;\s*|,\s+/)).map((clause) => clause.trim()).filter(Boolean);
   return {
-    positive: sentences.filter((sentence) => POSITIVE.some((pattern) => pattern.test(sentence)) && ABOUT_THE_OWNER.test(sentence) && !/^\s*n[ãa]o\b/i.test(sentence)),
-    negative: sentences.filter((sentence) => NEGATIVE.test(sentence)),
+    positive: clauses.filter(positiveClause),
+    negative: clauses.filter((clause) => NEGATIVE.test(clause)),
   };
 }
 

@@ -138,7 +138,20 @@ describe("one conversation with the owner, and the newest order wins", () => {
       "Esta é a única conversa sobre o release, não abra outra.",
       "não use a conversa do Monitor para isso",
       "não mande o relatório na outra thread",
+      // INSP-H r1 #2: requests and facts with no owner spoken to
+      "Mande só o link da PR aqui.",
+      "Responda só o número da issue aqui.",
+      "Fique só aqui esperando o CI terminar.",
+      "Use só a conversa do Monitor para os alertas do Chat.",
+      "O WhatsApp é o único canal de atendimento do cliente aqui.",
+      "Não me mande mais nada na thread do release, só quando terminar.",
+      "Esse ticket é a única conversa com o cliente sobre isso, comigo não.",
     ]) expect(isOwnerChannelOrder(request), request).toBe(false);
+    // INSP-H r1 #2: the owner spoken to, said other ways
+    for (const order of ["Converse comigo só por aqui", "Só me procure nesta conversa.", "Daqui pra frente, quero falar com você apenas aqui."]) {
+      expect(isOwnerChannelOrder(order), order).toBe(true);
+      expect(channelOrderTarget(order, "here", () => null), order).toBe("here");
+    }
     expect(isOwnerChannelOrder("A única conversa comigo é esta.")).toBe(true);
     expect(isOwnerChannelOrder("não me mande nada na outra conversa")).toBe(true);
   });

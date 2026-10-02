@@ -93,3 +93,39 @@ it("reads the owner's channel order back at boot and sends the boot report and t
     await fixture.close();
   }
 }, 90_000);
+
+// INSP-H r1 #2: "Mande só o link da PR aqui." in a side conversation is a
+// request, not the owner's channel: nothing is recorded as the conversation
+// with the owner, and no session moves.
+it("does not take a request with \"só … aqui\" for the owner's channel, nor move the sessions", async () => {
+  const fixture = await launchVerificationServer({ ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50" });
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+  let restarted: ChildProcess | undefined;
+  try {
+    const chief = (await runControlOmb(["new-bot", "--name", "Chief", "--url", url]) as any).bot;
+    await api(`/api/bots/${chief.id}`, { chiefOfStaff: true }, "PATCH");
+    const side = (await api(`/api/bots/${chief.id}/tasks`, { title: "Lateral" })).task.threadId as string;
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+    const at = Date.now() - 60_000;
+    writeFileSync(join(dataDir, "cc-sessions.json"), JSON.stringify({ sessions: [{
+      id: "cc-main", ownerBotId: chief.id, ownerThreadId: chief.activeTaskId, title: "9052 sessão", repo: dataDir, worktree: "9052-x",
+      permissionMode: "auto", status: "idle", surface: "cli", createdAt: at, lastActivityAt: at, turns: 1, costUsd: 0, queued: [],
+    }] }));
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment({ ...process.env }, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+    await runControlOmb(["send", "--bot", chief.id, "--task", side, "--text", "Mande só o link da PR aqui."], { env: { OPENMAUSBOT_URL: url } });
+    // the turn ran and its record was written: the request is on record, no channel
+    const stateFile = join(dataDir, "bots", chief.id, "shared-state.json");
+    await expect.poll(() => existsSync(stateFile) && JSON.parse(readFileSync(stateFile, "utf8")).threads?.some((thread: any) => thread.threadId === side), { timeout: 20_000 }).toBe(true);
+    expect(JSON.parse(readFileSync(stateFile, "utf8")).ownerThread).toBeUndefined();
+    expect(JSON.parse(readFileSync(join(dataDir, "cc-sessions.json"), "utf8")).sessions[0].ownerThreadId).toBe(chief.activeTaskId);
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 90_000);
