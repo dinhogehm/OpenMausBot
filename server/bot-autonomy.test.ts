@@ -944,7 +944,9 @@ describe("what waits on the person", () => {
     const o15 = { title: "Gravar a trava do release d5bb1f70b para destravar a PR #9348 (#9334/#9331 em produção)" };
     expect(sameOwnerPending(o15, o14)).toBe(true);
     for (const title of ["Travar o release d5bb1f70b", "Escrever o declined do d5bb1f70b"]) expect(sameOwnerPending({ title }, o14), title).toBe(true);
-    for (const title of ["Não parar o release d5bb1f70b ainda; esperar a #9348", "Conferir se o release do d5bb1f70b parou", "Seguir sem pausar o watcher no d5bb1f70b"]) {
+    for (const title of ["Não parar o release d5bb1f70b ainda; esperar a #9348", "Conferir se o release do d5bb1f70b parou", "Seguir sem pausar o watcher no d5bb1f70b",
+      // undoing the refusal is the opposite ask (INSP-H r4 #1)
+      "Liberar o release d5bb1f70b de novo (desfazer a recusa)", "Destrave o release d5bb1f70b (tire a trava)", "Apagar o declined do d5bb1f70b"]) {
       expect(sameOwnerPending({ title }, o14), title).toBe(false);
       expect(ownerPendingAction({ title }), title).toBeNull();
     }
@@ -968,6 +970,8 @@ describe("what waits on the person", () => {
     expect(loaded.ownerPendingOf("chief")).toHaveLength(1);
     // another repository is another item
     expect(sameOwnerPending({ title: o8 }, { title: "x", key: "app-reused-folder:OpenMausBot" })).toBe(false);
+    // not under a negation (INSP-H r4 #2)
+    expect(ownerPendingAction({ title: "Não abrir no app sessão na raiz de nuria-platform" })).toBeNull();
     expect(sameOwnerPending({ title: ITEMS[1]!.title }, { title: "Revisar com o QA o diff do cb015584a" })).toBe(false);
     // a conversation's id is no commit
     expect(commitsIn("Fechar a conversa 6477b3f4")).toEqual([]);
