@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
 import { releaseCauseKey, releaseInLoop } from "./release-watch.ts";
-import { ATTENTION_FILE_MAX_BYTES, ATTENTION_MAX_AGE_MS, fullReleaseSha, haltedRelease, readTail, releaseAttention, releaseAttentionAlert, releaseAttentionDue, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { ATTENTION_FILE_MAX_BYTES, ATTENTION_MAX_AGE_MS, fullReleaseSha, haltedRelease, haltReport, productionStateLine, readTail, releaseAttention, releaseAttentionAlert, releaseAttentionDue, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 const log = [
   "Release production failed for b51648498 (exit 1)",
@@ -177,19 +177,42 @@ describe("after a release", () => {
   // INSP-R r1 item 8: the halt is the .sha file — the one the watcher reads — and nothing else
   it("reads the watcher's halt from halted-production-release.sha; the escalation JSON (#9328) only adds detail for the same commit", () => {
     const json = '{"to":"chief","kind":"production-release-halted","reason":"content-failure-limit","sha":"2995ef215","failures":3,"limit":3,"last_failure":"reconcile 0608","at":"2026-10-01T12:00:00Z"}';
-    expect(haltedRelease({ escalationJson: json, haltedSha: "2995ef215\n", haltedReason: "" })).toEqual({ sha: "2995ef215", reason: "limite de falhas de conteúdo atingido", failures: 3, lastFailure: "reconcile 0608" });
+    expect(haltedRelease({ escalationJson: json, haltedSha: "2995ef215\n", haltedReason: "" })).toEqual({ sha: "2995ef215", reasonCode: "content-failure-limit", reason: "limite de falhas de conteúdo atingido", failures: 3, lastFailure: "reconcile 0608" });
     expect(haltedRelease({ escalationJson: json, haltedSha: "2995ef215fc784ea87387cb1550c1a733aba4dc5", haltedReason: "content-failure-limit\n" })).toMatchObject({ sha: "2995ef215fc784ea87387cb1550c1a733aba4dc5", failures: 3 });
     // the owner ran `rm halted-production-release.sha` to retry: the JSON left behind is no halt
     expect(haltedRelease({ escalationJson: json, haltedSha: "", haltedReason: "" })).toBeNull();
     // the JSON of another commit: only the .sha's own sha and reason
-    expect(haltedRelease({ escalationJson: json, haltedSha: "c88f99d62", haltedReason: "post-deploy-health" })).toEqual({ sha: "c88f99d62", reason: "post-deploy-health" });
+    expect(haltedRelease({ escalationJson: json, haltedSha: "c88f99d62", haltedReason: "post-deploy-health" })).toEqual({ sha: "c88f99d62", reasonCode: "post-deploy-health", reason: "post-deploy-health" });
     // INSP-R r2 item 5: the health halt's code (#9319) in pt-BR
-    expect(haltedRelease({ escalationJson: "", haltedSha: "c88f99d62", haltedReason: "post-release-health\n" })).toEqual({ sha: "c88f99d62", reason: "checagem de saúde pós-deploy" });
+    expect(haltedRelease({ escalationJson: "", haltedSha: "c88f99d62", haltedReason: "post-release-health\n" })).toEqual({ sha: "c88f99d62", reasonCode: "post-release-health", reason: "checagem de saúde pós-deploy" });
     // no .reason (post-deploy halts, exit 20/21/23, on main today): the post-deploy check
-    expect(haltedRelease({ escalationJson: "", haltedSha: "c88f99d62\n", haltedReason: "" })).toEqual({ sha: "c88f99d62", reason: "checagem pós-deploy" });
+    expect(haltedRelease({ escalationJson: "", haltedSha: "c88f99d62\n", haltedReason: "" })).toEqual({ sha: "c88f99d62", reasonCode: "post-release-health", reason: "checagem pós-deploy" });
+    // lot P's own halt: the same failure twice after the CI, in pt-BR
+    expect(haltedRelease({ escalationJson: "", haltedSha: "d5bb1f70b", haltedReason: "repeated-failure\n" })).toMatchObject({ reasonCode: "repeated-failure", reason: "a mesma falha 2× seguidas depois da CI" });
     // a .sha that is not a commit sha is no halt
     for (const junk of ["not-a-sha", "c88f", "C88F99D62", "c88f99d62 extra", "zzzzzzzzz"]) expect(haltedRelease({ escalationJson: json, haltedSha: junk, haltedReason: "" })).toBeNull();
-    expect(haltedRelease({ escalationJson: "not json", haltedSha: "c88f99d62", haltedReason: "" })).toEqual({ sha: "c88f99d62", reason: "checagem pós-deploy" });
+    expect(haltedRelease({ escalationJson: "not json", haltedSha: "c88f99d62", haltedReason: "" })).toEqual({ sha: "c88f99d62", reasonCode: "post-release-health", reason: "checagem pós-deploy" });
+  });
+
+  // lot T: the halt the lot P watcher now writes on its own needs its own way out
+  it("a repeated-failure halt tells both files to remove, that the next main commit goes by itself, and never asks for declined", () => {
+    const files = { halted: "/h/.nuria/halted-production-release.sha", escalation: "/h/.nuria/escalations/production-release-halted.json", lastFailure: "/h/.nuria/last-failure-production-release" };
+    const halted = haltedRelease({ escalationJson: '{"kind":"production-release-halted","reason":"repeated-failure","sha":"d5bb1f70b","failures":2,"last_failure":"Local CI failed at script-contracts; FAIL scripts/__tests__/unified-schema-tenant-reconcilers.test.ts"}', haltedSha: "d5bb1f70bea397bdd937d02148c685e406985ba0", haltedReason: "repeated-failure" })!;
+    const { text, report } = haltReport(halted, files);
+    expect(text).toBe("O watcher de produção PAROU de tentar o commit d5bb1f70b (a mesma falha 2× seguidas depois da CI, 2 falhas): ele não tenta de novo este commit sozinho.");
+    expect(report).toContain("Última falha: Local CI failed at script-contracts; FAIL scripts/__tests__/unified-schema-tenant-reconcilers.test.ts.");
+    expect(report).toContain("rm /h/.nuria/halted-production-release.sha /h/.nuria/last-failure-production-release");
+    expect(report).toContain("o watcher publica o próximo commit da main sozinho");
+    expect(report).toContain("Não peça ao dono para gravar declined-production-release.sha");
+    // the content halt keeps its own remedy, without the failure memory
+    const drift = haltReport(haltedRelease({ escalationJson: "", haltedSha: "2995ef215", haltedReason: "content-failure-limit" })!, files);
+    expect(drift.report).toContain("Drift de tenant");
+    expect(drift.report).not.toContain("last-failure-production-release");
+  });
+
+  it("every release alert carries production as read now, and says so when it could not be read (R10-release #3)", () => {
+    expect(productionStateLine("09d832f4bfa46e60fb6252e8da6d44471f6ec67b")).toBe("Produção agora (git ls-remote da tag nuria-production-deployed, lido neste alerta): 09d832f4b. Ao falar ao dono ou a cliente sobre o que está em produção, use este sha ou releia a tag no mesmo turno; nunca de memória.");
+    expect(productionStateLine(null)).toContain("não pôde ser lida neste alerta");
   });
 
   it("tells each stuck tag or halt once, across restarts", () => {
@@ -413,10 +436,10 @@ describe("a release in a loop", () => {
       // kept across a restart
       expect(Math.round(new ReleaseWatchState(path).cycleMs("cb015584a")! / 60_000)).toBe(41);
       const text = releaseRetryText({ halted: false, cycleMs: state.cycleMs("cb015584a"), nothingToPublish: nothingToPublish(CAUSE) });
-      expect(text).toBe("O watcher recomeça este commit logo depois de cada falha, sem limite de tentativas: cada volta leva ~41 min (medido aqui), e segura o lease de release o tempo todo, o que trava os gates das sessões. Não há nada para publicar neste commit: nenhuma volta vai dar certo.");
-      expect(text).not.toMatch(/a cada 2 min/);
-      expect(releaseRetryText({ halted: false, cycleMs: null, nothingToPublish: false })).toContain("cada volta é uma validação completa");
-      expect(releaseRetryText({ halted: true, cycleMs: 1, nothingToPublish: true })).toBe("O watcher PAROU de tentar este commit (halt): ele não sai sozinho.");
+      expect(text).toBe("O watcher recomeça este commit depois de uma falha e para sozinho (halt) quando a mesma falha se repete depois da CI (mesmo step, mesmos testes); falhas diferentes continuam sendo tentadas. Cada volta leva ~41 min (medido aqui), e enquanto roda ele segura o lease de release, o que faz os gates das sessões esperarem. Não há nada para publicar neste commit: nenhuma volta vai dar certo.");
+      expect(text).not.toMatch(/a cada 2 min|sem limite/);
+      expect(releaseRetryText({ halted: false, cycleMs: null, nothingToPublish: false })).toContain("Cada volta é uma validação completa");
+      expect(releaseRetryText({ halted: true, cycleMs: 1, nothingToPublish: true })).toBe("O watcher PAROU de tentar este commit (halt): ele não tenta de novo este commit, e o próximo commit da main entra sozinho.");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -136,14 +136,27 @@ export function fullReleaseSha(outTail: string, short: string): string | null {
   return found ?? null;
 }
 
-/** How the watcher retries, said right: never "every 2 min". */
+/** How the watcher retries, said right: never "every 2 min", and never "no limit" — since
+ * lot P (nuria-platform #9342) the installed watcher halts a commit by itself on the 2nd
+ * identical failure after the CI (lot T: same step and same failing tests), and on the
+ * 1st tenant-drift failure; a different failure is tried again. */
 export function releaseRetryText(input: { halted: boolean; cycleMs: number | null; nothingToPublish: boolean }): string {
-  if (input.halted) return "O watcher PAROU de tentar este commit (halt): ele não sai sozinho.";
+  if (input.halted) return "O watcher PAROU de tentar este commit (halt): ele não tenta de novo este commit, e o próximo commit da main entra sozinho.";
   const cycle = input.cycleMs !== null
     ? `cada volta leva ~${Math.max(1, Math.round(input.cycleMs / 60_000))} min (medido aqui)`
     : "cada volta é uma validação completa (dezenas de minutos)";
   const why = input.nothingToPublish ? " Não há nada para publicar neste commit: nenhuma volta vai dar certo." : "";
-  return `O watcher recomeça este commit logo depois de cada falha, sem limite de tentativas: ${cycle}, e segura o lease de release o tempo todo, o que trava os gates das sessões.${why}`;
+  return `O watcher recomeça este commit depois de uma falha e para sozinho (halt) quando a mesma falha se repete depois da CI (mesmo step, mesmos testes); falhas diferentes continuam sendo tentadas. ${cycle[0]!.toUpperCase()}${cycle.slice(1)}, e enquanto roda ele segura o lease de release, o que faz os gates das sessões esperarem.${why}`;
+}
+
+/** Production as it is right now, read in the same check that writes the alert (`git
+ * ls-remote` of the tag): the Chief told the owner twice on 02/10 that the tag was at
+ * a9e4b93ca and #9295 was not live, from memory, hours after the tag had moved to 09d832f4b
+ * and the clients had been told (R10-release #3). Null tag: not readable now — said so. */
+export function productionStateLine(tagSha: string | null): string {
+  return tagSha
+    ? `Produção agora (git ls-remote da tag nuria-production-deployed, lido neste alerta): ${tagSha.slice(0, 9)}. Ao falar ao dono ou a cliente sobre o que está em produção, use este sha ou releia a tag no mesmo turno; nunca de memória.`
+    : "Produção agora: a tag nuria-production-deployed não pôde ser lida neste alerta. Antes de dizer ao dono ou a cliente o que está em produção, leia a tag com git ls-remote no mesmo turno.";
 }
 
 /** The owner's one item for a release in a loop: the exact command the
@@ -342,6 +355,8 @@ export class ReleaseWatchState {
 export const HALTED_SHA_FILE = join(homedir(), ".nuria", "halted-production-release.sha");
 export const HALTED_REASON_FILE = join(homedir(), ".nuria", "halted-production-release.reason");
 export const HALT_ESCALATION_FILE = join(homedir(), ".nuria", "escalations", "production-release-halted.json");
+/** The watcher's memory of the last failure (lot P): removed together with the halt, or the same failure halts again. */
+export const LAST_FAILURE_FILE = join(homedir(), ".nuria", "last-failure-production-release");
 /** How long production may run ahead of the tag before the Chief hears it. */
 export const TAG_STUCK_AFTER_MS = 15 * 60_000;
 
@@ -586,7 +601,27 @@ const HALT_REASONS: Record<string, string> = {
   "content-failure-limit": "limite de falhas de conteúdo atingido",
   // nuria-platform #9319 (watch-production-release.sh): the post-deploy health halt
   "post-release-health": "checagem de saúde pós-deploy",
+  // lot P (#9342): the same failure twice after the CI
+  "repeated-failure": "a mesma falha 2× seguidas depois da CI",
 };
+
+/** The Chief's report for a watcher halt: what stopped, why, and the way out for THAT
+ * reason. A repeated failure is undone only by removing both files — the halt alone makes
+ * the same failure halt again at once (watch-production-release.sh, lot P); a fix that lands
+ * on main is released by itself, the halt holds only this commit. */
+export function haltReport(halted: { sha: string; reasonCode: string; reason: string; failures?: number; lastFailure?: string }, files: { halted: string; escalation: string; lastFailure: string }): { text: string; report: string } {
+  const short = halted.sha.slice(0, 9);
+  const text = `O watcher de produção PAROU de tentar o commit ${short} (${halted.reason}${halted.failures ? `, ${halted.failures} falhas` : ""}): ele não tenta de novo este commit sozinho.`;
+  const way = halted.reasonCode === "repeated-failure"
+    ? `Falhou igual duas vezes (mesmo step e mesmos testes): é falha do conteúdo, não da máquina. A saída é a correção entrar na main com um carrier novo: o watcher publica o próximo commit da main sozinho, sem ninguém tocar em arquivos. Só para repetir ESTE commit (depois de corrigir a máquina, se a causa for ela) é preciso apagar os dois arquivos: rm ${files.halted} ${files.lastFailure} — apagando só o primeiro, a mesma falha para o commit de novo na hora. Apagar é decisão do dono, não de bot.`
+    : halted.reasonCode === "content-failure-limit"
+      ? `Drift de tenant: corrija o tenant (DBA) ou a migration; depois, para repetir este commit, o dono apaga ${files.halted}. Um commit novo na main é publicado sozinho.`
+      : `Descubra a causa (saúde pós-deploy), corrija ou decida com o dono; para tentar de novo o mesmo commit, o dono apaga ${files.halted}.`;
+  return {
+    text,
+    report: `[Alerta do servidor: release de produção parado] ${text}${halted.lastFailure ? ` Última falha: ${halted.lastFailure}.` : ""}\n${way} Não peça ao dono para gravar declined-production-release.sha para este commit: o halt já o tirou da fila. Arquivos: ${files.escalation}, ${files.halted}.`,
+  };
+}
 
 /** The watcher's halt of a tip, or null when none. The halt exists if and
  * only if halted-production-release.sha holds a commit sha: that is the one
@@ -596,7 +631,7 @@ const HALT_REASONS: Record<string, string> = {
  * failure count and the last failure when its sha is the same commit.
  * Without a .reason (the post-deploy halts, exit 20/21/23, write none) the
  * reason is the post-deploy check. */
-export function haltedRelease(input: { escalationJson: string; haltedSha: string; haltedReason: string }): { sha: string; reason: string; failures?: number; lastFailure?: string } | null {
+export function haltedRelease(input: { escalationJson: string; haltedSha: string; haltedReason: string }): { sha: string; reasonCode: string; reason: string; failures?: number; lastFailure?: string } | null {
   const sha = input.haltedSha.trim();
   if (!COMMIT_SHA.test(sha)) return null;
   let escalation: { reason?: string; failures?: number; lastFailure?: string } = {};
@@ -613,6 +648,7 @@ export function haltedRelease(input: { escalationJson: string; haltedSha: string
   const code = input.haltedReason.trim().split("\n")[0]!.trim().slice(0, 200) || escalation.reason || "";
   return {
     sha,
+    reasonCode: code || "post-release-health",
     reason: code ? HALT_REASONS[code] ?? code : "checagem pós-deploy",
     ...(escalation.failures !== undefined ? { failures: escalation.failures } : {}),
     ...(escalation.lastFailure ? { lastFailure: escalation.lastFailure } : {}),

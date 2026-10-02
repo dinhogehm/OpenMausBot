@@ -373,7 +373,7 @@ import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isO
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
-import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, haltReport, LAST_FAILURE_FILE, productionStateLine, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8437,6 +8437,15 @@ function releaseAlertToChief(text: string, report: string, logPrefix = "release"
   autonomy.addReport(chief.id, desk, report);
 }
 
+/** The production tag's commit now (`git ls-remote`, no fetch), or null when unreadable. */
+async function readProductionTag(): Promise<string | null> {
+  try {
+    return parseLsRemoteTag(await execCc("git", ["-C", join(homedir(), "Projetos", "nuria-platform"), "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
+  } catch {
+    return null;
+  }
+}
+
 /** The watcher's halt of a tip (nuria-platform #9328), if any. */
 function readHaltedRelease(): ReturnType<typeof haltedRelease> {
   return haltedRelease({ escalationJson: readTail(HALT_ESCALATION_FILE, 8 * 1024), haltedSha: readTail(HALTED_SHA_FILE, 200), haltedReason: readTail(HALTED_REASON_FILE, 200) });
@@ -8466,8 +8475,8 @@ async function checkReleaseAftermath(state: ReleaseWatchState, released: string)
     releaseAlertToChief(alert.text, alert.report);
   }
   if (halted && haltMatters && state.once(`halt:${halted.sha}`)) {
-    const text = `O watcher de produção PAROU de tentar o commit ${halted.sha.slice(0, 9)} (${halted.reason}${halted.failures ? `, ${halted.failures} falhas` : ""}): ele não sai sozinho; precisa de ação.`;
-    releaseAlertToChief(text, `[Alerta do servidor: release de produção parado] ${text}${halted.lastFailure ? ` Última falha: ${halted.lastFailure}.` : ""}\nArquivos: ${HALT_ESCALATION_FILE}, ${HALTED_SHA_FILE}. Descubra a causa (drift de tenant, saúde), corrija ou decida com o dono; para tentar de novo o mesmo commit, o halt precisa ser removido (rm ${HALTED_SHA_FILE}).`);
+    const alert = haltReport(halted, { halted: HALTED_SHA_FILE, escalation: HALT_ESCALATION_FILE, lastFailure: LAST_FAILURE_FILE });
+    releaseAlertToChief(alert.text, `${alert.report}\n${productionStateLine(await readProductionTag())}`);
   }
   if (!released) return;
   const repo = join(homedir(), "Projetos", "nuria-platform");
@@ -8632,9 +8641,9 @@ async function checkProductionRelease(): Promise<void> {
   // after the watcher's halt it does not retry: never say it does; and never "every 2 min" (R9-release #7)
   const retries = releaseRetryText({ halted: isHalted, cycleMs: releaseWatch.state.cycleMs(failed.sha), nothingToPublish: nothingToPublish(cause) });
   const ownerItem = loopItem
-    ? ` O dono já tem UM item em "Precisa de você" para recusar este commit (${loopItem.id}): ${loopItem.title}${loopItem.command ? ` (comando, com botão de copiar no item: ${loopItem.command})` : ""}. Cite ${loopItem.id}; não abra outro item para este laço nem proponha o arquivo halted-production-release.sha (é a trava da checagem pós-deploy: escrito à mão, faz o servidor relatar um halt que não houve) nem desligar o LaunchAgent.`
+    ? ` O dono já tem UM item em "Precisa de você" para recusar este commit (${loopItem.id}): ${loopItem.title}${loopItem.command ? ` (comando, com botão de copiar no item: ${loopItem.command})` : ""}. Cite ${loopItem.id}; não abra outro item para este laço nem proponha o arquivo halted-production-release.sha (quem o escreve é o watcher, ao parar um commit: escrito à mão, faz o servidor relatar um halt que não houve) nem desligar o LaunchAgent.`
     : "";
-  releaseAlertToChief(text, `[Alerta do servidor: release de produção falhando] ${text}${cause ? ` Último motivo: ${cause}.` : ""}\nLogs: ${RELEASE_ERR_LOG} e ${RELEASE_OUT_LOG}. ${retries}${ownerItem} Veja se é carga da máquina (CI concorrente, timeouts) ou falha real, avise quem precisa (SRE/Delivery, o dono) e não dê a entrega como feita ao cliente.`);
+  releaseAlertToChief(text, `[Alerta do servidor: release de produção falhando] ${text}${cause ? ` Último motivo: ${cause}.` : ""}\nLogs: ${RELEASE_ERR_LOG} e ${RELEASE_OUT_LOG}. ${retries}${ownerItem} Veja se é carga da máquina (CI concorrente, timeouts) ou falha real, avise quem precisa (SRE/Delivery, o dono) e não dê a entrega como feita ao cliente.\n${productionStateLine(await readProductionTag())}`);
 }
 
 /** The owner's "refuse the looping release" items whose commit is no longer
