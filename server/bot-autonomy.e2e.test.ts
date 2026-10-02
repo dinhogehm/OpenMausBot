@@ -190,9 +190,10 @@ it("drops the goal and the pending wake when the person presses Stop", () => fix
   // The interrupted turn is killed before it records evidence; what matters
   // is that nothing resumed on its own afterwards.
   expect(f.turns()).toHaveLength(0);
+  // the chips land as the stop settles: waited for, not read once after a fixed second (INSP-J r1 #13: flaky under load)
+  await expect.poll(async () => (await f.chips()).includes("Despertador cancelado — parado por você"), { timeout: 15_000 }).toBe(true);
+  await expect.poll(async () => (await f.chips()).some((chip: string) => chip.startsWith("Objetivo parado")), { timeout: 15_000 }).toBe(true);
   const chips = await f.chips();
-  expect(chips).toContain("Despertador cancelado — parado por você");
-  expect(chips.some((chip: string) => chip.startsWith("Objetivo parado"))).toBe(true);
   expect(chips.some((chip: string) => chip.startsWith("Objetivo continua") || chip.startsWith("Acordou"))).toBe(false);
 }), 60_000);
 
