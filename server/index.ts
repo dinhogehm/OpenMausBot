@@ -348,7 +348,7 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
-import { carrierIntent, isReleaseProcess, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
+import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, type PowerState, type PowerWatchState } from "./power.ts";
 import { DECLINED_SHA_FILE, fullReleaseSha, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopPending, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
@@ -8464,8 +8464,9 @@ async function resolveTagAdvancePendings(repo: string, tagSha: string | null, re
   }
 }
 
-/** The Mac's power (server/power.ts): on battery long or low, the Chief and
- * the person hear it; no carrier starts on battery. */
+/** The Mac's power (server/power.ts): on battery below the owner's limit
+ * (20% unless config.power.batteryMinPercent), the Chief and the person hear
+ * it and the Chief's carrier orders are held; above it, nothing. */
 const POWER_WATCH_FILE = join(DATA_DIR, "power-watch.json");
 const powerWatch: { state: PowerState | null; watch: PowerWatchState | null; lastAt: number } = { state: null, watch: null, lastAt: 0 };
 async function checkPower(): Promise<void> {
@@ -8477,7 +8478,12 @@ async function checkPower(): Promise<void> {
   powerWatch.state = power;
   powerWatch.watch ??= readPowerWatch(existsSync(POWER_WATCH_FILE) ? readFileSync(POWER_WATCH_FILE, "utf8") : null);
   const releaseRunning = power.onBattery && (await psTable()).some((row) => isReleaseProcess(row.command));
-  const step = powerStep(powerWatch.watch, power, Date.now(), releaseRunning);
+  // the discharge counts from when the Mac left the wall (pmset's own log),
+  // not from this server's first look: read once per discharge (R9-resilience BAT-T0)
+  const unpluggedAt = power.onBattery && !powerWatch.watch.sinceFromLog
+    ? lastUnplugAt(await execPmsetLog().catch(() => ""), Date.now())
+    : null;
+  const step = powerStep(powerWatch.watch, power, Date.now(), releaseRunning, { minPercent: batteryMinPercent(cfg.power?.batteryMinPercent), unpluggedAt });
   powerWatch.watch = step.watch;
   if (step.changed) {
     try { writeFileSync(POWER_WATCH_FILE, JSON.stringify(step.watch)); } catch { /* memory still holds it */ }
@@ -8494,16 +8500,18 @@ async function checkPower(): Promise<void> {
   }
 }
 
-/** On battery: an order to run a carrier is refused; a mere mention of one
- * (a failed run to investigate) goes through with a note for the session. */
+/** `pmset -g log` (several MB): only the lines that say which power source was in use. */
+function execPmsetLog(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFileCc("/usr/bin/pmset", ["-g", "log"], { timeout: 20_000, maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => (error ? reject(error) : resolve(String(stdout).split("\n").filter((line) => /\bUsing (?:AC|Batt)/i.test(line)).join("\n"))));
+  });
+}
+
+/** On battery below the owner's limit (20% unless configured): an order to
+ * run a carrier is refused; a mere mention of one (a failed run to
+ * investigate) goes through with a note for the session. Above it: nothing. */
 function carrierPowerCheck(text: string): { refusal: string } | { note: string } | null {
-  const power = powerWatch.state;
-  if (!power?.onBattery) return null;
-  const intent = carrierIntent(text);
-  const charge = power.percent !== null ? ` (${power.percent}%)` : "";
-  if (intent === "order") return { refusal: `não inicio carrier com o Mac na bateria${charge}: se ele desligar no meio do deploy, a produção fica pela metade. Peça ao dono para ligar na tomada e mande de novo.` };
-  if (intent === "mention") return { note: `[Nota do servidor: Mac na bateria${charge}: não rode carrier até voltar à tomada.]` };
-  return null;
+  return carrierBatteryCheck(powerWatch.state, carrierIntent(text), batteryMinPercent(cfg.power?.batteryMinPercent));
 }
 
 async function checkProductionRelease(): Promise<void> {

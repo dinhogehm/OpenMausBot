@@ -1,9 +1,10 @@
 // The Mac runs releases and gates on battery too: on 01/10 it fell to 24%
 // with a production release running, and the app kept it awake until the
 // battery would have died mid-deploy (R8-resilience BAT). The server reads
-// `pmset -g batt` and tells the Chief (and the person, in "Precisa de
-// você") when the Mac has been on battery for a while or is running low,
-// and it does not start a release carrier on battery.
+// `pmset -g batt` and, below the owner's limit (20% unless configured), tells
+// the Chief (and the person, in "Precisa de você") and holds the Chief's
+// carrier orders. It does not hold the production watcher (a LaunchAgent of
+// nuria-platform, which reads no battery), and never says it does.
 
 export interface PowerState {
   onBattery: boolean;
@@ -51,37 +52,65 @@ export function isReleaseProcess(command: string): boolean {
   return false;
 }
 
-/** On battery this long, or below LOW_PERCENT, the Chief hears it. */
-export const ON_BATTERY_ALERT_MS = 20 * 60_000;
-export const LOW_PERCENT = 30;
-/** Below this, with a release or a gate running, the advice is to stop. */
-export const CRITICAL_PERCENT = 15;
+// The owner's limit (01/10): the battery matters below 20%. Above it, on
+// battery or not, nothing is said and nothing is refused — a Mac at 82% on
+// battery for 20 min is not news (R9-resilience: the alert of 21:26).
+/** The owner's battery limit, in %, unless config.power.batteryMinPercent says otherwise. */
+export const DEFAULT_BATTERY_MIN_PERCENT = 20;
+/** No charge to read (a no-break): the wall is out; said after this long. */
+export const UNKNOWN_CHARGE_ALERT_MS = 20 * 60_000;
 
-/** What to tell, once per level of a discharge ("battery", "low", "critical"), or null. */
-export function batteryAlert(input: { power: PowerState; onBatterySince: number | null; now: number; releaseRunning: boolean; told: ReadonlySet<string> }): { level: string; text: string } | null {
+/** The limit in force: the configured one when it is a sane percentage, else the default. */
+export function batteryMinPercent(configured: unknown): number {
+  return typeof configured === "number" && Number.isInteger(configured) && configured >= 1 && configured <= 99 ? configured : DEFAULT_BATTERY_MIN_PERCENT;
+}
+
+/** Below the limit with this little left, the advice is to stop now: half the limit (10% for 20). */
+export function criticalPercent(minPercent: number): number {
+  return Math.max(1, Math.floor(minPercent / 2));
+}
+
+/** Whether the charge is below the owner's limit; a battery whose charge
+ * cannot be read (a no-break on a desktop Mac) counts as below: the wall is out. */
+export function belowBatteryLimit(power: PowerState, minPercent: number): boolean {
+  return power.onBattery && (power.percent === null || power.percent < minPercent);
+}
+
+/** What the watcher of production releases does NOT do, said wherever the
+ * battery is: it reads no battery and may start a release on its own
+ * (R9-resilience BAT-W). Only the Chief's carrier orders are held. */
+const WATCHER_IGNORES_BATTERY = "o watcher automático de produção não olha a bateria e ainda pode começar um release sozinho";
+
+/** What to tell, once per level of a discharge below the owner's limit ("low", "critical"), or null. */
+export function batteryAlert(input: { power: PowerState; onBatterySince: number | null; now: number; releaseRunning: boolean; told: ReadonlySet<string>; minPercent?: number }): { level: string; text: string } | null {
   const { power } = input;
-  if (!power.onBattery) return null;
-  const percent = power.percent ?? 100;
-  const long = input.onBatterySince !== null && input.now - input.onBatterySince >= ON_BATTERY_ALERT_MS;
+  const minPercent = input.minPercent ?? DEFAULT_BATTERY_MIN_PERCENT;
+  if (!belowBatteryLimit(power, minPercent)) return null;
+  const minutes = input.onBatterySince !== null ? Math.max(0, Math.round((input.now - input.onBatterySince) / 60_000)) : null;
+  const since = minutes !== null ? ` há ${minutes} min` : "";
   const running = input.releaseRunning ? ", com release de produção em curso" : "";
-  const charge = power.percent === null ? "" : ` (${power.percent}%)`;
-  if (percent < CRITICAL_PERCENT && !input.told.has("critical")) {
-    return { level: "critical", text: `O Mac está na bateria e quase sem carga${charge}${running}. Se ele desligar no meio de um deploy, a produção fica pela metade: ligue na tomada já, ou peça PARAR antes de começar outro carrier.` };
+  if (power.percent === null) {
+    // a no-break: no charge to compare, only the time without the wall
+    if (minutes === null || input.now - input.onBatterySince! < UNKNOWN_CHARGE_ALERT_MS || input.told.has("low")) return null;
+    return { level: "low", text: `O Mac está sem energia da tomada${since} (no-break, carga desconhecida)${running}. Ligue na tomada: o Chief não manda carrier assim, mas ${WATCHER_IGNORES_BATTERY}.` };
   }
-  if (percent < LOW_PERCENT && !input.told.has("low")) {
-    return { level: "low", text: `O Mac está na bateria com carga baixa${charge}${running}. Ligue na tomada; nenhum carrier novo começa na bateria.` };
+  if (power.percent < criticalPercent(minPercent) && !input.told.has("critical")) {
+    return { level: "critical", text: `O Mac está na bateria${since} e quase sem carga (${power.percent}%)${running}. Se ele desligar no meio de um deploy, a produção fica pela metade: ligue na tomada já, ou peça PARAR — ${WATCHER_IGNORES_BATTERY}.` };
   }
-  if (long && !input.told.has("battery")) {
-    return { level: "battery", text: `O Mac está na bateria há ${Math.round((input.now - input.onBatterySince!) / 60_000)} min${charge}${running}. Ligue na tomada; nenhum carrier novo começa na bateria.` };
+  if (!input.told.has("low") && !input.told.has("critical")) {
+    return { level: "low", text: `O Mac está na bateria${since} com ${power.percent}%, abaixo do seu limite de ${minPercent}%${running}. Ligue na tomada: o Chief não manda carrier abaixo de ${minPercent}%, mas ${WATCHER_IGNORES_BATTERY}.` };
   }
   return null;
 }
 
 /** What the server remembers of the current discharge (kept on disk, so a
- * restart on battery neither repeats a level nor restarts the 20 min). */
+ * restart on battery neither repeats a level nor restarts the count). */
 export interface PowerWatchState {
   onBatterySince: number | null;
   told: string[];
+  /** onBatterySince was read from `pmset -g log` (when the Mac left the
+   * wall), not set when this server first saw the battery. */
+  sinceFromLog?: boolean;
 }
 export const POWER_PENDING_KEY = "power:battery";
 export const emptyPowerWatch = (): PowerWatchState => ({ onBatterySince: null, told: [] });
@@ -93,33 +122,66 @@ export function readPowerWatch(json: string | null): PowerWatchState {
     return {
       onBatterySince: typeof value.onBatterySince === "number" ? value.onBatterySince : null,
       told: Array.isArray(value.told) ? value.told.filter((level): level is string => typeof level === "string") : [],
+      ...(value.sinceFromLog === true ? { sinceFromLog: true } : {}),
     };
   } catch {
     return emptyPowerWatch();
   }
 }
 
+/** When the Mac last left the wall, from `pmset -g log`: the first "Using
+ * Batt" after the last "Using AC" ("2026-10-01 20:41:30 -0300 Assertions …
+ * Using Batt(Charge: 100)"). With no "Using AC" left in the log, its first
+ * "Using Batt" (a lower bound). Null when the log shows no battery, or the
+ * Mac is back on AC by the log. */
+export function lastUnplugAt(pmsetLog: string, now: number): number | null {
+  const events: Array<{ at: number; battery: boolean }> = [];
+  for (const line of pmsetLog.split("\n")) {
+    const found = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) ([+-])(\d{2})(\d{2})\b.*\bUsing (AC|Batt|BATT)\b/i.exec(line);
+    if (!found) continue;
+    const at = Date.parse(`${found[1]}T${found[2]}${found[3]}${found[4]}:${found[5]}`);
+    if (Number.isFinite(at) && at <= now) events.push({ at, battery: !/^ac$/i.test(found[6]!) });
+  }
+  const lastAc = events.findLastIndex((event) => !event.battery);
+  if (lastAc === events.length - 1) return null;
+  return events.slice(lastAc + 1).find((event) => event.battery)?.at ?? null;
+}
+
 /** One reading of `pmset`: the next state, whether the "Ligue o Mac na
- * tomada" item must be resolved, and the alert to give, if any. On AC the
- * item is always resolved — after a restart the memory of the discharge may
- * be gone while the item, saved, is still there (INSP-G r1 G1-b). */
-export function powerStep(watch: PowerWatchState, power: PowerState, now: number, releaseRunning: boolean): {
+ * tomada" item must be resolved, and the alert to give, if any. On AC, or
+ * back above the owner's limit, the item is resolved — after a restart the
+ * memory of the discharge may be gone while the item, saved, is still there
+ * (INSP-G r1 G1-b). `unpluggedAt` (from `pmset -g log`) dates the discharge
+ * from when the Mac left the wall, not from this server's first look. */
+export function powerStep(watch: PowerWatchState, power: PowerState, now: number, releaseRunning: boolean, opts: { minPercent?: number; unpluggedAt?: number | null } = {}): {
   watch: PowerWatchState;
   changed: boolean;
   resolvePending: boolean;
   alert: { level: string; text: string; log: string; pendingTitle: string } | null;
 } {
+  const minPercent = opts.minPercent ?? DEFAULT_BATTERY_MIN_PERCENT;
   if (!power.onBattery) {
-    const changed = watch.onBatterySince !== null || watch.told.length > 0;
+    const changed = watch.onBatterySince !== null || watch.told.length > 0 || watch.sinceFromLog === true;
     return { watch: emptyPowerWatch(), changed, resolvePending: true, alert: null };
   }
-  const onBatterySince = watch.onBatterySince ?? now;
-  const found = batteryAlert({ power, onBatterySince, now, releaseRunning, told: new Set(watch.told) });
-  const next = { onBatterySince, told: found ? [...watch.told, found.level] : watch.told };
-  const changed = watch.onBatterySince !== onBatterySince || next.told.length !== watch.told.length;
-  if (!found) return { watch: next, changed, resolvePending: false, alert: null };
-  const pendingTitle = `Ligue o Mac na tomada${power.percent !== null ? ` (${power.percent}%)` : ""}${releaseRunning ? " — release em curso" : ""}`;
+  const unplugged = typeof opts.unpluggedAt === "number" && opts.unpluggedAt <= now ? opts.unpluggedAt : null;
+  const onBatterySince = unplugged !== null ? Math.min(unplugged, watch.onBatterySince ?? unplugged) : watch.onBatterySince ?? now;
+  const below = belowBatteryLimit(power, minPercent);
+  const found = batteryAlert({ power, onBatterySince, now, releaseRunning, told: new Set(watch.told), minPercent });
+  const next: PowerWatchState = { onBatterySince, told: found ? [...watch.told, found.level] : watch.told, ...(watch.sinceFromLog || unplugged !== null ? { sinceFromLog: true } : {}) };
+  const changed = watch.onBatterySince !== onBatterySince || next.told.length !== watch.told.length || next.sinceFromLog !== watch.sinceFromLog;
+  if (!found) return { watch: next, changed, resolvePending: !below, alert: null };
+  const pendingTitle = `Ligue o Mac na tomada (${power.percent !== null ? `${power.percent}%, abaixo do seu limite de ${minPercent}%` : "no-break, sem tomada"})${releaseRunning ? " — release em curso" : ""}`;
   return { watch: next, changed, resolvePending: false, alert: { ...found, log: `[power] ${found.text}`, pendingTitle } };
+}
+
+/** On battery below the owner's limit: an order to run a carrier is refused;
+ * a mere mention of one passes with a note. Above the limit: nothing. */
+export function carrierBatteryCheck(power: PowerState | null, intent: "order" | "mention" | null, minPercent: number): { refusal: string } | { note: string } | null {
+  if (!power || !intent || !belowBatteryLimit(power, minPercent)) return null;
+  const charge = power.percent !== null ? `${power.percent}%` : "no-break, carga desconhecida";
+  if (intent === "order") return { refusal: `não inicio carrier com o Mac na bateria abaixo do limite do dono (${charge}; limite ${minPercent}%): se ele desligar no meio do deploy, a produção fica pela metade. Peça ao dono para ligar na tomada e mande de novo.` };
+  return { note: `[Nota do servidor: Mac na bateria abaixo do limite do dono (${charge}; limite ${minPercent}%): não rode carrier até voltar à tomada.]` };
 }
 
 // A message or brief that starts a carrier, as the Chief writes them: the

@@ -545,6 +545,10 @@ const appConfigSchema = z.object({
   /** The authorization decision log (server/decision-log.ts): days of month
    * files kept, at least; OMB_DECISION_RETENTION_DAYS wins when set. */
   decisions: z.object({ retentionDays: z.number().int().min(1).max(3650).optional() }).strict().optional(),
+  /** The Mac's battery (server/power.ts): below batteryMinPercent (the
+   * owner's limit, default 20) on battery, the Chief and the owner hear it
+   * and no carrier ORDER goes out; above it, nothing is said. */
+  power: z.object({ batteryMinPercent: z.number().int().min(1).max(99).optional() }).strict().optional(),
   /** #1655 cloud-overflow settings. perSecondCostUsd is the operator's own
    * verified rate: with no price configured the feature stays inert rather
    * than show an invented one. allowlistedThreads carries standing consent
@@ -602,6 +606,7 @@ export interface AppConfig {
   openrouter?: { key?: string };
   budgets?: { monthlyUsd?: number; warnAtPercent?: number };
   decisions?: { retentionDays?: number };
+  power?: { batteryMinPercent?: number };
   billing?: { currency?: string; prices?: Record<string, { inputPerMillion: number; outputPerMillion: number; cachedInputPerMillion?: number }> };
   openaiCompat?: { key?: string; url?: string; model?: string; provider?: string };
   composio?: { apiKey?: string; userId?: string; sessionId?: string };
@@ -1249,7 +1254,7 @@ export function saveConfig(
   // back after we have successfully recognized the legacy list.
   const storedProfiles = storedBrowserProfilesSchema.safeParse(disk.browserProfiles);
   if (storedProfiles.success) disk.browserProfiles = storedProfiles.data;
-  for (const key of ["xai", "anthropic", "mistral", "openai", "openrouter", "openaiCompat", "composio", "box", "opencodeGo", "tts", "decider", "imageGen", "profile", "rooms", "threads", "context", "memory", "localVm", "features", "cloudOverflow", "budgets", "billing", "decisions", "onboarding", "browserEngine", "newBots"] as const) {
+  for (const key of ["xai", "anthropic", "mistral", "openai", "openrouter", "openaiCompat", "composio", "box", "opencodeGo", "tts", "decider", "imageGen", "profile", "rooms", "threads", "context", "memory", "localVm", "features", "cloudOverflow", "budgets", "billing", "decisions", "power", "onboarding", "browserEngine", "newBots"] as const) {
     const section = checkedPatch[key];
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);

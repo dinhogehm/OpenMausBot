@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { batteryAlert, carrierIntent, isReleaseProcess, LOW_PERCENT, ON_BATTERY_ALERT_MS, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, startsCarrier } from "./power.ts";
+import { batteryAlert, batteryMinPercent, carrierBatteryCheck, carrierIntent, DEFAULT_BATTERY_MIN_PERCENT, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, startsCarrier, UNKNOWN_CHARGE_ALERT_MS } from "./power.ts";
 
 const onBattery = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=27525219)\t53%; discharging; 1:16 remaining present: true\n";
 const plugged = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=27525219)\t100%; charged; 0:00 remaining present: true\n";
@@ -22,8 +22,14 @@ describe("power", () => {
     // a laptop beside a UPS: the UPS line comes first, the charge that matters is the Mac's
     const both = "Now drawing from 'Battery Power'\n -UPS-1500VA (id=1234567)\t100%; charged; 0:00 remaining present: true\n -InternalBattery-0 (id=7340131)\t12%; discharging; 0:20 remaining present: true\n";
     expect(parsePmsetBatt(both)).toEqual({ onBattery: true, percent: 12 });
-    expect(batteryAlert({ power: parsePmsetBatt(both), onBatterySince: 0, now: 1, releaseRunning: false, told: new Set() })!.level).toBe("critical");
-    expect(batteryAlert({ power: parsePmsetBatt(ups), onBatterySince: 0, now: ON_BATTERY_ALERT_MS, releaseRunning: false, told: new Set() })!.level).toBe("battery");
+    // 12%: below the owner's 20%, not yet critical (10%)
+    expect(batteryAlert({ power: parsePmsetBatt(both), onBatterySince: 0, now: 1, releaseRunning: false, told: new Set() })!.level).toBe("low");
+    // the UPS at 87% is above the limit like any battery
+    expect(batteryAlert({ power: parsePmsetBatt(ups), onBatterySince: 0, now: UNKNOWN_CHARGE_ALERT_MS, releaseRunning: false, told: new Set() })).toBeNull();
+    // a no-break whose charge cannot be read: the wall is out, said after 20 min
+    const blind = { onBattery: true, percent: null };
+    expect(batteryAlert({ power: blind, onBatterySince: 0, now: UNKNOWN_CHARGE_ALERT_MS - 1, releaseRunning: false, told: new Set() })).toBeNull();
+    expect(batteryAlert({ power: blind, onBatterySince: 0, now: UNKNOWN_CHARGE_ALERT_MS, releaseRunning: false, told: new Set() })!.text).toContain("no-break, carga desconhecida");
     // the real AC reading of 01/10, and its variants, stay off battery
     expect(parsePmsetBatt("Now drawing from 'AC Power'\n -InternalBattery-0 (id=7340131)\t99%; finishing charge; 0:31 remaining present: true\n")).toEqual({ onBattery: false, percent: 99 });
     expect(parsePmsetBatt("Now drawing from 'AC Power'\n -InternalBattery-0 (id=7340131)\t80%; AC attached; not charging present: true\n")).toEqual({ onBattery: false, percent: 80 });
@@ -68,19 +74,71 @@ describe("power", () => {
     ]) expect(isReleaseProcess(line), line).toBe(false);
   });
 
-  it("tells the Chief after 20 min on battery, when low, and when critical — each once", () => {
+  it("says nothing above the owner's 20%, however long on battery (R9-resilience: the alert of 21:26 at 82%)", () => {
+    const base = { onBatterySince: 0, releaseRunning: true, told: new Set<string>() };
+    for (const percent of [100, 82, 30, 20]) {
+      expect(batteryAlert({ ...base, power: { onBattery: true, percent }, now: 6 * 3_600_000 }), `${percent}%`).toBeNull();
+    }
+    expect(DEFAULT_BATTERY_MIN_PERCENT).toBe(20);
+  });
+
+  it("tells the Chief below the limit, then when critical — each once, and never promises what the watcher does not do", () => {
     const told = new Set<string>();
     const base = { onBatterySince: 0, releaseRunning: true, told };
-    expect(batteryAlert({ ...base, power: { onBattery: true, percent: 80 }, now: ON_BATTERY_ALERT_MS - 1 })).toBeNull();
-    const long = batteryAlert({ ...base, power: { onBattery: true, percent: 80 }, now: ON_BATTERY_ALERT_MS })!;
-    expect(long).toMatchObject({ level: "battery", text: expect.stringContaining("com release de produção em curso") });
-    told.add(long.level);
-    expect(batteryAlert({ ...base, power: { onBattery: true, percent: 80 }, now: ON_BATTERY_ALERT_MS * 2 })).toBeNull();
-    const low = batteryAlert({ ...base, power: { onBattery: true, percent: LOW_PERCENT - 1 }, now: 1 })!;
-    expect(low.level).toBe("low");
+    const low = batteryAlert({ ...base, power: { onBattery: true, percent: 19 }, now: 45 * 60_000 })!;
+    expect(low).toEqual({ level: "low", text: "O Mac está na bateria há 45 min com 19%, abaixo do seu limite de 20%, com release de produção em curso. Ligue na tomada: o Chief não manda carrier abaixo de 20%, mas o watcher automático de produção não olha a bateria e ainda pode começar um release sozinho." });
+    expect(low.text).not.toMatch(/nenhum carrier novo começa/);
     told.add(low.level);
-    expect(batteryAlert({ ...base, power: { onBattery: true, percent: 12 }, now: 1 })!.text).toContain("PARAR");
+    expect(batteryAlert({ ...base, power: { onBattery: true, percent: 15 }, now: 50 * 60_000 })).toBeNull();
+    const critical = batteryAlert({ ...base, power: { onBattery: true, percent: 9 }, now: 80 * 60_000 })!;
+    expect(critical.level).toBe("critical");
+    expect(critical.text).toContain("PARAR");
+    expect(critical.text).toContain("não olha a bateria");
+    told.add(critical.level);
+    expect(batteryAlert({ ...base, power: { onBattery: true, percent: 5 }, now: 90 * 60_000 })).toBeNull();
     expect(batteryAlert({ ...base, power: { onBattery: false, percent: 12 }, now: 1 })).toBeNull();
+    // a Mac found already critical is told once, not "low" after it
+    const late = new Set<string>(["critical"]);
+    expect(batteryAlert({ ...base, told: late, power: { onBattery: true, percent: 8 }, now: 1 })).toBeNull();
+  });
+
+  it("takes the owner's limit from the config: alerts and carrier refusals follow it", () => {
+    expect(batteryMinPercent(undefined)).toBe(20);
+    expect(batteryMinPercent(35)).toBe(35);
+    for (const bad of [0, 100, 12.5, "30", null]) expect(batteryMinPercent(bad), String(bad)).toBe(20);
+    expect(batteryAlert({ power: { onBattery: true, percent: 30 }, onBatterySince: 0, now: 1, releaseRunning: false, told: new Set(), minPercent: 35 })!.text).toContain("abaixo do seu limite de 35%");
+    // a carrier ORDER is held only below the limit; a mention passes with a note, also only below it
+    expect(carrierBatteryCheck({ onBattery: true, percent: 82 }, "order", 20)).toBeNull();
+    expect(carrierBatteryCheck({ onBattery: true, percent: 20 }, "order", 20)).toBeNull();
+    expect(carrierBatteryCheck({ onBattery: false, percent: 5 }, "order", 20)).toBeNull();
+    expect(carrierBatteryCheck({ onBattery: true, percent: 19 }, "order", 20)).toEqual({ refusal: "não inicio carrier com o Mac na bateria abaixo do limite do dono (19%; limite 20%): se ele desligar no meio do deploy, a produção fica pela metade. Peça ao dono para ligar na tomada e mande de novo." });
+    expect(carrierBatteryCheck({ onBattery: true, percent: 19 }, "mention", 20)).toMatchObject({ note: expect.stringContaining("não rode carrier até voltar à tomada") });
+    expect(carrierBatteryCheck({ onBattery: true, percent: 19 }, null, 20)).toBeNull();
+    expect(carrierBatteryCheck({ onBattery: true, percent: 30 }, "order", 35)).toMatchObject({ refusal: expect.stringContaining("limite 35%") });
+  });
+
+  it("counts the discharge from when the Mac left the wall, read from pmset -g log (R9-resilience BAT-T0)", () => {
+    // the real lines of 01/10: on AC until 20:41:30, then on battery; the server booted at 21:06
+    const log = [
+      "2026-10-01 17:55:03 -0300 Assertions          \tSummary- [System: PrevIdle PrevSleep DeclUser kCPU kDisp] Using AC(Charge: 100)          ",
+      "2026-10-01 20:41:30 -0300 Assertions          \tSummary- [System: PrevIdle PrevDisp DeclUser kDisp] Using Batt(Charge: 100)          ",
+      "2026-10-01 21:02:11 -0300 Assertions          \tSummary- [System: PrevIdle DeclUser kDisp] Using Batt(Charge: 88)          ",
+    ].join("\n");
+    const unplugged = Date.parse("2026-10-01T20:41:30-03:00");
+    const boot = Date.parse("2026-10-01T21:06:21-03:00");
+    expect(lastUnplugAt(log, boot)).toBe(unplugged);
+    // back on AC by the log, no battery, or only battery left in a rotated log
+    expect(lastUnplugAt(`${log}\n2026-10-01 21:30:00 -0300 Assertions Summary- Using AC(Charge: 70)`, boot + 3_600_000)).toBeNull();
+    expect(lastUnplugAt("", boot)).toBeNull();
+    expect(lastUnplugAt(log.split("\n").slice(1).join("\n"), boot)).toBe(unplugged);
+    // the first look at 21:06 counts from 20:41, and is kept across a restart
+    const first = powerStep(readPowerWatch(null), { onBattery: true, percent: 19 }, boot, false, { unpluggedAt: unplugged });
+    expect(first.watch).toEqual({ onBatterySince: unplugged, told: ["low"], sinceFromLog: true });
+    expect(first.alert!.text).toContain("na bateria há 25 min com 19%");
+    // a state saved by an earlier build (counted from its boot) is moved back to the unplugging
+    const saved = powerStep({ onBatterySince: boot, told: [] }, { onBattery: true, percent: 82 }, boot + 60_000, false, { unpluggedAt: unplugged });
+    expect(saved).toMatchObject({ changed: true, alert: null, watch: { onBatterySince: unplugged, sinceFromLog: true } });
+    expect(readPowerWatch(JSON.stringify(saved.watch))).toEqual(saved.watch);
   });
 
   it("resolves \"Ligue o Mac na tomada\" on AC even after a restart forgot the discharge (INSP-G r1 item 7)", () => {
@@ -104,14 +162,16 @@ describe("power", () => {
   it("keeps the discharge across a restart, and logs the battery alert as [power] (items 7 and 11)", () => {
     let watch = readPowerWatch(null);
     const first = powerStep(watch, { onBattery: true, percent: 80 }, 0, false);
-    expect(first).toMatchObject({ changed: true, resolvePending: false, alert: null });
-    // a restart: what was saved comes back, the 20 min keep counting from the first reading
+    // above the limit: counted, nothing said, the item (if any) closed
+    expect(first).toMatchObject({ changed: true, resolvePending: true, alert: null });
+    // a restart: what was saved comes back, the count goes on from the first reading
     watch = readPowerWatch(JSON.stringify(first.watch));
-    const long = powerStep(watch, { onBattery: true, percent: 80 }, ON_BATTERY_ALERT_MS, true);
-    expect(long.alert).toMatchObject({ level: "battery", pendingTitle: "Ligue o Mac na tomada (80%) — release em curso" });
-    expect(long.alert!.log).toMatch(/^\[power\] O Mac está na bateria há 20 min/);
+    const low = powerStep(watch, { onBattery: true, percent: 19 }, 30 * 60_000, true);
+    expect(low.alert).toMatchObject({ level: "low", pendingTitle: "Ligue o Mac na tomada (19%, abaixo do seu limite de 20%) — release em curso" });
+    expect(low.alert!.log).toMatch(/^\[power\] O Mac está na bateria há 30 min com 19%/);
+    expect(low.resolvePending).toBe(false);
     // told once, also after another restart
-    expect(powerStep(readPowerWatch(JSON.stringify(long.watch)), { onBattery: true, percent: 80 }, ON_BATTERY_ALERT_MS * 2, true).alert).toBeNull();
+    expect(powerStep(readPowerWatch(JSON.stringify(low.watch)), { onBattery: true, percent: 17 }, 40 * 60_000, true).alert).toBeNull();
     expect(readPowerWatch("{broken")).toEqual({ onBatterySince: null, told: [] });
   });
 
