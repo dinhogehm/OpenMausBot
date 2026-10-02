@@ -21,6 +21,7 @@ import {
   ownerAsk,
   ownerAskText,
   ownerPendingReplyText,
+  ownerPendingAwaitNote,
   ownerPendingStepsRequestText,
   ownerPendingStepsRequestNote,
   parseOwnerPendingDetails,
@@ -996,6 +997,38 @@ describe("what the person answered stays with the item (J18)", () => {
   });
 });
 
+describe("the answers and the audit, robust and small (INSP-J2 #12, #13)", () => {
+  it("keeps settled items slim, and at most 3 of one server item", () => {
+    const autonomy = make();
+    for (let n = 0; n < 5; n += 1) {
+      autonomy.addOwnerPending("chief", "c1", { title: "Ligue o Mac na tomada", key: "power:battery", why: "x".repeat(300), steps: [{ text: "y" }] });
+      now += 60_000;
+      autonomy.resolveOwnerPending({ key: "power:battery" });
+    }
+    const kept = autonomy.resolvedOwnerPendingOf("chief");
+    expect(kept).toHaveLength(3);
+    expect(kept[0]).not.toHaveProperty("why");
+    expect(kept[0]).not.toHaveProperty("steps");
+    expect(Object.keys(kept[0]!).sort()).toEqual(["botId", "createdAt", "id", "key", "resolvedAt", "resolvedBy", "threadId", "title"]);
+  });
+
+  it("reads a hand-edited ledger without breaking: bad history dropped, an invalid recommendation loses only its mark", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], ownerPending: [
+      { id: "o1", botId: "chief", threadId: "c1", title: "A", createdAt: 1, why: "w", steps: [{ text: "s" }], history: "not a list", awaitingSince: "x",
+        options: [{ label: "Um", reply: "1", recommended: true }, { label: "Dois", reply: "2", recommended: true, why: "melhor" }, { label: "Três", reply: "3", recommended: true, why: "também" }] },
+      { id: "o2", botId: "chief", threadId: "c1", title: "B", createdAt: 2, history: [{ at: 5, kind: "option", label: "Um", text: "1", by: "owner", delivered: true }, { at: "bad" }, null] },
+    ] }));
+    const autonomy = make();
+    const one = autonomy.ownerPendingById("chief", "o1")!;
+    expect(one.history).toBeUndefined();
+    expect(one.awaitingSince).toBeUndefined();
+    expect(one.why).toBe("w");
+    expect(one.steps).toEqual([{ text: "s" }]);
+    expect(one.options).toEqual([{ label: "Um", reply: "1" }, { label: "Dois", reply: "2", recommended: true, why: "melhor" }, { label: "Três", reply: "3" }]);
+    expect(autonomy.ownerPendingById("chief", "o2")!.history).toEqual([{ at: 5, kind: "option", label: "Um", text: "1", by: "owner", delivered: true }]);
+  });
+});
+
 describe("what waits on the person, made practical (lot I)", () => {
   const steps = [
     { text: "Abra a PR e confira o diff do carrier", link: "https://github.com/acme/app/pull/12" },
@@ -1062,8 +1095,9 @@ describe("what waits on the person, made practical (lot I)", () => {
     const item = { id: "o3", title: "Aprovar o merge da PR #12" };
     expect(ownerPendingReplyText(item, " Aprovado: pode fazer o merge da #12. ", true)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Aprovado: pode fazer o merge da #12.\n\n(Marquei o3 como resolvido em \"Precisa de você\".)");
     // J18: not resolved, it says the item waits on the bot — in plain words, no tool name
-    expect(ownerPendingReplyText(item, "Espere a CI.", false)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Espere a CI.\n\n(o3 continua em \"Precisa de você\", aguardando você: resolva-o quando estiver feito, ou atualize-o se faltar algo.)");
-    expect(ownerPendingReplyText(item, "Espere a CI.", false)).not.toMatch(/owner_pending/);
+    // INSP-J2 #3: the person's words carry only facts; what the bot must do is a note only it reads
+    expect(ownerPendingReplyText(item, "Espere a CI.", false)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Espere a CI.");
+    expect(ownerPendingAwaitNote(item)).toMatch(/^\[Nota do OpenMausBot, não escrita pela pessoa\] A pendência o3 continua .*owner_pending resolve id o3.*owner_pending update id o3.*2 h/);
     // what the person "says" is plain; the tool call is a note only the bot reads (INSP-I r1 #6)
     expect(ownerPendingStepsRequestText(item)).toBe("Me mostre como resolver «Aprovar o merge da PR #12», passo a passo.");
     expect(ownerPendingStepsRequestText(item)).not.toMatch(/owner_pending|why|steps|options/);

@@ -269,8 +269,13 @@ import {
   ownerPendingStepsRequestText,
   ownerPendingStepsRequestNote,
   ownerPendingRecommendNote,
+  ownerPendingAwaitNote,
   ownerPendingRecommendText,
   ownerPendingStepsAutoReport,
+  missingParts,
+  STEPS_REPORT_PREFIX,
+  type OwnerPendingStep,
+  type OwnerPendingOption,
   practicalMissing,
   RECOMMEND_MISSING,
   parseOwnerPendingDetails,
@@ -8663,17 +8668,41 @@ function askStepsForOlderItems(): void {
   if (now - stepsAsk.bootAt < STEPS_ASK_AFTER_BOOT_MS || now - stepsAsk.lastAt < 60_000) return;
   if (existsSync(NURIA_STOP_FILE)) return;
   stepsAsk.lastAt = now;
-  const asked = new Set<string>();
-  for (const item of autonomy.ownerPendingNeedingSteps()) {
-    if (asked.has(item.botId)) continue;
-    const target = ownerTurnThread(item.botId, item.threadId);
-    if (!store.taskByThread(item.botId, target)) continue;
-    asked.add(item.botId);
-    autonomy.markOwnerPendingStepsAutoAsked(item.botId, item.id);
-    autonomy.addReport(item.botId, target, ownerPendingStepsAutoReport(item));
-    console.log(`[owner-pending] ${item.id} of ${store.bot(item.botId)?.name ?? item.botId} has no steps: its bot was asked once, in ${target}`);
+  // the server's own items, saved by an older build: the server completes them, never their bot (INSP-J2 #5)
+  for (const item of autonomy.serverItemsIncomplete()) {
+    const details = serverItemDetails(item);
+    if (!details) continue;
+    autonomy.addOwnerPending(item.botId, item.threadId, { title: item.title, key: item.key!, ...details });
+    console.log(`[owner-pending] server item ${item.id} (${item.key}) completed with why/steps/options by the server`);
     refreshBotRow(item.botId);
   }
+  // a bot's own items: ONE report per bot, listing each with what it lacks
+  const byBot = new Map<string, OwnerPending[]>();
+  for (const item of autonomy.ownerPendingNeedingSteps()) byBot.set(item.botId, [...(byBot.get(item.botId) ?? []), item]);
+  for (const [botId, items] of byBot) {
+    const target = ownerTurnThread(botId, items[0]!.threadId);
+    if (!store.taskByThread(botId, target)) continue;
+    for (const item of items) autonomy.markOwnerPendingStepsAutoAsked(botId, item.id);
+    autonomy.addReport(botId, target, ownerPendingStepsAutoReport(items));
+    console.log(`[owner-pending] ${store.bot(botId)?.name ?? botId}: ${items.map((item) => item.id).join(", ")} lack ${[...new Set(items.flatMap(missingParts))].join("/")}: one report, in ${target}`);
+    refreshBotRow(botId);
+  }
+}
+
+/** A server item's why/steps/options, rebuilt from its key (an older build saved it bare). */
+function serverItemDetails(item: OwnerPending): { why: string; steps: OwnerPendingStep[]; options?: OwnerPendingOption[] } | null {
+  const key = item.key ?? "";
+  if (key.startsWith(APP_UNBLOCK_KEY)) { const { why, steps, options } = appUnblockPending(key.slice(APP_UNBLOCK_KEY.length)); return { why, steps, options }; }
+  if (key === POWER_PENDING_KEY) { const { why, steps, options } = powerPendingDetails(false); return { why, steps, options }; }
+  const tag = /^tag-advance:([0-9a-f]{7,40})$/.exec(key)?.[1];
+  if (tag) { const { why, steps, options } = tagAdvancePending(tag, item.command ?? null); return { why, steps, options }; }
+  const loop = /^release-loop:([0-9a-f]{7,40})$/.exec(key)?.[1];
+  if (loop) {
+    const full = /\b([0-9a-f]{40})\b/.exec(item.command ?? "")?.[1] ?? null;
+    const { why, steps, options } = releaseLoopPending({ short: loop, full, count: Number(/(\d+)×/.exec(item.title)?.[1] ?? 3) });
+    return { why, steps, options };
+  }
+  return null;
 }
 
 async function autonomyTick(): Promise<void> {
@@ -8760,6 +8789,15 @@ async function autonomyTick(): Promise<void> {
     if (!store.taskByThread(pending.botId, pending.threadId)) {
       autonomy.takeReports(pending.threadId);
       continue;
+    }
+    // ~/.nuria/stop is checked at dispatch too: a steps request queued before the stop waits for it to go (INSP-J2 #6)
+    if (existsSync(NURIA_STOP_FILE)) {
+      for (const text of autonomy.dropReports(pending.threadId, (each) => each.startsWith(STEPS_REPORT_PREFIX))) {
+        const ids = /Itens: ([o\d, ]+)\./.exec(text)?.[1]?.split(/,\s*/).filter(Boolean) ?? [];
+        autonomy.unmarkOwnerPendingStepsAutoAsked(pending.botId, ids);
+        console.log(`[owner-pending] ~/.nuria/stop: the steps request for ${ids.join(", ")} was not sent; asked again once the stop is gone`);
+      }
+      if (!autonomy.hasReports(pending.threadId)) continue;
     }
     if (autonomyTurnBlocked(pending.botId, pending.threadId)) continue;
     const taken = autonomy.leaseReports(pending.threadId);
@@ -18994,7 +19032,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // the item as it would be: still why and steps (an older one gets them now) (J17)
           const current = autonomy.ownerPendingById(bot.id, id);
           if (!current) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
-          const incomplete = practicalMissing({ why: structured.why ?? current.why, steps: structured.steps ?? current.steps });
+          const incomplete = practicalMissing({ why: structured.why ?? current.why, steps: structured.steps ?? current.steps, options: structured.options ?? current.options });
           if (incomplete) return json(res, 400, { error: incomplete });
           const item = autonomy.updateOwnerPending(bot.id, id, patch);
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
@@ -22616,6 +22654,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       broadcast({ kind: "bot", bot: visible });
       return json(res, 200, { bot: visible });
     }
+    // the settled items, with what the person answered: the audit trail (INSP-J2 #12)
+    m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending-resolved$/);
+    if (m && method === "GET") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      return json(res, 200, { resolved: autonomy.resolvedOwnerPendingOf(bot.id).slice().reverse() });
+    }
     m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/resolve$/);
     if (m && method === "POST") {
       const bot = store.bot(m[1]!);
@@ -22668,8 +22713,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // "seguir no terminal" is kept: the server does not recreate the item for 24 h (INSP-J r1 #8) — and it closes it
         const declined = Boolean(item.key?.startsWith(APP_UNBLOCK_KEY) && option.label === APP_UNBLOCK_DECLINE_LABEL);
         if (declined) ownerDeclines.set(item.key!, Date.now() + APP_UNBLOCK_DECLINE_MS);
-        // a decision no longer closes the item: it waits on the bot ("Aguardando …"), with the choice shown (J18)
-        resolve = declined;
+        // a bot's item waits on the bot after a decision ("Aguardando …", J18); the
+        // server's own items (power, release loop, tag, the app) close on the choice
+        // as before — the server follows their condition itself (INSP-J2 #2)
+        resolve = declined || Boolean(item.key);
         text = ownerPendingReplyText(item, option.reply, resolve);
         answer = { kind: "option", label: option.label, text: option.reply };
       } else {
@@ -22682,7 +22729,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       try {
         assertWithinBudget(cfg, DATA_DIR);
       } catch (error) {
-        return json(res, 409, { error: error instanceof Error ? error.message : String(error), code: "spend_cap" });
+        // refused by the spend cap: in the history as not sent too, never silent (INSP-J2 #14)
+        const message = error instanceof Error ? error.message : String(error);
+        autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: false, error: message });
+        refreshBotRow(bot.id);
+        return json(res, 409, { error: message, code: "spend_cap" });
       }
       // with a channel named by the owner, the answer wakes the bot there,
       // saying which item and conversation it is about — the bot's reply
@@ -22711,6 +22762,22 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         refreshBotRow(bot.id);
         drainQueuedSends();
         return json(res, 202, { ok: true, threadId: target, resolved: 0 });
+      }
+      if (!resolve) {
+        // the item stays open and waits on the bot: what the bot must do next rides in
+        // its prompt as a note, never in the person's words (INSP-J2 #3). Queued, then
+        // drained: it runs now when the conversation is free, or after the running turn.
+        const prompt = promptWithReply(`${text}\n\n${ownerPendingAwaitNote(item)}`, undefined, cfg.profile?.name?.trim() || "User");
+        let queued: ReturnType<typeof queueSteeredMessage>;
+        try {
+          queued = queueSteeredMessage(bot.id, target, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
+        } catch (error) {
+          return ownerAnswerFailed(bot.id, item.id, answer, error);
+        }
+        autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: true });
+        refreshBotRow(bot.id);
+        drainQueuedSends();
+        return json(res, 202, { ok: true, queued: true, queueId: queued.id, threadId: target, text, resolved: 0 });
       }
       let receipt: Awaited<ReturnType<typeof startOrQueueDirectMessage>>;
       try {

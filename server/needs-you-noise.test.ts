@@ -83,6 +83,11 @@ describe("an item is born with why and steps", () => {
     expect(practicalMissing({ why: "x", steps: [] })).toContain("falta steps.");
     expect(practicalMissing({ why: "x", steps: [{ text: "x" }] })).toBeNull();
     expect(practicalMissing({})).toContain("o comando exato em command ou o link em link");
+    // INSP-J2 #7: 2+ decisions with none recommended is refused like why/steps
+    const two = [{ label: "A", reply: "a" }, { label: "B", reply: "b" }];
+    expect(practicalMissing({ why: "x", steps: [{ text: "x" }], options: two })).toContain("owner_pending recusado: falta a recomendada.");
+    expect(practicalMissing({ why: "x", steps: [{ text: "x" }], options: [{ ...two[0]!, recommended: true }, two[1]!] })).toBeNull();
+    expect(practicalMissing({ why: "x", steps: [{ text: "x" }], options: [two[0]!] })).toBeNull();
     const tool = availableTools(catalogProfileFromEnv({})).find((each) => each.name === "owner_pending")!;
     expect(tool.description).toContain("ALWAYS why and steps");
   });
@@ -92,8 +97,17 @@ describe("an item is born with why and steps", () => {
     for (const item of [appUnblockPending("nuria-platform"), releaseLoopPending({ short: "d5bb1f70b", full: FULL, count: 4 }), powerPendingDetails(false), tagAdvancePending(FULL, null), tagAdvancePending(FULL, "git tag -f x")]) {
       expect(practicalMissing(item)).toBeNull();
     }
-    // the server's own request for an older item's steps: a report, never the person's words
-    expect(ownerPendingStepsAutoReport({ id: "o9", title: "Planilha linha 169" })).toMatch(/^\[Servidor: pendência sem passo a passo\] O item o9 .*owner_pending update, id o9.*Não escreva ao dono só por isto\.$/);
+    // the server's own request: ONE report per bot, each item with exactly what it lacks (INSP-J2 #5)
+    const report = ownerPendingStepsAutoReport([
+      { id: "o9", title: "Planilha linha 169" },
+      { id: "o10", title: "Liberar a escrita", why: "x", steps: [{ text: "y" }], options: [{ label: "A", reply: "a" }, { label: "B", reply: "b" }] },
+      { id: "o14", title: "Avisar a cliente", why: "x" },
+    ]);
+    expect(report).toMatch(/^\[Servidor: pendências sem passo a passo\] Itens: o9, o10, o14\./);
+    expect(report).toContain("- o9 («Planilha linha 169»): falta why e steps");
+    expect(report).toContain("- o10 («Liberar a escrita»): falta a recomendada");
+    expect(report).toContain("- o14 («Avisar a cliente»): falta steps");
+    expect(report).toMatch(/Não escreva ao dono só por isto\.$/);
   });
 });
 

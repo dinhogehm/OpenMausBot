@@ -104,21 +104,36 @@ it("asks the bot once for an older item's steps, one item per bot at a time, nev
     await waitForExit(fixture.child, { signal: "SIGTERM" });
     const at = Date.now() - 20 * 3_600_000;
     const thread = monitor.activeTaskId ?? monitor.threadId;
-    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
-      { id: "o9", botId: monitor.id, threadId: thread, title: "Planilha linha 169 (#NNNN): atualizar o status", createdAt: at },
-      { id: "o10", botId: monitor.id, threadId: thread, title: "Liberar a escrita na linha 97 da planilha", createdAt: at + 60_000 },
+    // a steps request queued before the stop (INSP-J2 #6: the stop is checked at dispatch too)
+    const queuedBefore = `[Servidor: pendências sem passo a passo] Itens: o9. O dono quer cada pendência com o passo a passo.\n- o9 («Planilha linha 169»): falta why e steps`;
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [{ botId: monitor.id, threadId: thread, items: [queuedBefore] }], inFlight: [], ownerPending: [
+      { id: "o9", botId: monitor.id, threadId: thread, title: "Planilha linha 169 (#NNNN): atualizar o status", createdAt: at, stepsAutoAskedAt: at, stepsRequestedAt: at },
+      { id: "o10", botId: monitor.id, threadId: thread, title: "Liberar a escrita na linha 97 da planilha", createdAt: at + 60_000, why: "x", steps: [{ text: "y" }], options: [{ label: "Liberei", reply: "a" }, { label: "Ainda não", reply: "b" }] },
       { id: "o11", botId: monitor.id, threadId: thread, title: "Aprovar o aviso", createdAt: at, why: "x", steps: [{ text: "Leia o aviso" }] },
+      // a server item saved bare by an older build: the server completes it, never its bot (INSP-J2 #5)
+      { id: "o8", botId: monitor.id, threadId: thread, title: "Avançar a tag de produção para d5bb1f70b", key: "tag-advance:d5bb1f70bea397bdd937d02148c685e406985ba0", createdAt: at },
     ] }));
-    // with ~/.nuria/stop: nothing is asked
+    // with ~/.nuria/stop: the queued request is not sent (and o9 may be asked again later); nothing new is asked
     await boot(true);
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(ledger().ownerPending.filter((item: any) => item.stepsAutoAskedAt)).toEqual([]);
+    expect(ledger().reports ?? []).toEqual([]);
+    expect(existsSync(prompts) ? readFileSync(prompts, "utf8") : "").not.toContain("pendências sem passo a passo");
     await waitForExit(restarted, { signal: "SIGTERM" });
     rmSync(join(dataDir, ".nuria", "stop"));
-    // without it: the oldest item without steps, once; the bot gets a report, not the person's words
+    // without it: ONE report for the bot, each item with what it lacks; the server item completed by the server
     await boot();
-    await expect.poll(() => ledger().ownerPending.filter((item: any) => item.stepsAutoAskedAt).map((item: any) => item.id), { timeout: 10_000 }).toEqual(["o9"]);
-    await expect.poll(() => (existsSync(prompts) ? readFileSync(prompts, "utf8") : ""), { timeout: 20_000 }).toContain("[Servidor: pendência sem passo a passo] O item o9");
+    await expect.poll(() => ledger().ownerPending.filter((item: any) => item.stepsAutoAskedAt).map((item: any) => item.id).sort(), { timeout: 10_000 }).toEqual(["o10", "o9"]);
+    await expect.poll(() => (existsSync(prompts) ? readFileSync(prompts, "utf8") : ""), { timeout: 20_000 }).toContain("[Servidor: pendências sem passo a passo] Itens: o9, o10.");
+    const prompt = readFileSync(prompts, "utf8");
+    expect(prompt).toContain("- o9 («Planilha linha 169 (#NNNN): atualizar o status»): falta why e steps");
+    expect(prompt).toContain("- o10 («Liberar a escrita na linha 97 da planilha»): falta a recomendada");
+    expect(prompt).not.toMatch(/o8 \(/);
+    const o8 = ledger().ownerPending.find((item: any) => item.id === "o8");
+    expect(o8.steps.length).toBeGreaterThan(0);
+    expect(o8.why).toContain("a tag nuria-production-deployed não andou");
+    expect(o8.options.filter((option: any) => option.recommended)).toHaveLength(1);
+    expect(o8.stepsAutoAskedAt).toBeUndefined();
     const messages = (await api(`/api/threads/${thread}/messages`, undefined, "GET")).messages as any[];
     expect(messages.filter((message) => message.role === "user").map((message) => message.text)).toEqual([]);
     // the screen shows it asked
@@ -130,7 +145,7 @@ it("asks the bot once for an older item's steps, one item per bot at a time, nev
     await boot();
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(ledger().ownerPending.find((item: any) => item.id === "o9").stepsAutoAskedAt).toBe(askedAt);
-    expect(readFileSync(prompts, "utf8").split("O item o9 em").length - 1).toBe(1);
+    expect(readFileSync(prompts, "utf8").split("Itens: o9, o10.").length - 1).toBe(1);
   } finally {
     await waitForExit(restarted, { signal: "SIGTERM" });
     await fixture.close();
@@ -150,7 +165,10 @@ it("keeps the owner's 'seguir no terminal' on the unblock-the-app item for 24 h"
     await waitForExit(fixture.child, { signal: "SIGTERM" });
     const item = { id: "o8", botId: chief.id, threadId: chief.activeTaskId ?? chief.threadId, title: "Abrir no app uma sessão na raiz de nuria-platform", key: "app-reused-folder:nuria-platform", createdAt: Date.now() - 3_600_000,
       options: [{ label: "Feito, conferir", reply: "Abri." }, { label: "Seguir no terminal", reply: "Não vou destravar o app agora." }] };
-    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [item] }));
+    // a server item whose non-recommended choice used to close it (INSP-J2 #2): closes again
+    const tag = { id: "o7", botId: chief.id, threadId: item.threadId, title: "Avançar a tag de produção para d5bb1f70b", key: "tag-advance:d5bb1f70b", createdAt: Date.now() - 3_600_000, why: "w", steps: [{ text: "s" }],
+      options: [{ label: "Avancei a tag", reply: "Avancei.", recommended: true, why: "x" }, { label: "Não tenho o bypass", reply: "Não tenho bypass." }] };
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [item, tag] }));
     const log = openSync(logPath, "a", 0o600);
     restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
       cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment({ ...process.env }, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
@@ -168,6 +186,12 @@ it("keeps the owner's 'seguir no terminal' on the unblock-the-app item for 24 h"
     expect(answer.resolved).toBe(1);
     const declines = JSON.parse(readFileSync(join(dataDir, "owner-declines.json"), "utf8"));
     expect(declines["app-reused-folder:nuria-platform"]).toBeGreaterThanOrEqual(before + 24 * 3_600_000 - 5_000);
+    expect((await api(`/api/bots/${chief.id}/owner-pending/o7/reply`, { option: 1, label: "Não tenho o bypass" })).resolved).toBe(1);
+    // the audit trail, reachable (INSP-J2 #12): newest first, with the person's answers
+    const audit = (await api(`/api/bots/${chief.id}/owner-pending-resolved`, undefined, "GET")).resolved as any[];
+    expect(audit.map((each) => [each.id, each.resolvedBy])).toEqual([["o7", "owner"], ["o8", "owner"]]);
+    expect(audit[1].history.map((each: any) => [each.kind, each.label])).toEqual([["ask", "recommend"], ["option", "Seguir no terminal"]]);
+    expect(audit[0]).not.toHaveProperty("steps");
   } finally {
     await waitForExit(restarted, { signal: "SIGTERM" });
     await fixture.close();

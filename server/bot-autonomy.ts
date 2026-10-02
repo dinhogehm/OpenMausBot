@@ -273,7 +273,8 @@ export interface OwnerPendingOption {
 export const OWNER_PENDING_TITLE_MAX = 200;
 /** Answers kept per item, and settled items kept for audit (J18). */
 export const OWNER_PENDING_HISTORY_MAX = 30;
-export const RESOLVED_PENDING_MAX = 300;
+export const RESOLVED_PENDING_MAX = 200;
+export const RESOLVED_PER_KEY = 3;
 export const OWNER_PENDING_OPTION_WHY_MAX = 200;
 export const OWNER_PENDING_WHY_MAX = 400;
 export const OWNER_PENDING_STEPS_MAX = 8;
@@ -340,6 +341,34 @@ export function parseOwnerPendingDetails(input: { why?: unknown; steps?: unknown
   return { ok: true, ...out };
 }
 
+/** A settled item as kept for audit: who, what, when and what the person
+ * answered — not its why/steps/options, so the ledger (rewritten on every
+ * save) stays small (INSP-J2 #12). */
+function slimResolved(item: OwnerPending, resolvedAt: number, resolvedBy: ResolvedOwnerPending["resolvedBy"]): ResolvedOwnerPending {
+  return {
+    id: item.id, botId: item.botId, threadId: item.threadId, title: item.title, createdAt: item.createdAt, resolvedAt, resolvedBy,
+    ...(item.key ? { key: item.key } : {}),
+    ...(item.history?.length ? { history: item.history.slice(-OWNER_PENDING_HISTORY_MAX) } : {}),
+  };
+}
+
+/** The newest RESOLVED_PENDING_MAX, and at most RESOLVED_PER_KEY of one
+ * server item (the power item comes back at every unplug). */
+function keepResolved(items: readonly ResolvedOwnerPending[]): ResolvedOwnerPending[] {
+  const perKey = new Map<string, number>();
+  const kept: ResolvedOwnerPending[] = [];
+  for (const item of [...items].reverse()) {
+    if (item.key) {
+      const seen = perKey.get(item.key) ?? 0;
+      if (seen >= RESOLVED_PER_KEY) continue;
+      perKey.set(item.key, seen + 1);
+    }
+    kept.push(item);
+    if (kept.length >= RESOLVED_PENDING_MAX) break;
+  }
+  return kept.reverse();
+}
+
 /** The decisions put the recommended one first (the person reads it first,
  * and its color says so); the rest keep the bot's order. */
 export function recommendedFirst<T extends { recommended?: true }>(options: readonly T[]): T[] {
@@ -349,16 +378,32 @@ export function recommendedFirst<T extends { recommended?: true }>(options: read
 /** An item without why or steps is refused (J17: the owner does not want to
  * click "Pedir o passo a passo" — the steps come with the item). The bot
  * hears exactly what is missing; null when the item is complete. */
-export function practicalMissing(item: { why?: string | undefined; steps?: readonly unknown[] | undefined }): string | null {
-  const missing = [!item.why?.trim() ? "why" : "", !item.steps?.length ? "steps" : ""].filter(Boolean);
+export function practicalMissing(item: { why?: string | undefined; steps?: readonly unknown[] | undefined; options?: ReadonlyArray<{ label: string; recommended?: unknown }> | undefined }): string | null {
+  const missing = missingParts(item);
   if (!missing.length) return null;
-  return `owner_pending recusado: falta ${missing.join(" e ")}. Todo item nasce com why (1–2 frases: por que importa e o que acontece se esperar) e steps (pelo menos 1 passo prático, na ordem; o comando exato em command ou o link em link quando houver), por exemplo steps: [{"text": "No Terminal, grave a recusa", "command": "echo <sha> > ~/.nuria/declined-production-release.sha"}]. A pessoa não deve precisar pedir o passo a passo. Mande de novo com ${missing.join(" e ")}.`;
+  const said = missing.join(" e ");
+  return `owner_pending recusado: falta ${said}. Todo item nasce com why (1–2 frases: por que importa e o que acontece se esperar) e steps (pelo menos 1 passo prático, na ordem; o comando exato em command ou o link em link quando houver), por exemplo steps: [{"text": "No Terminal, grave a recusa", "command": "echo <sha> > ~/.nuria/declined-production-release.sha"}]; com 2 ou mais options, UMA delas com recommended: true e why (uma frase: por que é a melhor). A pessoa não deve precisar pedir o passo a passo nem a recomendação. Mande de novo com ${said}.`;
+}
+
+/** What an item lacks to be practical: "why", "steps", "a recomendada" (2+ options, none marked — INSP-J2 #7). */
+export function missingParts(item: { why?: string | undefined; steps?: readonly unknown[] | undefined; options?: ReadonlyArray<{ label: string; recommended?: unknown }> | undefined }): string[] {
+  return [
+    !item.why?.trim() ? "why" : "",
+    !item.steps?.length ? "steps" : "",
+    (item.options?.length ?? 0) >= 2 && !item.options!.some((option) => option.recommended) ? "a recomendada" : "",
+  ].filter(Boolean);
 }
 
 /** The server's own request, as a report to the bot, for an older item's
  * steps (J17): nobody typed it, and the person is not answered for it. */
-export function ownerPendingStepsAutoReport(item: Pick<OwnerPending, "id" | "title">): string {
-  return `[Servidor: pendência sem passo a passo] O item ${item.id} em "Precisa de você" («${item.title.slice(0, 160)}») não tem why nem steps, e o dono quer o passo a passo junto com cada pendência. Reescreva-o agora com owner_pending update, id ${item.id}: why (1–2 frases: por que importa), steps (passos práticos, cada um com o comando exato em command ou o link em link quando houver) e options com uma recommended, se for uma escolha. Se o item não vale mais, resolva-o com owner_pending resolve. Não escreva ao dono só por isto.`;
+export const STEPS_REPORT_PREFIX = "[Servidor: pendências sem passo a passo]";
+
+/** The server's own request, ONE report per bot for all its items that
+ * lack something (J17, INSP-J2 #5): each with exactly what it lacks. Nobody
+ * typed it, and the person is not answered for it. */
+export function ownerPendingStepsAutoReport(items: ReadonlyArray<Pick<OwnerPending, "id" | "title" | "why" | "steps" | "options">>): string {
+  const lines = items.map((item) => `- ${item.id} («${item.title.slice(0, 120)}»): falta ${missingParts(item).join(" e ")}`);
+  return `${STEPS_REPORT_PREFIX} Itens: ${items.map((item) => item.id).join(", ")}. O dono quer cada pendência com o passo a passo e, se for uma escolha, com a sua recomendação. Complete cada um com owner_pending update (why: 1–2 frases sobre por que importa; steps: passos práticos com o comando em command ou o link em link quando houver; options: UMA com recommended: true e why):\n${lines.join("\n")}\nSe um item não vale mais, resolva-o com owner_pending resolve. Não escreva ao dono só por isto.`;
 }
 
 /** What the bot hears when it offers 2+ decisions with none marked (J16). */
@@ -378,10 +423,27 @@ export function ownerPendingRecommendText(item: Pick<OwnerPending, "title">, bot
 /** A saved item's structured part, read back defensively (an older ledger
  * has none; a hand-edited one may carry anything). */
 function savedDetails(pending: OwnerPending): OwnerPending {
-  const details = parseOwnerPendingDetails({ why: pending.why, steps: pending.steps, options: pending.options });
-  const { why: _why, steps: _steps, options: _options, ...base } = pending;
-  if (!details.ok) return base;
-  return { ...base, ...(details.why ? { why: details.why } : {}), ...(details.steps?.length ? { steps: details.steps } : {}), ...(details.options?.length ? { options: details.options } : {}) };
+  // a saved recommendation that no longer passes (no why, or two of them) loses
+  // only the mark — never the item's why, steps and options (INSP-J2 #13)
+  let marked = false;
+  const options = Array.isArray(pending.options)
+    ? pending.options.map((option) => {
+      if (!option || typeof option !== "object" || !option.recommended) return option;
+      const keep = !marked && typeof option.why === "string" && option.why.trim().length > 0;
+      if (keep) { marked = true; return option; }
+      const { recommended: _r, why: _w, ...rest } = option;
+      return rest;
+    })
+    : pending.options;
+  const details = parseOwnerPendingDetails({ why: pending.why, steps: pending.steps, options });
+  const { why: _why, steps: _steps, options: _options, history, awaitingSince, ...base } = pending;
+  // the person's answers, read back defensively: a hand-edited ledger must never break the screen
+  const answers = Array.isArray(history)
+    ? history.filter((each): each is OwnerPendingAnswer => Boolean(each) && typeof each === "object" && typeof each.at === "number" && typeof each.text === "string" && (each.kind === "option" || each.kind === "text" || each.kind === "ask") && typeof each.delivered === "boolean").slice(-OWNER_PENDING_HISTORY_MAX)
+    : [];
+  const kept = { ...base, ...(answers.length ? { history: answers } : {}), ...(typeof awaitingSince === "number" && Number.isFinite(awaitingSince) ? { awaitingSince } : {}) };
+  if (!details.ok) return kept;
+  return { ...kept, ...(details.why ? { why: details.why } : {}), ...(details.steps?.length ? { steps: details.steps } : {}), ...(details.options?.length ? { options: details.options } : {}) };
 }
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -647,7 +709,7 @@ export class BotAutonomy {
       for (const done of raw.resolvedOwnerPending ?? []) {
         if (done && typeof done.id === "string" && typeof done.botId === "string" && typeof done.title === "string" && typeof done.resolvedAt === "number") this.resolvedOwnerPending.push(done);
       }
-      this.resolvedOwnerPending = this.resolvedOwnerPending.slice(-RESOLVED_PENDING_MAX);
+      this.resolvedOwnerPending = keepResolved(this.resolvedOwnerPending.map((item) => slimResolved(item, item.resolvedAt, item.resolvedBy)));
       const folded = this.foldEquivalentPending();
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
@@ -1194,6 +1256,9 @@ export class BotAutonomy {
       if (!into.why && item.why) into.why = item.why;
       if (!into.steps?.length && item.steps?.length) into.steps = item.steps;
       if (!into.options?.length && item.options?.length) into.options = item.options;
+      // and what the person answered on either, in time order (INSP-J2 #13)
+      if (item.history?.length) into.history = [...(into.history ?? []), ...item.history].sort((a, b) => a.at - b.at).slice(-OWNER_PENDING_HISTORY_MAX);
+      if (item.awaitingSince && (!into.awaitingSince || item.awaitingSince > into.awaitingSince)) into.awaitingSince = item.awaitingSince;
       // a server item's key (and its exact remedy) survives: else the server could never close it (INSP-H r1 #3)
       if (!into.key && item.key) {
         into.key = item.key;
@@ -1217,7 +1282,7 @@ export class BotAutonomy {
     this.ownerPending = this.ownerPending.filter((open) => !done.includes(open));
     // kept for audit, with what the person answered (J18)
     const at = this.now();
-    this.resolvedOwnerPending = [...this.resolvedOwnerPending, ...done.map((item) => ({ ...item, resolvedAt: at, resolvedBy: match.by ?? "server" }))].slice(-RESOLVED_PENDING_MAX);
+    this.resolvedOwnerPending = keepResolved([...this.resolvedOwnerPending, ...done.map((item) => slimResolved(item, at, match.by ?? "server"))]);
     this.save();
     return done;
   }
@@ -1293,7 +1358,37 @@ export class BotAutonomy {
   /** Older items still without steps that the server has not asked about
    * yet (J17): asked once each, oldest first. */
   ownerPendingNeedingSteps(): OwnerPending[] {
-    return this.ownerPending.filter((item) => !item.steps?.length && item.stepsAutoAskedAt === undefined).sort((a, b) => a.createdAt - b.createdAt);
+    // a bot's own items only: the server completes its keyed ones itself (INSP-J2 #5)
+    return this.ownerPending.filter((item) => !item.key && missingParts(item).length > 0 && item.stepsAutoAskedAt === undefined).sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** The server's own items (keyed) still without why or steps — saved by an older build. */
+  serverItemsIncomplete(): OwnerPending[] {
+    return this.ownerPending.filter((item) => item.key && missingParts(item).length > 0);
+  }
+
+  /** Steps reports for `ids` were dropped before reaching the bot (~/.nuria/stop): they may be asked again later. */
+  unmarkOwnerPendingStepsAutoAsked(botId: string, ids: readonly string[]): void {
+    let changed = false;
+    for (const item of this.ownerPending) {
+      if (item.botId !== botId || !ids.includes(item.id) || item.stepsAutoAskedAt === undefined) continue;
+      delete item.stepsAutoAskedAt;
+      if (item.stepsRequestedAt !== undefined) delete item.stepsRequestedAt;
+      changed = true;
+    }
+    if (changed) this.save();
+  }
+
+  /** Takes out of a conversation's waiting reports those matching `drop`; returns them. */
+  dropReports(threadId: string, drop: (text: string) => boolean): string[] {
+    const pending = this.reports.get(threadId);
+    if (!pending) return [];
+    const gone = pending.items.filter(drop);
+    if (!gone.length) return [];
+    pending.items = pending.items.filter((text) => !drop(text));
+    if (!pending.items.length) this.reports.delete(threadId);
+    this.save();
+    return gone;
   }
 
   /** The server asked the bot for `id`'s steps: the screen shows it asked, and it is never asked again by the server. */
@@ -1927,8 +2022,14 @@ export function askCoveredByItem(ask: { text: string; at: number }, items: Reado
  * the bot offered, or the person's own words. `resolved` says the item is
  * closed already, so the bot does not open it again. */
 export function ownerPendingReplyText(item: Pick<OwnerPending, "id" | "title">, reply: string, resolved: boolean): string {
-  // not resolved: the item waits on the bot ("Aguardando …" on the screen) until it resolves or rewrites it (J18)
-  return `Sobre "${item.title}" (${item.id}): ${reply.trim()}${resolved ? `\n\n(Marquei ${item.id} como resolvido em "Precisa de você".)` : `\n\n(${item.id} continua em "Precisa de você", aguardando você: resolva-o quando estiver feito, ou atualize-o se faltar algo.)`}`;
+  // only facts in the person's voice: what to do next goes in ownerPendingAwaitNote, which only the bot reads (INSP-J2 #3)
+  return `Sobre "${item.title}" (${item.id}): ${reply.trim()}${resolved ? `\n\n(Marquei ${item.id} como resolvido em "Precisa de você".)` : ""}`;
+}
+
+/** What only the bot reads with an answer that keeps the item open (the
+ * turn's prompt, never the transcript): it waits on the bot now (J18). */
+export function ownerPendingAwaitNote(item: Pick<OwnerPending, "id">): string {
+  return `[Nota do OpenMausBot, não escrita pela pessoa] A pendência ${item.id} continua em "Precisa de você", aguardando você: quando estiver feito, resolva-a com owner_pending resolve id ${item.id}; se faltar algo, reescreva-a com owner_pending update id ${item.id}. Sem uma das duas em 2 h, ela volta para a pessoa como "o bot não respondeu".`;
 }
 
 /** The person's request, from "Precisa de você", to rewrite an item that has

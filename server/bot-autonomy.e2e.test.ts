@@ -441,12 +441,15 @@ it("lists what waits on the person in \"Precisa de você\" until the bot or the 
 // (owner_pending update) when the person asks for the steps.
 it("sends the person's decision to the bot that asked, in its conversation, and resolves the item (lot I)", () => fixture(async f => {
   const steps = [{ text: "Abra a PR e confira o diff", link: "https://github.com/acme/app/pull/12" }, { text: "Rode o gate local", command: "pnpm run ci:local" }];
-  const options = [{ label: "Aprovar", reply: "Aprovado: pode fazer o merge da #12." }, { label: "Recusar", reply: "Recusado: não faça o merge." }];
+  // INSP-J2 #7: with 2+ decisions one is recommended, or the call is refused
+  const options = [{ label: "Aprovar", reply: "Aprovado: pode fazer o merge da #12.", recommended: true, why: "O gate passou e o QA aprovou." }, { label: "Recusar", reply: "Recusado: não faça o merge." }];
   f.save({ turns: [
     { steps: [
       { tool: "owner_pending", arguments: { action: "add", title: "Aprovar o merge da PR #12", why: "O release de hoje depende dela.", steps, options } },
       // J17: no item without why and steps — refused, saying what is missing
       { tool: "owner_pending", arguments: { action: "add", title: "Liberar a escrita na linha 97 da planilha" }, expectError: true },
+      // INSP-J2 #7: two decisions, none recommended — refused too
+      { tool: "owner_pending", arguments: { action: "add", title: "Escolher o teto", why: "x", steps: [{ text: "y" }], options: [{ label: "A", reply: "a" }, { label: "B", reply: "b" }] }, expectError: true },
       { tool: "owner_pending", arguments: { action: "add", title: "Liberar a escrita na linha 97 da planilha", why: "O relatório usa a linha 97.", steps: [{ text: "Peça o acesso à planilha" }] } },
       { tool: "owner_pending", arguments: { action: "add", title: "Passos inválidos", steps: [{ text: "Abrir", link: "javascript:alert(1)" }] }, expectError: true },
       // a title that only names someone says nothing to do (INSP-I r1 #2)
@@ -460,7 +463,7 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
     // the decision arrives as the person's message, naming the item (the
     // context is JSON: quotes inside it are escaped, so match around them)
     // J18: a decision keeps the item, waiting on the bot, which is told so
-    { expectContextIncludes: ["Aprovar o merge da PR #12", "(o1): Aprovado: pode fazer o merge da #12.", "o1 continua em", "aguardando você"], reply: "Fazendo o merge." },
+    { expectContextIncludes: ["Aprovar o merge da PR #12", "(o1): Aprovado: pode fazer o merge da #12.", "pendência o1 continua em", "aguardando você", "não escrita pela pessoa"], reply: "Fazendo o merge." },
     // asked for the steps, the bot rewrites o2 in place: the ask reaches it as a note
     { expectContextIncludes: ["Me mostre como resolver «Liberar a escrita na linha 97 da planilha», passo a passo.", "não escrita pela pessoa", "owner_pending update, id o2"], steps: [
       { tool: "owner_pending", arguments: { action: "update", id: "o2", why: "Sem a escrita, o relatório de amanhã sai vazio.", steps: [{ text: "Abra a planilha e libere a linha 97", link: "https://docs.example.com/sheet" }], options: [{ label: "Liberei", reply: "Liberei a linha 97." }] } },
@@ -473,6 +476,7 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
   expect(firstTools).toContain("o passo 1 deve começar com https://");
   expect(firstTools).toContain("title só com menção");
   expect(firstTools).toContain("owner_pending recusado: falta why e steps");
+  expect(firstTools).toContain("owner_pending recusado: falta a recomendada");
   const pending = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ownerPending ?? []);
   await expect.poll(async () => (await pending()).map((item: any) => item.id), { timeout: 10_000 }).toEqual(["o1", "o2"]);
   expect((await pending())[0]).toMatchObject({ why: "O release de hoje depende dela.", steps, options });
@@ -502,6 +506,8 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
     expect.objectContaining({ kind: "option", label: "Aprovar", text: "Aprovado: pode fazer o merge da #12.", delivered: true }),
   ]);
   expect((await userLines()).at(-1)).toContain("Aprovado: pode fazer o merge da #12.");
+  // INSP-J2 #3: nothing addressed to the bot in the person's balloon
+  expect((await userLines()).join("\n")).not.toMatch(/aguardando você|resolva-o|owner_pending/);
   // the person settles it: kept for audit with its history
   await f.api(`/api/bots/${f.bot.id}/owner-pending/o1/resolve`, {});
   expect((await pending()).map((item: any) => item.id)).toEqual(["o2"]);
