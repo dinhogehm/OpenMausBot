@@ -391,6 +391,8 @@ export class CcSessionLedger {
         }
         // Archived before archiving cleared it: an old error only misleads.
         if (session.status === "archived") delete session.lastError;
+        // Titled "#9058 …" by a build before the owner's no-"#" rule: said the owner's way (INSP-H r1 #11)
+        if (session.status !== "archived" && typeof session.title === "string") session.title = issueTitle(session.title);
         // Older ledgers queued bare strings, with no age: treat them as old.
         session.queued = Array.isArray(session.queued)
           ? (session.queued as unknown[]).map((item) => (typeof item === "string" ? { text: item, at: 0 } : item as CcQueued)).filter((item) => item && typeof item.text === "string")
@@ -792,7 +794,8 @@ export function useRepoScripts(text: string, manager: ReturnType<typeof repoPack
  * the numbers the title opens with lose it (each said once); a "#9330"
  * further in stays. */
 export function issueTitle(title: string): string {
-  return title.replace(/^\s*(?:#?\d{3,6}[\s,]+)*#?\d{3,6}(?=[\s,:—-]|$)/, (run) => [...new Set(run.match(/\d{3,6}/g))].join(" "));
+  // numbers apart, or glued by their "#" ("#9058#9059", INSP-H r1 #11)
+  return title.replace(/^\s*(?:#?\d{3,6}(?!\d)(?:[\s,]+|(?=#)))*#?\d{3,6}(?!\d)(?=[\s,:—-]|$)/, (run) => [...new Set(run.match(/\d{3,6}/g))].join(" "));
 }
 
 /** Whether an app title already opens with the issue number (with or without "#"). */

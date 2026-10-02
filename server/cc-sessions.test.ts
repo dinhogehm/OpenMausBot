@@ -103,6 +103,18 @@ describe("ledger", () => {
     expect(ccProcAlive({ pid: 0, lstart: "x" })).toBe(false);
   });
 
+  it("says the titles of a ledger saved before the no-\"#\" rule the owner's way (e47cf077, INSP-H r1 #11)", () => {
+    const first = ledger();
+    const live = first.create({ ...base, id: "eeeeeeee-0000-4000-8000-0000000000e5", title: "#9058 Chat entra com aviso no Widget" });
+    const old = first.create({ ...base, id: "ffffffff-0000-4000-8000-0000000000f6", title: "#9237 webauthn" });
+    first.setStatus(old, "archived");
+    first.save();
+    const reloaded = ledger();
+    expect(reloaded.get(live.id)!.title).toBe("9058 Chat entra com aviso no Widget");
+    // an archived one is history: left as it was
+    expect(reloaded.get(old.id)!.title).toBe("#9237 webauthn");
+  });
+
   it("follows a survivor within the turn limit, cuts it past it, closes it once gone (INSP-H r1 #10)", () => {
     const turnStart = { lastActivityAt: 1_000 };
     expect(survivorStep(turnStart, true, 1_000 + 90 * 60_000, 90 * 60_000)).toBe("follow");
@@ -339,6 +351,9 @@ describe("a repository's corridor", () => {
     // a number further in is the bot's own text: left as it is
     expect(issueTitle("9295 rebase sobre a #9330")).toBe("9295 rebase sobre a #9330");
     expect(issueTitle("Lote 2026 de PRs")).toBe("Lote 2026 de PRs");
+    // glued by their "#" (INSP-H r1 #11); an 8-digit number is not two issues
+    expect(issueTitle("#9058#9059 Chat e Widget")).toBe("9058 9059 Chat e Widget");
+    expect(issueTitle("20261001 relatório")).toBe("20261001 relatório");
     expect(titleOpensWithIssue("9311 Chat labels", "9311")).toBe(true);
     expect(titleOpensWithIssue("#9311 Chat labels", "9311")).toBe(true);
     expect(titleOpensWithIssue("93110 outra", "9311")).toBe(false);
