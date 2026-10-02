@@ -325,7 +325,22 @@ describe("a repository's corridor", () => {
     expect(clientIssue("9298 F4-0 publicar e fechar ciclo\n4) Não avise o cliente: o Monitor Chat Atendimento avisa o Pedro no fio [x].")).toBe(false);
     expect(clientIssue("OpenMausBot cc_session_rename\nExemplo: \"9311 Chat no ticket mostra Agente e Cliente\" virou \"Chat ticket agent/client labels bug\".")).toBe(false);
     expect(clientIssue("Troque o client HTTP do gateway; o erro é do lado do cliente.")).toBe(false);
-    expect(clientIssue("o mesmo cliente entrou na fila e abriu o ATD-202609-0825")).toBe(false);
+    expect(clientIssue("Corrija o retry do queryClient em 503 no inbox.")).toBe(false);
+  });
+
+  it("does not let real clients' issues pass as internal (INSP-H r2 #3, real briefs redacted)", () => {
+    // 8891 PIPERUN round 2
+    expect(clientIssue("8891 503 PIPERUN rodada 2\nIssue: https://github.com/o/r/issues/8891 (P1, cliente PIPERUN no ar). Está FECHADA; NÃO reabra nem comente.")).toBe(true);
+    // 9052 (P1 of a client: the reopening time)
+    expect(clientIssue("9052 Tempo de reabertura configurável\nIssue: https://github.com/o/r/issues/9052 (P1, decisão do Osvaldo em 01/10). Permitir configurar o tempo de reabertura do atendimento (por cliente/tenant). Mensagem do cliente recebida depois do prazo abre um novo atendimento.")).toBe(true);
+    // 9307 "a resposta do cliente reabriu…"
+    expect(clientIssue("9307 Atendimento reaberto\nIssue #9307: a resposta do cliente reabriu o atendimento antigo ATD-202609-0762 em vez de cair no ativo.")).toBe(true);
+    expect(clientIssue("O cliente Roberto não consegue trocar de plano.")).toBe(true);
+    expect(clientIssue("o mesmo cliente entrou na fila e abriu o ATD-202609-0825")).toBe(true);
+    // still not a client's: an order about clients, the OMB rename example
+    expect(clientIssue("9298 F4-0 publicar e fechar ciclo\n4) Não avise o cliente: o Monitor Chat Atendimento avisa o Pedro no fio [x].\nP1 vai antes no carrier.")).toBe(false);
+    expect(clientIssue("8891 inbox se recupera\nNão comente com o cliente. Mesmo erro 2 vezes: pare.")).toBe(false);
+    expect(clientIssue("OpenMausBot cc_session_rename\nExemplo: \"9311 Chat no ticket mostra Agente e Cliente\" virou \"Chat ticket agent/client labels bug\".")).toBe(false);
   });
 
   it("knows the app opens nothing now: the Mac locked, or a create stuck in the queue for 15 min (INSP-H r2 #2)", () => {

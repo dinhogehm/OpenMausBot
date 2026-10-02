@@ -817,17 +817,38 @@ export function hotfixWithReleaseScripts(text: string): string | null {
   return script ? `Atenção: este texto junta hotfix/P1 com mudança de script de release (${script[0]}). Pelo corredor, o hotfix sai num carrier próprio, antes, e os scripts de release num carrier separado, depois — a menos que o dono tenha ordenado esta ordem explicitamente; nesse caso, diga isso no relatório.` : null;
 }
 
-/** A brief about an issue a client of the business brought (the owner
- * follows those in the app): the Atendimento spreadsheet and its rows, the
- * clients' Chat, "issue do cliente", a report by someone named ("Relato do
- * Matheus", "quem pediu foi o Pedro"). Not the product's own word "cliente"
- * (the end customer in a ticket: "o mesmo cliente entrou na fila"), not an
- * order about clients ("Não avise o cliente"), not a technical "client"
- * (HTTP client, client-side) — INSP-H r1 #6. */
+/** A brief about an issue a client brought, or one that hits clients (the
+ * owner follows those in the app):
+ * - the Atendimento spreadsheet and its rows, the clients' Chat, "issue do
+ *   cliente", a report by someone named ("Relato do Matheus", "quem pediu
+ *   foi o Pedro");
+ * - a client named ("cliente PIPERUN", "o cliente Roberto");
+ * - clients doing something, any tense ("a resposta do cliente reabriu",
+ *   "o cliente não consegue", "até o cliente configurar");
+ * - a P1 that speaks of clients at all (9052, "P1 … mensagem do cliente").
+ * Not an order about clients ("Não avise o cliente", "não fale com o
+ * cliente"), nor a technical "client" (HTTP client, client-side) — INSP-H r1
+ * #6, r2 #3 (the real 8891 PIPERUN, 9052 and 9307 briefs are clients'). */
 export function clientIssue(text: string): boolean {
-  const flat = text.replace(/\s+/g, " ");
-  if (/planilha (?:de )?atendimento|linha \d{1,4} da planilha|chat\.google\.com|(?<![\p{L}])spaces\/[A-Za-z0-9_-]{6,}|issue (?:d[oe]|de um|de uma) clientes?(?![\p{L}])|(?<![\p{L}])clientes? (?:reportou|relatou|pediu|reclamou|reclama|reporta|reportaram|relataram)(?![\p{L}])/iu.test(flat)) return true;
-  return /(?<![\p{L}])(?:[Rr]elato|[Rr]elatad[oa]|[Rr]eportad[oa]|[Pp]edido) (?:d[oa]|pel[oa]|por|de) \p{Lu}\p{Ll}+|(?<![\p{L}])[Qq]uem pediu foi [oa] \p{Lu}\p{Ll}+/u.test(flat);
+  const flat = text
+    .replace(/\s+/g, " ")
+    // orders ABOUT clients, and the technical "client"
+    .replace(/(?<![\p{L}])(?:n[ãa]o|nem|sem|nunca)\s+(?:\S+\s+){0,2}?(?:avise|avisar|fale|falar|comente|comentar|responda|responder|mande|mandar|escreva|escrever)\s+(?:com\s+|ao?s?\s+|à\s+|para\s+)?(?:o|a|os|as)?\s*clientes?(?![\p{L}])/giu, " ")
+    .replace(/(?<![\p{L}])(?:clientes? (?:HTTP|HTTPS|API|SDK|REST|WebSocket|gRPC|GraphQL)|lado do cliente|client[-\s]side|HTTP client|API client|\w*Client)(?![\p{L}])/giu, " ");
+  if (/planilha (?:de )?atendimento|linha \d{1,4} da planilha|chat\.google\.com|(?<![\p{L}])spaces\/[A-Za-z0-9_-]{6,}|issue (?:d[oe]|de um|de uma) clientes?(?![\p{L}])/iu.test(flat)) return true;
+  if (/(?<![\p{L}])(?:[Rr]elato|[Rr]elatad[oa]|[Rr]eportad[oa]|[Pp]edido) (?:d[oa]|pel[oa]|por|de) \p{Lu}\p{Ll}+|(?<![\p{L}])[Qq]uem pediu foi [oa] \p{Lu}\p{Ll}+/u.test(flat)) return true;
+  // a client named: "cliente PIPERUN", "o cliente Roberto"
+  if (/(?<![\p{L}])clientes? \p{Lu}[\p{L}\d]+/u.test(flat)) return true;
+  // clients doing something, any tense — the word after "cliente" (past "não"/"já") is a verb,
+  // not "final", "do plano", "recebida" (a participle describes, it does not act)
+  for (const match of flat.matchAll(/(?<![\p{L}])[Cc]lientes? (?:n[ãa]o |j[áa] |tamb[ée]m )?(\p{Ll}{3,})(?![\p{L}])/gu)) {
+    const next = match[1]!;
+    if (/^(?:final|finais|que|para|com|pelo|pela|sobre|entre|sem|tenant|recebid[ao]s?|enviad[ao]s?)$/u.test(next) || /(?:ad[oa]s?|id[oa]s?)$/u.test(next)) continue;
+    // past (reabriu, entrou, receberam), imperfect (abria), infinitive (configurar), present plural (abrem) and a few present forms
+    if (/(?:ou|eu|iu|ram|am|em|ava|avam|ia|iam|ar|er|ir|ega|ece|ona|ama|ui|ai)$/u.test(next)) return true;
+  }
+  // a P1 that speaks of clients
+  return /(?<![\p{L}\d])P1(?![\p{L}\d])/u.test(flat) && /(?<![\p{L}])clientes?(?![\p{L}])/iu.test(flat);
 }
 
 /** A create waiting this long for the Mac means the app is not opening sessions now. */
