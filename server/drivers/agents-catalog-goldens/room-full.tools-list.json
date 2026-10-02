@@ -880,7 +880,7 @@
           "cli_reason": {
             "type": "string",
             "maxLength": 300,
-            "description": "With cli: why, as you know it (recorded beside the server's own reason). The server decides by the app's state, not by these words: a brief that merges or publishes, or a client's issue, runs headless only while the app is blocked, cannot open this repository, failed in the last 2 h, or for options the app does not apply (permission_mode, model)."
+            "description": "With cli: why, as you know it (recorded beside the server's own reason). The server decides by the app's state, not by these words: a brief that merges or publishes, or a client's issue, runs headless only while the app is blocked, cannot open this repository or open anything now (the Mac locked, its queue stuck), or failed in the last 2 h — permission_mode or model is no reason."
           },
           "permission_mode": {
             "type": "string",

@@ -450,7 +450,8 @@ it.runIf(process.platform === "darwin")("decides a headless session of a client'
   mkdirSync(records, { recursive: true });
   const newest = (cwd: string) => writeFileSync(join(records, "local_root.json"), JSON.stringify({ sessionId: "local_root", cliSessionId: "c-root", createdAt: Date.now(), cwd, title: "raiz" }));
   newest(repo);
-  const start = (path: string, cli_reason: string) => ({ tool: "cc_session_start", arguments: { title: "9058 Chat entra com aviso no Widget", brief: "Issue do cliente (planilha Atendimento, linha 97): investigue e relate. HOLD:100", repo: path, surface: "cli", cli_reason }, expectError: path === repo });
+  // permission_mode "auto" (the CLI's own default) frees nothing (INSP-H r2 #1)
+  const start = (path: string, cli_reason: string) => ({ tool: "cc_session_start", arguments: { title: "9058 Chat entra com aviso no Widget", brief: "Issue do cliente (planilha Atendimento, linha 97): investigue e relate. HOLD:100", repo: path, surface: "cli", cli_reason, permission_mode: "auto" }, expectError: path === repo });
   f.save({ turns: [
     { steps: [start(repo, "Sessões no terminal nunca falham por tela bloqueada nem por 409")], reply: "Recusado." },
     { steps: [start(other, "Esteira 24/7 gerida pelo Chief")], reply: "Aberta." },

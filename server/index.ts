@@ -294,6 +294,7 @@ import {
   parseCcStartInput,
   repoCorridor,
   cliSurfaceRefusal,
+  appStalledReason,
   recentAppFailure,
   issueTitle,
   clientIssue,
@@ -9664,11 +9665,10 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   let cliOnRecord = cliReason;
   if (body.surface === "cli") {
     // decided by the app's state the server knows, not by the words of cli_reason (R9-dispatch R9-3, INSP-H r1 #6)
-    const app = appAvailability(input.repo);
+    const { state: app, reason: appReason } = appAvailability(input.repo);
     // the app blocked by the reused folder, with a client's work waiting: the owner is asked, once, to unblock it
     if (app === "blocked" && clientIssue(`${input.title}\n${input.brief}`)) askOwnerToUnblockApp(bot, threadId, input.repo);
-    const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", typeof body.model === "string" ? "model" : ""].filter(Boolean);
-    const decided = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app, appFailure: app === "available" ? recentAppFailure(ccLedger.all(), input.repo, Date.now()) : null, appIgnoredOptions: ignored });
+    const decided = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app, appReason, appFailure: app === "available" ? recentAppFailure(ccLedger.all(), input.repo, Date.now()) : null });
     if ("refusal" in decided) return { status: 409, body: { error: decided.refusal } };
     cliOnRecord = decided.onRecord;
   }
@@ -9734,11 +9734,30 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
 /** Whether the Claude app can take a new session in `repo` now: not on this
  * Mac or opening another repository ("unavailable"), held by the
  * reused-folder 409 ("blocked"), else "available". */
-function appAvailability(repo: string): AppAvailability {
-  if (process.platform !== "darwin") return "unavailable";
+function appAvailability(repo: string): { state: AppAvailability; reason: string | null } {
+  if (process.platform !== "darwin") return { state: "unavailable", reason: null };
   const lastRepo = lastAppRepo();
-  if (!lastRepo || lastRepo !== repo) return "unavailable";
-  return lastAppWorktreeFolder() ? "blocked" : "available";
+  if (!lastRepo || lastRepo !== repo) return { state: "unavailable", reason: null };
+  if (lastAppWorktreeFolder()) return { state: "blocked", reason: null };
+  // the Mac locked, or a create stuck in the queue: the app opens nothing now (INSP-H r2 #2)
+  const stalled = appStalledReason(ccLedger.all(), repo, screenWatch.lockedSince, Date.now());
+  return stalled ? { state: "unavailable", reason: stalled } : { state: "available", reason: null };
+}
+
+/** Whether the screen is locked, and since when, read every minute by the
+ * desktop app's server with the screen helper (the one the screen actions
+ * use). Only the app's server touches the screen helper. */
+const screenWatch: { lockedSince: number | null; lastAt: number; running: boolean } = { lockedSince: null, lastAt: 0, running: false };
+async function watchScreenLock(): Promise<void> {
+  if (!DESKTOP_MANAGED || process.env.VITEST || process.platform !== "darwin" || screenWatch.running || Date.now() - screenWatch.lastAt < 60_000) return;
+  screenWatch.running = true;
+  screenWatch.lastAt = Date.now();
+  try {
+    const locked = await (await getDesktopDriver()).locked();
+    screenWatch.lockedSince = locked ? screenWatch.lockedSince ?? Date.now() : null;
+  } catch { /* unknown: keep what was known */ } finally {
+    screenWatch.running = false;
+  }
 }
 
 const APP_UNBLOCK_KEY = "app-reused-folder:";
@@ -9976,6 +9995,7 @@ async function runDesktopWork(): Promise<void> {
   void cleanReleasedWorktrees().catch((error) => console.error(`[worktrees] cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
   void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
   if (process.platform !== "darwin") return;
+  void watchScreenLock().catch(() => {});
   settleAppUnblock();
   await runDesktopWorkFlow(desktopWork, desktopState);
 }

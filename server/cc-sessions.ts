@@ -830,6 +830,22 @@ export function clientIssue(text: string): boolean {
   return /(?<![\p{L}])(?:[Rr]elato|[Rr]elatad[oa]|[Rr]eportad[oa]|[Pp]edido) (?:d[oa]|pel[oa]|por|de) \p{Lu}\p{Ll}+|(?<![\p{L}])[Qq]uem pediu foi [oa] \p{Lu}\p{Ll}+/u.test(flat);
 }
 
+/** A create waiting this long for the Mac means the app is not opening sessions now. */
+export const APP_CREATE_STUCK_MS = 15 * 60_000;
+
+/** Why the app cannot take a session NOW although it could in principle,
+ * as the server knows it: the Mac locked (creates wait for an unlocked,
+ * idle Mac), or a create of `repo` stuck in the queue for 15 min or more.
+ * A P1 at night must not wait for the owner to wake (INSP-H r2 #2). */
+export function appStalledReason(sessions: readonly CcSession[], repo: string, lockedSince: number | null, now: number): string | null {
+  const minutes = (since: number) => Math.max(1, Math.round((now - since) / 60_000));
+  if (lockedSince !== null && lockedSince <= now) return `Mac bloqueado há ${minutes(lockedSince)} min: o app não abre sessão`;
+  const stuck = sessions
+    .filter((session) => session.surface === "app" && session.repo === repo && session.status !== "archived" && session.desktop?.pending?.kind === "create" && now - session.desktop.pending.since >= APP_CREATE_STUCK_MS)
+    .sort((a, b) => a.desktop!.pending!.since - b.desktop!.pending!.since)[0];
+  return stuck ? `o app não abre sessão há ${minutes(stuck.desktop!.pending!.since)} min (a abertura de "${stuck.title.slice(0, 40)}" está parada na fila)` : null;
+}
+
 /** How far back an app failure the server saw still frees the cli. */
 export const APP_FAILURE_WINDOW_MS = 2 * 3_600_000;
 
@@ -864,18 +880,20 @@ export type AppAvailability = "available" | "blocked" | "unavailable";
  * - the app blocked (reused folder) or unavailable: allowed — the server
  *   records its own reason (`onRecord`);
  * - the app available: allowed only with an app failure the server saw in
- *   the last 2 h (`appFailure`), or for options the app does not apply
- *   (permission_mode, model) the start really sets; otherwise refused. */
-export function cliSurfaceRefusal(input: { corridor: string; title: string; brief: string; reason?: string; app?: AppAvailability; appFailure?: string | null; appIgnoredOptions?: string[] }): { refusal: string } | { onRecord: string } {
+ *   the last 2 h (`appFailure`); otherwise refused. An option the app does
+ *   not apply (permission_mode, model) is no reason: "auto" is the CLI's own
+ *   default, and any model would do (INSP-H r2 #1).
+ * `appReason`: why the app is unavailable, when the server knows it (the Mac
+ * locked, its queue stuck) — recorded instead of the generic reason. */
+export function cliSurfaceRefusal(input: { corridor: string; title: string; brief: string; reason?: string; app?: AppAvailability; appReason?: string | null; appFailure?: string | null }): { refusal: string } | { onRecord: string } {
   const text = `${input.title}\n${input.brief}`;
   const client = clientIssue(text);
   const ships = Boolean(input.corridor) && shipsWork(text);
   const said = input.reason?.trim() ? input.reason.trim().slice(0, 200) : "";
   if (!client && !ships) return { onRecord: said || "tarefa interna" };
   if (input.app === "blocked") return { onRecord: "o app Claude está reaproveitando worktrees (409 de pasta reaproveitada)" };
-  if (input.app !== "available") return { onRecord: "o app Claude não abre sessão neste repositório agora (outra pasta, ou sem app neste Mac)" };
+  if (input.app !== "available") return { onRecord: input.appReason ?? "o app Claude não abre sessão neste repositório agora (outra pasta, ou sem app neste Mac)" };
   if (input.appFailure) return { onRecord: `falha recente no app: ${input.appFailure}` };
-  if (input.appIgnoredOptions?.length) return { onRecord: `o app não aplica ${input.appIgnoredOptions.join(" nem ")}` };
   const why = client ? "é uma issue de cliente, que o dono acompanha no app Claude" : "faz merge ou publicação num repositório com gate e carrier";
   return {
     refusal: `${said ? `cli_reason recusado ("${said.slice(0, 120)}"): ` : ""}este brief ${why}, e o app Claude pode abrir a sessão agora — não houve falha no app nas últimas 2 h. Use surface "app" (o padrão); se o app falhar, o servidor registra e libera a cli.`,

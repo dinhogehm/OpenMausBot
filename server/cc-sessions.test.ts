@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccProcAlive, processStartSync, survivorStep, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, recentAppFailure, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccProcAlive, processStartSync, survivorStep, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, appStalledReason, recentAppFailure, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -304,8 +304,10 @@ describe("a repository's corridor", () => {
     expect(cliSurfaceRefusal({ ...CLIENT, reason: POLICY, app: "available" })).toMatchObject({ refusal: expect.stringContaining("é uma issue de cliente") });
     // a failure the server saw: allowed, recorded as the server knows it
     expect(cliSurfaceRefusal({ ...SHIPPING, app: "available", appFailure: "a mensagem digitada na sessão \"9326 gate\" não chegou (21:02)" })).toEqual({ onRecord: "falha recente no app: a mensagem digitada na sessão \"9326 gate\" não chegou (21:02)" });
-    // "O app Claude não suporta permission_mode bypass": options the app does not apply, really set
-    expect(cliSurfaceRefusal({ ...SHIPPING, app: "available", reason: "O app Claude não suporta permission_mode bypass", appIgnoredOptions: ["permission_mode"] })).toEqual({ onRecord: "o app não aplica permission_mode" });
+    // an option the app does not apply is no reason: e47cf077's brief with permission_mode "auto" (the CLI's default) is refused (INSP-H r2 #1)
+    expect(cliSurfaceRefusal({ ...CLIENT, app: "available", reason: "O app Claude não suporta permission_mode auto" })).toMatchObject({ refusal: expect.stringContaining("é uma issue de cliente") });
+    // the app unavailable NOW (Mac locked, queue stuck): the CLI runs, with the server's reason (INSP-H r2 #2)
+    expect(cliSurfaceRefusal({ ...CLIENT, app: "unavailable", appReason: "Mac bloqueado há 20 min: o app não abre sessão" })).toEqual({ onRecord: "Mac bloqueado há 20 min: o app não abre sessão" });
     // "O app está fechado agora" / blocked: the server knows it, no words needed
     expect(cliSurfaceRefusal({ ...CLIENT, app: "unavailable" })).toEqual({ onRecord: expect.stringContaining("não abre sessão neste repositório") });
     expect(cliSurfaceRefusal({ ...CLIENT, app: "blocked", reason: POLICY })).toEqual({ onRecord: "o app Claude está reaproveitando worktrees (409 de pasta reaproveitada)" });
@@ -324,6 +326,20 @@ describe("a repository's corridor", () => {
     expect(clientIssue("OpenMausBot cc_session_rename\nExemplo: \"9311 Chat no ticket mostra Agente e Cliente\" virou \"Chat ticket agent/client labels bug\".")).toBe(false);
     expect(clientIssue("Troque o client HTTP do gateway; o erro é do lado do cliente.")).toBe(false);
     expect(clientIssue("o mesmo cliente entrou na fila e abriu o ATD-202609-0825")).toBe(false);
+  });
+
+  it("knows the app opens nothing now: the Mac locked, or a create stuck in the queue for 15 min (INSP-H r2 #2)", () => {
+    const now = Date.parse("2026-10-02T03:10:00-03:00");
+    const creating = (since: number) => ({ id: "c", ownerBotId: "b", ownerThreadId: "t", title: "9058 Chat entra com aviso no Widget", repo: "/p", worktree: "w", permissionMode: "auto", status: "running", createdAt: since, lastActivityAt: since, turns: 0, costUsd: 0, queued: [], surface: "app", desktop: { marker: "m", turnsSeen: 0, pending: { kind: "create", text: "x", since, attempts: 0 } } }) as unknown as CcSession;
+    expect(appStalledReason([], "/p", null, now)).toBeNull();
+    expect(appStalledReason([creating(now - 10 * 60_000)], "/p", null, now)).toBeNull();
+    // a P1 at night: its create waits 20 min for an unlocked Mac, the screen is locked
+    expect(appStalledReason([creating(now - 20 * 60_000)], "/p", now - 3 * 3_600_000, now)).toBe("Mac bloqueado há 180 min: o app não abre sessão");
+    expect(appStalledReason([creating(now - 20 * 60_000)], "/p", null, now)).toBe("o app não abre sessão há 20 min (a abertura de \"9058 Chat entra com aviso no Widget\" está parada na fila)");
+    expect(appStalledReason([creating(now - 20 * 60_000)], "/other", null, now)).toBeNull();
+    // with it, the client's issue runs in the CLI, recorded with that reason
+    const reason = appStalledReason([creating(now - 20 * 60_000)], "/p", now - 3 * 3_600_000, now);
+    expect(cliSurfaceRefusal({ ...CLIENT, app: "unavailable", appReason: reason })).toEqual({ onRecord: "Mac bloqueado há 180 min: o app não abre sessão" });
   });
 
   it("finds the app failures the server itself saw in the last 2 h", () => {
