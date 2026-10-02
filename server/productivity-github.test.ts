@@ -4,7 +4,7 @@
 // old deployments and paginated compares. Only reads are ever asked for.
 import { describe, expect, it } from "vitest";
 import {
-  branchIssueNumbers, emptyGhCache, isCarrier, issuePriority, issueType, parseGate, RATE_FLOOR, RateLimited,
+  emptyGhCache, explicitReferences, GH_CACHE_VERSION, isCarrier, issuePriority, issueType, migrateGhCache, parseGate, parsePr, RATE_FLOOR, RateLimited,
   readCompare, readDeployments, readTagSha, syncCompares, syncGithub, type GhRunner, type SyncProgress,
 } from "./productivity-github.ts";
 
@@ -62,15 +62,22 @@ describe("labels and links", () => {
     expect(issuePriority([])).toBe("none");
   });
 
-  it("knows a release carrier and the issue numbers a branch names", () => {
+  it("knows a release carrier — and nothing else is one (INSP-V r1 #8)", () => {
     expect(isCarrier({ head: "chore/release-carrier-9347-sqlite", title: "x" })).toBe(true);
     expect(isCarrier({ head: "fix/9347-script-contracts", title: "x" })).toBe(false);
-    expect(branchIssueNumbers("fix/9331-inatividade-encerra-cedo")).toEqual([9331]);
-    expect(branchIssueNumbers("claude/helpdesk-rodizio-equipe-9195")).toEqual([9195]);
-    expect(branchIssueNumbers("chore/release-carrier-9334-9331-x")).toEqual([9334, 9331]);
-    expect(branchIssueNumbers("fix/f4-2-post-release-guard")).toEqual([]);
-    // real case: a migration id in the branch linked issue #608 to a release
-    expect(branchIssueNumbers("fix/9320-0608-tenant-unificado-sem-auditoria")).toEqual([9320]);
+    // real heads the watcher announced that are not carriers
+    expect(isCarrier({ head: "fix/8981-widget-otp-copy", title: "fix(widget): copy" })).toBe(false);
+    expect(isCarrier({ head: "release/lote-9192", title: "release lote" })).toBe(false);
+  });
+
+  it("reads only explicit issue references from a PR body or commit — never a bare #N or a branch name (INSP-V r1 #3)", () => {
+    expect(explicitReferences("Closes #12\n\nFixes: #3, #4 and #5\nRefs #9")).toEqual([12, 3, 4, 5, 9]);
+    expect(explicitReferences("Resolve #7 e #8")).toEqual([7, 8]);
+    expect(explicitReferences("veja a tabela #3 e o épico #8750")).toEqual([]);
+    expect(explicitReferences(null)).toEqual([]);
+    const node = { number: 100, title: "t", body: "Corrige o fluxo.\n\nCloses #8986", createdAt: at(1), updatedAt: at(2), mergedAt: at(2), state: "MERGED", baseRefName: "main", headRefName: "perf/8750-epico", mergeCommit: { oid: "m", message: "fix: x (#100)\n\nRefs #8751" }, closingIssuesReferences: { nodes: [] }, labels: { nodes: [] } };
+    // the epic number in the branch (#8750) is not a reference
+    expect(parsePr(node)!.refs).toEqual([8986, 8751]);
   });
 
   it("reads the merge gate on the PR head", () => {
@@ -86,7 +93,7 @@ describe("labels and links", () => {
 
 describe("syncGithub", () => {
   const issues = [{ number: 2001, title: "Issue", createdAt: at(1), updatedAt: at(5), closedAt: at(5), state: "CLOSED", stateReason: "COMPLETED", labels: { nodes: [{ name: "type:bug" }] } }];
-  const rest = { [`repos/${REPO}/git/ref/tags/nuria-production-deployed`]: { object: { sha: "tagsha", type: "commit" } }, [`repos/${REPO}/deployments?environment=production&per_page=100&page=1`]: [] };
+  const rest = { [`repos/${REPO}`]: { created_at: "2026-01-09T20:24:31Z" }, [`repos/${REPO}/git/ref/tags/nuria-production-deployed`]: { object: { sha: "tagsha", type: "commit" } }, [`repos/${REPO}/deployments?environment=production&per_page=100&page=1`]: [] };
 
   it("walks every page the first time, then only what changed since the watermark", async () => {
     const state = { calls: [] as string[][], remaining: 5000 };
@@ -97,6 +104,7 @@ describe("syncGithub", () => {
     expect(cache.prWalk).toMatchObject({ complete: true, cursor: null, watermark: Date.parse(at(6)) });
     expect(cache.issues["2001"]).toMatchObject({ state: "CLOSED", stateReason: "COMPLETED", labels: ["type:bug"] });
     expect(cache.tag.sha).toBe("tagsha");
+    expect(cache.repoCreatedAt).toBe(Date.parse("2026-01-09T20:24:31Z"));
     // a PR changes: the next sync reads one page and stops at the watermark
     data.prs = sortedPrs([pr(6, 9, { title: "new" }), pr(1, 2), pr(2, 3), pr(3, 4), pr(4, 5), pr(5, 6)]);
     state.calls = [];
@@ -191,13 +199,39 @@ describe("REST reads", () => {
     } }, state);
     const deployments = await readDeployments(gh, REPO, []);
     expect(deployments).toEqual([
-      { id: 2, sha: "s2", createdAt: Date.parse(at(24)), successAt: null, failedAt: Date.parse(at(24, 14)), final: true },
-      { id: 3, sha: "s3", createdAt: Date.parse(at(25)), successAt: Date.parse(at(25, 15)), failedAt: null, final: true },
+      { id: 2, sha: "s2", createdAt: Date.parse(at(24)), successAt: null, failedAt: Date.parse(at(24, 14)), creator: "dinhogehm", final: true },
+      { id: 3, sha: "s3", createdAt: Date.parse(at(25)), successAt: Date.parse(at(25, 15)), failedAt: null, creator: "dinhogehm", final: true },
     ]);
     // a final deployment is not asked again
     state.calls = [];
     await readDeployments(gh, REPO, deployments);
     expect(state.calls.some((args) => args[1]!.includes("/statuses"))).toBe(false);
+    // …unless it was saved by an older reader without the fields the filter needs (INSP-V r1 #9)
+    const stale = deployments.map(({ failedAt: _failed, creator: _creator, ...rest }) => rest);
+    state.calls = [];
+    const refreshed = await readDeployments(gh, REPO, stale);
+    expect(state.calls.filter((args) => args[1]!.includes("/statuses"))).toHaveLength(2);
+    expect(refreshed).toEqual(deployments);
+  });
+
+  it("migrates an older cache: walks start over, compares stay, a bot's or incomplete deployment goes (INSP-V r1 #9)", () => {
+    const old = { ...emptyGhCache(REPO), version: 1 };
+    old.prs["1"] = { number: 1, title: "x", createdAt: 1, updatedAt: 1, mergedAt: 1, closedAt: 1, state: "MERGED", draft: false, base: "main", head: "h", mergeSha: "m", closes: [], labels: [] };
+    old.compares["a...b"] = ["m"];
+    old.prWalk = { watermark: 99, cursor: null, complete: true, passStartedAt: null, newest: 99 };
+    old.deployments = [
+      { id: 3771688099, sha: "vercel", createdAt: Date.parse("2026-02-04T20:43:55Z"), successAt: Date.parse("2026-02-04T20:58:58Z"), final: true },
+      { id: 6053567395, sha: "dc1ec6de7", createdAt: 1, successAt: null, final: true },
+    ];
+    const { cache, migrated } = migrateGhCache(old);
+    expect(migrated).toBe(true);
+    expect(cache.version).toBe(GH_CACHE_VERSION);
+    expect(cache.prWalk).toMatchObject({ complete: false, watermark: null, cursor: null });
+    expect(cache.prs["1"]).toBeDefined();
+    expect(cache.compares["a...b"]).toEqual(["m"]);
+    expect(cache.deployments).toEqual([]);
+    expect(cache.deploymentsAt).toBeNull();
+    expect(migrateGhCache(cache).migrated).toBe(false);
   });
 
   it("reads each release range once", async () => {

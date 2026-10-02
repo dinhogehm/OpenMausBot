@@ -39,6 +39,9 @@ export interface GhPr {
   mergeSha: string | null;
   /** Issues the PR closes ("Closes #N", as GitHub resolves it). */
   closes: number[];
+  /** Issues the PR body or its merge commit names explicitly
+   * (Closes/Fixes/Resolves/Refs #N) — read at sync, the text is not kept. */
+  refs?: number[];
   labels: string[];
 }
 
@@ -63,14 +66,22 @@ export interface GhDeployment {
   successAt: number | null;
   /** The deployment ended in failure/error (never succeeded). */
   failedAt?: number | null;
+  /** Who created it (a hosting integration's preview, vercel[bot], is not a release). */
+  creator?: string;
   final: boolean;
 }
 
 export interface WalkState { watermark: number | null; cursor: string | null; complete: boolean; passStartedAt: number | null; newest: number | null }
 
+/** Bumped whenever what a sync stores changes: an older cache is migrated
+ * (see migrateGhCache) so a parser or filter fix reaches data already saved. */
+export const GH_CACHE_VERSION = 2;
+
 export interface GhCache {
-  version: 1;
+  version: number;
   repo: string;
+  /** When the repository was created: no period before it is a comparison base. */
+  repoCreatedAt?: number | null;
   prs: Record<string, GhPr>;
   issues: Record<string, GhIssue>;
   prWalk: WalkState;
@@ -87,7 +98,44 @@ export interface GhCache {
 
 export function emptyGhCache(repo = PRODUCTION_REPO): GhCache {
   const walk = (): WalkState => ({ watermark: null, cursor: null, complete: false, passStartedAt: null, newest: null });
-  return { version: 1, repo, prs: {}, issues: {}, prWalk: walk(), issueWalk: walk(), openPrs: [], openPrsAt: null, tag: { sha: null, checkedAt: null }, deployments: [], deploymentsAt: null, compares: {}, syncedAt: null };
+  return { version: GH_CACHE_VERSION, repo, repoCreatedAt: null, prs: {}, issues: {}, prWalk: walk(), issueWalk: walk(), openPrs: [], openPrsAt: null, tag: { sha: null, checkedAt: null }, deployments: [], deploymentsAt: null, compares: {}, syncedAt: null };
+}
+
+/** Bring a cache saved by an older version up to date, keeping what is still
+ * valid: compares are immutable facts (kept); PRs and issues are kept but the
+ * walks start over so every item is read again with the current fields
+ * (v2: explicit issue references); deployments whose final state was saved
+ * without the fields the current filter needs (failedAt, creator) are read again. */
+export function migrateGhCache(cache: GhCache): { cache: GhCache; migrated: boolean } {
+  if (cache.version === GH_CACHE_VERSION) return { cache, migrated: false };
+  const fresh = emptyGhCache(cache.repo);
+  return {
+    migrated: true,
+    cache: {
+      ...fresh,
+      prs: cache.prs ?? {},
+      issues: cache.issues ?? {},
+      compares: cache.compares ?? {},
+      tag: cache.tag ?? fresh.tag,
+      openPrs: cache.openPrs ?? [],
+      openPrsAt: cache.openPrsAt ?? null,
+      // keep only what the current reader would have kept; the rest is re-read
+      deployments: (cache.deployments ?? []).filter((deployment) => deployment.creator !== undefined && deployment.failedAt !== undefined && !deployment.creator.endsWith("[bot]")),
+      deploymentsAt: null,
+      syncedAt: cache.syncedAt ?? null,
+    },
+  };
+}
+
+const REFERENCE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references?)\b[\s:]*((?:#\d+(?:\s*(?:,|;|&|\band\b|\be\b)\s*)?)+)/gi;
+
+/** Issue numbers a text names explicitly: "Closes #12", "Fixes: #3, #4", "Refs #9".
+ * A bare "#12" is not a reference (it may be a PR, a table row, a sentence). */
+export function explicitReferences(text: string | null | undefined): number[] {
+  if (!text) return [];
+  const found = new Set<number>();
+  for (const match of text.matchAll(REFERENCE)) for (const number of match[1]!.matchAll(/#(\d+)/g)) found.add(Number(number[1]));
+  return [...found];
 }
 
 /** Run `gh` without a shell; output capped, a slow call cut at 90 s. */
@@ -123,17 +171,10 @@ export function issuePriority(labels: readonly string[]): IssuePriority {
 export const isCarrier = (pr: Pick<GhPr, "head" | "title">): boolean =>
   /(^|\/)release-carrier/i.test(pr.head) || /^chore\(release\):\s*carrier/i.test(pr.title);
 
-/** Issue numbers a PR names in its branch (fix/9331-…, claude/x-9195): the
- * team's convention when the body has no "Closes #N". Only numbers that are
- * issues of the repo count (checked by the caller). */
-export function branchIssueNumbers(head: string): number[] {
-  // a zero-padded number is a migration id (fix/0608-tenant-…), never an issue
-  return [...new Set([...head.matchAll(/(?:^|[/_-])([1-9]\d{2,5})(?=$|[/_-])/g)].map((match) => Number(match[1])))];
-}
 
 // ── GraphQL ─────────────────────────────────────────────────────────────────
 
-const PR_FIELDS = "number title createdAt updatedAt mergedAt closedAt state isDraft baseRefName headRefName mergeCommit { oid } closingIssuesReferences(first: 10) { nodes { number } } labels(first: 20) { nodes { name } }";
+const PR_FIELDS = "number title body createdAt updatedAt mergedAt closedAt state isDraft baseRefName headRefName mergeCommit { oid message } closingIssuesReferences(first: 10) { nodes { number } } labels(first: 20) { nodes { name } }";
 const ISSUE_FIELDS = "number title createdAt updatedAt closedAt state stateReason labels(first: 20) { nodes { name } }";
 const RATE = "rateLimit { remaining resetAt }";
 
@@ -181,6 +222,7 @@ export function parsePr(node: Json): GhPr | null {
     head: String(node.headRefName ?? ""),
     mergeSha: typeof node.mergeCommit?.oid === "string" ? node.mergeCommit.oid : null,
     closes: (node.closingIssuesReferences?.nodes ?? []).map((issue: Json) => issue?.number).filter((n: unknown): n is number => typeof n === "number"),
+    refs: [...new Set([...explicitReferences(node.body), ...explicitReferences(node.mergeCommit?.message)])].filter((n) => n !== node.number),
     labels: (node.labels?.nodes ?? []).map((label: Json) => String(label?.name ?? "")).filter(Boolean),
   };
 }
@@ -298,13 +340,14 @@ export async function readDeployments(gh: GhRunner, repo: string, known: readonl
       // a hosting integration's preview of one app (vercel[bot]) is not the platform's release
       if (String(item.creator?.login ?? "").endsWith("[bot]")) continue;
       const cached = byId.get(item.id);
-      if (cached?.final) { out.push(cached); continue; }
+      // a final deployment is not asked again — unless it was saved without the fields the filter needs
+      if (cached?.final && cached.creator !== undefined && cached.failedAt !== undefined) { out.push(cached); continue; }
       const statuses = JSON.parse(await gh(["api", `repos/${repo}/deployments/${item.id}/statuses?per_page=100`])) as Json[];
       const states = Array.isArray(statuses) ? statuses : [];
       const success = states.find((status) => status?.state === "success");
       const failure = states.find((status) => status?.state === "failure" || status?.state === "error");
       const final = states.some((status) => ["success", "failure", "error", "inactive"].includes(String(status?.state)));
-      out.push({ id: item.id, sha: item.sha, createdAt: ms(item.created_at) ?? 0, successAt: success ? ms(success.created_at) : null, failedAt: !success && failure ? ms(failure.created_at) : null, final });
+      out.push({ id: item.id, sha: item.sha, createdAt: ms(item.created_at) ?? 0, successAt: success ? ms(success.created_at) : null, failedAt: !success && failure ? ms(failure.created_at) : null, creator: String(item.creator?.login ?? ""), final });
     }
     if (list.length < 100) break;
   }
@@ -355,6 +398,15 @@ export async function syncGithub(input: {
   cache.openPrsAt = input.now;
   phase("tag");
   cache.tag = { sha: await readTagSha(gh, cache.repo), checkedAt: input.now };
+  if (!cache.repoCreatedAt) {
+    // only bounds comparisons ("before the repository"); its absence must not fail the sync
+    try {
+      const repo = JSON.parse(await gh(["api", `repos/${cache.repo}`])) as Json;
+      cache.repoCreatedAt = ms(repo?.created_at);
+    } catch {
+      /* unknown creation date: comparisons fall back to the coverage rules */
+    }
+  }
   const budget = await readRestBudget(gh);
   if (budget && budget.remaining < RATE_FLOOR) throw new RateLimited(budget.resetAt);
   if (!cache.deploymentsAt || input.now - cache.deploymentsAt > 24 * 3_600_000) {
