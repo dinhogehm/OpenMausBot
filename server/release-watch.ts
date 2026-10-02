@@ -130,14 +130,52 @@ export function releaseRetryText(input: { halted: boolean; cycleMs: number | nul
 }
 
 /** The owner's one item for a release in a loop: the exact command the
- * installed watcher respects (OWNER_PENDING_TITLE_MAX = 200). */
-export function releaseLoopPending(input: { short: string; full: string | null; count: number }): { title: string; key: string; command: string } {
+ * installed watcher respects (OWNER_PENDING_TITLE_MAX = 200), why it matters
+ * and the steps, so the resolution screen is never just a title (R10-visual
+ * N13). The title carries the count and the measured cycle: a new failure
+ * only refreshes it (R10-followup #4). */
+export function releaseLoopPending(input: { short: string; full: string | null; count: number; cycleMs?: number | null }): { title: string; key: string; command: string; why: string; steps: Array<{ text: string; command?: string }>; options: Array<{ label: string; reply: string }> } {
+  const short = input.short.slice(0, 9);
   const command = input.full
     ? `echo ${input.full} > ~/.nuria/declined-production-release.sha`
     : `git -C ~/Projetos/nuria-platform rev-parse ${input.short} > ~/.nuria/declined-production-release.sha`;
+  const cycle = input.cycleMs ? `, volta de ~${Math.max(1, Math.round(input.cycleMs / 60_000))} min` : "";
   // the title is what shows in two lines of "Precisa de você"; the command is copied with its own button (INSP-H r1 #8)
   // the commit and the verb first: the person sees which commit before copying (INSP-H r2 #6)
-  return { title: `Recusar ${input.short.slice(0, 9)} (laço, ${input.count}×): copie o comando de recusa`, key: `release-loop:${input.short.slice(0, 9)}`, command };
+  return {
+    title: `Recusar ${short} (laço, ${input.count}×${cycle}): copie o comando de recusa`,
+    key: `release-loop:${short}`,
+    command,
+    why: `O release de produção do ${short} falhou ${input.count}× seguidas pelo mesmo motivo e o watcher recomeça sozinho a cada falha: enquanto isso ele segura a fila de CI (os gates das sessões esperam) e as correções que vêm depois dele não chegam à produção.`,
+    steps: [
+      { text: "No Terminal deste Mac, grave a recusa deste commit (o watcher para de oferecê-lo):", command },
+      { text: "Pronto: o servidor vê o arquivo, fecha este item e o próximo commit da main entra no lugar. Nada mais a fazer." },
+    ],
+    options: [
+      { label: "Já gravei a recusa", reply: `Gravei a recusa do ${short} (declined-production-release.sha). Confira que o watcher passou ao próximo commit.` },
+      { label: "Deixar tentar", reply: `Não recuse o ${short}: deixe o watcher tentar. Só me avise de novo se a causa da falha mudar.` },
+    ],
+  };
+}
+
+/** Why a release must not take a session's CI from it: its commit is in a
+ * loop (≥ RELEASE_FAILURES_ALERT failures with one cause), the owner has the
+ * item to refuse it open, or already refused it. Stopping a session's gate
+ * for it only feeds the loop — and the gate may be the very fix (R10-release
+ * #1: the CI of #9348 killed for d5bb1f70b, then failing for the 5th time).
+ * Null when it is a release that may still go through. */
+export function releaseInLoop(input: { sha: string; failures: { sha: string; count: number } | null; seen: ReleaseLoopSeen | undefined; itemOpen: boolean; declined: string }): string | null {
+  const sha = input.sha.trim();
+  if (!COMMIT_SHA.test(sha)) return null;
+  const declined = input.declined.trim();
+  if (COMMIT_SHA.test(declined) && sameCommit(declined, sha)) return `o dono recusou o ${sha.slice(0, 9)} (declined-production-release.sha)`;
+  const count = input.failures && sameCommit(input.failures.sha, sha) ? input.failures.count : 0;
+  const causes = input.seen?.causes ?? [];
+  const same = count >= RELEASE_FAILURES_ALERT && causes.length <= 1;
+  const why = causes[0] ? releaseCausePt(causes[0]) : "";
+  if (same) return `o ${sha.slice(0, 9)} já falhou ${count}× seguidas pela mesma causa${why ? ` (${why})` : ""}`;
+  if (input.itemOpen) return `o dono tem aberto o item para recusar o ${sha.slice(0, 9)} (release em laço)`;
+  return null;
 }
 
 /** The owner's items about refusing a looping release (the server's, keyed,
@@ -158,7 +196,13 @@ export function releaseLoopItemsToClose<T extends { id: string; title: string; k
  *   reason to refuse the commit (INSP-H r1 #4);
  * - the item is created once per commit: resolved by the owner or a bot, it
  *   is not created again on the next check (INSP-H r1 #5b); still open, it
- *   is refreshed when a new failure is told. */
+ *   is refreshed when a new failure is told;
+ * - `report`: whether the Chief hears this failure. With the owner's item
+ *   already open and the loop the same, a new failure only refreshes the item
+ *   (count and cycle in its title): the Chief is not woken, so the owner does
+ *   not get "falhou pela N-ésima vez" again (R10-followup #4: 8 messages in
+ *   6 h, all asking for the same o14). A new cause is no longer a loop and
+ *   is told. */
 export function releaseLoopPlan(input: {
   sha: string;
   count: number;
@@ -169,11 +213,13 @@ export function releaseLoopPlan(input: {
   told: boolean;
   itemOpen: boolean;
   state: Pick<ReleaseWatchState, "seenOf" | "once">;
-}): { loop: boolean; upsert: "create" | "refresh" | null } {
+}): { loop: boolean; upsert: "create" | "refresh" | null; report: boolean } {
   const loop = !input.halted && !input.declined && !input.machine && releaseLoopDue(input.state.seenOf(input.sha), input.count);
-  if (!loop) return { loop, upsert: null };
-  if (input.itemOpen) return { loop, upsert: input.told ? "refresh" : null };
-  return { loop, upsert: input.state.once(`loop-item:${input.sha.slice(0, 9)}`) ? "create" : null };
+  if (!loop) return { loop, upsert: null, report: input.told };
+  if (input.itemOpen) return { loop, upsert: input.told ? "refresh" : null, report: false };
+  // the item was the owner's already and they closed it without refusing ("deixar tentar"): the same loop is not news
+  const created = input.state.once(`loop-item:${input.sha.slice(0, 9)}`);
+  return { loop, upsert: created ? "create" : null, report: created && input.told };
 }
 
 /** Failures already told, per commit, kept across restarts. */

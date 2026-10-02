@@ -280,12 +280,20 @@ export interface PreemptEnv {
   alertChief: (text: string, report: string) => void;
   /** The CI was stopped and its lease is free: tell the session, resume it later. */
   stopped: (event: { session: ManagedSession; blocked: Blocked; target: CiTarget }) => void | Promise<void>;
+  /** Why the release in `label` is in a loop (release-watch's releaseInLoop),
+   * or null: a looping release never takes a session's CI. */
+  looping?: (label: string) => string | null;
   log: (line: string) => void;
   home?: string;
   verifyAfterMs?: number;
 }
 
-export type PreemptOutcome = "idle" | "stale" | "retry" | "not-managed" | "refused" | "kill-failed" | "survived" | "stopped";
+export type PreemptOutcome = "idle" | "stale" | "retry" | "not-managed" | "refused" | "kill-failed" | "survived" | "stopped" | "looping";
+
+/** The commit a release's admission label names (`release:production:<sha>`), or null. */
+export function releaseLabelSha(label: string): string | null {
+  return /^release:[\w-]+:([0-9a-f]{7,40})$/.exec(label.trim())?.[1] ?? null;
+}
 
 const REPORT_TAIL = "\nO detalhe técnico (pids, grupo, comando) está no log do servidor, nas linhas [release-priority].";
 
@@ -300,6 +308,20 @@ export async function preemptCiForRelease(env: PreemptEnv, state: PreemptState):
   if (state.handled.has(key)) return "idle";
   const minutes = Math.max(1, Math.round(blocked.waitedS / 60));
   const waits = `O release de produção (${blocked.label}) espera há ${minutes} min`;
+  // a release in a loop fails again whatever it is given: stopping a gate for
+  // it only feeds the loop, and that gate may be its fix (R10-release #1:
+  // the CI of the fix #9348 killed for d5bb1f70b at its 4th failure).
+  // Logged and told once per release, whichever CI it waits on.
+  const loop = env.looping?.(blocked.label) ?? null;
+  if (loop) {
+    const loopKey = `loop:${blocked.label}`;
+    if (!state.handled.has(loopKey)) {
+      state.handled.add(loopKey);
+      env.log(`[release-priority] leave alone: release ${blocked.label} is looping (${loop}); it waited ${blocked.waitedS}s on ci-full:${blocked.pid} and no CI is stopped for it`);
+      env.alertChief(`${waits} atrás de um ci:local, e o servidor NÃO interrompe CI para ele: ${loop}. Interromper um gate para um release que vai falhar de novo só alimenta o laço (e o gate pode ser justamente a correção).`, `[Alerta do servidor: release em laço não passa na frente] ${waits} atrás de um ci:local, e o servidor NÃO interrompe CI de sessão para ele: ${loop}. Os gates das sessões seguem; o release espera a vez. Não peça ao dono outra ação por isto: o item de recusa do laço, se aberto, é o mesmo.${REPORT_TAIL}`);
+    }
+    return "looping";
+  }
   const settle = () => {
     state.handled.add(key);
     state.retries.delete(key);
@@ -404,4 +426,37 @@ export async function preemptCiForRelease(env: PreemptEnv, state: PreemptState):
 /** The Chief's alert when the server refuses to stop a session's CI: pt-BR, no argv. */
 export function refusalText(blocked: Blocked, title: string, reason: string): string {
   return `O release de produção (${blocked.label}) espera há ${Math.max(1, Math.round(blocked.waitedS / 60))} min atrás do ci:local da sessão "${title}" e o servidor NÃO o interrompeu: ${reason}. Interrompa esse ci:local na sessão, ou deixe o release esperar.`;
+}
+
+// ── giving the CI back ───────────────────────────────────────────────────
+
+/** A session whose CI gave way to a release (cc-sessions' resumeAfterTag). */
+export interface ResumeWait {
+  /** The production tag when the CI was stopped. */
+  fromSha: string | null;
+  at: number;
+  /** What the session hears when the tag moves. */
+  message: string;
+  /** The commit of the release that took the CI's place, and its failures
+   * then: a new failure, a refusal or a halt of it also gives the CI back. */
+  releaseSha?: string;
+  failuresAtStop?: number;
+}
+
+/** What the session hears now, or null while it still waits: the tag moved
+ * (the release went through), or THAT release failed again, was refused by
+ * the owner or halted — the tag will not move for it, and waiting on the tag
+ * left two sessions parked for hours (R10-resilience PRIO-LOOP: a59760a2 and
+ * 9b50cdf7, resumeAfterTag from 09d832f4b while d5bb1f70b kept failing). */
+export function resumeAfterRelease(wait: ResumeWait, now: { tagSha: string | null; failures: { sha: string; count: number } | null; declined: string; halted: string | null }): string | null {
+  if (now.tagSha && now.tagSha !== wait.fromSha) return wait.message;
+  const sha = wait.releaseSha;
+  if (!sha) return null;
+  const same = (other: string | null | undefined) => Boolean(other && /^[0-9a-f]{7,40}$/.test(other.trim()) && (other.trim().startsWith(sha) || sha.startsWith(other.trim())));
+  const relaunch = "relance o seu ci:local agora (npm run ci:local) e siga de onde parou; o servidor não interrompe mais CI de sessão por esse commit enquanto ele estiver em laço.";
+  const short = sha.slice(0, 9);
+  if (same(now.declined)) return `O release de produção do ${short}, que tomou a vez do seu ci:local, foi recusado pelo dono e não vai sair: ${relaunch}`;
+  if (same(now.halted)) return `O release de produção do ${short}, que tomou a vez do seu ci:local, foi parado pelo watcher (halt) e não vai sair agora: ${relaunch}`;
+  if (now.failures && same(now.failures.sha) && now.failures.count > (wait.failuresAtStop ?? 0)) return `O release de produção do ${short}, que tomou a vez do seu ci:local, falhou de novo (${now.failures.count}× seguidas) e a tag não andou: ${relaunch}`;
+  return null;
 }

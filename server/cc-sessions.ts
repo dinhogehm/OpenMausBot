@@ -94,8 +94,9 @@ export interface CcSession {
    * if this one is cut too, the server does not resume it again. */
   resumedAfterCut?: true;
   /** Its local CI was stopped so a production release could run: resume
-   * it once the production tag moves past `fromSha`. */
-  resumeAfterTag?: { fromSha: string | null; at: number; message: string };
+   * it once the production tag moves past `fromSha`, or once that release
+   * (`releaseSha`) fails again, is refused or halted (release-priority's resumeAfterRelease). */
+  resumeAfterTag?: { fromSha: string | null; at: number; message: string; releaseSha?: string; failuresAtStop?: number };
   /** When the owner was last told it sits idle with a PR still open. */
   idleReportedAt?: number;
   /** Its issue was checked for being a P1 left with no live session. */

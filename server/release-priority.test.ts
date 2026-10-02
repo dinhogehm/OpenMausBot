@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePsTable, type PsRow } from "./bg-jobs.ts";
-import { type AdmissionLease, ciLabel, ciOwner, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, releaseBlockedBy, type ReleaseIntent, targetDrift } from "./release-priority.ts";
+import { type AdmissionLease, ciLabel, ciOwner, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, releaseBlockedBy, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, targetDrift } from "./release-priority.ts";
+import { releaseFailures, releaseInLoop } from "./release-watch.ts";
 
 const log = [
   "ADMISSION_LOAD_CLEAR label=release:production load1=7.55 threshold=12.00 ncpu=10 waited=90s",
@@ -242,6 +243,7 @@ function harness(options: {
   killThrows?: boolean;
   /** the lease exists but cannot be read: before the signal, or after it */
   leaseThrows?: "before" | "after";
+  looping?: PreemptEnv["looping"];
 }): Run {
   const run: Omit<Run, "env"> = { state: { handled: new Set(), retries: new Map() }, kills: [], alerts: [], reports: [], stopped: [], sleeps: [], logs: [] };
   const reads = [...options.before];
@@ -267,6 +269,7 @@ function harness(options: {
     stopped: ({ session, target }) => { run.stopped.push({ session: session.sessionId, target }); },
     log: (line) => { run.logs.push(line); },
     home: "/Users/owner",
+    ...(options.looping ? { looping: options.looping } : {}),
   };
   return { ...run, env };
 }
@@ -447,5 +450,82 @@ describe("stopping a session's CI for the release (fake kill, real table)", () =
     expect(after.stopped).toEqual([]);
     expect(after.alerts[0]).toContain("não conseguiu ler o lease do admission: não sei se o release foi liberado");
     expectNoArgv([...stuck.alerts, ...after.alerts]);
+  });
+});
+
+// 02/10 (R10-release #1, R10-resilience PRIO-LOOP): the carrier d5bb1f70b
+// failed 10× at script-contracts (Node 22's ExperimentalWarning in stderr).
+// At its 4th failure the server killed the ci:local of the session fixing it
+// (#9348), then twice the CI of a P1 — for a release that failed again each
+// time — and both sessions waited for a tag that never moved.
+describe("a release in a loop never takes a session's CI (02/10, d5bb1f70b)", () => {
+  const FULL = "d5bb1f70bea397bdd937d02148c685e406985ba0";
+  const LOOP_LABEL = `release:production:${FULL}`;
+  const CAUSE = "Local CI failed at script-contracts";
+  // the real err log's shape that day: one line per try, the same commit
+  const errLog = (count: number) => Array.from({ length: count }, () => `Release production failed for d5bb1f70b (exit 1)`).join("\nnpm WARN deprecated glob\n");
+  const loopingWith = (count: number, extra: { itemOpen?: boolean; declined?: string; causes?: string[] } = {}) => (label: string) => {
+    const sha = releaseLabelSha(label);
+    return sha ? releaseInLoop({ sha, failures: releaseFailures(errLog(count), "09d832f4bfa4"), seen: { firstCount: 1, firstAt: 0, count, at: 1, causes: extra.causes ?? [CAUSE] }, itemOpen: extra.itemOpen ?? false, declined: extra.declined ?? "" }) : null;
+  };
+  const waiting = (pid: number) => [
+    `ADMISSION_INTENT kind=release label=${LOOP_LABEL} pid=50000`,
+    `ADMISSION_WAITING kind=release label=${LOOP_LABEL} blocked_by=ci-full:${pid} waited=135s limit=2700s`,
+  ].join("\n");
+  const loopIntent: ReleaseIntent = { pid: 50000, label: `${LOOP_LABEL}\n` };
+
+  it("reads the commit from the admission label", () => {
+    expect(releaseLabelSha(LOOP_LABEL)).toBe(FULL);
+    expect(releaseLabelSha("release:production:c88f99d62")).toBe("c88f99d62");
+    expect(releaseLabelSha("release:production")).toBeNull();
+  });
+
+  it("at its 4th failure with one cause: logs and tells once, and signals nothing — whichever CI it waits on", async () => {
+    const run = harness({ log: waiting(40409), before: [live, live], after: without(live, 40320), intents: [loopIntent], leaseAfter: null, looping: loopingWith(4) });
+    expect(await preemptCiForRelease(run.env, run.state)).toBe("looping");
+    expect(run.kills).toEqual([]);
+    expect(run.stopped).toEqual([]);
+    expect(run.logs).toEqual([`[release-priority] leave alone: release ${LOOP_LABEL} is looping (o d5bb1f70b já falhou 4× seguidas pela mesma causa (CI local falhou em script-contracts)); it waited 135s on ci-full:40409 and no CI is stopped for it`]);
+    expect(run.alerts).toHaveLength(1);
+    expect(run.alerts[0]).toContain("o servidor NÃO interrompe CI para ele: o d5bb1f70b já falhou 4× seguidas pela mesma causa");
+    expect(run.reports[0]).toMatch(/^\[Alerta do servidor: release em laço não passa na frente\]/);
+    // the next ticks, and the next CI it waits on (the P1's, an hour later): silent, still nothing signalled
+    expect(await preemptCiForRelease(run.env, run.state)).toBe("looping");
+    run.env.outLogTail = () => waiting(83637);
+    expect(await preemptCiForRelease(run.env, run.state)).toBe("looping");
+    expect(run.kills).toEqual([]);
+    expect(run.alerts).toHaveLength(1);
+    expect(run.logs).toHaveLength(1);
+    expectNoArgv(run.alerts);
+  });
+
+  it("the owner's loop item open, or the commit refused: also a loop; one failure, or two causes, is not", async () => {
+    expect(loopingWith(1, { itemOpen: true })(LOOP_LABEL)).toBe("o dono tem aberto o item para recusar o d5bb1f70b (release em laço)");
+    expect(loopingWith(1, { declined: FULL })(LOOP_LABEL)).toBe("o dono recusou o d5bb1f70b (declined-production-release.sha)");
+    expect(loopingWith(1)(LOOP_LABEL)).toBeNull();
+    expect(loopingWith(4, { causes: [CAUSE, "ADMISSION_TIMEOUT waiting for lease"] })(LOOP_LABEL)).toBeNull();
+    // another commit than the one failing: free to go first
+    expect(loopingWith(10)("release:production:09d832f4bfa4")).toBeNull();
+    // and then the release takes the CI as before
+    const run = harness({ log: waiting(40409), before: [live, live], after: without(live, 40320), intents: [loopIntent], leaseAfter: null, looping: loopingWith(1) });
+    expect(await preemptCiForRelease(run.env, run.state)).toBe("stopped");
+    expect(run.kills).toEqual([[-40320, "SIGTERM"]]);
+  });
+
+  it("gives the CI back when THAT release fails again, is refused or halted — not only when the tag moves", () => {
+    const wait = { fromSha: "09d832f4bfa4", at: 0, message: "A tag andou", releaseSha: FULL, failuresAtStop: 4 };
+    const now = { tagSha: "09d832f4bfa4", failures: releaseFailures(errLog(4), "09d832f4bfa4"), declined: "", halted: null };
+    // still the 4th failure: it is running; the session waits
+    expect(resumeAfterRelease(wait, now)).toBeNull();
+    // the 5th failure: back to work, with why
+    expect(resumeAfterRelease(wait, { ...now, failures: releaseFailures(errLog(5), "09d832f4bfa4") })).toBe("O release de produção do d5bb1f70b, que tomou a vez do seu ci:local, falhou de novo (5× seguidas) e a tag não andou: relance o seu ci:local agora (npm run ci:local) e siga de onde parou; o servidor não interrompe mais CI de sessão por esse commit enquanto ele estiver em laço.");
+    expect(resumeAfterRelease(wait, { ...now, declined: `${FULL}\n` })).toContain("foi recusado pelo dono e não vai sair");
+    expect(resumeAfterRelease(wait, { ...now, halted: "d5bb1f70b" })).toContain("foi parado pelo watcher (halt)");
+    // the tag moved: the release went through
+    expect(resumeAfterRelease(wait, { ...now, tagSha: FULL })).toBe("A tag andou");
+    // an old record without the release's commit waits for the tag only
+    expect(resumeAfterRelease({ fromSha: "09d832f4bfa4", at: 0, message: "A tag andou" }, { ...now, failures: releaseFailures(errLog(9), "") })).toBeNull();
+    // another commit failing is not this release ending
+    expect(resumeAfterRelease(wait, { ...now, failures: { sha: "2995ef215", count: 7 } })).toBeNull();
   });
 });

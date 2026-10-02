@@ -364,9 +364,9 @@ import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { appUnblockTitle, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
-import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent } from "./release-priority.ts";
+import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, POWER_PENDING_KEY, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
-import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8588,12 +8588,13 @@ async function checkProductionRelease(): Promise<void> {
   if (plan.upsert && chief && desk && store.taskByThread(chief.id, desk)) {
     // the full sha: git knows it (the release's own label sits MBs above the tail read here)
     const full = await execCc("git", ["-C", join(homedir(), "Projetos", "nuria-platform"), "rev-parse", "--verify", `${failed.sha}^{commit}`]).then((out) => out.trim(), () => fullReleaseSha(outTail, failed.sha));
-    loopItem = autonomy.addOwnerPending(chief.id, desk, releaseLoopPending({ short: failed.sha, full: /^[0-9a-f]{40}$/.test(full ?? "") ? full : null, count: failed.count }));
+    loopItem = autonomy.addOwnerPending(chief.id, desk, releaseLoopPending({ short: failed.sha, full: /^[0-9a-f]{40}$/.test(full ?? "") ? full : null, count: failed.count, cycleMs: releaseWatch.state.cycleMs(failed.sha) }));
     refreshBotRow(chief.id);
   } else if (plan.loop && chief) {
     loopItem = autonomy.ownerPendingOf(chief.id).find((item) => item.key === loopKey) ?? null;
   }
-  if (!told) return;
+  if (told && !plan.report) console.log(`[release] ${failed.sha.slice(0, 9)} failed again (${failed.count}×, same cause): ${loopItem ? `only ${loopItem.id}'s title refreshed` : "the owner already had the item"} — the Chief is not woken`);
+  if (!plan.report) return;
   // the chip opens with the essential (INSP-H r1 #8); the full cause goes in the report
   const text = releaseFailedText(failed.sha, failed.count, cause);
   // after the watcher's halt it does not retry: never say it does; and never "every 2 min" (R9-release #7)
@@ -9579,6 +9580,7 @@ async function preemptCiForReleaseTick(): Promise<void> {
       kill: (pid, signal) => { process.kill(pid, signal); },
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       alertChief: releaseAlertToChief,
+      looping: releaseLoopingNow,
       log: (line) => console.log(line),
       home: homedir(),
       stopped: async ({ session: managed, blocked, target }) => {
@@ -9588,14 +9590,20 @@ async function preemptCiForReleaseTick(): Promise<void> {
         try {
           tagSha = parseLsRemoteTag(await execCc("git", ["-C", session.repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
         } catch { /* resumed on the first tag read that works */ }
-        const note = "ci:local interrompido para liberar o release de produção; relançar quando a tag nuria-production-deployed andar";
-        session.resumeAfterTag = { fromSha: tagSha, at: Date.now(), message: `A tag ${PRODUCTION_TAG} andou: o release de produção que esperava passou. O seu ci:local (processo ${blocked.pid}) foi interrompido pelo servidor para liberar esse release — relance-o agora (npm run ci:local) e siga de onde parou.` };
+        const note = "ci:local interrompido para liberar o release de produção; relançar quando a tag nuria-production-deployed andar ou esse release falhar";
+        const releaseSha = releaseLabelSha(blocked.label);
+        const failures = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), readTail(RELEASED_SHA_FILE, 200).trim());
+        session.resumeAfterTag = {
+          fromSha: tagSha, at: Date.now(),
+          message: `A tag ${PRODUCTION_TAG} andou: o release de produção que esperava passou. O seu ci:local (processo ${blocked.pid}) foi interrompido pelo servidor para liberar esse release — relance-o agora (npm run ci:local) e siga de onde parou.`,
+          ...(releaseSha ? { releaseSha, failuresAtStop: failures && (failures.sha.startsWith(releaseSha) || releaseSha.startsWith(failures.sha)) ? failures.count : 0 } : {}),
+        };
         ccLedger.save();
         ccChip(session, note, false);
         const what = target.kind === "group" ? `o grupo de processos ${target.pgid}` : `a árvore de processos do CI (${target.pids.length} processos a partir de ${target.root.pid})`;
-        ccReport(session, `[Sessão Claude Code "${session.title}" (${session.id})] ${note}. O servidor interrompeu ${what} (ci-full:${blocked.pid}) porque ${blocked.label} esperava havia ${blocked.waitedS}s, e conferiu que o lease foi liberado; a sessão é retomada com uma mensagem quando a tag andar.`);
+        ccReport(session, `[Sessão Claude Code "${session.title}" (${session.id})] ${note}. O servidor interrompeu ${what} (ci-full:${blocked.pid}) porque ${blocked.label} esperava havia ${blocked.waitedS}s, e conferiu que o lease foi liberado; a sessão é retomada com uma mensagem quando a tag andar, ou quando esse release falhar, for recusado ou parado.`);
         const owner = store.bot(session.ownerBotId);
-        if (owner) alertAutomationTrouble(owner, session.ownerThreadId, `ci:local da sessão "${session.title}" interrompido para liberar o release de produção (${blocked.label}), que esperava havia ${Math.round(blocked.waitedS / 60)} min; o lease foi liberado e a sessão é retomada quando a tag de produção andar`);
+        if (owner) alertAutomationTrouble(owner, session.ownerThreadId, `ci:local da sessão "${session.title}" interrompido para liberar o release de produção (${blocked.label}), que esperava havia ${Math.round(blocked.waitedS / 60)} min; o lease foi liberado e a sessão é retomada quando a tag de produção andar ou esse release falhar`);
       },
     }, releasePriority.state);
   } finally {
@@ -9618,13 +9626,29 @@ async function resumeSessionsAfterTag(): Promise<void> {
     let sha: string | null = null;
     try {
       sha = parseLsRemoteTag(await execCc("git", ["-C", session.repo, "ls-remote", "origin", `refs/tags/${PRODUCTION_TAG}`, `refs/tags/${PRODUCTION_TAG}^{}`]), PRODUCTION_TAG);
-    } catch { continue; }
-    if (!sha || sha === wait.fromSha) continue;
+    } catch { /* the tag unread: the release's own end still gives the CI back */ }
+    // the release that took the CI's place failing again, refused or halted gives it back too (R10-resilience PRIO-LOOP)
+    const failures = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), readTail(RELEASED_SHA_FILE, 200).trim());
+    const message = resumeAfterRelease(wait, { tagSha: sha, failures, declined: readTail(DECLINED_SHA_FILE, 200).trim(), halted: readHaltedRelease()?.sha ?? null });
+    if (!message) continue;
     delete session.resumeAfterTag;
     ccLedger.save();
-    ccChip(session, `a tag de produção andou (${sha.slice(0, 8)}) — sessão retomada para relançar o ci:local`);
-    sendToSessionFromServer(session, wait.message);
+    const moved = Boolean(sha && sha !== wait.fromSha);
+    ccChip(session, moved ? `a tag de produção andou (${sha!.slice(0, 8)}) — sessão retomada para relançar o ci:local` : `o release que tomou a vez (${wait.releaseSha?.slice(0, 9)}) não saiu — sessão retomada para relançar o ci:local`);
+    console.log(`[release-priority] resumed session ${session.id}: ${moved ? `tag moved to ${sha!.slice(0, 9)}` : `release ${wait.releaseSha} failed again, was refused or halted`}`);
+    sendToSessionFromServer(session, message);
   }
+}
+
+/** The release in `label` is in a loop: why, or null (release-watch's releaseInLoop on this Mac's files). */
+function releaseLoopingNow(label: string): string | null {
+  const sha = releaseLabelSha(label);
+  if (!sha || !releaseWatch.state) return null;
+  const failures = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), readTail(RELEASED_SHA_FILE, 200).trim());
+  const key = `release-loop:${sha.slice(0, 9)}`;
+  const itemOpen = store.bots.some((bot) => autonomy.ownerPendingOf(bot.id).some((item) => item.key === key));
+  const known = failures && (failures.sha.startsWith(sha) || sha.startsWith(failures.sha)) ? failures.sha : sha;
+  return releaseInLoop({ sha, failures, seen: releaseWatch.state.seenOf(known), itemOpen, declined: readTail(DECLINED_SHA_FILE, 200).trim() });
 }
 
 /** A session idle for hours with its PR still open is often waiting for a

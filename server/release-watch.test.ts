@@ -343,7 +343,7 @@ describe("a release loop against the machine's failures and the owner's answers"
       state.observe("cb015584a", 3, 1, "Local CI failed at tests");
       const attention = releaseAttention(ATTENTION)!;
       const machine = releaseAttentionDue(attention, { now: Date.parse("2026-10-02T00:40:00Z"), releasedSha: "" });
-      expect(releaseLoopPlan({ sha: "cb015584a", count: 3, halted: false, declined: false, machine, told: true, itemOpen: false, state })).toEqual({ loop: false, upsert: null });
+      expect(releaseLoopPlan({ sha: "cb015584a", count: 3, halted: false, declined: false, machine, told: true, itemOpen: false, state })).toEqual({ loop: false, upsert: null, report: true });
       expect(releaseAttentionAlert(attention, { err: "e" }).report).toContain("não proponha recusá-lo");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -356,13 +356,13 @@ describe("a release loop against the machine's failures and the owner's answers"
       const state = new ReleaseWatchState(join(dir, "w.json"));
       state.observe("cb015584a", 3, 1, "Release de producao sem alvo de runtime");
       const base = { sha: "cb015584a", count: 3, halted: false, declined: false, machine: false, told: true, itemOpen: false, state };
-      expect(releaseLoopPlan(base)).toEqual({ loop: true, upsert: "create" });
-      // open: refreshed only when a new failure is told
-      expect(releaseLoopPlan({ ...base, itemOpen: true, told: false })).toEqual({ loop: true, upsert: null });
-      expect(releaseLoopPlan({ ...base, itemOpen: true, told: true })).toEqual({ loop: true, upsert: "refresh" });
-      // the owner resolved it: two more checks, nothing created — also after a restart
-      expect(releaseLoopPlan({ ...base, told: false })).toEqual({ loop: true, upsert: null });
-      expect(releaseLoopPlan({ ...base, told: true, count: 4, state: new ReleaseWatchState(join(dir, "w.json")) })).toEqual({ loop: true, upsert: null });
+      expect(releaseLoopPlan(base)).toEqual({ loop: true, upsert: "create", report: true });
+      // open: refreshed only when a new failure is told, and the Chief is not woken for it (R10-followup #4)
+      expect(releaseLoopPlan({ ...base, itemOpen: true, told: false })).toEqual({ loop: true, upsert: null, report: false });
+      expect(releaseLoopPlan({ ...base, itemOpen: true, told: true })).toEqual({ loop: true, upsert: "refresh", report: false });
+      // the owner resolved it: two more checks, nothing created and nothing told — also after a restart
+      expect(releaseLoopPlan({ ...base, told: false })).toEqual({ loop: true, upsert: null, report: false });
+      expect(releaseLoopPlan({ ...base, told: true, count: 4, state: new ReleaseWatchState(join(dir, "w.json")) })).toEqual({ loop: true, upsert: null, report: false });
       // refused or halted: no loop at all
       expect(releaseLoopPlan({ ...base, declined: true }).loop).toBe(false);
       expect(releaseLoopPlan({ ...base, halted: true }).loop).toBe(false);
@@ -434,7 +434,7 @@ describe("a release in a loop", () => {
     expect(fullReleaseSha(out, "2995ef215")).toBeNull();
     const item = releaseLoopPending({ short: "cb015584a", full: FULL, count: 4 });
     // the title fits two lines of "Precisa de você"; the command is copied with its own button (INSP-H r1 #8)
-    expect(item).toEqual({ key: "release-loop:cb015584a", title: "Recusar cb015584a (laço, 4×): copie o comando de recusa", command: `echo ${FULL} > ~/.nuria/declined-production-release.sha` });
+    expect(item).toMatchObject({ key: "release-loop:cb015584a", title: "Recusar cb015584a (laço, 4×): copie o comando de recusa", command: `echo ${FULL} > ~/.nuria/declined-production-release.sha` });
     // the commit and the verb within the first 40 characters (INSP-H r2 #6)
     expect(item.title.slice(0, 40)).toMatch(/Recusar cb015584a/);
     expect(item.title.length).toBeLessThanOrEqual(80);
@@ -457,6 +457,67 @@ describe("a release in a loop", () => {
       expect(autonomy.addOwnerPending("chief", "3e55c0fd", { title: "Parar o LaunchAgent? laço no cb015584a" })).toMatchObject({ id: o7.id, duplicate: true });
       // the server closes it by key once the owner refused the commit
       expect(autonomy.resolveOwnerPending({ key: loop.key }).map((each) => each.id)).toEqual([o7.id]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// 02/10 (R10-followup #4, R10-release #3): d5bb1f70b failed 10× at
+// script-contracts; between 07:18 and 13:01 the owner got 8 messages "o
+// release falhou pela N-ésima vez", all asking for the same o14, whose title
+// stayed at "(5 falhas iguais)".
+describe("a loop with the owner's item open: the item is refreshed, nobody is woken (02/10, d5bb1f70b)", () => {
+  const FULL = "d5bb1f70bea397bdd937d02148c685e406985ba0";
+  const CAUSE = "Local CI failed at script-contracts";
+  const T0 = Date.parse("2026-10-02T09:31:00Z");
+  const CYCLE = 50 * 60_000;
+
+  it("from the 4th failure on: only the count and the cycle in the title change; no report to the Chief", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-loop-open-"));
+    try {
+      const state = new ReleaseWatchState(join(dir, "release-watch.json"));
+      const autonomy = new BotAutonomy({ path: join(dir, "bot-autonomy.json"), now: () => T0 });
+      const reports: string[] = [];
+      let itemId = "";
+      // the server's checkProductionRelease, each new count as the log showed it
+      for (let count = 2; count <= 10; count += 1) {
+        state.observe("d5bb1f70b", count, T0 + (count - 2) * CYCLE, CAUSE);
+        const told = state.take("d5bb1f70b", count);
+        const loopKey = releaseLoopPending({ short: "d5bb1f70b", full: null, count }).key;
+        const itemOpen = autonomy.ownerPendingOf("chief").some((item) => item.key === loopKey);
+        const plan = releaseLoopPlan({ sha: "d5bb1f70b", count, halted: false, declined: false, machine: false, told, itemOpen, state });
+        if (plan.upsert) itemId = autonomy.addOwnerPending("chief", "52417e4a", releaseLoopPending({ short: "d5bb1f70b", full: FULL, count, cycleMs: state.cycleMs("d5bb1f70b") })).id;
+        if (plan.report) reports.push(`falhou ${count}×`);
+      }
+      // the 2nd failure (bad luck?) and the 3rd (the item is created): told; the 4th to the 10th: not
+      expect(reports).toEqual(["falhou 2×", "falhou 3×"]);
+      const items = autonomy.ownerPendingOf("chief");
+      expect(items).toHaveLength(1);
+      expect(items[0]).toMatchObject({ id: itemId, key: "release-loop:d5bb1f70b", title: "Recusar d5bb1f70b (laço, 10×, volta de ~50 min): copie o comando de recusa", command: `echo ${FULL} > ~/.nuria/declined-production-release.sha` });
+      expect(items[0]!.title.length).toBeLessThanOrEqual(80);
+      // the resolution screen has something to show: why, the step with the command, and two answers
+      expect(items[0]!.why).toMatch(/segura a fila de CI/);
+      expect(items[0]!.steps?.[0]).toMatchObject({ command: `echo ${FULL} > ~/.nuria/declined-production-release.sha` });
+      expect(items[0]!.options?.map((option) => option.label)).toEqual(["Já gravei a recusa", "Deixar tentar"]);
+      // a new cause is not the same loop: the Chief hears it
+      state.observe("d5bb1f70b", 11, T0 + 9 * CYCLE, "ADMISSION_TIMEOUT waiting for lease");
+      const plan = releaseLoopPlan({ sha: "d5bb1f70b", count: 11, halted: false, declined: false, machine: false, told: state.take("d5bb1f70b", 11), itemOpen: true, state });
+      expect(plan).toEqual({ loop: false, upsert: null, report: true });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the same report still waiting for the Chief's turn is queued once", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-loop-report-"));
+    try {
+      const autonomy = new BotAutonomy({ path: join(dir, "bot-autonomy.json"), now: () => T0 });
+      const report = "[Alerta do servidor: release de produção falhando] Release d5bb1f70b falhou 3× seguidas (CI local falhou em script-contracts)";
+      autonomy.addReport("chief", "52417e4a", report);
+      autonomy.addReport("chief", "52417e4a", report);
+      autonomy.addReport("chief", "52417e4a", "[Sessão Claude Code \"9347\"] PR aberta");
+      expect(autonomy.takeReports("52417e4a")?.items).toEqual([report, "[Sessão Claude Code \"9347\"] PR aberta"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

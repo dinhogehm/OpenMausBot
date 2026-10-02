@@ -1167,6 +1167,8 @@ export class BotAutonomy {
 
   addReport(botId: string, threadId: string, text: string): void {
     const pending = this.reports.get(threadId) ?? { botId, threadId, items: [] };
+    // the same report still waiting to be read is not news: one turn, one reminder (R10-followup #4)
+    if (pending.items.includes(text)) return;
     pending.items.push(text);
     this.reports.set(threadId, pending);
     this.save();
