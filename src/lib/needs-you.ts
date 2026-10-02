@@ -33,7 +33,21 @@ export interface NeedsYouItem {
   options?: NeedsYouOption[];
   /** The person asked the bot for steps; it has not rewritten the item yet. */
   stepsRequestedAt?: number;
+  /** The person asked the bot which decision it recommends; no update yet. */
+  recommendRequestedAt?: number;
 }
+
+/** The decisions in the order they are shown, each with its index in the
+ * item (what the server checks): the recommended one first (J16), the rest
+ * in the bot's order. */
+export function decisionsInOrder(options: readonly NeedsYouOption[]): Array<{ option: NeedsYouOption; index: number }> {
+  const all = options.map((option, index) => ({ option, index }));
+  return [...all.filter((each) => each.option.recommended), ...all.filter((each) => !each.option.recommended)];
+}
+
+/** An answer that declines or postpones: drawn as a neutral button (J15). */
+export const negativeDecision = (label: string): boolean =>
+  /^(?:n[ãa]o\b|nunca\b|recusar|rejeitar|cancelar|adiar|deixar\b|vou deixar|seguir no terminal|ignorar)/i.test(label.trim());
 
 const REFS_FIRST = /^((?:(?:PR|issue|sess[ãa]o)\s*)?#\d+(?:\s*(?:[/·,&+]|e)\s*(?:(?:PR|issue)\s*)?#\d+)*)\s*[:—–-]\s*(.+)$/iu;
 
@@ -78,6 +92,7 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
           ...(pending.due ? { due: pending.due } : {}), ...(pending.link ? { link: pending.link } : {}), ...(pending.command ? { command: pending.command } : {}),
           ...(pending.why ? { why: pending.why } : {}), ...(pending.steps?.length ? { steps: pending.steps } : {}), ...(pending.options?.length ? { options: pending.options } : {}),
           ...(pending.stepsRequestedAt ? { stepsRequestedAt: pending.stepsRequestedAt } : {}),
+          ...(pending.recommendRequestedAt ? { recommendRequestedAt: pending.recommendRequestedAt } : {}),
         });
       }
       const approval = task.activity === "waiting-on-you";

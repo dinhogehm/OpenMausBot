@@ -2936,5 +2936,10 @@
   "codeBlock.copy": "Copiar",
   "codeBlock.copied": "Copiado!",
   "codeBlock.languageCode": "Código",
-  "codeBlock.languageText": "Texto"
+  "codeBlock.languageText": "Texto",
+  "needsYou.screen.recommended": "Recomendado",
+  "needsYou.screen.recommendedLabel": "{label}, recomendada",
+  "needsYou.screen.askRecommend": "Pedir recomendação ao {name}",
+  "needsYou.screen.recommendAsked": "Recomendação pedida há {age}",
+  "needsYou.screen.askedRecommend": "Recomendação pedida para {name} — {title}."
 }

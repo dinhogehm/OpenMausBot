@@ -7,7 +7,7 @@ import type { NeedsYouItem } from "@/lib/needs-you";
 
 /** A decision carries the label the person saw with its position: the
  * server refuses it (409) when the bot rewrote the options since. */
-export type OwnerPendingReply = { option: number; label: string } | { ask: "steps" } | { text: string; resolve: boolean };
+export type OwnerPendingReply = { option: number; label: string } | { ask: "steps" } | { ask: "recommend" } | { text: string; resolve: boolean };
 
 /** The decision at `option` as the screen shows it. */
 export function decisionReply(item: NeedsYouItem, option: number): OwnerPendingReply {

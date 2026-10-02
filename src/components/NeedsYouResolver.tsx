@@ -7,7 +7,7 @@ import {
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import {
-  dueAt, needsYouBots, needsYouKey, needsYouSteps, sortNeedsYou, waitingAge,
+  decisionsInOrder, dueAt, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
   type NeedsYouItem, type NeedsYouSort,
 } from "@/lib/needs-you";
 
@@ -39,7 +39,7 @@ export function linkLabel(url: string): string {
   }
 }
 
-export type ResolverBusy = null | "reply" | "resolve" | "steps" | `option:${number}`;
+export type ResolverBusy = null | "reply" | "resolve" | "steps" | "recommend" | `option:${number}`;
 
 export interface NeedsYouResolverViewProps {
   items: NeedsYouItem[];
@@ -72,6 +72,7 @@ export interface NeedsYouResolverViewProps {
   onDecide: (item: NeedsYouItem, option: number) => void;
   onReply: (item: NeedsYouItem) => void;
   onAskSteps: (item: NeedsYouItem) => void;
+  onAskRecommend: (item: NeedsYouItem) => void;
   onResolve: (item: NeedsYouItem) => void;
   onOpenConversation: (item: NeedsYouItem) => void;
   onDismissError: () => void;
@@ -491,38 +492,87 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   );
 }
 
-/** The bot's decisions, all alike (none pushed by its position — INSP-I r1
- * #16), each saying what it sends. In the footer the reply is clipped to two
- * lines (the button's title has it whole); inline it is shown whole. */
+/** How a decision is drawn (J15): the recommended one — or the first, when
+ * the bot recommended none — filled with the accent; the others outlined in
+ * the accent over a light wash of it; a decline or postponement outlined in
+ * neutral. All read as buttons: an action icon, a pointer, hover, press and
+ * a focus ring. The text pairs are measured in every skin by
+ * scripts/check-skin-contrast.mjs (the "decisions" block). */
+export type DecisionLook = "primary" | "secondary" | "neutral";
+export function decisionLook(option: { label: string; recommended?: true }, index: number, options: ReadonlyArray<{ recommended?: true }>): DecisionLook {
+  const primary = options.some((each) => each.recommended) ? Boolean(option.recommended) : index === 0;
+  if (primary) return "primary";
+  return negativeDecision(option.label) ? "neutral" : "secondary";
+}
+const DECISION_BASE = "group/decision relative flex min-w-0 cursor-pointer items-start gap-2.5 rounded-xl border-2 px-3 py-2.5 text-left outline-none transition-[background-color,border-color,box-shadow,transform] focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2 focus-visible:ring-offset-panel active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50";
+const DECISION_LOOK: Record<DecisionLook, { button: string; label: string; sends: string; icon: string }> = {
+  primary: { button: "border-accent bg-accent text-accent-ink shadow-sm hover:brightness-110 hover:shadow-md", label: "text-accent-ink", sends: "text-accent-ink", icon: "text-accent-ink" },
+  secondary: { button: "border-accent bg-accent/8 hover:bg-accent/14 hover:shadow-sm", label: "text-accent-text", sends: "text-ink-secondary", icon: "text-accent-text" },
+  neutral: { button: "border-hairline bg-panel hover:border-ink-secondary hover:bg-raised", label: "text-ink", sends: "text-ink-secondary", icon: "text-ink-secondary" },
+};
+
+/** The bot's decisions, each a button saying what it sends; the recommended
+ * one first, with its badge and why (J16). In the footer the reply is
+ * clipped to two lines (the button's title has it whole); inline it is
+ * shown whole. Each keeps its index in the item: the server checks it. */
 function Decisions(props: NeedsYouResolverViewProps & { item: NeedsYouItem; placement: "footer" | "inline" }) {
-  const { item, busy, placement } = props;
+  const { item, busy, placement, now } = props;
   const inline = placement === "inline";
+  const options = item.options!;
+  const recommended = options.some((option) => option.recommended);
   return (
     <div role="group" aria-labelledby={`needs-you-decide-${placement}`}>
       <p id={`needs-you-decide-${placement}`} className={cn(sectionHeading, "mb-1.5")}>{t("needsYou.screen.decide")}</p>
-      <div className={cn("grid gap-2", inline ? "grid-cols-1" : "[grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]")}>
-        {item.options!.map((option, n) => (
-          <button
-            key={option.label}
-            type="button"
-            data-resolver-option={n}
-            data-placement={placement}
-            disabled={busy !== null}
-            aria-describedby={`needs-you-option-${placement}-${n}`}
-            title={t("needsYou.screen.sends", { reply: option.reply })}
-            onClick={() => props.onDecide(item, n)}
-            className="flex min-w-0 flex-col items-start gap-0.5 rounded-xl border border-hairline/70 bg-panel px-3 py-2 text-left outline-none hover:border-accent/60 hover:bg-raised focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-50"
-          >
-            <span className="flex items-center gap-1.5 text-[13.5px] font-semibold text-ink">
-              {busy === `option:${n}` && <Loader2 size={14} aria-hidden="true" className="animate-spin" />}
-              {option.label}
-            </span>
-            <span id={`needs-you-option-${placement}-${n}`} className={cn("text-[12px] leading-snug text-ink-secondary", inline ? "break-words" : "line-clamp-2")}>
-              {t("needsYou.screen.sends", { reply: option.reply })}
-            </span>
-          </button>
-        ))}
+      <div className={cn("grid gap-2", inline ? "grid-cols-1" : "[grid-template-columns:repeat(auto-fit,minmax(200px,1fr))]")}>
+        {decisionsInOrder(options).map(({ option, index: n }) => {
+          const look = DECISION_LOOK[decisionLook(option, n, options)];
+          return (
+            <button
+              key={option.label}
+              type="button"
+              data-resolver-option={n}
+              data-placement={placement}
+              data-look={decisionLook(option, n, options)}
+              {...(option.recommended ? { "data-recommended": "" } : {})}
+              disabled={busy !== null}
+              aria-label={option.recommended ? t("needsYou.screen.recommendedLabel", { label: option.label }) : option.label}
+              aria-describedby={`needs-you-option-${placement}-${n}`}
+              title={t("needsYou.screen.sends", { reply: option.reply })}
+              onClick={() => props.onDecide(item, n)}
+              className={cn(DECISION_BASE, look.button)}
+            >
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className={cn("text-[14px] font-semibold leading-snug", look.label)}>{option.label}</span>
+                  {option.recommended && (
+                    <span aria-hidden="true" className="inline-flex items-center gap-1 rounded-full border border-current px-1.5 py-px text-[10.5px] font-semibold uppercase tracking-wide text-accent-ink">
+                      <Sparkles size={10} aria-hidden="true" />
+                      {t("needsYou.screen.recommended")}
+                    </span>
+                  )}
+                </span>
+                {option.recommended && option.why && (
+                  <span className={cn("mt-0.5 block text-[12.5px] font-medium leading-snug", look.sends)}>{option.why}</span>
+                )}
+                <span id={`needs-you-option-${placement}-${n}`} className={cn("mt-0.5 block text-[12px] leading-snug", look.sends, inline ? "break-words" : "line-clamp-2")}>
+                  {option.recommended && option.why ? <span className="sr-only">{option.why}. </span> : null}
+                  {t("needsYou.screen.sends", { reply: option.reply })}
+                </span>
+              </span>
+              <span aria-hidden="true" className={cn("mt-0.5 shrink-0 transition-transform group-hover/decision:translate-x-0.5", look.icon)}>
+                {busy === `option:${n}` ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+              </span>
+            </button>
+          );
+        })}
       </div>
+      {!recommended && options.length >= 2 && item.pendingId && (
+        // an older item without the bot's pick: one quiet button asks for it (J16c)
+        <button type="button" data-resolver-ask-recommend="" disabled={busy !== null} onClick={() => props.onAskRecommend(item)} className={cn(quietButton, "mt-1.5 -ml-1 px-2 py-1 text-[12.5px] text-accent-text")}>
+          {busy === "recommend" ? <Loader2 size={13} aria-hidden="true" className="animate-spin" /> : <Sparkles size={13} aria-hidden="true" />}
+          {item.recommendRequestedAt ? t("needsYou.screen.recommendAsked", { age: waitingAge(item.recommendRequestedAt, now) }) : t("needsYou.screen.askRecommend", { name: item.botName })}
+        </button>
+      )}
     </div>
   );
 }
@@ -554,7 +604,7 @@ function NoSteps(props: NeedsYouResolverViewProps & { item: NeedsYouItem }) {
 /** The resolution screen: portalled over the app, focus held inside and
  * given back on close, keys handled, every action awaited with its own
  * loading and error state. */
-export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onResolve }: {
+export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClose, onOpenConversation, onOpenLink, onCopy, onDecide, onReply, onAskSteps, onAskRecommend, onResolve }: {
   open: boolean;
   items: NeedsYouItem[];
   initialKey?: string | null;
@@ -566,6 +616,8 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   onDecide: (item: NeedsYouItem, option: number) => Promise<unknown>;
   onReply: (item: NeedsYouItem, text: string, resolve: boolean) => Promise<unknown>;
   onAskSteps: (item: NeedsYouItem) => Promise<unknown>;
+  /** Asks the bot which decision it recommends (an item with 2+ decisions and none marked). */
+  onAskRecommend?: (item: NeedsYouItem) => Promise<unknown>;
   onResolve: (item: NeedsYouItem) => Promise<unknown>;
 }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialKey ?? null);
@@ -751,6 +803,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onDecide={(item, option) => void run(`option:${option}`, () => onDecide(item, option), t("needsYou.screen.decided", { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title }))}
           onReply={reply}
           onAskSteps={(item) => void run("steps", () => onAskSteps(item), t("needsYou.screen.askedSteps", { name: item.botName, title: item.title }))}
+          onAskRecommend={(item) => void run("recommend", () => (onAskRecommend ?? (async () => undefined))(item), t("needsYou.screen.askedRecommend", { name: item.botName, title: item.title }))}
           onResolve={(item) => void run("resolve", () => onResolve(item), t("needsYou.screen.resolved", { title: item.title }))}
           onOpenConversation={onOpenConversation}
           onDismissError={() => setError(null)}

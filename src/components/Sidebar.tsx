@@ -2205,6 +2205,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         onCopy={(text) => navigator.clipboard.writeText(text)}
         onDecide={(item, option) => replyToOwnerPending(item, decisionReply(item, option), dispatch)}
         onAskSteps={(item) => replyToOwnerPending(item, { ask: "steps" }, dispatch)}
+        onAskRecommend={(item) => replyToOwnerPending(item, { ask: "recommend" }, dispatch)}
         onReply={(item, text, resolve) => item.pendingId
           ? replyToOwnerPending(item, { text, resolve }, dispatch)
           // an approval or a question in the conversation: the answer is an ordinary message there, awaited

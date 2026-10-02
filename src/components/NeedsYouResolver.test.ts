@@ -49,7 +49,7 @@ function view(overrides: Partial<NeedsYouResolverViewProps> = {}) {
     onBack: () => calls.push("back"), onClose: () => calls.push("close"), onDraft: (text) => calls.push(`draft:${text}`),
     onResolveOnSend: (value) => calls.push(`resolveOnSend:${value}`), onCopy: (text) => calls.push(`copy:${text}`), onOpenLink: (url) => calls.push(`link:${url}`),
     onDecide: (item, n) => calls.push(`decide:${item.pendingId}:${n}`), onReply: (item) => calls.push(`reply:${item.pendingId ?? item.threadId}`),
-    onAskSteps: (item) => calls.push(`steps:${item.pendingId}`), onResolve: (item) => calls.push(`resolve:${item.pendingId}`),
+    onAskSteps: (item) => calls.push(`steps:${item.pendingId}`), onAskRecommend: (item) => calls.push(`recommend:${item.pendingId}`), onResolve: (item) => calls.push(`resolve:${item.pendingId}`),
     onOpenConversation: (item) => calls.push(`conversation:${item.threadId}`), onDismissError: () => calls.push("dismiss"),
     ...overrides,
   };
@@ -164,8 +164,10 @@ describe("the resolution screen (I1)", () => {
     const jump = tree.find((node) => "data-resolver-jump" in node.props)!;
     expect(String(jump.props.className)).toContain("sm:[@media(min-height:761px)]:hidden");
     expect(Children.toArray(jump.props.children).join("")).toContain("Ver as 2 decisões");
-    // every decision button looks the same, and says what it sends (whole, inline)
-    expect(new Set(decisions.map((node) => node.props.className)).size).toBe(1);
+    // the owner's decision (J15, 02/10): decisions look like buttons — with no
+    // recommendation the first is filled with the accent, a refusal outlined
+    // neutral — and each says what it sends (whole, inline)
+    expect(decisions.map((node) => node.props["data-look"])).toEqual(["primary", "neutral", "primary", "neutral"]);
     const inlineReply = tree.find((node) => node.props.id === "needs-you-option-inline-0")!;
     expect(String(inlineReply.props.className)).toContain("break-words");
     expect(String(inlineReply.props.className)).not.toContain("hidden");
@@ -281,6 +283,48 @@ describe("keys on the resolution screen", () => {
     expect(resolverKeyAction({ key: "ArrowDown", inField: true })).toBeNull();
     expect(resolverKeyAction({ key: "j", metaKey: true, inField: false })).toBeNull();
     for (const key of ["1", "2", "Enter", "a", "y"]) expect(resolverKeyAction({ key, inField: false })).toBeNull();
+  });
+
+  // J15 (the owner, 02/10): the decision cards did not read as buttons.
+  // J16: four options ("Sem limite + esperar / + update-branch / + timeout
+  // maior / Outro prazo padrão") and nothing said which was best. Redacted.
+  it("draws decisions as buttons and puts the bot's recommendation first, filled, with its badge and why", () => {
+    const four = [
+      { label: "Sem limite + esperar", reply: "Sem limite; espere o gate." },
+      { label: "Sem limite + update-branch", reply: "Sem limite; atualize a branch.", recommended: true as const, why: "Destrava o gate hoje sem mexer no limite de ninguém." },
+      { label: "Sem limite + timeout maior", reply: "Sem limite; aumente o timeout." },
+      { label: "Outro prazo padrão", reply: "Use outro prazo padrão." },
+    ];
+    const pick = needsYouItems([bot("chief", "Chief of Staff", [task("c9", "Limites", { ownerPending: [{ id: "o9", title: "Confirmar o padrão sem limite", since: now - 3_600_000, options: four }] })])]);
+    const { tree, html, press, calls } = view({ items: pick, selectedKey: needsYouKey(pick[0]!) });
+    const inline = tree.filter((node) => node.props["data-placement"] === "inline" && "data-resolver-option" in node.props);
+    // the recommended first, keeping its index in the item (what the server checks)
+    expect(inline.map((node) => node.props["data-resolver-option"])).toEqual([1, 0, 2, 3]);
+    expect(inline.map((node) => node.props["data-look"])).toEqual(["primary", "secondary", "secondary", "secondary"]);
+    expect(inline[0]!.props["aria-label"]).toBe("Sem limite + update-branch, recomendada");
+    expect(String(inline[0]!.props.className)).toMatch(/bg-accent .*text-accent-ink|text-accent-ink.*bg-accent /);
+    expect(String(inline[1]!.props.className)).toContain("border-accent bg-accent/8");
+    for (const node of inline) expect(String(node.props.className)).toMatch(/cursor-pointer.*focus-visible:ring-2|focus-visible:ring-2.*cursor-pointer/);
+    expect(html).toContain("Recomendado");
+    expect(html).toContain("Destrava o gate hoje sem mexer no limite de ninguém.");
+    // its "Envia" still reads, and the why reaches a screen reader with it
+    const described = tree.find((node) => node.props.id === "needs-you-option-inline-1")!;
+    expect(renderToStaticMarkup(described as ReactElement)).toMatch(/Destrava o gate hoje.*Envia: “Sem limite; atualize a branch.”/);
+    press("data-resolver-option", 1);
+    expect(calls).toContain("decide:o9:1");
+    // with a recommendation there is nothing to ask
+    expect(tree.find((node) => "data-resolver-ask-recommend" in node.props)).toBeUndefined();
+  });
+
+  it("an older item with 2+ decisions and none recommended: the first filled, a refusal neutral, and one quiet button asks the bot", () => {
+    const { tree, press, calls, html } = view({ selectedKey: keyOf("o1") });
+    expect(tree.filter((node) => node.props["data-placement"] === "inline").map((node) => node.props["data-look"])).toEqual(["primary", "neutral"]);
+    expect(html).toContain("Pedir recomendação ao Chief of Staff");
+    press("data-resolver-ask-recommend");
+    expect(calls).toContain("recommend:o1");
+    // asked already: said with how long ago
+    const asked = needsYouItems(bots).map((item) => (item.pendingId === "o1" ? { ...item, recommendRequestedAt: now - 3 * 60_000 } : item));
+    expect(view({ items: asked, selectedKey: keyOf("o1") }).html).toContain("Recomendação pedida há 3 min");
   });
 
   it("names links the way the person reads them", () => {

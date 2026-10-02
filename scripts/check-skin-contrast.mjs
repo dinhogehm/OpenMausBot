@@ -210,6 +210,34 @@ for (const [id, tokens] of skins) {
   if (skinFailed) failed = true;
 }
 
+// "Precisa de você" decisions (lot J, J15/J16): the other options are drawn
+// on the panel under a light wash of the accent (bg-accent/8, hover /14),
+// with the label in the accent's text tone and "Envia: …" in the secondary
+// ink. A wash is a composite no token holds, so it is measured here as it
+// renders: every skin, text held to 4.5:1 on the washed panel.
+const DECISION_WASHES = [0.08, 0.14];
+for (const [id, tokens] of skins) {
+  const panel = parseHex(tokens["--color-panel"] ?? "");
+  const accent = parseHex(tokens["--color-accent"] ?? "");
+  if (!panel || !accent) {
+    failed = true;
+    console.log(`✗ ${id} — decisions: cannot measure the accent wash on the panel`);
+    continue;
+  }
+  for (const alpha of DECISION_WASHES) {
+    const washed = flatten({ ...accent, a: alpha }, panel);
+    const hex = `#${[washed.r, washed.g, washed.b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("")}`;
+    for (const fg of [ACCENT_AS_TEXT, "--color-accent-text", "--color-ink", "--color-ink-secondary"]) {
+      const ratio = contrast(tokens[fg] ?? "", hex);
+      if (ratio === null || ratio < 4.5) {
+        failed = true;
+        console.log(`✗ ${id} — decisions: ${fg} on the panel washed ${Math.round(alpha * 100)}% with the accent: ${ratio?.toFixed(2) ?? "unmeasurable"}:1 (needs 4.5:1)`);
+      }
+    }
+  }
+}
+if (!failed) console.log(`✓ decisions — accent text, ink and secondary ink above 4.5:1 on the accent wash (${DECISION_WASHES.map((a) => `${Math.round(a * 100)}%`).join(", ")}) in every skin`);
+
 // The inverted Daylight bubble has its own inherited context: the editor,
 // labels, quotes and file chips explicitly use these tokens, not parent color.
 const daylightBubble = {
