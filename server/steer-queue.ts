@@ -88,6 +88,21 @@ export function restoreSteeredMessages(): void {
     queues.set(row.threadId, entry);
   }
 }
+/** Waiting sends that will never run: their bot or conversation was deleted,
+ * or the person cancelled them. Their queue ids, and why (INSP-J2 r3 R3). */
+export type SteerDropReason = "deleted" | "cancelled";
+const dropListeners = new Set<(queueIds: string[], reason: SteerDropReason) => void>();
+export function onSteeredDropped(listener: (queueIds: string[], reason: SteerDropReason) => void): () => void {
+  dropListeners.add(listener);
+  return () => { dropListeners.delete(listener); };
+}
+const dropped = (queueIds: string[], reason: SteerDropReason) => {
+  for (const listener of dropListeners) {
+    try { listener(queueIds, reason); }
+    catch { console.warn("steer-queue: drop listener failed"); }
+  }
+};
+
 const listeners = new Set<() => void>();
 const changed = () => {
   for (const listener of listeners) {
@@ -205,6 +220,7 @@ export function drainSteeredMessages(
       settleChatFollowups(entry.items.map((item) => item.messageId), "cancelled");
       queues.delete(threadId);
       changed();
+      dropped(entry.items.map((item) => item.messageId), "deleted");
       continue;
     }
     if (bot.busy || isBlocked?.(entry.botId, threadId)) continue;
@@ -298,6 +314,7 @@ export function cancelSteeredMessage(botId: string, messageId: string, expectedT
     if (items.length === 0) queues.delete(threadId);
     else queues.set(threadId, { botId: entry.botId, items });
     changed();
+    dropped([messageId], "cancelled");
     return true;
   }
   return false;

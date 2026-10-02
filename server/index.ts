@@ -398,7 +398,9 @@ import {
   drainSteeredMessages,
   hasQueuedSteeredMessages,
   holdSteeredQueue,
+  onSteeredDropped,
   onSteeredQueueChange,
+  type SteerDropReason,
   queuedSteerSnapshot,
   queuedSteeredMessage,
   queuedThreadPosition,
@@ -8801,7 +8803,9 @@ async function autonomyTick(): Promise<void> {
   }
   for (const pending of autonomy.reportThreads()) {
     if (!store.taskByThread(pending.botId, pending.threadId)) {
-      autonomy.takeReports(pending.threadId);
+      const gone = autonomy.takeReports(pending.threadId);
+      // a reminder the person asked for, dropped with its conversation: "não enviado", with why (INSP-J2 r3 R3)
+      settleReminders(pending.botId, gone?.items ?? [], { error: "a conversa do lembrete não existe mais" });
       continue;
     }
     // ~/.nuria/stop is checked at dispatch too: a steps request queued before the stop waits for it to go (INSP-J2 #6)
@@ -8818,11 +8822,8 @@ async function autonomyTick(): Promise<void> {
     if (!taken) continue;
     const chip = taken.items.length === 1 ? "Chegou um relatório" : `Chegaram ${taken.items.length} relatórios`;
     const outcome = await dispatchAutonomyTurn(taken.botId, taken.threadId, chip, reportsPrompt(taken, autonomy.goalFor(taken.threadId), languageReminder(cfg.language)));
-    if (outcome === "started") {
-      // a reminder the person asked for reached the bot: "na fila" becomes "enviado" (INSP-J2 r2 N3/N9)
-      const reminded = new Set(taken.items.filter((text) => text.startsWith(REMIND_REPORT_PREFIX)).map((text) => text.slice(REMIND_REPORT_PREFIX.length).trim().split(" ")[0]));
-      if (reminded.size) for (const botId of autonomy.settleOwnerPendingQueued((item, entry) => item.botId === taken.botId && reminded.has(item.id) && entry.label === "remind", { delivered: true })) refreshBotRow(botId);
-    }
+    // a reminder the person asked for reached the bot: "na fila" becomes "enviado" (INSP-J2 r2 N3/N9)
+    if (outcome === "started") settleReminders(taken.botId, taken.items, { delivered: true });
     if (outcome === "busy") autonomy.restoreReports(taken);
     else if (outcome === "failed") autonomy.settleInFlight(taken.threadId);
   }
@@ -10895,6 +10896,20 @@ function settleQueuedAnswers(queueIds: readonly string[] | undefined, outcome: {
   const ids = new Set(queueIds);
   for (const botId of autonomy.settleOwnerPendingQueued((_item, entry) => Boolean(entry.queueId && ids.has(entry.queueId)), outcome)) refreshBotRow(botId);
 }
+
+/** The "Lembrar" entries of the items these reports remind, settled. */
+function settleReminders(botId: string, reports: readonly string[], outcome: { delivered: true } | { error: string }): void {
+  const reminded = new Set(reports.filter((text) => text.startsWith(REMIND_REPORT_PREFIX)).map((text) => text.slice(REMIND_REPORT_PREFIX.length).trim().split(" ")[0]));
+  if (!reminded.size) return;
+  for (const touched of autonomy.settleOwnerPendingQueued((item, entry) => item.botId === botId && reminded.has(item.id) && entry.label === "remind", outcome)) refreshBotRow(touched);
+}
+
+/** Why a queued answer never reached its bot, as its history says it (INSP-J2 r3 R3). */
+const QUEUE_DROP_REASON: Record<SteerDropReason, string> = {
+  cancelled: "cancelada na conversa antes de chegar ao bot",
+  deleted: "a conversa ou o bot foi apagado antes de a resposta chegar",
+};
+onSteeredDropped((queueIds, reason) => settleQueuedAnswers(queueIds, { error: QUEUE_DROP_REASON[reason] }));
 
 function drainQueuedSends() {
   if (!followupsReady) return;
@@ -24027,8 +24042,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!cancelSteeredMessage(bot.id, queueId, bot.threadId)) {
         return json(res, 404, { error: "no such queued message" });
       }
-      // a "Precisa de você" answer cancelled before its turn: not sent, said so in its history
-      settleQueuedAnswers([queueId], { error: "cancelado antes de chegar ao bot" });
       return json(res, 200, { ok: true });
     }
 
@@ -26892,6 +26905,12 @@ for (const row of chatFollowups()) {
   settleChatFollowups([row.id], null);
 }
 restoreSteeredMessages();
+{
+  // a "Precisa de você" answer whose queued send did not come back with the
+  // queue (interrupted by the restart): never "na fila" forever (INSP-J2 r3 R3)
+  const waiting = new Set(Object.values(queuedSteerSnapshot(() => true)).flat().map((each) => each.queueId));
+  autonomy.settleOwnerPendingQueued((_item, entry) => Boolean(entry.queueId) && !waiting.has(entry.queueId!), { error: "o servidor reiniciou antes de confirmar a entrega; confira a conversa" });
+}
 restoreAsideMessages(store);
 restoreChannelMessages();
 

@@ -23,6 +23,7 @@ import {
   drainSteeredMessages,
   hasQueuedSteeredMessages,
   holdSteeredQueue,
+  onSteeredDropped,
   onSteeredQueueChange,
   queuedThreadPosition,
   queuedSteerSnapshot,
@@ -478,6 +479,28 @@ describe("steer-queue module", () => {
     drainSteeredMessages(fakeStore([]), run);
     expect(run).not.toHaveBeenCalled();
     expect(_queuedCount("thread-d")).toBe(0);
+  });
+
+  // INSP-J2 r3 R3: a "Precisa de você" answer whose send will never run must be settled, with why
+  it("tells who listens which waiting sends will never run, and why: cancelled, or bot/conversation deleted", () => {
+    const heard: Array<[string[], string]> = [];
+    const stop = onSteeredDropped((ids, reason) => heard.push([ids, reason]));
+    try {
+      const bot = fakeBot("bot-drop", "thread-drop", true);
+      const kept = queueSteeredMessage(bot.id, bot.threadId, "a");
+      const cancelled = queueSteeredMessage(bot.id, bot.threadId, "b");
+      cancelSteeredMessage(bot.id, cancelled.id);
+      expect(heard).toEqual([[[cancelled.id], "cancelled"]]);
+      drainSteeredMessages(fakeStore([]), vi.fn());
+      expect(heard).toEqual([[[cancelled.id], "cancelled"], [[kept.id], "deleted"]]);
+      // a drained send is not dropped
+      const live = fakeBot("bot-live", "thread-live", false);
+      queueSteeredMessage(live.id, live.threadId, "c");
+      drainSteeredMessages(fakeStore([live]), vi.fn());
+      expect(heard).toHaveLength(2);
+    } finally {
+      stop();
+    }
   });
 
   it("drains an idle task B while the same bot's task A stays busy", () => {

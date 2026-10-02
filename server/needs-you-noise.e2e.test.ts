@@ -216,7 +216,13 @@ it("checks the power before closing, tells 'na fila' from 'enviado', and reminds
     const thread = chief.activeTaskId ?? chief.threadId;
     const at = Date.now() - 3 * 3_600_000;
     const practical = { why: "O Jev barrou.", steps: [{ text: "Cole os comentários" }], options: [{ label: "Já colei", reply: "Já colei os comentários.", recommended: true, why: "Está pronto." }, { label: "Cole você", reply: "Tente colar de novo." }] };
-    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
+    // INSP-J2 r3 R3: a queued answer whose send did not survive the restart, and a reminder whose conversation is gone
+    const remindGone = `[Servidor: lembrete de pendência] o15 («Aprovar o envio do relatório»): a pessoa respondeu há 3 h.`;
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [{ botId: chief.id, threadId: "gone-thread", items: [remindGone] }], inFlight: [], ownerPending: [
+      { id: "o14", botId: chief.id, threadId: thread, title: "Atualizar o status da linha 169", createdAt: at, ...practical,
+        awaitingSince: at, history: [{ at, kind: "option", label: "Já colei", text: "Já colei os comentários.", by: "owner", delivered: false, queued: true, queueId: "lost-in-restart" }] },
+      { id: "o15", botId: chief.id, threadId: thread, title: "Aprovar o envio do relatório", createdAt: at, ...practical,
+        awaitingSince: at, history: [{ at, kind: "ask", label: "remind", text: "Lembrete enviado pelo OpenMausBot.", by: "owner", delivered: false, queued: true }] },
       { id: "o3", botId: chief.id, threadId: thread, title: "Ligue o Mac na tomada (17%, abaixo do seu limite de 20%)", key: "power:battery", createdAt: at, why: "w", steps: [{ text: "s" }],
         options: [{ label: "Liguei na tomada", reply: "Liguei o Mac na tomada.", recommended: true, why: "x" }, { label: "Vou deixar na bateria", reply: "Vou deixar." }] },
       { id: "o12", botId: chief.id, threadId: thread, title: "Colar os dois comentários nas issues #NNNN e #MMMM", createdAt: at, ...practical,
@@ -229,6 +235,14 @@ it("checks the power before closing, tells 'na fila' from 'enviado', and reminds
     });
     closeSync(log);
     await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+
+    // R3: never "na fila" forever — and the item is the person's again (R2)
+    const lost = (await pending(chief.id)).find((item) => item.id === "o14");
+    expect(lost.history.at(-1)).toMatchObject({ delivered: false, error: "o servidor reiniciou antes de confirmar a entrega; confira a conversa" });
+    expect(lost.history.at(-1).queued).toBeUndefined();
+    expect(lost.awaitingSince).toBeUndefined();
+    await expect.poll(async () => (await pending(chief.id)).find((item) => item.id === "o15").history.at(-1), { timeout: 30_000, interval: 300 })
+      .toMatchObject({ label: "remind", delivered: false, error: "a conversa do lembrete não existe mais" });
 
     // N4: still on battery — the item stays open and says why
     const plugged = await raw(`/api/bots/${chief.id}/owner-pending/o3/reply`, { option: 0, label: "Liguei na tomada" });
@@ -245,6 +259,8 @@ it("checks the power before closing, tells 'na fila' from 'enviado', and reminds
     expect((await raw(`/api/bots/${chief.id}/owner-pending/o13/remind`, {})).status).toBe(409);
     // the reminder reaches the bot as a report: "na fila", then "enviado"
     await expect.poll(async () => (await pending(chief.id)).find((item) => item.id === "o12").history.filter((entry: any) => entry.label === "remind").map((entry: any) => [entry.delivered, entry.queued ?? false]), { timeout: 30_000, interval: 300 }).toEqual([[true, false]]);
+    // "enviado" is set when the turn starts; the engine writes its prompt right after
+    await expect.poll(() => (existsSync(prompts) ? readFileSync(prompts, "utf8") : ""), { timeout: 15_000 }).toContain("[Servidor: lembrete de pendência] o12 ");
     const prompt = readFileSync(prompts, "utf8");
     expect(prompt.split("[Servidor: lembrete de pendência] o12 ").length - 1).toBe(1);
     expect(prompt).toContain("a pessoa escolheu «Já colei» há 3 h");

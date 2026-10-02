@@ -1336,11 +1336,24 @@ export class BotAutonomy {
     // a decision that closed its item may still be waiting its turn: the audit keeps its outcome too
     for (const item of [...this.ownerPending, ...this.resolvedOwnerPending]) {
       if (!item.history?.some((entry) => entry.queued && match(item, entry))) continue;
+      // the answer that put the item in wait is the last one sent or queued
+      const last = item.history.findLast((entry) => entry.delivered || entry.queued);
+      let settledLast = false;
       item.history = item.history.map((entry) => {
         if (!entry.queued || !match(item, entry)) return entry;
+        if (entry === last) settledLast = true;
         const { queued: _queued, queueId: _queueId, ...rest } = entry;
         return "error" in outcome ? { ...rest, delivered: false, error: outcome.error.slice(0, 300) } : { ...rest, delivered: true };
       });
+      if (settledLast) {
+        // INSP-J2 r3 R2: the bot's 2 h count from delivery, not from the queue; an
+        // answer that never arrived gives the item back to the person, with why
+        if ("error" in outcome) {
+          const earlier = item.history.findLast((entry) => entry.delivered || entry.queued);
+          if (earlier?.queued) item.awaitingSince = earlier.at;
+          else delete item.awaitingSince;
+        } else item.awaitingSince = this.now();
+      }
       touched.add(item.botId);
     }
     if (touched.size) this.save();
@@ -1355,6 +1368,8 @@ export class BotAutonomy {
     if (!item || item.awaitingSince === undefined) return null;
     const waiting = this.reports.get(threadId)?.items.some((text) => text.startsWith(`${REMIND_REPORT_PREFIX} ${item.id} `)) ?? false;
     if (waiting) return { item, deduped: true };
+    // the person's answer still waits its turn: the bot has not had it yet, nothing to remind (INSP-J2 r3 R2)
+    if (item.history?.findLast((entry) => entry.delivered || entry.queued)?.queued) return null;
     const now = this.now();
     if (now - item.awaitingSince < OWNER_PENDING_AWAIT_MS) return null;
     this.addReport(botId, threadId, ownerPendingRemindReport(item, now));
