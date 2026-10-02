@@ -32,21 +32,21 @@ describe("what needs the person, from every bot", () => {
   });
 
   it("renders one labelled block with a count, full titles in the label, and nothing when nothing waits", () => {
-    const html = renderToStaticMarkup(createElement(SidebarNeedsYou, { items: needsYouItems(bots), density: "comfortable", now, onJump: () => {} }));
+    const html = renderToStaticMarkup(createElement(SidebarNeedsYou, { items: needsYouItems(bots), density: "comfortable", now, onOpen: () => {} }));
     expect(html).toContain('aria-label="3 itens precisam de você"');
     expect(html).toContain(">Precisa de você<");
-    expect(html).toContain('aria-label="GO para o carrier #9278 · Chief of Staff · esperando há 3 h"');
+    expect(html).toContain('aria-label="Ver como resolver: GO para o carrier #9278 · Chief of Staff · esperando há 3 h"');
     expect(html.match(/data-needs-you-row=/g)).toHaveLength(3);
-    expect(renderToStaticMarkup(createElement(SidebarNeedsYou, { items: [], density: "comfortable", now, onJump: () => {} }))).toBe("");
-    expect(renderToStaticMarkup(createElement(SidebarNeedsYou, { items: needsYouItems(bots), density: "icons", now, onJump: () => {} }))).toBe("");
+    expect(renderToStaticMarkup(createElement(SidebarNeedsYou, { items: [], density: "comfortable", now, onOpen: () => {} }))).toBe("");
+    expect(renderToStaticMarkup(createElement(SidebarNeedsYou, { items: needsYouItems(bots), density: "icons", now, onOpen: () => {} }))).toBe("");
   });
 
   it("lists each owner_pending item with its deadline, and offers to mark it done", () => {
     const listed = [bot("chief", "Chief of Staff", [task("c0", "Main", { ownerPending: [{ id: "o1", title: "Aprovar o carrier da #9315", since: now - 2 * 3_600_000, due: "hoje 18h", link: "https://github.com/o/r/pull/9315" }] })])];
     const items = needsYouItems(listed);
     expect(items).toEqual([expect.objectContaining({ threadId: "c0", title: "Aprovar o carrier da #9315", pendingId: "o1", due: "hoje 18h" })]);
-    const html = renderToStaticMarkup(createElement(SidebarNeedsYou, { items, density: "comfortable", now, onJump: () => {}, onResolve: () => {} }));
-    expect(html).toContain("Aprovar o carrier da #9315 · Chief of Staff · esperando há 2 h · até hoje 18h · https://github.com/o/r/pull/9315");
+    const html = renderToStaticMarkup(createElement(SidebarNeedsYou, { items, density: "comfortable", now, onOpen: () => {}, onResolve: () => {} }));
+    expect(html).toContain('aria-label="Ver como resolver: Aprovar o carrier da #9315 · Chief of Staff · esperando há 2 h · até hoje 18h"');
     expect(html).toContain('aria-label="Marcar como resolvido: Aprovar o carrier da #9315"');
   });
 
@@ -56,7 +56,7 @@ describe("what needs the person, from every bot", () => {
     const listed = [bot("chief", "Chief of Staff", [task("c0", "Main", { ownerPending: [{ id: "o2", title, since: now - 60_000, link }, { id: "o3", title: "Sem link", since: now }] })])];
     const items = needsYouItems(listed);
     const opened: string[] = [];
-    const element = SidebarNeedsYou({ items, density: "comfortable", now, onJump: () => {}, onResolve: () => {}, onOpenLink: (url) => opened.push(url) });
+    const element = SidebarNeedsYou({ items, density: "comfortable", now, onOpen: () => {}, onResolve: () => {}, onOpenLink: (url) => opened.push(url) });
     const html = renderToStaticMarkup(element!);
     expect(html).toContain(`data-needs-you-link="${link}"`);
     expect(html).toContain(`aria-label="Abrir: ${title.replaceAll('"', "&quot;")}"`);
@@ -85,7 +85,7 @@ describe("what needs the person, from every bot", () => {
     const items = needsYouItems(listed);
     expect(items).toEqual([expect.objectContaining({ pendingId: "o9", command })]);
     const copied: string[] = [];
-    const element = SidebarNeedsYou({ items, density: "comfortable", now, onJump: () => {}, onResolve: () => {}, onCopy: (text) => copied.push(text) });
+    const element = SidebarNeedsYou({ items, density: "comfortable", now, onOpen: () => {}, onResolve: () => {}, onCopy: (text) => copied.push(text) });
     const html = renderToStaticMarkup(element!);
     const escaped = command.replaceAll(">", "&gt;");
     expect(html).toContain(`data-needs-you-copy="${escaped}"`);
@@ -105,5 +105,21 @@ describe("what needs the person, from every bot", () => {
     };
     findCopy(element)!.props.onClick();
     expect(copied).toEqual([command]);
+  });
+
+  it("orders rows like the resolution screen (overdue first), clamps titles to two real lines, and opens the screen (INSP-I r1 #7/#8/#15)", () => {
+    const listed = [bot("chief", "Chief of Staff", [task("c0", "Main", { ownerPending: [
+      { id: "o1", title: "Antigo sem prazo", since: now - 9 * 3_600_000 },
+      { id: "o2", title: "Vencido ontem", since: now - 60_000, due: "ontem 18h" },
+      { id: "o3", title: "Para hoje à noite", since: now - 2 * 60_000, due: "hoje 23h" },
+    ] })])];
+    const opened: Array<string | null> = [];
+    const element = SidebarNeedsYou({ items: needsYouItems(listed), density: "comfortable", now, onOpen: (item) => opened.push(item?.pendingId ?? null) });
+    const html = renderToStaticMarkup(element!);
+    expect([...html.matchAll(/class="line-clamp-2 break-words leading-snug">([^<]+)</g)].map((match) => match[1])).toEqual(["Vencido ontem", "Para hoje à noite", "Antigo sem prazo"]);
+    // "block" would undo the clamp's -webkit-box
+    expect(html).not.toMatch(/class="block line-clamp-2/);
+    expect(html).toContain(">Resolver os 3<");
+    expect(html).toMatch(/text-danger">ontem 18h</);
   });
 });

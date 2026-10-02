@@ -28,6 +28,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { languageReminder } from "./reply-language.ts";
+import { stripLeadingMentions } from "../shared/owner-pending-title.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
 import { chatTexts, ECHO_WINDOW_MS, isEcho, normalize, vmChatPostOf, vmSheetNoteOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
 /** How long, and how many, message starts a bot keeps as seen in its Chat watches. */
@@ -206,8 +207,97 @@ export interface OwnerPending {
   key?: string;
   /** Ids of equivalent items folded into this one (still resolvable by them). */
   aliases?: string[];
+  /** Why it matters, in one or two sentences (shown above the steps). */
+  why?: string;
+  /** What to do, in order: each step may carry the exact command or a link. */
+  steps?: OwnerPendingStep[];
+  /** When it is a choice: the answers the person can pick, each one the reply
+   * the bot receives in its conversation. */
+  options?: OwnerPendingOption[];
+  /** The person asked the bot to rewrite it with steps (the bot's update clears it). */
+  stepsRequestedAt?: number;
+  /** Last time the bot rewrote it (owner_pending update). */
+  updatedAt?: number;
+}
+export interface OwnerPendingStep {
+  text: string;
+  command?: string;
+  link?: string;
+}
+export interface OwnerPendingOption {
+  label: string;
+  reply: string;
 }
 export const OWNER_PENDING_TITLE_MAX = 200;
+export const OWNER_PENDING_WHY_MAX = 400;
+export const OWNER_PENDING_STEPS_MAX = 8;
+export const OWNER_PENDING_STEP_MAX = 300;
+export const OWNER_PENDING_OPTIONS_MAX = 4;
+export const OWNER_PENDING_OPTION_LABEL_MAX = 40;
+export const OWNER_PENDING_OPTION_REPLY_MAX = 500;
+
+/** A link the person can open from "Precisa de você": the web, or the Claude app. */
+const OPENABLE_LINK = /^(?:https?:\/\/\S+|claude:\/\/\S+)$/i;
+const oneLine = (value: string) => value.replace(/\s+/g, " ").trim();
+
+/** The structured part of an item (why, steps, options), as a bot sent it in
+ * owner_pending: checked and clipped, or the reasons it is refused — in
+ * pt-BR, since the bot reads them and fixes its call. A JSON string where an
+ * array belongs is read as that array (some engines send nested values as
+ * text). Absent fields stay absent; an empty list clears. */
+export function parseOwnerPendingDetails(input: { why?: unknown; steps?: unknown; options?: unknown }): {
+  ok: true; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[];
+} | { ok: false; error: string } {
+  const list = (value: unknown): unknown => {
+    if (typeof value !== "string") return value;
+    try { return JSON.parse(value); } catch { return value; }
+  };
+  const out: { why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] } = {};
+  if (input.why !== undefined && input.why !== null) {
+    if (typeof input.why !== "string") return { ok: false, error: "why deve ser um texto (1–2 frases dizendo por que importa)" };
+    out.why = oneLine(input.why).slice(0, OWNER_PENDING_WHY_MAX);
+  }
+  const steps = list(input.steps);
+  if (steps !== undefined && steps !== null) {
+    if (!Array.isArray(steps)) return { ok: false, error: "steps deve ser uma lista de passos: [{\"text\": \"…\", \"command\": \"…\", \"link\": \"…\"}]" };
+    if (steps.length > OWNER_PENDING_STEPS_MAX) return { ok: false, error: `no máximo ${OWNER_PENDING_STEPS_MAX} passos: junte os menores` };
+    out.steps = [];
+    for (const [index, raw] of steps.entries()) {
+      const step = typeof raw === "string" ? { text: raw } : raw as Record<string, unknown> | null;
+      const text = step && typeof step.text === "string" ? oneLine(step.text) : "";
+      if (!text) return { ok: false, error: `o passo ${index + 1} precisa de text: o que a pessoa faz, em uma frase` };
+      const command = step && typeof step.command === "string" ? step.command.trim() : "";
+      const link = step && typeof step.link === "string" ? step.link.trim() : "";
+      if (link && !OPENABLE_LINK.test(link)) return { ok: false, error: `o link do passo ${index + 1} deve começar com https:// (ou claude://)` };
+      out.steps.push({ text: text.slice(0, OWNER_PENDING_STEP_MAX), ...(command ? { command: command.slice(0, 500) } : {}), ...(link ? { link: link.slice(0, 500) } : {}) });
+    }
+  }
+  const options = list(input.options);
+  if (options !== undefined && options !== null) {
+    if (!Array.isArray(options)) return { ok: false, error: "options deve ser uma lista de decisões: [{\"label\": \"Aprovar\", \"reply\": \"Aprovado, pode seguir.\"}]" };
+    if (options.length > OWNER_PENDING_OPTIONS_MAX) return { ok: false, error: `no máximo ${OWNER_PENDING_OPTIONS_MAX} opções de decisão` };
+    out.options = [];
+    for (const [index, raw] of options.entries()) {
+      const option = raw as Record<string, unknown> | null;
+      const label = option && typeof option.label === "string" ? oneLine(option.label) : "";
+      const reply = option && typeof option.reply === "string" ? option.reply.trim() : "";
+      if (!label || !reply) return { ok: false, error: `a opção ${index + 1} precisa de label (o botão, ex. "Aprovar") e reply (o que você recebe quando a pessoa escolhe)` };
+      if (label.length > OWNER_PENDING_OPTION_LABEL_MAX) return { ok: false, error: `o label da opção ${index + 1} passa de ${OWNER_PENDING_OPTION_LABEL_MAX} caracteres: use um verbo curto ("Aprovar", "Recusar")` };
+      if (out.options.some((each) => each.label.toLowerCase() === label.toLowerCase())) return { ok: false, error: `duas opções com o label "${label}"` };
+      out.options.push({ label, reply: reply.slice(0, OWNER_PENDING_OPTION_REPLY_MAX) });
+    }
+  }
+  return { ok: true, ...out };
+}
+
+/** A saved item's structured part, read back defensively (an older ledger
+ * has none; a hand-edited one may carry anything). */
+function savedDetails(pending: OwnerPending): OwnerPending {
+  const details = parseOwnerPendingDetails({ why: pending.why, steps: pending.steps, options: pending.options });
+  const { why: _why, steps: _steps, options: _options, ...base } = pending;
+  if (!details.ok) return base;
+  return { ...base, ...(details.why ? { why: details.why } : {}), ...(details.steps?.length ? { steps: details.steps } : {}), ...(details.options?.length ? { options: details.options } : {}) };
+}
 
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 /** The commits an item's title names: 9–40 hex characters with a digit and
@@ -453,7 +543,7 @@ export class BotAutonomy {
         if (promise && typeof promise.id === "string" && typeof promise.threadId === "string" && typeof promise.botId === "string" && Number.isFinite(promise.dueAt)) this.promises.push(promise);
       }
       for (const pending of raw.ownerPending ?? []) {
-        if (pending && typeof pending.id === "string" && typeof pending.threadId === "string" && typeof pending.botId === "string" && typeof pending.title === "string") this.ownerPending.push(pending);
+        if (pending && typeof pending.id === "string" && typeof pending.threadId === "string" && typeof pending.botId === "string" && typeof pending.title === "string") this.ownerPending.push(savedDetails(pending));
       }
       const folded = this.foldEquivalentPending();
       for (const lost of raw.standingLost ?? []) {
@@ -847,7 +937,7 @@ export class BotAutonomy {
    * for anything else the existing item comes back untouched, flagged
    * `duplicate`, so the bot is told "já existe o5" instead of the person
    * getting a second item for the same action. */
-  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string }): OwnerPending & { duplicate?: true } {
+  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): OwnerPending & { duplicate?: true } {
     const title = input.title.replace(/\s+/g, " ").trim().slice(0, OWNER_PENDING_TITLE_MAX);
     const here = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
     const elsewhere = this.ownerPending.find((open) => open.botId === botId && !here(open) && sameOwnerPending(open, { ...input, title }));
@@ -867,6 +957,10 @@ export class BotAutonomy {
       ...(input.command?.trim() ? { command: input.command.trim().slice(0, 500) } : existing?.command ? { command: existing.command } : {}),
       ...(input.key ? { key: input.key } : {}),
       ...(existing?.aliases?.length ? { aliases: existing.aliases } : {}),
+      // the practical part: what the bot sent now, else what the item had
+      ...(input.why?.trim() ? { why: input.why.trim() } : existing?.why ? { why: existing.why } : {}),
+      ...(input.steps?.length ? { steps: input.steps } : existing?.steps?.length ? { steps: existing.steps } : {}),
+      ...(input.options?.length ? { options: input.options } : existing?.options?.length ? { options: existing.options } : {}),
     };
     // a server item (same key) found in another conversation follows the server to where it says it now
     this.ownerPending = [...this.ownerPending.filter((open) => !same(open)), pending];
@@ -914,6 +1008,53 @@ export class BotAutonomy {
     this.ownerPending = this.ownerPending.filter((open) => !done.includes(open));
     this.save();
     return done;
+  }
+
+  /** One of a bot's items, by id or by an id folded into it. */
+  ownerPendingById(botId: string, id: string): OwnerPending | null {
+    return this.ownerPending.find((open) => open.botId === botId && (open.id === id || Boolean(open.aliases?.includes(id)))) ?? null;
+  }
+
+  /** The bot rewrites one of its items (owner_pending update): the fields it
+   * sends replace the item's, an empty list clears steps or options, and a
+   * pending "pedir passo a passo" is answered. The item keeps its id, place
+   * and age — it is the same ask, said better. null when it is not the bot's. */
+  updateOwnerPending(botId: string, id: string, patch: { title?: string; due?: string; link?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): OwnerPending | null {
+    const item = this.ownerPendingById(botId, id);
+    if (!item) return null;
+    const title = patch.title === undefined ? "" : oneLine(patch.title).slice(0, OWNER_PENDING_TITLE_MAX);
+    const next: OwnerPending = { ...item, ...(title ? { title } : {}), updatedAt: this.now() };
+    const text = (field: "due" | "link" | "why", value: string | undefined, max: number) => {
+      if (value === undefined) return;
+      const clean = oneLine(value).slice(0, max);
+      if (clean) next[field] = clean;
+      else delete next[field];
+    };
+    text("due", patch.due, 80);
+    text("link", patch.link, 500);
+    text("why", patch.why, OWNER_PENDING_WHY_MAX);
+    if (patch.steps !== undefined) {
+      if (patch.steps.length) next.steps = patch.steps;
+      else delete next.steps;
+    }
+    if (patch.options !== undefined) {
+      if (patch.options.length) next.options = patch.options;
+      else delete next.options;
+    }
+    delete next.stepsRequestedAt;
+    this.ownerPending = this.ownerPending.map((open) => (open === item ? next : open));
+    this.save();
+    return next;
+  }
+
+  /** The person asked the bot to rewrite an item with steps: shown on the
+   * item ("pedido há 2 min") until the bot updates it. */
+  markOwnerPendingStepsRequested(botId: string, id: string): OwnerPending | null {
+    const item = this.ownerPendingById(botId, id);
+    if (!item) return null;
+    item.stepsRequestedAt = this.now();
+    this.save();
+    return item;
   }
 
   ownerPendingFor(threadId: string): OwnerPending[] {
@@ -1437,4 +1578,60 @@ export function ownerAskAt(messages: ReadonlyArray<{ role: string; kind: string;
     if ((text.endsWith("?") || OWNER_ASK.test(text)) && now - message.at < maxAgeMs) return message.at;
   }
   return null;
+}
+
+
+/** What the bot asked, in one sentence the person can read in "Precisa de
+ * você" instead of the conversation's title ("@Chief of Staff" says who, not
+ * what): the last question of its reply, else the sentence that asks for
+ * the person, else its first sentence. Markdown and a leading mention are
+ * dropped; at most `max` characters, cut at a word. "" when nothing reads. */
+export function ownerAskText(text: string, max = 200, knownNames: readonly string[] = []): string {
+  const plain = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^\s{0,3}(?:#{1,6}|[-*+]|\d+[.)])\s+/gm, "")
+    .replace(/[*_~>]+/g, "")
+    .replace(/\p{Extended_Pictographic}️?/gu, "");
+  const sentences = plain
+    .split(/(?<=[.!?…])\s+|\n+/)
+    .map((each) => stripLeadingMentions(each, knownNames))
+    .filter((each) => /\p{L}{3}/u.test(each));
+  const found = sentences.findLast((each) => each.endsWith("?")) ?? sentences.find((each) => OWNER_ASK.test(each)) ?? sentences[0] ?? "";
+  // a sentence that followed the mention starts lower-case ("@Chief, preciso…"): a title starts upper-case
+  const pick = found.charAt(0).toLocaleUpperCase("pt-BR") + found.slice(1);
+  if (pick.length <= max) return pick;
+  const cut = pick.slice(0, max - 1);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > max * 0.6 ? cut.slice(0, space) : cut).replace(/[\s,;:–—-]+$/, "")}…`;
+}
+
+/** The ask behind ownerAskAt: the bot's reply that waits on the person, as one sentence. */
+export function ownerAsk(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number; peerAsk?: unknown; from?: unknown }>, now: number, maxAgeMs = 48 * 3_600_000, knownNames: readonly string[] = []): string | null {
+  const at = ownerAskAt(messages, now, maxAgeMs);
+  if (at === null) return null;
+  const message = messages.find((each) => each.at === at && each.role === "bot" && each.kind === "text" && !each.from);
+  return message?.text ? ownerAskText(message.text, 200, knownNames) || null : null;
+}
+
+/** What the bot reads, in the item's conversation, when the person answers
+ * an item from "Precisa de você": which item, and the answer — a decision
+ * the bot offered, or the person's own words. `resolved` says the item is
+ * closed already, so the bot does not open it again. */
+export function ownerPendingReplyText(item: Pick<OwnerPending, "id" | "title">, reply: string, resolved: boolean): string {
+  return `Sobre "${item.title}" (${item.id}): ${reply.trim()}${resolved ? `\n\n(Marquei ${item.id} como resolvido em "Precisa de você".)` : ""}`;
+}
+
+/** The person's request, from "Precisa de você", to rewrite an item that has
+ * no steps — the words shown in the conversation as theirs (INSP-I r1 #6:
+ * plain, no tool names). */
+export function ownerPendingStepsRequestText(item: Pick<OwnerPending, "title">): string {
+  return `Me mostre como resolver «${item.title}», passo a passo.`;
+}
+
+/** What only the bot reads with that request (the turn's prompt, never the
+ * transcript): the exact tool call it answers with. */
+export function ownerPendingStepsRequestNote(item: Pick<OwnerPending, "id">): string {
+  return `[Nota do OpenMausBot, não escrita pela pessoa] A pessoa abriu a pendência ${item.id} em "Precisa de você" e pediu o passo a passo. Reescreva-a com owner_pending update, id ${item.id}: why (1–2 frases: por que importa e o que acontece se esperar), steps (passos numerados e práticos, cada um com o comando exato em command ou o link em link quando houver) e options (as decisões, se for uma escolha: label curto como "Aprovar" e reply com a resposta que você deve receber). Não abra outra pendência; responda à pessoa em uma frase.`;
 }

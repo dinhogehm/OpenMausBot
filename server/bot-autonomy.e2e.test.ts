@@ -434,6 +434,81 @@ it("lists what waits on the person in \"Precisa de você\" until the bot or the 
   await expect.poll(async () => (await f.chips()).some((chip: string) => chip === "Resolvido pela pessoa: Aprovar o carrier da #9315"), { timeout: 10_000 }).toBe(true);
 }), 60_000);
 
+// Lot I: an item opens as a screen with steps and the bot's decisions. The
+// person's click goes to the bot in the conversation the item came from,
+// and closes the item; an old item without steps is rewritten by the bot
+// (owner_pending update) when the person asks for the steps.
+it("sends the person's decision to the bot that asked, in its conversation, and resolves the item (lot I)", () => fixture(async f => {
+  const steps = [{ text: "Abra a PR e confira o diff", link: "https://github.com/acme/app/pull/12" }, { text: "Rode o gate local", command: "pnpm run ci:local" }];
+  const options = [{ label: "Aprovar", reply: "Aprovado: pode fazer o merge da #12." }, { label: "Recusar", reply: "Recusado: não faça o merge." }];
+  f.save({ turns: [
+    { steps: [
+      { tool: "owner_pending", arguments: { action: "add", title: "Aprovar o merge da PR #12", why: "O release de hoje depende dela.", steps, options } },
+      { tool: "owner_pending", arguments: { action: "add", title: "Liberar a escrita na linha 97 da planilha" } },
+      { tool: "owner_pending", arguments: { action: "add", title: "Passos inválidos", steps: [{ text: "Abrir", link: "javascript:alert(1)" }] }, expectError: true },
+      // a title that only names someone says nothing to do (INSP-I r1 #2)
+      { tool: "owner_pending", arguments: { action: "add", title: "@Chief of Staff", why: "Sem isso o relatório sai errado." }, expectError: true },
+    ], reply: "Anotei duas pendências." },
+    // while the screen is open, the bot rewrites o1 with its options in the other order
+    { expectContextIncludes: ["(o1): Pode inverter a ordem das opções."], steps: [
+      { tool: "owner_pending", arguments: { action: "update", id: "o1", options: [...options].reverse() } },
+      { tool: "owner_pending", arguments: { action: "update", id: "o1", title: "@Chief of Staff" }, expectError: true },
+    ], reply: "Invertidas." },
+    // the decision arrives as the person's message, naming the item (the
+    // context is JSON: quotes inside it are escaped, so match around them)
+    { expectContextIncludes: ["Aprovar o merge da PR #12", "(o1): Aprovado: pode fazer o merge da #12.", "Marquei o1 como resolvido"], reply: "Fazendo o merge." },
+    // asked for the steps, the bot rewrites o2 in place: the ask reaches it as a note
+    { expectContextIncludes: ["Me mostre como resolver «Liberar a escrita na linha 97 da planilha», passo a passo.", "não escrita pela pessoa", "owner_pending update, id o2"], steps: [
+      { tool: "owner_pending", arguments: { action: "update", id: "o2", why: "Sem a escrita, o relatório de amanhã sai vazio.", steps: [{ text: "Abra a planilha e libere a linha 97", link: "https://docs.example.com/sheet" }], options: [{ label: "Liberei", reply: "Liberei a linha 97." }] } },
+    ], reply: "Reescrevi com o passo a passo." },
+    { expectContextIncludes: ["(o2): Ainda não consegui, falta acesso."], reply: "Entendido, aguardo." },
+  ] });
+  await f.send("O que depende de mim?");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  const firstTools = JSON.stringify(f.turns()[0].evidence.map((entry: any) => entry.response?.result?.content?.[0]?.text ?? ""));
+  expect(firstTools).toContain("o passo 1 deve começar com https://");
+  expect(firstTools).toContain("title só com menção");
+  const pending = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ownerPending ?? []);
+  await expect.poll(async () => (await pending()).map((item: any) => item.id), { timeout: 10_000 }).toEqual(["o1", "o2"]);
+  expect((await pending())[0]).toMatchObject({ why: "O release de hoje depende dela.", steps, options });
+  const userLines = async () => (await f.messages()).filter((message: any) => message.role === "user").map((message: any) => message.text as string);
+
+  // the screen shows "Aprovar" first; the bot then reverses the options
+  await f.api(`/api/bots/${f.bot.id}/owner-pending/o1/reply`, { text: "Pode inverter a ordem das opções." });
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  expect(JSON.stringify(f.turns()[1].evidence.map((entry: any) => entry.response?.result?.content?.[0]?.text ?? ""))).toContain("title só com menção");
+  await expect.poll(async () => (await pending())[0]?.options?.[0]?.label, { timeout: 10_000 }).toBe("Recusar");
+  const before = (await userLines()).length;
+  // the click on "Aprovar" (position 0 when it was seen) is refused: position 0 is now "Recusar"
+  await expect(f.api(`/api/bots/${f.bot.id}/owner-pending/o1/reply`, { option: 0, label: "Aprovar" })).rejects.toThrow(/reescreveu as opções/);
+  await expect(f.api(`/api/bots/${f.bot.id}/owner-pending/o1/reply`, { option: 5, label: "Aprovar" })).rejects.toThrow(/decisão não existe/);
+  await expect(f.api(`/api/bots/${f.bot.id}/owner-pending/o1/reply`, { option: 1 })).rejects.toThrow(/reescreveu as opções/);
+  expect((await userLines()).length).toBe(before);
+  expect((await pending()).map((item: any) => item.id)).toEqual(["o1", "o2"]);
+  // the person picks "Aprovar" where it is now
+  const decided = await f.api(`/api/bots/${f.bot.id}/owner-pending/o1/reply`, { option: 1, label: "Aprovar" });
+  expect(decided.resolved).toBe(1);
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(3);
+  expect((await pending()).map((item: any) => item.id)).toEqual(["o2"]);
+  expect((await userLines()).at(-1)).toContain("Aprovado: pode fazer o merge da #12.");
+
+  // an old item without steps: the person asks the bot for them, in plain words
+  await f.api(`/api/bots/${f.bot.id}/owner-pending/o2/reply`, { ask: "steps" });
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(4);
+  expect((await userLines()).at(-1)).toBe("Me mostre como resolver «Liberar a escrita na linha 97 da planilha», passo a passo.");
+  expect((await userLines()).join("\n")).not.toContain("owner_pending");
+  expect(toolResult(f.turns()[3], "owner_pending")).toContain("Atualizado em \"Precisa de você\": o2");
+  await expect.poll(async () => (await pending())[0]?.steps?.[0]?.text, { timeout: 10_000 }).toBe("Abra a planilha e libere a linha 97");
+  expect((await pending())[0]).not.toHaveProperty("stepsRequestedAt");
+  expect((await pending())[0].options).toEqual([{ label: "Liberei", reply: "Liberei a linha 97." }]);
+
+  // free text answers without closing the item
+  await f.api(`/api/bots/${f.bot.id}/owner-pending/o2/reply`, { text: "Ainda não consegui, falta acesso." });
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(5);
+  expect((await pending()).map((item: any) => item.id)).toEqual(["o2"]);
+  await expect(f.api(`/api/bots/${f.bot.id}/owner-pending/o9/reply`, { text: "x" })).rejects.toThrow(/já foi resolvido/);
+}), 90_000);
+
 // The app's records (under the fixture's HOME) decide: with the app able to
 // open the repository, a client's issue headless is refused whatever the
 // cli_reason says; with the app opening another repository, it runs, and

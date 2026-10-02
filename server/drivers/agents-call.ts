@@ -1222,7 +1222,7 @@ export async function callTool(name: string, args: Json, context: ToolCallContex
   if (name === "owner_pending") {
     const r = await api("/api/internal/owner-pending", {
       method: "POST",
-      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: args.action, title: args.title, due: args.due, link: args.link, id: args.id }),
+      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, action: args.action, title: args.title, due: args.due, link: args.link, id: args.id, why: args.why, steps: args.steps, options: args.options }),
     });
     if (r.error) return { text: `owner_pending: ${String(r.error)}`, isError: true };
     return { text: String(r.message ?? "ok") };

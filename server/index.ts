@@ -104,6 +104,7 @@ import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as boat from "./boat.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner, type TeamComputerRecord } from "./team-computers.ts";
+import { isMentionOnly } from "../shared/owner-pending-title.ts";
 import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireCcAlert, type WireGroup, type WireOwnerPending, type WireCcSession, type WireTask } from "../shared/wire.ts";
 import type { TeamComputersPayload } from "../shared/team-computer.ts";
 import { boatCreateRecoverySnapshot, retireDeletedBoatCreate } from "./boat-create-idempotency.ts";
@@ -261,6 +262,12 @@ import {
   prsCited,
   lastQuestionAt,
   ownerAskAt,
+  ownerAsk,
+  ownerAskText,
+  ownerPendingReplyText,
+  ownerPendingStepsRequestText,
+  ownerPendingStepsRequestNote,
+  parseOwnerPendingDetails,
   NEEDS_INPUT_EXPIRE_MS,
   parseWakeInput,
   promiseOverdueReport,
@@ -702,6 +709,8 @@ import { localDesktopTarget, localVmViewerStatus, viewerTargetId } from "./deskt
 import { createAntigravityLeftoverRoutes } from "./routes/antigravity-leftovers.ts";
 import { findAntigravityLeftovers, removeAntigravityLeftovers } from "./drivers/antigravity-temp.ts";
 
+/** owner_pending refuses a title that only names someone (INSP-I r1 #2): the person could not tell what to do. */
+const MENTION_ONLY_TITLE = "title só com menção (\"@Chief of Staff\") não diz o que fazer: comece pelo verbo, com o essencial (\"Aprovar o merge da PR #12\"). Quem pediu a pessoa já vê.";
 const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
 const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
 // Behind a proxy or tunnel, the base URL senders should use (docs/self-hosting.md).
@@ -3706,13 +3715,16 @@ let activeCoordinationForThread = (_threadId: string): boolean => false;
 let threadSignals = (_threadId: string): Pick<WireTask, "watches" | "watchesLost" | "ccAlerts" | "ownerPending" | "ccSessions"> => ({});
 /** Goal mode in this thread stopped to ask the person (set once autonomy exists). */
 let goalNeedsInputForThread = (_threadId: string): number | null => null;
+/** What that ask says, in one sentence (set once autonomy exists). */
+let goalNeedsInputAskForThread = (_threadId: string): string | null => null;
 const wireTask = (task: TaskRecord): WireTask => {
   // Time-based snoozes heal on read against the server clock — no client
   // timer, no device skew. The 0 sentinel ("until new activity") is not a
   // time and survives reads; only a wake event in the store clears it.
   const { snoozedUntil, ...base } = toWireTask(task);
   const needsInput = goalNeedsInputForThread(task.threadId);
-  const coordinated = { ...base, ...threadSignals(task.threadId), waitingForTeammates: needsInput === null && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput } : {}) };
+  const ask = needsInput !== null ? goalNeedsInputAskForThread(task.threadId) : null;
+  const coordinated = { ...base, ...threadSignals(task.threadId), waitingForTeammates: needsInput === null && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput, ...(ask ? { goalNeedsInputAsk: ask } : {}) } : {}) };
   const asleep = snoozedUntil === 0 || (snoozedUntil !== undefined && snoozedUntil > Date.now());
   return asleep ? { ...coordinated, snoozedUntil } : coordinated;
 };
@@ -8029,6 +8041,12 @@ goalNeedsInputForThread = (threadId) => {
   if (!owner || threadBusy(owner.id, threadId)) return null;
   return ownerAskAt(store.messagesFor(threadId), Date.now());
 };
+goalNeedsInputAskForThread = (threadId) => {
+  const goal = autonomy.goalFor(threadId);
+  const names = store.bots.map((bot) => bot.name);
+  if (goal?.status === "needs-input") return goal.detail ? ownerAskText(goal.detail, 200, names) || null : null;
+  return ownerAsk(store.messagesFor(threadId), Date.now(), undefined, names);
+};
 const AUTONOMY_TICK_MS = autonomyTestMs("OMB_AUTONOMY_TICK_MS") ?? 10_000;
 /** Self-paced work due within this keeps the Mac awake (/api/routines/wake). */
 const AUTONOMY_WAKE_HOLD_MS = 60 * 60_000;
@@ -9413,6 +9431,8 @@ threadSignals = (threadId) => {
     .map((session): WireCcSession => ({ sessionId: session.id, title: session.title, status: session.status as WireCcSession["status"], surface: session.surface === "app" ? "app" : "cli" }));
   const ownerPending = autonomy.ownerPendingFor(threadId).map((item): WireOwnerPending => ({
     id: item.id, title: item.title, since: item.createdAt, ...(item.due ? { due: item.due } : {}), ...(item.link ? { link: item.link } : {}), ...(item.command ? { command: item.command } : {}),
+    ...(item.why ? { why: item.why } : {}), ...(item.steps?.length ? { steps: item.steps } : {}), ...(item.options?.length ? { options: item.options } : {}),
+    ...(item.stepsRequestedAt ? { stepsRequestedAt: item.stepsRequestedAt } : {}),
   }));
   return {
     ...(watches.length ? { watches } : {}),
@@ -18730,16 +18750,39 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (!store.taskByThread(bot.id, threadId)) return json(res, 404, { error: "esta conversa não existe mais" });
         requireActiveInternalCapability();
         const line = (item: OwnerPending) => `${item.id}: ${item.title}${item.due ? ` (até ${item.due})` : ""}${item.link ? ` — ${item.link}` : ""}`;
+        // how practical the item reads to the person: steps and decisions, or a nudge to add them
+        const practical = (item: OwnerPending) => [
+          item.steps?.length ? `${item.steps.length} passo${item.steps.length === 1 ? "" : "s"}` : "",
+          item.options?.length ? `decisões: ${item.options.map((option) => option.label).join(" / ")}` : "",
+        ].filter(Boolean).join("; ");
+        const details = parseOwnerPendingDetails({ why: body.why, steps: body.steps, options: body.options });
+        if (!details.ok && (body.action === "add" || body.action === "update")) return json(res, 400, { error: details.error });
+        const structured = details.ok ? { ...(details.why !== undefined ? { why: details.why } : {}), ...(details.steps !== undefined ? { steps: details.steps } : {}), ...(details.options !== undefined ? { options: details.options } : {}) } : {};
         if (body.action === "add") {
           const title = typeof body.title === "string" ? body.title.trim() : "";
           if (!title) return json(res, 400, { error: "title é obrigatório: o que a pessoa precisa fazer ou decidir" });
-          const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}) });
+          if (isMentionOnly(title, store.bots.map((each) => each.name))) return json(res, 400, { error: MENTION_ONLY_TITLE });
+          const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured });
           if (item.duplicate) {
             // one action, one item: the person never sees the same ask twice (R9-followup #3)
-            return json(res, 200, { message: `Já existe em "Precisa de você" um item para isso: ${line(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}. Não abri outro. Cite ${item.id} ao falar com o dono; se o pedido mudou, resolva ${item.id} (owner_pending resolve) e abra o novo.` });
+            return json(res, 200, { message: `Já existe em "Precisa de você" um item para isso: ${line(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}. Não abri outro. Cite ${item.id} ao falar com o dono; se o pedido mudou, use owner_pending update id ${item.id} (ou resolva ${item.id} e abra o novo).` });
           }
           refreshBotRow(bot.id);
-          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}. Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
+          const shape = practical(item);
+          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}. ${item.steps?.length ? "" : `Sem passos, a pessoa não sabe por onde começar: complete com owner_pending update id ${item.id} (why, steps, options). `}Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
+        }
+        if (body.action === "update") {
+          const id = typeof body.id === "string" ? body.id.trim() : "";
+          if (!id) return json(res, 400, { error: "id é obrigatório: o item que você reescreve (veja owner_pending list)" });
+          const patch = { ...(typeof body.title === "string" ? { title: body.title } : {}), ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured };
+          if (!Object.keys(patch).length) return json(res, 400, { error: "nada para atualizar: mande title, due, link, why, steps ou options" });
+          if (patch.title !== undefined && !patch.title.trim()) return json(res, 400, { error: "title não pode ficar vazio" });
+          if (patch.title !== undefined && isMentionOnly(patch.title, store.bots.map((each) => each.name))) return json(res, 400, { error: MENTION_ONLY_TITLE });
+          const item = autonomy.updateOwnerPending(bot.id, id, patch);
+          if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
+          refreshBotRow(bot.id);
+          const shape = practical(item);
+          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.` });
         }
         if (body.action === "resolve") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -18751,9 +18794,10 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
         if (body.action === "list") {
           const open = autonomy.ownerPendingOf(bot.id);
-          return json(res, 200, { message: open.length ? open.map((item) => `${line(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}`).join("\n") : "Nada esperando a pessoa." });
+          const state = (item: OwnerPending) => item.stepsRequestedAt ? " (a pessoa pediu o passo a passo: owner_pending update)" : item.steps?.length ? "" : " (sem passos)";
+          return json(res, 200, { message: open.length ? open.map((item) => `${line(item)}${state(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}`).join("\n") : "Nada esperando a pessoa." });
         }
-        return json(res, 400, { error: "action deve ser add, resolve ou list" });
+        return json(res, 400, { error: "action deve ser add, update, resolve ou list" });
       }
       if (method === "POST" && (path === "/api/internal/wake" || path === "/api/internal/goal")) {
         const body = await readInternalBody();
@@ -22365,6 +22409,65 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       refreshBotRow(bot.id);
       return json(res, 200, { resolved: done.length });
+    }
+    // The person answers an item from "Precisa de você": a decision the bot
+    // offered (options[n]), their own words, or a request for the steps. The
+    // answer goes to the bot that owns the item, in the conversation it came
+    // from — as the person's message, so it runs now or waits its turn there
+    // like any send — and a decision (or resolve: true) closes the item.
+    m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/reply$/);
+    if (m && method === "POST") {
+      const body = await readBody(req);
+      if (!body || typeof body !== "object" || Array.isArray(body)) return json(res, 400, { error: "body must be a JSON object" });
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const item = autonomy.ownerPendingById(bot.id, m[2]!);
+      if (!item) return json(res, 404, { error: "Este item já foi resolvido." });
+      if (!store.taskByThread(bot.id, item.threadId)) return json(res, 409, { error: "A conversa de origem deste item não existe mais. Marque-o como resolvido." });
+      const notYours = cloudGuestSendRefusal(auth, item.threadId);
+      if (notYours) return json(res, 403, { error: notYours });
+      let text: string;
+      let resolve: boolean;
+      if (body.ask === "steps") {
+        text = ownerPendingStepsRequestText(item);
+        resolve = false;
+      } else if (body.option !== undefined) {
+        // the decision the person SAW: its position and its label, so a bot
+        // that reordered or rewrote the options meanwhile never gets another
+        // answer than the one clicked (INSP-I r1 #3)
+        const option = Number.isInteger(body.option) ? item.options?.[body.option as number] : undefined;
+        if (!option) return json(res, 409, { error: "Esta decisão não existe mais: o bot reescreveu as opções. Confira e escolha de novo.", code: "options_changed" });
+        if (typeof body.label !== "string" || body.label !== option.label) return json(res, 409, { error: `O bot reescreveu as opções deste item: "${String(body.label ?? "")}" não é mais a opção ${Number(body.option) + 1}. Confira e escolha de novo.`, code: "options_changed" });
+        text = ownerPendingReplyText(item, option.reply, true);
+        resolve = true;
+      } else {
+        const reply = typeof body.text === "string" ? body.text.trim() : "";
+        if (!reply) return json(res, 400, { error: "Escreva a resposta ao bot." });
+        resolve = body.resolve === true;
+        text = ownerPendingReplyText(item, reply.slice(0, 4_000), resolve);
+      }
+      try {
+        assertWithinBudget(cfg, DATA_DIR);
+      } catch (error) {
+        return json(res, 409, { error: error instanceof Error ? error.message : String(error), code: "spend_cap" });
+      }
+      if (body.ask === "steps") {
+        // the person's words in the conversation; the tool call the bot must
+        // make rides only in its prompt, as a note — never as the person's
+        // speech (INSP-I r1 #6). Queued, then drained: it runs now when the
+        // conversation is free, or after the running turn.
+        const prompt = promptWithReply(`${text}\n\n${ownerPendingStepsRequestNote(item)}`, undefined, cfg.profile?.name?.trim() || "User");
+        queueSteeredMessage(bot.id, item.threadId, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
+        autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
+        refreshBotRow(bot.id);
+        drainQueuedSends();
+        return json(res, 202, { ok: true, threadId: item.threadId, resolved: 0 });
+      }
+      const receipt = await startOrQueueDirectMessage(bot.id, item.threadId, text, undefined, undefined, messageSender(auth), usageTriggerFor(auth));
+      const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id }) : [];
+      refreshBotRow(bot.id);
+      // the text rides along: a queued answer is shown queued in the conversation
+      return json(res, 202, { ...receipt, text, resolved: done.length });
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/command-allowlist(?:\/([\w-]+))?$/);
     if (m && ["GET", "POST", "DELETE"].includes(method)) {

@@ -284,9 +284,10 @@ function Marker({ checked, multi }: { checked: boolean; multi: boolean }) {
     >
       {checked &&
         (multi ? (
-          <Check size={11} className="text-white" strokeWidth={3} />
+          // the accent fill's own ink (dark on Midnight and Foundry), like SkinPicker
+          <Check size={11} className="text-accent-ink" strokeWidth={3} />
         ) : (
-          <span className="size-1.5 rounded-full bg-white" />
+          <span className="size-1.5 rounded-full bg-[var(--color-accent-ink)]" />
         ))}
     </span>
   );
