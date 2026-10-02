@@ -229,6 +229,8 @@ export interface OwnerPending {
   stepsRequestedAt?: number;
   /** The person asked the bot which decision it recommends (the bot's update clears it). */
   recommendRequestedAt?: number;
+  /** The server asked the bot for this item's steps on its own, once (J17): never again for it. */
+  stepsAutoAskedAt?: number;
   /** Last time the bot rewrote it (owner_pending update). */
   updatedAt?: number;
 }
@@ -315,6 +317,21 @@ export function parseOwnerPendingDetails(input: { why?: unknown; steps?: unknown
  * and its color says so); the rest keep the bot's order. */
 export function recommendedFirst<T extends { recommended?: true }>(options: readonly T[]): T[] {
   return [...options.filter((each) => each.recommended), ...options.filter((each) => !each.recommended)];
+}
+
+/** An item without why or steps is refused (J17: the owner does not want to
+ * click "Pedir o passo a passo" — the steps come with the item). The bot
+ * hears exactly what is missing; null when the item is complete. */
+export function practicalMissing(item: { why?: string | undefined; steps?: readonly unknown[] | undefined }): string | null {
+  const missing = [!item.why?.trim() ? "why" : "", !item.steps?.length ? "steps" : ""].filter(Boolean);
+  if (!missing.length) return null;
+  return `owner_pending recusado: falta ${missing.join(" e ")}. Todo item nasce com why (1–2 frases: por que importa e o que acontece se esperar) e steps (pelo menos 1 passo prático, na ordem; o comando exato em command ou o link em link quando houver), por exemplo steps: [{"text": "No Terminal, grave a recusa", "command": "echo <sha> > ~/.nuria/declined-production-release.sha"}]. A pessoa não deve precisar pedir o passo a passo. Mande de novo com ${missing.join(" e ")}.`;
+}
+
+/** The server's own request, as a report to the bot, for an older item's
+ * steps (J17): nobody typed it, and the person is not answered for it. */
+export function ownerPendingStepsAutoReport(item: Pick<OwnerPending, "id" | "title">): string {
+  return `[Servidor: pendência sem passo a passo] O item ${item.id} em "Precisa de você" («${item.title.slice(0, 160)}») não tem why nem steps, e o dono quer o passo a passo junto com cada pendência. Reescreva-o agora com owner_pending update, id ${item.id}: why (1–2 frases: por que importa), steps (passos práticos, cada um com o comando exato em command ou o link em link quando houver) e options com uma recommended, se for uma escolha. Se o item não vale mais, resolva-o com owner_pending resolve. Não escreva ao dono só por isto.`;
 }
 
 /** What the bot hears when it offers 2+ decisions with none marked (J16). */
@@ -1208,6 +1225,22 @@ export class BotAutonomy {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
     item.stepsRequestedAt = this.now();
+    this.save();
+    return item;
+  }
+
+  /** Older items still without steps that the server has not asked about
+   * yet (J17): asked once each, oldest first. */
+  ownerPendingNeedingSteps(): OwnerPending[] {
+    return this.ownerPending.filter((item) => !item.steps?.length && item.stepsAutoAskedAt === undefined).sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** The server asked the bot for `id`'s steps: the screen shows it asked, and it is never asked again by the server. */
+  markOwnerPendingStepsAutoAsked(botId: string, id: string): OwnerPending | null {
+    const item = this.ownerPendingById(botId, id);
+    if (!item) return null;
+    item.stepsAutoAskedAt = this.now();
+    item.stepsRequestedAt = item.stepsAutoAskedAt;
     this.save();
     return item;
   }

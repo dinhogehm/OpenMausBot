@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { practicalMissing } from "./bot-autonomy.ts";
 import { CcSessionLedger, type CcSession } from "./cc-sessions.ts";
 import type { DesktopRecord, DesktopStep } from "./claude-desktop.ts";
 import {
@@ -797,6 +798,9 @@ describe("a rename that cannot be done", () => {
     expect(session.desktop!.pending).toBeUndefined();
     expect(h.steps.rename).toHaveBeenCalledTimes(DESKTOP_RENAME_MAX_MISSES);
     expect(pendings).toEqual([expect.objectContaining({ key: "cc-rename:r", title: expect.stringContaining('→ "#8891 Inbox 503 diagnóstico"'), link: expect.stringContaining("claude://code/continue?session=") })]);
+    // J17: born with why and steps
+    expect(practicalMissing(pendings[0] as { why?: string; steps?: unknown[] })).toBeNull();
+    expect(JSON.stringify(pendings[0])).toContain("Renomeie-a para: #8891 Inbox 503 diagnóstico");
   });
 
   it("names the session by the app's title, short, and settles the item when the person renames it by hand or it is archived (INSP-D A6)", async () => {
@@ -891,6 +895,8 @@ describe("a field that already held text", () => {
     await h.tick();
     expect(pendings).toHaveLength(1);
     expect(pendings[0]!.title).toContain('deixei um "." no fim dele');
+    // J17: born with why and steps
+    expect(practicalMissing(pendings[0] as { why?: string; steps?: unknown[] })).toBeNull();
     expect(h.reports.at(-1)!.text).toContain('the test "." stayed at the end of their draft');
     expect(session.desktop!.pending).toMatchObject({ kind: "send", text: "Pode sim" });
     // 20 min later the field reads the draft WITH our dot; the probe takes its own dot back

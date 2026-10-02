@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { askCoveredByItem, echoAsk, ownerAskText, OWNER_PENDING_TITLE_MAX, ownerPendingRecommendNote, parseOwnerPendingDetails, RECOMMEND_MISSING } from "./bot-autonomy.ts";
+import { askCoveredByItem, echoAsk, ownerAskText, OWNER_PENDING_TITLE_MAX, ownerPendingRecommendNote, ownerPendingStepsAutoReport, parseOwnerPendingDetails, practicalMissing, RECOMMEND_MISSING } from "./bot-autonomy.ts";
 import { availableTools, catalogProfileFromEnv } from "./drivers/agents-catalog.ts";
 import { reusedFolderRefusal } from "./claude-desktop.ts";
 import { APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appUnblockPending } from "./owner-chips.ts";
@@ -71,6 +71,29 @@ describe("the lines of \"Precisa de você\" that say nothing of their own", () =
     expect(ownerAskText(REAL, 200, BOTS)).toBe("A sessão da #9058 está pronta para o gate, mas o timeout do pre-push depende de uma decisão sua: 10 min ou sem limite?");
     // a sentence that only starts with a capital word and a comma is not a vocative
     expect(ownerAskText("Pronto, posso seguir com o carrier?", 200, BOTS)).toBe("Pronto, posso seguir com o carrier?");
+  });
+});
+
+// J17 (the owner, 02/10): the steps come with the item, never on request
+describe("an item is born with why and steps", () => {
+  it("is refused without them, saying exactly what is missing", () => {
+    expect(practicalMissing({})).toContain("owner_pending recusado: falta why e steps.");
+    expect(practicalMissing({ why: "O release depende disso." })).toContain("falta steps.");
+    expect(practicalMissing({ why: "  ", steps: [{ text: "x" }] })).toContain("falta why.");
+    expect(practicalMissing({ why: "x", steps: [] })).toContain("falta steps.");
+    expect(practicalMissing({ why: "x", steps: [{ text: "x" }] })).toBeNull();
+    expect(practicalMissing({})).toContain("o comando exato em command ou o link em link");
+    const tool = availableTools(catalogProfileFromEnv({})).find((each) => each.name === "owner_pending")!;
+    expect(tool.description).toContain("ALWAYS why and steps");
+  });
+
+  it("every item the server creates has them", () => {
+    const FULL = "d5bb1f70bea397bdd937d02148c685e406985ba0";
+    for (const item of [appUnblockPending("nuria-platform"), releaseLoopPending({ short: "d5bb1f70b", full: FULL, count: 4 }), powerPendingDetails(false), tagAdvancePending(FULL, null), tagAdvancePending(FULL, "git tag -f x")]) {
+      expect(practicalMissing(item)).toBeNull();
+    }
+    // the server's own request for an older item's steps: a report, never the person's words
+    expect(ownerPendingStepsAutoReport({ id: "o9", title: "Planilha linha 169" })).toMatch(/^\[Servidor: pendência sem passo a passo\] O item o9 .*owner_pending update, id o9.*Não escreva ao dono só por isto\.$/);
   });
 });
 

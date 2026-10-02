@@ -82,7 +82,8 @@ describe("a session archived in the app by someone (INSP-F F1)", () => {
     expect(gh.reports).toHaveLength(1);
     expect(gh.reports[0]!.text).toContain("PR #9328 ficou sem sessão");
     expect(gh.reports[0]!.text).toContain("https://github.com/owner/platform/pull/9328");
-    expect(gh.pending).toEqual([{ id: session.id, item: { title: expect.stringContaining("PR #9328 ficou sem sessão"), link: "https://github.com/owner/platform/pull/9328", key: `cc-orphan-pr:${session.id}:9328` } }]);
+    // J17: born with why and steps (the PR's link in the first step)
+    expect(gh.pending).toEqual([{ id: session.id, item: { title: expect.stringContaining("PR #9328 ficou sem sessão"), link: "https://github.com/owner/platform/pull/9328", key: `cc-orphan-pr:${session.id}:9328`, why: expect.stringContaining("ninguém trabalha nela"), steps: [{ text: "Abra a PR #9328 e veja em que pé ela está.", link: "https://github.com/owner/platform/pull/9328" }, { text: expect.stringContaining("abrir uma sessão nova") }] } }]);
     // once per session
     await checkArchivedOutside([session], gh.deps);
     expect(gh.calls).toHaveLength(1);

@@ -82,7 +82,7 @@ export interface DesktopWorkDeps {
   /** Hand a report to the owning bot (and the thread the last order came from). */
   report: (session: CcSession, text: string) => void;
   /** Put an item in "Precisa de você" (owner_pending) for the session's owner, or resolve it by key. */
-  ownerPending?: (session: CcSession, item: { title: string; link?: string; key: string }) => void;
+  ownerPending?: (session: CcSession, item: { title: string; link?: string; key: string; why?: string; steps?: Array<{ text: string; command?: string; link?: string }> }) => void;
   resolveOwnerPending?: (key: string) => void;
   /** Worktree names of the app's live sessions: a new session must not open on one. */
   liveWorktrees?: () => string[];
@@ -222,7 +222,15 @@ export function giveUpPending(deps: DesktopWorkDeps, session: CcSession, reason:
     // The title the person sees in the app (not our ledger's), and the new one, essentials first.
     const appTitle = (desktop.localId ? deps.readRecord(desktop.localId)?.title : undefined) ?? session.title;
     desktop.renameAsked = true;
-    deps.ownerPending?.(session, { title: renameAskTitle(appTitle, pending.text), ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}), key: renameKey(session) });
+    deps.ownerPending?.(session, {
+      title: renameAskTitle(appTitle, pending.text), ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}), key: renameKey(session),
+      why: "O servidor não consegue renomear esta sessão no app sozinho, e com o título certo você a acha na lista do app Claude.",
+      steps: [
+        { text: `No app Claude, abra a sessão "${appTitle.slice(0, 60)}".`, ...(desktop.localId ? { link: `claude://code/continue?session=${desktop.localId}` } : {}) },
+        { text: `Renomeie-a para: ${pending.text.slice(0, 120)}` },
+        { text: "Pronto: o servidor vê o título novo e fecha este item sozinho." },
+      ],
+    });
   }
   deps.ledger.save();
   const what = pending.kind === "archive" ? "archive" : "rename";
@@ -699,7 +707,16 @@ function holdForDraft(deps: DesktopWorkDeps, session: CcSession, draft: string, 
   if (seen) return;
   const link = desktop.localId ? `claude://code/continue?session=${desktop.localId}` : undefined;
   deps.chip(session, `há texto não enviado no campo desta sessão — não sobrescrevi; ${pending.kind === "rename" ? "o novo título" : "a mensagem"} espera: “${draft.slice(0, 80)}”${leftProbe ? ' — ficou um "." no fim dele' : ""}`, false);
-  deps.ownerPending?.(session, { title: leftProbe ? `Rascunho na sessão "${session.title}": deixei um "." no fim dele — apague-o (“${draft.slice(0, 40)}”)` : `Texto não enviado no campo da sessão "${session.title}": envie ou apague (“${draft.slice(0, 60)}”)`, ...(link ? { link } : {}), key: draftKey(session) });
+  deps.ownerPending?.(session, {
+    title: leftProbe ? `Rascunho na sessão "${session.title}": deixei um "." no fim dele — apague-o (“${draft.slice(0, 40)}”)` : `Texto não enviado no campo da sessão "${session.title}": envie ou apague (“${draft.slice(0, 60)}”)`,
+    ...(link ? { link } : {}), key: draftKey(session),
+    why: "Há texto seu não enviado no campo da sessão: o servidor não escreve por cima dele, e a mensagem do bot fica esperando até o campo ficar livre.",
+    steps: [
+      { text: `No app Claude, abra a sessão "${session.title.slice(0, 60)}".`, ...(link ? { link } : {}) },
+      { text: leftProbe ? "Apague o \".\" que ficou no fim do rascunho (ou o rascunho inteiro, se não precisar dele)." : "Envie o texto que está no campo, ou apague-o." },
+      { text: "Pronto: com o campo livre, o servidor entrega a mensagem do bot e fecha este item sozinho." },
+    ],
+  });
   deps.report(session, `Claude Code session "${session.title}" (${session.id}): its message field holds text nobody sent — "${draft.slice(0, 300)}". It is the person's own draft (it did not give way to a keystroke), so nothing was typed over it; your ${pending.kind === "send" ? "message" : pending.kind} waits and is tried again every ${DESKTOP_DRAFT_RECHECK_MS / 60_000} min. The person was asked in "Precisa de você" to send or clear it${link ? ` (${link})` : ""}.${leftProbe ? ' The person came back mid-check, so the test "." stayed at the end of their draft; they were told.' : ""} Do not ask them to type your message for you.`);
 }
 

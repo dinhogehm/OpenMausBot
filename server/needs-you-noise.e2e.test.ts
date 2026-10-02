@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
@@ -76,6 +77,65 @@ it("sends no conversation line for an echo, an empty ask or a conversation that 
     await fixture.close();
   }
 }, 90_000);
+
+// J17 (the owner, 02/10): "Planilha linha 169 (#9295)" and other older items
+// had no steps, and he does not want to click "Pedir o passo a passo". The
+// server asks the bot once per item — a report, so it waits for the
+// conversation to be free — never with ~/.nuria/stop, never twice.
+it("asks the bot once for an older item's steps, one item per bot at a time, never twice nor with ~/.nuria/stop", async () => {
+  const prompts = join(tmpdir(), `omb-steps-ask-${process.pid}-${Date.now()}.jsonl`);
+  const env = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50", OMB_OWNER_STEPS_ASK_AFTER_MS: "0", FAKE_CLAUDE_PROMPTS: prompts };
+  const fixture = await launchVerificationServer(env);
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+  let restarted: ChildProcess | undefined;
+  const boot = async (stop = false) => {
+    if (stop) { mkdirSync(join(dataDir, ".nuria"), { recursive: true }); writeFileSync(join(dataDir, ".nuria", "stop"), ""); }
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment(env, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+  };
+  const ledger = () => JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8"));
+  try {
+    const monitor = (await runControlOmb(["new-bot", "--name", "Monitor Chat", "--url", url]) as any).bot;
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+    const at = Date.now() - 20 * 3_600_000;
+    const thread = monitor.activeTaskId ?? monitor.threadId;
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
+      { id: "o9", botId: monitor.id, threadId: thread, title: "Planilha linha 169 (#NNNN): atualizar o status", createdAt: at },
+      { id: "o10", botId: monitor.id, threadId: thread, title: "Liberar a escrita na linha 97 da planilha", createdAt: at + 60_000 },
+      { id: "o11", botId: monitor.id, threadId: thread, title: "Aprovar o aviso", createdAt: at, why: "x", steps: [{ text: "Leia o aviso" }] },
+    ] }));
+    // with ~/.nuria/stop: nothing is asked
+    await boot(true);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(ledger().ownerPending.filter((item: any) => item.stepsAutoAskedAt)).toEqual([]);
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    rmSync(join(dataDir, ".nuria", "stop"));
+    // without it: the oldest item without steps, once; the bot gets a report, not the person's words
+    await boot();
+    await expect.poll(() => ledger().ownerPending.filter((item: any) => item.stepsAutoAskedAt).map((item: any) => item.id), { timeout: 10_000 }).toEqual(["o9"]);
+    await expect.poll(() => (existsSync(prompts) ? readFileSync(prompts, "utf8") : ""), { timeout: 20_000 }).toContain("[Servidor: pendência sem passo a passo] O item o9");
+    const messages = (await api(`/api/threads/${thread}/messages`, undefined, "GET")).messages as any[];
+    expect(messages.filter((message) => message.role === "user").map((message) => message.text)).toEqual([]);
+    // the screen shows it asked
+    const wire = ((await api("/api/bots", undefined, "GET")).bots as any[]).find((each) => each.id === monitor.id).tasks.flatMap((task: any) => task.ownerPending ?? []);
+    expect(wire.find((item: any) => item.id === "o9").stepsRequestedAt).toBeGreaterThan(0);
+    // a restart does not ask o9 again
+    const askedAt = ledger().ownerPending.find((item: any) => item.id === "o9").stepsAutoAskedAt;
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await boot();
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(ledger().ownerPending.find((item: any) => item.id === "o9").stepsAutoAskedAt).toBe(askedAt);
+    expect(readFileSync(prompts, "utf8").split("O item o9 em").length - 1).toBe(1);
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 120_000);
 
 // INSP-J r1 #8: "Deixar no terminal" answered "não precisa me lembrar disso
 // de novo", and the next blocked start recreated the item. The server now

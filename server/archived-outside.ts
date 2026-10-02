@@ -36,7 +36,7 @@ const MAX_CANDIDATES = 6;
 
 export type PrState = "OPEN" | "CLOSED" | "MERGED" | "NOT_PR";
 
-export interface OwnerPendingItem { title: string; link?: string; key: string }
+export interface OwnerPendingItem { title: string; link?: string; key: string; why?: string; steps?: Array<{ text: string; command?: string; link?: string }> }
 
 /** An open PR as `gh pr list --json number,title,headRefName` gives it. */
 export interface FoundPr { number: number; title?: string; headRefName?: string }
@@ -204,6 +204,16 @@ function tell(session: CcSession, slug: string | null, open: number[], carried: 
     notChecked.length ? `GitHub did not answer after ${ARCHIVED_OUTSIDE_MAX_TRIES} tries for ${notChecked.join(", ")}: check by hand whether a PR of it is still open.` : "",
   ].filter(Boolean).join(" "));
   for (const number of open) {
-    deps.ownerPending(session, { title: `PR #${number} ficou sem sessão ("${session.title}" ${session.archivedAfterFailure ? "falhou e foi arquivada no app" : "foi arquivada no app"}) — decida quem segue`, ...(slug ? { link: link(number) } : {}), key: `cc-orphan-pr:${session.id}:${number}` });
+    // born with why and steps: the person never has to ask for them (J17)
+    deps.ownerPending(session, {
+      title: `PR #${number} ficou sem sessão ("${session.title}" ${session.archivedAfterFailure ? "falhou e foi arquivada no app" : "foi arquivada no app"}) — decida quem segue`,
+      ...(slug ? { link: link(number) } : {}),
+      key: `cc-orphan-pr:${session.id}:${number}`,
+      why: `A PR #${number} está aberta e ninguém trabalha nela desde que a sessão "${session.title}" foi arquivada: ela não anda, e quem espera a correção não sabe.`,
+      steps: [
+        { text: `Abra a PR #${number} e veja em que pé ela está.`, ...(slug ? { link: link(number) } : {}) },
+        { text: "Diga ao bot o que fazer: abrir uma sessão nova para ela, entregá-la a alguém, ou fechá-la." },
+      ],
+    });
   }
 }

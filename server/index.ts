@@ -270,6 +270,8 @@ import {
   ownerPendingStepsRequestNote,
   ownerPendingRecommendNote,
   ownerPendingRecommendText,
+  ownerPendingStepsAutoReport,
+  practicalMissing,
   RECOMMEND_MISSING,
   parseOwnerPendingDetails,
   NEEDS_INPUT_EXPIRE_MS,
@@ -8648,7 +8650,38 @@ function settleReleaseLoopPendings(failing: string | null): void {
   }
 }
 
+/** Older items without steps: the server asks their bot once each (J17), the
+ * owner does not have to click "Pedir o passo a passo". Not in the first
+ * minutes after a boot (the boot's own work goes first), never while
+ * ~/.nuria/stop exists, one item per bot per minute; the request is a report,
+ * so it wakes the bot only when its conversation is free, like any report. */
+const STEPS_ASK_AFTER_BOOT_MS = Number(process.env.OMB_OWNER_STEPS_ASK_AFTER_MS) >= 0 && process.env.OMB_OWNER_STEPS_ASK_AFTER_MS !== undefined ? Number(process.env.OMB_OWNER_STEPS_ASK_AFTER_MS) : 3 * 60_000;
+const stepsAsk = { bootAt: Date.now(), lastAt: 0 };
+const NURIA_STOP_FILE = join(homedir(), ".nuria", "stop");
+function askStepsForOlderItems(): void {
+  const now = Date.now();
+  if (now - stepsAsk.bootAt < STEPS_ASK_AFTER_BOOT_MS || now - stepsAsk.lastAt < 60_000) return;
+  if (existsSync(NURIA_STOP_FILE)) return;
+  stepsAsk.lastAt = now;
+  const asked = new Set<string>();
+  for (const item of autonomy.ownerPendingNeedingSteps()) {
+    if (asked.has(item.botId)) continue;
+    const target = ownerTurnThread(item.botId, item.threadId);
+    if (!store.taskByThread(item.botId, target)) continue;
+    asked.add(item.botId);
+    autonomy.markOwnerPendingStepsAutoAsked(item.botId, item.id);
+    autonomy.addReport(item.botId, target, ownerPendingStepsAutoReport(item));
+    console.log(`[owner-pending] ${item.id} of ${store.bot(item.botId)?.name ?? item.botId} has no steps: its bot was asked once, in ${target}`);
+    refreshBotRow(item.botId);
+  }
+}
+
 async function autonomyTick(): Promise<void> {
+  try {
+    askStepsForOlderItems();
+  } catch (error) {
+    console.error(`[owner-pending] ${error instanceof Error ? error.message : String(error)}`);
+  }
   void checkProductionRelease().catch((error) => console.error(`[release] ${error instanceof Error ? error.message : String(error)}`));
   void checkPower().catch((error) => console.error(`[power] ${error instanceof Error ? error.message : String(error)}`));
   void revalidateNeedsInputGoals().catch((error) => console.error(`[autonomy] needs-input check failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -18932,6 +18965,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const title = typeof body.title === "string" ? body.title.trim() : "";
           if (!title) return json(res, 400, { error: "title é obrigatório: o que a pessoa precisa fazer ou decidir" });
           if (isMentionOnly(title, store.bots.map((each) => each.name))) return json(res, 400, { error: MENTION_ONLY_TITLE });
+          // born practical: why and steps, or refused with what is missing (J17)
+          const incomplete = practicalMissing(structured);
+          if (incomplete) return json(res, 400, { error: incomplete });
           const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured });
           if (item.duplicate) {
             // one action, one item: the person never sees the same ask twice (R9-followup #3)
@@ -18948,6 +18984,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!Object.keys(patch).length) return json(res, 400, { error: "nada para atualizar: mande title, due, link, why, steps ou options" });
           if (patch.title !== undefined && !patch.title.trim()) return json(res, 400, { error: "title não pode ficar vazio" });
           if (patch.title !== undefined && isMentionOnly(patch.title, store.bots.map((each) => each.name))) return json(res, 400, { error: MENTION_ONLY_TITLE });
+          // the item as it would be: still why and steps (an older one gets them now) (J17)
+          const current = autonomy.ownerPendingById(bot.id, id);
+          if (!current) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
+          const incomplete = practicalMissing({ why: structured.why ?? current.why, steps: structured.steps ?? current.steps });
+          if (incomplete) return json(res, 400, { error: incomplete });
           const item = autonomy.updateOwnerPending(bot.id, id, patch);
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           refreshBotRow(bot.id);

@@ -745,7 +745,7 @@ const toolDefinitions = (externalRuntime: boolean) => [
   {
     name: "owner_pending",
     description:
-      "List what waits on the person (a decision, an approval, an answer only they have) in \"Precisa de você\"; each item opens as a step-by-step screen. add one item per thing instead of ending replies with \"continua com você…\", in pt-BR: title starting with the verb (never just a mention), why, steps with the exact command or link, options when it is a choice (a click sends you its reply here and resolves it). With 2 or more options, ALWAYS mark the one you recommend: recommended: true on exactly one, with why (one sentence). update rewrites an item (answer a request for steps with it); resolve when settled; list. Not for rooms.",
+      "List what waits on the person (a decision, an approval, an answer only they have) in \"Precisa de você\"; each item opens as a step-by-step screen. add one item per thing instead of ending replies with \"continua com você…\", in pt-BR: title starting with the verb (never just a mention), and ALWAYS why and steps (≥1, with the exact command or link) — add/update without them is refused —, options when it is a choice (a click sends you its reply here and resolves it). With 2 or more options, ALWAYS mark the one you recommend: recommended: true on exactly one, with why (one sentence). update rewrites an item (answer a request for steps with it); resolve when settled; list. Not for rooms.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -754,11 +754,11 @@ const toolDefinitions = (externalRuntime: boolean) => [
         title: { type: "string", maxLength: 200, description: "What the person must do or decide (\"Aprovar o carrier da #9315\")." },
         due: { type: "string", maxLength: 80, description: "Optional: by when (\"hoje 18h\")." },
         link: { type: "string", maxLength: 500, description: "Optional: where to act (PR, issue, session)." },
-        why: { type: "string", maxLength: 400, description: "Optional: 1–2 sentences, why it matters." },
+        why: { type: "string", maxLength: 400, description: "Required for add/update: 1–2 sentences, why it matters." },
         steps: {
           type: "array",
           maxItems: 8,
-          description: "Optional, in order; [] clears.",
+          description: "Required for add/update: at least 1, in order, each with its command or link when there is one.",
           items: {
             type: "object",
             additionalProperties: false,

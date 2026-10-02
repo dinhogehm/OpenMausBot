@@ -419,8 +419,8 @@ console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false
 it("lists what waits on the person in \"Precisa de você\" until the bot or the person resolves it", () => fixture(async f => {
   f.save({ turns: [
     { steps: [
-      { tool: "owner_pending", arguments: { action: "add", title: "Aprovar o carrier da #9315", due: "hoje 18h" } },
-      { tool: "owner_pending", arguments: { action: "add", title: "Decidir sobre a volta da #9290" } },
+      { tool: "owner_pending", arguments: { action: "add", title: "Aprovar o carrier da #9315", due: "hoje 18h", why: "O release das 18h depende dele.", steps: [{ text: "Abra o carrier e confira o diff" }] } },
+      { tool: "owner_pending", arguments: { action: "add", title: "Decidir sobre a volta da #9290", why: "A cliente espera a resposta.", steps: [{ text: "Leia o resumo na conversa" }] } },
       { tool: "owner_pending", arguments: { action: "resolve", id: "o2" } },
       { tool: "owner_pending", arguments: { action: "list" } },
     ], reply: "Anotado para você." },
@@ -445,7 +445,9 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
   f.save({ turns: [
     { steps: [
       { tool: "owner_pending", arguments: { action: "add", title: "Aprovar o merge da PR #12", why: "O release de hoje depende dela.", steps, options } },
-      { tool: "owner_pending", arguments: { action: "add", title: "Liberar a escrita na linha 97 da planilha" } },
+      // J17: no item without why and steps — refused, saying what is missing
+      { tool: "owner_pending", arguments: { action: "add", title: "Liberar a escrita na linha 97 da planilha" }, expectError: true },
+      { tool: "owner_pending", arguments: { action: "add", title: "Liberar a escrita na linha 97 da planilha", why: "O relatório usa a linha 97.", steps: [{ text: "Peça o acesso à planilha" }] } },
       { tool: "owner_pending", arguments: { action: "add", title: "Passos inválidos", steps: [{ text: "Abrir", link: "javascript:alert(1)" }] }, expectError: true },
       // a title that only names someone says nothing to do (INSP-I r1 #2)
       { tool: "owner_pending", arguments: { action: "add", title: "@Chief of Staff", why: "Sem isso o relatório sai errado." }, expectError: true },
@@ -469,6 +471,7 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
   const firstTools = JSON.stringify(f.turns()[0].evidence.map((entry: any) => entry.response?.result?.content?.[0]?.text ?? ""));
   expect(firstTools).toContain("o passo 1 deve começar com https://");
   expect(firstTools).toContain("title só com menção");
+  expect(firstTools).toContain("owner_pending recusado: falta why e steps");
   const pending = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).flatMap((task: any) => task.ownerPending ?? []);
   await expect.poll(async () => (await pending()).map((item: any) => item.id), { timeout: 10_000 }).toEqual(["o1", "o2"]);
   expect((await pending())[0]).toMatchObject({ why: "O release de hoje depende dela.", steps, options });
@@ -493,7 +496,7 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
   expect((await pending()).map((item: any) => item.id)).toEqual(["o2"]);
   expect((await userLines()).at(-1)).toContain("Aprovado: pode fazer o merge da #12.");
 
-  // an old item without steps: the person asks the bot for them, in plain words
+  // the person asks the bot for (better) steps, in plain words
   await f.api(`/api/bots/${f.bot.id}/owner-pending/o2/reply`, { ask: "steps" });
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(4);
   expect((await userLines()).at(-1)).toBe("Me mostre como resolver «Liberar a escrita na linha 97 da planilha», passo a passo.");
@@ -581,8 +584,8 @@ it.runIf(process.platform === "darwin")("asks the owner ONCE to unblock the app 
 
 it("keeps one \"Precisa de você\" item for one action, whichever conversation asks again (R9-followup #3)", () => fixture(async f => {
   f.save({ turns: [
-    { steps: [{ tool: "owner_pending", arguments: { action: "add", title: "Parar o laço do release no cb015584a: echo <sha> > ~/.nuria/declined-production-release.sha" } }], reply: "Anotado." },
-    { steps: [{ tool: "owner_pending", arguments: { action: "add", title: "Autorizar pausar o watcher no cb015584a (arquivo halted)", link: "https://github.com/o/r/pull/9341" } }], reply: "Já estava." },
+    { steps: [{ tool: "owner_pending", arguments: { action: "add", title: "Parar o laço do release no cb015584a: echo <sha> > ~/.nuria/declined-production-release.sha", why: "O laço segura a fila.", steps: [{ text: "Grave a recusa", command: "echo <sha> > ~/.nuria/declined-production-release.sha" }] } }], reply: "Anotado." },
+    { steps: [{ tool: "owner_pending", arguments: { action: "add", title: "Autorizar pausar o watcher no cb015584a (arquivo halted)", link: "https://github.com/o/r/pull/9341", why: "O laço segura a fila.", steps: [{ text: "Autorize a pausa" }] } }], reply: "Já estava." },
   ] });
   await f.send("O release está em laço.");
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
