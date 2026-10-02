@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb } from "../scripts/control-omb.ts";
 import { request } from "../scripts/mcp-server.ts";
@@ -642,6 +643,42 @@ it("renews a standing watch whose time limit ran out with nothing seen, without 
   expect(standing().reason).toBe("NEW note");
   expect(standing().watch.fired ?? 0).toBe(0);
 }), 60_000);
+
+// R10-followup #5: the Chief's 'prod' note still asked to close #9327 a day
+// after it merged. A fake gh answers GitHub's issues API: #4242 merged, #4243 open.
+const refsBin = mkdtempSync(join(tmpdir(), "omb-refs-gh-"));
+writeFileSync(join(refsBin, "gh"), [
+  "#!/bin/sh",
+  "case \"$2\" in",
+  "  */issues/4242) printf 'closed\\ttrue\\t2026-10-01T21:02:11Z\\n' ;;",
+  "  */issues/4243) printf 'open\\ttrue\\t\\n' ;;",
+  "  *) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;",
+  "esac",
+].join("\n"));
+chmodSync(join(refsBin, "gh"), 0o755);
+
+it("tells the bot, under an hour-old note, which PRs it names are no longer open (R10-followup #5)", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const repo = join(f.session.info.dataDir, "refs-repo");
+  const commit = (message: string) => execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", message]);
+  execFileSync("git", ["init", "-q", repo]);
+  commit("first");
+  const command = `git -C ${repo} log --format=%s -1`;
+  f.save({ turns: [
+    { steps: [{ tool: "wake_when", arguments: { command, reason: "Tag andou: fechar carrier #4242 e liberar gate da #4243 em https://github.com/acme/web", every_minutes: 1, max_minutes: 600, standing: true, label: "prod" } }], reply: "Watching" },
+    { expectContextIncludes: ["no longer open: PR #4242 merged.", "check before redoing it", "update_reason"], reply: "Checked" },
+  ] });
+  await f.send("Watch the tag.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  // an "hour" (60 shrunk minutes = 12 s) passes, then the watched output changes
+  await new Promise((resolve) => setTimeout(resolve, 13_000));
+  commit("second");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  const context = JSON.stringify(f.turns()[1]);
+  // the open PR is not said: it is what the note expects
+  expect(context).not.toContain("PR #4243");
+  await expect.poll(async () => (await f.messages()).some((message: any) => message.text === "Checked"), { timeout: 10_000 }).toBe(true);
+}, { OMB_TEST_GRANT_PATH: `${refsBin}${delimiter}${GIT_DIR}` }), 60_000);
 
 it("follows the gate a turn cut at the time limit left running, and resumes the session when it ends (R8-resilience TO)", async () => {
   const { chmodSync, mkdtempSync } = await import("node:fs");

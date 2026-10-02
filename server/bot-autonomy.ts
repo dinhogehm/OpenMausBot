@@ -1852,7 +1852,9 @@ function clipLines(lines: string[], max: number): string[] {
   return kept;
 }
 
-export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, reminder = languageReminder()): string {
+/** `refsLine`: what the note names that the server found already done
+ * (watch-reason-refs.ts), said right under the note (R10-followup #5). */
+export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, reminder = languageReminder(), refsLine: string | null = null): string {
   return [
     `[${wake.watch ? "Watch" : "Wake-up"} you scheduled ${minutesLabel(now - wake.createdAt)} ago. Nobody typed this.]`,
     ...watchLines(wake),
@@ -1860,6 +1862,7 @@ export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, rem
     wake.watch?.standing && wake.watch.reasonAt !== undefined && now - wake.watch.reasonAt >= 3_600_000
       ? `Your note for this moment, written ${minutesLabel(now - wake.watch.reasonAt)} ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${wake.reason}`
       : `Your note for this moment: ${wake.reason}`,
+    ...(refsLine ? [refsLine] : []),
     ...(goal && goal.status === "active"
       ? [`You are in goal mode (turn ${goal.turnCount} of ${goal.maxTurns}). Goal: ${goal.goal}`, ...GOAL_RULES]
       : ["Do what the note says. If it still is not ready, call wake_when or wake_me again; if it is, report the result here."]),

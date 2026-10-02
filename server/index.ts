@@ -298,6 +298,7 @@ import {
   DISPATCH_RETRY_MAX_MINUTES,
   wakeFiredChip,
   watchLabel,
+  type BotWake,
 } from "./bot-autonomy.ts";
 import { parseWatchCommand, runWatchCommand, watchCommandWarnings, watchIgnoreWarnings, watchMatches } from "./wake-watch.ts";
 import {
@@ -453,6 +454,7 @@ import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-s
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
+import { citedRefs, parseRefState, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
 import { archiveCleanupNote, codexRolloutFolders, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, STALE_OUTSIDE_TAG_MS, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
@@ -8755,6 +8757,55 @@ function serverItemDetails(item: OwnerPending): { why: string; steps: OwnerPendi
   return null;
 }
 
+// ── what an old note names that is already done (server/watch-reason-refs.ts)
+// A note an hour old or more: the PRs/issues it names are looked up on
+// GitHub (one `gh api` each, at most 8, 8 s, remembered 10 min) and the
+// sessions in the ledger; the bot reads which are merged, closed or
+// archived right under its note (R10-followup #5: 'prod' still asked to
+// close #9327 and tell sessions archived the day before).
+const REF_STATE_TTL_MS = 10 * 60_000;
+const refStates = new Map<string, { at: number; state: RefState | null }>();
+function refState(slug: string, number: number): Promise<RefState | null> {
+  const key = `${slug}#${number}`;
+  const known = refStates.get(key);
+  if (known && Date.now() - known.at < REF_STATE_TTL_MS) return Promise.resolve(known.state);
+  return new Promise((resolve) => {
+    execFileCc("gh", refStateArgs(slug, number), { timeout: 8_000, maxBuffer: 64 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => {
+      const state = error ? null : parseRefState(number, String(stdout));
+      // a failed look-up is retried next firing, an answer is kept a while
+      if (state) refStates.set(key, { at: Date.now(), state });
+      resolve(state);
+    });
+  });
+}
+
+async function reasonRefsLine(wake: BotWake): Promise<string | null> {
+  const writtenAt = wake.watch?.standing ? wake.watch.reasonAt ?? wake.createdAt : wake.createdAt;
+  // an hour (of the test's shrunk minutes, end to end)
+  if (Date.now() - writtenAt < 60 * (autonomyTestMs("OMB_AUTONOMY_MINUTE_MS") ?? 60_000)) return null;
+  const cited = citedRefs(wake.reason);
+  if (!cited.numbers.length && !cited.sessions.length) return null;
+  try {
+    const sessions = ccLedger.all().filter((session) => session.ownerBotId === wake.botId);
+    const slug = watchSlug(wake.watch?.argv ?? [], wake.reason)
+      ?? sessions.map((session) => session.delivery?.slug).findLast((each): each is string => Boolean(each))
+      ?? null;
+    const delivered = new Set(ccLedger.all().flatMap((session) => Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.inProductionAt !== undefined).map((pr) => pr.number)));
+    const refs = slug
+      ? (await Promise.all(cited.numbers.map((number) => refState(slug, number))))
+        .map((ref) => (ref?.kind === "pr" && ref.state === "merged" && delivered.has(ref.number) ? { ...ref, inProduction: true } : ref))
+      : [];
+    const named = cited.sessions.flatMap((number) => {
+      const session = sessionForNumber(sessions, number);
+      return session ? [{ number, title: session.title, archived: session.status === "archived" }] : [];
+    });
+    return staleRefsLine(refs, named);
+  } catch (error) {
+    console.error(`[autonomy] note refs: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
 async function autonomyTick(): Promise<void> {
   try {
     askStepsForOlderItems();
@@ -8802,6 +8853,8 @@ async function autonomyTick(): Promise<void> {
       if (wake.watch && intakeBusyElsewhere(wake.botId, turnThread)) holdIntake(wake.botId, wake.threadId, `wake ${wake.watch.label ?? watchLabel(wake.watch.command)} in ${turnThread}`);
       continue;
     }
+    // what an old note names that is already done, looked up now (R10-followup #5)
+    const refsLine = await reasonRefsLine(wake);
     if (!autonomy.isCurrent(wake)) continue;
     if (wake.watch) noteIntakeTurn(wake.botId, turnThread);
     // Leased, not dropped: on disk until the turn completes, so a restart
@@ -8809,7 +8862,7 @@ async function autonomyTick(): Promise<void> {
     if (!standing) autonomy.leaseWake(wake);
     const goal = autonomy.goalFor(wake.threadId);
     const fromTitle = store.taskByThread(wake.botId, wake.threadId)?.title ?? wake.threadId.slice(0, 8);
-    const basePrompt = wakePrompt(wake, goal, Date.now(), languageReminder(cfg.language));
+    const basePrompt = wakePrompt(wake, goal, Date.now(), languageReminder(cfg.language), refsLine);
     const prompt = routed ? `${routedWakeNote({ fromTitle, fromThread: wake.threadId, ...(wake.watch?.label ? { label: wake.watch.label } : {}) })}\n\n${basePrompt}` : basePrompt;
     const chip = wakeFiredChip(wake);
     // Raised once when it starts failing, not on every firing while it stays broken.
