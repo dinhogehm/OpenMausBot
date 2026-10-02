@@ -96,6 +96,10 @@ describe("titles that say what to do (I3, INSP-I r1 #1/#2)", () => {
     // reworded titles always keep what the bot wrote one line away (INSP-I r2 #1)
     expect(items.find((item) => item.pendingId === "o5")).toMatchObject({ title: "Aprovar o deploy da versão 2.14 em produção", rawTitle: "@Osvaldo aprovar o deploy da versão 2.14 em produção" });
     expect(items.find((item) => item.pendingId === "o3")).not.toHaveProperty("rawTitle");
+    // references moved to the end, a capital letter: nothing removed, no repeat (INSP-I r3 #2)
+    expect(items.find((item) => item.pendingId === "o1")).not.toHaveProperty("rawTitle");
+    expect(view({ selectedKey: keyOf("o1") }).html).not.toContain("O bot escreveu");
+    expect(needsYouTitle("@Osvaldo Silva", { botName: "Monitor Chat", botNames: names })).toBe("Monitor Chat precisa de uma resposta sua");
     expect(view({ selectedKey: keyOf("o5") }).html).toContain("O bot escreveu: @Osvaldo aprovar o deploy");
     expect(items.find((item) => item.threadId === "c2")?.title).toBe("Posso arquivar as 4 conversas antigas?");
     const shown = view({ selectedKey: keyOf("o4") });

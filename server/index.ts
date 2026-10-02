@@ -710,7 +710,7 @@ import { findAntigravityLeftovers, removeAntigravityLeftovers } from "./drivers/
 
 /** owner_pending refuses a title that only names someone (INSP-I r1 #2): the person could not tell what to do. */
 const MENTION_ONLY_TITLE = "title só com menção (\"@Chief of Staff\") não diz o que fazer: comece pelo verbo, com o essencial (\"Aprovar o merge da PR #12\"). Quem pediu a pessoa já vê.";
-const PORT =Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
+const PORT = Number(process.env.OMB_PORT || process.env.OGB_PORT || 8799);
 const WEBHOOK_PORT = Number(process.env.OMB_WEBHOOK_PORT || PORT + 1);
 // Behind a proxy or tunnel, the base URL senders should use (docs/self-hosting.md).
 const WEBHOOK_PUBLIC_URL = process.env.OMB_WEBHOOK_PUBLIC_URL || undefined;

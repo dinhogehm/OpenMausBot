@@ -13,7 +13,10 @@
 const HANDLE = /^@[\p{L}\p{N}][\p{L}\p{N}_.-]*/u;
 const AFTER = /^[\s,:;–—-]*/u;
 const CONNECTED = /^\s+(?:of|de|do|da|dos|das)\s+[\p{L}\p{N}]+/u;
-const CAPITALIZED_RUN = /^(?:\s+\p{Lu}[\p{L}\p{N}]*)+(?=\s*[,:;])/u;
+/** One or two capitalized words a "," ":" or ";" closes: the rest of a name
+ * ("@Monitor Chat Atendimento:"). Never a verb in the infinitive — the
+ * title's first word ("@Osvaldo Aprovar, por favor, …" — INSP-I r3 #3). */
+const CAPITALIZED_RUN = /^(?:\s+(?!\p{Lu}\p{Ll}*[aei]r\b)\p{Lu}[\p{L}\p{N}]*){1,2}(?=\s*[,:;])/u;
 
 /** The text after the mentions it opens with. Known names (longest first)
  * are taken off exactly; an unknown "@handle" takes only itself, plus a
@@ -40,7 +43,15 @@ export function stripLeadingMentions(text: string, knownNames: readonly string[]
   return rest.trim();
 }
 
-/** Nothing to do is said: no word of three letters once the mentions are set aside. */
+/** Nothing to do is said once the mentions are set aside: no word of three
+ * letters, or only the rest of a person's name — one or two capitalized
+ * words and nothing else ("@Osvaldo Silva", INSP-I r3 #3). Three words or a
+ * lower-case one say something ("@time Financeiro Conferir NF"). */
 export function isMentionOnly(text: string, knownNames: readonly string[] = []): boolean {
-  return !/\p{L}{3}/u.test(stripLeadingMentions(text, knownNames));
+  const rest = stripLeadingMentions(text, knownNames);
+  if (!/\p{L}{3}/u.test(rest)) return true;
+  // the name rule reads only what follows a mention: "Deploy" alone is a title
+  if (rest === text.replace(/\s+/g, " ").trim()) return false;
+  const words = rest.split(/\s+/).filter(Boolean);
+  return words.length <= 2 && words.every((word) => /^\p{Lu}[\p{L}'’-]*[.!]?$/u.test(word)) && !words.some((word) => /^\p{Lu}\p{Ll}*[aei]r$/u.test(word));
 }

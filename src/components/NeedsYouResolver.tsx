@@ -317,7 +317,7 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
   const why = item.why && !sameText(item.why, item.title) ? item.why : item.approval ? t("needsYou.why.approval", { name: item.botName }) : "";
   const working = busy !== null;
   const layout = placement(item.options?.length ?? 0);
-  const replyId =`needs-you-reply-${needsYouKey(item).replace(/[^\w-]/g, "-")}`;
+  const replyId = `needs-you-reply-${needsYouKey(item).replace(/[^\w-]/g, "-")}`;
   return (
     <>
       <div className="flex items-center gap-1 border-b border-hairline/40 px-2 py-1.5 sm:px-3">

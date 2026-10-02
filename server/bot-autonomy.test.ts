@@ -962,9 +962,14 @@ describe("what waits on the person, made practical (lot I)", () => {
     // the text shows where a name of several words ends: a connector, or closing punctuation
     expect(stripLeadingMentions("@Chief of Staff Rodei tudo")).toBe("Rodei tudo");
     expect(stripLeadingMentions("@Monitor Chat Atendimento: preciso da planilha")).toBe("preciso da planilha");
-    for (const title of ["@Osvaldo Aprovar o deploy da versão 2.14 em produção", "@Ana Revisar o contrato de Maria", "@time Financeiro Conferir NF", "@Osvaldo PR #12 aprovar"]) {
+    for (const title of ["@Osvaldo Aprovar o deploy da versão 2.14 em produção", "@Ana Revisar o contrato de Maria", "@time Financeiro Conferir NF", "@Osvaldo PR #12 aprovar", "@Osvaldo Aprovar", "Deploy"]) {
       expect(isMentionOnly(title)).toBe(false);
     }
+    // the rest of a person's name is no title; a verb closed by a comma is not a name (INSP-I r3 #3)
+    expect(isMentionOnly("@Osvaldo Silva")).toBe(true);
+    expect(isMentionOnly("@Osvaldo Silva Santos")).toBe(true);
+    expect(stripLeadingMentions("@Osvaldo Aprovar, por favor, o deploy")).toBe("Aprovar, por favor, o deploy");
+    expect(stripLeadingMentions("@Equipe Financeiro Comercial Norte: conferir a NF")).toBe("Financeiro Comercial Norte: conferir a NF");
     expect(ownerAskText("@Chief of Staff, rodei a análise. Posso abrir a PR?", 200, ["Chief of Staff"])).toBe("Posso abrir a PR?");
   });
 
