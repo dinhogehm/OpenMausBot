@@ -16,6 +16,11 @@ import {
   prsCited,
   lastQuestionAt,
   ownerAskAt,
+  ownerAsk,
+  ownerAskText,
+  ownerPendingReplyText,
+  ownerPendingStepsRequestText,
+  parseOwnerPendingDetails,
   parseWakeInput,
   promiseOverdueReport,
   parseWatchInput,
@@ -855,6 +860,93 @@ describe("a bot waiting on the person, in plain words", () => {
     expect(ownerAskAt([person, ask], at + 49 * 3_600_000)).toBeNull();
     // after a teammate's message, the asks go to the teammate
     expect(ownerAskAt([person, { role: "user", kind: "text", text: "@Monitor confira", at: at - 5, peerAsk: { botId: "c" } }, ask], at + 1)).toBeNull();
+  });
+});
+
+describe("what waits on the person, made practical (lot I)", () => {
+  const steps = [
+    { text: "Abra a PR e confira o diff do carrier", link: "https://github.com/acme/app/pull/12" },
+    { text: "Rode o gate local", command: "pnpm run ci:local" },
+  ];
+  const options = [{ label: "Aprovar", reply: "Aprovado: pode fazer o merge da #12." }, { label: "Recusar", reply: "Recusado: não faça o merge." }];
+
+  it("reads why, steps and options the way a bot sends them, and refuses what the person could not use", () => {
+    expect(parseOwnerPendingDetails({ why: "  Sem isso\n o deploy para.  ", steps, options })).toEqual({ ok: true, why: "Sem isso o deploy para.", steps, options });
+    // some engines send nested values as JSON text; a bare string is a step
+    expect(parseOwnerPendingDetails({ steps: JSON.stringify(["Abrir a planilha"]) })).toEqual({ ok: true, steps: [{ text: "Abrir a planilha" }] });
+    expect(parseOwnerPendingDetails({})).toEqual({ ok: true });
+    expect(parseOwnerPendingDetails({ steps: [], options: [] })).toEqual({ ok: true, steps: [], options: [] });
+    const refused = (input: Parameters<typeof parseOwnerPendingDetails>[0]) => { const r = parseOwnerPendingDetails(input); return r.ok ? "" : r.error; };
+    expect(refused({ steps: [{ text: "" }] })).toContain("o passo 1 precisa de text");
+    expect(refused({ steps: [{ text: "Abrir", link: "javascript:alert(1)" }] })).toContain("https://");
+    expect(refused({ steps: Array.from({ length: 9 }, (_, n) => ({ text: `passo ${n}` })) })).toContain("no máximo 8 passos");
+    expect(refused({ options: [{ label: "Aprovar" }] })).toContain("reply");
+    expect(refused({ options: [{ label: "Sim", reply: "a" }, { label: "sim", reply: "b" }] })).toContain("duas opções");
+    expect(refused({ options: [{ label: "x".repeat(41), reply: "a" }] })).toContain("verbo curto");
+    expect(refused({ steps: "abra a PR" })).toContain("lista de passos");
+  });
+
+  it("keeps why, steps and options on the item, refreshes them on a second add, and an old item without them still loads", () => {
+    const autonomy = make();
+    const item = autonomy.addOwnerPending("chief", "c1", { title: "Aprovar o merge da PR #12", why: "O release de hoje depende dela.", steps, options });
+    expect(item).toMatchObject({ why: "O release de hoje depende dela.", steps, options });
+    // the same ask again without the structure keeps it; with new steps replaces them
+    expect(autonomy.addOwnerPending("chief", "c1", { title: "Aprovar o merge da PR #12" })).toMatchObject({ id: item.id, steps, options });
+    expect(autonomy.addOwnerPending("chief", "c1", { title: "Aprovar o merge da PR #12", steps: [steps[1]!] }).steps).toEqual([steps[1]]);
+    // a ledger written before lot I, and one hand-edited with junk, load
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], ownerPending: [
+      { id: "o1", botId: "chief", threadId: "c1", title: "Liberar a escrita na linha 97 da planilha", createdAt: now - 3_600_000 },
+      { id: "o2", botId: "chief", threadId: "c1", title: "Decidir o padrão", createdAt: now, steps: "nope", options: [{ label: 3 }] },
+    ] }));
+    const loaded = make().ownerPendingFor("c1");
+    expect(loaded.map((each) => each.id)).toEqual(["o1", "o2"]);
+    expect(loaded[1]).not.toHaveProperty("steps");
+    expect(loaded[1]).not.toHaveProperty("options");
+  });
+
+  it("update rewrites the bot's own item in place — same id, place and age — clears with empty lists, and answers a request for steps", () => {
+    const autonomy = make();
+    const old = autonomy.addOwnerPending("chief", "c1", { title: "@Chief of Staff", link: "https://github.com/acme/app/pull/12" });
+    now += 60_000;
+    expect(autonomy.markOwnerPendingStepsRequested("chief", old.id)?.stepsRequestedAt).toBe(now);
+    expect(autonomy.updateOwnerPending("monitor", old.id, { why: "x" })).toBeNull();
+    expect(autonomy.updateOwnerPending("chief", "o99", { why: "x" })).toBeNull();
+    now += 60_000;
+    const updated = autonomy.updateOwnerPending("chief", old.id, { title: "Aprovar o merge da PR #12", why: "O release depende dela.", steps, options, due: "hoje 18h" })!;
+    expect(updated).toMatchObject({ id: old.id, threadId: "c1", createdAt: old.createdAt, updatedAt: now, title: "Aprovar o merge da PR #12", due: "hoje 18h", link: old.link, steps, options });
+    expect(updated).not.toHaveProperty("stepsRequestedAt");
+    expect(make().ownerPendingFor("c1")).toEqual([updated]);
+    const cleared = autonomy.updateOwnerPending("chief", old.id, { options: [], due: "" })!;
+    expect(cleared).not.toHaveProperty("options");
+    expect(cleared).not.toHaveProperty("due");
+    expect(cleared.steps).toEqual(steps);
+    // an id folded into the item (alias) still reaches it
+    autonomy.resolveOwnerPending({ botId: "chief", id: old.id });
+    expect(autonomy.ownerPendingById("chief", old.id)).toBeNull();
+  });
+
+  it("tells the bot which item the person answered, and asks it for the exact update call", () => {
+    const item = { id: "o3", title: "Aprovar o merge da PR #12" };
+    expect(ownerPendingReplyText(item, " Aprovado: pode fazer o merge da #12. ", true)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Aprovado: pode fazer o merge da #12.\n\n(Marquei o3 como resolvido em \"Precisa de você\".)");
+    expect(ownerPendingReplyText(item, "Espere a CI.", false)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Espere a CI.");
+    const ask = ownerPendingStepsRequestText(item);
+    expect(ask).toContain("owner_pending update, id o3");
+    expect(ask).toMatch(/why .* steps .* options/s);
+    expect(ask).toContain("Não abra outra pendência");
+  });
+
+  it("titles an ask by what it asks, not by who: the last question, without a leading mention or markdown", () => {
+    expect(ownerAskText("@Chief of Staff, rodei a análise. **Posso abrir a PR da #9052 agora?**")).toBe("Posso abrir a PR da #9052 agora?");
+    expect(ownerAskText("@Monitor Chat Atendimento: preciso que você libere a escrita na linha 97 da planilha. Depois sigo.")).toBe("Preciso que você libere a escrita na linha 97 da planilha.");
+    expect(ownerAskText("Feito.\n\n- item\n\nTudo certo")).toBe("Feito.");
+    expect(ownerAskText("@Chief of Staff")).toBe("");
+    const long = ownerAskText(`Você aprova ${"a mudança grande ".repeat(20)}?`, 80);
+    expect(long.length).toBeLessThanOrEqual(80);
+    expect(long.endsWith("…")).toBe(true);
+    const at = now;
+    const person = { role: "user", kind: "text", text: "status?", at: at - 10 };
+    expect(ownerAsk([person, { role: "bot", kind: "text", text: "@Chief of Staff Rodei tudo. Posso fazer o merge?", at }], at + 1)).toBe("Posso fazer o merge?");
+    expect(ownerAsk([person, { role: "bot", kind: "text", text: "Feito.", at }], at + 1)).toBeNull();
   });
 });
 

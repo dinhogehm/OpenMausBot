@@ -146,6 +146,14 @@ export interface WireOwnerPending {
   link?: string;
   /** A command the person runs to act on it (copied with one click, never run). */
   command?: string;
+  /** Why it matters, in one or two sentences. */
+  why?: string;
+  /** What to do, in order; a step may carry its exact command or a link. */
+  steps?: Array<{ text: string; command?: string; link?: string }>;
+  /** A choice: each option's label is a button, its reply what the bot receives. */
+  options?: Array<{ label: string; reply: string }>;
+  /** The person asked the bot for the steps, and the bot has not rewritten it yet. */
+  stepsRequestedAt?: number;
 }
 
 export interface WireTask {
@@ -155,6 +163,9 @@ export interface WireTask {
   goalNeedsInput?: boolean;
   /** Since when (the goal paused), so an old ask reads as old. */
   goalNeedsInputSince?: number;
+  /** What it asks, in one sentence (the conversation's title may only say
+   * who, like "@Chief of Staff"). */
+  goalNeedsInputAsk?: string;
   /** Watches (wake_when) running for this conversation, for its row. */
   watches?: WireWatch[];
   /** It had a standing watch and has had none for a while. */

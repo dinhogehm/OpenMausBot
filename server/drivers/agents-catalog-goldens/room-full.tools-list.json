@@ -1067,7 +1067,7 @@
     },
     {
       "name": "owner_pending",
-      "description": "Keep a list of what waits on the person (a decision, an approval, an answer only they have), shown to them in \"Precisa de você\" until resolved. add one item per thing, instead of ending replies with \"continua com você…\"; resolve it when it is settled; list to see what is open. Not for rooms.",
+      "description": "List what waits on the person (a decision, an approval, an answer only they have) in \"Precisa de você\"; each item opens as a step-by-step screen. add one item per thing instead of ending replies with \"continua com você…\", in pt-BR: title starting with the verb (never just a mention), why, steps with the exact command or link, options when it is a choice (a click sends you its reply here and resolves it). update rewrites an item (answer a request for steps with it); resolve when settled; list. Not for rooms.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1076,6 +1076,7 @@
             "type": "string",
             "enum": [
               "add",
+              "update",
               "resolve",
               "list"
             ]
@@ -1083,21 +1084,75 @@
           "title": {
             "type": "string",
             "maxLength": 200,
-            "description": "add: what the person must do or decide, in their words (\"aprovar o carrier da #9315\")."
+            "description": "What the person must do or decide (\"Aprovar o carrier da #9315\")."
           },
           "due": {
             "type": "string",
             "maxLength": 80,
-            "description": "add, optional: by when (\"hoje 18h\")."
+            "description": "Optional: by when (\"hoje 18h\")."
           },
           "link": {
             "type": "string",
             "maxLength": 500,
-            "description": "add, optional: where to act (PR, issue, session link)."
+            "description": "Optional: where to act (PR, issue, session)."
+          },
+          "why": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "Optional: 1–2 sentences, why it matters."
+          },
+          "steps": {
+            "type": "array",
+            "maxItems": 8,
+            "description": "Optional, in order; [] clears.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "maxLength": 300
+                },
+                "command": {
+                  "type": "string",
+                  "maxLength": 500
+                },
+                "link": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              },
+              "required": [
+                "text"
+              ]
+            }
+          },
+          "options": {
+            "type": "array",
+            "maxItems": 4,
+            "description": "Optional decisions (\"Aprovar\"/\"Recusar\"); [] clears.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "maxLength": 40
+                },
+                "reply": {
+                  "type": "string",
+                  "maxLength": 500
+                }
+              },
+              "required": [
+                "label",
+                "reply"
+              ]
+            }
           },
           "id": {
             "type": "string",
-            "description": "resolve: the item's id from add or list, or \"all\" for this conversation's."
+            "description": "update/resolve: the item's id (resolve: or \"all\")."
           }
         },
         "required": [
