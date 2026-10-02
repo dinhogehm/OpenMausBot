@@ -238,7 +238,12 @@ export function ownerPendingAction(item: { title: string; key?: string }): { kin
     return { kind: kind!, ...(rest.length ? { sha: rest.join(":").toLowerCase() } : {}) };
   }
   const sha = commitsIn(item.title)[0];
-  if (sha && /(?<![\p{L}])(?:la[çc]o|loop|watcher|launchagent|halted|declined|recus\w+ o release|parar o release|pausar o release)(?![\p{L}])/iu.test(item.title)) return { kind: "release-loop", sha };
+  // stopping a release of the commit: a verb of stopping, any inflection ("parar", "paramos",
+  // "pausar", "recusar", "desligar"; not "para", the preposition) AND what is stopped
+  // (release, watcher, loop, LaunchAgent) — "Conferir no watcher se o deploy terminou" asks
+  // something else and must not be folded nor closed with the loop (INSP-H r2 #5)
+  const stopping = /(?<![\p{L}])(?:par(?:ar|amos|e|em|ou|ando)|paus\p{L}*|recus\p{L}*|deslig\p{L}*|interromp\p{L}*|halt\p{L}*|declin\p{L}*)(?![\p{L}])/iu.test(item.title);
+  if (sha && stopping && /(?<![\p{L}])(?:release|watcher|la[çc]o|loop|launchagent|carrier)(?![\p{L}])/iu.test(item.title)) return { kind: "release-loop", sha };
   if (sha && /avan[çc]ar a tag/iu.test(item.title)) return { kind: "tag-advance", sha };
   if (/(?:ligu?e|ligar) o mac na tomada/iu.test(item.title)) return { kind: "power", sha: "battery" };
   return null;

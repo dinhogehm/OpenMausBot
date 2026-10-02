@@ -931,6 +931,10 @@ describe("what waits on the person", () => {
     for (const title of [ITEMS[1]!.title, ITEMS[2]!.title, ITEMS[3]!.title]) expect(sameOwnerPending(loop, { title }), title).toBe(true);
     // naming the commit is not asking to refuse it
     expect(sameOwnerPending(loop, { title: "Revisar com o QA o diff do cb015584a" })).toBe(false);
+    // INSP-H r2 #5: the watcher named for something else; stopping said another way
+    expect(sameOwnerPending(loop, { title: "Conferir no watcher se o deploy do cb015584a terminou" })).toBe(false);
+    expect(sameOwnerPending(loop, { title: "Decidir se paramos o release do cb015584a ou esperamos a #9341" })).toBe(true);
+    expect(sameOwnerPending(loop, { title: "Liberar a PR #9341 para passar no gate do cb015584a" })).toBe(false);
     expect(sameOwnerPending({ title: ITEMS[1]!.title }, { title: "Revisar com o QA o diff do cb015584a" })).toBe(false);
     // a conversation's id is no commit
     expect(commitsIn("Fechar a conversa 6477b3f4")).toEqual([]);

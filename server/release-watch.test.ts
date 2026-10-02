@@ -380,6 +380,9 @@ describe("a release loop against the machine's failures and the owner's answers"
     ];
     // declined (the real declined-production-release.sha = cb015584a…): nothing loops any more
     expect(releaseLoopItemsToClose(items, null).map((item) => item.id)).toEqual(["o7", "o10"]);
+    // asking something else about the commit survives (INSP-H r2 #5)
+    const check = { id: "o12", title: "Conferir no watcher se o deploy do cb015584a terminou" };
+    expect(releaseLoopItemsToClose([...items, check], null).map((item) => item.id)).toEqual(["o7", "o10"]);
     // still looping on it: nothing to close; looping on another commit: these are done
     expect(releaseLoopItemsToClose(items, "cb015584a")).toEqual([]);
     expect(releaseLoopItemsToClose(items, "2995ef215").map((item) => item.id)).toEqual(["o7", "o10"]);
