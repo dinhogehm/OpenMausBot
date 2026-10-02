@@ -31,19 +31,19 @@ import { leadingVocative } from "./owner-channel.ts";
 import { languageReminder } from "./reply-language.ts";
 import { stripLeadingMentions } from "../shared/owner-pending-title.ts";
 import { lineHash, newestStamp } from "./wake-watch.ts";
-import { chatTexts, ECHO_WINDOW_MS, isEcho, normalize, vmChatPostOf, vmSheetNoteOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
+import { chatStartHash, chatTexts, ECHO_WINDOW_MS, isEcho, normalize, vmChatPostOf, vmSheetNoteOf, watchKindOf, withoutLeadingMentions, type SelfWrite } from "./watch-echo.ts";
 /** How long, and how many, message starts a bot keeps as seen in its Chat watches. */
 export const SEEN_CHAT_MS = 24 * 3_600_000;
 export const SEEN_CHAT_MAX = 2_000;
-/** Message starts kept on disk per bot (the newest), and the largest watch output kept as lines. */
+/** Message starts kept on disk per bot (the newest, as hashes), and the most lines of a watch run kept (as hashes). */
 export const ECHO_SEEN_PERSIST_MAX = 1_000;
-export const ECHO_LINES_PERSIST_MAX = 40_000;
+export const ECHO_LINES_PERSIST_MAX = 5_000;
 
-/** The echo memory on disk (bot-autonomy.echo.json). */
+/** The echo memory on disk (bot-autonomy.echo.json): no client text, only hashes. */
 interface EchoMemory {
   selfWrites: Record<string, SelfWrite[]>;
-  seenChat: Record<string, Array<[string, number]>>;
-  lastLines: Record<string, { fingerprint: string; lines: string[] }>;
+  seenChatHashes: Record<string, Array<[string, number]>>;
+  lastLineHashes: Record<string, { fingerprint: string; hashes: string[] }>;
 }
 
 export const WAKE_MIN_MINUTES = 1;
@@ -515,6 +515,10 @@ export class BotAutonomy {
   private lastLinesPrint = new Map<string, string>();
   /** Per bot, the start of each message its Chat watches showed, and when (insertion order = age). */
   private seenChat = new Map<string, Map<string, number>>();
+  /** Per bot, the hashes of message starts seen before the last restart (chatStartHash), and when. */
+  private seenChatHashes = new Map<string, Map<string, number>>();
+  /** Each watch's run before the last restart, as its lines' hashes, until it runs again. */
+  private savedLineHashes = new Map<string, { fingerprint: string; hashes: string[] }>();
   /** Leases a restart cut off, as found on load. */
   readonly recoveredOnLoad: RecoveredLease[] = [];
   private readonly path: string | null;
@@ -680,7 +684,9 @@ export class BotAutonomy {
     // The whole output of the run before (not lastOutput, cut at 20 000
     // characters): what an echo is judged against. Unknown — after a
     // restart, or a run past WATCH_LINES_MAX — means no echo.
-    const previous = this.lastLines.get(wakeKey(wake)) ?? null;
+    // after a restart, the run before is read back from its hashes against this run's lines
+    const previous = this.lastLines.get(wakeKey(wake)) ?? this.savedRun(wakeKey(wake), result.ok ? result.lines : undefined);
+    if (result.ok) this.savedLineHashes.delete(wakeKey(wake));
     if (result.ok && result.lines && result.linesComplete !== false) {
       this.lastLines.set(wakeKey(wake), result.lines);
       // which output these lines are: after a restart they count only for that very output
@@ -764,10 +770,12 @@ export class BotAutonomy {
   // own writes and the messages seen were gone). Kept apart from the
   // ledger, bounded: writes of the last ECHO_WINDOW_MS (≤ 20 per bot), the
   // ECHO_SEEN_PERSIST_MAX newest message starts of the last 24 h per bot,
-  // and each live watch's last lines while they fit ECHO_LINES_PERSIST_MAX
-  // characters — taken back only for the very output they came from (its
-  // fingerprint), so a watch that ran elsewhere meanwhile is never compared
-  // with lines it did not see.
+  // and each live watch's last run — taken back only for the very output it
+  // came from (its fingerprint), so a watch that ran elsewhere meanwhile is
+  // never compared with lines it did not see. No client text goes to disk
+  // (INSP-J r1 #12): a run is kept as its lines' hashes and a message start
+  // as its hash; the run is read back against the next run's own lines (a
+  // line still there is known again; one gone stays a hash, never anyone's).
 
   private loadEcho(): void {
     if (!this.echoPath || !existsSync(this.echoPath)) return;
@@ -778,43 +786,65 @@ export class BotAutonomy {
         const kept = (Array.isArray(writes) ? writes : []).filter((write) => write && typeof write.at === "number" && typeof write.kind === "string" && Array.isArray(write.marks) && at - write.at <= ECHO_WINDOW_MS);
         if (kept.length) this.selfWrites.set(botId, kept.slice(-20));
       }
-      for (const [botId, starts] of Object.entries(raw.seenChat ?? {})) {
+      for (const [botId, starts] of Object.entries(raw.seenChatHashes ?? {})) {
         const seen = new Map<string, number>();
         for (const pair of Array.isArray(starts) ? starts : []) {
-          if (Array.isArray(pair) && typeof pair[0] === "string" && typeof pair[1] === "number" && at - pair[1] <= SEEN_CHAT_MS) seen.set(pair[0].slice(0, 40), pair[1]);
+          if (Array.isArray(pair) && typeof pair[0] === "string" && /^[0-9a-f]{16}$/.test(pair[0]) && typeof pair[1] === "number" && at - pair[1] <= SEEN_CHAT_MS) seen.set(pair[0], pair[1]);
         }
-        if (seen.size) this.seenChat.set(botId, seen);
+        if (seen.size) this.seenChatHashes.set(botId, seen);
       }
-      for (const [key, saved] of Object.entries(raw.lastLines ?? {})) {
+      for (const [key, saved] of Object.entries(raw.lastLineHashes ?? {})) {
         const wake = this.wakes.get(key);
-        if (!wake?.watch || !saved || !Array.isArray(saved.lines) || typeof saved.fingerprint !== "string") continue;
+        if (!wake?.watch || !saved || !Array.isArray(saved.hashes) || typeof saved.fingerprint !== "string") continue;
         if (wake.watch.lastFingerprint !== saved.fingerprint) continue;
-        this.lastLines.set(key, saved.lines.filter((line): line is string => typeof line === "string"));
-        this.lastLinesPrint.set(key, saved.fingerprint);
+        this.savedLineHashes.set(key, { fingerprint: saved.fingerprint, hashes: saved.hashes.filter((hash): hash is string => typeof hash === "string") });
       }
     } catch (error) {
       console.error(`[autonomy] ignoring unreadable ${this.echoPath}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
+  /** The run before a restart, read back against this run's lines: each
+   * hash that is one of them is that line again; one that is not stays an
+   * opaque placeholder (it went away, and isEcho accounts for it as such). */
+  private savedRun(key: string, current: readonly string[] | undefined): string[] | null {
+    const saved = this.savedLineHashes.get(key);
+    if (!saved || !current) return null;
+    const byHash = new Map<string, string>();
+    for (const line of current) byHash.set(lineHash(line), line);
+    const savedSet = new Set(saved.hashes);
+    // a line that grew (a note appended to a spreadsheet row): its old self is a prefix of a new line
+    const changed = current.filter((line) => !savedSet.has(lineHash(line))).slice(0, 50);
+    const grownFrom = (hash: string): string | undefined => {
+      for (const line of changed) {
+        for (let end = line.length - 1; end > 0; end -= 1) if (lineHash(line.slice(0, end)) === hash) return line.slice(0, end);
+      }
+      return undefined;
+    };
+    return saved.hashes.map((hash) => byHash.get(hash) ?? grownFrom(hash) ?? `\u0000gone:${hash}`);
+  }
+
   private saveEcho(): void {
     if (!this.echoPath) return;
     const at = this.now();
-    const memory: EchoMemory = { selfWrites: {}, seenChat: {}, lastLines: {} };
+    const memory: EchoMemory = { selfWrites: {}, seenChatHashes: {}, lastLineHashes: {} };
     for (const [botId, writes] of this.selfWrites) {
       const kept = writes.filter((write) => at - write.at <= ECHO_WINDOW_MS);
       if (kept.length) memory.selfWrites[botId] = kept.slice(-20);
     }
-    for (const [botId, seen] of this.seenChat) {
-      const kept = [...seen].filter(([, when]) => at - when <= SEEN_CHAT_MS).slice(-ECHO_SEEN_PERSIST_MAX);
-      if (kept.length) memory.seenChat[botId] = kept;
+    for (const botId of new Set([...this.seenChat.keys(), ...this.seenChatHashes.keys()])) {
+      const pairs = new Map<string, number>(this.seenChatHashes.get(botId) ?? []);
+      for (const [start, when] of this.seenChat.get(botId) ?? []) pairs.set(chatStartHash(start), Math.max(when, pairs.get(chatStartHash(start)) ?? 0));
+      const kept = [...pairs].filter(([, when]) => at - when <= SEEN_CHAT_MS).sort((a, b) => a[1] - b[1]).slice(-ECHO_SEEN_PERSIST_MAX);
+      if (kept.length) memory.seenChatHashes[botId] = kept;
     }
     for (const [key, lines] of this.lastLines) {
       const fingerprint = this.lastLinesPrint.get(key);
-      if (!fingerprint || !this.wakes.has(key)) continue;
-      if (lines.reduce((sum, line) => sum + line.length + 1, 0) > ECHO_LINES_PERSIST_MAX) continue;
-      memory.lastLines[key] = { fingerprint, lines };
+      if (!fingerprint || !this.wakes.has(key) || lines.length > ECHO_LINES_PERSIST_MAX) continue;
+      memory.lastLineHashes[key] = { fingerprint, hashes: lines.map(lineHash) };
     }
+    // read back but not run again since the restart: still the run before
+    for (const [key, saved] of this.savedLineHashes) if (!memory.lastLineHashes[key] && this.wakes.has(key)) memory.lastLineHashes[key] = saved;
     try {
       writeFileAtomic(this.echoPath, `${JSON.stringify(memory)}\n`, { mode: 0o600 });
     } catch (error) {
@@ -842,7 +872,9 @@ export class BotAutonomy {
 
   /** How many message starts a bot keeps as seen (for tests). */
   seenChatCount(botId: string): number {
-    return this.seenChat.get(botId)?.size ?? 0;
+    const hashes = new Set(this.seenChatHashes.get(botId)?.keys() ?? []);
+    for (const start of this.seenChat.get(botId)?.keys() ?? []) hashes.add(chatStartHash(start));
+    return hashes.size;
   }
 
   /** Text the bot put on the VM's clipboard: kept as its Chat post only when
@@ -858,10 +890,11 @@ export class BotAutonomy {
     // a Chat post: only when every Chat watch of the bot has its last output
     // to tell it from a copied message (none after a restart: in doubt, not kept)
     const chatWatches = [...this.wakes.entries()].filter(([, wake]) => wake.botId === botId && wake.watch && watchKindOf(wake.watch.argv) === "chat");
-    if (!chatWatches.length || chatWatches.some(([key]) => !this.lastLines.has(key))) return false;
-    // what its Chat watches show now, and every message they showed in the last 24 h
-    const shown = [...chatWatches.flatMap(([key]) => chatTexts(this.lastLines.get(key)!)), ...(this.seenChat.get(botId)?.keys() ?? [])];
-    const write = vmChatPostOf(text, this.now(), shown);
+    // (or, right after a restart, its run kept as hashes: the messages it showed are among the starts seen)
+    if (!chatWatches.length || chatWatches.some(([key]) => !this.lastLines.has(key) && !this.savedLineHashes.has(key))) return false;
+    // what its Chat watches show now, and every message they showed in the last 24 h (as text, or as hashes from before a restart)
+    const shown = [...chatWatches.flatMap(([key]) => chatTexts(this.lastLines.get(key) ?? [])), ...(this.seenChat.get(botId)?.keys() ?? [])];
+    const write = vmChatPostOf(text, this.now(), shown, this.seenChatHashes.get(botId));
     if (write) this.noteSelfWrite(botId, write);
     return write !== null;
   }

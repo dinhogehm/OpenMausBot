@@ -43,6 +43,7 @@
 //   message whose whole text, @mentions aside, is it.
 // Nothing assumes which page is open. Everything else typed through the VM
 // (a URL, a mention, a search, a Status) is not recognised and wakes the bot.
+import { createHash } from "node:crypto";
 
 export type WatchKind = "issues" | "chat" | "sheets";
 
@@ -161,15 +162,23 @@ export function selfWriteOf(command: string, at: number): SelfWrite | null {
   return null;
 }
 
+/** The hash a message's start is kept under across restarts (its first
+ * TEXT_MARK_MAX characters, normalised, @mentions aside). */
+export function chatStartHash(start: string): string {
+  return createHash("sha256").update(start.slice(0, TEXT_MARK_MAX)).digest("hex").slice(0, 16);
+}
+
 /** The Chat post the bot put on the VM's clipboard to paste (see the
  * header). `shown`: the TEXT of every message in the bot's Chat watches'
  * last output — a text already there is a copy of someone's message. */
-export function vmChatPostOf(clipboard: string, at: number, shown: readonly string[]): SelfWrite | null {
+export function vmChatPostOf(clipboard: string, at: number, shown: readonly string[], shownStarts?: { has(hash: string): boolean }): SelfWrite | null {
   if (/^\s*https?:\/\/\S+\s*$/.test(clipboard)) return null;
   const body = normalize(withoutLeadingMentions(clipboard));
   if (body.length < TEXT_MARK_MAX) return null;
   const start = body.slice(0, TEXT_MARK_MAX);
   if (shown.some((text) => normalize(withoutLeadingMentions(text)).includes(start))) return null;
+  // messages seen before a restart are kept only as the hash of their start (chatStartHash): no client text on disk
+  if (shownStarts?.has(chatStartHash(start))) return null;
   return { at, kind: "chat", marks: [start], body, via: "vm" };
 }
 

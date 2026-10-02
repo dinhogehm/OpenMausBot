@@ -562,7 +562,14 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     // past the echo window the post is forgotten; and lines of another output never come back
     const file = join(dir, "bot-autonomy.echo.json");
     const saved = JSON.parse(readFileSync(file, "utf8"));
-    expect(Object.keys(saved.lastLines)).toHaveLength(1);
+    expect(Object.keys(saved.lastLineHashes)).toHaveLength(1);
+    // INSP-J r1 #12: no client text on disk — the Chat's lines and message starts are hashes
+    const onDisk = readFileSync(file, "utf8");
+    for (const line of chat.slice(1)) {
+      const text = (line.split("\t")[3] ?? "").slice(0, 20);
+      if (text.length >= 8) expect(onDisk).not.toContain(text);
+    }
+    expect(Object.keys(saved)).toEqual(["selfWrites", "seenChatHashes", "lastLineHashes"]);
     now += 16 * 60_000;
     const later = make();
     expect(JSON.parse(readFileSync(file, "utf8")).selfWrites.monitor).toHaveLength(1); // on disk until the next save
@@ -577,7 +584,32 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify(ledger));
     const moved = make();
     moved.noteSelfWrite("monitor", { at: now, kind: "chat", marks: ["x"], via: "shell" });
-    expect(JSON.parse(readFileSync(file, "utf8")).lastLines).toEqual({});
+    expect(JSON.parse(readFileSync(file, "utf8")).lastLineHashes).toEqual({});
+  });
+
+  // INSP-J r1 #12: the real spreadsheet watch (~108 000 characters) never fit
+  // the 40 000 kept as text, so the watch that echoes most had no memory
+  it("keeps a spreadsheet run past 40 000 characters as hashes, and the bot's own note after a restart is an echo", () => {
+    const sheet = readFileSync(new URL("./testing/fixtures/gog-sheets-plain.txt", import.meta.url), "utf8").trim().split("\n");
+    expect(sheet.join("\n").length).toBeGreaterThan(40_000);
+    const row = sheet.findLastIndex((line) => line.startsWith("  Oqvnflfa  Neewdoa    Pendente"));
+    const ownMark = botMarkPattern("Monitor Chat Atendimento", "monitor-chat-atendimento");
+    const run = (lines: string[], fingerprint: string) => ({ ok: true, output: lines.join("\n").slice(0, 20_000), truncated: true, matched: false, fingerprint, lines, linesComplete: true, ownMark });
+    const first = make();
+    const wake = first.setWatch("monitor", "thread-planilha", { ...base, command: "gog sheets get SHEET_ID Atendimento!A1:H400 --plain", argv: ["gog", "sheets", "get", "SHEET_ID", "Atendimento!A1:H400", "--plain"], standing: true, label: "planilha", baseline: "x", baselineFingerprint: "a" });
+    first.recordWatchRun(wake, run(sheet, "a"));
+    first.rearmStanding(wake);
+    const note = " | [Monitor Chat Atendimento] 02/10 16:10 BRT: sessão aberta";
+    expect(first.noteVmClipboard("monitor", note, ownMark)).toBe(true);
+    const onDisk = readFileSync(join(dir, "bot-autonomy.echo.json"), "utf8");
+    expect(onDisk).not.toContain("Oqvnflfa");
+    // the server restarts; the note shows in the row: an echo, nobody woken
+    const restarted = make();
+    const again = restarted.standingFor("thread-planilha", "planilha")!;
+    now += 60_000;
+    const noted = sheet.map((line, i) => (i === row ? `${line}${note}` : line));
+    expect(restarted.recordWatchRun(again, run(noted, "b"))).toBeNull();
+    expect(again.watch!.echo?.reasons).toEqual(["nota que o bot escreveu, acrescentada igual"]);
   });
 
   it("keeps the echo memory bounded on disk", () => {
@@ -594,10 +626,11 @@ describe("watches that see nothing new, cut outputs and duplicates", () => {
     }
     for (let i = 0; i < 30; i += 1) autonomy.noteSelfWrite("monitor", { at: now, kind: "chat", marks: [`post ${i}`], via: "shell" });
     const saved = JSON.parse(readFileSync(join(dir, "bot-autonomy.echo.json"), "utf8"));
-    expect(saved.seenChat.monitor.length).toBe(ECHO_SEEN_PERSIST_MAX);
+    expect(saved.seenChatHashes.monitor.length).toBe(ECHO_SEEN_PERSIST_MAX);
     expect(saved.selfWrites.monitor).toHaveLength(20);
-    // 500 lines of ~90 characters exceed ECHO_LINES_PERSIST_MAX: not written
-    expect(saved.lastLines).toEqual({});
+    // the run, as 501 hashes of 10 hex characters: no message text
+    expect(Object.values(saved.lastLineHashes as Record<string, { hashes: string[] }>)[0]!.hashes).toHaveLength(501);
+    expect(JSON.stringify(saved)).not.toContain("mensagem número");
   });
 
   it("follows the real VM sequence of a Chat post: the pasted body is the bot's, a mention or a URL is not, a copied client message is not (INSP-E r3 4)", () => {
