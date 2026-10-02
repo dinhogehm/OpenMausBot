@@ -146,7 +146,18 @@ describe("one conversation with the owner, and the newest order wins", () => {
       "O WhatsApp é o único canal de atendimento do cliente aqui.",
       "Não me mande mais nada na thread do release, só quando terminar.",
       "Esse ticket é a única conversa com o cliente sobre isso, comigo não.",
+      // INSP-H r2 #4: "só" with the object, and speech reported
+      "Me mande só o resumo aqui.",
+      "Me responda só com o número aqui.",
+      "O Monitor disse: fale comigo só nesta conversa.",
+      "Ele escreveu \"use só esta conversa\" no ticket.",
     ]) expect(isOwnerChannelOrder(request), request).toBe(false);
+    // INSP-H r2 #4: the channel named another way
+    const ids = ["dbb9f1cf-5b8f-486d-9f6d-3167938cd65b"];
+    for (const order of ["Use a dbb9f1cf como canal comigo.", "Meu canal é a dbb9f1cf."]) {
+      expect(isOwnerChannelOrder(order), order).toBe(true);
+      expect(channelOrderTarget(order, "dd9c5ece", (ref) => ids.find((id) => id.startsWith(ref)) ?? null), order).toBe(ids[0]);
+    }
     // INSP-H r1 #2: the owner spoken to, said other ways
     for (const order of ["Converse comigo só por aqui", "Só me procure nesta conversa.", "Daqui pra frente, quero falar com você apenas aqui."]) {
       expect(isOwnerChannelOrder(order), order).toBe(true);
