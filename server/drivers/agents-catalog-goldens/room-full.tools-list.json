@@ -1067,7 +1067,7 @@
     },
     {
       "name": "owner_pending",
-      "description": "List what waits on the person (a decision, an approval, an answer only they have) in \"Precisa de você\"; each item opens as a step-by-step screen. add one item per thing instead of ending replies with \"continua com você…\", in pt-BR: title starting with the verb (never just a mention), why, steps with the exact command or link, options when it is a choice (a click sends you its reply here and resolves it). update rewrites an item (answer a request for steps with it); resolve when settled; list. Not for rooms.",
+      "description": "List what waits on the person (a decision, an approval, an answer only they have) in \"Precisa de você\"; each item opens as a step-by-step screen. add one item per thing instead of ending replies with \"continua com você…\", in pt-BR: title starting with the verb (never just a mention), why, steps with the exact command or link, options when it is a choice (a click sends you its reply here and resolves it). With 2 or more options, ALWAYS mark the one you recommend: recommended: true on exactly one, with why (one sentence). update rewrites an item (answer a request for steps with it); resolve when settled; list. Not for rooms.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1130,7 +1130,7 @@
           "options": {
             "type": "array",
             "maxItems": 4,
-            "description": "Optional decisions (\"Aprovar\"/\"Recusar\"); [] clears.",
+            "description": "Optional decisions (\"Aprovar\"/\"Recusar\"); [] clears. With 2+, one has recommended: true and why.",
             "items": {
               "type": "object",
               "additionalProperties": false,
@@ -1142,6 +1142,15 @@
                 "reply": {
                   "type": "string",
                   "maxLength": 500
+                },
+                "recommended": {
+                  "type": "boolean",
+                  "description": "The one you recommend (exactly one when there are 2+ options)."
+                },
+                "why": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "description": "With recommended: why it is the best, one sentence."
                 }
               },
               "required": [

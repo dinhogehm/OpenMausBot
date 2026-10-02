@@ -185,7 +185,7 @@ export function powerStep(watch: PowerWatchState, power: PowerState, now: number
 
 /** The owner's "plug the Mac in" item, born practical (R10-visual N13): why,
  * what to do, and that it closes by itself on the wall. */
-export function powerPendingDetails(releaseRunning: boolean): { due: string; why: string; steps: Array<{ text: string }>; options: Array<{ label: string; reply: string }> } {
+export function powerPendingDetails(releaseRunning: boolean): { due: string; why: string; steps: Array<{ text: string }>; options: Array<{ label: string; reply: string; recommended?: true; why?: string }> } {
   return {
     // the most urgent item: first in "Prazo" (INSP-J r1 #14)
     due: "agora",
@@ -194,7 +194,10 @@ export function powerPendingDetails(releaseRunning: boolean): { due: string; why
       { text: "Ligue o carregador no Mac (ou o no-break na tomada)." },
       { text: "Pronto: o servidor vê a tomada e fecha este item sozinho." },
     ],
-    options: [{ label: "Vou deixar na bateria", reply: "Vou deixar o Mac na bateria por enquanto. Não comece nada longo (CI, carrier) até eu ligar na tomada." }],
+    options: [
+      { label: "Liguei na tomada", reply: "Liguei o Mac na tomada.", recommended: true, why: "Na tomada nada longo morre no meio, e o servidor fecha este item sozinho." },
+      { label: "Vou deixar na bateria", reply: "Vou deixar o Mac na bateria por enquanto. Não comece nada longo (CI, carrier) até eu ligar na tomada." },
+    ],
   };
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { askCoveredByItem, echoAsk, ownerAskText, OWNER_PENDING_TITLE_MAX } from "./bot-autonomy.ts";
+import { askCoveredByItem, echoAsk, ownerAskText, OWNER_PENDING_TITLE_MAX, ownerPendingRecommendNote, parseOwnerPendingDetails, RECOMMEND_MISSING } from "./bot-autonomy.ts";
+import { availableTools, catalogProfileFromEnv } from "./drivers/agents-catalog.ts";
 import { reusedFolderRefusal } from "./claude-desktop.ts";
 import { APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appUnblockPending } from "./owner-chips.ts";
 import { powerPendingDetails } from "./power.ts";
@@ -70,6 +71,40 @@ describe("the lines of \"Precisa de você\" that say nothing of their own", () =
     expect(ownerAskText(REAL, 200, BOTS)).toBe("A sessão da #9058 está pronta para o gate, mas o timeout do pre-push depende de uma decisão sua: 10 min ou sem limite?");
     // a sentence that only starts with a capital word and a comma is not a vocative
     expect(ownerAskText("Pronto, posso seguir com o carrier?", 200, BOTS)).toBe("Pronto, posso seguir com o carrier?");
+  });
+});
+
+// J16 (the owner, 02/10): four decisions and nothing said which was best
+describe("the recommended decision", () => {
+  const four = [
+    { label: "Sem limite + esperar", reply: "Sem limite; espere o gate." },
+    { label: "Sem limite + update-branch", reply: "Sem limite; atualize a branch.", recommended: true, why: "Destrava o gate hoje." },
+    { label: "Sem limite + timeout maior", reply: "Sem limite; aumente o timeout." },
+    { label: "Outro prazo padrão", reply: "Use outro prazo padrão." },
+  ];
+
+  it("is at most one, always with why; a missing one is said to the bot", () => {
+    const ok = parseOwnerPendingDetails({ options: four });
+    expect(ok).toMatchObject({ ok: true });
+    expect(ok.ok && ok.options?.[1]).toEqual({ label: "Sem limite + update-branch", reply: "Sem limite; atualize a branch.", recommended: true, why: "Destrava o gate hoje." });
+    expect(ok.ok && ok.options?.[0]).toEqual({ label: "Sem limite + esperar", reply: "Sem limite; espere o gate." });
+    expect(parseOwnerPendingDetails({ options: four.map((each) => ({ ...each, recommended: true, why: "x" })) })).toEqual({ ok: false, error: "no máximo UMA opção recomendada: marque recommended só na melhor" });
+    expect(parseOwnerPendingDetails({ options: [{ label: "A", reply: "a", recommended: true }, { label: "B", reply: "b" }] })).toMatchObject({ ok: false, error: expect.stringContaining("precisa de why") });
+    // the tool asks for it
+    const tool = availableTools(catalogProfileFromEnv({})).find((each) => each.name === "owner_pending")!;
+    expect(tool.description).toContain("ALWAYS mark the one you recommend");
+    expect(RECOMMEND_MISSING).toContain("recommended: true e why");
+    expect(ownerPendingRecommendNote({ id: "o9" })).toContain("recommended: true em UMA delas");
+  });
+
+  it("the server's own items are born with it", () => {
+    const FULL = "d5bb1f70bea397bdd937d02148c685e406985ba0";
+    for (const item of [appUnblockPending("nuria-platform"), releaseLoopPending({ short: "d5bb1f70b", full: FULL, count: 4 }), powerPendingDetails(false), tagAdvancePending(FULL, null)]) {
+      const picks = item.options.filter((option) => option.recommended);
+      expect(picks).toHaveLength(1);
+      expect(picks[0]!.why!.length).toBeGreaterThan(20);
+      expect(parseOwnerPendingDetails({ options: item.options })).toMatchObject({ ok: true });
+    }
   });
 });
 

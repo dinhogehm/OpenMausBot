@@ -268,6 +268,9 @@ import {
   ownerPendingReplyText,
   ownerPendingStepsRequestText,
   ownerPendingStepsRequestNote,
+  ownerPendingRecommendNote,
+  ownerPendingRecommendText,
+  RECOMMEND_MISSING,
   parseOwnerPendingDetails,
   NEEDS_INPUT_EXPIRE_MS,
   parseWakeInput,
@@ -9539,6 +9542,7 @@ threadSignals = (threadId) => {
     id: item.id, title: item.title, since: item.createdAt, ...(item.due ? { due: item.due } : {}), ...(item.link ? { link: item.link } : {}), ...(item.command ? { command: item.command } : {}),
     ...(item.why ? { why: item.why } : {}), ...(item.steps?.length ? { steps: item.steps } : {}), ...(item.options?.length ? { options: item.options } : {}),
     ...(item.stepsRequestedAt ? { stepsRequestedAt: item.stepsRequestedAt } : {}),
+    ...(item.recommendRequestedAt ? { recommendRequestedAt: item.recommendRequestedAt } : {}),
   }));
   return {
     ...(watches.length ? { watches } : {}),
@@ -18919,6 +18923,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           item.steps?.length ? `${item.steps.length} passo${item.steps.length === 1 ? "" : "s"}` : "",
           item.options?.length ? `decisões: ${item.options.map((option) => option.label).join(" / ")}` : "",
         ].filter(Boolean).join("; ");
+        // 2+ decisions with none marked: the bot hears it (J16), the item is kept as sent
+        const recommendMissing = (item: OwnerPending) => ((item.options?.length ?? 0) >= 2 && !item.options!.some((option) => option.recommended) ? `${RECOMMEND_MISSING} ` : "");
         const details = parseOwnerPendingDetails({ why: body.why, steps: body.steps, options: body.options });
         if (!details.ok && (body.action === "add" || body.action === "update")) return json(res, 400, { error: details.error });
         const structured = details.ok ? { ...(details.why !== undefined ? { why: details.why } : {}), ...(details.steps !== undefined ? { steps: details.steps } : {}), ...(details.options !== undefined ? { options: details.options } : {}) } : {};
@@ -18933,7 +18939,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           }
           refreshBotRow(bot.id);
           const shape = practical(item);
-          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}. ${item.steps?.length ? "" : `Sem passos, a pessoa não sabe por onde começar: complete com owner_pending update id ${item.id} (why, steps, options). `}Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
+          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}. ${item.steps?.length ? "" : `Sem passos, a pessoa não sabe por onde começar: complete com owner_pending update id ${item.id} (why, steps, options). `}${recommendMissing(item)}Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
         }
         if (body.action === "update") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -18946,7 +18952,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           refreshBotRow(bot.id);
           const shape = practical(item);
-          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.` });
+          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}. ${recommendMissing(item)}`.trim() });
         }
         if (body.action === "resolve") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -18958,7 +18964,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
         if (body.action === "list") {
           const open = autonomy.ownerPendingOf(bot.id);
-          const state = (item: OwnerPending) => item.stepsRequestedAt ? " (a pessoa pediu o passo a passo: owner_pending update)" : item.steps?.length ? "" : " (sem passos)";
+          const state = (item: OwnerPending) => `${item.stepsRequestedAt ? " (a pessoa pediu o passo a passo: owner_pending update)" : item.steps?.length ? "" : " (sem passos)"}${item.recommendRequestedAt ? " (a pessoa pediu a sua recomendação: owner_pending update com recommended e why)" : (item.options?.length ?? 0) >= 2 && !item.options!.some((option) => option.recommended) ? " (sem recomendada)" : ""}`;
           return json(res, 200, { message: open.length ? open.map((item) => `${line(item)}${state(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}`).join("\n") : "Nada esperando a pessoa." });
         }
         return json(res, 400, { error: "action deve ser add, update, resolve ou list" });
@@ -22595,6 +22601,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (body.ask === "steps") {
         text = ownerPendingStepsRequestText(item);
         resolve = false;
+      } else if (body.ask === "recommend") {
+        // an item with decisions and none recommended: the bot is asked which, and why (J16)
+        if ((item.options?.length ?? 0) < 2) return json(res, 400, { error: "Este item não tem decisões para recomendar." });
+        text = ownerPendingRecommendText(item, bot.name);
+        resolve = false;
       } else if (body.option !== undefined) {
         // the decision the person SAW: its position and its label, so a bot
         // that reordered or rewrote the options meanwhile never gets another
@@ -22626,14 +22637,16 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (notThere) return json(res, 403, { error: notThere });
         text = routedReplyText(text, item, store.taskByThread(bot.id, item.threadId)?.title ?? item.threadId.slice(0, 8));
       }
-      if (body.ask === "steps") {
+      if (body.ask === "steps" || body.ask === "recommend") {
         // the person's words in the conversation; the tool call the bot must
         // make rides only in its prompt, as a note — never as the person's
         // speech (INSP-I r1 #6). Queued, then drained: it runs now when the
         // conversation is free, or after the running turn.
-        const prompt = promptWithReply(`${text}\n\n${ownerPendingStepsRequestNote(item)}`, undefined, cfg.profile?.name?.trim() || "User");
+        const note = body.ask === "recommend" ? ownerPendingRecommendNote(item) : ownerPendingStepsRequestNote(item);
+        const prompt = promptWithReply(`${text}\n\n${note}`, undefined, cfg.profile?.name?.trim() || "User");
         queueSteeredMessage(bot.id, target, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
-        autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
+        if (body.ask === "recommend") autonomy.markOwnerPendingRecommendRequested(bot.id, item.id);
+        else autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
         refreshBotRow(bot.id);
         drainQueuedSends();
         return json(res, 202, { ok: true, threadId: target, resolved: 0 });

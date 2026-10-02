@@ -151,7 +151,7 @@ export function releaseRetryText(input: { halted: boolean; cycleMs: number | nul
  * and the steps, so the resolution screen is never just a title (R10-visual
  * N13). The title carries the count and the measured cycle: a new failure
  * only refreshes it (R10-followup #4). */
-export function releaseLoopPending(input: { short: string; full: string | null; count: number; cycleMs?: number | null }): { title: string; key: string; command: string; why: string; steps: Array<{ text: string; command?: string }>; options: Array<{ label: string; reply: string }> } {
+export function releaseLoopPending(input: { short: string; full: string | null; count: number; cycleMs?: number | null }): { title: string; key: string; command: string; why: string; steps: Array<{ text: string; command?: string }>; options: Array<{ label: string; reply: string; recommended?: true; why?: string }> } {
   const short = input.short.slice(0, 9);
   const command = input.full
     ? `echo ${input.full} > ~/.nuria/declined-production-release.sha`
@@ -169,7 +169,7 @@ export function releaseLoopPending(input: { short: string; full: string | null; 
       { text: "Pronto: o servidor vê o arquivo, fecha este item e o próximo commit da main entra no lugar. Nada mais a fazer." },
     ],
     options: [
-      { label: "Já gravei a recusa", reply: `Gravei a recusa do ${short} (declined-production-release.sha). Confira que o watcher passou ao próximo commit.` },
+      { label: "Já gravei a recusa", reply: `Gravei a recusa do ${short} (declined-production-release.sha). Confira que o watcher passou ao próximo commit.`, recommended: true as const, why: "Falhou várias vezes pela mesma causa: recusar libera a fila e deixa o próximo commit, com a correção, entrar." },
       { label: "Deixar tentar", reply: `Não recuse o ${short}: deixe o watcher tentar. Só me avise de novo se a causa da falha mudar.` },
     ],
   };
@@ -424,7 +424,7 @@ export function tagAdvancePendingTitle(releasedSha: string, commandInItem = fals
 /** The whole item for a stuck tag, born practical (R10-visual N13): why it
  * matters, the manual advance the release printed (the owner's, never a
  * bot's: it is a force push past the ruleset) and that it closes itself. */
-export function tagAdvancePending(releasedSha: string, manual: string | null): { title: string; key: string; why: string; steps: Array<{ text: string; command?: string }>; command?: string } {
+export function tagAdvancePending(releasedSha: string, manual: string | null): { title: string; key: string; why: string; steps: Array<{ text: string; command?: string }>; options: Array<{ label: string; reply: string; recommended?: true; why?: string }>; command?: string } {
   const sha = releasedSha.trim();
   return {
     title: tagAdvancePendingTitle(sha, Boolean(manual)),
@@ -435,6 +435,10 @@ export function tagAdvancePending(releasedSha: string, manual: string | null): {
         ? { text: "No Terminal, dentro do clone de nuria-platform e com uma conta que tem bypass do ruleset, rode o avanço que o release imprimiu:", command: manual }
         : { text: `Com uma conta que tem bypass do ruleset, avance a tag nuria-production-deployed para ${sha.slice(0, 9)} (o comando exato está no log do servidor, linha [release] … manual advance).` },
       { text: "Pronto: o servidor vê a tag contendo o commit e fecha este item sozinho; os vigias avisam as entregas." },
+    ],
+    options: [
+      { label: "Avancei a tag", reply: `Avancei a tag nuria-production-deployed para ${sha.slice(0, 9)}. Confira e siga com os avisos de entrega.`, recommended: true, why: "Sem a tag no commit em produção, nenhum cliente é avisado da entrega." },
+      { label: "Não tenho o bypass", reply: `Não tenho bypass do ruleset para avançar a tag para ${sha.slice(0, 9)}: diga quem tem e o que pedir.` },
     ],
     ...(manual ? { command: manual } : {}),
   };

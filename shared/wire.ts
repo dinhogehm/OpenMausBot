@@ -151,9 +151,11 @@ export interface WireOwnerPending {
   /** What to do, in order; a step may carry its exact command or a link. */
   steps?: Array<{ text: string; command?: string; link?: string }>;
   /** A choice: each option's label is a button, its reply what the bot receives. */
-  options?: Array<{ label: string; reply: string }>;
+  options?: Array<{ label: string; reply: string; recommended?: true; why?: string }>;
   /** The person asked the bot for the steps, and the bot has not rewritten it yet. */
   stepsRequestedAt?: number;
+  /** The person asked the bot which decision it recommends, and it has not answered with an update yet. */
+  recommendRequestedAt?: number;
 }
 
 export interface WireTask {

@@ -98,6 +98,12 @@ it("keeps the owner's 'seguir no terminal' on the unblock-the-app item for 24 h"
     closeSync(log);
     await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
     const before = Date.now();
+    // J16c: first ask the bot which one it recommends — the item stays, marked as asked
+    const asked = await api(`/api/bots/${chief.id}/owner-pending/o8/reply`, { ask: "recommend" });
+    expect(asked).toMatchObject({ ok: true, resolved: 0 });
+    await expect.poll(() => JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")).ownerPending?.[0]?.recommendRequestedAt ?? 0, { timeout: 10_000 }).toBeGreaterThanOrEqual(before);
+    const wire = ((await api("/api/bots", undefined, "GET")).bots as any[]).find((each) => each.id === chief.id).tasks.flatMap((task: any) => task.ownerPending ?? []);
+    expect(wire[0].recommendRequestedAt).toBeGreaterThanOrEqual(before);
     const answer = await api(`/api/bots/${chief.id}/owner-pending/o8/reply`, { option: 1, label: "Seguir no terminal" });
     expect(answer.resolved).toBe(1);
     const declines = JSON.parse(readFileSync(join(dataDir, "owner-declines.json"), "utf8"));

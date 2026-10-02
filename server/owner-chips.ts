@@ -69,7 +69,7 @@ export const appUnblockPending = (repoName: string) => ({
     { text: "Pronto: com a sessão mais nova na raiz, o servidor volta a abrir sessões no app e fecha este item sozinho. Depois você pode arquivar essa sessão." },
   ],
   options: [
-    { label: "Feito, conferir", reply: `Abri no app uma sessão na raiz de ${repoName}, com a worktree desligada, e enviei uma mensagem. Confira se o app voltou a aceitar sessões novas.` },
+    { label: "Feito, conferir", reply: `Abri no app uma sessão na raiz de ${repoName}, com a worktree desligada, e enviei uma mensagem. Confira se o app voltou a aceitar sessões novas.`, recommended: true as const, why: "Leva um minuto e as sessões dos bots voltam a aparecer no app, onde você as acompanha." },
     { label: APP_UNBLOCK_DECLINE_LABEL, reply: `Não vou destravar o app agora: siga com as sessões de ${repoName} no terminal. O servidor não me pede isso de novo nas próximas 24 h.` },
   ],
 });

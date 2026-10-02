@@ -227,6 +227,8 @@ export interface OwnerPending {
   options?: OwnerPendingOption[];
   /** The person asked the bot to rewrite it with steps (the bot's update clears it). */
   stepsRequestedAt?: number;
+  /** The person asked the bot which decision it recommends (the bot's update clears it). */
+  recommendRequestedAt?: number;
   /** Last time the bot rewrote it (owner_pending update). */
   updatedAt?: number;
 }
@@ -238,8 +240,12 @@ export interface OwnerPendingStep {
 export interface OwnerPendingOption {
   label: string;
   reply: string;
+  /** The bot's pick among the decisions (at most one per item), with why in one sentence. */
+  recommended?: true;
+  why?: string;
 }
 export const OWNER_PENDING_TITLE_MAX = 200;
+export const OWNER_PENDING_OPTION_WHY_MAX = 200;
 export const OWNER_PENDING_WHY_MAX = 400;
 export const OWNER_PENDING_STEPS_MAX = 8;
 export const OWNER_PENDING_STEP_MAX = 300;
@@ -295,10 +301,34 @@ export function parseOwnerPendingDetails(input: { why?: unknown; steps?: unknown
       if (!label || !reply) return { ok: false, error: `a opção ${index + 1} precisa de label (o botão, ex. "Aprovar") e reply (o que você recebe quando a pessoa escolhe)` };
       if (label.length > OWNER_PENDING_OPTION_LABEL_MAX) return { ok: false, error: `o label da opção ${index + 1} passa de ${OWNER_PENDING_OPTION_LABEL_MAX} caracteres: use um verbo curto ("Aprovar", "Recusar")` };
       if (out.options.some((each) => each.label.toLowerCase() === label.toLowerCase())) return { ok: false, error: `duas opções com o label "${label}"` };
-      out.options.push({ label, reply: reply.slice(0, OWNER_PENDING_OPTION_REPLY_MAX) });
+      const recommended = option?.recommended === true || option?.recommended === "true";
+      const why = option && typeof option.why === "string" ? oneLine(option.why).slice(0, OWNER_PENDING_OPTION_WHY_MAX) : "";
+      if (recommended && !why) return { ok: false, error: `a opção recomendada ("${label}") precisa de why: em uma frase, por que é a melhor` };
+      out.options.push({ label, reply: reply.slice(0, OWNER_PENDING_OPTION_REPLY_MAX), ...(recommended ? { recommended: true as const, why } : {}) });
     }
+    if (out.options.filter((each) => each.recommended).length > 1) return { ok: false, error: "no máximo UMA opção recomendada: marque recommended só na melhor" };
   }
   return { ok: true, ...out };
+}
+
+/** The decisions put the recommended one first (the person reads it first,
+ * and its color says so); the rest keep the bot's order. */
+export function recommendedFirst<T extends { recommended?: true }>(options: readonly T[]): T[] {
+  return [...options.filter((each) => each.recommended), ...options.filter((each) => !each.recommended)];
+}
+
+/** What the bot hears when it offers 2+ decisions with none marked (J16). */
+export const RECOMMEND_MISSING = "Nenhuma opção está marcada como recomendada: com 2 ou mais decisões, marque a melhor com recommended: true e why (uma frase dizendo por que), com owner_pending update.";
+
+/** What only the bot reads when the person asks, from "Precisa de você",
+ * which decision it recommends (the turn's prompt, never the transcript). */
+export function ownerPendingRecommendNote(item: Pick<OwnerPending, "id">): string {
+  return `[Nota do OpenMausBot, não escrita pela pessoa] A pessoa abriu a pendência ${item.id} em "Precisa de você" e pediu a sua recomendação. Reescreva as options com owner_pending update, id ${item.id}: as mesmas decisões, com recommended: true em UMA delas (a que você escolheria) e why (uma frase: por que é a melhor). Responda à pessoa em uma frase.`;
+}
+
+/** The person's words for that request. */
+export function ownerPendingRecommendText(item: Pick<OwnerPending, "title">, botName: string): string {
+  return `${botName}, qual destas decisões você recomenda para «${item.title}», e por quê?`;
 }
 
 /** A saved item's structured part, read back defensively (an older ledger
@@ -1166,6 +1196,7 @@ export class BotAutonomy {
       else delete next.options;
     }
     delete next.stepsRequestedAt;
+    if (patch.options !== undefined) delete next.recommendRequestedAt;
     this.ownerPending = this.ownerPending.map((open) => (open === item ? next : open));
     this.save();
     return next;
@@ -1177,6 +1208,14 @@ export class BotAutonomy {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
     item.stepsRequestedAt = this.now();
+    this.save();
+    return item;
+  }
+
+  markOwnerPendingRecommendRequested(botId: string, id: string): OwnerPending | null {
+    const item = this.ownerPendingById(botId, id);
+    if (!item) return null;
+    item.recommendRequestedAt = this.now();
     this.save();
     return item;
   }
