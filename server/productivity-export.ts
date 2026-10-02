@@ -501,7 +501,8 @@ function table(doc: PdfDoc, input: { columns: Array<{ label: string; width: numb
 }
 
 function heading(doc: PdfDoc, text: string): void {
-  doc.ensure(40);
+  // a heading keeps at least its first rows with it (no orphan at a page foot)
+  doc.ensure(96);
   doc.y += 6;
   doc.text(doc.margin, doc.y + 12, text, { size: 12.5, bold: true });
   doc.y += 22;

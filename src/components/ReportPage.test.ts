@@ -150,5 +150,6 @@ describe("pieces", () => {
     expect(niceScale(37)).toEqual({ ceiling: 40, step: 10 });
     expect(niceScale(223)).toEqual({ ceiling: 250, step: 50 });
     expect(niceScale(5)).toEqual({ ceiling: 5, step: 1 });
+    expect(niceScale(13)).toEqual({ ceiling: 15, step: 5 });
   });
 });

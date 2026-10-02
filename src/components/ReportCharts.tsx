@@ -31,7 +31,8 @@ export function niceScale(max: number): { ceiling: number; step: number } {
   // at most five steps: 223 → 0…250 by 50, not 0…300 by 100
   const rough = max / 5;
   const magnitude = Math.pow(10, Math.floor(Math.log10(rough)));
-  const step = [1, 2, 2.5, 5, 10].map((factor) => factor * magnitude).find((candidate) => candidate >= rough)!;
+  // 1-2-5 steps: counts never get a fractional tick ("2,5" read as "3")
+  const step = [1, 2, 5, 10].map((factor) => factor * magnitude).find((candidate) => candidate >= rough)!;
   return { ceiling: Math.ceil(max / step) * step, step };
 }
 
