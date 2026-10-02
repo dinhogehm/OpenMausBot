@@ -8,7 +8,7 @@
 // WinAnsi, one Flate stream per page): no dependency, deterministic output.
 import { deflateSync } from "node:zlib";
 import {
-  REPORT_TZ, trend, zonedParts,
+  releaseComparable, REPORT_TZ, trend, zonedParts,
   type Distribution, type Granularity, type ProductivityReport, type ReportBucket, type ReportKpis,
 } from "../shared/productivity.ts";
 
@@ -94,28 +94,30 @@ export function executiveSummary(report: ProductivityReport, lang: SummaryLang =
   const oldest = b.oldestOpen ? (pt ? `; a mais antiga, #${b.oldestOpen.number}, tem ${formatDuration(report.generatedAt - b.oldestOpen.createdAt, lang)}` : `; the oldest, #${b.oldestOpen.number}, is ${formatDuration(report.generatedAt - b.oldestOpen.createdAt, lang)} old`) : "";
   const n = (value: number, one: string, many: string) => `${formatNumber(value, lang)} ${value === 1 ? one : many}`;
   const blocked = k.blockedMs > 0 ? formatDuration(k.blockedMs, lang) : "0 h";
-  const active = k.activeMs > 0 ? formatDuration(k.activeMs, lang) : "0 min";
+  // without a single timed turn the active time is unknown, not zero: left out
+  const activeText = k.timedTurns === 0 ? "" : `, ${k.activeMs > 0 ? formatDuration(k.activeMs, lang) : "0 min"} ${pt ? "ativos" : "active"}`;
   const resolved = k.closedIssues - k.closedNotPlanned;
   const previousResolved = p.closedIssues - p.closedNotPlanned;
-  // production numbers of a previous period no release source covers are unknown, not zero
-  const noPrevious = report.coverage.releaseCoverage?.previous === "none";
-  const rp = (value: number) => (noPrevious ? null : value);
+  // production numbers compare only when a release source covers both periods completely
+  const noPrevious = !releaseComparable(report);
+  /** A production trend, or the plain fact that there is no comparable base. */
+  const releaseTrend = (current: number, previous: number) => (noPrevious ? (pt ? "sem base comparável" : "no comparable base") : trendText(current, previous, lang));
   const leadTrend = k.leadIssueToProd.n && p.leadIssueToProd.n && !noPrevious;
   if (pt) {
     return [
-      `Produção: ${n(k.deliveries, "entrega", "entregas")} (${trendText(k.deliveries, rp(p.deliveries))}), com ${n(k.deliveredPrs, "PR", "PRs")} e ${n(k.deliveredIssues, "issue", "issues")} no ar${coverageNote}.`,
+      `Produção: ${n(k.deliveries, "entrega", "entregas")} (${releaseTrend(k.deliveries, p.deliveries)}), com ${n(k.deliveredPrs, "PR", "PRs")} e ${n(k.deliveredIssues, "issue", "issues")} no ar${coverageNote}.`,
       `Vazão: ${n(k.mergedPrs, "PR mergeada", "PRs mergeadas")} (${trendText(k.mergedPrs, p.mergedPrs)}) e ${n(resolved, "issue resolvida", "issues resolvidas")} (${trendText(resolved, previousResolved)}), ${n(k.closedByType.bug, "bug", "bugs")} e ${formatNumber(k.closedByPriority.p0 + k.closedByPriority.p1)} P0/P1.`,
       `Lead time issue → produção: ${lead(k.leadIssueToProd, lang)}${leadTrend ? `; mediana ${trendText(k.leadIssueToProd.median, p.leadIssueToProd.median, lang, "duration")}` : ""}.`,
       `Backlog agora: ${n(b.openIssues, "issue aberta", "issues abertas")}, ${formatNumber(b.openP0 + b.openP1)} P0/P1${oldest}; ${n(b.prsAwaitingGate, "PR esperando", "PRs esperando")} o gate.`,
-      `Falhas: ${n(k.failedReleases, "tentativa de release falhou", "tentativas de release falharam")} (${trendText(k.failedReleases, rp(p.failedReleases))}), ${n(k.declinedReleases, "recusada", "recusadas")}; produção travada ${blocked}. Bots: ${n(k.turns, "turno", "turnos")}, ${active} ativos${k.costUsd !== null ? `, ${formatMoney(k.costUsd)}` : ""}.`,
+      `Falhas: ${n(k.failedReleases, "tentativa de release falhou", "tentativas de release falharam")} (${releaseTrend(k.failedReleases, p.failedReleases)}), ${n(k.declinedReleases, "recusada", "recusadas")}; produção travada ${blocked}. Bots: ${n(k.turns, "turno", "turnos")}${activeText}${k.costUsd !== null ? `, ${formatMoney(k.costUsd)}` : ""}.`,
     ];
   }
   return [
-    `Production: ${n(k.deliveries, "delivery", "deliveries")} (${trendText(k.deliveries, rp(p.deliveries), lang)}), carrying ${n(k.deliveredPrs, "PR", "PRs")} and ${n(k.deliveredIssues, "issue", "issues")} live${coverageNote}.`,
+    `Production: ${n(k.deliveries, "delivery", "deliveries")} (${releaseTrend(k.deliveries, p.deliveries)}), carrying ${n(k.deliveredPrs, "PR", "PRs")} and ${n(k.deliveredIssues, "issue", "issues")} live${coverageNote}.`,
     `Throughput: ${n(k.mergedPrs, "PR merged", "PRs merged")} (${trendText(k.mergedPrs, p.mergedPrs, lang)}) and ${n(resolved, "issue resolved", "issues resolved")} (${trendText(resolved, previousResolved, lang)}), ${n(k.closedByType.bug, "bug", "bugs")} and ${formatNumber(k.closedByPriority.p0 + k.closedByPriority.p1, lang)} P0/P1.`,
     `Lead time issue → production: ${lead(k.leadIssueToProd, lang)}${leadTrend ? `; median ${trendText(k.leadIssueToProd.median, p.leadIssueToProd.median, lang, "duration")}` : ""}.`,
     `Backlog now: ${n(b.openIssues, "open issue", "open issues")}, ${formatNumber(b.openP0 + b.openP1, lang)} P0/P1${oldest}; ${n(b.prsAwaitingGate, "PR waiting", "PRs waiting")} for the gate.`,
-    `Failures: ${n(k.failedReleases, "release attempt failed", "release attempts failed")} (${trendText(k.failedReleases, rp(p.failedReleases), lang)}), ${formatNumber(k.declinedReleases, lang)} declined; production blocked ${blocked}. Bots: ${n(k.turns, "turn", "turns")}, ${active} active${k.costUsd !== null ? `, ${formatMoney(k.costUsd, lang)}` : ""}.`,
+    `Failures: ${n(k.failedReleases, "release attempt failed", "release attempts failed")} (${releaseTrend(k.failedReleases, p.failedReleases)}), ${formatNumber(k.declinedReleases, lang)} declined; production blocked ${blocked}. Bots: ${n(k.turns, "turn", "turns")}${activeText}${k.costUsd !== null ? `, ${formatMoney(k.costUsd, lang)}` : ""}.`,
   ];
 }
 
@@ -141,15 +143,22 @@ const nums = (items: ReadonlyArray<{ number: number }>, max = 30) => items.lengt
   ? `${items.slice(0, max).map((item) => `#${item.number}`).join(", ")}${items.length > max ? ` +${items.length - max}` : ""}`
   : "—";
 
-/** The indicators table. `noPrevious`: no release source covers the previous
- * period, so its production numbers are unknown — shown as such, never as 0. */
-function kpiRows(k: ReportKpis, p: ReportKpis, noPrevious = false): Array<[string, string, string, string]> {
-  const UNKNOWN = "s/ fonte";
-  const NO_BASE = "sem base de comparação";
+/** The indicators table. Production rows compare only when a release source
+ * covers both periods completely; otherwise the previous value is shown as
+ * partial (a lower bound) or unknown, and there is no trend — never a "+N"
+ * against a number that is not whole. */
+function kpiRows(k: ReportKpis, p: ReportKpis, coverage: ProductivityReport["coverage"]["releaseCoverage"]): Array<[string, string, string, string]> {
+  const comparable = coverage.period === "full" && coverage.previous === "full";
+  const NO_BASE = "sem base comparável";
+  const previousText = (value: string) => (coverage.previous === "none" ? "s/ fonte" : coverage.previous === "partial" ? `${value} (parcial)` : value);
   const row = (name: string, current: number, previous: number, release = false): [string, string, string, string] =>
-    release && noPrevious ? [name, formatNumber(current), UNKNOWN, NO_BASE] : [name, formatNumber(current), formatNumber(previous), trendText(current, previous)];
-  const leadRow = (name: string, current: Distribution, previous: Distribution, release = false): [string, string, string, string] =>
-    [name, current.n ? `${formatDuration(current.median)} / ${formatDuration(current.p90)}` : "—", release && noPrevious ? UNKNOWN : previous.n ? `${formatDuration(previous.median)} / ${formatDuration(previous.p90)}` : "—", release && noPrevious ? NO_BASE : trendText(current.median, previous.median, "pt-BR", "duration")];
+    release && !comparable ? [name, formatNumber(current), previousText(formatNumber(previous)), NO_BASE] : [name, formatNumber(current), formatNumber(previous), trendText(current, previous)];
+  const leadRow = (name: string, current: Distribution, previous: Distribution, release = false): [string, string, string, string] => {
+    const previousValue = previous.n ? `${formatDuration(previous.median)} / ${formatDuration(previous.p90)}` : "—";
+    return [name, current.n ? `${formatDuration(current.median)} / ${formatDuration(current.p90)}` : "—", release && !comparable ? previousText(previousValue) : previousValue, release && !comparable ? NO_BASE : trendText(current.median, previous.median, "pt-BR", "duration")];
+  };
+  const noPrevious = !comparable;
+  const UNKNOWN = previousText(formatDuration(p.blockedMs));
   return [
     row("Entregas em produção", k.deliveries, p.deliveries, true),
     row("PRs entregues em produção", k.deliveredPrs, p.deliveredPrs, true),
@@ -203,7 +212,7 @@ export function reportMarkdown(report: ProductivityReport): string {
   lines.push("## Resumo executivo", "");
   executiveSummary(report).forEach((line, index) => lines.push(`${index + 1}. ${line}`));
   lines.push("", "## Indicadores", "", "| Métrica | Período | Anterior | Variação |", "|---|---:|---:|---|");
-  for (const [name, current, previous, change] of kpiRows(report.kpis, report.previousKpis, report.coverage.releaseCoverage?.previous === "none")) lines.push(`| ${md(name)} | ${current} | ${previous} | ${change} |`);
+  for (const [name, current, previous, change] of kpiRows(report.kpis, report.previousKpis, report.coverage.releaseCoverage)) lines.push(`| ${md(name)} | ${current} | ${previous} | ${change} |`);
   lines.push("", `## Por ${granularityName(g, "pt-BR")}`, "", "| Período | Entregas | PRs entregues | PRs mergeadas | Issues fechadas | Bugs fechados | Falhas | Turnos dos bots |", "|---|---:|---:|---:|---:|---:|---:|---:|");
   for (const bucket of report.buckets) {
     const known = bucket.releaseCoverage !== "none";
@@ -524,10 +533,10 @@ export function reportPdf(report: ProductivityReport): Buffer {
   });
   doc.y += summaryHeight + 14;
   // KPI cards: 4 per row
-  const noPrevious = report.coverage.releaseCoverage?.previous === "none";
+  const noPrevious = !releaseComparable(report);
   /** A card's trend line and whether it is good news (null: neither, or nothing to compare). */
   const moved = (current: number | null, previous: number | null, better: "up" | "down", options: { release?: boolean; kind?: "count" | "duration" } = {}) => {
-    if (options.release && noPrevious) return { change: "anterior sem fonte", good: null };
+    if (options.release && noPrevious) return { change: "sem base comparável", good: null };
     const change = trendText(current, previous, "pt-BR", options.kind ?? "count");
     const good = current === null || previous === null || current === previous ? null : better === "up" ? current > previous : current < previous;
     return { change, good };
@@ -575,7 +584,7 @@ export function reportPdf(report: ProductivityReport): Buffer {
   heading(doc, "Indicadores");
   table(doc, {
     columns: [{ label: "Métrica", width: contentWidth * 0.46 }, { label: "Período", width: contentWidth * 0.17, align: "right" }, { label: "Anterior", width: contentWidth * 0.17, align: "right" }, { label: "Variação", width: contentWidth * 0.2 }],
-    rows: kpiRows(k, p, noPrevious),
+    rows: kpiRows(k, p, report.coverage.releaseCoverage),
   });
   // releases
   heading(doc, "Releases do período");

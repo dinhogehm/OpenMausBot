@@ -375,6 +375,14 @@ export interface ProductivityReport {
   enabled?: boolean;
 }
 
+/** Production numbers (deliveries, failures, lead time, blocked time) are
+ * compared only when a release source covers both periods completely: a
+ * partial period is a lower bound, and a trend against one is not a trend. */
+export function releaseComparable(report: Pick<ProductivityReport, "coverage">): boolean {
+  const coverage = report.coverage.releaseCoverage;
+  return Boolean(coverage) && coverage.period === "full" && coverage.previous === "full";
+}
+
 /** How a KPI moved against the previous period: null when there is nothing to compare. */
 export function trend(current: number | null, previous: number | null): { delta: number; ratio: number | null } | null {
   if (current === null || previous === null) return null;

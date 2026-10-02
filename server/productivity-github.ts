@@ -127,7 +127,8 @@ export const isCarrier = (pr: Pick<GhPr, "head" | "title">): boolean =>
  * team's convention when the body has no "Closes #N". Only numbers that are
  * issues of the repo count (checked by the caller). */
 export function branchIssueNumbers(head: string): number[] {
-  return [...new Set([...head.matchAll(/(?:^|[/_-])(\d{3,6})(?=$|[/_-])/g)].map((match) => Number(match[1])))];
+  // a zero-padded number is a migration id (fix/0608-tenant-…), never an issue
+  return [...new Set([...head.matchAll(/(?:^|[/_-])([1-9]\d{2,5})(?=$|[/_-])/g)].map((match) => Number(match[1])))];
 }
 
 // ── GraphQL ─────────────────────────────────────────────────────────────────

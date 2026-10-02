@@ -32,13 +32,13 @@ describe("report screen (pt-BR)", () => {
   it("opens with the five-line executive summary", () => {
     expect(plain).toContain("Resumo executivo");
     expect(html.match(/<ol[^>]*>[\s\S]*?<\/ol>/)![0].match(/<li>/g)).toHaveLength(5);
-    expect(plain).toContain("Produção: 3 entregas (sem base de comparação), com 2 PRs e 2 issues no ar");
+    expect(plain).toContain("Produção: 3 entregas (sem base comparável), com 2 PRs e 2 issues no ar");
   });
 
   it("says where no release source exists, as unknown — not zero", () => {
     expect(html).toContain('role="note"');
     expect(plain).toContain("Nenhuma fonte de releases cobre 28/09/2026 – 29/09/2026: entregas e falhas desse trecho são desconhecidas, não zero.");
-    expect(plain).toContain("O período anterior não tem fonte de releases");
+    expect(plain).toContain("Sem base comparável: a fonte de releases não cobre os dois períodos");
   });
 
   it("shows each KPI with its value, detail, trend and exact definition", () => {
@@ -106,10 +106,10 @@ describe("report screen (English)", () => {
     setLocale("en");
     const plain = text(renderToStaticMarkup(createElement(ReportView, { report: report() })));
     expect(plain).toContain("Executive summary");
-    expect(plain).toContain("Production: 3 deliveries (nothing to compare)");
+    expect(plain).toContain("Production: 3 deliveries (no comparable base)");
     expect(plain).toContain("Deliveries to production");
     expect(plain).toContain("Releases in the period");
-    expect(plain).toContain("The previous period has no release source");
+    expect(plain).toContain("No comparable base: the release source does not cover both periods");
   });
 });
 

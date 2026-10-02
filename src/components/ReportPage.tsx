@@ -18,7 +18,7 @@ import {
   periodLabel, reportPath, summaryLines, zonedToday,
   type Granularity, type Polarity, type ProductivityReport, type ReportBucket, type ReportQuery, type Tone,
 } from "@/lib/productivity";
-import type { ReportRelease } from "../../shared/productivity";
+import { releaseComparable, type ReportRelease } from "../../shared/productivity";
 import { BarChart, LineChart, type ChartSeries } from "./ReportCharts";
 
 const QUERY_KEY = "omb-report-query";
@@ -172,7 +172,7 @@ export function KpiGrid({ report }: { report: ProductivityReport }) {
   const k = report.kpis;
   const p = report.previousKpis;
   const b = report.backlog;
-  const noBase = report.coverage.releaseCoverage.previous === "none";
+  const noBase = !releaseComparable(report);
   return (
     <section aria-labelledby="report-kpis" className="space-y-2">
       <h2 id="report-kpis" className="sr-only">{t("report.kpis")}</h2>
@@ -320,7 +320,7 @@ export function ReleasesTable({ releases }: { releases: ReportRelease[] }) {
       {releases.length === 0 ? (
         <p className="px-4 pb-4 text-[13px] text-ink-secondary">{t("report.releases.empty")}</p>
       ) : (
-        <div className="overflow-x-auto">
+        <div tabIndex={0} role="region" aria-label={t("report.releases.table")} className="overflow-x-auto">
           <table className="w-full min-w-[640px] border-collapse text-left text-[13px]">
             <thead>
               <tr className="text-[12px] text-ink-secondary">
@@ -391,7 +391,7 @@ export function BotsPanel({ report }: { report: ProductivityReport }) {
     <section aria-labelledby="report-bots" className="min-w-0 rounded-xl border border-hairline/40 bg-card p-4">
       <h2 id="report-bots" className="text-[14px] font-semibold text-ink">{t("report.bots.title")}</h2>
       <p className="mb-2 text-[12px] text-ink-secondary">
-        {t("report.bots.totals", { turns: formatCount(k.turns), active: formatSpan(k.activeMs), cost: formatUsd(k.costUsd), tokens: formatTokens(k.inputTokens + k.outputTokens) })}
+        {t("report.bots.totals", { turns: formatCount(k.turns), active: k.timedTurns ? formatSpan(k.activeMs) : "—", cost: formatUsd(k.costUsd), tokens: formatTokens(k.inputTokens + k.outputTokens) })}
       </p>
       <p className="mb-3 text-[12px] text-ink-secondary">
         {k.ownerResponse.n
@@ -399,7 +399,7 @@ export function BotsPanel({ report }: { report: ProductivityReport }) {
           : t("report.bots.ownerNone", { opened: formatCount(k.needsYouOpened), resolved: formatCount(k.needsYouResolved) })}
       </p>
       {report.bots.length === 0 ? <p className="text-[13px] text-ink-secondary">{t("report.bots.empty")}</p> : (
-        <div className="overflow-x-auto">
+        <div tabIndex={0} role="region" aria-label={t("report.bots.table")} className="overflow-x-auto">
           <table className="w-full min-w-[480px] border-collapse text-left text-[13px]">
             <thead>
               <tr className="text-[12px] text-ink-secondary">

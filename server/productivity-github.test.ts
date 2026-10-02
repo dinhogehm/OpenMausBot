@@ -69,6 +69,8 @@ describe("labels and links", () => {
     expect(branchIssueNumbers("claude/helpdesk-rodizio-equipe-9195")).toEqual([9195]);
     expect(branchIssueNumbers("chore/release-carrier-9334-9331-x")).toEqual([9334, 9331]);
     expect(branchIssueNumbers("fix/f4-2-post-release-guard")).toEqual([]);
+    // real case: a migration id in the branch linked issue #608 to a release
+    expect(branchIssueNumbers("fix/9320-0608-tenant-unificado-sem-auditoria")).toEqual([9320]);
   });
 
   it("reads the merge gate on the PR head", () => {

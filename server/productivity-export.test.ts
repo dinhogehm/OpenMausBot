@@ -54,11 +54,11 @@ describe("executive summary", () => {
     const lines = executiveSummary(report());
     expect(lines).toHaveLength(5);
     // the previous five days have no release source: unknown, so no "+3"
-    expect(lines[0]).toBe("Produção: 3 entregas (sem base de comparação), com 2 PRs e 2 issues no ar — parte do período sem fonte de releases.");
+    expect(lines[0]).toBe("Produção: 3 entregas (sem base comparável), com 2 PRs e 2 issues no ar — parte do período sem fonte de releases.");
     expect(lines[1]).toBe("Vazão: 3 PRs mergeadas (+3) e 2 issues resolvidas (+2), 1 bug e 1 P0/P1.");
     expect(lines[2]).toBe("Lead time issue → produção: mediana 43 h, p90 2,6 d (n=2).");
     expect(lines[3]).toBe("Backlog agora: 2 issues abertas, 2 P0/P1; a mais antiga, #104, tem 22 d; 1 PR esperando o gate.");
-    expect(lines[4]).toBe("Falhas: 2 tentativas de release falharam (sem base de comparação), 1 recusada; produção travada 5 h. Bots: 3 turnos, 30 min ativos, US$ 0,75.");
+    expect(lines[4]).toBe("Falhas: 2 tentativas de release falharam (sem base comparável), 1 recusada; produção travada 5 h. Bots: 3 turnos, 30 min ativos, US$ 0,75.");
   });
 
   it("compares production numbers when a source covers the previous period too", () => {
@@ -70,10 +70,21 @@ describe("executive summary", () => {
     expect(reportMarkdown(covered)).toContain("| Entregas em produção | 1 | 2 | −1 (−50%) |");
   });
 
+  it("does not compare with a previous period the source covers only in part (a lower bound)", () => {
+    // 27–29/09 before 30/09–02/10: the log starts on the 29th
+    const partial = buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-09-30T00:00:00"), to: brt("2026-10-03T00:00:00") } });
+    expect(partial.coverage.releaseCoverage).toEqual({ period: "full", previous: "partial" });
+    expect(executiveSummary(partial)[0]).toBe("Produção: 2 entregas (sem base comparável), com 2 PRs e 2 issues no ar.");
+    const markdown = reportMarkdown(partial);
+    expect(markdown).toContain("| Entregas em produção | 2 | 1 (parcial) | sem base comparável |");
+    // throughput from GitHub is whole on both sides: it still compares
+    expect(markdown).toContain("| PRs mergeadas (sem carriers) | 3 | 0 | +3 |");
+  });
+
   it("has an English version with the same numbers", () => {
     const lines = executiveSummary(report(), "en");
     expect(lines).toHaveLength(5);
-    expect(lines[0]).toBe("Production: 3 deliveries (nothing to compare), carrying 2 PRs and 2 issues live — part of the period has no release source.");
+    expect(lines[0]).toBe("Production: 3 deliveries (no comparable base), carrying 2 PRs and 2 issues live — part of the period has no release source.");
   });
 });
 
@@ -84,7 +95,7 @@ describe("Markdown", () => {
     const headings = [...markdown.matchAll(/^#+ (.+)$/gm)].map((match) => match[1]);
     expect(headings).toEqual(["Relatório de produtividade — Time Nuria", "Resumo executivo", "Indicadores", "Por dia", "Releases do período", "Backlog (agora)", "Esforço dos bots", "Definições", "Cobertura dos dados"]);
     expect(markdown.indexOf("1. Produção: 3 entregas")).toBeLessThan(markdown.indexOf("## Indicadores"));
-    expect(markdown).toContain("| Entregas em produção | 3 | s/ fonte | sem base de comparação |");
+    expect(markdown).toContain("| Entregas em produção | 3 | s/ fonte | sem base comparável |");
     expect(markdown).toContain("| PRs mergeadas (sem carriers) | 3 | 0 | +3 |");
     expect(markdown).toContain("| 30/09 | 1 | 1 | 1 | 1 | 1 | 0 | 1 |");
     expect(markdown).toContain("| 28/09 | s/ fonte | s/ fonte | 0 | 0 | 0 | s/ fonte | 0 |");
@@ -123,8 +134,8 @@ describe("PDF", () => {
     const text = pdfText(pdf);
     expect(text).toContain("Relatório de produtividade — Time Nuria");
     expect(text.indexOf("Resumo executivo")).toBeLessThan(text.indexOf("Indicadores"));
-    expect(text).toContain("Produção: 3 entregas (sem base de comparação), com 2 PRs e 2 issues no ar");
-    expect(text).toContain("anterior sem fonte");
+    expect(text).toContain("Produção: 3 entregas (sem base comparável), com 2 PRs e 2 issues no ar");
+    expect(text).toContain("sem base comparável");
     expect(text).not.toMatch(/…\n/); // no card text cut short
     expect(text).toContain("Entregas e falhas por dia");
     expect(text).toContain("faixa cinza: sem fonte de releases (desconhecido, não zero)");

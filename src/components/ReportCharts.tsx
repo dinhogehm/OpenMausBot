@@ -74,7 +74,8 @@ function DataTable({ id, buckets, granularity, series, caption }: { id: string; 
   return (
     <details className="mt-2 text-[12px]">
       <summary className="w-fit cursor-pointer rounded text-ink-secondary hover:text-ink">{t("report.chart.showData")}</summary>
-      <div className="mt-2 max-h-64 overflow-auto rounded-lg border border-hairline/40">
+      {/* a scrolling region is reachable by keyboard (axe scrollable-region-focusable) */}
+      <div tabIndex={0} role="region" aria-label={t("report.table.of", { chart: caption })} className="mt-2 max-h-64 overflow-auto rounded-lg border border-hairline/40">
         <table className="w-full border-collapse text-left" aria-describedby={`${id}-title`}>
           <caption className="sr-only">{caption}</caption>
           <thead className="sticky top-0 bg-card">
