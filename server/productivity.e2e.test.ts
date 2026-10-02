@@ -33,7 +33,7 @@ appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(args) + "\\n");
 const query = (args.find((arg) => arg.startsWith("query=")) || "");
 const empty = { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] };
 const rate = { remaining: 4900, resetAt: "2026-10-02T20:00:00Z" };
-const pr = (number, merged, head, closes, title) => ({ number, title, createdAt: "2026-09-17T12:00:00Z", updatedAt: merged, mergedAt: merged, closedAt: merged, state: "MERGED", isDraft: false, baseRefName: "main", headRefName: head, mergeCommit: { oid: "m" + number }, closingIssuesReferences: { nodes: closes.map((number) => ({ number })) }, labels: { nodes: [] } });
+const pr = (number, merged, head, closes, title, body = "") => ({ number, title, body, createdAt: "2026-09-17T12:00:00Z", updatedAt: merged, mergedAt: merged, closedAt: merged, state: "MERGED", isDraft: false, baseRefName: "main", headRefName: head, mergeCommit: { oid: "m" + number, message: title }, closingIssuesReferences: { nodes: closes.map((number) => ({ number })) }, labels: { nodes: [] } });
 const out = (value) => process.stdout.write(JSON.stringify(value));
 if (args[0] !== "api") { process.stderr.write("only gh api is expected"); process.exit(2); }
 if (args[1] === "graphql") {
@@ -51,7 +51,8 @@ if (args[1] === "graphql") {
   process.exit(0);
 }
 const path = args[1];
-if (path === "rate_limit") out({ resources: { core: { remaining: 4900, reset: 1790971200 } } });
+if (path === "repos/dinhogehm/nuria-platform") out({ created_at: "2025-06-01T12:00:00Z" });
+else if (path === "rate_limit") out({ resources: { core: { remaining: 4900, reset: 1790971200 } } });
 else if (path.includes("/git/ref/tags/nuria-production-deployed")) out({ object: { sha: "${A76}", type: "commit" } });
 else if (path.includes("/deployments")) out([]);
 else if (path.includes("/compare/${F50}...${A76}")) out({ total_commits: 2, commits: [{ sha: "m8987" }, { sha: "m8990" }] });
@@ -120,7 +121,7 @@ posixOnly("GET /api/reports/productivity", () => {
     const first = await get("/api/reports/productivity?granularity=day&from=2026-09-17&to=2026-09-17&refresh=1");
     expect(first.status).toBe(200);
     expect(first.headers.get("cache-control")).toBe("no-store");
-    expect(first.body).toMatchObject({ version: 1, enabled: true, timezone: "America/Sao_Paulo", granularity: "day", repo: "dinhogehm/nuria-platform" });
+    expect(first.body).toMatchObject({ version: 2, enabled: true, timezone: "America/Sao_Paulo", granularity: "day", repo: "dinhogehm/nuria-platform" });
     let report = first.body;
     const deadline = Date.now() + 20_000;
     while (!(report.sync.state === "idle" && report.sync.lastSyncAt)) {
@@ -135,12 +136,14 @@ posixOnly("GET /api/reports/productivity", () => {
     const { body: report } = await get("/api/reports/productivity?granularity=day&from=2026-09-17&to=2026-09-17");
     expect(report.buckets.map((bucket: any) => bucket.key)).toEqual(["2026-09-17"]);
     // 13:27Z and 16:16Z are the 17th in São Paulo; so is 22:02Z (19:02); the 01:33Z failures were still the 16th there
-    expect(report.kpis).toMatchObject({ deliveries: 2, failedReleases: 2, declinedReleases: 1, deliveredPrs: 1, deliveredIssues: 1, mergedPrs: 1, carrierPrs: 1, closedIssues: 1 });
+    expect(report.kpis).toMatchObject({ deliveries: 2, failedReleases: 2, supersededReleases: 1, abortedReleases: 0, releaseSuccessRate: 0.5, declinedReleases: 1, deliveredPrs: 1, deliveredIssues: 1, mergedPrs: 1, carrierPrs: 1, closedIssues: 1 });
     expect(report.kpis.leadIssueToProd).toEqual({ n: 1, median: Date.parse("2026-09-17T16:16:13Z") - Date.parse("2026-09-16T10:00:00Z"), p90: Date.parse("2026-09-17T16:16:13Z") - Date.parse("2026-09-16T10:00:00Z") });
     const rows = report.releases.map((row: any) => [row.outcome, row.sha.slice(0, 9), row.prs.map((pr: any) => pr.number), row.issues.map((issue: any) => issue.number)]);
     expect(rows).toEqual([
       ["declined", "cb015584a", [], []],
       ["failed", "cb015584a", [], []],
+      // queued behind a newer commit and never ran: superseded, not a failure (INSP-V r1 #1)
+      ["superseded", "94eedf2b4", [], []],
       ["released", "a76a5aa0c", [8987, 8990], [8986]],
       ["failed", "3f99428bf", [], []],
       ["released", "f50b70a3d", [], []],
@@ -155,8 +158,17 @@ posixOnly("GET /api/reports/productivity", () => {
 
   it("the previous day holds the night's failures (01:33Z is 22:33 of the 16th)", async () => {
     const { body: report } = await get("/api/reports/productivity?granularity=day&from=2026-09-16&to=2026-09-16");
-    expect(report.kpis.failedReleases).toBe(2);
-    expect(report.kpis.deliveries).toBe(0);
+    // f50b70a3d (pid 76716) never ran — aborted, outside the rate; 3f99428bf ran and failed (INSP-V r1 #1)
+    expect(report.kpis).toMatchObject({ failedReleases: 1, abortedReleases: 1, supersededReleases: 0, deliveries: 0 });
+  });
+
+  it("keeps the board's targets: empty by default, saved sane, and lit in the report", async () => {
+    expect((await get("/api/reports/productivity/goals")).body).toEqual({ goals: {} });
+    const put = await fetch(`${BASE}/api/reports/productivity/goals`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ goals: { releaseSuccessRate: 80, leadTimeHours: -1 } }) });
+    expect(put.status).toBe(200);
+    expect((await get("/api/reports/productivity/goals")).body).toEqual({ goals: { releaseSuccessRate: 80 } });
+    expect((await get("/api/reports/productivity?granularity=day&from=2026-09-17&to=2026-09-17")).body.goals).toEqual({ releaseSuccessRate: 80 });
+    await fetch(`${BASE}/api/reports/productivity/goals`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ goals: {} }) });
   });
 
   it("serves the hour, day and month presets", async () => {
@@ -174,6 +186,7 @@ posixOnly("GET /api/reports/productivity", () => {
     expect(markdown.headers.get("content-disposition")).toBe('attachment; filename="produtividade-dia-2026-09-17_2026-09-17.md"');
     const text = markdown.buffer.toString("utf8");
     expect(text).toContain("## Resumo executivo");
+    expect(text.split("\n")[0]).toBe("# Produtividade de engenharia — 17/09/2026");
     expect(text).toContain("| `a76a5aa0c` | em produção | #8987 | #8986 |");
     expect(text).not.toContain("Zeta");
     const pdf = await get("/api/reports/productivity.pdf?granularity=day&from=2026-09-17&to=2026-09-17");

@@ -10,7 +10,8 @@ import { gzipSync } from "node:zlib";
 import { afterAll, describe, expect, it } from "vitest";
 import { presetPeriod } from "../shared/productivity.ts";
 import { MANUAL_SYNC_MIN_MS, oldestUsageAt, ProductivityCollector } from "./productivity-collector.ts";
-import type { GhRunner } from "./productivity-github.ts";
+import { emptyGhCache, GH_CACHE_VERSION, type GhRunner } from "./productivity-github.ts";
+import { reportMarkdown, reportPdf } from "./productivity-export.ts";
 import { mergeNeedsYou, ownerResponseMs, emptyNeedsYouLog } from "./productivity-local.ts";
 import { removeTempDir } from "./testing/cleanup.ts";
 import { brt } from "./testing/productivity-fixture.ts";
@@ -45,6 +46,7 @@ function quietGh(mode: { fail?: string; lowBudget?: boolean; delayMs?: number } 
     }
     // REST resets at the same moment as GraphQL here (2026-10-02T20:00Z, in seconds)
     if (args[1] === "rate_limit") return JSON.stringify({ resources: { core: { remaining: mode.lowBudget ? 10 : 4000, reset: 1_790_971_200 } } });
+    if (/^repos\/[^/]+\/[^/]+$/.test(args[1]!)) return JSON.stringify({ created_at: "2026-01-09T20:24:31Z" });
     if (args[1]!.includes("/git/ref/tags/")) return JSON.stringify({ object: { sha: "a".repeat(40), type: "commit" } });
     if (args[1]!.includes("/deployments")) return "[]";
     if (args[1]!.includes("/compare/")) return JSON.stringify({ total_commits: 0, commits: [] });
@@ -53,6 +55,12 @@ function quietGh(mode: { fail?: string; lowBudget?: boolean; delayMs?: number } 
   runner.calls = 0;
   return runner;
 }
+
+const collector2 = (dir: string) => new ProductivityCollector({
+  dataDir: dir, gh: quietGh(), now: () => brt("2026-10-02T12:00:00"),
+  logs: { gz: join(dir, "logs", "out.log.1.gz"), out: join(dir, "logs", "out.log") },
+  ownerPending: () => ({ open: [], resolved: [] }), botNames: () => new Map(), usage: () => [], digests: () => [], oldestDigestAt: () => null, usageFrom: () => null,
+});
 
 function collector(dir: string, gh: GhRunner, open: Array<{ id: string; botId: string; createdAt: number }> = [], now = () => brt("2026-10-02T12:00:00")) {
   return new ProductivityCollector({
@@ -134,6 +142,80 @@ describe("collector", () => {
     const second = make();
     await second.refreshLogs();
     expect(second.report("month", period).kpis.deliveries).toBe(1);
+  });
+
+  it("corrects an older cache on load: the bot's deployment and the deployments saved without their fields go, the walks restart, old runs that never ran stop being failures (INSP-V r1 #9)", async () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, "productivity"), { recursive: true });
+    mkdirSync(join(dir, "logs"));
+    writeFileSync(join(dir, "productivity", "github.json"), JSON.stringify({
+      ...emptyGhCache(), version: 1,
+      prWalk: { watermark: 5, cursor: null, complete: true, passStartedAt: null, newest: 5 },
+      deployments: [
+        { id: 3771688099, sha: "v".repeat(40), createdAt: Date.parse("2026-02-04T20:43:55Z"), successAt: Date.parse("2026-02-04T20:58:58Z"), final: true },
+        { id: 6083315308, sha: "d".repeat(40), createdAt: Date.parse("2026-08-25T12:40:27Z"), successAt: Date.parse("2026-08-25T15:36:00Z"), final: true },
+      ],
+    }));
+    writeFileSync(join(dir, "productivity", "releases.json"), JSON.stringify({
+      version: 1, declines: {}, coverage: { from: brt("2026-09-14T00:00:00"), to: brt("2026-09-20T00:00:00") },
+      runs: { [`${"9".repeat(40)}:8849`]: { key: `${"9".repeat(40)}:8849`, sha: "9".repeat(40), pid: 8849, outcome: "failed", startedAt: 1, endedAt: brt("2026-09-17T16:28:00"), timeSource: "neighbor", carrierPr: 8998 } },
+    }));
+    const collector = new ProductivityCollector({
+      dataDir: dir, gh: quietGh(), now: () => brt("2026-10-02T12:00:00"),
+      logs: { gz: join(dir, "logs", "none.gz"), out: join(dir, "logs", "none.log") },
+      ownerPending: () => ({ open: [], resolved: [] }), botNames: () => new Map(), usage: () => [], digests: () => [], oldestDigestAt: () => null, usageFrom: () => null,
+    });
+    const saved = JSON.parse(readFileSync(join(dir, "productivity", "github.json"), "utf8"));
+    expect(saved.version).toBe(GH_CACHE_VERSION);
+    expect(saved.deployments).toEqual([]);
+    expect(saved.prWalk.complete).toBe(false);
+    const report = collector.report("month", { from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") });
+    expect(report.kpis).toMatchObject({ failedReleases: 0, supersededReleases: 1 });
+    expect(report.releases[0]).toMatchObject({ outcome: "superseded", headPr: 8998 });
+  });
+
+  it("rebuilds the same PDF from the saved cache alone (INSP-V r1 #9)", async () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, "logs"));
+    writeFileSync(join(dir, "logs", "out.log"), [RUN("a".repeat(40), 1, "2026-10-01T10:00:00Z"), RUN("b".repeat(40), 2, "2026-10-01T16:00:00Z", false), RUN("c".repeat(40), 3, "2026-10-02T10:00:00Z")].join("\n"));
+    const now = () => brt("2026-10-02T12:00:00");
+    const make = (gh: GhRunner) => new ProductivityCollector({
+      dataDir: dir, gh, now,
+      logs: { gz: join(dir, "logs", "out.log.1.gz"), out: join(dir, "logs", "out.log") },
+      ownerPending: () => ({ open: [{ id: "o1", botId: "chief", createdAt: brt("2026-10-01T09:00:00") }], resolved: [] }),
+      botNames: () => new Map(), usage: () => [], digests: () => [], oldestDigestAt: () => null, usageFrom: () => null,
+    });
+    const period = { from: brt("2026-10-01T00:00:00"), to: brt("2026-11-01T00:00:00") };
+    const first = make(quietGh());
+    await first.refresh();
+    const original = reportPdf(first.report("month", period));
+    // a restart with GitHub unreachable: only what was saved
+    const second = make(quietGh({ fail: "offline" }));
+    await second.refreshLogs();
+    expect(reportPdf(second.report("month", period)).equals(original)).toBe(true);
+    expect(reportMarkdown(second.report("month", period))).toBe(reportMarkdown(first.report("month", period)));
+  });
+
+  it("answers the same question on the same data once, and again when the data changes (INSP-V r1 #10)", async () => {
+    const dir = freshDir();
+    mkdirSync(join(dir, "logs"));
+    writeFileSync(join(dir, "logs", "out.log"), RUN("a".repeat(40), 1, "2026-10-01T10:00:00Z"));
+    const collector = collector2(dir);
+    await collector.refreshLogs();
+    const period = { from: brt("2026-10-01T00:00:00"), to: brt("2026-11-01T00:00:00") };
+    const first = collector.report("month", period);
+    expect(collector.report("month", period).kpis).toBe(first.kpis);
+    writeFileSync(join(dir, "logs", "out.log"), [RUN("a".repeat(40), 1, "2026-10-01T10:00:00Z"), RUN("b".repeat(40), 2, "2026-10-02T10:00:00Z")].join("\n"));
+    await collector.refreshLogs();
+    expect(collector.report("month", period).kpis.deliveries).toBe(2);
+  });
+
+  it("keeps the owner's targets, empty by default, only sane numbers", () => {
+    const dir = freshDir();
+    const collector = collector2(dir);
+    expect(collector.getGoals()).toEqual({});
+    expect(collector.setGoals({ leadTimeHours: 48, releaseSuccessRate: 900 })).toEqual({ leadTimeHours: 48 });
+    expect(collector2(dir).getGoals()).toEqual({ leadTimeHours: 48 });
   });
 
   it("a failed sync says why and keeps what it had", async () => {

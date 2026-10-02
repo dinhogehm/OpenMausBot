@@ -6,9 +6,9 @@
 // built from whatever the cache holds, with the sync's state beside it.
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { previousPeriod, type Granularity, type ProductivityReport, type ReportPeriod, type ReportSyncState } from "../shared/productivity.ts";
+import { previousPeriod, sanitizeGoals, type Granularity, type ProductivityReport, type ReportGoals, type ReportPeriod, type ReportSyncState } from "../shared/productivity.ts";
 import { writeFileAtomic } from "./atomic.ts";
-import { emptyGhCache, execGh, RateLimited, syncCompares, syncGithub, type GhCache, type GhRunner, type SyncProgress } from "./productivity-github.ts";
+import { emptyGhCache, execGh, GH_CACHE_VERSION, migrateGhCache, RateLimited, syncCompares, syncGithub, type GhCache, type GhRunner, type SyncProgress } from "./productivity-github.ts";
 import { emptyNeedsYouLog, mergeNeedsYou, type NeedsYouLog } from "./productivity-local.ts";
 import { readFile } from "node:fs/promises";
 import {
@@ -40,8 +40,13 @@ export interface CollectorDeps {
   log?: (line: string) => void;
 }
 
+/** Bumped when the release log's reading changes (v2: superseded/aborted runs,
+ * the head PR, the post-release verdict). An older history is reparsed from
+ * the logs still on disk; runs only it remembers (rotated away) are kept. */
+export const RELEASES_VERSION = 2;
+
 interface ReleaseHistory {
-  version: 1;
+  version: number;
   runs: Record<string, ReleaseRun>;
   declines: Record<string, DeclineEvent>;
   coverage: { from: number | null; to: number | null };
@@ -49,7 +54,18 @@ interface ReleaseHistory {
   liveWithoutTag?: string[];
 }
 
-const emptyHistory = (): ReleaseHistory => ({ version: 1, runs: {}, declines: {}, coverage: { from: null, to: null } });
+const emptyHistory = (): ReleaseHistory => ({ version: RELEASES_VERSION, runs: {}, declines: {}, coverage: { from: null, to: null } });
+
+/** A run saved by an older reading: the field names of today, and a run that
+ * never ran (no time of its own, no verdict) is not a failure. */
+export function migrateRun(run: ReleaseRun & { carrierPr?: number }): ReleaseRun {
+  const { carrierPr, ...rest } = run;
+  const migrated: ReleaseRun = { ...rest, ...(carrierPr && !rest.headPr ? { headPr: carrierPr } : {}) };
+  if (migrated.outcome === "failed" && migrated.timeSource === "neighbor" && migrated.deployedAt === undefined) {
+    return migrated.cause ? { ...migrated, outcome: "aborted" } : { ...migrated, outcome: "superseded" };
+  }
+  return migrated;
+}
 
 function readJson<T>(path: string, fallback: () => T, valid: (value: any) => boolean): T {
   try {
@@ -76,16 +92,44 @@ export class ProductivityCollector {
   private inflight: Promise<void> | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private sync: ReportSyncState = { state: "idle", lastSyncAt: null, lastAttemptAt: null, nextSyncAt: null, error: null, rateLimit: null };
+  private goals: ReportGoals = {};
+  /** Reports already built for the current data (cleared whenever it changes). */
+  private readonly memo = new Map<string, ProductivityReport>();
+  private dataStamp = 0;
 
   constructor(deps: CollectorDeps) {
     this.deps = deps;
     this.dir = join(deps.dataDir, "productivity");
     this.gh = deps.gh ?? execGh;
     this.now = deps.now ?? Date.now;
-    this.github = readJson(join(this.dir, "github.json"), () => emptyGhCache(), (value) => value?.version === 1 && typeof value.prs === "object" && typeof value.issues === "object");
-    this.history = readJson(join(this.dir, "releases.json"), emptyHistory, (value) => value?.version === 1 && typeof value.runs === "object");
+    const savedGithub = readJson(join(this.dir, "github.json"), () => emptyGhCache(), (value) => typeof value?.version === "number" && typeof value.prs === "object" && typeof value.issues === "object");
+    const github = migrateGhCache(savedGithub);
+    this.github = github.cache;
+    if (github.migrated) {
+      deps.log?.(`[productivity] GitHub cache v${savedGithub.version} → v${GH_CACHE_VERSION}: walks restart, stale deployments re-read`);
+      this.save("github.json", this.github);
+    }
+    const savedHistory = readJson(join(this.dir, "releases.json"), emptyHistory, (value) => typeof value?.version === "number" && typeof value.runs === "object");
+    this.history = savedHistory.version === RELEASES_VERSION ? savedHistory : {
+      ...savedHistory,
+      version: RELEASES_VERSION,
+      runs: Object.fromEntries(Object.entries(savedHistory.runs).map(([key, run]) => [key, migrateRun(run)])),
+    };
     this.needsYou = readJson(join(this.dir, "needs-you.json"), emptyNeedsYouLog, (value) => value?.version === 1 && typeof value.items === "object");
+    this.goals = sanitizeGoals(readJson(join(this.dir, "goals.json"), () => ({}), (value) => typeof value === "object" && value !== null));
     this.sync.lastSyncAt = this.github.syncedAt;
+  }
+
+  /** The owner's targets (empty by default). */
+  getGoals(): ReportGoals {
+    return { ...this.goals };
+  }
+
+  setGoals(raw: unknown): ReportGoals {
+    this.goals = sanitizeGoals(raw);
+    this.save("goals.json", this.goals);
+    this.memo.clear();
+    return this.getGoals();
   }
 
   /** Sync now and then every SYNC_INTERVAL_MS, off the request path. */
@@ -166,10 +210,11 @@ export class ProductivityCollector {
     for (const decline of parsed.declines) if (!declines[decline.sha]) declines[decline.sha] = decline;
     const from = [this.history.coverage.from, parsed.from].filter((value): value is number => value !== null);
     const to = [this.history.coverage.to, parsed.to].filter((value): value is number => value !== null);
-    this.history = { version: 1, runs, declines, coverage: { from: from.length ? Math.min(...from) : null, to: to.length ? Math.max(...to) : null }, liveWithoutTag: [...liveWithoutTag] };
+    this.history = { version: RELEASES_VERSION, runs, declines, coverage: { from: from.length ? Math.min(...from) : null, to: to.length ? Math.max(...to) : null }, liveWithoutTag: [...liveWithoutTag] };
     this.outSignature = out;
     this.errSignature = err;
     this.save("releases.json", this.history);
+    this.touch();
   }
 
   private snapshotNeedsYou(): void {
@@ -177,6 +222,7 @@ export class ProductivityCollector {
       const { open, resolved } = this.deps.ownerPending();
       this.needsYou = mergeNeedsYou(this.needsYou, { open, resolved, now: this.now() });
       this.save("needs-you.json", this.needsYou);
+      this.touch();
     } catch (error) {
       this.deps.log?.(`[productivity] needs-you snapshot failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -210,11 +256,29 @@ export class ProductivityCollector {
     } finally {
       delete this.sync.phase;
       this.save("github.json", this.github);
+      this.touch();
     }
+  }
+
+  /** The data changed: reports built before are stale. */
+  private touch(): void {
+    this.dataStamp += 1;
+    this.memo.clear();
   }
 
   /** The report for a period, from the cache as it is now. */
   report(granularity: Granularity, period: ReportPeriod): ProductivityReport {
+    // the same question on the same data within the same minute is answered once
+    const key = `${granularity}:${period.from}:${period.to}:${this.dataStamp}:${Math.floor(this.now() / 60_000)}`;
+    const known = this.memo.get(key);
+    if (known) return { ...known, sync: this.state() };
+    const report = this.build(granularity, period);
+    if (this.memo.size > 16) this.memo.clear();
+    this.memo.set(key, report);
+    return report;
+  }
+
+  private build(granularity: Granularity, period: ReportPeriod): ProductivityReport {
     const previous = previousPeriod(period, granularity);
     const from = previous.from;
     const to = period.to;
@@ -235,9 +299,11 @@ export class ProductivityCollector {
       local: {
         usageFrom: this.deps.usageFrom(),
         digestsFrom,
-        needsYouFrom: needsYou.length ? Math.min(this.needsYou.startedAt ?? Infinity, ...needsYou.map((item) => item.createdAt)) : this.needsYou.startedAt,
+        // items are recorded from the log's first look on; earlier ones are not known
+        needsYouFrom: this.needsYou.startedAt,
       },
       sync: this.state(),
+      goals: this.goals,
     });
   }
 }

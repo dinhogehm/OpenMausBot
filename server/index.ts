@@ -25088,6 +25088,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       });
     }
 
+    // ── the report's targets: empty by default; a target lights its KPI ──
+    if (path === "/api/reports/productivity/goals" && (method === "GET" || method === "PUT")) {
+      if (method === "GET") return json(res, 200, { goals: productivity.getGoals() });
+      const body = await readBody(req, 4096);
+      if (!body || typeof body !== "object") return json(res, 400, { error: "send the goals as a JSON object" });
+      return json(res, 200, { goals: productivity.setGoals(body.goals ?? body) });
+    }
     // ── the productivity report (lot V): production throughput for the board ──
     // Read-only, built from the collector's cache (never waits on GitHub);
     // `refresh=1` asks for a sync in the background. Admin scope by default.
