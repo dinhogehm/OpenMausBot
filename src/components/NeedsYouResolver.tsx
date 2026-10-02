@@ -587,11 +587,23 @@ function NoSteps(props: NeedsYouResolverViewProps & { item: NeedsYouItem }) {
     );
   }
   const asked = item.stepsRequestedAt;
+  // asked (by the person, or by the server on its own — J17): the bot is
+  // writing them; the button comes back only if it has not answered by then
+  if (asked && now - asked < STEPS_ASK_AGAIN_AFTER_MS) {
+    return (
+      <div className="mt-2.5 rounded-xl border border-dashed border-hairline/80 px-4 py-3.5" data-resolver-steps-asking="">
+        <p role="status" className="flex items-start gap-2 text-[13.5px] leading-relaxed text-ink">
+          <Loader2 size={15} aria-hidden="true" className="mt-0.5 shrink-0 animate-spin text-accent-text motion-reduce:animate-none" />
+          <span>{t("needsYou.steps.asking", { name: item.botName })}</span>
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="mt-2.5 rounded-xl border border-dashed border-hairline/80 px-4 py-3.5">
       <p className="flex items-start gap-2 text-[13.5px] leading-relaxed text-ink">
         <Sparkles size={15} aria-hidden="true" className="mt-0.5 shrink-0 text-accent-text" />
-        <span>{asked ? t("needsYou.steps.asked", { age: waitingAge(asked, now) }) : t("needsYou.steps.none", { name: item.botName })}</span>
+        <span>{asked ? t("needsYou.steps.noAnswer", { name: item.botName, age: waitingAge(asked, now) }) : t("needsYou.steps.none", { name: item.botName })}</span>
       </p>
       <button type="button" data-resolver-ask-steps="" disabled={busy !== null} onClick={() => props.onAskSteps(item)} className={cn(asked ? quietButton : strongButton, "mt-3")}>
         {busy === "steps" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <ListChecks size={14} aria-hidden="true" />}
@@ -600,6 +612,9 @@ function NoSteps(props: NeedsYouResolverViewProps & { item: NeedsYouItem }) {
     </div>
   );
 }
+
+/** How long the screen shows "pedindo o passo a passo…" before offering to ask again. */
+export const STEPS_ASK_AGAIN_AFTER_MS = 15 * 60_000;
 
 /** The resolution screen: portalled over the app, focus held inside and
  * given back on close, keys handled, every action awaited with its own

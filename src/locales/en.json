@@ -3207,5 +3207,7 @@
   "needsYou.screen.recommendedLabel": "{label}, recommended",
   "needsYou.screen.askRecommend": "Ask {name} for a recommendation",
   "needsYou.screen.recommendAsked": "Recommendation asked {age} ago",
-  "needsYou.screen.askedRecommend": "Recommendation asked from {name} — {title}."
+  "needsYou.screen.askedRecommend": "Recommendation asked from {name} — {title}.",
+  "needsYou.steps.asking": "Asking {name} for the steps… This item updates here as soon as they arrive.",
+  "needsYou.steps.noAnswer": "{name} was asked for the steps {age} ago and has not answered yet."
 }

@@ -221,9 +221,17 @@ describe("the resolution screen (I1)", () => {
     expect(fresh.html).toContain("Pedir o passo a passo");
     fresh.press("data-resolver-ask-steps");
     expect(fresh.calls).toEqual(["steps:o3"]);
+    // J17: asked 4 min ago (by the person or by the server on its own): "pedindo…", no button
     const asked = view({ selectedKey: keyOf("o4") });
-    expect(asked.html).toContain("Você pediu os passos há 4 min.");
-    expect(asked.html).toContain("Pedir de novo");
+    expect(asked.html).toContain("Pedindo o passo a passo ao Monitor Chat…");
+    expect(asked.html).not.toContain("data-resolver-ask-steps");
+    expect(asked.find("data-resolver-steps-asking")).toBeDefined();
+    // no answer after 15 min: the button comes back as "Pedir de novo"
+    const late = view({ selectedKey: keyOf("o4"), now: now + 12 * 60_000 });
+    expect(late.html).toContain("O passo a passo foi pedido ao Monitor Chat há 16 min e ele ainda não respondeu.");
+    expect(late.html).toContain("Pedir de novo");
+    late.press("data-resolver-ask-steps");
+    expect(late.calls).toEqual(["steps:o4"]);
   });
 
   it("answers in free text, resolving on send is the person's choice, and a question gets no filler 'why'", () => {
