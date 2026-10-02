@@ -9576,6 +9576,8 @@ threadSignals = (threadId) => {
     ...(item.why ? { why: item.why } : {}), ...(item.steps?.length ? { steps: item.steps } : {}), ...(item.options?.length ? { options: item.options } : {}),
     ...(item.stepsRequestedAt ? { stepsRequestedAt: item.stepsRequestedAt } : {}),
     ...(item.recommendRequestedAt ? { recommendRequestedAt: item.recommendRequestedAt } : {}),
+    ...(item.history?.length ? { history: item.history.map(({ at, kind, label, text, delivered, error }) => ({ at, kind, ...(label ? { label } : {}), text, delivered, ...(error ? { error } : {}) })) } : {}),
+    ...(item.awaitingSince ? { awaitingSince: item.awaitingSince } : {}),
   }));
   return {
     ...(watches.length ? { watches } : {}),
@@ -18950,7 +18952,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (store.groupByThread(threadId)) return json(res, 400, { error: "não disponível em salas" });
         if (!store.taskByThread(bot.id, threadId)) return json(res, 404, { error: "esta conversa não existe mais" });
         requireActiveInternalCapability();
-        const line = (item: OwnerPending) => `${item.id}: ${item.title}${item.due ? ` (até ${item.due})` : ""}${item.link ? ` — ${item.link}` : ""}`;
+        // the person's last answer, when the item waits on the bot (J18)
+        const answered = (item: OwnerPending) => {
+          const last = item.awaitingSince ? item.history?.findLast((each) => each.delivered) : undefined;
+          return last ? ` [o dono respondeu: ${last.kind === "option" ? `escolheu "${last.label}"` : last.kind === "ask" ? (last.label === "recommend" ? "pediu a sua recomendação" : "pediu o passo a passo") : `"${last.text.slice(0, 80)}"`} — resolva ou atualize]` : "";
+        };
+        const line = (item: OwnerPending) => `${item.id}: ${item.title}${item.due ? ` (até ${item.due})` : ""}${item.link ? ` — ${item.link}` : ""}${answered(item)}`;
         // how practical the item reads to the person: steps and decisions, or a nudge to add them
         const practical = (item: OwnerPending) => [
           item.steps?.length ? `${item.steps.length} passo${item.steps.length === 1 ? "" : "s"}` : "",
@@ -18998,7 +19005,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (body.action === "resolve") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
           if (!id) return json(res, 400, { error: "id é obrigatório (ou \"all\" para os desta conversa)" });
-          const done = autonomy.resolveOwnerPending({ botId: bot.id, threadId, id });
+          const done = autonomy.resolveOwnerPending({ botId: bot.id, threadId, id, by: "bot" });
           if (!done.length) return json(res, 404, { error: `nenhum item ${id}; chame owner_pending list` });
           refreshBotRow(bot.id);
           return json(res, 200, { message: `Resolvido: ${done.map(line).join("; ")}` });
@@ -22613,7 +22620,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     if (m && method === "POST") {
       const bot = store.bot(m[1]!);
       if (!bot) return json(res, 404, { error: "no such bot" });
-      const done = autonomy.resolveOwnerPending({ botId: bot.id, id: m[2]! });
+      const done = autonomy.resolveOwnerPending({ botId: bot.id, id: m[2]!, by: "owner" });
       // the bot reads it in that conversation: the person settled it
       for (const item of done) {
         if (store.taskByThread(bot.id, item.threadId)) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Resolvido pela pessoa: ${item.title}`, 240), ok: true } });
@@ -22639,14 +22646,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (notYours) return json(res, 403, { error: notYours });
       let text: string;
       let resolve: boolean;
+      // what goes in the item's history (J18)
+      let answer: { kind: "option" | "text" | "ask"; label?: string; text: string };
       if (body.ask === "steps") {
         text = ownerPendingStepsRequestText(item);
         resolve = false;
+        answer = { kind: "ask", label: "steps", text };
       } else if (body.ask === "recommend") {
         // an item with decisions and none recommended: the bot is asked which, and why (J16)
         if ((item.options?.length ?? 0) < 2) return json(res, 400, { error: "Este item não tem decisões para recomendar." });
         text = ownerPendingRecommendText(item, bot.name);
         resolve = false;
+        answer = { kind: "ask", label: "recommend", text };
       } else if (body.option !== undefined) {
         // the decision the person SAW: its position and its label, so a bot
         // that reordered or rewrote the options meanwhile never gets another
@@ -22654,15 +22665,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         const option = Number.isInteger(body.option) ? item.options?.[body.option as number] : undefined;
         if (!option) return json(res, 409, { error: "Esta decisão não existe mais: o bot reescreveu as opções. Confira e escolha de novo.", code: "options_changed" });
         if (typeof body.label !== "string" || body.label !== option.label) return json(res, 409, { error: `O bot reescreveu as opções deste item: "${String(body.label ?? "")}" não é mais a opção ${Number(body.option) + 1}. Confira e escolha de novo.`, code: "options_changed" });
-        text = ownerPendingReplyText(item, option.reply, true);
-        resolve = true;
-        // "seguir no terminal" is kept: the server does not recreate the item for 24 h (INSP-J r1 #8)
-        if (item.key?.startsWith(APP_UNBLOCK_KEY) && option.label === APP_UNBLOCK_DECLINE_LABEL) ownerDeclines.set(item.key, Date.now() + APP_UNBLOCK_DECLINE_MS);
+        // "seguir no terminal" is kept: the server does not recreate the item for 24 h (INSP-J r1 #8) — and it closes it
+        const declined = Boolean(item.key?.startsWith(APP_UNBLOCK_KEY) && option.label === APP_UNBLOCK_DECLINE_LABEL);
+        if (declined) ownerDeclines.set(item.key!, Date.now() + APP_UNBLOCK_DECLINE_MS);
+        // a decision no longer closes the item: it waits on the bot ("Aguardando …"), with the choice shown (J18)
+        resolve = declined;
+        text = ownerPendingReplyText(item, option.reply, resolve);
+        answer = { kind: "option", label: option.label, text: option.reply };
       } else {
         const reply = typeof body.text === "string" ? body.text.trim() : "";
         if (!reply) return json(res, 400, { error: "Escreva a resposta ao bot." });
         resolve = body.resolve === true;
         text = ownerPendingReplyText(item, reply.slice(0, 4_000), resolve);
+        answer = { kind: "text", text: reply };
       }
       try {
         assertWithinBudget(cfg, DATA_DIR);
@@ -22685,18 +22700,38 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // conversation is free, or after the running turn.
         const note = body.ask === "recommend" ? ownerPendingRecommendNote(item) : ownerPendingStepsRequestNote(item);
         const prompt = promptWithReply(`${text}\n\n${note}`, undefined, cfg.profile?.name?.trim() || "User");
-        queueSteeredMessage(bot.id, target, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
+        try {
+          queueSteeredMessage(bot.id, target, text, { prompt, sender: messageSender(auth), trigger: usageTriggerFor(auth) });
+        } catch (error) {
+          return ownerAnswerFailed(bot.id, item.id, answer, error);
+        }
+        autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: true });
         if (body.ask === "recommend") autonomy.markOwnerPendingRecommendRequested(bot.id, item.id);
         else autonomy.markOwnerPendingStepsRequested(bot.id, item.id);
         refreshBotRow(bot.id);
         drainQueuedSends();
         return json(res, 202, { ok: true, threadId: target, resolved: 0 });
       }
-      const receipt = await startOrQueueDirectMessage(bot.id, target, text, undefined, undefined, messageSender(auth), usageTriggerFor(auth));
-      const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id }) : [];
+      let receipt: Awaited<ReturnType<typeof startOrQueueDirectMessage>>;
+      try {
+        receipt = await startOrQueueDirectMessage(bot.id, target, text, undefined, undefined, messageSender(auth), usageTriggerFor(auth));
+      } catch (error) {
+        // never a silent failure: kept in the history as not delivered, and said on the screen (J18)
+        return ownerAnswerFailed(bot.id, item.id, answer, error);
+      }
+      autonomy.recordOwnerPendingAnswer(bot.id, item.id, { ...answer, delivered: true });
+      const done = resolve ? autonomy.resolveOwnerPending({ botId: bot.id, id: item.id, by: "owner" }) : [];
       refreshBotRow(bot.id);
       // the text rides along: a queued answer is shown queued in the conversation
       return json(res, 202, { ...receipt, text, resolved: done.length });
+
+      function ownerAnswerFailed(botId: string, id: string, what: typeof answer, error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        autonomy.recordOwnerPendingAnswer(botId, id, { ...what, delivered: false, error: message });
+        refreshBotRow(botId);
+        console.error(`[owner-pending] the person's answer to ${id} did not reach ${store.bot(botId)?.name ?? botId}: ${message}`);
+        return json(res, 502, { error: `A resposta não chegou ao ${store.bot(botId)?.name ?? "bot"}: ${message}. Ela ficou no histórico do item como não enviada; tente de novo.`, code: "not_delivered" });
+      }
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/command-allowlist(?:\/([\w-]+))?$/);
     if (m && ["GET", "POST", "DELETE"].includes(method)) {

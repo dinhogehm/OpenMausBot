@@ -459,7 +459,8 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
     ], reply: "Invertidas." },
     // the decision arrives as the person's message, naming the item (the
     // context is JSON: quotes inside it are escaped, so match around them)
-    { expectContextIncludes: ["Aprovar o merge da PR #12", "(o1): Aprovado: pode fazer o merge da #12.", "Marquei o1 como resolvido"], reply: "Fazendo o merge." },
+    // J18: a decision keeps the item, waiting on the bot, which is told so
+    { expectContextIncludes: ["Aprovar o merge da PR #12", "(o1): Aprovado: pode fazer o merge da #12.", "o1 continua em", "aguardando você"], reply: "Fazendo o merge." },
     // asked for the steps, the bot rewrites o2 in place: the ask reaches it as a note
     { expectContextIncludes: ["Me mostre como resolver «Liberar a escrita na linha 97 da planilha», passo a passo.", "não escrita pela pessoa", "owner_pending update, id o2"], steps: [
       { tool: "owner_pending", arguments: { action: "update", id: "o2", why: "Sem a escrita, o relatório de amanhã sai vazio.", steps: [{ text: "Abra a planilha e libere a linha 97", link: "https://docs.example.com/sheet" }], options: [{ label: "Liberei", reply: "Liberei a linha 97." }] } },
@@ -491,10 +492,21 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
   expect((await pending()).map((item: any) => item.id)).toEqual(["o1", "o2"]);
   // the person picks "Aprovar" where it is now
   const decided = await f.api(`/api/bots/${f.bot.id}/owner-pending/o1/reply`, { option: 1, label: "Aprovar" });
-  expect(decided.resolved).toBe(1);
+  expect(decided.resolved).toBe(0);
   await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(3);
-  expect((await pending()).map((item: any) => item.id)).toEqual(["o2"]);
+  // J18: the item stays, waiting on the bot, with the choice in its history (delivered)
+  const o1 = (await pending()).find((item: any) => item.id === "o1");
+  expect(o1.awaitingSince).toBeGreaterThan(0);
+  expect(o1.history).toEqual([
+    expect.objectContaining({ kind: "text", text: "Pode inverter a ordem das opções.", delivered: true }),
+    expect.objectContaining({ kind: "option", label: "Aprovar", text: "Aprovado: pode fazer o merge da #12.", delivered: true }),
+  ]);
   expect((await userLines()).at(-1)).toContain("Aprovado: pode fazer o merge da #12.");
+  // the person settles it: kept for audit with its history
+  await f.api(`/api/bots/${f.bot.id}/owner-pending/o1/resolve`, {});
+  expect((await pending()).map((item: any) => item.id)).toEqual(["o2"]);
+  const audit = f.ledger().resolvedOwnerPending.find((item: any) => item.id === "o1");
+  expect(audit).toMatchObject({ resolvedBy: "owner", history: [expect.objectContaining({ kind: "text" }), expect.objectContaining({ kind: "option", label: "Aprovar" })] });
 
   // the person asks the bot for (better) steps, in plain words
   await f.api(`/api/bots/${f.bot.id}/owner-pending/o2/reply`, { ask: "steps" });

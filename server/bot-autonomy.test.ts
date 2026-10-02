@@ -965,6 +965,37 @@ describe("a bot waiting on the person, in plain words", () => {
   });
 });
 
+// J18 (the owner, 02/10): after choosing "Já colei" on o12 (#9331/#9334)
+// the screen showed nothing; the item, resolved by the click, left no trace.
+describe("what the person answered stays with the item (J18)", () => {
+  it("keeps the answers in order, waits on the bot until it rewrites or resolves, and keeps them after it is resolved", () => {
+    const autonomy = make();
+    const item = autonomy.addOwnerPending("monitor", "dc38193b", { title: "Colar os dois comentários dos avisos de 02/10 nas issues #NNNN e #MMMM", why: "O Jev barrou o comentário do bot.", steps: [{ text: "Cole os comentários" }], options: [{ label: "Já colei", reply: "Já colei os comentários; pode resolver." }, { label: "Cole você", reply: "Tente de novo." }] });
+    now += 60_000;
+    autonomy.recordOwnerPendingAnswer("monitor", item.id, { kind: "option", label: "Já colei", text: "Já colei os comentários; pode resolver.", delivered: true });
+    let open = autonomy.ownerPendingById("monitor", item.id)!;
+    expect(open.awaitingSince).toBe(now);
+    expect(open.history).toEqual([{ at: now, by: "owner", kind: "option", label: "Já colei", text: "Já colei os comentários; pode resolver.", delivered: true }]);
+    // a failed send is kept too, never silent, and does not make it wait
+    now += 60_000;
+    autonomy.recordOwnerPendingAnswer("monitor", item.id, { kind: "text", text: "E a planilha?", delivered: false, error: "turn admission blocked" });
+    open = autonomy.ownerPendingById("monitor", item.id)!;
+    expect(open.history?.at(-1)).toMatchObject({ kind: "text", delivered: false, error: "turn admission blocked" });
+    expect(open.awaitingSince).toBe(now - 60_000);
+    // the server refreshing the item keeps them; a restart too
+    autonomy.addOwnerPending("monitor", "dc38193b", { title: open.title, why: "x", steps: [{ text: "y" }] });
+    expect(make().ownerPendingById("monitor", item.id)?.history).toHaveLength(2);
+    // the bot rewrites it: no longer waiting
+    autonomy.updateOwnerPending("monitor", item.id, { why: "Conferi os dois comentários." });
+    expect(autonomy.ownerPendingById("monitor", item.id)?.awaitingSince).toBeUndefined();
+    // resolved by the bot: kept for audit, with the history, across a restart
+    autonomy.resolveOwnerPending({ botId: "monitor", id: item.id, by: "bot" });
+    const audit = make().resolvedOwnerPendingOf("monitor");
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ id: item.id, resolvedBy: "bot", resolvedAt: now, history: [expect.objectContaining({ label: "Já colei" }), expect.objectContaining({ delivered: false })] });
+  });
+});
+
 describe("what waits on the person, made practical (lot I)", () => {
   const steps = [
     { text: "Abra a PR e confira o diff do carrier", link: "https://github.com/acme/app/pull/12" },
@@ -1030,7 +1061,9 @@ describe("what waits on the person, made practical (lot I)", () => {
   it("tells the bot which item the person answered, and asks it for the exact update call", () => {
     const item = { id: "o3", title: "Aprovar o merge da PR #12" };
     expect(ownerPendingReplyText(item, " Aprovado: pode fazer o merge da #12. ", true)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Aprovado: pode fazer o merge da #12.\n\n(Marquei o3 como resolvido em \"Precisa de você\".)");
-    expect(ownerPendingReplyText(item, "Espere a CI.", false)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Espere a CI.");
+    // J18: not resolved, it says the item waits on the bot — in plain words, no tool name
+    expect(ownerPendingReplyText(item, "Espere a CI.", false)).toBe("Sobre \"Aprovar o merge da PR #12\" (o3): Espere a CI.\n\n(o3 continua em \"Precisa de você\", aguardando você: resolva-o quando estiver feito, ou atualize-o se faltar algo.)");
+    expect(ownerPendingReplyText(item, "Espere a CI.", false)).not.toMatch(/owner_pending/);
     // what the person "says" is plain; the tool call is a note only the bot reads (INSP-I r1 #6)
     expect(ownerPendingStepsRequestText(item)).toBe("Me mostre como resolver «Aprovar o merge da PR #12», passo a passo.");
     expect(ownerPendingStepsRequestText(item)).not.toMatch(/owner_pending|why|steps|options/);

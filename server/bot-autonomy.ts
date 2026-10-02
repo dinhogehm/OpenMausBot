@@ -231,8 +231,32 @@ export interface OwnerPending {
   recommendRequestedAt?: number;
   /** The server asked the bot for this item's steps on its own, once (J17): never again for it. */
   stepsAutoAskedAt?: number;
+  /** What the person answered from "Precisa de você", in order (J18): kept with the item, and after it is resolved. */
+  history?: OwnerPendingAnswer[];
+  /** The person's last answer reached the bot and the bot has not updated nor resolved the item since (J18). */
+  awaitingSince?: number;
   /** Last time the bot rewrote it (owner_pending update). */
   updatedAt?: number;
+}
+
+/** One answer of the person to an item (J18). */
+export interface OwnerPendingAnswer {
+  at: number;
+  kind: "option" | "text" | "ask";
+  /** The option's label, or the ask ("steps", "recommend"). */
+  label?: string;
+  /** What reached the bot (the option's reply, the person's words, the ask). */
+  text: string;
+  by: "owner";
+  delivered: boolean;
+  /** Why it did not reach the bot. */
+  error?: string;
+}
+
+/** A settled item, as kept for audit (J18). */
+export interface ResolvedOwnerPending extends OwnerPending {
+  resolvedAt: number;
+  resolvedBy: "owner" | "bot" | "server";
 }
 export interface OwnerPendingStep {
   text: string;
@@ -247,6 +271,9 @@ export interface OwnerPendingOption {
   why?: string;
 }
 export const OWNER_PENDING_TITLE_MAX = 200;
+/** Answers kept per item, and settled items kept for audit (J18). */
+export const OWNER_PENDING_HISTORY_MAX = 30;
+export const RESOLVED_PENDING_MAX = 300;
 export const OWNER_PENDING_OPTION_WHY_MAX = 200;
 export const OWNER_PENDING_WHY_MAX = 400;
 export const OWNER_PENDING_STEPS_MAX = 8;
@@ -441,6 +468,8 @@ export const PROMISES_MAX_PER_THREAD = 10;
 interface Ledger {
   promises?: BotPromise[];
   ownerPending?: OwnerPending[];
+  /** Items settled, kept with their history for audit (the newest RESOLVED_PENDING_MAX). */
+  resolvedOwnerPending?: ResolvedOwnerPending[];
   wakes: BotWake[];
   goals: BotGoal[];
   reports?: PendingReports[];
@@ -554,6 +583,7 @@ export class BotAutonomy {
   private standingLost = new Map<string, StandingLost>();
   private promises: BotPromise[] = [];
   private ownerPending: OwnerPending[] = [];
+  private resolvedOwnerPending: ResolvedOwnerPending[] = [];
   /** The bot's recent writes to watched sources, per bot (kept across restarts: saveEcho). */
   private selfWrites = new Map<string, SelfWrite[]>();
   /** Each watch's complete output lines of its last run (kept across restarts for that very output). */
@@ -614,6 +644,10 @@ export class BotAutonomy {
       for (const pending of raw.ownerPending ?? []) {
         if (pending && typeof pending.id === "string" && typeof pending.threadId === "string" && typeof pending.botId === "string" && typeof pending.title === "string") this.ownerPending.push(savedDetails(pending));
       }
+      for (const done of raw.resolvedOwnerPending ?? []) {
+        if (done && typeof done.id === "string" && typeof done.botId === "string" && typeof done.title === "string" && typeof done.resolvedAt === "number") this.resolvedOwnerPending.push(done);
+      }
+      this.resolvedOwnerPending = this.resolvedOwnerPending.slice(-RESOLVED_PENDING_MAX);
       const folded = this.foldEquivalentPending();
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
@@ -653,7 +687,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()] };
+    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()] };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -1128,6 +1162,10 @@ export class BotAutonomy {
       ...(input.why?.trim() ? { why: input.why.trim() } : existing?.why ? { why: existing.why } : {}),
       ...(input.steps?.length ? { steps: input.steps } : existing?.steps?.length ? { steps: existing.steps } : {}),
       ...(input.options?.length ? { options: input.options } : existing?.options?.length ? { options: existing.options } : {}),
+      // what the person answered stays with the item when the server refreshes it (J18)
+      ...(existing?.history?.length ? { history: existing.history } : {}),
+      ...(existing?.awaitingSince ? { awaitingSince: existing.awaitingSince } : {}),
+      ...(existing?.stepsAutoAskedAt ? { stepsAutoAskedAt: existing.stepsAutoAskedAt } : {}),
     };
     // a server item (same key) found in another conversation follows the server to where it says it now
     this.ownerPending = [...this.ownerPending.filter((open) => !same(open)), pending];
@@ -1169,7 +1207,7 @@ export class BotAutonomy {
   }
 
   /** Resolve one item of a bot by id, all of a conversation with "all", or a server item by key. */
-  resolveOwnerPending(match: { botId?: string; threadId?: string; id?: string; key?: string }): OwnerPending[] {
+  resolveOwnerPending(match: { botId?: string; threadId?: string; id?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"] }): OwnerPending[] {
     const done = this.ownerPending.filter((open) =>
       (match.botId === undefined || open.botId === match.botId)
       && (match.key !== undefined ? open.key === match.key
@@ -1177,8 +1215,29 @@ export class BotAutonomy {
           : open.id === match.id || Boolean(match.id && open.aliases?.includes(match.id))));
     if (!done.length) return [];
     this.ownerPending = this.ownerPending.filter((open) => !done.includes(open));
+    // kept for audit, with what the person answered (J18)
+    const at = this.now();
+    this.resolvedOwnerPending = [...this.resolvedOwnerPending, ...done.map((item) => ({ ...item, resolvedAt: at, resolvedBy: match.by ?? "server" }))].slice(-RESOLVED_PENDING_MAX);
     this.save();
     return done;
+  }
+
+  /** Settled items, newest last (audit). */
+  resolvedOwnerPendingOf(botId?: string): ResolvedOwnerPending[] {
+    return this.resolvedOwnerPending.filter((item) => botId === undefined || item.botId === botId);
+  }
+
+  /** The person answered `id` (J18): kept in its history; when it reached
+   * the bot, the item waits on the bot until it updates or resolves it. */
+  recordOwnerPendingAnswer(botId: string, id: string, answer: Omit<OwnerPendingAnswer, "at" | "by">): OwnerPending | null {
+    const item = this.ownerPendingById(botId, id);
+    if (!item) return null;
+    const at = this.now();
+    const entry: OwnerPendingAnswer = { at, by: "owner", ...answer, text: answer.text.slice(0, 500), ...(answer.error ? { error: answer.error.slice(0, 300) } : {}) };
+    item.history = [...(item.history ?? []), entry].slice(-OWNER_PENDING_HISTORY_MAX);
+    if (answer.delivered) item.awaitingSince = at;
+    this.save();
+    return item;
   }
 
   /** One of a bot's items, by id or by an id folded into it. */
@@ -1213,6 +1272,8 @@ export class BotAutonomy {
       else delete next.options;
     }
     delete next.stepsRequestedAt;
+    // the bot answered the person by rewriting the item: no longer waiting on it (J18)
+    delete next.awaitingSince;
     if (patch.options !== undefined) delete next.recommendRequestedAt;
     this.ownerPending = this.ownerPending.map((open) => (open === item ? next : open));
     this.save();
@@ -1866,7 +1927,8 @@ export function askCoveredByItem(ask: { text: string; at: number }, items: Reado
  * the bot offered, or the person's own words. `resolved` says the item is
  * closed already, so the bot does not open it again. */
 export function ownerPendingReplyText(item: Pick<OwnerPending, "id" | "title">, reply: string, resolved: boolean): string {
-  return `Sobre "${item.title}" (${item.id}): ${reply.trim()}${resolved ? `\n\n(Marquei ${item.id} como resolvido em "Precisa de você".)` : ""}`;
+  // not resolved: the item waits on the bot ("Aguardando …" on the screen) until it resolves or rewrites it (J18)
+  return `Sobre "${item.title}" (${item.id}): ${reply.trim()}${resolved ? `\n\n(Marquei ${item.id} como resolvido em "Precisa de você".)` : `\n\n(${item.id} continua em "Precisa de você", aguardando você: resolva-o quando estiver feito, ou atualize-o se faltar algo.)`}`;
 }
 
 /** The person's request, from "Precisa de você", to rewrite an item that has
