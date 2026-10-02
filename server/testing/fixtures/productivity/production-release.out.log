@@ -1,0 +1,108 @@
+No new origin/main tip (already released: af57e77f8)
+NURIA_RELEASE_AUTO enabled — releasing f50b70a3d
+HEAD=f50b70a3d Merge pull request #8983 from dinhogehm/chore/release-carrier-8967-presence-cutover
+ADMISSION_INTENT kind=release label=release:production:f50b70a3df5898865020e052c3749c3ddf6f2548 pid=83261
+ADMISSION_GRANTED kind=release label=release:production:f50b70a3df5898865020e052c3749c3ddf6f2548 pid=83261 waited=0s
+[01:33:57] build
+@nuria/payments:test: {"timestamp":"2026-03-22T17:04:31.162Z","level":"info","message":"fixture clock, not the release's"}
+[01:35:12] lint
+[01:39:40] typecheck
+[01:41:02] tests
+│ dist/index.html                              1.07 kB │ gzip:  0.56 kB
+[01:52:31] smart-deploy
+[ERROR] Validacao falhou: issues CRITICAL/ERROR presentes (canDeploy=false)
+[ERROR] Integridade do snapshot Git: falha operacional ao consultar fetch/refs/heads/main
+Local CI failed at smart-deploy. Logs: /private/var/folders/xx/T/nuria-smart-deploy.yD9OhF/release-ci-output/20260917T013357Z-release-f50b70a3df58-86209
+ADMISSION_RELEASED kind=release pid=83261
+NURIA_RELEASE_AUTO enabled — releasing f50b70a3d
+HEAD=f50b70a3d Merge pull request #8983 from dinhogehm/chore/release-carrier-8967-presence-cutover
+ADMISSION_INTENT kind=release label=release:production:f50b70a3df5898865020e052c3749c3ddf6f2548 pid=76716
+ADMISSION_GRANTED kind=release label=release:production:f50b70a3df5898865020e052c3749c3ddf6f2548 pid=76716 waited=0s
+[ERROR] Lock stale detectado para PID 83837; remova manualmente somente apos verificar o processo
+[ERROR] Nao foi possivel inicializar smart-deploy
+ADMISSION_RELEASED kind=release pid=76716
+NURIA_RELEASE_AUTO enabled — releasing f50b70a3d
+HEAD=f50b70a3d Merge pull request #8983 from dinhogehm/chore/release-carrier-8967-presence-cutover
+ADMISSION_INTENT kind=release label=release:production:f50b70a3df5898865020e052c3749c3ddf6f2548 pid=86574
+ADMISSION_GRANTED kind=release label=release:production:f50b70a3df5898865020e052c3749c3ddf6f2548 pid=86574 waited=0s
+[11:45:09] build
+[11:45:50] lint
+[11:46:31] typecheck
+[11:47:57] tests
+@nuria/web:test:  ✓ src/lib/__tests__/utils.test.ts (6 tests) 15ms
+[11:55:46] smart-deploy
+[12:03:41] migration-lint
+[12:03:44] migration-contracts
+[12:05:52] schema-syntax
+[12:05:54] script-contracts
+  2026-09-17T12:13:08.516Z LH:status Generating results...
+  2026-09-17T12:13:08.525Z LH:ChromeLauncher Killing Chrome instance 21678
+**Data:** 2026-09-17T12:13:10Z | **Branch:**  | **Commit:** f50b70a3d | **Duracao:** 306s
+[INFO] Recibo de deploy de production atualizado para f50b70a3df5898865020e052c3749c3ddf6f2548 (purge=success)
+[OK] Deploy concluido!
+[OK] Concluido! (4751s)
+post-release: sample 5/5 all healthy
+Certification tag nuria-production-deployed advanced to f50b70a3df5898865020e052c3749c3ddf6f2548
+Release production completed for f50b70a3df5898865020e052c3749c3ddf6f2548
+ADMISSION_RELEASED kind=release pid=86574
+Release production completed for f50b70a3d
+No new origin/main tip (already released: f50b70a3d)
+No new origin/main tip (already released: f50b70a3d)
+NURIA_RELEASE_AUTO enabled — releasing 3f99428bf
+HEAD=3f99428bf Merge pull request #8989 from dinhogehm/chore/release-carrier-8984-presence-cutover
+ADMISSION_INTENT kind=release label=release:production:3f99428bfe8b8982347c3279472447d8c3d823ea pid=6552
+ADMISSION_GRANTED kind=release label=release:production:3f99428bfe8b8982347c3279472447d8c3d823ea pid=6552 waited=0s
+[13:39:46] build
+[13:40:27] lint
+[13:41:08] typecheck
+[13:42:38] tests
+[13:55:08] smart-deploy
+[14:00:51] migration-lint
+[14:00:55] migration-contracts
+[14:02:30] schema-syntax
+[14:02:32] script-contracts
+  2026-09-17T14:09:16.351Z LH:status Generating results...
+**Data:** 2026-09-17T14:09:18Z | **Branch:**  | **Commit:** 3f99428bf | **Duracao:** 308s
+[ERROR] Integridade do snapshot Git: drift detectado em imediatamente antes da mutacao remota de deploy
+[ERROR] Release abortado
+ADMISSION_RELEASED kind=release pid=6552
+NURIA_RELEASE_AUTO enabled — releasing a76a5aa0c
+HEAD=a76a5aa0c Merge pull request #8990 from dinhogehm/chore/release-carrier-hotfix-8987
+ADMISSION_INTENT kind=release label=release:production:a76a5aa0c72868462320e04c16174383b18cd69e pid=51819
+ADMISSION_GRANTED kind=release label=release:production:a76a5aa0c72868462320e04c16174383b18cd69e pid=51819 waited=0s
+[14:16:03] build
+[14:19:49] lint
+[14:23:12] typecheck
+[14:26:20] tests
+[14:42:26] smart-deploy
+[14:49:23] migration-lint
+[14:49:27] migration-contracts
+[14:51:52] schema-syntax
+[14:51:55] script-contracts
+  2026-09-17T14:59:32.376Z LH:status Generating results...
+**Data:** 2026-09-17T14:59:34Z | **Branch:**  | **Commit:** a76a5aa0c | **Duracao:** 320s
+[OK] Concluido! (4919s)
+Certification tag nuria-production-deployed advanced to a76a5aa0c72868462320e04c16174383b18cd69e
+Release production completed for a76a5aa0c72868462320e04c16174383b18cd69e
+ADMISSION_RELEASED kind=release pid=51819
+Release production completed for a76a5aa0c
+NURIA_RELEASE_AUTO enabled — releasing cb015584a
+HEAD=cb015584a Merge pull request #9339 from dinhogehm/chore/release-carrier-f4-2-post-release-guard
+ADMISSION_INTENT kind=release label=release:production:cb015584a7d0e01b6a4b0d2c66b4d6e5a8f91c37 pid=91010
+ADMISSION_GRANTED kind=release label=release:production:cb015584a7d0e01b6a4b0d2c66b4d6e5a8f91c37 pid=91010 waited=0s
+[21:21:34] build
+[21:58:12] script-contracts
+  2026-09-17T22:02:47.120Z LH:status Generating results...
+**Data:** 2026-09-17T22:02:49Z | **Branch:**  | **Commit:** cb015584a | **Duracao:** 298s
+[ERROR] Release de producao sem alvo de runtime: nenhum Worker, web ou widget mudou desde o recibo a9e4b93ca000ffccc4b626dbe71ba0fecacc394e
+[ERROR] Release abortado
+ADMISSION_RELEASED kind=release pid=91010
+Operator declined release for cb015584a
+Operator already declined cb015584a; not asking again (rm /Users/owner/.nuria/declined-production-release.sha to re-offer)
+Operator already declined cb015584a; not asking again (rm /Users/owner/.nuria/declined-production-release.sha to re-offer)
+NURIA_RELEASE_AUTO enabled — releasing 9dbb1dcdd
+HEAD=9dbb1dcdd Merge pull request #9360 from dinhogehm/chore/release-carrier-9347-sqlite-warning
+ADMISSION_INTENT kind=release label=release:production:9dbb1dcdda74dc04debbf8ff6d2292e5ad597445 pid=56366
+ADMISSION_GRANTED kind=release label=release:production:9dbb1dcdda74dc04debbf8ff6d2292e5ad597445 pid=56366 waited=0s
+[23:40:02] build
+[23:41:30] lint
