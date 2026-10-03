@@ -1031,13 +1031,17 @@ export function rootFolderRefusal(last: { folder: string; title?: string }, repo
  * is on screen (the R9-dispatch hypothesis for the reuse: New Session with
  * a worktree session open inherits its folder). The newest one not
  * archived, in the root itself, not a scheduled run or scratch; null when
- * there is none (the create then goes as before). */
-export function rootAnchorSession(repo: string, dir = DESKTOP_SESSIONS_DIR): { localId: string; title?: string } | null {
+ * there is none (the create then goes as before). Never one the server
+ * opened (`ours`, the ledger's local ids): a create of ours that fell in the
+ * root is failed and left there, and as the newest it would be picked —
+ * the next New Session then inherits the root it fell into (INSP-S r1 S-3).
+ * Only the person's own root session (the unblock gesture) anchors. */
+export function rootAnchorSession(repo: string, dir = DESKTOP_SESSIONS_DIR, ours: ReadonlySet<string> = new Set()): { localId: string; title?: string } | null {
   let newest: DesktopRecord | null = null;
   for (const file of recordFiles(dir)) {
     const record = readRecord(file);
     if (!record || record.isArchived || notPickedFolder(record) || record.cwd !== repo || record.worktreePath) continue;
-    if (!/^local_[0-9a-f-]{36}$/.test(record.sessionId)) continue;
+    if (!/^local_[0-9a-f-]{36}$/.test(record.sessionId) || ours.has(record.sessionId)) continue;
     if ((record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
   }
   return newest ? { localId: newest.sessionId, ...(newest.title ? { title: newest.title } : {}) } : null;

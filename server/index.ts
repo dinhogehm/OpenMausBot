@@ -382,7 +382,7 @@ import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 import { IntakeLock } from "./intake-lock.ts";
 import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
-import { APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appStillBlockedText, appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips, staleUnblockItem } from "./owner-chips.ts";
+import { APP_FLAPPING_CHECK_LABEL, APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appFlappingPending, appStillBlockedText, appUnblockPending, flappingRefusal, type FolderBlockSeen, type FolderFlapState, noteFolderBlock, ownerChannelChip, serverRestartedChip, sessionChips, staleUnblockItem } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
 import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
@@ -9429,7 +9429,8 @@ const desktopWork: DesktopWorkDeps = {
   hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
   liveWorktrees: () => liveWorktreeNames(undefined, true),
   baseBranch: (session) => repoBaseBranch(session.repo),
-  rootAnchor: (session) => rootAnchorSession(session.repo),
+  // never a session the server opened (a failed one in the root is the newest there — INSP-S r1 S-3)
+  rootAnchor: (session) => rootAnchorSession(session.repo, undefined, ourAppLocalIds()),
   folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
   log: (line) => console.log(`[claude-desktop] ${line}`),
   onArchived: (session) => {
@@ -10045,7 +10046,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     // decided by the app's state the server knows, not by the words of cli_reason (R9-dispatch R9-3, INSP-H r1 #6)
     const { state: app, reason: appReason } = appAvailability(input.repo);
     // the app blocked by the reused folder, with a client's work waiting: the owner is asked, once, to unblock it
-    if (app === "blocked" && clientIssue(`${input.title}\n${input.brief}`)) askOwnerToUnblockApp(bot, threadId, input.repo, appFolderBlock()?.kind);
+    if (app === "blocked" && clientIssue(`${input.title}\n${input.brief}`)) askOwnerToUnblockApp(bot, threadId, input.repo, appFolderBlock());
     const decided = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app, appReason, appFailure: app === "available" ? recentAppFailure(ccLedger.all(), input.repo, Date.now()) : null });
     if ("refusal" in decided) return { status: 409, body: { error: decided.refusal } };
     cliOnRecord = decided.onRecord;
@@ -10081,8 +10082,9 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     const block = appFolderBlock();
     if (block) {
       // only the owner can unblock it: one item for them, however many starts hit this (R9-dispatch R9-2)
-      const asked = askOwnerToUnblockApp(bot, threadId, input.repo, block.kind);
-      const refusal = block.kind === "reused" ? reusedFolderRefusal(block.last, basename(input.repo), fromQueue) : rootFolderRefusal(block.last, basename(input.repo), fromQueue);
+      const asked = askOwnerToUnblockApp(bot, threadId, input.repo, block);
+      const refusal = block.kind === "flapping" ? flappingRefusal(block.seen, basename(input.repo), fromQueue)
+        : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(input.repo), fromQueue) : rootFolderRefusal(block.last, basename(input.repo), fromQueue);
       return { status: 409, body: { error: `${refusal}${asked ? ` O pedido ao dono já está em "Precisa de você" (${asked}): não abra outro item para isso.` : ""}` }, retry: fromQueue };
     }
     const appId = randomUUID();
@@ -10158,7 +10160,7 @@ const ownerDeclines = (() => {
 /** The app reuses worktrees, so the server will not create there: ONE item
  * in "Precisa de você" asks the owner to unblock it — the action that is
  * theirs alone. Its id, or null when no conversation of the bot can hold it. */
-function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string, kind: AppFolderBlock["kind"] = "reused"): string | null {
+function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string, block: AppFolderBlock | null = null): string | null {
   const thread = ownerChannelOf(bot.id) ?? threadId;
   if (!store.taskByThread(bot.id, thread)) return null;
   const name = basename(repo);
@@ -10168,22 +10170,48 @@ function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string, ki
     console.log(`[claude-desktop] the owner chose to keep ${name}'s sessions in the terminal until ${new Date(declinedUntil).toISOString()}: not asked again`);
     return null;
   }
-  const item = autonomy.addOwnerPending(bot.id, thread, { ...appUnblockPending(name, kind), key: `${APP_UNBLOCK_KEY}${name}` });
+  const want = block?.kind === "flapping" ? appFlappingPending(name, block.seen) : appUnblockPending(name, block?.kind ?? "reused");
+  const item = autonomy.addOwnerPending(bot.id, thread, { ...want, key: `${APP_UNBLOCK_KEY}${name}` });
   refreshBotRow(bot.id);
   return item.id;
 }
 
+/** The app sessions the server opened (their local ids): never the
+ * owner's, never an anchor. */
+const ourAppLocalIds = () => new Set(ccLedger.all().flatMap((session) => session.desktop?.localId ? [session.desktop.localId] : []));
+
+/** The blocks the server saw lately (owner-chips.ts noteFolderBlock), kept
+ * across restarts: a 2nd switch between "reused" and "root" stops the
+ * gestures (INSP-S r1 S-3). */
+const appFolderFlaps = (() => {
+  const path = join(DATA_DIR, "app-folder-blocks.json");
+  let state: FolderFlapState = { seen: [] };
+  try { state = JSON.parse(readFileSync(path, "utf8")) as FolderFlapState; } catch { /* none yet */ }
+  return {
+    get: () => state,
+    set(next: FolderFlapState) {
+      if (next === state) return;
+      if (next.stoppedAt !== undefined && state.stoppedAt === undefined) console.log(`[claude-desktop] the app flipped ${next.seen.map((each) => each.kind).join(" → ")}: no more gestures asked; sessions go to the terminal until the owner answers`);
+      state = next;
+      try { writeFileAtomic(path, `${JSON.stringify(state)}\n`, { mode: 0o600 }); } catch (error) { console.error(`[app-folder-blocks] ${error instanceof Error ? error.message : String(error)}`); }
+    },
+  };
+})();
+
 /** Why a New Session in the app would land in a wrong folder now: the
  * newest session in a worktree others had used ("reused"), or the server's
- * own last session in the root, without a worktree ("root"); null when the
- * app may be used. */
-type AppFolderBlock = { kind: "reused"; last: NonNullable<ReturnType<typeof lastAppWorktreeFolder>> } | { kind: "root"; last: NonNullable<ReturnType<typeof lastServerSessionInRoot>> };
+ * own last session in the root, without a worktree ("root"); "flapping"
+ * once the two took turns (each gesture brought the other back) until the
+ * owner answers; null when the app may be used. */
+type AppFolderBlock = { kind: "reused"; last: NonNullable<ReturnType<typeof lastAppWorktreeFolder>> } | { kind: "root"; last: NonNullable<ReturnType<typeof lastServerSessionInRoot>> } | { kind: "flapping"; last: { folder: string; title?: string }; seen: FolderBlockSeen[] };
 function appFolderBlock(): AppFolderBlock | null {
   const reused = lastAppWorktreeFolder();
-  if (reused) return { kind: "reused", last: reused };
-  const ours = new Set(ccLedger.all().flatMap((session) => session.desktop?.localId ? [session.desktop.localId] : []));
-  const root = lastServerSessionInRoot(ours);
-  return root ? { kind: "root", last: root } : null;
+  const root = reused ? null : lastServerSessionInRoot(ourAppLocalIds());
+  const raw: AppFolderBlock | null = reused ? { kind: "reused", last: reused } : root ? { kind: "root", last: root } : null;
+  const flaps = noteFolderBlock(appFolderFlaps.get(), raw ? { kind: raw.kind as "reused" | "root", folder: raw.last.folder, ...(raw.last.title ? { title: raw.last.title } : {}) } : null, Date.now());
+  appFolderFlaps.set(flaps);
+  if (flaps.stoppedAt !== undefined) return { kind: "flapping", last: raw?.last ?? flaps.seen.at(-1)!, seen: flaps.seen };
+  return raw;
 }
 
 /** The "destravar o app" items close by themselves once the app no longer
@@ -10200,7 +10228,7 @@ function settleAppUnblock(): void {
   const block = appFolderBlock();
   if (block) {
     for (const item of open) {
-      const want = staleUnblockItem(item, item.key!.slice(APP_UNBLOCK_KEY.length), block.kind);
+      const want = staleUnblockItem(item, item.key!.slice(APP_UNBLOCK_KEY.length), block.kind, block.kind === "flapping" ? block.seen : []);
       if (!want) continue;
       autonomy.addOwnerPending(item.botId, item.threadId, { ...want, key: item.key! });
       refreshBotRow(item.botId);
@@ -23029,12 +23057,18 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // "Feito, conferir" is checked against the app's records before it
         // is taken: still blocked, the item stays and the person reads why
         // (R10-dispatch R10-2)
-        if (item.key?.startsWith(APP_UNBLOCK_KEY) && option.label === APP_UNBLOCK_CHECK_LABEL && process.platform === "darwin") {
+        // "Rodei o teste, conferir" (the app flapped): the count starts over, then the same check (INSP-S r1 S-3)
+        const flapCheck = Boolean(item.key?.startsWith(APP_UNBLOCK_KEY) && option.label === APP_FLAPPING_CHECK_LABEL);
+        if (flapCheck) {
+          appFolderFlaps.set({ seen: [] });
+          console.log("[claude-desktop] the owner ran the guided test: the app's folder blocks are counted from zero");
+        }
+        if (item.key?.startsWith(APP_UNBLOCK_KEY) && (option.label === APP_UNBLOCK_CHECK_LABEL || flapCheck) && process.platform === "darwin") {
           const block = appFolderBlock();
           if (block) {
             const name = item.key.slice(APP_UNBLOCK_KEY.length);
             // the item asks, from now on, the gesture that fits what the records show
-            const want = staleUnblockItem(item, name, block.kind);
+            const want = staleUnblockItem(item, name, block.kind, block.kind === "flapping" ? block.seen : []);
             if (want) {
               autonomy.addOwnerPending(bot.id, item.threadId, { ...want, key: item.key });
               refreshBotRow(bot.id);

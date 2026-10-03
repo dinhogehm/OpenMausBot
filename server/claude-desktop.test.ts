@@ -1057,6 +1057,24 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     expect(rootAnchorSession(REPO, root)).toEqual({ localId: id(1), title: "Raiz antiga" });
   });
 
+  // INSP-S r1 S-3: a create of ours fell in the root (wrongFolder, failed and
+  // left unarchived — the bot is only asked to archive it); it is the newest
+  // root session, and anchoring on it would inherit the root it fell into.
+  it("never anchors on a session the server opened, the failed one in the root included: only the person's own", () => {
+    const records = join(root, "org", "acct");
+    mkdirSync(records, { recursive: true });
+    const REPO = "/Users/o/Projetos/nuria-platform";
+    const id = (n: number) => `local_0a0000${String(n).padStart(2, "0")}-0000-4000-8000-000000000000`;
+    const write = (n: number, extra: object) => writeFileSync(join(records, `${id(n)}.json`), JSON.stringify({ sessionId: id(n), cliSessionId: `c-${n}`, ...extra }));
+    write(1, { createdAt: 1_000, cwd: REPO, title: "Sessão raiz do gerente OpenMausBot" });
+    write(2, { createdAt: 2_000, cwd: REPO, title: "9311 Chat no ticket" });
+    // without knowing which are ours, the newest wins: the failed server session
+    expect(rootAnchorSession(REPO, root)?.localId).toBe(id(2));
+    expect(rootAnchorSession(REPO, root, new Set([id(2)]))).toEqual({ localId: id(1), title: "Sessão raiz do gerente OpenMausBot" });
+    // only ours in the root: no anchor (the create goes as before; the Passo 0 still guards it)
+    expect(rootAnchorSession(REPO, root, new Set([id(1), id(2)]))).toBeNull();
+  });
+
   it("blocks when the server's own last session landed in the root (the worktree option left off), and says the remedy", () => {
     const records = join(root, "org", "acct");
     mkdirSync(records, { recursive: true });

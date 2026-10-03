@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb, verificationServerEnvironment } from "../scripts/control-omb.ts";
 import { request } from "../scripts/mcp-server.ts";
-import { APP_UNBLOCK_CHECK_LABEL, appUnblockPending } from "./owner-chips.ts";
+import { APP_FLAPPING_CHECK_LABEL, APP_UNBLOCK_CHECK_LABEL, appUnblockPending } from "./owner-chips.ts";
 import { waitForExit } from "./testing/cleanup.ts";
 
 // R10-dispatch R10-2, through the real server: the owner's "destravar o app"
@@ -79,6 +79,87 @@ it.runIf(process.platform === "darwin")("'Feito, conferir' while the app still r
     expect(again.status).toBe(409);
     expect((await again.json() as { error: string }).error).toContain('a sessão mais recente do app ("ok")');
     expect(items().map((item) => item.id)).toEqual(["o8"]);
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 90_000);
+
+// INSP-S r1 S-3, through the real server: the two blocks take turns — a
+// reused folder; the gesture (root, worktree off) frees it, then a create of
+// ours falls in the root; "worktree ON" frees that, then lands in a reused
+// folder again. On that 2nd switch the server stops asking gestures: the one
+// item becomes the diagnosis + guided test, and stays so across a restart.
+// "Rodei o teste, conferir" counts from zero and checks the records again.
+// Again only BLOCKED states: no session is started.
+it.runIf(process.platform === "darwin")("the app flapping between 'reused' and 'root': on the 2nd switch, no third gesture — one item with the diagnosis and the guided test", async () => {
+  const env = { ...process.env, OMB_AUTONOMY_TICK_MS: "200" };
+  const fixture = await launchVerificationServer(env);
+  const { url, dataDir, logPath } = fixture.info;
+  const raw = (path: string, body: unknown) => fetch(url + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  let restarted: ChildProcess | undefined;
+  const items = () => (JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")).ownerPending ?? []) as any[];
+  const boot = async () => {
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment(env, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+  };
+  try {
+    const chief = (await runControlOmb(["new-bot", "--name", "Chief of Staff", "--url", url]) as any).bot;
+    const thread = chief.activeTaskId ?? chief.threadId;
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+    const t = Date.now() - 3 * 3_600_000;
+    writeRecords(dataDir, [
+      { sessionId: "local_e1", createdAt: t - 86_400_000, cwd: F, isArchived: true, title: "Atendimento reaberto bugs" },
+      { sessionId: "local_c6d395b2", createdAt: t, cwd: F, worktreePath: F, title: "Aumentar usuários Piperun para 50" },
+    ]);
+    // the create of ours that will fall in the root, as the ledger adopted it
+    writeFileSync(join(dataDir, "cc-sessions.json"), JSON.stringify({ sessions: [
+      { id: "s9311", ownerBotId: chief.id, ownerThreadId: thread, title: "9311 Chat no ticket", repo: REPO, worktree: "", permissionMode: "auto", surface: "app", status: "failed", turns: 0, costUsd: 0, queued: [], createdAt: t, lastActivityAt: t, failedAt: t,
+        desktop: { marker: "OMBFLAP01", turnsSeen: 0, localId: "local_srv1", wrongFolder: REPO } },
+    ] }));
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
+      { id: "o8", botId: chief.id, threadId: thread, ...appUnblockPending("nuria-platform"), key: "app-reused-folder:nuria-platform", createdAt: t, stepsAutoAskedAt: t },
+    ] }));
+    await boot();
+    const check = async (label = APP_UNBLOCK_CHECK_LABEL) => {
+      const option = items().find((item) => item.id === "o8").options.findIndex((each: any) => each.label === label);
+      const answer = await raw(`/api/bots/${chief.id}/owner-pending/o8/reply`, { option, label });
+      return { status: answer.status, ...(await answer.json() as { error?: string; code?: string }) };
+    };
+
+    // 1. reused: the gesture asked is root + worktree off
+    expect(await check()).toMatchObject({ status: 409, code: "app_still_blocked", error: expect.stringContaining("refaça com ela desligada") });
+    // 2. the owner's gesture in the root freed it; then our create fell in the root: 1st switch, the gesture flips to "worktree ON"
+    writeRecords(dataDir, [{ sessionId: "local_0a0000aa-0000-4000-8000-000000000000", createdAt: t + 60_000, cwd: REPO, title: "Sessão raiz do gerente OpenMausBot" }]);
+    writeRecords(dataDir, [{ sessionId: "local_srv1", createdAt: t + 120_000, cwd: REPO, title: "9311 Chat no ticket" }]);
+    expect(await check()).toMatchObject({ status: 409, error: expect.stringContaining("confira se a opção worktree estava ligada") });
+    expect(items().find((item) => item.id === "o8").title).toMatch(/com a worktree LIGADA/);
+    // 3. "worktree ON" landed in a reused folder again: 2nd switch — stop
+    writeRecords(dataDir, [{ sessionId: "local_again", createdAt: t + 180_000, cwd: F, worktreePath: F, title: "ok" }]);
+    const stopped = await check();
+    expect(stopped).toMatchObject({ status: 409, code: "app_still_blocked" });
+    expect(stopped.error).toContain("O servidor parou de pedir gestos");
+    const item = items().find((each) => each.id === "o8");
+    expect(item.title).toBe("O app Claude alterna entre reaproveitar worktree e cair na raiz: as sessões de nuria-platform seguem no terminal até você rodar o teste guiado");
+    expect(item.why).toContain("(2 trocas)");
+    expect(item.why).toContain('a sessão do servidor "9311 Chat no ticket" caiu na raiz, sem worktree');
+    expect(item.options.map((option: any) => option.label)).toEqual([APP_FLAPPING_CHECK_LABEL, "Seguir no terminal"]);
+    expect(items()).toHaveLength(1);
+    expect(readFileSync(logPath, "utf8")).toContain("[claude-desktop] the app flipped reused → root → reused: no more gestures asked");
+
+    // a restart keeps it stopped: still the one item, never a gesture again
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await boot();
+    expect(JSON.parse(readFileSync(join(dataDir, "app-folder-blocks.json"), "utf8")).stoppedAt).toEqual(expect.any(Number));
+    // 4. "Rodei o teste, conferir": counted from zero, and the records still show a reused folder — said, with that gesture
+    expect(await check(APP_FLAPPING_CHECK_LABEL)).toMatchObject({ status: 409, error: expect.stringContaining("refaça com ela desligada") });
+    expect(JSON.parse(readFileSync(join(dataDir, "app-folder-blocks.json"), "utf8"))).toEqual({ seen: [expect.objectContaining({ kind: "reused", folder: F })] });
+    expect(readFileSync(logPath, "utf8")).toContain("the owner ran the guided test: the app's folder blocks are counted from zero");
+    expect(items().map((each) => each.id)).toEqual(["o8"]);
   } finally {
     await waitForExit(restarted, { signal: "SIGTERM" });
     await fixture.close();

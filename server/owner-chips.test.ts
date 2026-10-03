@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, appStillBlockedText, appUnblockPending, appUnblockTitle, CHIP_VISIBLE, staleUnblockItem, ownerChannelChip, plural, serverRestartedChip, sessionChips, sessionLabel } from "./owner-chips.ts";
+import { APP_FLAPPING_CHECK_LABEL, APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, appFlappingPending, appStillBlockedText, appUnblockPending, appUnblockTitle, CHIP_VISIBLE, FOLDER_FLAP_WINDOW_MS, FOLDER_FLIPS_TO_STOP, folderFlips, type FolderFlapState, flappingRefusal, noteFolderBlock, staleUnblockItem, ownerChannelChip, plural, serverRestartedChip, sessionChips, sessionLabel } from "./owner-chips.ts";
 import { batteryAlert } from "./power.ts";
 import { releaseAttention, releaseAttentionAlert, releaseCausePt, releaseFailedText, releaseLoopPending } from "./release-watch.ts";
 
@@ -100,5 +100,72 @@ describe("the owner's unblock-the-app item", () => {
     expect(root).toContain("ainda é a do servidor (\"9298 Regra\"), na raiz de nuria-platform, sem worktree");
     expect(root).toContain("confira se a opção worktree estava ligada");
     expect(`${reused} ${root}`).not.toMatch(JARGON);
+  });
+});
+
+// INSP-S r1 S-3: "raiz + worktree desligada" and "worktree LIGADA" can each
+// bring the other block back. On the 2nd switch the server stops asking
+// gestures and gives the owner ONE item with the diagnosis and what to do.
+describe("the app flapping between the two blocks", () => {
+  const H = 3_600_000;
+  const T0 = Date.parse("2026-10-02T13:07:29Z");
+  const F = "/r/.claude/worktrees/atendimento-reaberto-bugs-496989";
+  const reused = { kind: "reused" as const, folder: F, title: "Aumentar usuários Piperun para 50" };
+  const rooted = { kind: "root" as const, folder: "/r", title: "9311 Chat no ticket" };
+
+  it("stops on the 2nd switch (reused → root → reused), not on a repeat of the same block or the app being free", () => {
+    let state: FolderFlapState = { seen: [] };
+    state = noteFolderBlock(state, reused, T0);
+    state = noteFolderBlock(state, reused, T0 + 60_000); // the same block, asked again: no switch
+    state = noteFolderBlock(state, null, T0 + 0.5 * H); // the owner's gesture freed it
+    expect(state).toEqual({ seen: [{ ...reused, at: T0 }] });
+    state = noteFolderBlock(state, rooted, T0 + H); // the next create fell in the root: 1st switch
+    expect(folderFlips(state.seen)).toBe(1);
+    expect(state.stoppedAt).toBeUndefined();
+    state = noteFolderBlock(state, null, T0 + 1.5 * H); // "worktree LIGADA" freed it
+    state = noteFolderBlock(state, reused, T0 + 2 * H); // …and landed in a reused folder: 2nd switch
+    expect(folderFlips(state.seen)).toBe(FOLDER_FLIPS_TO_STOP);
+    expect(state.stoppedAt).toBe(T0 + 2 * H);
+    // sticky: whatever the app does next, until the owner answers
+    expect(noteFolderBlock(state, null, T0 + 3 * H)).toBe(state);
+    expect(noteFolderBlock(state, rooted, T0 + 3 * H)).toBe(state);
+  });
+
+  it("forgets blocks a week old: a switch that far apart is no loop", () => {
+    let state: FolderFlapState = { seen: [] };
+    state = noteFolderBlock(state, reused, T0);
+    state = noteFolderBlock(state, rooted, T0 + H);
+    state = noteFolderBlock(state, reused, T0 + FOLDER_FLAP_WINDOW_MS + 2 * H);
+    expect(state.stoppedAt).toBeUndefined();
+    expect(state.seen.map((each) => each.kind)).toEqual(["reused"]);
+  });
+
+  it("gives ONE honest item: no third gesture, the diagnosis with each block, the guided test, the two answers", () => {
+    let state: FolderFlapState = { seen: [] };
+    for (const [block, hours] of [[reused, 0], [rooted, 1], [reused, 2]] as const) state = noteFolderBlock(state, block, T0 + hours * H);
+    const item = appFlappingPending("nuria-platform", state.seen);
+    expect(item.title).toBe("O app Claude alterna entre reaproveitar worktree e cair na raiz: as sessões de nuria-platform seguem no terminal até você rodar o teste guiado");
+    expect(item.why.split("\n")).toEqual([
+      "O servidor parou de pedir gestos de destravar: cada um trouxe o outro bloqueio (2 trocas).",
+      `02/10, 10:07: a sessão "Aumentar usuários Piperun para 50" caiu numa worktree que outras já usavam (${F}), pede raiz com a worktree desligada`,
+      "02/10, 11:07: a sessão do servidor \"9311 Chat no ticket\" caiu na raiz, sem worktree (/r), pede a worktree ligada",
+      `02/10, 12:07: a sessão "Aumentar usuários Piperun para 50" caiu numa worktree que outras já usavam (${F}), pede raiz com a worktree desligada`,
+      expect.stringContaining("Diagnóstico: o app não está abrindo sessões em pasta própria de forma confiável"),
+    ]);
+    const steps = item.steps.map((step) => step.text).join(" ");
+    expect(steps).toContain("Não refaça os gestos de destravar");
+    expect(steps).toContain("ROTEIRO-S.md");
+    expect(steps).not.toMatch(/LIGUE a opção|deixe a worktree DESLIGADA/);
+    expect(item.options.map((option) => option.label)).toEqual([APP_FLAPPING_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL]);
+    // the open unblock item becomes this one, in place
+    expect(staleUnblockItem(appUnblockPending("nuria-platform", "root"), "nuria-platform", "flapping", state.seen)).toEqual(item);
+    expect(staleUnblockItem(item, "nuria-platform", "flapping", state.seen)).toBeNull();
+    // the bot is told not to ask any gesture, and where to go
+    const refusal = flappingRefusal(state.seen, "nuria-platform");
+    expect(refusal).toContain("alternou 2 vezes");
+    expect(refusal).toContain("não peça gesto nenhum a ele nem abra outro item");
+    expect(refusal).toContain('surface "cli"');
+    expect(appStillBlockedText({ kind: "flapping", last: { folder: F } }, "nuria-platform")).toContain("O servidor parou de pedir gestos");
+    expect(`${item.title} ${item.why} ${steps}`).not.toMatch(JARGON);
   });
 });
