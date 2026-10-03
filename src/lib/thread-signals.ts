@@ -45,7 +45,7 @@ function resumeWhy(resume: NonNullable<WireCcSession["resume"]>): string {
 /** The conversation's Claude Code sessions, each with where it runs: a CLI
  * one is said to be out of the Claude app, so the person knows to follow it
  * here (R8-visual N2). `cli` when any of them is headless. */
-export function ccSessionsSummary(sessions: readonly WireCcSession[] | undefined, now = Date.now()): { text: string; cli: boolean; waiting: { count: number; text: string } | null; resume: { count: number; text: string } | null } | null {
+export function ccSessionsSummary(sessions: readonly WireCcSession[] | undefined, now = Date.now()): { text: string; cli: boolean; waiting: { count: number; text: string } | null; resume: { count: number; held: boolean; text: string } | null } | null {
   if (!sessions?.length) return null;
   const waiting = sessions.filter((session) => session.screenWait);
   const resume = sessions.filter((session) => session.resume);
@@ -70,16 +70,18 @@ export function ccSessionsSummary(sessions: readonly WireCcSession[] | undefined
       ].join("\n"),
     } : null,
     // S-retomar: failed or idle 2 h+ holding an open PR of its own; why, in the reader's language
+    // …kept, "on hold", while a release holds it: the PR is still held (INSP-S r2 S2-3)
     resume: resume.length ? {
       count: resume.length,
+      held: resume.every((session) => session.resume!.held),
       text: [
         resume.length === 1 ? t("ccSession.resumeOne") : t("ccSession.resumeMany", { count: resume.length }),
-        ...resume.map((session) => t("ccSession.resume.item", {
+        ...resume.map((session) => `${t("ccSession.resume.item", {
           title: session.title,
           why: resumeWhy(session.resume!),
           prs: session.resume!.prs.map((number) => `PR #${number}`).join(", "),
           when: sidebarStamp(session.resume!.since, now),
-        })),
+        })}${session.resume!.held ? ` — ${t(`ccSession.resume.held.${session.resume!.held}`)}` : ""}`),
       ].join("\n"),
     } : null,
   };

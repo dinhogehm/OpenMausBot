@@ -144,7 +144,10 @@ export interface WireCcSession {
    * resume it or say what blocks it (S-retomar). `why` is the bots' pt-BR;
    * a row says `kind` in the reader's language, with `detail` (the error or
    * the block, as recorded). */
-  resume?: { since: number; prs: number[]; why: string; kind?: "failed" | "blocked" | "idle"; detail?: string };
+  resume?: { since: number; prs: number[]; why: string; kind?: "failed" | "blocked" | "idle"; detail?: string;
+    /** On hold, not to resume now: "parked" behind a release by the server,
+     * or a "release" on its way on this Mac (the bots are not told meanwhile). */
+    held?: "parked" | "release" };
 }
 
 /** One thing that waits on the person (owner_pending), for "Precisa de você". */

@@ -3107,6 +3107,8 @@
   "ccSession.resume.why.failed": "failed: {detail}",
   "ccSession.resume.why.blocked": "stopped, blocked: {detail}",
   "ccSession.resume.why.idle": "stopped: its last turn ended and nothing resumed it",
+  "ccSession.resume.held.release": "on hold: a production release is running — do not resume it now",
+  "ccSession.resume.held.parked": "on hold: parked behind the production release — the server resumes it when the tag moves",
   "voice.fish.model": "Fish Audio model",
   "voice.fish.modelPro": "s2.1-pro (default)",
   "voice.fish.modelFree": "s2.1-pro-free (free for developers)",

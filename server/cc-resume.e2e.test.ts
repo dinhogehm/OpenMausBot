@@ -62,21 +62,22 @@ it("holds RETOMAR while a release is on its way or holds the session, then tells
     writeFileSync(join(deployLease, "label"), "release:production:d5bb1f70b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6");
     await boot();
 
-    // while it runs: no arrow, no RETOMAR to anyone
+    // while it runs: no RETOMAR to anyone; the rows keep the mark, "on hold" (INSP-S r2 S2-3)
     await expect.poll(() => readFileSync(logPath, "utf8"), { timeout: 15_000, interval: 200 }).toContain("[cc-sessions] release hold: o release de produção d5bb1f70b está em andamento");
     await expect.poll(async () => (await sessionsOf(monitor.id)).find((session) => session.sessionId === "s9311")?.screenWait?.waitingFor, { timeout: 15_000, interval: 200 }).toBe("locked");
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    expect((await sessionsOf(monitor.id)).filter((session) => session.resume)).toEqual([]);
+    const heldOf = async () => Object.fromEntries((await sessionsOf(monitor.id)).filter((session) => session.resume).map((session) => [session.sessionId, session.resume.held ?? "free"]));
+    expect(await heldOf()).toEqual({ s9052: "release", s9195: "release", s8204: "parked" });
     expect(existsSync(prompts) ? readFileSync(prompts, "utf8") : "").not.toContain("[Sessão para retomar]");
     expect(readFileSync(logPath, "utf8")).not.toContain("must be resumed");
 
-    // the release is gone: two to resume, never the parked one
+    // the release is gone: two to resume, the parked one still on hold (the server resumes it)
     rmSync(join(dataDir, ".nuria"), { recursive: true, force: true });
-    await expect.poll(async () => (await sessionsOf(monitor.id)).filter((session) => session.resume).map((session) => session.sessionId).sort(), { timeout: 15_000, interval: 200 }).toEqual(["s9052", "s9195"]);
+    await expect.poll(heldOf, { timeout: 15_000, interval: 200 }).toEqual({ s9052: "free", s9195: "free", s8204: "parked" });
     const rows = await sessionsOf(monitor.id);
     expect(rows.find((session) => session.sessionId === "s9052").resume).toMatchObject({ prs: [9332], why: "falhou: o turno passou de 45 minutos e foi parado", kind: "failed" });
     expect(rows.find((session) => session.sessionId === "s9195").resume).toMatchObject({ prs: [9280], why: "parada: o último turno terminou e nada a retomou", kind: "idle" });
-    expect(rows.find((session) => session.sessionId === "s8204").resume).toBeUndefined();
+    expect(rows.find((session) => session.sessionId === "s8204").resume).toMatchObject({ prs: [9350], held: "parked" });
     expect(rows.find((session) => session.sessionId === "s9301").resume).toBeUndefined();
     expect(rows.find((session) => session.sessionId === "s9311").screenWait).toEqual({ kind: "send", since: now - 12 * 60_000, waitingFor: "locked" });
 

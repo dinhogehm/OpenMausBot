@@ -2841,6 +2841,8 @@
   "ccSession.resume.why.failed": "falhou: {detail}",
   "ccSession.resume.why.blocked": "parada, bloqueada: {detail}",
   "ccSession.resume.why.idle": "parada: o último turno terminou e nada a retomou",
+  "ccSession.resume.held.release": "em espera: há um release de produção em andamento — não retome agora",
+  "ccSession.resume.held.parked": "em espera: estacionada atrás do release de produção — o servidor a retoma quando a tag andar",
   "voice.fish.model": "Modelo do Fish Audio",
   "voice.fish.modelPro": "s2.1-pro (padrão)",
   "voice.fish.modelFree": "s2.1-pro-free (grátis para desenvolvedores)",

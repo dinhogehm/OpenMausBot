@@ -9139,6 +9139,8 @@
       "ccSession.resume.why.failed": "69f8eef1dd3cd33eaf32b47a0692f6c00e2cdc0b0004995d7c3fd1817cfe655d",
       "ccSession.resume.why.blocked": "e22dcb38584bed0b202b14723b6d3dbcd30e994e5dc241b172052e901f96decd",
       "ccSession.resume.why.idle": "43b77b3e0303a8b895efde9bae037461e847e50385be9d85241a014fe232cf65",
+      "ccSession.resume.held.release": "091d69cf514c7edc4556e924ba015e3b0e1dd1a6284762339e7713c0ba8ae9fa",
+      "ccSession.resume.held.parked": "07ef08531f000d0afa26d32860b7ce2e9858e29e22f1bad26f4a2c6337db2171",
       "chat.digestTools": "49baf79deb39a1eb238a612a9c36dd77b3c0305da058f8fdd9b05902b100b838",
       "chat.digestToolFailed": "2b2c47b5d0f447e5c770aeeca6d8722d178a944e688d297db52233d5828f0feb",
       "chat.digestToolsMore": "ecccea94c62457a718fff608b635a8fdeb2a9d43b60a9db2680fa35e800b5dd6",

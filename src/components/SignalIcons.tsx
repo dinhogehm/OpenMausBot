@@ -21,7 +21,8 @@ export function SignalIcons({ watch, cc, sessions, size = 11 }: { watch: ReturnT
       </span>
     )}
     {sessions?.resume && (
-      <span data-thread-cc-resume={sessions.resume.count} role="img" aria-label={sessions.resume.text} title={sessions.resume.text} className="inline-flex shrink-0 items-center gap-px text-warning">
+      // amber to act on; the secondary ink, "on hold", while a release holds every one of them
+      <span data-thread-cc-resume={sessions.resume.count} data-held={sessions.resume.held || undefined} role="img" aria-label={sessions.resume.text} title={sessions.resume.text} className={cn("inline-flex shrink-0 items-center gap-px", sessions.resume.held ? "text-ink-secondary" : "text-warning")}>
         <StepForward size={size} aria-hidden="true" />
         {sessions.resume.count > 1 && <span aria-hidden="true" className="text-[10px] leading-none tabular-nums">{sessions.resume.count}</span>}
       </span>

@@ -84,6 +84,29 @@ describe("steps waiting for the Mac, and sessions to resume", () => {
     expect(two!.resume!.text).toContain("9195 — parada: o último turno terminou e nada a retomou · PR #9280");
   });
 
+  // INSP-S r2 S2-3: the mark used to vanish while a release ran and come back after
+  it("keeps the mark while a release holds them, in the secondary ink, saying not to resume now", () => {
+    const held = ccSessionsSummary([
+      { sessionId: "c", title: "9052", status: "failed", surface: "cli", resume: { since: now, prs: [9332], why: "x", kind: "failed", detail: "the turn ran past 45 minutes and was stopped", held: "release" } },
+      { sessionId: "p", title: "8204", status: "idle", surface: "cli", resume: { since: now, prs: [9350], why: "y", kind: "idle", held: "parked" } },
+    ], now);
+    expect(held!.resume).toMatchObject({ count: 2, held: true });
+    const html = renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions: held }));
+    const mark = /<span data-thread-cc-resume="2"[^>]*>/.exec(html)?.[0] ?? "";
+    expect(mark).toContain('data-held="true"');
+    expect(mark).toContain("text-ink-secondary");
+    expect(mark).not.toContain("text-warning");
+    expect(held!.resume!.text).toMatch(/9052 — falhou: o turno passou de 45 minutos e foi parado · PR #9332 · desde .+ — em espera: há um release de produção em andamento — não retome agora/);
+    expect(held!.resume!.text).toMatch(/8204 — parada: o último turno terminou e nada a retomou · PR #9350 · desde .+ — em espera: estacionada atrás do release de produção — o servidor a retoma quando a tag andar/);
+    // one free to resume among them: amber again
+    const mixed = ccSessionsSummary([
+      { sessionId: "c", title: "9052", status: "failed", surface: "cli", resume: { since: now, prs: [9332], why: "x", kind: "idle", held: "release" } },
+      { sessionId: "d", title: "9195", status: "idle", surface: "cli", resume: { since: now, prs: [9280], why: "y", kind: "idle" } },
+    ], now);
+    expect(mixed!.resume!.held).toBe(false);
+    expect(renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions: mixed }))).toMatch(/data-thread-cc-resume="2"[^>]*text-warning/);
+  });
+
   it("says why to resume in English for an English reader (INSP-S r1 S-8)", () => {
     setLocale("en");
     const text = ccSessionsSummary([

@@ -9720,7 +9720,7 @@ threadSignals = (threadId) => {
     .filter((session) => session.ownerThreadId === threadId && session.status !== "archived")
     .map((session): WireCcSession => {
       const screenWait = screenWaitOf(session);
-      const resume = resumeOf(session);
+      const resume = wireResumeOf(session);
       return {
         sessionId: session.id, title: session.title, status: session.status as WireCcSession["status"], surface: session.surface === "app" ? "app" : "cli",
         ...(screenWait ? { screenWait } : {}), ...(resume ? { resume } : {}),
@@ -9901,6 +9901,15 @@ async function refreshReleaseHold(): Promise<void> {
 }
 /** resumeNeeded under the release hold this server last read. */
 const resumeOf = (session: CcSession, now = Date.now()) => resumeNeeded(session, now, { release: releaseHold.label });
+/** What a row shows: the session still holds its PR while a release runs,
+ * so the mark stays, "on hold" — parked behind the release, or with one on
+ * its way — instead of vanishing and coming back (INSP-S r2 S2-3). The bots
+ * are told nothing meanwhile (resumeOf). */
+const wireResumeOf = (session: CcSession, now = Date.now()): WireCcSession["resume"] | null => {
+  const held = session.resumeAfterTag ? "parked" as const : releaseHold.label ? "release" as const : null;
+  const need = resumeNeeded(held === "parked" ? { ...session, resumeAfterTag: undefined } : session, now);
+  return need ? { ...need, ...(held ? { held } : {}) } : null;
+};
 
 async function preemptCiForReleaseTick(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || releasePriority.running || Date.now() - releasePriority.lastAt < 20_000) return;
@@ -10448,8 +10457,8 @@ function refreshSessionSignals(): void {
   const next = new Map<string, string>();
   for (const session of ccLedger.all()) {
     const wait = screenWaitOf(session);
-    const resume = resumeOf(session, now);
-    if (wait || resume) next.set(session.id, `${session.ownerBotId}#${wait ? `${wait.kind}:${wait.waitingFor}` : ""}|${resume ? resume.prs.join(",") : ""}`);
+    const resume = wireResumeOf(session, now);
+    if (wait || resume) next.set(session.id, `${session.ownerBotId}#${wait ? `${wait.kind}:${wait.waitingFor}` : ""}|${resume ? `${resume.prs.join(",")}${resume.held ? `:${resume.held}` : ""}` : ""}`);
   }
   const owners = new Set<string>();
   for (const [id, seen] of next) if (sessionSignalsSeen.get(id) !== seen) owners.add(seen.split("#")[0]!);
