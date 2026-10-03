@@ -125,9 +125,9 @@ it.runIf(process.platform === "darwin")("the app flapping between 'reused' and '
       { id: "o8", botId: chief.id, threadId: thread, ...appUnblockPending("nuria-platform"), key: "app-reused-folder:nuria-platform", createdAt: t, stepsAutoAskedAt: t },
     ] }));
     await boot();
+    // the click as the owner makes it: the label they saw (the server may rewrite the item meanwhile)
     const check = async (label = APP_UNBLOCK_CHECK_LABEL) => {
-      const option = items().find((item) => item.id === "o8").options.findIndex((each: any) => each.label === label);
-      const answer = await raw(`/api/bots/${chief.id}/owner-pending/o8/reply`, { option, label });
+      const answer = await raw(`/api/bots/${chief.id}/owner-pending/o8/reply`, { option: 0, label });
       return { status: answer.status, ...(await answer.json() as { error?: string; code?: string }) };
     };
 
@@ -140,9 +140,18 @@ it.runIf(process.platform === "darwin")("the app flapping between 'reused' and '
     expect(items().find((item) => item.id === "o8").title).toMatch(/com a worktree LIGADA/);
     // 3. "worktree ON" landed in a reused folder again: 2nd switch — stop
     writeRecords(dataDir, [{ sessionId: "local_again", createdAt: t + 180_000, cwd: F, worktreePath: F, title: "ok" }]);
+    // whether the server's own tick rewrote the item first (the race of INSP-S r2 S2-1) or the click
+    // found the flip itself, the owner reads the diagnosis — never "o bot reescreveu"
     const stopped = await check();
-    expect(stopped).toMatchObject({ status: 409, code: "app_still_blocked" });
-    expect(stopped.error).toContain("O servidor parou de pedir gestos");
+    expect(stopped.status).toBe(409);
+    expect(["app_still_blocked", "item_changed"]).toContain(stopped.code);
+    expect(stopped.error).toContain("O servidor parou de pedir gestos de destravar: cada um trouxe o outro bloqueio (2 trocas).");
+    expect(stopped.error).not.toMatch(/o bot/i);
+    // the click again, on the label that is gone: what the item is now, with the diagnosis
+    const late = await check();
+    expect(late).toMatchObject({ status: 409, code: "item_changed" });
+    expect(late.error).toContain("O item mudou enquanto você o lia: \"Feito, conferir\" não vale mais. Agora ele diz: O app Claude alterna");
+    expect(late.error).toContain("(2 trocas)");
     const item = items().find((each) => each.id === "o8");
     expect(item.title).toBe("O app Claude alterna entre reaproveitar worktree e cair na raiz: as sessões de nuria-platform seguem no terminal até você rodar o teste guiado");
     expect(item.why).toContain("(2 trocas)");

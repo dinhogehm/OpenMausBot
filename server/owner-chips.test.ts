@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { APP_FLAPPING_CHECK_LABEL, APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, appFlappingPending, appStillBlockedText, appUnblockPending, appUnblockTitle, CHIP_VISIBLE, FOLDER_FLAP_WINDOW_MS, FOLDER_FLIPS_TO_STOP, folderFlips, type FolderFlapState, flappingRefusal, noteFolderBlock, staleUnblockItem, ownerChannelChip, plural, serverRestartedChip, sessionChips, sessionLabel } from "./owner-chips.ts";
+import { APP_FLAPPING_CHECK_LABEL, APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, appFlappingPending, appStillBlockedText, appUnblockPending, appUnblockTitle, CHIP_VISIBLE, FOLDER_FLAP_WINDOW_MS, FOLDER_FLIPS_TO_STOP, FOLDER_STOP_FREE_MS, FOLDER_STOP_MAX_MS, folderFlips, type FolderFlapState, flappingRefusal, noteFolderBlock, staleUnblockItem, ownerChannelChip, plural, serverRestartedChip, sessionChips, sessionLabel } from "./owner-chips.ts";
 import { batteryAlert } from "./power.ts";
 import { releaseAttention, releaseAttentionAlert, releaseCausePt, releaseFailedText, releaseLoopPending } from "./release-watch.ts";
 
@@ -118,7 +118,7 @@ describe("the app flapping between the two blocks", () => {
     state = noteFolderBlock(state, reused, T0);
     state = noteFolderBlock(state, reused, T0 + 60_000); // the same block, asked again: no switch
     state = noteFolderBlock(state, null, T0 + 0.5 * H); // the owner's gesture freed it
-    expect(state).toEqual({ seen: [{ ...reused, at: T0 }] });
+    expect(state).toEqual({ seen: [{ ...reused, at: T0 }], freeSince: T0 + 0.5 * H });
     state = noteFolderBlock(state, rooted, T0 + H); // the next create fell in the root: 1st switch
     expect(folderFlips(state.seen)).toBe(1);
     expect(state.stoppedAt).toBeUndefined();
@@ -126,9 +126,57 @@ describe("the app flapping between the two blocks", () => {
     state = noteFolderBlock(state, reused, T0 + 2 * H); // …and landed in a reused folder: 2nd switch
     expect(folderFlips(state.seen)).toBe(FOLDER_FLIPS_TO_STOP);
     expect(state.stoppedAt).toBe(T0 + 2 * H);
-    // sticky: whatever the app does next, until the owner answers
-    expect(noteFolderBlock(state, null, T0 + 3 * H)).toBe(state);
+    // held while the app keeps blocking, or is free only briefly
     expect(noteFolderBlock(state, rooted, T0 + 3 * H)).toBe(state);
+    const brief = noteFolderBlock(state, null, T0 + 3 * H);
+    expect(brief.stoppedAt).toBe(T0 + 2 * H);
+    expect(noteFolderBlock(brief, null, T0 + 3 * H + FOLDER_STOP_FREE_MS - 1).stoppedAt).toBe(T0 + 2 * H);
+  });
+
+  // INSP-S r2 S2-2: Monday a reuse, Thursday a root, Saturday a reuse —
+  // each fixed by its gesture, the app working in between: no loop
+  it("three independent incidents in a week, the app working between them, stop nothing", () => {
+    const D = 24 * H;
+    // with creates of ours that worked in between
+    let state: FolderFlapState = { seen: [] };
+    state = noteFolderBlock(state, reused, T0);
+    state = noteFolderBlock(state, null, T0 + 0.5 * H);
+    state = noteFolderBlock(state, rooted, T0 + 3 * D, T0 + D); // a create worked on Tuesday
+    state = noteFolderBlock(state, null, T0 + 3 * D + H, T0 + D);
+    state = noteFolderBlock(state, reused, T0 + 5 * D, T0 + 4 * D); // and on Friday
+    expect(state.stoppedAt).toBeUndefined();
+    expect(folderFlips(state.seen)).toBe(0);
+    // with no create at all, but the app free for days between them
+    let quiet: FolderFlapState = { seen: [] };
+    quiet = noteFolderBlock(quiet, reused, T0);
+    quiet = noteFolderBlock(quiet, null, T0 + H);
+    quiet = noteFolderBlock(quiet, rooted, T0 + 3 * D);
+    quiet = noteFolderBlock(quiet, null, T0 + 3 * D + H);
+    quiet = noteFolderBlock(quiet, reused, T0 + 5 * D);
+    expect(quiet.stoppedAt).toBeUndefined();
+    // a create that worked between two switches in the same hour breaks the chain too
+    let quick: FolderFlapState = { seen: [] };
+    quick = noteFolderBlock(quick, reused, T0);
+    quick = noteFolderBlock(quick, rooted, T0 + H);
+    quick = noteFolderBlock(quick, reused, T0 + 2 * H, T0 + 1.5 * H);
+    expect(quick.stoppedAt).toBeUndefined();
+    expect(quick.seen).toEqual([{ ...reused, at: T0 + 2 * H }]);
+  });
+
+  it("the stop is never for good: it ends when the app stays free a day, a create works, or after 3 days", () => {
+    let stopped: FolderFlapState = { seen: [] };
+    for (const [block, hours] of [[reused, 0], [rooted, 1], [reused, 2]] as const) stopped = noteFolderBlock(stopped, block, T0 + hours * H);
+    expect(stopped.stoppedAt).toBe(T0 + 2 * H);
+    // free for 24 h
+    const free = noteFolderBlock(stopped, null, T0 + 3 * H);
+    expect(noteFolderBlock(free, null, T0 + 3 * H + FOLDER_STOP_FREE_MS)).toEqual({ seen: [] });
+    // a block in the middle restarts the free clock
+    const again = noteFolderBlock(noteFolderBlock(free, rooted, T0 + 10 * H), null, T0 + 11 * H);
+    expect(noteFolderBlock(again, null, T0 + 3 * H + FOLDER_STOP_FREE_MS).stoppedAt).toBe(T0 + 2 * H);
+    // a create of ours that worked after the stop
+    expect(noteFolderBlock(stopped, null, T0 + 4 * H, T0 + 3 * H)).toEqual({ seen: [] });
+    // 3 days, whatever the app does: re-evaluated from zero (the block now is a plain one, its gesture asked)
+    expect(noteFolderBlock(stopped, rooted, T0 + 2 * H + FOLDER_STOP_MAX_MS)).toEqual({ seen: [{ ...rooted, at: T0 + 2 * H + FOLDER_STOP_MAX_MS }] });
   });
 
   it("forgets blocks a week old: a switch that far apart is no loop", () => {

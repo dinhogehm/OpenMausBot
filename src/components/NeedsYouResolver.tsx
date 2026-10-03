@@ -555,7 +555,8 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
         {props.error && (
           <div role="alert" className="mb-2.5 flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/8 px-3 py-2 text-[12.5px] text-danger">
             <CircleAlert size={14} aria-hidden="true" className="mt-px shrink-0" />
-            <span className="min-w-0 flex-1">{props.error}</span>
+            {/* a server diagnosis comes in lines (the app's flip, INSP-S r2 S2-1) */}
+            <span className="min-w-0 flex-1 whitespace-pre-line">{props.error}</span>
             <button type="button" onClick={props.onDismissError} className="shrink-0 rounded px-1 text-[12px] underline-offset-2 hover:underline">{t("needsYou.screen.dismiss")}</button>
           </div>
         )}

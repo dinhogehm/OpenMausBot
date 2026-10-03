@@ -124,7 +124,7 @@ export function staleUnblockItem(item: { why?: string; steps?: ReadonlyArray<{ t
  * lastAppWorktreeFolder: "reused"; lastServerSessionInRoot: "root"). */
 export interface FolderBlockSeen { kind: "reused" | "root"; at: number; folder: string; title?: string }
 /** The blocks seen lately, and when the server stopped asking gestures. */
-export interface FolderFlapState { seen: FolderBlockSeen[]; stoppedAt?: number }
+export interface FolderFlapState { seen: FolderBlockSeen[]; stoppedAt?: number; freeSince?: number }
 
 /** Switches between the two blocks that stop the gestures: the 2nd one is a
  * round trip (reused → root → reused): each gesture asked brought back the
@@ -136,13 +136,37 @@ export const FOLDER_FLAP_WINDOW_MS = 7 * 24 * 3_600_000;
 /** How many times the block switched kind in `seen`. */
 export const folderFlips = (seen: readonly FolderBlockSeen[]) => seen.reduce((flips, each, index) => flips + (index > 0 && seen[index - 1]!.kind !== each.kind ? 1 : 0), 0);
 
+/** A free spell this long between two blocks means the gesture worked: the
+ * next block is a new incident, not the other half of a flip. */
+export const FOLDER_FREE_RESET_MS = 12 * 3_600_000;
+/** Stopped, the app free this long: the stop is over, re-evaluated from zero. */
+export const FOLDER_STOP_FREE_MS = 24 * 3_600_000;
+/** Stopped this long, whatever the app does: re-evaluated from zero (never for good). */
+export const FOLDER_STOP_MAX_MS = 72 * 3_600_000;
+
 /** The state after the server saw `block` (null: the app is free) at `at`.
- * Only a change of kind is kept; at FOLDER_FLIPS_TO_STOP switches it stops
- * (sticky, until the owner answers the item it opens). */
-export function noteFolderBlock(state: FolderFlapState, block: Omit<FolderBlockSeen, "at"> | null, at: number): FolderFlapState {
-  if (state.stoppedAt !== undefined || !block) return state;
-  const seen = state.seen.filter((each) => at - each.at < FOLDER_FLAP_WINDOW_MS);
-  if (seen.at(-1)?.kind === block.kind) return seen.length === state.seen.length ? state : { seen };
+ * Only a change of kind is kept, and only CONSECUTIVE ones count: a create
+ * of ours that worked after the last block (`lastGoodCreateAt`: adopted in a
+ * worktree of its own, past its folder check) or a free spell of
+ * FOLDER_FREE_RESET_MS starts the count over — three independent incidents,
+ * each fixed by its gesture, are no loop (INSP-S r2 S2-2). At
+ * FOLDER_FLIPS_TO_STOP switches it stops; the stop ends by itself after
+ * FOLDER_STOP_FREE_MS with the app free, a create that worked, or
+ * FOLDER_STOP_MAX_MS — or when the owner answers the item. */
+export function noteFolderBlock(state: FolderFlapState, block: Omit<FolderBlockSeen, "at"> | null, at: number, lastGoodCreateAt = Number.NEGATIVE_INFINITY): FolderFlapState {
+  const lastAt = state.seen.at(-1)?.at;
+  if (lastAt !== undefined && lastGoodCreateAt > lastAt) return noteFolderBlock({ seen: [] }, block, at);
+  if (state.stoppedAt !== undefined) {
+    if (at - state.stoppedAt >= FOLDER_STOP_MAX_MS) return noteFolderBlock({ seen: [] }, block, at);
+    if (block) return state.freeSince === undefined ? state : { seen: state.seen, stoppedAt: state.stoppedAt };
+    const freeSince = state.freeSince ?? at;
+    if (at - freeSince >= FOLDER_STOP_FREE_MS) return { seen: [] };
+    return state.freeSince === undefined ? { ...state, freeSince } : state;
+  }
+  if (!block) return state.freeSince === undefined && state.seen.length ? { ...state, freeSince: at } : state;
+  const fresh = state.freeSince !== undefined && at - state.freeSince >= FOLDER_FREE_RESET_MS;
+  const seen = fresh ? [] : state.seen.filter((each) => at - each.at < FOLDER_FLAP_WINDOW_MS);
+  if (seen.at(-1)?.kind === block.kind) return seen.length === state.seen.length && state.freeSince === undefined ? state : { seen };
   const next = [...seen, { kind: block.kind, at, folder: block.folder, ...(block.title ? { title: block.title } : {}) }].slice(-6);
   return folderFlips(next) >= FOLDER_FLIPS_TO_STOP ? { seen: next, stoppedAt: at } : { seen: next };
 }
@@ -180,6 +204,7 @@ export function appFlappingPending(repoName: string, seen: readonly FolderBlockS
       { text: "Não refaça os gestos de destravar (raiz com a worktree desligada, ou worktree ligada): cada um reproduziu o outro bloqueio." },
       { text: "Quando tiver 10 a 15 minutos, rode o teste guiado do app (Roteiro S, em ~/nuria-ops/audit/ROTEIRO-S.md): ele mostra, com capturas, de onde o app tira a pasta de uma sessão nova." },
       { text: `Depois, responda "${APP_FLAPPING_CHECK_LABEL}": o servidor zera esta contagem e confere os registros do app. Se o app estiver livre, as sessões voltam para ele; se não, este item volta a dizer o que os registros mostram.` },
+      { text: "Se você não fizer nada: quando o app passar 24 h sem bloqueio, o servidor encerra este item sozinho e volta a usar o app; e, de qualquer forma, ele reavalia tudo do zero em 3 dias." },
     ],
     options: [
       { label: APP_FLAPPING_CHECK_LABEL, reply: `Rodei o teste guiado do app (Roteiro S). Pode voltar a tentar abrir as sessões de ${repoName} no app; o servidor confere os registros antes.`, recommended: true as const, why: "Só o teste no app real diz de onde ele tira a pasta; sem isso, cada gesto é um palpite." },

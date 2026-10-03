@@ -10191,7 +10191,8 @@ const appFolderFlaps = (() => {
     get: () => state,
     set(next: FolderFlapState) {
       if (next === state) return;
-      if (next.stoppedAt !== undefined && state.stoppedAt === undefined) console.log(`[claude-desktop] the app flipped ${next.seen.map((each) => each.kind).join(" → ")}: no more gestures asked; sessions go to the terminal until the owner answers`);
+      if (next.stoppedAt !== undefined && state.stoppedAt === undefined) console.log(`[claude-desktop] the app flipped ${next.seen.map((each) => each.kind).join(" → ")}: no more gestures asked; sessions go to the terminal until the owner answers or the app stays free`);
+      if (next.stoppedAt === undefined && state.stoppedAt !== undefined) console.log("[claude-desktop] the app's flip stop is over (it stayed free, a create worked, it expired, or the owner answered): counted from zero");
       state = next;
       try { writeFileAtomic(path, `${JSON.stringify(state)}\n`, { mode: 0o600 }); } catch (error) { console.error(`[app-folder-blocks] ${error instanceof Error ? error.message : String(error)}`); }
     },
@@ -10208,7 +10209,11 @@ function appFolderBlock(): AppFolderBlock | null {
   const reused = lastAppWorktreeFolder();
   const root = reused ? null : lastServerSessionInRoot(ourAppLocalIds());
   const raw: AppFolderBlock | null = reused ? { kind: "reused", last: reused } : root ? { kind: "root", last: root } : null;
-  const flaps = noteFolderBlock(appFolderFlaps.get(), raw ? { kind: raw.kind as "reused" | "root", folder: raw.last.folder, ...(raw.last.title ? { title: raw.last.title } : {}) } : null, Date.now());
+  // the latest create of ours that worked: adopted in a worktree of its own and past its folder check (a turn seen)
+  const lastGoodCreateAt = Math.max(Number.NEGATIVE_INFINITY, ...ccLedger.all()
+    .filter((session) => session.surface === "app" && session.desktop?.localId && !session.desktop.wrongFolder && /\/\.(?:claude\/)?worktrees\//.test(session.cwd ?? "") && (session.turns > 0 || (session.desktop.turnsSeen ?? 0) > 0))
+    .map((session) => session.createdAt));
+  const flaps = noteFolderBlock(appFolderFlaps.get(), raw ? { kind: raw.kind as "reused" | "root", folder: raw.last.folder, ...(raw.last.title ? { title: raw.last.title } : {}) } : null, Date.now(), lastGoodCreateAt);
   appFolderFlaps.set(flaps);
   if (flaps.stoppedAt !== undefined) return { kind: "flapping", last: raw?.last ?? flaps.seen.at(-1)!, seen: flaps.seen };
   return raw;
@@ -23051,9 +23056,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // the decision the person SAW: its position and its label, so a bot
         // that reordered or rewrote the options meanwhile never gets another
         // answer than the one clicked (INSP-I r1 #3)
-        const option = Number.isInteger(body.option) ? item.options?.[body.option as number] : undefined;
-        if (!option) return json(res, 409, { error: "Esta decisão não existe mais: o bot reescreveu as opções. Confira e escolha de novo.", code: "options_changed" });
-        if (typeof body.label !== "string" || body.label !== option.label) return json(res, 409, { error: `O bot reescreveu as opções deste item: "${String(body.label ?? "")}" não é mais a opção ${Number(body.option) + 1}. Confira e escolha de novo.`, code: "options_changed" });
+        // the server's own unblock item is rewritten by the SERVER (gesture, flip
+        // diagnosis) — the answer is taken by its label, and a label the item no
+        // longer has says what the item is now, never "o bot" (INSP-S r2 S2-1)
+        const unblockItem = Boolean(item.key?.startsWith(APP_UNBLOCK_KEY));
+        const option = unblockItem && typeof body.label === "string"
+          ? item.options?.find((each) => each.label === body.label)
+          : Number.isInteger(body.option) ? item.options?.[body.option as number] : undefined;
+        if (unblockItem && !option) {
+          return json(res, 409, { error: `O item mudou enquanto você o lia: "${String(body.label ?? "")}" não vale mais. Agora ele diz: ${item.title}.${item.why ? `\n\n${item.why}` : ""}`, code: "item_changed" });
+        }
+        const rewrote = item.key ? "O servidor atualizou" : "O bot reescreveu";
+        if (!option) return json(res, 409, { error: `Esta decisão não existe mais: ${rewrote.charAt(0).toLowerCase()}${rewrote.slice(1)} as opções. Confira e escolha de novo.`, code: "options_changed" });
+        if (typeof body.label !== "string" || body.label !== option.label) return json(res, 409, { error: `${rewrote} as opções deste item: "${String(body.label ?? "")}" não é mais a opção ${Number(body.option) + 1}. Confira e escolha de novo.`, code: "options_changed" });
         // "Feito, conferir" is checked against the app's records before it
         // is taken: still blocked, the item stays and the person reads why
         // (R10-dispatch R10-2)
@@ -23073,7 +23088,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
               autonomy.addOwnerPending(bot.id, item.threadId, { ...want, key: item.key });
               refreshBotRow(bot.id);
             }
-            return json(res, 409, { error: appStillBlockedText(block, name), code: "app_still_blocked" });
+            // the flip: the diagnosis itself, not only "it changed"
+            const diagnosis = block.kind === "flapping" ? `\n\n${(want ?? staleUnblockItem({}, name, "flapping", block.seen))?.why ?? ""}` : "";
+            return json(res, 409, { error: `${appStillBlockedText(block, name)}${diagnosis}`, code: "app_still_blocked" });
           }
         }
         // "seguir no terminal" is kept: the server does not recreate the item for 24 h (INSP-J r1 #8) — and it closes it
