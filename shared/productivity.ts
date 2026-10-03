@@ -274,9 +274,15 @@ export interface ReportKpis {
   /** Releases in the period whose contents are not known yet: delivered PRs and
    * issues are then lower bounds ("≥N"). */
   unknownContentReleases: number;
-  /** DORA — deliveries per business day (Mon–Fri, São Paulo) elapsed in the period. */
+  /** DORA — deliveries per business day WITH A RELEASE SOURCE (Mon–Fri, São
+   * Paulo, national holidays off): days no source covers are unknown, not zero. */
   deploysPerBusinessDay: number | null;
+  /** Business days elapsed in the period. */
   businessDays: number;
+  /** Of those, the business days a release source covers (the denominator above). */
+  releaseBusinessDays: number;
+  /** How much of the period a release source covers: below "full", deliveries are a lower bound. */
+  releaseCovered: "full" | "partial" | "none";
   /** DORA — change failure rate: releases whose post-release check rolled back
    * or found production unhealthy ÷ releases with a conclusive check. */
   changeFailures: number;
@@ -298,7 +304,13 @@ export interface ReportKpis {
   costUsd: number | null;
   /** Days of the period the usage ledger covers (turns, tokens, cost are for these days only). */
   usageDays: number;
-  /** Bots' cost in the covered days ÷ deliveries in the same days; null without either. */
+  /** The cost split by who the bots work for (botRole): engineering builds
+   * what ships, operations (Monitor Chat, Chief of Staff) does not. */
+  costEngineeringUsd: number | null;
+  costOperationsUsd: number | null;
+  costOtherUsd: number | null;
+  /** Engineering bots' cost in the covered days ÷ deliveries in the same days;
+   * null without cost or with fewer than MIN_TREND_BASE deliveries (a ratio on 1 is noise). */
   costPerDelivery: number | null;
   deliveriesInUsageDays: number;
   needsYouOpened: number;
@@ -357,8 +369,11 @@ export interface ReportRelease {
    * "pending" — both are known, the commits between them are not read yet. */
   contentUnknown?: boolean;
   contentUnknownReason?: "first" | "gap" | "pending";
-  /** Failures of one commit in a row are one row: how many tries, since when. */
+  /** Runs of one commit in a row are one row: how many tries, since when. */
   attempts?: number;
+  /** Folded into a failed commit's row: its runs that were superseded or aborted. */
+  supersededRuns?: number;
+  abortedRuns?: number;
   firstAt?: number;
   /** The PR whose merge is the released commit, and whether it is a release carrier. */
   headPr?: number;
@@ -384,6 +399,9 @@ export interface ReportBacklog {
   prsAwaitingGateList: Array<{ number: number; title: string; gate: "pending" | "failure" | "missing"; since: number }>;
   openPrs: number;
   at: number | null;
+  /** The snapshot at the END of the period, when it ended before the sync
+   * (a closed month): what the board reads for that month. Today's labels. */
+  periodEnd: { at: number; openIssues: number; openP0P1: number; oldestOpen: { number: number; createdAt: number } | null } | null;
 }
 
 export interface ReportBotEffort {
@@ -493,6 +511,76 @@ export function goalStatus(key: GoalKey, value: number | null, goals: ReportGoal
   if (higher ? value >= target : value <= target) return "met";
   const slack = Math.max(Math.abs(target) * 0.2, 1e-9);
   return (higher ? value >= target - slack : value <= target + slack) ? "close" : "off";
+}
+
+// ── release counts (one source for the screen, the PDF and the Markdown) ───
+
+/** The period's release header: commits in production, commits that failed and
+ * how many tries ran, and the runs that never ran (superseded, aborted) —
+ * runs, not rows, so the screen and the exports say the same thing. */
+export function releaseCountParts(report: Pick<ProductivityReport, "releases" | "kpis">): { released: number; failedCommits: number; failedTries: number; superseded: number; aborted: number; declined: number } {
+  return {
+    released: report.releases.filter((row) => row.outcome === "released").length,
+    failedCommits: report.releases.filter((row) => row.outcome === "failed").length,
+    failedTries: report.kpis.failedReleases,
+    superseded: report.kpis.supersededReleases,
+    aborted: report.kpis.abortedReleases,
+    declined: report.kpis.declinedReleases,
+  };
+}
+
+// ── export readiness ────────────────────────────────────────────────────────
+
+/** Older than this, GitHub numbers (and the tag check) are not exported without a warning. */
+export const EXPORT_MAX_AGE_MS = 3_600_000;
+
+export type ExportBlocker = "never" | "syncing" | "stale" | "tag-mismatch";
+
+/** Whether the report may go to the board as is: synced in the last hour, no
+ * sync running, and the production tag agreeing with the history. Otherwise
+ * the screen offers "Atualizar e exportar" and the export carries a banner. */
+export function exportReadiness(report: Pick<ProductivityReport, "sync" | "coverage">, now: number): { ready: boolean; blockers: ExportBlocker[]; ageMs: number | null } {
+  const blockers: ExportBlocker[] = [];
+  const synced = report.sync.lastSyncAt ?? report.coverage.github.syncedAt;
+  const ageMs = synced === null ? null : Math.max(0, now - synced);
+  if (synced === null) blockers.push("never");
+  else if (ageMs! > EXPORT_MAX_AGE_MS) blockers.push("stale");
+  if (report.sync.state === "syncing") blockers.push("syncing");
+  if (report.coverage.tag.matchesHistory === false) blockers.push("tag-mismatch");
+  return { ready: blockers.length === 0, blockers, ageMs };
+}
+
+// ── calendar: national holidays and who a bot works for ────────────────────
+
+/** Easter Sunday (Gregorian, anonymous algorithm) as [month, day]. */
+function easter(year: number): [number, number] {
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100, d = Math.floor(b / 4), e = b % 4;
+  const f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  return [Math.floor((h + l - 7 * m + 114) / 31), ((h + l - 7 * m + 114) % 31) + 1];
+}
+
+const FIXED_HOLIDAYS = ["01-01", "04-21", "05-01", "09-07", "10-12", "11-02", "11-15", "11-20", "12-25"];
+
+/** A Brazilian national holiday (fixed dates and Good Friday); optional days
+ * such as Carnival and Corpus Christi stay business days. */
+export function isNationalHoliday(year: number, month: number, day: number): boolean {
+  if (FIXED_HOLIDAYS.includes(`${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`)) return year < 2024 && month === 11 && day === 20 ? false : true;
+  const [em, ed] = easter(year);
+  const goodFriday = new Date(Date.UTC(year, em - 1, ed - 2));
+  return goodFriday.getUTCMonth() + 1 === month && goodFriday.getUTCDate() === day;
+}
+
+export type BotRole = "engineering" | "operations" | "other";
+
+/** Engineering bots (Lead, Eng, QA, DBA, SRE, Delivery) build what ships;
+ * operations bots (Monitor Chat, Chief of Staff) do not, so their cost stays
+ * out of the cost per delivery. */
+export function botRole(name: string | undefined): BotRole {
+  if (!name) return "other";
+  if (/monitor|chief of staff|atendimento/i.test(name)) return "operations";
+  if (/\b(lead|eng|qa|dba|sre|delivery)\b/i.test(name)) return "engineering";
+  return "other";
 }
 
 // ── comparisons (one rule for the screen, the PDF and the Markdown) ─────────

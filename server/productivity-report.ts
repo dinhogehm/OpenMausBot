@@ -17,7 +17,7 @@
 // prefix sums), so a bucket costs two binary searches, not a scan of every
 // PR and issue (a year by day over the real cache: a few ms).
 import {
-  bucketKey, bucketStart, bucketStarts, distribution, ISSUE_PRIORITIES, ISSUE_TYPES, nextBucket, previousPeriod, PRODUCTION_REPO, REPORT_TZ, zonedParts,
+  botRole, bucketKey, bucketStart, bucketStarts, distribution, isNationalHoliday, ISSUE_PRIORITIES, ISSUE_TYPES, MIN_TREND_BASE, nextBucket, previousPeriod, PRODUCTION_REPO, REPORT_TZ, zonedParts,
   type Granularity, type IssuePriority, type IssueType, type ProductivityReport, type ReportBacklog, type ReportBotEffort,
   type ReportBucket, type ReportCoverage, type ReportGoals, type ReportKpis, type ReportPeriod, type ReportRelease, type ReportReleaseItem, type ReportSyncState,
 } from "../shared/productivity.ts";
@@ -228,6 +228,8 @@ const isConclusive = (verdict: string | undefined) => Boolean(verdict && !/incon
 
 interface ReportIndex {
   timeline: Timeline;
+  /** Where a release source exists (deliveries outside are unknown). */
+  spans: Array<{ from: number; to: number }>;
   runs: ReleaseRun[];
   releases: Series; // value: delivered non-carrier PRs first shipped there
   releaseList: ReleaseEvent[];
@@ -264,6 +266,7 @@ function buildIndex(input: ReportInputs): ReportIndex {
   const usageTimes = input.usage.map((row) => [Date.parse(row.at), row.costUsd ?? 0] as [number, number]).filter(([at]) => Number.isFinite(at));
   return {
     timeline,
+    spans: releaseSourceSpans(input),
     runs,
     releases: new Series(timeline.releases.map((release) => [release.at, deliveredNonCarrier.get(release.at) ?? 0])),
     releaseList: timeline.releases,
@@ -304,15 +307,37 @@ export function weekendMs(from: number, to: number): number {
 }
 const bucketStartDay = (at: number) => bucketStart(at, "day");
 
-/** Business days (Mon–Fri, São Paulo) of [from, min(to, now)), fractional for the current one. */
+/** Business days (Mon–Fri, São Paulo, national holidays off) of [from, to), fractional at the edges. */
 export function businessDays(from: number, to: number): number {
   let total = 0;
   for (let day = bucketStartDay(from); day < to; day = nextBucket(day, "day")) {
-    const weekday = zonedParts(day + 12 * 3_600_000).weekday;
-    if (weekday === 0 || weekday === 6) continue;
+    const noon = zonedParts(day + 12 * 3_600_000);
+    if (noon.weekday === 0 || noon.weekday === 6 || isNationalHoliday(noon.year, noon.month, noon.day)) continue;
     const end = nextBucket(day, "day");
     total += overlap({ from: day, to: end }, from, to) / (end - day);
   }
+  return Math.round(total * 100) / 100;
+}
+
+/** Merge overlapping spans into disjoint ones, sorted. */
+function mergeSpans(spans: ReadonlyArray<{ from: number; to: number }>): Array<{ from: number; to: number }> {
+  const merged: Array<{ from: number; to: number }> = [];
+  for (const span of [...spans].sort((a, b) => a.from - b.from)) {
+    const last = merged.at(-1);
+    if (last && span.from <= last.to) last.to = Math.max(last.to, span.to);
+    else merged.push({ ...span });
+  }
+  return merged;
+}
+
+/** Business days of [from, to) that a release source covers: the only days
+ * on which a delivery could have been seen. */
+export function coveredBusinessDays(from: number, to: number, spans: ReadonlyArray<{ from: number; to: number }>): number {
+  const total = mergeSpans(spans).reduce((sum, span) => {
+    const a = Math.max(from, span.from);
+    const b = Math.min(to, span.to);
+    return b > a ? sum + businessDays(a, b) : sum;
+  }, 0);
   return Math.round(total * 100) / 100;
 }
 
@@ -345,8 +370,9 @@ export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, t
     const b = Math.min(interval.to, end);
     return b > a ? sum + weekendMs(a, b) : sum;
   }, 0);
-  // DORA
+  // DORA — the denominator is the business days a release source covers
   const days = businessDays(from, end);
+  const releaseDays = coveredBusinessDays(from, end, index.spans);
   const checked = releases.filter((release) => isConclusive(release.postRelease));
   const failedChanges = checked.filter((release) => isChangeFailure(release.postRelease));
   const restores = failedChanges.map((release) => {
@@ -358,7 +384,12 @@ export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, t
   const usageWindow = usageFrom === null ? null : { from: Math.max(from, usageFrom), to: end };
   const usage = input.usage.filter((row) => within(Date.parse(row.at), from, to));
   const priced = usage.filter((row) => row.costUsd !== null);
-  const costUsd = priced.length ? Math.round(priced.reduce((sum, row) => sum + row.costUsd!, 0) * 100) / 100 : null;
+  const costOf = (rows: readonly UsageLike[]) => (rows.length ? Math.round(rows.reduce((sum, row) => sum + row.costUsd!, 0) * 100) / 100 : null);
+  const costUsd = costOf(priced);
+  const roleOf = (row: UsageLike) => botRole(input.botNames.get(row.botId) ?? row.botName);
+  const costEngineeringUsd = costOf(priced.filter((row) => roleOf(row) === "engineering"));
+  const costOperationsUsd = costOf(priced.filter((row) => roleOf(row) === "operations"));
+  const costOtherUsd = costOf(priced.filter((row) => roleOf(row) === "other"));
   const deliveriesInUsageDays = usageWindow && usageWindow.to > usageWindow.from ? index.releases.count(usageWindow.from, usageWindow.to) : 0;
   const opened = input.needsYou.filter((item) => within(item.createdAt, from, to));
   const responses = opened.map(ownerResponseMs).filter((value): value is number => value !== null);
@@ -384,8 +415,10 @@ export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, t
     declinedReleases: index.declines.count(from, to),
     blockedMs,
     blockedWeekendMs,
-    deploysPerBusinessDay: days > 0 ? Math.round((releases.length / days) * 100) / 100 : null,
+    deploysPerBusinessDay: releaseDays > 0 ? Math.round((releases.length / releaseDays) * 100) / 100 : null,
     businessDays: days,
+    releaseBusinessDays: releaseDays,
+    releaseCovered: end > from ? coverageOf(index.spans, from, end) : "none",
     changeFailures: failedChanges.length,
     checkedReleases: checked.length,
     timeToRestore: distribution(restores),
@@ -399,7 +432,10 @@ export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, t
     cachedTokens: usage.reduce((sum, row) => sum + (row.cachedInput ?? 0), 0),
     costUsd,
     usageDays: usageWindow && usageWindow.to > usageWindow.from ? Math.round(((usageWindow.to - usageWindow.from) / DAY_MS) * 10) / 10 : 0,
-    costPerDelivery: costUsd !== null && deliveriesInUsageDays > 0 ? Math.round((costUsd / deliveriesInUsageDays) * 100) / 100 : null,
+    costEngineeringUsd,
+    costOperationsUsd,
+    costOtherUsd,
+    costPerDelivery: costEngineeringUsd !== null && deliveriesInUsageDays >= MIN_TREND_BASE ? Math.round((costEngineeringUsd / deliveriesInUsageDays) * 100) / 100 : null,
     deliveriesInUsageDays,
     needsYouOpened: opened.length,
     needsYouResolved: input.needsYou.filter((item) => within(item.resolvedAt, from, to)).length,
@@ -462,28 +498,37 @@ function releaseRows(input: ReportInputs, index: ReportIndex, from: number, to: 
     issues: release.issues.map(item),
     ...(release.contentUnknown ? { contentUnknown: true, contentUnknownReason: release.contentUnknownReason } : {}),
   }));
-  // runs of the same commit and the same kind in a row are one row
+  // runs of the same commit in a row are one row: a commit that failed and was
+  // also superseded or aborted reads "failed (n tries) · m superseded", not as
+  // pairs of rows a minute apart (INSP-V r2 #7)
   const runs = index.runs.filter((run) => ["failed", "superseded", "aborted"].includes(run.outcome) && run.endedAt !== null).sort((a, b) => a.endedAt! - b.endedAt!);
-  type Group = { sha: string; outcome: "failed" | "superseded" | "aborted"; first: number; last: number; attempts: number; cause?: string; headPr?: number; timeSource: ReportRelease["timeSource"] };
+  type Group = { sha: string; first: number; last: number; failed: number; superseded: number; aborted: number; cause?: string; headPr?: number; timeSource: ReportRelease["timeSource"] };
   let group: Group | null = null;
   const sourceOf = (run: ReleaseRun): ReportRelease["timeSource"] => run.origin ? "github-deployment" : run.timeSource === "log" ? "log" : "log-clock";
   const flush = () => {
     if (group && within(group.last, from, to)) {
-      rows.push({ sha: group.sha, at: group.last, firstAt: group.first, attempts: group.attempts, timeSource: group.timeSource, outcome: group.outcome, ...(group.cause ? { cause: group.cause } : {}), ...head(group.headPr), prs: [], issues: [] });
+      const outcome = group.failed ? "failed" : group.superseded ? "superseded" : "aborted";
+      const attempts = outcome === "failed" ? group.failed : outcome === "superseded" ? group.superseded : group.aborted;
+      rows.push({
+        sha: group.sha, at: group.last, firstAt: group.first, attempts, timeSource: group.timeSource, outcome,
+        ...(outcome !== "superseded" && group.superseded ? { supersededRuns: group.superseded } : {}),
+        ...(outcome !== "aborted" && group.aborted ? { abortedRuns: group.aborted } : {}),
+        ...(group.cause ? { cause: group.cause } : {}), ...head(group.headPr), prs: [], issues: [],
+      });
     }
     group = null;
   };
   for (const run of runs) {
-    const outcome = run.outcome as Group["outcome"];
-    if (group && group.sha === run.sha && group.outcome === outcome) {
-      group.last = run.endedAt!;
-      group.attempts += 1;
-      if (run.cause) group.cause = run.cause;
-      if (sourceOf(run) === "log-clock") group.timeSource = "log-clock";
-      continue;
+    const kind = run.outcome as "failed" | "superseded" | "aborted";
+    if (!group || group.sha !== run.sha) {
+      flush();
+      group = { sha: run.sha, first: run.endedAt!, last: run.endedAt!, failed: 0, superseded: 0, aborted: 0, ...(run.headPr ? { headPr: run.headPr } : {}), timeSource: sourceOf(run) };
     }
-    flush();
-    group = { sha: run.sha, outcome, first: run.endedAt!, last: run.endedAt!, attempts: 1, ...(run.cause ? { cause: run.cause } : {}), ...(run.headPr ? { headPr: run.headPr } : {}), timeSource: sourceOf(run) };
+    group.last = run.endedAt!;
+    group[kind] += 1;
+    // the row's cause is the failure's own verdict when there is one
+    if (run.cause && (kind === "failed" || !group.failed)) group.cause = run.cause;
+    if (sourceOf(run) === "log-clock") group.timeSource = "log-clock";
   }
   flush();
   const seen = new Set<string>();
@@ -499,7 +544,21 @@ function releaseRows(input: ReportInputs, index: ReportIndex, from: number, to: 
 }
 
 function backlogOf(input: ReportInputs): ReportBacklog {
-  const open = Object.values(input.github.issues).filter((issue) => issue.state === "OPEN");
+  const all = Object.values(input.github.issues);
+  const open = all.filter((issue) => issue.state === "OPEN");
+  // a period that ended before the sync (a closed month) gets its own end-of-period snapshot
+  const synced = input.github.syncedAt;
+  const endAt = Math.min(input.period.to, input.now);
+  const periodEnd = synced !== null && endAt < synced - 60_000 ? (() => {
+    const openThen = all.filter((issue) => issue.createdAt < endAt && (issue.closedAt === null || issue.closedAt >= endAt));
+    const oldestThen = openThen.slice().sort((a, b) => a.createdAt - b.createdAt)[0];
+    return {
+      at: endAt,
+      openIssues: openThen.length,
+      openP0P1: openThen.filter((issue) => ["p0", "p1"].includes(issuePriority(issue.labels))).length,
+      oldestOpen: oldestThen ? { number: oldestThen.number, createdAt: oldestThen.createdAt } : null,
+    };
+  })() : null;
   const has = (issue: GhIssue, label: string) => issue.labels.some((each) => each.toLowerCase() === label);
   const oldest = open.slice().sort((a, b) => a.createdAt - b.createdAt)[0];
   const p1 = open.filter((issue) => issuePriority(issue.labels) === "p1");
@@ -518,6 +577,7 @@ function backlogOf(input: ReportInputs): ReportBacklog {
     prsAwaitingGateList: waiting.slice(0, 50).map((pr) => ({ number: pr.number, title: pr.title, gate: pr.gate === "success" ? "pending" : pr.gate, since: pr.gateAt ?? pr.createdAt })),
     openPrs: input.github.openPrs.length,
     at: input.github.syncedAt,
+    periodEnd,
   };
 }
 

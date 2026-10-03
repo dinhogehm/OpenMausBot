@@ -1,7 +1,7 @@
 // São Paulo calendar and statistics behind the productivity report (lot V).
 import { describe, expect, it } from "vitest";
 import {
-  bucketKey, bucketStart, bucketStarts, closedMonth, compareKpi, distribution, goalStatus, nextBucket, parseReportBound, periodTitle, presetPeriod,
+  botRole, bucketKey, bucketStart, bucketStarts, closedMonth, compareKpi, distribution, exportReadiness, goalStatus, isNationalHoliday, nextBucket, parseReportBound, periodTitle, presetPeriod,
   previousPeriod, resolveReportPeriod, sanitizeGoals, zonedParts, zonedToUtc,
 } from "./productivity.ts";
 
@@ -62,6 +62,36 @@ describe("comparisons (INSP-V r1 #7)", () => {
     expect(compareKpi(0.9, 0.8, { samples: { current: 12, previous: 10 } })).toMatchObject({ kind: "trend" });
     expect(compareKpi(1.2, 0.8, { base: 16 })).toMatchObject({ kind: "trend" });
     expect(compareKpi(1.2, 0.2, { base: 1 })).toEqual({ kind: "absolute", previous: 0.2 });
+  });
+});
+
+describe("export readiness (INSP-V r2 #3)", () => {
+  const now = brt("2026-10-03T09:00:00");
+  const base = (lastSyncAt: number | null, state: "idle" | "syncing" = "idle", matchesHistory: boolean | null = true) => ({
+    sync: { state, lastSyncAt, lastAttemptAt: lastSyncAt, nextSyncAt: null, error: null, rateLimit: null },
+    coverage: { github: { syncedAt: lastSyncAt }, tag: { sha: "9dbb1dcdd", matchesHistory, checkedAt: lastSyncAt } },
+  }) as never;
+  it("is ready only when synced within the hour, not syncing, and the tag agrees", () => {
+    expect(exportReadiness(base(now - 30 * 60_000), now)).toEqual({ ready: true, blockers: [], ageMs: 30 * 60_000 });
+    // the r2 board PDF: synced 16 h earlier, the tag read before the last release
+    expect(exportReadiness(base(now - 16 * 3_600_000, "idle", false), now).blockers).toEqual(["stale", "tag-mismatch"]);
+    expect(exportReadiness(base(now - 60_000, "syncing"), now).blockers).toEqual(["syncing"]);
+    expect(exportReadiness(base(null, "idle", null), now).blockers).toEqual(["never"]);
+  });
+});
+
+describe("calendar and roles", () => {
+  it("knows Brazil's national holidays, Good Friday included; Carnival stays a business day", () => {
+    expect(isNationalHoliday(2026, 9, 7)).toBe(true);
+    expect(isNationalHoliday(2026, 4, 3)).toBe(true); // Good Friday 2026
+    expect(isNationalHoliday(2026, 2, 17)).toBe(false); // Carnival, optional
+    expect(isNationalHoliday(2026, 9, 8)).toBe(false);
+  });
+
+  it("tells engineering bots from operations (INSP-V r2 #4)", () => {
+    for (const name of ["Lead PRODEV", "Eng PRODEV", "QA PRODEV", "DBA PRODEV", "SRE PRODEV", "Delivery PRODEV"]) expect(botRole(name)).toBe("engineering");
+    for (const name of ["Monitor Chat Atendimento", "Chief of Staff"]) expect(botRole(name)).toBe("operations");
+    expect(botRole("Assistente")).toBe("other");
   });
 });
 

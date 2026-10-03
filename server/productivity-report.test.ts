@@ -7,8 +7,8 @@
 import { describe, expect, it } from "vitest";
 import { bucketStarts } from "../shared/productivity.ts";
 import type { GhIssue, GhPr } from "./productivity-github.ts";
-import { buildProductivityReport, buildTimeline, businessDays, issuesOfPr, releasePairs, weekendMs } from "./productivity-report.ts";
-import { brt, HOUR, scenario, sha } from "./testing/productivity-fixture.ts";
+import { buildProductivityReport, buildTimeline, businessDays, coveredBusinessDays, issuesOfPr, releasePairs, weekendMs } from "./productivity-report.ts";
+import { brt, HOUR, run, scenario, sha } from "./testing/productivity-fixture.ts";
 
 const monthReport = () => {
   const base = scenario();
@@ -124,10 +124,12 @@ describe("KPIs", () => {
     expect(k).toMatchObject({ blockedMs: 5 * HOUR, blockedWeekendMs: 0 });
   });
 
-  it("DORA: deploys per business day, change failure rate and time to restore from the post-release check", () => {
-    // September has 22 business days; Oct 1st (Thu) whole, Oct 2nd (Fri) half by noon
-    expect(k.businessDays).toBe(23.5);
-    expect(k.deploysPerBusinessDay).toBe(0.13);
+  it("DORA: deploys per business day WITH a release source; change failure rate and time to restore from the post-release check (INSP-V r2 #1)", () => {
+    // September has 21 business days (22 weekdays, Sep 7th a national holiday); Oct 1st whole, Oct 2nd half by noon
+    expect(k.businessDays).toBe(22.5);
+    // the log starts on Sep 29th: Tue 29, Wed 30, Thu 1st and half of Fri 2nd have a source — 3 deliveries in 3,5 days,
+    // not 3 in 22,5 (the days without a source are unknown, not zero)
+    expect(k).toMatchObject({ releaseBusinessDays: 3.5, deploysPerBusinessDay: 0.86, releaseCovered: "partial" });
     expect(k).toMatchObject({ changeFailures: 1, checkedReleases: 2 });
     expect(k.timeToRestore).toEqual({ n: 1, median: 10.5 * HOUR, p90: 10.5 * HOUR });
   });
@@ -140,15 +142,25 @@ describe("KPIs", () => {
     expect(report.backlog.prsAwaitingGateList.map((pr) => pr.number)).toEqual([20]);
   });
 
-  it("bots: only the recorded days, the cost per delivery in those days (INSP-V r1 #6)", () => {
+  it("bots: only the recorded days; the cost split by role; no cost per delivery on fewer than 5 deliveries (INSP-V r1 #6, r2 #4)", () => {
     expect(k).toMatchObject({ turns: 3, activeMs: 30 * 60_000, timedTurns: 1, inputTokens: 1510, outputTokens: 151, cachedTokens: 800, costUsd: 0.75, needsYouOpened: 3, needsYouResolved: 2 });
-    // ledger from 28/09 00:00 to now (02/10 12:00): 4,5 days, 3 deliveries in them
-    expect(k).toMatchObject({ usageDays: 4.5, deliveriesInUsageDays: 3, costPerDelivery: 0.25 });
+    // ledger from 28/09 00:00 to now (02/10 12:00): 4,5 days, 3 deliveries in them — too few for a ratio
+    expect(k).toMatchObject({ usageDays: 4.5, deliveriesInUsageDays: 3, costPerDelivery: null });
+    // the Chief of Staff is operations, the Lead (no priced turn) engineering
+    expect(k).toMatchObject({ costEngineeringUsd: null, costOperationsUsd: 0.75, costOtherUsd: null });
     expect(k.ownerResponse).toEqual({ n: 2, median: 1.25 * HOUR, p90: 2 * HOUR });
     expect(report.bots.map((bot) => [bot.name, bot.turns, bot.activeMs, bot.costUsd, bot.needsYouOpened, bot.needsYouResolved, bot.needsYouOpenNow])).toEqual([
       ["Chief of Staff", 2, 30 * 60_000, 0.75, 2, 2, 0],
       ["Lead", 1, 0, null, 1, 0, 1],
     ]);
+  });
+
+  it("the cost per delivery is the engineering bots' cost over 5+ deliveries; operations stay out (INSP-V r2 #4)", () => {
+    const base = scenario();
+    const runs = [...base.runs, run("e1", "released", "2026-10-01T14:00:00"), run("f1", "released", "2026-10-01T16:00:00"), run("g1", "released", "2026-10-02T09:00:00")];
+    const usage = [...base.usage, { at: new Date(brt("2026-10-01T15:00:00")).toISOString(), botId: "eng", botName: "Eng PRODEV", input: 10, output: 1, costUsd: 1.2 }];
+    const many = buildProductivityReport({ ...base, runs, usage, granularity: "month", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-11-01T00:00:00") } }).kpis;
+    expect(many).toMatchObject({ deliveriesInUsageDays: 6, costEngineeringUsd: 1.2, costOperationsUsd: 0.75, costPerDelivery: 0.2 });
   });
 
   it("knows when the repository was created (no comparison against a period before it)", () => {
@@ -174,6 +186,29 @@ describe("release rows", () => {
       ["released", "a", 1, null, false, [], []],
     ]);
     expect(monthReport().releases.find((row) => row.sha[0] === "a")).toMatchObject({ contentUnknown: true, contentUnknownReason: "first" });
+  });
+
+  it("folds a commit's superseded and aborted runs into its failure row, not pairs of rows a minute apart (INSP-V r2 #7)", () => {
+    // the real 94eedf2b4 shape: the commit failed, and a run of the same commit was then superseded
+    const base = scenario();
+    const runs = [...base.runs.filter((each) => each.key !== "s1" && each.key !== "z1"),
+      run("x3", "superseded", "2026-10-01T06:01:00", { sha: sha("x"), timeSource: "neighbor" }),
+      run("x4", "aborted", "2026-10-01T06:02:00", { sha: sha("x"), timeSource: "neighbor", cause: "lock" })];
+    const report = buildProductivityReport({ ...base, runs, declines: [], granularity: "month", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-11-01T00:00:00") } });
+    const rows = report.releases.filter((row) => row.sha[0] === "x");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ outcome: "failed", attempts: 2, supersededRuns: 1, abortedRuns: 1, cause: "Local CI failed at tests" });
+    // the counts stay runs: 2 failures that ran, 1 superseded, 1 aborted
+    expect(report.kpis).toMatchObject({ failedReleases: 2, supersededReleases: 1, abortedReleases: 1 });
+  });
+
+  it("keeps the backlog snapshot at the end of a closed period apart from now (INSP-V r2 #2, #7)", () => {
+    const september = buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") } });
+    // at 30/09 23:59 #101, #102, #104 and #105 were open (#103 was created then and closed later)
+    expect(september.backlog.periodEnd).toEqual({ at: brt("2026-10-01T00:00:00"), openIssues: 4, openP0P1: 2, oldestOpen: { number: 104, createdAt: brt("2026-09-10T10:00:00") } });
+    expect(september.kpis.openP1AtEnd).toBe(2);
+    // a period that runs to now has no separate snapshot
+    expect(monthReport().backlog.periodEnd).toBeNull();
   });
 });
 
@@ -206,6 +241,19 @@ describe("calendar helpers", () => {
     expect(weekendMs(brt("2026-09-25T03:05:00"), brt("2026-09-29T14:26:00"))).toBe(48 * HOUR);
     expect(businessDays(brt("2026-09-28T00:00:00"), brt("2026-10-05T00:00:00"))).toBe(5);
     expect(businessDays(brt("2026-10-03T00:00:00"), brt("2026-10-05T00:00:00"))).toBe(0);
+    // national holidays are not business days: Sep 7th, Oct 12th, Good Friday 2026 (Apr 3rd)
+    expect(businessDays(brt("2026-09-07T00:00:00"), brt("2026-09-08T00:00:00"))).toBe(0);
+    expect(businessDays(brt("2026-10-12T00:00:00"), brt("2026-10-13T00:00:00"))).toBe(0);
+    expect(businessDays(brt("2026-04-03T00:00:00"), brt("2026-04-04T00:00:00"))).toBe(0);
+    expect(businessDays(brt("2026-09-01T00:00:00"), brt("2026-10-01T00:00:00"))).toBe(21);
+  });
+
+  it("counts only the business days a release source covers (INSP-V r2 #1)", () => {
+    // the real September: log from 14/09 14:34 — 12,4 business days with a source, of 21
+    const spans = [{ from: brt("2026-09-14T14:34:00"), to: brt("2026-10-03T09:00:00") }];
+    expect(coveredBusinessDays(brt("2026-09-01T00:00:00"), brt("2026-10-01T00:00:00"), spans)).toBe(12.39);
+    // overlapping sources are not counted twice
+    expect(coveredBusinessDays(brt("2026-09-28T00:00:00"), brt("2026-10-03T00:00:00"), [...spans, { from: brt("2026-09-20T00:00:00"), to: brt("2026-09-30T00:00:00") }])).toBe(5);
   });
 });
 
