@@ -521,6 +521,8 @@ export const ATTENTION_MAX_AGE_MS = 24 * 3_600_000;
 const ATTENTION_REASONS: Record<string, string> = {
   "fast-failure": "falhou antes da CI ou sem veredito dela (git/ssh, npm ci, lock de admissão): é a máquina, não o commit",
   signal: "foi morto por um sinal (reinício, falta de memória ou alguém parou o processo): é a máquina, não o commit",
+  // nuria-platform INSP-W r2 R2-3: the 3rd refusal of the tenant roster on one tip
+  "roster-drift": "recusou o roster de tenants 3 vezes seguidas (tenant criado ou sumido durante o plano, antes de qualquer mutação)",
 };
 
 // control characters, built from a string so none sits in a regex literal
@@ -591,6 +593,14 @@ export function releaseFailedText(sha: string, count: number, cause: string | nu
 export function releaseAttentionAlert(attention: ReleaseAttention, logs: { err: string }): { text: string; report: string } {
   const short = attention.sha.slice(0, 9);
   const last = attention.lastFailure?.slice(0, 160).replace(/[.\s]+$/, "");
+  // not the machine: the tenant roster kept changing, and the watcher stopped trying this commit
+  if (attention.reason === "roster-drift") {
+    const text = `Release ${short} parado: o roster de tenants mudou 3× seguidas durante o plano, nada foi mutado — o watcher não tenta este commit de novo até a main andar.`;
+    return {
+      text,
+      report: `[Alerta do servidor: release de produção pede atenção] ${text}\nO release ${attention.reasonPt}${last ? `; último erro: ${last}` : ""}.\nO que fazer: veja ${logs.err}${attention.at ? ` perto de ${attention.at}` : ""} e descubra por que a descoberta de tenants oscila (tenant em provisionamento, um que aparece e some, ou o congelamento do roster) — é assunto do DBA. Depois, um commit novo na main, ou \`rm ~/.nuria/roster-drifts-production-release\` para o watcher tentar este mesmo commit. Arquivo: ${ATTENTION_ESCALATION_FILE}.`,
+    };
+  }
   // what the owner sees first (a chip shows ~55 characters): whose fault, and that it retries (INSP-H r1 #8)
   const hint = attention.reason === "signal" ? "processo morto por sinal" : machineHint(attention.lastFailure ?? "");
   const text = `Release ${short}: falha da máquina${hint ? ` (${hint})` : ""}, não do commit — o watcher tenta de novo. O release ${attention.reasonPt}${last ? `; último erro: ${last}` : ""}.`;

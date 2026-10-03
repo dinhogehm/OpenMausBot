@@ -318,6 +318,18 @@ describe("a release that needs attention without being halted (H9)", () => {
     expect(releaseAttentionAlert(signal, { err: "e" }).report).toContain("descubra o que matou o processo");
   });
 
+  // nuria-platform INSP-W r2 R2-3: the 3rd roster refusal on a tip, written by escalate_to_chief
+  it("a roster that kept changing is said as such: not the machine, and the commit is no longer tried", () => {
+    const roster = releaseAttention(JSON.stringify({ ...JSON.parse(FIXTURE), reason: "roster-drift", failures: 3, limit: 3, last_failure: "Roster tenant mudou (drift) desde o preflight em 3 tentativas seguidas" }))!;
+    expect(roster.reasonPt).toContain("recusou o roster de tenants 3 vezes seguidas");
+    const alert = releaseAttentionAlert(roster, { err: "/x/production-release.err.log" });
+    expect(alert.text).toBe("Release cb015584a parado: o roster de tenants mudou 3× seguidas durante o plano, nada foi mutado — o watcher não tenta este commit de novo até a main andar.");
+    expect(alert.text).not.toContain("falha da máquina");
+    expect(alert.report).toContain("último erro: Roster tenant mudou (drift) desde o preflight em 3 tentativas seguidas");
+    expect(alert.report).toContain("é assunto do DBA");
+    expect(alert.report).toContain("rm ~/.nuria/roster-drifts-production-release");
+  });
+
   it("tells each write once: a new signature (another time) is news, the same file read again is not", () => {
     const dir = mkdtempSync(join(tmpdir(), "omb-attention-"));
     try {

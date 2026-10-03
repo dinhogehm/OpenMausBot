@@ -197,8 +197,80 @@ export function ciToStop(pid: number, rows: readonly PsRow[], guard: StopGuard):
 // (~/.nuria/admission/lease/{owner.pid,kind}) and the release's intent
 // (~/.nuria/admission/intents/<release pid>, holding its label).
 
-export interface AdmissionLease { ownerPid: string; kind: string }
-export interface ReleaseIntent { pid: number; label: string }
+/** `start` (INSP-W r1 W-1): the owner's `ps -o lstart`, one space apart, when the lease records it. */
+export interface AdmissionLease { ownerPid: string; kind: string; label?: string; start?: string }
+export interface ReleaseIntent { pid: number; label: string; start?: string }
+/** nuria-platform lote W2: one release or deploy at a time, held for the whole release;
+ * `startedAt` is when the release took it (epoch seconds). */
+export interface DeployLease { ownerPid: string; label: string; start?: string; startedAt?: number }
+/** nuria-platform's NURIA_ADMISSION_RELEASE_CEILING_SECONDS default: a release older than this has very likely hung. */
+export const RELEASE_QUEUE_CEILING_S = 5 * 3600;
+export interface QueuedBehindRelease { label: string; state: "holding" | "queued"; ageS: number | null; overdue: boolean }
+
+/** A ci:local that queues for the machine (profile full or release; not --steps, not quick). */
+const QUEUEING_CI = (command: string) => isCiCommand(command) && !/\s--steps(?:\s|=|$)|\s--profile\s+quick(?:\s|$)|ci:local:quick/.test(command);
+
+/** nuria-platform lote W1: a full ci:local behind a release waits for it, however long,
+ * and that wait is legitimate — the session's turn must not be cut for it. The session's
+ * ci:local (a queueing local-ci under its turn's process) is queued behind a release when
+ * it does not hold the machine and a live release does — or queues for it (an intent,
+ * which local CIs wait behind), or holds the deploy lease with the machine free (a CI in
+ * the release's own checkout waits for it). Null when it runs, waits behind another CI, or
+ * there is no CI.
+ * INSP-W r1 W-1: a holder is alive only when its pid is in the table AND, when the lease
+ * recorded it, with the same start (a pid reused after a crash or a reboot is no release);
+ * and a release older than the ceiling (its deploy lease's `startedAt`) is `overdue`: the
+ * wait is no longer excused, the turn is cut again, saying the release may have hung. */
+export function ciQueuedBehindRelease(input: { rows: readonly PsRow[]; rootPid: number; lease: AdmissionLease | null; deployLease: DeployLease | null; intents: readonly ReleaseIntent[]; alive: (pid: number) => boolean; nowMs?: number; ceilingS?: number }): QueuedBehindRelease | null {
+  const children = new Map<number, PsRow[]>();
+  for (const row of input.rows) children.set(row.ppid, [...(children.get(row.ppid) ?? []), row]);
+  const queue = [...(children.get(input.rootPid) ?? [])];
+  const ciPids = new Set<number>();
+  const seen = new Set<number>();
+  while (queue.length) {
+    const row = queue.shift()!;
+    if (seen.has(row.pid)) continue;
+    seen.add(row.pid);
+    if (QUEUEING_CI(row.command)) ciPids.add(row.pid);
+    queue.push(...(children.get(row.pid) ?? []));
+  }
+  if (!ciPids.size) return null;
+  const startOf = new Map(input.rows.map((row) => [row.pid, row.start.replace(/\s+/g, " ").trim()]));
+  const live = (pid: number, start?: string) => {
+    if (!input.alive(pid)) return false;
+    const recorded = start?.replace(/\s+/g, " ").trim();
+    const now = startOf.get(pid);
+    return !recorded || !now || recorded === now;
+  };
+  const deployOwner = Number(input.deployLease?.ownerPid.trim());
+  const releaseLive = input.deployLease && live(deployOwner, input.deployLease.start);
+  const ageS = releaseLive && input.deployLease?.startedAt ? Math.max(0, Math.round((input.nowMs ?? Date.now()) / 1000 - input.deployLease.startedAt)) : null;
+  const queued = (label: string, state: QueuedBehindRelease["state"]): QueuedBehindRelease => ({ label, state, ageS, overdue: ageS !== null && ageS >= (input.ceilingS ?? RELEASE_QUEUE_CEILING_S) });
+  const owner = Number(input.lease?.ownerPid.trim());
+  if (input.lease && ciPids.has(owner)) return null;
+  if (input.lease && input.lease.kind.trim() === "release" && live(owner, input.lease.start)) return queued(input.lease.label?.trim() ?? "", "holding");
+  const intent = input.intents.find((each) => live(each.pid, each.start));
+  if (intent) return queued(intent.label.trim(), "queued");
+  if (!input.lease && releaseLive) return queued(input.deployLease!.label.trim(), "holding");
+  return null;
+}
+
+const releaseName = (label: string, article: boolean) => {
+  const sha = releaseLabelSha(label)?.slice(0, 9);
+  return sha ? `${article ? "o " : ""}release de produção ${sha}` : article ? "um release" : "release";
+};
+
+/** The chip for a session whose ci:local waits behind a release: what it waits for, not an error. */
+export function ciQueuedText(queued: { label: string; state: "holding" | "queued" }): string {
+  return `aguardando ${releaseName(queued.label, true)} (${queued.state === "holding" ? "ele ocupa a máquina" : "ele está na fila pela máquina"}): o ci:local desta sessão está na fila e começa quando ele liberar; o turno não é cortado por essa espera`;
+}
+
+/** Past the ceiling: the turn is cut again, and this is why (the same words as nuria-platform's admission). */
+export function releaseOverdueText(label: string, ceilingS = RELEASE_QUEUE_CEILING_S): string {
+  const sha = releaseLabelSha(label)?.slice(0, 9) ?? (label || "?");
+  const hours = ceilingS % 3600 === 0 ? `${ceilingS / 3600} h` : `${ceilingS} s`;
+  return `release ${sha} passou de ${hours}: verifique se travou`;
+}
 export type Blocked = NonNullable<ReturnType<typeof releaseBlockedBy>>;
 
 /** Whether the lease and the intents confirm the log: a live release intent
