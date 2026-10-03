@@ -57,6 +57,8 @@ export interface NeedsYouResolverViewProps {
   error: string | null;
   /** What was just done, naming its item (the screen may show another one by now). */
   notice: string | null;
+  /** How the notice reads: done (default) or neutral news (INSP-J2 r5 B4). */
+  noticeTone?: "success" | "info";
   copied: string | null;
   replyRef?: RefObject<HTMLTextAreaElement | null>;
   closeRef?: RefObject<HTMLButtonElement | null>;
@@ -313,12 +315,16 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
  * never covers a control or the next title, and takes at most two lines,
  * the whole text in its tooltip (INSP-I r2 #3). The live region is always
  * there, so a screen reader hears each notice. */
-function Notice(props: Pick<NeedsYouResolverViewProps, "notice" | "onDismissNotice">) {
+function Notice(props: Pick<NeedsYouResolverViewProps, "notice" | "noticeTone" | "onDismissNotice">) {
+  // "info": news that is neither a success nor a failure ("ainda está na fila") — neutral (INSP-J2 r5 B4)
+  const info = props.noticeTone === "info";
   return (
     <div role="status" aria-live="polite">
       {props.notice ? (
-        <p data-resolver-notice="" title={props.notice} className="mb-2.5 flex items-start gap-2 rounded-lg border border-success/30 bg-success/8 px-3 py-2 text-[12.5px] leading-snug text-ink">
-          <CircleCheck size={14} aria-hidden="true" className="mt-px shrink-0 text-success" />
+        <p data-resolver-notice="" data-tone={info ? "info" : "success"} title={props.notice} className={cn("mb-2.5 flex items-start gap-2 rounded-lg border px-3 py-2 text-[12.5px] leading-snug text-ink", info ? "border-hairline bg-panel" : "border-success/30 bg-success/8")}>
+          {info
+            ? <Clock size={14} aria-hidden="true" className="mt-px shrink-0 text-ink-secondary" />
+            : <CircleCheck size={14} aria-hidden="true" className="mt-px shrink-0 text-success" />}
           <span className="line-clamp-2 min-w-0 flex-1 break-words">{props.notice}</span>
           {props.onDismissNotice && (
             <button type="button" aria-label={t("needsYou.screen.dismissNotice")} onClick={props.onDismissNotice} className="-mr-1 shrink-0 rounded p-0.5 text-ink-secondary hover:text-ink">
@@ -892,6 +898,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   const [changingAnswer, setChangingAnswer] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [noticeTone, setNoticeTone] = useState<"success" | "info">("success");
   const [copied, setCopied] = useState<string | null>(null);
   const [tick, setTick] = useState(() => Date.now());
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -963,6 +970,8 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     try {
       const result = await action();
       setNotice(typeof done === "function" ? done(result) : done);
+      // news, not a result: "ainda está na fila" (INSP-J2 r5 B4)
+      setNoticeTone((result as { info?: unknown } | undefined)?.info ? "info" : "success");
     } catch (cause) {
       setError(cause instanceof Error && cause.message ? cause.message : t("needsYou.screen.failed"));
     } finally {
@@ -1052,6 +1061,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           busy={busy}
           error={error}
           notice={notice}
+          noticeTone={noticeTone}
           copied={copied}
           replyRef={replyRef}
           closeRef={closeRef}

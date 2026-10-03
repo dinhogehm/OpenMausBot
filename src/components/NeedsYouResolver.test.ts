@@ -553,9 +553,13 @@ describe("keys on the resolution screen", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "Monitor Chat ainda tem tempo para responder a este item.", code: "not_silent" }), { status: 409 })));
     await expect(remindOwnerPending(item)).rejects.toThrow("ainda tem tempo");
     // the notice is the polite status line, never the red alert
-    const shown = view({ selectedKey: keyOf("o3"), notice: info });
-    expect(shown.html).toMatch(/role="status" aria-live="polite"[^>]*><p data-resolver-notice=""/);
+    const shown = view({ selectedKey: keyOf("o3"), notice: info, noticeTone: "info" });
+    expect(shown.html).toMatch(/role="status" aria-live="polite"[^>]*><p data-resolver-notice="" data-tone="info"/);
     expect(shown.html).not.toContain('role="alert"');
+    // neutral: neither the red of a failure nor the green of a success
+    const note = shown.find("data-resolver-notice")!;
+    expect(String(note.props.className)).not.toMatch(/danger|success/);
+    expect(view({ selectedKey: keyOf("o3"), notice: "Enviado." }).find("data-resolver-notice")!.props["data-tone"]).toBe("success");
   });
 
   it("drops the 'não foi entregue' banner once the bot rewrote the item, or the chosen decision is gone", () => {
