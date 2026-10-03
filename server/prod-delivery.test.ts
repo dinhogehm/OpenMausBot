@@ -473,9 +473,9 @@ describe("sessions to resume", () => {
 
   it("marks failed and idle sessions 2 h+ old with an open PR of their own, with the reason in pt-BR", () => {
     const failed = make("failed", { failedAt: now - 2 * 3_600_000 - 1, lastError: "the turn ran past 45 minutes and was stopped", delivery: { slug: SLUG, prs: pr(9332) } });
-    expect(resumeNeeded(failed, now)).toEqual({ since: now - 2 * 3_600_000 - 1, prs: [9332], why: "falhou: o turno passou de 45 minutos e foi parado" });
+    expect(resumeNeeded(failed, now)).toEqual({ since: now - 2 * 3_600_000 - 1, prs: [9332], why: "falhou: o turno passou de 45 minutos e foi parado", kind: "failed", detail: "the turn ran past 45 minutes and was stopped" });
     const idle = make("idle", { delivery: { slug: SLUG, prs: pr(9350) } });
-    expect(resumeNeeded(idle, now)).toEqual({ since: now - 3 * 3_600_000, prs: [9350], why: "parada: o último turno terminou e nada a retomou" });
+    expect(resumeNeeded(idle, now)).toEqual({ since: now - 3 * 3_600_000, prs: [9350], why: "parada: o último turno terminou e nada a retomou", kind: "idle" });
     const blocked = make("idle", { blockedOn: "aprovar o comando npm run pr:merge -- --pr 9280 --merge", delivery: { slug: SLUG, prs: pr(9280) } });
     expect(resumeNeeded(blocked, now)?.why).toBe("parada, bloqueada: aprovar o comando npm run pr:merge -- --pr 9280 --merge");
     // a PR handed over to it counts too, unless known merged or closed
@@ -494,5 +494,31 @@ describe("sessions to resume", () => {
     expect(resumeNeeded(make("idle", { delivery: { slug: SLUG, prs: { ...pr(9350, { state: "merged" }), ...pr(9351, { state: "closed" }) } } }), now)).toBeNull();
     // the app opened it in a wrong folder: started anew, never resumed
     expect(resumeNeeded(make("failed", { failedAt: now - 3 * 3_600_000, desktop: { wrongFolder: "/repo" }, delivery: { slug: SLUG, prs: pr(9332) } }), now)).toBeNull();
+    // INSP-S r1 S-5: a create that never opened in the app — the send refuses it ("comece outra")
+    expect(resumeNeeded(make("failed", { surface: "app", failedAt: now - 3 * 3_600_000, claimedPrs: [9332], desktop: {} }), now)).toBeNull();
+    expect(resumeNeeded(make("failed", { surface: "app", failedAt: now - 3 * 3_600_000, claimedPrs: [9332], desktop: { localId: "local_x" } }), now)?.prs).toEqual([9332]);
+  });
+
+  it("says the kind and the recorded detail, for a row in the reader's language", () => {
+    expect(resumeNeeded(make("failed", { failedAt: now - 3 * 3_600_000, lastError: "the turn ran past 45 minutes and was stopped", claimedPrs: [1] }), now)).toMatchObject({ kind: "failed", detail: "the turn ran past 45 minutes and was stopped" });
+    expect(resumeNeeded(make("idle", { blockedOn: "aprovar o merge", claimedPrs: [1] }), now)).toMatchObject({ kind: "blocked", detail: "aprovar o merge" });
+    const idle = resumeNeeded(make("idle", { claimedPrs: [1] }), now);
+    expect(idle?.kind).toBe("idle");
+    expect(idle).not.toHaveProperty("detail");
+  });
+
+  // INSP-S r1 S-1, the real 8204/#9350 (9b50cdf7): its ci:local gave way to the
+  // release on 02/10, so it sat idle with resumeAfterTag until the tag moved.
+  it("never while the server holds it behind a release, nor while a release is on its way", () => {
+    const given = make("idle", { lastActivityAt: now - 2.5 * 3_600_000, delivery: { slug: SLUG, prs: pr(9350) } });
+    const parked = { ...given, resumeAfterTag: { fromSha: "09d832f4bfa4", at: now - 2.5 * 3_600_000, message: "A tag andou", releaseSha: "d5bb1f70b" } };
+    expect(resumeNeeded(parked, now)).toBeNull();
+    // the server's own resumption cleared it: from then on, it is one like any other
+    expect(resumeNeeded(given, now)?.prs).toEqual([9350]);
+    // a release holding the machine (or its deploy lease, or queued for it): nobody is told to resume
+    expect(resumeNeeded(given, now, { release: "o release de produção d5bb1f70b está em andamento" })).toBeNull();
+    // the admission state unreadable: undecided, so nobody either
+    expect(resumeNeeded(given, now, { release: "?" })).toBeNull();
+    expect(resumeNeeded(given, now, { release: null })?.prs).toEqual([9350]);
   });
 });

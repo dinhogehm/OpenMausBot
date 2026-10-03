@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePsTable, type PsRow } from "./bg-jobs.ts";
-import { type AdmissionLease, ciLabel, ciOwner, ciQueuedBehindRelease, ciQueuedText, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, RELEASE_QUEUE_CEILING_S, releaseBlockedBy, type ReleaseIntent, releaseLabelSha, releaseOverdueText, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
+import { type AdmissionLease, ciLabel, ciOwner, ciQueuedBehindRelease, ciQueuedText, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, RELEASE_QUEUE_CEILING_S, releaseBlockedBy, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
 import { releaseFailures, releaseInLoop } from "./release-watch.ts";
 
 const log = [
@@ -614,6 +614,34 @@ describe("a session's ci:local queued behind a release is a legitimate wait (lot
     expect(ciQueuedBehindRelease(input({ nowMs, deployLease: deployLease(6 * 3600) }))).toMatchObject({ state: "holding", overdue: true });
     expect(RELEASE_QUEUE_CEILING_S).toBe(18_000);
     expect(releaseOverdueText(release)).toBe("release 23a9f93c0 passou de 5 h: verifique se travou");
+  });
+});
+
+describe("a release on its way holds every session's RETOMAR (INSP-S r1 S-1)", () => {
+  const alive = (pid: number) => real.some((row) => row.pid === pid) || pid === 90001;
+  const release = "release:production:23a9f93c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a";
+  const base = { rows: real, lease: null, deployLease: null, intents: [], alive };
+  const liveStart = "Thu Oct 1 15:01:22 2026";
+
+  it("holds while a live release holds the machine, the deploy lease, or queues for the machine", () => {
+    expect(releaseInFlight({ ...base, lease: { ownerPid: "90001", kind: "release", label: release } })).toEqual({ label: release, state: "holding", ageS: null, overdue: false });
+    // a CI holds the machine and the release holds its deploy lease: it is on its way all the same
+    expect(releaseInFlight({ ...base, lease: { ownerPid: "40409", kind: "ci-full" }, deployLease: { ownerPid: "90001", label: release } })).toMatchObject({ label: release, state: "holding" });
+    expect(releaseInFlight({ ...base, lease: { ownerPid: "40409", kind: "ci-full" }, intents: [{ pid: 90001, label: release }] })).toMatchObject({ label: release, state: "queued" });
+    expect(releaseHoldText({ label: release, state: "holding" })).toBe("o release de produção 23a9f93c0 está em andamento");
+    expect(releaseHoldText({ label: release, state: "queued" })).toBe("o release de produção 23a9f93c0 está na fila da máquina");
+  });
+  it("holds nothing with no release, a CI on the machine, a dead or reused pid", () => {
+    expect(releaseInFlight(base)).toBeNull();
+    expect(releaseInFlight({ ...base, lease: { ownerPid: "40409", kind: "ci-full" } })).toBeNull();
+    expect(releaseInFlight({ ...base, lease: { ownerPid: "99999", kind: "release", label: release } })).toBeNull();
+    expect(releaseInFlight({ ...base, deployLease: { ownerPid: "38043", label: release, start: "Mon Sep 28 09:00:00 2026" } })).toBeNull();
+    expect(releaseInFlight({ ...base, deployLease: { ownerPid: "", label: release } })).toBeNull();
+    expect(releaseInFlight({ ...base, deployLease: { ownerPid: "38043", label: release, start: liveStart } })).toMatchObject({ state: "holding" });
+  });
+  it("a release past the 5 h ceiling is overdue (likely hung): the caller holds nothing for it", () => {
+    const nowMs = Date.UTC(2026, 9, 3, 18, 0, 0);
+    expect(releaseInFlight({ ...base, nowMs, deployLease: { ownerPid: "38043", label: release, start: liveStart, startedAt: nowMs / 1000 - RELEASE_QUEUE_CEILING_S } })).toMatchObject({ overdue: true });
   });
 });
 

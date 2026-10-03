@@ -533,33 +533,54 @@ export async function archiveBlockers(session: DeliverySession, deps: Pick<Deliv
   return { blockers, unknown };
 }
 
-/** A session idle this long with a PR of it still open may be waiting for
- * a word nobody sends ("fico parado até o seu aviso"). */
 /** A session failed or idle this long with a PR of its own open holds the
  * line (02/10: 9052/#9332 failed, 8204/#9350 and 9195/#9280 idle): it is
  * shown to its bot and to the Chief as one to resume (S-retomar). */
 export const RESUME_AFTER_MS = 2 * 3_600_000;
 
+/** A session to resume: since when it stopped, its open PRs, and why it
+ * stopped — `why` in pt-BR for the bots, `kind` (and `detail`, the error or
+ * the block as recorded) for a row in the reader's language. */
+export interface ResumeNeed { since: number; prs: number[]; why: string; kind: "failed" | "blocked" | "idle"; detail?: string }
+
 /** Why a session must be resumed now, or null: failed or idle for
  * RESUME_AFTER_MS with an own or handed-over PR not known merged or
- * closed. A session the app opened in a wrong folder is never resumed (a
- * new one is started), nor one archived or stopped. */
+ * closed. Never one the app opened in a wrong folder (a new one is
+ * started), nor a create that never opened (the send refuses it: "comece
+ * outra" — INSP-S r1 S-5), nor one archived or stopped. Nor, while the
+ * server itself holds it, one parked behind a release (`resumeAfterTag`:
+ * the server resumes it when the tag moves, at most RESUME_AFTER_MAX_MS
+ * later), nor any while a production release is on its way on this Mac
+ * (`hold.release`): resumed now, its ci:local would run against the
+ * release (INSP-S r1 S-1, 8204/#9350 parked on 02/10). */
 export function resumeNeeded(
-  session: Pick<DeliverySession, "status" | "delivery" | "claimedPrs"> & { lastActivityAt: number; failedAt?: number; lastError?: string; blockedOn?: string; desktop?: { wrongFolder?: string } },
+  session: Pick<DeliverySession, "status" | "delivery" | "claimedPrs"> & { lastActivityAt: number; failedAt?: number; lastError?: string; blockedOn?: string; surface?: string; resumeAfterTag?: object; desktop?: { wrongFolder?: string; localId?: string } },
   now: number,
-): { since: number; prs: number[]; why: string } | null {
+  hold: { release?: string | null } = {},
+): ResumeNeed | null {
   if ((session.status !== "failed" && session.status !== "idle") || session.desktop?.wrongFolder) return null;
+  if (session.surface === "app" && !session.desktop?.localId) return null;
+  if (session.resumeAfterTag || hold.release) return null;
   const since = session.status === "failed" ? session.failedAt ?? session.lastActivityAt : session.lastActivityAt;
   if (now - since < RESUME_AFTER_MS) return null;
-  const done = new Set(Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.state === "merged" || pr.state === "closed").map((pr) => pr.number));
-  const prs = prsOfSession(session).filter((number) => !done.has(number)).sort((a, b) => a - b);
+  const prs = openPrsOfSession(session);
   if (!prs.length) return null;
-  const why = session.status === "failed"
+  const kind = session.status === "failed" ? "failed" : session.blockedOn ? "blocked" : "idle";
+  const detail = kind === "failed" ? session.lastError : kind === "blocked" ? session.blockedOn : undefined;
+  const why = kind === "failed"
     ? `falhou: ${sessionErrorPt(session.lastError ?? "sem motivo registrado")}`
-    : session.blockedOn ? `parada, bloqueada: ${session.blockedOn}` : "parada: o último turno terminou e nada a retomou";
-  return { since, prs, why: why.replace(/\s+/g, " ").slice(0, 240) };
+    : kind === "blocked" ? `parada, bloqueada: ${session.blockedOn}` : "parada: o último turno terminou e nada a retomou";
+  return { since, prs, why: why.replace(/\s+/g, " ").slice(0, 240), kind, ...(detail ? { detail: detail.replace(/\s+/g, " ").slice(0, 200) } : {}) };
 }
 
+/** A session's PRs (own or handed over) not known merged or closed, in order. */
+export function openPrsOfSession(session: Pick<DeliverySession, "delivery" | "claimedPrs">): number[] {
+  const done = new Set(Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.state === "merged" || pr.state === "closed").map((pr) => pr.number));
+  return prsOfSession(session).filter((number) => !done.has(number)).sort((a, b) => a - b);
+}
+
+/** A session idle this long with a PR of it still open may be waiting for
+ * a word nobody sends ("fico parado até o seu aviso"). */
 export const IDLE_WITH_PR_MS = 6 * 3_600_000;
 const IDLE_REPORT_EVERY_MS = 24 * 3_600_000;
 

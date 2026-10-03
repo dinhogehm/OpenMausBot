@@ -255,6 +255,36 @@ export function ciQueuedBehindRelease(input: { rows: readonly PsRow[]; rootPid: 
   return null;
 }
 
+/** A production release on its way on this Mac now, whatever CI waits for
+ * it: it holds the machine (admission lease of kind release), holds the
+ * deploy lease (lote W2: the whole release), or queues for the machine (an
+ * intent). Liveness as in ciQueuedBehindRelease (pid in the table with the
+ * start the lease recorded); `overdue` past the ceiling, when the release
+ * very likely hung. Resuming a session now would put its ci:local against
+ * that release — what lote W exists to prevent — so a session is not told
+ * to resume while one is on its way (INSP-S r1 S-1). */
+export function releaseInFlight(input: { rows: readonly PsRow[]; lease: AdmissionLease | null; deployLease: DeployLease | null; intents: readonly ReleaseIntent[]; alive: (pid: number) => boolean; nowMs?: number; ceilingS?: number }): QueuedBehindRelease | null {
+  const startOf = new Map(input.rows.map((row) => [row.pid, row.start.replace(/\s+/g, " ").trim()]));
+  const live = (pid: number, start?: string) => {
+    if (!Number.isInteger(pid) || pid <= 0 || !input.alive(pid)) return false;
+    const recorded = start?.replace(/\s+/g, " ").trim();
+    const now = startOf.get(pid);
+    return !recorded || !now || recorded === now;
+  };
+  const deployLive = input.deployLease !== null && live(Number(input.deployLease.ownerPid.trim()), input.deployLease.start);
+  const ageS = deployLive && input.deployLease?.startedAt ? Math.max(0, Math.round((input.nowMs ?? Date.now()) / 1000 - input.deployLease.startedAt)) : null;
+  const found = (label: string, state: QueuedBehindRelease["state"]): QueuedBehindRelease => ({ label, state, ageS, overdue: ageS !== null && ageS >= (input.ceilingS ?? RELEASE_QUEUE_CEILING_S) });
+  if (input.lease && input.lease.kind.trim() === "release" && live(Number(input.lease.ownerPid.trim()), input.lease.start)) return found(input.lease.label?.trim() ?? "", "holding");
+  if (deployLive) return found(input.deployLease!.label.trim(), "holding");
+  const intent = input.intents.find((each) => live(each.pid, each.start));
+  return intent ? found(intent.label.trim(), "queued") : null;
+}
+
+/** What a session waiting on a release is told it waits for, in pt-BR. */
+export function releaseHoldText(release: Pick<QueuedBehindRelease, "label" | "state">): string {
+  return `${releaseName(release.label, true)} está ${release.state === "holding" ? "em andamento" : "na fila da máquina"}`;
+}
+
 const releaseName = (label: string, article: boolean) => {
   const sha = releaseLabelSha(label)?.slice(0, 9);
   return sha ? `${article ? "o " : ""}release de produção ${sha}` : article ? "um release" : "release";

@@ -453,6 +453,19 @@ describe("what cc_session_list says about a session", () => {
     expect(ccSessionLine(session)).not.toContain("RETOMAR");
   });
 
+  it("says a session parked behind a release is the server's to resume, never the bot's (INSP-S r1 S-1)", () => {
+    const ledger = new CcSessionLedger({ path: null, now: () => 0 });
+    const session = ledger.create({ id: "9b50cdf7", ownerBotId: "b", ownerThreadId: "t", title: "8204 Sidebar da fila", repo: "/r", permissionMode: "auto" });
+    session.status = "idle";
+    session.resumeAfterTag = { fromSha: "09d832f4bfa4", at: 0, message: "A tag andou" };
+    const line = ccSessionLine(session);
+    expect(line).toContain("PARKED behind the production release: the server resumes it itself when the tag moves or that release fails — do not send to it before");
+    expect(line).not.toContain("RETOMAR");
+    // running again (the server resumed it): no longer said
+    session.status = "running";
+    expect(ccSessionLine(session)).not.toContain("PARKED");
+  });
+
 
   it("says a message that never arrived, and that a CLI session is not in the app; an archived one carries no old error", () => {
     const path = join(dir, "ledger.json");

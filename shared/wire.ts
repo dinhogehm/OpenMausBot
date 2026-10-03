@@ -141,8 +141,10 @@ export interface WireCcSession {
    * "queued" — not tried yet). */
   screenWait?: { kind: "create" | "send" | "rename" | "archive"; since: number; waitingFor: "locked" | "inUse" | "screen" | "draft" | "queued" };
   /** Failed or idle for 2 h+ with a PR of its own still open: someone must
-   * resume it or say what blocks it (S-retomar). */
-  resume?: { since: number; prs: number[]; why: string };
+   * resume it or say what blocks it (S-retomar). `why` is the bots' pt-BR;
+   * a row says `kind` in the reader's language, with `detail` (the error or
+   * the block, as recorded). */
+  resume?: { since: number; prs: number[]; why: string; kind?: "failed" | "blocked" | "idle"; detail?: string };
 }
 
 /** One thing that waits on the person (owner_pending), for "Precisa de você". */

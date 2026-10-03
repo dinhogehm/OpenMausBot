@@ -385,7 +385,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appStillBlockedText, appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips, staleUnblockItem } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
-import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, type ReleaseIntent, releaseLabelSha, releaseOverdueText, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
+import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, haltReport, LAST_FAILURE_FILE, productionStateLine, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
@@ -9719,7 +9719,7 @@ threadSignals = (threadId) => {
     .filter((session) => session.ownerThreadId === threadId && session.status !== "archived")
     .map((session): WireCcSession => {
       const screenWait = screenWaitOf(session);
-      const resume = resumeNeeded(session, Date.now());
+      const resume = resumeOf(session);
       return {
         sessionId: session.id, title: session.title, status: session.status as WireCcSession["status"], surface: session.surface === "app" ? "app" : "cli",
         ...(screenWait ? { screenWait } : {}), ...(resume ? { resume } : {}),
@@ -9823,7 +9823,8 @@ const releasePriority = {
   tagCheckAt: 0,
 };
 /** admission-control.sh's state (nuria-platform scripts/admission-control.sh): lease and release intents. */
-const ADMISSION_DIR = join(homedir(), ".nuria", "admission");
+// OMB_ADMISSION_DIR: a test's own admission state, never this Mac's
+const ADMISSION_DIR = process.env.OMB_ADMISSION_DIR || join(homedir(), ".nuria", "admission");
 /** null only when there is no lease (ENOENT); any other read error throws. */
 function readAdmissionLease(): AdmissionLease | null {
   const read = (name: string) => {
@@ -9864,6 +9865,40 @@ function readReleaseIntents(): ReleaseIntent[] | null {
     return null;
   }
 }
+
+/** A production release on its way on this Mac (release-priority.ts
+ * releaseInFlight), read at most once a minute: while one is, no session is
+ * told to resume (INSP-S r1 S-1). `label` null: none; "?" while the
+ * admission state cannot be read (undecided, so nobody is told either). A
+ * release past the ceiling has likely hung and holds nothing. */
+const releaseHold: { label: string | null; at: number; running: boolean } = { label: null, at: 0, running: false };
+async function refreshReleaseHold(): Promise<void> {
+  if (releaseHold.running || Date.now() - releaseHold.at < 60_000) return;
+  releaseHold.running = true;
+  try {
+    let label: string | null;
+    try {
+      const lease = readAdmissionLease();
+      const deployLease = readDeployLease();
+      const intents = readReleaseIntents() ?? [];
+      if (!lease && !deployLease && !intents.length) label = null;
+      else {
+        const rows = await psTable();
+        const found = releaseInFlight({ rows, lease, deployLease, intents, alive: (pid) => rows.some((row) => row.pid === pid) });
+        label = found && !found.overdue ? releaseHoldText(found) : null;
+      }
+    } catch {
+      label = "?";
+    }
+    if (label !== releaseHold.label) console.log(`[cc-sessions] release hold: ${label === null ? "none" : label === "?" ? "admission state unreadable" : label}`);
+    releaseHold.label = label;
+    releaseHold.at = Date.now();
+  } finally {
+    releaseHold.running = false;
+  }
+}
+/** resumeNeeded under the release hold this server last read. */
+const resumeOf = (session: CcSession, now = Date.now()) => resumeNeeded(session, now, { release: releaseHold.label });
 
 async function preemptCiForReleaseTick(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || releasePriority.running || Date.now() - releasePriority.lastAt < 20_000) return;
@@ -10410,7 +10445,7 @@ function refreshSessionSignals(): void {
   const next = new Map<string, string>();
   for (const session of ccLedger.all()) {
     const wait = screenWaitOf(session);
-    const resume = resumeNeeded(session, now);
+    const resume = resumeOf(session, now);
     if (wait || resume) next.set(session.id, `${session.ownerBotId}#${wait ? `${wait.kind}:${wait.waitingFor}` : ""}|${resume ? resume.prs.join(",") : ""}`);
   }
   const owners = new Set<string>();
@@ -10430,7 +10465,7 @@ function reportSessionsToResume(): void {
   const desk = chief ? chiefDeskThread(chief) : null;
   // at most 3 per pass, oldest stop first: a first boot over many old stops never floods the bots
   const due = ccLedger.all()
-    .map((session) => ({ session, resume: resumeNeeded(session, now) }))
+    .map((session) => ({ session, resume: resumeOf(session, now) }))
     .filter((item): item is { session: CcSession; resume: NonNullable<typeof item.resume> } => item.resume !== null && !(item.session.resumeReportedAt !== undefined && item.session.resumeReportedAt >= item.resume.since))
     .sort((a, b) => a.resume.since - b.resume.since)
     .slice(0, 3);
@@ -10448,6 +10483,7 @@ function reportSessionsToResume(): void {
 }
 
 async function runDesktopWork(): Promise<void> {
+  await refreshReleaseHold();
   refreshSessionSignals();
   reportSessionsToResume();
   followSurvivingSessions();
@@ -19474,7 +19510,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // the Chief sees every bot's session to resume: the line waits on them (S-retomar)
           const othersToResume = bot.chiefOfStaff
             ? ccLedger.all().filter((session) => session.ownerBotId !== bot.id).flatMap((session) => {
-              const resume = resumeNeeded(session, now);
+              const resume = resumeOf(session, now);
               return resume ? [`${session.id} · "${session.title}" · de ${store.bot(session.ownerBotId)?.name ?? session.ownerBotId} · ${resumeLine(session, resume, now).replace(/Retome com cc_session_send \(session_id [^)]+\)/, `Peça a ${store.bot(session.ownerBotId)?.name ?? "o bot dono"} que a retome com cc_session_send`)}`] : [];
             })
             : [];
@@ -19482,9 +19518,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             message: [
               sessions.length ? sessions.map((session) => {
                 const record = session.surface === "app" && session.desktop?.localId && session.status !== "archived" ? readDesktopRecord(session.desktop.localId) : null;
-                return ccSessionLine(session, { blocked: record ? recordBlocked(record) : null, resume: resumeNeeded(session, now), now });
+                return ccSessionLine(session, { blocked: record ? recordBlocked(record) : null, resume: resumeOf(session, now), now });
               }).join("\n") : "Você não gerencia nenhuma sessão do Claude Code.",
               ...(othersToResume.length ? [`\nSessões de outros bots para RETOMAR (seguram PRs):\n${othersToResume.join("\n")}`] : []),
+              // the ones a live release holds back: said, so nobody resumes them by hand meanwhile (INSP-S r1 S-1)
+              ...(releaseHold.label && (bot.chiefOfStaff ? ccLedger.all() : sessions).some((session) => resumeNeeded(session, now) !== null)
+                ? [`\nNenhuma sessão é retomada agora: ${releaseHold.label === "?" ? "o estado do release de produção não pôde ser lido" : releaseHold.label}. Uma sessão retomada agora rodaria o ci:local contra ele; o aviso de RETOMAR volta quando ele terminar.`]
+                : []),
               // the slots are shared: everyone sees the whole queue, the Chief with whose each item is
               ...(ccStartQueue.ordered().length ? [queueListing(ccStartQueue, { id: bot.id, chief: Boolean(bot.chiefOfStaff) }, (botId) => store.bot(botId)?.name ?? botId, CC_MAX_RUNNING)] : []),
               ...(detail ? [`\nÚltimo relatório de ${detail.id}:\n${detail.lastReport ?? "(nenhum ainda)"}${detail.lastError ? `\nÚltimo problema: ${detail.lastError}` : ""}`] : []),

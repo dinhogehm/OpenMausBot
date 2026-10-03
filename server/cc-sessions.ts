@@ -555,6 +555,8 @@ export function ccSessionLine(session: CcSession, app: { blocked?: string | null
   const bits = [
     `${session.id} · "${session.title}" · ${session.status}${session.surface === "app" ? " · in the Claude app" : ""}`,
     ...(app.resume ? [resumeLine(session, app.resume, app.now ?? Date.now())] : []),
+    // parked by the server itself behind a release: never resumed by hand (INSP-S r1 S-1)
+    ...(session.resumeAfterTag && (session.status === "idle" || session.status === "failed") ? ["PARKED behind the production release: the server resumes it itself when the tag moves or that release fails — do not send to it before"] : []),
     `turns ${session.turns}, US$ ${session.costUsd.toFixed(2)}`,
     session.cwd ? `worktree ${session.cwd}` : session.surface === "app" ? "worktree chosen by the app (pending)" : `worktree ${session.repo}/.claude/worktrees/${session.worktree} (pending)`,
     ...(session.desktop?.pending ? [`waiting for an idle Mac to ${session.desktop.pending.kind === "create" ? "open it" : session.desktop.pending.kind === "archive" ? "archive it" : session.desktop.pending.kind === "rename" ? "rename it" : "send a message"}${session.desktop.pending.lastReason ? ` (${session.desktop.pending.lastReason})` : ""}`] : []),
