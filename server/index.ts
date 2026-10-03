@@ -249,7 +249,7 @@ import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type C
 import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, toolCallsWith, userTextMessagesWith, digestTimings, oldestDigestAt } from "./message-db.ts";
 import { oldestUsageAt, ProductivityCollector } from "./productivity-collector.ts";
 import { executiveSummary, exportFileName, reportMarkdown, reportPdf } from "./productivity-export.ts";
-import { GRANULARITIES, resolveReportPeriod, type Granularity } from "../shared/productivity.ts";
+import { exportReadiness, GRANULARITIES, resolveReportPeriod, type Granularity } from "../shared/productivity.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, parseUntil, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
 import { chiefForBot, deskThread, OwnerWroteAt, ownerWrote, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
@@ -25111,6 +25111,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       report.summary = { "pt-BR": executiveSummary(report, "pt-BR"), en: executiveSummary(report, "en") };
       if (path.endsWith(".md") || path.endsWith(".pdf")) {
         const pdf = path.endsWith(".pdf");
+        // the board never gets a stale or unverified report by accident: the
+        // screen syncs first ("Atualizar e exportar") or the owner insists
+        // (force=1), and then the export carries the warning on its first page
+        const readiness = exportReadiness(report, report.generatedAt);
+        if (!readiness.ready && url.searchParams.get("force") !== "1") {
+          res.setHeader("cache-control", "no-store");
+          return json(res, 409, { error: "export-blocked", blockers: readiness.blockers, ageMs: readiness.ageMs });
+        }
         res.writeHead(200, {
           "content-type": pdf ? "application/pdf" : "text/markdown; charset=utf-8",
           "content-disposition": `attachment; filename="${exportFileName(report, pdf ? "pdf" : "md")}"`,

@@ -117,6 +117,15 @@ posixOnly("GET /api/reports/productivity", () => {
     expect((await get("/api/reports/productivity?granularity=hour&from=2026-01-01&to=2026-09-01")).status).toBe(400);
   });
 
+  it("will not export for the board before GitHub is synced, unless forced — and then says so on the first page (INSP-V r2 #3)", async () => {
+    const blocked = await get("/api/reports/productivity.pdf?granularity=day&from=2026-09-17&to=2026-09-17");
+    expect(blocked.status).toBe(409);
+    expect(blocked.body).toMatchObject({ error: "export-blocked", blockers: ["never"] });
+    const forced = await get("/api/reports/productivity.md?granularity=day&from=2026-09-17&to=2026-09-17&force=1");
+    expect(forced.status).toBe(200);
+    expect(forced.buffer.toString("utf8")).toContain("Atenção — este relatório não está com os dados verificados");
+  });
+
   it("answers at once from the cache, and refresh=1 syncs in the background", async () => {
     const first = await get("/api/reports/productivity?granularity=day&from=2026-09-17&to=2026-09-17&refresh=1");
     expect(first.status).toBe(200);

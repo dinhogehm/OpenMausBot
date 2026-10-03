@@ -15,7 +15,7 @@
 // WinAnsi, one Flate stream per page): no dependency, deterministic output.
 import { deflateSync } from "node:zlib";
 import {
-  beforeRepo, compareKpi, goalStatus, periodTitle, releaseComparable, REPORT_TZ, zonedParts,
+  beforeRepo, compareKpi, exportReadiness, goalStatus, MIN_TREND_BASE, periodTitle, releaseComparable, releaseCountParts, REPORT_TZ, zonedParts,
   type Comparison, type GoalKey, type Granularity, type ProductivityReport, type ReportBucket,
 } from "../shared/productivity.ts";
 
@@ -99,6 +99,8 @@ const granularityName = (granularity: Granularity, lang: SummaryLang) =>
   lang === "pt-BR" ? { hour: "hora", day: "dia", month: "mês" }[granularity] : granularity;
 
 const pluralPt = (value: number, one: string, many: string) => `${formatNumber(value)} ${value === 1 ? one : many}`;
+/** Business days: whole ones without a decimal ("21"), partial ones with one ("12,4"). */
+const daysText = (value: number, lang: SummaryLang = "pt-BR") => new Intl.NumberFormat(lang, { maximumFractionDigits: 1 }).format(value);
 
 // ── the board model ─────────────────────────────────────────────────────────
 
@@ -142,12 +144,13 @@ export function boardKpis(report: ProductivityReport): BoardKpi[] {
   const lowerBound = k.unknownContentReleases > 0;
   const tries = k.deliveries + k.failedReleases;
   const p1 = b.openP1Split;
+  const partial = k.releaseCovered !== "full";
   return [
-    kpi({ key: "deliveries", label: "Entregas em produção", value: formatNumber(k.deliveries), current: k.deliveries, previous: p.deliveries, better: "up", release: true,
-      detail: `${lowerBound ? "≥" : ""}${pluralPt(k.deliveredPrs, "PR", "PRs")} e ${lowerBound ? "≥" : ""}${pluralPt(k.deliveredIssues, "issue concluída", "issues concluídas")} no ar${lowerBound ? ` · ${pluralPt(k.unknownContentReleases, "release sem conteúdo lido", "releases sem conteúdo lido")}` : ""}`,
+    kpi({ key: "deliveries", label: "Entregas em produção", value: `${partial ? "≥" : ""}${formatNumber(k.deliveries)}`, current: k.deliveries, previous: p.deliveries, better: "up", release: true,
+      detail: `${lowerBound ? "≥" : ""}${pluralPt(k.deliveredPrs, "PR", "PRs")} e ${lowerBound ? "≥" : ""}${pluralPt(k.deliveredIssues, "issue concluída", "issues concluídas")} no ar${lowerBound ? ` · ${pluralPt(k.unknownContentReleases, "release sem conteúdo lido", "releases sem conteúdo lido")}` : ""}${partial ? ` · fonte de releases em ${daysText(k.releaseBusinessDays)} de ${daysText(k.businessDays)} dias úteis` : ""}`,
       short: "avanços da tag de produção (fim do deploy)" }),
     kpi({ key: "deployFrequency", label: "Frequência de deploy", value: k.deploysPerBusinessDay === null ? "—" : `${formatNumber(k.deploysPerBusinessDay, "pt-BR", 1)}/dia útil`, current: k.deploysPerBusinessDay, previous: p.deploysPerBusinessDay, better: "up", release: true, base: p.deliveries,
-      detail: `${formatNumber(k.deliveries)} em ${formatNumber(k.businessDays, "pt-BR", 1)} dias úteis`, short: "DORA: entregas por dia útil (seg–sex)",
+      detail: `${formatNumber(k.deliveries)} em ${daysText(k.releaseBusinessDays)} dias úteis com dados${partial ? ` (de ${daysText(k.businessDays)})` : ""}`, short: "DORA: entregas por dia útil com fonte de releases (seg–sex, sem feriados)",
       goal: goals.deploysPerBusinessDay !== undefined ? { key: "deploysPerBusinessDay", value: k.deploysPerBusinessDay, target: `≥ ${formatNumber(goals.deploysPerBusinessDay, "pt-BR", Number.isInteger(goals.deploysPerBusinessDay) ? 0 : 1)}/dia útil` } : undefined }),
     kpi({ key: "successRate", label: "Sucesso de release", value: formatPercent(k.releaseSuccessRate), current: k.releaseSuccessRate, previous: p.releaseSuccessRate, better: "up", release: true, kind: "percent",
       samples: { current: tries, previous: p.deliveries + p.failedReleases },
@@ -162,11 +165,12 @@ export function boardKpis(report: ProductivityReport): BoardKpi[] {
     kpi({ key: "merged", label: "PRs mergeadas", value: formatNumber(k.mergedPrs), current: k.mergedPrs, previous: p.mergedPrs, better: "up", github: true,
       detail: `mais ${pluralPt(k.carrierPrs, "carrier de release", "carriers de release")}`, short: "PRs na main, sem carriers de release" }),
     kpi({ key: "resolved", label: "Issues resolvidas", value: formatNumber(resolved), current: resolved, previous: p.closedIssues - p.closedNotPlanned, better: "up", github: true,
-      detail: `${pluralPt(k.closedByType.bug, "bug", "bugs")} · ${formatNumber(k.closedByPriority.p0 + k.closedByPriority.p1)} P0/P1 · ${formatNumber(k.closedNotPlanned)} não planejadas à parte`,
+      detail: `${pluralPt(k.closedByType.bug, "bug", "bugs")} · ${formatNumber(k.closedByPriority.p0 + k.closedByPriority.p1)} P0/P1 · ${pluralPt(k.closedNotPlanned, "não planejada", "não planejadas")} à parte`,
       short: "fechadas como concluídas no período" }),
-    kpi({ key: "openP1", label: "Issues P0/P1 abertas", value: formatNumber(b.openP0 + b.openP1), current: k.openP1AtEnd, previous: p.openP1AtEnd, better: "down", github: true,
-      detail: `P1 ${formatNumber(b.openP1)} = ${formatNumber(p1.current)} priority:p1 + ${formatNumber(p1.legacy)} priority:high (legado) · P0 ${formatNumber(b.openP0)}`,
-      short: "agora; P1 = p1 + high, P0 = p0 + critical" }),
+    // the value and its comparison are the same instant: the end of each period (INSP-V r2 #2)
+    kpi({ key: "openP1", label: "Issues P0/P1 abertas", value: formatNumber(k.openP1AtEnd), current: k.openP1AtEnd, previous: p.openP1AtEnd, better: "down", github: true,
+      detail: `${b.periodEnd ? `ao fim do período · agora ${formatNumber(b.openP0 + b.openP1)}: ` : "agora: "}P1 ${formatNumber(b.openP1)} = ${formatNumber(p1.current)} priority:p1 + ${formatNumber(p1.legacy)} priority:high (legado) · P0 ${formatNumber(b.openP0)}`,
+      short: "fim do período contra fim do anterior; P1 = p1 + high, P0 = p0 + critical" }),
     kpi({ key: "blocked", label: "Pipeline de release parado", value: formatDuration(k.blockedMs) === "—" ? "0 h" : formatDuration(k.blockedMs), current: k.blockedMs, previous: p.blockedMs, better: "down", release: true, kind: "duration",
       detail: `produção no ar · ${formatDuration(k.blockedWeekendMs)} em fim de semana`, short: "1ª falha que rodou após um sucesso até o próximo sucesso" }),
   ];
@@ -177,11 +181,42 @@ export function doraRows(report: ProductivityReport): Array<[string, string, str
   const k = report.kpis;
   const cfr = k.checkedReleases ? k.changeFailures / k.checkedReleases : null;
   return [
-    ["Frequência de deploy", k.deploysPerBusinessDay === null ? "—" : `${formatNumber(k.deploysPerBusinessDay, "pt-BR", 1)} por dia útil (${formatNumber(k.deliveries)} em ${formatNumber(k.businessDays, "pt-BR", 1)} dias úteis)`, "entregas em produção ÷ dias úteis decorridos"],
+    ["Frequência de deploy", k.deploysPerBusinessDay === null ? "— (nenhum dia útil com fonte de releases)" : `${formatNumber(k.deploysPerBusinessDay, "pt-BR", 1)} por dia útil (${formatNumber(k.deliveries)} em ${daysText(k.releaseBusinessDays)} dias úteis com dados${k.releaseCovered !== "full" ? `, de ${daysText(k.businessDays)} no período` : ""})`, "entregas em produção ÷ dias úteis com fonte de releases (seg–sex, sem feriados nacionais); dias sem fonte não contam como zero"],
     ["Lead time de mudança", k.leadMergeToProd.n ? `${formatDuration(k.leadMergeToProd.median)} (p90 ${formatDuration(k.leadMergeToProd.p90)}, n=${k.leadMergeToProd.n})` : "—", "merge da PR até o fim do deploy que a levou ao ar (mediana)"],
     ["Taxa de falha de mudança", cfr === null ? "— (nenhum release com verificação pós-release)" : `${formatPercent(cfr)} (${k.changeFailures} de ${k.checkedReleases} releases verificados)`, "releases cuja verificação pós-release reverteu ou achou produção fora do ar ÷ releases com verificação conclusiva"],
     ["Tempo de restauração", k.timeToRestore.n ? `${formatDuration(k.timeToRestore.median)} (n=${k.timeToRestore.n})` : k.changeFailures ? "— (sem release saudável depois da falha)" : "— (nenhuma falha de mudança registrada)", "da falha de mudança ao próximo release com verificação saudável"],
   ];
+}
+
+// ── bots' cost ──────────────────────────────────────────────────────────────
+
+/** The cost per delivery, or why there is none: engineering bots only, and
+ * only over at least MIN_TREND_BASE deliveries (INSP-V r2 #4). */
+export function costPerDeliveryText(report: ProductivityReport, lang: SummaryLang = "pt-BR"): string {
+  const k = report.kpis;
+  const pt = lang === "pt-BR";
+  if (k.usageDays <= 0) return pt ? "— (sem registro de uso no período)" : "— (no usage recorded in the period)";
+  if (k.costPerDelivery !== null) return pt ? `${formatMoney(k.costPerDelivery, lang)} por entrega (${pluralPt(k.deliveriesInUsageDays, "entrega", "entregas")} nos dias registrados)` : `${formatMoney(k.costPerDelivery, lang)} per delivery (${formatNumber(k.deliveriesInUsageDays, lang)} deliveries on the recorded days)`;
+  if (k.costEngineeringUsd === null) return pt ? "— (nenhum custo de bot de engenharia registrado)" : "— (no engineering bot cost recorded)";
+  const few = k.deliveriesInUsageDays;
+  return pt
+    ? `— (só ${pluralPt(few, "entrega", "entregas")} nos dias registrados; mínimo ${MIN_TREND_BASE})`
+    : `— (only ${formatNumber(few, lang)} ${few === 1 ? "delivery" : "deliveries"} on the recorded days; at least ${MIN_TREND_BASE})`;
+}
+
+/** The bots' sentence of the summary: turns, the cost split by role, the cost per delivery. */
+function botsLine(report: ProductivityReport, lang: SummaryLang): string {
+  const k = report.kpis;
+  const pt = lang === "pt-BR";
+  if (k.usageDays <= 0) return pt ? "Bots: sem registro de uso no período." : "Bots: no usage recorded in the period.";
+  const days = daysText(k.usageDays, lang);
+  const split = pt
+    ? `engenharia ${formatMoney(k.costEngineeringUsd ?? 0, lang)}, operação ${formatMoney(k.costOperationsUsd ?? 0, lang)}${k.costOtherUsd ? `, outros ${formatMoney(k.costOtherUsd, lang)}` : ""}`
+    : `engineering ${formatMoney(k.costEngineeringUsd ?? 0, lang)}, operations ${formatMoney(k.costOperationsUsd ?? 0, lang)}${k.costOtherUsd ? `, other ${formatMoney(k.costOtherUsd, lang)}` : ""}`;
+  const turns = pt ? `${formatNumber(k.turns, lang)} ${k.turns === 1 ? "turno" : "turnos"}` : `${formatNumber(k.turns, lang)} ${k.turns === 1 ? "turn" : "turns"}`;
+  return pt
+    ? `Bots: ${turns} em ${days} dias registrados; custo ${formatMoney(k.costUsd, lang)} (${split}); custo de engenharia por entrega ${costPerDeliveryText(report, lang)}.`
+    : `Bots: ${turns} over ${days} recorded days; cost ${formatMoney(k.costUsd, lang)} (${split}); engineering cost per delivery ${costPerDeliveryText(report, lang)}.`;
 }
 
 // ── executive summary ───────────────────────────────────────────────────────
@@ -203,24 +238,34 @@ export function executiveSummary(report: ProductivityReport, lang: SummaryLang =
   const previousResolved = p.closedIssues - p.closedNotPlanned;
   const tries = k.deliveries + k.failedReleases;
   const oldest = b.oldestOpen ? `#${b.oldestOpen.number}, ${formatDuration(report.generatedAt - b.oldestOpen.createdAt, lang)}` : "—";
-  const usageNote = k.usageDays > 0 ? (pt ? ` em ${formatNumber(k.usageDays, lang, 1)} dias registrados` : ` over ${formatNumber(k.usageDays, lang, 1)} recorded days`) : "";
-  const perDelivery = k.costPerDelivery !== null ? (pt ? `; ${formatMoney(k.costPerDelivery, lang)} por entrega` : `; ${formatMoney(k.costPerDelivery, lang)} per delivery`) : "";
-  const cost = k.costUsd !== null ? `, ${formatMoney(k.costUsd, lang)}${usageNote}${perDelivery}` : "";
-  const bots = k.usageDays > 0 ? (pt ? `Bots: ${n(k.turns, "turno", "turnos")}${cost}.` : `Bots: ${n(k.turns, "turn", "turns")}${cost}.`) : (pt ? "Bots: sem registro de uso no período." : "Bots: no usage recorded in the period.");
+  const partial = k.releaseCovered !== "full";
+  const atLeast = partial ? "≥" : "";
+  const frequency = k.deploysPerBusinessDay === null
+    ? (pt ? "frequência — (nenhum dia útil com fonte)" : "frequency — (no business day with a source)")
+    : pt ? `${formatNumber(k.deploysPerBusinessDay, lang, 1)} por dia útil com dados (${daysText(k.releaseBusinessDays, lang)} dias úteis)` : `${formatNumber(k.deploysPerBusinessDay, lang, 1)} per business day with data (${daysText(k.releaseBusinessDays, lang)} business days)`;
+  const bots = botsLine(report, lang);
+  // the backlog line reads the period's own end for a closed period; today apart, labelled
+  const end = b.periodEnd;
+  const backlogPt = end
+    ? `Backlog ao fim do período (${formatInstant(end.at - 60_000, lang, false)}): ${n(end.openIssues, "issue aberta", "issues abertas")}, ${formatNumber(end.openP0P1)} P0/P1. Agora: P1 ${formatNumber(b.openP1)} (${formatNumber(b.openP1Split.current)} priority:p1 + ${formatNumber(b.openP1Split.legacy)} priority:high legado) e P0 ${formatNumber(b.openP0)}; ${n(b.prsAwaitingGate, "PR esperando", "PRs esperando")} o gate.`
+    : `Backlog agora: ${n(b.openIssues, "issue aberta", "issues abertas")}; P1 ${formatNumber(b.openP1)} (${formatNumber(b.openP1Split.current)} priority:p1 + ${formatNumber(b.openP1Split.legacy)} priority:high legado) e P0 ${formatNumber(b.openP0)}; a mais antiga ${oldest}; ${n(b.prsAwaitingGate, "PR esperando", "PRs esperando")} o gate.`;
+  const backlogEn = end
+    ? `Backlog at the end of the period (${formatInstant(end.at - 60_000, lang, false)}): ${n(end.openIssues, "open issue", "open issues")}, ${formatNumber(end.openP0P1, lang)} P0/P1. Now: P1 ${formatNumber(b.openP1, lang)} (${formatNumber(b.openP1Split.current, lang)} priority:p1 + ${formatNumber(b.openP1Split.legacy, lang)} legacy priority:high) and P0 ${formatNumber(b.openP0, lang)}; ${n(b.prsAwaitingGate, "PR waiting", "PRs waiting")} for the gate.`
+    : `Backlog now: ${n(b.openIssues, "open issue", "open issues")}; P1 ${formatNumber(b.openP1, lang)} (${formatNumber(b.openP1Split.current, lang)} priority:p1 + ${formatNumber(b.openP1Split.legacy, lang)} legacy priority:high) and P0 ${formatNumber(b.openP0, lang)}; the oldest ${oldest}; ${n(b.prsAwaitingGate, "PR waiting", "PRs waiting")} for the gate.`;
   if (pt) {
     return [
-      `Produção: ${n(k.deliveries, "entrega", "entregas")} (${cmp(k.deliveries, p.deliveries, { release: true })}), ${formatNumber(k.deploysPerBusinessDay ?? 0, lang, 1)} por dia útil, com ${lower}${n(k.deliveredPrs, "PR", "PRs")} e ${lower}${n(k.deliveredIssues, "issue concluída", "issues concluídas")} no ar${k.unknownContentReleases ? ` (${n(k.unknownContentReleases, "release sem conteúdo lido", "releases sem conteúdo lido")})` : ""}${gaps ? "; parte do período sem fonte de releases" : ""}.`,
+      `Produção: ${atLeast}${n(k.deliveries, "entrega", "entregas")} (${cmp(k.deliveries, p.deliveries, { release: true })}), ${frequency}, com ${lower}${n(k.deliveredPrs, "PR", "PRs")} e ${lower}${n(k.deliveredIssues, "issue concluída", "issues concluídas")} no ar${k.unknownContentReleases ? ` (${n(k.unknownContentReleases, "release sem conteúdo lido", "releases sem conteúdo lido")})` : ""}${gaps ? "; parte do período sem fonte de releases" : ""}.`,
       `Vazão: ${n(k.mergedPrs, "PR mergeada", "PRs mergeadas")} (${cmp(k.mergedPrs, p.mergedPrs, { github: true })}) e ${n(resolved, "issue resolvida", "issues resolvidas")} (${cmp(resolved, previousResolved, { github: true })}), ${n(k.closedByType.bug, "bug", "bugs")} e ${formatNumber(k.closedByPriority.p0 + k.closedByPriority.p1)} P0/P1.`,
       `Lead time issue até produção: ${k.leadIssueToProd.n ? `mediana ${formatDuration(k.leadIssueToProd.median, lang)}, p90 ${formatDuration(k.leadIssueToProd.p90, lang)} (n=${k.leadIssueToProd.n}; ${cmp(k.leadIssueToProd.median, p.leadIssueToProd.median, { release: true, kind: "duration", samples: { current: k.leadIssueToProd.n, previous: p.leadIssueToProd.n } })})` : "nenhuma issue concluída entregue"}; merge até produção ${formatDuration(k.leadMergeToProd.median, lang)}.`,
-      `Backlog agora: ${n(b.openIssues, "issue aberta", "issues abertas")}; P1 ${formatNumber(b.openP1)} (${formatNumber(b.openP1Split.current)} priority:p1 + ${formatNumber(b.openP1Split.legacy)} priority:high legado) e P0 ${formatNumber(b.openP0)}; a mais antiga ${oldest}; ${n(b.prsAwaitingGate, "PR esperando", "PRs esperando")} o gate.`,
+      backlogPt,
       `Releases: sucesso ${formatPercent(k.releaseSuccessRate, lang)} (${formatNumber(k.deliveries)} de ${formatNumber(tries)} que rodaram; ${n(k.supersededReleases, "substituído", "substituídos")} e ${n(k.abortedReleases, "abortado", "abortados")} fora da taxa), ${n(k.declinedReleases, "recusado", "recusados")}; pipeline parado ${k.blockedMs > 0 ? formatDuration(k.blockedMs, lang) : "0 h"} com produção no ar (${formatDuration(k.blockedWeekendMs, lang)} em fim de semana). ${bots}`,
     ];
   }
   return [
-    `Production: ${n(k.deliveries, "delivery", "deliveries")} (${cmp(k.deliveries, p.deliveries, { release: true })}), ${formatNumber(k.deploysPerBusinessDay ?? 0, lang, 1)} per business day, carrying ${lower}${n(k.deliveredPrs, "PR", "PRs")} and ${lower}${n(k.deliveredIssues, "completed issue", "completed issues")} live${k.unknownContentReleases ? ` (${n(k.unknownContentReleases, "release with contents not read", "releases with contents not read")})` : ""}${gaps ? "; part of the period has no release source" : ""}.`,
+    `Production: ${atLeast}${n(k.deliveries, "delivery", "deliveries")} (${cmp(k.deliveries, p.deliveries, { release: true })}), ${frequency}, carrying ${lower}${n(k.deliveredPrs, "PR", "PRs")} and ${lower}${n(k.deliveredIssues, "completed issue", "completed issues")} live${k.unknownContentReleases ? ` (${n(k.unknownContentReleases, "release with contents not read", "releases with contents not read")})` : ""}${gaps ? "; part of the period has no release source" : ""}.`,
     `Throughput: ${n(k.mergedPrs, "PR merged", "PRs merged")} (${cmp(k.mergedPrs, p.mergedPrs, { github: true })}) and ${n(resolved, "issue resolved", "issues resolved")} (${cmp(resolved, previousResolved, { github: true })}), ${n(k.closedByType.bug, "bug", "bugs")} and ${formatNumber(k.closedByPriority.p0 + k.closedByPriority.p1, lang)} P0/P1.`,
     `Lead time issue to production: ${k.leadIssueToProd.n ? `median ${formatDuration(k.leadIssueToProd.median, lang)}, p90 ${formatDuration(k.leadIssueToProd.p90, lang)} (n=${k.leadIssueToProd.n}; ${cmp(k.leadIssueToProd.median, p.leadIssueToProd.median, { release: true, kind: "duration", samples: { current: k.leadIssueToProd.n, previous: p.leadIssueToProd.n } })})` : "no completed issue delivered"}; merge to production ${formatDuration(k.leadMergeToProd.median, lang)}.`,
-    `Backlog now: ${n(b.openIssues, "open issue", "open issues")}; P1 ${formatNumber(b.openP1, lang)} (${formatNumber(b.openP1Split.current, lang)} priority:p1 + ${formatNumber(b.openP1Split.legacy, lang)} legacy priority:high) and P0 ${formatNumber(b.openP0, lang)}; the oldest ${oldest}; ${n(b.prsAwaitingGate, "PR waiting", "PRs waiting")} for the gate.`,
+    backlogEn,
     `Releases: ${formatPercent(k.releaseSuccessRate, lang)} success (${formatNumber(k.deliveries, lang)} of ${formatNumber(tries, lang)} that ran; ${formatNumber(k.supersededReleases, lang)} superseded and ${formatNumber(k.abortedReleases, lang)} aborted left out), ${formatNumber(k.declinedReleases, lang)} declined; release pipeline stopped ${k.blockedMs > 0 ? formatDuration(k.blockedMs, lang) : "0 h"} with production up (${formatDuration(k.blockedWeekendMs, lang)} on weekends). ${bots}`,
   ];
 }
@@ -230,16 +275,16 @@ export function executiveSummary(report: ProductivityReport, lang: SummaryLang =
 export const DEFINITIONS_PT: ReadonlyArray<[string, string]> = [
   ["Entregas em produção", "avanços da tag nuria-production-deployed: releases que terminaram o deploy (log do watcher de produção; antes de 15/09, deployments de produção do GitHub). O horário é o fim do deploy. Um deploy que foi ao ar sem a tag avançar (push recusado) conta e é marcado."],
   ["PRs e issues entregues", "PRs mergeadas cujos commits entraram entre o release anterior e este (compare do GitHub), sem os carriers de release. Issue entregue: só as citadas explicitamente pela PR (vínculo do GitHub, ou Closes/Fixes/Resolves/Refs #N no corpo ou no commit) e já fechadas como concluídas. Release cujo conteúdo ainda não foi lido torna o total um mínimo (≥)."],
-  ["Frequência de deploy (DORA)", "entregas em produção ÷ dias úteis (seg–sex, horário de São Paulo) decorridos no período."],
+  ["Frequência de deploy (DORA)", "entregas em produção ÷ dias úteis com fonte de releases (seg–sex, horário de São Paulo, sem feriados nacionais). Dias sem fonte não entram no denominador nem contam como zero; quando o período tem trecho sem fonte, o total de entregas é um mínimo (≥)."],
   ["Sucesso de release", "entregas ÷ (entregas + falhas). Falha é a tentativa que rodou (CI ou deploy) e não avançou a tag. Substituídos (o watcher passou a um commit mais novo, ou o run saiu da fila sem rodar) e abortados (pararam antes de rodar: lock, smart-deploy que não iniciou) ficam fora da taxa."],
   ["Lead time", "criação da issue até o fim do deploy que levou sua PR ao ar, para as issues concluídas entregues no período; mediana e p90 (posto mais próximo). Lead time de mudança (DORA): merge da PR até o fim do deploy."],
   ["Taxa de falha de mudança e tempo de restauração (DORA)", "pela verificação pós-release (POST_RELEASE_RESULT): reverteu ou achou produção fora do ar ÷ releases com verificação conclusiva; restauração = da falha ao próximo release com verificação saudável. Sem verificação ou sem falha, aparece —."],
   ["PRs mergeadas", "PRs mergeadas na main no período, sem os carriers de release (chore/release-carrier-*), que só publicam outras PRs."],
   ["Issues resolvidas", "issues fechadas como concluídas no período (não planejadas e duplicadas à parte); tipo pelos rótulos type:bug/hotfix, type:improvement, type:feature."],
-  ["Prioridade", "P0 = priority:p0 + priority:critical; P1 = priority:p1 + priority:high (escala antiga, contada junto e mostrada à parte); P2 = p2 + medium; P3 = p3 + low. A tendência do backlog usa os rótulos de hoje no fim de cada período."],
+  ["Prioridade", "P0 = priority:p0 + priority:critical; P1 = priority:p1 + priority:high (escala antiga, contada junto e mostrada à parte); P2 = p2 + medium; P3 = p3 + low. O cartão P0/P1 compara o fim do período com o fim do anterior (rótulos de hoje); o número de agora aparece à parte, rotulado."],
   ["PRs esperando o gate", "PRs abertas na main, fora de rascunho, sem o status nuria/local-merge-gate verde no último commit (retrato de agora)."],
   ["Pipeline de release parado", "produção continua no ar; conta do primeiro release que rodou e falhou depois de um sucesso até o próximo sucesso. Runs substituídos e abortados não abrem intervalo. A parte em sábado e domingo aparece separada."],
-  ["Esforço dos bots", "dados locais do OpenMausBot, só nos dias em que o ledger de uso existe (antes: —). Custo por entrega = custo desses dias ÷ entregas nesses mesmos dias. \"Precisa de você\": itens abertos e resolvidos; resposta do dono = do item aberto à primeira resposta (ou resolução) do dono."],
+  ["Esforço dos bots", "dados locais do OpenMausBot, só nos dias em que o ledger de uso existe (antes: —). Custo separado por papel: engenharia (Lead, Eng, QA, DBA, SRE, Delivery) e operação (Monitor Chat, Chief of Staff). Custo de engenharia por entrega = custo dos bots de engenharia nesses dias ÷ entregas nesses mesmos dias, só com pelo menos 5 entregas (antes disso: —). \"Precisa de você\": itens abertos e resolvidos; resposta do dono = do item aberto à primeira resposta (ou resolução) do dono."],
   ["Comparações", "só contra um período anterior com fonte comparável e de depois da criação do repositório; com base menor que 5 (ou menos de 10 amostras numa mediana) mostra o valor anterior, sem variação."],
 ];
 
@@ -263,17 +308,48 @@ function headPrText(release: ProductivityReport["releases"][number]): string {
   return release.headPrIsCarrier ? `carrier #${release.headPr}` : `PR #${release.headPr}`;
 }
 
-function releaseCounts(report: ProductivityReport): string {
-  const rows = report.releases;
-  const count = (outcome: string) => rows.filter((row) => row.outcome === outcome);
-  const tries = (outcome: string) => count(outcome).reduce((sum, row) => sum + (row.attempts ?? 1), 0);
+/** The release header, from the same counts as the screen (releaseCountParts). */
+export function releaseCounts(report: ProductivityReport): string {
+  const c = releaseCountParts(report);
   return [
-    `${count("released").length} em produção`,
-    `${pluralPt(count("failed").length, "commit falhou", "commits falharam")} (${pluralPt(tries("failed"), "tentativa", "tentativas")} que rodaram)`,
-    pluralPt(tries("superseded"), "substituído", "substituídos"),
-    pluralPt(tries("aborted"), "abortado", "abortados"),
-    pluralPt(count("declined").length, "recusado", "recusados"),
+    `${formatNumber(c.released)} em produção`,
+    `${pluralPt(c.failedCommits, "commit falhou", "commits falharam")} (${pluralPt(c.failedTries, "tentativa", "tentativas")} que rodaram)`,
+    `${pluralPt(c.superseded, "run substituído", "runs substituídos")}`,
+    `${pluralPt(c.aborted, "run abortado", "runs abortados")}`,
+    pluralPt(c.declined, "recusado", "recusados"),
   ].join(" · ");
+}
+
+/** A failed commit's row, with the runs that never ran folded in. */
+function outcomeLabel(row: ProductivityReport["releases"][number]): string {
+  if (row.outcome === "released") return row.tagNotAdvanced ? "em produção (tag movida à mão)" : "em produção";
+  const tries = row.attempts ?? 1;
+  const base = row.outcome === "failed" ? (tries > 1 ? `falhou (${tries} tentativas)` : "falhou")
+    : row.outcome === "superseded" ? (tries > 1 ? `substituído (${tries} runs)` : "substituído")
+    : row.outcome === "aborted" ? (tries > 1 ? `abortado (${tries} runs)` : "abortado") : outcomeText(row.outcome);
+  const folded = [row.supersededRuns ? `${row.supersededRuns} substituído${row.supersededRuns > 1 ? "s" : ""}` : "", row.abortedRuns ? `${row.abortedRuns} abortado${row.abortedRuns > 1 ? "s" : ""}` : ""].filter(Boolean);
+  return folded.length ? `${base} · ${folded.join(", ")}` : base;
+}
+
+/** The board's release table: deliveries, failures and refusals; commits that
+ * only had runs that never ran are counted in the header, not listed. */
+function boardReleaseRows(report: ProductivityReport): { rows: ProductivityReport["releases"]; omitted: number } {
+  const rows = report.releases.filter((row) => row.outcome === "released" || row.outcome === "failed" || row.outcome === "declined");
+  return { rows, omitted: report.releases.length - rows.length };
+}
+
+/** Why this export is not the fresh, verified picture — printed first, never buried. */
+export function exportWarnings(report: ProductivityReport): string[] {
+  const readiness = exportReadiness(report, report.generatedAt);
+  const age = readiness.ageMs === null ? null : formatDuration(readiness.ageMs);
+  return readiness.blockers.map((blocker) => {
+    if (blocker === "never") return "O GitHub ainda não foi sincronizado: PRs, issues e a tag de produção não estão neste relatório.";
+    if (blocker === "stale") return `Dados do GitHub de ${age} atrás (sincronizado em ${formatInstant(report.coverage.github.syncedAt ?? report.sync.lastSyncAt ?? 0)}): PRs, issues, backlog e a verificação da tag podem estar desatualizados.`;
+    if (blocker === "syncing") return "Uma sincronização com o GitHub estava em andamento: os números do GitHub podem estar incompletos.";
+    return report.coverage.tag.matchesHistory === false && readiness.blockers.includes("stale")
+      ? "A verificação da tag de produção está desatualizada (ver acima)."
+      : `A tag de produção no GitHub (${report.coverage.tag.sha?.slice(0, 9)}) não é o último release do histórico: confira antes de levar ao board.`;
+  });
 }
 
 function coverageLines(report: ProductivityReport): string[] {
@@ -282,9 +358,16 @@ function coverageLines(report: ProductivityReport): string[] {
   if (c.releaseLog.from !== null) lines.push(`Log do watcher de produção desde ${formatInstant(c.releaseLog.from)}.`);
   if (c.githubDeployments.from !== null) lines.push(`Deployments de produção do GitHub de ${formatInstant(c.githubDeployments.from)} a ${formatInstant(c.githubDeployments.to!)}.`);
   for (const gap of c.releaseGaps) lines.push(`Sem fonte de releases de ${formatInstant(gap.from)} a ${formatInstant(gap.to)}: entregas e falhas desse trecho não são conhecidas (não são zero).`);
-  lines.push(c.github.syncedAt ? `GitHub sincronizado em ${formatInstant(c.github.syncedAt)} (${formatNumber(c.github.prs)} PRs, ${formatNumber(c.github.issues)} issues${c.github.complete ? "" : ", sincronização ainda em andamento"}).` : "GitHub ainda não sincronizado.");
+  const readiness = exportReadiness(report, report.generatedAt);
+  const stale = readiness.blockers.includes("stale");
+  lines.push(c.github.syncedAt ? `GitHub sincronizado em ${formatInstant(c.github.syncedAt)} (${formatNumber(c.github.prs)} PRs, ${formatNumber(c.github.issues)} issues${c.github.complete ? "" : "; a varredura do histórico continua nas próximas sincronizações"}).` : "GitHub ainda não sincronizado.");
   if (c.github.repoCreatedAt) lines.push(`Repositório criado em ${formatInstant(c.github.repoCreatedAt, "pt-BR", false)}: nenhum período anterior a isso serve de comparação.`);
-  if (c.tag.sha) lines.push(`Tag de produção no GitHub: ${c.tag.sha.slice(0, 9)}${c.tag.matchesHistory === true ? " (confere com o histórico)" : c.tag.matchesHistory === false ? " (NÃO confere com o último release do histórico)" : ""}.`);
+  if (c.tag.sha) {
+    const verdict = c.tag.matchesHistory === true ? " (confere com o histórico)"
+      : c.tag.matchesHistory === false ? (stale ? ` (verificação desatualizada: lida há ${formatDuration(readiness.ageMs)}, antes do último release do histórico)` : " (diferente do último release do histórico; ver o aviso no início)")
+      : "";
+    lines.push(`Tag de produção no GitHub: ${c.tag.sha.slice(0, 9)}${verdict}.`);
+  }
   lines.push(c.usage.from !== null ? `Ledger de uso dos bots desde ${formatInstant(c.usage.from)}; antes disso os números dos bots são — (sem registro), não zero.` : "Sem ledger de uso dos bots.");
   if (c.digests.from !== null) lines.push(`Durações de turno desde ${formatInstant(c.digests.from)}.`);
   if (c.needsYou.from !== null) lines.push(`"Precisa de você" registrado desde ${formatInstant(c.needsYou.from)}.`);
@@ -303,6 +386,12 @@ export function reportMarkdown(report: ProductivityReport): string {
   const lines: string[] = [];
   lines.push(`# ${reportTitle(report)}`, "");
   lines.push(`**Time Nuria · ${PRODUCT_NAME}** · ${periodText(report.period)} (${REPORT_TZ}) · por ${granularityName(g, "pt-BR")} · comparado a ${periodText(report.previous)} · gerado em ${formatInstant(report.generatedAt)}`, "");
+  const warnings = exportWarnings(report);
+  if (warnings.length) {
+    lines.push("> **⚠ Atenção — este relatório não está com os dados verificados:**");
+    for (const warning of warnings) lines.push(`> - ${warning}`);
+    lines.push("");
+  }
   lines.push("## Resumo executivo", "");
   executiveSummary(report).forEach((line, index) => lines.push(`${index + 1}. ${line}`));
   lines.push("", "## Indicadores", "", "| Indicador | Período | Anterior | Comparação | Meta | Como é contado |", "|---|---:|---:|---|---|---|");
@@ -317,17 +406,23 @@ export function reportMarkdown(report: ProductivityReport): string {
   }
   if (report.buckets.some((bucket) => bucket.unknownContentReleases)) lines.push("", "≥: há release no intervalo cujo conteúdo ainda não é conhecido; o número é um mínimo.");
   lines.push("", "## Releases do período", "", releaseCounts(report), "");
-  if (!report.releases.length) lines.push("Nenhum release, falha ou recusa no período.");
+  const board = boardReleaseRows(report);
+  if (!board.rows.length && !board.omitted) lines.push("Nenhum release, falha ou recusa no período.");
   else {
     lines.push("| Quando | Commit | Resultado | PRs | Issues concluídas |", "|---|---|---|---|---|");
-    for (const release of report.releases) {
-      const what = (release.attempts ?? 1) > 1 ? `${outcomeText(release.outcome)} (${release.attempts} tentativas)` : release.tagNotAdvanced ? `${outcomeText(release.outcome)} (tag movida à mão)` : outcomeText(release.outcome);
+    for (const release of board.rows) {
       const prs = release.outcome === "released" ? (release.contentUnknown ? UNKNOWN_REASON[release.contentUnknownReason ?? "pending"]! : nums(release.prs.filter((pr) => !pr.carrier))) : headPrText(release);
-      lines.push(`| ${formatInstant(release.at)} | \`${release.sha.slice(0, 9)}\` | ${what} | ${prs} | ${release.outcome === "released" ? nums(release.issues) : "—"} |`);
+      lines.push(`| ${formatInstant(release.at)} | \`${release.sha.slice(0, 9)}\` | ${outcomeLabel(release)} | ${prs} | ${release.outcome === "released" ? nums(release.issues) : "—"} |`);
     }
+    if (board.omitted) lines.push("", `${pluralPt(board.omitted, "commit só teve", "commits só tiveram")} runs substituídos ou abortados (nenhum rodou): contados no cabeçalho, não listados.`);
   }
   const b = report.backlog;
-  lines.push("", "## Backlog (agora)", "");
+  if (b.periodEnd) {
+    lines.push("", `## Backlog ao fim do período (${formatInstant(b.periodEnd.at - 60_000)})`, "");
+    lines.push(`- Issues abertas: ${formatNumber(b.periodEnd.openIssues)}; P0/P1: ${formatNumber(b.periodEnd.openP0P1)} (rótulos de hoje)`);
+    if (b.periodEnd.oldestOpen) lines.push(`- Mais antiga aberta: #${b.periodEnd.oldestOpen.number} (${formatDuration(b.periodEnd.at - b.periodEnd.oldestOpen.createdAt)} naquela data)`);
+  }
+  lines.push("", `## Backlog agora (${b.at ? formatInstant(b.at) : "—"})`, "");
   lines.push(`- Issues abertas: ${formatNumber(b.openIssues)}`);
   lines.push(`- P1: ${formatNumber(b.openP1)} = ${formatNumber(b.openP1Split.current)} priority:p1 + ${formatNumber(b.openP1Split.legacy)} priority:high (escala antiga)`);
   lines.push(`- P0: ${formatNumber(b.openP0)} = ${formatNumber(b.openP0Split.current)} priority:p0 + ${formatNumber(b.openP0Split.legacy)} priority:critical (escala antiga)`);
@@ -337,7 +432,7 @@ export function reportMarkdown(report: ProductivityReport): string {
   lines.push("", "## Esforço dos bots", "");
   if (k.usageDays <= 0) lines.push("Sem registro de uso dos bots no período (—, não zero).");
   else {
-    lines.push(`Cobre ${formatNumber(k.usageDays, "pt-BR", 1)} dias registrados do período. Custo: ${formatMoney(k.costUsd)}; por entrega: ${formatMoney(k.costPerDelivery)} (${formatNumber(k.deliveriesInUsageDays)} entregas nesses dias).`, "");
+    lines.push(`Cobre ${daysText(k.usageDays)} dias registrados do período. Custo: ${formatMoney(k.costUsd)} — engenharia (Lead, Eng, QA, DBA, SRE, Delivery) ${formatMoney(k.costEngineeringUsd ?? 0)}, operação (Monitor Chat, Chief of Staff) ${formatMoney(k.costOperationsUsd ?? 0)}${k.costOtherUsd ? `, outros ${formatMoney(k.costOtherUsd)}` : ""}. Custo de engenharia por entrega: ${costPerDeliveryText(report)}.`, "");
     lines.push("| Bot | Turnos | Horas ativas | Tokens (entrada / saída) | Custo | \"Precisa de você\" abertos / resolvidos |", "|---|---:|---:|---:|---:|---:|");
     for (const bot of report.bots) lines.push(`| ${md(bot.name)} | ${formatNumber(bot.turns)} | ${formatDuration(bot.timedTurns ? bot.activeMs : null)} | ${formatNumber(bot.inputTokens)} / ${formatNumber(bot.outputTokens)} | ${formatMoney(bot.costUsd)} | ${bot.needsYouOpened} / ${bot.needsYouResolved} |`);
   }
@@ -356,8 +451,11 @@ const HELVETICA = [278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 2
 const HELVETICA_BOLD = [278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584, 584, 611, 975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556, 333, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556, 500, 389, 280, 389, 584];
 const WIN_ANSI_EXTRA: Record<string, number> = { "€": 0x80, "…": 0x85, "‘": 0x91, "’": 0x92, "“": 0x93, "”": 0x94, "•": 0x95, "–": 0x96, "—": 0x97 };
 const WIDE: Record<number, number> = { 0x80: 556, 0x85: 1000, 0x91: 222, 0x92: 222, 0x93: 333, 0x94: 333, 0x95: 350, 0x96: 556, 0x97: 1000, 0xa0: 278, 0xb7: 278, 0xba: 365, 0xaa: 370, 0xd7: 584, 0xb0: 400 };
-// WinAnsi has no true minus, arrows or ≥/≤: the minus becomes an en dash (not a hyphen)
-const SUBSTITUTE: Record<string, string> = { "→": "»", "←": "«", "↑": "+", "↓": "–", "−": "–", "≥": ">=", "≤": "<=", "✓": "v" };
+// WinAnsi has no true minus, arrows or ≥/≤: the minus becomes an en dash (not
+// a hyphen), ≥/≤ are written out in words ("no mínimo 22"), arrows become dashes
+const SUBSTITUTE: Record<string, string> = { "→": "–", "←": "–", "↑": "+", "↓": "–", "−": "–", "✓": "v", "⚠": "!" };
+/** The words a reader expects where the font has no glyph (INSP-V r2 #7). */
+export const pdfPlain = (text: string) => text.replace(/≥\s?/g, "no mínimo ").replace(/≤\s?/g, "no máximo ");
 
 const winAnsiCode = (char: string): number => {
   const code = char.codePointAt(0)!;
@@ -370,7 +468,7 @@ const winAnsiCode = (char: string): number => {
 /** A string as WinAnsi codes: Latin-1 as is, the few cp1252 extras mapped, the rest spelled out. */
 function winAnsi(text: string): number[] {
   const codes: number[] = [];
-  for (const char of text) {
+  for (const char of pdfPlain(text)) {
     const sub = SUBSTITUTE[char];
     if (sub) for (const c of sub) codes.push(winAnsiCode(c));
     else codes.push(winAnsiCode(char));
@@ -418,6 +516,7 @@ const GOOD = hex("#1d6b45");
 const BAD = hex("#a3262a");
 const WARN = hex("#8a5a00");
 const NOSOURCE = hex("#e4e6ea");
+const WARN_SOFT = hex("#fbeeee");
 
 /** A tiny page-layout engine: A4 portrait, points, top-down y. */
 class PdfDoc {
@@ -657,6 +756,17 @@ export function reportPdf(report: ProductivityReport): Buffer {
   doc.y += 12;
   doc.text(doc.margin, doc.y, `Comparado a ${periodText(report.previous)} · gerado em ${formatInstant(report.generatedAt)}`, { size: 9, color: MUTED, maxWidth: contentWidth });
   doc.y += 16;
+  // a stale or unverified export says so first, in a box the reader cannot miss
+  const warnings = exportWarnings(report);
+  if (warnings.length) {
+    const lines = warnings.flatMap((warning) => doc.wrap(`• ${warning}`, contentWidth - 28, 8.5));
+    const boxHeight = 24 + lines.length * 11.5;
+    doc.rect(doc.margin, doc.y, contentWidth, boxHeight, WARN_SOFT);
+    doc.rect(doc.margin, doc.y, 3, boxHeight, BAD);
+    doc.text(doc.margin + 14, doc.y + 15, "Atenção — dados não verificados neste relatório", { size: 10, bold: true, color: BAD });
+    lines.forEach((line, index) => doc.text(doc.margin + 14, doc.y + 29 + index * 11.5, line, { size: 8.5 }));
+    doc.y += boxHeight + 10;
+  }
   // executive summary
   const summary = executiveSummary(report);
   const summaryHeight = summary.reduce((sum, line) => sum + doc.measureLines(line, contentWidth - 40, 9) * 12.5, 0) + 34;
@@ -670,26 +780,43 @@ export function reportPdf(report: ProductivityReport): Buffer {
   });
   doc.y += summaryHeight + 12;
   // KPI cards, 4 per row, each with its definition beside the number
+  // every line of a card is laid out in full: the card grows, the text is never cut (INSP-V r2 #5)
   const cards = boardKpis(report);
   const gap = 8;
   const cardWidth = (contentWidth - gap * 3) / 4;
-  const cardHeight = 92;
-  doc.ensure(cardHeight * 2 + gap + 10);
-  cards.forEach((card, index) => {
-    const x = doc.margin + (index % 4) * (cardWidth + gap);
-    const top = doc.y + Math.floor(index / 4) * (cardHeight + gap);
-    const inner = cardWidth - 16;
-    doc.rect(x, top, cardWidth, cardHeight, CARD);
-    doc.text(x + 8, top + 13, card.label, { size: 7.5, bold: true, color: MUTED, maxWidth: inner });
-    doc.text(x + 8, top + 33, card.value, { size: 15, bold: true, maxWidth: inner });
-    const lines = [card.comparison];
-    doc.text(x + 8, top + 46, lines[0]!, { size: 7.2, color: card.good === null ? MUTED : card.good ? GOOD : BAD, maxWidth: inner });
-    let line = top + 56;
-    for (const text of doc.wrap(card.detail ?? "", inner, 6.6).slice(0, 2)) { doc.text(x + 8, line, text, { size: 6.6, color: MUTED }); line += 8; }
-    for (const text of doc.wrap(card.short, inner, 6.4).slice(0, 2)) { doc.text(x + 8, line, text, { size: 6.4, color: MUTED }); line += 7.6; }
-    if (card.goal) doc.text(x + cardWidth - 8, top + 13, `meta ${card.goal.target}`, { size: 6.4, bold: true, color: STATUS_COLOR[card.goal.status], align: "right" });
-  });
-  doc.y += cardHeight * 2 + gap + 14;
+  const inner = cardWidth - 16;
+  const layout = cards.map((card) => ({
+    card,
+    label: doc.wrap(card.label, inner, 7.5, true),
+    value: doc.wrap(card.value, inner, 15, true),
+    goal: card.goal ? doc.wrap(`meta ${card.goal.target} · ${STATUS_TEXT[card.goal.status]}`, inner, 6.8, true) : [],
+    comparison: doc.wrap(card.comparison, inner, 7.2),
+    detail: doc.wrap(card.detail ?? "", inner, 6.6),
+    short: doc.wrap(card.short, inner, 6.4),
+  }));
+  const heightOf = (item: (typeof layout)[number]) => 10 + item.label.length * 9 + item.value.length * 17 + 4 + item.goal.length * 8.5 + item.comparison.length * 8.6 + item.detail.length * 8 + 3 + item.short.length * 7.6 + 6;
+  for (let row = 0; row < layout.length; row += 4) {
+    const items = layout.slice(row, row + 4);
+    const cardHeight = Math.max(...items.map(heightOf));
+    doc.ensure(cardHeight + gap);
+    items.forEach((item, column) => {
+      const x = doc.margin + column * (cardWidth + gap);
+      let y = doc.y;
+      doc.rect(x, y, cardWidth, cardHeight, CARD);
+      y += 13;
+      for (const line of item.label) { doc.text(x + 8, y, line, { size: 7.5, bold: true, color: MUTED }); y += 9; }
+      y += 8;
+      for (const line of item.value) { doc.text(x + 8, y, line, { size: 15, bold: true }); y += 17; }
+      y -= 4;
+      for (const line of item.goal) { doc.text(x + 8, y, line, { size: 6.8, bold: true, color: STATUS_COLOR[item.card.goal!.status] }); y += 8.5; }
+      for (const line of item.comparison) { doc.text(x + 8, y, line, { size: 7.2, color: item.card.good === null ? MUTED : item.card.good ? GOOD : BAD }); y += 8.6; }
+      for (const line of item.detail) { doc.text(x + 8, y, line, { size: 6.6, color: MUTED }); y += 8; }
+      y += 3;
+      for (const line of item.short) { doc.text(x + 8, y, line, { size: 6.4, color: MUTED }); y += 7.6; }
+    });
+    doc.y += cardHeight + gap;
+  }
+  doc.y += 6;
   // DORA
   heading(doc, "DORA");
   table(doc, {
@@ -724,30 +851,41 @@ export function reportPdf(report: ProductivityReport): Buffer {
   heading(doc, "Releases do período");
   doc.text(doc.margin, doc.y + 4, releaseCounts(report), { size: 8, color: MUTED, maxWidth: contentWidth });
   doc.y += 14;
-  if (!report.releases.length) { doc.text(doc.margin, doc.y + 8, "Nenhum release, falha ou recusa no período.", { size: 9, color: MUTED }); doc.y += 20; }
+  const board = boardReleaseRows(report);
+  if (!board.rows.length && !board.omitted) { doc.text(doc.margin, doc.y + 8, "Nenhum release, falha ou recusa no período.", { size: 9, color: MUTED }); doc.y += 20; }
   else {
-    const prsWidth = contentWidth * 0.3 - 8;
-    const issuesWidth = contentWidth * 0.25 - 8;
+    const prsWidth = contentWidth * 0.25 - 8;
+    const issuesWidth = contentWidth * 0.22 - 8;
     table(doc, {
-      columns: [{ label: "Quando", width: contentWidth * 0.17 }, { label: "Commit", width: contentWidth * 0.11 }, { label: "Resultado", width: contentWidth * 0.17 }, { label: "PRs", width: contentWidth * 0.3 }, { label: "Issues concluídas", width: contentWidth * 0.25 }],
-      rows: report.releases.map((row) => [
+      columns: [{ label: "Quando", width: contentWidth * 0.16 }, { label: "Commit", width: contentWidth * 0.1 }, { label: "Resultado", width: contentWidth * 0.27 }, { label: "PRs", width: contentWidth * 0.25 }, { label: "Issues concluídas", width: contentWidth * 0.22 }],
+      rows: board.rows.map((row) => [
         formatInstant(row.at),
         row.sha.slice(0, 9),
-        (row.attempts ?? 1) > 1 ? `${outcomeText(row.outcome)} (${row.attempts}x)` : row.tagNotAdvanced ? "em produção*" : outcomeText(row.outcome),
+        row.tagNotAdvanced ? "em produção*" : outcomeLabel(row),
         row.outcome === "released" ? (row.contentUnknown ? (row.contentUnknownReason === "pending" ? "ainda não lido" : "desconhecido") : fitNumbers(row.prs.filter((pr) => !pr.carrier), prsWidth, 7.5)) : headPrText(row),
         row.outcome === "released" ? fitNumbers(row.issues, issuesWidth, 7.5) : "—",
       ]),
       size: 7.5,
     });
-    if (report.releases.some((row) => row.tagNotAdvanced)) {
+    if (board.omitted) {
+      doc.ensure(14);
+      doc.text(doc.margin, doc.y, `${pluralPt(board.omitted, "commit só teve", "commits só tiveram")} runs substituídos ou abortados (nenhum rodou): contados acima, não listados.`, { size: 7.5, color: MUTED, maxWidth: contentWidth });
+      doc.y += 14;
+    }
+    if (board.rows.some((row) => row.tagNotAdvanced)) {
       doc.ensure(14);
       doc.text(doc.margin, doc.y, "* no ar, mas o watcher não conseguiu avançar a tag de produção; ela foi movida à mão depois.", { size: 7.5, color: MUTED });
       doc.y += 14;
     }
   }
   // backlog
-  heading(doc, "Backlog (agora)");
   const b = report.backlog;
+  if (b.periodEnd) {
+    heading(doc, `Backlog ao fim do período (${formatInstant(b.periodEnd.at - 60_000, "pt-BR", false)})`);
+    const line = `Issues abertas: ${formatNumber(b.periodEnd.openIssues)}. P0/P1: ${formatNumber(b.periodEnd.openP0P1)} (rótulos de hoje).${b.periodEnd.oldestOpen ? ` Mais antiga: #${b.periodEnd.oldestOpen.number} (${formatDuration(b.periodEnd.at - b.periodEnd.oldestOpen.createdAt)} naquela data).` : ""}`;
+    doc.y += doc.paragraph(doc.margin, doc.y + 8, line, contentWidth, { size: 8.5, leading: 11.5 }) + 8;
+  }
+  heading(doc, `Backlog agora${b.at ? ` (${formatInstant(b.at)})` : ""}`);
   for (const line of [
     `Issues abertas: ${formatNumber(b.openIssues)}. P1: ${formatNumber(b.openP1)} (${formatNumber(b.openP1Split.current)} priority:p1 + ${formatNumber(b.openP1Split.legacy)} priority:high, escala antiga). P0: ${formatNumber(b.openP0)} (${formatNumber(b.openP0Split.current)} priority:p0 + ${formatNumber(b.openP0Split.legacy)} priority:critical).`,
     `${b.oldestOpen ? `Mais antiga: #${b.oldestOpen.number} (${formatDuration(report.generatedAt - b.oldestOpen.createdAt)}). ` : ""}${b.oldestOpenP1 ? `P0/P1 mais antiga: #${b.oldestOpenP1.number} (${formatDuration(report.generatedAt - b.oldestOpenP1.createdAt)}). ` : ""}PRs esperando o gate: ${formatNumber(b.prsAwaitingGate)} de ${formatNumber(b.openPrs)} abertas.`,
@@ -760,8 +898,8 @@ export function reportPdf(report: ProductivityReport): Buffer {
   heading(doc, "Esforço dos bots");
   if (k.usageDays <= 0) { doc.text(doc.margin, doc.y + 8, "Sem registro de uso dos bots no período (—, não zero).", { size: 9, color: MUTED }); doc.y += 20; }
   else {
-    doc.text(doc.margin, doc.y + 6, `Cobre ${formatNumber(k.usageDays, "pt-BR", 1)} dias registrados. Custo ${formatMoney(k.costUsd)}; por entrega ${formatMoney(k.costPerDelivery)} (${formatNumber(k.deliveriesInUsageDays)} entregas nesses dias).`, { size: 8.5, color: MUTED, maxWidth: contentWidth });
-    doc.y += 16;
+    const line = `Cobre ${daysText(k.usageDays)} dias registrados. Custo ${formatMoney(k.costUsd)}: engenharia ${formatMoney(k.costEngineeringUsd ?? 0)}, operação (Monitor Chat, Chief of Staff) ${formatMoney(k.costOperationsUsd ?? 0)}${k.costOtherUsd ? `, outros ${formatMoney(k.costOtherUsd)}` : ""}. Custo de engenharia por entrega: ${costPerDeliveryText(report)}.`;
+    doc.y += doc.paragraph(doc.margin, doc.y + 6, line, contentWidth, { size: 8.5, color: MUTED, leading: 11.5 }) + 6;
     table(doc, {
       columns: [{ label: "Bot", width: contentWidth * 0.24 }, { label: "Turnos", width: contentWidth * 0.12, align: "right" }, { label: "Horas ativas", width: contentWidth * 0.14, align: "right" }, { label: "Custo", width: contentWidth * 0.14, align: "right" }, { label: "Precisa de você (abertos/resolvidos)", width: contentWidth * 0.36, align: "right" }],
       rows: report.bots.map((bot) => [bot.name, formatNumber(bot.turns), formatDuration(bot.timedTurns ? bot.activeMs : null), formatMoney(bot.costUsd), `${bot.needsYouOpened} / ${bot.needsYouResolved}`]),
