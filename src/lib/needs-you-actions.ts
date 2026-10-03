@@ -2,7 +2,7 @@
 // server: answer it (a decision, the person's words, or a request for the
 // steps), or mark it resolved. The server sends the answer to the bot in the
 // item's conversation; the row updates through the bot frame it broadcasts.
-import { api, type Action } from "@/state/store";
+import { api, ApiError, type Action } from "@/state/store";
 import type { NeedsYouItem } from "@/lib/needs-you";
 
 /** A decision carries the label the person saw with its position: the
@@ -43,10 +43,16 @@ export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendin
 }
 
 /** "Lembrar <bot>" (INSP-J2 r2 N3): the server reminds the bot, as itself. */
-export async function remindOwnerPending(item: NeedsYouItem): Promise<{ deduped: boolean }> {
+export async function remindOwnerPending(item: NeedsYouItem): Promise<{ deduped: boolean; info?: string }> {
   if (!item.pendingId) return { deduped: false };
-  const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/remind`, { method: "POST" });
-  return { deduped: receipt?.deduped === true };
+  try {
+    const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/remind`, { method: "POST" });
+    return { deduped: receipt?.deduped === true };
+  } catch (error) {
+    // "sua resposta ainda está na fila" is news, not a failure: a neutral notice (INSP-J2 r5 B4)
+    if (error instanceof ApiError && (error.body as { code?: unknown } | undefined)?.code === "answer_queued") return { deduped: false, info: error.message };
+    throw error;
+  }
 }
 
 export async function resolveOwnerPending(item: NeedsYouItem): Promise<void> {

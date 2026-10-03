@@ -588,10 +588,11 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
               {t("needsYou.screen.jumpToDecisions", { count: item.options?.length ?? 0 })}
             </button>
           ) : null}
-          <button type="button" data-resolver-conversation="" onClick={() => props.onOpenConversation(item)} className={quietButton}>
+          {/* the stuck banner carries "Abrir conversa" as the way in: one on screen (INSP-J2 r5 B2) */}
+          {!stuck && <button type="button" data-resolver-conversation="" onClick={() => props.onOpenConversation(item)} className={quietButton}>
             <MessageSquare size={14} aria-hidden="true" />
             {t("needsYou.screen.openConversation")}
-          </button>
+          </button>}
           {pending && (
             <button type="button" data-resolver-resolve="" disabled={working} onClick={() => props.onResolve(item)} className={cn(item.options?.length || !steps.length ? quietButton : strongButton)}>
               {busy === "resolve" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <Check size={14} aria-hidden="true" />}
@@ -610,6 +611,14 @@ export function decisionNotice(item: Pick<NeedsYouItem, "options" | "botName" | 
   const values = { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title };
   const resolved = Number((result as { resolved?: unknown } | undefined)?.resolved ?? 0) > 0;
   return t(resolved ? "needsYou.screen.decided" : "needsYou.screen.decidedWaiting", values);
+}
+
+/** What the screen says after "Lembrar": sent, already on its way, or — in
+ * the neutral notice, never the red alert — why there was nothing to remind (INSP-J2 r5 B4). */
+export function remindNotice(item: Pick<NeedsYouItem, "botName" | "title">, result: unknown): string {
+  const { deduped, info } = (result ?? {}) as { deduped?: boolean; info?: string };
+  if (info) return info;
+  return t(deduped ? "needsYou.screen.remindDeduped" : "needsYou.screen.reminded", { name: item.botName, title: item.title });
 }
 
 /** What Escape undoes, innermost first (INSP-J2 #10): a switch being
@@ -653,6 +662,8 @@ export function notDeliveredLine(item: Pick<NeedsYouItem, "history" | "awaitingS
 
 /** What the person answered, oldest first, and whether it reached the bot (J18). */
 function History({ item, now }: { item: NeedsYouItem; now: number }) {
+  // the failure the banner above already explains; any other keeps its reason in view (INSP-J2 r5 B5)
+  const explained = answerNotDelivered(item);
   return (
     <section className="mt-6 sm:mt-7" aria-labelledby="needs-you-history" data-resolver-history="">
       <h3 id="needs-you-history" className={sectionHeading}>{t("needsYou.screen.history")}</h3>
@@ -680,10 +691,14 @@ function History({ item, now }: { item: NeedsYouItem; now: number }) {
                   ? <span className="sr-only">{` — ${sent}`}</span>
                   : (
                     <span className={entry.queued ? "text-ink-secondary" : "font-medium text-danger"}>
-                      {/* the reason lives in the banner above (and here on hover), not twice on screen (r4 A3) */}
+                      {/* the banner's own failure is not said twice (r4 A3); an older one shows its reason,
+                          readable on touch and by a screen reader, not only on hover (r5 B5) */}
                       {" — "}{entry.queued ? t("needsYou.history.queued", { name: item.botName }) : <span title={entry.error}>{t("needsYou.history.notDelivered")}</span>}
                     </span>
                   )}
+                {!entry.delivered && !entry.queued && entry.error && entry !== explained && (
+                  <span data-history-reason="" className="block text-[12px] text-ink-secondary">{entry.error}</span>
+                )}
               </span>
             </li>
           );
@@ -862,7 +877,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   /** Asks the bot which decision it recommends (an item with 2+ decisions and none marked). */
   onAskRecommend?: (item: NeedsYouItem) => Promise<unknown>;
   /** Reminds the bot of an answered item it let go silent; `deduped` when one is already on its way. */
-  onRemind?: (item: NeedsYouItem) => Promise<{ deduped: boolean }>;
+  onRemind?: (item: NeedsYouItem) => Promise<{ deduped: boolean; info?: string }>;
   onResolve: (item: NeedsYouItem) => Promise<unknown>;
 }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(initialKey ?? null);
@@ -1064,7 +1079,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onAskSteps={(item) => void run("steps", () => onAskSteps(item), t("needsYou.screen.askedSteps", { name: item.botName, title: item.title }))}
           onAskRecommend={(item) => void run("recommend", () => (onAskRecommend ?? (async () => undefined))(item), t("needsYou.screen.askedRecommend", { name: item.botName, title: item.title }))}
           onResolve={(item) => void run("resolve", () => onResolve(item), t("needsYou.screen.resolved", { title: item.title }))}
-          onRemind={(item) => void run("remind", () => (onRemind ?? (async () => ({ deduped: false })))(item), (result) => t((result as { deduped?: boolean } | undefined)?.deduped ? "needsYou.screen.remindDeduped" : "needsYou.screen.reminded", { name: item.botName, title: item.title }))}
+          onRemind={(item) => void run("remind", () => (onRemind ?? (async () => ({ deduped: false })))(item), (result) => remindNotice(item, result))}
           onOpenConversation={onOpenConversation}
           onDismissError={() => setError(null)}
           onDismissNotice={() => setNotice(null)}

@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
 import { answerNotDelivered, answerStuck, answerTime, awaitingBot, AWAITING_MAX_MS, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, nextAwaitingChange, sortNeedsYou } from "@/lib/needs-you";
-import { decisionReply } from "@/lib/needs-you-actions";
-import { awaitingLine, decisionNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
+import { decisionReply, remindOwnerPending } from "@/lib/needs-you-actions";
+import { awaitingLine, decisionNotice, remindNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
 
 // Invented bots and items: no client data.
 const now = new Date(2026, 9, 2, 15, 40).getTime();
@@ -500,13 +500,19 @@ describe("keys on the resolution screen", () => {
     const { html, find, press, calls, tree } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
     expect(html).toContain("2 itens esperando você");
     expect(html).not.toContain("Aguardando bots");
-    expect(html).toContain("Sua escolha está na fila há 5 h: Monitor Chat está ocupado(a) com outra coisa.");
+    // r5 B3: no "(a)" — a phrase with no gender
+    expect(html).toContain("Sua escolha está na fila há 5 h: Monitor Chat está com outra tarefa em andamento.");
+    expect(html).not.toContain("(a)");
     expect(find("data-resolver-remind")).toBeUndefined();
     expect(html).not.toContain("não respondeu");
     // "Abrir conversa" stands out in the banner and opens the conversation
     expect(String(find("data-resolver-stuck-conversation")!.props.className)).toContain("bg-accent");
     press("data-resolver-stuck-conversation");
     expect(calls).toEqual(["conversation:m1"]);
+    // r5 B2: one "Abrir conversa" on screen — the footer's quiet one steps aside
+    expect(find("data-resolver-conversation")).toBeUndefined();
+    expect(html.match(/Abrir conversa/g)).toHaveLength(1);
+    expect(view({ items: list, selectedKey: needsYouKey(list[0]!), now: at + 30 * 60_000 }).find("data-resolver-conversation")).toBeDefined();
     // the row says so too, and the decisions are open again
     expect(tree.filter((node) => "data-resolver-stuck-row" in node.props)).toHaveLength(2);
     expect(html).toContain("Na fila há 5 h");
@@ -517,6 +523,41 @@ describe("keys on the resolution screen", () => {
   });
 
   // INSP-J2 r4 A2
+  // INSP-J2 r5 B5: an older failure's reason, readable on touch and by a screen reader
+  it("shows the reason of a failure the banner does not cover, in the history itself", () => {
+    const at = new Date(2026, 9, 2, 14, 0).getTime();
+    const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o45", title: "Confirmar o teto do lote", since: now - 6 * 3_600_000, options: [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }], history: [
+        { at, kind: "option", label: "Sim", text: "Sim.", delivered: false, error: "substituída pela nova escolha" },
+        { at: at + 60_000, kind: "option", label: "Não", text: "Não.", delivered: false, error: "cancelamento na conversa antes de chegar ao bot" },
+      ] },
+    ] })])]);
+    const { tree, html } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
+    const reasons = tree.filter((node) => "data-history-reason" in node.props).map((node) => Children.toArray(node.props.children).join(""));
+    // the older one shows its reason; the last one is the banner's, said once there
+    expect(reasons).toEqual(["substituída pela nova escolha"]);
+    expect(html.split("cancelamento na conversa").length - 1).toBe(2);
+    expect(String(tree.find((node) => "data-history-reason" in node.props)!.props.className)).not.toContain("sr-only");
+  });
+
+  // INSP-J2 r5 B4: "ainda está na fila" is news, not a failure
+  it("says 'sua resposta ainda está na fila' as a neutral notice, not as an error", async () => {
+    const info = "Sua resposta ainda está na fila: Monitor Chat a recebe assim que terminar o que está fazendo. Um lembrete não passaria na frente.";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: info, code: "answer_queued" }), { status: 409 })));
+    const item = items.find((each) => each.pendingId === "o3")!;
+    const result = await remindOwnerPending(item);
+    expect(result).toEqual({ deduped: false, info });
+    expect(remindNotice(item, result)).toBe(info);
+    expect(remindNotice(item, { deduped: true })).toBe("O lembrete para Monitor Chat já está a caminho.");
+    // any other refusal stays an error
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: "Monitor Chat ainda tem tempo para responder a este item.", code: "not_silent" }), { status: 409 })));
+    await expect(remindOwnerPending(item)).rejects.toThrow("ainda tem tempo");
+    // the notice is the polite status line, never the red alert
+    const shown = view({ selectedKey: keyOf("o3"), notice: info });
+    expect(shown.html).toMatch(/role="status" aria-live="polite"[^>]*><p data-resolver-notice=""/);
+    expect(shown.html).not.toContain('role="alert"');
+  });
+
   it("drops the 'não foi entregue' banner once the bot rewrote the item, or the chosen decision is gone", () => {
     const at = now - 3_600_000;
     const failed = { at, kind: "option" as const, label: "Sim", text: "Sim.", delivered: false, error: "cancelamento na conversa antes de chegar ao bot" };
