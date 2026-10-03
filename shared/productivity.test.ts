@@ -1,7 +1,7 @@
 // São Paulo calendar and statistics behind the productivity report (lot V).
 import { describe, expect, it } from "vitest";
 import {
-  botRole, bucketKey, bucketStart, bucketStarts, closedMonth, compareKpi, distribution, exportReadiness, goalStatus, isNationalHoliday, nextBucket, parseReportBound, periodTitle, presetPeriod,
+  BOT_ROLES, botRole, bucketKey, bucketStart, bucketStarts, closedMonth, compareKpi, distribution, exportReadiness, goalStatus, isNationalHoliday, nextBucket, parseReportBound, periodTitle, presetPeriod,
   previousPeriod, resolveReportPeriod, sanitizeGoals, zonedParts, zonedToUtc,
 } from "./productivity.ts";
 
@@ -77,6 +77,10 @@ describe("export readiness (INSP-V r2 #3)", () => {
     expect(exportReadiness(base(now - 16 * 3_600_000, "idle", false), now).blockers).toEqual(["stale", "tag-mismatch"]);
     expect(exportReadiness(base(now - 60_000, "syncing"), now).blockers).toEqual(["syncing"]);
     expect(exportReadiness(base(null, "idle", null), now).blockers).toEqual(["never"]);
+    // a fresh sync whose history walk stopped short still leaves partial counts (INSP-V r3 #3)
+    const partial = base(now - 60_000) as unknown as { coverage: { github: { complete: boolean } } };
+    partial.coverage.github.complete = false;
+    expect(exportReadiness(partial as never, now).blockers).toEqual(["incomplete"]);
   });
 });
 
@@ -88,10 +92,14 @@ describe("calendar and roles", () => {
     expect(isNationalHoliday(2026, 9, 8)).toBe(false);
   });
 
-  it("tells engineering bots from operations (INSP-V r2 #4)", () => {
+  it("tells engineering bots from operations by an explicit list, id first (INSP-V r2 #4, r3 #4)", () => {
     for (const name of ["Lead PRODEV", "Eng PRODEV", "QA PRODEV", "DBA PRODEV", "SRE PRODEV", "Delivery PRODEV"]) expect(botRole(name)).toBe("engineering");
     for (const name of ["Monitor Chat Atendimento", "Chief of Staff"]) expect(botRole(name)).toBe("operations");
+    // a renamed bot keeps its role by id; a new one is "other", never guessed from its name
+    expect(botRole("Monitor renomeado", "891b6b94-facf-4d44-9ef4-de647a15ce72")).toBe("operations");
+    expect(botRole("Eng PRODEV 2")).toBe("other");
     expect(botRole("Assistente")).toBe("other");
+    expect(Object.values(BOT_ROLES).filter((role) => role === "engineering")).toHaveLength(12);
   });
 });
 

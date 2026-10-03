@@ -534,7 +534,7 @@ export function releaseCountParts(report: Pick<ProductivityReport, "releases" | 
 /** Older than this, GitHub numbers (and the tag check) are not exported without a warning. */
 export const EXPORT_MAX_AGE_MS = 3_600_000;
 
-export type ExportBlocker = "never" | "syncing" | "stale" | "tag-mismatch";
+export type ExportBlocker = "never" | "syncing" | "incomplete" | "stale" | "tag-mismatch";
 
 /** Whether the report may go to the board as is: synced in the last hour, no
  * sync running, and the production tag agreeing with the history. Otherwise
@@ -546,6 +546,8 @@ export function exportReadiness(report: Pick<ProductivityReport, "sync" | "cover
   if (synced === null) blockers.push("never");
   else if (ageMs! > EXPORT_MAX_AGE_MS) blockers.push("stale");
   if (report.sync.state === "syncing") blockers.push("syncing");
+  // a walk that stopped at its page limit leaves partial counts, even with a fresh lastSyncAt (INSP-V r3 #3)
+  else if (synced !== null && report.coverage.github.complete === false) blockers.push("incomplete");
   if (report.coverage.tag.matchesHistory === false) blockers.push("tag-mismatch");
   return { ready: blockers.length === 0, blockers, ageMs };
 }
@@ -573,14 +575,25 @@ export function isNationalHoliday(year: number, month: number, day: number): boo
 
 export type BotRole = "engineering" | "operations" | "other";
 
-/** Engineering bots (Lead, Eng, QA, DBA, SRE, Delivery) build what ships;
- * operations bots (Monitor Chat, Chief of Staff) do not, so their cost stays
- * out of the cost per delivery. */
-export function botRole(name: string | undefined): BotRole {
-  if (!name) return "other";
-  if (/monitor|chief of staff|atendimento/i.test(name)) return "operations";
-  if (/\b(lead|eng|qa|dba|sre|delivery)\b/i.test(name)) return "engineering";
-  return "other";
+/** Who each bot works for, by id first and by name second — an explicit list,
+ * never a guess from the name: engineering bots build what ships, operations
+ * bots do not, so their cost stays out of the cost per delivery. A bot not in
+ * the list is "other", and its cost is shown as its own share (INSP-V r3 #4). */
+export const BOT_ROLES: Readonly<Record<string, Exclude<BotRole, "other">>> = {
+  // engineering (PRODEV)
+  "b932d593-2c3b-4285-95f3-f46f85caf0d3": "engineering", "Lead PRODEV": "engineering",
+  "82feff85-aab2-4cb7-9f70-8969ec976979": "engineering", "Eng PRODEV": "engineering",
+  "e9ba01c7-6f49-4ddd-a7de-b9a1545f985f": "engineering", "QA PRODEV": "engineering",
+  "6aaf9d73-fa26-4c78-ac7a-03e5f774de80": "engineering", "DBA PRODEV": "engineering",
+  "63f7b834-6675-4dea-8fca-7bf0dad8522f": "engineering", "SRE PRODEV": "engineering",
+  "8644c266-5a09-485f-bca6-988ff929d3cc": "engineering", "Delivery PRODEV": "engineering",
+  // operations
+  "891b6b94-facf-4d44-9ef4-de647a15ce72": "operations", "Monitor Chat Atendimento": "operations",
+  "871e87c8-74a4-427a-8a4e-494439e748a8": "operations", "Chief of Staff": "operations",
+};
+
+export function botRole(name: string | undefined, id?: string): BotRole {
+  return (id ? BOT_ROLES[id] : undefined) ?? (name ? BOT_ROLES[name] : undefined) ?? "other";
 }
 
 // ── comparisons (one rule for the screen, the PDF and the Markdown) ─────────

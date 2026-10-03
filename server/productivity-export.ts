@@ -211,8 +211,8 @@ function botsLine(report: ProductivityReport, lang: SummaryLang): string {
   if (k.usageDays <= 0) return pt ? "Bots: sem registro de uso no período." : "Bots: no usage recorded in the period.";
   const days = daysText(k.usageDays, lang);
   const split = pt
-    ? `engenharia ${formatMoney(k.costEngineeringUsd ?? 0, lang)}, operação ${formatMoney(k.costOperationsUsd ?? 0, lang)}${k.costOtherUsd ? `, outros ${formatMoney(k.costOtherUsd, lang)}` : ""}`
-    : `engineering ${formatMoney(k.costEngineeringUsd ?? 0, lang)}, operations ${formatMoney(k.costOperationsUsd ?? 0, lang)}${k.costOtherUsd ? `, other ${formatMoney(k.costOtherUsd, lang)}` : ""}`;
+    ? `engenharia ${formatMoney(k.costEngineeringUsd ?? 0, lang)}, operação ${formatMoney(k.costOperationsUsd ?? 0, lang)}${k.costOtherUsd !== null ? `, outros (bots fora da lista de papéis) ${formatMoney(k.costOtherUsd, lang)}` : ""}`
+    : `engineering ${formatMoney(k.costEngineeringUsd ?? 0, lang)}, operations ${formatMoney(k.costOperationsUsd ?? 0, lang)}${k.costOtherUsd !== null ? `, other (bots not in the role list) ${formatMoney(k.costOtherUsd, lang)}` : ""}`;
   const turns = pt ? `${formatNumber(k.turns, lang)} ${k.turns === 1 ? "turno" : "turnos"}` : `${formatNumber(k.turns, lang)} ${k.turns === 1 ? "turn" : "turns"}`;
   return pt
     ? `Bots: ${turns} em ${days} dias registrados; custo ${formatMoney(k.costUsd, lang)} (${split}); custo de engenharia por entrega ${costPerDeliveryText(report, lang)}.`
@@ -346,6 +346,7 @@ export function exportWarnings(report: ProductivityReport): string[] {
     if (blocker === "never") return "O GitHub ainda não foi sincronizado: PRs, issues e a tag de produção não estão neste relatório.";
     if (blocker === "stale") return `Dados do GitHub de ${age} atrás (sincronizado em ${formatInstant(report.coverage.github.syncedAt ?? report.sync.lastSyncAt ?? 0)}): PRs, issues, backlog e a verificação da tag podem estar desatualizados.`;
     if (blocker === "syncing") return "Uma sincronização com o GitHub estava em andamento: os números do GitHub podem estar incompletos.";
+    if (blocker === "incomplete") return "A varredura do histórico do GitHub ainda não terminou: as contagens de PRs e issues são parciais.";
     return report.coverage.tag.matchesHistory === false && readiness.blockers.includes("stale")
       ? "A verificação da tag de produção está desatualizada (ver acima)."
       : `A tag de produção no GitHub (${report.coverage.tag.sha?.slice(0, 9)}) não é o último release do histórico: confira antes de levar ao board.`;
@@ -432,7 +433,7 @@ export function reportMarkdown(report: ProductivityReport): string {
   lines.push("", "## Esforço dos bots", "");
   if (k.usageDays <= 0) lines.push("Sem registro de uso dos bots no período (—, não zero).");
   else {
-    lines.push(`Cobre ${daysText(k.usageDays)} dias registrados do período. Custo: ${formatMoney(k.costUsd)} — engenharia (Lead, Eng, QA, DBA, SRE, Delivery) ${formatMoney(k.costEngineeringUsd ?? 0)}, operação (Monitor Chat, Chief of Staff) ${formatMoney(k.costOperationsUsd ?? 0)}${k.costOtherUsd ? `, outros ${formatMoney(k.costOtherUsd)}` : ""}. Custo de engenharia por entrega: ${costPerDeliveryText(report)}.`, "");
+    lines.push(`Cobre ${daysText(k.usageDays)} dias registrados do período. Custo: ${formatMoney(k.costUsd)} — engenharia (Lead, Eng, QA, DBA, SRE, Delivery) ${formatMoney(k.costEngineeringUsd ?? 0)}, operação (Monitor Chat, Chief of Staff) ${formatMoney(k.costOperationsUsd ?? 0)}${k.costOtherUsd !== null ? `, outros (bots fora da lista de papéis) ${formatMoney(k.costOtherUsd)}` : ""}. Custo de engenharia por entrega: ${costPerDeliveryText(report)}.`, "");
     lines.push("| Bot | Turnos | Horas ativas | Tokens (entrada / saída) | Custo | \"Precisa de você\" abertos / resolvidos |", "|---|---:|---:|---:|---:|---:|");
     for (const bot of report.bots) lines.push(`| ${md(bot.name)} | ${formatNumber(bot.turns)} | ${formatDuration(bot.timedTurns ? bot.activeMs : null)} | ${formatNumber(bot.inputTokens)} / ${formatNumber(bot.outputTokens)} | ${formatMoney(bot.costUsd)} | ${bot.needsYouOpened} / ${bot.needsYouResolved} |`);
   }
@@ -455,7 +456,10 @@ const WIDE: Record<number, number> = { 0x80: 556, 0x85: 1000, 0x91: 222, 0x92: 2
 // a hyphen), ≥/≤ are written out in words ("no mínimo 22"), arrows become dashes
 const SUBSTITUTE: Record<string, string> = { "→": "–", "←": "–", "↑": "+", "↓": "–", "−": "–", "✓": "v", "⚠": "!" };
 /** The words a reader expects where the font has no glyph (INSP-V r2 #7). */
-export const pdfPlain = (text: string) => text.replace(/≥\s?/g, "no mínimo ").replace(/≤\s?/g, "no máximo ");
+export const pdfPlain = (text: string) => text
+  // the "(≥)" that explains the sign has nothing to explain once it is spelled out (INSP-V r3 #1)
+  .replace(/\s?\(≥\)/g, "")
+  .replace(/≥\s?/g, "no mínimo ").replace(/≤\s?/g, "no máximo ");
 
 const winAnsiCode = (char: string): number => {
   const code = char.codePointAt(0)!;
@@ -696,7 +700,7 @@ function barChart(doc: PdfDoc, input: { title: string; buckets: ReportBucket[]; 
   }
 }
 
-function table(doc: PdfDoc, input: { columns: Array<{ label: string; width: number; align?: "left" | "right" }>; rows: string[][]; size?: number; wrapColumn?: number }): void {
+function table(doc: PdfDoc, input: { columns: Array<{ label: string; width: number; align?: "left" | "right" }>; rows: string[][]; size?: number; wrapColumn?: number; wrapValues?: number[] }): void {
   const size = input.size ?? 8;
   const x0 = doc.margin;
   const lineHeight = size * 1.3;
@@ -715,13 +719,18 @@ function table(doc: PdfDoc, input: { columns: Array<{ label: string; width: numb
   for (const row of input.rows) {
     // the wrap column (a definition) may take several lines; the others stay on one
     const wrapped = input.wrapColumn !== undefined ? doc.wrap(row[input.wrapColumn] ?? "", input.columns[input.wrapColumn]!.width - 8, size - 0.5) : [];
-    const rowHeight = Math.max(size * 1.9, wrapped.length * lineHeight + size * 0.8);
+    // value columns that wrap in full ink instead of ending in "…" (INSP-V r3 #2)
+    const values = new Map((input.wrapValues ?? []).map((index) => [index, doc.wrap(row[index] ?? "", input.columns[index]!.width - 8, size)]));
+    const tallest = Math.max(wrapped.length, ...[...values.values()].map((lines) => lines.length));
+    const rowHeight = Math.max(size * 1.9, tallest * lineHeight + size * 0.8);
     if (doc.y + rowHeight > doc.height - doc.margin - 18) { doc.addPage(); header(); }
     let x = x0;
     row.forEach((cell, index) => {
       const column = input.columns[index]!;
       if (index === input.wrapColumn) {
         wrapped.forEach((line, at) => doc.text(x + 4, doc.y + size * 1.25 + at * lineHeight, line, { size: size - 0.5, color: MUTED }));
+      } else if (values.has(index)) {
+        values.get(index)!.forEach((line, at) => doc.text(x + 4, doc.y + size * 1.25 + at * lineHeight, line, { size }));
       } else {
         doc.text(column.align === "right" ? x + column.width - 4 : x + 4, doc.y + size * 1.25, cell, { size, align: column.align === "right" ? "right" : "left", maxWidth: column.width - 8 });
       }
@@ -821,7 +830,7 @@ export function reportPdf(report: ProductivityReport): Buffer {
   heading(doc, "DORA");
   table(doc, {
     columns: [{ label: "Métrica", width: contentWidth * 0.27 }, { label: "Valor", width: contentWidth * 0.36 }, { label: "Como é contado", width: contentWidth * 0.37 }],
-    rows: doraRows(report), wrapColumn: 2, size: 7.8,
+    rows: doraRows(report), wrapColumn: 2, wrapValues: [1], size: 7.8,
   });
   // charts
   const release = (bucket: ReportBucket) => bucket.releaseCoverage;
@@ -898,7 +907,7 @@ export function reportPdf(report: ProductivityReport): Buffer {
   heading(doc, "Esforço dos bots");
   if (k.usageDays <= 0) { doc.text(doc.margin, doc.y + 8, "Sem registro de uso dos bots no período (—, não zero).", { size: 9, color: MUTED }); doc.y += 20; }
   else {
-    const line = `Cobre ${daysText(k.usageDays)} dias registrados. Custo ${formatMoney(k.costUsd)}: engenharia ${formatMoney(k.costEngineeringUsd ?? 0)}, operação (Monitor Chat, Chief of Staff) ${formatMoney(k.costOperationsUsd ?? 0)}${k.costOtherUsd ? `, outros ${formatMoney(k.costOtherUsd)}` : ""}. Custo de engenharia por entrega: ${costPerDeliveryText(report)}.`;
+    const line = `Cobre ${daysText(k.usageDays)} dias registrados. Custo ${formatMoney(k.costUsd)}: engenharia ${formatMoney(k.costEngineeringUsd ?? 0)}, operação (Monitor Chat, Chief of Staff) ${formatMoney(k.costOperationsUsd ?? 0)}${k.costOtherUsd !== null ? `, outros (bots fora da lista de papéis) ${formatMoney(k.costOtherUsd)}` : ""}. Custo de engenharia por entrega: ${costPerDeliveryText(report)}.`;
     doc.y += doc.paragraph(doc.margin, doc.y + 6, line, contentWidth, { size: 8.5, color: MUTED, leading: 11.5 }) + 6;
     table(doc, {
       columns: [{ label: "Bot", width: contentWidth * 0.24 }, { label: "Turnos", width: contentWidth * 0.12, align: "right" }, { label: "Horas ativas", width: contentWidth * 0.14, align: "right" }, { label: "Custo", width: contentWidth * 0.14, align: "right" }, { label: "Precisa de você (abertos/resolvidos)", width: contentWidth * 0.36, align: "right" }],

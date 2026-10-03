@@ -386,7 +386,7 @@ export function kpisFor(input: ReportInputs, index: ReportIndex, from: number, t
   const priced = usage.filter((row) => row.costUsd !== null);
   const costOf = (rows: readonly UsageLike[]) => (rows.length ? Math.round(rows.reduce((sum, row) => sum + row.costUsd!, 0) * 100) / 100 : null);
   const costUsd = costOf(priced);
-  const roleOf = (row: UsageLike) => botRole(input.botNames.get(row.botId) ?? row.botName);
+  const roleOf = (row: UsageLike) => botRole(input.botNames.get(row.botId) ?? row.botName, row.botId);
   const costEngineeringUsd = costOf(priced.filter((row) => roleOf(row) === "engineering"));
   const costOperationsUsd = costOf(priced.filter((row) => roleOf(row) === "operations"));
   const costOtherUsd = costOf(priced.filter((row) => roleOf(row) === "other"));

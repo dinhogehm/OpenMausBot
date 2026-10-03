@@ -229,7 +229,9 @@ describe("pieces", () => {
   it("folds a commit's superseded and aborted runs into its failure row (INSP-V r2 #7)", () => {
     const row = { sha: "9".repeat(40), at: 1, timeSource: "log" as const, outcome: "failed" as const, attempts: 2, supersededRuns: 1, abortedRuns: 0, prs: [], issues: [] };
     const plain = text(renderToStaticMarkup(createElement(ReleasesTable, { releases: [row] })));
-    expect(plain).toContain("same commit: superseded runs 1, aborted runs 0");
+    // only the counts that exist: no "aborted runs 0" (INSP-V r3 #5)
+    expect(plain).toContain("same commit: superseded runs 1");
+    expect(plain).not.toContain("aborted runs 0");
     expect(plain).toContain("failed commits: 1 (tries that ran: 2) · runs superseded: 1 · runs aborted: 0");
   });
 

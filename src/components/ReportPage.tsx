@@ -294,6 +294,8 @@ export function DoraPanel({ report }: { report: ProductivityReport }) {
           {usage > 0 && (
             <dd className="tabular-nums text-[12px] text-ink-secondary">
               {t("report.cost.split", { total: formatUsd(k.costUsd), engineering: formatUsd(k.costEngineeringUsd ?? 0), operations: formatUsd(k.costOperationsUsd ?? 0), days: formatCount(usage, 1) })}
+              {/* bots not in the role list never vanish from the sum (INSP-V r3 #4) */}
+              {k.costOtherUsd !== null && k.costOtherUsd !== undefined ? t("report.cost.other", { other: formatUsd(k.costOtherUsd) }) : null}
             </dd>
           )}
           <dd className="text-[11.5px] leading-snug text-ink-secondary">{t("report.cost.def")}</dd>
@@ -427,7 +429,13 @@ function ReleaseRow({ release }: { release: ReportRelease }) {
           <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[11.5px] font-medium", OUTCOME_STYLE[release.outcome])}>{outcome}</span>
           {release.outcome !== "released" && release.outcome !== "declined" && (release.attempts ?? 1) > 1 && <span className="ml-1.5 text-[12px] text-ink-secondary">{t("report.releases.attempts", { count: String(release.attempts) })}</span>}
           {(release.supersededRuns || release.abortedRuns) ? (
-            <span className="mt-0.5 block text-[12px] text-ink-secondary">{t("report.releases.folded", { superseded: formatCount(release.supersededRuns ?? 0), aborted: formatCount(release.abortedRuns ?? 0) })}</span>
+            <span className="mt-0.5 block text-[12px] text-ink-secondary">{t("report.releases.folded", {
+              // only the counts that exist: no "aborted runs 0" (INSP-V r3 #5)
+              runs: [
+                release.supersededRuns ? t("report.releases.foldedSuperseded", { count: formatCount(release.supersededRuns) }) : "",
+                release.abortedRuns ? t("report.releases.foldedAborted", { count: formatCount(release.abortedRuns) }) : "",
+              ].filter(Boolean).join(", "),
+            })}</span>
           ) : null}
           {release.tagNotAdvanced && <span className="mt-0.5 block text-[12px] text-ink-secondary">{t("report.releases.tagManual")}</span>}
         </td>

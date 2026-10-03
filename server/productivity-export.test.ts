@@ -261,6 +261,30 @@ describe("PDF", () => {
     expect(text).toContain("no mínimo 4 PRs");
     expect(text).not.toContain(">=");
     expect(text).not.toContain("»");
+    // the definitions' explanatory "(≥)" leaves no empty "(no mínimo )" behind (INSP-V r3 #1)
+    const flat = text.replace(/\s+/g, " ");
+    expect(flat).not.toContain("(no mínimo )");
+    expect(flat).toContain("torna o total um mínimo.");
+  });
+
+  it("wraps the DORA frequency value instead of cutting it (INSP-V r3 #2)", () => {
+    const flat = pdfText(pdf).replace(/\s+/g, " ");
+    expect(flat).toContain("0,9 por dia útil (3 em 3,5 dias úteis com dados, de 4,5 no período)");
+    expect(flat).not.toMatch(/dias úteis com dados…/);
+  });
+
+  it("blocks the export while the GitHub history walk is incomplete (INSP-V r3 #3)", () => {
+    const fresh = report();
+    const partial = { ...fresh, coverage: { ...fresh.coverage, github: { ...fresh.coverage.github, complete: false } } };
+    expect(exportWarnings(partial)).toEqual(["A varredura do histórico do GitHub ainda não terminou: as contagens de PRs e issues são parciais."]);
+  });
+
+  it("keeps the cost of a bot outside the role list as a visible 'outros' share (INSP-V r3 #4)", () => {
+    const base = scenario();
+    const usage = [...base.usage, { at: new Date(brt("2026-10-01T15:00:00")).toISOString(), botId: "new-bot", botName: "Bot Novo", input: 10, output: 1, costUsd: 0.4 }];
+    const withOther = buildProductivityReport({ ...base, usage, granularity: "day", period: { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") } });
+    expect(withOther.kpis).toMatchObject({ costUsd: 1.15, costOperationsUsd: 0.75, costOtherUsd: 0.4 });
+    expect(executiveSummary(withOther)[4]).toContain("custo US$ 1,15 (engenharia US$ 0,00, operação US$ 0,75, outros (bots fora da lista de papéis) US$ 0,40)");
   });
 
   it("never cuts a list without saying how many are left (INSP-V r1 #12)", () => {
