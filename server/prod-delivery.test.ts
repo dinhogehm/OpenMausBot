@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, mergeStatePt, prOwnership, sessionBranches, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, resumeNeeded, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
+import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, DELIVERY_CHECK_MS, deliveryReport, mergeStatePt, prOwnership, sessionBranches, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, resumeNeeded, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
 
 const SLUG = "dinhogehm/nuria-platform";
 const TAG = "c".repeat(40);
@@ -450,17 +450,14 @@ describe("GitHub's merge state on a chip", () => {
 });
 
 describe("a session idle with its PR still open", () => {
-  it("is picked after hours idle with a PR of its own not merged or closed, once a day", () => {
+  it("holds the line with a PR of its own not merged or closed (the stop ladder says it: stop-ladder.test.ts)", () => {
     const now = 100 * 3_600_000;
-    const make = (id: string, extra: object) => ({ id, title: id, repo: "/r", status: "idle", lastActivityAt: now - IDLE_WITH_PR_MS - 1, delivery: { slug: SLUG, prs: { "9314": { url: "u", number: 9314, state: "open" as const, owned: "branch" as const } } }, ...extra });
-    const waiting = make("c01aae76", {});
-    const merged = make("m", { delivery: { slug: SLUG, prs: { "9315": { url: "u", number: 9315, state: "merged" as const, owned: "branch" as const } } } });
-    const busy = make("b", { status: "running" });
-    const fresh = make("f", { lastActivityAt: now - 60_000 });
-    const told = make("t", { idleReportedAt: now - 3_600_000 });
+    const make = (id: string, extra: object) => ({ id, title: id, repo: "/r", status: "idle", lastActivityAt: now - 6 * 3_600_000, delivery: { slug: SLUG, prs: { "9314": { url: "u", number: 9314, state: "open" as const, owned: "branch" as const } } }, ...extra });
+    expect(resumeNeeded(make("c01aae76", {}), now)?.prs).toEqual([9314]);
+    expect(resumeNeeded(make("m", { delivery: { slug: SLUG, prs: { "9315": { url: "u", number: 9315, state: "merged" as const, owned: "branch" as const } } } }), now)).toBeNull();
+    expect(resumeNeeded(make("b", { status: "running" }), now)).toBeNull();
     // a PR its report only named (never checked as its own) does not count
-    const cited = make("c", { delivery: { slug: SLUG, prs: { "9328": { url: "u", number: 9328, state: "open" as const } } } });
-    expect(idleWithOpenPrs([waiting, merged, busy, fresh, told, cited], now)).toEqual([{ session: waiting, prs: [9314] }]);
+    expect(resumeNeeded(make("c", { delivery: { slug: SLUG, prs: { "9328": { url: "u", number: 9328, state: "open" as const } } } }), now)).toBeNull();
   });
 });
 

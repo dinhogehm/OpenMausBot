@@ -579,11 +579,6 @@ export function openPrsOfSession(session: Pick<DeliverySession, "delivery" | "cl
   return prsOfSession(session).filter((number) => !done.has(number)).sort((a, b) => a - b);
 }
 
-/** A session idle this long with a PR of it still open may be waiting for
- * a word nobody sends ("fico parado até o seu aviso"). */
-export const IDLE_WITH_PR_MS = 6 * 3_600_000;
-const IDLE_REPORT_EVERY_MS = 24 * 3_600_000;
-
 /** A session's own PRs (by its branch, or handed to it), not merged or closed. */
 export function ownPrs(session: Pick<DeliverySession, "delivery">): DeliveryPr[] {
   return Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.owned !== undefined && pr.state !== "merged" && pr.state !== "closed");
@@ -596,15 +591,4 @@ export function ownPrs(session: Pick<DeliverySession, "delivery">): DeliveryPr[]
  * branch) are looked up by the caller (archived-outside.ts). */
 export function prsOfSession(session: Pick<DeliverySession, "delivery" | "claimedPrs">): number[] {
   return [...new Set([...ownPrs(session).map((pr) => pr.number), ...(session.claimedPrs ?? [])])];
-}
-
-/** Sessions idle past IDLE_WITH_PR_MS with their own PRs not yet merged or
- * closed, not reported in the last day, oldest first. */
-export function idleWithOpenPrs<T extends DeliverySession & { lastActivityAt: number; idleReportedAt?: number }>(sessions: readonly T[], now: number): Array<{ session: T; prs: number[] }> {
-  return sessions
-    .filter((session) => session.status === "idle" && now - session.lastActivityAt >= IDLE_WITH_PR_MS)
-    .filter((session) => session.idleReportedAt === undefined || now - session.idleReportedAt >= IDLE_REPORT_EVERY_MS)
-    .map((session) => ({ session, prs: ownPrs(session).map((pr) => pr.number) }))
-    .filter((item) => item.prs.length > 0 && item.session.delivery?.slug)
-    .sort((a, b) => a.session.lastActivityAt - b.session.lastActivityAt);
 }

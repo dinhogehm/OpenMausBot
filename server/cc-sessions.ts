@@ -123,6 +123,9 @@ export interface CcSession {
   claimsReadAt?: number;
   /** When its bot and the Chief were told it must be resumed (once per stop: a later failure or idle tells again). */
   resumeReportedAt?: number;
+  /** When the last word on its stop was said (24 h: the exact block, or
+   * "sugiro arquivar"): nothing more until it moves (stop-ladder.ts). */
+  stopEscalatedAt?: number;
 }
 
 export type CcSurface = "app" | "cli";

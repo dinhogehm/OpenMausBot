@@ -27,7 +27,6 @@ import {
   orphanedIssues,
   reviveScreenFailures,
   screenWaitOf,
-  ageFailedSessions,
   uniqueSessionTitle,
   pickDesktopPending,
   renameAskTitle,
@@ -36,6 +35,7 @@ import {
   type DesktopWorkDeps,
 } from "./desktop-work.ts";
 import { checkArchivedOutside } from "./archived-outside.ts";
+import { climbStopLadder } from "./stop-ladder.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
 
 const LOCAL = "local_0a000004-0000-4000-8000-000000000000";
@@ -746,17 +746,18 @@ describe("old failures and duplicates", () => {
 });
 
 describe("failed sessions left alone, and titles alike", () => {
-  it("reports a session failed for over 24 h once, suggesting to archive it", () => {
+  it("reports a session failed for over 24 h once, suggesting to archive it (now the stop ladder's last step)", async () => {
     const h = harness();
     const session = h.appSession("a");
     session.status = "failed";
     session.failedAt = h.now;
+    const climb = () => climbStopLadder({ ledger: h.ledger, now: () => h.now, release: () => null, report: h.deps.report, chip: h.deps.chip });
     h.advance(23 * 3_600_000);
-    expect(ageFailedSessions(h.deps)).toEqual([]);
+    expect(await climb()).toEqual([]);
     h.advance(2 * 3_600_000);
-    expect(ageFailedSessions(h.deps).map((aged) => aged.id)).toEqual(["a"]);
+    expect((await climb()).map((aged) => aged.session.id)).toEqual(["a"]);
     expect(h.reports.at(-1)!.text).toContain("cc_session_archive");
-    expect(ageFailedSessions(h.deps)).toEqual([]);
+    expect(await climb()).toEqual([]);
   });
 
   it("gives a new session a short suffix when a live one has the same title", () => {

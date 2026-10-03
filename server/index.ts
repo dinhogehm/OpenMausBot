@@ -362,7 +362,6 @@ import {
   issueNumber,
   liveSessionForIssue,
   orphanedIssues,
-  ageFailedSessions,
   uniqueSessionTitle,
   reviveScreenFailures,
   screenWaitOf,
@@ -376,7 +375,8 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, idleWithOpenPrs, mergeStatePt, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
+import { climbStopLadder } from "./stop-ladder.ts";
 import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
@@ -9823,8 +9823,7 @@ const releasePriority = {
   tagCheckAt: 0,
 };
 /** admission-control.sh's state (nuria-platform scripts/admission-control.sh): lease and release intents. */
-// OMB_ADMISSION_DIR: a test's own admission state, never this Mac's
-const ADMISSION_DIR = process.env.OMB_ADMISSION_DIR || join(homedir(), ".nuria", "admission");
+const ADMISSION_DIR = join(homedir(), ".nuria", "admission");
 /** null only when there is no lease (ENOENT); any other read error throws. */
 function readAdmissionLease(): AdmissionLease | null {
   const read = (name: string) => {
@@ -9872,8 +9871,10 @@ function readReleaseIntents(): ReleaseIntent[] | null {
  * admission state cannot be read (undecided, so nobody is told either). A
  * release past the ceiling has likely hung and holds nothing. */
 const releaseHold: { label: string | null; at: number; running: boolean } = { label: null, at: 0, running: false };
+// a test's minute is shorter (OMB_AUTONOMY_MINUTE_MS)
+const RELEASE_HOLD_EVERY_MS = autonomyTestMs("OMB_AUTONOMY_MINUTE_MS") ?? 60_000;
 async function refreshReleaseHold(): Promise<void> {
-  if (releaseHold.running || Date.now() - releaseHold.at < 60_000) return;
+  if (releaseHold.running || Date.now() - releaseHold.at < RELEASE_HOLD_EVERY_MS) return;
   releaseHold.running = true;
   try {
     let label: string | null;
@@ -10013,37 +10014,6 @@ function releaseLoopingNow(label: string): string | null {
   const itemOpen = store.bots.some((bot) => autonomy.ownerPendingOf(bot.id).some((item) => item.key === key));
   const known = failures && (failures.sha.startsWith(sha) || sha.startsWith(failures.sha)) ? failures.sha : sha;
   return releaseInLoop({ sha, failures, seen: releaseWatch.state.seenOf(known), itemOpen, declined: readTail(DECLINED_SHA_FILE, 200).trim() });
-}
-
-/** A session idle for hours with its PR still open is often waiting for a
- * word its owner promised ("fico parado até o seu aviso"): the owner hears
- * it, with the PR's state, once a day. */
-const idleWatch = { running: false, lastAt: 0 };
-async function watchIdleSessionsWithOpenPrs(): Promise<void> {
-  if (idleWatch.running || Date.now() - idleWatch.lastAt < 10 * 60_000) return;
-  idleWatch.running = true;
-  idleWatch.lastAt = Date.now();
-  try {
-    for (const { session, prs } of idleWithOpenPrs(ccLedger.all(), Date.now()).slice(0, 3)) {
-      const states: string[] = [];
-      for (const number of prs.slice(0, 3)) {
-        try {
-          const view = JSON.parse(await execCc("gh", ["pr", "view", String(number), "--repo", session.delivery!.slug!, "--json", "state,mergeStateStatus"])) as { state?: string; mergeStateStatus?: string };
-          // GitHub's own code ("UNKNOWN", "BLOCKED") said in pt-BR, never raw on the chip (R9-followup #5)
-          if (view.state === "OPEN") states.push(`PR #${number} aberta${mergeStatePt(view.mergeStateStatus) ? ` (${mergeStatePt(view.mergeStateStatus)})` : ""}`);
-        } catch { /* gh unavailable: next pass */ }
-      }
-      session.idleReportedAt = Date.now();
-      ccLedger.save();
-      if (!states.length) continue;
-      const hours = Math.round((Date.now() - session.lastActivityAt) / 3_600_000);
-      const last = (session.lastReport ?? "").trim().split("\n").filter(Boolean).at(-1) ?? "";
-      ccChip(session, `parada há ${hours} h com ${states.join(", ")} — esperando um aviso?`, false);
-      ccReport(session, `Claude Code session "${session.title}" (${session.id}) has been idle for ${hours} h with ${states.join(", ")}. It may be waiting for a word from you${last ? ` — its last report ends: "${last.slice(0, 240)}"` : ""}. Resume it with cc_session_send, put its PR back in the queue, or tell the owner why it stopped.`);
-    }
-  } finally {
-    idleWatch.running = false;
-  }
 }
 
 // ── starting a Claude Code session (cc_session_start) ──────────────────
@@ -10455,44 +10425,68 @@ function refreshSessionSignals(): void {
   for (const botId of owners) if (store.bot(botId)) refreshBotRow(botId);
 }
 
-/** A session failed or idle 2 h+ with its PR open holds the line (02/10:
- * 9052/#9332 failed, 8204/#9350 and 9195/#9280 idle). Once per stop, its
- * bot and the Chief hear it as one to RESUME — with the PRs, the reason and
- * the two ways out (resume it, or report the exact block) (S-retomar). */
-function reportSessionsToResume(): void {
-  const now = Date.now();
-  const chief = store.bots.find((bot) => bot.chiefOfStaff);
-  const desk = chief ? chiefDeskThread(chief) : null;
-  // at most 3 per pass, oldest stop first: a first boot over many old stops never floods the bots
-  const due = ccLedger.all()
-    .map((session) => ({ session, resume: resumeOf(session, now) }))
-    .filter((item): item is { session: CcSession; resume: NonNullable<typeof item.resume> } => item.resume !== null && !(item.session.resumeReportedAt !== undefined && item.session.resumeReportedAt >= item.resume.since))
-    .sort((a, b) => a.resume.since - b.resume.since)
-    .slice(0, 3);
-  for (const { session, resume } of due) {
-    session.resumeReportedAt = now;
-    ccLedger.save();
-    const owner = store.bot(session.ownerBotId);
-    const text = `[Sessão para retomar] Claude Code session "${session.title}" (${session.id}) — ${resumeLine(session, resume, now)}.`;
-    if (owner) ccReport(session, text);
-    if (chief && desk && chief.id !== session.ownerBotId && openThreadOf(chief.id, desk)) {
-      autonomy.addReport(chief.id, desk, `${text.replace(/Retome com cc_session_send \(session_id [^)]+\)/, `Cobre de ${owner?.name ?? "o bot dono"} a retomada (cc_session_send na sessão ${session.id})`)} Ela é de ${owner?.name ?? session.ownerBotId}.`);
+/** A stopped session's one ladder (stop-ladder.ts): RETOMAR at 2 h with its
+ * PR open (02/10: 9052/#9332 failed, 8204/#9350 and 9195/#9280 idle), the
+ * exact block — or "sugiro arquivar" when no PR is open — at 24 h, and
+ * nothing more on that stop; never while a release holds it; at most 3 an
+ * hour. It replaces the 6 h "esperando um aviso?" (daily) and the 24 h
+ * failed-aging notice, which spoke over it (INSP-S r1 S-2). */
+const stopLadder = { running: false };
+async function climbStopLadderTick(): Promise<void> {
+  if (stopLadder.running) return;
+  stopLadder.running = true;
+  try {
+    const chief = store.bots.find((bot) => bot.chiefOfStaff);
+    const said = await climbStopLadder({
+      ledger: ccLedger,
+      now: Date.now,
+      release: () => releaseHold.label,
+      // GitHub's word before a PR is said open: the cache may lag a merge
+      confirmOpen: async (session, prs) => {
+        if (!session.delivery?.slug) return null;
+        const open: number[] = [];
+        for (const number of prs) {
+          try {
+            const view = JSON.parse(await execCc("gh", ["pr", "view", String(number), "--repo", session.delivery.slug, "--json", "state"])) as { state?: string };
+            const known = session.delivery.prs[String(number)];
+            if (view.state === "OPEN") open.push(number);
+            else if (known && (view.state === "MERGED" || view.state === "CLOSED")) known.state = view.state === "MERGED" ? "merged" : "closed";
+          } catch {
+            return null; // GitHub unavailable: the record stands
+          }
+        }
+        ccLedger.save();
+        return open;
+      },
+      report: (session, text) => { if (store.bot(session.ownerBotId)) ccReport(session, text); },
+      chip: (session, text, ok) => ccChip(session, text, ok),
+      chief: (session, text) => {
+        const desk = chief ? chiefDeskThread(chief) : null;
+        if (chief && desk && chief.id !== session.ownerBotId && openThreadOf(chief.id, desk)) autonomy.addReport(chief.id, desk, text);
+      },
+      ownerName: (session) => store.bot(session.ownerBotId)?.name ?? "o bot dono",
+    });
+    for (const { session, stage } of said) {
+      const prs = openPrsOfSession(session).map((n) => `#${n}`).join(", ");
+      const who = `its bot${chief && chief.id !== session.ownerBotId && stage !== "archive" ? " and the Chief" : ""} were told`;
+      console.log(stage === "resume"
+        ? `[cc-sessions] ${session.id} must be resumed (${prs}): ${who}`
+        : stage === "escalate" ? `[cc-sessions] ${session.id} stopped 24 h with ${prs} open: the exact block asked, last word on this stop; ${who}` : `[cc-sessions] ${session.id} failed 24 h: archive suggested, last word on this stop`);
     }
-    console.log(`[cc-sessions] ${session.id} must be resumed (${resume.prs.map((n) => `#${n}`).join(", ")}; ${resume.why.slice(0, 80)}): its bot${chief && chief.id !== session.ownerBotId ? " and the Chief" : ""} were told`);
+  } finally {
+    stopLadder.running = false;
   }
 }
 
 async function runDesktopWork(): Promise<void> {
   await refreshReleaseHold();
   refreshSessionSignals();
-  reportSessionsToResume();
+  void climbStopLadderTick().catch((error) => console.error(`[cc-sessions] stop ladder failed: ${error instanceof Error ? error.message : String(error)}`));
   followSurvivingSessions();
   watchStalledSessions(desktopWork);
-  ageFailedSessions(desktopWork);
   await watchBackgroundJobs();
   watchDelivery();
   void preemptCiForReleaseTick().catch((error) => console.error(`[release-priority] ${error instanceof Error ? error.message : String(error)}`));
-  void watchIdleSessionsWithOpenPrs().catch((error) => console.error(`[cc-sessions] idle check failed: ${error instanceof Error ? error.message : String(error)}`));
   drainCcStartQueue();
   void watchArchivedOutside().catch((error) => console.error(`[cc-sessions] archived-outside check failed: ${error instanceof Error ? error.message : String(error)}`));
   void cleanReleasedWorktrees().catch((error) => console.error(`[worktrees] cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
