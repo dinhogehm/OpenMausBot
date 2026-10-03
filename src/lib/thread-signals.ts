@@ -3,7 +3,7 @@
 // that need a look. Red when something is failing or a watcher bot lost its
 // standing watch; the tooltip spells it out.
 import type { WireCcAlert, WireCcSession, WireWatch } from "../../shared/wire";
-import { t } from "@/lib/i18n";
+import { activeLocale, t } from "@/lib/i18n";
 import { sidebarStamp } from "@/lib/message-stamp";
 import { sessionErrorPt } from "../../shared/session-error-pt";
 
@@ -29,6 +29,19 @@ export function ccAlertSummary(alerts: readonly WireCcAlert[] | undefined): { te
   };
 }
 
+/** What holds a screen step, in the order the tooltip says them. */
+const WAIT_REASONS = ["locked", "inUse", "screen", "draft", "queued"] as const;
+
+/** Why a session is to resume, in the reader's language: the kind from the
+ * server, with the error said in pt-BR words when the reader reads pt-BR. A
+ * server older than `kind` sends only its pt-BR `why`. */
+function resumeWhy(resume: NonNullable<WireCcSession["resume"]>): string {
+  if (!resume.kind) return resume.why;
+  const detail = resume.detail ?? "";
+  if (resume.kind === "idle") return t("ccSession.resume.why.idle");
+  return t(`ccSession.resume.why.${resume.kind}`, { detail: resume.kind === "failed" && activeLocale().startsWith("pt") ? sessionErrorPt(detail) : detail });
+}
+
 /** The conversation's Claude Code sessions, each with where it runs: a CLI
  * one is said to be out of the Claude app, so the person knows to follow it
  * here (R8-visual N2). `cli` when any of them is headless. */
@@ -39,27 +52,31 @@ export function ccSessionsSummary(sessions: readonly WireCcSession[] | undefined
   return {
     text: [t("ccSession.indicator"), ...sessions.map((session) => t(session.surface === "cli" ? "ccSession.cliItem" : "ccSession.appItem", { title: session.title, status: t(`ccSession.status.${session.status}`) }))].join("\n"),
     cli: sessions.some((session) => session.surface === "cli"),
-    // R8-dispatch D6: screen steps waiting for the Mac — what, since when, what holds them
+    // R8-dispatch D6: screen steps in the app not done yet — what, since when,
+    // under a heading for what holds them: only "locked" and "inUse" wait for
+    // the Mac; the screen, a draft and the queue are said as they are (INSP-S r1 S-8)
     waiting: waiting.length ? {
       count: waiting.length,
       text: [
         waiting.length === 1 ? t("ccSession.waitingOne") : t("ccSession.waitingMany", { count: waiting.length }),
-        ...waiting.map((session) => t("ccSession.wait.item", {
-          title: session.title,
-          action: t(`ccSession.wait.action.${session.screenWait!.kind}`),
-          when: sidebarStamp(session.screenWait!.since, now),
-          why: t(`ccSession.wait.why.${session.screenWait!.waitingFor}`),
-        })),
+        ...WAIT_REASONS.flatMap((reason) => {
+          const held = waiting.filter((session) => session.screenWait!.waitingFor === reason);
+          return held.length ? [t(`ccSession.wait.head.${reason}`), ...held.map((session) => `  ${t("ccSession.wait.item", {
+            title: session.title,
+            action: t(`ccSession.wait.action.${session.screenWait!.kind}`),
+            when: sidebarStamp(session.screenWait!.since, now),
+          })}`)] : [];
+        }),
       ].join("\n"),
     } : null,
-    // S-retomar: failed or idle 2 h+ holding an open PR of its own
+    // S-retomar: failed or idle 2 h+ holding an open PR of its own; why, in the reader's language
     resume: resume.length ? {
       count: resume.length,
       text: [
         resume.length === 1 ? t("ccSession.resumeOne") : t("ccSession.resumeMany", { count: resume.length }),
         ...resume.map((session) => t("ccSession.resume.item", {
           title: session.title,
-          why: session.resume!.why,
+          why: resumeWhy(session.resume!),
           prs: session.resume!.prs.map((number) => `PR #${number}`).join(", "),
           when: sidebarStamp(session.resume!.since, now),
         })),

@@ -173,6 +173,40 @@ describe("a folded bot's activity rows", () => {
     expect(markup).toContain("#9308");
   });
 
+  // INSP-S r1 S-6: the button's aria-label replaces its children's, and the
+  // icons-only density used to drop the hourglass and the resume mark
+  const sessionsLine = (now: number): Partial<Task> => ({
+    ccSessions: [
+      { sessionId: "a", title: "9353 Comprar assentos", status: "running", surface: "app", screenWait: { kind: "create", since: now - 12 * 60_000, waitingFor: "inUse" } },
+      { sessionId: "b", title: "9052 Tempo de reabertura", status: "failed", surface: "cli", resume: { since: now - 3 * 3_600_000, prs: [9332], why: "falhou: o turno passou de 45 minutos e foi parado", kind: "failed", detail: "the turn ran past 45 minutes and was stopped" } },
+      { sessionId: "c", title: "9195 Filtros", status: "idle", surface: "cli", resume: { since: now - 4 * 3_600_000, prs: [9280], why: "parada: o último turno terminou e nada a retomou", kind: "idle" } },
+    ],
+  });
+
+  it("says the sessions, the steps pending in the app and the ones to resume in the row's accessible name", () => {
+    setLocale("pt-br");
+    try {
+      const markup = row(sessionsLine(Date.now()));
+      const label = /<button[^>]*aria-label="([^"]*)"/.exec(markup)?.[1] ?? "";
+      expect(label).toContain("Sessões do Claude Code desta conversa · 9353 Comprar assentos");
+      expect(label).toContain("1 passo no app Claude pendente · Esperando o Mac: alguém está usando (precisa de 5 s sem mexer) · 9353 Comprar assentos — abrir no app, desde");
+      expect(label).toContain("2 sessões para retomar: seguram PRs abertas · 9052 Tempo de reabertura — falhou: o turno passou de 45 minutos e foi parado · PR #9332");
+      expect(label).not.toContain("\n");
+      // the visible marks: the hourglass, and the resume mark with its count
+      expect(markup).toContain('data-thread-cc-waiting="1"');
+      expect(/<span data-thread-cc-resume="2"[^>]*>.*?<\/span><\/span>/.exec(markup)?.[0]).toMatch(/tabular-nums">2<\/span>/);
+    } finally { setLocale("en"); }
+  });
+
+  it("shows the hourglass and the resume mark in the icons-only density too", () => {
+    const markup = renderToStaticMarkup(createElement(BotActivityRow, {
+      bot: { name: "Chief" }, task: { ...task("c1", "#9311", sessionsLine(Date.now())), queued: false }, iconOnly: true, onJump: () => {},
+    }));
+    expect(markup).toContain("data-thread-cc-waiting");
+    expect(markup).toContain("data-thread-cc-resume");
+    expect(markup).not.toContain("data-activity-title");
+  });
+
   it("keeps a conversation whose automation needs a look reachable while folded", () => {
     const chief = bot("c", "Chief", "c0", [
       task("c0", "Main", {}),

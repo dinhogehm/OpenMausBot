@@ -162,7 +162,9 @@ export function BotActivityRow({ bot, task, iconOnly, onJump, now }: { bot: Pick
   // only unread: the accent bell already says so; no "Unread" label next to it
   const unreadOnly = !waiting && !working && !teammateWait && !task.queued;
   // a row that is here only for its signals says nothing more than they do
-  const label = `${bot.name}: ${task.title}${attention ? ` · ${status}` : ""}${task.unread && (waiting || working || teammateWait || task.queued) ? ` · ${t("task.unread")}` : ""}${watch ? ` · ${watch.text.replace(/\n/g, " · ")}` : ""}${cc ? ` · ${cc.text.replace(/\n/g, " · ")}` : ""}`;
+  // the button's label replaces its children's: every signal it shows is said here (INSP-S r1 S-6)
+  const said = [watch?.text, sessions?.text, sessions?.waiting?.text, sessions?.resume?.text, cc?.text].filter((text): text is string => Boolean(text)).map((text) => ` · ${text.replace(/\n\s*/g, " · ")}`).join("");
+  const label = `${bot.name}: ${task.title}${attention ? ` · ${status}` : ""}${task.unread && (waiting || working || teammateWait || task.queued) ? ` · ${t("task.unread")}` : ""}${said}`;
   const Icon = waiting ? CircleAlert : working ? Loader2 : teammateWait || task.queued ? Clock3 : BellDot;
   return <button type="button" data-sidebar-activity-row={task.threadId} aria-label={label} title={label}
     onClick={onJump}
@@ -172,6 +174,6 @@ export function BotActivityRow({ bot, task, iconOnly, onJump, now }: { bot: Pick
       {!unreadOnly && <span data-activity-status className="min-w-0 max-w-[55%] shrink truncate text-[10px]">{waiting && !needsYou ? t("task.waiting") : status}</span>}
       <SignalIcons watch={watch} cc={cc} sessions={sessions} />
       {task.unread && (waiting || working || teammateWait || task.queued) && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden="true" />}</>}
-    {iconOnly && !attention && <SignalIcons watch={watch} cc={cc} size={12} />}
+    {iconOnly && !attention && <SignalIcons watch={watch} cc={cc} sessions={sessions} size={12} />}
   </button>;
 }

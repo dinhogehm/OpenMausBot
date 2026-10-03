@@ -30,29 +30,69 @@ describe("steps waiting for the Mac, and sessions to resume", () => {
     { sessionId: "c", title: "9052 Tempo de reabertura", status: "failed", surface: "cli", resume: { since: now - 3 * 3_600_000, prs: [9332], why: "falhou: o turno passou de 45 minutos e foi parado" } },
   ], now);
 
-  it("shows an hourglass with the count and says, per session, what waits, since when and why", () => {
+  it("shows an hourglass with the count and says, under what holds them, what is pending and since when", () => {
     const sessions = line();
     const html = renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions }));
     expect(html).toContain('data-thread-cc-waiting="2"');
     expect(html).toMatch(/<span aria-hidden="true" class="text-\[10px\] leading-none tabular-nums">2<\/span>/);
     expect(sessions!.waiting!.text.split("\n")).toEqual([
-      "2 passos no app Claude esperando o Mac",
-      expect.stringMatching(/^9353 Comprar assentos — abrir no app, esperando desde .+: a tela está bloqueada ou apagada$/),
-      expect.stringMatching(/^9311 Chat no ticket — digitar uma mensagem, esperando desde .+: alguém está usando o Mac \(precisa de 5 s sem mexer\)$/),
+      "2 passos no app Claude pendentes",
+      "Esperando o Mac: a tela está bloqueada ou apagada",
+      expect.stringMatching(/^ {2}9353 Comprar assentos — abrir no app, desde .+$/),
+      "Esperando o Mac: alguém está usando (precisa de 5 s sem mexer)",
+      expect.stringMatching(/^ {2}9311 Chat no ticket — digitar uma mensagem, desde .+$/),
     ]);
     // one step: the hourglass alone, said in the singular
     const one = ccSessionsSummary([{ sessionId: "a", title: "x", status: "running", surface: "app", screenWait: { kind: "archive", since: now, waitingFor: "queued" } }], now);
-    expect(one!.waiting!.text).toMatch(/^1 passo no app Claude esperando o Mac\nx — arquivar, esperando desde .+: vai assim que o Mac ficar livre$/);
+    expect(one!.waiting!.text).toMatch(/^1 passo no app Claude pendente\nNa fila: vai assim que o Mac ficar livre\n {2}x — arquivar, desde .+$/);
     expect(renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions: one }))).not.toContain("tabular-nums");
   });
 
-  it("shows the turn-back arrow, amber, for a session holding an open PR, with what to resume", () => {
+  // INSP-S r1 S-8: "esperando o Mac" was said of a screen miss and a draft too
+  it("never says 'waiting for the Mac' of a screen step that did not show, or of a draft", () => {
+    const held = ccSessionsSummary([
+      { sessionId: "a", title: "9298 Regra", status: "running", surface: "app", screenWait: { kind: "send", since: now, waitingFor: "screen" } },
+      { sessionId: "b", title: "9300 Gate", status: "running", surface: "app", screenWait: { kind: "send", since: now, waitingFor: "draft" } },
+    ], now)!.waiting!.text;
+    expect(held).not.toContain("Esperando o Mac");
+    expect(held.split("\n").filter((text) => !text.startsWith("  "))).toEqual([
+      "2 passos no app Claude pendentes",
+      "O app não mostrou o esperado; tenta de novo",
+      "Há texto não enviado no campo da sessão: envie ou apague",
+    ]);
+  });
+
+  it("shows the step-forward mark, amber, with the count, for sessions holding an open PR, with what to resume", () => {
     const sessions = line();
     const html = renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions }));
-    const arrow = /<svg[^>]*data-thread-cc-resume="1"[^>]*>/.exec(html)?.[0] ?? "";
-    expect(arrow).toContain("text-warning");
-    expect(arrow).toContain('role="img"');
+    const mark = /<span data-thread-cc-resume="1"[^>]*>(.*?)<\/span>/.exec(html);
+    expect(mark?.[0]).toContain("text-warning");
+    expect(mark?.[0]).toContain('role="img"');
+    expect(mark?.[0]).toContain('aria-label="1 sessão para retomar');
+    // not the turn-back arrow (it read as "reload/undo")
+    expect(html).toContain("lucide-step-forward");
+    expect(html).not.toMatch(/lucide-rotate-ccw|lucide-refresh/);
+    expect(mark?.[1]).not.toContain("tabular-nums");
     expect(sessions!.resume!.text).toMatch(/^1 sessão para retomar: segura uma PR aberta\n9052 Tempo de reabertura — falhou: o turno passou de 45 minutos e foi parado · PR #9332 · desde .+$/);
+    const two = ccSessionsSummary([
+      { sessionId: "c", title: "9052", status: "failed", surface: "cli", resume: { since: now, prs: [9332], why: "x", kind: "failed", detail: "the turn ran past 45 minutes and was stopped" } },
+      { sessionId: "d", title: "9195", status: "idle", surface: "cli", resume: { since: now, prs: [9280], why: "y", kind: "idle" } },
+    ], now);
+    expect(renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions: two }))).toMatch(/data-thread-cc-resume="2".*tabular-nums">2<\/span>/s);
+    // the reason in the reader's words, from the kind (not the server's pt-BR `why`)
+    expect(two!.resume!.text).toContain("9052 — falhou: o turno passou de 45 minutos e foi parado · PR #9332");
+    expect(two!.resume!.text).toContain("9195 — parada: o último turno terminou e nada a retomou · PR #9280");
+  });
+
+  it("says why to resume in English for an English reader (INSP-S r1 S-8)", () => {
+    setLocale("en");
+    const text = ccSessionsSummary([
+      { sessionId: "c", title: "9052", status: "failed", surface: "cli", resume: { since: now, prs: [9332], why: "falhou: o turno passou de 45 minutos e foi parado", kind: "failed", detail: "the turn ran past 45 minutes and was stopped" } },
+      { sessionId: "e", title: "9280", status: "idle", surface: "cli", resume: { since: now, prs: [9280], why: "parada, bloqueada: aprovar", kind: "blocked", detail: "approve the merge" } },
+    ], now)!.resume!.text;
+    expect(text).toContain("9052 — failed: the turn ran past 45 minutes and was stopped · PR #9332");
+    expect(text).toContain("9280 — stopped, blocked: approve the merge · PR #9280");
+    expect(text).not.toMatch(/falhou|parada/);
   });
 
   it("shows neither when nothing waits and nothing is to resume", () => {
