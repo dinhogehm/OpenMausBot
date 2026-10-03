@@ -380,7 +380,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
-import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
+import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, type ReleaseIntent, releaseLabelSha, releaseOverdueText, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
@@ -9234,9 +9234,13 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   // nuria-platform lote W1: a ci:local of this turn queued behind a release
   // waits for it as long as it takes; that wait is not the turn's, so it is
   // added to the turn's limit instead of cutting it, and said once per release.
+  // INSP-W r1 W-1: up to the same 5 h ceiling as the admission: a release older
+  // than that (or 5 h of excused wait, when its age is unknown) is no longer an
+  // excuse, and the turn is cut again saying the release may have hung.
   const turnStartedAt = Date.now();
   let queuedMs = 0;
   let queuedSince = 0;
+  let overdueReason = "";
   const queuedTold = new Set<string>();
   const noteReleaseQueue = (rows: Parameters<typeof noteDescendants>[1]) => {
     if (!child.pid) return;
@@ -9248,12 +9252,18 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
       // the lease could not be read: undecided, so the wait is not counted
     }
     const now = Date.now();
-    if (queued && !queuedSince) queuedSince = now;
-    if (!queued && queuedSince) {
+    const excusedMs = queuedMs + (queuedSince ? now - queuedSince : 0);
+    if (queued && (queued.overdue || excusedMs >= RELEASE_QUEUE_CEILING_S * 1000) && !overdueReason) {
+      overdueReason = releaseOverdueText(queued.label);
+      ccChip(session, `${overdueReason} — o ci:local desta sessão não espera mais por ele e o turno volta a ter limite`, false);
+    }
+    const excused = Boolean(queued) && !overdueReason;
+    if (excused && !queuedSince) queuedSince = now;
+    if (!excused && queuedSince) {
       queuedMs += now - queuedSince;
       queuedSince = 0;
     }
-    if (queued && !queuedTold.has(queued.label)) {
+    if (queued && excused && !queuedTold.has(queued.label)) {
       queuedTold.add(queued.label);
       ccChip(session, ciQueuedText(queued));
     }
@@ -9269,6 +9279,7 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
       return;
     }
     timedOut = true;
+    if (overdueReason) ccChip(session, `turno cortado: ${overdueReason}`, false);
     child.kill("SIGTERM");
     setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
   };
@@ -9800,28 +9811,30 @@ function readAdmissionLease(): AdmissionLease | null {
   };
   const ownerPid = read("owner.pid");
   if (!ownerPid) return null;
-  return { ownerPid, kind: read("kind") ?? "", label: read("label") ?? "" };
+  // `start` (INSP-W r1 W-1): the owner's lstart, absent in leases written before it
+  return { ownerPid, kind: read("kind") ?? "", label: read("label") ?? "", start: read("start") ?? undefined };
+}
+/** A small admission file, or undefined when it is not there (or unreadable). */
+function readAdmissionFile(...path: string[]): string | undefined {
+  try {
+    return readFileSync(join(ADMISSION_DIR, ...path), "utf8").trim();
+  } catch {
+    return undefined;
+  }
 }
 /** The release's deploy lease (lote W2): held for the whole release, also while the machine is free. */
 function readDeployLease(): DeployLease | null {
-  try {
-    const ownerPid = readFileSync(join(ADMISSION_DIR, "deploy-lease", "owner.pid"), "utf8").trim();
-    if (!ownerPid) return null;
-    let label = "";
-    try {
-      label = readFileSync(join(ADMISSION_DIR, "deploy-lease", "label"), "utf8").trim();
-    } catch {}
-    return { ownerPid, label };
-  } catch {
-    return null;
-  }
+  const ownerPid = readAdmissionFile("deploy-lease", "owner.pid");
+  if (!ownerPid) return null;
+  const startedAt = Number(readAdmissionFile("deploy-lease", "started"));
+  return { ownerPid, label: readAdmissionFile("deploy-lease", "label") ?? "", start: readAdmissionFile("deploy-lease", "start"), startedAt: startedAt > 0 ? startedAt : undefined };
 }
 function readReleaseIntents(): ReleaseIntent[] | null {
   // admission-control.sh creates intents/ on every acquire: missing while a
   // release logs a wait means we look in the wrong place — undecided, not "no release"
   const dir = join(ADMISSION_DIR, "intents");
   try {
-    return readdirSync(dir).filter((name) => /^\d+$/.test(name)).map((name) => ({ pid: Number(name), label: readTail(join(dir, name), 512).trim() }));
+    return readdirSync(dir).filter((name) => /^\d+$/.test(name)).map((name) => ({ pid: Number(name), label: readTail(join(dir, name), 512).trim(), start: readAdmissionFile("intents", `${name}.start`) }));
   } catch {
     return null;
   }

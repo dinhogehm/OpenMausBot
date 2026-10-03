@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePsTable, type PsRow } from "./bg-jobs.ts";
-import { type AdmissionLease, ciLabel, ciQueuedBehindRelease, ciQueuedText, ciOwner, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, releaseBlockedBy, type ReleaseIntent, releaseLabelSha, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
+import { type AdmissionLease, ciLabel, ciOwner, ciQueuedBehindRelease, ciQueuedText, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, RELEASE_QUEUE_CEILING_S, releaseBlockedBy, type ReleaseIntent, releaseLabelSha, releaseOverdueText, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
 import { releaseFailures, releaseInLoop } from "./release-watch.ts";
 
 const log = [
@@ -567,17 +567,17 @@ describe("a session's ci:local queued behind a release is a legitimate wait (lot
   const input = (over: Partial<Parameters<typeof ciQueuedBehindRelease>[0]>) => ({ rows: real, rootPid: 78795, lease: releaseLease, deployLease: null, intents: [], alive, ...over });
 
   it("is queued while a live release holds the machine", () => {
-    expect(ciQueuedBehindRelease(input({}))).toEqual({ label: release, state: "holding" });
+    expect(ciQueuedBehindRelease(input({}))).toEqual({ label: release, state: "holding", ageS: null, overdue: false });
   });
   it("is queued behind a live release intent while another CI holds the machine", () => {
     const ciLease: AdmissionLease = { ownerPid: "40409", kind: "ci-full" };
-    expect(ciQueuedBehindRelease(input({ lease: ciLease, intents: [{ pid: 90001, label: release }] }))).toEqual({ label: release, state: "queued" });
+    expect(ciQueuedBehindRelease(input({ lease: ciLease, intents: [{ pid: 90001, label: release }] }))).toMatchObject({ label: release, state: "queued" });
     // a dead intent is no release: it waits behind the other CI, which the turn limit still covers
     expect(ciQueuedBehindRelease(input({ lease: ciLease, intents: [{ pid: 99999, label: release }] }))).toBeNull();
     expect(ciQueuedBehindRelease(input({ lease: ciLease }))).toBeNull();
   });
   it("is queued behind the deploy lease when the release freed the machine but the CI shares its checkout", () => {
-    expect(ciQueuedBehindRelease(input({ lease: null, deployLease: { ownerPid: "90001", label: release } }))).toEqual({ label: release, state: "holding" });
+    expect(ciQueuedBehindRelease(input({ lease: null, deployLease: { ownerPid: "90001", label: release } }))).toMatchObject({ label: release, state: "holding" });
     expect(ciQueuedBehindRelease(input({ lease: null, deployLease: { ownerPid: "99999", label: release } }))).toBeNull();
   });
   it("is not queued when the session's own CI holds the machine, or when the session runs no CI", () => {
@@ -593,6 +593,28 @@ describe("a session's ci:local queued behind a release is a legitimate wait (lot
     expect(text).toContain("o turno não é cortado");
     expect(ciQueuedText({ label: "", state: "queued" })).toContain("aguardando um release");
   });
+
+  // INSP-W r1 W-1: 38043 is a live process of the real table that started at 15:01:22
+  const liveStart = "Thu Oct 1 15:01:22 2026";
+  it("a pid reused after a crash or reboot (another start) is no release", () => {
+    expect(ciQueuedBehindRelease(input({ lease: { ownerPid: "38043", kind: "release", label: release, start: liveStart } }))).toMatchObject({ state: "holding" });
+    expect(ciQueuedBehindRelease(input({ lease: { ownerPid: "38043", kind: "release", label: release, start: "Mon Sep 28 09:00:00 2026" } }))).toBeNull();
+    const ciLease: AdmissionLease = { ownerPid: "40409", kind: "ci-full" };
+    expect(ciQueuedBehindRelease(input({ lease: ciLease, intents: [{ pid: 38043, label: release, start: "Mon Sep 28 09:00:00 2026" }] }))).toBeNull();
+    expect(ciQueuedBehindRelease(input({ lease: null, deployLease: { ownerPid: "38043", label: release, start: "Mon  Sep 28 09:00:00 2026" } }))).toBeNull();
+    // the same start, spaced as ps pads it, is the same process
+    expect(ciQueuedBehindRelease(input({ lease: null, deployLease: { ownerPid: "38043", label: release, start: "Thu Oct  1 15:01:22 2026" } }))).toMatchObject({ state: "holding" });
+  });
+  it("a release older than the 5 h ceiling is overdue: the wait is no longer excused", () => {
+    const nowMs = Date.UTC(2026, 9, 3, 18, 0, 0);
+    const deployLease = (ageS: number) => ({ ownerPid: "38043", label: release, start: liveStart, startedAt: nowMs / 1000 - ageS });
+    expect(ciQueuedBehindRelease(input({ lease: null, nowMs, deployLease: deployLease(3 * 3600) }))).toEqual({ label: release, state: "holding", ageS: 3 * 3600, overdue: false });
+    expect(ciQueuedBehindRelease(input({ lease: null, nowMs, deployLease: deployLease(RELEASE_QUEUE_CEILING_S) }))).toMatchObject({ ageS: RELEASE_QUEUE_CEILING_S, overdue: true });
+    // the release holding the machine is the same release: its deploy lease gives the age
+    expect(ciQueuedBehindRelease(input({ nowMs, deployLease: deployLease(6 * 3600) }))).toMatchObject({ state: "holding", overdue: true });
+    expect(RELEASE_QUEUE_CEILING_S).toBe(18_000);
+    expect(releaseOverdueText(release)).toBe("release 23a9f93c0 passou de 5 h: verifique se travou");
+  });
 });
 
 describe("the turn's cut waits out a ci:local queued behind a release (lote W1, server/index.ts)", () => {
@@ -600,5 +622,14 @@ describe("the turn's cut waits out a ci:local queued behind a release (lote W1, 
   it("the timer adds the queued time to the limit and never cuts while queued", () => {
     expect(source).toMatch(/const due = turnStartedAt \+ ccTurnTimeoutMs \+ queuedMs \+ \(queuedSince \? now - queuedSince : 0\);\n\s+if \(queuedSince \|\| now < due\)/);
     expect(source).toContain("ccChip(session, ciQueuedText(queued));");
+  });
+  it("past the ceiling (release age, or 5 h of excused wait) the wait stops counting and the cut says why", () => {
+    expect(source).toMatch(/if \(queued && \(queued\.overdue \|\| excusedMs >= RELEASE_QUEUE_CEILING_S \* 1000\) && !overdueReason\) \{\n\s+overdueReason = releaseOverdueText\(queued\.label\);/);
+    expect(source).toContain("const excused = Boolean(queued) && !overdueReason;");
+    expect(source).toContain("if (overdueReason) ccChip(session, `turno cortado: ${overdueReason}`, false);");
+    // the lease's identity is read with it
+    expect(source).toMatch(/start: read\("start"\) \?\? undefined/);
+    expect(source).toMatch(/startedAt: startedAt > 0 \? startedAt : undefined/);
+    expect(source).toMatch(/start: readAdmissionFile\("intents", `\$\{name\}\.start`\)/);
   });
 });
