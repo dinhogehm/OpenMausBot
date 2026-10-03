@@ -10899,6 +10899,18 @@ function settleQueuedAnswers(queueIds: readonly string[] | undefined, outcome: {
   for (const botId of autonomy.settleOwnerPendingQueued((_item, entry) => Boolean(entry.queueId && ids.has(entry.queueId)), outcome)) refreshBotRow(botId);
 }
 
+/** The person's earlier choice on `item` that still waits in the send queue:
+ * settled as replaced, then taken out of the queue so it never runs. */
+const CHOICE_REPLACED = "substituída pela nova escolha";
+function replaceQueuedChoice(botId: string, item: OwnerPending): void {
+  const queued = (item.history ?? []).filter((entry) => entry.queued && entry.kind === "option" && entry.queueId).map((entry) => entry.queueId!);
+  if (!queued.length) return;
+  const ids = new Set(queued);
+  // settled first: the drop listener then finds nothing queued and adds no second reason
+  autonomy.settleOwnerPendingQueued((open, entry) => open.id === item.id && Boolean(entry.queueId && ids.has(entry.queueId)), { error: CHOICE_REPLACED });
+  for (const queueId of queued) cancelSteeredMessage(botId, queueId);
+}
+
 /** The "Lembrar" entries of the items these reports remind, settled. */
 function settleReminders(botId: string, reports: readonly string[], outcome: { delivered: true } | { error: string }): void {
   const reminded = new Set(reports.filter((text) => text.startsWith(REMIND_REPORT_PREFIX)).map((text) => text.slice(REMIND_REPORT_PREFIX.length).trim().split(" ")[0]));
@@ -22809,6 +22821,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         refreshBotRow(bot.id);
         return json(res, 409, { error: message, code: "spend_cap" });
       }
+      // a new decision while the previous one still waits its turn: only the new one
+      // reaches the bot — the old one leaves the queue, said so in the history (INSP-J2 r5 B1)
+      if (answer.kind === "option") replaceQueuedChoice(bot.id, item);
       // with a channel named by the owner, the answer wakes the bot there,
       // saying which item and conversation it is about — the bot's reply
       // reaches the owner where they read (R10-followup #1)

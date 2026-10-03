@@ -281,3 +281,51 @@ it("checks the power before closing, tells 'na fila' from 'enviado', and reminds
     await fixture.close();
   }
 }, 120_000);
+
+// INSP-J2 r5 B1 (redacted): with the bot busy, the owner chose "Já colei",
+// then switched to "Cole você" — both used to reach the bot in one turn.
+it("replaces a choice still in the queue: only the new one reaches the bot", async () => {
+  const prompts = join(tmpdir(), `omb-replace-${process.pid}-${Date.now()}.jsonl`);
+  const gate = join(tmpdir(), `omb-replace-gate-${process.pid}-${Date.now()}`);
+  const env = { ...process.env, FAKE_CLAUDE_MODE: "slow", FAKE_CLAUDE_SLOW_FINISH_GATE: gate, FAKE_CLAUDE_PROMPTS: prompts };
+  const fixture = await launchVerificationServer(env);
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+  const pending = async (botId: string) => ((await api("/api/bots", undefined, "GET")).bots as any[]).find((each) => each.id === botId).tasks.flatMap((task: any) => task.ownerPending ?? []) as any[];
+  let restarted: ChildProcess | undefined;
+  try {
+    const monitor = (await runControlOmb(["new-bot", "--name", "Monitor Chat", "--url", url]) as any).bot;
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+    const thread = monitor.activeTaskId ?? monitor.threadId;
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
+      { id: "o12", botId: monitor.id, threadId: thread, title: "Colar os dois comentários nas issues #NNNN e #MMMM", createdAt: Date.now() - 3_600_000, why: "O Jev barrou.", steps: [{ text: "Cole os comentários" }],
+        options: [{ label: "Já colei", reply: "RESPOSTA-UM: já colei.", recommended: true, why: "Está pronto." }, { label: "Cole você", reply: "RESPOSTA-DOIS: cole você." }] },
+    ] }));
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment(env, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+    // the bot is busy with another turn (held open by the gate)
+    await api(`/api/bots/${monitor.id}/messages`, { text: "Como está o lote?", threadId: thread });
+    await expect.poll(() => (existsSync(prompts) ? readFileSync(prompts, "utf8") : ""), { timeout: 15_000 }).toContain("Como está o lote?");
+    // the first choice waits its turn; the second replaces it
+    await api(`/api/bots/${monitor.id}/owner-pending/o12/reply`, { option: 0, label: "Já colei" });
+    expect((await pending(monitor.id))[0].history.map((entry: any) => [entry.label, entry.queued ?? false])).toEqual([["Já colei", true]]);
+    await api(`/api/bots/${monitor.id}/owner-pending/o12/reply`, { option: 1, label: "Cole você" });
+    const replaced = (await pending(monitor.id))[0].history;
+    expect(replaced[0]).toMatchObject({ label: "Já colei", delivered: false, error: "substituída pela nova escolha" });
+    expect(replaced[0].queued).toBeUndefined();
+    expect(replaced[1]).toMatchObject({ label: "Cole você", queued: true });
+    // the bot is free: only the new choice reaches it
+    writeFileSync(gate, "");
+    await expect.poll(async () => (await pending(monitor.id))[0].history.map((entry: any) => [entry.label, entry.delivered]), { timeout: 30_000, interval: 200 }).toEqual([["Já colei", false], ["Cole você", true]]);
+    await expect.poll(() => readFileSync(prompts, "utf8"), { timeout: 15_000 }).toContain("RESPOSTA-DOIS");
+    expect(readFileSync(prompts, "utf8")).not.toContain("RESPOSTA-UM");
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+    rmSync(gate, { force: true });
+  }
+}, 120_000);
