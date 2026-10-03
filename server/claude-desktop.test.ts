@@ -14,7 +14,11 @@ import {
   reusedWorktreeChip,
   notRepoRoot,
   lastAppWorktreeFolder,
+  lastServerSessionInRoot,
   reusedFolderRefusal,
+  rootAnchorSession,
+  rootFolderRefusal,
+  ROOT_SESSION_HOWTO,
   COMPOSER_MODE,
   isHeaderOf,
   DESKTOP_BRIEF_NOTE,
@@ -182,6 +186,36 @@ describe("createDesktopSession", () => {
     const app = fakeApp({ screens: [OPEN_SESSION, REPO_SCREEN, AFTER_SEND] });
     expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "[OMBX] brief" })).toEqual({ ok: true });
     expect(app.actions).toEqual(["activate", "menu new session", "paste(all) [OMBX] brief", `type  ${DESKTOP_BRIEF_NOTE}`, "key 36"]);
+  });
+
+  // R9-dispatch R9-1b / R10-dispatch R10-1b: New Session from a session in
+  // the repository root, never from the worktree session on screen
+  const ANCHOR_ID = "local_0a0000aa-0000-4000-8000-000000000000";
+  const ANCHOR_TITLE = "Sessão raiz do gerente OpenMausBot";
+  const ANCHOR_SCREEN = swap(R7_SESSION, { "• Automação inatividade não dispara v (nuria-platform": `• ${ANCHOR_TITLE} v (nuria-platform` });
+
+  it("opens the repository's root session first, then New Session, and says so", async () => {
+    const app = fakeApp({ screens: [OPEN_SESSION, ANCHOR_SCREEN, REPO_SCREEN, AFTER_SEND] });
+    const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "[OMBX] brief", anchor: { localId: ANCHOR_ID, title: ANCHOR_TITLE } });
+    expect(step).toEqual({ ok: true, note: `New Session from the root session ${ANCHOR_ID}` });
+    expect(app.actions).toEqual(["activate", `open claude://code/continue?session=${ANCHOR_ID}`, "menu new session", "paste(all) [OMBX] brief", `type  ${DESKTOP_BRIEF_NOTE}`, "key 36"]);
+  });
+
+  it("goes on as before when the root session does not show, and says that too", async () => {
+    const app = fakeApp({ screens: [OPEN_SESSION, OPEN_SESSION, REPO_SCREEN, AFTER_SEND] });
+    const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", anchor: { localId: ANCHOR_ID, title: ANCHOR_TITLE } });
+    expect(step).toEqual({ ok: true, note: `the root session ${ANCHOR_ID} ("${ANCHOR_TITLE}") did not show; New Session from whatever was on screen` });
+    expect(app.actions.slice(0, 3)).toEqual(["activate", `open claude://code/continue?session=${ANCHOR_ID}`, "menu new session"]);
+  });
+
+  it("never opens an anchor that is not an app session id, and stops for the person at the anchor too", async () => {
+    const bad = fakeApp({ screens: [OPEN_SESSION, REPO_SCREEN, AFTER_SEND] });
+    expect(await createDesktopSession(bad.driver, { repoName: "nuria-platform", text: "x", anchor: { localId: "local_x; rm -rf ~" } })).toEqual({ ok: true });
+    expect(bad.actions.some((action) => action.startsWith("open"))).toBe(false);
+    // a fresh input right after the anchor opened: nothing more is done
+    const app = fakeApp({ idle: [120, 120, 120, 0.1], screens: [OPEN_SESSION, ANCHOR_SCREEN] });
+    expect(await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "x", anchor: { localId: ANCHOR_ID, title: ANCHOR_TITLE } })).toMatchObject({ ok: false, human: true });
+    expect(app.actions).toEqual(["activate", `open claude://code/continue?session=${ANCHOR_ID}`]);
   });
 
   it("waits while the person is using the Mac", async () => {
@@ -966,8 +1000,88 @@ describe("questions, folders and reused worktrees in the app's records", () => {
     write("local_0a000004", { createdAt: Date.parse("2026-09-29T22:35:00Z"), cwd: wt("suporte-inatividade-f30521"), isArchived: true, title: "Inatividade do suporte" });
     write("local_0a000005", { createdAt: Date.parse("2026-10-01T12:54:03Z"), cwd: wt("suporte-inatividade-f30521"), worktreeName: "suporte-inatividade-f30521", title: "Gerenciador OpenMausBot" });
     expect(lastAppWorktreeFolder(root)).toMatchObject({ title: "Gerenciador OpenMausBot", earlier: ["Inatividade do suporte"] });
-    // the person then starts (and sends in) a session at the root, worktree on: the app makes a fresh worktree — unblocked, archived or not
+    // a newest session in a worktree of its own (fresh folder): unblocked, archived or not
     write("local_root", { createdAt: Date.parse("2026-10-01T15:00:00Z"), cwd: wt("tarefa-nova-9a8b7c"), worktreeName: null, isArchived: true, title: "ok" });
     expect(lastAppWorktreeFolder(root)).toBeNull();
+  });
+
+  // R10-dispatch R10-1, the real 02/10 10:07 (redacted): the owner's own
+  // session, started from the ROOT with the worktree on, landed in a folder
+  // four earlier sessions had used — the 5th time. The 409 must stay on, say
+  // which folder was picked (originCwd), and ask the gesture that does end it
+  // (root, worktree OFF); that gesture's record then frees the app and is the
+  // root session the server starts new ones from.
+  it("10:07: the owner's root+worktree-on session in a 5th-time folder keeps the 409, which names the picked folder; root+worktree-off frees it", () => {
+    const records = join(root, "org", "acct");
+    mkdirSync(records, { recursive: true });
+    const write = (id: string, extra: object) => writeFileSync(join(records, `${id}.json`), JSON.stringify({ sessionId: id, cliSessionId: `c-${id}`, originCwd: REPO, ...extra }));
+    const REPO = "/Users/o/Projetos/nuria-platform";
+    const F = `${REPO}/.claude/worktrees/atendimento-reaberto-bugs-496989`;
+    write("local_e1", { createdAt: Date.parse("2026-09-30T14:56:00Z"), cwd: F, isArchived: true, title: "Atendimento reaberto bugs" });
+    write("local_e2", { createdAt: Date.parse("2026-10-01T14:12:00Z"), cwd: F, isArchived: true, title: "Tempo de reabertura configurável" });
+    write("local_e3", { createdAt: Date.parse("2026-10-01T14:19:00Z"), cwd: F, isArchived: true, title: "Tempo de reabertura configurável" });
+    write("local_e4", { createdAt: Date.parse("2026-10-01T14:45:00Z"), cwd: F, isArchived: true, title: "Post-release-guard PREVIOUS_COMMIT vazio" });
+    // the owner's session of 10:07 BRT (13:07Z): picked the root, landed in F
+    write("local_c6d395b2", { createdAt: Date.parse("2026-10-02T13:07:29Z"), cwd: F, worktreePath: F, worktreeName: "atendimento-reaberto-bugs-496989", title: "Aumentar usuários Piperun para 50" });
+    const last = lastAppWorktreeFolder(root);
+    expect(last).toMatchObject({ folder: F, title: "Aumentar usuários Piperun para 50", origin: REPO });
+    expect(last!.earlier).toHaveLength(4);
+    const refusal = reusedFolderRefusal(last!, "nuria-platform");
+    expect(refusal).toContain(`, embora a pasta escolhida ao abri-la fosse ${REPO}.`);
+    expect(refusal).toContain("com a worktree DESLIGADA");
+    expect(refusal).not.toMatch(/worktree ligada/i);
+    expect(refusal).toContain("o servidor parte dela para abrir as sessões novas");
+    // no root session yet that is alive: nothing to start from
+    expect(rootAnchorSession(REPO, root)).toBeNull();
+    // the gesture: a new session in the root, worktree off, one message sent
+    write("local_0a0000aa-0000-4000-8000-000000000000", { createdAt: Date.parse("2026-10-02T13:30:00Z"), cwd: REPO, title: "Sessão raiz do gerente OpenMausBot" });
+    expect(lastAppWorktreeFolder(root)).toBeNull();
+    expect(rootAnchorSession(REPO, root)).toEqual({ localId: "local_0a0000aa-0000-4000-8000-000000000000", title: "Sessão raiz do gerente OpenMausBot" });
+    // and the owner's session (by hand, in the root) is not the server's own landing in the root
+    expect(lastServerSessionInRoot(new Set(["local_server1"]), root)).toBeNull();
+  });
+
+  it("picks the newest live root session as the anchor: never an archived one, a worktree, a scheduled run, scratch or another repository", () => {
+    const records = join(root, "org", "acct");
+    mkdirSync(records, { recursive: true });
+    const REPO = "/Users/o/Projetos/nuria-platform";
+    const id = (n: number) => `local_0a0000${String(n).padStart(2, "0")}-0000-4000-8000-000000000000`;
+    const write = (n: number, extra: object) => writeFileSync(join(records, `${id(n)}.json`), JSON.stringify({ sessionId: id(n), cliSessionId: `c-${n}`, ...extra }));
+    write(1, { createdAt: 1_000, cwd: REPO, title: "Raiz antiga" });
+    write(2, { createdAt: 2_000, cwd: REPO, isArchived: true, title: "Raiz arquivada" });
+    write(3, { createdAt: 3_000, cwd: `${REPO}/.claude/worktrees/x-1a2b3c`, title: "Worktree" });
+    write(4, { createdAt: 4_000, cwd: REPO, scheduledTaskId: "routine", title: "Rotina" });
+    write(5, { createdAt: 5_000, cwd: "/Users/o/Projetos/OpenMausBot", title: "Outro repo" });
+    write(6, { createdAt: 6_000, cwd: REPO, worktreePath: `${REPO}/.claude/worktrees/y-9z8y7x`, title: "Raiz com worktree" });
+    writeFileSync(join(records, "local_bad.json"), JSON.stringify({ sessionId: "local_bad", cliSessionId: "c-bad", createdAt: 9_000, cwd: REPO }));
+    expect(rootAnchorSession(REPO, root)).toEqual({ localId: id(1), title: "Raiz antiga" });
+  });
+
+  it("blocks when the server's own last session landed in the root (the worktree option left off), and says the remedy", () => {
+    const records = join(root, "org", "acct");
+    mkdirSync(records, { recursive: true });
+    const REPO = "/Users/o/Projetos/nuria-platform";
+    const write = (id: string, extra: object) => writeFileSync(join(records, `${id}.json`), JSON.stringify({ sessionId: id, cliSessionId: `c-${id}`, ...extra }));
+    write("local_owner", { createdAt: 1_000, cwd: REPO, title: "Sessão raiz do gerente OpenMausBot" });
+    write("local_ours", { createdAt: 2_000, cwd: REPO, title: "9298 Regra de tempo" });
+    const ours = new Set(["local_ours"]);
+    expect(lastServerSessionInRoot(ours, root)).toEqual({ folder: REPO, title: "9298 Regra de tempo" });
+    // a scheduled run after it does not count as the newest work session
+    write("local_routine", { createdAt: 3_000, cwd: REPO, scheduledTaskId: "r1" });
+    expect(lastServerSessionInRoot(ours, root)).not.toBeNull();
+    const text = rootFolderRefusal(lastServerSessionInRoot(ours, root)!, "nuria-platform");
+    expect(text).toContain('a última sessão que o servidor abriu no app Claude ("9298 Regra de tempo") caiu na raiz');
+    expect(text).toContain("LIGAR a opção worktree");
+    expect(text).toContain("Então tente de novo.");
+    expect(rootFolderRefusal({ folder: REPO }, "nuria-platform", true)).toContain("continua nela");
+    // the owner's session in a fresh worktree after it: free again
+    write("local_owner2", { createdAt: 4_000, cwd: `${REPO}/.claude/worktrees/nova-1a2b3c`, worktreeName: "nova-1a2b3c" });
+    expect(lastServerSessionInRoot(ours, root)).toBeNull();
+    expect(lastAppWorktreeFolder(root)).toBeNull();
+  });
+
+  it("asks the same gesture wherever it is said: 409, create refusal and the owner's item", () => {
+    expect(ROOT_SESSION_HOWTO("nuria-platform", "main")).toContain("worktree OFF");
+    expect(ROOT_SESSION_HOWTO("nuria-platform", "main")).not.toMatch(/worktree on\b/);
   });
 });

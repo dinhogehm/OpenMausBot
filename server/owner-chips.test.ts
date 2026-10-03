@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appUnblockTitle, CHIP_VISIBLE, ownerChannelChip, plural, serverRestartedChip, sessionChips, sessionLabel } from "./owner-chips.ts";
+import { APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, appStillBlockedText, appUnblockPending, appUnblockTitle, CHIP_VISIBLE, staleUnblockItem, ownerChannelChip, plural, serverRestartedChip, sessionChips, sessionLabel } from "./owner-chips.ts";
 import { batteryAlert } from "./power.ts";
 import { releaseAttention, releaseAttentionAlert, releaseCausePt, releaseFailedText, releaseLoopPending } from "./release-watch.ts";
 
@@ -58,5 +58,47 @@ describe("what the owner reads on the lot's chips", () => {
     expect(plural(3, "sessão", "sessões")).toBe("3 sessões");
     expect(serverRestartedChip({ interrupted: 0, survived: 1, rerun: 0, asked: 2 })).toBe("Servidor reiniciado: 1 sessão segue rodando, 2 turnos para confirmar");
     expect(serverRestartedChip({ interrupted: 0, survived: 0, rerun: 0, asked: 0 })).toBe("Servidor reiniciado: nada a retomar");
+  });
+});
+
+// R10-dispatch R10-2: the unblock item asks the gesture that fits what the
+// records show now, is rewritten in place when it does not (the legacy o8
+// had only a title), and "Feito, conferir" says why when it did not work.
+describe("the owner's unblock-the-app item", () => {
+  it("asks root + worktree OFF for a reused folder, worktree ON when the server's session landed in the root — same answers", () => {
+    const reused = appUnblockPending("nuria-platform");
+    const root = appUnblockPending("nuria-platform", "root");
+    expect(reused.steps.map((step) => step.text).join(" ")).toContain("deixe a worktree DESLIGADA");
+    expect(reused.steps.map((step) => step.text).join(" ")).toContain("Não arquive essa sessão");
+    expect(root.title).toMatch(/^Abrir no app uma sessão em nuria-platform com a worktree LIGADA/);
+    expect(root.steps.map((step) => step.text).join(" ")).toContain("LIGUE a opção worktree");
+    expect(root.why).toContain("mexe direto no checkout principal");
+    for (const item of [reused, root]) {
+      expect(item.options.map((option) => option.label)).toEqual([APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL]);
+      expect(item.options[0]!.recommended).toBe(true);
+      expect(item.steps.length).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it("rewrites a legacy or out-of-date item, and leaves a current one alone", () => {
+    // the real o8 of 02/10: a title, nothing else
+    expect(staleUnblockItem({}, "nuria-platform", "reused")).toEqual(appUnblockPending("nuria-platform"));
+    // the J item before this lot ("Depois você pode arquivar essa sessão")
+    const older = { ...appUnblockPending("nuria-platform"), steps: appUnblockPending("nuria-platform").steps.map((step, i) => (i === 3 ? { text: "Pronto: … Depois você pode arquivar essa sessão." } : step)) };
+    expect(staleUnblockItem(older, "nuria-platform", "reused")).not.toBeNull();
+    expect(staleUnblockItem(appUnblockPending("nuria-platform"), "nuria-platform", "reused")).toBeNull();
+    // asked "off", then the server's own session landed in the root: it switches
+    expect(staleUnblockItem(appUnblockPending("nuria-platform"), "nuria-platform", "root")).toEqual(appUnblockPending("nuria-platform", "root"));
+  });
+
+  it("'Feito, conferir' still blocked: says what the records show and the likely slip, in pt-BR", () => {
+    const reused = appStillBlockedText({ kind: "reused", last: { folder: "/r/.claude/worktrees/atendimento-reaberto-bugs-496989", title: "Aumentar usuários Piperun para 50" } }, "nuria-platform");
+    expect(reused).toMatch(/^Ainda não destravou: a sessão mais recente do app \("Aumentar usuários Piperun para 50"\) está em \/r\/\.claude\/worktrees\/atendimento-reaberto-bugs-496989/);
+    expect(reused).toContain("espere alguns segundos e confira de novo");
+    expect(reused).toContain("refaça com ela desligada, na raiz de nuria-platform");
+    const root = appStillBlockedText({ kind: "root", last: { folder: "/r", title: "9298 Regra" } }, "nuria-platform");
+    expect(root).toContain("ainda é a do servidor (\"9298 Regra\"), na raiz de nuria-platform, sem worktree");
+    expect(root).toContain("confira se a opção worktree estava ligada");
+    expect(`${reused} ${root}`).not.toMatch(JARGON);
   });
 });

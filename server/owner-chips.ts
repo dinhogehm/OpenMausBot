@@ -79,7 +79,7 @@ export const appUnblockPending = (repoName: string, kind: "reused" | "root" = "r
   steps: [
     { text: "Abra o app Claude e, no menu Arquivo, escolha Nova sessão." },
     { text: `Escolha a pasta raiz do repositório ${repoName} e deixe a worktree DESLIGADA: a sessão tem de abrir na raiz, não numa pasta de .claude/worktrees.` },
-    { text: "Envie uma mensagem curta, por exemplo \"ok\", e espere a resposta: o app só grava a sessão depois do primeiro envio." },
+    { text: "Envie uma mensagem curta, por exemplo \"Sessão raiz do gerente OpenMausBot\", e espere a resposta: o app só grava a sessão depois do primeiro envio, e um título com palavras deixa o servidor reconhecê-la na tela." },
     { text: "Pronto: com a sessão mais nova na raiz, o servidor volta a abrir sessões no app e fecha este item sozinho. Não arquive essa sessão: o servidor parte dela para abrir as sessões novas." },
   ],
   options: [
