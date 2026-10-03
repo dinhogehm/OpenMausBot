@@ -205,6 +205,8 @@ describe("a folded bot's activity rows", () => {
     expect(markup).toContain("data-thread-cc-waiting");
     expect(markup).toContain("data-thread-cc-resume");
     expect(markup).not.toContain("data-activity-title");
+    // the icons sidebar is 80 px: the marks wrap to a second line instead of spilling out
+    expect(/<button[^>]*class="([^"]*)"/.exec(markup)?.[1]).toContain("flex-wrap");
   });
 
   it("keeps a conversation whose automation needs a look reachable while folded", () => {

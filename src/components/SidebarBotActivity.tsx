@@ -168,7 +168,7 @@ export function BotActivityRow({ bot, task, iconOnly, onJump, now }: { bot: Pick
   const Icon = waiting ? CircleAlert : working ? Loader2 : teammateWait || task.queued ? Clock3 : BellDot;
   return <button type="button" data-sidebar-activity-row={task.threadId} aria-label={label} title={label}
     onClick={onJump}
-    className={cn("flex min-h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] outline-none hover:bg-raised/50 focus-visible:ring-1 focus-visible:ring-accent/60", iconOnly && "justify-center", waiting ? "text-warning" : "text-ink-secondary")}>
+    className={cn("flex min-h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] outline-none hover:bg-raised/50 focus-visible:ring-1 focus-visible:ring-accent/60", iconOnly && "flex-wrap justify-center gap-y-0.5", waiting ? "text-warning" : "text-ink-secondary")}>
     {attention && <Icon size={12} aria-hidden="true" className={cn("shrink-0", working && "animate-spin text-success", teammateWait && "text-warning", task.unread && !waiting && !working && !teammateWait && "text-accent")} />}
     {!iconOnly && <><span data-activity-title className="min-w-0 flex-1 truncate">{displayThreadTitle(task.title)}</span>
       {!unreadOnly && <span data-activity-status className="min-w-0 max-w-[55%] shrink truncate text-[10px]">{waiting && !needsYou ? t("task.waiting") : status}</span>}
