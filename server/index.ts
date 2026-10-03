@@ -246,7 +246,10 @@ import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-g
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { openCodeProviderKeysAllowed, setOpenCodeProviderKeyPolicy } from "./drivers/acp/opencode-go.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
-import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, toolCallsWith, userTextMessagesWith } from "./message-db.ts";
+import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, toolCallsWith, userTextMessagesWith, digestTimings, oldestDigestAt } from "./message-db.ts";
+import { oldestUsageAt, ProductivityCollector } from "./productivity-collector.ts";
+import { executiveSummary, exportFileName, reportMarkdown, reportPdf } from "./productivity-export.ts";
+import { exportReadiness, GRANULARITIES, resolveReportPeriod, type Granularity } from "../shared/productivity.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, parseUntil, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
 import { chiefForBot, deskThread, OwnerWroteAt, ownerWrote, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
@@ -8048,6 +8051,23 @@ const autonomy = new BotAutonomy({
   turnGapMs: autonomyTestMs("OMB_AUTONOMY_TURN_GAP_MS"),
 });
 const autonomyDispatching = new Set<string>();
+// ── the productivity report (lot V) ──
+// Collected only where the Nuria release runs (its ~/.nuria state exists) or
+// when asked (OMB_PRODUCTIVITY=1); OMB_PRODUCTIVITY=0 turns it off. Read-only
+// everywhere: the release log, GitHub through gh, this machine's own ledgers.
+const productivityEnabled = process.env.OMB_PRODUCTIVITY === "1" || (process.env.OMB_PRODUCTIVITY !== "0" && existsSync(join(homedir(), ".nuria")));
+const productivity = new ProductivityCollector({
+  dataDir: DATA_DIR,
+  logs: { gz: `${RELEASE_OUT_LOG}.1.gz`, out: RELEASE_OUT_LOG, err: RELEASE_ERR_LOG },
+  ownerPending: () => ({ open: autonomy.allOwnerPending(), resolved: autonomy.resolvedOwnerPendingOf() }),
+  botNames: () => new Map(store.bots.map((bot) => [bot.id, bot.name])),
+  usage: (range) => readUsage(DATA_DIR, range),
+  digests: digestTimings,
+  oldestDigestAt,
+  usageFrom: () => oldestUsageAt(DATA_DIR),
+  log: (line) => console.log(line),
+});
+if (productivityEnabled) productivity.start();
 /** What a conversation's own line in "Precisa de você" asks, raw (the goal's
  * detail, or the bot's reply that waits on the person); null when none. */
 function threadOwnerAskRaw(threadId: string): { text: string; at: number } | null {
@@ -25226,6 +25246,49 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         budget: spendState(cfg, DATA_DIR),
         billing: prices ? { currency: cfg.billing?.currency ?? "USD" } : null,
       });
+    }
+
+    // ── the report's targets: empty by default; a target lights its KPI ──
+    if (path === "/api/reports/productivity/goals" && (method === "GET" || method === "PUT")) {
+      if (method === "GET") return json(res, 200, { goals: productivity.getGoals() });
+      const body = await readBody(req, 4096);
+      if (!body || typeof body !== "object") return json(res, 400, { error: "send the goals as a JSON object" });
+      return json(res, 200, { goals: productivity.setGoals(body.goals ?? body) });
+    }
+    // ── the productivity report (lot V): production throughput for the board ──
+    // Read-only, built from the collector's cache (never waits on GitHub);
+    // `refresh=1` asks for a sync in the background. Admin scope by default.
+    if (method === "GET" && (path === "/api/reports/productivity" || path === "/api/reports/productivity.md" || path === "/api/reports/productivity.pdf")) {
+      const granularity = (url.searchParams.get("granularity") ?? "day") as Granularity;
+      if (!GRANULARITIES.includes(granularity)) return json(res, 400, { error: "granularity must be hour, day or month" });
+      const rawCount = url.searchParams.get("count");
+      const count = rawCount === null ? null : Number(rawCount);
+      if (count !== null && (!Number.isInteger(count) || count <= 0)) return json(res, 400, { error: "count must be a positive whole number" });
+      const resolved = resolveReportPeriod({ granularity, from: url.searchParams.get("from"), to: url.searchParams.get("to"), count, now: Date.now() });
+      if ("error" in resolved) return json(res, 400, { error: resolved.error });
+      if (url.searchParams.get("refresh") === "1" && productivityEnabled) productivity.requestSync();
+      const report = { ...productivity.report(granularity, resolved.period), enabled: productivityEnabled };
+      report.summary = { "pt-BR": executiveSummary(report, "pt-BR"), en: executiveSummary(report, "en") };
+      if (path.endsWith(".md") || path.endsWith(".pdf")) {
+        const pdf = path.endsWith(".pdf");
+        // the board never gets a stale or unverified report by accident: the
+        // screen syncs first ("Atualizar e exportar") or the owner insists
+        // (force=1), and then the export carries the warning on its first page
+        const readiness = exportReadiness(report, report.generatedAt);
+        if (!readiness.ready && url.searchParams.get("force") !== "1") {
+          res.setHeader("cache-control", "no-store");
+          return json(res, 409, { error: "export-blocked", blockers: readiness.blockers, ageMs: readiness.ageMs });
+        }
+        res.writeHead(200, {
+          "content-type": pdf ? "application/pdf" : "text/markdown; charset=utf-8",
+          "content-disposition": `attachment; filename="${exportFileName(report, pdf ? "pdf" : "md")}"`,
+          "cache-control": "no-store",
+        });
+        res.end(pdf ? reportPdf(report) : reportMarkdown(report));
+        return;
+      }
+      res.setHeader("cache-control", "no-store");
+      return json(res, 200, report);
     }
 
     // ── provider key check: does a pasted or saved key open the provider's door ──

@@ -1490,6 +1490,11 @@ export class BotAutonomy {
     return this.ownerPending.filter((open) => open.botId === botId);
   }
 
+  /** Every open item, all bots (the productivity report's snapshot, lot V). */
+  allOwnerPending(): OwnerPending[] {
+    return [...this.ownerPending];
+  }
+
   /** Past their time, not kept, not yet reported. */
   overduePromises(): BotPromise[] {
     const at = this.now();
