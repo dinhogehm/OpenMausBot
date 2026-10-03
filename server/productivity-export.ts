@@ -127,8 +127,8 @@ export function boardKpis(report: ProductivityReport): BoardKpi[] {
   const releaseOk = releaseComparable(report);
   const oldRepo = beforeRepo(report);
   const goals = report.goals ?? {};
-  const kpi = (input: { key: string; label: string; value: string; detail?: string; short: string; current: number | null; previous: number | null; better: "up" | "down" | "none"; release?: boolean; github?: boolean; kind?: "count" | "duration" | "percent"; samples?: { current: number; previous: number }; previousText?: string; goal?: { key: GoalKey; value: number | null; target: string } }): BoardKpi => {
-    const comparison = compareKpi(input.current, input.previous, { comparable: input.release ? releaseOk : true, beforeRepo: input.github ? oldRepo : false, samples: input.samples });
+  const kpi = (input: { key: string; label: string; value: string; detail?: string; short: string; current: number | null; previous: number | null; better: "up" | "down" | "none"; release?: boolean; github?: boolean; kind?: "count" | "duration" | "percent"; samples?: { current: number; previous: number }; base?: number; previousText?: string; goal?: { key: GoalKey; value: number | null; target: string } }): BoardKpi => {
+    const comparison = compareKpi(input.current, input.previous, { comparable: input.release ? releaseOk : true, beforeRepo: input.github ? oldRepo : false, samples: input.samples, base: input.base });
     const good = comparison.kind !== "trend" || comparison.delta === 0 || input.better === "none" ? null : (comparison.delta > 0) === (input.better === "up");
     const status = input.goal ? goalStatus(input.goal.key, input.goal.value, goals) : null;
     const previousText = input.previousText ?? (comparison.kind === "none" ? "—" : input.previous === null ? "—" : input.kind === "duration" ? formatDuration(input.previous) : input.kind === "percent" ? formatPercent(input.previous) : formatNumber(input.previous));
@@ -146,7 +146,7 @@ export function boardKpis(report: ProductivityReport): BoardKpi[] {
     kpi({ key: "deliveries", label: "Entregas em produção", value: formatNumber(k.deliveries), current: k.deliveries, previous: p.deliveries, better: "up", release: true,
       detail: `${lowerBound ? "≥" : ""}${pluralPt(k.deliveredPrs, "PR", "PRs")} e ${lowerBound ? "≥" : ""}${pluralPt(k.deliveredIssues, "issue concluída", "issues concluídas")} no ar${lowerBound ? ` · ${pluralPt(k.unknownContentReleases, "release sem conteúdo lido", "releases sem conteúdo lido")}` : ""}`,
       short: "avanços da tag de produção (fim do deploy)" }),
-    kpi({ key: "deployFrequency", label: "Frequência de deploy", value: k.deploysPerBusinessDay === null ? "—" : `${formatNumber(k.deploysPerBusinessDay, "pt-BR", 1)}/dia útil`, current: k.deploysPerBusinessDay, previous: p.deploysPerBusinessDay, better: "up", release: true,
+    kpi({ key: "deployFrequency", label: "Frequência de deploy", value: k.deploysPerBusinessDay === null ? "—" : `${formatNumber(k.deploysPerBusinessDay, "pt-BR", 1)}/dia útil`, current: k.deploysPerBusinessDay, previous: p.deploysPerBusinessDay, better: "up", release: true, base: p.deliveries,
       detail: `${formatNumber(k.deliveries)} em ${formatNumber(k.businessDays, "pt-BR", 1)} dias úteis`, short: "DORA: entregas por dia útil (seg–sex)",
       goal: goals.deploysPerBusinessDay !== undefined ? { key: "deploysPerBusinessDay", value: k.deploysPerBusinessDay, target: `≥ ${formatNumber(goals.deploysPerBusinessDay, "pt-BR", Number.isInteger(goals.deploysPerBusinessDay) ? 0 : 1)}/dia útil` } : undefined }),
     kpi({ key: "successRate", label: "Sucesso de release", value: formatPercent(k.releaseSuccessRate), current: k.releaseSuccessRate, previous: p.releaseSuccessRate, better: "up", release: true, kind: "percent",

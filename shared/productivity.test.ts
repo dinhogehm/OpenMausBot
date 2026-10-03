@@ -58,6 +58,10 @@ describe("comparisons (INSP-V r1 #7)", () => {
     expect(compareKpi(null, 4)).toEqual({ kind: "none", reason: "no-base" });
     // a median of 9 samples gets no trend, only the previous value
     expect(compareKpi(30, 90, { samples: { current: 9, previous: 40 } })).toEqual({ kind: "absolute", previous: 90 });
+    // a rate on enough runs trends though it is below 5; a ratio is judged by the count under it
+    expect(compareKpi(0.9, 0.8, { samples: { current: 12, previous: 10 } })).toMatchObject({ kind: "trend" });
+    expect(compareKpi(1.2, 0.8, { base: 16 })).toMatchObject({ kind: "trend" });
+    expect(compareKpi(1.2, 0.2, { base: 1 })).toEqual({ kind: "absolute", previous: 0.2 });
   });
 });
 

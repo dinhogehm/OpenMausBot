@@ -511,12 +511,18 @@ export type Comparison =
  * %), only the previous absolute value (base under MIN_TREND_BASE, or fewer
  * than MIN_TREND_SAMPLES samples for a median), or nothing (no comparable
  * source, or a previous period before the repository existed). */
-export function compareKpi(current: number | null, previous: number | null, options: { comparable?: boolean; beforeRepo?: boolean; samples?: { current: number; previous: number } } = {}): Comparison {
+export function compareKpi(current: number | null, previous: number | null, options: { comparable?: boolean; beforeRepo?: boolean; samples?: { current: number; previous: number }; base?: number } = {}): Comparison {
   if (options.beforeRepo) return { kind: "none", reason: "before-repo" };
   if (options.comparable === false) return { kind: "none", reason: "not-comparable" };
   if (current === null || previous === null) return { kind: "none", reason: "no-base" };
-  if (options.samples && (options.samples.current < MIN_TREND_SAMPLES || options.samples.previous < MIN_TREND_SAMPLES)) return { kind: "absolute", previous };
-  if (Math.abs(previous) < MIN_TREND_BASE) return { kind: "absolute", previous };
+  // a median or a rate is judged by how many samples it stands on, not by its own size
+  if (options.samples) {
+    if (options.samples.current < MIN_TREND_SAMPLES || options.samples.previous < MIN_TREND_SAMPLES) return { kind: "absolute", previous };
+  } else if (Math.abs(options.base ?? previous) < MIN_TREND_BASE) {
+    // a ratio (deploys per business day) is judged by the count under it
+    return { kind: "absolute", previous };
+  }
+  if (previous === 0) return { kind: "absolute", previous };
   return { kind: "trend", delta: current - previous, ratio: (current - previous) / previous };
 }
 
