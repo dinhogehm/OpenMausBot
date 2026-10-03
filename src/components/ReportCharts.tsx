@@ -14,9 +14,18 @@ export interface ChartSeries {
   /** A CSS colour, normally a skin token: var(--color-accent-text). */
   color: string;
   value: (bucket: ReportBucket) => number | null;
-  /** Production numbers: unknown (not zero) where no release source covers the bucket. */
-  releaseMetric?: boolean;
+  /** Where the number comes from: unknown (not zero) where that source does not
+   * cover the bucket — the release history for production numbers, this
+   * computer's usage ledger for the bots'. */
+  source?: "release" | "usage";
   format?: (value: number) => string;
+}
+
+/** The series has no source for this bucket: its value is unknown, not zero. */
+export function unknownAt(series: ChartSeries, bucket: ReportBucket): boolean {
+  if (series.source === "release") return bucket.releaseCoverage === "none";
+  if (series.source === "usage") return bucket.usageCoverage === "none" || series.value(bucket) === null;
+  return false;
 }
 
 const PLOT_HEIGHT = 168;
@@ -90,7 +99,7 @@ function DataTable({ id, buckets, granularity, series, caption }: { id: string; 
               <tr key={bucket.key} className="border-t border-hairline/30">
                 <th scope="row" className="px-2 py-1 font-normal text-ink">{bucketName(bucket, granularity)}</th>
                 {series.map((each) => {
-                  const unknown = each.releaseMetric && bucket.releaseCoverage === "none";
+                  const unknown = unknownAt(each, bucket);
                   const value = each.value(bucket);
                   return <td key={each.key} className="px-2 py-1 text-right tabular-nums text-ink">{unknown ? t("report.chart.unknown") : value === null ? "—" : (each.format ?? formatCount)(value)}</td>;
                 })}
@@ -110,7 +119,7 @@ export function BarChart({ id, title, summary, buckets, granularity, series, now
   const [box, width] = useWidth(640);
   const [hover, setHover] = useState<number | null>(null);
   const plotWidth = Math.max(120, width - AXIS_LEFT - 4);
-  const max = useMemo(() => Math.max(0, ...buckets.flatMap((bucket) => series.map((each) => (each.releaseMetric && bucket.releaseCoverage === "none" ? 0 : each.value(bucket) ?? 0)))), [buckets, series]);
+  const max = useMemo(() => Math.max(0, ...buckets.flatMap((bucket) => series.map((each) => (unknownAt(each, bucket) ? 0 : each.value(bucket) ?? 0)))), [buckets, series]);
   const { ceiling, step } = niceScale(max);
   const slot = plotWidth / Math.max(1, buckets.length);
   const barWidth = Math.max(1.5, Math.min(22, (slot * 0.74) / series.length));
@@ -118,7 +127,9 @@ export function BarChart({ id, title, summary, buckets, granularity, series, now
   const y = (value: number) => TOP + PLOT_HEIGHT - (value / ceiling) * PLOT_HEIGHT;
   const ticks: number[] = [];
   for (let tick = 0; tick <= ceiling + 1e-9; tick += step) ticks.push(Math.round(tick * 1000) / 1000);
-  const noSource = series.some((each) => each.releaseMetric) && buckets.some((bucket) => bucket.releaseCoverage === "none" && bucket.start < now);
+  // a bucket is hatched only when every series in it lacks a source
+  const allUnknown = (bucket: ReportBucket) => bucket.start < now && series.every((each) => unknownAt(each, bucket));
+  const noSource = buckets.some(allUnknown);
   const hovered = hover === null ? null : buckets[hover];
   return (
     <figure aria-labelledby={`${id}-title`} className="min-w-0 rounded-xl border border-hairline/40 bg-card p-4">
@@ -143,14 +154,14 @@ export function BarChart({ id, title, summary, buckets, granularity, series, now
           ))}
           {buckets.map((bucket, index) => {
             const left = AXIS_LEFT + index * slot;
-            const unknown = series.some((each) => each.releaseMetric) && bucket.releaseCoverage === "none" && bucket.start < now;
+            const unknown = allUnknown(bucket);
             const groupLeft = left + (slot - barWidth * series.length) / 2;
             return (
               <g key={bucket.key}>
                 {hover === index && <rect x={left} y={TOP} width={slot} height={PLOT_HEIGHT} fill="var(--color-control)" opacity={0.6} />}
                 {unknown && <rect x={left + slot * 0.08} y={TOP} width={slot * 0.84} height={PLOT_HEIGHT} fill={`url(#${id}-hatch)`} />}
                 {series.map((each, position) => {
-                  if (each.releaseMetric && unknown) return null;
+                  if (unknownAt(each, bucket)) return null;
                   const value = each.value(bucket) ?? 0;
                   if (value <= 0) return null;
                   const top = y(value);
@@ -169,7 +180,7 @@ export function BarChart({ id, title, summary, buckets, granularity, series, now
             style={{ left: AXIS_LEFT + hover! * slot + (hover! > buckets.length / 2 ? -6 : slot + 6) }}>
             <p className="mb-1 font-medium text-ink">{bucketName(hovered, granularity)}</p>
             {series.map((each) => {
-              const unknown = each.releaseMetric && hovered.releaseCoverage === "none";
+              const unknown = unknownAt(each, hovered);
               const value = each.value(hovered);
               return (
                 <p key={each.key} className="flex items-center justify-between gap-3 text-ink-secondary">
@@ -244,6 +255,7 @@ export function LineChart({ id, title, summary, buckets, granularity, series, no
           </div>
         )}
       </div>
+      {base > 0 && <p className="mt-1 text-[11.5px] text-ink-secondary">{t("report.chart.axisFrom", { value: formatCount(base) })}</p>}
       <DataTable id={id} buckets={past} granularity={granularity} series={[series]} caption={title} />
     </figure>
   );

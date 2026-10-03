@@ -1,58 +1,92 @@
 // The "Relatório" screen (lot V), rendered from a report the real server code
-// builds over the shared fixture: summary, KPI cards with their trend and
-// definition, charts with their description and data table, the releases
-// with what they carried, backlog, bots, coverage — in pt-BR and English.
+// builds over the shared fixture: the period in the title, the summary, the
+// board's KPI cards with their comparison (one rule, the exports' rule), the
+// definition beside each and a target light only when set, DORA and cost per
+// delivery, charts with their description and data table, the releases with
+// what they carried (superseded and aborted apart), backlog, bots, coverage —
+// in pt-BR and English.
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it } from "vitest";
 import { setLocale } from "@/lib/i18n";
-import { deltaTone, formatDelta, formatSpan, reportPath } from "@/lib/productivity";
+import { formatSpan, formatTrend, reportPath } from "@/lib/productivity";
 import { buildProductivityReport } from "../../server/productivity-report";
 import { executiveSummary } from "../../server/productivity-export";
 import { brt, CLIENT_NAME, scenario } from "../../server/testing/productivity-fixture";
-import type { ProductivityReport } from "../../shared/productivity";
-import { KpiCard, ReleasesTable, ReportView } from "./ReportPage";
+import { compareKpi, type ProductivityReport, type ReportGoals } from "../../shared/productivity";
+import { DeltaLine, KpiCard, ReleasesTable, ReportView } from "./ReportPage";
 import { niceScale } from "./ReportCharts";
 
-function report(period = { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") }): ProductivityReport {
-  const built = buildProductivityReport({ ...scenario(), granularity: "day", period });
+function report(period = { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") }, goals: ReportGoals = {}): ProductivityReport {
+  const built = buildProductivityReport({ ...scenario(), goals, granularity: "day", period });
   return { ...built, enabled: true, summary: { "pt-BR": executiveSummary(built, "pt-BR"), en: executiveSummary(built, "en") } };
 }
 
-const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, "\"").replace(/&#x27;/g, "'").replace(/\s+/g, " ");
+const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, "\"").replace(/&#x27;/g, "'").replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/\s+/g, " ");
+
+const render = (value: ProductivityReport, locale: "pt-BR" | "en" = "pt-BR") => {
+  setLocale(locale);
+  const html = renderToStaticMarkup(createElement(ReportView, { report: value }));
+  setLocale("en");
+  return html;
+};
 
 afterEach(() => setLocale("en"));
 
 describe("report screen (pt-BR)", () => {
-  setLocale("pt-BR");
-  const html = renderToStaticMarkup(createElement(ReportView, { report: report() }));
-  setLocale("en");
+  const html = render(report());
   const plain = text(html);
 
-  it("opens with the five-line executive summary", () => {
+  it("names the period in the title and opens with the five-line summary", () => {
+    expect(plain).toContain("Produtividade de engenharia — 28/09 a 02/10/2026");
     expect(plain).toContain("Resumo executivo");
     expect(html.match(/<ol[^>]*>[\s\S]*?<\/ol>/)![0].match(/<li>/g)).toHaveLength(5);
-    expect(plain).toContain("Produção: 3 entregas (sem base comparável), com 2 PRs e 2 issues no ar");
+    expect(plain).toContain("Produção: 3 entregas (sem base comparável), 0,7 por dia útil, com ≥4 PRs e ≥2 issues concluídas no ar");
   });
 
   it("says where no release source exists, as unknown — not zero", () => {
     expect(html).toContain('role="note"');
-    expect(plain).toContain("Nenhuma fonte de releases cobre 28/09/2026 – 29/09/2026: entregas e falhas desse trecho são desconhecidas, não zero.");
     expect(plain).toContain("Sem base comparável: a fonte de releases não cobre os dois períodos");
   });
 
-  it("shows each KPI with its value, detail, trend and exact definition", () => {
-    for (const label of ["Entregas em produção", "PRs mergeadas", "Issues resolvidas", "Lead time issue → produção", "Issues P0/P1 abertas", "PRs esperando o gate", "Releases falhados", "Produção travada"]) {
+  it("shows the board's eight KPIs, each with its definition beside it and behind its button", () => {
+    for (const label of ["Entregas em produção", "Frequência de deploy", "Sucesso de release", "Lead time issue → produção", "PRs mergeadas", "Issues resolvidas", "Issues P0/P1 abertas", "Pipeline de release parado (produção no ar)"]) {
       expect(plain).toContain(label);
       expect(html).toContain(`aria-label="O que “${label}” conta"`);
     }
-    expect(plain).toContain("2 PRs e 2 issues foram ao ar");
-    expect(plain).toContain("mais 1 carriers de release");
-    expect(plain).toContain("+3 vs. período anterior (melhor)");
+    expect(plain).not.toContain("Produção travada");
+    // the short definition is on the card, not only in the tooltip
+    expect(plain).toContain("avanços da tag de produção (fim do deploy)");
+    expect(plain).toContain("DORA: entregas por dia útil (seg–sex)");
+    expect(plain).toContain("1ª falha que rodou após um sucesso até o próximo sucesso");
     expect(html).toMatch(/role="tooltip" id="[^"]+"[^>]*>Avanços da tag nuria-production-deployed/);
-    // a definition is reachable from its button
     const describedBy = /aria-describedby="([^"]+)"/.exec(html)![1];
     expect(html).toContain(`id="${describedBy}"`);
+  });
+
+  it("marks lower bounds and counts success over runs that ran, superseded and aborted apart (INSP-V r1 #1, #4)", () => {
+    expect(plain).toContain("≥4 PRs e ≥2 issues concluídas foram ao ar · 1 releases sem conteúdo lido");
+    expect(plain).toContain("60%");
+    expect(plain).toContain("3 de 5 que rodaram · 1 substituídos, 1 abortados, 1 recusados — fora da taxa");
+    expect(plain).toContain("produção no ar · 0 min em fim de semana");
+  });
+
+  it("shows P1 as p1 + high with the split (INSP-V r1 #5)", () => {
+    expect(plain).toContain("P1 1 = 1 priority:p1 + 0 priority:high (escala antiga) · P0 1");
+  });
+
+  it("compares by one rule: no trend on a small base, the previous value instead (INSP-V r1 #7)", () => {
+    expect(plain).toContain("Período anterior: 0 (base pequena demais para tendência)");
+    expect(plain).not.toMatch(/vs\. período anterior/);
+  });
+
+  it("has a DORA section and the bots' cost per delivery over the recorded days (INSP-V r1 #6)", () => {
+    expect(plain).toContain("DORA");
+    expect(plain).toContain("Taxa de falha de mudança");
+    expect(plain).toContain("50% (1 de 2 releases verificados)");
+    expect(plain).toContain("Tempo de restauração");
+    expect(plain).toMatch(/US\$\s?0,25 por entrega \(US\$\s?0,75 em 3 entregas nos 4,5 dias registrados\)/);
+    expect(plain).toMatch(/US\$\s?0,75 em 4,5 dias registrados/);
   });
 
   it("draws four charts, each with a description and its numbers as a table", () => {
@@ -60,37 +94,41 @@ describe("report screen (pt-BR)", () => {
     expect(html.match(/role="img"/g)).toHaveLength(4);
     expect(plain).toContain("Entregas e falhas");
     expect(plain).toContain("Entregas: 3 no período, o máximo em");
-    expect(plain).toContain("Sem fonte de releases (desconhecido, não zero)");
+    expect(plain).toContain("Sem fonte (desconhecido, não zero)");
     expect(html.match(/Ver os números/g)).toHaveLength(4);
     expect(html).toContain("<caption");
   });
 
-  it("lists the releases with what they carried, grouped failures and the refusal", () => {
+  it("lists the releases with what they carried; superseded and aborted runs are not failures (INSP-V r1 #1, #4, #8)", () => {
     expect(plain).toContain("Releases do período");
-    expect(plain).toContain("3 em produção · 1 falhados · 1 recusados");
-    expect(plain).toMatch(/01\/10\/2026, 10:00|01\/10\/2026 10:00/);
-    expect(plain).toContain("#3");
-    expect(plain).toContain("#102");
-    expect(plain).toContain("Falhou");
+    expect(plain).toContain("3 em produção · 1 falhados · 1 substituídos · 1 abortados · 1 recusados");
+    expect(plain).toContain("Substituído");
+    expect(plain).toContain("Abortado");
     expect(plain).toContain("2 tentativas");
     expect(plain).toContain("Recusado");
-    expect(plain).toContain("Conteúdo desconhecido (sem release anterior para comparar)");
+    // the head PR of a failed run is a PR, called carrier only when it is one
+    expect(plain).toContain("PR #6");
+    expect(plain).not.toContain("carrier #6");
+    expect(plain).toContain("Conteúdo desconhecido (primeiro release conhecido)");
+    expect(plain).not.toContain("sem release anterior para comparar");
   });
 
   it("shows the backlog now, the PRs waiting for the gate and the bots' effort", () => {
     expect(plain).toContain("Backlog agora");
     expect(plain).toContain("#104 · 22 d");
     expect(plain).toContain("1 PRs esperando o gate (de 3 abertas)");
-    expect(plain).toContain("sem gate");
     expect(plain).toContain("Esforço dos bots");
     expect(plain).toContain("Chief of Staff");
-    expect(plain).toContain("o dono respondeu em 1,3 h (mediana), 2 h (p90), n = 2");
   });
 
   it("explains how each number is counted and where the data comes from", () => {
     expect(plain).toContain("Como é contado");
     expect(plain).toContain("De onde vêm os dados");
-    expect(plain).toContain("Tag de produção no GitHub: ccccccccc, a mesma do último release do histórico.");
+  });
+
+  it("offers board targets, empty by default, and lights no card without one", () => {
+    expect(plain).toContain("Metas do board");
+    expect(plain).not.toMatch(/(na meta|perto da meta|fora da meta) ·/);
   });
 
   it("keeps the releases' rows to numbers; titles wait behind each row's details", () => {
@@ -101,29 +139,56 @@ describe("report screen (pt-BR)", () => {
   });
 });
 
+describe("targets", () => {
+  it("light a card with its word and its target, only where a target is set", () => {
+    const plain = text(render(report(undefined, { deploysPerBusinessDay: 1, releaseSuccessRate: 70, leadTimeHours: 48, changeFailureRate: 20 })));
+    expect(plain).toContain("fora da meta · ≥ 1/dia útil");
+    expect(plain).toContain("perto da meta · ≥ 70%");
+    expect(plain).toContain("na meta · ≤ 48 h");
+    expect(plain).toContain("fora da meta · ≤ 20%");
+  });
+});
+
+describe("a closed month and the time before the bots' ledger", () => {
+  it("titles a whole month by name and shows the bots' days without a ledger as —, not 0 (INSP-V r1 #6)", () => {
+    const september = report({ from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") });
+    const plain = text(render(september));
+    expect(plain).toContain("Produtividade de engenharia — setembro/2026");
+    const bots = september.buckets.filter((bucket) => bucket.turns === null);
+    expect(bots.length).toBeGreaterThan(0);
+  });
+});
+
 describe("report screen (English)", () => {
   it("speaks the reader's language", () => {
-    setLocale("en");
-    const plain = text(renderToStaticMarkup(createElement(ReportView, { report: report() })));
+    const plain = text(render(report(), "en"));
+    expect(plain).toContain("Engineering productivity — 2026-09-28 to 2026-10-02");
     expect(plain).toContain("Executive summary");
     expect(plain).toContain("Production: 3 deliveries (no comparable base)");
-    expect(plain).toContain("Deliveries to production");
+    expect(plain).toContain("Release pipeline stopped (production up)");
     expect(plain).toContain("Releases in the period");
-    expect(plain).toContain("No comparable base: the release source does not cover both periods");
   });
 });
 
 describe("pieces", () => {
   it("a KPI's trend says better or worse in words, not only in colour", () => {
-    const good = renderToStaticMarkup(createElement(KpiCard, { label: "Entregas", value: "5", definition: "d", current: 5, previous: 2, polarity: "up" }));
+    const card = (comparison: ReturnType<typeof compareKpi>, polarity: "up" | "down") =>
+      renderToStaticMarkup(createElement(KpiCard, { label: "Entregas", value: "8", definition: "d", short: "s", comparison, polarity }));
+    const good = card(compareKpi(8, 5), "up");
     expect(good).toContain("text-success");
-    expect(text(good)).toContain("+3 (+150%) vs previous period");
+    expect(text(good)).toContain("+3, +60% vs previous period");
     expect(text(good)).toContain("(better)");
-    const bad = renderToStaticMarkup(createElement(KpiCard, { label: "Falhas", value: "5", definition: "d", current: 5, previous: 2, polarity: "down" }));
+    const bad = card(compareKpi(8, 5), "down");
     expect(bad).toContain("text-danger");
     expect(text(bad)).toContain("(worse)");
-    const same = renderToStaticMarkup(createElement(KpiCard, { label: "x", value: "2", definition: "d", current: 2, previous: 2, polarity: "up" }));
-    expect(text(same)).toContain("Same as the previous period");
+    expect(text(card(compareKpi(6, 6), "up"))).toContain("Same as the previous period");
+  });
+
+  it("never draws a trend on a small base or before the repository (INSP-V r1 #7)", () => {
+    const line = (comparison: ReturnType<typeof compareKpi>) => text(renderToStaticMarkup(createElement(DeltaLine, { comparison, polarity: "up" })));
+    expect(line(compareKpi(2868, 2))).toContain("Previous period: 2");
+    expect(line(compareKpi(2868, 0, { beforeRepo: true }))).toContain("before the repository existed");
+    expect(line(compareKpi(27, 2, { comparable: false }))).toContain("No comparable base");
   });
 
   it("a long list of releases shows 15 and offers the rest", () => {
@@ -133,16 +198,13 @@ describe("pieces", () => {
     expect(text(html)).toContain("Show all 20");
   });
 
-  it("builds the requests and formats deltas", () => {
+  it("builds the requests and formats trends", () => {
     expect(reportPath({ granularity: "day", count: 90 })).toBe("/api/reports/productivity?granularity=day&count=90");
     expect(reportPath({ granularity: "month", from: "2026-01", to: "2026-09" }, { format: "pdf" })).toBe("/api/reports/productivity.pdf?granularity=month&from=2026-01&to=2026-09");
     expect(reportPath({ granularity: "hour", count: 48 }, { refresh: true })).toBe("/api/reports/productivity?granularity=hour&count=48&refresh=1");
-    expect(deltaTone(5, 2, "up")).toBe("good");
-    expect(deltaTone(5, 2, "down")).toBe("bad");
-    expect(deltaTone(5, 2, "neutral")).toBe("neutral");
-    expect(deltaTone(null, 2, "up")).toBe("neutral");
-    expect(formatDelta(3, 0)).toBe("+3");
-    expect(formatDelta(1, 4)).toBe("−3 (−75%)");
+    expect(formatTrend(compareKpi(1, 6), "count")).toBe("−5, −83%");
+    expect(formatTrend(compareKpi(0.9, 0.8, { samples: { current: 10, previous: 10 } }), "rate")).toBe("+10 p.p.");
+    expect(formatTrend(compareKpi(2, 1), "count")).toBeNull();
     expect(formatSpan(0)).toBe("0 min");
     expect(formatSpan(90 * 60_000)).toBe("1.5 h");
     expect(niceScale(0)).toEqual({ ceiling: 1, step: 1 });

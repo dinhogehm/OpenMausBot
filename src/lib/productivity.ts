@@ -3,9 +3,14 @@
 // reader's language. The numbers themselves come from the server
 // (server/productivity-report.ts); nothing here recomputes them.
 import { activeLocale, documentLanguage } from "@/lib/i18n";
-import { REPORT_TZ, trend, zonedParts, type Granularity, type ProductivityReport, type ReportBucket } from "../../shared/productivity";
+import { REPORT_TZ, periodTitle, trend, zonedParts, type Comparison, type Granularity, type ProductivityReport, type ReportBucket } from "../../shared/productivity";
 
-export type { Granularity, ProductivityReport, ReportBucket } from "../../shared/productivity";
+export type { Comparison, Granularity, ProductivityReport, ReportBucket, ReportGoals } from "../../shared/productivity";
+
+/** The period as the board reads it: "setembro/2026", "03/09 a 02/10/2026". */
+export function reportHeading(report: Pick<ProductivityReport, "period" | "generatedAt">): string {
+  return periodTitle(report.period, report.generatedAt, locale() === "pt-BR" ? "pt-BR" : "en");
+}
 
 /** What the screen asks for: a preset (count) or an explicit São Paulo date range. */
 export interface ReportQuery {
@@ -67,6 +72,41 @@ export function formatUsd(value: number | null): string {
 
 export function formatTokens(value: number): string {
   return new Intl.NumberFormat(locale(), { notation: "compact", maximumFractionDigits: 1 }).format(value);
+}
+
+export function formatRate(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat(locale(), { style: "percent", maximumFractionDigits: 0 }).format(value);
+}
+
+/** How a card's number reads against the previous period — the same rule as the exports. */
+export type ComparisonKind = "count" | "span" | "rate" | "decimal";
+
+export function formatComparisonValue(value: number, kind: ComparisonKind): string {
+  if (kind === "span") return formatSpan(value);
+  if (kind === "rate") return formatRate(value);
+  return formatCount(value, kind === "decimal" ? 1 : 0);
+}
+
+/** "+2, +33%" for a trend; null when there is no trend (the caller says why). A
+ * rate's delta is in percentage points ("+10 p.p."), never a percent of a percent. */
+export function formatTrend(comparison: Comparison, kind: ComparisonKind): string | null {
+  if (comparison.kind !== "trend") return null;
+  if (comparison.delta === 0) return "=";
+  const sign = comparison.delta > 0 ? "+" : "−";
+  const size = Math.abs(comparison.delta);
+  if (kind === "rate") return `${sign}${formatCount(size * 100)} p.p.`;
+  const amount = kind === "span" ? formatSpan(size) : formatCount(size, kind === "decimal" ? 1 : 0);
+  return `${sign}${amount}, ${sign}${formatCount(Math.abs(comparison.ratio) * 100)}%`;
+}
+
+export function comparisonTone(comparison: Comparison, polarity: Polarity): Tone {
+  if (comparison.kind !== "trend" || comparison.delta === 0 || polarity === "neutral") return "neutral";
+  return (comparison.delta > 0) === (polarity === "up") ? "good" : "bad";
+}
+
+export function goalsPath(): string {
+  return "/api/reports/productivity/goals";
 }
 
 /** "+3 (+150%)" / "−3" / "=" — the delta against the previous period. */

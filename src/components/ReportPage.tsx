@@ -14,12 +14,12 @@ import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 import {
-  DEFAULT_QUERY, bucketName, deltaTone, formatCount, formatDelta, formatSpan, formatTokens, formatUsd, formatWhen, minutesSince,
-  periodLabel, reportPath, summaryLines, zonedToday,
-  type Granularity, type Polarity, type ProductivityReport, type ReportBucket, type ReportQuery, type Tone,
+  DEFAULT_QUERY, bucketName, comparisonTone, formatComparisonValue, formatCount, formatRate, formatSpan, formatTokens, formatTrend, formatUsd, formatWhen, goalsPath,
+  minutesSince, periodLabel, reportHeading, reportPath, summaryLines, zonedToday,
+  type Comparison, type ComparisonKind, type Granularity, type Polarity, type ProductivityReport, type ReportBucket, type ReportGoals, type ReportQuery, type Tone,
 } from "@/lib/productivity";
-import { releaseComparable, type ReportRelease } from "../../shared/productivity";
-import { BarChart, LineChart, type ChartSeries } from "./ReportCharts";
+import { GOAL_KEYS, beforeRepo, closedMonth, compareKpi, goalStatus, releaseComparable, type GoalKey, type ReportRelease } from "../../shared/productivity";
+import { BarChart, LineChart, unknownAt, type ChartSeries } from "./ReportCharts";
 
 const QUERY_KEY = "omb-report-query";
 const POLL_MS = 60_000;
@@ -53,8 +53,10 @@ const PRESETS: Record<Granularity, Array<{ count: number; label: LocaleKey }>> =
 
 export function PeriodBar({ query, onChange, report }: { query: ReportQuery; onChange: (query: ReportQuery) => void; report: ProductivityReport | null }) {
   const name = useId();
-  const custom = Boolean(query.from && query.to);
   const today = zonedToday();
+  const closed = closedMonth(Date.now());
+  const isClosed = query.granularity !== "hour" && query.from === closed.from && query.to === closed.to;
+  const custom = Boolean(query.from && query.to) && !isClosed;
   const [from, setFrom] = useState(query.from ?? today);
   const [to, setTo] = useState(query.to ?? today);
   useEffect(() => { setFrom(query.from ?? today); setTo(query.to ?? today); }, [query.from, query.to, today]);
@@ -79,14 +81,16 @@ export function PeriodBar({ query, onChange, report }: { query: ReportQuery; onC
       </fieldset>
       <label className="flex flex-col gap-1 text-[12px] font-medium text-ink-secondary">
         {t("report.window")}
-        <select value={custom ? "custom" : String(query.count ?? PRESETS[query.granularity][0]!.count)}
+        <select value={isClosed ? "closed" : custom ? "custom" : String(query.count ?? PRESETS[query.granularity][0]!.count)}
           onChange={(event) => {
             const value = event.target.value;
-            if (value === "custom") onChange({ granularity: query.granularity, from: normalize(report ? new Date(report.period.from).toISOString().slice(0, 10) : today), to: normalize(today) });
+            if (value === "closed") onChange({ granularity: query.granularity, from: closed.from, to: closed.to });
+            else if (value === "custom") onChange({ granularity: query.granularity, from: normalize(report ? new Date(report.period.from).toISOString().slice(0, 10) : today), to: normalize(today) });
             else onChange({ granularity: query.granularity, count: Number(value) });
           }}
           className="h-9 rounded-lg border border-hairline/60 bg-panel px-2.5 text-[13px] font-normal text-ink">
           {PRESETS[query.granularity].map((preset) => <option key={preset.count} value={preset.count}>{t(preset.label)}</option>)}
+          {query.granularity !== "hour" && <option value="closed">{t("report.preset.closedMonth")}</option>}
           <option value="custom">{t("report.preset.custom")}</option>
         </select>
       </label>
@@ -118,12 +122,18 @@ export function PeriodBar({ query, onChange, report }: { query: ReportQuery; onC
 
 // ── KPI cards ───────────────────────────────────────────────────────────────
 
-function DeltaLine({ current, previous, polarity, kind = "count" }: { current: number | null; previous: number | null; polarity: Polarity; kind?: "count" | "span" }) {
-  const text = formatDelta(current, previous, kind);
-  const tone: Tone = deltaTone(current, previous, polarity);
-  if (text === null) return <p className="text-[12px] text-ink-secondary">{t("report.delta.none")}</p>;
+/** The comparison under a card, by the one rule the exports use: a trend on a
+ * comparable base of at least 5, the previous value below it, a reason otherwise. */
+export function DeltaLine({ comparison, polarity, kind = "count" }: { comparison: Comparison; polarity: Polarity; kind?: ComparisonKind }) {
+  if (comparison.kind === "none") {
+    const key: LocaleKey = comparison.reason === "before-repo" ? "report.delta.beforeRepo" : comparison.reason === "not-comparable" ? "report.delta.noSource" : "report.delta.none";
+    return <p className="text-[12px] text-ink-secondary">{t(key)}</p>;
+  }
+  if (comparison.kind === "absolute") return <p className="text-[12px] text-ink-secondary">{t("report.delta.previous", { value: formatComparisonValue(comparison.previous, kind) })}</p>;
+  const text = formatTrend(comparison, kind)!;
+  const tone: Tone = comparisonTone(comparison, polarity);
   if (text === "=") return <p className="flex items-center gap-1 text-[12px] text-ink-secondary"><Minus size={13} aria-hidden />{t("report.delta.same")}</p>;
-  const up = !text.startsWith("−");
+  const up = comparison.delta > 0;
   const Icon = up ? TrendingUp : TrendingDown;
   return (
     <p className={cn("flex items-center gap-1 text-[12px]", tone === "good" ? "text-success" : tone === "bad" ? "text-danger" : "text-ink-secondary")}>
@@ -150,10 +160,19 @@ export function Definition({ label, text }: { label: string; text: string }) {
   );
 }
 
-export function KpiCard({ label, value, detail, definition, current, previous, polarity, kind, noBase }: {
-  label: string; value: string; detail?: string; definition: string; current: number | null; previous: number | null; polarity: Polarity; kind?: "count" | "span";
-  /** No release source covers the previous period: its production numbers are unknown, not zero. */
-  noBase?: boolean;
+const GOAL_STYLE: Record<GoalState, string> = {
+  met: "border-success/60 text-success",
+  close: "border-warning/60 text-ink",
+  off: "border-danger/60 text-danger",
+};
+
+export function KpiCard({ label, value, detail, short, definition, comparison, polarity, kind, goal }: {
+  label: string; value: string; detail?: string;
+  /** One line beside the number: how it is counted, always visible. */
+  short: string;
+  definition: string; comparison: Comparison; polarity: Polarity; kind?: ComparisonKind;
+  /** Only when the owner set a target: a light, with its word (never colour alone). */
+  goal?: { target: string; status: GoalState } | null;
 }) {
   return (
     <article className="flex min-w-0 flex-col gap-1 rounded-xl border border-hairline/40 bg-card p-4">
@@ -161,55 +180,178 @@ export function KpiCard({ label, value, detail, definition, current, previous, p
         <h3 className="text-[12.5px] font-medium leading-snug text-ink-secondary">{label}</h3>
         <Definition label={label} text={definition} />
       </header>
-      <p className="text-[26px] font-semibold leading-tight tabular-nums text-ink">{value}</p>
+      <p className="flex flex-wrap items-baseline gap-x-2 text-[26px] font-semibold leading-tight tabular-nums text-ink">
+        {value}
+        {goal && (
+          <span className={cn("rounded-full border px-2 py-0.5 text-[11px] font-medium", GOAL_STYLE[goal.status])}>
+            {t(`report.goal.${goal.status}` as LocaleKey, { target: goal.target })}
+          </span>
+        )}
+      </p>
       {detail && <p className="text-[12px] text-ink-secondary">{detail}</p>}
-      {noBase ? <p className="text-[12px] text-ink-secondary">{t("report.delta.noSource")}</p> : <DeltaLine current={current} previous={previous} polarity={polarity} kind={kind} />}
+      <DeltaLine comparison={comparison} polarity={polarity} kind={kind} />
+      <p className="mt-auto border-t border-hairline/30 pt-1.5 text-[11.5px] leading-snug text-ink-secondary">{short}</p>
     </article>
   );
+}
+
+type GoalState = "met" | "close" | "off";
+
+function goalOf(report: ProductivityReport, key: GoalKey, value: number | null, target: (goal: number) => string): { target: string; status: GoalState } | null {
+  const goal = report.goals?.[key];
+  const status = goalStatus(key, value, report.goals ?? {});
+  return goal === undefined || status === null ? null : { target: target(goal), status };
 }
 
 export function KpiGrid({ report }: { report: ProductivityReport }) {
   const k = report.kpis;
   const p = report.previousKpis;
   const b = report.backlog;
-  const noBase = !releaseComparable(report);
+  const release = releaseComparable(report);
+  const oldRepo = beforeRepo(report);
+  const lower = k.unknownContentReleases > 0 ? "≥" : "";
+  const tries = k.deliveries + k.failedReleases;
+  const resolved = k.closedIssues - k.closedNotPlanned;
+  const decimals = (value: number) => formatCount(value, Number.isInteger(value) ? 0 : 1);
   return (
     <section aria-labelledby="report-kpis" className="space-y-2">
       <h2 id="report-kpis" className="sr-only">{t("report.kpis")}</h2>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label={t("report.kpi.deliveries")} value={formatCount(k.deliveries)} definition={t("report.kpi.deliveries.def")}
-          detail={t("report.kpi.deliveries.detail", { prs: formatCount(k.deliveredPrs), issues: formatCount(k.deliveredIssues) })}
-          current={k.deliveries} previous={p.deliveries} polarity="up" noBase={noBase} />
-        <KpiCard label={t("report.kpi.mergedPrs")} value={formatCount(k.mergedPrs)} definition={t("report.kpi.mergedPrs.def")}
-          detail={t("report.kpi.mergedPrs.detail", { carriers: formatCount(k.carrierPrs) })}
-          current={k.mergedPrs} previous={p.mergedPrs} polarity="up" />
-        <KpiCard label={t("report.kpi.closedIssues")} value={formatCount(k.closedIssues - k.closedNotPlanned)} definition={t("report.kpi.closedIssues.def")}
-          detail={t("report.kpi.closedIssues.detail", { bugs: formatCount(k.closedByType.bug), improvements: formatCount(k.closedByType.improvement), p1: formatCount(k.closedByPriority.p0 + k.closedByPriority.p1), p2: formatCount(k.closedByPriority.p2) })}
-          current={k.closedIssues - k.closedNotPlanned} previous={p.closedIssues - p.closedNotPlanned} polarity="up" />
-        <KpiCard label={t("report.kpi.lead")} value={formatSpan(k.leadIssueToProd.median)} definition={t("report.kpi.lead.def")}
+        <KpiCard label={t("report.kpi.deliveries")} value={formatCount(k.deliveries)} definition={t("report.kpi.deliveries.def")} short={t("report.kpi.deliveries.short")}
+          detail={t(k.unknownContentReleases ? "report.kpi.deliveries.detailLower" : "report.kpi.deliveries.detail", { prs: `${lower}${formatCount(k.deliveredPrs)}`, issues: `${lower}${formatCount(k.deliveredIssues)}`, unknown: formatCount(k.unknownContentReleases) })}
+          comparison={compareKpi(k.deliveries, p.deliveries, { comparable: release })} polarity="up" />
+        <KpiCard label={t("report.kpi.frequency")} value={k.deploysPerBusinessDay === null ? "—" : t("report.kpi.frequency.value", { value: formatCount(k.deploysPerBusinessDay, 1) })}
+          definition={t("report.kpi.frequency.def")} short={t("report.kpi.frequency.short")}
+          detail={t("report.kpi.frequency.detail", { deliveries: formatCount(k.deliveries), days: formatCount(k.businessDays, 1) })}
+          comparison={compareKpi(k.deploysPerBusinessDay, p.deploysPerBusinessDay, { comparable: release, base: p.deliveries })} polarity="up" kind="decimal"
+          goal={goalOf(report, "deploysPerBusinessDay", k.deploysPerBusinessDay, (goal) => t("report.goal.perDay", { value: decimals(goal) }))} />
+        <KpiCard label={t("report.kpi.success")} value={formatRate(k.releaseSuccessRate)} definition={t("report.kpi.success.def")} short={t("report.kpi.success.short")}
+          detail={t("report.kpi.success.detail", { released: formatCount(k.deliveries), ran: formatCount(tries), superseded: formatCount(k.supersededReleases), aborted: formatCount(k.abortedReleases), declined: formatCount(k.declinedReleases) })}
+          comparison={compareKpi(k.releaseSuccessRate, p.releaseSuccessRate, { comparable: release, samples: { current: tries, previous: p.deliveries + p.failedReleases } })} polarity="up" kind="rate"
+          goal={goalOf(report, "releaseSuccessRate", k.releaseSuccessRate === null ? null : k.releaseSuccessRate * 100, (goal) => `≥ ${decimals(goal)}%`)} />
+        <KpiCard label={t("report.kpi.lead")} value={formatSpan(k.leadIssueToProd.median)} definition={t("report.kpi.lead.def")} short={t("report.kpi.lead.short")}
           detail={k.leadIssueToProd.n ? t("report.kpi.lead.detail", { p90: formatSpan(k.leadIssueToProd.p90), n: formatCount(k.leadIssueToProd.n), merge: formatSpan(k.leadIssueToMerge.median), prod: formatSpan(k.leadMergeToProd.median) }) : t("report.kpi.lead.none")}
-          current={k.leadIssueToProd.median} previous={p.leadIssueToProd.median} polarity="down" kind="span" noBase={noBase} />
-        <KpiCard label={t("report.kpi.backlog")} value={formatCount(b.openP0 + b.openP1)} definition={t("report.kpi.backlog.def")}
-          detail={t("report.kpi.backlog.detail", { open: formatCount(b.openIssues), p0: formatCount(b.openP0), oldest: b.oldestOpenP1 ? `#${b.oldestOpenP1.number} · ${formatSpan(report.generatedAt - b.oldestOpenP1.createdAt)}` : "—" })}
-          current={k.openP1AtEnd} previous={p.openP1AtEnd} polarity="down" />
-        <KpiCard label={t("report.kpi.gate")} value={formatCount(b.prsAwaitingGate)} definition={t("report.kpi.gate.def")}
-          detail={t("report.kpi.gate.detail", { open: formatCount(b.openPrs) })}
-          current={null} previous={null} polarity="down" />
-        <KpiCard label={t("report.kpi.failures")} value={formatCount(k.failedReleases)} definition={t("report.kpi.failures.def")}
-          detail={t("report.kpi.failures.detail", { declined: formatCount(k.declinedReleases) })}
-          current={k.failedReleases} previous={p.failedReleases} polarity="down" noBase={noBase} />
-        <KpiCard label={t("report.kpi.blocked")} value={formatSpan(k.blockedMs)} definition={t("report.kpi.blocked.def")}
-          detail={t("report.kpi.blocked.detail")}
-          current={k.blockedMs} previous={p.blockedMs} polarity="down" kind="span" noBase={noBase} />
+          comparison={compareKpi(k.leadIssueToProd.median, p.leadIssueToProd.median, { comparable: release, samples: { current: k.leadIssueToProd.n, previous: p.leadIssueToProd.n } })} polarity="down" kind="span"
+          goal={goalOf(report, "leadTimeHours", k.leadIssueToProd.median === null ? null : k.leadIssueToProd.median / 3_600_000, (goal) => `≤ ${decimals(goal)} h`)} />
+        <KpiCard label={t("report.kpi.mergedPrs")} value={formatCount(k.mergedPrs)} definition={t("report.kpi.mergedPrs.def")} short={t("report.kpi.mergedPrs.short")}
+          detail={t("report.kpi.mergedPrs.detail", { carriers: formatCount(k.carrierPrs) })}
+          comparison={compareKpi(k.mergedPrs, p.mergedPrs, { beforeRepo: oldRepo })} polarity="up" />
+        <KpiCard label={t("report.kpi.closedIssues")} value={formatCount(resolved)} definition={t("report.kpi.closedIssues.def")} short={t("report.kpi.closedIssues.short")}
+          detail={t("report.kpi.closedIssues.detail", { bugs: formatCount(k.closedByType.bug), improvements: formatCount(k.closedByType.improvement), p1: formatCount(k.closedByPriority.p0 + k.closedByPriority.p1), p2: formatCount(k.closedByPriority.p2) })}
+          comparison={compareKpi(resolved, p.closedIssues - p.closedNotPlanned, { beforeRepo: oldRepo })} polarity="up" />
+        <KpiCard label={t("report.kpi.backlog")} value={formatCount(b.openP0 + b.openP1)} definition={t("report.kpi.backlog.def")} short={t("report.kpi.backlog.short")}
+          detail={t("report.kpi.backlog.split", { p1: formatCount(b.openP1), current: formatCount(b.openP1Split?.current ?? b.openP1), legacy: formatCount(b.openP1Split?.legacy ?? 0), p0: formatCount(b.openP0) })}
+          comparison={compareKpi(k.openP1AtEnd, p.openP1AtEnd, { beforeRepo: oldRepo })} polarity="down" />
+        <KpiCard label={t("report.kpi.blocked")} value={formatSpan(k.blockedMs)} definition={t("report.kpi.blocked.def")} short={t("report.kpi.blocked.short")}
+          detail={t("report.kpi.blocked.detail", { weekend: formatSpan(k.blockedWeekendMs ?? 0) })}
+          comparison={compareKpi(k.blockedMs, p.blockedMs, { comparable: release })} polarity="down" kind="span" />
       </div>
     </section>
+  );
+}
+
+// ── DORA and cost ───────────────────────────────────────────────────────────
+
+export function DoraPanel({ report }: { report: ProductivityReport }) {
+  const k = report.kpis;
+  const cfr = k.checkedReleases ? k.changeFailures / k.checkedReleases : null;
+  const rows: Array<[string, string, string]> = [
+    [t("report.dora.frequency"), k.deploysPerBusinessDay === null ? "—" : t("report.dora.frequency.value", { value: formatCount(k.deploysPerBusinessDay, 1), deliveries: formatCount(k.deliveries), days: formatCount(k.businessDays, 1) }), t("report.dora.frequency.def")],
+    [t("report.dora.lead"), k.leadMergeToProd.n ? t("report.dora.lead.value", { median: formatSpan(k.leadMergeToProd.median), p90: formatSpan(k.leadMergeToProd.p90), n: formatCount(k.leadMergeToProd.n) }) : "—", t("report.dora.lead.def")],
+    [t("report.dora.cfr"), cfr === null ? t("report.dora.cfr.none") : t("report.dora.cfr.value", { rate: formatRate(cfr), failures: formatCount(k.changeFailures), checked: formatCount(k.checkedReleases) }), t("report.dora.cfr.def")],
+    [t("report.dora.restore"), k.timeToRestore.n ? t("report.dora.restore.value", { median: formatSpan(k.timeToRestore.median), n: formatCount(k.timeToRestore.n) }) : t(k.changeFailures ? "report.dora.restore.open" : "report.dora.restore.none"), t("report.dora.restore.def")],
+  ];
+  const usage = k.usageDays ?? 0;
+  const cfrGoal = goalOf(report, "changeFailureRate", cfr === null ? null : cfr * 100, (goal) => `≤ ${formatCount(goal, Number.isInteger(goal) ? 0 : 1)}%`);
+  return (
+    <section aria-labelledby="report-dora" className="rounded-xl border border-hairline/40 bg-card p-4">
+      <h2 id="report-dora" className="text-[14px] font-semibold text-ink">{t("report.dora.title")}</h2>
+      <p className="mb-2 text-[12px] text-ink-secondary">{t("report.dora.subtitle")}</p>
+      <dl className="grid gap-x-6 gap-y-2.5 text-[13px] sm:grid-cols-2">
+        {rows.map(([term, value, definition]) => (
+          <div key={term} className="min-w-0">
+            <dt className="text-ink-secondary">{term}</dt>
+            <dd className="flex flex-wrap items-baseline gap-x-2 tabular-nums text-ink">
+              {value}
+              {term === t("report.dora.cfr") && cfrGoal && (
+                <span className={cn("rounded-full border px-2 py-0.5 text-[11px] font-medium", GOAL_STYLE[cfrGoal.status])}>{t(`report.goal.${cfrGoal.status}` as LocaleKey, { target: cfrGoal.target })}</span>
+              )}
+            </dd>
+            <dd className="text-[11.5px] leading-snug text-ink-secondary">{definition}</dd>
+          </div>
+        ))}
+        <div className="min-w-0">
+          <dt className="text-ink-secondary">{t("report.cost.title")}</dt>
+          <dd className="tabular-nums text-ink">
+            {usage === 0 ? t("report.cost.none") : k.costPerDelivery === null
+              ? t("report.cost.noDelivery", { cost: formatUsd(k.costUsd), days: formatCount(usage, 1) })
+              : t("report.cost.value", { perDelivery: formatUsd(k.costPerDelivery), cost: formatUsd(k.costUsd), deliveries: formatCount(k.deliveriesInUsageDays), days: formatCount(usage, 1) })}
+          </dd>
+          <dd className="text-[11.5px] leading-snug text-ink-secondary">{t("report.cost.def")}</dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+// ── targets ─────────────────────────────────────────────────────────────────
+
+const GOAL_FIELDS: Array<{ key: GoalKey; label: LocaleKey; step: string; max?: number }> = [
+  { key: "deploysPerBusinessDay", label: "report.goals.deploysPerBusinessDay", step: "0.1" },
+  { key: "releaseSuccessRate", label: "report.goals.releaseSuccessRate", step: "1", max: 100 },
+  { key: "leadTimeHours", label: "report.goals.leadTimeHours", step: "1" },
+  { key: "changeFailureRate", label: "report.goals.changeFailureRate", step: "1", max: 100 },
+];
+
+/** The owner's targets: empty by default; a light appears only where one is set. */
+export function GoalsEditor({ goals, onSaved }: { goals: ReportGoals; onSaved: () => void }) {
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  useEffect(() => { setDraft(Object.fromEntries(GOAL_KEYS.map((key) => [key, goals[key] === undefined ? "" : String(goals[key])]))); }, [goals]);
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setState("saving");
+    const next: ReportGoals = {};
+    for (const key of GOAL_KEYS) {
+      const value = Number(draft[key]);
+      if (draft[key]?.trim() && Number.isFinite(value) && value >= 0) next[key] = value;
+    }
+    try {
+      await api(goalsPath(), { method: "PUT", body: JSON.stringify({ goals: next }) });
+      setState("saved");
+      onSaved();
+    } catch {
+      setState("error");
+    }
+  };
+  return (
+    <details className="rounded-xl border border-hairline/40 bg-card">
+      <summary className="cursor-pointer rounded-xl px-4 py-3 text-[14px] font-semibold text-ink">{t("report.goals.title")}</summary>
+      <form onSubmit={save} className="space-y-3 px-4 pb-4">
+        <p className="text-[12px] text-ink-secondary">{t("report.goals.hint")}</p>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {GOAL_FIELDS.map((field) => (
+            <label key={field.key} className="flex flex-col gap-1 text-[12px] font-medium text-ink-secondary">
+              {t(field.label)}
+              <input type="number" inputMode="decimal" min={0} max={field.max} step={field.step} value={draft[field.key] ?? ""} placeholder={t("report.goals.none")}
+                onChange={(event) => setDraft((current) => ({ ...current, [field.key]: event.target.value }))}
+                className="h-9 rounded-lg border border-hairline/60 bg-panel px-2.5 text-[13px] font-normal text-ink" />
+            </label>
+          ))}
+        </div>
+        <div className="flex items-center gap-3">
+          <button type="submit" disabled={state === "saving"} className="h-9 rounded-lg border border-hairline/60 bg-panel px-3 text-[13px] font-medium text-ink hover:bg-control disabled:opacity-60">{t("report.goals.save")}</button>
+          <span role="status" className="text-[12px] text-ink-secondary">{state === "saved" ? t("report.goals.saved") : state === "error" ? t("report.goals.error") : ""}</span>
+        </div>
+      </form>
+    </details>
   );
 }
 
 // ── charts ──────────────────────────────────────────────────────────────────
 
 function chartSummary(buckets: ReportBucket[], granularity: Granularity, series: ChartSeries): string {
-  const known = buckets.filter((bucket) => !(series.releaseMetric && bucket.releaseCoverage === "none"));
+  const known = buckets.filter((bucket) => !unknownAt(series, bucket));
   const total = known.reduce((sum, bucket) => sum + (series.value(bucket) ?? 0), 0);
   const peak = known.reduce<ReportBucket | null>((best, bucket) => (best === null || (series.value(bucket) ?? 0) > (series.value(best) ?? 0) ? bucket : best), null);
   if (!peak || total === 0) return t("report.chart.summaryNone", { series: series.label });
@@ -219,13 +361,13 @@ function chartSummary(buckets: ReportBucket[], granularity: Granularity, series:
 export function ReportCharts({ report }: { report: ProductivityReport }) {
   const g = report.granularity;
   const buckets = report.buckets;
-  const deliveries: ChartSeries = { key: "deliveries", label: t("report.series.deliveries"), color: "var(--color-accent-text)", value: (bucket) => bucket.deliveries, releaseMetric: true };
-  const failures: ChartSeries = { key: "failures", label: t("report.series.failures"), color: "var(--color-danger)", value: (bucket) => bucket.failedReleases, releaseMetric: true };
+  const deliveries: ChartSeries = { key: "deliveries", label: t("report.series.deliveries"), color: "var(--color-accent-text)", value: (bucket) => bucket.deliveries, source: "release" };
+  const failures: ChartSeries = { key: "failures", label: t("report.series.failures"), color: "var(--color-danger)", value: (bucket) => bucket.failedReleases, source: "release" };
   const merged: ChartSeries = { key: "merged", label: t("report.series.mergedPrs"), color: "var(--color-accent-text)", value: (bucket) => bucket.mergedPrs };
   const closed: ChartSeries = { key: "closed", label: t("report.series.closedIssues"), color: "var(--color-ink-secondary)", value: (bucket) => bucket.closedIssues };
   const backlog: ChartSeries = { key: "backlog", label: t("report.series.openIssues"), color: "var(--color-accent-text)", value: (bucket) => bucket.openIssuesAtEnd };
-  const turns: ChartSeries = { key: "turns", label: t("report.series.turns"), color: "var(--color-ink-secondary)", value: (bucket) => bucket.turns };
-  const active: ChartSeries = { key: "active", label: t("report.series.activeHours"), color: "var(--color-accent-text)", value: (bucket) => Math.round((bucket.activeMs / 3_600_000) * 10) / 10, format: (value) => `${formatCount(value, 1)} h` };
+  const turns: ChartSeries = { key: "turns", label: t("report.series.turns"), color: "var(--color-ink-secondary)", value: (bucket) => bucket.turns, source: "usage" };
+  const active: ChartSeries = { key: "active", label: t("report.series.activeHours"), color: "var(--color-accent-text)", value: (bucket) => (bucket.activeMs === null ? null : Math.round((bucket.activeMs / 3_600_000) * 10) / 10), format: (value) => `${formatCount(value, 1)} h`, source: "usage" };
   return (
     <section aria-labelledby="report-charts" className="space-y-2">
       <h2 id="report-charts" className="sr-only">{t("report.charts")}</h2>
@@ -245,6 +387,8 @@ export function ReportCharts({ report }: { report: ProductivityReport }) {
 const OUTCOME_STYLE: Record<ReportRelease["outcome"], string> = {
   released: "border border-success/60 text-success",
   failed: "border border-danger/60 text-danger",
+  superseded: "border border-dashed border-hairline text-ink-secondary",
+  aborted: "border border-dashed border-hairline text-ink-secondary",
   declined: "border border-hairline text-ink-secondary",
 };
 
@@ -272,14 +416,14 @@ function ReleaseRow({ release }: { release: ReportRelease }) {
         <td className="px-3 py-2 font-mono text-[12px] text-ink">{release.sha.slice(0, 9)}</td>
         <td className="px-3 py-2">
           <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[11.5px] font-medium", OUTCOME_STYLE[release.outcome])}>{outcome}</span>
-          {release.outcome === "failed" && (release.attempts ?? 1) > 1 && <span className="ml-1.5 text-[12px] text-ink-secondary">{t("report.releases.attempts", { count: String(release.attempts) })}</span>}
+          {release.outcome !== "released" && release.outcome !== "declined" && (release.attempts ?? 1) > 1 && <span className="ml-1.5 text-[12px] text-ink-secondary">{t("report.releases.attempts", { count: String(release.attempts) })}</span>}
           {release.tagNotAdvanced && <span className="mt-0.5 block text-[12px] text-ink-secondary">{t("report.releases.tagManual")}</span>}
         </td>
         <td className="px-3 py-2 text-ink">
           {release.outcome === "released"
-            ? release.contentUnknown ? <span className="text-ink-secondary">{t("report.releases.contentUnknown")}</span>
+            ? release.contentUnknown ? <span className="text-ink-secondary">{t(`report.releases.contentUnknown.${release.contentUnknownReason ?? "pending"}` as LocaleKey)}</span>
               : prs.length ? prs.slice(0, 8).map((pr) => `#${pr.number}`).join(", ") + (prs.length > 8 ? ` +${prs.length - 8}` : "") : "—"
-            : release.carrierPr ? <span className="text-ink-secondary">{t("report.releases.carrier", { number: String(release.carrierPr) })}</span> : "—"}
+            : release.headPr ? <span className="text-ink-secondary">{t(release.headPrIsCarrier ? "report.releases.carrier" : "report.releases.headPr", { number: String(release.headPr) })}</span> : "—"}
         </td>
         <td className="px-3 py-2 text-ink">
           {release.outcome === "released" && release.issues.length ? release.issues.slice(0, 8).map((issue) => `#${issue.number}`).join(", ") + (release.issues.length > 8 ? ` +${release.issues.length - 8}` : "") : "—"}
@@ -316,7 +460,13 @@ export function ReleasesTable({ releases }: { releases: ReportRelease[] }) {
     <section aria-labelledby="report-releases" className="rounded-xl border border-hairline/40 bg-card">
       <header className="flex flex-wrap items-baseline justify-between gap-2 px-4 pb-2 pt-4">
         <h2 id="report-releases" className="text-[14px] font-semibold text-ink">{t("report.releases.title")}</h2>
-        <p className="text-[12px] text-ink-secondary">{t("report.releases.count", { released: formatCount(releases.filter((release) => release.outcome === "released").length), failed: formatCount(releases.filter((release) => release.outcome === "failed").length), declined: formatCount(releases.filter((release) => release.outcome === "declined").length) })}</p>
+        <p className="text-[12px] text-ink-secondary">{t("report.releases.count", {
+          released: formatCount(releases.filter((release) => release.outcome === "released").length),
+          failed: formatCount(releases.filter((release) => release.outcome === "failed").length),
+          superseded: formatCount(releases.filter((release) => release.outcome === "superseded").length),
+          aborted: formatCount(releases.filter((release) => release.outcome === "aborted").length),
+          declined: formatCount(releases.filter((release) => release.outcome === "declined").length),
+        })}</p>
       </header>
       {releases.length === 0 ? (
         <p className="px-4 pb-4 text-[13px] text-ink-secondary">{t("report.releases.empty")}</p>
@@ -392,7 +542,9 @@ export function BotsPanel({ report }: { report: ProductivityReport }) {
     <section aria-labelledby="report-bots" className="min-w-0 rounded-xl border border-hairline/40 bg-card p-4">
       <h2 id="report-bots" className="text-[14px] font-semibold text-ink">{t("report.bots.title")}</h2>
       <p className="mb-2 text-[12px] text-ink-secondary">
-        {t("report.bots.totals", { turns: formatCount(k.turns), active: k.timedTurns ? formatSpan(k.activeMs) : "—", cost: formatUsd(k.costUsd), tokens: formatTokens(k.inputTokens + k.outputTokens) })}
+        {(k.usageDays ?? 0) > 0
+          ? t("report.bots.totals", { turns: formatCount(k.turns), active: k.timedTurns ? formatSpan(k.activeMs) : "—", cost: formatUsd(k.costUsd), tokens: formatTokens(k.inputTokens + k.outputTokens), days: formatCount(k.usageDays, 1) })
+          : t("report.bots.noLedger")}
       </p>
       <p className="mb-3 text-[12px] text-ink-secondary">
         {k.ownerResponse.n
@@ -433,13 +585,16 @@ export function BotsPanel({ report }: { report: ProductivityReport }) {
 
 const DEFINITIONS: Array<[LocaleKey, LocaleKey]> = [
   ["report.kpi.deliveries", "report.kpi.deliveries.def"],
+  ["report.kpi.frequency", "report.kpi.frequency.def"],
+  ["report.kpi.success", "report.kpi.success.def"],
+  ["report.kpi.lead", "report.kpi.lead.def"],
   ["report.kpi.mergedPrs", "report.kpi.mergedPrs.def"],
   ["report.kpi.closedIssues", "report.kpi.closedIssues.def"],
-  ["report.kpi.lead", "report.kpi.lead.def"],
   ["report.kpi.backlog", "report.kpi.backlog.def"],
-  ["report.kpi.gate", "report.kpi.gate.def"],
-  ["report.kpi.failures", "report.kpi.failures.def"],
   ["report.kpi.blocked", "report.kpi.blocked.def"],
+  ["report.kpi.gate", "report.kpi.gate.def"],
+  ["report.dora.cfr", "report.dora.cfr.def"],
+  ["report.dora.restore", "report.dora.restore.def"],
   ["report.bots.title", "report.bots.def"],
 ];
 
@@ -475,11 +630,12 @@ export function CoverageNotes({ report }: { report: ProductivityReport }) {
 
 // ── the body, given a report (rendered as is by the component tests) ────────
 
-export function ReportView({ report }: { report: ProductivityReport }) {
+export function ReportView({ report, onGoalsSaved }: { report: ProductivityReport; onGoalsSaved?: () => void }) {
   const lines = summaryLines(report);
   const gaps = report.coverage.releaseGaps;
   return (
     <div className="space-y-4">
+      <h2 className="text-[19px] font-semibold leading-snug text-ink">{t("report.heading", { period: reportHeading(report) })}</h2>
       {gaps.length > 0 && (
         <div role="note" className="flex items-start gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-[13px] text-ink">
           <AlertTriangle size={16} className="mt-0.5 shrink-0 text-warning" aria-hidden />
@@ -495,6 +651,7 @@ export function ReportView({ report }: { report: ProductivityReport }) {
         </section>
       )}
       <KpiGrid report={report} />
+      <DoraPanel report={report} />
       <ReportCharts report={report} />
       <ReleasesTable releases={report.releases} />
       <div className="grid gap-3 lg:grid-cols-2">
@@ -502,6 +659,7 @@ export function ReportView({ report }: { report: ProductivityReport }) {
         <BotsPanel report={report} />
       </div>
       <CoverageNotes report={report} />
+      <GoalsEditor goals={report.goals ?? {}} onSaved={onGoalsSaved ?? (() => undefined)} />
     </div>
   );
 }
@@ -619,7 +777,7 @@ export function ReportPage() {
                 <h2 className="text-[15px] font-semibold text-ink">{t("report.disabled.title")}</h2>
                 <p className="mx-auto mt-1 max-w-xl text-[13px] text-ink-secondary">{t("report.disabled.body")}</p>
               </section>
-            ) : <ReportView report={report} />
+            ) : <ReportView report={report} onGoalsSaved={() => void load()} />
           ) : null}
         </div>
       </div>
