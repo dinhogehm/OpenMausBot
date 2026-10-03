@@ -14,11 +14,11 @@ import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import type { LocaleKey } from "@/locales";
 import {
-  DEFAULT_QUERY, bucketName, comparisonTone, formatComparisonValue, formatCount, formatRate, formatSpan, formatTokens, formatTrend, formatUsd, formatWhen, goalsPath,
+  DEFAULT_QUERY, bucketName, comparisonTone, exportPath, formatComparisonValue, formatCount, formatDecimal, formatRate, formatSpan, formatTokens, formatTrend, formatUsd, formatWhen, goalsPath,
   minutesSince, periodLabel, reportHeading, reportPath, summaryLines, zonedToday,
   type Comparison, type ComparisonKind, type Granularity, type Polarity, type ProductivityReport, type ReportBucket, type ReportGoals, type ReportQuery, type Tone,
 } from "@/lib/productivity";
-import { GOAL_KEYS, beforeRepo, closedMonth, compareKpi, goalStatus, releaseComparable, type GoalKey, type ReportRelease } from "../../shared/productivity";
+import { EXPORT_MAX_AGE_MS, GOAL_KEYS, beforeRepo, closedMonth, compareKpi, exportReadiness, goalStatus, releaseComparable, releaseCountParts, type ExportBlocker, type GoalKey, type ReportRelease } from "../../shared/productivity";
 import { BarChart, LineChart, unknownAt, type ChartSeries } from "./ReportCharts";
 
 const QUERY_KEY = "omb-report-query";
@@ -210,6 +210,8 @@ export function KpiGrid({ report }: { report: ProductivityReport }) {
   const release = releaseComparable(report);
   const oldRepo = beforeRepo(report);
   const lower = k.unknownContentReleases > 0 ? "≥" : "";
+  // part of the period has no release source: deliveries are a lower bound (INSP-V r2 #1)
+  const partial = k.releaseCovered !== undefined && k.releaseCovered !== "full";
   const tries = k.deliveries + k.failedReleases;
   const resolved = k.closedIssues - k.closedNotPlanned;
   const decimals = (value: number) => formatCount(value, Number.isInteger(value) ? 0 : 1);
@@ -217,12 +219,12 @@ export function KpiGrid({ report }: { report: ProductivityReport }) {
     <section aria-labelledby="report-kpis" className="space-y-2">
       <h2 id="report-kpis" className="sr-only">{t("report.kpis")}</h2>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label={t("report.kpi.deliveries")} value={formatCount(k.deliveries)} definition={t("report.kpi.deliveries.def")} short={t("report.kpi.deliveries.short")}
-          detail={t(k.unknownContentReleases ? "report.kpi.deliveries.detailLower" : "report.kpi.deliveries.detail", { prs: `${lower}${formatCount(k.deliveredPrs)}`, issues: `${lower}${formatCount(k.deliveredIssues)}`, unknown: formatCount(k.unknownContentReleases) })}
+        <KpiCard label={t("report.kpi.deliveries")} value={`${partial ? "≥" : ""}${formatCount(k.deliveries)}`} definition={t("report.kpi.deliveries.def")} short={t("report.kpi.deliveries.short")}
+          detail={`${t(k.unknownContentReleases ? "report.kpi.deliveries.detailLower" : "report.kpi.deliveries.detail", { prs: `${lower}${formatCount(k.deliveredPrs)}`, issues: `${lower}${formatCount(k.deliveredIssues)}`, unknown: formatCount(k.unknownContentReleases) })}${partial ? ` · ${t("report.kpi.deliveries.partial", { covered: formatCount(k.releaseBusinessDays, 1), days: formatCount(k.businessDays, 1) })}` : ""}`}
           comparison={compareKpi(k.deliveries, p.deliveries, { comparable: release })} polarity="up" />
-        <KpiCard label={t("report.kpi.frequency")} value={k.deploysPerBusinessDay === null ? "—" : t("report.kpi.frequency.value", { value: formatCount(k.deploysPerBusinessDay, 1) })}
+        <KpiCard label={t("report.kpi.frequency")} value={k.deploysPerBusinessDay === null ? "—" : t("report.kpi.frequency.value", { value: formatDecimal(k.deploysPerBusinessDay) })}
           definition={t("report.kpi.frequency.def")} short={t("report.kpi.frequency.short")}
-          detail={t("report.kpi.frequency.detail", { deliveries: formatCount(k.deliveries), days: formatCount(k.businessDays, 1) })}
+          detail={`${t("report.kpi.frequency.detail", { deliveries: formatCount(k.deliveries), covered: formatCount(k.releaseBusinessDays, 1) })}${partial ? ` ${t("report.kpi.frequency.of", { days: formatCount(k.businessDays, 1) })}` : ""}`}
           comparison={compareKpi(k.deploysPerBusinessDay, p.deploysPerBusinessDay, { comparable: release, base: p.deliveries })} polarity="up" kind="decimal"
           goal={goalOf(report, "deploysPerBusinessDay", k.deploysPerBusinessDay, (goal) => t("report.goal.perDay", { value: decimals(goal) }))} />
         <KpiCard label={t("report.kpi.success")} value={formatRate(k.releaseSuccessRate)} definition={t("report.kpi.success.def")} short={t("report.kpi.success.short")}
@@ -239,8 +241,9 @@ export function KpiGrid({ report }: { report: ProductivityReport }) {
         <KpiCard label={t("report.kpi.closedIssues")} value={formatCount(resolved)} definition={t("report.kpi.closedIssues.def")} short={t("report.kpi.closedIssues.short")}
           detail={t("report.kpi.closedIssues.detail", { bugs: formatCount(k.closedByType.bug), improvements: formatCount(k.closedByType.improvement), p1: formatCount(k.closedByPriority.p0 + k.closedByPriority.p1), p2: formatCount(k.closedByPriority.p2) })}
           comparison={compareKpi(resolved, p.closedIssues - p.closedNotPlanned, { beforeRepo: oldRepo })} polarity="up" />
-        <KpiCard label={t("report.kpi.backlog")} value={formatCount(b.openP0 + b.openP1)} definition={t("report.kpi.backlog.def")} short={t("report.kpi.backlog.short")}
-          detail={t("report.kpi.backlog.split", { p1: formatCount(b.openP1), current: formatCount(b.openP1Split?.current ?? b.openP1), legacy: formatCount(b.openP1Split?.legacy ?? 0), p0: formatCount(b.openP0) })}
+        {/* the value and its comparison are the same instant: the end of each period (INSP-V r2 #2) */}
+        <KpiCard label={t("report.kpi.backlog")} value={formatCount(k.openP1AtEnd)} definition={t("report.kpi.backlog.def")} short={t("report.kpi.backlog.short")}
+          detail={t(b.periodEnd ? "report.kpi.backlog.splitEnd" : "report.kpi.backlog.split", { now: formatCount(b.openP0 + b.openP1), p1: formatCount(b.openP1), current: formatCount(b.openP1Split?.current ?? b.openP1), legacy: formatCount(b.openP1Split?.legacy ?? 0), p0: formatCount(b.openP0) })}
           comparison={compareKpi(k.openP1AtEnd, p.openP1AtEnd, { beforeRepo: oldRepo })} polarity="down" />
         <KpiCard label={t("report.kpi.blocked")} value={formatSpan(k.blockedMs)} definition={t("report.kpi.blocked.def")} short={t("report.kpi.blocked.short")}
           detail={t("report.kpi.blocked.detail", { weekend: formatSpan(k.blockedWeekendMs ?? 0) })}
@@ -256,7 +259,7 @@ export function DoraPanel({ report }: { report: ProductivityReport }) {
   const k = report.kpis;
   const cfr = k.checkedReleases ? k.changeFailures / k.checkedReleases : null;
   const rows: Array<[string, string, string]> = [
-    [t("report.dora.frequency"), k.deploysPerBusinessDay === null ? "—" : t("report.dora.frequency.value", { value: formatCount(k.deploysPerBusinessDay, 1), deliveries: formatCount(k.deliveries), days: formatCount(k.businessDays, 1) }), t("report.dora.frequency.def")],
+    [t("report.dora.frequency"), k.deploysPerBusinessDay === null ? t("report.dora.frequency.none") : t("report.dora.frequency.value", { value: formatDecimal(k.deploysPerBusinessDay), deliveries: formatCount(k.deliveries), covered: formatCount(k.releaseBusinessDays, 1), days: formatCount(k.businessDays, 1) }), t("report.dora.frequency.def")],
     [t("report.dora.lead"), k.leadMergeToProd.n ? t("report.dora.lead.value", { median: formatSpan(k.leadMergeToProd.median), p90: formatSpan(k.leadMergeToProd.p90), n: formatCount(k.leadMergeToProd.n) }) : "—", t("report.dora.lead.def")],
     [t("report.dora.cfr"), cfr === null ? t("report.dora.cfr.none") : t("report.dora.cfr.value", { rate: formatRate(cfr), failures: formatCount(k.changeFailures), checked: formatCount(k.checkedReleases) }), t("report.dora.cfr.def")],
     [t("report.dora.restore"), k.timeToRestore.n ? t("report.dora.restore.value", { median: formatSpan(k.timeToRestore.median), n: formatCount(k.timeToRestore.n) }) : t(k.changeFailures ? "report.dora.restore.open" : "report.dora.restore.none"), t("report.dora.restore.def")],
@@ -283,10 +286,16 @@ export function DoraPanel({ report }: { report: ProductivityReport }) {
         <div className="min-w-0">
           <dt className="text-ink-secondary">{t("report.cost.title")}</dt>
           <dd className="tabular-nums text-ink">
-            {usage === 0 ? t("report.cost.none") : k.costPerDelivery === null
-              ? t("report.cost.noDelivery", { cost: formatUsd(k.costUsd), days: formatCount(usage, 1) })
-              : t("report.cost.value", { perDelivery: formatUsd(k.costPerDelivery), cost: formatUsd(k.costUsd), deliveries: formatCount(k.deliveriesInUsageDays), days: formatCount(usage, 1) })}
+            {usage === 0 ? t("report.cost.none") : k.costPerDelivery !== null
+              ? t("report.cost.value", { perDelivery: formatUsd(k.costPerDelivery), deliveries: formatCount(k.deliveriesInUsageDays) })
+              : k.costEngineeringUsd === null ? t("report.cost.noEngineering")
+              : t("report.cost.few", { deliveries: formatCount(k.deliveriesInUsageDays) })}
           </dd>
+          {usage > 0 && (
+            <dd className="tabular-nums text-[12px] text-ink-secondary">
+              {t("report.cost.split", { total: formatUsd(k.costUsd), engineering: formatUsd(k.costEngineeringUsd ?? 0), operations: formatUsd(k.costOperationsUsd ?? 0), days: formatCount(usage, 1) })}
+            </dd>
+          )}
           <dd className="text-[11.5px] leading-snug text-ink-secondary">{t("report.cost.def")}</dd>
         </div>
       </dl>
@@ -417,6 +426,9 @@ function ReleaseRow({ release }: { release: ReportRelease }) {
         <td className="px-3 py-2">
           <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[11.5px] font-medium", OUTCOME_STYLE[release.outcome])}>{outcome}</span>
           {release.outcome !== "released" && release.outcome !== "declined" && (release.attempts ?? 1) > 1 && <span className="ml-1.5 text-[12px] text-ink-secondary">{t("report.releases.attempts", { count: String(release.attempts) })}</span>}
+          {(release.supersededRuns || release.abortedRuns) ? (
+            <span className="mt-0.5 block text-[12px] text-ink-secondary">{t("report.releases.folded", { superseded: formatCount(release.supersededRuns ?? 0), aborted: formatCount(release.abortedRuns ?? 0) })}</span>
+          ) : null}
           {release.tagNotAdvanced && <span className="mt-0.5 block text-[12px] text-ink-secondary">{t("report.releases.tagManual")}</span>}
         </td>
         <td className="px-3 py-2 text-ink">
@@ -453,19 +465,26 @@ function ReleaseRow({ release }: { release: ReportRelease }) {
   );
 }
 
-export function ReleasesTable({ releases }: { releases: ReportRelease[] }) {
+export function ReleasesTable({ releases, counts: given }: { releases: ReportRelease[]; counts?: ReturnType<typeof releaseCountParts> }) {
+  const tries = (outcome: ReportRelease["outcome"]) => releases.filter((row) => row.outcome === outcome).reduce((sum, row) => sum + (row.attempts ?? 1), 0);
+  const counts = given ?? {
+    released: releases.filter((row) => row.outcome === "released").length,
+    failedCommits: releases.filter((row) => row.outcome === "failed").length,
+    failedTries: tries("failed"),
+    superseded: tries("superseded") + releases.reduce((sum, row) => sum + (row.supersededRuns ?? 0), 0),
+    aborted: tries("aborted") + releases.reduce((sum, row) => sum + (row.abortedRuns ?? 0), 0),
+    declined: releases.filter((row) => row.outcome === "declined").length,
+  };
   const [all, setAll] = useState(false);
   const shown = all ? releases : releases.slice(0, 15);
   return (
     <section aria-labelledby="report-releases" className="rounded-xl border border-hairline/40 bg-card">
       <header className="flex flex-wrap items-baseline justify-between gap-2 px-4 pb-2 pt-4">
         <h2 id="report-releases" className="text-[14px] font-semibold text-ink">{t("report.releases.title")}</h2>
+        {/* the same counts as the exports: commits for deliveries and failures, runs for what never ran (INSP-V r2 #6) */}
         <p className="text-[12px] text-ink-secondary">{t("report.releases.count", {
-          released: formatCount(releases.filter((release) => release.outcome === "released").length),
-          failed: formatCount(releases.filter((release) => release.outcome === "failed").length),
-          superseded: formatCount(releases.filter((release) => release.outcome === "superseded").length),
-          aborted: formatCount(releases.filter((release) => release.outcome === "aborted").length),
-          declined: formatCount(releases.filter((release) => release.outcome === "declined").length),
+          released: formatCount(counts.released), failedCommits: formatCount(counts.failedCommits), failedTries: formatCount(counts.failedTries),
+          superseded: formatCount(counts.superseded), aborted: formatCount(counts.aborted), declined: formatCount(counts.declined),
         })}</p>
       </header>
       {releases.length === 0 ? (
@@ -510,6 +529,17 @@ export function BacklogPanel({ report }: { report: ProductivityReport }) {
   ];
   return (
     <section aria-labelledby="report-backlog" className="rounded-xl border border-hairline/40 bg-card p-4">
+      {/* a closed period reads its own end first; today follows, labelled (INSP-V r2 #7) */}
+      {b.periodEnd && (
+        <div className="mb-4 border-b border-hairline/30 pb-3">
+          <h2 className="text-[14px] font-semibold text-ink">{t("report.backlog.periodEnd", { when: formatWhen(b.periodEnd.at - 60_000, false) })}</h2>
+          <dl className="mt-2 grid grid-cols-[1fr_auto] gap-x-4 gap-y-1.5 text-[13px]">
+            <div className="contents"><dt className="text-ink-secondary">{t("report.backlog.open")}</dt><dd className="text-right tabular-nums text-ink">{formatCount(b.periodEnd.openIssues)}</dd></div>
+            <div className="contents"><dt className="text-ink-secondary">{t("report.backlog.p0p1")}</dt><dd className="text-right tabular-nums text-ink">{formatCount(b.periodEnd.openP0P1)}</dd></div>
+            {b.periodEnd.oldestOpen && <div className="contents"><dt className="text-ink-secondary">{t("report.backlog.oldest")}</dt><dd className="text-right tabular-nums text-ink">#{b.periodEnd.oldestOpen.number} · {formatSpan(b.periodEnd.at - b.periodEnd.oldestOpen.createdAt)}</dd></div>}
+          </dl>
+        </div>
+      )}
       <h2 id="report-backlog" className="text-[14px] font-semibold text-ink">{t("report.backlog.title")}</h2>
       <p className="mb-2 text-[12px] text-ink-secondary">{b.at ? t("report.backlog.asOf", { when: formatWhen(b.at) }) : t("report.sync.never")}</p>
       <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1.5 text-[13px]">
@@ -653,7 +683,7 @@ export function ReportView({ report, onGoalsSaved }: { report: ProductivityRepor
       <KpiGrid report={report} />
       <DoraPanel report={report} />
       <ReportCharts report={report} />
-      <ReleasesTable releases={report.releases} />
+      <ReleasesTable releases={report.releases} counts={releaseCountParts(report)} />
       <div className="grid gap-3 lg:grid-cols-2">
         <BacklogPanel report={report} />
         <BotsPanel report={report} />
@@ -671,12 +701,53 @@ function SyncStatus({ report, busy }: { report: ProductivityReport | null; busy:
   if (sync.state === "error") return <span role="status" className="flex min-w-0 max-w-[420px] items-center gap-1.5 text-[12px] text-ink" title={sync.error ?? ""}><AlertTriangle size={13} className="shrink-0 text-danger" aria-hidden /><span className="truncate">{t("report.sync.error", { error: sync.error ?? "" })}</span></span>;
   if (sync.state === "rate-limited" && sync.rateLimit) return <span role="status" className="flex items-center gap-1.5 text-[12px] text-ink"><AlertTriangle size={13} className="shrink-0 text-warning" aria-hidden />{t("report.sync.rateLimited", { when: formatWhen(sync.rateLimit.resetAt) })}</span>;
   const minutes = minutesSince(sync.lastSyncAt);
+  // older than the export limit: said in words and marked, not a quiet grey line (INSP-V r2 #3)
+  if (minutes !== null && minutes * 60_000 > EXPORT_MAX_AGE_MS) {
+    return <span role="status" className="flex items-center gap-1.5 text-[12px] text-ink"><AlertTriangle size={13} className="shrink-0 text-warning" aria-hidden />{t("report.sync.stale", { age: formatSpan(minutes * 60_000) })}</span>;
+  }
   return <span role="status" className="text-[12px] text-ink-secondary">{minutes === null ? t("report.sync.never") : minutes < 1 ? t("report.sync.justNow") : t("report.sync.updated", { minutes: formatCount(minutes) })}</span>;
 }
 
-function ExportMenu({ query, disabled }: { query: ReportQuery; disabled: boolean }) {
+/** Before a board export: synced within the hour, nothing syncing, the tag agreeing —
+ * otherwise the menu says why and offers "Atualizar e exportar" (INSP-V r2 #3). */
+export function ExportMenu({ query, report, disabled, onRefreshAndExport }: {
+  query: ReportQuery; report: ProductivityReport | null; disabled: boolean; onRefreshAndExport: (format: "pdf" | "md") => void;
+}) {
   const ref = useRef<HTMLDetailsElement>(null);
   const close = () => { ref.current?.removeAttribute("open"); ref.current?.querySelector("summary")?.focus(); };
+  const readiness = report ? exportReadiness(report, Date.now()) : null;
+  if (readiness && !readiness.ready) {
+    const age = readiness.ageMs === null ? "—" : formatSpan(readiness.ageMs);
+    return (
+      <details ref={ref} className={cn("relative", disabled && "pointer-events-none opacity-60")}
+        onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.removeAttribute("open"); }}
+        onKeyDown={(event) => { if (event.key === "Escape") close(); }}>
+        <summary className="flex h-9 cursor-pointer list-none items-center gap-1.5 rounded-lg bg-accent px-3 text-[13px] font-medium hover:opacity-90 [&::-webkit-details-marker]:hidden">
+          <Download size={15} aria-hidden />{t("report.export")}
+        </summary>
+        <div className="absolute right-0 top-full z-40 mt-2 w-80 rounded-xl border border-hairline/60 bg-menu p-1.5 shadow-xl">
+          <div role="note" className="mx-1.5 mb-1.5 mt-1 rounded-lg border border-warning/50 px-3 py-2 text-[12px] text-ink">
+            <p className="mb-1 flex items-center gap-1.5 font-medium"><AlertTriangle size={13} className="shrink-0 text-warning" aria-hidden />{t("report.export.notReady")}</p>
+            <ul className="list-disc space-y-0.5 pl-4 text-ink-secondary">
+              {readiness.blockers.map((blocker: ExportBlocker) => <li key={blocker}>{t(`report.export.blocker.${blocker}` as LocaleKey, { age })}</li>)}
+            </ul>
+          </div>
+          {(["pdf", "md"] as const).map((format) => (
+            <button key={format} type="button" onClick={() => { close(); onRefreshAndExport(format); }}
+              className="flex w-full items-start gap-2.5 rounded-lg px-3 py-2.5 text-left text-[13px] text-ink hover:bg-control">
+              <RefreshCw size={16} className="mt-0.5 shrink-0 text-ink-secondary" aria-hidden />
+              <span className="block font-medium">{t(format === "pdf" ? "report.export.refreshPdf" : "report.export.refreshMd")}</span>
+            </button>
+          ))}
+          <p className="px-3 pb-1 pt-1.5 text-[11.5px] text-ink-secondary">
+            {t("report.export.anyway")}{" "}
+            <a href={exportPath(query, "pdf", true)} download onClick={close} className="font-medium text-accent hover:underline">PDF</a>{" · "}
+            <a href={exportPath(query, "md", true)} download onClick={close} className="font-medium text-accent hover:underline">Markdown</a>
+          </p>
+        </div>
+      </details>
+    );
+  }
   return (
     <details ref={ref} className={cn("relative", disabled && "pointer-events-none opacity-60")}
       onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.removeAttribute("open"); }}
@@ -742,6 +813,34 @@ export function ReportPage() {
     return () => window.clearInterval(timer);
   }, [load, report?.sync.state, refreshing]);
 
+  // "Atualizar e exportar": ask for a sync, wait for one that finished after the
+  // request, then download only if the report is now ready — never a stale one
+  const [pendingExport, setPendingExport] = useState<{ format: "pdf" | "md"; since: number } | null>(null);
+  const [exportProblem, setExportProblem] = useState<string | null>(null);
+  const refreshAndExport = (format: "pdf" | "md") => {
+    setExportProblem(null);
+    setPendingExport({ format, since: Date.now() });
+    setRefreshing(true);
+    void load(true);
+  };
+  useEffect(() => {
+    if (!pendingExport || !report || refreshing || report.sync.state === "syncing") return;
+    const attempted = Math.max(report.sync.lastAttemptAt ?? 0, report.sync.lastSyncAt ?? 0);
+    if (attempted < pendingExport.since) return; // the sync asked for has not run yet
+    const readiness = exportReadiness(report, Date.now());
+    if (readiness.ready) {
+      const link = document.createElement("a");
+      link.href = exportPath(query, pendingExport.format);
+      link.download = "";
+      document.body.append(link);
+      link.click();
+      link.remove();
+    } else {
+      setExportProblem(readiness.blockers.map((blocker) => t(`report.export.blocker.${blocker}` as LocaleKey, { age: readiness.ageMs === null ? "—" : formatSpan(readiness.ageMs) })).join(" "));
+    }
+    setPendingExport(null);
+  }, [pendingExport, report, refreshing, query]);
+
   const change = (next: ReportQuery) => { saveQuery(next); setQuery(next); };
   return (
     <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-app text-ink" aria-labelledby="report-title" aria-busy={loading}>
@@ -754,17 +853,25 @@ export function ReportPage() {
           <p className="mt-1 text-[12px] text-ink-secondary">{t("report.subtitle", { repo: report?.repo ?? "dinhogehm/nuria-platform" })}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <SyncStatus report={report} busy={refreshing} />
+          {pendingExport
+            ? <span role="status" className="flex items-center gap-1.5 text-[12px] text-ink-secondary"><Loader2 size={13} className="animate-spin" aria-hidden />{t("report.export.waiting")}</span>
+            : <SyncStatus report={report} busy={refreshing} />}
           <button type="button" onClick={() => { setRefreshing(true); void load(true); }} disabled={refreshing || report?.enabled === false}
             className="flex h-9 items-center gap-1.5 rounded-lg border border-hairline/60 bg-panel px-3 text-[13px] font-medium text-ink hover:bg-control disabled:opacity-60">
             <RefreshCw size={14} className={cn(refreshing && "animate-spin")} aria-hidden />{t("report.refresh")}
           </button>
-          <ExportMenu query={query} disabled={!report || report.enabled === false} />
+          <ExportMenu query={query} report={report} disabled={!report || report.enabled === false || pendingExport !== null} onRefreshAndExport={refreshAndExport} />
         </div>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-[1280px] space-y-4 px-4 py-5 sm:px-6">
           <PeriodBar query={query} onChange={change} report={report} />
+          {exportProblem && (
+            <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-warning/40 bg-warning/10 px-4 py-2.5 text-[13px] text-ink">
+              <span className="flex items-center gap-1.5"><AlertTriangle size={15} className="shrink-0 text-warning" aria-hidden />{t("report.export.stillNotReady", { why: exportProblem })}</span>
+              <button type="button" onClick={() => setExportProblem(null)} className="rounded-md px-2 py-1 font-medium hover:bg-control">{t("report.export.dismiss")}</button>
+            </div>
+          )}
           {error && (
             <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-danger/30 bg-danger/10 px-4 py-2.5 text-[13px] text-danger">
               {t("report.error", { error })}

@@ -14,7 +14,7 @@ import { buildProductivityReport } from "../../server/productivity-report";
 import { executiveSummary } from "../../server/productivity-export";
 import { brt, CLIENT_NAME, scenario } from "../../server/testing/productivity-fixture";
 import { compareKpi, type ProductivityReport, type ReportGoals } from "../../shared/productivity";
-import { DeltaLine, KpiCard, ReleasesTable, ReportView } from "./ReportPage";
+import { DeltaLine, ExportMenu, KpiCard, ReleasesTable, ReportView } from "./ReportPage";
 import { niceScale } from "./ReportCharts";
 
 function report(period = { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") }, goals: ReportGoals = {}): ProductivityReport {
@@ -41,7 +41,7 @@ describe("report screen (pt-BR)", () => {
     expect(plain).toContain("Produtividade de engenharia — 28/09 a 02/10/2026");
     expect(plain).toContain("Resumo executivo");
     expect(html.match(/<ol[^>]*>[\s\S]*?<\/ol>/)![0].match(/<li>/g)).toHaveLength(5);
-    expect(plain).toContain("Produção: 3 entregas (sem base comparável), 0,7 por dia útil, com ≥4 PRs e ≥2 issues concluídas no ar");
+    expect(plain).toContain("Produção: ≥3 entregas (sem base comparável), 0,9 por dia útil com dados (3,5 dias úteis), com ≥4 PRs e ≥2 issues concluídas no ar");
   });
 
   it("says where no release source exists, as unknown — not zero", () => {
@@ -57,7 +57,7 @@ describe("report screen (pt-BR)", () => {
     expect(plain).not.toContain("Produção travada");
     // the short definition is on the card, not only in the tooltip
     expect(plain).toContain("avanços da tag de produção (fim do deploy)");
-    expect(plain).toContain("DORA: entregas por dia útil (seg–sex)");
+    expect(plain).toContain("DORA: entregas por dia útil com fonte de releases");
     expect(plain).toContain("1ª falha que rodou após um sucesso até o próximo sucesso");
     expect(html).toMatch(/role="tooltip" id="[^"]+"[^>]*>Avanços da tag nuria-production-deployed/);
     const describedBy = /aria-describedby="([^"]+)"/.exec(html)![1];
@@ -65,9 +65,10 @@ describe("report screen (pt-BR)", () => {
   });
 
   it("marks lower bounds and counts success over runs that ran, superseded and aborted apart (INSP-V r1 #1, #4)", () => {
-    expect(plain).toContain("≥4 PRs e ≥2 issues concluídas foram ao ar · 1 releases sem conteúdo lido");
+    // labels before numbers: no "1 releases" whatever the count (INSP-V r2 #4)
+    expect(plain).toContain("no ar: PRs ≥4, issues concluídas ≥2 · releases sem conteúdo lido: 1");
     expect(plain).toContain("60%");
-    expect(plain).toContain("3 de 5 que rodaram · 1 substituídos, 1 abortados, 1 recusados — fora da taxa");
+    expect(plain).toContain("3 de 5 que rodaram · fora da taxa: substituídos 1, abortados 1, recusados 1");
     expect(plain).toContain("produção no ar · 0 min em fim de semana");
   });
 
@@ -85,8 +86,18 @@ describe("report screen (pt-BR)", () => {
     expect(plain).toContain("Taxa de falha de mudança");
     expect(plain).toContain("50% (1 de 2 releases verificados)");
     expect(plain).toContain("Tempo de restauração");
-    expect(plain).toMatch(/US\$\s?0,25 por entrega \(US\$\s?0,75 em 3 entregas nos 4,5 dias registrados\)/);
-    expect(plain).toMatch(/US\$\s?0,75 em 4,5 dias registrados/);
+    // 3 deliveries and no engineering cost: no ratio, the reason instead; the cost split by role (INSP-V r2 #4)
+    expect(plain).toContain("Custo dos bots de engenharia por entrega");
+    expect(plain).toContain("— (nenhum custo de bot de engenharia registrado)");
+    expect(plain).toMatch(/US\$\s?0,75 em 4,5 dias registrados: engenharia US\$\s?0,00, operação \(Monitor Chat, Chief of Staff\) US\$\s?0,75/);
+  });
+
+  it("counts deliveries and their frequency only where a release source exists, with one decimal like the exports (INSP-V r2 #1, #6)", () => {
+    expect(plain).toContain("≥3");
+    expect(plain).toContain("0,9/dia útil");
+    expect(plain).toContain("3 em 3,5 dias úteis com dados (de 4,5)");
+    expect(plain).toContain("fonte de releases em 3,5 de 4,5 dias úteis");
+    expect(plain).toContain("0,9 por dia útil (3 em 3,5 dias úteis com dados, de 4,5)");
   });
 
   it("draws four charts, each with a description and its numbers as a table", () => {
@@ -101,7 +112,8 @@ describe("report screen (pt-BR)", () => {
 
   it("lists the releases with what they carried; superseded and aborted runs are not failures (INSP-V r1 #1, #4, #8)", () => {
     expect(plain).toContain("Releases do período");
-    expect(plain).toContain("3 em produção · 1 falhados · 1 substituídos · 1 abortados · 1 recusados");
+    // the same counts as the exports: commits for failures, runs for what never ran (INSP-V r2 #6)
+    expect(plain).toContain("em produção: 3 · commits que falharam: 1 (tentativas que rodaram: 2) · runs substituídos: 1 · runs abortados: 1 · recusados: 1");
     expect(plain).toContain("Substituído");
     expect(plain).toContain("Abortado");
     expect(plain).toContain("2 tentativas");
@@ -116,7 +128,7 @@ describe("report screen (pt-BR)", () => {
   it("shows the backlog now, the PRs waiting for the gate and the bots' effort", () => {
     expect(plain).toContain("Backlog agora");
     expect(plain).toContain("#104 · 22 d");
-    expect(plain).toContain("1 PRs esperando o gate (de 3 abertas)");
+    expect(plain).toContain("PRs esperando o gate: 1 (de 3 abertas)");
     expect(plain).toContain("Esforço dos bots");
     expect(plain).toContain("Chief of Staff");
   });
@@ -142,7 +154,7 @@ describe("report screen (pt-BR)", () => {
 describe("targets", () => {
   it("light a card with its word and its target, only where a target is set", () => {
     const plain = text(render(report(undefined, { deploysPerBusinessDay: 1, releaseSuccessRate: 70, leadTimeHours: 48, changeFailureRate: 20 })));
-    expect(plain).toContain("fora da meta · ≥ 1/dia útil");
+    expect(plain).toContain("perto da meta · ≥ 1/dia útil");
     expect(plain).toContain("perto da meta · ≥ 70%");
     expect(plain).toContain("na meta · ≤ 48 h");
     expect(plain).toContain("fora da meta · ≤ 20%");
@@ -154,6 +166,12 @@ describe("a closed month and the time before the bots' ledger", () => {
     const september = report({ from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") });
     const plain = text(render(september));
     expect(plain).toContain("Produtividade de engenharia — setembro/2026");
+    // P0/P1 at the end of September against the end of August; today apart, labelled (INSP-V r2 #2)
+    expect(plain).toContain("ao fim do período · agora 2: P1 1 = 1 priority:p1 + 0 priority:high (escala antiga) · P0 1");
+    // the backlog of the closed month, then today's (INSP-V r2 #7)
+    expect(plain).toContain("Backlog ao fim do período (30/09/2026)");
+    expect(plain).toContain("P0/P1 abertas (rótulos de hoje)");
+    expect(plain.indexOf("Backlog ao fim do período")).toBeLessThan(plain.indexOf("Backlog agora"));
     const bots = september.buckets.filter((bucket) => bucket.turns === null);
     expect(bots.length).toBeGreaterThan(0);
   });
@@ -164,7 +182,7 @@ describe("report screen (English)", () => {
     const plain = text(render(report(), "en"));
     expect(plain).toContain("Engineering productivity — 2026-09-28 to 2026-10-02");
     expect(plain).toContain("Executive summary");
-    expect(plain).toContain("Production: 3 deliveries (no comparable base)");
+    expect(plain).toContain("Production: ≥3 deliveries (no comparable base)");
     expect(plain).toContain("Release pipeline stopped (production up)");
     expect(plain).toContain("Releases in the period");
   });
@@ -189,6 +207,30 @@ describe("pieces", () => {
     expect(line(compareKpi(2868, 2))).toContain("Previous period: 2");
     expect(line(compareKpi(2868, 0, { beforeRepo: true }))).toContain("before the repository existed");
     expect(line(compareKpi(27, 2, { comparable: false }))).toContain("No comparable base");
+  });
+
+  it("will not hand a stale report to the board: the menu says why and offers \"Atualizar e exportar\" (INSP-V r2 #3)", () => {
+    const fresh = report();
+    const now = Date.now();
+    const at = (lastSyncAt: number, matchesHistory: boolean | null = true) => ({ ...fresh, sync: { ...fresh.sync, lastSyncAt }, coverage: { ...fresh.coverage, github: { ...fresh.coverage.github, syncedAt: lastSyncAt }, tag: { ...fresh.coverage.tag, matchesHistory } } });
+    setLocale("pt-BR");
+    const ready = text(renderToStaticMarkup(createElement(ExportMenu, { query: { granularity: "day", count: 30 }, report: at(now - 60_000), disabled: false, onRefreshAndExport: () => undefined })));
+    const stale = renderToStaticMarkup(createElement(ExportMenu, { query: { granularity: "day", count: 30 }, report: at(now - 16 * 3_600_000, false), disabled: false, onRefreshAndExport: () => undefined }));
+    setLocale("en");
+    expect(ready).not.toContain("Atualizar e exportar");
+    expect(text(stale)).toContain("Ainda não está pronto para o board");
+    expect(text(stale)).toContain("Os dados do GitHub têm 16 h (o limite é 1 h).");
+    expect(text(stale)).toContain("A tag de produção no GitHub não é o último release do histórico.");
+    expect(text(stale)).toContain("Atualizar e exportar PDF");
+    // exporting anyway is explicit, and the export then carries the warning
+    expect(stale).toContain("force=1");
+  });
+
+  it("folds a commit's superseded and aborted runs into its failure row (INSP-V r2 #7)", () => {
+    const row = { sha: "9".repeat(40), at: 1, timeSource: "log" as const, outcome: "failed" as const, attempts: 2, supersededRuns: 1, abortedRuns: 0, prs: [], issues: [] };
+    const plain = text(renderToStaticMarkup(createElement(ReleasesTable, { releases: [row] })));
+    expect(plain).toContain("same commit: superseded runs 1, aborted runs 0");
+    expect(plain).toContain("failed commits: 1 (tries that ran: 2) · runs superseded: 1 · runs aborted: 0");
   });
 
   it("a long list of releases shows 15 and offers the rest", () => {

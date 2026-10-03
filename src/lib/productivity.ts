@@ -74,6 +74,11 @@ export function formatTokens(value: number): string {
   return new Intl.NumberFormat(locale(), { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
+/** One decimal, always: "1,0/dia útil", as the exports write it (INSP-V r2 #6). */
+export function formatDecimal(value: number): string {
+  return new Intl.NumberFormat(locale(), { maximumFractionDigits: 1, minimumFractionDigits: 1 }).format(value);
+}
+
 export function formatRate(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "—";
   return new Intl.NumberFormat(locale(), { style: "percent", maximumFractionDigits: 0 }).format(value);
@@ -85,7 +90,7 @@ export type ComparisonKind = "count" | "span" | "rate" | "decimal";
 export function formatComparisonValue(value: number, kind: ComparisonKind): string {
   if (kind === "span") return formatSpan(value);
   if (kind === "rate") return formatRate(value);
-  return formatCount(value, kind === "decimal" ? 1 : 0);
+  return kind === "decimal" ? formatDecimal(value) : formatCount(value);
 }
 
 /** "+2, +33%" for a trend; null when there is no trend (the caller says why). A
@@ -103,6 +108,11 @@ export function formatTrend(comparison: Comparison, kind: ComparisonKind): strin
 export function comparisonTone(comparison: Comparison, polarity: Polarity): Tone {
   if (comparison.kind !== "trend" || comparison.delta === 0 || polarity === "neutral") return "neutral";
   return (comparison.delta > 0) === (polarity === "up") ? "good" : "bad";
+}
+
+/** An export's URL; `force` exports a report that is not ready, with its warning on top. */
+export function exportPath(query: ReportQuery, format: "md" | "pdf", force = false): string {
+  return `${reportPath(query, { format })}${force ? "&force=1" : ""}`;
 }
 
 export function goalsPath(): string {
