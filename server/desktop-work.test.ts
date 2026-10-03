@@ -26,6 +26,7 @@ import {
   liveSessionForIssue,
   orphanedIssues,
   reviveScreenFailures,
+  screenWaitOf,
   ageFailedSessions,
   uniqueSessionTitle,
   pickDesktopPending,
@@ -965,6 +966,34 @@ describe("a field that already held text", () => {
     await h.tick();
     expect(session.desktop!.pending).toBeUndefined();
     expect(resolved).toEqual(["cc-draft:a"]);
+  });
+});
+
+// R8-dispatch D6: what a session's row says of a screen step waiting for the Mac.
+describe("a screen step waiting for the Mac, for the row", () => {
+  it("says what waits, since when and what holds it — from the step's own last reason", () => {
+    const h = harness();
+    const session = h.appSession("w");
+    expect(screenWaitOf(session)).toBeUndefined();
+    session.desktop!.pending = { kind: "create", text: "brief", since: 1_000, attempts: 0 };
+    expect(screenWaitOf(session)).toEqual({ kind: "create", since: 1_000, waitingFor: "queued" });
+    for (const [reason, waitingFor] of [
+      ["the screen is locked or the display is asleep", "locked"],
+      ["the Mac is in use (idle 2s, need 5s)", "inUse"],
+      ['the person picked the Mac back up at "paste"', "inUse"],
+      ['the Claude app lost focus at "send" (frontmost: com.apple.Terminal)', "inUse"],
+      ['há texto não enviado no campo da sessão: "pode reescrever…"', "draft"],
+      ["the new session did not open in nuria-platform", "screen"],
+    ] as const) {
+      session.desktop!.pending.lastReason = reason;
+      expect(screenWaitOf(session)?.waitingFor).toBe(waitingFor);
+    }
+    // clicked and being verified: not waiting for the Mac; nor a CLI session, nor an archived one
+    session.desktop!.pending.verifyUntil = 5_000;
+    expect(screenWaitOf(session)).toBeUndefined();
+    delete session.desktop!.pending.verifyUntil;
+    expect(screenWaitOf({ ...session, surface: "cli" })).toBeUndefined();
+    expect(screenWaitOf({ ...session, status: "archived" })).toBeUndefined();
   });
 });
 

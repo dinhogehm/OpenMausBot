@@ -13,6 +13,7 @@
 // whole flow is testable with a fake app and fake records.
 import { existsSync, statSync } from "node:fs";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
+import type { WireCcSession } from "../shared/wire.ts";
 import type { CcDesktopPending, CcSession, CcSessionLedger } from "./cc-sessions.ts";
 import { ccHeldQueueReport, ccReportForOwner, ccStallReport, issueTitle, titleOpensWithIssue, type CcStallFacts } from "./cc-sessions.ts";
 export { CC_ACTIVE_MS, ccSessionActive } from "./cc-sessions.ts";
@@ -163,6 +164,22 @@ export const saidWrongFolder = (text: string) => text.trimStart().toUpperCase().
 /** Wait before retrying a screen action that touched the screen and stopped. */
 export function desktopBackoffMs(attempts: number): number {
   return Math.min(DESKTOP_BACKOFF_BASE_MS * 2 ** Math.max(0, attempts - 1), DESKTOP_BACKOFF_MAX_MS);
+}
+
+/** A screen step of the session waiting for the Mac, for its row (R8-dispatch
+ * D6: nothing told the person that work waits for them to leave the Mac
+ * alone or unlock it). A step being verified (archive, rename clicked) does
+ * not wait for the Mac. */
+export function screenWaitOf(session: Pick<CcSession, "surface" | "status" | "desktop">): WireCcSession["screenWait"] | undefined {
+  const pending = session.surface === "app" && session.status !== "archived" && session.status !== "stopped" ? session.desktop?.pending : undefined;
+  if (!pending || pending.verifyUntil) return undefined;
+  const reason = pending.lastReason ?? "";
+  const waitingFor = !reason ? "queued" as const
+    : /locked|asleep/i.test(reason) ? "locked" as const
+      : /Mac is in use|picked the Mac back up|lost focus/i.test(reason) ? "inUse" as const
+        : /texto não enviado/i.test(reason) ? "draft" as const
+          : "screen" as const;
+  return { kind: pending.kind, since: pending.since, waitingFor };
 }
 
 const liveApp = (session: CcSession) =>

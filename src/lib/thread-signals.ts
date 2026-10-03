@@ -32,11 +32,39 @@ export function ccAlertSummary(alerts: readonly WireCcAlert[] | undefined): { te
 /** The conversation's Claude Code sessions, each with where it runs: a CLI
  * one is said to be out of the Claude app, so the person knows to follow it
  * here (R8-visual N2). `cli` when any of them is headless. */
-export function ccSessionsSummary(sessions: readonly WireCcSession[] | undefined): { text: string; cli: boolean } | null {
+export function ccSessionsSummary(sessions: readonly WireCcSession[] | undefined, now = Date.now()): { text: string; cli: boolean; waiting: { count: number; text: string } | null; resume: { count: number; text: string } | null } | null {
   if (!sessions?.length) return null;
+  const waiting = sessions.filter((session) => session.screenWait);
+  const resume = sessions.filter((session) => session.resume);
   return {
     text: [t("ccSession.indicator"), ...sessions.map((session) => t(session.surface === "cli" ? "ccSession.cliItem" : "ccSession.appItem", { title: session.title, status: t(`ccSession.status.${session.status}`) }))].join("\n"),
     cli: sessions.some((session) => session.surface === "cli"),
+    // R8-dispatch D6: screen steps waiting for the Mac — what, since when, what holds them
+    waiting: waiting.length ? {
+      count: waiting.length,
+      text: [
+        waiting.length === 1 ? t("ccSession.waitingOne") : t("ccSession.waitingMany", { count: waiting.length }),
+        ...waiting.map((session) => t("ccSession.wait.item", {
+          title: session.title,
+          action: t(`ccSession.wait.action.${session.screenWait!.kind}`),
+          when: sidebarStamp(session.screenWait!.since, now),
+          why: t(`ccSession.wait.why.${session.screenWait!.waitingFor}`),
+        })),
+      ].join("\n"),
+    } : null,
+    // S-retomar: failed or idle 2 h+ holding an open PR of its own
+    resume: resume.length ? {
+      count: resume.length,
+      text: [
+        resume.length === 1 ? t("ccSession.resumeOne") : t("ccSession.resumeMany", { count: resume.length }),
+        ...resume.map((session) => t("ccSession.resume.item", {
+          title: session.title,
+          why: session.resume!.why,
+          prs: session.resume!.prs.map((number) => `PR #${number}`).join(", "),
+          when: sidebarStamp(session.resume!.since, now),
+        })),
+      ].join("\n"),
+    } : null,
   };
 }
 
@@ -49,7 +77,7 @@ export function botSignals(tasks: readonly SignalTask[] | undefined, now = Date.
   return {
     watch: watchSummary(own.flatMap((task) => task.watches ?? []), own.some((task) => task.watchesLost === true), now),
     cc: ccAlertSummary(own.flatMap((task) => task.ccAlerts ?? [])),
-    sessions: ccSessionsSummary(own.flatMap((task) => task.ccSessions ?? [])),
+    sessions: ccSessionsSummary(own.flatMap((task) => task.ccSessions ?? []), now),
   };
 }
 
@@ -57,5 +85,7 @@ export function botSignals(tasks: readonly SignalTask[] | undefined, now = Date.
  * Claude Code session in trouble. Kept reachable when its tree is folded. */
 export function needsSignalLook(task: SignalTask): boolean {
   // a headless session is followed here, nowhere else: keep its conversation reachable
-  return Boolean(task.watchesLost || task.watches?.some((watch) => watch.failures > 0) || task.ccAlerts?.length || task.ccSessions?.some((session) => session.surface === "cli"));
+  // …and one to resume, or a step waiting for the person to leave the Mac alone
+  return Boolean(task.watchesLost || task.watches?.some((watch) => watch.failures > 0) || task.ccAlerts?.length
+    || task.ccSessions?.some((session) => session.surface === "cli" || session.resume || session.screenWait));
 }

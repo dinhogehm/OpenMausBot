@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { CcSessionLedger, ccProcAlive, processStartSync, survivorStep, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, appStalledReason, recentAppFailure, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
+import { CcSessionLedger, ccProcAlive, processStartSync, survivorStep, hotfixWithReleaseScripts, cliSurfaceRefusal, clientIssue, appStalledReason, recentAppFailure, type CcSession, corridorForSend, corridorVersionOf, issueTitle, titleOpensWithIssue, ccSessionLine, resumeLine, ccHeldQueueReport, repoCorridor, repoPackageManager, repoScripts, useRepoScripts, ccReportForOwner, ccStallReport, corridorHint, ccTurnArgs, lastHookBlock, lastHookDecision, parseCcStartInput, parseCcStream, slugify } from "./cc-sessions.ts";
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "omb-cc-")); });
@@ -441,6 +441,19 @@ describe("the corridor form of what the hook stopped", () => {
 });
 
 describe("what cc_session_list says about a session", () => {
+  it("puts RETOMAR right after the session's name, with the PRs, how long, why and the two ways out (S-retomar)", () => {
+    const ledger = new CcSessionLedger({ path: null, now: () => 0 });
+    const session = ledger.create({ id: "9052a", ownerBotId: "b", ownerThreadId: "t", title: "9052 Tempo de reabertura", repo: "/r", permissionMode: "auto" });
+    session.status = "failed";
+    const now = Date.parse("2026-10-02T18:00:00Z");
+    const resume = { since: now - 3.5 * 3_600_000, prs: [9332], why: "falhou: o turno passou de 45 minutos e foi parado" };
+    const line = ccSessionLine(session, { resume, now });
+    expect(line.split(" · ").slice(0, 4)).toEqual(['9052a', '"9052 Tempo de reabertura"', "failed", expect.stringMatching(/^RETOMAR — há 3 h com PR #9332 aberta, falhou: o turno passou de 45 minutos e foi parado\. Retome com cc_session_send \(session_id 9052a\) dizendo o próximo passo, ou reporte ao dono o bloqueio exato/)]);
+    expect(resumeLine(session, { ...resume, prs: [9350, 9351] }, now)).toContain("com PR #9350, PR #9351 abertas,");
+    expect(ccSessionLine(session)).not.toContain("RETOMAR");
+  });
+
+
   it("says a message that never arrived, and that a CLI session is not in the app; an archived one carries no old error", () => {
     const path = join(dir, "ledger.json");
     const ledger = new CcSessionLedger({ path, now: () => 0 });

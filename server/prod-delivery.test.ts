@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, mergeStatePt, prOwnership, sessionBranches, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
+import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, DELIVERY_CHECK_MS, IDLE_WITH_PR_MS, idleWithOpenPrs, deliveryReport, mergeStatePt, prOwnership, sessionBranches, githubSlug, newDeliveryCache, parseLsRemoteTag, prLinks, prsOfSession, productionTime, resumeNeeded, watchProductionDelivery, type CcDelivery, type DeliveryDeps } from "./prod-delivery.ts";
 
 const SLUG = "dinhogehm/nuria-platform";
 const TAG = "c".repeat(40);
@@ -461,5 +461,38 @@ describe("a session idle with its PR still open", () => {
     // a PR its report only named (never checked as its own) does not count
     const cited = make("c", { delivery: { slug: SLUG, prs: { "9328": { url: "u", number: 9328, state: "open" as const } } } });
     expect(idleWithOpenPrs([waiting, merged, busy, fresh, told, cited], now)).toEqual([{ session: waiting, prs: [9314] }]);
+  });
+});
+
+// S-retomar, the line on 02/10 (redacted): 9052 (#9332) failed, 8204 (#9350)
+// and 9195 (#9280) idle, each holding its own PR open — nobody resumed them.
+describe("sessions to resume", () => {
+  const now = Date.parse("2026-10-02T18:00:00Z");
+  const pr = (number: number, extra: object = {}) => ({ [String(number)]: { url: `https://github.com/${SLUG}/pull/${number}`, number, state: "open" as const, owned: "branch" as const, ...extra } });
+  const make = (status: string, extra: object = {}) => ({ id: "s", title: "t", repo: "/repo", status, lastActivityAt: now - 3 * 3_600_000, ...extra });
+
+  it("marks failed and idle sessions 2 h+ old with an open PR of their own, with the reason in pt-BR", () => {
+    const failed = make("failed", { failedAt: now - 2 * 3_600_000 - 1, lastError: "the turn ran past 45 minutes and was stopped", delivery: { slug: SLUG, prs: pr(9332) } });
+    expect(resumeNeeded(failed, now)).toEqual({ since: now - 2 * 3_600_000 - 1, prs: [9332], why: "falhou: o turno passou de 45 minutos e foi parado" });
+    const idle = make("idle", { delivery: { slug: SLUG, prs: pr(9350) } });
+    expect(resumeNeeded(idle, now)).toEqual({ since: now - 3 * 3_600_000, prs: [9350], why: "parada: o último turno terminou e nada a retomou" });
+    const blocked = make("idle", { blockedOn: "aprovar o comando npm run pr:merge -- --pr 9280 --merge", delivery: { slug: SLUG, prs: pr(9280) } });
+    expect(resumeNeeded(blocked, now)?.why).toBe("parada, bloqueada: aprovar o comando npm run pr:merge -- --pr 9280 --merge");
+    // a PR handed over to it counts too, unless known merged or closed
+    expect(resumeNeeded(make("idle", { claimedPrs: [9328] }), now)?.prs).toEqual([9328]);
+    expect(resumeNeeded(make("idle", { claimedPrs: [9328], delivery: { slug: SLUG, prs: pr(9328, { state: "merged" }) } }), now)).toBeNull();
+  });
+
+  it("leaves alone what does not hold the line", () => {
+    // under 2 h; failed long ago but recently (failedAt counts, not the last activity)
+    expect(resumeNeeded(make("idle", { lastActivityAt: now - 3_600_000, delivery: { slug: SLUG, prs: pr(9350) } }), now)).toBeNull();
+    expect(resumeNeeded(make("failed", { failedAt: now - 60_000, delivery: { slug: SLUG, prs: pr(9332) } }), now)).toBeNull();
+    // running, stalled (the stall watch tells it), archived, stopped
+    for (const status of ["running", "stalled", "archived", "stopped"]) expect(resumeNeeded(make(status, { delivery: { slug: SLUG, prs: pr(9350) } }), now)).toBeNull();
+    // no PR of its own: a PR only cited in a report, merged, closed
+    expect(resumeNeeded(make("idle", { delivery: { slug: SLUG, prs: pr(9350, { owned: undefined }) } }), now)).toBeNull();
+    expect(resumeNeeded(make("idle", { delivery: { slug: SLUG, prs: { ...pr(9350, { state: "merged" }), ...pr(9351, { state: "closed" }) } } }), now)).toBeNull();
+    // the app opened it in a wrong folder: started anew, never resumed
+    expect(resumeNeeded(make("failed", { failedAt: now - 3 * 3_600_000, desktop: { wrongFolder: "/repo" }, delivery: { slug: SLUG, prs: pr(9332) } }), now)).toBeNull();
   });
 });

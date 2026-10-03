@@ -34,11 +34,23 @@ describe("thread signals", () => {
     expect(ccSessionsSummary(sessions)).toEqual({
       cli: true,
       text: "Sessões do Claude Code desta conversa\n#9315 lote — trabalhando · CLI, não aparece no app Claude\n#9298 inatividade — parada esperando ordem · no app Claude",
+      waiting: null,
+      resume: null,
     });
     expect(ccSessionsSummary([sessions[1]!])?.cli).toBe(false);
     expect(ccSessionsSummary([])).toBeNull();
     expect(needsSignalLook({ ccSessions: [sessions[0]!] })).toBe(true);
     expect(needsSignalLook({ ccSessions: [sessions[1]!] })).toBe(false);
+    // a step waiting for the Mac, or a session to resume, keeps the conversation reachable when folded (D6, S-retomar)
+    expect(needsSignalLook({ ccSessions: [{ ...sessions[1]!, screenWait: { kind: "send", since: now, waitingFor: "locked" } }] })).toBe(true);
+    expect(needsSignalLook({ ccSessions: [{ ...sessions[1]!, resume: { since: now, prs: [9350], why: "parada" } }] })).toBe(true);
+    // a folded bot sums them across its conversations
+    const folded = botSignals([
+      { ccSessions: [{ ...sessions[1]!, screenWait: { kind: "create", since: now, waitingFor: "inUse" } }] },
+      { ccSessions: [{ ...sessions[1]!, sessionId: "z", screenWait: { kind: "send", since: now, waitingFor: "queued" }, resume: { since: now, prs: [9280], why: "parada" } }] },
+    ], now).sessions!;
+    expect(folded.waiting?.count).toBe(2);
+    expect(folded.resume?.count).toBe(1);
     expect(botSignals([{ ccSessions: sessions }]).sessions?.cli).toBe(true);
   });
 

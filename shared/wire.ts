@@ -135,6 +135,14 @@ export interface WireCcSession {
   status: "running" | "idle" | "stalled" | "failed" | "stopped";
   /** cli: headless, not visible in the Claude app. */
   surface: "app" | "cli";
+  /** A step on the Claude app's screen waiting for the Mac (R8-dispatch D6):
+   * what, since when, and what holds it ("locked" screen, Mac "inUse", the
+   * app's "screen" not as expected, a "draft" in the field nobody sent, or
+   * "queued" — not tried yet). */
+  screenWait?: { kind: "create" | "send" | "rename" | "archive"; since: number; waitingFor: "locked" | "inUse" | "screen" | "draft" | "queued" };
+  /** Failed or idle for 2 h+ with a PR of its own still open: someone must
+   * resume it or say what blocks it (S-retomar). */
+  resume?: { since: number; prs: number[]; why: string };
 }
 
 /** One thing that waits on the person (owner_pending), for "Precisa de você". */

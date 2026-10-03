@@ -310,6 +310,7 @@ import {
   PS_ENV,
   ccReportForOwner,
   ccSessionLine,
+  resumeLine,
   ccTurnArgs,
   lastHookBlock,
   lastHookDecision,
@@ -364,6 +365,7 @@ import {
   ageFailedSessions,
   uniqueSessionTitle,
   reviveScreenFailures,
+  screenWaitOf,
   reportFor as desktopReportFor,
   takeFreshQueued,
   runDesktopWork as runDesktopWorkFlow,
@@ -374,7 +376,7 @@ import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
-import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, idleWithOpenPrs, mergeStatePt, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, watchProductionDelivery } from "./prod-delivery.ts";
+import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, idleWithOpenPrs, mergeStatePt, newDeliveryCache, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
 import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
@@ -9715,7 +9717,14 @@ threadSignals = (threadId) => {
     });
   const ccSessions = ccLedger.all()
     .filter((session) => session.ownerThreadId === threadId && session.status !== "archived")
-    .map((session): WireCcSession => ({ sessionId: session.id, title: session.title, status: session.status as WireCcSession["status"], surface: session.surface === "app" ? "app" : "cli" }));
+    .map((session): WireCcSession => {
+      const screenWait = screenWaitOf(session);
+      const resume = resumeNeeded(session, Date.now());
+      return {
+        sessionId: session.id, title: session.title, status: session.status as WireCcSession["status"], surface: session.surface === "app" ? "app" : "cli",
+        ...(screenWait ? { screenWait } : {}), ...(resume ? { resume } : {}),
+      };
+    });
   const ownerPending = autonomy.ownerPendingFor(threadId).map((item): WireOwnerPending => ({
     id: item.id, title: item.title, since: item.createdAt, ...(item.due ? { due: item.due } : {}), ...(item.link ? { link: item.link } : {}), ...(item.command ? { command: item.command } : {}),
     ...(item.why ? { why: item.why } : {}), ...(item.steps?.length ? { steps: item.steps } : {}), ...(item.options?.length ? { options: item.options } : {}),
@@ -10031,7 +10040,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     // decided by the app's state the server knows, not by the words of cli_reason (R9-dispatch R9-3, INSP-H r1 #6)
     const { state: app, reason: appReason } = appAvailability(input.repo);
     // the app blocked by the reused folder, with a client's work waiting: the owner is asked, once, to unblock it
-    if (app === "blocked" && clientIssue(`${input.title}\n${input.brief}`)) askOwnerToUnblockApp(bot, threadId, input.repo);
+    if (app === "blocked" && clientIssue(`${input.title}\n${input.brief}`)) askOwnerToUnblockApp(bot, threadId, input.repo, appFolderBlock()?.kind);
     const decided = cliSurfaceRefusal({ corridor, title: input.title, brief: input.brief, reason: cliReason, app, appReason, appFailure: app === "available" ? recentAppFailure(ccLedger.all(), input.repo, Date.now()) : null });
     if ("refusal" in decided) return { status: 409, body: { error: decided.refusal } };
     cliOnRecord = decided.onRecord;
@@ -10392,7 +10401,55 @@ function followSurvivingSessions(): void {
   }
 }
 
+/** What the owners' rows last showed of screen steps waiting for the Mac
+ * and of sessions to resume: those change without a chip (a retry, the
+ * clock passing 2 h), so a change refreshes the owner's row here. */
+let sessionSignalsSeen = new Map<string, string>();
+function refreshSessionSignals(): void {
+  const now = Date.now();
+  const next = new Map<string, string>();
+  for (const session of ccLedger.all()) {
+    const wait = screenWaitOf(session);
+    const resume = resumeNeeded(session, now);
+    if (wait || resume) next.set(session.id, `${session.ownerBotId}#${wait ? `${wait.kind}:${wait.waitingFor}` : ""}|${resume ? resume.prs.join(",") : ""}`);
+  }
+  const owners = new Set<string>();
+  for (const [id, seen] of next) if (sessionSignalsSeen.get(id) !== seen) owners.add(seen.split("#")[0]!);
+  for (const [id, seen] of sessionSignalsSeen) if (!next.has(id)) owners.add(seen.split("#")[0]!);
+  sessionSignalsSeen = next;
+  for (const botId of owners) if (store.bot(botId)) refreshBotRow(botId);
+}
+
+/** A session failed or idle 2 h+ with its PR open holds the line (02/10:
+ * 9052/#9332 failed, 8204/#9350 and 9195/#9280 idle). Once per stop, its
+ * bot and the Chief hear it as one to RESUME — with the PRs, the reason and
+ * the two ways out (resume it, or report the exact block) (S-retomar). */
+function reportSessionsToResume(): void {
+  const now = Date.now();
+  const chief = store.bots.find((bot) => bot.chiefOfStaff);
+  const desk = chief ? chiefDeskThread(chief) : null;
+  // at most 3 per pass, oldest stop first: a first boot over many old stops never floods the bots
+  const due = ccLedger.all()
+    .map((session) => ({ session, resume: resumeNeeded(session, now) }))
+    .filter((item): item is { session: CcSession; resume: NonNullable<typeof item.resume> } => item.resume !== null && !(item.session.resumeReportedAt !== undefined && item.session.resumeReportedAt >= item.resume.since))
+    .sort((a, b) => a.resume.since - b.resume.since)
+    .slice(0, 3);
+  for (const { session, resume } of due) {
+    session.resumeReportedAt = now;
+    ccLedger.save();
+    const owner = store.bot(session.ownerBotId);
+    const text = `[Sessão para retomar] Claude Code session "${session.title}" (${session.id}) — ${resumeLine(session, resume, now)}.`;
+    if (owner) ccReport(session, text);
+    if (chief && desk && chief.id !== session.ownerBotId && openThreadOf(chief.id, desk)) {
+      autonomy.addReport(chief.id, desk, `${text.replace(/Retome com cc_session_send \(session_id [^)]+\)/, `Cobre de ${owner?.name ?? "o bot dono"} a retomada (cc_session_send na sessão ${session.id})`)} Ela é de ${owner?.name ?? session.ownerBotId}.`);
+    }
+    console.log(`[cc-sessions] ${session.id} must be resumed (${resume.prs.map((n) => `#${n}`).join(", ")}; ${resume.why.slice(0, 80)}): its bot${chief && chief.id !== session.ownerBotId ? " and the Chief" : ""} were told`);
+  }
+}
+
 async function runDesktopWork(): Promise<void> {
+  refreshSessionSignals();
+  reportSessionsToResume();
   followSurvivingSessions();
   watchStalledSessions(desktopWork);
   ageFailedSessions(desktopWork);
@@ -19413,12 +19470,21 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const sessions = ccLedger.owned(bot.id, body.includeArchived === true);
           const detail = typeof body.sessionId === "string" ? ccLedger.get(body.sessionId) : null;
           if (detail && detail.ownerBotId !== bot.id) return json(res, 404, { error: "você não tem essa sessão" });
+          const now = Date.now();
+          // the Chief sees every bot's session to resume: the line waits on them (S-retomar)
+          const othersToResume = bot.chiefOfStaff
+            ? ccLedger.all().filter((session) => session.ownerBotId !== bot.id).flatMap((session) => {
+              const resume = resumeNeeded(session, now);
+              return resume ? [`${session.id} · "${session.title}" · de ${store.bot(session.ownerBotId)?.name ?? session.ownerBotId} · ${resumeLine(session, resume, now).replace(/Retome com cc_session_send \(session_id [^)]+\)/, `Peça a ${store.bot(session.ownerBotId)?.name ?? "o bot dono"} que a retome com cc_session_send`)}`] : [];
+            })
+            : [];
           return json(res, 200, {
             message: [
               sessions.length ? sessions.map((session) => {
                 const record = session.surface === "app" && session.desktop?.localId && session.status !== "archived" ? readDesktopRecord(session.desktop.localId) : null;
-                return ccSessionLine(session, { blocked: record ? recordBlocked(record) : null });
+                return ccSessionLine(session, { blocked: record ? recordBlocked(record) : null, resume: resumeNeeded(session, now), now });
               }).join("\n") : "Você não gerencia nenhuma sessão do Claude Code.",
+              ...(othersToResume.length ? [`\nSessões de outros bots para RETOMAR (seguram PRs):\n${othersToResume.join("\n")}`] : []),
               // the slots are shared: everyone sees the whole queue, the Chief with whose each item is
               ...(ccStartQueue.ordered().length ? [queueListing(ccStartQueue, { id: bot.id, chief: Boolean(bot.chiefOfStaff) }, (botId) => store.bot(botId)?.name ?? botId, CC_MAX_RUNNING)] : []),
               ...(detail ? [`\nÚltimo relatório de ${detail.id}:\n${detail.lastReport ?? "(nenhum ainda)"}${detail.lastError ? `\nÚltimo problema: ${detail.lastError}` : ""}`] : []),

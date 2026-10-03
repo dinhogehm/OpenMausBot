@@ -121,6 +121,8 @@ export interface CcSession {
   claimedPrs?: number[];
   /** The orders it was given before claimedPrs existed were read back (once). */
   claimsReadAt?: number;
+  /** When its bot and the Chief were told it must be resumed (once per stop: a later failure or idle tells again). */
+  resumeReportedAt?: number;
 }
 
 export type CcSurface = "app" | "cli";
@@ -543,9 +545,16 @@ export class CcSessionLedger {
   }
 }
 
-export function ccSessionLine(session: CcSession, app: { blocked?: string | null } = {}): string {
+/** A session to resume (prod-delivery.ts resumeNeeded), said where a bot reads its sessions. */
+export function resumeLine(session: Pick<CcSession, "id">, resume: { since: number; prs: number[]; why: string }, now: number): string {
+  const hours = Math.max(2, Math.floor((now - resume.since) / 3_600_000));
+  return `RETOMAR — há ${hours} h com ${resume.prs.map((n) => `PR #${n}`).join(", ")} ${resume.prs.length > 1 ? "abertas" : "aberta"}, ${resume.why}. Retome com cc_session_send (session_id ${session.id}) dizendo o próximo passo, ou reporte ao dono o bloqueio exato (o comando ou a decisão que falta)`;
+}
+
+export function ccSessionLine(session: CcSession, app: { blocked?: string | null; resume?: { since: number; prs: number[]; why: string } | null; now?: number } = {}): string {
   const bits = [
     `${session.id} · "${session.title}" · ${session.status}${session.surface === "app" ? " · in the Claude app" : ""}`,
+    ...(app.resume ? [resumeLine(session, app.resume, app.now ?? Date.now())] : []),
     `turns ${session.turns}, US$ ${session.costUsd.toFixed(2)}`,
     session.cwd ? `worktree ${session.cwd}` : session.surface === "app" ? "worktree chosen by the app (pending)" : `worktree ${session.repo}/.claude/worktrees/${session.worktree} (pending)`,
     ...(session.desktop?.pending ? [`waiting for an idle Mac to ${session.desktop.pending.kind === "create" ? "open it" : session.desktop.pending.kind === "archive" ? "archive it" : session.desktop.pending.kind === "rename" ? "rename it" : "send a message"}${session.desktop.pending.lastReason ? ` (${session.desktop.pending.lastReason})` : ""}`] : []),
