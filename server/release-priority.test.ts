@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePsTable, type PsRow } from "./bg-jobs.ts";
-import { type AdmissionLease, ciLabel, ciOwner, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, releaseBlockedBy, type ReleaseIntent, releaseLabelSha, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
+import { type AdmissionLease, ciLabel, ciQueuedBehindRelease, ciQueuedText, ciOwner, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, releaseBlockedBy, type ReleaseIntent, releaseLabelSha, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
 import { releaseFailures, releaseInLoop } from "./release-watch.ts";
 
 const log = [
@@ -555,5 +555,50 @@ describe("a release in a loop never takes a session's CI (02/10, d5bb1f70b)", ()
     expect(resumeAfterRelease(parked, { ...quiet, at: legacy.at + RESUME_AFTER_MAX_MS - 60_000 })).toBeNull();
     expect(resumeAfterRelease(parked, { ...quiet, at: legacy.at + RESUME_AFTER_MAX_MS })).toBe("O release de produção do d5bb1f70b, que tomou a vez do seu ci:local, não saiu em 3 h e a tag não andou: relance o seu ci:local agora (npm run ci:local) e siga de onde parou.");
     expect(resumeAfterRelease(legacy, { ...quiet, at: legacy.at + RESUME_AFTER_MAX_MS })).toContain("não saiu em 3 h");
+  });
+});
+
+describe("a session's ci:local queued behind a release is a legitimate wait (lote W1)", () => {
+  // the real table: session 38002's CI holds the lease (owner 40409); session
+  // 78795's CI (83637) waits in the queue
+  const alive = (pid: number) => real.some((row) => row.pid === pid) || pid === 90001;
+  const release = "release:production:23a9f93c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a";
+  const releaseLease: AdmissionLease = { ownerPid: "90001", kind: "release", label: release };
+  const input = (over: Partial<Parameters<typeof ciQueuedBehindRelease>[0]>) => ({ rows: real, rootPid: 78795, lease: releaseLease, deployLease: null, intents: [], alive, ...over });
+
+  it("is queued while a live release holds the machine", () => {
+    expect(ciQueuedBehindRelease(input({}))).toEqual({ label: release, state: "holding" });
+  });
+  it("is queued behind a live release intent while another CI holds the machine", () => {
+    const ciLease: AdmissionLease = { ownerPid: "40409", kind: "ci-full" };
+    expect(ciQueuedBehindRelease(input({ lease: ciLease, intents: [{ pid: 90001, label: release }] }))).toEqual({ label: release, state: "queued" });
+    // a dead intent is no release: it waits behind the other CI, which the turn limit still covers
+    expect(ciQueuedBehindRelease(input({ lease: ciLease, intents: [{ pid: 99999, label: release }] }))).toBeNull();
+    expect(ciQueuedBehindRelease(input({ lease: ciLease }))).toBeNull();
+  });
+  it("is queued behind the deploy lease when the release freed the machine but the CI shares its checkout", () => {
+    expect(ciQueuedBehindRelease(input({ lease: null, deployLease: { ownerPid: "90001", label: release } }))).toEqual({ label: release, state: "holding" });
+    expect(ciQueuedBehindRelease(input({ lease: null, deployLease: { ownerPid: "99999", label: release } }))).toBeNull();
+  });
+  it("is not queued when the session's own CI holds the machine, or when the session runs no CI", () => {
+    expect(ciQueuedBehindRelease(input({ rootPid: 38002, lease: { ownerPid: "40409", kind: "ci-full" }, intents: [{ pid: 90001, label: release }] }))).toBeNull();
+    expect(ciQueuedBehindRelease(input({ rootPid: 34250 + 1 }))).toBeNull();
+  });
+  it("a dead release holding the lease is no wait to excuse", () => {
+    expect(ciQueuedBehindRelease(input({ lease: { ownerPid: "99999", kind: "release", label: release } }))).toBeNull();
+  });
+  it("says what it waits for, not an error", () => {
+    const text = ciQueuedText({ label: release, state: "holding" });
+    expect(text).toContain("aguardando o release de produção 23a9f93c0");
+    expect(text).toContain("o turno não é cortado");
+    expect(ciQueuedText({ label: "", state: "queued" })).toContain("aguardando um release");
+  });
+});
+
+describe("the turn's cut waits out a ci:local queued behind a release (lote W1, server/index.ts)", () => {
+  const source = readFileSync(join(import.meta.dirname, "index.ts"), "utf8");
+  it("the timer adds the queued time to the limit and never cuts while queued", () => {
+    expect(source).toMatch(/const due = turnStartedAt \+ ccTurnTimeoutMs \+ queuedMs \+ \(queuedSince \? now - queuedSince : 0\);\n\s+if \(queuedSince \|\| now < due\)/);
+    expect(source).toContain("ccChip(session, ciQueuedText(queued));");
   });
 });

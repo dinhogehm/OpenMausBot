@@ -197,8 +197,51 @@ export function ciToStop(pid: number, rows: readonly PsRow[], guard: StopGuard):
 // (~/.nuria/admission/lease/{owner.pid,kind}) and the release's intent
 // (~/.nuria/admission/intents/<release pid>, holding its label).
 
-export interface AdmissionLease { ownerPid: string; kind: string }
+export interface AdmissionLease { ownerPid: string; kind: string; label?: string }
 export interface ReleaseIntent { pid: number; label: string }
+/** nuria-platform lote W2: one release or deploy at a time, held for the whole release. */
+export interface DeployLease { ownerPid: string; label: string }
+
+/** A ci:local that queues for the machine (profile full or release; not --steps, not quick). */
+const QUEUEING_CI = (command: string) => isCiCommand(command) && !/\s--steps(?:\s|=|$)|\s--profile\s+quick(?:\s|$)|ci:local:quick/.test(command);
+
+/** nuria-platform lote W1: a full ci:local behind a release waits for it, however long,
+ * and that wait is legitimate — the session's turn must not be cut for it. The session's
+ * ci:local (a queueing local-ci under its turn's process) is queued behind a release when
+ * it does not hold the machine and a live release does — or queues for it (an intent,
+ * which local CIs wait behind), or holds the deploy lease with the machine free (a CI in
+ * the release's own checkout waits for it). Null when it runs, waits behind another CI, or
+ * there is no CI. */
+export function ciQueuedBehindRelease(input: { rows: readonly PsRow[]; rootPid: number; lease: AdmissionLease | null; deployLease: DeployLease | null; intents: readonly ReleaseIntent[]; alive: (pid: number) => boolean }): { label: string; state: "holding" | "queued" } | null {
+  const children = new Map<number, PsRow[]>();
+  for (const row of input.rows) children.set(row.ppid, [...(children.get(row.ppid) ?? []), row]);
+  const queue = [...(children.get(input.rootPid) ?? [])];
+  const ciPids = new Set<number>();
+  const seen = new Set<number>();
+  while (queue.length) {
+    const row = queue.shift()!;
+    if (seen.has(row.pid)) continue;
+    seen.add(row.pid);
+    if (QUEUEING_CI(row.command)) ciPids.add(row.pid);
+    queue.push(...(children.get(row.pid) ?? []));
+  }
+  if (!ciPids.size) return null;
+  const owner = Number(input.lease?.ownerPid.trim());
+  if (input.lease && ciPids.has(owner)) return null;
+  if (input.lease && input.lease.kind.trim() === "release" && input.alive(owner)) return { label: input.lease.label?.trim() ?? "", state: "holding" };
+  const intent = input.intents.find((each) => input.alive(each.pid));
+  if (intent) return { label: intent.label.trim(), state: "queued" };
+  const deployOwner = Number(input.deployLease?.ownerPid.trim());
+  if (!input.lease && input.deployLease && input.alive(deployOwner)) return { label: input.deployLease.label.trim(), state: "holding" };
+  return null;
+}
+
+/** The chip for a session whose ci:local waits behind a release: what it waits for, not an error. */
+export function ciQueuedText(queued: { label: string; state: "holding" | "queued" }): string {
+  const sha = releaseLabelSha(queued.label);
+  const what = sha ? `o release de produção ${sha.slice(0, 9)}` : "um release";
+  return `aguardando ${what} (${queued.state === "holding" ? "ele ocupa a máquina" : "ele está na fila pela máquina"}): o ci:local desta sessão está na fila e começa quando ele liberar; o turno não é cortado por essa espera`;
+}
 export type Blocked = NonNullable<ReturnType<typeof releaseBlockedBy>>;
 
 /** Whether the lease and the intents confirm the log: a live release intent

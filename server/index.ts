@@ -380,7 +380,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appUnblockPending, ownerChannelChip, serverRestartedChip, sessionChips } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
-import { type AdmissionLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
+import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, type ReleaseIntent, releaseLabelSha, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
@@ -9224,15 +9224,55 @@ function runCcTurn(session: CcSession, prompt: string, first: boolean): void {
   const sample = () => {
     if (!tree || process.platform === "win32" || Date.now() - sampledAt < 5_000) return;
     sampledAt = Date.now();
-    void psTable().then((rows) => noteDescendants(tree, rows)).catch(() => {});
+    void psTable()
+      .then((rows) => {
+        noteDescendants(tree, rows);
+        noteReleaseQueue(rows);
+      })
+      .catch(() => {});
+  };
+  // nuria-platform lote W1: a ci:local of this turn queued behind a release
+  // waits for it as long as it takes; that wait is not the turn's, so it is
+  // added to the turn's limit instead of cutting it, and said once per release.
+  const turnStartedAt = Date.now();
+  let queuedMs = 0;
+  let queuedSince = 0;
+  const queuedTold = new Set<string>();
+  const noteReleaseQueue = (rows: Parameters<typeof noteDescendants>[1]) => {
+    if (!child.pid) return;
+    let queued: ReturnType<typeof ciQueuedBehindRelease> = null;
+    try {
+      const alive = (pid: number) => rows.some((row) => row.pid === pid);
+      queued = ciQueuedBehindRelease({ rows, rootPid: child.pid, lease: readAdmissionLease(), deployLease: readDeployLease(), intents: readReleaseIntents() ?? [], alive });
+    } catch {
+      // the lease could not be read: undecided, so the wait is not counted
+    }
+    const now = Date.now();
+    if (queued && !queuedSince) queuedSince = now;
+    if (!queued && queuedSince) {
+      queuedMs += now - queuedSince;
+      queuedSince = 0;
+    }
+    if (queued && !queuedTold.has(queued.label)) {
+      queuedTold.add(queued.label);
+      ccChip(session, ciQueuedText(queued));
+    }
   };
   const sampler = setInterval(sample, 30_000);
   sampler.unref();
-  const timer = setTimeout(() => {
+  const cutOrWait = () => {
+    const now = Date.now();
+    const due = turnStartedAt + ccTurnTimeoutMs + queuedMs + (queuedSince ? now - queuedSince : 0);
+    if (queuedSince || now < due) {
+      timer = setTimeout(cutOrWait, Math.max(60_000, due - now));
+      timer.unref();
+      return;
+    }
     timedOut = true;
     child.kill("SIGTERM");
     setTimeout(() => child.kill("SIGKILL"), 5_000).unref();
-  }, ccTurnTimeoutMs);
+  };
+  let timer = setTimeout(cutOrWait, ccTurnTimeoutMs);
   timer.unref();
   child.stdout?.on("data", (chunk: Buffer) => {
     sample();
@@ -9760,7 +9800,21 @@ function readAdmissionLease(): AdmissionLease | null {
   };
   const ownerPid = read("owner.pid");
   if (!ownerPid) return null;
-  return { ownerPid, kind: read("kind") ?? "" };
+  return { ownerPid, kind: read("kind") ?? "", label: read("label") ?? "" };
+}
+/** The release's deploy lease (lote W2): held for the whole release, also while the machine is free. */
+function readDeployLease(): DeployLease | null {
+  try {
+    const ownerPid = readFileSync(join(ADMISSION_DIR, "deploy-lease", "owner.pid"), "utf8").trim();
+    if (!ownerPid) return null;
+    let label = "";
+    try {
+      label = readFileSync(join(ADMISSION_DIR, "deploy-lease", "label"), "utf8").trim();
+    } catch {}
+    return { ownerPid, label };
+  } catch {
+    return null;
+  }
 }
 function readReleaseIntents(): ReleaseIntent[] | null {
   // admission-control.sh creates intents/ on every acquire: missing while a
