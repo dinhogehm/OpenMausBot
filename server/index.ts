@@ -376,7 +376,7 @@ import { DiskWatch } from "./disk-watch.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
-import { climbStopLadder } from "./stop-ladder.ts";
+import { climbStopLadder, ownerItemCiting } from "./stop-ladder.ts";
 import { checkArchivedOutside, githubLookups } from "./archived-outside.ts";
 import { computerErrorPt, isInfraFailure } from "./error-pt.ts";
 import { sessionErrorPt } from "../shared/session-error-pt.ts";
@@ -10507,6 +10507,7 @@ async function climbStopLadderTick(): Promise<void> {
         if (chief && desk && chief.id !== session.ownerBotId && openThreadOf(chief.id, desk)) autonomy.addReport(chief.id, desk, text);
       },
       ownerName: (session) => store.bot(session.ownerBotId)?.name ?? "o bot dono",
+      ownerItem: (session, prs) => ownerItemCiting(store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)), session, prs),
     });
     for (const { session, stage } of said) {
       const prs = openPrsOfSession(session).map((n) => `#${n}`).join(", ");

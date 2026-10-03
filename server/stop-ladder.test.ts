@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CcSessionLedger, type CcSession } from "./cc-sessions.ts";
-import { climbStopLadder, STOP_NOTICES_PER_HOUR, type StopLadderDeps } from "./stop-ladder.ts";
+import { climbStopLadder, ownerItemCiting, STOP_NOTICES_PER_HOUR, type StopLadderDeps } from "./stop-ladder.ts";
 
 const H = 3_600_000;
 const SLUG = "dinhogehm/nuria-platform";
@@ -164,6 +164,34 @@ describe("at most 3 an hour, across restarts (INSP-S r1 S-9)", () => {
     expect(await climbStopLadder({ ...h.deps })).toEqual([]);
     expect(await h.at(2.9)).toEqual([]);
     expect(await h.at(3)).toEqual(["d:resume", "e:resume"]);
+  });
+});
+
+// INSP-S r2 S2-5: a session the bot resumes and that stops again on the same
+// block (QA, the owner's decision) used to hear RETOMAR 2 h after every stop
+describe("the block already with the owner", () => {
+  it("neither starts over on a new stop nor repeats while the owner's item citing the PR is open; resumes once it closes", async () => {
+    const h = harness();
+    const session = h.stopped("9195", "idle", { blockedOn: "decisão do dono sobre o merge" }, [9280]);
+    let open = [{ title: "Decidir o merge da PR #9280 (rodízio de atendentes)", why: "a sessão 9195 espera" }];
+    h.deps.ownerItem = (s, prs) => ownerItemCiting(open, s, prs);
+    expect(await h.at(2)).toEqual([]);
+    // resumed, stopped again on the same block: still nothing, at 2 h or 24 h
+    vi.setSystemTime(T0 + 3 * H);
+    session.lastActivityAt = Date.now();
+    expect([...await h.at(5), ...await h.at(28), ...await h.at(60)]).toEqual([]);
+    expect(h.said).toEqual([]);
+    // the owner answered (the item closed): the ladder speaks again on this stop
+    open = [];
+    expect(await h.at(61)).toEqual(["9195:escalate"]);
+  });
+
+  it("matches the PR by number or link, or the session by id — never another number that only contains it", () => {
+    const session = { id: "s-9195" };
+    expect(ownerItemCiting([{ title: "Aprovar PR 9280" }], session, [9280])).toBe("Aprovar PR 9280");
+    expect(ownerItemCiting([{ title: "x", steps: [{ text: "abra", link: "https://github.com/o/r/pull/9280" }] }], session, [9280])).toBe("x");
+    expect(ownerItemCiting([{ title: "Sessão s-9195 precisa de você" }], session, [1])).toBe("Sessão s-9195 precisa de você");
+    expect(ownerItemCiting([{ title: "Aprovar PR #92801" }, { title: "issue 9280 do cliente" }], session, [9280])).toBeNull();
   });
 });
 

@@ -68,6 +68,18 @@ export interface StopLadderDeps {
   /** What the Chief hears (another bot's session), with the owner's name. */
   chief?: (session: CcSession, text: string) => void;
   ownerName?: (session: CcSession) => string;
+  /** An open owner item ("Precisa de você") that already carries this
+   * session's block — its title — or null (ownerItemCiting). */
+  ownerItem?: (session: CcSession, prs: number[]) => string | null;
+}
+
+/** The open owner item that already names this session or one of its PRs
+ * (the bot did report the exact block): the ladder neither starts over on
+ * a new stop nor repeats it while it is open (INSP-S r2 S2-5). Its title, or null. */
+export function ownerItemCiting(items: ReadonlyArray<{ title: string; why?: string; link?: string; command?: string; steps?: ReadonlyArray<{ text: string; link?: string; command?: string }> }>, session: Pick<CcSession, "id">, prs: readonly number[]): string | null {
+  const cites = (text: string) => text.includes(session.id) || prs.some((n) => new RegExp(`(?:#|\\bPRs?\\s*#?|/pull/)${n}(?!\\d)`, "i").test(text));
+  const found = items.find((item) => cites([item.title, item.why, item.link, item.command, ...(item.steps ?? []).flatMap((step) => [step.text, step.link, step.command])].filter(Boolean).join("\n")));
+  return found?.title ?? null;
 }
 
 const prList = (prs: readonly number[]) => prs.map((n) => `PR #${n}`).join(", ");
@@ -113,6 +125,8 @@ export async function climbStopLadder(deps: StopLadderDeps): Promise<Array<{ ses
   for (const { session, step: planned } of due) {
     if (budget <= 0) break;
     let step = planned;
+    // the block is already with the owner: nothing to add on this stop, nor on the next while it is open
+    if (step.stage !== "archive" && deps.ownerItem?.(session, step.need.prs)) continue;
     if (step.stage !== "archive" && deps.confirmOpen) {
       const open = await deps.confirmOpen(session, step.need.prs);
       if (open && !open.length) continue; // merged or closed meanwhile: nothing holds the line
