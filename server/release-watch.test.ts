@@ -328,6 +328,13 @@ describe("a release that needs attention without being halted (H9)", () => {
     expect(alert.report).toContain("último erro: Roster tenant mudou (drift) desde o preflight em 3 tentativas seguidas");
     expect(alert.report).toContain("é assunto do DBA");
     expect(alert.report).toContain("rm ~/.nuria/roster-drifts-production-release");
+    // INSP-W r3 W3-3: the count is the watcher's (NURIA_RELEASE_MAX_ROSTER_DRIFTS), never a fixed 3
+    const five = releaseAttention(JSON.stringify({ ...JSON.parse(FIXTURE), reason: "roster-drift", failures: 5, limit: 5 }))!;
+    expect(five.reasonPt).toContain("recusou o roster de tenants 5 vezes seguidas");
+    expect(releaseAttentionAlert(five, { err: "e" }).text).toContain("mudou 5× seguidas");
+    const unknown = releaseAttention(JSON.stringify({ ...JSON.parse(FIXTURE), reason: "roster-drift", failures: "x" }))!;
+    expect(unknown.failures).toBeNull();
+    expect(releaseAttentionAlert(unknown, { err: "e" }).text).toContain("mudou várias vezes seguidas");
   });
 
   it("tells each write once: a new signature (another time) is news, the same file read again is not", () => {

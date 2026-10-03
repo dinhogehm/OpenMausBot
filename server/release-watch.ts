@@ -521,14 +521,16 @@ export const ATTENTION_MAX_AGE_MS = 24 * 3_600_000;
 const ATTENTION_REASONS: Record<string, string> = {
   "fast-failure": "falhou antes da CI ou sem veredito dela (git/ssh, npm ci, lock de admissão): é a máquina, não o commit",
   signal: "foi morto por um sinal (reinício, falta de memória ou alguém parou o processo): é a máquina, não o commit",
-  // nuria-platform INSP-W r2 R2-3: the 3rd refusal of the tenant roster on one tip
-  "roster-drift": "recusou o roster de tenants 3 vezes seguidas (tenant criado ou sumido durante o plano, antes de qualquer mutação)",
+  // nuria-platform INSP-W r2 R2-3: the Nth refusal of the tenant roster on one tip ({n}: the
+  // watcher's count, NURIA_RELEASE_MAX_ROSTER_DRIFTS by default 3 — INSP-W r3 W3-3)
+  "roster-drift": "recusou o roster de tenants {n} vezes seguidas (tenant criado ou sumido durante o plano, antes de qualquer mutação)",
 };
 
 // control characters, built from a string so none sits in a regex literal
 const CONTROL_CHARS = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]+`, "g");
 
-export interface ReleaseAttention { key: string; sha: string; reason: string; reasonPt: string; lastFailure: string | null; at: string | null; atMs: number | null }
+/** `failures`: the watcher's count for this escalation (the limit it reached), when it wrote one. */
+export interface ReleaseAttention { key: string; sha: string; reason: string; reasonPt: string; lastFailure: string | null; at: string | null; atMs: number | null; failures: number | null }
 
 /** The watcher's "needs attention" escalation, or null when the file is
  * missing, empty, corrupt, too large or of another kind. Free text from the
@@ -551,7 +553,9 @@ export function releaseAttention(json: string): ReleaseAttention | null {
   const atMs = at && Number.isFinite(Date.parse(at)) ? Date.parse(at) : null;
   // one alert per write: the watcher writes once per failure signature, each with its own time
   const stamp = at ?? `${lastFailure ?? ""}`.slice(0, 80);
-  return { key: `attention:${raw.sha.slice(0, 12)}:${reason}:${stamp}`, sha: raw.sha, reason, reasonPt: ATTENTION_REASONS[reason] ?? `pediu atenção (${reason})`, lastFailure, at, atMs };
+  const failures = typeof raw.failures === "number" && Number.isInteger(raw.failures) && raw.failures > 0 && raw.failures < 1000 ? raw.failures : null;
+  const reasonPt = (ATTENTION_REASONS[reason] ?? `pediu atenção (${reason})`).replace("{n}", String(failures ?? "várias"));
+  return { key: `attention:${raw.sha.slice(0, 12)}:${reason}:${stamp}`, sha: raw.sha, reason, reasonPt, lastFailure, at, atMs, failures };
 }
 
 /** Whether an escalation is news: not older than ATTENTION_MAX_AGE_MS, not of
@@ -595,7 +599,8 @@ export function releaseAttentionAlert(attention: ReleaseAttention, logs: { err: 
   const last = attention.lastFailure?.slice(0, 160).replace(/[.\s]+$/, "");
   // not the machine: the tenant roster kept changing, and the watcher stopped trying this commit
   if (attention.reason === "roster-drift") {
-    const text = `Release ${short} parado: o roster de tenants mudou 3× seguidas durante o plano, nada foi mutado — o watcher não tenta este commit de novo até a main andar.`;
+    const times = attention.failures ? `${attention.failures}×` : "várias vezes";
+    const text = `Release ${short} parado: o roster de tenants mudou ${times} seguidas durante o plano, nada foi mutado — o watcher não tenta este commit de novo até a main andar.`;
     return {
       text,
       report: `[Alerta do servidor: release de produção pede atenção] ${text}\nO release ${attention.reasonPt}${last ? `; último erro: ${last}` : ""}.\nO que fazer: veja ${logs.err}${attention.at ? ` perto de ${attention.at}` : ""} e descubra por que a descoberta de tenants oscila (tenant em provisionamento, um que aparece e some, ou o congelamento do roster) — é assunto do DBA. Depois, um commit novo na main, ou \`rm ~/.nuria/roster-drifts-production-release\` para o watcher tentar este mesmo commit. Arquivo: ${ATTENTION_ESCALATION_FILE}.`,
