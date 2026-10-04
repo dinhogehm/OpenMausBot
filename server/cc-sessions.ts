@@ -231,6 +231,31 @@ export interface CcDesktopState {
   wrongFolder?: string;
   /** Its brief opens with the folder check (desktop-work.ts folderGuard). */
   folderGuarded?: boolean;
+  /** The worktree the server makes for it before opening it (own-worktrees.ts, lote X). */
+  own?: CcOwnWorktree;
+}
+
+/** A worktree the server made (or will make) for an app session, and how it
+ * went: `planned` until it exists, `ready` once made (the create opens the
+ * app right there), `failed` when it could not be made and `abandoned` when
+ * the app would not open there — both go on through New Session, as before.
+ * The worktree is never removed by the server. */
+export interface CcOwnWorktree {
+  path: string;
+  branch: string;
+  state: "planned" | "ready" | "failed" | "abandoned";
+  /** The folder handed to the app (an alias of `path`, own-worktrees.ts ownLinkPath). */
+  link?: string;
+  /** The commit it was made at. */
+  head?: string;
+  /** Its caches: cloned from the seed, or installed by the session (and why). */
+  caches?: { mode: "cloned" | "install"; reason?: string; dirs?: string[]; savedKb?: number; savedMs?: number; ms?: number };
+  /** Why it failed or was abandoned. */
+  reason?: string;
+  /** The brief as the bot wrote it: the app's text is made from it once the worktree is ready. */
+  brief: string;
+  /** The brief for New Session (its own folder check), should this one not open. */
+  classicText: string;
 }
 
 export interface CcDesktopPending {
