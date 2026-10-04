@@ -183,6 +183,10 @@ it("drops the goal and the pending wake when the person presses Stop", () => fix
   ] });
   await f.send("Start the long job.");
   await expect.poll(() => f.ledger().goals?.[0]?.status, { timeout: 20_000 }).toBe("active");
+  // Stop only once the wake is armed too: under load, a Stop between goal_start
+  // and wake_me killed the turn before the wake existed, and no "Despertador
+  // cancelado" chip could ever come (the flaky case of 04/10, base and lot U alike)
+  await expect.poll(() => f.ledger().wakes?.length ?? 0, { timeout: 20_000 }).toBe(1);
   await f.api(`/api/bots/${f.bot.id}/interrupt`, { threadId: f.bot.activeTaskId });
   await expect.poll(() => f.ledger().goals[0].status, { timeout: 10_000 }).toBe("stopped");
   expect(f.ledger().wakes).toEqual([]);
