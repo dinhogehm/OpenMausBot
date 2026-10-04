@@ -281,6 +281,8 @@ export function ownerPendingRemindReport(item: Pick<OwnerPending, "id" | "title"
 export interface ResolvedOwnerPending extends OwnerPending {
   resolvedAt: number;
   resolvedBy: "owner" | "bot" | "server";
+  /** How, when it says more than who ("respondida na conversa"). */
+  resolvedNote?: string;
 }
 export interface OwnerPendingStep {
   text: string;
@@ -368,9 +370,10 @@ export function parseOwnerPendingDetails(input: { why?: unknown; steps?: unknown
 /** A settled item as kept for audit: who, what, when and what the person
  * answered — not its why/steps/options, so the ledger (rewritten on every
  * save) stays small (INSP-J2 #12). */
-function slimResolved(item: OwnerPending, resolvedAt: number, resolvedBy: ResolvedOwnerPending["resolvedBy"]): ResolvedOwnerPending {
+function slimResolved(item: OwnerPending, resolvedAt: number, resolvedBy: ResolvedOwnerPending["resolvedBy"], note?: string): ResolvedOwnerPending {
   return {
     id: item.id, botId: item.botId, threadId: item.threadId, title: item.title, createdAt: item.createdAt, resolvedAt, resolvedBy,
+    ...(note ? { resolvedNote: note } : {}),
     ...(item.key ? { key: item.key } : {}),
     ...(item.history?.length ? { history: item.history.slice(-OWNER_PENDING_HISTORY_MAX) } : {}),
   };
@@ -428,6 +431,85 @@ export const STEPS_REPORT_PREFIX = "[Servidor: pendências sem passo a passo]";
 export function ownerPendingStepsAutoReport(items: ReadonlyArray<Pick<OwnerPending, "id" | "title" | "why" | "steps" | "options">>): string {
   const lines = items.map((item) => `- ${item.id} («${item.title.slice(0, 120)}»): falta ${missingParts(item).join(" e ")}`);
   return `${STEPS_REPORT_PREFIX} Itens: ${items.map((item) => item.id).join(", ")}. O dono quer cada pendência com o passo a passo e, se for uma escolha, com a sua recomendação. Complete cada um com owner_pending update (why: 1–2 frases sobre por que importa; steps: passos práticos com o comando em command ou o link em link quando houver; options: UMA com recommended: true e why):\n${lines.join("\n")}\nSe um item não vale mais, resolva-o com owner_pending resolve. Não escreva ao dono só por isto.`;
+}
+
+/** A question a bot ended its turn with (a goal's needs_input, or its reply
+ * that waits on the person), which the server asked it, once, to register
+ * as an owner_pending item with why, steps and options (lot J2): the
+ * question's own line in "Precisa de você" gives way to that item. */
+export interface AskPromotion {
+  botId: string;
+  /** The conversation that asked. */
+  threadId: string;
+  /** When it asked (the line's "since"): one request per question. */
+  askAt: number;
+  /** What it asked, as the panel shows it. */
+  text: string;
+  /** When the server asked the bot (again, when the person asked it to). */
+  askedAt: number;
+  /** Where the request went: the owner's channel, or the conversation itself. */
+  reportThreadId: string;
+  /** The item the bot opened for it, linked by owner_pending add replacesAsk. */
+  itemId?: string;
+  /** When the server saw the person answer it in the conversation itself (settled once). */
+  answeredAt?: number;
+}
+export const ASK_PROMOTIONS_MAX = 100;
+
+/** The server's own request, as a report, to turn a bare question into an item (lot J2). */
+export const QUESTION_REPORT_PREFIX = "[Servidor: pergunta sem passo a passo]";
+
+/** That request: facts and the one tool call, never in the person's voice.
+ * `Ref <thread>@<askAt>` lets a stop at dispatch put the question back. */
+export function questionStepsAutoReport(ask: Pick<AskPromotion, "threadId" | "askAt" | "text">, threadTitle?: string): string {
+  const where = threadTitle ? ` na conversa «${threadTitle.slice(0, 80)}»` : "";
+  return `${QUESTION_REPORT_PREFIX} Ref ${ask.threadId}@${ask.askAt}. Você terminou um turno${where} com uma pergunta ao dono: «${ask.text.slice(0, 300)}». Em "Precisa de você" ela aparece só como título, sem por quê, sem passos e sem opções. Registre-a com owner_pending add: replacesAsk "${ask.threadId}@${ask.askAt}" (é o que liga o item a esta pergunta), title (o que o dono decide, em uma frase), why (1–2 frases: por que importa e o que acontece se esperar), steps (passos práticos, com o comando em command ou o link em link quando houver) e options (as respostas possíveis, UMA com recommended: true e why). O item substitui a pergunta na tela. Se a pergunta não vale mais, não abra nada. Não escreva ao dono só por isto.`;
+}
+
+/** The question a stopped request was about, read back from its Ref. */
+export function questionReportRef(text: string): { threadId: string; askAt: number } | null {
+  if (!text.startsWith(QUESTION_REPORT_PREFIX)) return null;
+  const ref = /^ Ref ([\w-]+)@(\d+)\./.exec(text.slice(QUESTION_REPORT_PREFIX.length));
+  return ref ? { threadId: ref[1]!, askAt: Number(ref[2]) } : null;
+}
+
+/** owner_pending add's replacesAsk, "<thread>@<askAt>" — the Ref of the
+ * request it answers (INSP-J2b #1: only this link replaces a question). */
+export function parseReplacesAsk(value: unknown): { threadId: string; askAt: number } | null {
+  const ref = typeof value === "string" ? /^([\w-]+)@(\d+)$/.exec(value.trim()) : null;
+  return ref ? { threadId: ref[1]!, askAt: Number(ref[2]) } : null;
+}
+
+/** Why an item settled by the server says the person answered its question in the conversation itself. */
+export const ANSWERED_IN_CONVERSATION = "respondida na conversa";
+
+/** The person's message that answers a question the bot asked at `askAt`
+ * (INSP-J2b r2 c-2): the first one after it, before the bot asks anything
+ * else — unless it names other #refs and none of the question's —, or any
+ * later one naming the question's #ref. null while none does: a message
+ * about something else never settles the question's item. */
+export function answerToAsk(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number; peerAsk?: unknown; from?: unknown }>, askAt: number, askText: string): { at: number; text: string } | null {
+  const refs = new Set(askText.match(/#\d+/g) ?? []);
+  let first = true;
+  for (const message of messages.filter((each) => each.at > askAt).toSorted((a, b) => a.at - b.at)) {
+    const text = (message.text ?? "").trim();
+    if (message.role === "bot" && message.kind === "text" && !message.from) {
+      // the bot asked something else: what follows answers that, unless it names this question's #ref
+      if (/\?[\s*_`)\]]*$/.test(text) || OWNER_ASK.test(text)) first = false;
+      continue;
+    }
+    if (message.role !== "user" || message.kind !== "text" || message.peerAsk || message.from) continue;
+    const cited = text.match(/#\d+/g) ?? [];
+    if (cited.some((ref) => refs.has(ref)) || (first && !cited.length)) return { at: message.at, text };
+    first = false;
+  }
+  return null;
+}
+
+/** The server tells the bot it closed the item of its question, answered by the person in the conversation. */
+export const ANSWERED_REPORT_PREFIX = "[Servidor: pendência fechada]";
+export function answeredInConversationReport(item: Pick<OwnerPending, "id" | "title">, ask: string, answer: string): string {
+  return `${ANSWERED_REPORT_PREFIX} O dono respondeu na conversa à sua pergunta «${ask.slice(0, 200)}»: «${answer.slice(0, 300)}». O item ${item.id} («${item.title.slice(0, 120)}») foi fechado como ${ANSWERED_IN_CONVERSATION}. Siga com a resposta dele; não reabra o item. Não escreva ao dono só por isto.`;
 }
 
 /** What only the bot reads when the person asks, from "Precisa de você",
@@ -559,6 +641,8 @@ interface Ledger {
   reports?: PendingReports[];
   inFlight?: InFlight[];
   standingLost?: StandingLost[];
+  /** Questions a bot left in a conversation, asked once to become items (lot J2). */
+  askPromotions?: AskPromotion[];
 }
 
 /** A conversation whose last standing watch was cancelled: a watcher bot
@@ -668,6 +752,7 @@ export class BotAutonomy {
   private promises: BotPromise[] = [];
   private ownerPending: OwnerPending[] = [];
   private resolvedOwnerPending: ResolvedOwnerPending[] = [];
+  private askPromotions: AskPromotion[] = [];
   /** The bot's recent writes to watched sources, per bot (kept across restarts: saveEcho). */
   private selfWrites = new Map<string, SelfWrite[]>();
   /** Each watch's complete output lines of its last run (kept across restarts for that very output). */
@@ -731,10 +816,15 @@ export class BotAutonomy {
       for (const done of raw.resolvedOwnerPending ?? []) {
         if (done && typeof done.id === "string" && typeof done.botId === "string" && typeof done.title === "string" && typeof done.resolvedAt === "number") this.resolvedOwnerPending.push(done);
       }
-      this.resolvedOwnerPending = keepResolved(this.resolvedOwnerPending.map((item) => slimResolved(item, item.resolvedAt, item.resolvedBy)));
+      this.resolvedOwnerPending = keepResolved(this.resolvedOwnerPending.map((item) => slimResolved(item, item.resolvedAt, item.resolvedBy, typeof item.resolvedNote === "string" ? item.resolvedNote : undefined)));
       const folded = this.foldEquivalentPending();
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
+      }
+      for (const asked of raw.askPromotions ?? []) {
+        if (asked && typeof asked.botId === "string" && typeof asked.threadId === "string" && typeof asked.text === "string" && Number.isFinite(asked.askAt) && Number.isFinite(asked.askedAt)) {
+          this.askPromotions.push({ ...asked, reportThreadId: typeof asked.reportThreadId === "string" ? asked.reportThreadId : asked.threadId });
+        }
       }
       // Turns a restart cut off: what woke them is due again, marked as such.
       const at = this.now();
@@ -771,7 +861,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()] };
+    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()], ...(this.askPromotions.length ? { askPromotions: this.askPromotions } : {}) };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -1294,7 +1384,7 @@ export class BotAutonomy {
   }
 
   /** Resolve one item of a bot by id, all of a conversation with "all", or a server item by key. */
-  resolveOwnerPending(match: { botId?: string; threadId?: string; id?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"] }): OwnerPending[] {
+  resolveOwnerPending(match: { botId?: string; threadId?: string; id?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"]; note?: string }): OwnerPending[] {
     const done = this.ownerPending.filter((open) =>
       (match.botId === undefined || open.botId === match.botId)
       && (match.key !== undefined ? open.key === match.key
@@ -1304,7 +1394,7 @@ export class BotAutonomy {
     this.ownerPending = this.ownerPending.filter((open) => !done.includes(open));
     // kept for audit, with what the person answered (J18)
     const at = this.now();
-    this.resolvedOwnerPending = keepResolved([...this.resolvedOwnerPending, ...done.map((item) => slimResolved(item, at, match.by ?? "server"))]);
+    this.resolvedOwnerPending = keepResolved([...this.resolvedOwnerPending, ...done.map((item) => slimResolved(item, at, match.by ?? "server", match.note))]);
     this.save();
     return done;
   }
@@ -1433,6 +1523,60 @@ export class BotAutonomy {
   ownerPendingNeedingSteps(): OwnerPending[] {
     // a bot's own items only: the server completes its keyed ones itself (INSP-J2 #5)
     return this.ownerPending.filter((item) => !item.key && missingParts(item).length > 0 && item.stepsAutoAskedAt === undefined).sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** The request for a bot's question (lot J2): this very ask, by its exact
+   * moment — a new question with the same words is a new one (INSP-J2b #2). */
+  askPromotionFor(botId: string, threadId: string, askAt: number): AskPromotion | null {
+    return this.askPromotions.find((each) => each.botId === botId && each.threadId === threadId && each.askAt === askAt) ?? null;
+  }
+
+  /** Every request made, for the server's settling pass. */
+  allAskPromotions(): readonly AskPromotion[] {
+    return this.askPromotions;
+  }
+
+  /** The person answered the question in its conversation: settled once. */
+  markAskAnswered(promotion: AskPromotion): void {
+    promotion.answeredAt = this.now();
+    this.save();
+  }
+
+  /** The bot answered the request with owner_pending add replacesAsk: this item takes the question's place. */
+  linkAskPromotion(promotion: AskPromotion, itemId: string): void {
+    promotion.itemId = itemId;
+    this.save();
+  }
+
+  /** The server asked the bot to register its question (again, when the person asked). */
+  noteAskPromotion(input: Omit<AskPromotion, "askedAt" | "itemId">): AskPromotion {
+    const current = this.askPromotionFor(input.botId, input.threadId, input.askAt);
+    const asked: AskPromotion = { ...input, askedAt: this.now() };
+    this.askPromotions = [...this.askPromotions.filter((each) => each !== current), asked].slice(-ASK_PROMOTIONS_MAX);
+    this.save();
+    return asked;
+  }
+
+  /** A request that never reached the bot (~/.nuria/stop): the question may be asked again later. */
+  dropAskPromotion(botId: string, threadId: string, askAt: number): void {
+    const before = this.askPromotions.length;
+    this.askPromotions = this.askPromotions.filter((each) => !(each.botId === botId && each.threadId === threadId && each.askAt === askAt && !each.itemId));
+    if (this.askPromotions.length !== before) this.save();
+  }
+
+  /** The item the bot linked to the question (replacesAsk), open or already
+   * settled; null while none is — nothing else ever replaces it (INSP-J2b #1). */
+  askPromotionItem(promotion: AskPromotion): OwnerPending | null {
+    if (!promotion.itemId) return null;
+    return this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!)))
+      ?? this.resolvedOwnerPending.find((item) => item.botId === promotion.botId && item.id === promotion.itemId)
+      // settled and aged out of the audit trail: this very question was answered all the same
+      ?? { id: promotion.itemId, botId: promotion.botId, threadId: promotion.reportThreadId, title: promotion.text, createdAt: promotion.askedAt };
+  }
+
+  /** The open item linked to the question, if any (the one to settle when the person answers in the conversation). */
+  askPromotionOpenItem(promotion: AskPromotion): OwnerPending | null {
+    return promotion.itemId ? this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!))) ?? null : null;
   }
 
   /** The server's own items (keyed) still without why or steps — saved by an older build. */

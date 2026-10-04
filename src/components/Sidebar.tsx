@@ -117,7 +117,7 @@ import { SidebarNow } from "./NowPanel";
 import { NeedsYouResolver } from "./NeedsYouResolver";
 import { needsYouItems, needsYouKey, nextAwaitingChange, startNeedsYouClock } from "@/lib/needs-you";
 import { OPEN_NEEDS_YOU_EVENT } from "@/lib/pipeline-board";
-import { decisionReply, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
+import { askQuestionSteps, decisionReply, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
 import { openExternalLink } from "@/lib/app-links";
 import { ShortcutHint } from "./ShortcutHint";
 import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
@@ -2228,7 +2228,8 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         onOpenLink={(url) => void openExternalLink(url)}
         onCopy={(text) => navigator.clipboard.writeText(text)}
         onDecide={(item, option) => replyToOwnerPending(item, decisionReply(item, option), dispatch)}
-        onAskSteps={(item) => replyToOwnerPending(item, { ask: "steps" }, dispatch)}
+        // a bot's bare question: the server asks the bot for the item, never in the person's words (lot J2)
+        onAskSteps={(item) => item.pendingId ? replyToOwnerPending(item, { ask: "steps" }, dispatch) : askQuestionSteps(item)}
         onAskRecommend={(item) => replyToOwnerPending(item, { ask: "recommend" }, dispatch)}
         onReply={(item, text, resolve) => item.pendingId
           ? replyToOwnerPending(item, { text, resolve }, dispatch)

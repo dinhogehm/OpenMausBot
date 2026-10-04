@@ -189,6 +189,9 @@ export interface WireTask {
   /** What it asks, in one sentence (the conversation's title may only say
    * who, like "@Chief of Staff"). */
   goalNeedsInputAsk?: string;
+  /** When the server asked the bot to register that ask as an item with
+   * why, steps and options (lot J2): the item then takes its place. */
+  goalNeedsInputStepsAskedAt?: number;
   /** Watches (wake_when) running for this conversation, for its row. */
   watches?: WireWatch[];
   /** It had a standing watch and has had none for a while. */

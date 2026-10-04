@@ -645,3 +645,64 @@ describe("keys on the resolution screen", () => {
     expect(linkLabel("https://www.docs.example.com/x")).toBe("docs.example.com");
   });
 });
+
+// Lot J2, as the panel was on 04/10 (redacted): the Monitor's routine
+// "Atendimento: Chat, planilha e issues" opened o14 and o15 inside its runs,
+// and the owner saw "1 item" — only the bare question of its main
+// conversation, with no why, steps nor options.
+describe("items a routine's run or an archived conversation opened, and a bare question (lot J2)", () => {
+  const routine = "Atendimento: Chat, planilha e issues";
+  const steps = [{ text: "Confira a issue", link: "https://github.com/acme/app/issues/9355" }];
+  const choice = [{ label: "Autorizar", reply: "Autorizo criar a linha.", recommended: true as const, why: "É uma linha só, conferida depois." }, { label: "Faço eu", reply: "Eu crio a linha." }];
+  const monitor = bot("monitor", "Monitor Chat Atendimento", [
+    task("main", "@Chief of Staff", { goalNeedsInput: true, goalNeedsInputSince: now - 13 * 3_600_000, goalNeedsInputAsk: "A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282.", goalNeedsInputStepsAskedAt: now - 5 * 60_000 }),
+    task("run-a", routine, { routineRunId: "r1", ownerPending: [{ id: "o14", title: "Autorizar a linha nova da #9355 na planilha Atendimento", since: now - 20 * 3_600_000, why: "A demanda não tem linha na planilha.", steps, options: choice }] }),
+    task("run-b", routine, { routineRunId: "r2", ownerPending: [{ id: "o15", title: "Liberar os comentários de registro dos avisos na #9331 e na #9334", since: now - 6 * 3_600_000, why: "O hook barrou os comentários.", steps, options: choice }] }),
+    // a routine's run that ends asking: its own line stays out (only the items count)
+    task("run-c", routine, { routineRunId: "r3", goalNeedsInput: true, goalNeedsInputSince: now - 30 * 3_600_000, goalNeedsInputAsk: "Abro uma conversa nova no Chat?" }),
+    task("old", "Arquivada", { archivedAt: now - 3_600_000, ownerPending: [{ id: "o16", title: "Conferir o aviso enviado", since: now - 2 * 3_600_000, why: "x", steps }] }),
+  ]);
+  const real = needsYouItems([monitor]);
+  const realKey = (id: string) => needsYouKey(real.find((item) => item.pendingId === id || (!item.pendingId && item.threadId === id))!);
+
+  it("lists o14 and o15 from the routine's runs and an archived conversation's item, never a routine run's own question", () => {
+    expect(real.map((item) => item.pendingId ?? item.threadId).sort()).toEqual(["main", "o14", "o15", "o16"]);
+    expect(real.find((item) => item.pendingId === "o14")).toMatchObject({ threadId: "run-a", threadKind: "routine", why: "A demanda não tem linha na planilha." });
+    expect(real.find((item) => item.pendingId === "o16")?.threadKind).toBe("archived");
+    expect(real.find((item) => item.threadId === "main")?.threadKind).toBeUndefined();
+    expect(view({ items: real, selectedKey: null, pane: "list" }).html).toContain("4 itens esperando você");
+  });
+
+  it("says where the item came from, and 'Abrir conversa' opens the routine's run (or the archived one)", () => {
+    const o14 = view({ items: real, selectedKey: realKey("o14") });
+    expect(o14.title).toBe("Autorizar a linha nova da #9355 na planilha Atendimento");
+    expect(o14.html).toContain(`em “${routine}”, execução de rotina`);
+    // never cut on a phone: it wraps (INSP-J2b #4)
+    expect(o14.find("data-resolver-thread-kind", "routine")?.props.className).toBe("min-w-0 max-w-full break-words");
+    expect(o14.html).toContain("Autorizar");
+    o14.press("data-resolver-conversation");
+    expect(o14.calls).toEqual(["conversation:run-a"]);
+    const o16 = view({ items: real, selectedKey: realKey("o16") });
+    expect(o16.html).toContain("em “Arquivada”, conversa arquivada");
+    o16.press("data-resolver-conversation");
+    expect(o16.calls).toEqual(["conversation:old"]);
+  });
+
+  it("shows a bare question as 'Pedindo o passo a passo…' while the bot registers it, then 'Pedir de novo' after 15 min — and it stays answerable", () => {
+    const asking = view({ items: real, selectedKey: realKey("main"), draft: "Siga com a opção A." });
+    expect(asking.title).toBe("A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282.");
+    expect(asking.html).toContain("Pedindo o passo a passo para Monitor Chat Atendimento… Ele chega aqui como um item com as opções, no lugar desta pergunta.");
+    expect(asking.find("data-resolver-steps-asking")).toBeDefined();
+    expect(asking.html).not.toContain("data-resolver-ask-steps");
+    expect(asking.html).not.toContain("Responda abaixo, ou abra a conversa para ver o contexto.");
+    asking.press("data-resolver-send");
+    expect(asking.calls).toEqual(["reply:main"]);
+    const late = view({ items: real, selectedKey: realKey("main"), now: now + 11 * 60_000 });
+    expect(late.html).toContain("O passo a passo foi pedido para Monitor Chat Atendimento há 16 min e ainda não chegou. Você pode responder abaixo.");
+    late.press("data-resolver-ask-steps");
+    expect(late.calls).toEqual(["steps:undefined"]);
+    // not asked (yet, or ~/.nuria/stop): as before
+    const bare = needsYouItems([bot("monitor", "Monitor Chat Atendimento", [task("main", "@Chief of Staff", { goalNeedsInput: true, goalNeedsInputSince: now - 60_000, goalNeedsInputAsk: "Mesclo a #12?" })])]);
+    expect(view({ items: bare, selectedKey: needsYouKey(bare[0]!) }).html).toContain("Responda abaixo, ou abra a conversa para ver o contexto.");
+  });
+});

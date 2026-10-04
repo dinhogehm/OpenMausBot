@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { expect, it } from "vitest";
@@ -538,6 +538,50 @@ it("sends the person's decision to the bot that asked, in its conversation, and 
   expect((await pending()).map((item: any) => item.id)).toEqual(["o2"]);
   await expect(f.api(`/api/bots/${f.bot.id}/owner-pending/o9/reply`, { text: "x" })).rejects.toThrow(/já foi resolvido/);
 }), 90_000);
+
+// Lot J2 bug 2 (04/10): "A decisão de produto da #9356 continua com você…"
+// sat 13 h in "Precisa de você" as a bare title. The server asks the bot,
+// once and as itself, to register its question as an item with why, steps
+// and options; never with ~/.nuria/stop; the item then takes the question's place.
+it("asks the bot once to register its bare question as an item, never with ~/.nuria/stop, and the item replaces the question (lot J2)", () => fixture(async f => {
+  const stop = join(f.session.info.dataDir, ".nuria", "stop");
+  mkdirSync(join(f.session.info.dataDir, ".nuria"), { recursive: true });
+  writeFileSync(stop, "");
+  const options = [{ label: "Opção A", reply: "Siga com a opção A.", recommended: true, why: "Mantém o fluxo atual do cliente." }, { label: "Opção B", reply: "Siga com a opção B." }];
+  const asking = { reply: "A decisão de produto da #9356 continua com você, sem registro novo na issue. Sigo com a opção A ou B?" };
+  f.save({ turns: [asking] });
+  const task = async () => ((await f.api("/api/bots", undefined, "GET")).bots.find((bot: any) => bot.id === f.bot.id).tasks ?? []).find((each: any) => each.threadId === f.bot.activeTaskId);
+  await f.send("Como está a #9356?");
+  await expect.poll(async () => (await task())?.goalNeedsInput, { timeout: 20_000 }).toBe(true);
+  // the bot answers the request with its Ref (INSP-J2b #1: only that link replaces the question); a wrong one is refused
+  const ref = `${f.bot.activeTaskId}@${(await task()).goalNeedsInputSince}`;
+  const item = { action: "add", title: "Decidir a opção de produto da #9356", why: "A cliente espera a resposta para seguir.", steps: [{ text: "Leia o resumo da #9356", link: "https://github.com/acme/app/issues/9356" }], options };
+  f.save({ turns: [asking, { expectContextIncludes: ["[Servidor: pergunta sem passo a passo]", "Sigo com a opção A ou B?", `owner_pending add: replacesAsk \\"${ref}\\"`], steps: [
+    { tool: "owner_pending", arguments: { ...item, replacesAsk: `${f.bot.activeTaskId}@1` }, expectError: true },
+    { tool: "owner_pending", arguments: { ...item, replacesAsk: "não é um ref" }, expectError: true },
+    { tool: "owner_pending", arguments: { ...item, replacesAsk: ref } },
+  ], reply: "Registrado." }] });
+  // with ~/.nuria/stop: nothing is asked, and "Pedir de novo" is refused saying why
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  expect(existsSync(join(f.session.info.dataDir, "bot-autonomy.json")) ? f.ledger().askPromotions ?? [] : []).toEqual([]);
+  expect((await task()).goalNeedsInputStepsAskedAt).toBeUndefined();
+  await expect(f.api(`/api/bots/${f.bot.id}/tasks/${f.bot.activeTaskId}/ask-steps`, {})).rejects.toThrow(/nuria\/stop está ativo/);
+  expect(f.turns()).toHaveLength(1);
+  // without it: one request, as the server, and the bot's item takes the question's place
+  rmSync(stop);
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(2);
+  await expect.poll(async () => (await task())?.goalNeedsInput, { timeout: 10_000 }).toBeUndefined();
+  expect((await task()).ownerPending).toEqual([expect.objectContaining({ id: "o1", title: "Decidir a opção de produto da #9356", why: "A cliente espera a resposta para seguir.", options })]);
+  // one request, remembered (a restart does not ask again), linked to the item the bot opened with its Ref
+  expect(f.ledger().askPromotions).toEqual([expect.objectContaining({ threadId: f.bot.activeTaskId, reportThreadId: f.bot.activeTaskId, text: "Sigo com a opção A ou B?", itemId: "o1" })]);
+  expect(toolResult(f.turns()[1], "owner_pending")).toContain("Ele substitui a sua pergunta");
+  // never in the person's voice
+  expect((await f.messages()).filter((message: any) => message.role === "user").map((message: any) => message.text)).toEqual(["Como está a #9356?"]);
+  // the question is gone: "Pedir de novo" has nothing to ask, and nothing is asked again
+  await expect(f.api(`/api/bots/${f.bot.id}/tasks/${f.bot.activeTaskId}/ask-steps`, {})).rejects.toThrow(/não espera mais uma resposta sua/);
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  expect(f.turns()).toHaveLength(2);
+}, { OMB_OWNER_STEPS_ASK_AFTER_MS: "0", OMB_QUESTION_STEPS_ASK_AFTER_MS: "0" }), 90_000);
 
 // The app's records (under the fixture's HOME) decide: with the app able to
 // open the repository, a client's issue headless is refused whatever the

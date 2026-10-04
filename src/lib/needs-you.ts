@@ -19,6 +19,8 @@ export interface NeedsYouItem {
   rawTitle?: string;
   /** The conversation it came from ("Abrir conversa"). */
   threadTitle?: string;
+  /** That conversation is a routine's run, or archived: it still opens, and the screen says which. */
+  threadKind?: "routine" | "archived";
   since: number;
   approval: boolean;
   /** An owner_pending item: its id (the person can resolve it), deadline and link. */
@@ -171,13 +173,15 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
     if (bot.hidden) continue;
     const tasks: Task[] = bot.tasks ?? [{ threadId: bot.threadId, title: bot.name, createdAt: 0, activity: bot.activity, goalNeedsInput: bot.goalNeedsInput, goalNeedsInputSince: bot.goalNeedsInputSince } as Task];
     for (const task of tasks) {
-      if (task.routineRunId || task.archivedAt) continue;
+      // an item stays the person's wherever the bot opened it: a routine's run
+      // or an archived conversation hides only the conversation's own line below
+      const threadKind = task.routineRunId ? "routine" as const : task.archivedAt ? "archived" as const : undefined;
       // listed by the bot (or the server): one row each, until resolved
       for (const pending of task.ownerPending ?? []) {
         // never the "why" as the title: it is shown under it (INSP-I r1 #2)
         const title = needsYouTitle(pending.title, { botName: bot.name, botNames });
         items.push({
-          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title,
+          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, ...(threadKind ? { threadKind } : {}),
           // a mention was set aside: what the bot wrote stays one line away (INSP-I r2 #1);
           // moved references or a capital letter are no reason to repeat it (INSP-I r3 #2)
           ...(stripLeadingMentions(pending.title, botNames) !== pending.title.replace(/\s+/g, " ").trim() ? { rawTitle: pending.title } : {}),
@@ -191,12 +195,18 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
           ...(pending.updatedAt ? { updatedAt: pending.updatedAt } : {}),
         });
       }
+      // the conversation's own line (an approval, a question): never from a routine's run nor an archived one
+      if (threadKind) continue;
       const approval = task.activity === "waiting-on-you";
       if (!approval && task.goalNeedsInput !== true) continue;
       // the bot's question says what it waits for better than the conversation's title
       const ask = task.goalNeedsInputAsk?.trim();
       const title = ask || needsYouTitle(task.title, { botName: bot.name, botNames });
-      items.push({ botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval });
+      items.push({
+        botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval,
+        // the server asked the bot to register the question as an item with steps (lot J2): the screen says so
+        ...(!approval && task.goalNeedsInputStepsAskedAt ? { stepsRequestedAt: task.goalNeedsInputStepsAskedAt } : {}),
+      });
     }
   }
   return items.sort((a, b) => a.since - b.since);

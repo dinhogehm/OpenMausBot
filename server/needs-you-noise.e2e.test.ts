@@ -78,6 +78,209 @@ it("sends no conversation line for an echo, an empty ask or a conversation that 
   }
 }, 90_000);
 
+// Lot J2, as the ledger was on 04/10 (redacted): the Monitor's routine opened
+// o14 and o15 inside its runs (routineRunId) and "Precisa de você" showed
+// only the main conversation's bare question. The wire carries the runs'
+// items; a question the server asked the bot to register says so, and the
+// item the bot opened for it, later, takes its place.
+it("carries a routine run's items on the wire, says a question was asked for its steps, and lets the item replace it (lot J2)", async () => {
+  const prompts = join(tmpdir(), `omb-j2-prompts-${process.pid}-${Date.now()}.jsonl`);
+  const fixture = await launchVerificationServer({ ...process.env });
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+  let restarted: ChildProcess | undefined;
+  try {
+    const monitor = (await runControlOmb(["new-bot", "--name", "Monitor Chat Atendimento", "--url", url]) as any).bot;
+    const thread = async (title: string) => (await api(`/api/bots/${monitor.id}/tasks`, { title })).task.threadId as string;
+    const main = await thread("@Chief of Staff");
+    const asked = await thread("Planilha da semana");
+    const late = await thread("Aviso da publicação");
+    const fp = await thread("Produto da #9356");
+    const answered = await thread("Teto do pre-push");
+    const unrelated = await thread("Canal do Monitor");
+    const runA = await thread("Atendimento: Chat, planilha e issues");
+    const runB = await thread("Atendimento: Chat, planilha e issues");
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+
+    // the runs are a routine's: the store marks them so
+    const botsPath = join(dataDir, "bots.json");
+    const saved = JSON.parse(readFileSync(botsPath, "utf8"));
+    for (const task of saved.find((each: any) => each.id === monitor.id).tasks) {
+      if (task.threadId === runA) task.routineRunId = "run-a";
+      if (task.threadId === runB) task.routineRunId = "run-b";
+    }
+    writeFileSync(botsPath, JSON.stringify(saved));
+    const now = Date.now();
+    const db = new DatabaseSync(join(dataDir, "messages.db"));
+    const insert = db.prepare("INSERT INTO messages(thread_id, id, at, role, kind, text, json) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    const write = (threadId: string, id: string, when: number, role: string, text: string) => insert.run(threadId, id, when, role, "text", text, JSON.stringify({ id, role, kind: "text", text, at: when }));
+    const mainAsk = now - 13 * 3_600_000;
+    write(main, "m-u", mainAsk - 60_000, "user", "Como está a #9356?");
+    write(main, "m-b", mainAsk, "bot", "A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282. Sigo com a opção A ou B?");
+    const otherAsk = now - 2 * 3_600_000;
+    write(asked, "a-u", otherAsk - 60_000, "user", "E a planilha?");
+    write(asked, "a-b", otherAsk, "bot", "A linha 97 continua travada. Libero a escrita na linha 97 da planilha?");
+    const lateAsk = now - 3 * 3_600_000;
+    write(late, "l-u", lateAsk - 60_000, "user", "Avisou?");
+    write(late, "l-b", lateAsk, "bot", "Aviso pronto para a #9331. Publico o comentário agora?");
+    const fpAsk = now - 3 * 3_600_000;
+    write(fp, "f-u", fpAsk - 60_000, "user", "E a decisão?");
+    write(fp, "f-b", fpAsk, "bot", "A decisão de produto da #9356 continua com você: qual caminho sigo com o cliente?");
+    // asked, the bot opened o17 for it, and then the person answered right there
+    const answeredAsk = now - 2 * 3_600_000;
+    write(answered, "n-u", answeredAsk - 60_000, "user", "E o pre-push?");
+    write(answered, "n-b", answeredAsk, "bot", "Fica 10 min ou sem limite?");
+    // INSP-J2b r2 c-2, the 04/10 case: asked about #9356, the bot opened o23; next day the owner
+    // writes there about #9355 — not an answer: o23 stays open
+    const unrelatedAsk = now - 26 * 3_600_000;
+    write(unrelated, "u-u", unrelatedAsk - 60_000, "user", "E o produto?");
+    write(unrelated, "u-b", unrelatedAsk, "bot", "A decisão de produto da #9356 continua com você: qual caminho sigo com o cliente?");
+    write(unrelated, "u-u2", now - 60 * 60_000, "user", "status da #9355?");
+    write(answered, "n-u2", now - 30 * 60_000, "user", "Sem limite.");
+    db.close();
+    const steps = [{ text: "Confira a issue", link: "https://github.com/acme/app/issues/9355" }];
+    const options = [{ label: "Autorizar", reply: "Autorizo.", recommended: true, why: "É uma linha só." }, { label: "Faço eu", reply: "Eu faço." }];
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
+      { id: "o14", botId: monitor.id, threadId: runA, title: "Autorizar a linha nova da #9355 na planilha Atendimento", createdAt: now - 20 * 3_600_000, why: "A demanda não tem linha na planilha.", steps, options },
+      { id: "o15", botId: monitor.id, threadId: runB, title: "Liberar os comentários de registro dos avisos na #9331 e na #9334", createdAt: now - 6 * 3_600_000, why: "O hook barrou os comentários.", steps, options },
+      // what the bot opened, an hour after the server asked, for the main conversation's question
+      { id: "o16", botId: monitor.id, threadId: main, title: "Decidir a opção de produto da #9356", createdAt: now - 3_600_000, why: "A cliente espera a resposta.", steps, options },
+      // INSP-J2b #1, the three look-alikes for fp's question, none linked: FP1 another subject in the
+      // channel after the request, FP2 a short look-alike elsewhere before it, FP3 the same #ref
+      { id: "o20", botId: monitor.id, threadId: main, title: "Autorizar a linha nova da #9355 na planilha", createdAt: now - 3_600_000, why: "x", steps },
+      { id: "o21", botId: monitor.id, threadId: asked, title: "Decisão de produto pendente", createdAt: now - 2.9 * 3_600_000, why: "x", steps },
+      { id: "o22", botId: monitor.id, threadId: fp, title: "Liberar o merge da #9356 em produção", createdAt: now - 3_600_000, why: "x", steps },
+      { id: "o17", botId: monitor.id, threadId: main, title: "Decidir o teto do pre-push", createdAt: now - 3_600_000, why: "x", steps, options },
+      { id: "o23", botId: monitor.id, threadId: unrelated, title: "Decidir o caminho de produto da #9356", createdAt: now - 25 * 3_600_000, why: "x", steps, options },
+    ], resolvedOwnerPending: [
+      { id: "o9", botId: monitor.id, threadId: main, title: "Liberar a escrita na linha 97", createdAt: now - 26 * 3_600_000, resolvedAt: now - 25 * 3_600_000, resolvedBy: "owner" },
+    ], askPromotions: [
+      { botId: monitor.id, threadId: main, askAt: mainAsk, text: "Sigo com a opção A ou B?", askedAt: now - 2 * 3_600_000, reportThreadId: main, itemId: "o16" },
+      // yesterday's question with the same words, answered by o9 (settled): today's is a new one (INSP-J2b #2)
+      { botId: monitor.id, threadId: asked, askAt: otherAsk - 86_400_000, text: "Libero a escrita na linha 97 da planilha?", askedAt: now - 26 * 3_600_000, reportThreadId: main, itemId: "o9" },
+      { botId: monitor.id, threadId: fp, askAt: fpAsk, text: "Qual caminho sigo com o cliente?", askedAt: now - 2 * 3_600_000, reportThreadId: main },
+      { botId: monitor.id, threadId: answered, askAt: answeredAsk, text: "Fica 10 min ou sem limite?", askedAt: now - 90 * 60_000, reportThreadId: main, itemId: "o17" },
+      { botId: monitor.id, threadId: unrelated, askAt: unrelatedAsk, text: "Qual caminho sigo com o cliente?", askedAt: now - 25.5 * 3_600_000, reportThreadId: unrelated, itemId: "o23" },
+      // asked 20 min ago, nothing yet: "Pedir de novo" is open
+      { botId: monitor.id, threadId: late, askAt: lateAsk, text: "Aviso pronto para a #9331. Publico o comentário agora?", askedAt: now - 20 * 60_000, reportThreadId: late },
+    ] }));
+
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      // a fast tick (the settling pass), the server's own requests still held by the 3 min boot delay
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment({ ...process.env, OMB_AUTONOMY_TICK_MS: "100", FAKE_CLAUDE_PROMPTS: prompts }, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(async () => {
+      if (restarted?.exitCode !== null) throw new Error(readFileSync(logPath, "utf8"));
+      return fetch(url + "/api/health").then((r) => r.ok).catch(() => false);
+    }, { timeout: 15_000, interval: 150 }).toBe(true);
+
+    const tasks = new Map<string, any>(((await api("/api/bots", undefined, "GET")).bots as any[]).find((bot) => bot.id === monitor.id).tasks.map((task: any) => [task.threadId, task]));
+    // bug 1: the runs' items ride the wire with their run, why, steps and options
+    expect(tasks.get(runA)).toMatchObject({ routineRunId: "run-a", ownerPending: [expect.objectContaining({ id: "o14", why: "A demanda não tem linha na planilha.", options })] });
+    expect(tasks.get(runB)).toMatchObject({ routineRunId: "run-b", ownerPending: [expect.objectContaining({ id: "o15" })] });
+    // bug 2: the item the bot linked (replacesAsk) takes the question's place
+    expect(tasks.get(main).goalNeedsInput).toBeUndefined();
+    expect(tasks.get(main).ownerPending.map((item: any) => item.id)).toContain("o16");
+    // INSP-J2b #1: FP1, FP2 and FP3 are not linked — the question stays, with its request
+    expect(tasks.get(fp)).toMatchObject({ goalNeedsInput: true, goalNeedsInputSince: fpAsk, goalNeedsInputStepsAskedAt: now - 2 * 3_600_000 });
+    // INSP-J2b #2: today's question with yesterday's words inherits nothing — shown, not asked yet
+    expect(tasks.get(asked)).toMatchObject({ goalNeedsInput: true, goalNeedsInputSince: otherAsk });
+    expect(tasks.get(asked).goalNeedsInputStepsAskedAt).toBeUndefined();
+    // INSP-J2b #3: the person answered in the conversation — o17 settles as "respondida na conversa"
+    const ledgerNow = () => JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8"));
+    await expect.poll(() => ledgerNow().resolvedOwnerPending.find((item: any) => item.id === "o17"), { timeout: 20_000 }).toMatchObject({ resolvedBy: "owner", resolvedNote: "respondida na conversa" });
+    expect(ledgerNow().askPromotions.find((each: any) => each.threadId === answered).answeredAt).toBeGreaterThan(now);
+    const chips = (await api(`/api/threads/${main}/messages`, undefined, "GET")).messages.filter((message: any) => message.kind === "activity").map((message: any) => message.tool?.name);
+    expect(chips).toContain("Resolvido (respondida na conversa): Decidir o teto do pre-push");
+    // …and its bot hears it, as the server, in that conversation
+    await expect.poll(() => (existsSync(prompts) ? readFileSync(prompts, "utf8") : ""), { timeout: 20_000 }).toContain("[Servidor: pendência fechada] O dono respondeu na conversa à sua pergunta «Fica 10 min ou sem limite?»: «Sem limite.». O item o17");
+    // INSP-J2b r2 c-2: a message about #9355 does not answer the #9356 question — o23 stays, the bot hears nothing
+    expect(ledgerNow().askPromotions.find((each: any) => each.threadId === unrelated).answeredAt).toBeUndefined();
+    expect(readFileSync(prompts, "utf8")).not.toContain("O item o23");
+    expect(ledgerNow().ownerPending.map((item: any) => item.id).sort()).toEqual(["o14", "o15", "o16", "o20", "o21", "o22", "o23"]);
+    // "Pedir de novo": a new request; within 15 min of it nothing more is sent
+    const first = await api(`/api/bots/${monitor.id}/tasks/${asked}/ask-steps`, {});
+    expect(first).toMatchObject({ deduped: false });
+    expect(await api(`/api/bots/${monitor.id}/tasks/${asked}/ask-steps`, {})).toMatchObject({ deduped: true, askedAt: first.askedAt });
+    const again = await api(`/api/bots/${monitor.id}/tasks/${late}/ask-steps`, {});
+    expect(again).toMatchObject({ deduped: false });
+    expect(again.askedAt).toBeGreaterThan(now);
+    await expect(api(`/api/bots/${monitor.id}/tasks/${main}/ask-steps`, {})).rejects.toThrow(/não espera mais uma resposta sua/);
+    const ledger = ledgerNow();
+    expect(ledger.askPromotions.find((each: any) => each.threadId === late).askedAt).toBe(again.askedAt);
+    expect(ledger.askPromotions.filter((each: any) => each.threadId === asked).map((each: any) => each.askAt).sort()).toEqual([otherAsk - 86_400_000, otherAsk]);
+    // INSP-J2b r2 c-1: while the bot's turn on that request runs (and after it), the question never leaves the panel
+    const lateTask = async () => ((await api("/api/bots", undefined, "GET")).bots as any[]).find((bot) => bot.id === monitor.id).tasks.find((task: any) => task.threadId === late);
+    // (the fake bot's turn on it runs inside these 3 s: seen busy in 3 of 3 probe runs)
+    for (let n = 0; n < 30; n += 1) {
+      const seen = await lateTask();
+      expect(seen).toMatchObject({ goalNeedsInput: true, goalNeedsInputSince: lateAsk, goalNeedsInputStepsAskedAt: again.askedAt });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    await expect.poll(() => (existsSync(prompts) ? readFileSync(prompts, "utf8") : ""), { timeout: 20_000 }).toContain(`[Servidor: pergunta sem passo a passo] Ref ${late}@${lateAsk}.`);
+    expect((await lateTask()).goalNeedsInputStepsAskedAt).toBe(again.askedAt);    // nothing in the person's voice
+    const lines = (await api(`/api/threads/${late}/messages`, undefined, "GET")).messages.filter((message: any) => message.role === "user").map((message: any) => message.text);
+    expect(lines).toEqual(["Avisou?"]);
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 90_000);
+
+// INSP-J2b #3: a question in a live exchange is not a turn for the bot. The
+// server asks for the item only after 30 min, and never once the person
+// wrote in that conversation after the question (a goal's needs_input).
+it("asks for a question's item only after 30 min, and never once the person wrote in the conversation (INSP-J2b #3)", async () => {
+  const env = { ...process.env, OMB_AUTONOMY_MINUTE_MS: "200", OMB_AUTONOMY_TICK_MS: "100", OMB_AUTONOMY_TURN_GAP_MS: "50", OMB_OWNER_STEPS_ASK_AFTER_MS: "0" };
+  const fixture = await launchVerificationServer(env);
+  const { url, dataDir, logPath } = fixture.info;
+  const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
+  let restarted: ChildProcess | undefined;
+  try {
+    const chief = (await runControlOmb(["new-bot", "--name", "Chief of Staff", "--url", url]) as any).bot;
+    const thread = async (title: string) => (await api(`/api/bots/${chief.id}/tasks`, { title })).task.threadId as string;
+    const fresh = await thread("Sessão da #9058");
+    const old = await thread("Gate da #9350");
+    const spoke = await thread("Release em laço");
+    await waitForExit(fixture.child, { signal: "SIGTERM" });
+    const now = Date.now();
+    const db = new DatabaseSync(join(dataDir, "messages.db"));
+    const insert = db.prepare("INSERT INTO messages(thread_id, id, at, role, kind, text, json) VALUES (?, ?, ?, ?, ?, ?, ?)");
+    const write = (threadId: string, id: string, when: number, role: string, text: string) => insert.run(threadId, id, when, role, "text", text, JSON.stringify({ id, role, kind: "text", text, at: when }));
+    write(fresh, "f-u", now - 21 * 60_000, "user", "Como está?");
+    write(fresh, "f-b", now - 20 * 60_000, "bot", "A sessão está pronta. Abro o PR agora?");
+    write(old, "o-u", now - 41 * 60_000, "user", "E o gate?");
+    write(old, "o-b", now - 40 * 60_000, "bot", "A #9350 passou no gate e o QA aprovou. Mesclo?");
+    // a goal waiting on the person, who wrote in the conversation after it stopped
+    write(spoke, "s-u", now - 30 * 60_000, "user", "Já vi, depois respondo.");
+    db.close();
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], reports: [], inFlight: [], goals: [
+      { botId: chief.id, threadId: spoke, goal: "Destravar o release", status: "needs-input", startedAt: now - 3 * 3_600_000, finishedAt: now - 2 * 3_600_000, detail: "Retomo o release ou espero o carrier?", maxTurns: 10, turnCount: 1, consecutiveFailures: 0 },
+    ] }));
+    const log = openSync(logPath, "a", 0o600);
+    restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment(env, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+    });
+    closeSync(log);
+    await expect.poll(() => fetch(url + "/api/health").then((r) => r.ok).catch(() => false), { timeout: 15_000, interval: 150 }).toBe(true);
+    const ledger = () => JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8"));
+    await expect.poll(() => (ledger().askPromotions ?? []).map((each: any) => each.threadId), { timeout: 10_000 }).toEqual([old]);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect((ledger().askPromotions ?? []).map((each: any) => each.threadId)).toEqual([old]);
+    const tasks = new Map<string, any>(((await api("/api/bots", undefined, "GET")).bots as any[]).find((bot) => bot.id === chief.id).tasks.map((task: any) => [task.threadId, task]));
+    // both still shown and answerable: the fresh one waits its 30 min, the other the person already took up
+    expect(tasks.get(fresh)).toMatchObject({ goalNeedsInput: true });
+    expect(tasks.get(fresh).goalNeedsInputStepsAskedAt).toBeUndefined();
+    expect(tasks.get(spoke)).toMatchObject({ goalNeedsInput: true, goalNeedsInputAsk: "Retomo o release ou espero o carrier?" });
+    expect(tasks.get(spoke).goalNeedsInputStepsAskedAt).toBeUndefined();
+  } finally {
+    await waitForExit(restarted, { signal: "SIGTERM" });
+    await fixture.close();
+  }
+}, 90_000);
+
 // J17 (the owner, 02/10): "Planilha linha 169 (#9295)" and other older items
 // had no steps, and he does not want to click "Pedir o passo a passo". The
 // server asks the bot once per item — a report, so it waits for the

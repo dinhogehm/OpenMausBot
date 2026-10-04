@@ -286,6 +286,8 @@ export interface Task {
   goalNeedsInputSince?: number;
   /** What it asks, in one sentence (the title may only say who). */
   goalNeedsInputAsk?: string;
+  /** The server asked the bot to register that ask as an item with steps (lot J2). */
+  goalNeedsInputStepsAskedAt?: number;
   /** Watches running for this conversation (wake_when). */
   watches?: WireWatch[];
   /** It had a standing watch and has had none for a while. */

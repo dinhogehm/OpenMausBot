@@ -42,6 +42,13 @@ import {
   wakeFiredChip,
   watchLabel,
   wakePrompt,
+  questionStepsAutoReport,
+  questionReportRef,
+  QUESTION_REPORT_PREFIX,
+  parseReplacesAsk,
+  ANSWERED_IN_CONVERSATION,
+  answerToAsk,
+  answeredInConversationReport,
 } from "./bot-autonomy.ts";
 
 let dir: string;
@@ -1430,5 +1437,96 @@ describe("a standing watch's note", () => {
     expect(wake.watch!.baseline).toBe("90b3ef2a5");
     expect(wake.dueAt).toBe(due);
     expect(autonomy.updateStandingReason("t1", "chat", "x")).toBeNull();
+  });
+});
+
+// Lot J2 bug 2: a bot's bare question is asked, once, to become an item with
+// why, steps and options; the item the bot opens then takes its place.
+describe("a bare question asked to become an item (lot J2)", () => {
+  const ask = { threadId: "main", askAt: Date.parse("2026-09-29T00:00:00Z"), text: "A decisão de produto da #9356 continua com você. Sigo com a opção A ou B?" };
+  const steps = [{ text: "Leia a issue" }];
+
+  it("asks as the server, never in the person's voice, and reads its own Ref back", () => {
+    const report = questionStepsAutoReport(ask, "@Chief of Staff");
+    expect(report.startsWith(`${QUESTION_REPORT_PREFIX} Ref main@${ask.askAt}.`)).toBe(true);
+    expect(report).toContain("na conversa «@Chief of Staff»");
+    expect(report).toContain(`owner_pending add: replacesAsk "main@${ask.askAt}"`);
+    expect(report).toContain("UMA com recommended: true e why");
+    expect(report).toContain("Não escreva ao dono só por isto.");
+    expect(questionReportRef(report)).toEqual({ threadId: "main", askAt: ask.askAt });
+    expect(questionReportRef("[Servidor: lembrete de pendência] o1")).toBeNull();
+    expect(parseReplacesAsk(`main@${ask.askAt}`)).toEqual({ threadId: "main", askAt: ask.askAt });
+    for (const bad of ["main", "main@", "@1", "main@x", 12, "a b@1"]) expect(parseReplacesAsk(bad)).toBeNull();
+  });
+
+  it("is one request per exact question — the same words asked later are a new one (INSP-J2b #2); remembered across a restart", () => {
+    const autonomy = make();
+    const asked = autonomy.noteAskPromotion({ botId: "b", ...ask, reportThreadId: "channel" });
+    expect(asked.askedAt).toBe(now);
+    expect(autonomy.askPromotionFor("b", "main", ask.askAt)).toEqual(asked);
+    expect(autonomy.askPromotionFor("b", "main", ask.askAt + 60_000)).toBeNull();
+    expect(autonomy.askPromotionFor("b", "other", ask.askAt)).toBeNull();
+    expect(autonomy.askPromotionFor("other", "main", ask.askAt)).toBeNull();
+    // "Pedir de novo": the same request, dated now
+    now += 20 * 60_000;
+    expect(autonomy.noteAskPromotion({ botId: "b", ...ask, reportThreadId: "channel" }).askedAt).toBe(now);
+    expect(make().askPromotionFor("b", "main", ask.askAt)?.askedAt).toBe(now);
+    // ~/.nuria/stop dropped the request before it reached the bot: the question goes back to unasked
+    autonomy.dropAskPromotion("b", "main", ask.askAt);
+    expect(make().askPromotionFor("b", "main", ask.askAt)).toBeNull();
+  });
+
+  // INSP-J2b #1: three items the old word/#ref/thread rules took for the answer
+  it("is replaced only by the item linked with replacesAsk — never by one in the same channel, a short look-alike or the same #ref", () => {
+    const autonomy = make();
+    // FP2: "Decisão de produto pendente", another conversation, before the request
+    autonomy.addOwnerPending("b", "elsewhere", { title: "Decisão de produto pendente", why: "x", steps });
+    now += 60_000;
+    const asked = autonomy.noteAskPromotion({ botId: "b", ...ask, reportThreadId: "channel" });
+    now += 60_000;
+    // FP1: another subject, in the owner's channel, after the request
+    autonomy.addOwnerPending("b", "channel", { title: "Autorizar a linha nova da #9355 na planilha", why: "x", steps });
+    // FP3: another decision about the same issue
+    autonomy.addOwnerPending("b", "main", { title: "Liberar o merge da #9356 em produção", why: "x", steps });
+    expect(autonomy.askPromotionItem(asked)).toBeNull();
+    expect(make().askPromotionItem(make().askPromotionFor("b", "main", ask.askAt)!)).toBeNull();
+    // the bot's item, linked: it replaces the question, open or settled, across a restart
+    const item = autonomy.addOwnerPending("b", "channel", { title: "Escolher entre A e B para o cliente", why: "A cliente espera.", steps });
+    autonomy.linkAskPromotion(asked, item.id);
+    expect(autonomy.askPromotionItem(asked)?.id).toBe(item.id);
+    expect(autonomy.askPromotionOpenItem(asked)?.id).toBe(item.id);
+    autonomy.resolveOwnerPending({ botId: "b", id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION });
+    const reloaded = make();
+    const again = reloaded.askPromotionFor("b", "main", ask.askAt)!;
+    expect(reloaded.askPromotionItem(again)?.id).toBe(item.id);
+    expect(reloaded.askPromotionOpenItem(again)).toBeNull();
+    expect(reloaded.resolvedOwnerPendingOf("b").find((each) => each.id === item.id)).toMatchObject({ resolvedBy: "owner", resolvedNote: "respondida na conversa" });
+    // a new question with the same words never inherits it
+    expect(reloaded.askPromotionFor("b", "main", ask.askAt + 86_400_000)).toBeNull();
+    // answered in the conversation: marked once, kept
+    reloaded.markAskAnswered(again);
+    expect(make().askPromotionFor("b", "main", ask.askAt)?.answeredAt).toBe(now);
+  });
+
+  // INSP-J2b r2 c-2: only an answer to THIS question settles its item
+  it("takes as the answer the person's first message after the question (before the bot asks anything else), or one naming its #ref — never one about another #ref", () => {
+    const at = ask.askAt;
+    const asked = { role: "bot", kind: "text", at, text: "A decisão de produto da #9356 continua com você: qual caminho sigo com o cliente?" };
+    const person = (when: number, text: string) => ({ role: "user", kind: "text", at: when, text });
+    const bot = (when: number, text: string) => ({ role: "bot", kind: "text", at: when, text });
+    // the 04/10 case: next day the owner asks about #9355 in the same conversation — not an answer
+    expect(answerToAsk([person(at - 60_000, "E a #9356?"), asked, person(at + 86_400_000, "status da #9355?")], at, asked.text)).toBeNull();
+    // …and a later message naming #9356 is
+    expect(answerToAsk([asked, person(at + 1, "status da #9355?"), bot(at + 2, "A #9355 está em QA."), person(at + 3, "Na #9356, siga com o caminho A.")], at, asked.text)).toEqual({ at: at + 3, text: "Na #9356, siga com o caminho A." });
+    // the first message right after, with no #ref of its own, answers it
+    expect(answerToAsk([asked, person(at + 1, "Siga com o caminho A.")], at, asked.text)?.text).toBe("Siga com o caminho A.");
+    // once the bot asked something else, a plain message answers that, not this
+    expect(answerToAsk([asked, bot(at + 1, "Posso arquivar as conversas antigas?"), person(at + 2, "Pode.")], at, asked.text)).toBeNull();
+    // a bot's statement in between changes nothing; peers and other bots' handoffs are not the person
+    expect(answerToAsk([asked, bot(at + 1, "Vou conferir o QA."), { ...person(at + 2, "x"), from: { botId: "other" } }, person(at + 3, "Caminho B.")], at, asked.text)?.text).toBe("Caminho B.");
+    // a question without #refs: a first message about some #ref is about something else
+    expect(answerToAsk([bot(at, "Fica 10 min ou sem limite?"), person(at + 1, "E a #9355?")], at, "Fica 10 min ou sem limite?")).toBeNull();
+    expect(answeredInConversationReport({ id: "o20", title: "Decidir o caminho da #9356" }, "Qual caminho sigo?", "Caminho B.")).toBe(
+      "[Servidor: pendência fechada] O dono respondeu na conversa à sua pergunta «Qual caminho sigo?»: «Caminho B.». O item o20 («Decidir o caminho da #9356») foi fechado como respondida na conversa. Siga com a resposta dele; não reabra o item. Não escreva ao dono só por isto.");
   });
 });
