@@ -7,17 +7,18 @@
 // way to the issue, the PR, the session's conversation and "Precisa de
 // você". Filters by bot, priority and client-or-internal. It refreshes by
 // itself; what the data does not know is "—", never zero.
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import {
-  AlertTriangle, ArrowUpRight, Bot, CheckCircle2, CircleAlert, CircleDot, Clock, GitMerge, GitPullRequest, Hourglass, Inbox, Loader2, MessageSquare,
+  AlertTriangle, ArrowUpRight, Bot, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, CircleDot, Clock, GitMerge, GitPullRequest, Hourglass, Inbox, Loader2, MessageSquare,
   OctagonAlert, PauseCircle, RefreshCw, Rocket, ShieldCheck, SquareTerminal, Workflow, X,
 } from "lucide-react";
 import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
 import { activeLocale, t } from "@/lib/i18n";
 import {
-  BOARD_STAGES, DEFAULT_FILTERS, STATE_KEY, boardSummary, fetchBoard, isStale, loadFilters, openNeedsYou, reasonText, saveFilters, stageAge, visibleCards,
-  type BoardCard, type BoardFilters, type BoardStage, type CardState, type PipelineBoard,
+  BOARD_STAGES, DEFAULT_FILTERS, DEFAULT_LIMITS, ENTRY_FOLD, LIMIT_KEYS, LIMIT_MAX_H, STATE_KEY, boardSummary, fetchBoard, foldEntry, isStale, loadFilters, openNeedsYou, reasonText,
+  saveBoardLimits, saveFilters, stageAge, visibleCards,
+  type BoardCard, type BoardFilters, type BoardLimits, type BoardStage, type CardState, type PipelineBoard,
 } from "@/lib/pipeline-board";
 import { formatCount, formatSpan, formatWhen } from "@/lib/productivity";
 import type { LocaleKey } from "@/locales";
@@ -48,8 +49,7 @@ const span = (ms: number) => formatSpan(ms).replace(" ", " ");
 
 const lang = (): "pt-BR" | "en" => (activeLocale().toLowerCase().startsWith("pt") ? "pt-BR" : "en");
 
-function useNarrow(): boolean {
-  const query = "(max-width: 767px)";
+function useNarrow(query = "(max-width: 767px)"): boolean {
   const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(query).matches);
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
@@ -58,7 +58,7 @@ function useNarrow(): boolean {
     change();
     list.addEventListener("change", change);
     return () => list.removeEventListener("change", change);
-  }, []);
+  }, [query]);
   return narrow;
 }
 
@@ -93,7 +93,7 @@ function Chip({ children, className, title }: { children: ReactNode; className?:
 export function BoardCardView({ card, now, actions }: { card: BoardCard; now: number; actions: CardActions }) {
   const titleId = useId();
   const stale = isStale(card, now);
-  const reason = reasonText(card.reason, lang());
+  const reason = reasonText(card.reason, lang(), card.release?.at ?? null);
   const StateIcon = STATE_ICON[card.state];
   const age = stageAge(card, now);
   const tone = stale && card.state !== "owner" ? "border-l-danger" : STATE_EDGE[card.state];
@@ -107,7 +107,7 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
         stale && card.state !== "owner" && "ring-1 ring-danger/40",
       )}>
       {/* who it is: priority, issue, origin, spreadsheet row — and how long it has sat here */}
-      <div className="flex items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         {card.priority === "p0" || card.priority === "p1"
           ? <Chip className={card.priority === "p0" ? "border-danger/60 text-danger" : "border-warning/60 text-warning"}>{card.priority.toUpperCase()}</Chip>
           : card.priority ? <Chip>{card.priority.toUpperCase()}</Chip> : null}
@@ -119,6 +119,7 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
         )}
         <Chip>{t(card.origin === "client" ? "pipeline.card.client" : "pipeline.card.internal")}</Chip>
         {card.sheetRow !== null && <Chip title={t("pipeline.card.rowTitle", { row: card.sheetRow })}>{t("pipeline.card.row", { row: card.sheetRow })}</Chip>}
+        {card.closeout && <Chip className="border-warning/60 text-warning">{t("pipeline.card.closeout")}</Chip>}
         <span className={cn("ml-auto flex shrink-0 items-center gap-1 text-[11.5px] tabular-nums", stale ? "font-semibold text-danger" : "text-ink-secondary")}
           title={card.since === null ? t("pipeline.card.ageUnknown") : t("pipeline.card.since", { when: formatWhen(card.since) })}>
           <Clock size={12} aria-hidden />
@@ -152,7 +153,7 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
           <Chip>{t(card.gate.receipt === "head" ? "pipeline.card.receiptHead" : card.gate.receipt === "other" ? "pipeline.card.receiptOther" : "pipeline.card.receiptNone")}</Chip>
         </p>
       )}
-      {card.release && card.stage === "production" && (
+      {card.release && card.stage === "production" && card.reason?.code !== "delivered-open" && (
         <p className="mt-1.5 text-[11.5px] text-ink-secondary" title={card.release.inferred ? t("pipeline.card.inferred") : undefined}>
           <Rocket size={12} aria-hidden className="mr-1 inline align-[-2px] text-success" />
           {card.release.at !== null ? t("pipeline.card.deliveredAt", { when: formatWhen(card.release.at), sha: card.release.sha }) : t("pipeline.card.release", { sha: card.release.sha })}
@@ -209,7 +210,10 @@ export function BoardColumnView({ board, stage, cards, now, actions, filtered, l
   const column = board.columns.find((each) => each.stage === stage)!;
   const headingId = useId();
   const Icon = STAGE_ICON[stage];
+  const [unfolded, setUnfolded] = useState(false);
   const count = !column.known ? "—" : filtered ? t("pipeline.count.filtered", { shown: formatCount(cards.length), total: formatCount(column.total ?? 0) }) : formatCount(column.total ?? 0);
+  // Entrada folds its tail — by the board's order the old backlog, never a new or a client's demand
+  const { shown, folded } = stage === "entry" && !unfolded ? foldEntry(cards, now, ENTRY_FOLD) : { shown: cards, folded: [] as BoardCard[] };
   return (
     <section id={id} role={role} aria-labelledby={labelledBy ?? headingId} tabIndex={role ? 0 : undefined} data-stage={stage}
       className="flex min-h-0 min-w-0 flex-col rounded-2xl border border-hairline/40 bg-panel focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60">
@@ -234,10 +238,15 @@ export function BoardColumnView({ board, stage, cards, now, actions, filtered, l
           </p>
         ) : (
           <ol className="space-y-2">
-            {cards.map((card) => <li key={card.key}><BoardCardView card={card} now={now} actions={actions} /></li>)}
+            {shown.map((card) => <li key={card.key}><BoardCardView card={card} now={now} actions={actions} /></li>)}
           </ol>
         )}
-        {column.known && column.hidden > 0 && <p className="px-2 pt-2 text-[11.5px] text-ink-secondary">{t("pipeline.column.hidden", { count: formatCount(column.hidden) })}</p>}
+        {folded.length > 0 && (
+          <button type="button" onClick={() => setUnfolded(true)}
+            className="mt-2 w-full rounded-lg border border-dashed border-hairline/70 px-2 py-2 text-left text-[12px] font-medium text-ink hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70">
+            {t("pipeline.column.folded", { count: formatCount(folded.length) })}
+          </button>
+        )}
         {column.dormant !== null && column.dormant > 0 && <p className="px-2 pt-1.5 text-[11.5px] text-ink-secondary">{t("pipeline.column.dormant", { count: formatCount(column.dormant) })}</p>}
       </div>
     </section>
@@ -261,15 +270,16 @@ export function StageMap({ board, now, filters, current, onPick, tabs, panelId, 
     onPick(stage);
     refs.current.get(stage)?.focus();
   };
-  return (
-    <nav aria-label={tabs ? undefined : t("pipeline.map.aria")} className="min-w-0 max-w-full">
-      <ol role={tabs ? "tablist" : undefined} aria-label={tabs ? t("pipeline.tabs.aria") : undefined}
-        className={cn("flex items-stretch", tabs ? "gap-1.5 overflow-x-auto pb-1 [scrollbar-width:none]" : "gap-0")}>
+  const list = (
+    <ol role={tabs ? "tablist" : undefined} aria-label={tabs ? t("pipeline.tabs.aria") : undefined}
+      className={cn("flex items-stretch", tabs ? "gap-1.5 pb-1" : "gap-0")}>
         {BOARD_STAGES.map((stage, index) => {
           const column = board.columns.find((each) => each.stage === stage)!;
           const cards = visibleCards(column.cards, filters, now, stage);
           const owner = cards.filter((card) => card.state === "owner").length;
           const stale = cards.filter((card) => isStale(card, now)).length;
+          // past the limit in Entrada is backlog waiting: said, not alarmed
+          const backlog = stage === "entry";
           const Icon = STAGE_ICON[stage];
           const selected = current === stage;
           const filtered = JSON.stringify(filters) !== JSON.stringify(DEFAULT_FILTERS);
@@ -286,22 +296,68 @@ export function StageMap({ board, now, filters, current, onPick, tabs, panelId, 
                   tabs ? "shrink-0" : "w-full",
                   selected ? "border-accent/70 bg-raised" : "border-hairline/50 bg-card hover:bg-raised",
                 )}>
-                <Icon size={16} aria-hidden className={cn("shrink-0", selected ? "text-accent" : "text-ink-secondary")} />
+                <Icon size={16} aria-hidden className={cn("shrink-0", selected ? "text-accent" : "text-ink-secondary", !tabs && "max-lg:hidden")} />
                 <span className="min-w-0">
                   <span className="block truncate text-[12px] font-medium text-ink">{t(`pipeline.stage.${stage}` as LocaleKey)}</span>
-                  <span className="flex items-center gap-1.5 text-[11.5px] tabular-nums text-ink-secondary">
+                  <span className="flex flex-wrap items-center gap-x-1.5 text-[11.5px] tabular-nums text-ink-secondary">
                     <span className="text-[15px] font-semibold leading-5 text-ink">{count}</span>
                     {owner > 0 && <span className="inline-flex items-center gap-0.5 text-warning" title={t("pipeline.map.owner", { count: owner })}><CircleAlert size={11} aria-hidden /><span className="sr-only">{t("pipeline.map.owner", { count: owner })}</span><span aria-hidden>{owner}</span></span>}
-                    {stale > 0 && <span className="inline-flex items-center gap-0.5 text-danger" title={t("pipeline.map.stale", { count: stale })}><AlertTriangle size={11} aria-hidden /><span className="sr-only">{t("pipeline.map.stale", { count: stale })}</span><span aria-hidden>{stale}</span></span>}
+                    {stale > 0 && (backlog
+                      ? <span className="inline-flex items-center gap-0.5" title={t("pipeline.map.entryStale", { count: stale })}><Clock size={11} aria-hidden /><span className="sr-only">{t("pipeline.map.entryStale", { count: stale })}</span><span aria-hidden>{stale}</span></span>
+                      : <span className="inline-flex items-center gap-0.5 text-danger" title={t("pipeline.map.stale", { count: stale })}><AlertTriangle size={11} aria-hidden /><span className="sr-only">{t("pipeline.map.stale", { count: stale })}</span><span aria-hidden>{stale}</span></span>)}
                   </span>
                 </span>
               </button>
-              {!tabs && index < BOARD_STAGES.length - 1 && <span aria-hidden className="mx-1 h-px w-3 shrink-0 bg-hairline lg:w-5" />}
+              {!tabs && index < BOARD_STAGES.length - 1 && <span aria-hidden className="mx-0.5 h-px w-2 shrink-0 bg-hairline lg:mx-1 lg:w-5" />}
             </li>
           );
         })}
-      </ol>
+    </ol>
+  );
+  return (
+    <nav aria-label={tabs ? undefined : t("pipeline.map.aria")} className="min-w-0 max-w-full">
+      {tabs ? <ScrollStrip label={t("pipeline.tabs.more")}>{list}</ScrollStrip> : list}
     </nav>
+  );
+}
+
+/** A sideways scroller that says there is more: a fade and an arrow button on
+ * each side that has something hidden (the columns at 840 px, the tabs on a phone). */
+export function ScrollStrip({ children, label, className, innerRef }: { children: ReactNode; label: string; className?: string; innerRef?: RefObject<HTMLDivElement | null> }) {
+  const own = useRef<HTMLDivElement>(null);
+  const ref = innerRef ?? own;
+  const [edges, setEdges] = useState({ left: false, right: false });
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const update = () => setEdges({ left: node.scrollLeft > 2, right: node.scrollLeft + node.clientWidth < node.scrollWidth - 2 });
+    update();
+    node.addEventListener("scroll", update, { passive: true });
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(update) : null;
+    observer?.observe(node);
+    return () => { node.removeEventListener("scroll", update); observer?.disconnect(); };
+  }, [ref]);
+  const by = (direction: 1 | -1) => ref.current?.scrollBy({ left: direction * Math.max(160, (ref.current?.clientWidth ?? 0) * 0.8), behavior: "smooth" });
+  return (
+    <div className={cn("relative min-h-0 min-w-0", className)} data-scroll-left={edges.left ? "" : undefined} data-scroll-right={edges.right ? "" : undefined}>
+      <div ref={ref} className="h-full min-h-0 overflow-x-auto [scrollbar-width:thin]">{children}</div>
+      {edges.left && (
+        <div className="pointer-events-none absolute inset-y-0 left-0 flex w-12 items-center bg-gradient-to-r from-app to-transparent">
+          <button type="button" onClick={() => by(-1)} aria-label={t("pipeline.scroll.left")}
+            className="pointer-events-auto flex size-8 items-center justify-center rounded-full border border-hairline bg-card text-ink shadow-md hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70">
+            <ChevronLeft size={17} aria-hidden />
+          </button>
+        </div>
+      )}
+      {edges.right && (
+        <div className="pointer-events-none absolute inset-y-0 right-0 flex w-12 items-center justify-end bg-gradient-to-l from-app to-transparent">
+          <button type="button" onClick={() => by(1)} aria-label={label}
+            className="pointer-events-auto flex size-8 items-center justify-center rounded-full border border-hairline bg-card text-ink shadow-md hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70">
+            <ChevronRight size={17} aria-hidden />
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -357,23 +413,24 @@ export function BoardFiltersBar({ board, filters, onChange }: { board: PipelineB
 
 export function SummaryBar({ board, now, filters, onFocus }: { board: PipelineBoard; now: number; filters: BoardFilters; onFocus: (focus: BoardFilters["focus"]) => void }) {
   const summary = boardSummary(board, now);
-  const toggle = (focus: "owner" | "stale") => onFocus(filters.focus === focus ? "all" : focus);
+  const toggle = (focus: Exclude<BoardFilters["focus"], "all">) => onFocus(filters.focus === focus ? "all" : focus);
+  const chip = (focus: Exclude<BoardFilters["focus"], "all">, count: number, tone: string, pressedTone: string, icon: ReactNode, text: string) => (
+    <button type="button" aria-pressed={filters.focus === focus} onClick={() => toggle(focus)} disabled={count === 0 && filters.focus !== focus}
+      className={cn("inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[12.5px] font-semibold transition-colors max-md:h-7 max-md:px-2.5 max-md:text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 disabled:cursor-default disabled:opacity-60",
+        filters.focus === focus ? pressedTone : tone)}>
+      {icon}{text}
+    </button>
+  );
   return (
     <div className="flex flex-wrap items-center gap-2" aria-label={t("pipeline.summary.aria")} role="group">
-      <button type="button" aria-pressed={filters.focus === "owner"} onClick={() => toggle("owner")} disabled={summary.owner === 0 && filters.focus !== "owner"}
-        className={cn("inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[12.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 disabled:cursor-default disabled:opacity-60",
-          filters.focus === "owner" ? "border-warning bg-raised text-warning" : "border-warning/60 bg-card text-warning hover:bg-raised")}>
-        <CircleAlert size={14} aria-hidden />{t("pipeline.summary.owner", { count: formatCount(summary.owner) })}
-      </button>
-      <button type="button" aria-pressed={filters.focus === "stale"} onClick={() => toggle("stale")} disabled={summary.stale === 0 && filters.focus !== "stale"}
-        className={cn("inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[12.5px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70 disabled:cursor-default disabled:opacity-60",
-          filters.focus === "stale" ? "border-danger bg-raised text-danger" : "border-danger/50 bg-card text-danger hover:bg-raised")}>
-        <AlertTriangle size={14} aria-hidden />{t("pipeline.summary.stale", { count: formatCount(summary.stale) })}
-      </button>
-      <span className="inline-flex h-8 items-center gap-1.5 rounded-full border border-hairline/60 bg-card px-3 text-[12.5px] text-ink">
+      {chip("owner", summary.owner, "border-warning/60 bg-card text-warning hover:bg-raised", "border-warning bg-raised text-warning", <CircleAlert size={14} aria-hidden />, t("pipeline.summary.owner", { count: formatCount(summary.owner) }))}
+      {chip("stale", summary.stale, "border-danger/50 bg-card text-danger hover:bg-raised", "border-danger bg-raised text-danger", <AlertTriangle size={14} aria-hidden />, t("pipeline.summary.stale", { count: formatCount(summary.stale) }))}
+      <span className="inline-flex h-8 items-center gap-1.5 rounded-full border border-hairline/60 bg-card px-3 text-[12.5px] text-ink max-md:h-7 max-md:px-2.5 max-md:text-[12px]">
         <OctagonAlert size={14} aria-hidden className="text-danger" />{t("pipeline.summary.blocked", { count: formatCount(summary.blocked) })}
       </span>
-      <span className="inline-flex h-8 items-center gap-1.5 rounded-full border border-hairline/60 bg-card px-3 text-[12.5px] text-ink">
+      {chip("closeout", summary.closeout, "border-hairline/60 bg-card text-ink hover:bg-raised", "border-accent bg-raised text-ink", <CircleDot size={14} aria-hidden className="text-warning" />, t("pipeline.summary.closeout", { count: formatCount(summary.closeout) }))}
+      {chip("entryStale", summary.entryStale, "border-hairline/60 bg-card text-ink hover:bg-raised", "border-accent bg-raised text-ink", <Clock size={14} aria-hidden className="text-ink-secondary" />, t("pipeline.summary.entryStale", { count: formatCount(summary.entryStale) }))}
+      <span className="inline-flex h-8 items-center gap-1.5 rounded-full border border-hairline/60 bg-card px-3 text-[12.5px] text-ink max-md:h-7 max-md:px-2.5 max-md:text-[12px]">
         <Rocket size={14} aria-hidden className="text-success" />
         {summary.production === null ? t("pipeline.summary.productionUnknown") : t("pipeline.summary.production", { count: formatCount(summary.production) })}
       </span>
@@ -406,12 +463,87 @@ export function ReleaseHoldNote({ hold }: { hold: string | null }) {
   );
 }
 
+// ── the owner's limits ──────────────────────────────────────────────────────
+
+const LIMIT_LABEL: Record<(typeof LIMIT_KEYS)[number], LocaleKey> = {
+  entryUrgentH: "pipeline.limits.entryUrgent",
+  entryOtherH: "pipeline.limits.entryOther",
+  sessionH: "pipeline.limits.session",
+  prH: "pipeline.limits.pr",
+  gateH: "pipeline.limits.gate",
+  releaseH: "pipeline.limits.release",
+};
+
+/** "7 d", "24 h", "4 h". */
+const hoursText = (hours: number) => (hours >= 48 && hours % 24 === 0 ? `${hours / 24} d` : `${hours} h`);
+
+/** One line with the limits the cards are measured against; "Editar" opens them, in hours, saved on the server. */
+export function LimitsBar({ limits, onSave }: { limits: BoardLimits; onSave?: (limits: BoardLimits) => Promise<void> }) {
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [problem, setProblem] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const ref = useRef<HTMLDetailsElement>(null);
+  const base = useId();
+  const value = (key: (typeof LIMIT_KEYS)[number]) => draft[key] ?? String(limits[key]);
+  const save = async () => {
+    const next = { ...limits };
+    for (const key of LIMIT_KEYS) {
+      const hours = Number(value(key));
+      if (!Number.isInteger(hours) || hours < 1 || hours > LIMIT_MAX_H) { setProblem(t("pipeline.limits.invalid", { max: LIMIT_MAX_H })); return; }
+      next[key] = hours;
+    }
+    setSaving(true);
+    setProblem(null);
+    try {
+      await onSave?.(next);
+      setDraft({});
+      ref.current?.removeAttribute("open");
+    } catch (cause) {
+      setProblem(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <details ref={ref} className="group rounded-xl border border-hairline/50 bg-card px-3 py-1.5 text-[12px]">
+      <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-0.5 text-ink-secondary [&::-webkit-details-marker]:hidden">
+        <span className="font-semibold text-ink">{t("pipeline.limits.title")}</span>
+        {LIMIT_KEYS.map((key) => <span key={key} className="whitespace-nowrap">{t(LIMIT_LABEL[key])} {hoursText(limits[key])}</span>)}
+        {onSave && <span className="ml-auto font-medium text-accent">{t("pipeline.limits.edit")}</span>}
+      </summary>
+      {onSave && (
+        // noValidate: the screen says what is wrong in words (role=alert), the same in every browser
+        <form noValidate className="flex flex-wrap items-end gap-3 pb-1.5 pt-2.5" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          {LIMIT_KEYS.map((key) => (
+            <label key={key} htmlFor={`${base}-${key}`} className="flex flex-col gap-1 text-[11.5px] font-medium text-ink-secondary">
+              {t(LIMIT_LABEL[key])} ({t("pipeline.limits.hours")})
+              <input id={`${base}-${key}`} type="number" inputMode="numeric" min={1} max={LIMIT_MAX_H} step={1} value={value(key)}
+                onChange={(event) => setDraft({ ...draft, [key]: event.target.value })}
+                className="h-8 w-24 rounded-lg border border-hairline/60 bg-panel px-2 text-[12.5px] font-normal text-ink" />
+            </label>
+          ))}
+          <button type="submit" disabled={saving}
+            className="h-8 rounded-lg border border-hairline/60 bg-panel px-3 text-[12.5px] font-medium text-ink hover:bg-control disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70">
+            {t("pipeline.limits.save")}
+          </button>
+          <button type="button" onClick={() => { setDraft(Object.fromEntries(LIMIT_KEYS.map((key) => [key, String(DEFAULT_LIMITS[key])]))); }}
+            className="h-8 rounded-lg px-2 text-[12.5px] font-medium text-ink-secondary hover:bg-raised hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70">
+            {t("pipeline.limits.defaults")}
+          </button>
+          {problem && <p role="alert" className="basis-full text-[12px] text-danger">{problem}</p>}
+        </form>
+      )}
+    </details>
+  );
+}
+
 // ── the screen ──────────────────────────────────────────────────────────────
 
 /** The board, filtered: the map, the summary, the filters and the columns (or, on a phone, the tabs). */
-export function BoardView({ board, now, filters, onFilters, actions, narrow, tab, onTab }: {
+export function BoardView({ board, now, filters, onFilters, actions, narrow, compact = false, tab, onTab, onSaveLimits }: {
   board: PipelineBoard; now: number; filters: BoardFilters; onFilters: (filters: BoardFilters) => void; actions: CardActions;
-  narrow: boolean; tab: BoardStage; onTab: (stage: BoardStage) => void;
+  /** A phone: the columns are tabs. Compact (a window under 1100 px): the filters and limits fold away. */
+  narrow: boolean; compact?: boolean; tab: BoardStage; onTab: (stage: BoardStage) => void; onSaveLimits?: (limits: BoardLimits) => Promise<void>;
 }) {
   const base = useId();
   const filtered = JSON.stringify(filters) !== JSON.stringify(DEFAULT_FILTERS);
@@ -430,23 +562,32 @@ export function BoardView({ board, now, filters, onFilters, actions, narrow, tab
         <SummaryBar board={board} now={now} filters={filters} onFocus={(focus) => onFilters({ ...filters, focus })} />
         <ReleaseHoldNote hold={board.sources.releaseHold} />
       </div>
-      {narrow ? (
+      {narrow || compact ? (
+        // narrow: the filters fold away, so the cards start in the first fold
         <details className="rounded-xl border border-hairline/50 bg-card px-3 py-2">
           <summary className="cursor-pointer text-[12.5px] font-medium text-ink">{t("pipeline.filter.toggle", { count: [filters.bot !== "all", filters.priority !== "all", filters.origin !== "all"].filter(Boolean).length })}</summary>
-          <div className="pt-2"><BoardFiltersBar board={board} filters={filters} onChange={onFilters} /></div>
+          <div className="space-y-2 pt-2"><BoardFiltersBar board={board} filters={filters} onChange={onFilters} /><LimitsBar limits={board.limits} onSave={onSaveLimits} /></div>
         </details>
-      ) : <BoardFiltersBar board={board} filters={filters} onChange={onFilters} />}
+      ) : (
+        <>
+          <BoardFiltersBar board={board} filters={filters} onChange={onFilters} />
+          <LimitsBar limits={board.limits} onSave={onSaveLimits} />
+        </>
+      )}
       {narrow ? (
         <BoardColumnView board={board} stage={tab} cards={cardsOf(tab)} now={now} actions={actions} filtered={filtered} role="tabpanel" id={panelId(tab)} labelledBy={tabId(tab)} />
       ) : (
-        // the six side by side whenever they fit at a readable width; scrolled sideways (snapping) when not
-        <div ref={columnsRef} className="-mx-1 grid min-h-0 flex-1 snap-x auto-cols-[minmax(13.5rem,1fr)] grid-flow-col gap-2.5 overflow-x-auto px-1 pb-2">
-          {BOARD_STAGES.map((stage) => (
-            <div key={stage} className="flex min-h-0 snap-start flex-col">
-              <BoardColumnView board={board} stage={stage} cards={cardsOf(stage)} now={now} actions={actions} filtered={filtered} />
-            </div>
-          ))}
-        </div>
+        // the six side by side whenever they fit at a readable width; scrolled sideways (snapping) when
+        // not, with a fade and an arrow on the side that hides columns
+        <ScrollStrip label={t("pipeline.scroll.right")} className="flex-1" innerRef={columnsRef}>
+          <div className="grid h-full min-h-0 snap-x auto-cols-[minmax(13.5rem,1fr)] grid-flow-col gap-2.5 px-px pb-2">
+            {BOARD_STAGES.map((stage) => (
+              <div key={stage} className="flex min-h-0 snap-start flex-col">
+                <BoardColumnView board={board} stage={stage} cards={cardsOf(stage)} now={now} actions={actions} filtered={filtered} />
+              </div>
+            ))}
+          </div>
+        </ScrollStrip>
       )}
     </div>
   );
@@ -485,6 +626,7 @@ export function PipelineBoardScreen({ actions }: { actions: CardActions }) {
   const [now, setNow] = useState(() => Date.now());
   const [tab, setTab] = useState<BoardStage>("entry");
   const narrow = useNarrow();
+  const compact = useNarrow("(max-width: 1099px)");
   const etag = useRef<string | null>(null);
   const inflight = useRef(false);
 
@@ -561,7 +703,8 @@ export function PipelineBoardScreen({ actions }: { actions: CardActions }) {
               <h2 className="text-[15px] font-semibold text-ink">{t("pipeline.disabled.title")}</h2>
               <p className="mx-auto mt-1 max-w-xl text-[13px] text-ink-secondary">{t("pipeline.disabled.body")}</p>
             </section>
-          ) : <BoardView board={board} now={now} filters={filters} onFilters={change} actions={actions} narrow={narrow} tab={tab} onTab={setTab} />
+          ) : <BoardView board={board} now={now} filters={filters} onFilters={change} actions={actions} narrow={narrow} compact={compact} tab={tab} onTab={setTab}
+            onSaveLimits={async (limits) => { await saveBoardLimits(limits); await load(true); }} />
         ) : null}
       </div>
     </main>

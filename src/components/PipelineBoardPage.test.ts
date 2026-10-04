@@ -2,28 +2,28 @@
 // makes over the real pipeline of 03–04/10: the six columns in order with
 // their counts, each card's state and reason in words, the stuck ones said
 // with their limit, what waits on the person in evidence with its way to
-// "Precisa de você", unknown as "—", the filters, and the phone's tabs —
-// in pt-BR and English.
+// "Precisa de você", unknown as "—", the filters, the limits, Entrada's fold
+// (never a client's or a new demand), and the phone's tabs — in pt-BR and English.
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setLocale } from "@/lib/i18n";
 import { needsYouKey } from "@/lib/needs-you";
-import { boardSummary, DEFAULT_FILTERS, matchesFilters, OPEN_NEEDS_YOU_EVENT, openNeedsYou, reasonText, stageAge, visibleCards, type BoardFilters } from "@/lib/pipeline-board";
+import { boardSummary, DEFAULT_FILTERS, ENTRY_FOLD, foldEntry, matchesFilters, OPEN_NEEDS_YOU_EVENT, openNeedsYou, reasonText, stageAge, visibleCards, type BoardFilters } from "@/lib/pipeline-board";
 import { buildPipelineBoard } from "../../server/pipeline-board";
-import { boardInputs, CHIEF, CLIENT_NAMES, MONITOR, NOW } from "../../server/testing/pipeline-board-fixture";
+import { boardInputs, boardInputsWithBacklog, CHIEF, CLIENT_NAMES, MONITOR, NOW } from "../../server/testing/pipeline-board-fixture";
 import type { BoardStage, PipelineBoard } from "../../shared/pipeline-board";
-import { BoardView } from "./PipelineBoardPage";
+import { BoardView, LimitsBar } from "./PipelineBoardPage";
 
 const board = buildPipelineBoard(boardInputs());
 const actions = { onOpenLink: () => {}, onOpenThread: () => {}, onOpenNeedsYou: () => {} };
-const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, "\"").replace(/&#x27;/g, "'").replace(/ /g, " ").replace(/\s+/g, " ");
+const text = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, "\"").replace(/&#x27;/g, "'").replace(/&gt;/g, ">").replace(/ /g, " ").replace(/\s+/g, " ");
 
-function render(value: PipelineBoard, options: { locale?: string; filters?: BoardFilters; narrow?: boolean; tab?: BoardStage } = {}) {
+function render(value: PipelineBoard, options: { locale?: string; filters?: BoardFilters; narrow?: boolean; compact?: boolean; tab?: BoardStage } = {}) {
   setLocale(options.locale ?? "pt-br");
   const html = renderToStaticMarkup(createElement(BoardView, {
     board: value, now: NOW, filters: options.filters ?? DEFAULT_FILTERS, onFilters: () => {}, actions,
-    narrow: options.narrow ?? false, tab: options.tab ?? "entry", onTab: () => {},
+    narrow: options.narrow ?? false, compact: options.compact ?? false, tab: options.tab ?? "entry", onTab: () => {}, onSaveLimits: async () => {},
   }));
   setLocale("en");
   return html;
@@ -44,37 +44,56 @@ describe("the board screen (pt-BR)", () => {
     expect(html).toContain('aria-label="Etapas da esteira"');
   });
 
-  it("puts what waits on the person, what is stuck and what is blocked above the columns", () => {
+  it("separates what is stuck in the pipeline from the Entrada backlog past its limit; blocked, cycles to close, production", () => {
     expect(plain).toContain("Esperando você: 2");
-    expect(plain).toContain("Parados além do limite: 3");
+    expect(plain).toContain("Parados na esteira: 2");
+    expect(plain).toContain("Entrada além do limite: 1");
     expect(plain).toContain("Bloqueados: 1");
-    expect(plain).toContain("Em produção (7 dias): 2");
+    expect(plain).toContain("Ciclos a fechar: 3");
+    expect(plain).toContain("Em produção (7 dias): 3");
     expect(plain).toContain("Release de produção 3c04d7c3d a caminho neste Mac");
   });
 
-  it("says each card's state and why, from the data: BEHIND, the running release, the stopped session", () => {
-    expect(plain).toContain("Bloqueado — BEHIND: atrás da main — atualizar a branch e rodar o gate de novo");
+  it("says each card's state and why, in Portuguese, from the data", () => {
+    expect(plain).toContain("Bloqueado — atrás da main — atualizar a branch e rodar o gate de novo");
+    expect(plain).not.toContain("BEHIND");
     expect(plain).toContain("Rodando — no release 3c04d7c3d, em curso");
     expect(plain).toContain("Aguardando — a sessão parou: o último turno terminou e nada a retomou");
+    expect(plain).toContain("Aguardando — issue aberta, PR entregue em 22/09: provável falta de fechamento");
+    expect(plain).toContain("Aguardando — a sessão foi arquivada sem PR — reabrir ou fechar a issue");
+    expect(plain).not.toMatch(/ainda sem sessão[^#]*sessão arquivada/);
     expect(plain).toContain("Gate: sem status");
     expect(plain).toContain("recibo de outro commit");
     expect(plain).toContain("pela hora do release (o conteúdo ainda não foi conferido)");
+    expect(plain).toContain("Fechar o ciclo");
   });
 
   it("flags the stuck with how long and the limit; the time in the stage is on every card", () => {
-    expect(plain).toContain("Parado há 2,3 d (limite 8 h)");
-    expect(plain).toContain("Parado há 34 h (limite 8 h)");
+    expect(plain).toContain("Parado há 2,3 d (limite 24 h)");
+    expect(plain).toContain("Parado há 11 d (limite 7 d)");
     expect(html.match(/data-stale=""/g)).toHaveLength(3);
-    expect(plain).toContain("20 min nesta etapa");
+    expect(plain).toContain("2,4 d nesta etapa");
+  });
+
+  it("shows the limits the cards are measured against, editable", () => {
+    expect(plain).toContain("Limites Entrada (P0/P1, cliente) 7 d Entrada (demais) 30 d Sessão 24 h PR 24 h Gate 24 h Release 4 h Editar");
+    expect(plain).toContain("Salvar limites");
+    expect(html.match(/type="number"/g)).toHaveLength(6);
+  });
+
+  it("keeps the whole title for its tooltip, two lines on the card", () => {
+    expect(html).toContain('title="Fila sem estouro atrás de release, máquina devolvida na fase de rede, release mais curto (lote W)"');
+    expect(html).toMatch(/line-clamp-2[^"]*" title="Fila sem estouro/);
   });
 
   it("puts the person's items in evidence, first in their column, with the way to them", () => {
     expect(html.match(/data-state="owner"/g)).toHaveLength(2);
-    expect(html.indexOf('data-card="issue:9355"')).toBeLessThan(html.indexOf('data-card="issue:9354"'));
+    expect(html.indexOf('data-card="issue:9355"')).toBeLessThan(html.indexOf('data-card="issue:9365"'));
     expect(html.match(/aria-label="Abrir este item em Precisa de você"/g)).toHaveLength(2);
     expect(html).toContain('aria-label="Abrir a PR #9332 no GitHub"');
     expect(html).toContain('aria-label="Abrir a issue #9052 no GitHub"');
     expect(html).toContain('aria-label="Abrir a conversa do bot"');
+    expect(html).toContain('aria-label="Abrir a sessão no app Claude"');
   });
 
   it("names who carries each card, or '—' when nobody does", () => {
@@ -87,6 +106,32 @@ describe("the board screen (pt-BR)", () => {
 
   it("never shows a requester's or a client's name", () => {
     for (const name of CLIENT_NAMES) expect(plain).not.toContain(name);
+  });
+});
+
+describe("Entrada's fold (INSP-Z r1 Z-1)", () => {
+  const full = buildPipelineBoard(boardInputsWithBacklog());
+  const entry = full.columns.find((column) => column.stage === "entry")!.cards;
+
+  it("folds only the old internal backlog: the new clients' demands are in sight", () => {
+    const { shown, folded } = foldEntry(entry, NOW, ENTRY_FOLD);
+    expect(shown.length + folded.length).toBe(entry.length);
+    const visible = shown.map((card) => card.key);
+    for (const key of ["issue:9365", "issue:9364", "issue:9358", "issue:9352", "issue:9337", "issue:9363"]) expect(visible).toContain(key);
+    expect(folded.length).toBeGreaterThan(0);
+    for (const card of folded) {
+      expect(card.origin).toBe("internal");
+      expect(card.closeout).toBe(false);
+      expect(["p0", "p1"]).not.toContain(card.priority);
+      expect(NOW - (card.since ?? 0)).toBeGreaterThan(7 * 24 * 3_600_000);
+    }
+    expect(folded.map((card) => card.key)).toContain("issue:7111");
+  });
+
+  it("says what the fold holds, and the summary counts every card", () => {
+    const plain = text(render(full));
+    expect(plain).toMatch(/Mostrar mais \d+ issues antigas, sem prioridade, internas/);
+    expect(boardSummary(full, NOW).entryStale).toBe(full.columns[0]!.cards.filter((card) => card.since !== null && card.limitMs !== null && NOW - card.since > card.limitMs).length);
   });
 });
 
@@ -112,29 +157,44 @@ describe("filters", () => {
 
   it("by bot, by none, by priority, by origin, by focus", () => {
     expect(keys({ bot: MONITOR })).toEqual(["issue:9355"]);
-    expect(keys({ bot: "none" })).toEqual(["issue:9354", "issue:9365", "pr:9368"]);
-    expect(keys({ bot: CHIEF })).toHaveLength(5);
+    expect(keys({ bot: "none" })).toEqual(["issue:9074", "issue:9185", "issue:9337", "issue:9352", "issue:9354", "issue:9358", "issue:9364", "issue:9365", "pr:9368"]);
+    expect(keys({ bot: CHIEF })).toEqual(["issue:8204", "issue:9052", "issue:9058", "issue:9195", "issue:9305", "issue:9308", "issue:9334"]);
     expect(keys({ priority: "p0" })).toEqual([]);
-    expect(keys({ priority: "p1" })).toEqual(["issue:9052", "issue:9058", "issue:9195", "issue:9334", "issue:9354"]);
-    expect(keys({ origin: "client" })).toEqual(["issue:8204", "issue:9195", "issue:9334", "issue:9355", "issue:9365"]);
+    expect(keys({ priority: "p1" })).toEqual(["issue:9052", "issue:9058", "issue:9074", "issue:9185", "issue:9195", "issue:9334", "issue:9354"]);
+    expect(keys({ origin: "client" })).toEqual(["issue:8204", "issue:9195", "issue:9305", "issue:9308", "issue:9334", "issue:9337", "issue:9352", "issue:9355", "issue:9358", "issue:9364", "issue:9365"]);
     expect(keys({ focus: "owner" })).toEqual(["issue:9334", "issue:9355"]);
-    expect(keys({ focus: "stale" })).toEqual(["issue:9058", "issue:9354", "pr:9368"]);
+    expect(keys({ focus: "stale" })).toEqual(["issue:9052", "issue:9058"]);
+    expect(keys({ focus: "entryStale" })).toEqual(["issue:9074"]);
+    expect(keys({ focus: "closeout" })).toEqual(["issue:9074", "issue:9305", "issue:9308"]);
   });
 
   it("a filtered column says how many of how many, and why it is empty", () => {
     const plain = text(render(board, { filters: { ...DEFAULT_FILTERS, origin: "client" } }));
-    expect(plain).toContain("Entrada 2 de 3");
+    expect(plain).toContain("Entrada 8 de 10");
     expect(plain).toContain("Nada aqui com estes filtros");
     expect(plain).toContain("Limpar filtros");
   });
 
-  it("puts the person's items, then the stuck, first in a column", () => {
+  it("Entrada keeps the board's order; the other columns put the person's items, then the stuck, first", () => {
     const entry = board.columns.find((column) => column.stage === "entry")!;
-    expect(visibleCards(entry.cards, DEFAULT_FILTERS, NOW, "entry").map((card) => card.key)).toEqual(["issue:9355", "issue:9354", "issue:9365"]);
+    expect(visibleCards(entry.cards, DEFAULT_FILTERS, NOW, "entry").map((card) => card.key)).toEqual(entry.cards.map((card) => card.key));
   });
 
-  it("counts the summary over the whole board", () => {
-    expect(boardSummary(board, NOW)).toEqual({ owner: 2, stale: 3, blocked: 1, production: 2 });
+  it("counts the summary over the whole board; blocked includes a blocked card the owner's item also holds", () => {
+    expect(boardSummary(board, NOW)).toEqual({ owner: 2, stale: 2, entryStale: 1, blocked: 1, closeout: 3, production: 3 });
+    const both = buildPipelineBoard(boardInputs({ ownerPending: [...boardInputs().ownerPending, { id: "o4", botId: CHIEF, threadId: "t4", title: "Decidir a PR #9332", createdAt: NOW - 3_600_000 }] }));
+    expect(boardSummary(both, NOW)).toMatchObject({ owner: 3, blocked: 1 });
+  });
+});
+
+describe("the limits line", () => {
+  it("reads the owner's limits in days and hours", () => {
+    setLocale("pt-br");
+    const html = renderToStaticMarkup(createElement(LimitsBar, { limits: { entryUrgentH: 48, entryOtherH: 720, sessionH: 6, prH: 24, gateH: 30, releaseH: 4 } }));
+    setLocale("en");
+    expect(text(html)).toContain("Limites Entrada (P0/P1, cliente) 2 d Entrada (demais) 30 d Sessão 6 h PR 24 h Gate 30 h Release 4 h");
+    // read-only without a way to save
+    expect(html).not.toContain("Editar");
   });
 });
 
@@ -153,7 +213,7 @@ describe("a card's way to 'Precisa de você'", () => {
   });
 });
 
-describe("on a phone, the columns are tabs", () => {
+describe("on a phone, the columns are tabs; on a narrow window, filters and limits fold", () => {
   const html = render(board, { narrow: true, tab: "gate" });
 
   it("one tab list of six, one panel, labelled by its tab", () => {
@@ -166,8 +226,11 @@ describe("on a phone, the columns are tabs", () => {
     expect(text(html)).not.toContain("Chats distribuídos mesmo com agentes offline");
   });
 
-  it("folds the filters away", () => {
+  it("folds the filters and the limits away", () => {
     expect(text(html)).toContain("Filtros (0)");
+    const compact = render(board, { compact: true });
+    expect(compact.indexOf("Filtros (0)")).toBeGreaterThan(-1);
+    expect(compact.indexOf("Filtros (0)")).toBeLessThan(compact.indexOf("Limites"));
   });
 });
 
@@ -175,8 +238,11 @@ describe("in English", () => {
   it("says the same in the reader's language, the session's error included", () => {
     const plain = text(render(board, { locale: "en" }));
     expect(plain).toContain("Waiting on you: 2");
-    expect(plain).toContain("Blocked — BEHIND: behind main — update the branch and run the gate again");
-    expect(plain).toContain("Stuck for 34 h (limit 8 h)");
+    expect(plain).toContain("Stuck in the pipeline: 2");
+    expect(plain).toContain("Intake past its limit: 1");
+    expect(plain).toContain("Blocked — behind main — update the branch and run the gate again");
+    expect(plain).toContain("Stuck for 11 d (limit 7 d)");
+    expect(plain).toContain("the issue is open, its PR shipped on 22/09: probably never closed");
     setLocale("pt-br");
     expect(reasonText({ code: "session-failed", detail: "the turn ran past 45 minutes and was stopped" }, "pt-BR")).toBe("a sessão falhou: o turno passou de 45 minutos e foi parado");
     setLocale("en");
