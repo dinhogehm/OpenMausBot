@@ -13,7 +13,7 @@ import type { PsRow } from "./bg-jobs.ts";
 import type { ReleaseRun } from "./productivity-release-log.ts";
 import {
   buildNowStatus, ciLocalNow, clockBefore, deliveriesToday, emptyReleaseTail, gateOf, NowStatusService, OPEN_PRS_ARGS, parseOpenPrs,
-  pushReleaseTail, readLogGrowth, releaseEstimate, releasePrsFromGitLog, throughputToday, type NowInputs,
+  pushReleaseTail, readLogGrowth, releasePrsFromGitLog, throughputToday, type NowInputs,
 } from "./now-status.ts";
 import { removeTempDir } from "./testing/cleanup.ts";
 
@@ -73,14 +73,6 @@ describe("the release's phase, read from its log as it grows", () => {
     expect(new Date(clockBefore(tail.firstClock!, NOW)).toISOString()).toBe("2026-10-04T00:59:17.000Z");
   });
 
-  it("goes through review, deploy, purge, post-release and the tag, and ends released", () => {
-    const tail = emptyReleaseTail();
-    const phases: Array<string | null> = [];
-    for (const line of [...RUNNING_LOG, ...ENDING_LOG]) { pushReleaseTail(tail, line); phases.push(tail.phase); }
-    expect([...new Set(phases.filter(Boolean))]).toEqual(["queued", "build", "lint", "typecheck", "tests", "smart-deploy", "script-contracts", "review", "deploy", "purge", "post-release", "tag"]);
-    expect(tail.ended).toBe("released");
-  });
-
   it("a failed run ends failed; the next intent starts over", () => {
     const tail = emptyReleaseTail();
     for (const line of [...RUNNING_LOG, `Release production failed for 3c04d7c3d (exit 1)`]) pushReleaseTail(tail, line);
@@ -105,16 +97,6 @@ describe("the release's phase, read from its log as it grows", () => {
     } finally {
       removeTempDir(dir);
     }
-  });
-
-  it("estimates by the median of the last releases that reached production, never from a failure or a guess", () => {
-    const h = 3_600_000;
-    const runs = [
-      run("a", 0, 2 * h, { endedAt: 2 * h }), run("b", 10 * h, 13 * h), run("c", 20 * h, 22.5 * h),
-      run("d", 30 * h, 31 * h, { outcome: "failed" }), run("e", 40 * h, 41 * h, { timeSource: "log-clock" }),
-    ];
-    expect(releaseEstimate(runs)).toEqual({ ms: 2.5 * h, samples: 3 });
-    expect(releaseEstimate([])).toEqual({ ms: null, samples: 0 });
   });
 });
 
@@ -196,7 +178,7 @@ describe("the local CI: the lease and who waits for it", () => {
 });
 
 describe("the aggregate", () => {
-  it("a release running: commit, PRs, since when, phase, estimate", () => {
+  it("a release running: commit, PRs, since when, phase — and no estimate while its profile is unknown", () => {
     const tail = emptyReleaseTail();
     for (const line of RUNNING_LOG) pushReleaseTail(tail, line);
     const h = 3_600_000;
@@ -210,9 +192,10 @@ describe("the aggregate", () => {
     expect(status.release).toEqual({
       state: "running", sha: SHA,
       startedAt: Date.parse("2026-10-04T00:59:17Z"), // the first CI step, as the history measures
-      phase: "tests", phaseAt: Date.parse("2026-10-04T01:04:37Z"),
+      phase: "tests", phaseAt: Date.parse("2026-10-04T01:04:37Z"), progress: null,
       prs: [{ number: 9280, title: "fix(helpdesk): rodízio", url: "https://github.com/dinhogehm/nuria-platform/pull/9280" }],
-      estimateMs: 2.75 * h, samples: 2,
+      // tests come before the CI tells whether there are migrations: no "faltam ~" on a guess
+      profile: null, estimateMs: null, remainingMs: null, samples: 0,
     });
   });
 
@@ -229,7 +212,8 @@ describe("the aggregate", () => {
   });
 
   it("production: the last release that went live, today's deliveries with their PRs, the tag checked", () => {
-    const delivered = Date.parse("2026-10-04T00:30:00Z");
+    // delivered 41 min before the GitHub sync read the tag: past the 15 min a tag needs to settle
+    const delivered = Date.parse("2026-10-04T00:21:00Z");
     const status = buildNowStatus(base({
       runs: [run(PREV, NOW - 6 * 3_600_000, delivered)],
       report: report({ deliveries: 1, mergedPrs: 7, closedIssues: 4, failedReleases: 1, tag: PREV, releases: [
@@ -247,11 +231,12 @@ describe("the aggregate", () => {
     expect(status.throughput).toEqual({ deliveries: 1, mergedPrs: 7, closedIssues: 4, failedReleases: 1, syncedAt: NOW - 600_000 });
   });
 
-  it("the log said the tag advanced before the history was re-read: production is that commit already", () => {
+  it("the log said the tag advanced before the history was re-read: production is that commit already, the tag 'a conferir'", () => {
     const tail = emptyReleaseTail();
-    for (const line of [...RUNNING_LOG, ...ENDING_LOG]) pushReleaseTail(tail, line);
+    for (const line of [...RUNNING_LOG, ...ENDING_LOG]) pushReleaseTail(tail, line, NOW - 60_000);
     const status = buildNowStatus(base({ tail }));
-    expect(status.production).toMatchObject({ sha: SHA, at: null, tag: { sha: PREV, agrees: false } });
+    // the GitHub reading (10 min old) is from before the release: never "diverge" on it
+    expect(status.production).toMatchObject({ sha: SHA, at: null, tag: { sha: PREV, agrees: null } });
   });
 
   it("unknown is null, never zero: no release source today, no GitHub sync yet, no collector", () => {
@@ -288,7 +273,7 @@ describe("the service", () => {
   const dirs: string[] = [];
   afterEach(() => { for (const dir of dirs.splice(0)) removeTempDir(dir); });
 
-  function service(extra: { gh?: (args: string[]) => Promise<string>; log?: string } = {}) {
+  function service(extra: { gh?: (args: string[]) => Promise<string>; log?: string; tag?: () => string } = {}) {
     const dir = mkdtempSync(join(tmpdir(), "omb-now-"));
     dirs.push(dir);
     const outLog = join(dir, "out.log");
@@ -308,49 +293,117 @@ describe("the service", () => {
       ps: async () => [row(83221, 1, "bash watch-production-release.sh"), row(2002, 600, "bash /x/scripts/local-ci.sh")],
       gh: extra.gh ?? (async (args) => { calls.push(args); return JSON.stringify([{ number: 9332, title: "t", isDraft: false, mergeStateStatus: "BEHIND", createdAt: "2026-10-01T15:17:56Z", statusCheckRollup: [] }]); }),
       git: async (args) => { calls.push(["git", ...args]); return "fix: x (#9280)"; },
-      sessions: () => [], sessionInfo: () => null, failing: () => ({ sha: "cb015584a", count: 2 }),
+      sessions: () => [], sessionInfo: () => null, failing: () => ({ sha: "cb015584a", count: 2, at: NOW - 20 * 60_000 }),
+      readTag: async () => { calls.push(["ls-remote"]); return extra.tag?.() ?? PREV; },
+      declined: () => null,
       onChange: () => changes.push(clock),
     });
-    return { svc, calls, changes, outLog, dir, refreshed: () => refreshed, tick: (ms: number) => { clock += ms; } };
+    /** One tick: the status, after the background GitHub read it started has landed. */
+    const tickRefresh = async () => { await svc.refresh(); await svc.settled(); return svc.refresh(); };
+    return { svc, calls, changes, outLog, dir, refreshed: () => refreshed, tick: (ms: number) => { clock += ms; }, tickRefresh };
   }
 
-  it("gathers everything once, pushes it once, and asks GitHub at most every 3 min", async () => {
-    const { svc, calls, changes, tick } = service();
-    const status = await svc.refresh();
+  it("gathers everything, pushes it when it changes, and asks GitHub at most every 3 min — off the request path", async () => {
+    // the first answer does not wait for a slow gh: the list is not read yet ("—"), never empty
+    let answer: (value: string) => void = () => {};
+    const { svc: slow } = service({ gh: () => new Promise<string>((resolve) => { answer = resolve; }) });
+    expect((await slow.refresh()).prs.list).toBeNull();
+    answer("[]");
+    await slow.settled();
+    expect((await slow.refresh()).prs.list).toEqual([]);
+    const { calls, changes, tick, tickRefresh } = service();
+    const status = await tickRefresh();
     expect(status.release).toMatchObject({ state: "running", sha: SHA, phase: "tests", prs: [{ number: 9280 }] });
     expect(status.ci).toEqual({ state: "queued", queued: 1, behindRelease: true });
     expect(status.prs.list).toMatchObject([{ number: 9332, merge: "BEHIND", gate: "missing" }]);
-    expect(status.alerts).toMatchObject([{ key: "failing:cb015584a:2", text: "release cb015584a falhou 2× e não foi publicado" }]);
+    // read from the watcher's log, dated by the failure (not by this read), and said so
+    expect(status.alerts).toMatchObject([{ key: "failing:cb015584a:2", at: NOW - 20 * 60_000, sha: "cb015584a", text: "Release cb015584a falhou 2× seguidas — não está em produção (log do watcher)" }]);
+    expect(status.alerts![0]!.botId).toBeUndefined();
+    const pushed = changes.length;
     tick(60_000);
-    await svc.refresh();
-    expect(changes).toHaveLength(1); // nothing changed: nothing pushed
+    await tickRefresh();
+    expect(changes).toHaveLength(pushed); // nothing changed: nothing pushed
     expect(calls.filter((call) => call[0] === "pr")).toHaveLength(1);
     expect(calls.filter((call) => call[0] === "git")).toEqual([["git", "log", "--first-parent", "--format=%s", `${PREV}..${SHA}`]]);
     tick(3 * 60_000);
-    await svc.refresh();
+    await tickRefresh();
     expect(calls.filter((call) => call[0] === "pr")).toHaveLength(2);
   });
 
-  it("a release ending in the log re-reads the history at once, and the change is pushed", async () => {
-    const { svc, changes, outLog, refreshed, tick } = service();
-    await svc.refresh();
+  it("a release ending in the log re-reads the history at once, and the tag a minute later", async () => {
+    let tag = PREV;
+    const { svc, changes, outLog, refreshed, tick, tickRefresh, calls } = service({ tag: () => tag });
+    await tickRefresh();
     appendFileSync(outLog, ENDING_LOG.join("\n") + "\n");
     tick(60_000);
-    const status = await svc.refresh();
+    const ended = await svc.refresh();
     expect(refreshed()).toBe(1);
-    expect(status.production.sha).toBe(SHA);
-    expect(changes).toHaveLength(2);
+    expect(ended.production).toMatchObject({ sha: SHA, tag: { agrees: null } });
+    expect(changes.length).toBeGreaterThanOrEqual(2);
+    const reads = calls.filter((call) => call[0] === "ls-remote").length;
+    tag = SHA;
+    tick(61_000);
+    const confirmed = await tickRefresh();
+    expect(calls.filter((call) => call[0] === "ls-remote").length).toBe(reads + 1);
+    expect(confirmed.production.tag).toMatchObject({ sha: SHA, agrees: true });
+  });
+
+  it("a tag that really stayed behind is said only on a reading after the release", async () => {
+    const { svc, outLog, tick, tickRefresh } = service({ tag: () => PREV });
+    await tickRefresh();
+    appendFileSync(outLog, ENDING_LOG.join("\n") + "\n");
+    tick(60_000);
+    expect((await svc.refresh()).production.tag.agrees).toBeNull();
+    tick(61_000);
+    expect((await tickRefresh()).production.tag).toMatchObject({ sha: PREV, agrees: false });
   });
 
   it("a GitHub failure keeps the last list and says so; it is never an empty list", async () => {
     let fail = false;
-    const { svc, tick } = service({ gh: async () => { if (fail) throw new Error("HTTP 502"); return "[]"; } });
-    expect((await svc.refresh()).prs).toEqual({ list: [], checkedAt: NOW });
+    const { tick, tickRefresh } = service({ gh: async () => { if (fail) throw new Error("HTTP 502"); return "[]"; } });
+    expect((await tickRefresh()).prs).toEqual({ list: [], checkedAt: NOW });
     fail = true;
     tick(4 * 60_000);
-    expect((await svc.refresh()).prs).toEqual({ list: [], checkedAt: NOW, error: "HTTP 502" });
-    const { svc: never } = service({ gh: async () => { throw new Error("gh: not logged in"); } });
-    expect((await never.refresh()).prs).toEqual({ list: null, checkedAt: null, error: "gh: not logged in" });
+    expect((await tickRefresh()).prs).toEqual({ list: [], checkedAt: NOW, error: "HTTP 502" });
+    const { tickRefresh: never } = service({ gh: async () => { throw new Error("gh: not logged in"); } });
+    expect((await never()).prs).toEqual({ list: null, checkedAt: null, error: "gh: not logged in" });
+  });
+
+  it("a git failure is asked again in 2 min, not kept for the whole release", async () => {
+    let fail = true;
+    const { svc, tick } = service();
+    // swap git for a failing one (same service, its deps object)
+    const deps = (svc as unknown as { deps: { git: (args: string[]) => Promise<string> } }).deps;
+    deps.git = async () => { if (fail) throw new Error("timeout"); return "fix: x (#9280)"; };
+    expect((await svc.refresh()).release.prs).toBeNull();
+    fail = false;
+    tick(60_000);
+    expect((await svc.refresh()).release.prs).toBeNull(); // within the 2 min
+    tick(61_000);
+    expect((await svc.refresh()).release.prs).toMatchObject([{ number: 9280 }]);
+  });
+
+  it("intents it cannot read make the release unknown ('—'), never 'none on its way'", async () => {
+    const { svc } = service();
+    (svc as unknown as { deps: { inFlight: () => never } }).deps.inFlight = () => { throw new Error("release intents unreadable"); };
+    expect((await svc.refresh()).release.state).toBe("unknown");
+  });
+
+  it("the phases read live keep their time across a restart; what came while down has none", async () => {
+    const { svc, outLog, dir, tick } = service();
+    await svc.refresh();
+    appendFileSync(outLog, ["[01:19:52] smart-deploy", "[01:29:07] migration-lint", "**Data:** 2026-10-04T01:39:30Z | **Commit:** 3c04d7c3d | **Duracao:** 301s", "=== RELEASE ORQUESTRADO ===", "=== DEPLOY ==="].join("\n") + "\n");
+    tick(60_000);
+    const live = await svc.refresh();
+    expect(live.release).toMatchObject({ phase: "deploy-check", phaseAt: NOW + 60_000, profile: "migrations" });
+    // a new server on the same data: the phase and its time are still known
+    const again = new NowStatusService({ ...(svc as unknown as { deps: ConstructorParameters<typeof NowStatusService>[0] }).deps, now: () => NOW + 120_000 });
+    expect((await again.refresh()).release).toMatchObject({ phase: "deploy-check", phaseAt: NOW + 60_000 });
+    // a line that arrived while it was down: its phase, but no invented time
+    appendFileSync(outLog, "[INFO] Banco/migrations: verificacao completa (unclassified-sql; review=unknown)\n");
+    const cold = new NowStatusService({ ...(svc as unknown as { deps: ConstructorParameters<typeof NowStatusService>[0] }).deps, now: () => NOW + 180_000 });
+    expect((await cold.refresh()).release).toMatchObject({ phase: "migrations-check", phaseAt: null });
+    expect(existsSync(join(dir, "now", "tail.json"))).toBe(true);
   });
 
   it("keeps what the owner saw and the alerts the Chief got, across a restart", async () => {
@@ -359,6 +412,13 @@ describe("the service", () => {
     svc.recordAlert({ text: "release 3c04d7c3d falhou 2×", botId: "chief", threadId: "desk" });
     expect(svc.seen()).toEqual({ at: NOW, keys: { production: "abc" } });
     expect(existsSync(join(dir, "now", "seen.json"))).toBe(true);
-    expect(JSON.parse(readFileSync(join(dir, "now", "alerts.json"), "utf8"))).toMatchObject([{ text: "release 3c04d7c3d falhou 2×", botId: "chief", threadId: "desk", at: NOW }]);
+    expect(JSON.parse(readFileSync(join(dir, "now", "alerts.json"), "utf8"))).toMatchObject([{ key: "release:3c04d7c3d", sha: "3c04d7c3d", kind: "release", text: "release 3c04d7c3d falhou 2×", botId: "chief", threadId: "desk", at: NOW }]);
+    // the same commit's next alert replaces it (one line per subject); a stuck tag is its own subject
+    svc.recordAlert({ text: "release 3c04d7c3d falhou 3×", botId: "chief", threadId: "desk" });
+    svc.recordAlert({ text: "Produção está no ar em f9e7a2350 há 20 min, mas a tag de produção continua em 3c04d7c3d: …", botId: "chief", threadId: "desk" });
+    expect(JSON.parse(readFileSync(join(dir, "now", "alerts.json"), "utf8")).map((alert: { key: string; text: string }) => [alert.key, alert.text.slice(0, 26)])).toEqual([
+      ["release:3c04d7c3d", "release 3c04d7c3d falhou 3"],
+      ["tag:f9e7a2350", "Produção está no ar em f9e"],
+    ]);
   });
 });

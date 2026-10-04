@@ -38,6 +38,9 @@ export interface NowProduction {
  * moment the server recognizes ("queued", "review", "deploy", "purge",
  * "post-release", "tag"). */
 export type NowReleasePhase = string;
+export type NowReleaseProfile = "migrations" | "light";
+/** Fewer comparable releases than this: no estimate ("—"). */
+export const NOW_MIN_SAMPLES = 3;
 
 export interface NowRelease {
   /** running: holds the machine or the deploy; queued: waits for the machine; idle: none on its way; unknown: the admission state could not be read. */
@@ -47,11 +50,22 @@ export interface NowRelease {
   phase?: NowReleasePhase | null;
   /** When the phase started (the log's UTC clock, dated), when known. */
   phaseAt?: number | null;
+  /** Steps of a phase that counts them: workers deployed (of how many), post-release samples (of 5). */
+  progress?: { done: number; total: number | null } | null;
   /** PRs it carries (from git: production's commit → this one); null when unknown. */
   prs?: NowPr[] | null;
-  /** Median duration of recent releases that reached production, and how many it is the median of. */
+  /** With database migrations (~3 h) or without (~45 min): the two are never estimated together.
+   * null until the run says which (its CI steps after smart-deploy, or the deploy's "Banco/migrations:"). */
+  profile?: NowReleaseProfile | null;
+  /** Median duration, first CI step → deploy finished, of the last releases of THIS profile; null below 3 of them. */
   estimateMs: number | null;
+  /** Time left: the typical time from the current phase's anchor to the end, minus what already passed
+   * since it in this run (negative: past the median); null without a comparable base. */
+  remainingMs?: number | null;
+  /** How many comparable releases the estimate stands on. */
   samples: number;
+  /** Each profile's median and how many releases it stands on (shown when no release runs). */
+  profiles?: Record<NowReleaseProfile, { ms: number | null; samples: number }>;
   /** The release may have hung: older than the admission's ceiling. */
   overdue?: boolean;
 }
@@ -95,9 +109,20 @@ export interface NowAlert {
   at: number;
   /** As the Chief received it (pt-BR, the server's words). */
   text: string;
-  /** Where it was said: the Chief's conversation. */
+  /** Where it was said: the Chief's conversation (absent: read from the watcher's log, said nowhere). */
   botId?: string;
   threadId?: string;
+  /** The commit it is about, and what settles it: "release" (a failing or halted commit: settled
+   * when declined, released or in production) or "tag" (the tag stuck behind production:
+   * settled when the tag reaches it). */
+  sha?: string;
+  kind?: "release" | "tag";
+}
+
+/** What a release alert is about, from the words release-watch uses. */
+export function alertSubject(text: string): { sha?: string; kind: "release" | "tag" } {
+  const sha = /\b([0-9a-f]{9,40})\b/.exec(text)?.[1];
+  return { ...(sha ? { sha } : {}), kind: /tag de produção continua em|avançar a tag/i.test(text) ? "tag" : "release" };
 }
 
 export interface NowThroughput {

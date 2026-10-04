@@ -113,7 +113,13 @@ posixOnly("GET /api/now", () => {
     const res = await fetch(`${BASE}/api/now?refresh=1`);
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
-    const { status, seen } = await res.json() as any;
+    let { status, seen } = await res.json() as any;
+    // GitHub is read in the background: the answer never waits for it, the next one carries it
+    const deadline = Date.now() + 10_000;
+    while (status.prs.list === null && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      ({ status, seen } = await (await fetch(`${BASE}/api/now`)).json() as any);
+    }
     expect(seen).toBeNull();
     expect(status).toMatchObject({ version: 1, enabled: true });
     expect(status.release).toMatchObject({ state: "running", sha: SHA, phase: "tests", estimateMs: null, samples: 0 });

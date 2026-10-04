@@ -57,6 +57,29 @@ export interface ReleaseRun {
   deployedAt?: number;
   /** Live in production, but the watcher could not advance the tag (it was moved by hand later). */
   tagNotAdvanced?: true;
+  /** When each CI step started (its first "[HH:MM:SS] step" line, dated like startedAt) — lot Y's estimate. */
+  steps?: Record<string, number>;
+  /** The review report's date (**Data:**): the deploy starts right after it. */
+  reviewAt?: number;
+  /** With database migrations (a migration-lint step, or "Banco/migrations: verificacao completa") or
+   * without ("NAO APLICAVEL", or no migration-lint between smart-deploy and script-contracts):
+   * the two take ~3 h and ~45 min, and are never averaged together. */
+  profile?: "migrations" | "light";
+}
+
+/** The profile a run declares: the deploy's own "Banco/migrations:" verdict first, else its CI steps. */
+export function runProfile(steps: readonly string[], database: "migrations" | "light" | null): "migrations" | "light" | undefined {
+  if (database) return database;
+  if (steps.includes("migration-lint")) return "migrations";
+  if (steps.includes("script-contracts")) return "light";
+  return undefined;
+}
+
+/** "[INFO] Banco/migrations: verificacao completa (…)" / "…: NAO APLICAVEL (…)". */
+export function databaseVerdict(line: string): "migrations" | "light" | null {
+  const match = /Banco\/migrations:\s*(.*)$/.exec(line);
+  if (!match) return null;
+  return /N[AÃ]O APLIC[AÁ]VEL/i.test(match[1]!) ? "light" : "migrations";
 }
 
 const LIVE_WITHOUT_TAG = /production is live at ([0-9a-f]{40}) but the certification tag was NOT advanced/g;
@@ -116,6 +139,9 @@ interface RawRun {
   headPr?: number;
   postRelease?: string;
   tail: string[];
+  /** Each CI step's first clock reading (seconds of the UTC day), in order. Absent in states saved before lot Y. */
+  steps?: Array<[string, number]>;
+  database?: "migrations" | "light" | null;
 }
 
 interface RawDecline { seq: number; sha: string }
@@ -137,6 +163,7 @@ const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
 const INTENT = /^ADMISSION_INTENT kind=release label=release:production:([0-9a-f]{40}) pid=(\d+)/;
 const RELEASED = /^ADMISSION_RELEASED kind=release pid=(\d+)/;
 const CLOCK = /^\[(\d{2}):(\d{2}):(\d{2})\] \S/;
+const STEP = /^\[\d{2}:\d{2}:\d{2}\] ([a-z][\w:-]*)\s*$/;
 const LIGHTHOUSE = /^\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z) LH:/;
 const REVIEW = /\*\*Data:\*\*\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z).*\*\*Duracao:\*\*\s*(\d+)s/;
 const CONCLUDED = /Concluido! \((\d+)s\)/;
@@ -177,7 +204,7 @@ export function pushReleaseLogLine(state: ReleaseLogState, raw: string): void {
       state.open = {
         seq: state.seq++, sha, pid: Number(intent[2]), firstClock: null, lastClock: null, anchors: [],
         dataAt: null, dataDuration: null, concluded: null, certified: false, closed: false, noop: false,
-        ...(carrier ? { headPr: carrier } : {}), tail: [],
+        ...(carrier ? { headPr: carrier } : {}), tail: [], steps: [], database: null,
       };
       return;
     }
@@ -204,8 +231,12 @@ export function pushReleaseLogLine(state: ReleaseLogState, raw: string): void {
     const seconds = Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3]);
     if (run.firstClock === null) run.firstClock = seconds;
     run.lastClock = seconds;
+    const step = STEP.exec(line)?.[1];
+    if (step && !(run.steps ??= []).some(([name]) => name === step)) run.steps.push([step, seconds]);
     return;
   }
+  const database = databaseVerdict(line);
+  if (database) { run.database ??= database; return; }
   const lighthouse = LIGHTHOUSE.exec(line);
   if (lighthouse) {
     const at = Date.parse(lighthouse[1]!);
@@ -325,6 +356,14 @@ export function finishReleaseLog(state: ReleaseLogState, options: { endOfStream?
       outcome = cause ? "aborted" : "superseded";
       if (outcome === "superseded") cause = null;
     }
+    // each step dated like the start: near the run's first stamp, or after the start
+    const steps: Record<string, number> = {};
+    if (startedAt !== null) {
+      for (const [name, seconds] of raw.steps ?? []) {
+        steps[name] = source === "log" ? clockNear(seconds, raw.anchors[0]!) : clockAfter(seconds, startedAt);
+      }
+    }
+    const profile = runProfile((raw.steps ?? []).map(([name]) => name), raw.database ?? null);
     runs.push({
       key: `${raw.sha}:${raw.pid}`,
       sha: raw.sha,
@@ -338,6 +377,9 @@ export function finishReleaseLog(state: ReleaseLogState, options: { endOfStream?
       ...(raw.postRelease ? { postRelease: raw.postRelease } : {}),
       ...(!raw.closed && outcome !== "running" ? { interrupted: true } : {}),
       ...(deployedAt !== null ? { deployedAt } : {}),
+      ...(Object.keys(steps).length ? { steps } : {}),
+      ...(raw.dataAt !== null ? { reviewAt: raw.dataAt } : {}),
+      ...(profile ? { profile } : {}),
     });
     note(startedAt);
     note(endedAt);

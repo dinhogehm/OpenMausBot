@@ -9885,7 +9885,12 @@ const nowStatus = new NowStatusService({
   readLease: readAdmissionLease,
   readDeployLease,
   leaseSince: () => { try { return statSync(join(ADMISSION_DIR, "lease", "owner.pid")).mtimeMs; } catch { return null; } },
-  inFlight: (rows) => releaseInFlight({ rows, lease: readAdmissionLease(), deployLease: readDeployLease(), intents: readReleaseIntents() ?? [], alive: (pid) => rows.some((row) => row.pid === pid) }),
+  inFlight: (rows) => {
+    // intents/ unreadable is undecided, never "no release" (admission-control.sh creates it on every acquire)
+    const intents = readReleaseIntents();
+    if (intents === null) throw new Error("release intents unreadable");
+    return releaseInFlight({ rows, lease: readAdmissionLease(), deployLease: readDeployLease(), intents, alive: (pid) => rows.some((row) => row.pid === pid) });
+  },
   ps: psTable,
   gh: execGh,
   git: (args) => execCc("git", ["-C", join(homedir(), "Projetos", "nuria-platform"), ...args]),
@@ -9902,8 +9907,13 @@ const nowStatus = new NowStatusService({
   failing: () => {
     const failed = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), readTail(RELEASED_SHA_FILE, 200).trim());
     const declined = readTail(DECLINED_SHA_FILE, 200).trim();
-    return failed && failed.count >= RELEASE_FAILURES_ALERT && !(declined && (declined.startsWith(failed.sha) || failed.sha.startsWith(declined))) ? failed : null;
+    if (!failed || failed.count < RELEASE_FAILURES_ALERT || (declined && (declined.startsWith(failed.sha) || failed.sha.startsWith(declined)))) return null;
+    // when it last failed: the watcher's last-failure record, else the err log's last write (never the read)
+    const mtime = (path: string) => { try { return statSync(path).mtimeMs; } catch { return null; } };
+    return { ...failed, at: mtime(LAST_FAILURE_FILE) ?? mtime(RELEASE_ERR_LOG) };
   },
+  readTag: readProductionTag,
+  declined: () => readTail(DECLINED_SHA_FILE, 200).trim() || null,
   onChange: (status) => broadcast({ kind: "now", status }, { adminOnly: true }),
   log: (line) => console.log(line),
 });
