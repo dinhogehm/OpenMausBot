@@ -86,8 +86,17 @@ describe("the board of 04/10 02:13Z (real records)", () => {
     expect(isStale(card(board, "issue:9354"), NOW)).toBe(true);
     expect(card(board, "issue:9365")).toMatchObject({ priority: null, limitMs: 72 * HOUR, origin: "client" });
     expect(isStale(card(board, "issue:9365"), NOW)).toBe(false);
-    // an old P3 nobody names stays off the board
+    // an old P3 nobody names stays off the board; an old P0 nobody touched is counted as backlog
     expect(JSON.stringify(board)).not.toContain("9293");
+    expect(JSON.stringify(board)).not.toContain("7857");
+    expect(column(board, "entry").dormant).toBe(1);
+    expect(board.columns.filter((each) => each.stage !== "entry").every((each) => each.dormant === null)).toBe(true);
+  });
+
+  it("capitals are not a client: emphasis and code stay as written", () => {
+    const names = nameDictionary(["FORBIDDEN_WORDS apaga sentenças de resposta NEGATIVA legítima", "depois de ABORTAR a suíte do web"]);
+    expect([...names.tenants]).toEqual([]);
+    expect(boardTitle("FORBIDDEN_WORDS apaga sentenças de resposta NEGATIVA legítima", names)).toBe("FORBIDDEN_WORDS apaga sentenças de resposta NEGATIVA legítima");
   });
 
   it("an issue closed before a PR opened does not fold that PR into its work (lot W's 'Refs #9347')", () => {
@@ -206,6 +215,7 @@ describe("titles, rows and receipts", () => {
     "Helpdesk: ticket 142527 não distribuído — automação registrou \"fora do horário\" — Fulana 30/09",
     "BI: indicadores de CSAT não funcionam — erro de filtros não compatíveis (Beltrano, planilha L110)",
     "fix(web): refresh do board derruba o D1 do ACMECORP (#8891)",
+    "core: coluna extra estoura o teto do D1 (tenant ACMECORP)",
     "Relato do Sicrano: tela trava",
   ]);
 
@@ -218,6 +228,12 @@ describe("titles, rows and receipts", () => {
     expect(boardTitle("BI: indicadores de CSAT não funcionam — erro de filtros não compatíveis (Beltrano, planilha L110)", names)).toBe("BI: indicadores de CSAT não funcionam — erro de filtros não compatíveis");
     expect(boardTitle("fix(filas): Sidebar do ticket (Filas > Editar) salva mas não reflete — reprovação linha 106 (Fulana, 02/10) (ref #8204)", names)).toBe("Sidebar do ticket (Filas > Editar) salva mas não reflete");
     expect(boardTitle("fix(web): refresh do board derruba o D1 do ACMECORP (#8891)", names)).toBe("Refresh do board derruba o D1 do cliente");
+    // the client in any spelling, inside a name too
+    expect(boardTitle("Epic: e-mail do helpdesk — achados do caso AcmeCorp", names)).toBe("Epic: e-mail do helpdesk");
+    expect(boardTitle("Piloto AcmeCorp: D1 com full-scans", names)).toBe("Piloto cliente: D1 com full-scans");
+    expect(boardTitle("Revalidar portal acmecorp-crm 404", names)).toBe("Revalidar portal cliente-crm 404");
+    // a dot that opens a word stays on it
+    expect(boardTitle("gate de main no Node da .nvmrc", names)).toBe("Gate de main no Node da .nvmrc");
     expect(boardTitle("Relato do Sicrano: tela trava", names)).toBe("Relato: tela trava");
     expect(boardTitle("9334 9331 Inatividade do chat", names)).toBe("Inatividade do chat");
     expect(boardTitle("Atendimento: e-mail do Fulana não grava", names)).toBe("Atendimento: e-mail não grava");

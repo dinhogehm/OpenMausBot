@@ -27,7 +27,7 @@ export type BoardReasonCode =
   // pr / gate
   | "draft" | "behind" | "conflict" | "repo-blocked" | "no-gate" | "ci-running" | "ci-queued" | "gate-pending" | "gate-failed" | "receipt-only" | "awaiting-merge"
   // release
-  | "release-running" | "release-wait" | "release-failed" | "release-declined";
+  | "release-running" | "release-wait" | "release-failed";
 
 export interface BoardReason {
   code: BoardReasonCode;
@@ -93,6 +93,9 @@ export interface BoardColumn {
   cards: BoardCard[];
   /** Cards past the column's cap (Entrada only), counted in `total`. */
   hidden: number;
+  /** Entrada only: open P0/P1 issues nobody touched for ENTRY_DORMANT_MS — backlog, not
+   * in motion; counted here, not shown as cards (null when GitHub was never read). */
+  dormant: number | null;
 }
 
 export interface PipelineBoard {
@@ -135,6 +138,10 @@ export function stageLimitMs(stage: BoardStage, priority: BoardPriority | null):
 export const PRODUCTION_WINDOW_MS = 7 * 24 * HOUR;
 /** Entrada shows at most this many cards (most urgent first); the rest are counted. */
 export const ENTRY_CAP = 40;
+/** Entrada: an issue opened this recently is new work. */
+export const ENTRY_RECENT_MS = 7 * 24 * HOUR;
+/** Entrada: a P0/P1 updated this recently is in motion; one quiet longer is backlog. */
+export const ENTRY_DORMANT_MS = 14 * 24 * HOUR;
 
 /** Past its stage's limit now. Unknown time is never "stale". */
 export function isStale(card: Pick<BoardCard, "since" | "limitMs" | "state">, now: number): boolean {

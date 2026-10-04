@@ -192,7 +192,7 @@ function safe<T>(read: () => T, fallback: T): T {
 export function disabledBoard(now: number, repo: string): PipelineBoard {
   return {
     version: 1, enabled: false, generatedAt: now, repo,
-    columns: BOARD_STAGES.map((stage) => ({ stage, known: false, total: null, cards: [], hidden: 0 })),
+    columns: BOARD_STAGES.map((stage) => ({ stage, known: false, total: null, cards: [], hidden: 0, dormant: null })),
     bots: [],
     sources: { githubSyncedAt: null, livePrsAt: null, livePrsError: null, releaseLogTo: null, releaseHold: null },
   };

@@ -11,7 +11,7 @@
 // Closes/Fixes/Refs, a session's PR by its branch or by hand-over, the issue
 // number a session's title opens with). Its stage is the least advanced of
 // its unfinished parts; what it waits on comes from the data, never guessed.
-import { BOARD_STAGES, ENTRY_CAP, PRODUCTION_WINDOW_MS, stageLimitMs, type BoardCard, type BoardColumn, type BoardGateStatus, type BoardOwnerItem, type BoardPriority, type BoardReason, type BoardStage, type CardState, type PipelineBoard } from "../shared/pipeline-board.ts";
+import { BOARD_STAGES, ENTRY_CAP, ENTRY_DORMANT_MS, ENTRY_RECENT_MS, PRODUCTION_WINDOW_MS, stageLimitMs, type BoardCard, type BoardColumn, type BoardGateStatus, type BoardOwnerItem, type BoardPriority, type BoardReason, type BoardStage, type CardState, type PipelineBoard } from "../shared/pipeline-board.ts";
 import { OWNER_PENDING_AWAIT_MS } from "./bot-autonomy.ts";
 import { CC_ACTIVE_MS, clientIssue } from "./cc-sessions.ts";
 import { issuePriority, isCarrier, type GateState, type GhCache, type GhIssue, type GhPr } from "./productivity-github.ts";
@@ -122,18 +122,23 @@ export function nameDictionary(texts: Iterable<string>): NameDictionary {
   const tenants = new Set<string>();
   const groupBeforeDate = new RegExp(String.raw`((?:${NAME}\s*\/\s*)*${NAME}),?\s+${DATE}`, "gu");
   const groupBeforeSheet = new RegExp(String.raw`\((${NAME}),\s*(?:planilha|linha|L\d)`, "gu");
-  const reported = new RegExp(String.raw`(?:[Rr]elato|[Rr]elatad[oa]|[Rr]eportad[oa]|[Pp]edido|[Qq]uem pediu foi)\s+(?:d[oa]|pel[oa]|por|de|[oa])\s+(${NAME})`, "gu");
-  const tenant = /(?<![\p{L}])(?:tenant|cliente|workspace|d[oa]|de|n[oa])\s+(\p{Lu}{4,}[\p{Lu}\d]*)(?![\p{L}\d])/gu;
+  const reported = new RegExp(String.raw`(?:[Rr]elato|[Rr]elatad[oa]|[Rr]eportad[oa]|[Pp]edido|[Qq]uem pediu foi)\s+(?:d[oa]|pel[oa]|por|de|[oa])\s+(${NAME})|(?<![\p{L}])[Cc]lientes?\s+(${NAME})(?![\p{L}])`, "gu");
+  // a client is named as one somewhere ("tenant PIPERUN", "cliente ACME"): then it goes from
+  // every title, also where nothing marks it ("derruba o D1 do PIPERUN"). Capitals alone are
+  // not a client ("NEGATIVA", "ABORTAR", "FORBIDDEN_WORDS" are emphasis or code)
+  const tenant = /(?<![\p{L}\d_])(?:[Tt]enant|[Cc]liente|[Ww]orkspace)\s+([A-Z][A-Z0-9]{3,})(?![\p{L}\d_])/gu;
   for (const text of texts) {
     for (const match of text.matchAll(groupBeforeDate)) for (const name of match[1]!.split("/")) people.add(name.trim());
     for (const match of text.matchAll(groupBeforeSheet)) people.add(match[1]!);
-    for (const match of text.matchAll(reported)) people.add(match[1]!);
+    for (const match of text.matchAll(reported)) people.add((match[1] ?? match[2])!);
     for (const match of text.matchAll(tenant)) if (!ACRONYMS.has(match[1]!)) tenants.add(match[1]!);
   }
   return { people, tenants };
 }
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** A client's name in any case, as a whole word (hyphens and underscores split words: "piperun-crm"). */
+const tenantPattern = (name: string, flags = "") => new RegExp(`(?<![\\p{L}\\d])${escape(name)}(?![\\p{L}\\d])`, `iu${flags}`);
 const TITLE_MAX = 90;
 
 /** A card's title: no leading issue numbers, no "fix(scope):", no requester
@@ -141,7 +146,7 @@ const TITLE_MAX = 90;
  * spreadsheet row, its ticket), at most TITLE_MAX characters. */
 export function boardTitle(raw: string, names: NameDictionary): string {
   const named = (text: string) => [...names.people].some((name) => new RegExp(`(?<![\\p{L}])${escape(name)}(?![\\p{L}])`, "u").test(text))
-    || [...names.tenants].some((name) => text.includes(name));
+    || [...names.tenants].some((name) => tenantPattern(name).test(text));
   const sensitive = (text: string) => new RegExp(String.raw`#\d|\bref\b|planilha|(?<![\p{L}])L\d{1,4}(?![\p{L}\d])|linha \d|ticket \d|${DATE}|(?<![\p{L}])cliente`, "iu").test(text) || named(text);
   let text = raw.replace(/\s+/g, " ").trim();
   text = text.replace(/^(?:#?\d{3,6}(?!\d)[\s,]+)+(?=\S)/, "");
@@ -151,8 +156,9 @@ export function boardTitle(raw: string, names: NameDictionary): string {
   // a dash tail of the same kind: "— Marluce 30/09", "— reprovação linha 106"
   for (let before = ""; before !== text;) { before = text; text = text.replace(/\s+[—–-]\s+([^—–]*)$/u, (whole, tail: string) => (sensitive(tail) ? "" : whole)); }
   for (const name of names.people) text = text.replace(new RegExp(`\\s*(?:(?<![\\p{L}])(?:d[oa]|pel[oa]|por|com)\\s+)?(?<![\\p{L}])${escape(name)}(?![\\p{L}])`, "gu"), "");
-  for (const name of names.tenants) text = text.replace(new RegExp(`(?<![\\p{L}])${escape(name)}(?![\\p{L}\\d])`, "gu"), "cliente");
-  text = text.replace(/\s+([,.;:!?)])/g, "$1").replace(/\(\s*\)/g, "").replace(/[\s,;:—–-]+$/u, "").replace(/\s{2,}/g, " ").trim();
+  // in any case and inside a name ("PipeRun", "piperun-crm"): the client, not its spelling
+  for (const name of names.tenants) text = text.replace(tenantPattern(name, "g"), "cliente");
+  text = text.replace(/\s+([,.;:!?)])(?=\s|$)/g, "$1").replace(/\(\s*\)/g, "").replace(/[\s,;:—–-]+$/u, "").replace(/\s{2,}/g, " ").trim();
   if (!text) return "—";
   text = text[0]!.toLocaleUpperCase("pt-BR") + text.slice(1);
   if (text.length <= TITLE_MAX) return text;
@@ -176,7 +182,7 @@ export function isClientWork(texts: readonly string[], names: NameDictionary): b
     // a client's ticket or conversation, or the spreadsheet's "Reprovado" (the client did not accept it)
     || /(?<![\p{L}])(?:ticket\s+\d{5,}|ATD-\d{6}-\d{3,4}|Reprovad[oa](?![\p{L}]))/u.test(text)
     || new RegExp(String.raw`(?:${NAME})(?:\s*\/\s*${NAME})*,?\s+${DATE}`, "u").test(text) && [...names.people].some((name) => text.includes(name))
-    || [...names.tenants].some((name) => text.includes(name)));
+    || [...names.tenants].some((name) => tenantPattern(name).test(text)));
 }
 
 // ── references ──────────────────────────────────────────────────────────────
@@ -214,12 +220,12 @@ const labelNamesHead = (label: string, head: string | null) => {
 const PRIORITY_RANK: Record<BoardPriority, number> = { p0: 0, p1: 1, p2: 2, p3: 3 };
 const STATE_RANK: Record<CardState, number> = { owner: 0, blocked: 1, running: 2, queued: 3, idle: 4, done: 5 };
 const RECENT_MERGE_MS = 21 * 24 * 3_600_000;
-const ENTRY_RECENT_MS = 7 * 24 * 3_600_000;
 const SESSION_LIVE = new Set(["running", "stalled", "idle", "failed"]);
 
 class Groups {
   private readonly parent = new Map<string, string>();
   add(key: string): void { if (!this.parent.has(key)) this.parent.set(key, key); }
+  has(key: string): boolean { return this.parent.has(key); }
   find(key: string): string {
     this.add(key);
     let root = key;
@@ -316,11 +322,16 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
   const ownerItems = input.ownerPending.filter((item) => !(item.awaitingSince !== undefined && now - item.awaitingSince < OWNER_PENDING_AWAIT_MS));
   const cites = new Map(ownerItems.map((item) => [item, itemCites(item)]));
   const citedIssues = new Set([...cites.values()].flatMap((cite) => [...cite.numbers]));
-  // Entrada: open issues that entered lately, are urgent, are on the delivery track, or wait on the person
+  // Entrada: open issues that entered lately, urgent ones in motion, those on the delivery
+  // track ("esteira") or waiting on the person; an urgent one quiet for weeks is backlog, counted
+  let dormant = 0;
   for (const issue of Object.values(issues)) {
     if (issue.state !== "OPEN") continue;
     const priority = issuePriority(issue.labels);
-    if (now - issue.createdAt < ENTRY_RECENT_MS || priority === "p0" || priority === "p1" || issue.labels.includes("esteira") || citedIssues.has(issue.number)) groups.add(`issue:${issue.number}`);
+    const urgent = priority === "p0" || priority === "p1";
+    const quiet = now - issue.updatedAt >= ENTRY_DORMANT_MS;
+    if (now - issue.createdAt < ENTRY_RECENT_MS || (urgent && !quiet) || (issue.labels.includes("esteira") && !quiet) || citedIssues.has(issue.number)) groups.add(`issue:${issue.number}`);
+    else if (urgent && !groups.has(`issue:${issue.number}`)) dormant += 1; // a session or a PR names it: it is on a card
   }
 
   const members = new Map<string, string[]>();
@@ -354,7 +365,7 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
     const known = stage === "session" ? true : stage === "production" ? productionKnown : githubKnown || (stage !== "entry" && input.live !== null);
     const all = cards.filter((card) => card.stage === stage).sort(stage === "production" ? productionOrder : order);
     const shown = stage === "entry" ? all.slice(0, ENTRY_CAP) : all;
-    return { stage, known, total: known ? all.length : null, cards: shown, hidden: all.length - shown.length };
+    return { stage, known, total: known ? all.length : null, cards: shown, hidden: all.length - shown.length, dormant: stage === "entry" && known ? dormant : null };
   });
   const botIds = new Set(cards.map((card) => card.bot?.id).filter((id): id is string => Boolean(id)));
   return {

@@ -46,6 +46,8 @@ export function boardIssues(): GhIssue[] {
     issue(9354, "fix(release): produção de d5bb1f70b reprova 10× em script-contracts — ExperimentalWarning do node:sqlite (Node 22) no stderr dos reconcilers", 1790957808000, ["type:bug", "source:agent", "priority:p1"]),
     // closed by #9348 on 02/10; lot W's #9368 (opened 03/10) still "Refs" it — history, not its work
     issue(9347, "Release travado em script-contracts: stderr com ExperimentalWarning do SQLite", 1790930000000, ["source:agent", "priority:p1", "bug", "esteira"], { state: "CLOSED", closedAt: 1790964800000, stateReason: "COMPLETED" }),
+    // a P0 (old "critical") untouched since 30/07: backlog, counted under Entrada, not a card
+    issue(7857, "FORBIDDEN_WORDS apaga sentenças de resposta NEGATIVA legítima; se for a única sentença, vira o sentinel que a policy N1 troca pelo fallback de incidente", 1785441636000, ["app:ai", "type:bug", "priority:critical", "source:agent"]),
     // older backlog: no priority, not recent, nobody names it — not on the board
     issue(9293, "Flaky: admission-control-contract.test.mjs depende do locale (pt_BR \"12,00\")", 1789600000000, ["type:bug", "priority:p3"]),
   ];
