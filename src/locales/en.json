@@ -3563,6 +3563,7 @@
   "pipeline.card.partial": "Partial delivery",
   "pipeline.card.partialHint": "what shipped says it is a phase of the issue; the rest is still to do",
   "pipeline.reason.deliveredPartial": "partial delivery: a phase of the issue shipped on {when}, the rest is still to do",
+  "pipeline.convention.refs": "Convention: a PR with \"Refs #N\" is a complete fix; the issue stays open until the requester validates it (delivered, awaiting validation/closing, counted in Cycles to close). \"Partial delivery\" only when the PR says Phase/part/stage N.",
   "pipeline.card.validate": "Validate and close",
   "pipeline.card.validateHint": "tell the requester",
   "pipeline.reason.deliveredValidate": "delivered on {when}, awaiting validation and closing",

@@ -10335,6 +10335,7 @@
       "pipeline.card.partial": "8b7dc05011ad8e44860e6d333aa79097141ec78f43d8d1bebc82263b3a488671",
       "pipeline.card.partialHint": "c77783ebc26dae3ccad235a8e2089bf4bfbc6a3d7b89e170fa856bba756483e1",
       "pipeline.reason.deliveredPartial": "1b822c92452bfaf7bd442a39792a88733d2b44f90f09e331a96fa467b0a25482",
+      "pipeline.convention.refs": "c78a5160dd61355672700d6e76092d43e43b26a98a3c974b04328f2ce3186a6e",
       "pipeline.card.validate": "08eed6f6ed1c911ea1b4368e0a45a4bbe3d53f6aa02bfb3b3e2f409e0157d5ce",
       "pipeline.card.validateHint": "564e5034e74cd2f5d5326087ef0254cb37f82d6436fa8873a809745b74015b11",
       "pipeline.reason.deliveredValidate": "91e182cf72503e342cffb82c4ee64bad35a43b83c303be52b25910abf6960aab",

@@ -67,6 +67,10 @@ describe("the board screen (pt-BR)", () => {
     // in Produção with the issue open: validate and close (Refs: #9284, #9334, #9197); close (Fecha: #9185)
     expect(plain.match(/Validar e fechar avisar o solicitante/g)).toHaveLength(3);
     expect(plain).toContain("Issue ainda aberta fechar e avisar o solicitante");
+    // the convention, confirmed by the owner, in the tooltip of Entrada and Produção (and for a screen reader)
+    const convention = "Convenção: PR com &quot;Refs #N&quot; é correção completa; a issue fica aberta até o solicitante validar (entregue, aguardando validação/fechamento, conta em Ciclos a fechar). &quot;Entrega parcial&quot; só quando a PR diz Fase/parte/etapa N.";
+    expect(html.split(`title="${convention}"`)).toHaveLength(3);
+    expect(plain).toContain("issue ou linha da planilha — Convenção: PR com \"Refs #N\" é correção completa");
     expect(plain).toContain("Aguardando — a sessão foi arquivada sem PR — reabrir ou fechar a issue");
     expect(plain).not.toMatch(/ainda sem sessão[^#]*sessão arquivada/);
     expect(plain).toContain("Gate: sem status");

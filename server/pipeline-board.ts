@@ -54,11 +54,16 @@ export function closesIssue(pr: Pick<LivePr, "closes" | "refs" | "fixes">, issue
   return pr.closes.includes(issue) || (pr.fixes ?? []).includes(issue);
 }
 
-/** What shipped means for an issue still open. The repository's convention (lot P's gate
- * refuses Closes/Fixes in a runtime PR): a whole fix ships with "Refs #N" and the issue
- * stays open until it is validated — "validate". A PR that closes it and the issue is still
- * open: "close" (the cycle was not closed). Only PRs that say they ship a part ("Fase 0",
- * "parte 2"): "partial". */
+/** What shipped means for an issue still open.
+ *
+ * CONVENTION (confirmed by the owner, 04/10/2026): "Refs #N" is a COMPLETE fix awaiting
+ * validation — lot P's gate refuses Closes/Fixes in a runtime PR, so a whole fix ships with
+ * "Refs #N" and the issue stays open until the requester validates it. Shipped and still
+ * open, it is "validate": "entregue, aguardando validação/fechamento", a cycle to close.
+ * A PR that says it closes it (Closes/Fecha…) with the issue still open: "close" (the
+ * cycle was not closed). "partial" only when every PR that shipped says it is a part
+ * ("Fase 0", "parte 2", "etapa 1", "entrega parcial" — partialDelivery): never inferred
+ * from "Refs". The screen says the same in the columns' tooltip (pipeline.convention.refs). */
 export function deliveryKind(prs: ReadonlyArray<Pick<LivePr, "closes" | "refs" | "fixes" | "partial">>, issue: number): "close" | "validate" | "partial" {
   if (prs.some((pr) => closesIssue(pr, issue))) return "close";
   return prs.length > 0 && prs.every((pr) => pr.partial) ? "partial" : "validate";

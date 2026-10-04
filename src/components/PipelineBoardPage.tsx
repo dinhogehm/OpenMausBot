@@ -267,7 +267,12 @@ export function BoardColumnView({ board, stage, cards, now, actions, filtered, l
             {t(`pipeline.stage.${stage}` as LocaleKey)}
             <span className="text-[12px] font-medium tabular-nums text-ink-secondary" aria-label={column.known ? undefined : t("pipeline.count.unknown")}>{count}</span>
           </h2>
-          <p className="text-[11.5px] text-ink-secondary">{t(`pipeline.stageHint.${stage}` as LocaleKey)}</p>
+          {/* Entrada and Produção carry the delivered-but-open cards: the convention behind them in the tooltip
+              (and for a screen reader): "Refs #N" is a complete fix awaiting validation */}
+          <p className="text-[11.5px] text-ink-secondary" title={stage === "entry" || stage === "production" ? t("pipeline.convention.refs") : undefined}>
+            {t(`pipeline.stageHint.${stage}` as LocaleKey)}
+            {(stage === "entry" || stage === "production") && <span className="sr-only"> — {t("pipeline.convention.refs")}</span>}
+          </p>
         </div>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">

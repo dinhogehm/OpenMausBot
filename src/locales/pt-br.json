@@ -3297,6 +3297,7 @@
   "pipeline.card.partial": "Entrega parcial",
   "pipeline.card.partialHint": "o que subiu diz ser uma fase da issue; o resto ainda falta",
   "pipeline.reason.deliveredPartial": "entrega parcial: uma fase da issue entrou em produção em {when}, o resto ainda falta",
+  "pipeline.convention.refs": "Convenção: PR com \"Refs #N\" é correção completa; a issue fica aberta até o solicitante validar (entregue, aguardando validação/fechamento, conta em Ciclos a fechar). \"Entrega parcial\" só quando a PR diz Fase/parte/etapa N.",
   "pipeline.card.validate": "Validar e fechar",
   "pipeline.card.validateHint": "avisar o solicitante",
   "pipeline.reason.deliveredValidate": "entregue em {when}, aguardando validação e fechamento",
