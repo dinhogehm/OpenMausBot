@@ -23,7 +23,7 @@
 // server only reports. A failed clone takes back only the temporary copy it
 // was writing, inside the new worktree, before any session saw it.
 import { createHash } from "node:crypto";
-import { constants, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, statSync, symlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { slugify } from "./cc-sessions.ts";
@@ -225,8 +225,8 @@ export interface CloneIo {
   exists: (path: string) => boolean;
   /** The volume a path is on, or null. */
   device: (path: string) => number | null;
-  /** Clone one file, failing when the volume cannot clone (never a plain copy). Null when done, else why not. */
-  cloneFile: (src: string, dst: string) => string | null;
+  /** Clone one file and prove it shares the original's blocks. Null when it does, else why not. */
+  cloneFile: (src: string, dst: string) => Promise<string | null>;
   rename: (from: string, to: string) => void;
   /** Take back a temporary copy this clone made (never a worktree). */
   dropTemp: (path: string) => void;
@@ -264,10 +264,10 @@ export async function cloneSeedCaches(seed: SeedState | undefined, worktree: str
   const seedDevice = io.device(seed.path);
   const device = io.device(worktree);
   if (seedDevice === null || device === null || seedDevice !== device) return fallback("a semente e a worktree não estão no mesmo volume: o clone copiaria tudo");
-  // one file first: a volume that cannot clone fails here, before cp -c
-  // falls back to a full copy on its own (man cp), filling the disk
+  // one file first, proved shared: where the volume cannot clone, cp -c
+  // falls back to a full copy on its own (man cp) and would fill the disk
   const probe = join(worktree, CLONE_PROBE);
-  const cannot = io.cloneFile(join(seed.path, seed.lockName!), probe);
+  const cannot = await io.cloneFile(join(seed.path, seed.lockName!), probe);
   io.dropTemp(probe);
   if (cannot) return fallback(`o volume não clona arquivos (não é APFS?): ${cannot}`);
   const cloned: string[] = [];
@@ -422,6 +422,22 @@ export async function refreshSeed(repo: string, settings: OwnWorktreeSettings, p
   return seed;
 }
 
+/** Where a file's first block sits on the device (fcntl F_LOG2PHYS = 49;
+ * struct log2phys is packed: u32 flags, off_t contigbytes, off_t
+ * devoffset), as hex; null when it cannot be read. Two files with the same
+ * offset share their blocks: one is a clone of the other. */
+export async function physicalOffset(path: string, exec: Exec): Promise<string | null> {
+  try {
+    const out = (await exec("/usr/bin/perl", ["-e", 'open(my $f, "<", $ARGV[0]) or die "open: $!"; my $b = pack("Lqq", 0, 0, 0); fcntl($f, 49, $b) or die "fcntl: $!"; print unpack("H*", substr($b, 12, 8));', path], { timeoutMs: 15_000 })).trim();
+    return /^[0-9a-f]{16}$/.test(out) && !/^0+$/.test(out) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/** statfs's type for APFS on macOS. */
+const APFS_TYPE = 26;
+
 /** The real filesystem side of a clone. */
 export function realCloneIo(exec: Exec, node: () => Promise<string | null>): CloneIo {
   return {
@@ -430,10 +446,19 @@ export function realCloneIo(exec: Exec, node: () => Promise<string | null>): Clo
     readFile: (path) => { try { return readFileSync(path, "utf8"); } catch { return null; } },
     exists: existsSync,
     device: (path) => { try { return statSync(path).dev; } catch { return null; } },
-    cloneFile: (src, dst) => {
+    // Node's COPYFILE_FICLONE_FORCE is ENOSYS on macOS, and cp -c copies
+    // when it cannot clone: clone with cp -c, then check the blocks
+    cloneFile: async (src, dst) => {
       try {
-        copyFileSync(src, dst, constants.COPYFILE_FICLONE_FORCE);
-        return null;
+        await exec("/bin/cp", ["-c", src, dst], { timeoutMs: 60_000 });
+      } catch (error) {
+        return failureText(error);
+      }
+      const [from, to] = [await physicalOffset(src, exec), await physicalOffset(dst, exec)];
+      if (from && to) return from === to ? null : "cp -c fez uma cópia comum, não um clone";
+      // the blocks could not be read (no perl): APFS on the same volume clones
+      try {
+        return statfsSync(dst).type === APFS_TYPE ? null : `não deu para confirmar o clone e o volume não é APFS (tipo ${statfsSync(dst).type})`;
       } catch (error) {
         return failureText(error);
       }
@@ -503,8 +528,9 @@ export function ownSummary(events: readonly OwnEvent[], seeds: readonly SeedStat
     cloned: inside.filter((event) => event.mode === "cloned").length,
     installed: inside.filter((event) => event.mode === "install").length,
     failed: inside.filter((event) => event.mode === "failed").length,
-    savedKb: inside.reduce((sum, event) => sum + (event.savedKb ?? 0), 0),
-    savedMs: inside.reduce((sum, event) => sum + (event.savedMs ?? 0), 0),
+    // only a clone saves anything
+    savedKb: inside.reduce((sum, event) => sum + (event.mode === "cloned" ? event.savedKb ?? 0 : 0), 0),
+    savedMs: inside.reduce((sum, event) => sum + (event.mode === "cloned" ? event.savedMs ?? 0 : 0), 0),
     reasons: [...reasons].map(([reason, count]) => ({ reason, count })).sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason)),
     seeds: seeds.map((seed) => ({ repo: seed.repo, state: seed.state, ...(seed.reason ? { reason: seed.reason } : {}), ...(seed.head ? { head: seed.head } : {}), ...(seed.lockHash ? { lockHash: seed.lockHash } : {}), ...(seed.installedAt ? { installedAt: seed.installedAt } : {}), ...(seed.installMs ? { installMs: seed.installMs } : {}), kb: (seed.dirs ?? []).reduce((sum, dir) => sum + dir.kb, 0) })),
   };
