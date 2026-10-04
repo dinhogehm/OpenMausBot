@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { releaseCauseKey, releaseInLoop } from "./release-watch.ts";
+import { releaseCauseKey, releaseCausePt, releaseCauseShown, releaseInLoop } from "./release-watch.ts";
 import { ATTENTION_FILE_MAX_BYTES, ATTENTION_MAX_AGE_MS, fullReleaseSha, haltedRelease, haltReport, productionStateLine, readTail, releaseAttention, releaseAttentionAlert, releaseAttentionDue, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 const log = [
@@ -593,7 +593,10 @@ describe("a loop with the owner's item open: the item is refreshed, nobody is wo
     expect(new Set(REAL_CAUSES.map(releaseCauseKey))).toEqual(new Set(["Local CI failed at script-contracts"]));
     // what still tells two failures apart stays
     expect(releaseCauseKey("Tenant nuria-ws-01a0ed885c1a reprovou inspecao da migration 0608")).toContain("migration 0608");
-    expect(releaseCauseKey("ADMISSION_TIMEOUT waited=2700s pid=4411 at 2026-10-02T12:57:49Z")).toBe("ADMISSION_TIMEOUT waited=2700s at");
+    expect(releaseCauseKey("ADMISSION_TIMEOUT waited=2700s pid=4411 at 2026-10-02T12:57:49Z")).toBe("ADMISSION_TIMEOUT waited");
+    // two tries that timed out on the lease after different waits are one cause (R10-resilience: waited=1060s live)
+    expect(releaseCauseKey("ADMISSION_TIMEOUT waited=1060s pid=70272")).toBe(releaseCauseKey("ADMISSION_TIMEOUT waited=2700s pid=4411 at 2026-10-02T12:57:49Z"));
+    expect(releaseCauseKey("Local CI failed at script-contracts")).toBe("Local CI failed at script-contracts");
     const dir = mkdtempSync(join(tmpdir(), "omb-loop-causes-"));
     try {
       const path = join(dir, "release-watch.json");
@@ -612,6 +615,84 @@ describe("a loop with the owner's item open: the item is refreshed, nobody is wo
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // Lot W (nuria-platform ops/lot-w-throughput) appended holder=, held=, counted= and
+  // reason=release-ceiling to the admission lines and added ADMISSION_STOPPED,
+  // ADMISSION_NESTED_REFUSED and ADMISSION_DIR_IGNORED; every one of them carries
+  // something that changes on every try (a pid, a wait, a holder, a mktemp dir).
+  it("lease lines of the old and of the lot W shapes group by cause, not by try", () => {
+    const old = [
+      "ADMISSION_TIMEOUT kind=release label=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 blocked_by=ci-full:50433 waited=1060s limit=2700s",
+      "ADMISSION_TIMEOUT kind=release label=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 blocked_by=ci-full:8095 waited=2700s limit=2700s",
+    ];
+    const lotW = [
+      "ADMISSION_TIMEOUT kind=release label=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 blocked_by=ci-full:4029 waited=2700s limit=2700s holder=ci:local:feat/9052-tempo-de-reabertura held=3110s counted=2700s",
+      "ADMISSION_TIMEOUT kind=release label=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 blocked_by=ci-full:61234 waited=2950s limit=2700s holder=ci:local:fix/9319-unified-schema held=2955s counted=2700s",
+    ];
+    expect(new Set([...old, ...lotW].map(releaseCauseKey)).size).toBe(1);
+    // who held the lease and for how long is the try's, not the cause's: a lot W line reads like the old one
+    expect(releaseCauseKey(lotW[0]!)).toBe("ADMISSION_TIMEOUT kind=release label=release:production: blocked_by waited limit=2700s");
+    expect(releaseCauseKey(lotW[0]!)).toBe(releaseCauseKey(old[0]!));
+    // the ceiling is its own cause, the same on every try
+    const ceiling = [
+      "ADMISSION_TIMEOUT kind=ci-full label=ci:local:a blocked_by=release:70272 waited=900s limit=18000s holder=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 held=18010s counted=600s reason=release-ceiling",
+      "ADMISSION_TIMEOUT kind=ci-full label=ci:local:a blocked_by=release:4411 waited=30s limit=18000s holder=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 held=18300s counted=30s reason=release-ceiling",
+    ];
+    expect(new Set(ceiling.map(releaseCauseKey)).size).toBe(1);
+    expect(releaseCauseKey(ceiling[0]!)).not.toBe(releaseCauseKey(lotW[0]!));
+    expect(releaseCauseKey(ceiling[0]!)).toContain("reason=release-ceiling");
+    // the owner's stop, a refused nested claim, an ignored dir: pids, waits and temp dirs out
+    expect(releaseCauseKey("ADMISSION_STOPPED kind=ci-full label=ci:local:a waited=120s reason=/Users/osvaldo/.nuria/stop"))
+      .toBe(releaseCauseKey("ADMISSION_STOPPED kind=ci-full label=ci:local:a waited=3s reason=/Users/osvaldo/.nuria/stop"));
+    expect(releaseCauseKey("ADMISSION_NESTED_REFUSED kind=release label=release:production:d5bb1f70b holder_kind=release holder_pid=70272 reason=not-a-descendant-of-the-live-holder"))
+      .toBe("ADMISSION_NESTED_REFUSED kind=release label=release:production:d5bb1f70b holder_kind=release holder_pid reason=not-a-descendant-of-the-live-holder");
+    expect(releaseCauseKey("ADMISSION_DIR_IGNORED kind=release label=x dir=/private/var/folders/xx/T/adm.5RILoB root=/Users/osvaldo/.nuria/admission reason=production-uses-the-owner-root"))
+      .toBe(releaseCauseKey("ADMISSION_DIR_IGNORED kind=release label=x dir=/private/var/folders/xx/T/adm.u9pRC1 root=/Users/osvaldo/.nuria/admission reason=production-uses-the-owner-root"));
+  });
+
+  // INSP-U r1 U3: a holder caught between mkdir and its pid (unknown:pending), a deploy lease
+  // with or without its pid, and a pid in the prose split one cause in two
+  it("whoever blocked the lease, and a job's pid in prose, are the try's too", () => {
+    const timeout = (blockedBy: string) => `ADMISSION_TIMEOUT kind=release label=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 blocked_by=${blockedBy} waited=2700s limit=2700s holder=x held=1s counted=2700s`;
+    expect(new Set(["ci-full:4029", "unknown:pending", "release-intent:4411", "deploy:pending", "deploy:5123"].map((each) => releaseCauseKey(timeout(each)))).size).toBe(1);
+    expect(releaseCauseKey("ADMISSION_TIMEOUT kind=deploy label=x blocked_by=deploy:pending waited=60s limit=900s holder=unknown"))
+      .toBe(releaseCauseKey("ADMISSION_TIMEOUT kind=deploy label=x blocked_by=deploy:5123 waited=900s limit=900s holder=release:production:abc"));
+    // the release ceiling stays its own cause
+    expect(releaseCauseKey(`${timeout("release:70272")} reason=release-ceiling`)).not.toBe(releaseCauseKey(timeout("ci-full:1")));
+    // the real .out.log: one cause, two job pids
+    expect(releaseCauseKey("Job 86207 terminou, mas o grupo 86207 ainda possui processos"))
+      .toBe(releaseCauseKey("Job 96719 terminou, mas o grupo 96719 ainda possui processos"));
+    expect(releaseCauseKey("Job 86207 terminou, mas o grupo 86207 ainda possui processos")).toBe("Job terminou, mas o grupo ainda possui processos");
+  });
+
+  // INSP-U r1 U4: a count after "after" is not a unit, and no word is glued to the next
+  it("a number that is not a duration leaves its words apart", () => {
+    expect(releaseCauseKey("Local CI failed at tests after 3 retries")).toBe("Local CI failed at tests after retries");
+    expect(releaseCauseKey("Local CI failed at tests after 3 retries")).toBe(releaseCauseKey("Local CI failed at tests after 5 retries"));
+    expect(releaseCauseKey("ADMISSION_TIMEOUT waited=1060s pid=70272")).toBe("ADMISSION_TIMEOUT waited");
+    expect(releaseCauseKey("gave up after 30 s of silence")).toBe("gave up after of silence");
+  });
+
+  it("what a person reads of a cause: a lease line in pt-BR, anything else without paths", () => {
+    expect(releaseCauseShown("ADMISSION_TIMEOUT kind=release label=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 blocked_by=ci-full:4029 waited=2700s limit=2700s")).toBe("tempo de espera na fila esgotou (ADMISSION_TIMEOUT)");
+    expect(releaseCauseShown("ADMISSION_STOPPED kind=release label=x waited=1s reason=/Users/o/.nuria/stop")).toBe("parado pelo PARAR do dono (~/.nuria/stop) (ADMISSION_STOPPED)");
+    expect(releaseCauseShown(REAL_CAUSES[0]!)).toBe("Local CI failed at script-contracts");
+  });
+
+  const lotWTimeout = "ADMISSION_TIMEOUT kind=release label=r blocked_by=ci-full:4029 waited=2700s limit=2700s holder=ci:local:x held=3110s counted=2700s";
+  it("the release's cause names the lot W stops and says them in pt-BR", () => {
+    const stopped = "ADMISSION_STOPPED kind=release label=release:production:d5bb1f70b waited=12s reason=/Users/o/.nuria/stop";
+    expect(releaseFailureCause(`ADMISSION_INTENT kind=release label=x pid=1\n${stopped}\nexit 75`)).toBe(stopped);
+    const nested = "ADMISSION_NESTED_REFUSED kind=release label=x holder_kind=release holder_pid=9 reason=not-a-descendant-of-the-live-holder";
+    expect(releaseFailureCause(`${nested}\nsomething else`)).toBe(nested);
+    // an ignored dir is a warning on the way, never why the release failed
+    expect(releaseFailureCause("ADMISSION_DIR_IGNORED kind=release label=x dir=/tmp/a root=/r reason=production-uses-the-owner-root\nLocal CI failed at tests")).toBe("Local CI failed at tests");
+    expect(releaseFailureCause("ADMISSION_DIR_IGNORED kind=release label=x dir=/tmp/a root=/r reason=production-uses-the-owner-root\nall good")).toBeNull();
+    expect(releaseCausePt(stopped)).toBe("parado pelo PARAR do dono (~/.nuria/stop)");
+    expect(releaseCausePt(nested)).toBe("lease recusado: o processo não descende do dono do lease");
+    expect(releaseCausePt("ADMISSION_TIMEOUT kind=ci-full label=a blocked_by=release:1 waited=9s limit=18000s holder=r held=18010s counted=9s reason=release-ceiling")).toBe("o release na frente passou do teto de espera");
+    expect(releaseCausePt(lotWTimeout)).toBe("tempo de espera na fila esgotou");
   });
 
   it("the same report still waiting for the Chief's turn is queued once", () => {

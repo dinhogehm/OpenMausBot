@@ -301,6 +301,7 @@ import {
   DISPATCH_RETRY_MAX_MINUTES,
   wakeFiredChip,
   watchLabel,
+  type BotWake,
 } from "./bot-autonomy.ts";
 import { parseWatchCommand, runWatchCommand, watchCommandWarnings, watchIgnoreWarnings, watchMatches } from "./wake-watch.ts";
 import {
@@ -459,8 +460,9 @@ import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-s
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
+import { citedRefs, parseRefState, RefLookups, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, STALE_OUTSIDE_TAG_MS, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, diskAlertText, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, STALE_OUTSIDE_TAG_MS, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -8409,12 +8411,13 @@ function checkDiskSpace(): void {
   if (!drops.length) return;
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   for (const drop of drops) {
-    const text = `Pouco espaço em disco: ${drop.freeGiB} GiB livres em ${drop.path} (abaixo de ${drop.band} GiB). Worktrees, CI local e builds podem falhar, e em zero o servidor para de gravar. Libere espaço (worktrees antigas, caches de build) ou avise a pessoa.`;
-    console.warn(`[disk] ${text}`);
+    // with what the worktree report last measured outside the tag, and no "free space" order to a bot (R10-resilience D)
+    const alert = diskAlertText(drop, releasedCleanup.lastStale);
+    console.warn(`[disk] ${alert.report.split("\n")[0]}`);
     const desk = chief ? chiefDeskThread(chief) : null;
     if (!chief || !desk || !store.taskByThread(chief.id, desk)) continue;
-    store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 200), ok: false } });
-    autonomy.addReport(chief.id, desk, `[Alerta do servidor] ${text}`);
+    store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(alert.chip, 200), ok: false } });
+    autonomy.addReport(chief.id, desk, `[Alerta do servidor] ${alert.report}`);
   }
 }
 
@@ -8763,6 +8766,49 @@ function serverItemDetails(item: OwnerPending): { why: string; steps: OwnerPendi
   return null;
 }
 
+// ── what an old note names that is already done (server/watch-reason-refs.ts)
+// A note an hour old or more: the PRs/issues it names are looked up on
+// GitHub (one `gh api` each, at most 8, 8 s, remembered 10 min) and the
+// sessions in the ledger; the bot reads which are merged, closed or
+// archived right under its note (R10-followup #5: 'prod' still asked to
+// close #9327 and tell sessions archived the day before).
+// an answer and a failure alike (a 404, no network) are kept 10 min (INSP-U r1 U5)
+const refLookups = new RefLookups(10 * 60_000);
+function refState(slug: string, number: number): Promise<RefState | null> {
+  return refLookups.lookup(`${slug}#${number}`, () => new Promise((resolve) => {
+    execFileCc("gh", refStateArgs(slug, number), { timeout: 8_000, maxBuffer: 64 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => {
+      resolve(error ? null : parseRefState(number, String(stdout)));
+    });
+  }));
+}
+
+async function reasonRefsLine(wake: BotWake): Promise<string | null> {
+  const writtenAt = wake.watch?.standing ? wake.watch.reasonAt ?? wake.createdAt : wake.createdAt;
+  // an hour (of the test's shrunk minutes, end to end)
+  if (Date.now() - writtenAt < 60 * (autonomyTestMs("OMB_AUTONOMY_MINUTE_MS") ?? 60_000)) return null;
+  const cited = citedRefs(wake.reason);
+  if (!cited.numbers.length && !cited.sessions.length) return null;
+  try {
+    const sessions = ccLedger.all().filter((session) => session.ownerBotId === wake.botId);
+    const slug = watchSlug(wake.watch?.argv ?? [], wake.reason)
+      ?? sessions.map((session) => session.delivery?.slug).findLast((each): each is string => Boolean(each))
+      ?? null;
+    const delivered = new Set(ccLedger.all().flatMap((session) => Object.values(session.delivery?.prs ?? {}).filter((pr) => pr.inProductionAt !== undefined).map((pr) => pr.number)));
+    const refs = slug
+      ? (await Promise.all(cited.numbers.map((number) => refState(slug, number))))
+        .map((ref) => (ref?.kind === "pr" && ref.state === "merged" && delivered.has(ref.number) ? { ...ref, inProduction: true } : ref))
+      : [];
+    const named = cited.sessions.flatMap((number) => {
+      const session = sessionForNumber(sessions, number);
+      return session ? [{ number, title: session.title, archived: session.status === "archived" }] : [];
+    });
+    return staleRefsLine(refs, named);
+  } catch (error) {
+    console.error(`[autonomy] note refs: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
 async function autonomyTick(): Promise<void> {
   try {
     askStepsForOlderItems();
@@ -8810,14 +8856,22 @@ async function autonomyTick(): Promise<void> {
       if (wake.watch && intakeBusyElsewhere(wake.botId, turnThread)) holdIntake(wake.botId, wake.threadId, `wake ${wake.watch.label ?? watchLabel(wake.watch.command)} in ${turnThread}`);
       continue;
     }
+    // what an old note names that is already done, looked up now (R10-followup #5)
+    const refsLine = await reasonRefsLine(wake);
     if (!autonomy.isCurrent(wake)) continue;
+    // the look-up may have taken seconds: a routine or a teammate may have taken the
+    // intake lock (or the thread) meanwhile, and noting ours would overwrite theirs (INSP-U r1 U1)
+    if (autonomyTurnBlocked(wake.botId, turnThread, Boolean(wake.watch))) {
+      if (wake.watch && intakeBusyElsewhere(wake.botId, turnThread)) holdIntake(wake.botId, wake.threadId, `wake ${wake.watch.label ?? watchLabel(wake.watch.command)} in ${turnThread}`);
+      continue;
+    }
     if (wake.watch) noteIntakeTurn(wake.botId, turnThread);
     // Leased, not dropped: on disk until the turn completes, so a restart
     // in between gives it back (bot-autonomy.ts, inFlight).
     if (!standing) autonomy.leaseWake(wake);
     const goal = autonomy.goalFor(wake.threadId);
     const fromTitle = store.taskByThread(wake.botId, wake.threadId)?.title ?? wake.threadId.slice(0, 8);
-    const basePrompt = wakePrompt(wake, goal, Date.now(), languageReminder(cfg.language));
+    const basePrompt = wakePrompt(wake, goal, Date.now(), languageReminder(cfg.language), refsLine);
     const prompt = routed ? `${routedWakeNote({ fromTitle, fromThread: wake.threadId, ...(wake.watch?.label ? { label: wake.watch.label } : {}) })}\n\n${basePrompt}` : basePrompt;
     const chip = wakeFiredChip(wake);
     // Raised once when it starts failing, not on every firing while it stays broken.
@@ -9607,7 +9661,7 @@ function repoBaseBranch(repo: string): string {
  * repositories the sessions use: every 6 h the Chief gets the ones a person
  * may remove, with the command, and those kept and why — only when that
  * changed. The server removes none (R8 G3, server/nested-worktrees.ts). */
-const releasedCleanup: { lastAt: number; running: boolean; lastKey: Map<string, string> } = { lastAt: 0, running: false, lastKey: new Map() };
+const releasedCleanup: { lastAt: number; running: boolean; lastKey: Map<string, string>; lastStale: { at: number; folders: StaleFolder[] } | null } = { lastAt: 0, running: false, lastKey: new Map(), lastStale: null };
 /** `git` with git's stderr on the error, async, with a timeout. */
 const gitAsync = (args: string[]) => new Promise<string>((resolve, reject) => {
   execFileCc("git", args, { timeout: 120_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath(), GIT_OPTIONAL_LOCKS: "0" } }, (error, stdout, stderr) => {
@@ -9745,8 +9799,10 @@ async function cleanReleasedWorktrees(): Promise<void> {
     if (staleNews && stale.length) {
       // every one measured (du, 2 min each at most), so the report orders by size, not by disk order (INSP-J r1 #7b)
       for (const each of stale) each.sizeKb = await duKb(each.path);
+      releasedCleanup.lastStale = { at: Date.now(), folders: stale };
       console.log(`[worktrees] idle >72 h outside ${PRODUCTION_TAG} (told as information, nothing removed): ${stale.map((each) => `${each.path} (${each.sizeKb ?? "?"} KB)`).join(", ")}`);
     }
+    if (!stale.length) releasedCleanup.lastStale = { at: Date.now(), folders: [] };
     const staleTold = staleNews ? staleFoldersReport(stale) : null;
     if (!lines.length && !staleTold) return;
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);

@@ -271,6 +271,15 @@ export function staleTaskWorkspaces(folders: ReadonlyArray<{ path: string; lastA
   });
 }
 
+/** A folder line's kind, with whose conversation it was for a task-workspace. */
+const folderKind = (each: StaleFolder): string => (each.kind === "worktree" ? "worktree" : `task-workspace${each.note ? ` (${each.note})` : ""}`);
+
+/** "Nobody in them" only when it is true: a quiet conversation still open has its
+ * workspace listed with a note, and only no PROCESS uses it (INSP-U r1 U2). */
+const nobodyIn = (folders: readonly StaleFolder[]): string => (folders.some((each) => each.note && /\baberta\b/.test(each.note))
+  ? "sem processo nelas (uma conversa ainda aberta está marcada como tal)"
+  : folders.some((each) => each.note) ? "sem processo nelas" : "sem ninguém nelas");
+
 /** A size for a person: "3,0 GB", "640 MB". */
 export function sizeLabel(kb: number): string {
   if (kb >= 1024 * 1024) return `${(kb / 1024 / 1024).toFixed(1).replace(".", ",")} GB`;
@@ -295,12 +304,54 @@ export function staleFoldersReport(stale: readonly StaleFolder[], timeZone = "Am
   if (!shown.length) return null;
   const totalKb = shown.reduce((sum, each) => sum + (each.sizeKb ?? 0), 0);
   const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone, day: "2-digit", month: "2-digit" });
-  const lines = shown.map((each) => `- ${each.kind === "worktree" ? "worktree" : `task-workspace${each.note ? ` (${each.note})` : ""}`} ${each.path} (${sizeLabel(each.sizeKb!)}, sem mudança desde ${day(each.idleSince)}): ${each.command}`);
+  const lines = shown.map((each) => `- ${folderKind(each)} ${each.path} (${sizeLabel(each.sizeKb!)}, sem mudança desde ${day(each.idleSince)}): ${each.command}`);
   const total = `~${sizeLabel(totalKb)}`;
   const trash = shown.some((each) => each.kind === "task-workspace") ? " A task-workspace vai para a Lixeira: o espaço só volta ao esvaziar a Lixeira." : "";
   return {
     chip: `Disco: ${shown.length} pasta(s) parada(s) há mais de 72 h fora da tag, ${total} — informação para o dono, nada foi removido`,
-    report: `Paradas há mais de 72 h, fora da tag e sem ninguém nelas: ${shown.length}, ${total} no total${small ? ` (e mais ${small} pequena(s), abaixo de ${sizeLabel(minKb)}, não listada(s))` : ""}. Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force.${trash}\n${lines.join("\n")}`,
+    report: `Paradas há mais de 72 h, fora da tag e ${nobodyIn(shown)}: ${shown.length}, ${total} no total${small ? ` (e mais ${small} pequena(s), abaixo de ${sizeLabel(minKb)}, não listada(s))` : ""}. Só informação: o servidor não removeu nada e não avaliou se podem sair; uma pessoa confere (git status, o que há dentro) e decide. Os comandos não usam --force.${trash}\n${lines.join("\n")}`,
+  };
+}
+
+/** How many idle folders a low-disk alert names: the biggest. */
+export const DISK_ALERT_FOLDERS_MAX = 5;
+
+/** The low-disk alert for the Chief. On 02/10 (6,3 GiB free) the old text,
+ * "Libere espaço (worktrees antigas, caches de build) ou avise a pessoa",
+ * had the Chief delete node_modules of 9 worktrees on its own and then tell
+ * the owner twice that "nenhuma worktree pode ser removida" — while ~17 GB
+ * sat idle outside the tag (R10-resilience D). The alert now carries what
+ * the server last measured, biggest first with the command, says nothing is
+ * removed by a bot without the owner's OK, and, when nothing was measured
+ * yet, that the in-tag report says nothing about the rest. */
+export function diskAlertText(
+  drop: { freeGiB: number; path: string; band: number },
+  stale: { at: number; folders: readonly StaleFolder[] } | null,
+  timeZone = "America/Sao_Paulo",
+  minKb = STALE_MIN_KB,
+): { chip: string; report: string } {
+  const head = `Pouco espaço em disco: ${String(drop.freeGiB).replace(".", ",")} GiB livres em ${drop.path} (abaixo de ${drop.band} GiB). Worktrees, CI local e builds podem falhar, e em zero o servidor para de gravar.`;
+  const rule = "Não remova nada por conta própria, nem node_modules: o que sai do disco é decisão do dono. Leve a ele o que ocupa espaço, com tamanho e comando, e espere o OK.";
+  const big = [...(stale?.folders ?? [])].filter((each) => (each.sizeKb ?? 0) >= minKb).sort((a, b) => (b.sizeKb ?? 0) - (a.sizeKb ?? 0));
+  if (!stale || !big.length) {
+    // du failed on some: not measured is not small (INSP-U r1 U2)
+    const unsized = (stale?.folders ?? []).filter((each) => each.sizeKb === undefined || each.sizeKb === null);
+    const unmeasured = stale && unsized.length
+      ? `Na última medição do servidor havia ${unsized.length} pasta(s) parada(s) há mais de 72 h fora da tag cujo tamanho não consegui medir: ${unsized.slice(0, DISK_ALERT_FOLDERS_MAX).map((each) => `${folderKind(each)} ${each.path}`).join("; ")}. Meça com du -sh e não diga ao dono que nada pode ser removido.`
+      : stale
+      ? "Na última medição do servidor não havia pasta grande parada há mais de 72 h fora da tag: veja caches de build e o $TMPDIR (du -sh) e diga ao dono o que achou."
+      : "O servidor ainda não mediu as pastas paradas fora da tag (o relatório de worktrees sai a cada 6 h e avalia para remoção só as contidas na tag): não diga ao dono que nada pode ser removido; meça com du -sh e diga o que achou.";
+    return { chip: head, report: `${head} ${rule} ${unmeasured}` };
+  }
+  const totalKb = big.reduce((sum, each) => sum + (each.sizeKb ?? 0), 0);
+  const when = new Date(stale.at).toLocaleString("pt-BR", { timeZone, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const shown = big.slice(0, DISK_ALERT_FOLDERS_MAX);
+  const more = big.length - shown.length;
+  const lines = shown.map((each) => `- ${folderKind(each)} ${each.path} (${sizeLabel(each.sizeKb!)}): ${each.command}`);
+  const trash = shown.some((each) => each.kind === "task-workspace") ? " A task-workspace vai para a Lixeira: o espaço só volta ao esvaziar a Lixeira." : "";
+  return {
+    chip: `${head.replace(/\. Worktrees, CI local.*$/, "")} — ~${sizeLabel(totalKb)} em ${big.length} pasta(s) parada(s) fora da tag, para o dono decidir`,
+    report: `${head} ${rule} Medido pelo servidor em ${when}: ${big.length} pasta(s) parada(s) há mais de 72 h, fora da tag e ${nobodyIn(shown)}, ~${sizeLabel(totalKb)} no total — "nenhuma worktree pode ser removida" vale só para as contidas na tag, não para estas. As maiores${more ? ` (e mais ${more})` : ""}:\n${lines.join("\n")}\nOs comandos não usam --force; uma pessoa confere antes.${trash}`,
   };
 }
 
