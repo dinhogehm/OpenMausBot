@@ -260,6 +260,11 @@ export class ProductivityCollector {
     }
   }
 
+  /** Every release run the history holds, as read (the "Agora" panel's production and estimate). */
+  releaseRuns(): ReleaseRun[] {
+    return Object.values(this.history.runs);
+  }
+
   /** The data changed: reports built before are stale. */
   private touch(): void {
     this.dataStamp += 1;
