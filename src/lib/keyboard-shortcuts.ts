@@ -61,6 +61,12 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
         macKeys: ["⌘", "F"],
         winKeys: ["Ctrl", "F"],
       },
+      {
+        id: "now-panel",
+        description: "Open “Agora”: production, the release, PRs, ci:local and what waits on you",
+        macKeys: ["⌘", "⇧", "A"],
+        winKeys: ["Ctrl", "Shift", "A"],
+      },
     ],
   },
   {

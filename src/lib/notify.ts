@@ -30,6 +30,22 @@ export function buildNotificationOptions(bot: NotificationBotIdentity): Notifica
   return { tag: `openmausbot:${bot.id}`, icon: bot.avatarUrl ?? undefined };
 }
 
+/** When the server last notified about each conversation ("bot:thread" → ms):
+ * "Agora" does not raise a second banner for what the bot's own turn already
+ * announced. Kept for this page's life only. */
+const serverNotified = new Map<string, number>();
+
+export function recordServerNotification(target: NotificationTarget, at = Date.now()): void {
+  serverNotified.set(`${target.botId}:${target.threadId}`, at);
+}
+
+/** The server notified about this conversation at or after `since` (a 2 min margin: the turn's
+ * notification may land just before the item it opened reaches the screen). */
+export function serverNotifiedSince(botId: string, threadId: string, since: number): boolean {
+  const at = serverNotified.get(`${botId}:${threadId}`);
+  return at !== undefined && at >= since - 2 * 60_000;
+}
+
 /** Show one unless the exact destination conversation is already visible.
  * A focused app may still be showing another task (routine runs are detached),
  * so window focus alone is not proof that the actionable card can be seen. */
@@ -39,6 +55,7 @@ export function showNotification(
   avatarUrl?: string | null,
   visibleThreadId?: string | null,
 ) {
+  recordServerNotification({ botId: frame.botId, threadId: frame.threadId });
   if (typeof Notification === "undefined") return;
   // A spend notice is the workspace's news, not the thread's: it shows even
   // over the conversation whose turn crossed the line.

@@ -249,7 +249,9 @@ import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type C
 import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, toolCallsWith, userTextMessagesWith, digestTimings, oldestDigestAt } from "./message-db.ts";
 import { oldestUsageAt, ProductivityCollector } from "./productivity-collector.ts";
 import { executiveSummary, exportFileName, reportMarkdown, reportPdf } from "./productivity-export.ts";
-import { exportReadiness, GRANULARITIES, resolveReportPeriod, type Granularity } from "../shared/productivity.ts";
+import { exportReadiness, GRANULARITIES, presetPeriod, resolveReportPeriod, type Granularity } from "../shared/productivity.ts";
+import { NowStatusService } from "./now-status.ts";
+import { execGh } from "./productivity-github.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
 import { parseSince, parseUntil, recentWork, recentWorkPrompt, turnOutcomeLine } from "./recent-work.ts";
 import { chiefForBot, deskThread, OwnerWroteAt, ownerWrote, INCIDENTS_THREAD_TITLE, IncidentLedger, incidentChip, incidentText, routineFailureAlertDue, type Incident, type IncidentKind } from "./incidents.ts";
@@ -390,7 +392,7 @@ import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isO
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
 import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
-import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, fullReleaseSha, haltReport, LAST_FAILURE_FILE, productionStateLine, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
+import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, RELEASE_FAILURES_ALERT, fullReleaseSha, haltReport, LAST_FAILURE_FILE, productionStateLine, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 /** A session_read answer competes with the transcript for the context
  * window; a computer-use turn's output can run to hundreds of KB. */
@@ -8468,6 +8470,8 @@ function releaseAlertToChief(text: string, report: string, logPrefix = "release"
   console.warn(`[${logPrefix}] ${text}`);
   const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
   const desk = chief ? chiefDeskThread(chief) : null;
+  // "Agora" shows the release alerts the Chief got, and where (lot Y); power alerts are not release news
+  if (logPrefix === "release") nowStatus.recordAlert({ text: chipText(text, 240), ...(chief && desk ? { botId: chief.id, threadId: desk } : {}) });
   if (!chief || !desk || !store.taskByThread(chief.id, desk)) return;
   store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(text, 240), ok: false } });
   autonomy.addReport(chief.id, desk, report);
@@ -10011,6 +10015,55 @@ function readReleaseIntents(): ReleaseIntent[] | null {
     return null;
   }
 }
+
+/** "Agora" (lot Y): the delivery line's state for the panel at the top of the
+ * sidebar — production, the release on its way, open PRs and their gate, the
+ * ci:local, release alerts and today's throughput — recomputed every minute,
+ * pushed to the screens when it changes. Read-only; same inputs, same panel. */
+const nowStatus = new NowStatusService({
+  dataDir: DATA_DIR,
+  enabled: productivityEnabled,
+  report: () => productivity.report("day", presetPeriod("day", 1, Date.now())),
+  runs: () => productivity.releaseRuns(),
+  refreshLogs: () => productivity.refreshLogs(),
+  outLog: RELEASE_OUT_LOG,
+  releaseStartedFile: join(ADMISSION_DIR, "release-started.json"),
+  readLease: readAdmissionLease,
+  readDeployLease,
+  leaseSince: () => { try { return statSync(join(ADMISSION_DIR, "lease", "owner.pid")).mtimeMs; } catch { return null; } },
+  inFlight: (rows) => {
+    // intents/ unreadable is undecided, never "no release" (admission-control.sh creates it on every acquire)
+    const intents = readReleaseIntents();
+    if (intents === null) throw new Error("release intents unreadable");
+    return releaseInFlight({ rows, lease: readAdmissionLease(), deployLease: readDeployLease(), intents, alive: (pid) => rows.some((row) => row.pid === pid) });
+  },
+  ps: psTable,
+  gh: execGh,
+  git: (args) => execCc("git", ["-C", join(homedir(), "Projetos", "nuria-platform"), ...args]),
+  sessions: () => ccLedger.all().filter((session) => session.status !== "archived").map((session) => ({
+    sessionId: session.id,
+    ...(ccProcesses.get(session.id)?.pid ? { claudePid: ccProcesses.get(session.id)!.pid } : {}),
+    ...(session.bgJob ? { jobPids: session.bgJob.pids, ...(session.bgJob.starts ? { jobStarts: session.bgJob.starts } : {}) } : {}),
+    ...(session.surface === "app" && session.cwd ? { worktree: session.cwd } : {}),
+  })),
+  sessionInfo: (sessionId) => {
+    const session = ccLedger.get(sessionId);
+    return session ? { sessionId, title: session.title, botId: session.ownerBotId, threadId: session.ownerThreadId } : null;
+  },
+  failing: () => {
+    const failed = releaseFailures(readTail(RELEASE_ERR_LOG, 128 * 1024), readTail(RELEASED_SHA_FILE, 200).trim());
+    const declined = readTail(DECLINED_SHA_FILE, 200).trim();
+    if (!failed || failed.count < RELEASE_FAILURES_ALERT || (declined && (declined.startsWith(failed.sha) || failed.sha.startsWith(declined)))) return null;
+    // when it last failed: the watcher's last-failure record, else the err log's last write (never the read)
+    const mtime = (path: string) => { try { return statSync(path).mtimeMs; } catch { return null; } };
+    return { ...failed, at: mtime(LAST_FAILURE_FILE) ?? mtime(RELEASE_ERR_LOG) };
+  },
+  readTag: readProductionTag,
+  declined: () => readTail(DECLINED_SHA_FILE, 200).trim() || null,
+  onChange: (status) => broadcast({ kind: "now", status }, { adminOnly: true }),
+  log: (line) => console.log(line),
+});
+if (!process.env.VITEST || process.env.OMB_NOW_IN_TESTS === "1") nowStatus.start();
 
 /** A production release on its way on this Mac (release-priority.ts
  * releaseInFlight), read at most once a minute: while one is, no session is
@@ -25711,6 +25764,21 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         budget: spendState(cfg, DATA_DIR),
         billing: prices ? { currency: cfg.billing?.currency ?? "USD" } : null,
       });
+    }
+
+    // ── "Agora" (lot Y): the delivery line now, and what the owner last saw ──
+    // Admin scope by default. GET answers from the last minute's status
+    // (`refresh=1` recomputes first); POST /seen records each line's
+    // fingerprint when the owner closes the panel, for "novo" next time.
+    if (method === "GET" && path === "/api/now") {
+      const status = url.searchParams.get("refresh") === "1" ? await nowStatus.refresh() : await nowStatus.current();
+      res.setHeader("cache-control", "no-store");
+      return json(res, 200, { status, seen: nowStatus.seen() });
+    }
+    if (method === "POST" && path === "/api/now/seen") {
+      const body = await readBody(req, 8192);
+      if (!body || typeof body !== "object" || typeof body.keys !== "object" || body.keys === null || Array.isArray(body.keys)) return json(res, 400, { error: "send { keys: { line: fingerprint } }" });
+      return json(res, 200, { seen: nowStatus.markSeen(body.keys) });
     }
 
     // ── the report's targets: empty by default; a target lights its KPI ──
