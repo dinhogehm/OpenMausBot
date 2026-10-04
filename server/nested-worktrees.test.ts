@@ -599,6 +599,33 @@ describe("the low-disk alert (R10-resilience D)", () => {
     expect(empty.chip).toBe("Pouco espaço em disco: 6,3 GiB livres em /Users/o/Projetos (abaixo de 10 GiB). Worktrees, CI local e builds podem falhar, e em zero o servidor para de gravar.");
   });
 
+  // INSP-U r1 U2: a quiet OPEN conversation's workspace is in the list; the alert must say so,
+  // or the owner approves a mv of a live conversation's folder to the Trash
+  it("keeps the note of an open conversation's workspace, and claims nobody is in a folder only when none has a note", () => {
+    const open = { ...stale[2]!, note: "conversa \"Revisão\" aberta, parada desde 29/09" };
+    const alert = diskAlertText(drop, { at, folders: [stale[0]!, open] });
+    expect(alert.report).toContain(`- task-workspace (conversa "Revisão" aberta, parada desde 29/09) /t/82feff85/54118a8a (2,2 GB): mv /t/82feff85/54118a8a ~/.Trash/`);
+    expect(alert.report).not.toContain("sem ninguém nelas");
+    expect(alert.report).toContain("fora da tag e sem processo nelas");
+    expect(alert.report).toContain("uma conversa ainda aberta está marcada");
+    // the report the Chief gets every 6 h says the same
+    const told = staleFoldersReport([stale[0]!, open])!;
+    expect(told.report).not.toContain("sem ninguém nelas");
+    expect(told.report).toContain("fora da tag e sem processo nelas");
+    // without a note, nothing changes
+    expect(diskAlertText(drop, { at, folders: stale }).report).toContain("fora da tag e sem ninguém nelas");
+    expect(staleFoldersReport(stale)!.report).toContain("fora da tag e sem ninguém nelas");
+  });
+
+  it("idle folders it could not measure are not 'no big folder'", () => {
+    const unsized = stale.slice(0, 2).map(({ sizeKb: _sizeKb, ...each }) => each);
+    const alert = diskAlertText(drop, { at, folders: unsized });
+    expect(alert.report).not.toContain("não havia pasta grande parada");
+    expect(alert.report).toContain("2 pasta(s) parada(s) há mais de 72 h fora da tag cujo tamanho não consegui medir");
+    expect(alert.report).toContain("/r/.claude/worktrees/nur-12-d1-overload-02e53e");
+    expect(alert.report).toContain("não diga ao dono que nada pode ser removido");
+  });
+
   it("lists at most five and counts the rest", () => {
     const many = Array.from({ length: 7 }, (_, i) => ({ ...stale[0]!, path: `/w/${i}`, command: `git worktree remove /w/${i}`, sizeKb: (i + 1) * GB }));
     const alert = diskAlertText(drop, { at, folders: many });
