@@ -280,6 +280,8 @@ import {
   QUESTION_REPORT_PREFIX,
   parseReplacesAsk,
   ANSWERED_IN_CONVERSATION,
+  answerToAsk,
+  answeredInConversationReport,
   type AskPromotion,
   missingParts,
   STEPS_REPORT_PREFIX,
@@ -8111,8 +8113,13 @@ function threadNeedsInputAt(threadId: string): number | null {
   const goal = autonomy.goalFor(threadId);
   if (goal?.status === "needs-input") return goal.finishedAt ?? goal.startedAt;
   // the bot ended its last reply asking the person something: that waits on them too
-  if (!owner || threadBusy(owner.id, threadId)) return null;
-  return ownerAskAt(store.messagesFor(threadId), Date.now());
+  if (!owner) return null;
+  const at = ownerAskAt(store.messagesFor(threadId), Date.now());
+  if (at === null || !threadBusy(owner.id, threadId)) return at;
+  // busy: a new turn usually supersedes the ask — but not the turn that registers this very
+  // question as an item, which keeps it ("Pedindo o passo a passo…") until the item arrives (INSP-J2b r2 c-1)
+  const promotion = autonomy.askPromotionFor(owner.id, threadId, at);
+  return promotion && !promotion.itemId && promotion.answeredAt === undefined ? at : null;
 }
 /** The server's request that the bot register this conversation's question
  * (asked at `at`) as an item with why, steps and options (lot J2), if made. */
@@ -8797,18 +8804,30 @@ function askStepsForQuestions(now: number): void {
  * answering the item itself — and a request still waiting is withdrawn. */
 function settleAnsweredQuestions(): void {
   for (const promotion of autonomy.allAskPromotions()) {
-    if (promotion.answeredAt !== undefined || !personSpokeSince(promotion.threadId, promotion.askAt)) continue;
+    if (promotion.answeredAt !== undefined || !store.taskByThread(promotion.botId, promotion.threadId)) continue;
+    const answer = questionAnswer(promotion);
+    if (!answer) continue;
     autonomy.markAskAnswered(promotion);
     autonomy.dropReports(promotion.reportThreadId, (each) => { const ref = questionReportRef(each); return ref?.threadId === promotion.threadId && ref.askAt === promotion.askAt; });
     const item = autonomy.askPromotionOpenItem(promotion);
     if (item && !item.history?.length) {
       for (const done of autonomy.resolveOwnerPending({ botId: item.botId, id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION })) {
         if (store.taskByThread(done.botId, done.threadId)) store.appendMessage(done.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Resolvido (${ANSWERED_IN_CONVERSATION}): ${done.title}`, 240), ok: true } });
+        // the bot hears it closed, as the server, where the person answered (INSP-J2b r2 c-2)
+        autonomy.addReport(done.botId, promotion.threadId, answeredInConversationReport(done, promotion.text, answer.text));
         console.log(`[owner-pending] ${done.id} settled: the person answered its question in ${promotion.threadId}`);
       }
     }
     refreshBotRow(promotion.botId);
   }
+}
+
+/** The person's message answering the promoted question, by answerToAsk: the
+ * question's whole message (its #refs), else what the panel showed. */
+function questionAnswer(promotion: AskPromotion): { at: number; text: string } | null {
+  const messages = store.messagesFor(promotion.threadId);
+  const asked = messages.find((each) => each.at === promotion.askAt && each.role === "bot" && each.kind === "text")?.text ?? autonomy.goalFor(promotion.threadId)?.detail ?? "";
+  return answerToAsk(messages, promotion.askAt, `${asked} ${promotion.text}`);
 }
 
 /** A bare question gets this long to be answered on the spot before its bot is asked for the item (INSP-J2b #3: 30 min). */
@@ -19439,7 +19458,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (body.replacesAsk !== undefined && !replaces) return json(res, 400, { error: "replacesAsk deve ser o Ref do pedido do servidor, no formato <conversa>@<número> (ex.: 9f3c…@1791066754187)." });
           const promotion = replaces ? autonomy.askPromotionFor(bot.id, replaces.threadId, replaces.askAt) : null;
           if (replaces && !promotion) return json(res, 400, { error: `replacesAsk ${replaces.threadId}@${replaces.askAt} não é de nenhum pedido do servidor a você. Copie o Ref exato do pedido "[Servidor: pergunta sem passo a passo]", ou abra o item sem replacesAsk.` });
-          if (promotion && personSpokeSince(promotion.threadId, promotion.askAt)) {
+          if (promotion && questionAnswer(promotion)) {
             return json(res, 200, { message: "A pessoa já respondeu essa pergunta na conversa: não abri o item. Siga com a resposta dela." });
           }
           const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured });

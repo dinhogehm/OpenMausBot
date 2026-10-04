@@ -84,6 +84,7 @@ it("sends no conversation line for an echo, an empty ask or a conversation that 
 // items; a question the server asked the bot to register says so, and the
 // item the bot opened for it, later, takes its place.
 it("carries a routine run's items on the wire, says a question was asked for its steps, and lets the item replace it (lot J2)", async () => {
+  const prompts = join(tmpdir(), `omb-j2-prompts-${process.pid}-${Date.now()}.jsonl`);
   const fixture = await launchVerificationServer({ ...process.env });
   const { url, dataDir, logPath } = fixture.info;
   const api = (path: string, body?: unknown, method = "POST") => request(path, body === undefined ? {} : { method, body: JSON.stringify(body) }, url) as Promise<any>;
@@ -96,6 +97,7 @@ it("carries a routine run's items on the wire, says a question was asked for its
     const late = await thread("Aviso da publicação");
     const fp = await thread("Produto da #9356");
     const answered = await thread("Teto do pre-push");
+    const unrelated = await thread("Canal do Monitor");
     const runA = await thread("Atendimento: Chat, planilha e issues");
     const runB = await thread("Atendimento: Chat, planilha e issues");
     await waitForExit(fixture.child, { signal: "SIGTERM" });
@@ -128,6 +130,12 @@ it("carries a routine run's items on the wire, says a question was asked for its
     const answeredAsk = now - 2 * 3_600_000;
     write(answered, "n-u", answeredAsk - 60_000, "user", "E o pre-push?");
     write(answered, "n-b", answeredAsk, "bot", "Fica 10 min ou sem limite?");
+    // INSP-J2b r2 c-2, the 04/10 case: asked about #9356, the bot opened o23; next day the owner
+    // writes there about #9355 — not an answer: o23 stays open
+    const unrelatedAsk = now - 26 * 3_600_000;
+    write(unrelated, "u-u", unrelatedAsk - 60_000, "user", "E o produto?");
+    write(unrelated, "u-b", unrelatedAsk, "bot", "A decisão de produto da #9356 continua com você: qual caminho sigo com o cliente?");
+    write(unrelated, "u-u2", now - 60 * 60_000, "user", "status da #9355?");
     write(answered, "n-u2", now - 30 * 60_000, "user", "Sem limite.");
     db.close();
     const steps = [{ text: "Confira a issue", link: "https://github.com/acme/app/issues/9355" }];
@@ -143,6 +151,7 @@ it("carries a routine run's items on the wire, says a question was asked for its
       { id: "o21", botId: monitor.id, threadId: asked, title: "Decisão de produto pendente", createdAt: now - 2.9 * 3_600_000, why: "x", steps },
       { id: "o22", botId: monitor.id, threadId: fp, title: "Liberar o merge da #9356 em produção", createdAt: now - 3_600_000, why: "x", steps },
       { id: "o17", botId: monitor.id, threadId: main, title: "Decidir o teto do pre-push", createdAt: now - 3_600_000, why: "x", steps, options },
+      { id: "o23", botId: monitor.id, threadId: unrelated, title: "Decidir o caminho de produto da #9356", createdAt: now - 25 * 3_600_000, why: "x", steps, options },
     ], resolvedOwnerPending: [
       { id: "o9", botId: monitor.id, threadId: main, title: "Liberar a escrita na linha 97", createdAt: now - 26 * 3_600_000, resolvedAt: now - 25 * 3_600_000, resolvedBy: "owner" },
     ], askPromotions: [
@@ -151,6 +160,7 @@ it("carries a routine run's items on the wire, says a question was asked for its
       { botId: monitor.id, threadId: asked, askAt: otherAsk - 86_400_000, text: "Libero a escrita na linha 97 da planilha?", askedAt: now - 26 * 3_600_000, reportThreadId: main, itemId: "o9" },
       { botId: monitor.id, threadId: fp, askAt: fpAsk, text: "Qual caminho sigo com o cliente?", askedAt: now - 2 * 3_600_000, reportThreadId: main },
       { botId: monitor.id, threadId: answered, askAt: answeredAsk, text: "Fica 10 min ou sem limite?", askedAt: now - 90 * 60_000, reportThreadId: main, itemId: "o17" },
+      { botId: monitor.id, threadId: unrelated, askAt: unrelatedAsk, text: "Qual caminho sigo com o cliente?", askedAt: now - 25.5 * 3_600_000, reportThreadId: unrelated, itemId: "o23" },
       // asked 20 min ago, nothing yet: "Pedir de novo" is open
       { botId: monitor.id, threadId: late, askAt: lateAsk, text: "Aviso pronto para a #9331. Publico o comentário agora?", askedAt: now - 20 * 60_000, reportThreadId: late },
     ] }));
@@ -158,7 +168,7 @@ it("carries a routine run's items on the wire, says a question was asked for its
     const log = openSync(logPath, "a", 0o600);
     restarted = spawn(process.execPath, ["--experimental-strip-types", fileURLToPath(new URL("./index.ts", import.meta.url))], {
       // a fast tick (the settling pass), the server's own requests still held by the 3 min boot delay
-      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment({ ...process.env, OMB_AUTONOMY_TICK_MS: "100" }, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
+      cwd: fileURLToPath(new URL("..", import.meta.url)), env: verificationServerEnvironment({ ...process.env, OMB_AUTONOMY_TICK_MS: "100", FAKE_CLAUDE_PROMPTS: prompts }, dataDir, Number(new URL(url).port)), stdio: ["ignore", log, log],
     });
     closeSync(log);
     await expect.poll(async () => {
@@ -184,7 +194,12 @@ it("carries a routine run's items on the wire, says a question was asked for its
     expect(ledgerNow().askPromotions.find((each: any) => each.threadId === answered).answeredAt).toBeGreaterThan(now);
     const chips = (await api(`/api/threads/${main}/messages`, undefined, "GET")).messages.filter((message: any) => message.kind === "activity").map((message: any) => message.tool?.name);
     expect(chips).toContain("Resolvido (respondida na conversa): Decidir o teto do pre-push");
-    expect(ledgerNow().ownerPending.map((item: any) => item.id).sort()).toEqual(["o14", "o15", "o16", "o20", "o21", "o22"]);
+    // …and its bot hears it, as the server, in that conversation
+    await expect.poll(() => (existsSync(prompts) ? readFileSync(prompts, "utf8") : ""), { timeout: 20_000 }).toContain("[Servidor: pendência fechada] O dono respondeu na conversa à sua pergunta «Fica 10 min ou sem limite?»: «Sem limite.». O item o17");
+    // INSP-J2b r2 c-2: a message about #9355 does not answer the #9356 question — o23 stays, the bot hears nothing
+    expect(ledgerNow().askPromotions.find((each: any) => each.threadId === unrelated).answeredAt).toBeUndefined();
+    expect(readFileSync(prompts, "utf8")).not.toContain("O item o23");
+    expect(ledgerNow().ownerPending.map((item: any) => item.id).sort()).toEqual(["o14", "o15", "o16", "o20", "o21", "o22", "o23"]);
     // "Pedir de novo": a new request; within 15 min of it nothing more is sent
     const first = await api(`/api/bots/${monitor.id}/tasks/${asked}/ask-steps`, {});
     expect(first).toMatchObject({ deduped: false });
@@ -196,9 +211,16 @@ it("carries a routine run's items on the wire, says a question was asked for its
     const ledger = ledgerNow();
     expect(ledger.askPromotions.find((each: any) => each.threadId === late).askedAt).toBe(again.askedAt);
     expect(ledger.askPromotions.filter((each: any) => each.threadId === asked).map((each: any) => each.askAt).sort()).toEqual([otherAsk - 86_400_000, otherAsk]);
-    const lateTask = ((await api("/api/bots", undefined, "GET")).bots as any[]).find((bot) => bot.id === monitor.id).tasks.find((task: any) => task.threadId === late);
-    expect(lateTask.goalNeedsInputStepsAskedAt).toBe(again.askedAt);
-    // nothing in the person's voice
+    // INSP-J2b r2 c-1: while the bot's turn on that request runs (and after it), the question never leaves the panel
+    const lateTask = async () => ((await api("/api/bots", undefined, "GET")).bots as any[]).find((bot) => bot.id === monitor.id).tasks.find((task: any) => task.threadId === late);
+    // (the fake bot's turn on it runs inside these 3 s: seen busy in 3 of 3 probe runs)
+    for (let n = 0; n < 30; n += 1) {
+      const seen = await lateTask();
+      expect(seen).toMatchObject({ goalNeedsInput: true, goalNeedsInputSince: lateAsk, goalNeedsInputStepsAskedAt: again.askedAt });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    await expect.poll(() => (existsSync(prompts) ? readFileSync(prompts, "utf8") : ""), { timeout: 20_000 }).toContain(`[Servidor: pergunta sem passo a passo] Ref ${late}@${lateAsk}.`);
+    expect((await lateTask()).goalNeedsInputStepsAskedAt).toBe(again.askedAt);    // nothing in the person's voice
     const lines = (await api(`/api/threads/${late}/messages`, undefined, "GET")).messages.filter((message: any) => message.role === "user").map((message: any) => message.text);
     expect(lines).toEqual(["Avisou?"]);
   } finally {

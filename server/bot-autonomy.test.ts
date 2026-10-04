@@ -47,6 +47,8 @@ import {
   QUESTION_REPORT_PREFIX,
   parseReplacesAsk,
   ANSWERED_IN_CONVERSATION,
+  answerToAsk,
+  answeredInConversationReport,
 } from "./bot-autonomy.ts";
 
 let dir: string;
@@ -1504,5 +1506,27 @@ describe("a bare question asked to become an item (lot J2)", () => {
     // answered in the conversation: marked once, kept
     reloaded.markAskAnswered(again);
     expect(make().askPromotionFor("b", "main", ask.askAt)?.answeredAt).toBe(now);
+  });
+
+  // INSP-J2b r2 c-2: only an answer to THIS question settles its item
+  it("takes as the answer the person's first message after the question (before the bot asks anything else), or one naming its #ref — never one about another #ref", () => {
+    const at = ask.askAt;
+    const asked = { role: "bot", kind: "text", at, text: "A decisão de produto da #9356 continua com você: qual caminho sigo com o cliente?" };
+    const person = (when: number, text: string) => ({ role: "user", kind: "text", at: when, text });
+    const bot = (when: number, text: string) => ({ role: "bot", kind: "text", at: when, text });
+    // the 04/10 case: next day the owner asks about #9355 in the same conversation — not an answer
+    expect(answerToAsk([person(at - 60_000, "E a #9356?"), asked, person(at + 86_400_000, "status da #9355?")], at, asked.text)).toBeNull();
+    // …and a later message naming #9356 is
+    expect(answerToAsk([asked, person(at + 1, "status da #9355?"), bot(at + 2, "A #9355 está em QA."), person(at + 3, "Na #9356, siga com o caminho A.")], at, asked.text)).toEqual({ at: at + 3, text: "Na #9356, siga com o caminho A." });
+    // the first message right after, with no #ref of its own, answers it
+    expect(answerToAsk([asked, person(at + 1, "Siga com o caminho A.")], at, asked.text)?.text).toBe("Siga com o caminho A.");
+    // once the bot asked something else, a plain message answers that, not this
+    expect(answerToAsk([asked, bot(at + 1, "Posso arquivar as conversas antigas?"), person(at + 2, "Pode.")], at, asked.text)).toBeNull();
+    // a bot's statement in between changes nothing; peers and other bots' handoffs are not the person
+    expect(answerToAsk([asked, bot(at + 1, "Vou conferir o QA."), { ...person(at + 2, "x"), from: { botId: "other" } }, person(at + 3, "Caminho B.")], at, asked.text)?.text).toBe("Caminho B.");
+    // a question without #refs: a first message about some #ref is about something else
+    expect(answerToAsk([bot(at, "Fica 10 min ou sem limite?"), person(at + 1, "E a #9355?")], at, "Fica 10 min ou sem limite?")).toBeNull();
+    expect(answeredInConversationReport({ id: "o20", title: "Decidir o caminho da #9356" }, "Qual caminho sigo?", "Caminho B.")).toBe(
+      "[Servidor: pendência fechada] O dono respondeu na conversa à sua pergunta «Qual caminho sigo?»: «Caminho B.». O item o20 («Decidir o caminho da #9356») foi fechado como respondida na conversa. Siga com a resposta dele; não reabra o item. Não escreva ao dono só por isto.");
   });
 });

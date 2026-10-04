@@ -483,6 +483,35 @@ export function parseReplacesAsk(value: unknown): { threadId: string; askAt: num
 /** Why an item settled by the server says the person answered its question in the conversation itself. */
 export const ANSWERED_IN_CONVERSATION = "respondida na conversa";
 
+/** The person's message that answers a question the bot asked at `askAt`
+ * (INSP-J2b r2 c-2): the first one after it, before the bot asks anything
+ * else — unless it names other #refs and none of the question's —, or any
+ * later one naming the question's #ref. null while none does: a message
+ * about something else never settles the question's item. */
+export function answerToAsk(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number; peerAsk?: unknown; from?: unknown }>, askAt: number, askText: string): { at: number; text: string } | null {
+  const refs = new Set(askText.match(/#\d+/g) ?? []);
+  let first = true;
+  for (const message of messages.filter((each) => each.at > askAt).toSorted((a, b) => a.at - b.at)) {
+    const text = (message.text ?? "").trim();
+    if (message.role === "bot" && message.kind === "text" && !message.from) {
+      // the bot asked something else: what follows answers that, unless it names this question's #ref
+      if (/\?[\s*_`)\]]*$/.test(text) || OWNER_ASK.test(text)) first = false;
+      continue;
+    }
+    if (message.role !== "user" || message.kind !== "text" || message.peerAsk || message.from) continue;
+    const cited = text.match(/#\d+/g) ?? [];
+    if (cited.some((ref) => refs.has(ref)) || (first && !cited.length)) return { at: message.at, text };
+    first = false;
+  }
+  return null;
+}
+
+/** The server tells the bot it closed the item of its question, answered by the person in the conversation. */
+export const ANSWERED_REPORT_PREFIX = "[Servidor: pendência fechada]";
+export function answeredInConversationReport(item: Pick<OwnerPending, "id" | "title">, ask: string, answer: string): string {
+  return `${ANSWERED_REPORT_PREFIX} O dono respondeu na conversa à sua pergunta «${ask.slice(0, 200)}»: «${answer.slice(0, 300)}». O item ${item.id} («${item.title.slice(0, 120)}») foi fechado como ${ANSWERED_IN_CONVERSATION}. Siga com a resposta dele; não reabra o item. Não escreva ao dono só por isto.`;
+}
+
 /** What only the bot reads when the person asks, from "Precisa de você",
  * which decision it recommends (the turn's prompt, never the transcript). */
 export function ownerPendingRecommendNote(item: Pick<OwnerPending, "id">): string {
