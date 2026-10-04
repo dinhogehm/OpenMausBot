@@ -469,6 +469,21 @@ export interface ProductivityReport {
   enabled?: boolean;
   /** The owner's targets; empty by default (no traffic light without a target). */
   goals: ReportGoals;
+  /** The worktrees the server made for its app sessions in the period and
+   * what cloning their caches saved (lote X); absent when not known. */
+  worktrees?: ReportOwnWorktrees;
+}
+
+/** server/own-worktrees.ts OwnSummary, as the report carries it. */
+export interface ReportOwnWorktrees {
+  created: number;
+  cloned: number;
+  installed: number;
+  failed: number;
+  savedKb: number;
+  savedMs: number;
+  reasons: Array<{ reason: string; count: number }>;
+  seeds: Array<{ repo: string; state: string; reason?: string; head?: string; lockHash?: string; installedAt?: number; installMs?: number; kb: number }>;
 }
 
 // ── goals ───────────────────────────────────────────────────────────────────

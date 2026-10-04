@@ -359,6 +359,8 @@ import {
 import {
   ccSessionActive,
   desktopBriefText,
+  ownBriefText,
+  prepareOwnWorktrees,
   issueNumber,
   liveSessionForIssue,
   orphanedIssues,
@@ -372,7 +374,8 @@ import {
   type DesktopWorkDeps,
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
-import { DiskWatch } from "./disk-watch.ts";
+import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
+import { addOwnWorktree, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
@@ -9400,6 +9403,140 @@ function desktopBrief(session: CcSession, brief: string, since = Date.now()): st
 
 const DUAL_DECISIONS_LOG = join(homedir(), ".laya", "hooks", "dual-decisions.log");
 
+// ── worktrees the server makes for its app sessions (lote X, own-worktrees.ts)
+// The settings file (own-worktrees-settings.json in the data dir) is optional:
+// on by default, `{"enabled": false}` (or per repository under "repos") or
+// OMB_OWN_WORKTREES=0 turns it off; the seeds and what each clone saved live
+// in own-worktrees.json. The server never removes a worktree.
+const OWN_SETTINGS_PATH = join(DATA_DIR, "own-worktrees-settings.json");
+const ownStore = new OwnWorktreeStore(join(DATA_DIR, "own-worktrees.json"));
+function ownWorktreeSettings(repo: string) {
+  let config: unknown = null;
+  try { config = JSON.parse(readFileSync(OWN_SETTINGS_PATH, "utf8")); } catch { /* none: the defaults */ }
+  return ownSettingsFor(config, repo, process.env);
+}
+/** Whether the app sessions of `repo` open in a worktree the server makes. */
+const ownWorktreesOn = (repo: string) => process.platform === "darwin" && ownWorktreeSettings(repo).enabled;
+/** A program with the server's PATH, its stdout; rejects with its stderr. */
+const ownExec: OwnExec = (file, args, options = {}) => new Promise<string>((resolve, reject) => {
+  execFileCc(file, args, { cwd: options.cwd, timeout: options.timeoutMs ?? 120_000, maxBuffer: 16 * 1024 * 1024, signal: options.signal, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout, stderr) => {
+    if (error) reject(Object.assign(error, { stderr: String(stderr ?? "") }));
+    else resolve(String(stdout));
+  });
+});
+const nodeVersion = async () => {
+  try { return (await ownExec("node", ["--version"], { timeoutMs: 15_000 })).trim() || null; } catch { return null; }
+};
+/** A worktree plan nobody has: no folder, no branch, no session (ours, planned ones too, or the app's) ever in it. */
+function ownPlanTaken(repo: string, plan: { path: string; branch: string; dir: string }): boolean {
+  if (existsSync(plan.path) || existsSync(ownLinkPath(repo, plan.dir))) return true;
+  if (ccLedger.all().some((session) => session.cwd === plan.path || session.desktop?.own?.path === plan.path)) return true;
+  if (recordsUsingFolder(plan.path, undefined, undefined, true).length) return true;
+  try {
+    execFileSyncCc("git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${plan.branch}`], { stdio: "ignore", timeout: 15_000, env: { ...process.env, PATH: augmentedPath() } });
+    return true;
+  } catch {
+    return false;
+  }
+}
+/** Why New Session, the old way, would not land in a new worktree of its
+ * own in `repo` now (the 409's words), or null. */
+function classicAppRefusal(repo: string, fromQueue = false): string | null {
+  const lastRepo = lastAppRepo();
+  if (lastRepo && lastRepo !== repo) return `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(repo)} no app uma vez e tente de novo.`;
+  const block = appFolderBlock();
+  if (!block) return null;
+  return block.kind === "flapping" ? flappingRefusal(block.seen, basename(repo), fromQueue)
+    : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(repo), fromQueue) : rootFolderRefusal(block.last, basename(repo), fromQueue);
+}
+/** Make the session's planned worktree, its alias for the app, and clone its caches from the seed. */
+async function prepareOwnWorktree(session: CcSession): Promise<Awaited<ReturnType<NonNullable<DesktopWorkDeps["own"]>["prepare"]>>> {
+  const own = session.desktop!.own!;
+  const dir = basename(own.path);
+  const settings = ownWorktreeSettings(session.repo);
+  const event = { at: Date.now(), sessionId: session.id, repo: session.repo, path: own.path, branch: own.branch };
+  const made = await addOwnWorktree(session.repo, { dir, path: own.path, branch: own.branch }, ownExec, repoBaseBranch(session.repo));
+  if (!made.ok) {
+    ownStore.record({ ...event, mode: "failed", reason: made.error });
+    return { ok: false, reason: made.error };
+  }
+  // next to the repository (~/Projetos/.omb-worktree-links/…): inside the review hook's scope
+  const link = ownLinkPath(session.repo, dir);
+  const linkError = ensureLink(link, own.path);
+  if (linkError) {
+    const reason = `a worktree foi criada (${own.path}, fica como está), mas não o apelido que o app recebe: ${linkError}`;
+    ownStore.record({ ...event, mode: "failed", reason });
+    return { ok: false, reason };
+  }
+  // while this clone reads the seed, the seed is not installed again (refreshOwnSeeds waits)
+  ownSeedWatch.cloning += 1;
+  let caches: Awaited<ReturnType<typeof cloneSeedCaches>>;
+  try {
+    caches = await cloneSeedCaches(ownStore.seed(session.repo), own.path, settings.lockfiles, realCloneIo(ownExec, nodeVersion));
+  } finally {
+    ownSeedWatch.cloning -= 1;
+  }
+  // origin/main moved past the seed (or its hooks are missing): refresh it on the next pass instead of in 30 min
+  if (caches.mode === "install" && /não é o da semente|Node mudou|nunca instalada|hooks do git/.test(caches.reason ?? "")) ownSeedWatch.due.add(session.repo);
+  // made again after a restart: counted once
+  if (!ownStore.allEvents().some((each) => each.path === own.path && each.mode === caches.mode)) {
+    ownStore.record({ ...event, mode: caches.mode, ...(caches.reason ? { reason: caches.reason } : {}), ...(caches.mode === "cloned" ? { savedKb: caches.savedKb, savedMs: caches.savedMs, cloneMs: caches.ms } : {}) });
+  }
+  if (caches.mode === "cloned") console.log(`[own-worktrees] ${own.path}: ${caches.dirs.join(", ")} cloned in ${Math.round(caches.ms / 1000)} s, sparing ${savedText(caches.savedKb, caches.savedMs)}`);
+  return {
+    ok: true, head: made.head, link,
+    caches: { mode: caches.mode, ...(caches.reason ? { reason: caches.reason } : {}), dirs: caches.dirs, savedKb: caches.savedKb, savedMs: caches.savedMs, ms: caches.ms, install: caches.install, ...(caches.hooks ? { hooks: caches.hooks } : {}) },
+    ...(made.fetchError ? { fetchError: made.fetchError } : {}),
+  };
+}
+const ownPrepareState = { preparing: false };
+/** The seeds of the repositories whose app sessions open in worktrees of the
+ * server's: checked every `seedEveryMs` (sooner when a clone met a seed
+ * behind origin/main), one at a time, never with a release on its way. */
+const ownSeedWatch = { running: false, cloning: 0, due: new Set<string>() };
+async function refreshOwnSeeds(): Promise<void> {
+  // a clone reading a seed now: no seed changes until it is done
+  if (ownSeedWatch.running || ownSeedWatch.cloning || process.platform !== "darwin") return;
+  const now = Date.now();
+  // the repositories the app sessions of the last 30 days worked in
+  const repos = [...new Set(ccLedger.all().filter((session) => session.surface === "app" && now - session.createdAt < 30 * 86_400_000).map((session) => session.repo))];
+  const repo = repos.find((each) => {
+    const settings = ownWorktreeSettings(each);
+    const seed = ownStore.seed(each);
+    return ownWorktreesOn(each) && (ownSeedWatch.due.has(each) || !seed?.checkedAt || now - seed.checkedAt >= settings.seedEveryMs);
+  });
+  if (!repo) return;
+  ownSeedWatch.running = true;
+  ownSeedWatch.due.delete(repo);
+  try {
+    const settings = ownWorktreeSettings(repo);
+    await refreshSeed(repo, settings, ownStore.seed(repo), {
+      exec: ownExec,
+      now: Date.now,
+      releaseBusy: async () => {
+        await refreshReleaseHold();
+        return releaseHold.label === "?" ? "o estado da fila de admissão não pôde ser lido" : releaseHold.label;
+      },
+      freeBytes: volumeFreeBytes,
+      readFile: (path) => { try { return readFileSync(path, "utf8"); } catch { return null; } },
+      exists: existsSync,
+      findDirs: (seedPath, each) => findCacheDirs(seedPath, each.cacheNames, each.extraDirs, realDirFs),
+      sizeKb: async (path) => {
+        try { return Number((await ownExec("/usr/bin/nice", ["-n", "15", "/usr/bin/du", "-sk", path], { timeoutMs: 10 * 60_000 })).split(/\s+/)[0]) || null; } catch { return null; }
+      },
+      node: nodeVersion,
+      log: (line) => console.log(`[own-worktrees] ${line}`),
+      save: (seed) => ownStore.setSeed(seed),
+      mayInstall: () => (ownSeedWatch.cloning ? "uma worktree está sendo clonada da semente agora; tento de novo em seguida" : null),
+      hooks: (folder) => hooksFolder(folder, ownExec),
+    }, repoBaseBranch(repo));
+    // held by a clone that started meanwhile: once it is done, not in half an hour
+    if (/sendo clonada/.test(ownStore.seed(repo)?.reason ?? "")) ownSeedWatch.due.add(repo);
+  } finally {
+    ownSeedWatch.running = false;
+  }
+}
+
 const desktopWork: DesktopWorkDeps = {
   ledger: ccLedger,
   now: Date.now,
@@ -9435,6 +9572,15 @@ const desktopWork: DesktopWorkDeps = {
   log: (line) => console.log(`[claude-desktop] ${line}`),
   onArchived: (session) => {
     void reportArchivedWorktrees(session, session.desktop?.removeWorktree === true).catch((error) => console.warn(`[worktrees] archive report of ${session.id} failed: ${error instanceof Error ? error.message : String(error)}`));
+  },
+  own: {
+    prepare: prepareOwnWorktree,
+    briefFor: (session) => {
+      const own = session.desktop!.own!;
+      session.desktop!.folderGuarded = true;
+      return ownBriefText(session.title, session.desktop!.marker, own.brief, ccTurnFooter(session), own, cacheLine(own.caches ?? { mode: "install", reason: "sem resultado do clone", dirs: [] }));
+    },
+    classicBlocked: (session) => classicAppRefusal(session.repo),
   },
 };
 
@@ -10080,15 +10226,25 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     return { status: 200, body: { message: `Não abri agora porque ${why}: "${input.title}" entrou na fila de sessões (#${queued.position}, prioridade ${priorityLabel(priority)}, id ${queued.id}) e abre sozinha quando uma vaga liberar; o aviso chega aqui. Veja a fila em cc_session_list; para tirá-la da fila, cc_session_archive com session_id ${queued.id}. Encerre o turno agora.` } };
   }
   if (body.surface !== "cli" && process.platform === "darwin") {
+    const appId = randomUUID();
+    // The server makes the session's worktree and opens the app right in it
+    // (lote X): the app's last folder, and the worktree it would reuse, do
+    // not matter then — no 409 for them. Should the app not open there, the
+    // create goes on through New Session, checked as below at that moment.
+    // the repository's real path: the brief's folder check compares `pwd -P` with it
+    const realRepo = (() => { try { return realpathSync(input.repo); } catch { return input.repo; } })();
+    const ownPlan = ownWorktreesOn(input.repo)
+      ? planOwnWorktree(realRepo, { title: input.title, issue: issueNumber(input.title, input.brief), sessionId: appId }, (plan) => ownPlanTaken(realRepo, plan))
+      : null;
     // New Session in the app opens in the folder of its latest
     // session; another repository cannot be picked from here. Say so
     // before touching the screen instead of failing five times. From the
     // queue it may pass (the person opens one there): it keeps its place.
-    const lastRepo = lastAppRepo();
+    const lastRepo = ownPlan ? null : lastAppRepo();
     if (lastRepo && lastRepo !== input.repo) {
       return { status: 409, body: { error: `o app Claude abre sessões novas na última pasta usada (${lastRepo}), não em ${input.repo}. Use surface "cli" para este repositório, ou peça à pessoa para abrir uma sessão em ${basename(input.repo)} no app uma vez e tente de novo.` }, retry: fromQueue };
     }
-    const block = appFolderBlock();
+    const block = ownPlan ? null : appFolderBlock();
     if (block) {
       // only the owner can unblock it: one item for them, however many starts hit this (R9-dispatch R9-2)
       const asked = askOwnerToUnblockApp(bot, threadId, input.repo, block);
@@ -10096,19 +10252,22 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
         : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(input.repo), fromQueue) : rootFolderRefusal(block.last, basename(input.repo), fromQueue);
       return { status: 409, body: { error: `${refusal}${asked ? ` O pedido ao dono já está em "Precisa de você" (${asked}): não abra outro item para isso.` : ""}` }, retry: fromQueue };
     }
-    const appId = randomUUID();
-    const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
+    const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: ownPlan ? realRepo : input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
     if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
     const issue = issueNumber(input.title, input.brief);
     if (issue) session.desktop!.issue = issue;
-    session.desktop!.pending = { kind: "create", text: desktopBrief(session, input.brief), since: Date.now(), attempts: 0 };
+    const classicText = desktopBrief(session, input.brief);
+    session.desktop!.pending = { kind: "create", text: classicText, since: Date.now(), attempts: 0 };
+    // the app's text is made once the worktree exists (its folder check names it)
+    if (ownPlan) session.desktop!.own = { path: ownPlan.path, branch: ownPlan.branch, state: "planned", brief: input.brief, classicText };
     if (corridor) session.corridorVersion = corridorVersionOf(corridor);
     session.status = "running";
     ccLedger.save();
-    ccChip(session, "na fila para abrir no app Claude quando o Mac estiver livre");
+    ccChip(session, ownPlan ? `criando a worktree ${ownPlan.dir} (${ownPlan.branch}, de origin/main); depois abre no app Claude quando o Mac estiver livre` : "na fila para abrir no app Claude quando o Mac estiver livre");
     noteClaimedPrs(session, input.brief);
     const ignored = [body.permissionMode !== undefined ? "permission_mode" : "", input.model ? "model" : ""].filter(Boolean);
-    return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, em ${basename(input.repo)} com worktree própria, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
+    const where = ownPlan ? `numa worktree que o servidor cria agora para ela (${ownPlan.path}, branch ${ownPlan.branch}, com as dependências clonadas quando a semente está em dia)` : `em ${basename(input.repo)} com worktree própria`;
+    return { status: 200, body: { message: `Sessão do Claude Code ${session.id} ("${session.title}") na fila para abrir no app Claude, ${where}, assim que o Mac estiver desbloqueado e ninguém mexer nele por ${DESKTOP_IDLE_SECONDS} segundos — a pessoa acompanha por lá.${mixWarning ? ` ${mixWarning}` : ""}${ignored.length ? ` ${ignored.join(" e ")} não valem no app (ele usa as próprias configurações; o relatório diz o modo em que ela realmente roda).` : ""} Quando ela terminar um turno, o relatório chega aqui como um novo turno. Encerre o turno agora — não fique consultando.${scripts.changed ? " (Troquei pnpm por npm run no texto: este repositório usa npm.)" : ""}` } };
   }
   const session = ccLedger.create({ id: randomUUID(), ownerBotId: bot.id, ownerThreadId: threadId, title: input.title, repo: input.repo, permissionMode: input.permissionMode, surface: "cli", ...(input.model ? { model: input.model } : {}) });
   if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
@@ -10126,9 +10285,12 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
  * reused-folder 409 ("blocked"), else "available". */
 function appAvailability(repo: string): { state: AppAvailability; reason: string | null } {
   if (process.platform !== "darwin") return { state: "unavailable", reason: null };
-  const lastRepo = lastAppRepo();
-  if (!lastRepo || lastRepo !== repo) return { state: "unavailable", reason: null };
-  if (appFolderBlock()) return { state: "blocked", reason: null };
+  // with a worktree the server makes, the app's last folder and the one it would reuse do not matter (lote X)
+  if (!ownWorktreesOn(repo)) {
+    const lastRepo = lastAppRepo();
+    if (!lastRepo || lastRepo !== repo) return { state: "unavailable", reason: null };
+    if (appFolderBlock()) return { state: "blocked", reason: null };
+  }
   // the Mac locked, or a create stuck in the queue: the app opens nothing now (INSP-H r2 #2)
   const stalled = appStalledReason(ccLedger.all(), repo, screenWatch.lockedSince, Date.now());
   return stalled ? { state: "unavailable", reason: stalled } : { state: "available", reason: null };
@@ -10237,7 +10399,15 @@ const appUnblockWatch = { lastAt: 0 };
 function settleAppUnblock(): void {
   if (process.platform !== "darwin" || Date.now() - appUnblockWatch.lastAt < 2 * 60_000) return;
   appUnblockWatch.lastAt = Date.now();
-  const open = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)).filter((item) => item.key?.startsWith(APP_UNBLOCK_KEY));
+  let open = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)).filter((item) => item.key?.startsWith(APP_UNBLOCK_KEY));
+  if (!open.length) return;
+  // the server makes the worktrees of these repositories' sessions (lote X): no gesture of the owner is needed there
+  const ownNames = new Set([...new Set(ccLedger.all().map((session) => session.repo))].filter(ownWorktreesOn).map((repo) => basename(repo)));
+  for (const key of new Set(open.map((item) => item.key!).filter((key) => ownNames.has(key.slice(APP_UNBLOCK_KEY.length))))) {
+    for (const done of autonomy.resolveOwnerPending({ key })) refreshBotRow(done.botId);
+    console.log(`[claude-desktop] the owner's "destravar o app" item (${key}) is closed: the server now makes each session's worktree and opens the app in it, so no gesture is needed`);
+  }
+  open = open.filter((item) => !ownNames.has(item.key!.slice(APP_UNBLOCK_KEY.length)));
   if (!open.length) return;
   const block = appFolderBlock();
   if (block) {
@@ -10536,6 +10706,9 @@ async function runDesktopWork(): Promise<void> {
   void watchOrphanedIssues().catch((error) => console.error(`[cc-sessions] orphan check failed: ${error instanceof Error ? error.message : String(error)}`));
   if (process.platform !== "darwin") return;
   void watchScreenLock().catch(() => {});
+  // the worktrees the server makes, and their seeds: git and installs, never the screen
+  void prepareOwnWorktrees(desktopWork, ownPrepareState).catch((error) => console.error(`[own-worktrees] ${error instanceof Error ? error.message : String(error)}`));
+  void refreshOwnSeeds().catch((error) => console.error(`[own-worktrees] seed: ${error instanceof Error ? error.message : String(error)}`));
   settleAppUnblock();
   await runDesktopWorkFlow(desktopWork, desktopState);
 }
@@ -25547,6 +25720,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!body || typeof body !== "object") return json(res, 400, { error: "send the goals as a JSON object" });
       return json(res, 200, { goals: productivity.setGoals(body.goals ?? body) });
     }
+    // ── the worktrees the server made for its app sessions (lote X): what the
+    // clones saved, the seeds, the latest worktrees. Read-only; nothing here
+    // (nor anywhere in the server) removes a worktree.
+    if (method === "GET" && path === "/api/worktrees/own") {
+      const now = Date.now();
+      const days = Math.min(365, Math.max(1, Number(url.searchParams.get("days") ?? 30) || 30));
+      return json(res, 200, {
+        period: { from: now - days * 86_400_000, to: now, days },
+        summary: ownStore.summary(now - days * 86_400_000, now + 1),
+        allTime: ownStore.summary(0, now + 1),
+        latest: ownStore.allEvents().slice(-20).reverse(),
+      });
+    }
     // ── the productivity report (lot V): production throughput for the board ──
     // Read-only, built from the collector's cache (never waits on GitHub);
     // `refresh=1` asks for a sync in the background. Admin scope by default.
@@ -25560,6 +25746,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if ("error" in resolved) return json(res, 400, { error: resolved.error });
       if (url.searchParams.get("refresh") === "1" && productivityEnabled) productivity.requestSync();
       const report = { ...productivity.report(granularity, resolved.period), enabled: productivityEnabled };
+      // what the server's own worktrees saved in the period (lote X)
+      report.worktrees = ownStore.summary(resolved.period.from, resolved.period.to);
       report.summary = { "pt-BR": executiveSummary(report, "pt-BR"), en: executiveSummary(report, "en") };
       if (path.endsWith(".md") || path.endsWith(".pdf")) {
         const pdf = path.endsWith(".pdf");

@@ -381,6 +381,29 @@ export function reportTitle(report: ProductivityReport): string {
   return `Produtividade de engenharia — ${periodTitle(report.period, report.generatedAt)}`;
 }
 
+const SEED_STATE_PT: Record<string, string> = { ready: "pronta", installing: "instalando", waiting: "esperando", failed: "falhou", interrupted: "interrompida", missing: "ainda não criada" };
+
+/** "Worktrees criadas pelo OMB" (lote X): how many, how many got their
+ * caches cloned, what that saved in disk and install time, why the others
+ * did not, and each seed. Nothing when the report does not carry it. */
+export function worktreeLines(report: ProductivityReport): string[] {
+  const w = report.worktrees;
+  if (!w) return [];
+  const size = (kb: number) => (kb >= 1024 * 1024 ? `${formatNumber(kb / 1024 / 1024, "pt-BR", 1)} GB` : `${formatNumber(Math.round(kb / 1024))} MB`);
+  const lines = ["", "## Worktrees criadas pelo OMB (clone APFS)", ""];
+  if (!w.created && !w.failed) lines.push("Nenhuma worktree criada pelo servidor no período.");
+  else {
+    lines.push(`- Criadas: ${formatNumber(w.created)}; com dependências clonadas da semente: ${formatNumber(w.cloned)}; a sessão instalou (npm ci, pnpm install…): ${formatNumber(w.installed)}${w.failed ? `; não criadas: ${formatNumber(w.failed)}` : ""}`);
+    lines.push(`- Economia dos clones: ${size(w.savedKb)} que não foram gravados em disco e ${formatDuration(w.savedMs)} de instalação poupados (o tempo do npm ci da semente, por clone)`);
+    for (const each of w.reasons.slice(0, 5)) lines.push(`- Sem clone, ${formatNumber(each.count)}×: ${md(each.reason)}`);
+  }
+  for (const seed of w.seeds) {
+    lines.push(`- Semente de ${md(seed.repo.split("/").pop() ?? seed.repo)}: ${SEED_STATE_PT[seed.state] ?? md(seed.state)}${seed.head ? ` em \`${seed.head.slice(0, 9)}\`` : ""}${seed.kb ? `, ${size(seed.kb)} de dependências` : ""}${seed.installMs ? `, instalada em ${formatDuration(seed.installMs)}` : ""}${seed.reason ? ` — ${md(seed.reason)}` : ""}`);
+  }
+  lines.push("- O servidor nunca remove worktrees: só relata.");
+  return lines;
+}
+
 export function reportMarkdown(report: ProductivityReport): string {
   const g = report.granularity;
   const k = report.kpis;
@@ -437,6 +460,7 @@ export function reportMarkdown(report: ProductivityReport): string {
     lines.push("| Bot | Turnos | Horas ativas | Tokens (entrada / saída) | Custo | \"Precisa de você\" abertos / resolvidos |", "|---|---:|---:|---:|---:|---:|");
     for (const bot of report.bots) lines.push(`| ${md(bot.name)} | ${formatNumber(bot.turns)} | ${formatDuration(bot.timedTurns ? bot.activeMs : null)} | ${formatNumber(bot.inputTokens)} / ${formatNumber(bot.outputTokens)} | ${formatMoney(bot.costUsd)} | ${bot.needsYouOpened} / ${bot.needsYouResolved} |`);
   }
+  lines.push(...worktreeLines(report));
   lines.push("", "## Definições", "");
   for (const [name, text] of DEFINITIONS_PT) lines.push(`- **${name}:** ${text}`);
   lines.push("", "## Cobertura dos dados", "");

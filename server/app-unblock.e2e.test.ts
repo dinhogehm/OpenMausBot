@@ -124,6 +124,9 @@ it.runIf(process.platform === "darwin")("the app flapping between 'reused' and '
     writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
       { id: "o8", botId: chief.id, threadId: thread, ...appUnblockPending("nuria-platform"), key: "app-reused-folder:nuria-platform", createdAt: t, stepsAutoAskedAt: t },
     ] }));
+    // New Session the old way: with worktrees the server makes (lote X, on by
+    // default) the owner's unblock item closes itself — own-worktrees tests
+    writeFileSync(join(dataDir, "own-worktrees-settings.json"), JSON.stringify({ enabled: false }));
     await boot();
     // the click as the owner makes it: the label they saw (the server may rewrite the item meanwhile)
     const check = async (label = APP_UNBLOCK_CHECK_LABEL) => {
