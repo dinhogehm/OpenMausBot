@@ -3528,7 +3528,7 @@
   "report.coverage.needsYou": "“Precisa de você” recorded since {since}.",
   "now.title": "Now",
   "now.buttonAria": "Now: the delivery line at a glance",
-  "now.buttonAriaNews": "Now: {count} changed since you last looked",
+  "now.buttonAriaNews": "Now: {count} waiting on you since you last looked",
   "now.listAria": "The delivery line now",
   "now.newBadge": "new",
   "now.newAria": "changed since you last looked",
