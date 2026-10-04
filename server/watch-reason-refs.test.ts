@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { wakePrompt, type BotWake } from "./bot-autonomy.ts";
-import { citedRefs, parseRefState, refStateArgs, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
+import { citedRefs, parseRefState, RefLookups, refStateArgs, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 
 // The Chief's real 'prod' note on 02/10 (bot-autonomy.json, dbb9f1cf):
 // every PR it names merged, every session archived since 01/10.
@@ -13,6 +13,43 @@ describe("what a watch's note names (R10-followup #5)", () => {
     // "F4-1" is not a session; a note without numbers names nothing
     expect(citedRefs("Main andou: conferir qual PR entrou, informar o Osvaldo (PR, head)")).toEqual({ numbers: [], sessions: [] });
     expect(citedRefs("rever PR 9350 e a issue 9351; sessão 8204")).toEqual({ numbers: [9350, 9351], sessions: [8204] });
+  });
+
+  // INSP-U r1 U5: the Monitor's real 'tag' note of 04/10 names its base — merged on purpose
+  it("does not name the refs of the base a note compares from", () => {
+    const TAG_NOTE = "Tag de produção mudou. Em 04/10 ~21:55 BRT (03/10) estava em 3c04d7c3d (carrier #9370: PR #9280 da #9195, rodízio de equipe atômico; Matheus já avisado em 04/10 01:16 na conversa mmx6HoDk3a8; linha 122 já \"Publicado\"/\"Em teste\"). Comparar a partir de 3c04d7c3d: listar PRs do compare, achar issue/linha/solicitante de cada uma";
+    expect(citedRefs(TAG_NOTE)).toEqual({ numbers: [], sessions: [] });
+    // what the note asks to do is still named, around a base
+    expect(citedRefs("A tag estava em abc123 (PR #9280). Avisar a #9400 e fechar o carrier #9401").numbers).toEqual([9400, 9401]);
+    expect(citedRefs("(era o carrier #9370) liberar gate da #9328").numbers).toEqual([9328]);
+    // a plain parenthesis is still read
+    expect(citedRefs("avisar sessões 9295 (#9314)").numbers).toEqual([9314]);
+  });
+
+  it("keeps a failed look-up as long as an answer, and shares one still running", async () => {
+    let now = 0;
+    let asked = 0;
+    const lookups = new RefLookups(600_000, () => now);
+    const failing = () => { asked += 1; return Promise.resolve(null); };
+    expect(await lookups.lookup("acme/web#1", failing)).toBeNull();
+    now = 60_000;
+    expect(await lookups.lookup("acme/web#1", failing)).toBeNull();
+    // a 1-minute watch: one gh in 10 minutes, not ten
+    expect(asked).toBe(1);
+    now = 600_001;
+    await lookups.lookup("acme/web#1", failing);
+    expect(asked).toBe(2);
+    // a gh that throws is a failure kept too
+    await lookups.lookup("acme/web#2", () => { asked += 1; return Promise.reject(new Error("ENOENT")); });
+    await lookups.lookup("acme/web#2", failing);
+    expect(asked).toBe(3);
+    // two firings at once ask once
+    let release!: (state: null) => void;
+    const slow = () => { asked += 1; return new Promise<null>((resolve) => { release = resolve; }); };
+    const both = Promise.all([lookups.lookup("acme/web#3", slow), lookups.lookup("acme/web#3", slow)]);
+    release(null);
+    await both;
+    expect(asked).toBe(4);
   });
 
   it("finds the repository in the command, a -R flag or a URL", () => {

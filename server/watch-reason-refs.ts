@@ -17,7 +17,14 @@ export interface CitedRefs {
 /** At most this many look-ups per firing: a note is a sentence, not a list. */
 export const CITED_REFS_MAX = 8;
 
+/** Where a note says where things STOOD — the base it compares from, merged on
+ * purpose: "estava em 3c04d7c3d (carrier #9370: PR #9280 da #9195 …)", the
+ * Monitor's real 'tag' note of 04/10. Those refs are not work to redo, and
+ * naming them as "no longer open" on every firing is noise (INSP-U r1 U5). */
+const BASELINE = /\b(?:estava|estavam|esteve|era|eram|was|were|base(?:line)?)\b[^()\n.;]{0,40}\([^)]*\)?|\((?:estava|era|was|base(?:line)?)\b[^)]*\)?/gi;
+
 export function citedRefs(reason: string): CitedRefs {
+  reason = reason.replace(BASELINE, " ");
   const numbers = new Set<number>();
   for (const match of reason.matchAll(/#(\d{2,7})\b/g)) numbers.add(Number(match[1]));
   for (const match of reason.matchAll(/\b(?:PRs?|issues?|carriers?)\s+(?:n[º°.]\s*)?(\d{3,7})\b/gi)) numbers.add(Number(match[1]));
@@ -61,6 +68,37 @@ export function parseRefState(number: number, output: string): RefState | null {
   if (state !== "open" && state !== "closed") return null;
   if (isPr === "true") return { number, kind: "pr", state: mergedAt ? "merged" : state };
   return { number, kind: "issue", state };
+}
+
+/** GitHub's answers, kept `ttlMs` — a failure too (a 404, no network): a
+ * 1-minute watch whose note names a wrong number would otherwise ask gh 8
+ * times a minute (INSP-U r1 U5). A look-up still running is shared. */
+export class RefLookups {
+  private readonly known = new Map<string, { at: number; state: RefState | null }>();
+  private readonly running = new Map<string, Promise<RefState | null>>();
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+
+  // plain field assignments, not parameter properties (node type-stripping)
+  constructor(ttlMs: number, now: () => number = Date.now) {
+    this.ttlMs = ttlMs;
+    this.now = now;
+  }
+
+  lookup(key: string, ask: () => Promise<RefState | null>): Promise<RefState | null> {
+    const known = this.known.get(key);
+    if (known && this.now() - known.at < this.ttlMs) return Promise.resolve(known.state);
+    const running = this.running.get(key);
+    if (running) return running;
+    const asked = ask().catch(() => null).then((state) => {
+      this.running.delete(key);
+      if (this.known.size >= 500) for (const [each, value] of this.known) if (this.now() - value.at >= this.ttlMs) this.known.delete(each);
+      this.known.set(key, { at: this.now(), state });
+      return state;
+    });
+    this.running.set(key, asked);
+    return asked;
+  }
 }
 
 /** A session the note names, as the server's ledger has it. */

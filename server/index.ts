@@ -454,7 +454,7 @@ import { selectDefaultModelSelection, withNewBotEffort } from "./default-model-s
 import { cancelPeerApprovalsFor, cancelPeerApprovalsForThread, dismissStalePeerCards, peerApprovalFailure, requestPeerApproval, resolvePeerComms, type ApprovalBus } from "./peer-approval.ts";
 import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.ts";
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
-import { citedRefs, parseRefState, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
+import { citedRefs, parseRefState, RefLookups, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
 import { archiveCleanupNote, codexRolloutFolders, diskAlertText, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, STALE_OUTSIDE_TAG_MS, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
@@ -8764,20 +8764,14 @@ function serverItemDetails(item: OwnerPending): { why: string; steps: OwnerPendi
 // sessions in the ledger; the bot reads which are merged, closed or
 // archived right under its note (R10-followup #5: 'prod' still asked to
 // close #9327 and tell sessions archived the day before).
-const REF_STATE_TTL_MS = 10 * 60_000;
-const refStates = new Map<string, { at: number; state: RefState | null }>();
+// an answer and a failure alike (a 404, no network) are kept 10 min (INSP-U r1 U5)
+const refLookups = new RefLookups(10 * 60_000);
 function refState(slug: string, number: number): Promise<RefState | null> {
-  const key = `${slug}#${number}`;
-  const known = refStates.get(key);
-  if (known && Date.now() - known.at < REF_STATE_TTL_MS) return Promise.resolve(known.state);
-  return new Promise((resolve) => {
+  return refLookups.lookup(`${slug}#${number}`, () => new Promise((resolve) => {
     execFileCc("gh", refStateArgs(slug, number), { timeout: 8_000, maxBuffer: 64 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => {
-      const state = error ? null : parseRefState(number, String(stdout));
-      // a failed look-up is retried next firing, an answer is kept a while
-      if (state) refStates.set(key, { at: Date.now(), state });
-      resolve(state);
+      resolve(error ? null : parseRefState(number, String(stdout)));
     });
-  });
+  }));
 }
 
 async function reasonRefsLine(wake: BotWake): Promise<string | null> {
