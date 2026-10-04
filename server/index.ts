@@ -248,6 +248,7 @@ import { openCodeProviderKeysAllowed, setOpenCodeProviderKeyPolicy } from "./dri
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
 import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, toolCallsWith, userTextMessagesWith, digestTimings, oldestDigestAt } from "./message-db.ts";
 import { oldestUsageAt, ProductivityCollector } from "./productivity-collector.ts";
+import { boardEtag, PipelineBoardService } from "./pipeline-board-live.ts";
 import { executiveSummary, exportFileName, reportMarkdown, reportPdf } from "./productivity-export.ts";
 import { exportReadiness, GRANULARITIES, resolveReportPeriod, type Granularity } from "../shared/productivity.ts";
 import { briefCrossingLabel, claimRecallCrossings, recallCrossingLabel } from "./recall-disclosure.ts";
@@ -9910,6 +9911,37 @@ const wireResumeOf = (session: CcSession, now = Date.now()): WireCcSession["resu
   const need = resumeNeeded(held === "parked" ? { ...session, resumeAfterTag: undefined } : session, now);
   return need ? { ...need, ...(held ? { held } : {}) } : null;
 };
+
+// ── "Esteira" (lot Z): the delivery pipeline board ──
+// Built from the productivity collector's cache plus the live state held
+// here (sessions, "Precisa de você", the release hold, the admission lease);
+// the open PRs are read for it through gh, read-only, only when it is asked for.
+const pidAlive = (pid: number) => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+const pipelineBoard = new PipelineBoardService({
+  enabled: productivityEnabled,
+  source: () => productivity.boardSource(),
+  refreshLogs: () => productivity.refreshLogs(),
+  sessions: () => ccLedger.all(),
+  ownerPending: () => autonomy.allOwnerPending(),
+  botNames: () => new Map(store.bots.map((bot) => [bot.id, bot.name])),
+  releaseHold: () => releaseHold.label,
+  admission: () => {
+    const lease = readAdmissionLease();
+    return {
+      lease: lease && pidAlive(Number(lease.ownerPid)) ? { kind: lease.kind, label: lease.label ?? "" } : null,
+      intents: (readReleaseIntents() ?? []).filter((intent) => pidAlive(intent.pid)).map((intent) => intent.label),
+    };
+  },
+  log: (line) => console.log(line),
+});
 
 async function preemptCiForReleaseTick(): Promise<void> {
   if (!DESKTOP_MANAGED || process.env.VITEST || releasePriority.running || Date.now() - releasePriority.lastAt < 20_000) return;
@@ -25581,6 +25613,21 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
       res.setHeader("cache-control", "no-store");
       return json(res, 200, report);
+    }
+
+    // ── "Esteira" (lot Z): where each piece of work stands, stage by stage ──
+    // Read-only, never waits on GitHub; a poll that finds nothing new gets a 304.
+    if (method === "GET" && path === "/api/pipeline-board") {
+      const board = pipelineBoard.board();
+      const etag = boardEtag(board);
+      res.setHeader("cache-control", "no-cache");
+      res.setHeader("etag", etag);
+      if (req.headers["if-none-match"] === etag) {
+        res.writeHead(304);
+        res.end();
+        return;
+      }
+      return json(res, 200, board);
     }
 
     // ── provider key check: does a pasted or saved key open the provider's door ──
