@@ -6,9 +6,10 @@
 // in pt-BR and English.
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { setLocale } from "@/lib/i18n";
-import { boardSummary, DEFAULT_FILTERS, matchesFilters, reasonText, stageAge, visibleCards, type BoardFilters } from "@/lib/pipeline-board";
+import { needsYouKey } from "@/lib/needs-you";
+import { boardSummary, DEFAULT_FILTERS, matchesFilters, OPEN_NEEDS_YOU_EVENT, openNeedsYou, reasonText, stageAge, visibleCards, type BoardFilters } from "@/lib/pipeline-board";
 import { buildPipelineBoard } from "../../server/pipeline-board";
 import { boardInputs, CHIEF, CLIENT_NAMES, MONITOR, NOW } from "../../server/testing/pipeline-board-fixture";
 import type { BoardStage, PipelineBoard } from "../../shared/pipeline-board";
@@ -134,6 +135,21 @@ describe("filters", () => {
 
   it("counts the summary over the whole board", () => {
     expect(boardSummary(board, NOW)).toEqual({ owner: 2, stale: 3, blocked: 1, production: 2 });
+  });
+});
+
+describe("a card's way to 'Precisa de você'", () => {
+  it("names the item by the key the sidebar's resolution screen opens on", () => {
+    const target = new EventTarget();
+    const seen: unknown[] = [];
+    target.addEventListener(OPEN_NEEDS_YOU_EVENT, (event) => seen.push((event as CustomEvent).detail));
+    vi.stubGlobal("window", target);
+    try {
+      openNeedsYou({ botId: MONITOR, threadId: "b5306bef", pendingId: "o14" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(seen).toEqual([{ key: needsYouKey({ botId: MONITOR, threadId: "b5306bef", pendingId: "o14" }) }]);
   });
 });
 

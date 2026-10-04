@@ -72,6 +72,8 @@ describe("the board of 04/10 02:13Z (real records)", () => {
     expect(card(board, "issue:8204").release).not.toHaveProperty("inferred");
     // 9344/9345/9348 merged before 9dbb1dcdd started (02/10 19:21Z), whose content was never read
     expect(card(board, "issue:9334")).toMatchObject({ stage: "production", release: { sha: "9dbb1dcdd", inferred: true, at: 1790979918000 }, prs: [9344, 9345, 9348], issues: [9331, 9334, 9347] });
+    // its link is the PR shipped last (all three by the same release here: the board's order)
+    expect(card(board, "issue:9334").links.pr).toMatch(/\/pull\/93(44|45|48)$/);
   });
 
   it("what waits on the person is in evidence on its card: state owner, the item to open, in Entrada and in Produção alike", () => {

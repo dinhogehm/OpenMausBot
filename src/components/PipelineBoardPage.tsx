@@ -166,7 +166,7 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
         <span className="sr-only">{t("pipeline.card.carriedBy")}</span>
         <span className="text-ink">{card.bot ? card.bot.name ?? card.bot.id.slice(0, 8) : "—"}</span>
         {card.session && (
-          <span className="whitespace-nowrap" title={card.session.title}><span aria-hidden>· </span>{t("pipeline.card.session", { status: t(SESSION_STATUS[card.session.status] ?? "pipeline.card.sessionStatus.idle") })}</span>
+          <Chip title={card.session.title}>{t("pipeline.card.session", { status: t(SESSION_STATUS[card.session.status] ?? "pipeline.card.sessionStatus.idle") })}</Chip>
         )}
       </p>
 

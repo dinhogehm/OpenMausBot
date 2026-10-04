@@ -505,7 +505,8 @@ function buildCard(keys: string[], context: CardContext): BoardCard | null {
   if (owner) state = "owner";
 
   const key = primary !== null ? `issue:${primary}` : leadPr ? `pr:${leadPr.number}` : `session:${sessions[0]?.id ?? keys[0]}`;
-  const linkPr = (stage === "pr" || stage === "gate" ? open[0] : stage === "release" ? waitingRelease[0] : leadPr) ?? null;
+  // the PR the card is about now: the one holding it back, the first waiting, or the last shipped
+  const linkPr = (stage === "pr" || stage === "gate" ? open[0] : stage === "release" ? waitingRelease[0] : stage === "production" ? recentDelivery[0] : leadPr) ?? null;
   return {
     key, stage,
     title: boardTitle(rawTitle, names),
