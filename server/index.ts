@@ -375,7 +375,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
-import { addOwnWorktree, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
+import { addOwnWorktree, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
@@ -9429,7 +9429,7 @@ const nodeVersion = async () => {
 };
 /** A worktree plan nobody has: no folder, no branch, no session (ours, planned ones too, or the app's) ever in it. */
 function ownPlanTaken(repo: string, plan: { path: string; branch: string; dir: string }): boolean {
-  if (existsSync(plan.path) || existsSync(ownLinkPath(DATA_DIR, repo, plan.dir))) return true;
+  if (existsSync(plan.path) || existsSync(ownLinkPath(repo, plan.dir))) return true;
   if (ccLedger.all().some((session) => session.cwd === plan.path || session.desktop?.own?.path === plan.path)) return true;
   if (recordsUsingFolder(plan.path, undefined, undefined, true).length) return true;
   try {
@@ -9460,21 +9460,32 @@ async function prepareOwnWorktree(session: CcSession): Promise<Awaited<ReturnTyp
     ownStore.record({ ...event, mode: "failed", reason: made.error });
     return { ok: false, reason: made.error };
   }
-  const link = ownLinkPath(DATA_DIR, session.repo, dir);
+  // next to the repository (~/Projetos/.omb-worktree-links/…): inside the review hook's scope
+  const link = ownLinkPath(session.repo, dir);
   const linkError = ensureLink(link, own.path);
   if (linkError) {
     const reason = `a worktree foi criada (${own.path}, fica como está), mas não o apelido que o app recebe: ${linkError}`;
     ownStore.record({ ...event, mode: "failed", reason });
     return { ok: false, reason };
   }
-  const caches = await cloneSeedCaches(ownStore.seed(session.repo), own.path, settings.lockfiles, realCloneIo(ownExec, nodeVersion));
-  // origin/main moved past the seed: refresh it on the next pass instead of in 30 min
-  if (caches.mode === "install" && /não é o da semente|Node mudou|nunca instalada/.test(caches.reason ?? "")) ownSeedWatch.due.add(session.repo);
-  ownStore.record({ ...event, mode: caches.mode, ...(caches.reason ? { reason: caches.reason } : {}), ...(caches.mode === "cloned" ? { savedKb: caches.savedKb, savedMs: caches.savedMs, cloneMs: caches.ms } : {}) });
+  // while this clone reads the seed, the seed is not installed again (refreshOwnSeeds waits)
+  ownSeedWatch.cloning += 1;
+  let caches: Awaited<ReturnType<typeof cloneSeedCaches>>;
+  try {
+    caches = await cloneSeedCaches(ownStore.seed(session.repo), own.path, settings.lockfiles, realCloneIo(ownExec, nodeVersion));
+  } finally {
+    ownSeedWatch.cloning -= 1;
+  }
+  // origin/main moved past the seed (or its hooks are missing): refresh it on the next pass instead of in 30 min
+  if (caches.mode === "install" && /não é o da semente|Node mudou|nunca instalada|hooks do git/.test(caches.reason ?? "")) ownSeedWatch.due.add(session.repo);
+  // made again after a restart: counted once
+  if (!ownStore.allEvents().some((each) => each.path === own.path && each.mode === caches.mode)) {
+    ownStore.record({ ...event, mode: caches.mode, ...(caches.reason ? { reason: caches.reason } : {}), ...(caches.mode === "cloned" ? { savedKb: caches.savedKb, savedMs: caches.savedMs, cloneMs: caches.ms } : {}) });
+  }
   if (caches.mode === "cloned") console.log(`[own-worktrees] ${own.path}: ${caches.dirs.join(", ")} cloned in ${Math.round(caches.ms / 1000)} s, sparing ${savedText(caches.savedKb, caches.savedMs)}`);
   return {
     ok: true, head: made.head, link,
-    caches: { mode: caches.mode, ...(caches.reason ? { reason: caches.reason } : {}), dirs: caches.dirs, savedKb: caches.savedKb, savedMs: caches.savedMs, ms: caches.ms },
+    caches: { mode: caches.mode, ...(caches.reason ? { reason: caches.reason } : {}), dirs: caches.dirs, savedKb: caches.savedKb, savedMs: caches.savedMs, ms: caches.ms, install: caches.install, ...(caches.hooks ? { hooks: caches.hooks } : {}) },
     ...(made.fetchError ? { fetchError: made.fetchError } : {}),
   };
 }
@@ -9482,9 +9493,10 @@ const ownPrepareState = { preparing: false };
 /** The seeds of the repositories whose app sessions open in worktrees of the
  * server's: checked every `seedEveryMs` (sooner when a clone met a seed
  * behind origin/main), one at a time, never with a release on its way. */
-const ownSeedWatch = { running: false, due: new Set<string>() };
+const ownSeedWatch = { running: false, cloning: 0, due: new Set<string>() };
 async function refreshOwnSeeds(): Promise<void> {
-  if (ownSeedWatch.running || process.platform !== "darwin") return;
+  // a clone reading a seed now: no seed changes until it is done
+  if (ownSeedWatch.running || ownSeedWatch.cloning || process.platform !== "darwin") return;
   const now = Date.now();
   // the repositories the app sessions of the last 30 days worked in
   const repos = [...new Set(ccLedger.all().filter((session) => session.surface === "app" && now - session.createdAt < 30 * 86_400_000).map((session) => session.repo))];
@@ -9515,7 +9527,11 @@ async function refreshOwnSeeds(): Promise<void> {
       node: nodeVersion,
       log: (line) => console.log(`[own-worktrees] ${line}`),
       save: (seed) => ownStore.setSeed(seed),
+      mayInstall: () => (ownSeedWatch.cloning ? "uma worktree está sendo clonada da semente agora; tento de novo em seguida" : null),
+      hooks: (folder) => hooksFolder(folder, ownExec),
     }, repoBaseBranch(repo));
+    // held by a clone that started meanwhile: once it is done, not in half an hour
+    if (/sendo clonada/.test(ownStore.seed(repo)?.reason ?? "")) ownSeedWatch.due.add(repo);
   } finally {
     ownSeedWatch.running = false;
   }
@@ -10215,8 +10231,10 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     // (lote X): the app's last folder, and the worktree it would reuse, do
     // not matter then — no 409 for them. Should the app not open there, the
     // create goes on through New Session, checked as below at that moment.
+    // the repository's real path: the brief's folder check compares `pwd -P` with it
+    const realRepo = (() => { try { return realpathSync(input.repo); } catch { return input.repo; } })();
     const ownPlan = ownWorktreesOn(input.repo)
-      ? planOwnWorktree(input.repo, { title: input.title, issue: issueNumber(input.title, input.brief), sessionId: appId }, (plan) => ownPlanTaken(input.repo, plan))
+      ? planOwnWorktree(realRepo, { title: input.title, issue: issueNumber(input.title, input.brief), sessionId: appId }, (plan) => ownPlanTaken(realRepo, plan))
       : null;
     // New Session in the app opens in the folder of its latest
     // session; another repository cannot be picked from here. Say so
@@ -10234,7 +10252,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
         : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(input.repo), fromQueue) : rootFolderRefusal(block.last, basename(input.repo), fromQueue);
       return { status: 409, body: { error: `${refusal}${asked ? ` O pedido ao dono já está em "Precisa de você" (${asked}): não abra outro item para isso.` : ""}` }, retry: fromQueue };
     }
-    const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
+    const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: ownPlan ? realRepo : input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
     if (replyThreadId !== threadId) session.replyThreadId = replyThreadId;
     const issue = issueNumber(input.title, input.brief);
     if (issue) session.desktop!.issue = issue;

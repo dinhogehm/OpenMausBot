@@ -23,15 +23,15 @@
 // server only reports. A failed clone takes back only the temporary copy it
 // was writing, inside the new worktree, before any session saw it.
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, symlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { slugify } from "./cc-sessions.ts";
 
 /** Where the seed lives, inside the repository (`.claude/*` is ignored there). */
 export const SEED_DIR = ".claude/omb-seed";
-/** The folders the app is given: aliases outside `.claude/worktrees/` (see ownLinkPath). */
-export const OWN_LINK_DIR = "worktree-links";
+/** The folders the app is given: aliases next to the repository, outside `.claude/worktrees/` (see ownLinkPath). */
+export const OWN_LINK_DIR = ".omb-worktree-links";
 /** What the seed's lock says, so `git worktree list` tells a person why it is there. */
 export const SEED_LOCK_REASON = "OpenMausBot: semente das dependências das worktrees novas; não remover";
 
@@ -43,8 +43,8 @@ export interface OwnWorktreeSettings {
   extraDirs: string[];
   /** The lockfiles compared, in order: the first the repository has counts. */
   lockfiles: string[];
-  /** How the seed installs (run with nice in the seed). */
-  install: string[];
+  /** How the seed installs (run with nice in the seed); unset: by the lockfile (installFor). */
+  install?: string[];
   /** The seed is not installed with less free space than this. */
   minFreeGiB: number;
   /** How often the seed is checked against origin/main. */
@@ -54,12 +54,26 @@ export interface OwnWorktreeSettings {
 export const OWN_DEFAULTS: OwnWorktreeSettings = {
   enabled: true,
   cacheNames: ["node_modules"],
-  extraDirs: [],
+  // husky 9 writes its hook shims there on install (ignored by git); git's
+  // core.hooksPath points at it, so a worktree without it runs NO hooks
+  extraDirs: [".husky/_"],
   lockfiles: ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"],
-  install: ["npm", "ci", "--no-audit", "--no-fund"],
   minFreeGiB: 10,
   seedEveryMs: 30 * 60_000,
 };
+
+/** The repository's own install, by its lockfile: npm ci for npm, pnpm and
+ * yarn with the lockfile frozen (never npm ci in a pnpm repository). */
+export function installFor(lockName: string | undefined, settings: Pick<OwnWorktreeSettings, "install"> = {}): string[] {
+  if (settings.install) return settings.install;
+  if (lockName === "pnpm-lock.yaml") return ["pnpm", "install", "--frozen-lockfile"];
+  if (lockName === "yarn.lock") return ["yarn", "install", "--frozen-lockfile"];
+  return ["npm", "ci", "--no-audit", "--no-fund"];
+}
+
+/** The install as a session is told to run it ("npm ci", "pnpm install --frozen-lockfile"). */
+export const installText = (lockName: string | undefined, settings: Pick<OwnWorktreeSettings, "install"> = {}) =>
+  installFor(lockName, settings).filter((arg) => arg !== "--no-audit" && arg !== "--no-fund").join(" ");
 
 const strings = (value: unknown): string[] | null => (Array.isArray(value) && value.every((item) => typeof item === "string" && item.trim()) ? value.map((item: string) => item.trim()) : null);
 const safeRelative = (path: string) => !path.startsWith("/") && !path.split("/").includes("..");
@@ -138,6 +152,15 @@ export async function addOwnWorktree(repo: string, plan: OwnPlan, exec: Exec, ba
   } catch (error) {
     fetchError = failureText(error);
   }
+  // made already by this very plan (the server stopped right after): go on with it
+  try {
+    const branch = (await exec("git", ["-C", plan.path, "rev-parse", "--abbrev-ref", "HEAD"], { timeoutMs: 30_000 })).trim();
+    const top = (await exec("git", ["-C", plan.path, "rev-parse", "--show-toplevel"], { timeoutMs: 30_000 })).trim();
+    if (branch === plan.branch && top === plan.path) {
+      const head = (await exec("git", ["-C", plan.path, "rev-parse", "HEAD"], { timeoutMs: 30_000 })).trim();
+      return { ok: true, head, ...(fetchError ? { fetchError } : {}) };
+    }
+  } catch { /* not there yet */ }
   try {
     await exec("git", ["-C", repo, "worktree", "add", "--no-track", "-b", plan.branch, plan.path, `origin/${baseBranch}`], { timeoutMs: 300_000 });
     const head = (await exec("git", ["-C", plan.path, "rev-parse", "HEAD"], { timeoutMs: 30_000 })).trim();
@@ -147,11 +170,31 @@ export async function addOwnWorktree(repo: string, plan: OwnPlan, exec: Exec, ba
   }
 }
 
-/** The alias the app is given for a worktree. The app's link
- * claude://code/new?folder=… maps any folder inside `.claude/worktrees/`
- * back to its repository root (Claude 2.19675, `vIn`), which would put the
- * session in the main checkout; an alias outside it keeps the folder. */
-export const ownLinkPath = (dataDir: string, repo: string, dir: string) => join(dataDir, OWN_LINK_DIR, basename(repo), dir);
+/** The alias the app is given for a worktree:
+ * `<repo's parent>/.omb-worktree-links/<repo>/<dir>` (~/Projetos/… for
+ * nuria-platform). Two rules place it:
+ * - the app's link claude://code/new?folder=… maps any folder inside
+ *   `.claude/worktrees/` back to its repository root (appLinkFolder), which
+ *   would put the session in the main checkout, so it lives outside that;
+ * - next to the repository, so a cwd the app reports through the alias is
+ *   still under ~/Projetos, where the review hook (~/.laya, dual-review.cjs:
+ *   `cwd.startsWith(~/Projetos/)`) reviews every command — never in the data
+ *   dir, which that hook would treat as out of scope (INSP-X r1 X1-2). */
+export const ownLinkPath = (repo: string, dir: string) => join(dirname(repo), OWN_LINK_DIR, basename(repo), dir);
+
+/** The folder the Claude app opens for claude://code/new?folder=<path>: its
+ * own rule, copied from Claude 2.19675 (app.asar, .vite/build/
+ * index.chunk-BZdcw7TE.js, `vIn`, used as `vIn(e)??e`): a path with a
+ * `.claude/worktrees/<something>` segment pair (case folded) becomes the
+ * folder before `.claude`. */
+export function appLinkFolder(path: string): string {
+  if (!path.startsWith("/")) return path;
+  const parts = path.split("/");
+  for (let i = 1; i + 2 < parts.length; i++) {
+    if (parts[i]!.toLowerCase() === ".claude" && parts[i + 1]!.toLowerCase() === "worktrees") return parts.slice(0, i).join("/") || "/";
+  }
+  return path;
+}
 
 /** Make (or keep) the alias `link` → `target`. Null when done, else why not. */
 export function ensureLink(link: string, target: string): string | null {
@@ -200,6 +243,12 @@ export interface SeedState {
   /** How long the seed's install took: what each clone spares a session. */
   installMs?: number;
   checkedAt?: number;
+  /** Where git looks for hooks, relative to the seed, when that is inside the
+   * checkout (".husky/_", made by the install): cloned with the caches. */
+  hooks?: string;
+  /** An install that left no hooks is not tried again before this, for the same lockfile. */
+  retryAfter?: number;
+  failedLock?: string;
 }
 
 export const lockHash = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 16);
@@ -208,13 +257,46 @@ export interface CloneOutcome {
   mode: "cloned" | "install";
   /** Why the caches were not cloned (pt-BR). */
   reason?: string;
-  /** The folders cloned, relative to the repository. */
+  /** The folders cloned (or found cloned already, after a restart), relative to the repository. */
   dirs: string[];
   /** What a full copy (or an install) would have written, in KiB. */
   savedKb: number;
   /** The seed's install time each clone spares, in ms. */
   savedMs: number;
   ms: number;
+  /** The repository's own install, as the session is told to run it ("npm ci", "pnpm install --frozen-lockfile"). */
+  install: string;
+  /** The hooks folder found in the worktree and checked against the main checkout's, when cloned. */
+  hooks?: string;
+}
+
+/** Where git looks for hooks in `folder` (absolute), or null. */
+export async function hooksFolder(folder: string, exec: Exec): Promise<string | null> {
+  try {
+    return (await exec("git", ["-C", folder, "rev-parse", "--path-format=absolute", "--git-path", "hooks"], { timeoutMs: 30_000 })).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Why the worktree's git hooks are not the main checkout's (pt-BR), or null
+ * when they are: the folder git looks in exists, and has every hook the main
+ * checkout has. A hooks folder made by the install (husky 9's `.husky/_`,
+ * ignored by git) that did not come with the clone leaves the worktree with
+ * no hooks at all, silently (INSP-X r1 X1-1). */
+export async function hooksProblem(worktree: string, repo: string, io: Pick<CloneIo, "hooks" | "listDir" | "realpath">): Promise<{ problem: string } | { folder: string }> {
+  const here = await io.hooks(worktree);
+  if (!here) return { problem: "não consegui ler onde ficam os hooks do git desta worktree" };
+  const roots = [worktree, io.realpath(worktree)];
+  const root = roots.find((each) => here.startsWith(`${each}/`));
+  const name = root ? here.slice(root.length + 1) : here;
+  const list = io.listDir(here);
+  if (root && list === null) return { problem: `os hooks do git (${name}) não vieram com o clone: sem eles nenhum hook roda nesta worktree` };
+  const main = await io.hooks(repo);
+  const mainList = main ? io.listDir(main) : null;
+  const missing = (mainList ?? []).filter((hook) => !(list ?? []).includes(hook));
+  if (missing.length) return { problem: `faltam hooks do git em ${name} (${missing.slice(0, 5).join(", ")}), que o checkout principal tem` };
+  return { folder: name };
 }
 
 export interface CloneIo {
@@ -232,6 +314,15 @@ export interface CloneIo {
   dropTemp: (path: string) => void;
   /** `node --version` now, or null. */
   node: () => Promise<string | null>;
+  /** Where git looks for hooks in a folder (hooksFolder). */
+  hooks: (folder: string) => Promise<string | null>;
+  /** A folder's entries, or null when it is not there. */
+  listDir: (path: string) => string[] | null;
+  realpath: (path: string) => string;
+  /** A file inside a cache folder (relative) to tell a clone of it by its blocks, or null. */
+  sample: (dir: string) => string | null;
+  /** Whether two files share their blocks (one is a clone of the other); null when it cannot be told. */
+  sameBlocks: (a: string, b: string) => Promise<boolean | null>;
 }
 
 /** The first of `lockfiles` the folder has: its name and hash. */
@@ -247,15 +338,22 @@ const CLONE_PROBE = ".omb-clone-probe";
 
 /** Clone the seed's caches into a new worktree, or say why not (then the
  * session installs them as before). Each folder is cloned to a temporary
- * name and renamed once whole, so a session never sees half a node_modules. */
+ * name and renamed once whole, so a session never sees half a node_modules.
+ * A folder already there that shares its blocks with the seed's is a clone
+ * a stopped server made: counted, never redone nor installed over. The
+ * clone counts only when the worktree then has the main checkout's git
+ * hooks; otherwise the session installs (the install makes them). */
 export async function cloneSeedCaches(seed: SeedState | undefined, worktree: string, lockfiles: readonly string[], io: CloneIo): Promise<CloneOutcome> {
   const started = io.now();
-  const fallback = (reason: string): CloneOutcome => ({ mode: "install", reason, dirs: [], savedKb: 0, savedMs: 0, ms: io.now() - started });
+  const lock = lockOf(worktree, lockfiles, io.readFile);
+  // what the session runs is the repository's own install, by its lockfile (a setting only changes how the seed installs)
+  const install = installText(lock?.name ?? seed?.lockName);
+  const fallback = (reason: string): CloneOutcome => ({ mode: "install", reason, dirs: [], savedKb: 0, savedMs: 0, ms: io.now() - started, install });
   if (!seed || seed.state !== "ready" || !seed.lockHash || !seed.dirs?.length) {
     return fallback(`a semente de dependências ainda não está pronta (${seed ? seed.reason ?? seed.state : "nunca instalada"})`);
   }
-  const lock = lockOf(worktree, lockfiles, io.readFile);
   if (!lock) return fallback(`a branch não tem lockfile (${lockfiles.join(", ")})`);
+  if (seed.hooks && !seed.dirs.some((dir) => dir.path === seed.hooks)) return fallback(`a semente não tem os hooks do git (${seed.hooks}) entre as pastas que clona`);
   if (lock.name !== seed.lockName || lock.hash !== seed.lockHash) {
     return fallback(`o ${lock.name} desta branch (${lock.hash.slice(0, 8)}) não é o da semente (${seed.lockName ?? "?"} ${seed.lockHash.slice(0, 8)}): a semente é de outro commit de origin/main`);
   }
@@ -275,8 +373,18 @@ export async function cloneSeedCaches(seed: SeedState | undefined, worktree: str
   for (const dir of seed.dirs) {
     const target = join(worktree, dir.path);
     if (!io.exists(dirname(target))) continue; // a workspace this branch does not have
-    if (io.exists(target)) continue; // never over what is there
+    if (io.exists(target)) {
+      // never over what is there; a clone of the seed (same blocks) counts as done
+      const sample = io.sample(join(seed.path, dir.path));
+      if (sample && (await io.sameBlocks(join(seed.path, dir.path, sample), join(target, sample))) === true) {
+        cloned.push(dir.path);
+        savedKb += dir.kb;
+      }
+      continue;
+    }
     const temp = `${target}.omb-clone`;
+    // a copy a stopped server left half made: cp -R into it would nest
+    io.dropTemp(temp);
     try {
       await io.exec("/usr/bin/nice", ["-n", "10", "/bin/cp", "-c", "-R", join(seed.path, dir.path), temp], { timeoutMs: 15 * 60_000 });
       io.rename(temp, target);
@@ -288,7 +396,10 @@ export async function cloneSeedCaches(seed: SeedState | undefined, worktree: str
     savedKb += dir.kb;
   }
   if (!cloned.length) return fallback("nenhuma pasta de dependências da semente cabe nesta branch");
-  return { mode: "cloned", dirs: cloned, savedKb, savedMs: seed.installMs ?? 0, ms: io.now() - started };
+  // the hooks git runs here must be the main checkout's: or the session installs (which makes them)
+  const hooks = await hooksProblem(worktree, seed.repo, io);
+  if ("problem" in hooks) return { ...fallback(hooks.problem), dirs: cloned };
+  return { mode: "cloned", dirs: cloned, savedKb, savedMs: seed.installMs ?? 0, ms: io.now() - started, install, hooks: hooks.folder };
 }
 
 /** The cache folders of a checkout: every folder named in `names` up to
@@ -327,16 +438,36 @@ export interface SeedDeps {
   node: () => Promise<string | null>;
   log: (line: string) => void;
   save: (seed: SeedState) => void;
+  /** Why the seed may not change now (a worktree being cloned from it), or null. */
+  mayInstall?: () => string | null;
+  /** Where git looks for hooks in a folder (hooksFolder). */
+  hooks: (folder: string) => Promise<string | null>;
   /** How often a running install looks for a release that started meanwhile. */
   pollMs?: number;
 }
 
 const GIB = 1024 ** 3;
+/** An install that left no git hooks is tried again after this (same lockfile): HUSKY=0 does not pass by itself. */
+export const SEED_HOOKS_RETRY_MS = 6 * 3_600_000;
+
+/** The seed's hooks folder relative to it, when git keeps hooks inside the
+ * checkout (husky's `.husky/_`); undefined when they are shared (.git/hooks). */
+async function seedHooks(path: string, deps: Pick<SeedDeps, "hooks">): Promise<string | undefined> {
+  const found = await deps.hooks(path);
+  if (!found) return undefined;
+  for (const root of [path, (() => { try { return realpathSync(path); } catch { return path; } })()]) {
+    if (found.startsWith(`${root}/`)) return found.slice(root.length + 1);
+  }
+  return undefined;
+}
 
 /** Bring the seed of `repo` to origin/<base>: made the first time (a locked,
  * detached worktree), installed again only when origin/<base>'s lockfile
- * (or the Node) is not the one installed. Never with a release on its way,
- * never on a nearly full disk; an install a release meets is stopped. */
+ * (or the Node) is not the one installed, or its git hooks are missing.
+ * Never with a release on its way, never on a nearly full disk; an install
+ * a release meets is stopped. An install that leaves no hooks (HUSKY=0, a
+ * failed prepare) makes the seed unusable: clones from it would run no
+ * hooks. A ready seed from an older build is brought to today's folders. */
 export async function refreshSeed(repo: string, settings: OwnWorktreeSettings, previous: SeedState | undefined, deps: SeedDeps, baseBranch = "main"): Promise<SeedState> {
   const path = join(repo, SEED_DIR);
   let seed: SeedState = { ...(previous ?? { repo, path, state: "missing" as const }), repo, path, checkedAt: deps.now() };
@@ -365,12 +496,39 @@ export async function refreshSeed(repo: string, settings: OwnWorktreeSettings, p
   }
   if (!wanted) return keep("failed", `origin/${baseBranch} não tem lockfile (${settings.lockfiles.join(", ")})`);
   const node = await deps.node();
-  const fresh = previous?.state === "ready" && previous.lockName === wanted.name && previous.lockHash === wanted.hash && previous.node === node && deps.exists(join(path, ".git"));
-  if (fresh) return keep("ready");
+  const install = installFor(wanted.name, settings);
+  const same = previous?.lockName === wanted.name && previous.lockHash === wanted.hash && previous.node === node && deps.exists(join(path, ".git"));
+  if (same && previous?.state === "ready") {
+    // ready for this lockfile: its hooks must still be there, and its folders today's (an older build listed fewer)
+    const hooks = await seedHooks(path, deps);
+    if (!hooks || deps.exists(join(path, hooks))) {
+      const known = new Set((previous.dirs ?? []).map((dir) => dir.path));
+      const wantedDirs = [...new Set([...deps.findDirs(path, settings), ...(hooks ? [hooks] : [])])];
+      const added = wantedDirs.filter((dir) => !known.has(dir));
+      if (added.length || previous.hooks !== hooks) {
+        const dirs = [...(previous.dirs ?? [])];
+        for (const dir of added) dirs.push({ path: dir, kb: (await deps.sizeKb(join(path, dir))) ?? 0 });
+        seed = { ...seed, dirs, ...(hooks ? { hooks } : {}) };
+        if (!hooks) delete seed.hooks;
+        deps.log(`seed of ${repo}: brought to today's folders (${added.join(", ") || "hooks"})`);
+      }
+      return keep("ready");
+    }
+    deps.log(`seed of ${repo}: its git hooks (${hooks}) are gone; installing again`);
+  }
+  // an install that left no hooks, for this very lockfile: not every 30 min
+  if (previous?.state === "failed" && previous.failedLock === wanted.hash && (previous.retryAfter ?? 0) > deps.now()) return keep("failed", previous.reason);
   const free = deps.freeBytes(repo);
   if (free !== null && free < settings.minFreeGiB * GIB) {
     return keep("waiting", `só ${(free / GIB).toFixed(1).replace(".", ",")} GiB livres; instalo a semente com ${settings.minFreeGiB} GiB ou mais`);
   }
+  const held = deps.mayInstall?.() ?? null;
+  if (held) return keep("waiting", held);
+  // from here on no clone is taken from it (its folders are about to change),
+  // said before the first await so a clone starting meanwhile sees it
+  seed = { ...seed, state: "installing", reason: `instalando ${wanted.name} ${wanted.hash.slice(0, 8)}` };
+  delete seed.dirs;
+  deps.save(seed);
   try {
     if (!deps.exists(join(path, ".git"))) {
       await deps.exec("git", ["-C", repo, "worktree", "add", "--detach", path, `origin/${baseBranch}`], { timeoutMs: 300_000 });
@@ -384,10 +542,6 @@ export async function refreshSeed(repo: string, settings: OwnWorktreeSettings, p
   } catch (error) {
     return keep("failed", `não consegui preparar ${path}: ${failureText(error)}`);
   }
-  // installing now: until it ends, no clone is taken from a half-made node_modules
-  seed = { ...seed, state: "installing", reason: `instalando ${wanted.name} ${wanted.hash.slice(0, 8)}` };
-  delete seed.dirs;
-  deps.save(seed);
   const controller = new AbortController();
   let stoppedFor: string | null = null;
   const watch = setInterval(() => {
@@ -400,23 +554,32 @@ export async function refreshSeed(repo: string, settings: OwnWorktreeSettings, p
   }, deps.pollMs ?? 30_000);
   const started = deps.now();
   try {
-    deps.log(`seed of ${repo}: ${settings.install.join(" ")} (nice) for ${wanted.name} ${wanted.hash.slice(0, 8)}`);
-    await deps.exec("/usr/bin/nice", ["-n", "15", ...settings.install], { cwd: path, timeoutMs: 45 * 60_000, signal: controller.signal });
+    deps.log(`seed of ${repo}: ${install.join(" ")} (nice) for ${wanted.name} ${wanted.hash.slice(0, 8)}`);
+    await deps.exec("/usr/bin/nice", ["-n", "15", ...install], { cwd: path, timeoutMs: 45 * 60_000, signal: controller.signal });
   } catch (error) {
     clearInterval(watch);
     if (stoppedFor) return keep("interrupted", `parei a instalação da semente: um release começou (${stoppedFor}); volto depois dele`);
-    return keep("failed", `${settings.install.join(" ")} falhou na semente: ${failureText(error)}`);
+    return keep("failed", `${install.join(" ")} falhou na semente: ${failureText(error)}`);
   }
   clearInterval(watch);
   if (stoppedFor) return keep("interrupted", `parei a instalação da semente: um release começou (${stoppedFor}); volto depois dele`);
   const installed = lockOf(path, settings.lockfiles, deps.readFile);
+  // where git looks for hooks there, when the install is what makes them (husky's .husky/_)
+  const hooks = await seedHooks(path, deps);
+  if (hooks && !deps.exists(join(path, hooks))) {
+    seed = { ...seed, failedLock: wanted.hash, retryAfter: deps.now() + SEED_HOOKS_RETRY_MS };
+    return keep("failed", `${install.join(" ")} terminou sem criar os hooks do git (${hooks}) — HUSKY=0 ou o prepare falhou; a semente não serve, porque as worktrees clonadas dela não rodariam hook nenhum. Tento de novo em ${SEED_HOOKS_RETRY_MS / 3_600_000} h ou quando o lockfile mudar`);
+  }
   const dirs: Array<{ path: string; kb: number }> = [];
-  for (const dir of deps.findDirs(path, settings)) dirs.push({ path: dir, kb: (await deps.sizeKb(join(path, dir))) ?? 0 });
+  for (const dir of new Set([...deps.findDirs(path, settings), ...(hooks ? [hooks] : [])])) dirs.push({ path: dir, kb: (await deps.sizeKb(join(path, dir))) ?? 0 });
   let head: string | undefined;
   try { head = (await deps.exec("git", ["-C", path, "rev-parse", "HEAD"], { timeoutMs: 30_000 })).trim(); } catch { /* unknown */ }
   if (!installed || !dirs.length) return keep("failed", !installed ? "a semente ficou sem lockfile depois de instalar" : "a instalação não deixou nenhuma pasta de dependências na semente");
-  seed = { ...seed, state: "ready", lockName: installed.name, lockHash: installed.hash, ...(node ? { node } : {}), ...(head ? { head } : {}), dirs, installedAt: deps.now(), installMs: deps.now() - started };
+  seed = { ...seed, state: "ready", lockName: installed.name, lockHash: installed.hash, ...(node ? { node } : {}), ...(head ? { head } : {}), dirs, ...(hooks ? { hooks } : {}), installedAt: deps.now(), installMs: deps.now() - started };
+  if (!hooks) delete seed.hooks;
   delete seed.reason;
+  delete seed.retryAfter;
+  delete seed.failedLock;
   deps.save(seed);
   deps.log(`seed of ${repo}: ready at ${head?.slice(0, 9) ?? "?"} (${installed.name} ${installed.hash.slice(0, 8)}, ${dirs.length} folder(s), ${Math.round(dirs.reduce((sum, dir) => sum + dir.kb, 0) / 1024)} MiB, ${Math.round((seed.installMs ?? 0) / 1000)} s)`);
   return seed;
@@ -466,7 +629,34 @@ export function realCloneIo(exec: Exec, node: () => Promise<string | null>): Clo
     rename: renameSync,
     dropTemp: (path) => rmSync(path, { recursive: true, force: true }),
     node,
+    hooks: (folder) => hooksFolder(folder, exec),
+    listDir: (path) => { try { return readdirSync(path); } catch { return null; } },
+    realpath: (path) => { try { return realpathSync(path); } catch { return path; } },
+    sample: (dir) => sampleFile(dir),
+    sameBlocks: async (a, b) => {
+      const [from, to] = [await physicalOffset(a, exec), await physicalOffset(b, exec)];
+      return from && to ? from === to : null;
+    },
   };
+}
+
+/** A regular file of a cache folder to compare blocks with (npm's
+ * `.package-lock.json` first), found within a few levels; relative, or null. */
+export function sampleFile(dir: string): string | null {
+  const isFile = (path: string) => { try { return lstatSync(path).isFile(); } catch { return false; } };
+  if (isFile(join(dir, ".package-lock.json"))) return ".package-lock.json";
+  const queue: Array<{ rel: string; depth: number }> = [{ rel: "", depth: 0 }];
+  for (let seen = 0; queue.length && seen < 200; seen++) {
+    const { rel, depth } = queue.shift()!;
+    let names: string[];
+    try { names = readdirSync(rel ? join(dir, rel) : dir).sort(); } catch { continue; }
+    for (const name of names) {
+      const path = rel ? `${rel}/${name}` : name;
+      if (isFile(join(dir, path))) return path;
+    }
+    if (depth < 4) for (const name of names) queue.push({ rel: rel ? `${rel}/${name}` : name, depth: depth + 1 });
+  }
+  return null;
 }
 
 /** The real filesystem side of findCacheDirs. */
@@ -478,11 +668,14 @@ export const realDirFs = {
 // ── what each session's brief is told ─────────────────────────────────────
 
 /** The line about dependencies in the brief of a session in its own worktree. */
-export function cacheLine(outcome: Pick<CloneOutcome, "mode" | "reason"> & { dirs?: string[] }): string {
-  if (outcome.mode === "cloned") {
-    return `As dependências já estão instaladas nesta worktree: ${(outcome.dirs ?? []).join(", ")} foram clonadas de uma cópia atualizada de origin/main, com o mesmo lockfile. Não rode npm ci nem npm install no começo; só rode se um comando falhar por dependência faltando.`;
+export function cacheLine(outcome: Pick<CloneOutcome, "mode" | "reason"> & { dirs?: string[]; install?: string; hooks?: string }): string {
+  const install = outcome.install ?? "npm ci";
+  // "não instale" only with the hooks checked: a clone without them is an install (cloneSeedCaches)
+  if (outcome.mode === "cloned" && outcome.hooks) {
+    return `As dependências já estão instaladas nesta worktree: ${(outcome.dirs ?? []).join(", ")} foram clonadas de uma cópia atualizada de origin/main, com o mesmo lockfile, e os hooks do git (${outcome.hooks}) foram conferidos com os do checkout principal. Não rode \`${install}\` no começo; só rode se um comando falhar por dependência faltando.`;
   }
-  return `As dependências NÃO foram clonadas (${outcome.reason ?? "motivo desconhecido"}): rode \`npm ci\` nesta worktree antes de testar ou buildar.`;
+  const why = outcome.mode === "cloned" ? "os hooks do git não foram conferidos" : outcome.reason ?? "motivo desconhecido";
+  return `As dependências NÃO foram clonadas (${why}): rode \`${install}\` nesta worktree antes de testar, buildar ou commitar — ele também instala os hooks do git.`;
 }
 
 // ── what was saved: the ledger behind the metrics and the report ──────────

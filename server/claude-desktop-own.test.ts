@@ -26,7 +26,7 @@ beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); });
 afterEach(() => { vi.useRealTimers(); });
 
 const FOLDER = "9353-comprar-assentos";
-const LINK = `/Users/o/.openmausbot/worktree-links/nuria-platform/${FOLDER}`;
+const LINK = `/Users/o/Projetos/.omb-worktree-links/nuria-platform/${FOLDER}`;
 
 /** A fake app: each OCR shows the next screen (the last one stays). */
 function fakeApp(screens: string[][], opts: { idle?: number; front?: string } = {}) {
@@ -118,7 +118,7 @@ describe("the app's records of a session opened through the alias", () => {
     const repo = join(home, "Projetos", "nuria-platform");
     const worktree = join(repo, ".claude", "worktrees", FOLDER);
     mkdirSync(worktree, { recursive: true });
-    const link = join(home, ".openmausbot", "worktree-links", "nuria-platform", FOLDER);
+    const link = join(home, "Projetos", ".omb-worktree-links", "nuria-platform", FOLDER);
     mkdirSync(join(link, ".."), { recursive: true });
     symlinkSync(worktree, link);
     const sessions = join(home, "sessions");

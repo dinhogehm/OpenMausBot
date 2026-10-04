@@ -393,7 +393,7 @@ export function worktreeLines(report: ProductivityReport): string[] {
   const lines = ["", "## Worktrees criadas pelo OMB (clone APFS)", ""];
   if (!w.created && !w.failed) lines.push("Nenhuma worktree criada pelo servidor no período.");
   else {
-    lines.push(`- Criadas: ${formatNumber(w.created)}; com dependências clonadas da semente: ${formatNumber(w.cloned)}; a sessão instalou (npm ci): ${formatNumber(w.installed)}${w.failed ? `; não criadas: ${formatNumber(w.failed)}` : ""}`);
+    lines.push(`- Criadas: ${formatNumber(w.created)}; com dependências clonadas da semente: ${formatNumber(w.cloned)}; a sessão instalou (npm ci, pnpm install…): ${formatNumber(w.installed)}${w.failed ? `; não criadas: ${formatNumber(w.failed)}` : ""}`);
     lines.push(`- Economia dos clones: ${size(w.savedKb)} que não foram gravados em disco e ${formatDuration(w.savedMs)} de instalação poupados (o tempo do npm ci da semente, por clone)`);
     for (const each of w.reasons.slice(0, 5)) lines.push(`- Sem clone, ${formatNumber(each.count)}×: ${md(each.reason)}`);
   }

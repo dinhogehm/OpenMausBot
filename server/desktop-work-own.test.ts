@@ -23,7 +23,7 @@ import {
 
 const REPO = "/Users/o/Projetos/nuria-platform";
 const PATH = `${REPO}/.claude/worktrees/9353-comprar-assentos`;
-const LINK = "/Users/o/.openmausbot/worktree-links/nuria-platform/9353-comprar-assentos";
+const LINK = "/Users/o/Projetos/.omb-worktree-links/nuria-platform/9353-comprar-assentos";
 const LOCAL = "local_0a000009-0000-4000-8000-000000000000";
 
 function harness(prepare?: OwnWorktreeDeps["prepare"], blocked: string | null = null) {

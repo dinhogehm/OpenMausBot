@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
+  appLinkFolder, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
 } from "./own-worktrees.ts";
 import { worktreeLines } from "./productivity-export.ts";
@@ -74,6 +74,12 @@ function cloneWorld(over: Partial<CloneIo> = {}, files: Record<string, string> =
     rename: (from, to) => { renamed.push(`${from} -> ${to}`); present.add(to); },
     dropTemp: (path) => { dropped.push(path); },
     node: async () => "v22.19.0",
+    // husky-style hooks inside each checkout; the worktree's came with the clone when node_modules did
+    hooks: async (folder) => `${folder}/.husky/_`,
+    listDir: (path) => (path === `${REPO}/.husky/_` || present.has(`${REPO}/.claude/worktrees/w/node_modules`) ? ["pre-commit", "pre-push", "h"] : null),
+    realpath: (path) => path,
+    sample: () => ".package-lock.json",
+    sameBlocks: async () => false,
     ...over,
   };
   return { io, seed, calls, renamed, dropped, present, worktree: `${REPO}/.claude/worktrees/w` };
@@ -83,14 +89,14 @@ describe("cloning the seed's caches", () => {
   it("clones each folder with nice + cp -c -R to a temporary name, renames it whole, and counts what it saved", async () => {
     const w = cloneWorld();
     const out = await cloneSeedCaches(w.seed, w.worktree, OWN_DEFAULTS.lockfiles, w.io);
-    expect(out).toMatchObject({ mode: "cloned", dirs: ["node_modules", "web/node_modules"], savedKb: 1_500_000, savedMs: 14 * 60_000 });
+    expect(out).toMatchObject({ mode: "cloned", dirs: ["node_modules", "web/node_modules"], savedKb: 1_500_000, savedMs: 14 * 60_000, install: "npm ci", hooks: ".husky/_" });
     expect(w.calls).toEqual([
       ["/usr/bin/nice", "-n", "10", "/bin/cp", "-c", "-R", `${w.seed.path}/node_modules`, `${w.worktree}/node_modules.omb-clone`],
       ["/usr/bin/nice", "-n", "10", "/bin/cp", "-c", "-R", `${w.seed.path}/web/node_modules`, `${w.worktree}/web/node_modules.omb-clone`],
     ]);
     expect(w.renamed).toEqual([`${w.worktree}/node_modules.omb-clone -> ${w.worktree}/node_modules`, `${w.worktree}/web/node_modules.omb-clone -> ${w.worktree}/web/node_modules`]);
-    // only the one-file probe was taken back; a workspace the branch lacks was skipped
-    expect(w.dropped).toEqual([`${w.worktree}/.omb-clone-probe`]);
+    // only the one-file probe and stale temporary copies are taken back; a workspace the branch lacks was skipped
+    expect(w.dropped).toEqual([`${w.worktree}/.omb-clone-probe`, `${w.worktree}/node_modules.omb-clone`, `${w.worktree}/web/node_modules.omb-clone`]);
   });
 
   it("never writes over a folder that is already there", async () => {
@@ -99,6 +105,42 @@ describe("cloning the seed's caches", () => {
     const out = await cloneSeedCaches(w.seed, w.worktree, OWN_DEFAULTS.lockfiles, w.io);
     expect(out.dirs).toEqual(["web/node_modules"]);
     expect(w.calls).toHaveLength(1);
+  });
+
+  it("after a restart, takes the folders a stopped server cloned (same blocks as the seed's) as done: cloned, no install over them (X1-3)", async () => {
+    const w = cloneWorld({ sameBlocks: async () => true });
+    w.present.add(`${w.worktree}/node_modules`);
+    w.present.add(`${w.worktree}/web/node_modules`);
+    const out = await cloneSeedCaches(w.seed, w.worktree, OWN_DEFAULTS.lockfiles, w.io);
+    expect(out).toMatchObject({ mode: "cloned", dirs: ["node_modules", "web/node_modules"], savedKb: 1_500_000, hooks: ".husky/_" });
+    expect(w.calls).toEqual([]);
+    expect(cacheLine(out)).toContain("Não rode `npm ci` no começo");
+  });
+
+  it("is an install when the worktree ends up without the main checkout's git hooks — the brief then says to install (X1-1)", async () => {
+    // the clone brought node_modules but no hooks folder (a seed of an older build, HUSKY=0, a failed prepare)
+    const w = cloneWorld({ listDir: (path) => (path === `${REPO}/.husky/_` ? ["pre-commit", "pre-push", "h"] : null) });
+    const out = await cloneSeedCaches(w.seed, w.worktree, OWN_DEFAULTS.lockfiles, w.io);
+    expect(out).toMatchObject({ mode: "install", reason: "os hooks do git (.husky/_) não vieram com o clone: sem eles nenhum hook roda nesta worktree", savedKb: 0 });
+    expect(cacheLine(out)).toBe("As dependências NÃO foram clonadas (os hooks do git (.husky/_) não vieram com o clone: sem eles nenhum hook roda nesta worktree): rode `npm ci` nesta worktree antes de testar, buildar ou commitar — ele também instala os hooks do git.");
+    // a hook missing that the main checkout has
+    const some = cloneWorld({ listDir: (path) => (path === `${REPO}/.husky/_` ? ["pre-commit", "pre-push"] : ["pre-commit"]) });
+    expect((await cloneSeedCaches(some.seed, some.worktree, OWN_DEFAULTS.lockfiles, some.io)).reason).toBe("faltam hooks do git em .husky/_ (pre-push), que o checkout principal tem");
+    // a seed whose hooks folder is not among what it clones
+    const stale = cloneWorld();
+    expect((await cloneSeedCaches({ ...stale.seed, hooks: ".husky/_" }, stale.worktree, OWN_DEFAULTS.lockfiles, stale.io)).reason).toBe("a semente não tem os hooks do git (.husky/_) entre as pastas que clona");
+  });
+
+  it("tells the session the repository's own install: pnpm where the lockfile is pnpm's", async () => {
+    const w = cloneWorld({ readFile: (path) => (path.endsWith("/pnpm-lock.yaml") ? "lockfileVersion: 9" : null) });
+    const out = await cloneSeedCaches(w.seed, w.worktree, OWN_DEFAULTS.lockfiles, w.io);
+    expect(out.install).toBe("pnpm install --frozen-lockfile");
+    expect(cacheLine(out)).toContain("rode `pnpm install --frozen-lockfile` nesta worktree");
+    expect(installFor("pnpm-lock.yaml")).toEqual(["pnpm", "install", "--frozen-lockfile"]);
+    expect(installFor("yarn.lock")).toEqual(["yarn", "install", "--frozen-lockfile"]);
+    expect(installFor("package-lock.json")).toEqual(["npm", "ci", "--no-audit", "--no-fund"]);
+    expect(installFor("pnpm-lock.yaml", { install: ["custom"] })).toEqual(["custom"]);
+    expect(installText("package-lock.json")).toBe("npm ci");
   });
 
   it.each([
@@ -129,14 +171,15 @@ describe("cloning the seed's caches", () => {
     expect(w.dropped.every((path) => path.endsWith(".omb-clone") || path.endsWith(".omb-clone-probe"))).toBe(true);
   });
 
-  it("tells the session what to do either way", () => {
-    expect(cacheLine({ mode: "cloned", dirs: ["node_modules", "web/node_modules"] })).toContain("Não rode npm ci nem npm install no começo");
-    expect(cacheLine({ mode: "install", reason: "o volume não clona arquivos" })).toBe("As dependências NÃO foram clonadas (o volume não clona arquivos): rode `npm ci` nesta worktree antes de testar ou buildar.");
+  it("tells the session not to install only when the hooks were checked", () => {
+    expect(cacheLine({ mode: "cloned", dirs: ["node_modules"], install: "npm ci", hooks: ".husky/_" })).toContain("os hooks do git (.husky/_) foram conferidos com os do checkout principal. Não rode `npm ci` no começo");
+    expect(cacheLine({ mode: "cloned", dirs: ["node_modules"], install: "npm ci" })).toContain("NÃO foram clonadas (os hooks do git não foram conferidos): rode `npm ci`");
+    expect(cacheLine({ mode: "install", reason: "o volume não clona arquivos" })).toBe("As dependências NÃO foram clonadas (o volume não clona arquivos): rode `npm ci` nesta worktree antes de testar, buildar ou commitar — ele também instala os hooks do git.");
   });
 });
 
 /** A repository whose origin/main has `lock`, seen through a fake exec. */
-function seedWorld(opts: { lock?: string; busy?: Array<string | null>; free?: number; installFails?: boolean; seedExists?: boolean; slowInstall?: boolean } = {}) {
+function seedWorld(opts: { lock?: string; busy?: Array<string | null>; free?: number; installFails?: boolean; seedExists?: boolean; slowInstall?: boolean; noHooksMade?: boolean } = {}) {
   const calls: string[][] = [];
   const saved: SeedState[] = [];
   let installed = false;
@@ -162,12 +205,14 @@ function seedWorld(opts: { lock?: string; busy?: Array<string | null>; free?: nu
     releaseBusy: async () => (busy.length > 1 ? busy.shift()! : busy[0] ?? null),
     freeBytes: () => opts.free ?? 100 * 1024 ** 3,
     readFile: (path) => (path.endsWith("package-lock.json") && installed ? opts.lock ?? LOCK : null),
-    exists: (path) => (path.endsWith(".git") ? opts.seedExists ?? true : true),
+    // the install makes husky's hooks folder (or not: HUSKY=0, a failed prepare)
+    exists: (path) => (path.endsWith(".git") ? opts.seedExists ?? true : path.endsWith(".husky/_") ? !opts.noHooksMade : true),
     findDirs: () => ["node_modules", "web/node_modules"],
-    sizeKb: async (path) => (path.endsWith("web/node_modules") ? 300_000 : 1_200_000),
+    sizeKb: async (path) => (path.endsWith("web/node_modules") ? 300_000 : path.endsWith(".husky/_") ? 8 : 1_200_000),
     node: async () => "v22.19.0",
     log: () => {},
     save: (seed) => { saved.push(structuredClone(seed)); },
+    hooks: async (folder) => `${folder}/.husky/_`,
     pollMs: 20,
   };
   return { deps, calls, saved };
@@ -183,7 +228,7 @@ describe("the seed", () => {
     expect(w.calls).toContainEqual(["git", "-C", REPO, "worktree", "add", "--detach", `${REPO}/${SEED_DIR}`, "origin/main"]);
     expect(w.calls).toContainEqual(["git", "-C", REPO, "worktree", "lock", "--reason", SEED_LOCK_REASON, `${REPO}/${SEED_DIR}`]);
     expect(w.calls).toContainEqual(["/usr/bin/nice", "-n", "15", "npm", "ci", "--no-audit", "--no-fund"]);
-    expect(seed).toMatchObject({ state: "ready", lockName: "package-lock.json", lockHash: lockHash(LOCK), node: "v22.19.0", head: "abc1234567890", dirs: [{ path: "node_modules", kb: 1_200_000 }, { path: "web/node_modules", kb: 300_000 }] });
+    expect(seed).toMatchObject({ state: "ready", lockName: "package-lock.json", lockHash: lockHash(LOCK), node: "v22.19.0", head: "abc1234567890", hooks: ".husky/_", dirs: [{ path: "node_modules", kb: 1_200_000 }, { path: "web/node_modules", kb: 300_000 }, { path: ".husky/_", kb: 8 }] });
     // while installing, it said so (no clone is taken from a half-made node_modules)
     expect(w.saved.some((each) => each.state === "installing")).toBe(true);
     expect(noRemoval(w.calls)).toEqual([]);
@@ -191,11 +236,49 @@ describe("the seed", () => {
 
   it("is left alone when origin/main's lockfile and the Node are the ones installed", async () => {
     const w = seedWorld();
-    const ready: SeedState = { repo: REPO, path: `${REPO}/${SEED_DIR}`, state: "ready", lockName: "package-lock.json", lockHash: lockHash(LOCK), node: "v22.19.0", dirs: [{ path: "node_modules", kb: 1 }] };
+    const ready: SeedState = { repo: REPO, path: `${REPO}/${SEED_DIR}`, state: "ready", lockName: "package-lock.json", lockHash: lockHash(LOCK), node: "v22.19.0", hooks: ".husky/_", dirs: [{ path: "node_modules", kb: 1 }, { path: "web/node_modules", kb: 1 }, { path: ".husky/_", kb: 1 }] };
     const seed = await refreshSeed(REPO, settings, ready, w.deps);
-    expect(seed.state).toBe("ready");
+    expect(seed).toMatchObject({ state: "ready", dirs: ready.dirs });
     expect(w.calls.some(([file]) => file === "/usr/bin/nice")).toBe(false);
     expect(w.calls.some((call) => call.includes("checkout"))).toBe(false);
+  });
+
+  it("brings a ready seed of an older build to today's folders (its hooks), measuring only, without installing (X1-1)", async () => {
+    const w = seedWorld();
+    const old: SeedState = { repo: REPO, path: `${REPO}/${SEED_DIR}`, state: "ready", lockName: "package-lock.json", lockHash: lockHash(LOCK), node: "v22.19.0", dirs: [{ path: "node_modules", kb: 1 }] };
+    const seed = await refreshSeed(REPO, settings, old, w.deps);
+    expect(seed).toMatchObject({ state: "ready", hooks: ".husky/_" });
+    expect(seed.dirs!.map((dir) => dir.path)).toEqual(["node_modules", "web/node_modules", ".husky/_"]);
+    expect(w.calls.some(([file]) => file === "/usr/bin/nice")).toBe(false);
+  });
+
+  it("is installed again when its hooks are gone, and is not usable when the install makes none (HUSKY=0, a failed prepare) — not retried for 6 h (X1-1)", async () => {
+    const gone = seedWorld({ noHooksMade: true });
+    const ready: SeedState = { repo: REPO, path: `${REPO}/${SEED_DIR}`, state: "ready", lockName: "package-lock.json", lockHash: lockHash(LOCK), node: "v22.19.0", hooks: ".husky/_", dirs: [{ path: "node_modules", kb: 1 }, { path: ".husky/_", kb: 1 }] };
+    const seed = await refreshSeed(REPO, settings, ready, gone.deps);
+    expect(gone.calls).toContainEqual(["/usr/bin/nice", "-n", "15", "npm", "ci", "--no-audit", "--no-fund"]);
+    expect(seed.state).toBe("failed");
+    expect(seed.reason).toContain("terminou sem criar os hooks do git (.husky/_) — HUSKY=0 ou o prepare falhou");
+    expect(seed.retryAfter).toBeGreaterThan(Date.now() + 5 * 3_600_000);
+    // a clone never comes from it
+    const w = cloneWorld();
+    expect((await cloneSeedCaches(seed, w.worktree, OWN_DEFAULTS.lockfiles, w.io)).mode).toBe("install");
+    // and the next pass does not install again for the same lockfile
+    const again = seedWorld({ noHooksMade: true });
+    expect((await refreshSeed(REPO, settings, seed, again.deps)).state).toBe("failed");
+    expect(again.calls.some(([file]) => file === "/usr/bin/nice")).toBe(false);
+  });
+
+  it("installs a pnpm repository with pnpm, never npm ci (X1-4)", async () => {
+    const w = seedWorld();
+    w.deps.exec = (async (file: string, args: string[]) => {
+      w.calls.push([file, ...args]);
+      if (args.includes("show")) { if (args.at(-1)!.endsWith("pnpm-lock.yaml")) return "lockfileVersion: 9"; throw new Error("no such path"); }
+      return "";
+    }) as Exec;
+    await refreshSeed(REPO, settings, undefined, w.deps);
+    expect(w.calls).toContainEqual(["/usr/bin/nice", "-n", "15", "pnpm", "install", "--frozen-lockfile"]);
+    expect(w.calls.flat()).not.toContain("ci");
   });
 
   it("is installed again when origin/main's lockfile changed: checkout of origin/main in the seed, then the install", async () => {
@@ -230,6 +313,29 @@ describe("the seed", () => {
     expect(seed.reason).toContain("só 3,3 GiB livres; instalo a semente com 10 GiB ou mais");
     const fresh = await refreshSeed(REPO, settings, undefined, seedWorld({ free: 3.3 * 1024 ** 3 }).deps);
     expect(fresh.state).toBe("waiting");
+  });
+
+  it("does not change while a worktree is being cloned from it, and says it is installing before its first change", async () => {
+    const held = seedWorld({ lock: '{"changed":true}' });
+    held.deps.mayInstall = () => "uma worktree está sendo clonada da semente agora; tento de novo em seguida";
+    const old: SeedState = { repo: REPO, path: `${REPO}/${SEED_DIR}`, state: "ready", lockName: "package-lock.json", lockHash: lockHash(LOCK), node: "v22.19.0", dirs: [{ path: "node_modules", kb: 1 }] };
+    const kept = await refreshSeed(REPO, settings, old, held.deps);
+    expect(kept).toMatchObject({ state: "ready", lockHash: lockHash(LOCK) });
+    expect(kept.reason).toContain("sendo clonada");
+    expect(held.calls.some((call) => call.includes("checkout") || call[0] === "/usr/bin/nice")).toBe(false);
+    // the first change (checkout) comes only after "installing" was saved
+    const w = seedWorld({ lock: '{"changed":true}' });
+    const states: string[] = [];
+    const save = w.deps.save;
+    w.deps.save = (seed) => { states.push(seed.state); save(seed); };
+    const exec = w.deps.exec;
+    w.deps.exec = (file, args, options) => { if (args.includes("checkout")) states.push("checkout"); return exec(file, args, options); };
+    await refreshSeed(REPO, settings, old, w.deps);
+    expect(states.indexOf("installing")).toBeLessThan(states.indexOf("checkout"));
+  });
+
+  it("clones husky's hook shims with the dependencies by default: git's hooksPath points at them", () => {
+    expect(OWN_DEFAULTS.extraDirs).toContain(".husky/_");
   });
 
   it("says when the install failed, and removes nothing", async () => {
@@ -296,7 +402,7 @@ describe("the V report", () => {
     ], [{ repo: REPO, path: "/s", state: "waiting", reason: "só 3,3 GiB livres", head: "c360ee2a2ffff" }], 0, 10);
     const lines = worktreeLines({ worktrees } as ProductivityReport);
     expect(lines).toContain("## Worktrees criadas pelo OMB (clone APFS)");
-    expect(lines).toContain("- Criadas: 2; com dependências clonadas da semente: 1; a sessão instalou (npm ci): 1");
+    expect(lines).toContain("- Criadas: 2; com dependências clonadas da semente: 1; a sessão instalou (npm ci, pnpm install…): 1");
     expect(lines.find((line) => line.startsWith("- Economia dos clones:"))).toMatch(/^- Economia dos clones: 2,3 GB que não foram gravados em disco e 14 ?min/);
     expect(lines).toContain("- Sem clone, 1×: a semente de dependências ainda não está pronta (só N GiB livres; instalo a semente com N GiB ou mais)");
     expect(lines).toContain("- Semente de nuria-platform: esperando em `c360ee2a2` — só 3,3 GiB livres");
@@ -311,18 +417,31 @@ describe("the folder the app is given", () => {
     const dir = temp();
     const worktree = join(dir, "repo", ".claude", "worktrees", "9353-x");
     mkdirSync(worktree, { recursive: true });
-    const link = ownLinkPath(join(dir, "data"), join(dir, "repo"), "9353-x");
-    expect(link).toBe(join(dir, "data", "worktree-links", "repo", "9353-x"));
+    const link = ownLinkPath(join(dir, "repo"), "9353-x");
+    // next to the repository, never in the data dir
+    expect(link).toBe(join(dir, ".omb-worktree-links", "repo", "9353-x"));
     expect(link.includes("/.claude/worktrees/")).toBe(false);
     expect(ensureLink(link, worktree)).toBeNull();
     expect(ensureLink(link, worktree)).toBeNull(); // kept
     expect(canonicalFolder(link)).toBe(worktree);
     expect(canonicalFolder(worktree)).toBe(worktree);
-    expect(canonicalFolder("/x/worktree-links/missing")).toBe("/x/worktree-links/missing");
+    expect(canonicalFolder("/x/.omb-worktree-links/missing")).toBe("/x/.omb-worktree-links/missing");
     // something else in its place is never replaced
-    const other = join(dir, "data", "worktree-links", "repo", "busy");
+    const other = join(dir, ".omb-worktree-links", "repo", "busy");
     mkdirSync(other, { recursive: true });
     expect(ensureLink(other, worktree)).toContain("já existe e não aponta para");
     expect(existsSync(other)).toBe(true);
+  });
+
+  it("is a folder the app's link keeps, while the worktree's own path is mapped back to the root by it", () => {
+    const repo = "/Users/osvaldo/Projetos/nuria-platform";
+    const worktree = `${repo}/.claude/worktrees/9353-x`;
+    // the app's rule (vIn) on the worktree itself: the repository root — why the alias exists
+    expect(appLinkFolder(worktree)).toBe(repo);
+    expect(appLinkFolder(`${repo}/.Claude/Worktrees/9353-x`)).toBe(repo);
+    // on the alias: kept as it is
+    const link = ownLinkPath(repo, "9353-x");
+    expect(link).toBe("/Users/osvaldo/Projetos/.omb-worktree-links/nuria-platform/9353-x");
+    expect(appLinkFolder(link)).toBe(link);
   });
 });

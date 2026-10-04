@@ -1,7 +1,7 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb, verificationServerEnvironment } from "../scripts/control-omb.ts";
@@ -85,7 +85,9 @@ it.runIf(process.platform === "darwin")("makes the planned worktree and the seed
     await expect.poll(() => ledger().find((each) => each.id === "s9353")?.desktop?.own?.state, { timeout: 60_000, interval: 300 }).toBe("ready");
     const first = ledger().find((each) => each.id === "s9353");
     expect(first.desktop.own.head).toBe(git(repo, "rev-parse", "origin/main"));
-    expect(first.desktop.own.link).toBe(join(dataDir, "worktree-links", "nuria-platform", "9353-comprar-assentos"));
+    // next to the repository (inside the review hook's ~/Projetos scope in real life), never in the data dir
+    expect(first.desktop.own.link).toBe(join(dirname(repo), ".omb-worktree-links", "nuria-platform", "9353-comprar-assentos"));
+    expect(first.desktop.own.link.startsWith(dataDir)).toBe(false);
     expect(first.desktop.pending.text).toContain(`Rode \`pwd -P\`. Se a saída não for exatamente ${join(repo, ".claude", "worktrees", "9353-comprar-assentos")}`);
     const listed = parseWorktreeList(git(repo, "worktree", "list", "--porcelain"));
     expect(listed.map((entry) => entry.path)).toContain(join(repo, ".claude", "worktrees", "9353-comprar-assentos"));
@@ -98,7 +100,9 @@ it.runIf(process.platform === "darwin")("makes the planned worktree and the seed
     await expect.poll(() => ledger().find((each) => each.id === "s9354")?.desktop?.own?.state, { timeout: 60_000, interval: 300 }).toBe("ready");
     const second = ledger().find((each) => each.id === "s9354");
     expect(second.desktop.own.caches).toMatchObject({ mode: "cloned", dirs: ["node_modules"] });
-    expect(second.desktop.pending.text).toContain("Não rode npm ci nem npm install no começo");
+    // hooks checked (here git's own, shared): only then "do not install"
+    expect(second.desktop.own.caches.hooks).toBeTruthy();
+    expect(second.desktop.pending.text).toContain("Não rode `npm ci` no começo");
     expect(readFileSync(join(repo, ".claude", "worktrees", "9354-outra", "node_modules", "dep", "index.bin")).length).toBe(2 * 1024 * 1024);
 
     // what it saved, for the metrics and the V report

@@ -42,6 +42,8 @@ it.runIf(APFS)("clones node_modules without duplicating its blocks: same physica
   const worktree = join(root, "repo", ".claude", "worktrees", "9353-x");
   const lock = `{"lockfileVersion":3,"packages":{"":{"name":"x"}},"pad":"${"p".repeat(200_000)}"}`;
   for (const dir of [join(seedPath, "node_modules", "big"), join(seedPath, "node_modules", ".bin"), join(seedPath, "web", "node_modules", "w"), join(worktree, "web")]) mkdirSync(dir, { recursive: true });
+  // git checkouts, with git's own hooks folder: the clone is checked against the main one's
+  for (const dir of [join(root, "repo"), worktree]) execFileSync("git", ["init", "--quiet", dir]);
   writeFileSync(join(seedPath, "package-lock.json"), lock);
   writeFileSync(join(worktree, "package-lock.json"), lock);
   // 8 MiB of noise: big enough to own its blocks

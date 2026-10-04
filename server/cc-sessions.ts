@@ -249,7 +249,7 @@ export interface CcOwnWorktree {
   /** The commit it was made at. */
   head?: string;
   /** Its caches: cloned from the seed, or installed by the session (and why). */
-  caches?: { mode: "cloned" | "install"; reason?: string; dirs?: string[]; savedKb?: number; savedMs?: number; ms?: number };
+  caches?: { mode: "cloned" | "install"; reason?: string; dirs?: string[]; savedKb?: number; savedMs?: number; ms?: number; install?: string; hooks?: string };
   /** Why it failed or was abandoned. */
   reason?: string;
   /** The brief as the bot wrote it: the app's text is made from it once the worktree is ready. */

@@ -9,7 +9,7 @@ import { findDesktopSession, readDesktopRecord, recordsUsingFolder } from "./cla
 import { desktopBriefText, followDesktopSessions, ownBriefText, prepareOwnWorktrees, runDesktopWork, type DesktopWorkDeps } from "./desktop-work.ts";
 import { parseWorktreeList } from "./nested-worktrees.ts";
 import {
-  addOwnWorktree, cacheLine, cloneSeedCaches, ensureLink, findCacheDirs, OWN_DEFAULTS, ownLinkPath, OwnWorktreeStore, physicalOffset, planOwnWorktree, realCloneIo, realDirFs, refreshSeed,
+  addOwnWorktree, cacheLine, cloneSeedCaches, ensureLink, findCacheDirs, hooksFolder, OWN_DEFAULTS, ownLinkPath, OwnWorktreeStore, physicalOffset, planOwnWorktree, realCloneIo, realDirFs, refreshSeed,
   SEED_DIR, SEED_LOCK_REASON, type Exec, type OwnWorktreeSettings,
 } from "./own-worktrees.ts";
 
@@ -45,11 +45,18 @@ function repository(root: string): string {
   writeFileSync(join(repo, "package.json"), '{"name":"x","workspaces":["web"]}\n');
   writeFileSync(join(repo, "package-lock.json"), '{"lockfileVersion":3,"v":1}\n');
   writeFileSync(join(repo, "web", "package.json"), '{"name":"web"}\n');
+  // the repository's own hooks, husky 9's way: the pre-commit must stop any commit
+  mkdirSync(join(repo, ".husky"), { recursive: true });
+  writeFileSync(join(repo, ".husky", "pre-commit"), "echo 'pre-commit do repositório: barrado'\nexit 1\n");
+  writeFileSync(join(repo, ".husky", "pre-push"), "npm test\n");
   writeFileSync(join(repo, ".gitignore"), ".claude/*\nnode_modules/\n");
   git(repo, "add", "-A");
   git(repo, "commit", "--quiet", "-m", "init");
   git(repo, "remote", "add", "origin", origin);
   git(repo, "push", "--quiet", "-u", "origin", "main");
+  // what husky's prepare does: shims in .husky/_, and git told to look there (relative: per worktree)
+  execFileSync(INSTALL[0]!, INSTALL.slice(1), { cwd: repo });
+  git(repo, "config", "core.hooksPath", ".husky/_");
   return realpathSync(repo);
 }
 
@@ -61,6 +68,10 @@ const INSTALL = [process.execPath, "-e", [
   "fs.writeFileSync('web/node_modules/w/index.js','module.exports=1');",
   "try{fs.symlinkSync('../dep/index.bin','node_modules/.bin/dep')}catch{}",
   "fs.writeFileSync('node_modules/.installed-from',fs.readFileSync('package-lock.json'));",
+  // husky 9's prepare: its shims, ignored by git, each running .husky/<hook> of the checkout
+  "fs.mkdirSync('.husky/_',{recursive:true});fs.writeFileSync('.husky/_/.gitignore','*');",
+  "fs.writeFileSync('.husky/_/h','#!/bin/sh\\nn=$(basename \"$0\")\\ns=$(dirname \"$(dirname \"$0\")\")/$n\\n[ -f \"$s\" ] || exit 0\\nsh -e \"$s\" \"$@\"\\n',{mode:0o755});",
+  "for(const k of ['pre-commit','pre-push'])fs.writeFileSync('.husky/_/'+k,'#!/bin/sh\\n. \"$(dirname \"$0\")/h\"\\n',{mode:0o755});",
 ].join("")];
 
 it.runIf(process.platform === "darwin")("makes worktrees from origin/main, clones their caches from a seed it keeps fresh, opens the app in them, and never removes one", async () => {
@@ -86,6 +97,7 @@ it.runIf(process.platform === "darwin")("makes worktrees from origin/main, clone
     findDirs: (path: string, each: OwnWorktreeSettings) => findCacheDirs(path, each.cacheNames, each.extraDirs, realDirFs),
     sizeKb: async (path: string) => Number((await exec("/usr/bin/du", ["-sk", path])).split(/\s+/)[0]) || null,
     node: async () => process.version, log: () => {}, save: (seed: Parameters<typeof store.setSeed>[0]) => store.setSeed(seed),
+    hooks: (folder: string) => hooksFolder(folder, exec),
   };
 
   // a release queued for the machine: the seed waits, nothing runs
@@ -98,7 +110,7 @@ it.runIf(process.platform === "darwin")("makes worktrees from origin/main, clone
 
   // the seed: a locked, detached worktree of origin/main, installed
   const seed = await refreshSeed(repo, settings, store.seed(repo), seedDeps);
-  expect(seed).toMatchObject({ state: "ready", lockName: "package-lock.json", dirs: [{ path: "node_modules" }, { path: "web/node_modules" }] });
+  expect(seed).toMatchObject({ state: "ready", lockName: "package-lock.json", dirs: [{ path: "node_modules" }, { path: "web/node_modules" }, { path: ".husky/_" }] });
   const seedEntry = parseWorktreeList(git(repo, "worktree", "list", "--porcelain")).find((entry) => entry.path === join(repo, SEED_DIR));
   expect(seedEntry).toMatchObject({ locked: true, lockReason: SEED_LOCK_REASON });
   expect(git(repo, "status", "--porcelain")).toBe(""); // .claude/* is ignored in the main checkout
@@ -121,12 +133,12 @@ it.runIf(process.platform === "darwin")("makes worktrees from origin/main, clone
         const dir = own.path.split("/").pop()!;
         const made = await addOwnWorktree(session.repo, { dir, path: own.path, branch: own.branch }, exec);
         if (!made.ok) return { ok: false, reason: made.error };
-        const link = ownLinkPath(dataDir, session.repo, dir);
+        const link = ownLinkPath(session.repo, dir);
         const linkError = ensureLink(link, own.path);
         if (linkError) return { ok: false, reason: linkError };
         const caches = await cloneSeedCaches(store.seed(session.repo), own.path, settings.lockfiles, realCloneIo(exec, async () => process.version));
         store.record({ at: now, sessionId: session.id, repo: session.repo, path: own.path, branch: own.branch, mode: caches.mode, ...(caches.reason ? { reason: caches.reason } : {}), savedKb: caches.savedKb, savedMs: caches.savedMs });
-        return { ok: true, head: made.head, link, caches: { mode: caches.mode, ...(caches.reason ? { reason: caches.reason } : {}), dirs: caches.dirs, savedKb: caches.savedKb } };
+        return { ok: true, head: made.head, link, caches: { mode: caches.mode, ...(caches.reason ? { reason: caches.reason } : {}), dirs: caches.dirs, savedKb: caches.savedKb, install: caches.install, ...(caches.hooks ? { hooks: caches.hooks } : {}) } };
       },
       briefFor: (session) => ownBriefText(session.title, session.desktop!.marker, session.desktop!.own!.brief, "", session.desktop!.own!, cacheLine(session.desktop!.own!.caches!)),
       classicBlocked: () => null,
@@ -166,11 +178,27 @@ it.runIf(process.platform === "darwin")("makes worktrees from origin/main, clone
   const first = start("aa000001", "9353 Comprar assentos UI");
   await open(first);
   const own1 = first.desktop!.own!;
-  expect(own1).toMatchObject({ state: "ready", path: join(repo, ".claude", "worktrees", "9353-comprar-assentos-ui"), branch: "omb/9353-comprar-assentos-ui", caches: { mode: "cloned", dirs: ["node_modules", "web/node_modules"] } });
+  expect(own1).toMatchObject({ state: "ready", path: join(repo, ".claude", "worktrees", "9353-comprar-assentos-ui"), branch: "omb/9353-comprar-assentos-ui", caches: { mode: "cloned", dirs: ["node_modules", "web/node_modules", ".husky/_"], hooks: ".husky/_" } });
   expect(own1.head).toBe(git(repo, "rev-parse", "origin/main"));
-  // the app was handed the alias, outside .claude/worktrees; the session is the worktree itself
-  expect(opened[0]).toEqual({ folder: ownLinkPath(dataDir, repo, "9353-comprar-assentos-ui"), folderName: "9353-comprar-assentos-ui" });
+  // the hooks git runs there are the main checkout's, effective: the repository's pre-commit (exit 1) stops a commit
+  expect(git(own1.path, "rev-parse", "--path-format=absolute", "--git-path", "hooks")).toBe(join(own1.path, ".husky", "_"));
+  expect(() => execFileSync("git", ["-C", own1.path, "hook", "run", "--ignore-missing", "pre-commit"], { stdio: "pipe" })).toThrow();
+  expect(() => execFileSync("git", ["-C", own1.path, "commit", "--allow-empty", "-m", "teste"], { stdio: "pipe" })).toThrow(/pre-commit do repositório: barrado/);
+  expect(git(own1.path, "rev-parse", "HEAD")).toBe(own1.head);
+  // and only then is the session told not to install
+  expect(cacheLine(own1.caches!)).toContain("os hooks do git (.husky/_) foram conferidos com os do checkout principal. Não rode");
+  // made again after a restart mid-way: the same worktree, not a failure; its clone counts as done, nothing copied again (X1-3)
+  expect(await addOwnWorktree(repo, { dir: "9353-comprar-assentos-ui", path: own1.path, branch: own1.branch }, exec)).toEqual({ ok: true, head: own1.head });
+  const copies = calls.filter(([file]) => file === "/usr/bin/nice").length;
+  const resumed = await cloneSeedCaches(store.seed(repo), own1.path, settings.lockfiles, realCloneIo(exec, async () => process.version));
+  expect(resumed).toMatchObject({ mode: "cloned", dirs: ["node_modules", "web/node_modules", ".husky/_"], hooks: ".husky/_" });
+  expect(resumed.savedKb).toBeGreaterThan(4 * 1024);
+  expect(calls.filter(([file]) => file === "/usr/bin/nice").length).toBe(copies);
+  // the app was handed the alias: under ~/Projetos (the repository's folder), outside .claude/worktrees; the session is the worktree itself
+  expect(opened[0]).toEqual({ folder: join(dirname(repo), ".omb-worktree-links", "nuria-platform", "9353-comprar-assentos-ui"), folderName: "9353-comprar-assentos-ui" });
+  expect(opened[0]!.folder.startsWith(`${dirname(repo)}/`)).toBe(true);
   expect(opened[0]!.folder.includes("/.claude/worktrees/")).toBe(false);
+  expect(opened[0]!.folder.startsWith(dataDir)).toBe(false);
   expect(readlinkSync(opened[0]!.folder)).toBe(own1.path);
   expect(first).toMatchObject({ status: "running", cwd: own1.path, worktree: "9353-comprar-assentos-ui" });
   expect(first.desktop!.wrongFolder).toBeUndefined();
@@ -208,8 +236,25 @@ it.runIf(process.platform === "darwin")("makes worktrees from origin/main, clone
   // 3rd: cloned again
   const third = start("cc000003", "9355 Mais uma");
   await open(third);
-  expect(third.desktop!.own).toMatchObject({ state: "ready", caches: { mode: "cloned" } });
+  expect(third.desktop!.own).toMatchObject({ state: "ready", caches: { mode: "cloned", hooks: ".husky/_" } });
   expect(third.status).toBe("running");
+
+  // a seed from the older build (its folders listed without the hooks): the clone leaves the
+  // worktree with no hooks, so it is an install, and the brief says to install (X1-1)
+  const ready = store.seed(repo)!;
+  store.setSeed({ ...ready, hooks: undefined, dirs: ready.dirs!.filter((dir) => dir.path !== ".husky/_") });
+  const stale = start("ee000005", "9356 Semente antiga");
+  await open(stale);
+  expect(stale.desktop!.own).toMatchObject({ state: "ready", caches: { mode: "install" } });
+  expect(stale.desktop!.own!.caches!.reason).toBe("os hooks do git (.husky/_) não vieram com o clone: sem eles nenhum hook roda nesta worktree");
+  expect(cacheLine(stale.desktop!.own!.caches!)).toContain("NÃO foram clonadas (os hooks do git (.husky/_) não vieram com o clone");
+  expect(existsSync(join(stale.desktop!.own!.path, ".husky", "_"))).toBe(false);
+  // the next pass brings the seed to today's folders, measuring only
+  const installs = calls.filter(([file]) => file === "/usr/bin/nice").length;
+  const brought = await refreshSeed(repo, settings, store.seed(repo), seedDeps);
+  expect(brought).toMatchObject({ state: "ready", hooks: ".husky/_" });
+  expect(brought.dirs!.map((dir) => dir.path)).toContain(".husky/_");
+  expect(calls.filter(([file]) => file === "/usr/bin/nice").length).toBe(installs);
 
   // the same issue again later: a folder of its own (the old one stays)
   const again = start("dd000004", "9353 Comprar assentos UI");
@@ -224,12 +269,12 @@ it.runIf(process.platform === "darwin")("makes worktrees from origin/main, clone
   // what was saved
   // (the flow's clock runs ahead of the wall clock here)
   const summary = store.summary(0, Number.MAX_SAFE_INTEGER);
-  expect(summary).toMatchObject({ created: 3, cloned: 2, installed: 1, failed: 0 });
+  expect(summary).toMatchObject({ created: 4, cloned: 2, installed: 2, failed: 0 });
   expect(summary.savedKb).toBeGreaterThanOrEqual(2 * 4 * 1024);
 
   // never removed: every worktree made is still there, and no command removed, pruned or unlocked one
   const listed = parseWorktreeList(git(repo, "worktree", "list", "--porcelain")).map((entry) => entry.path);
-  for (const session of [first, second, third]) {
+  for (const session of [first, second, third, stale]) {
     expect(listed).toContain(session.desktop!.own!.path);
     expect(existsSync(join(session.desktop!.own!.path, ".git"))).toBe(true);
   }
@@ -248,5 +293,7 @@ it("has no command that removes, prunes or unlocks a worktree anywhere in its co
   const own = readFileSync(join(here, "own-worktrees.ts"), "utf8");
   expect(own.match(/rmSync\(/g)).toHaveLength(1);
   expect(own).toMatch(/dropTemp: \(path\) => rmSync\(path, \{ recursive: true, force: true \}\)/);
-  expect([...own.matchAll(/io\.dropTemp\((\w+)\)/g)].map((match) => match[1])).toEqual(["probe", "temp"]);
+  // the probe, a temporary copy a stopped server left, and the one a failed cp left
+  expect([...own.matchAll(/io\.dropTemp\((\w+)\)/g)].map((match) => match[1])).toEqual(["probe", "temp", "temp"]);
+  expect(own).toContain("const temp = `${target}.omb-clone`;");
 });
