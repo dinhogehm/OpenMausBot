@@ -72,7 +72,13 @@ it.runIf(process.platform === "darwin")("makes the planned worktree and the seed
       },
     });
     writeFileSync(join(dataDir, "cc-sessions.json"), JSON.stringify({ sessions: [session("s9353", "9353 Comprar assentos", "9353-comprar-assentos")] }));
+    // the owner's "destravar o app" item of the old way: no gesture is needed any more
+    writeFileSync(join(dataDir, "bot-autonomy.json"), JSON.stringify({ wakes: [], goals: [], reports: [], inFlight: [], ownerPending: [
+      { id: "o8", botId: bot.id, threadId: thread, title: "Destravar o app Claude (pasta reaproveitada)", key: "app-reused-folder:nuria-platform", createdAt: now - 3_600_000, stepsAutoAskedAt: now - 3_600_000 },
+    ] }));
     await boot();
+    await expect.poll(() => (JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")).ownerPending ?? []).filter((item: any) => item.id === "o8" && !item.resolvedAt).length, { timeout: 20_000, interval: 300 }).toBe(0);
+    await expect.poll(() => readFileSync(logPath, "utf8"), { timeout: 5_000 }).toContain(`the owner's "destravar o app" item (app-reused-folder:nuria-platform) is closed: the server now makes each session's worktree`);
 
     // the seed: made, locked, installed; the worktree: made from origin/main
     await expect.poll(() => own().seeds[repo]?.state, { timeout: 60_000, interval: 300 }).toBe("ready");
