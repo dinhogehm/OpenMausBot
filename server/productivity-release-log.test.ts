@@ -46,6 +46,18 @@ describe("release log runs (real excerpt)", () => {
     expect(runs.filter((run) => run.outcome === "failed").map((run) => run.pid)).toEqual([83261, 6552, 91010]);
   });
 
+  // INSP-U r1 U4: the cause is what the report shows as "Motivo:" — words, not the comparison key
+  it("a run's cause reads as words: a lease line in pt-BR, a count kept apart from its word", () => {
+    const run = (cause: string) => parseReleaseLogText([
+      "ADMISSION_INTENT kind=release label=release:production:8888888888888888888888888888888888888888 pid=8",
+      "[10:00:00] build",
+      cause,
+      "ADMISSION_RELEASED kind=release pid=8",
+    ].join("\n")).runs[0]!;
+    expect(run("[ERROR] ADMISSION_TIMEOUT kind=deploy label=x blocked_by=deploy:5123 waited=900s limit=900s holder=release:production:abc")).toMatchObject({ outcome: "failed", cause: "tempo de espera na fila esgotou (ADMISSION_TIMEOUT)" });
+    expect(run("Local CI failed at tests after 3 retries. Logs: /private/var/folders/xx/T/nuria-smart-deploy.5RILoB/x").cause).toBe("Local CI failed at tests after retries");
+  });
+
   it("reads the post-release health verdict of a run", () => {
     const parsed = parseReleaseLogText([
       "ADMISSION_INTENT kind=release label=release:production:7777777777777777777777777777777777777777 pid=7",

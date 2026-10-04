@@ -67,10 +67,15 @@ export function releaseCauseKey(cause: string): string {
     // lot W's lease lines: who blocked and who held the lease, for how long, are the try's
     // (blocked_by=ci-full:<pid>, holder_pid=<pid>, holder=<label> held=<N>s counted=<N>s)
     .replace(/\b(\w+_pid)=\d+\b/g, "$1")
-    .replace(/\b(blocked_by=[\w-]+):\d+\b/g, "$1")
+    // who blocked is the try's: a CI, a deploy, a holder caught before its pid
+    // (unknown:pending) — the wait timed out the same way (INSP-U r1 U3)
+    .replace(/\bblocked_by=\S*/g, "blocked_by")
     .replace(/\s+(?:holder|held|counted)=\S*/g, "")
-    // how long one try waited for the lease changes every try, the timeout does not
-    .replace(/\b(waited|elapsed|after)[=: ]+\d+(?:\.\d+)?\s*(?:ms|s|m|min)?\b/gi, "$1")
+    // a job's pid in prose ("Job 86207 terminou, mas o grupo 86207 …")
+    .replace(/\b(Job|grupo|group|processo|process)\s+\d+\b/gi, "$1")
+    // how long one try waited for the lease changes every try, the timeout does not;
+    // a count that is no duration ("after 3 retries") leaves the next word apart
+    .replace(/\b(waited|elapsed|after)[=: ]+\d+(?:\.\d+)?(?:\s*(?:ms|s|m|min)\b)?/gi, "$1")
     .replace(/\b[0-9a-f]{12,40}\b/g, "")
     .replace(/[\s.,;:-]+$/u, "")
     // a time stamp taken out leaves its preposition behind ("… at", "… às")
@@ -600,6 +605,15 @@ export function releaseCausePt(cause: string | null): string {
   if (step) return `CI local falhou em ${step}`;
   if (/migration/i.test(cause)) return "migration reprovou";
   return cause.replace(/\s+/g, " ").slice(0, 60);
+}
+
+/** A cause as a person reads it (the report's "Motivo:"): a lease line in pt-BR
+ * with its name, anything else as compared across tries — no log path, time
+ * stamp or pid (INSP-U r1 U4). */
+export function releaseCauseShown(cause: string): string {
+  const lease = /\bADMISSION_[A-Z_]+/.exec(cause)?.[0];
+  if (lease) return `${releaseCausePt(cause)} (${lease})`;
+  return releaseCauseKey(cause);
 }
 
 export function releaseFailedText(sha: string, count: number, cause: string | null): string {

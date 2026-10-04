@@ -16,6 +16,7 @@ import {
   type DeclineEvent, type FileSignature, type ReleaseLogState, type ReleaseRun,
 } from "./productivity-release-log.ts";
 import { buildProductivityReport, releasePairs, type UsageLike } from "./productivity-report.ts";
+import { releaseCauseShown } from "./release-watch.ts";
 
 export const SYNC_INTERVAL_MS = 15 * 60_000;
 /** A request may ask for a fresh sync at most this often. */
@@ -41,9 +42,10 @@ export interface CollectorDeps {
 }
 
 /** Bumped when the release log's reading changes (v2: superseded/aborted runs,
- * the head PR, the post-release verdict). An older history is reparsed from
- * the logs still on disk; runs only it remembers (rotated away) are kept. */
-export const RELEASES_VERSION = 2;
+ * the head PR, the post-release verdict; v3: a lease cause in words). An older
+ * history is reparsed from the logs still on disk; runs only it remembers
+ * (rotated away) are kept. */
+export const RELEASES_VERSION = 3;
 
 interface ReleaseHistory {
   version: number;
@@ -60,7 +62,11 @@ const emptyHistory = (): ReleaseHistory => ({ version: RELEASES_VERSION, runs: {
  * never ran (no time of its own, no verdict) is not a failure. */
 export function migrateRun(run: ReleaseRun & { carrierPr?: number }): ReleaseRun {
   const { carrierPr, ...rest } = run;
-  const migrated: ReleaseRun = { ...rest, ...(carrierPr && !rest.headPr ? { headPr: carrierPr } : {}) };
+  const migrated: ReleaseRun = {
+    ...rest, ...(carrierPr && !rest.headPr ? { headPr: carrierPr } : {}),
+    // a lease line saved as its comparison key reads in words (INSP-U r1 U4)
+    ...(rest.cause && /\bADMISSION_/.test(rest.cause) ? { cause: releaseCauseShown(rest.cause) } : {}),
+  };
   if (migrated.outcome === "failed" && migrated.timeSource === "neighbor" && migrated.deployedAt === undefined) {
     return migrated.cause ? { ...migrated, outcome: "aborted" } : { ...migrated, outcome: "superseded" };
   }

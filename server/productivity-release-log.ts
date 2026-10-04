@@ -22,7 +22,7 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { createGunzip } from "node:zlib";
-import { releaseCauseKey, releaseFailureCause } from "./release-watch.ts";
+import { releaseCauseShown, releaseFailureCause } from "./release-watch.ts";
 
 /** released: the tag advanced (or went live without it); failed: the run EXECUTED
  * (CI or deploy steps ran) and ended without releasing; superseded: it never ran —
@@ -333,7 +333,8 @@ export function finishReleaseLog(state: ReleaseLogState, options: { endOfStream?
       startedAt,
       endedAt,
       timeSource: source,
-      ...(cause ? { cause: releaseCauseKey(cause).slice(0, 240) } : {}),
+      // shown to the owner as "Motivo:": in words, not the comparison key (INSP-U r1 U4)
+      ...(cause ? { cause: releaseCauseShown(cause).slice(0, 240) } : {}),
       ...(raw.headPr ? { headPr: raw.headPr } : {}),
       ...(raw.postRelease ? { postRelease: raw.postRelease } : {}),
       ...(!raw.closed && outcome !== "running" ? { interrupted: true } : {}),

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { afterAll, describe, expect, it } from "vitest";
 import { presetPeriod } from "../shared/productivity.ts";
-import { MANUAL_SYNC_MIN_MS, oldestUsageAt, ProductivityCollector } from "./productivity-collector.ts";
+import { MANUAL_SYNC_MIN_MS, migrateRun, oldestUsageAt, ProductivityCollector } from "./productivity-collector.ts";
 import { emptyGhCache, GH_CACHE_VERSION, type GhRunner } from "./productivity-github.ts";
 import { reportMarkdown, reportPdf } from "./productivity-export.ts";
 import { mergeNeedsYou, ownerResponseMs, emptyNeedsYouLog } from "./productivity-local.ts";
@@ -101,6 +101,15 @@ describe("needs-you log", () => {
 });
 
 describe("collector", () => {
+  // INSP-U r1 U4: a history saved by the lot U build kept a lease cause as its key
+  it("a lease cause saved as its comparison key reads in words after the upgrade", () => {
+    const base = { key: "a:1", sha: "a".repeat(40), pid: 1, outcome: "failed" as const, startedAt: 1, endedAt: 2, timeSource: "log" as const };
+    expect(migrateRun({ ...base, cause: "ADMISSION_TIMEOUT kind=release label=release:production: blocked_by=ci-full waited limit=2700s" }).cause).toBe("tempo de espera na fila esgotou (ADMISSION_TIMEOUT)");
+    expect(migrateRun({ ...base, cause: "Local CI failed at tests" }).cause).toBe("Local CI failed at tests");
+    // already in words: unchanged
+    expect(migrateRun({ ...base, cause: "tempo de espera na fila esgotou (ADMISSION_TIMEOUT)" }).cause).toBe("tempo de espera na fila esgotou (ADMISSION_TIMEOUT)");
+  });
+
   it("keeps the release history across a rotation and replays the live log on the rotated one", async () => {
     const dir = freshDir();
     mkdirSync(join(dir, "logs"));

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { releaseCauseKey, releaseCausePt, releaseInLoop } from "./release-watch.ts";
+import { releaseCauseKey, releaseCausePt, releaseCauseShown, releaseInLoop } from "./release-watch.ts";
 import { ATTENTION_FILE_MAX_BYTES, ATTENTION_MAX_AGE_MS, fullReleaseSha, haltedRelease, haltReport, productionStateLine, readTail, releaseAttention, releaseAttentionAlert, releaseAttentionDue, haltStillMatters, nothingToPublish, releaseFailureCause, releaseFailures, releaseLoopDue, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, TAG_STUCK_AFTER_MS, tagAdvancePendingTitle, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
 const log = [
@@ -632,7 +632,7 @@ describe("a loop with the owner's item open: the item is refreshed, nobody is wo
     ];
     expect(new Set([...old, ...lotW].map(releaseCauseKey)).size).toBe(1);
     // who held the lease and for how long is the try's, not the cause's: a lot W line reads like the old one
-    expect(releaseCauseKey(lotW[0]!)).toBe("ADMISSION_TIMEOUT kind=release label=release:production: blocked_by=ci-full waited limit=2700s");
+    expect(releaseCauseKey(lotW[0]!)).toBe("ADMISSION_TIMEOUT kind=release label=release:production: blocked_by waited limit=2700s");
     expect(releaseCauseKey(lotW[0]!)).toBe(releaseCauseKey(old[0]!));
     // the ceiling is its own cause, the same on every try
     const ceiling = [
@@ -649,6 +649,35 @@ describe("a loop with the owner's item open: the item is refreshed, nobody is wo
       .toBe("ADMISSION_NESTED_REFUSED kind=release label=release:production:d5bb1f70b holder_kind=release holder_pid reason=not-a-descendant-of-the-live-holder");
     expect(releaseCauseKey("ADMISSION_DIR_IGNORED kind=release label=x dir=/private/var/folders/xx/T/adm.5RILoB root=/Users/osvaldo/.nuria/admission reason=production-uses-the-owner-root"))
       .toBe(releaseCauseKey("ADMISSION_DIR_IGNORED kind=release label=x dir=/private/var/folders/xx/T/adm.u9pRC1 root=/Users/osvaldo/.nuria/admission reason=production-uses-the-owner-root"));
+  });
+
+  // INSP-U r1 U3: a holder caught between mkdir and its pid (unknown:pending), a deploy lease
+  // with or without its pid, and a pid in the prose split one cause in two
+  it("whoever blocked the lease, and a job's pid in prose, are the try's too", () => {
+    const timeout = (blockedBy: string) => `ADMISSION_TIMEOUT kind=release label=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 blocked_by=${blockedBy} waited=2700s limit=2700s holder=x held=1s counted=2700s`;
+    expect(new Set(["ci-full:4029", "unknown:pending", "release-intent:4411", "deploy:pending", "deploy:5123"].map((each) => releaseCauseKey(timeout(each)))).size).toBe(1);
+    expect(releaseCauseKey("ADMISSION_TIMEOUT kind=deploy label=x blocked_by=deploy:pending waited=60s limit=900s holder=unknown"))
+      .toBe(releaseCauseKey("ADMISSION_TIMEOUT kind=deploy label=x blocked_by=deploy:5123 waited=900s limit=900s holder=release:production:abc"));
+    // the release ceiling stays its own cause
+    expect(releaseCauseKey(`${timeout("release:70272")} reason=release-ceiling`)).not.toBe(releaseCauseKey(timeout("ci-full:1")));
+    // the real .out.log: one cause, two job pids
+    expect(releaseCauseKey("Job 86207 terminou, mas o grupo 86207 ainda possui processos"))
+      .toBe(releaseCauseKey("Job 96719 terminou, mas o grupo 96719 ainda possui processos"));
+    expect(releaseCauseKey("Job 86207 terminou, mas o grupo 86207 ainda possui processos")).toBe("Job terminou, mas o grupo ainda possui processos");
+  });
+
+  // INSP-U r1 U4: a count after "after" is not a unit, and no word is glued to the next
+  it("a number that is not a duration leaves its words apart", () => {
+    expect(releaseCauseKey("Local CI failed at tests after 3 retries")).toBe("Local CI failed at tests after retries");
+    expect(releaseCauseKey("Local CI failed at tests after 3 retries")).toBe(releaseCauseKey("Local CI failed at tests after 5 retries"));
+    expect(releaseCauseKey("ADMISSION_TIMEOUT waited=1060s pid=70272")).toBe("ADMISSION_TIMEOUT waited");
+    expect(releaseCauseKey("gave up after 30 s of silence")).toBe("gave up after of silence");
+  });
+
+  it("what a person reads of a cause: a lease line in pt-BR, anything else without paths", () => {
+    expect(releaseCauseShown("ADMISSION_TIMEOUT kind=release label=release:production:d5bb1f70bea3c0ffee00d5bb1f70bea3c0ffee00 blocked_by=ci-full:4029 waited=2700s limit=2700s")).toBe("tempo de espera na fila esgotou (ADMISSION_TIMEOUT)");
+    expect(releaseCauseShown("ADMISSION_STOPPED kind=release label=x waited=1s reason=/Users/o/.nuria/stop")).toBe("parado pelo PARAR do dono (~/.nuria/stop) (ADMISSION_STOPPED)");
+    expect(releaseCauseShown(REAL_CAUSES[0]!)).toBe("Local CI failed at script-contracts");
   });
 
   const lotWTimeout = "ADMISSION_TIMEOUT kind=release label=r blocked_by=ci-full:4029 waited=2700s limit=2700s holder=ci:local:x held=3110s counted=2700s";
