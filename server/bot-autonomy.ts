@@ -490,26 +490,34 @@ export const ANSWERED_IN_CONVERSATION = "respondida na conversa";
  * about something else never settles the question's item. */
 export function answerToAsk(messages: ReadonlyArray<{ role: string; kind: string; text?: string; at: number; peerAsk?: unknown; from?: unknown }>, askAt: number, askText: string): { at: number; text: string } | null {
   const refs = new Set(askText.match(/#\d+/g) ?? []);
+  const asks = (text: string) => /\?[\s*_`)\]]*$/.test(text);
   let first = true;
   for (const message of messages.filter((each) => each.at > askAt).toSorted((a, b) => a.at - b.at)) {
     const text = (message.text ?? "").trim();
     if (message.role === "bot" && message.kind === "text" && !message.from) {
       // the bot asked something else: what follows answers that, unless it names this question's #ref
-      if (/\?[\s*_`)\]]*$/.test(text) || OWNER_ASK.test(text)) first = false;
+      if (asks(text) || OWNER_ASK.test(text)) first = false;
       continue;
     }
     if (message.role !== "user" || message.kind !== "text" || message.peerAsk || message.from) continue;
+    // the person asking something back never answers it, #ref or not (INSP-J2b r3)
+    if (asks(text)) { first = false; continue; }
     const cited = text.match(/#\d+/g) ?? [];
-    if (cited.some((ref) => refs.has(ref)) || (first && !cited.length)) return { at: message.at, text };
+    // "the first message" holds only while the question is fresh: a plain order a day later is about something else
+    const fresh = message.at - askAt <= ANSWER_WINDOW_MS;
+    if (cited.some((ref) => refs.has(ref)) || (first && fresh && !cited.length)) return { at: message.at, text };
     first = false;
   }
   return null;
 }
 
+/** How long after a question the person's first plain message counts as its answer (INSP-J2b r3). */
+export const ANSWER_WINDOW_MS = 2 * 3_600_000;
+
 /** The server tells the bot it closed the item of its question, answered by the person in the conversation. */
 export const ANSWERED_REPORT_PREFIX = "[Servidor: pendência fechada]";
-export function answeredInConversationReport(item: Pick<OwnerPending, "id" | "title">, ask: string, answer: string): string {
-  return `${ANSWERED_REPORT_PREFIX} O dono respondeu na conversa à sua pergunta «${ask.slice(0, 200)}»: «${answer.slice(0, 300)}». O item ${item.id} («${item.title.slice(0, 120)}») foi fechado como ${ANSWERED_IN_CONVERSATION}. Siga com a resposta dele; não reabra o item. Não escreva ao dono só por isto.`;
+export function answeredInConversationReport(item: Pick<OwnerPending, "id" | "title">, ref: Pick<AskPromotion, "threadId" | "askAt" | "text">, answer: string): string {
+  return `${ANSWERED_REPORT_PREFIX} O dono respondeu na conversa à sua pergunta «${ref.text.slice(0, 200)}»: «${answer.slice(0, 300)}». O item ${item.id} («${item.title.slice(0, 120)}») foi fechado como ${ANSWERED_IN_CONVERSATION}. Se era a resposta, siga com ela. Se não era resposta a esta pergunta, reabra o item com owner_pending add replacesAsk "${ref.threadId}@${ref.askAt}" (o mesmo title, why, steps e options). Não escreva ao dono só por isto.`;
 }
 
 /** What only the bot reads when the person asks, from "Precisa de você",

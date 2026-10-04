@@ -8825,7 +8825,7 @@ function settleAnsweredQuestions(): void {
       for (const done of autonomy.resolveOwnerPending({ botId: item.botId, id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION })) {
         if (store.taskByThread(done.botId, done.threadId)) store.appendMessage(done.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Resolvido (${ANSWERED_IN_CONVERSATION}): ${done.title}`, 240), ok: true } });
         // the bot hears it closed, as the server, where the person answered (INSP-J2b r2 c-2)
-        autonomy.addReport(done.botId, promotion.threadId, answeredInConversationReport(done, promotion.text, answer.text));
+        autonomy.addReport(done.botId, promotion.threadId, answeredInConversationReport(done, promotion, answer.text));
         console.log(`[owner-pending] ${done.id} settled: the person answered its question in ${promotion.threadId}`);
       }
     }
@@ -19773,7 +19773,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (body.replacesAsk !== undefined && !replaces) return json(res, 400, { error: "replacesAsk deve ser o Ref do pedido do servidor, no formato <conversa>@<número> (ex.: 9f3c…@1791066754187)." });
           const promotion = replaces ? autonomy.askPromotionFor(bot.id, replaces.threadId, replaces.askAt) : null;
           if (replaces && !promotion) return json(res, 400, { error: `replacesAsk ${replaces.threadId}@${replaces.askAt} não é de nenhum pedido do servidor a você. Copie o Ref exato do pedido "[Servidor: pergunta sem passo a passo]", ou abra o item sem replacesAsk.` });
-          if (promotion && questionAnswer(promotion)) {
+          // reopening what the server settled as "respondida na conversa" is the bot's call (INSP-J2b r3): allowed
+          const reopening = Boolean(promotion?.itemId && autonomy.resolvedOwnerPendingOf(bot.id).some((each) => each.id === promotion.itemId && each.resolvedNote === ANSWERED_IN_CONVERSATION));
+          if (promotion && !reopening && questionAnswer(promotion)) {
             return json(res, 200, { message: "A pessoa já respondeu essa pergunta na conversa: não abri o item. Siga com a resposta dela." });
           }
           const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured });
