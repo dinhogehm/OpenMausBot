@@ -275,6 +275,10 @@ import {
   ownerPendingAwaitNote,
   ownerPendingRecommendText,
   ownerPendingStepsAutoReport,
+  questionStepsAutoReport,
+  questionReportRef,
+  QUESTION_REPORT_PREFIX,
+  type AskPromotion,
   missingParts,
   STEPS_REPORT_PREFIX,
   type OwnerPendingStep,
@@ -3740,6 +3744,8 @@ let threadSignals = (_threadId: string): Pick<WireTask, "watches" | "watchesLost
 let goalNeedsInputForThread = (_threadId: string): number | null => null;
 /** What that ask says, in one sentence (set once autonomy exists). */
 let goalNeedsInputAskForThread = (_threadId: string): string | null => null;
+/** When the server asked the bot to turn that ask into an item with steps (lot J2), or null. */
+let goalNeedsInputStepsAskedForThread = (_threadId: string, _at: number): number | null => null;
 const wireTask = (task: TaskRecord): WireTask => {
   // Time-based snoozes heal on read against the server clock — no client
   // timer, no device skew. The 0 sentinel ("until new activity") is not a
@@ -3747,7 +3753,8 @@ const wireTask = (task: TaskRecord): WireTask => {
   const { snoozedUntil, ...base } = toWireTask(task);
   const needsInput = goalNeedsInputForThread(task.threadId);
   const ask = needsInput !== null ? goalNeedsInputAskForThread(task.threadId) : null;
-  const coordinated = { ...base, ...threadSignals(task.threadId), waitingForTeammates: needsInput === null && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput, ...(ask ? { goalNeedsInputAsk: ask } : {}) } : {}) };
+  const stepsAsked = needsInput !== null ? goalNeedsInputStepsAskedForThread(task.threadId, needsInput) : null;
+  const coordinated = { ...base, ...threadSignals(task.threadId), waitingForTeammates: needsInput === null && activeCoordinationForThread(task.threadId) && !task.busy, ...(needsInput !== null ? { goalNeedsInput: true, goalNeedsInputSince: needsInput, ...(ask ? { goalNeedsInputAsk: ask } : {}), ...(stepsAsked !== null ? { goalNeedsInputStepsAskedAt: stepsAsked } : {}) } : {}) };
   const asleep = snoozedUntil === 0 || (snoozedUntil !== undefined && snoozedUntil > Date.now());
   return asleep ? { ...coordinated, snoozedUntil } : coordinated;
 };
@@ -8096,7 +8103,7 @@ function threadAskIsNoise(threadId: string, botId: string): boolean {
   // the sentence the panel would show is what the person reads
   return askCoveredByItem({ text: ownerAskText(raw.text, 400, names), at: raw.at }, items, threadId);
 }
-goalNeedsInputForThread = (threadId) => {
+function threadNeedsInputAt(threadId: string): number | null {
   const owner = store.botByThread(threadId);
   if (owner && threadAskIsNoise(threadId, owner.id)) return null;
   const goal = autonomy.goalFor(threadId);
@@ -8104,7 +8111,21 @@ goalNeedsInputForThread = (threadId) => {
   // the bot ended its last reply asking the person something: that waits on them too
   if (!owner || threadBusy(owner.id, threadId)) return null;
   return ownerAskAt(store.messagesFor(threadId), Date.now());
+}
+/** The server's request that the bot register this conversation's question
+ * (asked at `at`) as an item with why, steps and options (lot J2), if made. */
+function questionPromotion(threadId: string, at: number): AskPromotion | null {
+  const owner = store.botByThread(threadId);
+  return owner ? autonomy.askPromotionFor(owner.id, threadId, at, goalNeedsInputAskForThread(threadId) ?? "") : null;
+}
+goalNeedsInputForThread = (threadId) => {
+  const at = threadNeedsInputAt(threadId);
+  if (at === null) return null;
+  // the bot registered it as an item when the server asked: the item, with its steps, takes the question's place
+  const promotion = questionPromotion(threadId, at);
+  return promotion && autonomy.askPromotionItem(promotion) ? null : at;
 };
+goalNeedsInputStepsAskedForThread = (threadId, at) => questionPromotion(threadId, at)?.askedAt ?? null;
 goalNeedsInputAskForThread = (threadId) => {
   const goal = autonomy.goalFor(threadId);
   const names = store.bots.map((bot) => bot.name);
@@ -8711,12 +8732,17 @@ function settleReleaseLoopPendings(failing: string | null): void {
  * ~/.nuria/stop exists, one item per bot per minute; the request is a report,
  * so it wakes the bot only when its conversation is free, like any report. */
 const STEPS_ASK_AFTER_BOOT_MS = Number(process.env.OMB_OWNER_STEPS_ASK_AFTER_MS) >= 0 && process.env.OMB_OWNER_STEPS_ASK_AFTER_MS !== undefined ? Number(process.env.OMB_OWNER_STEPS_ASK_AFTER_MS) : 3 * 60_000;
-const stepsAsk = { bootAt: Date.now(), lastAt: 0 };
+const stepsAsk = { bootAt: Date.now(), lastAt: 0, questionsAt: 0 };
 const NURIA_STOP_FILE = join(homedir(), ".nuria", "stop");
 function askStepsForOlderItems(): void {
   const now = Date.now();
-  if (now - stepsAsk.bootAt < STEPS_ASK_AFTER_BOOT_MS || now - stepsAsk.lastAt < 60_000) return;
-  if (existsSync(NURIA_STOP_FILE)) return;
+  if (now - stepsAsk.bootAt < STEPS_ASK_AFTER_BOOT_MS || existsSync(NURIA_STOP_FILE)) return;
+  // a bare question is looked at every minute on its own: an item's pace must not hold it back
+  if (now - stepsAsk.questionsAt >= QUESTION_STEPS_PACE_MS) {
+    stepsAsk.questionsAt = now;
+    askStepsForQuestions(now);
+  }
+  if (now - stepsAsk.lastAt < 60_000) return;
   stepsAsk.lastAt = now;
   // the server's own items, saved by an older build: the server completes them, never their bot (INSP-J2 #5)
   for (const item of autonomy.serverItemsIncomplete()) {
@@ -8737,6 +8763,47 @@ function askStepsForOlderItems(): void {
     console.log(`[owner-pending] ${store.bot(botId)?.name ?? botId}: ${items.map((item) => item.id).join(", ")} lack ${[...new Set(items.flatMap(missingParts))].join("/")}: one report, in ${target}`);
     refreshBotRow(botId);
   }
+}
+
+/** A question a bot ended its turn with (lot J2): the line "Precisa de você"
+ * shows has no why, steps nor options — the bot is asked, once, to register
+ * it as an item that takes its place. Not in a routine's run nor an archived
+ * conversation (the panel does not show those lines either), and only once
+ * the person had a moment to answer it on the spot. */
+function askStepsForQuestions(now: number): void {
+  for (const bot of store.bots) {
+    if (bot.hidden) continue;
+    for (const task of store.tasks(bot.id)) {
+      if (task.routineRunId || task.archivedAt || task.activity === "waiting-on-you") continue;
+      const at = goalNeedsInputForThread(task.threadId);
+      if (at === null || now - at < QUESTION_STEPS_ASK_AFTER_MS || questionPromotion(task.threadId, at)) continue;
+      askQuestionSteps(bot.id, task.threadId, at);
+    }
+  }
+}
+
+/** A bare question gets this long to be answered on the spot before its bot is asked for the item (lot J2). */
+const QUESTION_STEPS_ASK_AFTER_MS = Number(process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS) >= 0 && process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS !== undefined ? Number(process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS) : 5 * 60_000;
+/** How often the bare questions are looked at: a minute (shrunk by the autonomy tests). */
+const QUESTION_STEPS_PACE_MS = autonomyTestMs("OMB_AUTONOMY_MINUTE_MS") ?? 60_000;
+/** "Pedir de novo" on a question: the same 15 min the screen waits before offering it (J17). */
+const QUESTION_STEPS_ASK_AGAIN_MS = 15 * 60_000;
+
+/** Asks the bot, as the server, to register the question its conversation
+ * asked at `at` as an owner_pending item (lot J2): a report, the J17 way —
+ * to the owner's channel, waiting for it to be free, dropped by ~/.nuria/stop
+ * at dispatch. A request still waiting for the same question is replaced. */
+function askQuestionSteps(botId: string, threadId: string, at: number): AskPromotion | null {
+  const target = ownerTurnThread(botId, threadId);
+  if (!store.taskByThread(botId, target)) return null;
+  const title = store.taskByThread(botId, threadId)?.title;
+  const text = goalNeedsInputAskForThread(threadId) ?? title ?? "";
+  const asked = autonomy.noteAskPromotion({ botId, threadId, askAt: at, text, reportThreadId: target });
+  autonomy.dropReports(target, (each) => { const ref = questionReportRef(each); return ref?.threadId === threadId && ref.askAt === at; });
+  autonomy.addReport(botId, target, questionStepsAutoReport(asked, title));
+  console.log(`[owner-pending] ${store.bot(botId)?.name ?? botId}: its question in ${threadId} ("${text.slice(0, 80)}") has no steps: asked to register it as an item, in ${target}`);
+  refreshBotRow(botId);
+  return asked;
 }
 
 /** A server item's why/steps/options, rebuilt from its key (an older build saved it bare). */
@@ -8848,6 +8915,13 @@ async function autonomyTick(): Promise<void> {
         const ids = /Itens: ([o\d, ]+)\./.exec(text)?.[1]?.split(/,\s*/).filter(Boolean) ?? [];
         autonomy.unmarkOwnerPendingStepsAutoAsked(pending.botId, ids);
         console.log(`[owner-pending] ~/.nuria/stop: the steps request for ${ids.join(", ")} was not sent; asked again once the stop is gone`);
+      }
+      // and a question's request (lot J2): the question goes back to unasked
+      for (const text of autonomy.dropReports(pending.threadId, (each) => each.startsWith(QUESTION_REPORT_PREFIX))) {
+        const ref = questionReportRef(text);
+        if (ref) autonomy.dropAskPromotion(pending.botId, ref.threadId, ref.askAt);
+        console.log(`[owner-pending] ~/.nuria/stop: the request to register the question in ${ref?.threadId ?? "?"} was not sent; asked again once the stop is gone`);
+        if (ref) refreshBotRow(pending.botId);
       }
       if (!autonomy.hasReports(pending.threadId)) continue;
     }
@@ -23031,6 +23105,26 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!reminded) return json(res, 409, { error: `${bot.name} ainda tem tempo para responder a este item.`, code: "not_silent" });
       refreshBotRow(bot.id);
       return json(res, 202, { ok: true, deduped: reminded.deduped, threadId: target });
+    }
+    // "Pedir de novo" on a bot's bare question (lot J2): the server asks the
+    // bot again, as itself, to register it as an item with why, steps and
+    // options — never in the person's words, never within 15 min of the last
+    // request, never with ~/.nuria/stop.
+    m = path.match(/^\/api\/bots\/([\w-]+)\/tasks\/([\w-]+)\/ask-steps$/);
+    if (m && method === "POST") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      if (!store.taskByThread(bot.id, m[2]!)) return json(res, 404, { error: "Esta conversa não existe mais." });
+      const notYours = cloudGuestSendRefusal(auth, m[2]!);
+      if (notYours) return json(res, 403, { error: notYours });
+      const at = goalNeedsInputForThread(m[2]!);
+      if (at === null) return json(res, 409, { error: `${bot.name} não espera mais uma resposta sua nesta conversa.`, code: "no_question" });
+      if (existsSync(NURIA_STOP_FILE)) return json(res, 409, { error: "O ~/.nuria/stop está ativo: nenhum pedido sai para os bots até ele ser removido. Responda abaixo ou abra a conversa.", code: "stopped" });
+      const current = questionPromotion(m[2]!, at);
+      if (current && Date.now() - current.askedAt < QUESTION_STEPS_ASK_AGAIN_MS) return json(res, 200, { ok: true, deduped: true, askedAt: current.askedAt });
+      const asked = askQuestionSteps(bot.id, m[2]!, at);
+      if (!asked) return json(res, 409, { error: `A conversa de ${bot.name} com você não existe mais. Responda abaixo.`, code: "no_channel" });
+      return json(res, 202, { ok: true, deduped: false, askedAt: asked.askedAt });
     }
     // The person answers an item from "Precisa de você": a decision the bot
     // offered (options[n]), their own words, or a request for the steps. The

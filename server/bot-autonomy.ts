@@ -430,6 +430,69 @@ export function ownerPendingStepsAutoReport(items: ReadonlyArray<Pick<OwnerPendi
   return `${STEPS_REPORT_PREFIX} Itens: ${items.map((item) => item.id).join(", ")}. O dono quer cada pendência com o passo a passo e, se for uma escolha, com a sua recomendação. Complete cada um com owner_pending update (why: 1–2 frases sobre por que importa; steps: passos práticos com o comando em command ou o link em link quando houver; options: UMA com recommended: true e why):\n${lines.join("\n")}\nSe um item não vale mais, resolva-o com owner_pending resolve. Não escreva ao dono só por isto.`;
 }
 
+/** A question a bot ended its turn with (a goal's needs_input, or its reply
+ * that waits on the person), which the server asked it, once, to register
+ * as an owner_pending item with why, steps and options (lot J2): the
+ * question's own line in "Precisa de você" gives way to that item. */
+export interface AskPromotion {
+  botId: string;
+  /** The conversation that asked. */
+  threadId: string;
+  /** When it asked (the line's "since"): one request per question. */
+  askAt: number;
+  /** What it asked, as the panel shows it. */
+  text: string;
+  /** When the server asked the bot (again, when the person asked it to). */
+  askedAt: number;
+  /** Where the request went: the owner's channel, or the conversation itself. */
+  reportThreadId: string;
+  /** The item that took the question over, once the bot opened it. */
+  itemId?: string;
+}
+export const ASK_PROMOTIONS_MAX = 100;
+
+/** The server's own request, as a report, to turn a bare question into an item (lot J2). */
+export const QUESTION_REPORT_PREFIX = "[Servidor: pergunta sem passo a passo]";
+
+/** That request: facts and the one tool call, never in the person's voice.
+ * `Ref <thread>@<askAt>` lets a stop at dispatch put the question back. */
+export function questionStepsAutoReport(ask: Pick<AskPromotion, "threadId" | "askAt" | "text">, threadTitle?: string): string {
+  const where = threadTitle ? ` na conversa «${threadTitle.slice(0, 80)}»` : "";
+  return `${QUESTION_REPORT_PREFIX} Ref ${ask.threadId}@${ask.askAt}. Você terminou um turno${where} com uma pergunta ao dono: «${ask.text.slice(0, 300)}». Em "Precisa de você" ela aparece só como título, sem por quê, sem passos e sem opções. Registre-a com owner_pending add: title (o que o dono decide, em uma frase), why (1–2 frases: por que importa e o que acontece se esperar), steps (passos práticos, com o comando em command ou o link em link quando houver) e options (as respostas possíveis, UMA com recommended: true e why). O item substitui a pergunta na tela. Se já existe um item para isso, ou a pergunta não vale mais, não abra outro. Não escreva ao dono só por isto.`;
+}
+
+/** The question a stopped request was about, read back from its Ref. */
+export function questionReportRef(text: string): { threadId: string; askAt: number } | null {
+  if (!text.startsWith(QUESTION_REPORT_PREFIX)) return null;
+  const ref = /^ Ref ([\w-]+)@(\d+)\./.exec(text.slice(QUESTION_REPORT_PREFIX.length));
+  return ref ? { threadId: ref[1]!, askAt: Number(ref[2]) } : null;
+}
+
+/** The words of a question or an item that say something (accents, case and punctuation aside). */
+function askWords(text: string): Set<string> {
+  return new Set(text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().split(/[^a-z0-9#]+/).filter((word) => word.length >= 4 || /^#\d+$/.test(word)));
+}
+
+/** The same question said again (a later reply repeating it): its words, in any order. */
+export function sameAskText(left: string, right: string): boolean {
+  const a = [...askWords(left)].sort().join(" ");
+  return a.length > 0 && a === [...askWords(right)].sort().join(" ");
+}
+
+/** The item the bot opened for a question it was asked to register: in the
+ * conversation that asked or where the request went, after the request; or
+ * anywhere after the question, saying it (the same #refs, or most of its words). */
+export function itemTakesOverAsk(promotion: AskPromotion, item: Pick<OwnerPending, "botId" | "threadId" | "createdAt" | "title" | "why" | "key">): boolean {
+  if (item.botId !== promotion.botId || item.key || item.createdAt < promotion.askAt) return false;
+  const words = askWords(promotion.text);
+  const said = askWords(`${item.title} ${item.why ?? ""}`);
+  const refs = [...words].filter((word) => word.startsWith("#"));
+  if (refs.length && refs.every((ref) => said.has(ref)) && item.createdAt >= promotion.askedAt) return true;
+  if ((item.threadId === promotion.threadId || item.threadId === promotion.reportThreadId) && item.createdAt >= promotion.askedAt) return true;
+  const shared = [...words].filter((word) => said.has(word)).length;
+  return words.size >= 3 && shared / Math.min(words.size, said.size || 1) >= 0.6;
+}
+
 /** What only the bot reads when the person asks, from "Precisa de você",
  * which decision it recommends (the turn's prompt, never the transcript). */
 export function ownerPendingRecommendNote(item: Pick<OwnerPending, "id">): string {
@@ -559,6 +622,8 @@ interface Ledger {
   reports?: PendingReports[];
   inFlight?: InFlight[];
   standingLost?: StandingLost[];
+  /** Questions a bot left in a conversation, asked once to become items (lot J2). */
+  askPromotions?: AskPromotion[];
 }
 
 /** A conversation whose last standing watch was cancelled: a watcher bot
@@ -668,6 +733,7 @@ export class BotAutonomy {
   private promises: BotPromise[] = [];
   private ownerPending: OwnerPending[] = [];
   private resolvedOwnerPending: ResolvedOwnerPending[] = [];
+  private askPromotions: AskPromotion[] = [];
   /** The bot's recent writes to watched sources, per bot (kept across restarts: saveEcho). */
   private selfWrites = new Map<string, SelfWrite[]>();
   /** Each watch's complete output lines of its last run (kept across restarts for that very output). */
@@ -736,6 +802,11 @@ export class BotAutonomy {
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
       }
+      for (const asked of raw.askPromotions ?? []) {
+        if (asked && typeof asked.botId === "string" && typeof asked.threadId === "string" && typeof asked.text === "string" && Number.isFinite(asked.askAt) && Number.isFinite(asked.askedAt)) {
+          this.askPromotions.push({ ...asked, reportThreadId: typeof asked.reportThreadId === "string" ? asked.reportThreadId : asked.threadId });
+        }
+      }
       // Turns a restart cut off: what woke them is due again, marked as such.
       const at = this.now();
       let recovered = false;
@@ -771,7 +842,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()] };
+    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()], ...(this.askPromotions.length ? { askPromotions: this.askPromotions } : {}) };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -1433,6 +1504,43 @@ export class BotAutonomy {
   ownerPendingNeedingSteps(): OwnerPending[] {
     // a bot's own items only: the server completes its keyed ones itself (INSP-J2 #5)
     return this.ownerPending.filter((item) => !item.key && missingParts(item).length > 0 && item.stepsAutoAskedAt === undefined).sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  /** The request for a bot's question (lot J2): this very ask, or the same
+   * words asked again in that conversation — one request per question. */
+  askPromotionFor(botId: string, threadId: string, askAt: number, text: string): AskPromotion | null {
+    return this.askPromotions.find((each) => each.botId === botId && each.threadId === threadId && (each.askAt === askAt || sameAskText(each.text, text))) ?? null;
+  }
+
+  /** The server asked the bot to register its question (again, when the person asked). */
+  noteAskPromotion(input: Omit<AskPromotion, "askedAt" | "itemId">): AskPromotion {
+    const current = this.askPromotionFor(input.botId, input.threadId, input.askAt, input.text);
+    const asked: AskPromotion = { ...input, askedAt: this.now() };
+    this.askPromotions = [...this.askPromotions.filter((each) => each !== current), asked].slice(-ASK_PROMOTIONS_MAX);
+    this.save();
+    return asked;
+  }
+
+  /** A request that never reached the bot (~/.nuria/stop): the question may be asked again later. */
+  dropAskPromotion(botId: string, threadId: string, askAt: number): void {
+    const before = this.askPromotions.length;
+    this.askPromotions = this.askPromotions.filter((each) => !(each.botId === botId && each.threadId === threadId && each.askAt === askAt && !each.itemId));
+    if (this.askPromotions.length !== before) this.save();
+  }
+
+  /** The item that took the question over (open or already settled), remembered once found; null while none did. */
+  askPromotionItem(promotion: AskPromotion): OwnerPending | null {
+    if (promotion.itemId) {
+      return this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!)))
+        ?? this.resolvedOwnerPending.find((item) => item.botId === promotion.botId && item.id === promotion.itemId)
+        // settled and aged out of the audit trail: the question was answered all the same
+        ?? { id: promotion.itemId, botId: promotion.botId, threadId: promotion.reportThreadId, title: promotion.text, createdAt: promotion.askedAt };
+    }
+    const item = [...this.ownerPending, ...this.resolvedOwnerPending].filter((each) => itemTakesOverAsk(promotion, each)).sort((a, b) => a.createdAt - b.createdAt)[0];
+    if (!item) return null;
+    promotion.itemId = item.id;
+    this.save();
+    return item;
   }
 
   /** The server's own items (keyed) still without why or steps — saved by an older build. */
