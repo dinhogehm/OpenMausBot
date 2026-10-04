@@ -6,6 +6,8 @@ import {
   cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
 } from "./own-worktrees.ts";
+import { worktreeLines } from "./productivity-export.ts";
+import type { ProductivityReport } from "../shared/productivity.ts";
 
 const REPO = "/Users/o/Projetos/nuria-platform";
 const LOCK = '{"lockfileVersion":3,"packages":{}}';
@@ -283,6 +285,24 @@ describe("what the clones saved", () => {
     expect(again.seed(REPO)).toMatchObject({ state: "interrupted" });
     expect(again.allEvents()).toHaveLength(1);
     expect(JSON.parse(readFileSync(path, "utf8")).events).toHaveLength(1);
+  });
+});
+
+describe("the V report", () => {
+  it("has a section with what the server's worktrees saved, why some were not cloned, the seeds, and that nothing is removed", () => {
+    const worktrees = ownSummary([
+      { at: 1, sessionId: "a", repo: REPO, path: "/p1", branch: "b", mode: "cloned", savedKb: 2_400_000, savedMs: 14 * 60_000 },
+      { at: 2, sessionId: "b", repo: REPO, path: "/p2", branch: "b", mode: "install", reason: "a semente de dependências ainda não está pronta (só 3,3 GiB livres; instalo a semente com 10 GiB ou mais)" },
+    ], [{ repo: REPO, path: "/s", state: "waiting", reason: "só 3,3 GiB livres", head: "c360ee2a2ffff" }], 0, 10);
+    const lines = worktreeLines({ worktrees } as ProductivityReport);
+    expect(lines).toContain("## Worktrees criadas pelo OMB (clone APFS)");
+    expect(lines).toContain("- Criadas: 2; com dependências clonadas da semente: 1; a sessão instalou (npm ci): 1");
+    expect(lines.find((line) => line.startsWith("- Economia dos clones:"))).toMatch(/^- Economia dos clones: 2,3 GB que não foram gravados em disco e 14 ?min/);
+    expect(lines).toContain("- Sem clone, 1×: a semente de dependências ainda não está pronta (só N GiB livres; instalo a semente com N GiB ou mais)");
+    expect(lines).toContain("- Semente de nuria-platform: esperando em `c360ee2a2` — só 3,3 GiB livres");
+    expect(lines.at(-1)).toBe("- O servidor nunca remove worktrees: só relata.");
+    expect(worktreeLines({} as ProductivityReport)).toEqual([]);
+    expect(worktreeLines({ worktrees: ownSummary([], [], 0, 1) } as ProductivityReport)).toContain("Nenhuma worktree criada pelo servidor no período.");
   });
 });
 

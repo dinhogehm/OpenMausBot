@@ -381,6 +381,8 @@ export function reportTitle(report: ProductivityReport): string {
   return `Produtividade de engenharia — ${periodTitle(report.period, report.generatedAt)}`;
 }
 
+const SEED_STATE_PT: Record<string, string> = { ready: "pronta", installing: "instalando", waiting: "esperando", failed: "falhou", interrupted: "interrompida", missing: "ainda não criada" };
+
 /** "Worktrees criadas pelo OMB" (lote X): how many, how many got their
  * caches cloned, what that saved in disk and install time, why the others
  * did not, and each seed. Nothing when the report does not carry it. */
@@ -396,7 +398,7 @@ export function worktreeLines(report: ProductivityReport): string[] {
     for (const each of w.reasons.slice(0, 5)) lines.push(`- Sem clone, ${formatNumber(each.count)}×: ${md(each.reason)}`);
   }
   for (const seed of w.seeds) {
-    lines.push(`- Semente de ${md(seed.repo.split("/").pop() ?? seed.repo)}: ${seed.state === "ready" ? "pronta" : md(seed.state)}${seed.head ? ` em \`${seed.head.slice(0, 9)}\`` : ""}${seed.kb ? `, ${size(seed.kb)} de dependências` : ""}${seed.installMs ? `, instalada em ${formatDuration(seed.installMs)}` : ""}${seed.reason ? ` — ${md(seed.reason)}` : ""}`);
+    lines.push(`- Semente de ${md(seed.repo.split("/").pop() ?? seed.repo)}: ${SEED_STATE_PT[seed.state] ?? md(seed.state)}${seed.head ? ` em \`${seed.head.slice(0, 9)}\`` : ""}${seed.kb ? `, ${size(seed.kb)} de dependências` : ""}${seed.installMs ? `, instalada em ${formatDuration(seed.installMs)}` : ""}${seed.reason ? ` — ${md(seed.reason)}` : ""}`);
   }
   lines.push("- O servidor nunca remove worktrees: só relata.");
   return lines;
