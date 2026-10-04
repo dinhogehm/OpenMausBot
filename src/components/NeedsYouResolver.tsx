@@ -394,8 +394,9 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
           <span><span className="font-medium text-ink">{item.botName}</span> {t("needsYou.screen.askedAgo", { age: waitingAge(item.since, now) })}</span>
           {item.threadTitle && (item.threadTitle !== item.title || item.threadKind) && (
             // the separator travels with what it introduces: never alone at a line's end (INSP-I r1 #19);
-            // a routine's run or an archived conversation is said: "Abrir conversa" opens it all the same
-            <span data-resolver-thread-kind={item.threadKind} className="min-w-0 max-w-full truncate"><span aria-hidden="true">· </span>{t(item.threadKind === "routine" ? "needsYou.screen.inRoutineThread" : item.threadKind === "archived" ? "needsYou.screen.inArchivedThread" : "needsYou.screen.inThread", { title: item.threadTitle })}</span>
+            // a routine's run or an archived conversation is said ("Abrir conversa" opens it all the same),
+            // wrapping instead of cut: on a phone the kind is the news (INSP-J2b #4)
+            <span data-resolver-thread-kind={item.threadKind} className={cn("min-w-0 max-w-full", item.threadKind ? "break-words" : "truncate")}><span aria-hidden="true">· </span>{t(item.threadKind === "routine" ? "needsYou.screen.inRoutineThread" : item.threadKind === "archived" ? "needsYou.screen.inArchivedThread" : "needsYou.screen.inThread", { title: item.threadTitle })}</span>
           )}
         </p>
         <h2 id="needs-you-item-title" className="mt-1.5 break-words text-[18px] font-semibold leading-snug text-ink sm:mt-2 sm:text-[21px]">{item.title}</h2>

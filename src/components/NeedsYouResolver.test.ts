@@ -677,6 +677,8 @@ describe("items a routine's run or an archived conversation opened, and a bare q
     const o14 = view({ items: real, selectedKey: realKey("o14") });
     expect(o14.title).toBe("Autorizar a linha nova da #9355 na planilha Atendimento");
     expect(o14.html).toContain(`em “${routine}”, execução de rotina`);
+    // never cut on a phone: it wraps (INSP-J2b #4)
+    expect(o14.find("data-resolver-thread-kind", "routine")?.props.className).toBe("min-w-0 max-w-full break-words");
     expect(o14.html).toContain("Autorizar");
     o14.press("data-resolver-conversation");
     expect(o14.calls).toEqual(["conversation:run-a"]);

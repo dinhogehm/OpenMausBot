@@ -114,7 +114,7 @@ import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { SidebarNeedsYou } from "./SidebarNeedsYou";
 import { NeedsYouResolver } from "./NeedsYouResolver";
 import { needsYouItems, needsYouKey, nextAwaitingChange, startNeedsYouClock } from "@/lib/needs-you";
-import { askQuestionSteps, decisionReply, remindOwnerPending,replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
+import { askQuestionSteps, decisionReply, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
 import { openExternalLink } from "@/lib/app-links";
 import { ShortcutHint } from "./ShortcutHint";
 import { sidebarStamp, needsYouLabel } from "@/lib/message-stamp";
