@@ -113,6 +113,7 @@ describe("the lines, from the real states", () => {
     expect(at({ phase: "workers", phaseAt: NOW - 3 * MIN, progress: { done: 12, total: 46 } }).text).toBe("3c04d7c3d · deploy dos workers 12 de 46 há 3 min · começou há 1 h 15");
     expect(at({ phase: "post-release", phaseAt: NOW - MIN, progress: { done: 3, total: 5 } }).text).toBe("3c04d7c3d · checagem pós-release 3 de 5 há 1 min · começou há 1 h 15");
     expect(at({ phase: "deploy", phaseAt: null }).text).toBe("3c04d7c3d · deploy há — · começou há 1 h 15");
+    expect(at({ phase: "purge", phaseAt: NOW - 20_000 }).text).toBe("3c04d7c3d · purge do CDN agora mesmo · começou há 1 h 15");
   });
 
   it("release: no estimate without the profile or with fewer than 3 comparable releases ('—')", () => {

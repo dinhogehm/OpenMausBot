@@ -155,7 +155,7 @@ function releaseLine(server: NowServerStatus | null, now: number): NowLine {
   } else {
     // every phase says since when; one read on a cold start (no clock in the log) says "—"
     const progress = release.progress ? ` ${release.progress.total !== null ? t("now.release.progress", { done: release.progress.done, total: release.progress.total }) : t("now.release.progressOpen", { done: release.progress.done })}` : "";
-    const phaseAge = ` ${t("now.release.phaseFor", { age: release.phaseAt ? durationText(now - release.phaseAt) : DASH })}`;
+    const phaseAge = ` ${release.phaseAt && now - release.phaseAt < 60_000 ? t("now.release.phaseJustStarted") : t("now.release.phaseFor", { age: release.phaseAt ? durationText(now - release.phaseAt) : DASH })}`;
     text = t("now.release.running", { sha, phase: `${phaseText(release.phase)}${progress}`, phaseAge, age: elapsed !== null ? durationText(elapsed) : DASH });
   }
   // the estimate stands on releases of this run's profile only, from its current phase

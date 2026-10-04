@@ -3653,5 +3653,6 @@
   "now.merge.HAS_HOOKS": "ready",
   "now.merge.DRAFT": "draft",
   "now.merge.UNKNOWN": "state —",
-  "now.alerts.whenLog": "{age} ago, in the watcher's log"
+  "now.alerts.whenLog": "{age} ago, in the watcher's log",
+  "now.release.phaseJustStarted": "just now"
 }

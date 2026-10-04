@@ -3387,5 +3387,6 @@
   "now.merge.HAS_HOOKS": "pronta",
   "now.merge.DRAFT": "rascunho",
   "now.merge.UNKNOWN": "estado —",
-  "now.alerts.whenLog": "há {age}, no log do watcher"
+  "now.alerts.whenLog": "há {age}, no log do watcher",
+  "now.release.phaseJustStarted": "agora mesmo"
 }
