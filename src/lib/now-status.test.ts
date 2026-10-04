@@ -49,7 +49,7 @@ function server(extra: Partial<NowServerStatus> = {}): NowServerStatus {
     release: {
       state: "running", sha: SHA, startedAt: NOW - 75 * MIN, phase: "tests", phaseAt: NOW - 12 * MIN,
       prs: [{ number: 9301, title: "feat: x", url: "https://github.com/dinhogehm/nuria-platform/pull/9301" }],
-      estimateMs: 2 * H + 45 * MIN, samples: 8,
+      profile: "migrations", estimateMs: 2 * H + 45 * MIN, remainingMs: 90 * MIN, samples: 3, progress: null,
     },
     prs: {
       checkedAt: NOW - MIN,
@@ -96,24 +96,46 @@ describe("the lines, from the real states", () => {
   it("release running: commit, phase and for how long, since when, time left by the history, its PRs", () => {
     expect(line.release).toMatchObject({
       text: "3c04d7c3d · testes há 12 min · começou há 1 h 15",
-      detail: "faltam ~1 h 30 · mediana 2 h 45 (8 releases) · #9301 feat: x",
+      detail: "faltam ~1 h 30 · mediana 2 h 45 (3 releases com migrations) · #9301 feat: x",
       tone: "info",
       target: { kind: "url", url: "https://github.com/dinhogehm/nuria-platform/pull/9301" },
     });
-    const late = byId(nowLines(server({ release: { ...server().release, startedAt: NOW - 3 * H } }), local, NOW));
-    expect(late.release).toMatchObject({ tone: "warn", detail: "passou da mediana (2 h 45) · #9301 feat: x" });
+    const late = byId(nowLines(server({ release: { ...server().release, remainingMs: -20 * MIN } }), local, NOW));
+    expect(late.release).toMatchObject({ tone: "warn", detail: "passou da mediana em 20 min · mediana 2 h 45 (3 releases com migrations) · #9301 feat: x" });
     const hung = byId(nowLines(server({ release: { ...server().release, overdue: true } }), local, NOW));
     expect(hung.release).toMatchObject({ tone: "danger" });
     expect(hung.release!.detail).toContain("pode ter travado");
   });
 
-  it("open PRs: BEHIND and BLOCKED counted, receipts counted, the one needing a hand first, drafts apart", () => {
+  it("release: every phase says since when, the deploy's included; workers counted; '—' when its start is not known", () => {
+    const at = (release: Partial<NowServerStatus["release"]>) => byId(nowLines(server({ release: { ...server().release, ...release } }), local, NOW)).release!;
+    expect(at({ phase: "migrations-check", phaseAt: NOW - 95 * MIN }).text).toBe("3c04d7c3d · verificando migrations nos tenants há 1 h 35 · começou há 1 h 15");
+    expect(at({ phase: "workers", phaseAt: NOW - 3 * MIN, progress: { done: 12, total: 46 } }).text).toBe("3c04d7c3d · deploy dos workers 12 de 46 há 3 min · começou há 1 h 15");
+    expect(at({ phase: "post-release", phaseAt: NOW - MIN, progress: { done: 3, total: 5 } }).text).toBe("3c04d7c3d · checagem pós-release 3 de 5 há 1 min · começou há 1 h 15");
+    expect(at({ phase: "deploy", phaseAt: null }).text).toBe("3c04d7c3d · deploy há — · começou há 1 h 15");
+  });
+
+  it("release: no estimate without the profile or with fewer than 3 comparable releases ('—')", () => {
+    const of = (release: Partial<NowServerStatus["release"]>) => byId(nowLines(server({ release: { ...server().release, ...release } }), local, NOW)).release!.detail;
+    expect(of({ profile: null, estimateMs: null, remainingMs: null, samples: 0 })).toBe("estimativa: — (ainda não se sabe se tem migrations) · #9301 feat: x");
+    expect(of({ profile: "light", estimateMs: null, remainingMs: null, samples: 1 })).toBe("estimativa: — (1 releases sem migrations no histórico; precisa de 3) · #9301 feat: x");
+  });
+
+  it("release idle: each profile's median, never one mixed", () => {
+    const idle = byId(nowLines(server({ release: { state: "idle", estimateMs: null, samples: 0, profiles: { migrations: { ms: 3 * H + 5 * MIN, samples: 7 }, light: { ms: 49 * MIN, samples: 3 } } } }), local, NOW)).release!;
+    expect(idle).toMatchObject({ text: "nenhum release em curso", detail: "mediana 3 h 05 com migrations · 49 min sem" });
+  });
+
+  it("open PRs in pt-BR: behind main and blocked counted, receipts counted, the one needing a hand first, drafts apart", () => {
     expect(line.prs).toMatchObject({
-      text: "2 abertas · 1 BEHIND, 1 BLOCKED · com recibo: 1",
-      detail: "#9332 BEHIND, sem recibo · #9368 BLOCKED, recibo verde · +1 rascunho",
+      text: "2 abertas · 1 atrás da main, 1 bloqueada · com recibo: 1",
+      detail: "#9332 atrás da main, sem recibo · #9368 bloqueada, recibo verde · +1 rascunho",
       tone: "warn",
       target: { kind: "url", url: "https://github.com/dinhogehm/nuria-platform/pull/9332" },
     });
+    // BLOCKED is every PR's state before its gate: no alarm for it alone
+    const blocked = byId(nowLines(server({ prs: { checkedAt: NOW, list: [server().prs.list![1]!] } }), local, NOW)).prs!;
+    expect(blocked).toMatchObject({ text: "1 aberta · 1 bloqueada · com recibo: 1", tone: "info" });
   });
 
   it("ci:local queued behind the release: a legitimate wait, not an alarm", () => {
@@ -139,12 +161,19 @@ describe("the lines, from the real states", () => {
   });
 
   it("today's throughput from the report, to the report", () => {
-    expect(line.throughput).toMatchObject({ text: "produção 1 · PRs mergeadas 7 · issues fechadas 4", target: { kind: "report" } });
+    // each label stays with its number (no "1" alone on the next line of a narrow panel)
+    expect(line.throughput).toMatchObject({ text: "produção 1 · PRs mergeadas 7 · issues fechadas 4", target: { kind: "report" } });
   });
 
   it("an alert of the Chief's: its words, when, to the Chief's conversation", () => {
     const alerted = byId(nowLines(server({ alerts: [{ key: "a", at: NOW - 5 * MIN, text: "release cb015584a falhou 2× e não foi publicado", botId: "chief", threadId: "desk" }] }), local, NOW));
     expect(alerted.alerts).toMatchObject({ text: "release cb015584a falhou 2× e não foi publicado", detail: "há 5 min, na conversa do Chief", tone: "danger", target: { kind: "thread", botId: "chief", threadId: "desk" } });
+  });
+
+  it("an alert only read from the watcher's log never claims the Chief's conversation", () => {
+    const logged = byId(nowLines(server({ alerts: [{ key: "failing:cb015584a:2", at: NOW - 40 * MIN, sha: "cb015584a", kind: "release", text: "Release cb015584a falhou 2× seguidas — não está em produção (log do watcher)" }] }), local, NOW));
+    expect(logged.alerts).toMatchObject({ detail: "há 40 min, no log do watcher", tone: "danger" });
+    expect(logged.alerts!.target).toBeUndefined();
   });
 });
 
@@ -155,20 +184,20 @@ describe("unknown is '—', never zero", () => {
     expect(lines.release!.text).toBe("—");
     expect(lines.prs!.text).toBe("—");
     expect(lines.ci!.text).toBe("—");
-    expect(lines.throughput!.text).toBe("produção — · PRs mergeadas — · issues fechadas —");
+    expect(lines.throughput!.text).toBe("produção — · PRs mergeadas — · issues fechadas —");
     expect(lines.needsYou!.text).toBe("2 itens · o mais antigo há 2 h");
   });
 
   it("partial knowledge: today without a release source, GitHub never synced, the release's PRs unknown", () => {
     const lines = byId(nowLines(server({
       production: { ...server().production, today: null },
-      release: { ...server().release, prs: null, estimateMs: null, samples: 0 },
+      release: { ...server().release, prs: null, profile: null, estimateMs: null, remainingMs: null, samples: 0 },
       throughput: { deliveries: null, mergedPrs: null, closedIssues: null, failedReleases: null, syncedAt: null },
       prs: { list: null, checkedAt: null, error: "gh: not logged in" },
     }), nowLocal([], NOW), NOW));
     expect(lines.production!.text).toBe("f9e7a2350 · no ar há 3 h · hoje: —");
-    expect(lines.release!.detail).toBe("sem histórico para estimar · PRs: —");
-    expect(lines.throughput).toMatchObject({ text: "produção — · PRs mergeadas — · issues fechadas —", detail: "GitHub ainda não sincronizado" });
+    expect(lines.release!.detail).toBe("estimativa: — (ainda não se sabe se tem migrations) · PRs: —");
+    expect(lines.throughput).toMatchObject({ text: "produção — · PRs mergeadas — · issues fechadas —", detail: "GitHub ainda não sincronizado" });
     expect(lines.prs).toMatchObject({ text: "—", detail: "O GitHub não respondeu" });
   });
 
@@ -232,12 +261,12 @@ describe("Copiar resumo", () => {
       "_Desde 08:30: +1 em produção_",
       "",
       "- Produção: f9e7a2350 · no ar há 3 h · 1 entrega hoje — [#9280](https://github.com/dinhogehm/nuria-platform/pull/9280) fix(helpdesk): rodízio de equipe atômico",
-      "- Release: 3c04d7c3d · testes há 12 min · começou há 1 h 15 — faltam ~1 h 30 · mediana 2 h 45 (8 releases); [#9301](https://github.com/dinhogehm/nuria-platform/pull/9301) feat: x",
-      "- PRs abertas: 2 abertas · 1 BEHIND, 1 BLOCKED · com recibo: 1 — [#9332](https://github.com/dinhogehm/nuria-platform/pull/9332) BEHIND, sem recibo; [#9368](https://github.com/dinhogehm/nuria-platform/pull/9368) BLOCKED, recibo verde",
+      "- Release: 3c04d7c3d · testes há 12 min · começou há 1 h 15 — faltam ~1 h 30 · mediana 2 h 45 (3 releases com migrations); [#9301](https://github.com/dinhogehm/nuria-platform/pull/9301) feat: x",
+      "- PRs abertas: 2 abertas · 1 atrás da main, 1 bloqueada · com recibo: 1 — [#9332](https://github.com/dinhogehm/nuria-platform/pull/9332) atrás da main, sem recibo; [#9368](https://github.com/dinhogehm/nuria-platform/pull/9368) bloqueada, recibo verde",
       "- ci:local: na fila atrás do release: 2 (espera legítima: começa quando o release liberar a máquina)",
       "- Precisa de você: 2 itens · o mais antigo há 2 h — Aprovar o merge da PR #9332; Recusar o release cb015584a",
       "- Sessões: 1 a retomar · 1 travada · em espera pelo release: 1 — fix/9368 admissão; chore: limpeza; feat/9332 prazo",
-      "- Hoje: produção 1 · PRs mergeadas 7 · issues fechadas 4",
+      "- Hoje: produção 1 · PRs mergeadas 7 · issues fechadas 4",
     ]);
   });
 });
@@ -254,5 +283,19 @@ describe("notifications: discreet, once each", () => {
     ]);
     // the answered item (on its bot) is not news for the owner
     expect(nowNotificationKeys(server(), local).some((key) => key.endsWith(":o3"))).toBe(false);
+  });
+
+  it("no second banner for what the bot's turn already announced, nor for a bot whose switch is off", () => {
+    const local = nowLocal(bots, NOW);
+    const sent = new Set([`production:${PREV}`]);
+    const notified = nowNotifications(server(), local, sent, { serverNotified: (botId, threadId, since) => botId === "chief" && threadId === "desk" && since === NOW - 20 * MIN });
+    expect(notified.map((each) => [each.key, each.quiet ?? false])).toEqual([["needsYou:chief:desk:o1", false], ["needsYou:chief:desk:o2", true]]);
+    expect(nowNotifications(server(), local, sent, { botNotifies: () => false }).every((each) => each.quiet)).toBe(true);
+  });
+
+  it("the same conversation asking again is news again (its own key per ask)", () => {
+    const asking = (since: number) => nowLocal([bot("qa", "QA", [task("q1", "Rodar QA", { goalNeedsInput: true, goalNeedsInputSince: since })])], NOW);
+    const first = nowNotificationKeys(null, asking(NOW - 3 * H));
+    expect(nowNotifications(null, asking(NOW - 10 * MIN), new Set(first)).map((each) => each.key)).toEqual([`needsYou:qa:q1:ask@${NOW - 10 * MIN}`]);
   });
 });

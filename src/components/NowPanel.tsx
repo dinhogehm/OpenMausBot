@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { createPortal } from "react-dom";
 import { BellRing, ChevronRight, ClipboardCopy, ExternalLink, Radar, X } from "lucide-react";
 import { openExternalLink } from "@/lib/app-links";
+import { serverNotifiedSince } from "@/lib/notify";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import {
@@ -24,7 +25,7 @@ const DOT: Record<NowTone, string> = {
 /** The panel itself: the lines, what changed since the owner last looked,
  * "Copiar resumo" and the notification switch. Pure render, for tests and
  * the harness; SidebarNow holds the state. */
-export function NowPanel({ lines, news, since, firstLook, updatedAt, offline, disabled, notify, copied, onOpen, onCopy, onToggleNotify, onClose }: {
+export function NowPanel({ lines, news, since, firstLook, updatedAt, offline, disabled, notify, canNotify = false, copied, onOpen, onCopy, onToggleNotify, onClose }: {
   lines: NowLine[];
   news: ReadonlySet<NowLineId>;
   /** "Desde 08:30: +1 em produção" (null on the first look). */
@@ -37,6 +38,8 @@ export function NowPanel({ lines, news, since, firstLook, updatedAt, offline, di
   /** This Mac does not run the Nuria release. */
   disabled: boolean;
   notify: boolean;
+  /** macOS notifications exist here (the desktop app on a Mac): the switch is shown only then. */
+  canNotify?: boolean;
   copied: boolean;
   onOpen: (line: NowLine) => void;
   onCopy: () => void;
@@ -84,7 +87,8 @@ export function NowPanel({ lines, news, since, firstLook, updatedAt, offline, di
                   )}
                 </span>
                 <span className="block break-words text-[12.5px] leading-snug text-ink tabular-nums">{line.text}</span>
-                {line.detail && <span className="line-clamp-2 break-words text-[11px] leading-snug text-ink-secondary">{line.detail}</span>}
+                {/* whole, never clamped: a cut detail hides exactly its last fact, and a touch has no tooltip */}
+                {line.detail && <span className="block break-words text-[11px] leading-snug text-ink-secondary">{line.detail}</span>}
               </span>
               {line.target && (external
                 ? <ExternalLink size={12} aria-hidden="true" className="mt-1 shrink-0 text-ink-secondary" />
@@ -120,7 +124,8 @@ export function NowPanel({ lines, news, since, firstLook, updatedAt, offline, di
           <ClipboardCopy size={13} aria-hidden="true" className="text-ink-secondary" />
           <span aria-live="polite">{copied ? t("now.copied") : t("now.copy")}</span>
         </button>
-        <label className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] text-ink hover:bg-raised" title={t("now.notifyHint")}>
+        {/* only where macOS notifications exist: the desktop app on a Mac (not a phone, not a browser) */}
+        {canNotify && <label className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] text-ink hover:bg-raised" title={t("now.notifyHint")}>
           <BellRing size={13} aria-hidden="true" className="text-ink-secondary" />
           {t("now.notify")}
           <input
@@ -130,7 +135,7 @@ export function NowPanel({ lines, news, since, firstLook, updatedAt, offline, di
             onChange={(event) => onToggleNotify(event.target.checked)}
             className="size-3.5 accent-[var(--color-accent)]"
           />
-        </label>
+        </label>}
       </div>
     </div>
   );
@@ -152,6 +157,22 @@ const readSent = (): Set<string> | null => {
   } catch { return null; }
 };
 const writeSent = (sent: Set<string>) => { try { storage()?.setItem(SENT_KEY, JSON.stringify([...sent].slice(-300))); } catch { /* memory keeps it */ } };
+
+/** macOS notifications exist here: the desktop app (its bridge) on a Mac — not a phone, not a browser tab. */
+export function macDesktop(env: { bridge: boolean; platform: string } = { bridge: typeof window !== "undefined" && Boolean(window.ogb), platform: typeof navigator === "undefined" ? "" : navigator.platform }): boolean {
+  return env.bridge && /^Mac/i.test(env.platform);
+}
+
+/** Tab and Shift+Tab stay inside the panel: from its last control to its first, and back. */
+export function trapTab(event: Pick<KeyboardEvent, "key" | "shiftKey" | "preventDefault">, controls: readonly HTMLElement[], active: Element | null): HTMLElement | null {
+  if (event.key !== "Tab" || !controls.length) return null;
+  const first = controls[0]!;
+  const last = controls.at(-1)!;
+  const inside = controls.includes(active as HTMLElement);
+  if (event.shiftKey && (active === first || !inside)) { event.preventDefault(); return last; }
+  if (!event.shiftKey && (active === last || !inside)) { event.preventDefault(); return first; }
+  return null;
+}
 
 /** ⌘⇧A (Ctrl+Shift+A): open or close "Agora". */
 export const isNowShortcut = (event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">): boolean =>
@@ -190,10 +211,11 @@ export function SidebarNow({ density, onOpenNeedsYou }: { density: SidebarDensit
   const panelRef = useRef<HTMLDivElement>(null);
   const motion = useMenuMotion(open);
   const server = state.nowStatus;
+  const canNotify = macDesktop();
 
   const load = useCallback(async (refresh = false) => {
     try {
-      const res = await fetch(`/api/now${refresh ? "?refresh=1" : ""}`, { cache: "no-store" });
+      const res = await fetch(`/api/now${refresh ? "?refresh=1" : ""}`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
       if (!res.ok) throw new Error(String(res.status));
       const body = await res.json() as { status: NowServerStatus; seen: NowSeen | null };
       dispatch({ type: "nowStatus", status: body.status });
@@ -228,13 +250,17 @@ export function SidebarNow({ density, onOpenNeedsYou }: { density: SidebarDensit
       writeSent(new Set(nowNotificationKeys(server, local)));
       return;
     }
-    const fresh = nowNotifications(server, local, sent);
+    const fresh = nowNotifications(server, local, sent, {
+      botNotifies: (botId) => state.bots.find((bot) => bot.id === botId)?.notifications !== false,
+      serverNotified: serverNotifiedSince,
+    });
     if (!fresh.length) return;
     sent = new Set([...sent, ...fresh.map((each) => each.key)]);
     writeSent(sent);
-    if (!notify || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    if (!canNotify || !notify || typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (open && document.hasFocus()) return;
-    for (const each of fresh.slice(0, 3)) {
+    // what the bot's own turn already announced (or its switch is off) is recorded, not shown twice
+    for (const each of fresh.filter((one) => !one.quiet).slice(0, 3)) {
       const shown = new Notification(each.title, { body: each.body, tag: `openmausbot:now:${each.key}`, silent: true });
       shown.onclick = () => { window.focus(); go(each.target); };
     }
@@ -327,6 +353,11 @@ export function SidebarNow({ density, onOpenNeedsYou }: { density: SidebarDensit
             tabIndex={-1}
             // the panel itself takes focus to land the keyboard in it; its lines carry the visible ring
             style={{ ...place, outline: "none" }}
+            // the keyboard stays in the panel while it is open (Esc closes it)
+            onKeyDown={(event) => {
+              const controls = [...(panelRef.current?.querySelectorAll<HTMLElement>("button, input, [href]") ?? [])];
+              trapTab(event.nativeEvent, controls, document.activeElement)?.focus();
+            }}
             className={cn(
               "fixed z-50 overflow-hidden rounded-xl outline-none border border-hairline/50 bg-menu shadow-2xl shadow-black/60",
               motion.className,
@@ -342,6 +373,7 @@ export function SidebarNow({ density, onOpenNeedsYou }: { density: SidebarDensit
               offline={offline}
               disabled={Boolean(server && !server.enabled)}
               notify={notify}
+              canNotify={canNotify}
               copied={copied}
               onOpen={(line) => { if (line.target) { close(false); go(line.target); } }}
               onCopy={copy}

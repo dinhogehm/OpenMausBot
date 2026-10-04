@@ -90,7 +90,7 @@ export function nowLocal(bots: readonly Bot[], now: number): NowLocal {
   return { needsYou: { waiting: waitingOnYou(all, now), awaitingBot: all.filter((item) => awaitingBot(item, now)).length }, sessions };
 }
 
-const PHASES = new Set(["queued", "build", "lint", "typecheck", "tests", "smart-deploy", "migration-lint", "migration-contracts", "schema-syntax", "script-contracts", "review", "deploy", "purge", "post-release", "tag"]);
+const PHASES = new Set(["queued", "build", "lint", "typecheck", "tests", "smart-deploy", "migration-lint", "migration-contracts", "schema-syntax", "script-contracts", "review", "deploy-check", "migrations-check", "migrations", "deploy", "workers", "purge", "post-release", "tag"]);
 
 /** The phase in the reader's words; a step the server does not know is said as the log names it. */
 export function phaseText(phase: string | null | undefined): string {
@@ -141,9 +141,10 @@ function releaseLine(server: NowServerStatus | null, now: number): NowLine {
   if (!server?.enabled || !release || release.state === "unknown") {
     return { id: "release", label, text: t("now.release.unknown"), tone: "muted", fingerprint: "unknown", markdown: `${label}: ${DASH}` };
   }
-  const estimate = release.estimateMs !== null ? t("now.release.estimate", { estimate: durationText(release.estimateMs), samples: release.samples }) : t("now.release.noEstimate");
   if (release.state === "idle") {
-    return { id: "release", label, text: t("now.release.idle"), detail: estimate, tone: "muted", fingerprint: "idle", markdown: `${label}: ${t("now.release.idle")}` };
+    const medians = release.profiles;
+    const detail = medians ? t("now.release.idleProfiles", { migrations: medians.migrations.ms !== null ? durationText(medians.migrations.ms) : DASH, light: medians.light.ms !== null ? durationText(medians.light.ms) : DASH }) : undefined;
+    return { id: "release", label, text: t("now.release.idle"), ...(detail ? { detail } : {}), tone: "muted", fingerprint: "idle", markdown: `${label}: ${t("now.release.idle")}` };
   }
   const sha = release.sha ? shortSha(release.sha) : DASH;
   const elapsed = release.startedAt ? now - release.startedAt : null;
@@ -152,15 +153,20 @@ function releaseLine(server: NowServerStatus | null, now: number): NowLine {
   if (release.state === "queued") {
     text = t("now.release.queued", { sha, age: elapsed !== null ? durationText(elapsed) : DASH });
   } else {
-    const phaseAge = release.phaseAt ? ` ${t("now.release.phaseFor", { age: durationText(now - release.phaseAt) })}` : "";
-    text = t("now.release.running", { sha, phase: phaseText(release.phase), phaseAge, age: elapsed !== null ? durationText(elapsed) : DASH });
+    // every phase says since when; one read on a cold start (no clock in the log) says "—"
+    const progress = release.progress ? ` ${release.progress.total !== null ? t("now.release.progress", { done: release.progress.done, total: release.progress.total }) : t("now.release.progressOpen", { done: release.progress.done })}` : "";
+    const phaseAge = ` ${t("now.release.phaseFor", { age: release.phaseAt ? durationText(now - release.phaseAt) : DASH })}`;
+    text = t("now.release.running", { sha, phase: `${phaseText(release.phase)}${progress}`, phaseAge, age: elapsed !== null ? durationText(elapsed) : DASH });
   }
+  // the estimate stands on releases of this run's profile only, from its current phase
+  const profile = release.profile ? t(`now.profile.${release.profile}` as LocaleKey) : null;
+  const estimate = release.estimateMs !== null && profile ? t("now.release.estimateProfile", { estimate: durationText(release.estimateMs), samples: release.samples, profile }) : null;
   const parts: string[] = [];
   if (release.overdue) { tone = "danger"; parts.push(t("now.release.overdue")); }
-  else if (elapsed !== null && release.estimateMs !== null && release.state === "running") {
-    if (elapsed > release.estimateMs) { tone = "warn"; parts.push(t("now.release.over", { estimate: durationText(release.estimateMs) })); }
-    else parts.push(t("now.release.left", { left: durationText(release.estimateMs - elapsed), estimate }));
-  } else parts.push(estimate);
+  else if (!profile) parts.push(t("now.release.noProfile"));
+  else if (release.remainingMs === null || release.remainingMs === undefined || !estimate) parts.push(t("now.release.fewSamples", { samples: release.samples, profile }));
+  else if (release.remainingMs < 0) { tone = "warn"; parts.push(t("now.release.overBy", { over: durationText(-release.remainingMs), estimate })); }
+  else parts.push(t("now.release.left", { left: durationText(release.remainingMs), estimate }));
   const prs = release.prs;
   parts.push(prs === null || prs === undefined ? t("now.release.prsUnknown") : prs.length ? prs.slice(0, 3).map((pr) => titled(pr, prs.length === 1 ? 72 : 40)).join(" · ") + (prs.length > 3 ? ` ${t("now.more", { count: prs.length - 3 })}` : "") : t("now.release.prsNone"));
   const first = prs?.[0];
@@ -173,6 +179,9 @@ function releaseLine(server: NowServerStatus | null, now: number): NowLine {
 }
 
 const gateText = (gate: NowOpenPr["gate"]): string => t(`now.gate.${gate}` as LocaleKey);
+const MERGE_STATES = new Set(["BEHIND", "BLOCKED", "DIRTY", "UNSTABLE", "CLEAN", "HAS_HOOKS", "DRAFT", "UNKNOWN"]);
+/** GitHub's merge state in the reader's words ("atrás da main"); one GitHub adds later stays as it is. */
+export const mergeText = (merge: string): string => (MERGE_STATES.has(merge) ? t(`now.merge.${merge}` as LocaleKey) : merge);
 const mergeRank = (pr: NowOpenPr): number => {
   const at = (PR_ATTENTION as readonly string[]).indexOf(pr.merge);
   return at < 0 ? PR_ATTENTION.length : at;
@@ -191,12 +200,12 @@ function prsLine(server: NowServerStatus | null): NowLine {
   const red = open.filter((pr) => pr.gate === "failure").length;
   const text = open.length === 0 ? t("now.prs.none")
     : [open.length === 1 ? t("now.prs.openOne") : t("now.prs.openMany", { count: open.length }),
-      counts.map((each) => `${each.count} ${each.state}`).join(", "),
+      counts.map((each) => `${each.count} ${mergeText(each.state)}`).join(", "),
       t("now.prs.receipts", { count: receipts }),
       ...(red ? [t("now.prs.red", { count: red })] : [])].filter(Boolean).join(" · ");
   const ordered = open.toSorted((a, b) => mergeRank(a) - mergeRank(b) || a.number - b.number);
   const detail = [
-    ...ordered.slice(0, 3).map((pr) => `${prRef(pr)} ${pr.merge}, ${gateText(pr.gate)}`),
+    ...ordered.slice(0, 3).map((pr) => `${prRef(pr)} ${mergeText(pr.merge)}, ${gateText(pr.gate)}`),
     ...(ordered.length > 3 ? [t("now.more", { count: ordered.length - 3 })] : []),
     ...(drafts ? [drafts === 1 ? t("now.prs.draftOne") : t("now.prs.draftMany", { count: drafts })] : []),
     ...(prs.error ? [t("now.prs.stale", { at: prs.checkedAt ? clockText(prs.checkedAt) : DASH })] : []),
@@ -204,10 +213,11 @@ function prsLine(server: NowServerStatus | null): NowLine {
   const first = ordered[0];
   return {
     id: "prs", label, text, ...(detail ? { detail } : {}),
-    tone: red || counts.some((each) => each.state === "DIRTY") ? "danger" : counts.length ? "warn" : open.length ? "info" : "ok",
+    // BLOCKED is every PR's normal state before its gate: no alarm for it; conflicts and a red gate are
+    tone: red || counts.some((each) => each.state === "DIRTY") ? "danger" : counts.some((each) => each.state === "BEHIND" || each.state === "UNSTABLE") ? "warn" : open.length ? "info" : "ok",
     target: { kind: "url", url: first ? first.url : `${PRODUCTION_REPO_URL}/pulls` },
     fingerprint: open.map((pr) => `${pr.number}:${pr.merge}:${pr.gate}`).join(","),
-    markdown: `${label}: ${text}${ordered.length ? ` — ${ordered.map((pr) => `${prMd(pr)} ${pr.merge}, ${gateText(pr.gate)}`).join("; ")}` : ""}`,
+    markdown: `${label}: ${text}${ordered.length ? ` — ${ordered.map((pr) => `${prMd(pr)} ${mergeText(pr.merge)}, ${gateText(pr.gate)}`).join("; ")}` : ""}`,
   };
 }
 
@@ -291,7 +301,8 @@ function alertsLine(server: NowServerStatus | null, now: number): NowLine | null
   const text = alerts.length === 1 ? newest.text : `${newest.text} ${t("now.more", { count: alerts.length - 1 })}`;
   return {
     id: "alerts", label, text,
-    detail: t("now.alerts.when", { age: durationText(now - newest.at) }),
+    // said in the Chief's conversation, or only read from the watcher's log: never claim the first for the second
+    detail: t(newest.botId && newest.threadId ? "now.alerts.when" : "now.alerts.whenLog", { age: durationText(now - newest.at) }),
     tone: "danger",
     ...(newest.botId && newest.threadId ? { target: { kind: "thread" as const, botId: newest.botId, threadId: newest.threadId } } : {}),
     fingerprint: alerts.map((alert) => alert.key).join(","),
@@ -365,8 +376,18 @@ export function nowMarkdown(lines: readonly NowLine[], now: number, since: strin
 /** What deserves a discreet macOS notification: a delivery that just reached
  * production, an item that just started waiting on the owner — each once
  * (`sent` is the dedupe record, kept by the caller). */
-export function nowNotifications(server: NowServerStatus | null, local: NowLocal, sent: ReadonlySet<string>): Array<{ key: string; title: string; body: string; target: NowTarget }> {
-  const out: Array<{ key: string; title: string; body: string; target: NowTarget }> = [];
+export interface NowNotifyRules {
+  /** The bot's own notification switch (Bot.notifications): off, nothing about its items. */
+  botNotifies?: (botId: string) => boolean;
+  /** The server already raised a banner for this conversation since then (its turn's "question"/"done"). */
+  serverNotified?: (botId: string, threadId: string, since: number) => boolean;
+}
+
+/** `quiet`: recorded as sent, never shown (someone else already told, or the bot's switch is off). */
+export interface NowNotification { key: string; title: string; body: string; target: NowTarget; quiet?: true }
+
+export function nowNotifications(server: NowServerStatus | null, local: NowLocal, sent: ReadonlySet<string>, rules: NowNotifyRules = {}): NowNotification[] {
+  const out: NowNotification[] = [];
   for (const delivery of server?.production.today ?? []) {
     const key = `production:${delivery.sha}`;
     if (sent.has(key)) continue;
@@ -374,9 +395,12 @@ export function nowNotifications(server: NowServerStatus | null, local: NowLocal
     out.push({ key, title: t("now.notify.production", { sha: shortSha(delivery.sha) }), body: prs.length ? prs.map((pr) => titled(pr, 60)).join(" · ") : t("now.production.contentsPending"), target: { kind: "url", url: prs[0]?.url ?? commitUrl(delivery.sha) } });
   }
   for (const item of local.needsYou.waiting) {
-    const key = `needsYou:${item.botId}:${item.threadId}:${item.pendingId ?? ""}`;
+    // an item, or the conversation's own ask: each new ask of the same conversation is its own news
+    const key = `needsYou:${item.botId}:${item.threadId}:${item.pendingId ?? `ask@${item.since}`}`;
     if (sent.has(key)) continue;
-    out.push({ key, title: t("now.notify.needsYou", { name: item.botName }), body: item.title, target: { kind: "needsYou" } });
+    // the bot's switch off, or its turn already raised the banner: recorded, not shown again
+    const quiet = rules.botNotifies?.(item.botId) === false || rules.serverNotified?.(item.botId, item.threadId, item.since) === true;
+    out.push({ key, title: t("now.notify.needsYou", { name: item.botName }), body: item.title, target: { kind: "needsYou" }, ...(quiet ? { quiet: true } : {}) });
   }
   return out;
 }

@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setLocale } from "@/lib/i18n";
 import type { NowLine } from "@/lib/now-status";
-import { isNowShortcut, NowPanel, nowPanelPlace, openNowTarget } from "./NowPanel";
+import { isNowShortcut, macDesktop, NowPanel, nowPanelPlace, openNowTarget, trapTab } from "./NowPanel";
 
 const NOW = Date.parse("2026-10-04T13:30:00Z");
 
@@ -38,8 +38,13 @@ describe("the panel", () => {
     expect(html.match(/data-now-new=""/g)).toHaveLength(1);
     expect(html).toContain('<span class="sr-only"> — mudou desde a última vez</span>');
     expect(html).toContain("Copiar resumo");
-    expect(html).toContain("Avisar no macOS");
-    expect(html).toMatch(/data-now-notify=""[^>]*checked=""/);
+    // the switch only where macOS notifications exist (the desktop app on a Mac): not on a phone, not in a browser
+    expect(html).not.toContain("Avisar no macOS");
+    const mac = renderToStaticMarkup(createElement(NowPanel, props({ canNotify: true })));
+    expect(mac).toContain("Avisar no macOS");
+    expect(mac).toMatch(/data-now-notify=""[^>]*checked=""/);
+    // details are whole: no clamp cutting their last fact
+    expect(html).not.toContain("line-clamp");
   });
 
   it("first look, offline and a Mac without the release say so", () => {
@@ -49,6 +54,26 @@ describe("the panel", () => {
     expect(renderToStaticMarkup(createElement(NowPanel, props({ updatedAt: null })))).toContain("Lendo a esteira…");
     expect(renderToStaticMarkup(createElement(NowPanel, props({ disabled: true })))).toContain("Este Mac não roda o release da Nuria");
     expect(renderToStaticMarkup(createElement(NowPanel, props({ copied: true })))).toContain("Resumo copiado");
+  });
+});
+
+describe("macOS only, and the keyboard kept in the panel", () => {
+  it("notifications only in the desktop app on a Mac", () => {
+    expect(macDesktop({ bridge: true, platform: "MacIntel" })).toBe(true);
+    expect(macDesktop({ bridge: false, platform: "MacIntel" })).toBe(false); // a browser tab
+    expect(macDesktop({ bridge: true, platform: "Win32" })).toBe(false);
+    expect(macDesktop({ bridge: false, platform: "iPhone" })).toBe(false); // the phone
+  });
+
+  it("Tab from the last control goes to the first, Shift+Tab from the first to the last, from outside to the first", () => {
+    const [a, b, c] = [{ id: "a" }, { id: "b" }, { id: "c" }] as unknown as HTMLElement[];
+    const press = (shiftKey: boolean) => ({ key: "Tab", shiftKey, preventDefault: vi.fn() });
+    expect(trapTab(press(false), [a!, b!, c!], c!)).toBe(a);
+    expect(trapTab(press(true), [a!, b!, c!], a!)).toBe(c);
+    expect(trapTab(press(false), [a!, b!, c!], b!)).toBeNull(); // the browser moves it
+    expect(trapTab(press(false), [a!, b!, c!], null)).toBe(a); // the panel itself had focus
+    const escape = { key: "Escape", shiftKey: false, preventDefault: vi.fn() };
+    expect(trapTab(escape, [a!], a!)).toBeNull();
   });
 });
 
