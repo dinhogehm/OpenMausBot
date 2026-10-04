@@ -9,6 +9,7 @@
  * fails compilation until it is either declared here or explicitly listed
  * as server-private. */
 import type { ApprovalMode } from "./approval-mode.ts";
+import type { NowServerStatus } from "./now-status.ts";
 import type { CommandAllowlistCandidate } from "./command-allowlist.ts";
 import type { TurnDigest } from "./digest.ts";
 import type { BotAvatarCrop } from "./bot-avatar.ts";
@@ -724,6 +725,8 @@ export type BotQueuedMessages = Record<string, Array<{ queueId: string; text: st
 export type ServerFrame =
   | { kind: "sections"; sections: string[] }
   | { kind: "bot.queued"; queues: BotQueuedMessages }
+  /** "Agora" (lot Y): the delivery line changed; admin streams only. */
+  | { kind: "now"; status: NowServerStatus }
   | { kind: "message"; threadId: string; message: WireMessage }
   | { kind: "message.patch"; threadId: string; message: WireMessage }
   | { kind: "thread"; threadId: string; activeLeafId: string }

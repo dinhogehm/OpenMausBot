@@ -43,6 +43,7 @@ import { activeLocale, t } from "@/lib/i18n";
 import { createBotPatchQueue, type BotUpdatePatch } from "./bot-patch-queue";
 import type { OnboardingStatus } from "@/lib/onboarding";
 import { openLiveEvents } from "@/lib/live-events";
+import type { NowServerStatus } from "../../shared/now-status";
 
 const MAX_ROUTINE_RUNS = 2_000;
 const ACTIVE_ROUTINE_RUN_STATUSES = new Set<RoutineRun["status"]>(["queued", "running", "waiting"]);
@@ -917,6 +918,8 @@ export interface AppState {
   /** selected chat — a bot id OR a group id */
   selectedId: string;
   activeView: "chat" | "team-map" | "routines" | "report";
+  /** "Agora" (lot Y): the server's last word on the delivery line, pushed when it changes. */
+  nowStatus: NowServerStatus | null;
   routines: Routine[];
   routineRuns: RoutineRun[];
   routinesLoadState: "loading" | "ready" | "error";
@@ -1086,6 +1089,7 @@ export type Action =
   | { type: "showRoutines"; section?: "schedule" | "logs"; view?: "calendar" | "list"; botId?: string; routineId?: string; runStatus?: RoutineRunStatusFilter }
   | { type: "showTeamMap" }
   | { type: "showReport" }
+  | { type: "nowStatus"; status: NowServerStatus }
   | { type: "showChat" }
   | { type: "routinesHydrated"; routines: Routine[]; runs: RoutineRun[] }
   | { type: "routinesLoadFailed" }
@@ -1542,6 +1546,9 @@ export function reducer(state: AppState, action: Action): AppState {
         appSettingsOpen: false,
         pluginsOpen: false,
       };
+    case "nowStatus":
+      // an older answer (a slow fetch after a pushed frame) never replaces a newer one
+      return state.nowStatus && state.nowStatus.generatedAt > action.status.generatedAt ? state : { ...state, nowStatus: action.status };
     case "routinesHydrated":
       return { ...state, routines: action.routines, routineRuns: trimRoutineRuns(action.runs), routinesLoadState: "ready" };
     case "routinesLoadFailed":
@@ -2384,6 +2391,7 @@ export const initialState: AppState = {
   config: null,
   selectedId: "",
   activeView: "chat",
+  nowStatus: null,
   routines: [],
   routineRuns: [],
   routinesLoadState: "loading",
@@ -3781,6 +3789,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           break;
         case "bot.queued":
           rawDispatch({ type: "botQueues", queues: frame.queues });
+          break;
+        case "now":
+          rawDispatch({ type: "nowStatus", status: frame.status });
           break;
         case "message": {
           rawDispatch({ type: "messageAdded", threadId: frame.threadId, message: frame.message as Message });

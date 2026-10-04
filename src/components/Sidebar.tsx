@@ -112,6 +112,7 @@ import { botShowsUnread } from "@/lib/bot-unread";
 import { attentionJumpAction, AttentionThreadRows, crossBotAttentionThreads, SidebarBotActivity, sidebarBotActivityTasks } from "./SidebarBotActivity";
 import { SidebarAttentionPanel } from "./SidebarAttentionPanel";
 import { SidebarNeedsYou } from "./SidebarNeedsYou";
+import { SidebarNow } from "./NowPanel";
 import { NeedsYouResolver } from "./NeedsYouResolver";
 import { needsYouItems, needsYouKey, nextAwaitingChange, startNeedsYouClock } from "@/lib/needs-you";
 import { decisionReply, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
@@ -2063,6 +2064,8 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
               </>
             )}
           </div>
+          {/* "Agora" (lot Y): the delivery line in one look, ⌘⇧A */}
+          <SidebarNow density={density} onOpenNeedsYou={() => setResolver({ open: true, key: null })} />
           <button
             ref={importReturnRef}
             onClick={() => setPlusOpen((o) => !o)}
