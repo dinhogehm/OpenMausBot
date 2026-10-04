@@ -55,7 +55,7 @@ export function matchesFilters(card: BoardCard, filters: BoardFilters, now: numb
   if (filters.focus === "owner" && card.state !== "owner") return false;
   if (filters.focus === "stale" && !(card.stage !== "entry" && isStale(card, now))) return false;
   if (filters.focus === "entryStale" && !(card.stage === "entry" && isStale(card, now))) return false;
-  if (filters.focus === "closeout" && !card.closeout) return false;
+  if (filters.focus === "closeout" && !isCycleToClose(card)) return false;
   return true;
 }
 
@@ -83,6 +83,13 @@ export function foldEntry(cards: readonly BoardCard[], now: number, fold: number
   return { shown, folded };
 }
 
+/** A cycle to close: in Entrada, delivered or abandoned and still open; in Produção, its issue
+ * still open — "Validar e fechar" (shipped whole with "Refs") or "Issue ainda aberta" (a PR
+ * said it closes it). A phase shipped ("Entrega parcial") is not: the rest is still to do. */
+export function isCycleToClose(card: Pick<BoardCard, "closeout" | "stage" | "issueOpen" | "closing">): boolean {
+  return card.closeout || (card.stage === "production" && card.issueOpen && (card.closing === "validate" || card.closing === "close"));
+}
+
 export interface BoardSummary { owner: number; stale: number; entryStale: number; blocked: number; closeout: number; production: number | null }
 
 /** The line above the columns, over every card (not the filtered ones): what is
@@ -95,7 +102,8 @@ export function boardSummary(board: PipelineBoard, now: number): BoardSummary {
     stale: cards.filter((card) => card.stage !== "entry" && isStale(card, now)).length,
     entryStale: cards.filter((card) => card.stage === "entry" && isStale(card, now)).length,
     blocked: cards.filter((card) => card.blocked).length,
-    closeout: cards.filter((card) => card.closeout).length,
+    // one per issue: a card is one piece of work, but count by issue so none is counted twice
+    closeout: new Set(cards.filter(isCycleToClose).map((card) => (card.issue !== null ? `issue:${card.issue}` : card.key))).size,
     production: production?.known ? production.total : null,
   };
 }

@@ -9,10 +9,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setLocale } from "@/lib/i18n";
 import { needsYouKey } from "@/lib/needs-you";
-import { boardSummary, DEFAULT_FILTERS, ENTRY_FOLD, foldEntry, matchesFilters, OPEN_NEEDS_YOU_EVENT, openNeedsYou, reasonText, stageAge, visibleCards, type BoardFilters } from "@/lib/pipeline-board";
+import { boardSummary, DEFAULT_FILTERS, ENTRY_FOLD, foldEntry, isCycleToClose, matchesFilters, OPEN_NEEDS_YOU_EVENT, openNeedsYou, reasonText, stageAge, visibleCards, type BoardFilters } from "@/lib/pipeline-board";
 import { buildPipelineBoard } from "../../server/pipeline-board";
 import { boardInputs, boardInputsWithBacklog, CHIEF, CLIENT_NAMES, MONITOR, NOW } from "../../server/testing/pipeline-board-fixture";
-import type { BoardStage, PipelineBoard } from "../../shared/pipeline-board";
+import type { BoardCard, BoardStage, PipelineBoard } from "../../shared/pipeline-board";
 import { BoardView, foldedText, LimitsBar } from "./PipelineBoardPage";
 
 const board = buildPipelineBoard(boardInputs());
@@ -49,8 +49,9 @@ describe("the board screen (pt-BR)", () => {
     expect(plain).toContain("Parados na esteira: 2");
     expect(plain).toContain("Entrada além do limite: 3");
     expect(plain).toContain("Bloqueados: 1");
-    // six shipped whole with "Refs" (validate and close) and two sessions archived without a PR; #9071's phase is not one
-    expect(plain).toContain("Ciclos a fechar: 8");
+    // Entrada: six shipped whole with "Refs" and two sessions archived without a PR; #9071's phase is not one.
+    // Produção (INSP-Z r4): #9284, #9334, #9197 "Validar e fechar" and #9185 "Issue ainda aberta"
+    expect(plain).toContain("Ciclos a fechar: 12");
     expect(plain).toContain("Em produção (7 dias): 5");
     expect(plain).toContain("Release de produção 3c04d7c3d a caminho neste Mac");
   });
@@ -191,7 +192,7 @@ describe("filters", () => {
     expect(keys({ focus: "owner" })).toEqual(["issue:9334", "issue:9355"]);
     expect(keys({ focus: "stale" })).toEqual(["issue:9052", "issue:9058"]);
     expect(keys({ focus: "entryStale" })).toEqual(["issue:8883", "issue:8958", "issue:9074"]);
-    expect(keys({ focus: "closeout" })).toEqual(["issue:8829", "issue:8883", "issue:8958", "issue:8961", "issue:9074", "issue:9172", "issue:9305", "issue:9308"]);
+    expect(keys({ focus: "closeout" })).toEqual(["issue:8829", "issue:8883", "issue:8958", "issue:8961", "issue:9074", "issue:9172", "issue:9185", "issue:9197", "issue:9284", "issue:9305", "issue:9308", "issue:9334"]);
   });
 
   it("a filtered column says how many of how many, and why it is empty", () => {
@@ -207,7 +208,15 @@ describe("filters", () => {
   });
 
   it("counts the summary over the whole board; blocked includes a blocked card the owner's item also holds", () => {
-    expect(boardSummary(board, NOW)).toEqual({ owner: 2, stale: 2, entryStale: 3, blocked: 1, closeout: 8, production: 5 });
+    expect(boardSummary(board, NOW)).toEqual({ owner: 2, stale: 2, entryStale: 3, blocked: 1, closeout: 12, production: 5 });
+    // Produção with the issue open counts (validate, close); a phase does not; the same issue never twice
+    const cycle = (extra: Partial<BoardCard>) => ({ ...board.columns[5]!.cards[0]!, ...extra }) as BoardCard;
+    expect(isCycleToClose(cycle({ stage: "production", issueOpen: true, closing: "validate", closeout: false }))).toBe(true);
+    expect(isCycleToClose(cycle({ stage: "production", issueOpen: true, closing: "close", closeout: false }))).toBe(true);
+    expect(isCycleToClose(cycle({ stage: "production", issueOpen: true, closing: "partial", closeout: false }))).toBe(false);
+    expect(isCycleToClose(cycle({ stage: "production", issueOpen: false, closing: null, closeout: false }))).toBe(false);
+    const twice = { ...board, columns: board.columns.map((column, index) => (index === 0 ? { ...column, cards: [...column.cards, cycle({ key: "pr:9361", issue: 9284, stage: "entry", closeout: true })] } : column)) };
+    expect(boardSummary(twice, NOW).closeout).toBe(12);
     const both = buildPipelineBoard(boardInputs({ ownerPending: [...boardInputs().ownerPending, { id: "o4", botId: CHIEF, threadId: "t4", title: "Decidir a PR #9332", createdAt: NOW - 3_600_000 }] }));
     expect(boardSummary(both, NOW)).toMatchObject({ owner: 3, blocked: 1 });
   });
