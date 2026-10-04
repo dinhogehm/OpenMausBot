@@ -916,7 +916,7 @@ export interface AppState {
   config: ConfigStatus | null;
   /** selected chat — a bot id OR a group id */
   selectedId: string;
-  activeView: "chat" | "team-map" | "routines" | "report";
+  activeView: "chat" | "team-map" | "routines" | "report" | "pipeline";
   routines: Routine[];
   routineRuns: RoutineRun[];
   routinesLoadState: "loading" | "ready" | "error";
@@ -1086,6 +1086,7 @@ export type Action =
   | { type: "showRoutines"; section?: "schedule" | "logs"; view?: "calendar" | "list"; botId?: string; routineId?: string; runStatus?: RoutineRunStatusFilter }
   | { type: "showTeamMap" }
   | { type: "showReport" }
+  | { type: "showPipeline" }
   | { type: "showChat" }
   | { type: "routinesHydrated"; routines: Routine[]; runs: RoutineRun[] }
   | { type: "routinesLoadFailed" }
@@ -1536,6 +1537,16 @@ export function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         activeView: "report",
+        settingsOpen: false,
+        computerOpen: false,
+        inspectorOpen: false,
+        appSettingsOpen: false,
+        pluginsOpen: false,
+      };
+    case "showPipeline":
+      return {
+        ...state,
+        activeView: "pipeline",
         settingsOpen: false,
         computerOpen: false,
         inspectorOpen: false,
