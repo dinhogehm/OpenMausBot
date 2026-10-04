@@ -9927,6 +9927,7 @@ const pidAlive = (pid: number) => {
 };
 const pipelineBoard = new PipelineBoardService({
   enabled: productivityEnabled,
+  limitsFile: join(DATA_DIR, "pipeline-board", "limits.json"),
   source: () => productivity.boardSource(),
   refreshLogs: () => productivity.refreshLogs(),
   sessions: () => ccLedger.all(),
@@ -25617,6 +25618,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
     // ── "Esteira" (lot Z): where each piece of work stands, stage by stage ──
     // Read-only, never waits on GitHub; a poll that finds nothing new gets a 304.
+    // the owner's limits per stage: the defaults until set; a value out of range keeps its default
+    if (path === "/api/pipeline-board/limits" && (method === "GET" || method === "PUT")) {
+      if (method === "GET") return json(res, 200, { limits: pipelineBoard.getLimits() });
+      const body = await readBody(req, 4096);
+      if (!body || typeof body !== "object") return json(res, 400, { error: "send the limits as a JSON object" });
+      return json(res, 200, { limits: pipelineBoard.setLimits(body.limits ?? body) });
+    }
     if (method === "GET" && path === "/api/pipeline-board") {
       const board = pipelineBoard.board();
       const etag = boardEtag(board);

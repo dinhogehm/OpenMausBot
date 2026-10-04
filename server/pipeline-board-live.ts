@@ -12,11 +12,12 @@
 // read while nobody asks for the board. It carries an ETag over its content,
 // so a poll that finds nothing new is a 304.
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
-import { BOARD_STAGES, type PipelineBoard } from "../shared/pipeline-board.ts";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { BOARD_STAGES, DEFAULT_LIMITS, sanitizeLimits, type BoardLimits, type PipelineBoard } from "../shared/pipeline-board.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
-import { buildPipelineBoard, parseReceipt, sessionPrs, type BoardInputs, type BoardOwnerPending, type BoardSession, type LivePr } from "./pipeline-board.ts";
+import { writeFileAtomic } from "./atomic.ts";
+import { buildPipelineBoard, parseReceipt, sessionPrs, utcStamp, type BoardInputs, type BoardOwnerPending, type BoardSession, type LivePr } from "./pipeline-board.ts";
 import { execGh, explicitReferences, GATE_CONTEXT, parseGate, type GhCache, type GhRunner } from "./productivity-github.ts";
 import type { ReleaseRun } from "./productivity-release-log.ts";
 
@@ -26,7 +27,7 @@ export const LIVE_EVERY_MS = 2 * 60_000;
 export const LOGS_EVERY_MS = 30_000;
 
 const PR_FIELDS = `number title body createdAt updatedAt mergedAt state isDraft baseRefName headRefName mergeStateStatus mergeCommit { oid message } closingIssuesReferences(first: 10) { nodes { number } } labels(first: 20) { nodes { name } } commits(last: 1) { nodes { commit { oid status { context(name: "${GATE_CONTEXT}") { state createdAt } } } } }`;
-export const BOARD_PRS_QUERY = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { open: pullRequests(first: 100, states: OPEN, orderBy: { field: CREATED_AT, direction: ASC }) { nodes { ${PR_FIELDS} } } merged: pullRequests(first: 50, states: MERGED, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${PR_FIELDS} } } } rateLimit { remaining resetAt } }`;
+export const BOARD_PRS_QUERY = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { open: pullRequests(first: 100, states: OPEN, orderBy: { field: CREATED_AT, direction: DESC }) { pageInfo { hasNextPage } nodes { ${PR_FIELDS} } } merged: pullRequests(first: 50, states: MERGED, orderBy: { field: UPDATED_AT, direction: DESC }) { nodes { ${PR_FIELDS} } } } rateLimit { remaining resetAt } }`;
 
 type Json = Record<string, any>;
 const ms = (value: unknown): number | null => (typeof value === "string" && Number.isFinite(Date.parse(value)) ? Date.parse(value) : null);
@@ -56,14 +57,16 @@ export function parseLivePr(node: Json): LivePr | null {
   };
 }
 
-export async function readBoardPrs(gh: GhRunner, repo: string): Promise<{ open: LivePr[]; merged: LivePr[] }> {
+/** The newest 100 open PRs (more than that: `openComplete` false, and none
+ * missing from the list is taken for closed) and the 50 merged last. */
+export async function readBoardPrs(gh: GhRunner, repo: string): Promise<{ open: LivePr[]; merged: LivePr[]; openComplete: boolean }> {
   const [owner, name] = repo.split("/");
   const out = JSON.parse(await gh(["api", "graphql", "-f", `query=${BOARD_PRS_QUERY}`, "-f", `owner=${owner}`, "-f", `name=${name}`])) as Json;
   if (Array.isArray(out.errors) && out.errors.length) throw new Error(`GitHub: ${String(out.errors[0]?.message ?? "query failed").slice(0, 300)}`);
   const repository = out.data?.repository as Json | undefined;
   if (!repository) throw new Error(`GitHub returned no repository ${repo}`);
   const parse = (nodes: unknown) => (Array.isArray(nodes) ? nodes : []).map(parseLivePr).filter((pr): pr is LivePr => pr !== null);
-  return { open: parse(repository.open?.nodes), merged: parse(repository.merged?.nodes) };
+  return { open: parse(repository.open?.nodes), merged: parse(repository.merged?.nodes), openComplete: repository.open?.pageInfo?.hasNextPage !== true };
 }
 
 export interface BoardSourceSnapshot {
@@ -88,8 +91,20 @@ export interface PipelineBoardDeps {
   admission: () => BoardInputs["admission"];
   /** A small file's text, or null (tests replace it). */
   readText?: (path: string) => { text: string; stamp: string } | null;
+  /** A directory's entries, or null (tests replace it). */
+  listDir?: (path: string) => string[] | null;
+  /** Where the owner's limits are kept (none: the defaults, not saved). */
+  limitsFile?: string;
   log?: (line: string) => void;
 }
+
+const listDir = (path: string): string[] | null => {
+  try {
+    return readdirSync(path);
+  } catch {
+    return null;
+  }
+};
 
 const readText = (path: string): { text: string; stamp: string } | null => {
   try {
@@ -113,12 +128,35 @@ export class PipelineBoardService {
   private logsAt = 0;
   private logsInflight: Promise<void> | null = null;
   private readonly receipts = new Map<string, { stamp: string; value: { commit: string; finishedAt: number | null } | null }>();
+  private limits: BoardLimits;
 
   constructor(deps: PipelineBoardDeps) {
     this.deps = deps;
     this.gh = deps.gh ?? execGh;
     this.now = deps.now ?? Date.now;
     this.repo = deps.repo ?? PRODUCTION_REPO;
+    let saved: unknown = {};
+    try {
+      if (deps.limitsFile && existsSync(deps.limitsFile)) saved = JSON.parse(readFileSync(deps.limitsFile, "utf8"));
+    } catch {
+      /* unreadable: the defaults */
+    }
+    this.limits = sanitizeLimits(saved);
+  }
+
+  /** The owner's limits per stage (the defaults until set). */
+  getLimits(): BoardLimits {
+    return { ...this.limits };
+  }
+
+  /** Save the owner's limits: what is not a sane number of hours keeps its default. */
+  setLimits(raw: unknown): BoardLimits {
+    this.limits = sanitizeLimits(raw);
+    if (this.deps.limitsFile) {
+      mkdirSync(dirname(this.deps.limitsFile), { recursive: true, mode: 0o700 });
+      writeFileAtomic(this.deps.limitsFile, JSON.stringify(this.limits), { mode: 0o600 });
+    }
+    return this.getLimits();
   }
 
   /** The board as the data stands now; starts the refreshes it is due. */
@@ -138,7 +176,23 @@ export class PipelineBoardService {
       releaseHold: this.deps.releaseHold(),
       admission: safe(() => this.deps.admission(), { lease: null, intents: [] }),
       receipts: this.readReceipts(sessions),
+      ciRuns: this.readCiRuns(sessions),
+      limits: this.limits,
     });
+  }
+
+  /** When each ci:local run in a working session's worktree started (.local-ci/runs/<UTC stamp>-<profile>-…). */
+  private readCiRuns(sessions: readonly BoardSession[]): Record<string, number[]> {
+    const list = this.deps.listDir ?? listDir;
+    const out: Record<string, number[]> = {};
+    for (const session of sessions) {
+      if (!session.cwd || session.status === "archived" || !sessionPrs(session).length) continue;
+      const starts = (list(join(session.cwd, ".local-ci", "runs")) ?? [])
+        .filter((name) => /^\d{8}T\d{6}Z-(?:full|release)-/.test(name))
+        .map(utcStamp).filter((at): at is number => at !== null).sort((a, b) => a - b);
+      if (starts.length) out[session.id] = starts;
+    }
+    return out;
   }
 
   /** Wait for the refreshes in flight (tests, and a first board that should not be empty). */
@@ -192,8 +246,9 @@ function safe<T>(read: () => T, fallback: T): T {
 export function disabledBoard(now: number, repo: string): PipelineBoard {
   return {
     version: 1, enabled: false, generatedAt: now, repo,
-    columns: BOARD_STAGES.map((stage) => ({ stage, known: false, total: null, cards: [], hidden: 0, dormant: null })),
+    columns: BOARD_STAGES.map((stage) => ({ stage, known: false, total: null, cards: [], dormant: null })),
     bots: [],
+    limits: DEFAULT_LIMITS,
     sources: { githubSyncedAt: null, livePrsAt: null, livePrsError: null, releaseLogTo: null, releaseHold: null },
   };
 }

@@ -14,6 +14,9 @@
 // in the shapes the real titles use. What was adjusted to the clock: the
 // running session's last activity and its receipt's time (both later in the
 // real record).
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { emptyGhCache, type GhCache, type GhIssue, type GhPr } from "../productivity-github.ts";
 import type { ReleaseRun } from "../productivity-release-log.ts";
 import type { BoardInputs, BoardOwnerPending, BoardSession, LivePr } from "../pipeline-board.ts";
@@ -22,11 +25,26 @@ export const NOW = 1791080000000; // 2026-10-04T02:13:20Z
 export const CHIEF = "871e87c8-74a4-427a-8a4e-494439e748a8";
 export const MONITOR = "891b6b94-0000-4000-8000-000000000001";
 export const CHIEF_DESK = "dbb9f1cf-0000-4000-8000-000000000001";
-export const CLIENT_NAMES = ["Fulana", "Beltrano", "Sicrano"];
+export const CLIENT_NAMES = ["Fulana", "Fulano", "Beltrano", "Sicrano", "ACMECORP"];
+
+/** The rest of the real Entrada of 04/10 (58 open issues, names replaced): with it, Entrada passes the screen's fold. */
+export function backlogIssues(): GhIssue[] {
+  const rows = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "pipeline-board", "entry-backlog.json"), "utf8")) as Array<[number, string, number, number, string[]]>;
+  return rows.map(([number, title, createdAt, updatedAt, labels]) => issue(number, title, createdAt, labels, { updatedAt }));
+}
+
+/** boardInputs() with the real backlog in GitHub's issues. */
+export function boardInputsWithBacklog(extra: Partial<BoardInputs> = {}): BoardInputs {
+  const github = boardGithub();
+  for (const each of backlogIssues()) github.issues[String(each.number)] = each;
+  return boardInputs({ github, ...extra });
+}
 
 const S3C04 = "3c04d7c3d2608c36f082fded54bcb0d99e833a85";
 const SF9E7 = "f9e7a2350e58397d155858568184650b66e24a91";
 const SF82D = "f82d10edb99b702a5c3a227121eabbbc33fbd1ac";
+const SA886 = "a886cf55628d2b76ec8337fcece5ea5d2d827d13";
+const SF6D1 = "f6d1276934d868195b44536938d2f70320af19dc";
 export const HEAD_9332 = "407e3f9247c315011ad85c663cf74c21bfb01475";
 export const LOCAL_9052 = "e388511c72a261e7f10cd191f01a7add05d9e685";
 
@@ -44,6 +62,18 @@ export function boardIssues(): GhIssue[] {
     issue(9334, "fix(atendimento): inatividade não encerrou o ATD-202610-0028 depois do tempo configurado", 1790870521000, ["priority:p2", "app:atendimento", "bug"]),
     issue(9365, "fix(atendimento): aviso vermelho de limite de assentos na tela da atendente e fila esvaziada sem explicação (Fulana 01/10)", 1791031003000, ["bug"]),
     issue(9354, "fix(release): produção de d5bb1f70b reprova 10× em script-contracts — ExperimentalWarning do node:sqlite (Node 22) no stderr dos reconcilers", 1790957808000, ["type:bug", "source:agent", "priority:p1"]),
+    // INSP-Z r1 Z-1: new client demands of 01–03/10, no priority label — never folded away
+    issue(9364, "fix(atendimento): ATD-202610-0042 reaberto volta a encerrar por inatividade logo em seguida (Fulana 01/10)", 1791030992000, ["bug"]),
+    issue(9358, "BI: indicadores de CSAT não funcionam — erro de filtros não compatíveis (Beltrano, planilha L110)", 1790964114000, ["bug"]),
+    issue(9352, "fix(filas): Sidebar do ticket (Filas > Editar) salva mas não reflete no atendimento — reprovação linha 106 (Sicrano, 02/10) (ref #8204)", 1790954581000, ["type:bug", "source:agent", "area:frontend"]),
+    issue(9337, "fix(atendimento): erro ao enviar mensagem no ATD-202610-0036 (Fulano, 01/10)", 1790875306000, [], { updatedAt: 1790877085000 }),
+    // Z-2: P1 still open, its three PRs shipped on 22–23/09 — a cycle never closed
+    issue(9074, "fix(atendimento): distribuicao da fila reporta sucesso sem atribuir agente e encerra o atendimento sem registro no historico", 1790009019000, ["app:widget", "type:bug", "source:agent", "priority:p1", "app:atendimento"], { updatedAt: 1790087657000 }),
+    // Z-4: #9190's body says "Fecha #9185" — the issue was never closed by GitHub
+    issue(9185, "perf(atendimento): pulso de presença do widget sem leitura no D1 — InboxRoom decide o \"ficou online\" (#8984)", 1790229293000, ["app:widget", "type:improvement", "source:agent", "priority:p1", "app:atendimento"], { updatedAt: 1790284445000 }),
+    // Z-6: sessions opened for them on 30/09 and archived the same day without a PR
+    issue(9305, "Helpdesk: ticket criado pelo módulo de Atendimento fica com a fila errada (selecionada \"Fila N1\", gravada \"Fila Gestão\") — Fulano 30/09", 1790769972000, [], { updatedAt: 1790778934000 }),
+    issue(9308, "Atendimento: e-mail informado pelo cliente no chat aparece no JSON mas não é gravado no Cadastro de Pessoa (ATD-202609-0821) — Fulano 30/09", 1790773982000, [], { updatedAt: 1790795016000 }),
     // closed by #9348 on 02/10; lot W's #9368 (opened 03/10) still "Refs" it — history, not its work
     issue(9347, "Release travado em script-contracts: stderr com ExperimentalWarning do SQLite", 1790930000000, ["source:agent", "priority:p1", "bug", "esteira"], { state: "CLOSED", closedAt: 1790964800000, stateReason: "COMPLETED" }),
     // a P0 (old "critical") untouched since 30/07: backlog, counted under Entrada, not a card
@@ -72,6 +102,12 @@ export function boardLive(): NonNullable<BoardInputs["live"]> {
       merged(9344, "fix(inbox): pausa de inatividade do Webchat não vem mais marcada por padrão (#9334)", 1790927738000, 1790928868000, "fix/9334-pausa-inatividade-padrao", "3d98404b8cc8e4e55be6b795fb16e4159e971b43", [9334], ["priority:p2", "app:atendimento", "bug"]),
       merged(9345, "fix(atendimento): webchat não encerra antes do prazo nem ao dispensar pesquisa antiga (#9331)", 1790927771000, 1790929958000, "fix/9331-inatividade-encerra-cedo", "aa74c6345005427981e659874200dff5646a832d", [9331], ["priority:p2", "app:atendimento", "bug"]),
       merged(9348, "fix(scripts): contratos do reconciler selado não dependem do runtime Node (#9347)", 1790934232000, 1790964800000, "fix/9347-script-contracts-sqlite-warning", "9720b32e0c3179eafd7c0a31ae88b488528e7557", [9347], ["priority:p1", "bug"]),
+      // #9074's three, shipped on 22–23/09 (by the release times: their compares are not in this fixture)
+      merged(9087, "fix(atendimento): distribute_assignee não reporta sucesso quando só enfileira (#9074)", 1790018588000, 1790031752000, "fix/9074-distribute-assignee-false-success", "14a30776607d7f5e65e3a58dc45bf74f9b05915d", [9074]),
+      merged(9113, "fix(atendimento): registrar no histórico o motivo do encerramento da fila de espera (#9074)", 1790082290000, 1790088627000, "fix/9074-waiting-closure-history", "06797f64ba332024ced346631c7c9523c2c4e365", [9074]),
+      merged(9118, "fix(atendimento): presença expirada não encerra quem escreveu esperando resposta (#9074)", 1790087592000, 1790088636000, "fix/9074-presence-message-window", "8c56abfc1ef82367d085817d8fb8897e96912040", [9074]),
+      // "Fecha #9185" in its body (parsed into refs as the reader does), shipped by f6d127693 on 29/09
+      merged(9190, "perf(atendimento): pulso de presença do widget sem leitura no D1 — InboxRoom decide o \"ficou online\" (#9185)", 1790230111000, 1790341948000, "perf/9185-presence-sem-d1", "549e4a974f210b4331ee8144471c1b5f42cc9521", [9185], ["app:widget", "type:improvement", "source:agent", "priority:p1", "app:atendimento"]),
       // the carrier that shipped 9280: how code ships, never a card
       merged(9370, "chore(release): carrier 9195-rodizio-equipe-atomico", 1791075300000, 1791075327000, "chore/release-carrier-9195-rodizio-equipe-atomico", S3C04, []),
     ],
@@ -86,6 +122,8 @@ export function boardGithub(): GhCache {
   for (const pr of [...live.merged, ...live.open]) github.prs[String(pr.number)] = toGh(pr);
   // what f9e7a2350 carried (the real compare: three commits, #9350's merge among them)
   github.compares[`${SF82D}...${SF9E7}`] = ["ba034e1f30b43dd2abea695bb01082b69dc34c58", "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"];
+  // what f6d127693 carried: #9190's merge
+  github.compares[`${SA886}...${SF6D1}`] = ["549e4a974f210b4331ee8144471c1b5f42cc9521"];
   github.openPrs = live.open.map((pr) => ({ number: pr.number, title: pr.title, createdAt: pr.createdAt, draft: pr.draft, base: pr.base, headSha: pr.headSha, gate: pr.gate, gateAt: pr.gateAt }));
   github.syncedAt = NOW - 10 * 60_000;
   return github;
@@ -97,6 +135,15 @@ const run = (sha: string, pid: number, outcome: ReleaseRun["outcome"], startedAt
 /** The release log of 02–04/10 as the collector parsed it, at the clock. */
 export function boardRuns(): ReleaseRun[] {
   return [
+    // 22–23/09: what shipped #9074's PRs (first tried after their merges)
+    run("b99b47226d7558037019c5b0fb37d71282738c34", 62804, "failed", 1790031929000, 1790033604000, { cause: "Local CI failed at migration-contracts", headPr: 9094 }),
+    run("f2511e145e124ca648b6d7b4ae9bc28d42967e35", 76849, "failed", 1790034379000, 1790036315000, { cause: "helpdesk FALHOU", headPr: 9103 }),
+    run("f2511e145e124ca648b6d7b4ae9bc28d42967e35", 23360, "released", 1790042033000, 1790049376000, { headPr: 9103, deployedAt: 1790049376000 }),
+    run("e21afb7e57ffcec6668f90f72d91f7189f31d259", 78475, "released", 1790103558000, 1790111712000, { headPr: 9131, deployedAt: 1790111712000 }),
+    run(SA886, 62702, "released", 1790181340000, 1790189400000, { headPr: 9150, deployedAt: 1790189400000 }),
+    // f6d127693 first tried on 25/09 before #9190 merged, and released on 29/09: the compare says it carried it
+    run(SF6D1, 41001, "failed", 1790306807000, 1790307734000, { cause: "Local CI failed at tests" }),
+    run(SF6D1, 41002, "released", 1790680959000, 1790692009000, { deployedAt: 1790692009000 }),
     run("d5bb1f70bea397bdd937d02148c685e406985ba0", 68244, "failed", 1790954490000, 1790956598000, { cause: "Local CI failed at script-contracts", headPr: 9346 }),
     run("d5bb1f70bea397bdd937d02148c685e406985ba0", 70272, "failed", 1790958178000, 1790960253000, { cause: "Local CI failed at script-contracts", headPr: 9346 }),
     run("9dbb1dcdda74dc04debbf8ff6d2292e5ad597445", 53038, "failed", 1790965351000, 1790966967000, { cause: "Local CI failed at tests", headPr: 9360 }),
@@ -135,6 +182,9 @@ export function boardSessions(): BoardSession[] {
       archivedAt: 1791072278577,
       delivery: { prs: { 9350: { number: 9350, state: "merged", owned: "branch", mergeSha: "ba034e1f30b43dd2abea695bb01082b69dc34c58" } } },
     }),
+    // opened for #9305 and #9308 on 30/09 and archived the same day, with no PR
+    session("28963e07-1958-421f-99fa-b4eb1d1fc5bb", "#9305 fila errada ao criar ticket", "archived", 1790776100897, 1790793140122, { surface: "app", archivedAt: 1790793140122, desktop: { localId: "local_afeb24d3-d5d4-4d9b-8040-1d7f52a094bc" } }),
+    session("0d394c3b-c534-4652-ae29-71fcfbe5d97b", "#9308 e-mail não grava no Cadastro de Pessoa", "archived", 1790776107197, 1790794644558, { surface: "app", archivedAt: 1790794644558, desktop: { localId: "local_0c262b7f-63ae-400e-98ab-d242ef64de38" } }),
     // archived long ago: nothing on the board
     session("93001904-eda1-436f-9ba4-cd74849bb030", "9052 Tempo de reabertura configurável", "archived", 1790863894819, 1790864036683, { surface: "app", archivedAt: 1790864036683, desktop: { localId: "local_4b0ab114-df2d-4b90-9cc6-92cc9ad8a443", issue: "9052" } }),
   ];
@@ -154,13 +204,15 @@ export function boardInputs(extra: Partial<BoardInputs> = {}): BoardInputs {
     github: boardGithub(),
     live: boardLive(),
     runs: boardRuns(),
-    logCoverage: { from: 1790900000000, to: NOW - 30_000 },
+    logCoverage: { from: 1790000000000, to: NOW - 30_000 },
     sessions: boardSessions(),
     ownerPending: boardOwnerPending(),
     botNames: new Map([[CHIEF, "Chief of Staff"], [MONITOR, "Monitor Chat Atendimento"]]),
     releaseHold: "o release de produção 3c04d7c3d está em andamento",
     admission: { lease: { kind: "release", label: `release:production:${S3C04}` }, intents: [] },
     receipts: { "35787b0f-ff38-459e-b543-0dd921d068f4": { commit: LOCAL_9052, finishedAt: NOW - 20 * 60_000 } },
+    // its worktree's .local-ci/runs: the first full run at 15:57Z on 01/10, 40 min after #9332 opened
+    ciRuns: { "35787b0f-ff38-459e-b543-0dd921d068f4": [Date.parse("2026-10-01T15:57:24Z"), Date.parse("2026-10-04T00:46:18Z")] },
     ...extra,
   };
 }

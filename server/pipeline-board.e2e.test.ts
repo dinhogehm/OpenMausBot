@@ -148,6 +148,18 @@ posixOnly("GET /api/pipeline-board", () => {
     expect(stale.body.columns).toHaveLength(6);
   });
 
+  it("keeps the owner's limits: the defaults, a saved value, a broken one refused to its default (INSP-Z r1 Z-3)", async () => {
+    expect((await get("/api/pipeline-board/limits")).body).toEqual({ limits: { entryUrgentH: 168, entryOtherH: 720, sessionH: 24, prH: 24, gateH: 24, releaseH: 4 } });
+    const put = await fetch(`${BASE}/api/pipeline-board/limits`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ limits: { sessionH: 6, releaseH: 0 } }) });
+    expect(put.status).toBe(200);
+    expect(((await put.json()) as { limits: unknown }).limits).toMatchObject({ sessionH: 6, releaseH: 4 });
+    expect(JSON.parse(readFileSync(join(home, ".openmausbot", "pipeline-board", "limits.json"), "utf8"))).toMatchObject({ sessionH: 6 });
+    const { body } = await get("/api/pipeline-board");
+    expect(body.limits.sessionH).toBe(6);
+    const session = body.columns.find((column: any) => column.stage === "session").cards.find((card: any) => card.key === "issue:9058");
+    expect(session.limitMs).toBe(6 * 3_600_000);
+  });
+
   it("asked GitHub for reads only", async () => {
     const calls = readFileSync(join(home, "gh-calls.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
     expect(calls.some((args) => args.join(" ").includes("mergeStateStatus"))).toBe(true);

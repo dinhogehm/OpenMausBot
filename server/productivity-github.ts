@@ -75,7 +75,7 @@ export interface WalkState { watermark: number | null; cursor: string | null; co
 
 /** Bumped whenever what a sync stores changes: an older cache is migrated
  * (see migrateGhCache) so a parser or filter fix reaches data already saved. */
-export const GH_CACHE_VERSION = 2;
+export const GH_CACHE_VERSION = 3;
 
 export interface GhCache {
   version: number;
@@ -104,7 +104,7 @@ export function emptyGhCache(repo = PRODUCTION_REPO): GhCache {
 /** Bring a cache saved by an older version up to date, keeping what is still
  * valid: compares are immutable facts (kept); PRs and issues are kept but the
  * walks start over so every item is read again with the current fields
- * (v2: explicit issue references); deployments whose final state was saved
+ * (v2: explicit issue references; v3: the Portuguese ones, "Fecha #N"); deployments whose final state was saved
  * without the fields the current filter needs (failedAt, creator) are read again. */
 export function migrateGhCache(cache: GhCache): { cache: GhCache; migrated: boolean } {
   if (cache.version === GH_CACHE_VERSION) return { cache, migrated: false };
@@ -127,10 +127,11 @@ export function migrateGhCache(cache: GhCache): { cache: GhCache; migrated: bool
   };
 }
 
-const REFERENCE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references?)\b[\s:]*((?:#\d+(?:\s*(?:,|;|&|\band\b|\be\b)\s*)?)+)/gi;
+// English and the repository's Portuguese (lot Z: #9190's "Fecha #9185" was no reference)
+const REFERENCE = /(?<![\p{L}])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references?|fecha[rm]?|fechou|corrige[m]?|corrigir|corrigiu|resolvido|resolvida|resolveu|encerra[rm]?|encerrou)(?![\p{L}])[\s:]*((?:#\d+(?:\s*(?:,|;|&|\band\b|\be\b)\s*)?)+)/giu;
 
-/** Issue numbers a text names explicitly: "Closes #12", "Fixes: #3, #4", "Refs #9".
- * A bare "#12" is not a reference (it may be a PR, a table row, a sentence). */
+/** Issue numbers a text names explicitly: "Closes #12", "Fixes: #3, #4", "Refs #9",
+ * "Fecha #9185", "Corrige #3". A bare "#12" is not a reference (it may be a PR, a table row, a sentence). */
 export function explicitReferences(text: string | null | undefined): number[] {
   if (!text) return [];
   const found = new Set<number>();

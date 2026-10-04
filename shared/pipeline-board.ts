@@ -22,6 +22,10 @@ export type CardState = "running" | "queued" | "blocked" | "owner" | "idle" | "d
 export type BoardReasonCode =
   // entry
   | "no-session"
+  /** Its PRs reached production (detail: when) but the issue is still open: the cycle was not closed. */
+  | "delivered-open"
+  /** Its session was archived without a PR and the issue is still open: reopen it or close the issue. */
+  | "session-archived"
   // session
   | "session-running" | "session-stalled" | "session-failed" | "session-blocked" | "session-idle" | "screen-wait" | "parked-release"
   // pr / gate
@@ -73,6 +77,12 @@ export interface BoardCard {
   /** The stage's limit for this card (by priority); null: no limit (production). */
   limitMs: number | null;
   state: CardState;
+  /** Blocked by its data, also when the owner's item puts it in "owner" (the summary counts both). */
+  blocked: boolean;
+  /** Entrada: urgent for its limit (P0/P1, a client's, a spreadsheet row). */
+  urgent: boolean;
+  /** A cycle to close: delivered or abandoned, the issue still open. */
+  closeout: boolean;
   reason: BoardReason | null;
   owner: BoardOwnerItem | null;
   links: {
@@ -90,9 +100,10 @@ export interface BoardColumn {
   /** False when the source this column needs was never read: its count is "—". */
   known: boolean;
   total: number | null;
+  /** Every card, in the column's order (Entrada: what waits on the person,
+   * then clients' and spreadsheet rows, then P0/P1, newest first — the screen
+   * folds the tail, which is old backlog by this order). */
   cards: BoardCard[];
-  /** Cards past the column's cap (Entrada only), counted in `total`. */
-  hidden: number;
   /** Entrada only: open P0/P1 issues nobody touched for ENTRY_DORMANT_MS — backlog, not
    * in motion; counted here, not shown as cards (null when GitHub was never read). */
   dormant: number | null;
@@ -106,6 +117,8 @@ export interface PipelineBoard {
   columns: BoardColumn[];
   /** The bots that carry at least one card, for the filter. */
   bots: Array<{ id: string; name: string }>;
+  /** The limits the cards were measured against (the owner's, or the defaults). */
+  limits: BoardLimits;
   sources: {
     /** The productivity collector's last GitHub sync (issues, merged PRs). */
     githubSyncedAt: number | null;
@@ -121,23 +134,48 @@ export interface PipelineBoard {
 
 const HOUR = 3_600_000;
 
-/** How long a card may sit in a stage before it is flagged. Entrada depends
- * on the priority: a P0 waits for a session 2 h, a P1 8 h, the rest 3 days. */
-export function stageLimitMs(stage: BoardStage, priority: BoardPriority | null): number | null {
+/** How long a card may sit in each stage before it is flagged, in hours.
+ * Entrada has two: the urgent (P0/P1, a client's, a spreadsheet row) and the rest. */
+export interface BoardLimits {
+  entryUrgentH: number;
+  entryOtherH: number;
+  sessionH: number;
+  prH: number;
+  gateH: number;
+  releaseH: number;
+}
+export const LIMIT_KEYS = ["entryUrgentH", "entryOtherH", "sessionH", "prH", "gateH", "releaseH"] as const;
+export const DEFAULT_LIMITS: BoardLimits = { entryUrgentH: 7 * 24, entryOtherH: 30 * 24, sessionH: 24, prH: 24, gateH: 24, releaseH: 4 };
+/** A limit is a whole number of hours between 1 h and 90 days. */
+export const LIMIT_MAX_H = 90 * 24;
+
+/** The owner's limits as saved, made sane: an unknown, broken or out-of-range value is the default. */
+export function sanitizeLimits(raw: unknown): BoardLimits {
+  const value = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const out = { ...DEFAULT_LIMITS };
+  for (const key of LIMIT_KEYS) {
+    const hours = value[key];
+    if (typeof hours === "number" && Number.isInteger(hours) && hours >= 1 && hours <= LIMIT_MAX_H) out[key] = hours;
+  }
+  return out;
+}
+
+/** A stage's limit for a card; null: no limit (production). */
+export function stageLimitMs(stage: BoardStage, urgent: boolean, limits: BoardLimits = DEFAULT_LIMITS): number | null {
   switch (stage) {
-    case "entry": return priority === "p0" ? 2 * HOUR : priority === "p1" ? 8 * HOUR : 72 * HOUR;
-    case "session": return priority === "p0" ? 4 * HOUR : 8 * HOUR;
-    case "pr": return 4 * HOUR;
-    case "gate": return 4 * HOUR;
-    case "release": return 6 * HOUR;
+    case "entry": return (urgent ? limits.entryUrgentH : limits.entryOtherH) * HOUR;
+    case "session": return limits.sessionH * HOUR;
+    case "pr": return limits.prH * HOUR;
+    case "gate": return limits.gateH * HOUR;
+    case "release": return limits.releaseH * HOUR;
     case "production": return null;
   }
 }
 
 /** Produção shows what reached production in the last 7 days. */
 export const PRODUCTION_WINDOW_MS = 7 * 24 * HOUR;
-/** Entrada shows at most this many cards (most urgent first); the rest are counted. */
-export const ENTRY_CAP = 40;
+/** The screen shows this many Entrada cards before "show the older ones" (never a client's, a row or a new one). */
+export const ENTRY_FOLD = 40;
 /** Entrada: an issue opened this recently is new work. */
 export const ENTRY_RECENT_MS = 7 * 24 * HOUR;
 /** Entrada: a P0/P1 updated this recently is in motion; one quiet longer is backlog. */

@@ -2,16 +2,18 @@
 // PR aberta, Gate, Release, Produção — from the productivity collector's
 // cache (issues, merged PRs, the release log, the compares that say what
 // each release carried) and the live state the server holds (Claude Code
-// sessions, the open PRs read for the board, the ci:local receipts in the
-// sessions' worktrees, the admission lease and intents, "Precisa de você").
+// sessions, the open PRs read for the board, the ci:local receipts and runs
+// in the sessions' worktrees, the admission lease and intents, "Precisa de você").
 //
 // Pure and deterministic: the same inputs give the same board, cards in the
 // same order. A card is one piece of work: an issue together with the
 // sessions and PRs that name it — joined only by explicit references (a PR's
-// Closes/Fixes/Refs, a session's PR by its branch or by hand-over, the issue
-// number a session's title opens with). Its stage is the least advanced of
-// its unfinished parts; what it waits on comes from the data, never guessed.
-import { BOARD_STAGES, ENTRY_CAP, ENTRY_DORMANT_MS, ENTRY_RECENT_MS, PRODUCTION_WINDOW_MS, stageLimitMs, type BoardCard, type BoardColumn, type BoardGateStatus, type BoardOwnerItem, type BoardPriority, type BoardReason, type BoardStage, type CardState, type PipelineBoard } from "../shared/pipeline-board.ts";
+// Closes/Fixes/Fecha/Corrige/Refs, a session's PR by its branch or by
+// hand-over, the issue number a session's title opens with). Its stage is the
+// least advanced of its unfinished parts; what it waits on comes from the
+// data, never guessed. An open issue never leaves the board unsaid: delivered
+// or abandoned and still open, it is back in Entrada as a cycle to close.
+import { BOARD_STAGES, DEFAULT_LIMITS, ENTRY_DORMANT_MS, ENTRY_RECENT_MS, PRODUCTION_WINDOW_MS, stageLimitMs, type BoardCard, type BoardColumn, type BoardGateStatus, type BoardLimits, type BoardOwnerItem, type BoardPriority, type BoardReason, type BoardStage, type CardState, type PipelineBoard } from "../shared/pipeline-board.ts";
 import { OWNER_PENDING_AWAIT_MS } from "./bot-autonomy.ts";
 import { CC_ACTIVE_MS, clientIssue } from "./cc-sessions.ts";
 import { issuePriority, isCarrier, type GateState, type GhCache, type GhIssue, type GhPr } from "./productivity-github.ts";
@@ -51,7 +53,7 @@ export interface BoardSession {
   title: string;
   status: string;
   surface?: string;
-  /** Its worktree: where its last ci:local receipt is. */
+  /** Its worktree: where its ci:local receipt and runs are. */
   cwd?: string;
   createdAt: number;
   lastActivityAt: number;
@@ -84,8 +86,9 @@ export interface BoardInputs {
   repo: string;
   /** The productivity collector's GitHub cache; null when it was never synced. */
   github: Pick<GhCache, "prs" | "issues" | "openPrs" | "compares" | "deployments" | "syncedAt"> | null;
-  /** The board's own read of open and recently merged PRs; null before the first one. */
-  live: { at: number; open: LivePr[]; merged: LivePr[] } | null;
+  /** The board's own read of open and recently merged PRs; null before the first one.
+   * `openComplete` false: more PRs are open than the read holds (none is taken for closed). */
+  live: { at: number; open: LivePr[]; merged: LivePr[]; openComplete?: boolean } | null;
   /** The last live read failed (the board keeps the one before, or the collector's cache). */
   liveError?: string | null;
   runs: readonly ReleaseRun[];
@@ -99,55 +102,88 @@ export interface BoardInputs {
   admission: { lease: { kind: string; label: string } | null; intents: readonly string[] };
   /** The last ci:local receipt in each session's worktree. */
   receipts: Readonly<Record<string, { commit: string; finishedAt: number | null }>>;
+  /** When each ci:local run in a session's worktree started (.local-ci/runs/<stamp>-…). */
+  ciRuns?: Readonly<Record<string, readonly number[]>>;
+  /** The owner's limits (the defaults when none). */
+  limits?: BoardLimits;
 }
 
 // ── titles without names ────────────────────────────────────────────────────
 
-const DATE = String.raw`\d{1,2}\/\d{1,2}(?:\/\d{2,4})?`;
+/** A real day/month: "Etapa 1/3" is a date by shape, "Deploy 45/10" is not. */
+const DATE = String.raw`(?<!\d)(?:0?[1-9]|[12]\d|3[01])\/(?:0?[1-9]|1[0-2])(?:\/\d{2,4})?(?!\d)`;
 const NAME = String.raw`\p{Lu}\p{Ll}{2,}`;
-/** Uppercase words that are not a client (a tenant is named in capitals: "do PIPERUN"). */
-const ACRONYMS = new Set(["CSAT", "JSON", "HTTP", "HTTPS", "HTML", "SMTP", "IMAP", "UUID", "CORS", "SAML", "OAUTH", "LGPD", "SLA", "CRUD", "REST", "WABA", "NPS", "SSO", "UTC", "BRT", "CPU", "PDF", "CSV", "DNS", "SSL", "TLS", "URL", "APIS", "NODE", "SQLITE", "MIGRATION", "TODO", "WIP", "PLG", "AAQA"]);
+const NAMES = String.raw`(?:${NAME}\s*(?:\/|,|e(?![\p{L}]))\s*)*${NAME}`;
+/** Without accents, in lower case: "Patrícia" and "PATRICIA" are one name. */
+export const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+/** Words a title puts before a date or after "cliente" that are never a person. */
+const STOPWORDS = new Set([
+  "deploy", "release", "releases", "relatorio", "etapa", "fase", "lote", "sprint", "versao", "build", "teste", "testes", "bug", "erro", "falha", "fila", "filas",
+  "helpdesk", "atendimento", "atendimentos", "ticket", "tickets", "chat", "widget", "sessao", "gate", "hoje", "ontem", "amanha", "issue", "issues", "linha", "planilha",
+  "cliente", "clientes", "data", "prazo", "status", "admin", "agente", "agentes", "supervisor", "reprovado", "aprovado", "reprovacao", "producao", "main", "carrier",
+  "hotfix", "nuria", "piloto", "epic", "inbox", "portal", "core", "web", "infra", "segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo",
+  "janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro", "atualizacao", "correcao",
+  "melhoria", "ajuste", "tarefa", "demanda", "rodada", "revisao", "validacao", "entrega", "publicacao", "migracao", "backup", "monitor", "chief", "delivery",
+  "lead", "eng", "qa", "dba", "sre", "relato", "pedido", "final", "inicio", "fim", "semana", "mes", "dia", "plano", "conta", "empresa", "usuario", "usuarios",
+]);
 
 export interface NameDictionary {
+  /** Folded (fold()) requesters' names. */
   people: ReadonlySet<string>;
+  /** Folded clients' (tenants') names. */
   tenants: ReadonlySet<string>;
 }
 
-/** Requesters and clients named in the titles themselves — "(Daiane 01/10)",
- * "— Marluce 30/09", "(Filipe, planilha L110)", "Relato do Matheus", "do
- * PIPERUN" — so a name is removed wherever it appears, even where no date
- * follows it. Built over every title the board may show. */
+/** Requesters and clients, learned only where the title says who asked —
+ * "(Daiane 01/10)", "(ticket 142461, Pedro 02/10)", "— Marluce 30/09",
+ * "(Filipe, planilha L110)", "Relato do Matheus", "cliente Roberto" — or names
+ * a client as one ("tenant PIPERUN"); never a common word ("Deploy 02/10",
+ * "Relatório 30/09"). Built over every title the board may show, so a name
+ * is removed wherever it appears, in any case and with or without accents. */
 export function nameDictionary(texts: Iterable<string>): NameDictionary {
   const people = new Set<string>();
   const tenants = new Set<string>();
-  const groupBeforeDate = new RegExp(String.raw`((?:${NAME}\s*\/\s*)*${NAME}),?\s+${DATE}`, "gu");
-  const groupBeforeSheet = new RegExp(String.raw`\((${NAME}),\s*(?:planilha|linha|L\d)`, "gu");
+  const learn = (names: string) => {
+    for (const name of names.split(/\s*(?:\/|,|(?<![\p{L}])e(?![\p{L}]))\s*/u)) if (name && !STOPWORDS.has(fold(name))) people.add(fold(name));
+  };
+  const attributed = new RegExp(String.raw`(?:^|[(,]\s*)(${NAMES}),?\s+${DATE}\s*$`, "u");
+  const tail = new RegExp(String.raw`[—–-]\s+(${NAMES}),?\s+${DATE}\s*$`, "u");
+  const sheet = new RegExp(String.raw`\((${NAME}),\s*(?:planilha|linha|L\d)`, "gu");
   const reported = new RegExp(String.raw`(?:[Rr]elato|[Rr]elatad[oa]|[Rr]eportad[oa]|[Pp]edido|[Qq]uem pediu foi)\s+(?:d[oa]|pel[oa]|por|de|[oa])\s+(${NAME})|(?<![\p{L}])[Cc]lientes?\s+(${NAME})(?![\p{L}])`, "gu");
   // a client is named as one somewhere ("tenant PIPERUN", "cliente ACME"): then it goes from
-  // every title, also where nothing marks it ("derruba o D1 do PIPERUN"). Capitals alone are
-  // not a client ("NEGATIVA", "ABORTAR", "FORBIDDEN_WORDS" are emphasis or code)
+  // every title, also where nothing marks it. Capitals alone are not a client ("NEGATIVA", "FORBIDDEN_WORDS")
   const tenant = /(?<![\p{L}\d_])(?:[Tt]enant|[Cc]liente|[Ww]orkspace)\s+([A-Z][A-Z0-9]{3,})(?![\p{L}\d_])/gu;
   for (const text of texts) {
-    for (const match of text.matchAll(groupBeforeDate)) for (const name of match[1]!.split("/")) people.add(name.trim());
-    for (const match of text.matchAll(groupBeforeSheet)) people.add(match[1]!);
-    for (const match of text.matchAll(reported)) people.add((match[1] ?? match[2])!);
-    for (const match of text.matchAll(tenant)) if (!ACRONYMS.has(match[1]!)) tenants.add(match[1]!);
+    for (const group of text.matchAll(/\(([^()]*)\)/gu)) {
+      const match = attributed.exec(group[1]!.trim());
+      if (match) learn(match[1]!);
+    }
+    const end = tail.exec(text);
+    if (end) learn(end[1]!);
+    for (const match of text.matchAll(sheet)) learn(match[1]!);
+    for (const match of text.matchAll(reported)) learn((match[1] ?? match[2])!);
+    for (const match of text.matchAll(tenant)) tenants.add(fold(match[1]!));
   }
   return { people, tenants };
 }
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-/** A client's name in any case, as a whole word (hyphens and underscores split words: "piperun-crm"). */
-const tenantPattern = (name: string, flags = "") => new RegExp(`(?<![\\p{L}\\d])${escape(name)}(?![\\p{L}\\d])`, `iu${flags}`);
-const TITLE_MAX = 90;
+const EMAIL = /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)+/gu;
+const TOKEN = /[\p{L}\p{N}][\p{L}\p{N}._-]*/gu;
+const MARK = "\u0000";
+/** Longer than this, a title is cut (the screen clamps to two lines and shows it whole on hover). */
+const TITLE_MAX = 240;
+
+const hasPerson = (text: string, names: NameDictionary) => [...text.matchAll(/\p{L}+/gu)].some((word) => names.people.has(fold(word[0])));
+const hasTenant = (text: string, names: NameDictionary) => [...names.tenants].some((name) => fold(text).includes(name));
 
 /** A card's title: no leading issue numbers, no "fix(scope):", no requester
  * or client (their parenthesis or dash tail goes whole, with its date, its
- * spreadsheet row, its ticket), at most TITLE_MAX characters. */
+ * spreadsheet row, its ticket), no e-mail address, a client's domain or name
+ * inside a word said as "cliente". */
 export function boardTitle(raw: string, names: NameDictionary): string {
-  const named = (text: string) => [...names.people].some((name) => new RegExp(`(?<![\\p{L}])${escape(name)}(?![\\p{L}])`, "u").test(text))
-    || [...names.tenants].some((name) => tenantPattern(name).test(text));
-  const sensitive = (text: string) => new RegExp(String.raw`#\d|\bref\b|planilha|(?<![\p{L}])L\d{1,4}(?![\p{L}\d])|linha \d|ticket \d|${DATE}|(?<![\p{L}])cliente`, "iu").test(text) || named(text);
+  const sensitive = (text: string) => new RegExp(String.raw`#\d|\bref\b|planilha|(?<![\p{L}])L\d{1,4}(?![\p{L}\d])|linha \d|ticket \d|${DATE}|(?<![\p{L}])cliente|@`, "iu").test(text)
+    || hasPerson(text, names) || hasTenant(text, names);
   let text = raw.replace(/\s+/g, " ").trim();
   text = text.replace(/^(?:#?\d{3,6}(?!\d)[\s,]+)+(?=\S)/, "");
   text = text.replace(/^(?:feat|fix|chore|perf|refactor|docs|test|ci|build|style|hotfix|ops|revert)(?:\([^)]*\))?!?:\s+/i, "");
@@ -155,15 +191,25 @@ export function boardTitle(raw: string, names: NameDictionary): string {
   for (let before = ""; before !== text;) { before = text; text = text.replace(/\s*\(([^()]*)\)/gu, (whole, inner: string) => (sensitive(inner) ? "" : whole)); }
   // a dash tail of the same kind: "— Marluce 30/09", "— reprovação linha 106"
   for (let before = ""; before !== text;) { before = text; text = text.replace(/\s+[—–-]\s+([^—–]*)$/u, (whole, tail: string) => (sensitive(tail) ? "" : whole)); }
-  for (const name of names.people) text = text.replace(new RegExp(`\\s*(?:(?<![\\p{L}])(?:d[oa]|pel[oa]|por|com)\\s+)?(?<![\\p{L}])${escape(name)}(?![\\p{L}])`, "gu"), "");
-  // in any case and inside a name ("PipeRun", "piperun-crm"): the client, not its spelling
-  for (const name of names.tenants) text = text.replace(tenantPattern(name, "g"), "cliente");
-  text = text.replace(/\s+([,.;:!?)])(?=\s|$)/g, "$1").replace(/\(\s*\)/g, "").replace(/[\s,;:—–-]+$/u, "").replace(/\s{2,}/g, " ").trim();
+  // an address is a person's; a domain or a word with a client inside is the client
+  text = text.replace(EMAIL, "e-mail");
+  text = text.replace(TOKEN, (token) => {
+    const client = [...names.tenants].find((name) => fold(token).includes(name));
+    if (!client) return token;
+    if (/\.[\p{L}]{2,}$/u.test(token)) return "cliente";
+    const inside = token.replace(new RegExp(escape(client), "i"), "cliente");
+    return inside === token ? "cliente" : inside;
+  });
+  // a requester, with the "do/da/pelo" before and the names and date that go with
+  text = text.replace(/\p{L}+/gu, (word) => (names.people.has(fold(word)) ? MARK : word));
+  text = text.replace(new RegExp(String.raw`(?:(?<![\p{L}])(?:d[oa]|pel[oa]|por|com|[oa])\s+)?${MARK}(?:\s*(?:\/|,|(?<![\p{L}])e(?![\p{L}]))\s*${MARK})*(?:,?\s+${DATE})?`, "gu"), "");
+  text = text.replace(/\s+([,.;:!?)])(?=\s|$)/g, "$1").replace(/\(\s*\)/g, "").replace(/\s+\/\s+/g, " ")
+    .replace(/^[\s,;:/—–-]+/u, "").replace(/[\s,;:/—–-]+$/u, "").replace(/\s{2,}/g, " ").trim();
   if (!text) return "—";
   text = text[0]!.toLocaleUpperCase("pt-BR") + text.slice(1);
   if (text.length <= TITLE_MAX) return text;
   const cut = text.slice(0, TITLE_MAX - 1);
-  return `${cut.slice(0, Math.max(cut.lastIndexOf(" "), TITLE_MAX - 20)).replace(/[\s,;:—–-]+$/u, "")}…`;
+  return `${cut.slice(0, cut.lastIndexOf(" ")).replace(/[\s,;:—–-]+$/u, "")}…`;
 }
 
 /** The Atendimento spreadsheet row a text names ("planilha L110", "(L99)", "linha 106"). */
@@ -181,8 +227,7 @@ export function isClientWork(texts: readonly string[], names: NameDictionary): b
     || sheetRowOf(text) !== null
     // a client's ticket or conversation, or the spreadsheet's "Reprovado" (the client did not accept it)
     || /(?<![\p{L}])(?:ticket\s+\d{5,}|ATD-\d{6}-\d{3,4}|Reprovad[oa](?![\p{L}]))/u.test(text)
-    || new RegExp(String.raw`(?:${NAME})(?:\s*\/\s*${NAME})*,?\s+${DATE}`, "u").test(text) && [...names.people].some((name) => text.includes(name))
-    || [...names.tenants].some((name) => tenantPattern(name).test(text)));
+    || hasPerson(text, names) || hasTenant(text, names));
 }
 
 // ── references ──────────────────────────────────────────────────────────────
@@ -249,8 +294,18 @@ interface PrView extends LivePr { delivered: { at: number; sha: string | null; i
 const short = (sha: string) => sha.slice(0, 9);
 const clip = (text: string | undefined, max = 160) => (text ?? "").replace(/\s+/g, " ").trim().slice(0, max);
 
+/** Whether a release of `sha` can carry a merge made at `mergedAt`: it is the
+ * merge's own commit, or a commit the watcher first tried after the merge (a
+ * retry of an older commit, d5bb1f70b ×11, never carries what merged since). */
+function shipsMerge(sha: string, pr: Pick<LivePr, "mergeSha" | "mergedAt">, firstTry: ReadonlyMap<string, number>): boolean {
+  if (pr.mergeSha && sha === pr.mergeSha) return true;
+  const first = firstTry.get(sha);
+  return first !== undefined && pr.mergedAt !== null && first >= pr.mergedAt;
+}
+
 export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
   const { now, repo } = input;
+  const limits = input.limits ?? DEFAULT_LIMITS;
   const github = input.github;
   const githubKnown = github !== null && github.syncedAt !== null;
   const issues: Record<string, GhIssue> = github?.issues ?? {};
@@ -258,17 +313,15 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
   // ── PRs: the collector's, overlaid with the board's own live read ──
   const prs = new Map<number, LivePr>();
   for (const pr of Object.values(github?.prs ?? {})) prs.set(pr.number, fromCache(pr));
-  const openNow = new Set<number>();
   if (input.live) {
     for (const pr of [...input.live.merged, ...input.live.open]) prs.set(pr.number, pr);
-    for (const pr of input.live.open) openNow.add(pr.number);
-    // open in the older cache, gone from the live open list and not seen merged: closed meanwhile (or unknown) — off the board
-    for (const pr of prs.values()) if (pr.state === "OPEN" && !openNow.has(pr.number)) prs.set(pr.number, { ...pr, state: "CLOSED" });
+    const openNow = new Set(input.live.open.map((pr) => pr.number));
+    // open in the older cache, gone from a complete live open list and not seen merged: closed meanwhile — off the board
+    if (input.live.openComplete !== false) for (const pr of prs.values()) if (pr.state === "OPEN" && !openNow.has(pr.number)) prs.set(pr.number, { ...pr, state: "CLOSED" });
   } else if (github) {
     for (const open of github.openPrs) {
       const known = prs.get(open.number);
       prs.set(open.number, { ...(known ?? fromCache(null, open.number)), number: open.number, title: open.title || known?.title || "", createdAt: open.createdAt, state: "OPEN", draft: open.draft, base: open.base, headSha: open.headSha, gate: open.gate, gateAt: open.gateAt, mergeState: null, mergedAt: null });
-      openNow.add(open.number);
     }
   }
 
@@ -279,6 +332,8 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
   const sessionDelivered = new Map<number, number>();
   for (const session of input.sessions) for (const pr of Object.values(session.delivery?.prs ?? {})) if (pr.inProductionAt) sessionDelivered.set(pr.number, Math.min(sessionDelivered.get(pr.number) ?? Infinity, pr.inProductionAt));
   const runs = [...input.runs].filter((run) => run.startedAt !== null || run.endedAt !== null).sort((a, b) => (a.startedAt ?? a.endedAt!) - (b.startedAt ?? b.endedAt!));
+  const firstTry = new Map<string, number>();
+  for (const run of runs) if (!firstTry.has(run.sha)) firstTry.set(run.sha, run.startedAt ?? run.endedAt!);
   const successes = runs.filter((run) => run.outcome === "released" && run.endedAt !== null);
   const deliveredOf = (pr: LivePr): PrView["delivered"] => {
     if (pr.mergedAt === null) return null;
@@ -286,9 +341,9 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
     if (exact) return { at: exact.at, sha: exact.sha, inferred: false };
     const told = sessionDelivered.get(pr.number);
     if (told !== undefined) return { at: told, sha: null, inferred: false };
-    // what a release carried is read later (compares): a release that STARTED after the merge
-    // published a main that already had it — said as inferred, by the times
-    const after = successes.find((run) => run.startedAt !== null && run.startedAt >= pr.mergedAt!);
+    // what a release carried is read later (compares): until then, a release of the merge's
+    // own commit or of one first tried after the merge — said as inferred, by the times
+    const after = successes.find((run) => shipsMerge(run.sha, pr, firstTry));
     return after ? { at: after.endedAt!, sha: after.sha, inferred: true } : null;
   };
   const views = new Map<number, PrView>();
@@ -349,7 +404,7 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
 
   const cards: BoardCard[] = [];
   for (const keys of members.values()) {
-    const card = buildCard(keys.sort(), { input, issues, views, sessions, names, cites, githubKnown });
+    const card = buildCard(keys.sort(), { input, issues, views, sessions, names, cites, limits, firstTry });
     if (card) cards.push(card);
   }
 
@@ -359,13 +414,20 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
     || (a.priority ? PRIORITY_RANK[a.priority] : 9) - (b.priority ? PRIORITY_RANK[b.priority] : 9)
     || (a.since ?? Infinity) - (b.since ?? Infinity)
     || a.key.localeCompare(b.key);
+  // Entrada: what waits on the person, then a client's demand (or a spreadsheet row), then P0/P1,
+  // then the newest: what the screen folds at the tail is old backlog, never a new demand
+  const entryRank = (card: BoardCard) => (card.state === "owner" ? 0 : card.origin === "client" || card.sheetRow !== null ? 1 : card.priority === "p0" || card.priority === "p1" ? 2 : 3);
+  const entryOrder = (a: BoardCard, b: BoardCard) =>
+    entryRank(a) - entryRank(b)
+    || (a.priority ? PRIORITY_RANK[a.priority] : 9) - (b.priority ? PRIORITY_RANK[b.priority] : 9)
+    || (b.since ?? -Infinity) - (a.since ?? -Infinity)
+    || a.key.localeCompare(b.key);
   const productionOrder = (a: BoardCard, b: BoardCard) => (b.since ?? 0) - (a.since ?? 0) || a.key.localeCompare(b.key);
   const productionKnown = githubKnown && (input.logCoverage.to !== null || (github?.deployments.length ?? 0) > 0);
   const columns: BoardColumn[] = BOARD_STAGES.map((stage) => {
     const known = stage === "session" ? true : stage === "production" ? productionKnown : githubKnown || (stage !== "entry" && input.live !== null);
-    const all = cards.filter((card) => card.stage === stage).sort(stage === "production" ? productionOrder : order);
-    const shown = stage === "entry" ? all.slice(0, ENTRY_CAP) : all;
-    return { stage, known, total: known ? all.length : null, cards: shown, hidden: all.length - shown.length, dormant: stage === "entry" && known ? dormant : null };
+    const all = cards.filter((card) => card.stage === stage).sort(stage === "production" ? productionOrder : stage === "entry" ? entryOrder : order);
+    return { stage, known, total: known ? all.length : null, cards: all, dormant: stage === "entry" && known ? dormant : null };
   });
   const botIds = new Set(cards.map((card) => card.bot?.id).filter((id): id is string => Boolean(id)));
   return {
@@ -375,6 +437,7 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
     repo,
     columns,
     bots: [...botIds].map((id) => ({ id, name: input.botNames.get(id) ?? id.slice(0, 8) })).sort((a, b) => a.name.localeCompare(b.name, "pt-BR")),
+    limits,
     sources: {
       githubSyncedAt: github?.syncedAt ?? null,
       livePrsAt: input.live?.at ?? null,
@@ -400,7 +463,8 @@ interface CardContext {
   sessions: readonly BoardSession[];
   names: NameDictionary;
   cites: Map<BoardOwnerPending, { numbers: Set<number>; text: string }>;
-  githubKnown: boolean;
+  limits: BoardLimits;
+  firstTry: ReadonlyMap<string, number>;
 }
 
 /** A session's weight as the card's responsible: one at work first, then stopped, then done. */
@@ -428,27 +492,21 @@ function buildCard(keys: string[], context: CardContext): BoardCard | null {
     // its record names PRs (on the board or not): at work only while it runs
     return sessionPrs(session).length === 0 || session.status === "running" || session.status === "stalled";
   });
-  // the gate began: a status on its head, ci:local holding or queued for the machine for
-  // its head, or a receipt in its worktree from after the PR opened (maybe of a newer local commit)
-  const gateTouched = (pr: PrView) => {
-    const receipt = receiptFor(pr, sessions, input);
-    return pr.gate !== "missing" || admissionFor(pr, input) !== null || (receipt !== null && (receipt.head || (receipt.finishedAt ?? 0) >= pr.createdAt));
-  };
   const recentDelivery = delivered.filter((pr) => now - pr.delivered!.at < PRODUCTION_WINDOW_MS);
   const openIssues = knownIssues.filter((issue) => issue.state === "OPEN");
 
   let stage: BoardStage;
   if (workingSession) stage = "session";
-  else if (open.length) stage = open.some((pr) => !gateTouched(pr)) ? "pr" : "gate";
+  else if (open.length) stage = open.some((pr) => gateSince(pr, sessions, input) === undefined) ? "pr" : "gate";
   else if (waitingRelease.length) stage = "release";
   else if (recentDelivery.length) stage = "production";
-  else if (delivered.length || !openIssues.length) return null; // delivered over 7 days ago, or nothing left open
+  else if (!openIssues.length) return null; // delivered over 7 days ago and closed, or nothing left open
   else stage = liveSessions.length ? "session" : "entry";
 
   // ── what it is ──
   const primary = pickPrimary(issueNumbers, sessions, knownIssues);
   const primaryIssue = primary !== null ? issues[String(primary)] : undefined;
-  const leadPr = open[0] ?? waitingRelease[0] ?? recentDelivery[0] ?? null;
+  const leadPr = open[0] ?? waitingRelease[0] ?? recentDelivery[0] ?? delivered[0] ?? null;
   const rawTitle = primaryIssue?.title ?? leadPr?.title ?? sessions[0]?.title ?? "";
   const ownerCites = [...context.cites.entries()].filter(([, cite]) => issueNumbers.some((number) => cite.numbers.has(number)) || prViews.some((pr) => cite.numbers.has(pr.number)) || sessions.some((session) => cite.text.includes(session.id) || new RegExp(`(?<![0-9a-f])${session.id.slice(0, 8)}(?![0-9a-f])`).test(cite.text)))
     .map(([item]) => item).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
@@ -457,6 +515,8 @@ function buildCard(keys: string[], context: CardContext): BoardCard | null {
   const priorities = [issuePriority(labels), ...knownIssues.map((issue) => issuePriority(issue.labels))].filter((value): value is BoardPriority => value !== "none");
   const priority = priorities.sort((a, b) => PRIORITY_RANK[a] - PRIORITY_RANK[b])[0] ?? null;
   const sheetRow = texts.map(sheetRowOf).find((row) => row !== null) ?? null;
+  const origin = isClientWork(texts, names) ? "client" : "internal";
+  const urgent = priority === "p0" || priority === "p1" || origin === "client" || sheetRow !== null;
   const responsible = sessions[0] ?? null;
   const ownerItem = ownerCites[0] ?? null;
   const botId = responsible?.ownerBotId ?? ownerItem?.botId ?? null;
@@ -467,46 +527,58 @@ function buildCard(keys: string[], context: CardContext): BoardCard | null {
   let reason: BoardReason | null = null;
   let gate: BoardCard["gate"] = null;
   let release: BoardCard["release"] = null;
+  let closeout = false;
   if (stage === "entry") {
-    since = primaryIssue?.createdAt ?? null;
-    reason = { code: "no-session" };
+    if (delivered.length) {
+      // its PRs reached production more than 7 days ago and the issue is still open: the cycle was not closed
+      const last = [...delivered].sort((a, b) => b.delivered!.at - a.delivered!.at)[0]!;
+      since = last.delivered!.at;
+      reason = { code: "delivered-open" };
+      release = { sha: last.delivered!.sha ? short(last.delivered!.sha) : "—", state: "released", at: last.delivered!.at, ...(last.delivered!.inferred ? { inferred: true as const } : {}) };
+      closeout = true;
+    } else if (sessions.length) {
+      // a session was opened for it and archived without a PR: reopen it or close the issue
+      since = Math.max(...sessions.map((session) => session.archivedAt ?? session.lastActivityAt));
+      reason = { code: "session-archived" };
+      closeout = true;
+    } else {
+      since = primaryIssue?.createdAt ?? null;
+      reason = { code: "no-session" };
+    }
   } else if (stage === "session") {
     const session = workingSession ?? liveSessions[0]!;
     since = session.createdAt;
     ({ state, reason } = sessionState(session, now));
   } else if (stage === "pr" || stage === "gate") {
     // the PR that holds the card back: the least advanced, then the oldest
-    const pr = stage === "pr" ? open.find((each) => !gateTouched(each))! : open[0]!;
+    const pr = stage === "pr" ? open.find((each) => gateSince(each, sessions, input) === undefined)! : open[0]!;
     const receipt = receiptFor(pr, sessions, input);
     const admission = admissionFor(pr, input);
-    gate = { status: context.input.live || pr.gate !== "missing" ? pr.gate as BoardGateStatus : "unknown", receipt: receipt?.head ? "head" : receipt ? "other" : null, at: pr.gateAt ?? (receipt?.head ? receipt.finishedAt : null) };
-    if (stage === "pr") {
-      since = pr.createdAt || null;
-      ({ state, reason } = prState(pr, null, receipt?.head === true, liveSessions[0] ?? null, now));
-    } else {
-      // the earliest sign of the gate in the data: the status on the head, or the worktree's receipt
-      since = [pr.gateAt, receipt && (receipt.finishedAt ?? 0) >= pr.createdAt ? receipt.finishedAt : null].filter((at): at is number => typeof at === "number").sort((a, b) => a - b)[0] ?? null;
-      ({ state, reason } = prState(pr, admission, receipt?.head === true, liveSessions[0] ?? null, now));
-    }
+    gate = { status: input.live || pr.gate !== "missing" ? pr.gate as BoardGateStatus : "unknown", receipt: receipt?.head ? "head" : receipt ? "other" : null, at: pr.gateAt ?? (receipt?.head ? receipt.finishedAt : null) };
+    // Gate: since the first sign of it (the first ci:local run after the PR opened, its status, a receipt)
+    since = stage === "pr" ? pr.createdAt || null : gateSince(pr, sessions, input) ?? null;
+    ({ state, reason } = prState(pr, stage === "gate" ? admission : null, receipt?.head === true, liveSessions[0] ?? null, now));
   } else if (stage === "release") {
-    const pr = waitingRelease.sort((a, b) => a.mergedAt! - b.mergedAt!)[0]!;
+    const pr = [...waitingRelease].sort((a, b) => a.mergedAt! - b.mergedAt!)[0]!;
     since = pr.mergedAt;
-    ({ state, reason, release } = releaseState(pr.mergedAt!, input));
+    ({ state, reason, release } = releaseState(pr, input, context.firstTry));
   } else {
-    const last = recentDelivery.sort((a, b) => b.delivered!.at - a.delivered!.at)[0]!;
+    const last = [...recentDelivery].sort((a, b) => b.delivered!.at - a.delivered!.at)[0]!;
     since = last.delivered!.at;
     state = "done";
     release = { sha: last.delivered!.sha ? short(last.delivered!.sha) : "—", state: "released", at: last.delivered!.at, ...(last.delivered!.inferred ? { inferred: true as const } : {}) };
   }
+  const blocked = state === "blocked";
   // in production too: closing the cycle (telling the requester, the issue) may still wait on the person
   const owner: BoardOwnerItem | null = ownerItem
-    ?{ botId: ownerItem.botId, threadId: ownerItem.threadId, pendingId: ownerItem.id, since: ownerItem.createdAt, more: ownerCites.length - 1 }
+    ? { botId: ownerItem.botId, threadId: ownerItem.threadId, pendingId: ownerItem.id, since: ownerItem.createdAt, more: ownerCites.length - 1 }
     : null;
   if (owner) state = "owner";
 
   const key = primary !== null ? `issue:${primary}` : leadPr ? `pr:${leadPr.number}` : `session:${sessions[0]?.id ?? keys[0]}`;
   // the PR the card is about now: the one holding it back, the first waiting, or the last shipped
-  const linkPr = (stage === "pr" || stage === "gate" ? open[0] : stage === "release" ? waitingRelease[0] : stage === "production" ? recentDelivery[0] : leadPr) ?? null;
+  const lastShipped = [...(stage === "production" ? recentDelivery : delivered)].sort((a, b) => b.delivered!.at - a.delivered!.at || b.number - a.number)[0];
+  const linkPr = (stage === "pr" || stage === "gate" ? open[0] : stage === "release" ? waitingRelease[0] : lastShipped ?? leadPr) ?? null;
   return {
     key, stage,
     title: boardTitle(rawTitle, names),
@@ -514,13 +586,13 @@ function buildCard(keys: string[], context: CardContext): BoardCard | null {
     issues: issueNumbers,
     prs: prViews.map((pr) => pr.number),
     priority,
-    origin: isClientWork(texts, names) ? "client" : "internal",
+    origin,
     sheetRow,
     bot: botId ? { id: botId, name: input.botNames.get(botId) ?? null } : null,
     session: responsible ? { id: responsible.id, title: boardTitle(responsible.title, names), status: responsible.status } : null,
     since,
-    limitMs: stageLimitMs(stage, priority),
-    state, reason, owner,
+    limitMs: stageLimitMs(stage, urgent, context.limits),
+    state, blocked, urgent, closeout, reason, owner,
     links: {
       issue: primary !== null ? `https://github.com/${repo}/issues/${primary}` : null,
       pr: linkPr ? `https://github.com/${repo}/pull/${linkPr.number}` : null,
@@ -570,12 +642,17 @@ function prState(pr: PrView, admission: "running" | "queued" | null, receiptOfHe
   return { state: working ? "running" : "idle", reason: { code: "no-gate" } };
 }
 
-function releaseState(mergedAt: number, input: BoardInputs): { state: CardState; reason: BoardReason; release: BoardCard["release"] } {
-  const runs = input.runs.filter((run) => (run.startedAt ?? run.endedAt ?? 0) >= mergedAt).sort((a, b) => (a.startedAt ?? a.endedAt!) - (b.startedAt ?? b.endedAt!));
+/** Where the merged PR stands on its way to production. Only releases that can
+ * carry it count: of its merge's commit, or of one first tried after it. */
+function releaseState(pr: PrView, input: BoardInputs, firstTry: ReadonlyMap<string, number>): { state: CardState; reason: BoardReason; release: BoardCard["release"] } {
+  const runs = input.runs.filter((run) => shipsMerge(run.sha, pr, firstTry)).sort((a, b) => (a.startedAt ?? a.endedAt!) - (b.startedAt ?? b.endedAt!));
   const running = runs.filter((run) => run.outcome === "running").at(-1);
   if (running) return { state: "running", reason: { code: "release-running", detail: short(running.sha) }, release: { sha: short(running.sha), state: "running", at: running.startedAt } };
-  const heldSha = /([0-9a-f]{9,40})/.exec(input.releaseHold ?? "")?.[1];
-  if (input.releaseHold && input.releaseHold !== "?") return { state: "running", reason: { code: "release-running", ...(heldSha ? { detail: short(heldSha) } : {}) }, release: { sha: heldSha ? short(heldSha) : "—", state: "running", at: null } };
+  // a release on its way that the log does not show yet: it carries the PR only if it is its commit or a newer one
+  const heldSha = /([0-9a-f]{40})/.exec(input.releaseHold ?? "")?.[1];
+  if (heldSha && (heldSha === pr.mergeSha || (firstTry.get(heldSha) ?? -Infinity) >= pr.mergedAt!)) {
+    return { state: "running", reason: { code: "release-running", detail: short(heldSha) }, release: { sha: short(heldSha), state: "running", at: null } };
+  }
   const failed = runs.filter((run) => run.outcome === "failed");
   const last = failed.at(-1);
   if (last) {
@@ -595,6 +672,23 @@ function receiptFor(pr: PrView, sessions: readonly BoardSession[], input: BoardI
   return null;
 }
 
+/** When the PR entered the gate — the first ci:local run in its worktree after it
+ * opened, its gate status, a receipt — null when it is in the gate with no time
+ * (ci:local holding the machine now), undefined when the gate never began. */
+function gateSince(pr: PrView, sessions: readonly BoardSession[], input: BoardInputs): number | null | undefined {
+  const times: number[] = [];
+  for (const session of sessions) {
+    if (!sessionPrs(session).includes(pr.number)) continue;
+    for (const at of input.ciRuns?.[session.id] ?? []) if (at >= pr.createdAt) times.push(at);
+  }
+  const receipt = receiptFor(pr, sessions, input);
+  if (receipt && (receipt.head || (receipt.finishedAt ?? 0) >= pr.createdAt) && receipt.finishedAt !== null) times.push(receipt.finishedAt);
+  if (pr.gate !== "missing" && pr.gateAt !== null) times.push(pr.gateAt);
+  if (times.length) return Math.min(...times);
+  if (pr.gate !== "missing" || admissionFor(pr, input) !== null || receipt?.head) return null;
+  return undefined;
+}
+
 /** The ci:local of this PR's head holds the machine (running) or waits for it (queued). */
 function admissionFor(pr: PrView, input: BoardInputs): "running" | "queued" | null {
   const lease = input.admission.lease;
@@ -607,7 +701,11 @@ export function parseReceipt(text: string): { commit: string; finishedAt: number
   const field = (name: string) => new RegExp(`^${name}=(.*)$`, "m").exec(text)?.[1]?.trim() ?? "";
   const commit = field("CI_COMMIT");
   if (!/^[0-9a-f]{40}$/.test(commit) || field("CI_RESULT") !== "success") return null;
-  const stamp = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(field("CI_FINISHED_AT"));
-  const finishedAt = stamp ? Date.UTC(Number(stamp[1]), Number(stamp[2]) - 1, Number(stamp[3]), Number(stamp[4]), Number(stamp[5]), Number(stamp[6])) : null;
-  return { commit, finishedAt };
+  return { commit, finishedAt: utcStamp(field("CI_FINISHED_AT")) };
+}
+
+/** "20261001T155724Z" (ci:local's stamps) as an instant. */
+export function utcStamp(text: string): number | null {
+  const stamp = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(text);
+  return stamp ? Date.UTC(Number(stamp[1]), Number(stamp[2]) - 1, Number(stamp[3]), Number(stamp[4]), Number(stamp[5]), Number(stamp[6])) : null;
 }

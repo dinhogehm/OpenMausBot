@@ -3,7 +3,11 @@
 // body dropped), at most every LIVE_EVERY_MS and never in the request's way;
 // the release log re-read when it changed; the receipts read from the
 // worktrees; an ETag that only moves when the content does.
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_LIMITS } from "../shared/pipeline-board.ts";
 import { boardEtag, BOARD_PRS_QUERY, LIVE_EVERY_MS, parseLivePr, PipelineBoardService, readBoardPrs } from "./pipeline-board-live.ts";
 import { boardGithub, boardOwnerPending, boardRuns, boardSessions, CHIEF, MONITOR, NOW } from "./testing/pipeline-board-fixture.ts";
 
@@ -40,6 +44,13 @@ describe("reading the PRs for the board", () => {
     expect(BOARD_PRS_QUERY.startsWith("query(")).toBe(true);
     expect(prs.open.map((pr) => pr.number)).toEqual([9332]);
     expect(prs.merged[0]).toMatchObject({ number: 9350, state: "MERGED", mergeSha: "ba034e1f" });
+  });
+
+  it("asks for the newest open PRs first, and says when more are open than it read (INSP-Z r1 Z-9)", async () => {
+    expect(BOARD_PRS_QUERY).toContain("states: OPEN, orderBy: { field: CREATED_AT, direction: DESC }) { pageInfo { hasNextPage }");
+    const reply = (more: boolean) => async () => JSON.stringify({ data: { repository: { open: { pageInfo: { hasNextPage: more }, nodes: [node()] }, merged: { nodes: [] } } } });
+    expect((await readBoardPrs(reply(true), "dinhogehm/nuria-platform")).openComplete).toBe(false);
+    expect((await readBoardPrs(reply(false), "dinhogehm/nuria-platform")).openComplete).toBe(true);
   });
 
   it("fails loudly on a GraphQL error, so the board keeps what it had", async () => {
@@ -127,6 +138,38 @@ describe("the board service", () => {
     expect(card.gate).toMatchObject({ receipt: "head", at: Date.parse("2026-10-04T01:00:00Z") });
     // only sessions with a PR and a worktree are looked at
     expect(reads).toEqual([path]);
+  });
+
+  it("starts the Gate at the first ci:local run in the worktree after the PR opened (.local-ci/runs)", () => {
+    const listed: string[] = [];
+    const board = new PipelineBoardService({
+      enabled: true, now: () => NOW, gh: async () => JSON.stringify({ data: { repository: { open: { nodes: [] }, merged: { nodes: [] } } } }),
+      source: () => ({ github: boardGithub(), runs: boardRuns(), logCoverage: { from: 1790000000000, to: NOW } }),
+      sessions: () => boardSessions(), ownerPending: () => [], botNames: () => new Map(), releaseHold: () => null, admission: () => ({ lease: null, intents: [] }),
+      readText: () => null,
+      listDir: (path) => { listed.push(path); return ["20261001T155724Z-full-6cf57a9af456-39753", "20261004T064618Z-full-e388511c72a2-42276", "20261003T000000Z-quick-aaaa-1", "notes.txt"]; },
+    }).board();
+    const card = board.columns.flatMap((each) => each.cards).find((each) => each.key === "issue:9052")!;
+    expect(card).toMatchObject({ stage: "gate", since: Date.parse("2026-10-01T15:57:24Z") });
+    expect(listed).toEqual(["/repo/.claude/worktrees/9052-tempo-de-reabertura-configuravel-35787b/.local-ci/runs"]);
+  });
+
+  it("keeps the owner's limits on disk, sane, and measures the board with them", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omb-board-limits-"));
+    try {
+      const file = join(dir, "pipeline-board", "limits.json");
+      const make = () => new PipelineBoardService({ enabled: true, now: () => NOW, limitsFile: file, gh: async () => "{}", source: () => ({ github: boardGithub(), runs: boardRuns(), logCoverage: { from: 1790000000000, to: NOW } }), sessions: () => boardSessions(), ownerPending: () => [], botNames: () => new Map(), releaseHold: () => null, admission: () => ({ lease: null, intents: [] }), readText: () => null, listDir: () => null });
+      const one = make();
+      expect(one.getLimits()).toEqual(DEFAULT_LIMITS);
+      expect(one.setLimits({ sessionH: 6, prH: -3 })).toEqual({ ...DEFAULT_LIMITS, sessionH: 6 });
+      expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ ...DEFAULT_LIMITS, sessionH: 6 });
+      const two = make();
+      expect(two.getLimits().sessionH).toBe(6);
+      expect(two.board().limits.sessionH).toBe(6);
+      expect(two.board().columns.flatMap((each) => each.cards).find((each) => each.key === "issue:9058")!.limitMs).toBe(6 * 3_600_000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("says nothing when the release machinery is not on this Mac", () => {
