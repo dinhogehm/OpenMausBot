@@ -5,6 +5,7 @@ import type { Bot, Task } from "@/state/store";
 import { t } from "@/lib/i18n";
 import type { WireOwnerPending } from "../../shared/wire";
 import { isMentionOnly, stripLeadingMentions } from "../../shared/owner-pending-title";
+import { displayThreadTitle, isHandoffTitle } from "@/lib/thread-title";
 
 export type NeedsYouStep = NonNullable<WireOwnerPending["steps"]>[number];
 export type NeedsYouOption = NonNullable<WireOwnerPending["options"]>[number];
@@ -181,7 +182,7 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
         // never the "why" as the title: it is shown under it (INSP-I r1 #2)
         const title = needsYouTitle(pending.title, { botName: bot.name, botNames });
         items.push({
-          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, ...(threadKind ? { threadKind } : {}),
+          botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: displayThreadTitle(task.title, botNames), title, ...(threadKind ? { threadKind } : {}),
           // a mention was set aside: what the bot wrote stays one line away (INSP-I r2 #1);
           // moved references or a capital letter are no reason to repeat it (INSP-I r3 #2)
           ...(stripLeadingMentions(pending.title, botNames) !== pending.title.replace(/\s+/g, " ").trim() ? { rawTitle: pending.title } : {}),
@@ -201,9 +202,10 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
       if (!approval && task.goalNeedsInput !== true) continue;
       // the bot's question says what it waits for better than the conversation's title
       const ask = task.goalNeedsInputAsk?.trim();
-      const title = ask || needsYouTitle(task.title, { botName: bot.name, botNames });
+      // a teammate's handoff conversation ("@Chief of Staff · work") reads as one, never "· work" (R11-visual N9)
+      const title = ask || (isHandoffTitle(task.title) ? displayThreadTitle(task.title, botNames) : needsYouTitle(task.title, { botName: bot.name, botNames }));
       items.push({
-        botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval,
+        botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: displayThreadTitle(task.title, botNames), title, since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval,
         // the server asked the bot to register the question as an item with steps (lot J2): the screen says so
         ...(!approval && task.goalNeedsInputStepsAskedAt ? { stepsRequestedAt: task.goalNeedsInputStepsAskedAt } : {}),
       });
