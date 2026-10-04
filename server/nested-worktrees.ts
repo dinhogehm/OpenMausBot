@@ -254,6 +254,28 @@ export async function planReleasedWorktrees(repo: string, releasedSha: string, d
   return plan;
 }
 
+/** What one open (not archived) conversation keeps in use, and — for the disk
+ * report only — the note of its workspace when the conversation is closed, or
+ * quiet past STALE_OUTSIDE_TAG_MS without a turn or a goal. A bot conversation's
+ * own folder (task.cwd) usually IS that workspace: it must not count as in use
+ * then, or no closed or quiet workspace ever reaches the report (R11-resilience
+ * D2: ~6,5 GB never told). A folder elsewhere (a project) stays in use. */
+export function conversationFolders(
+  task: { cwd?: unknown; closedBy?: unknown; busy?: boolean; title: string; createdAt: number; updatedAt?: number },
+  workspace: string,
+  opts: { forDisk: boolean; hasGoal: boolean; now: number; day: (ms: number) => string },
+): { inUse: string[]; quiet?: string } {
+  const cwd = typeof task.cwd === "string" ? task.cwd : null;
+  let quiet: string | undefined;
+  if (opts.forDisk) {
+    const quietSince = task.updatedAt ?? task.createdAt;
+    if (task.closedBy) quiet = `conversa "${task.title.slice(0, 40)}" fechada`;
+    else if (!task.busy && !opts.hasGoal && opts.now - quietSince > STALE_OUTSIDE_TAG_MS) quiet = `conversa "${task.title.slice(0, 40)}" aberta, parada desde ${opts.day(quietSince)}`;
+  }
+  if (quiet) return { inUse: cwd && !isInside(trimSlash(cwd), trimSlash(workspace)) ? [cwd] : [], quiet };
+  return { inUse: [...(cwd ? [cwd] : []), workspace] };
+}
+
 /** The task-workspaces (task-workspaces/<bot>/<conversation>) idle past
  * STALE_OUTSIDE_TAG_MS that no agent uses: no open conversation, no session
  * inside, not already told as a worktree. Information for a person, with a
