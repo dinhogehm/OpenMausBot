@@ -2842,6 +2842,8 @@
   "ccSession.wait.head.queued": "Na fila: vai assim que o Mac ficar livre",
   "ccSession.resumeOne": "1 sessão para retomar: segura uma PR aberta",
   "ccSession.resumeMany": "{count} sessões para retomar: seguram PRs abertas",
+  "signal.short.resume": "{count} a retomar",
+  "signal.short.waiting": "{count} no app",
   "ccSession.resume.item": "{title} — {why} · {prs} · desde {when}",
   "ccSession.resume.why.failed": "falhou: {detail}",
   "ccSession.resume.why.blocked": "parada, bloqueada: {detail}",

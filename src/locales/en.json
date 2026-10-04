@@ -3108,6 +3108,8 @@
   "ccSession.wait.head.queued": "Queued: it goes as soon as the Mac is free",
   "ccSession.resumeOne": "1 session to resume: it holds an open PR",
   "ccSession.resumeMany": "{count} sessions to resume: they hold open PRs",
+  "signal.short.resume": "{count} to resume",
+  "signal.short.waiting": "{count} in the app",
   "ccSession.resume.item": "{title} — {why} · {prs} · since {when}",
   "ccSession.resume.why.failed": "failed: {detail}",
   "ccSession.resume.why.blocked": "stopped, blocked: {detail}",

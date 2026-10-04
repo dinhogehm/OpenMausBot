@@ -9280,6 +9280,8 @@
       "ccSession.wait.head.queued": "feb9e0495b7f0ceeb61a04c583cb1c80df77453b67b707601a767628d91bb14e",
       "ccSession.resumeOne": "2754c18a6dafa1f221033c243fcfaeefb0aa3868397f591411e002e964e6f357",
       "ccSession.resumeMany": "ee66e8bc0efd04e2bc6e6c8b04125b21d5a3f7f069d04cb61d816682124d6115",
+      "signal.short.resume": "249ed37eec9e1eefdeeeb9263af8058d955673d86820a9dc08e211b40275fd49",
+      "signal.short.waiting": "202ac2725ec07ad6c181326563b3bb8b6e03d9277de7c1d8a0d1f59f57791ffb",
       "ccSession.resume.item": "7b16250789f920eab4373567c3960d20ddd5469dbf596d4b624f21c39e4095a1",
       "ccSession.resume.why.failed": "69f8eef1dd3cd33eaf32b47a0692f6c00e2cdc0b0004995d7c3fd1817cfe655d",
       "ccSession.resume.why.blocked": "e22dcb38584bed0b202b14723b6d3dbcd30e994e5dc241b172052e901f96decd",
