@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setLocale } from "@/lib/i18n";
 import type { NowLine } from "@/lib/now-status";
-import { isNowShortcut, NowPanel, openNowTarget } from "./NowPanel";
+import { isNowShortcut, NowPanel, nowPanelPlace, openNowTarget } from "./NowPanel";
 
 const NOW = Date.parse("2026-10-04T13:30:00Z");
 
@@ -49,6 +49,17 @@ describe("the panel", () => {
     expect(renderToStaticMarkup(createElement(NowPanel, props({ updatedAt: null })))).toContain("Lendo a esteira…");
     expect(renderToStaticMarkup(createElement(NowPanel, props({ disabled: true })))).toContain("Este Mac não roda o release da Nuria");
     expect(renderToStaticMarkup(createElement(NowPanel, props({ copied: true })))).toContain("Resumo copiado");
+  });
+});
+
+describe("where the panel sits", () => {
+  it("over the expanded sidebar from its left edge, from the icon rail's button, always inside the window", () => {
+    expect(nowPanelPlace({ left: 222, bottom: 52 }, { width: 1440, height: 900 })).toEqual({ left: 12, top: 56, width: 416, maxHeight: 832 });
+    expect(nowPanelPlace({ left: 20, bottom: 52 }, { width: 1440, height: 900 }, false)).toEqual({ left: 20, top: 56, width: 416, maxHeight: 832 });
+    // a phone: the window less 12 px a side
+    expect(nowPanelPlace({ left: 222, bottom: 52 }, { width: 390, height: 844 })).toEqual({ left: 12, top: 56, width: 366, maxHeight: 776 });
+    // a button near the right edge never pushes the panel out
+    expect(nowPanelPlace({ left: 700, bottom: 52 }, { width: 800, height: 600 }, false).left).toBe(372);
   });
 });
 

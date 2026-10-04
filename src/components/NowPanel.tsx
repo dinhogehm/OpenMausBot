@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { BellRing, ChevronRight, ClipboardCopy, ExternalLink, Radar, X } from "lucide-react";
 import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
@@ -43,7 +44,7 @@ export function NowPanel({ lines, news, since, firstLook, updatedAt, offline, di
   onClose: () => void;
 }) {
   return (
-    <div data-now-panel="" className="flex max-h-[min(36rem,calc(100dvh-5rem))] flex-col">
+    <div data-now-panel="" className="flex max-h-[inherit] flex-col">
       <div className="flex items-center gap-2 border-b border-hairline/40 py-2 pl-3.5 pr-2">
         <Radar size={15} aria-hidden="true" className="shrink-0 text-ink-secondary" />
         <h2 id="now-panel-title" className="text-[13.5px] font-semibold text-ink">{t("now.title")}</h2>
@@ -156,6 +157,18 @@ const writeSent = (sent: Set<string>) => { try { storage()?.setItem(SENT_KEY, JS
 export const isNowShortcut = (event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "shiftKey" | "altKey">): boolean =>
   (event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "a";
 
+/** The panel's box: 26rem wide (the window less 12 px a side when narrower),
+ * 4 px under the button, tall enough for its lines and never past the
+ * bottom; over the sidebar from its left edge (`fromLeft`, the expanded
+ * sidebar), or from the button's left (the 80 px icon rail), never past the window. */
+export function nowPanelPlace(button: Pick<DOMRect, "left" | "bottom">, viewport: { width: number; height: number }, fromLeft = true): { left: number; top: number; width: number; maxHeight: number } {
+  const margin = 12;
+  const width = Math.min(416, viewport.width - 2 * margin);
+  const left = Math.max(margin, Math.min(fromLeft ? margin : button.left, viewport.width - width - margin));
+  const top = button.bottom + 4;
+  return { left, top, width, maxHeight: Math.max(240, viewport.height - top - margin) };
+}
+
 /** Where a line goes. */
 export function openNowTarget(target: NowTarget, actions: { url: (url: string) => void; thread: (botId: string, threadId: string) => void; needsYou: () => void; report: () => void }): void {
   if (target.kind === "url") actions.url(target.url);
@@ -259,9 +272,22 @@ export function SidebarNow({ density, onOpenNeedsYou }: { density: SidebarDensit
     return () => window.removeEventListener("keydown", onKey);
   }, [open, toggle, close]);
 
-  // focus the first line on open, so the keyboard lands in the panel
+  // where the panel sits: under the button, as wide as reads well, inside the window
+  const [place, setPlace] = useState<CSSProperties>({});
+  useLayoutEffect(() => {
+    if (!open) return;
+    const measure = () => {
+      const rect = buttonRef.current?.getBoundingClientRect();
+      if (rect) setPlace(nowPanelPlace(rect, { width: window.innerWidth, height: window.innerHeight }, density !== "icons"));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [open, density]);
+
+  // focus the panel on open, so the keyboard lands in it (Tab reaches the lines, Esc closes)
   useEffect(() => {
-    if (open) window.setTimeout(() => panelRef.current?.querySelector<HTMLElement>("[data-now-line] button")?.focus(), 0);
+    if (open) window.setTimeout(() => panelRef.current?.focus(), 0);
   }, [open]);
 
   const copy = () => {
@@ -290,17 +316,19 @@ export function SidebarNow({ density, onOpenNeedsYou }: { density: SidebarDensit
           <span data-now-news="" aria-hidden="true" className="absolute right-1 top-1 flex min-w-4 items-center justify-center rounded-full bg-accent px-0.5 text-[9.5px] font-semibold leading-4 text-accent-ink">{count > 9 ? "9+" : count}</span>
         )}
       </button>
-      {motion.shown && (
+      {/* in a portal, fixed under the button: wider than the sidebar, never cut by its edge nor by the phone drawer's transform */}
+      {motion.shown && createPortal(
         <>
-          <div className={cn("fixed inset-0 z-30", motion.closing && "pointer-events-none")} onMouseDown={() => close(false)} />
+          <div className={cn("fixed inset-0 z-40", motion.closing && "pointer-events-none")} onMouseDown={() => close(false)} />
           <div
             ref={panelRef}
             role="dialog"
             aria-labelledby="now-panel-title"
+            tabIndex={-1}
+            // the panel itself takes focus to land the keyboard in it; its lines carry the visible ring
+            style={{ ...place, outline: "none" }}
             className={cn(
-              "absolute top-full z-40 mt-1 overflow-hidden rounded-xl border border-hairline/50 bg-menu shadow-2xl shadow-black/60",
-              density === "icons" ? "left-0" : "right-0",
-              "w-[min(22rem,calc(100vw-1.5rem))]",
+              "fixed z-50 overflow-hidden rounded-xl outline-none border border-hairline/50 bg-menu shadow-2xl shadow-black/60",
               motion.className,
             )}
             {...motion.exitProps}
@@ -325,7 +353,8 @@ export function SidebarNow({ density, onOpenNeedsYou }: { density: SidebarDensit
               onClose={() => close()}
             />
           </div>
-        </>
+        </>,
+        document.body,
       )}
     </div>
   );

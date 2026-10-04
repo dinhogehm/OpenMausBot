@@ -120,7 +120,7 @@ function productionLine(server: NowServerStatus | null, now: number): NowLine {
   const tagOff = production.tag.agrees === false && production.tag.sha;
   const text = `${sha} · ${since} · ${todayText}`;
   const detailParts = [
-    ...(prs.length ? [prs.slice(0, 3).map((pr) => titled(pr, 48)).join(" · ") + (prs.length > 3 ? ` ${t("now.more", { count: prs.length - 3 })}` : "")] : []),
+    ...(prs.length ? [prs.slice(0, 3).map((pr) => titled(pr, prs.length === 1 ? 90 : 48)).join(" · ") + (prs.length > 3 ? ` ${t("now.more", { count: prs.length - 3 })}` : "")] : []),
     ...(unknownContents ? [t("now.production.contentsPending")] : []),
     ...(tagOff ? [t("now.production.tagOff", { sha: shortSha(production.tag.sha!), at: production.tag.checkedAt ? clockText(production.tag.checkedAt) : DASH })] : []),
   ];
@@ -162,7 +162,7 @@ function releaseLine(server: NowServerStatus | null, now: number): NowLine {
     else parts.push(t("now.release.left", { left: durationText(release.estimateMs - elapsed), estimate }));
   } else parts.push(estimate);
   const prs = release.prs;
-  parts.push(prs === null || prs === undefined ? t("now.release.prsUnknown") : prs.length ? prs.slice(0, 3).map((pr) => titled(pr, 40)).join(" · ") + (prs.length > 3 ? ` ${t("now.more", { count: prs.length - 3 })}` : "") : t("now.release.prsNone"));
+  parts.push(prs === null || prs === undefined ? t("now.release.prsUnknown") : prs.length ? prs.slice(0, 3).map((pr) => titled(pr, prs.length === 1 ? 72 : 40)).join(" · ") + (prs.length > 3 ? ` ${t("now.more", { count: prs.length - 3 })}` : "") : t("now.release.prsNone"));
   const first = prs?.[0];
   return {
     id: "release", label, text, detail: parts.join(" · "), tone,
