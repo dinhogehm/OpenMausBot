@@ -417,9 +417,10 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
   // Entrada: what waits on the person, then a client's demand (or a spreadsheet row), then P0/P1,
   // then the newest: what the screen folds at the tail is old backlog, never a new demand
   const entryRank = (card: BoardCard) => (card.state === "owner" ? 0 : card.origin === "client" || card.sheetRow !== null ? 1 : card.priority === "p0" || card.priority === "p1" ? 2 : 3);
+  const urgency = (card: BoardCard) => (card.priority === "p0" ? 0 : card.priority === "p1" ? 1 : 2);
   const entryOrder = (a: BoardCard, b: BoardCard) =>
     entryRank(a) - entryRank(b)
-    || (a.priority ? PRIORITY_RANK[a.priority] : 9) - (b.priority ? PRIORITY_RANK[b.priority] : 9)
+    || urgency(a) - urgency(b)
     || (b.since ?? -Infinity) - (a.since ?? -Infinity)
     || a.key.localeCompare(b.key);
   const productionOrder = (a: BoardCard, b: BoardCard) => (b.since ?? 0) - (a.since ?? 0) || a.key.localeCompare(b.key);
