@@ -184,7 +184,26 @@ describe("the real Chat output (gog --plain, TSV)", () => {
     expect(chatEcho(scrolled(message("nWw6", "Karntf Fhqxr", "combinado, pode testar! mas ainda dá erro")), [write])).toBe(false);
     expect(withoutLeadingMentions("@Dono Exemplo Combinado, obrigada")).toBe("Combinado, obrigada");
     expect(withoutLeadingMentions("@Fulana de Tal da Silva saiu hoje")).toBe("saiu hoje");
-    expect(withoutLeadingMentions("@Fulana Tal, @Dono Exemplo veja")).toBe("Tal, @Dono Exemplo veja");
+    // two people named, joined by "," or "e" before the second @: both are mentions (R11-intake 4)
+    expect(withoutLeadingMentions("@Fulana Tal, @Dono Exemplo veja")).toBe("veja");
+    expect(withoutLeadingMentions("@Fulana Tal e @Dono Exemplo veja")).toBe("veja");
+    expect(withoutLeadingMentions("@Fulana Tal , @Dono Exemplo veja")).toBe("veja");
+    // a connector that is not followed by a mention stays the sentence's
+    expect(withoutLeadingMentions("@Fulana Tal e Dono Exemplo veja")).toBe("veja");
+    expect(withoutLeadingMentions("@Fulana Tal e você, veja")).toBe("e você, veja");
+    expect(withoutLeadingMentions("@Fulana Tal, veja")).toBe("Tal, veja");
+  });
+
+  // R11-intake 4: the post of 04/10 20:16 began "@<nome de 4 palavras com 'de'>  e @<nome>  lembram
+  // desse caso…" (names anonymised here, the shape and the double spaces kept); the bot had put
+  // only the body on the VM's clipboard, so its own post woke the chat watch at 20:19
+  it("takes as the bot's post a VM post that names two people as '@A e @B' (R11-intake 4)", () => {
+    const body = "lembram desse caso da reabertura? a correção da #9052 já está em produção, podem testar";
+    const post = `@Fulana Exemplo de Tal  e @Dona Exemplo  ${body}`;
+    expect(withoutLeadingMentions(post)).toBe(body);
+    const write = vmChatPostOf(` ${body}`, 1_000, [])!;
+    expect(write).not.toBeNull();
+    expect(chatEcho(scrolled(message("nR11", "Neewdoa Ocex", post)), [write])).toBe(true);
   });
 
   it("takes as the bot's post only a long body it put on the VM's clipboard, never a URL, a mention or a copied message (INSP-E r3 4)", () => {
