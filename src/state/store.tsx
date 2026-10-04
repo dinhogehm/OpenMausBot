@@ -917,7 +917,7 @@ export interface AppState {
   config: ConfigStatus | null;
   /** selected chat — a bot id OR a group id */
   selectedId: string;
-  activeView: "chat" | "team-map" | "routines" | "report";
+  activeView: "chat" | "team-map" | "routines" | "report" | "pipeline";
   /** "Agora" (lot Y): the server's last word on the delivery line, pushed when it changes. */
   nowStatus: NowServerStatus | null;
   routines: Routine[];
@@ -1090,6 +1090,7 @@ export type Action =
   | { type: "showTeamMap" }
   | { type: "showReport" }
   | { type: "nowStatus"; status: NowServerStatus }
+  | { type: "showPipeline" }
   | { type: "showChat" }
   | { type: "routinesHydrated"; routines: Routine[]; runs: RoutineRun[] }
   | { type: "routinesLoadFailed" }
@@ -1549,6 +1550,16 @@ export function reducer(state: AppState, action: Action): AppState {
     case "nowStatus":
       // an older answer (a slow fetch after a pushed frame) never replaces a newer one
       return state.nowStatus && state.nowStatus.generatedAt > action.status.generatedAt ? state : { ...state, nowStatus: action.status };
+    case "showPipeline":
+      return {
+        ...state,
+        activeView: "pipeline",
+        settingsOpen: false,
+        computerOpen: false,
+        inspectorOpen: false,
+        appSettingsOpen: false,
+        pluginsOpen: false,
+      };
     case "routinesHydrated":
       return { ...state, routines: action.routines, routineRuns: trimRoutineRuns(action.runs), routinesLoadState: "ready" };
     case "routinesLoadFailed":

@@ -265,6 +265,18 @@ export class ProductivityCollector {
     return Object.values(this.history.runs);
   }
 
+  /** What the delivery board (lot Z) reads from the cache as it is now:
+   * GitHub (null until the first sync), the release runs and how far the log
+   * was read, and a stamp that changes whenever any of it does. Read-only. */
+  boardSource(): { github: GhCache | null; runs: ReleaseRun[]; logCoverage: { from: number | null; to: number | null }; stamp: number } {
+    return {
+      github: this.github.syncedAt === null ? null : this.github,
+      runs: Object.values(this.history.runs),
+      logCoverage: { ...this.history.coverage },
+      stamp: this.dataStamp,
+    };
+  }
+
   /** The data changed: reports built before are stale. */
   private touch(): void {
     this.dataStamp += 1;

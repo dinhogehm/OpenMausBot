@@ -32,6 +32,7 @@ import {
   Share2,
   Trash2,
   Users,
+  Workflow,
   X,
   AlertTriangle,
 } from "lucide-react";
@@ -115,6 +116,7 @@ import { SidebarNeedsYou } from "./SidebarNeedsYou";
 import { SidebarNow } from "./NowPanel";
 import { NeedsYouResolver } from "./NeedsYouResolver";
 import { needsYouItems, needsYouKey, nextAwaitingChange, startNeedsYouClock } from "@/lib/needs-you";
+import { OPEN_NEEDS_YOU_EVENT } from "@/lib/pipeline-board";
 import { decisionReply, remindOwnerPending, replyToOwnerPending, resolveOwnerPending, sendToConversation } from "@/lib/needs-you-actions";
 import { openExternalLink } from "@/lib/app-links";
 import { ShortcutHint } from "./ShortcutHint";
@@ -1967,6 +1969,15 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
   useEffect(() => startNeedsYouClock(() => needsYouRef.current, setNeedsYouClock), [nextNeedsYouChange]);
   // the resolution screen: open on one item (its key) or on the list (null)
   const [resolver, setResolver] = useState<{ open: boolean; key: string | null }>({ open: false, key: null });
+  // a card on "Esteira" opens its item here (the screen this sidebar owns)
+  useEffect(() => {
+    const open = (event: Event) => {
+      const key = (event as CustomEvent<{ key?: unknown }>).detail?.key;
+      setResolver({ open: true, key: typeof key === "string" ? key : null });
+    };
+    window.addEventListener(OPEN_NEEDS_YOU_EVENT, open);
+    return () => window.removeEventListener(OPEN_NEEDS_YOU_EVENT, open);
+  }, []);
   const pendingBotUndo = teamFeedback?.restoreBot;
 
   return (
@@ -2408,6 +2419,18 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
             <BarChart3 size={20} className={state.activeView === "report" ? "text-accent" : "text-ink-secondary"} />
           </button>
           <button
+            onClick={() => dispatch({ type: "showPipeline" })}
+            aria-label={t("sidebar.nav.pipeline")}
+            aria-current={state.activeView === "pipeline" ? "page" : undefined}
+            title={t("sidebar.nav.pipeline")}
+            className={cn(
+              "flex min-h-10 w-full items-center justify-center rounded-xl px-2 py-2 text-left transition-colors",
+              state.activeView === "pipeline" ? "bg-raised text-ink" : "text-ink hover:bg-raised/50",
+            )}
+          >
+            <Workflow size={20} className={state.activeView === "pipeline" ? "text-accent" : "text-ink-secondary"} />
+          </button>
+          <button
             data-tour="nav-automations"
             onClick={() => dispatch({ type: "showRoutines" })}
             aria-label={density === "icons" ? t("sidebar.nav.automations") : undefined}
@@ -2457,6 +2480,13 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
                 icon: <BarChart3 size={18} />,
                 active: state.activeView === "report",
                 onSelect: () => dispatch({ type: "showReport" }),
+              },
+              {
+                key: "pipeline",
+                label: t("sidebar.nav.pipeline"),
+                icon: <Workflow size={18} />,
+                active: state.activeView === "pipeline",
+                onSelect: () => dispatch({ type: "showPipeline" }),
               },
               {
                 key: "routines",

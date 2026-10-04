@@ -1,0 +1,253 @@
+// The delivery board's fixture (lot Z), taken from the real pipeline of
+// 03–04/10/2026 (cc-sessions.json, the productivity cache, the release log,
+// "Precisa de você" and GitHub), with the clock at 04/10 02:13Z — 23:13 in
+// São Paulo, while the release of 3c04d7c3d was running:
+//   - 9058: a session (idle) with no PR yet;
+//   - 9052: its session running, PR #9332 BEHIND main, a ci:local receipt in
+//     its worktree of a newer local commit;
+//   - 9195: PR #9280 merged at 00:54Z, before the running release started (00:59Z);
+//   - 8204: PR #9350 shipped by f9e7a2350 (the compare says so);
+//   - 9331/9334: their session's PRs shipped (by the release times only), an
+//     owner item still open on them;
+//   - Entrada: 9354 (P1), 9355 (an owner item names it), 9365 (a client's, of 01/10).
+// Requesters' names are replaced (Fulana, Beltrano, Sicrano), on purpose kept
+// in the shapes the real titles use. What was adjusted to the clock: the
+// running session's last activity and its receipt's time (both later in the
+// real record).
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { emptyGhCache, type GhCache, type GhIssue, type GhPr } from "../productivity-github.ts";
+import type { ReleaseRun } from "../productivity-release-log.ts";
+import type { BoardInputs, BoardOwnerPending, BoardSession, LivePr } from "../pipeline-board.ts";
+
+export const NOW = 1791080000000; // 2026-10-04T02:13:20Z
+export const CHIEF = "871e87c8-74a4-427a-8a4e-494439e748a8";
+export const MONITOR = "891b6b94-0000-4000-8000-000000000001";
+export const CHIEF_DESK = "dbb9f1cf-0000-4000-8000-000000000001";
+export const CLIENT_NAMES = ["Fulana", "Fulano", "Beltrano", "Sicrano", "ACMECORP"];
+
+/** The rest of the real Entrada of 04/10 (58 open issues, names replaced): with it, Entrada passes the screen's fold. */
+export function backlogIssues(): GhIssue[] {
+  const rows = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "fixtures", "pipeline-board", "entry-backlog.json"), "utf8")) as Array<[number, string, number, number, string[]]>;
+  return rows.map(([number, title, createdAt, updatedAt, labels]) => issue(number, title, createdAt, labels, { updatedAt }));
+}
+
+/** boardInputs() with the real backlog in GitHub's issues. */
+export function boardInputsWithBacklog(extra: Partial<BoardInputs> = {}): BoardInputs {
+  const github = boardGithub();
+  for (const each of backlogIssues()) github.issues[String(each.number)] = each;
+  return boardInputs({ github, ...extra });
+}
+
+const S3C04 = "3c04d7c3d2608c36f082fded54bcb0d99e833a85";
+const SF9E7 = "f9e7a2350e58397d155858568184650b66e24a91";
+const SF82D = "f82d10edb99b702a5c3a227121eabbbc33fbd1ac";
+const SA886 = "a886cf55628d2b76ec8337fcece5ea5d2d827d13";
+const SF6D1 = "f6d1276934d868195b44536938d2f70320af19dc";
+const S9045 = "90454396348db0bce2b6c2cd6327817f89609c3d";
+const S3C4A = "3c4a33ceb26b4599948873c4795f14ecf492dd8f";
+const SA837 = "a83779db536037106a5e09e4615322ded04b38fa";
+const SB91F = "b91f4aa21fcfc5f77d1eebd63987629dcbda1b69";
+export const HEAD_9332 = "407e3f9247c315011ad85c663cf74c21bfb01475";
+export const LOCAL_9052 = "e388511c72a261e7f10cd191f01a7add05d9e685";
+
+const issue = (number: number, title: string, createdAt: number, labels: string[], extra: Partial<GhIssue> = {}): GhIssue =>
+  ({ number, title, createdAt, updatedAt: createdAt, closedAt: null, state: "OPEN", stateReason: null, labels, ...extra });
+
+export function boardIssues(): GhIssue[] {
+  return [
+    issue(9052, "Atendimento: criar configuração de tempo de reabertura do atendimento", 1789951940000, ["type:feature", "source:agent", "priority:p1", "app:atendimento"]),
+    issue(9058, "Chats distribuídos mesmo com agentes offline e aviso no Widget", 1790000483000, ["app:widget", "type:bug", "source:agent", "priority:p1"]),
+    issue(9195, "Helpdesk: tickets novos caem todos em um agente (outros vazios) ao logar no CRM — Beltrano 24/09", 1790252954000, ["app:helpdesk", "type:bug", "source:agent", "status:in-progress", "priority:p1", "esteira"], { stateReason: "REOPENED" }),
+    issue(8204, "fix(inbox): sidebar do detalhe diverge do helpdesk — catálogo sem árvore, campos descartados e FK de catalog_item_id quebrada", 1785848922000, ["source:agent"], { state: "CLOSED", closedAt: 1786577658000, stateReason: "COMPLETED" }),
+    issue(9355, "fix(helpdesk): CSAT enviado ao fim do N1 teve a nota atribuída ao N2 (ticket 142461, Sicrano 02/10) (ref #8696)", 1790960752000, []),
+    issue(9331, "fix(atendimento): inatividade encerrou o ATD-202609-0178 ~3 min após a mensagem da cliente e o retorno abriu atendimento novo (ATD-202610-0029)", 1790867717000, ["priority:p2", "app:atendimento", "bug"]),
+    issue(9334, "fix(atendimento): inatividade não encerrou o ATD-202610-0028 depois do tempo configurado", 1790870521000, ["priority:p2", "app:atendimento", "bug"]),
+    issue(9365, "fix(atendimento): aviso vermelho de limite de assentos na tela da atendente e fila esvaziada sem explicação (Fulana 01/10)", 1791031003000, ["bug"]),
+    issue(9354, "fix(release): produção de d5bb1f70b reprova 10× em script-contracts — ExperimentalWarning do node:sqlite (Node 22) no stderr dos reconcilers", 1790957808000, ["type:bug", "source:agent", "priority:p1"]),
+    // INSP-Z r1 Z-1: new client demands of 01–03/10, no priority label — never folded away
+    issue(9364, "fix(atendimento): ATD-202610-0042 reaberto volta a encerrar por inatividade logo em seguida (Fulana 01/10)", 1791030992000, ["bug"]),
+    issue(9358, "BI: indicadores de CSAT não funcionam — erro de filtros não compatíveis (Beltrano, planilha L110)", 1790964114000, ["bug"]),
+    issue(9352, "fix(filas): Sidebar do ticket (Filas > Editar) salva mas não reflete no atendimento — reprovação linha 106 (Sicrano, 02/10) (ref #8204)", 1790954581000, ["type:bug", "source:agent", "area:frontend"]),
+    issue(9337, "fix(atendimento): erro ao enviar mensagem no ATD-202610-0036 (Fulano, 01/10)", 1790875306000, [], { updatedAt: 1790877085000 }),
+    // Z-2: P1 still open, its three PRs shipped on 22–23/09 — a cycle never closed
+    issue(9074, "fix(atendimento): distribuicao da fila reporta sucesso sem atribuir agente e encerra o atendimento sem registro no historico", 1790009019000, ["app:widget", "type:bug", "source:agent", "priority:p1", "app:atendimento"], { updatedAt: 1790087657000 }),
+    // Z-4: #9190's body says "Fecha #9185" — the issue was never closed by GitHub
+    issue(9185, "perf(atendimento): pulso de presença do widget sem leitura no D1 — InboxRoom decide o \"ficou online\" (#8984)", 1790229293000, ["app:widget", "type:improvement", "source:agent", "priority:p1", "app:atendimento"], { updatedAt: 1790284445000 }),
+    // Z-6: sessions opened for them on 30/09 and archived the same day without a PR
+    issue(9305, "Helpdesk: ticket criado pelo módulo de Atendimento fica com a fila errada (selecionada \"Fila N1\", gravada \"Fila Gestão\") — Fulano 30/09", 1790769972000, [], { updatedAt: 1790778934000 }),
+    issue(9308, "Atendimento: e-mail informado pelo cliente no chat aparece no JSON mas não é gravado no Cadastro de Pessoa (ATD-202609-0821) — Fulano 30/09", 1790773982000, [], { updatedAt: 1790795016000 }),
+    // INSP-Z r3: shipped whole with "Refs" and still open (validate and close), or a phase (#9071)
+    issue(9284, "Reprovado: mensagem de agentes offline via automação / Chat Web não dispara (L76)", 1790683454000, ["type:bug", "priority:p1", "source:climpsu", "app:atendimento", "app:automations"], { updatedAt: 1791045865000 }),
+    issue(9197, "fix(atendimento): encerramento pelo cliente atualiza etapa para Finalizado mas não o status customizado", 1790261205000, ["type:bug", "source:agent", "priority:p2", "app:atendimento"], { updatedAt: 1790359914000 }),
+    issue(8958, "fix(helpdesk): recuperar fila, etapa e status após reimportação Movidesk", 1789483942000, ["app:helpdesk", "type:bug", "source:agent", "priority:p1", "esteira"], { updatedAt: 1790806204000 }),
+    issue(8883, "Fix: preservar continuidade do chat e atividade real na fila de espera", 1788982568000, ["app:widget", "type:bug", "source:agent", "priority:p1", "app:atendimento"], { updatedAt: 1789073504000 }),
+    issue(8829, "fix(atendimento): canário de silêncio da fila se autossabota — visitante sozinho espera 40 min em vez de 20", 1788474532000, ["app:widget", "type:bug", "source:agent", "priority:p2", "app:atendimento"], { updatedAt: 1788787548000 }),
+    issue(9172, "Inbound SendGrid: ressalvas do #9170 (atomicBatch sem binding nativo, outbox > 2 MB, commit+timeout, drain sem idade mínima)", 1790203594000, ["app:core", "app:helpdesk", "type:bug", "source:agent", "priority:p2"], { updatedAt: 1790229719000 }),
+    issue(9071, "Helpdesk: remetente em domínio próprio do cliente (BYOD) — ex.: `suporte@crmACMECORP.com`", 1790008099000, ["app:helpdesk", "type:feature", "source:agent", "priority:p2", "epic:helpdesk-email-pipeline", "esteira"], { updatedAt: 1790806210000 }),
+    issue(8961, "Otimizar listagem de deliveries dos canais de email do Helpdesk", 1789496417000, ["app:web", "app:helpdesk", "type:improvement", "source:agent", "priority:p2", "esteira"], { updatedAt: 1790806205000 }),
+    // closed by #9348 on 02/10; lot W's #9368 (opened 03/10) still "Refs" it — history, not its work
+    issue(9347, "Release travado em script-contracts: stderr com ExperimentalWarning do SQLite", 1790930000000, ["source:agent", "priority:p1", "bug", "esteira"], { state: "CLOSED", closedAt: 1790964800000, stateReason: "COMPLETED" }),
+    // a P0 (old "critical") untouched since 30/07: backlog, counted under Entrada, not a card
+    issue(7857, "FORBIDDEN_WORDS apaga sentenças de resposta NEGATIVA legítima; se for a única sentença, vira o sentinel que a policy N1 troca pelo fallback de incidente", 1785441636000, ["app:ai", "type:bug", "priority:critical", "source:agent"]),
+    // older backlog: no priority, not recent, nobody names it — not on the board
+    issue(9293, "Flaky: admission-control-contract.test.mjs depende do locale (pt_BR \"12,00\")", 1789600000000, ["type:bug", "priority:p3"]),
+  ];
+}
+
+/** `fixes`: what the body says it closes; undefined like a cache read before the field existed. */
+const merged = (number: number, title: string, createdAt: number, mergedAt: number, head: string, mergeSha: string, refs: number[], labels: string[] = [], fixes?: number[]): LivePr => ({
+  number, title, createdAt, updatedAt: mergedAt, mergedAt, state: "MERGED", draft: false, base: "main", head, headSha: null, mergeSha,
+  gate: "success", gateAt: mergedAt - 600_000, mergeState: null, closes: [], refs, ...(fixes ? { fixes } : {}), labels,
+});
+
+/** The board's live read at the clock: the two open PRs and the merged ones. */
+export function boardLive(): NonNullable<BoardInputs["live"]> {
+  return {
+    at: NOW - 60_000,
+    open: [
+      { number: 9332, title: "feat(atendimento): prazo de reabertura configurável do atendimento do chat (#9052)", createdAt: 1790867876000, updatedAt: 1791070000000, mergedAt: null, state: "OPEN", draft: false, base: "main", head: "feat/9052-tempo-reabertura-configuravel-v2", headSha: HEAD_9332, mergeSha: null, gate: "missing", gateAt: null, mergeState: "BEHIND", closes: [], refs: [9052], labels: ["type:feature", "priority:p1", "app:atendimento"] },
+      { number: 9368, title: "perf(release/admission): fila sem estouro atrás de release, máquina devolvida na fase de rede, release mais curto (lote W)", createdAt: 1791059533000, updatedAt: 1791070000000, mergedAt: null, state: "OPEN", draft: false, base: "main", head: "ops/lot-w-throughput", headSha: "5bc51ed6ab3dda77e6ec0a803b3582a97b1d3e46", mergeSha: null, gate: "missing", gateAt: null, mergeState: "BLOCKED", closes: [], refs: [9347], labels: [] },
+    ],
+    merged: [
+      merged(9280, "fix(helpdesk): rodízio de equipe atômico no fallback de distribuição (#9195)", 1790646964000, 1791075278000, "hotfix/9195-helpdesk-team-round-robin-race", "432bbd027f2794ae95ea7e823e30403743f90a49", [9195], [], []), // "Refs #9195"
+      merged(9350, "fix(filas): sidebar da fila do atendimento grava na chave que a conversa lê (ref #8204)", 1790950750000, 1791069231000, "fix/8204-sidebar-fila-atendimento", "ba034e1f30b43dd2abea695bb01082b69dc34c58", [8204], [], []),
+      merged(9344, "fix(inbox): pausa de inatividade do Webchat não vem mais marcada por padrão (#9334)", 1790927738000, 1790928868000, "fix/9334-pausa-inatividade-padrao", "3d98404b8cc8e4e55be6b795fb16e4159e971b43", [9334], ["priority:p2", "app:atendimento", "bug"], []),
+      merged(9345, "fix(atendimento): webchat não encerra antes do prazo nem ao dispensar pesquisa antiga (#9331)", 1790927771000, 1790929958000, "fix/9331-inatividade-encerra-cedo", "aa74c6345005427981e659874200dff5646a832d", [9331], ["priority:p2", "app:atendimento", "bug"], []),
+      merged(9348, "fix(scripts): contratos do reconciler selado não dependem do runtime Node (#9347)", 1790934232000, 1790964800000, "fix/9347-script-contracts-sqlite-warning", "9720b32e0c3179eafd7c0a31ae88b488528e7557", [9347], ["priority:p1", "bug"]),
+      // #9074's three, shipped on 22–23/09 (by the release times: their compares are not in this fixture);
+      // each says "Refs #9074" — #9087: "Este PR resolve só o falso sucesso", the other legs stay open
+      merged(9087, "fix(atendimento): distribute_assignee não reporta sucesso quando só enfileira (#9074)", 1790018588000, 1790031752000, "fix/9074-distribute-assignee-false-success", "14a30776607d7f5e65e3a58dc45bf74f9b05915d", [9074], [], []),
+      merged(9113, "fix(atendimento): registrar no histórico o motivo do encerramento da fila de espera (#9074)", 1790082290000, 1790088627000, "fix/9074-waiting-closure-history", "06797f64ba332024ced346631c7c9523c2c4e365", [9074], [], []),
+      merged(9118, "fix(atendimento): presença expirada não encerra quem escreveu esperando resposta (#9074)", 1790087592000, 1790088636000, "fix/9074-presence-message-window", "8c56abfc1ef82367d085817d8fb8897e96912040", [9074], [], []),
+      // "Fecha #9185" in its body (parsed into refs as the reader does), shipped by f6d127693 on 29/09
+      merged(9190, "perf(atendimento): pulso de presença do widget sem leitura no D1 — InboxRoom decide o \"ficou online\" (#9185)", 1790230111000, 1790341948000, "perf/9185-presence-sem-d1", "549e4a974f210b4331ee8144471c1b5f42cc9521", [9185], ["app:widget", "type:improvement", "source:agent", "priority:p1", "app:atendimento"], [9185]),
+      // INSP-Z r3: the repository's convention — a whole fix ships with "Refs #N" (lot P's gate refuses
+      // Closes/Fixes in a runtime PR) and the issue stays open until validated; a phase says so
+      merged(9361, "fix(atendimento): agentes offline medidos no escopo da distribuição (#9284)", 1790966192000, 1791031805000, "fix/9284-agentes-offline-escopo-equipe", "7ab3adaea7000d420a3f8631452940a47c090029", [9284], ["type:bug", "priority:p1", "app:atendimento"], []),
+      merged(9275, "fix(atendimento): encerramento pelo cliente não deixa status customizado \"Em atendimento\" (#9197)", 1790550378000, 1790562225000, "claude/etapa-finalizado-custom-status-4303b9", "bf6c6f364b71f748208682a380dc2eaf7e36b670", [9197], ["type:bug", "source:agent", "app:atendimento"], []),
+      merged(8959, "fix(helpdesk): restaurar estado anterior de tickets importados sem gatilhos (#8958)", 1789484808000, 1789489167000, "hotfix/helpdesk-import-restore", "d75ecf5989205cb80fabc0b25ad301f92b447384", [8958], [], []),
+      merged(9019, "fix(helpdesk): restaurar fila e etapa de tickets importados sem fila (#8958)", 1789768705000, 1789824805000, "fix/8958-orphan-queue-restore", "1cb32ffa4c254a1672328167e62513db00166e97", [8958], [], []),
+      merged(8922, "fix(atendimento): require the atomic batch for the legacy widget closure", 1789086339000, 1789420606000, "fix/widget-close-atomic-guard-8883", "dd394c6284abd9c6dddc43a3e277879b9bf7fd41", [8883], [], []),
+      merged(8842, "fix(atendimento): exigir canário independente na fila de espera", 1788789503000, 1789826603000, "codex/waiting-canary-8829", "0973c12a4c4fb2ab4330a453b26a358906dc4c55", [8829], [], []),
+      merged(9177, "fix(core): evento de resposta por e-mail cabe na fila e na linha do outbox (#9172)", 1790209649000, 1790231251000, "fix/reply-event-payload-budget-9172", "a01f95e3958c80265a685478074e4ab28de94321", [9172], ["app:core", "app:helpdesk", "type:bug", "source:agent", "priority:p2"], []),
+      { ...merged(9097, "feat(email): threading de ticket independente do From — Fase 0 do #9071", 1790033161000, 1790084365000, "feat/9071-fase0-message-id-threading", "2c99d53cdd3c04b3a7382591a05c8a2ebadb2fb8", [9071], ["app:core", "app:helpdesk", "app:shared", "type:improvement", "source:agent", "priority:p2", "epic:helpdesk-email-pipeline"], []), partial: true },
+      merged(8964, "perf(helpdesk): paginar e otimizar listagem de deliveries de email", 1789497224000, 1789828813000, "codex/email-deliveries-list", "05c65a206874e12d489f977036c8409b3266ff3c", [8961], [], []),
+      // the carrier that shipped 9280: how code ships, never a card
+      merged(9370, "chore(release): carrier 9195-rodizio-equipe-atomico", 1791075300000, 1791075327000, "chore/release-carrier-9195-rodizio-equipe-atomico", S3C04, []),
+    ],
+  };
+}
+
+export function boardGithub(): GhCache {
+  const github = emptyGhCache();
+  for (const each of boardIssues()) github.issues[String(each.number)] = each;
+  const toGh = (pr: LivePr): GhPr => ({ number: pr.number, title: pr.title, createdAt: pr.createdAt, updatedAt: pr.updatedAt, mergedAt: pr.mergedAt, closedAt: pr.mergedAt, state: pr.state, draft: pr.draft, base: pr.base, head: pr.head, mergeSha: pr.mergeSha, closes: pr.closes, refs: pr.refs, labels: pr.labels });
+  const live = boardLive();
+  for (const pr of [...live.merged, ...live.open]) github.prs[String(pr.number)] = toGh(pr);
+  // what f9e7a2350 carried (the real compare: three commits, #9350's merge among them)
+  github.compares[`${SF82D}...${SF9E7}`] = ["ba034e1f30b43dd2abea695bb01082b69dc34c58", "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"];
+  // what f6d127693 carried: #9190's and #9275's merges (of the real 39); what 3c4a33ceb carried: #9177's
+  github.compares[`${SB91F}...${SF6D1}`] = ["549e4a974f210b4331ee8144471c1b5f42cc9521", "bf6c6f364b71f748208682a380dc2eaf7e36b670"];
+  github.compares[`${S9045}...${S3C4A}`] = ["a01f95e3958c80265a685478074e4ab28de94321"];
+  github.openPrs = live.open.map((pr) => ({ number: pr.number, title: pr.title, createdAt: pr.createdAt, draft: pr.draft, base: pr.base, headSha: pr.headSha, gate: pr.gate, gateAt: pr.gateAt }));
+  github.syncedAt = NOW - 10 * 60_000;
+  return github;
+}
+
+const run = (sha: string, pid: number, outcome: ReleaseRun["outcome"], startedAt: number, endedAt: number | null, extra: Partial<ReleaseRun> = {}): ReleaseRun =>
+  ({ key: `${sha}:${pid}`, sha, pid, outcome, startedAt, endedAt, timeSource: "log", ...extra });
+
+/** The release log of 02–04/10 as the collector parsed it, at the clock. */
+export function boardRuns(): ReleaseRun[] {
+  return [
+    // 14–19/09: what shipped #8883's, #8958's, #8829's and #8961's PRs
+    run("8ac65b4836ad712fc44a5b9e9c0429f6ba269042", 3655, "released", 1789439651000, 1789445898000, { headPr: 8954, deployedAt: 1789445898000 }),
+    run("d75ecf5989205cb80fabc0b25ad301f92b447384", 59345, "released", 1789490505000, 1789498042000, { headPr: 8959, deployedAt: 1789498042000 }),
+    run("6dbf4d03517c2544e4de21dde4d4989b60fdb79b", 91499, "released", 1789839740000, 1789847835000, { headPr: 9050, deployedAt: 1789847835000 }),
+    // 22–23/09: what shipped #9074's PRs (first tried after their merges)
+    run("b99b47226d7558037019c5b0fb37d71282738c34", 62804, "failed", 1790031929000, 1790033604000, { cause: "Local CI failed at migration-contracts", headPr: 9094 }),
+    run("f2511e145e124ca648b6d7b4ae9bc28d42967e35", 76849, "failed", 1790034379000, 1790036315000, { cause: "helpdesk FALHOU", headPr: 9103 }),
+    run("f2511e145e124ca648b6d7b4ae9bc28d42967e35", 23360, "released", 1790042033000, 1790049376000, { headPr: 9103, deployedAt: 1790049376000 }),
+    run("e21afb7e57ffcec6668f90f72d91f7189f31d259", 78475, "released", 1790103558000, 1790111712000, { headPr: 9131, deployedAt: 1790111712000 }),
+    run(SA886, 62702, "released", 1790181340000, 1790189400000, { headPr: 9150, deployedAt: 1790189400000 }),
+    run(S9045, 40138, "released", 1790210673000, 1790220928000, { headPr: 9179, deployedAt: 1790220928000 }),
+    run(S3C4A, 1867, "released", 1790273113000, 1790284077000, { headPr: 9207, deployedAt: 1790284077000 }),
+    run(SA837, 75730, "released", 1790286065000, 1790294929000, { headPr: 9216, deployedAt: 1790294929000 }),
+    run(SB91F, 50190, "released", 1790296657000, 1790305548000, { headPr: 9202, deployedAt: 1790305548000 }),
+    // f6d127693 first tried on 25/09 before #9190 merged, and released on 29/09: the compare says it carried it
+    run(SF6D1, 41001, "failed", 1790306807000, 1790307734000, { cause: "Local CI failed at tests" }),
+    run(SF6D1, 41002, "released", 1790680959000, 1790692009000, { deployedAt: 1790692009000 }),
+    run("d5bb1f70bea397bdd937d02148c685e406985ba0", 68244, "failed", 1790954490000, 1790956598000, { cause: "Local CI failed at script-contracts", headPr: 9346 }),
+    run("d5bb1f70bea397bdd937d02148c685e406985ba0", 70272, "failed", 1790958178000, 1790960253000, { cause: "Local CI failed at script-contracts", headPr: 9346 }),
+    run("9dbb1dcdda74dc04debbf8ff6d2292e5ad597445", 53038, "failed", 1790965351000, 1790966967000, { cause: "Local CI failed at tests", headPr: 9360 }),
+    run("9dbb1dcdda74dc04debbf8ff6d2292e5ad597445", 56366, "released", 1790967661000, 1790979918000, { headPr: 9360, deployedAt: 1790979918000 }),
+    run("23a9f93c544a5e8c1c8035da781e926baeb2894a", 14500, "released", 1791032610000, 1791045263000, { headPr: 9366, deployedAt: 1791045263000 }),
+    run(SF82D, 88474, "released", 1791053582000, 1791065907000, { headPr: 9367, deployedAt: 1791065907000 }),
+    run(SF9E7, 76254, "released", 1791069412000, 1791071914000, { headPr: 9369, deployedAt: 1791071914000 }),
+    run(S3C04, 83221, "running", 1791075557000, null, { headPr: 9370 }),
+  ];
+}
+
+const session = (id: string, title: string, status: string, createdAt: number, lastActivityAt: number, extra: Partial<BoardSession> = {}): BoardSession =>
+  ({ id, ownerBotId: CHIEF, ownerThreadId: CHIEF_DESK, title, status, surface: "cli", createdAt, lastActivityAt, ...extra });
+
+export function boardSessions(): BoardSession[] {
+  return [
+    session("35787b0f-ff38-459e-b543-0dd921d068f4", "9052 Tempo de reabertura configurável", "running", 1790864769239, NOW - 6 * 60_000, {
+      progressAt: NOW - 6 * 60_000,
+      cwd: "/repo/.claude/worktrees/9052-tempo-de-reabertura-configuravel-35787b",
+      delivery: { prs: { 9332: { number: 9332, state: "open", owned: "branch" } } },
+    }),
+    session("e47cf077-0000-4000-8000-000000000058", "9058 Chat entra com aviso no Widget", "idle", 1790884777154, 1790962596503, { progressAt: 1790962596503 }),
+    session("c38a865a-0000-4000-8000-000000009334", "9334 9331 Inatividade do chat", "idle", 1790926614563, 1790967511365, {
+      progressAt: 1790967511365,
+      delivery: { prs: {
+        9344: { number: 9344, state: "merged", owned: "branch", mergeSha: "3d98404b8cc8e4e55be6b795fb16e4159e971b43" },
+        9345: { number: 9345, state: "merged", owned: "branch", mergeSha: "aa74c6345005427981e659874200dff5646a832d" },
+        9348: { number: 9348, state: "merged", owned: "branch", mergeSha: "9720b32e0c3179eafd7c0a31ae88b488528e7557" },
+      } },
+    }),
+    session("0fa889be-ff38-459e-b543-0dd921d06195", "9195 Rodízio de equipe atômico PR 9280", "idle", 1791033960437, 1791075453800, {
+      progressAt: 1791075453800,
+      delivery: { prs: { 9280: { number: 9280, state: "merged", owned: "branch", mergeSha: "432bbd027f2794ae95ea7e823e30403743f90a49" } } },
+    }),
+    session("9b50cdf7-0000-4000-8000-000000008204", "8204 Reprovado sidebar da fila não reflete no atendimento", "archived", 1790949274688, 1791072278577, {
+      archivedAt: 1791072278577,
+      delivery: { prs: { 9350: { number: 9350, state: "merged", owned: "branch", mergeSha: "ba034e1f30b43dd2abea695bb01082b69dc34c58" } } },
+    }),
+    // opened for #9305 and #9308 on 30/09 and archived the same day, with no PR
+    session("28963e07-1958-421f-99fa-b4eb1d1fc5bb", "#9305 fila errada ao criar ticket", "archived", 1790776100897, 1790793140122, { surface: "app", archivedAt: 1790793140122, desktop: { localId: "local_afeb24d3-d5d4-4d9b-8040-1d7f52a094bc" } }),
+    session("0d394c3b-c534-4652-ae29-71fcfbe5d97b", "#9308 e-mail não grava no Cadastro de Pessoa", "archived", 1790776107197, 1790794644558, { surface: "app", archivedAt: 1790794644558, desktop: { localId: "local_0c262b7f-63ae-400e-98ab-d242ef64de38" } }),
+    // archived long ago: nothing on the board
+    session("93001904-eda1-436f-9ba4-cd74849bb030", "9052 Tempo de reabertura configurável", "archived", 1790863894819, 1790864036683, { surface: "app", archivedAt: 1790864036683, desktop: { localId: "local_4b0ab114-df2d-4b90-9cc6-92cc9ad8a443", issue: "9052" } }),
+  ];
+}
+
+export function boardOwnerPending(): BoardOwnerPending[] {
+  return [
+    { id: "o14", botId: MONITOR, threadId: "b5306bef-0000-4000-8000-000000000014", title: "Autorizar a linha nova da #9355 na planilha Atendimento (Sicrano, CSAT do N1 atribuído ao N2, ticket 142461)", link: "https://github.com/dinhogehm/nuria-platform/issues/9355", createdAt: 1790960959453 },
+    { id: "o15", botId: MONITOR, threadId: "097e4cff-0000-4000-8000-000000000015", title: "Liberar os comentários de registro dos avisos na #9331 e na #9334", link: "https://github.com/dinhogehm/nuria-platform/issues/9334", createdAt: 1791029313380 },
+  ];
+}
+
+export function boardInputs(extra: Partial<BoardInputs> = {}): BoardInputs {
+  return {
+    now: NOW,
+    repo: "dinhogehm/nuria-platform",
+    github: boardGithub(),
+    live: boardLive(),
+    runs: boardRuns(),
+    logCoverage: { from: 1789407240000, to: NOW - 30_000 },
+    sessions: boardSessions(),
+    ownerPending: boardOwnerPending(),
+    botNames: new Map([[CHIEF, "Chief of Staff"], [MONITOR, "Monitor Chat Atendimento"]]),
+    releaseHold: "o release de produção 3c04d7c3d está em andamento",
+    admission: { lease: { kind: "release", label: `release:production:${S3C04}` }, intents: [] },
+    receipts: { "35787b0f-ff38-459e-b543-0dd921d068f4": { commit: LOCAL_9052, finishedAt: NOW - 20 * 60_000 } },
+    // its worktree's .local-ci/runs: the first full run at 15:57Z on 01/10, 40 min after #9332 opened
+    ciRuns: { "35787b0f-ff38-459e-b543-0dd921d068f4": [Date.parse("2026-10-01T15:57:24Z"), Date.parse("2026-10-04T00:46:18Z")] },
+    ...extra,
+  };
+}
