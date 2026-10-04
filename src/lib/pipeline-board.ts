@@ -122,6 +122,17 @@ export const STATE_KEY: Record<CardState, LocaleKey> = {
   done: "pipeline.state.done",
 };
 
+/** Nobody took it: waiting, no bot, no session (R11-visual N18: "Aguardando — ainda sem sessão" and "—"). */
+export const unownedCard = (card: Pick<BoardCard, "state" | "bot" | "reason">): boolean =>
+  card.state === "idle" && !card.bot && card.reason?.code === "no-session";
+
+/** The state as the card says it: waiting says on whom, nobody's says so (R11-visual N18). */
+export function stateLabel(card: Pick<BoardCard, "state" | "bot" | "reason">): string {
+  if (unownedCard(card)) return t("pipeline.state.unowned");
+  if (card.state === "idle" && card.bot) return t("pipeline.state.idleBot", { name: card.bot.name ?? card.bot.id.slice(0, 8) });
+  return t(STATE_KEY[card.state]);
+}
+
 const SCREEN_KIND: Record<string, LocaleKey> = {
   create: "pipeline.screen.create",
   send: "pipeline.screen.send",

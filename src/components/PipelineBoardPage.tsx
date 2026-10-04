@@ -16,7 +16,7 @@ import { openExternalLink } from "@/lib/app-links";
 import { cn } from "@/lib/cn";
 import { activeLocale, t } from "@/lib/i18n";
 import {
-  BOARD_STAGES, DEFAULT_FILTERS, DEFAULT_LIMITS, ENTRY_FOLD, LIMIT_KEYS, LIMIT_MAX_H, STATE_KEY, boardSummary, fetchBoard, foldEntry, isStale, loadFilters, openNeedsYou, reasonText,
+  BOARD_STAGES, DEFAULT_FILTERS, DEFAULT_LIMITS, ENTRY_FOLD, LIMIT_KEYS, LIMIT_MAX_H, boardSummary, stateLabel, unownedCard, fetchBoard, foldEntry, isStale, loadFilters, openNeedsYou, reasonText,
   saveBoardLimits, saveFilters, stageAge, visibleCards,
   type BoardCard, type BoardFilters, type BoardLimits, type BoardStage, type CardState, type PipelineBoard,
 } from "@/lib/pipeline-board";
@@ -102,6 +102,7 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
   const titleId = useId();
   const stale = isStale(card, now);
   const reason = reasonText(card.reason, lang(), card.release?.at ?? null);
+  const unowned = unownedCard(card);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const [expanded, setExpanded] = useState(false);
   // before the layout is measured (and where it is not, as in a static render), a long title is taken as cut
@@ -159,11 +160,12 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
       )}
 
       {/* where it stands */}
-      <p className="mt-1.5 flex items-start gap-1.5 text-[12px] leading-snug text-ink">
-        <StateIcon size={14} aria-hidden className={cn("mt-px shrink-0", STATE_TONE[card.state], card.state === "running" && "motion-safe:animate-spin [animation-duration:2.4s]")} />
+      <p className="mt-1.5 flex items-start gap-1.5 text-[12px] leading-snug text-ink" data-card-state-line={unowned ? "unowned" : card.state}>
+        <StateIcon size={14} aria-hidden className={cn("mt-px shrink-0", unowned && stale ? "text-warning" : STATE_TONE[card.state], card.state === "running" && "motion-safe:animate-spin [animation-duration:2.4s]")} />
         <span className="min-w-0">
-          <span className="font-semibold">{t(STATE_KEY[card.state])}</span>
-          {reason && <span className="text-ink-secondary"> — {reason}</span>}
+          {/* waiting says on whom; nobody's says so, amber past its limit (R11-visual N18) */}
+          <span className={cn("font-semibold", unowned && stale && "text-warning")}>{stateLabel(card)}</span>
+          {(unowned ? t("pipeline.reason.nobody") : reason) && <span className="text-ink-secondary"> — {unowned ? t("pipeline.reason.nobody") : reason}</span>}
         </span>
       </p>
       {stale && card.limitMs !== null && card.since !== null && (
@@ -200,7 +202,7 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
       <p className="relative mt-1.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11.5px] text-ink-secondary">
         <Bot size={12} aria-hidden className="shrink-0" />
         <span className="sr-only">{t("pipeline.card.carriedBy")}</span>
-        <span className="text-ink">{card.bot ? card.bot.name ?? card.bot.id.slice(0, 8) : "—"}</span>
+        <span className="text-ink">{card.bot ? card.bot.name ?? card.bot.id.slice(0, 8) : t("pipeline.card.nobody")}</span>
         {card.session && (
           <Chip title={card.session.title}>{t("pipeline.card.session", { status: t(SESSION_STATUS[card.session.status] ?? "pipeline.card.sessionStatus.idle") })}</Chip>
         )}
