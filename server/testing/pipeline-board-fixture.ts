@@ -45,6 +45,10 @@ const SF9E7 = "f9e7a2350e58397d155858568184650b66e24a91";
 const SF82D = "f82d10edb99b702a5c3a227121eabbbc33fbd1ac";
 const SA886 = "a886cf55628d2b76ec8337fcece5ea5d2d827d13";
 const SF6D1 = "f6d1276934d868195b44536938d2f70320af19dc";
+const S9045 = "90454396348db0bce2b6c2cd6327817f89609c3d";
+const S3C4A = "3c4a33ceb26b4599948873c4795f14ecf492dd8f";
+const SA837 = "a83779db536037106a5e09e4615322ded04b38fa";
+const SB91F = "b91f4aa21fcfc5f77d1eebd63987629dcbda1b69";
 export const HEAD_9332 = "407e3f9247c315011ad85c663cf74c21bfb01475";
 export const LOCAL_9052 = "e388511c72a261e7f10cd191f01a7add05d9e685";
 
@@ -74,6 +78,15 @@ export function boardIssues(): GhIssue[] {
     // Z-6: sessions opened for them on 30/09 and archived the same day without a PR
     issue(9305, "Helpdesk: ticket criado pelo módulo de Atendimento fica com a fila errada (selecionada \"Fila N1\", gravada \"Fila Gestão\") — Fulano 30/09", 1790769972000, [], { updatedAt: 1790778934000 }),
     issue(9308, "Atendimento: e-mail informado pelo cliente no chat aparece no JSON mas não é gravado no Cadastro de Pessoa (ATD-202609-0821) — Fulano 30/09", 1790773982000, [], { updatedAt: 1790795016000 }),
+    // INSP-Z r3: shipped whole with "Refs" and still open (validate and close), or a phase (#9071)
+    issue(9284, "Reprovado: mensagem de agentes offline via automação / Chat Web não dispara (L76)", 1790683454000, ["type:bug", "priority:p1", "source:climpsu", "app:atendimento", "app:automations"], { updatedAt: 1791045865000 }),
+    issue(9197, "fix(atendimento): encerramento pelo cliente atualiza etapa para Finalizado mas não o status customizado", 1790261205000, ["type:bug", "source:agent", "priority:p2", "app:atendimento"], { updatedAt: 1790359914000 }),
+    issue(8958, "fix(helpdesk): recuperar fila, etapa e status após reimportação Movidesk", 1789483942000, ["app:helpdesk", "type:bug", "source:agent", "priority:p1", "esteira"], { updatedAt: 1790806204000 }),
+    issue(8883, "Fix: preservar continuidade do chat e atividade real na fila de espera", 1788982568000, ["app:widget", "type:bug", "source:agent", "priority:p1", "app:atendimento"], { updatedAt: 1789073504000 }),
+    issue(8829, "fix(atendimento): canário de silêncio da fila se autossabota — visitante sozinho espera 40 min em vez de 20", 1788474532000, ["app:widget", "type:bug", "source:agent", "priority:p2", "app:atendimento"], { updatedAt: 1788787548000 }),
+    issue(9172, "Inbound SendGrid: ressalvas do #9170 (atomicBatch sem binding nativo, outbox > 2 MB, commit+timeout, drain sem idade mínima)", 1790203594000, ["app:core", "app:helpdesk", "type:bug", "source:agent", "priority:p2"], { updatedAt: 1790229719000 }),
+    issue(9071, "Helpdesk: remetente em domínio próprio do cliente (BYOD) — ex.: `suporte@crmACMECORP.com`", 1790008099000, ["app:helpdesk", "type:feature", "source:agent", "priority:p2", "epic:helpdesk-email-pipeline", "esteira"], { updatedAt: 1790806210000 }),
+    issue(8961, "Otimizar listagem de deliveries dos canais de email do Helpdesk", 1789496417000, ["app:web", "app:helpdesk", "type:improvement", "source:agent", "priority:p2", "esteira"], { updatedAt: 1790806205000 }),
     // closed by #9348 on 02/10; lot W's #9368 (opened 03/10) still "Refs" it — history, not its work
     issue(9347, "Release travado em script-contracts: stderr com ExperimentalWarning do SQLite", 1790930000000, ["source:agent", "priority:p1", "bug", "esteira"], { state: "CLOSED", closedAt: 1790964800000, stateReason: "COMPLETED" }),
     // a P0 (old "critical") untouched since 30/07: backlog, counted under Entrada, not a card
@@ -100,8 +113,8 @@ export function boardLive(): NonNullable<BoardInputs["live"]> {
     merged: [
       merged(9280, "fix(helpdesk): rodízio de equipe atômico no fallback de distribuição (#9195)", 1790646964000, 1791075278000, "hotfix/9195-helpdesk-team-round-robin-race", "432bbd027f2794ae95ea7e823e30403743f90a49", [9195], [], []), // "Refs #9195"
       merged(9350, "fix(filas): sidebar da fila do atendimento grava na chave que a conversa lê (ref #8204)", 1790950750000, 1791069231000, "fix/8204-sidebar-fila-atendimento", "ba034e1f30b43dd2abea695bb01082b69dc34c58", [8204], [], []),
-      merged(9344, "fix(inbox): pausa de inatividade do Webchat não vem mais marcada por padrão (#9334)", 1790927738000, 1790928868000, "fix/9334-pausa-inatividade-padrao", "3d98404b8cc8e4e55be6b795fb16e4159e971b43", [9334], ["priority:p2", "app:atendimento", "bug"]),
-      merged(9345, "fix(atendimento): webchat não encerra antes do prazo nem ao dispensar pesquisa antiga (#9331)", 1790927771000, 1790929958000, "fix/9331-inatividade-encerra-cedo", "aa74c6345005427981e659874200dff5646a832d", [9331], ["priority:p2", "app:atendimento", "bug"]),
+      merged(9344, "fix(inbox): pausa de inatividade do Webchat não vem mais marcada por padrão (#9334)", 1790927738000, 1790928868000, "fix/9334-pausa-inatividade-padrao", "3d98404b8cc8e4e55be6b795fb16e4159e971b43", [9334], ["priority:p2", "app:atendimento", "bug"], []),
+      merged(9345, "fix(atendimento): webchat não encerra antes do prazo nem ao dispensar pesquisa antiga (#9331)", 1790927771000, 1790929958000, "fix/9331-inatividade-encerra-cedo", "aa74c6345005427981e659874200dff5646a832d", [9331], ["priority:p2", "app:atendimento", "bug"], []),
       merged(9348, "fix(scripts): contratos do reconciler selado não dependem do runtime Node (#9347)", 1790934232000, 1790964800000, "fix/9347-script-contracts-sqlite-warning", "9720b32e0c3179eafd7c0a31ae88b488528e7557", [9347], ["priority:p1", "bug"]),
       // #9074's three, shipped on 22–23/09 (by the release times: their compares are not in this fixture);
       // each says "Refs #9074" — #9087: "Este PR resolve só o falso sucesso", the other legs stay open
@@ -110,6 +123,17 @@ export function boardLive(): NonNullable<BoardInputs["live"]> {
       merged(9118, "fix(atendimento): presença expirada não encerra quem escreveu esperando resposta (#9074)", 1790087592000, 1790088636000, "fix/9074-presence-message-window", "8c56abfc1ef82367d085817d8fb8897e96912040", [9074], [], []),
       // "Fecha #9185" in its body (parsed into refs as the reader does), shipped by f6d127693 on 29/09
       merged(9190, "perf(atendimento): pulso de presença do widget sem leitura no D1 — InboxRoom decide o \"ficou online\" (#9185)", 1790230111000, 1790341948000, "perf/9185-presence-sem-d1", "549e4a974f210b4331ee8144471c1b5f42cc9521", [9185], ["app:widget", "type:improvement", "source:agent", "priority:p1", "app:atendimento"], [9185]),
+      // INSP-Z r3: the repository's convention — a whole fix ships with "Refs #N" (lot P's gate refuses
+      // Closes/Fixes in a runtime PR) and the issue stays open until validated; a phase says so
+      merged(9361, "fix(atendimento): agentes offline medidos no escopo da distribuição (#9284)", 1790966192000, 1791031805000, "fix/9284-agentes-offline-escopo-equipe", "7ab3adaea7000d420a3f8631452940a47c090029", [9284], ["type:bug", "priority:p1", "app:atendimento"], []),
+      merged(9275, "fix(atendimento): encerramento pelo cliente não deixa status customizado \"Em atendimento\" (#9197)", 1790550378000, 1790562225000, "claude/etapa-finalizado-custom-status-4303b9", "bf6c6f364b71f748208682a380dc2eaf7e36b670", [9197], ["type:bug", "source:agent", "app:atendimento"], []),
+      merged(8959, "fix(helpdesk): restaurar estado anterior de tickets importados sem gatilhos (#8958)", 1789484808000, 1789489167000, "hotfix/helpdesk-import-restore", "d75ecf5989205cb80fabc0b25ad301f92b447384", [8958], [], []),
+      merged(9019, "fix(helpdesk): restaurar fila e etapa de tickets importados sem fila (#8958)", 1789768705000, 1789824805000, "fix/8958-orphan-queue-restore", "1cb32ffa4c254a1672328167e62513db00166e97", [8958], [], []),
+      merged(8922, "fix(atendimento): require the atomic batch for the legacy widget closure", 1789086339000, 1789420606000, "fix/widget-close-atomic-guard-8883", "dd394c6284abd9c6dddc43a3e277879b9bf7fd41", [8883], [], []),
+      merged(8842, "fix(atendimento): exigir canário independente na fila de espera", 1788789503000, 1789826603000, "codex/waiting-canary-8829", "0973c12a4c4fb2ab4330a453b26a358906dc4c55", [8829], [], []),
+      merged(9177, "fix(core): evento de resposta por e-mail cabe na fila e na linha do outbox (#9172)", 1790209649000, 1790231251000, "fix/reply-event-payload-budget-9172", "a01f95e3958c80265a685478074e4ab28de94321", [9172], ["app:core", "app:helpdesk", "type:bug", "source:agent", "priority:p2"], []),
+      { ...merged(9097, "feat(email): threading de ticket independente do From — Fase 0 do #9071", 1790033161000, 1790084365000, "feat/9071-fase0-message-id-threading", "2c99d53cdd3c04b3a7382591a05c8a2ebadb2fb8", [9071], ["app:core", "app:helpdesk", "app:shared", "type:improvement", "source:agent", "priority:p2", "epic:helpdesk-email-pipeline"], []), partial: true },
+      merged(8964, "perf(helpdesk): paginar e otimizar listagem de deliveries de email", 1789497224000, 1789828813000, "codex/email-deliveries-list", "05c65a206874e12d489f977036c8409b3266ff3c", [8961], [], []),
       // the carrier that shipped 9280: how code ships, never a card
       merged(9370, "chore(release): carrier 9195-rodizio-equipe-atomico", 1791075300000, 1791075327000, "chore/release-carrier-9195-rodizio-equipe-atomico", S3C04, []),
     ],
@@ -124,8 +148,9 @@ export function boardGithub(): GhCache {
   for (const pr of [...live.merged, ...live.open]) github.prs[String(pr.number)] = toGh(pr);
   // what f9e7a2350 carried (the real compare: three commits, #9350's merge among them)
   github.compares[`${SF82D}...${SF9E7}`] = ["ba034e1f30b43dd2abea695bb01082b69dc34c58", "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"];
-  // what f6d127693 carried: #9190's merge
-  github.compares[`${SA886}...${SF6D1}`] = ["549e4a974f210b4331ee8144471c1b5f42cc9521"];
+  // what f6d127693 carried: #9190's and #9275's merges (of the real 39); what 3c4a33ceb carried: #9177's
+  github.compares[`${SB91F}...${SF6D1}`] = ["549e4a974f210b4331ee8144471c1b5f42cc9521", "bf6c6f364b71f748208682a380dc2eaf7e36b670"];
+  github.compares[`${S9045}...${S3C4A}`] = ["a01f95e3958c80265a685478074e4ab28de94321"];
   github.openPrs = live.open.map((pr) => ({ number: pr.number, title: pr.title, createdAt: pr.createdAt, draft: pr.draft, base: pr.base, headSha: pr.headSha, gate: pr.gate, gateAt: pr.gateAt }));
   github.syncedAt = NOW - 10 * 60_000;
   return github;
@@ -137,12 +162,20 @@ const run = (sha: string, pid: number, outcome: ReleaseRun["outcome"], startedAt
 /** The release log of 02–04/10 as the collector parsed it, at the clock. */
 export function boardRuns(): ReleaseRun[] {
   return [
+    // 14–19/09: what shipped #8883's, #8958's, #8829's and #8961's PRs
+    run("8ac65b4836ad712fc44a5b9e9c0429f6ba269042", 3655, "released", 1789439651000, 1789445898000, { headPr: 8954, deployedAt: 1789445898000 }),
+    run("d75ecf5989205cb80fabc0b25ad301f92b447384", 59345, "released", 1789490505000, 1789498042000, { headPr: 8959, deployedAt: 1789498042000 }),
+    run("6dbf4d03517c2544e4de21dde4d4989b60fdb79b", 91499, "released", 1789839740000, 1789847835000, { headPr: 9050, deployedAt: 1789847835000 }),
     // 22–23/09: what shipped #9074's PRs (first tried after their merges)
     run("b99b47226d7558037019c5b0fb37d71282738c34", 62804, "failed", 1790031929000, 1790033604000, { cause: "Local CI failed at migration-contracts", headPr: 9094 }),
     run("f2511e145e124ca648b6d7b4ae9bc28d42967e35", 76849, "failed", 1790034379000, 1790036315000, { cause: "helpdesk FALHOU", headPr: 9103 }),
     run("f2511e145e124ca648b6d7b4ae9bc28d42967e35", 23360, "released", 1790042033000, 1790049376000, { headPr: 9103, deployedAt: 1790049376000 }),
     run("e21afb7e57ffcec6668f90f72d91f7189f31d259", 78475, "released", 1790103558000, 1790111712000, { headPr: 9131, deployedAt: 1790111712000 }),
     run(SA886, 62702, "released", 1790181340000, 1790189400000, { headPr: 9150, deployedAt: 1790189400000 }),
+    run(S9045, 40138, "released", 1790210673000, 1790220928000, { headPr: 9179, deployedAt: 1790220928000 }),
+    run(S3C4A, 1867, "released", 1790273113000, 1790284077000, { headPr: 9207, deployedAt: 1790284077000 }),
+    run(SA837, 75730, "released", 1790286065000, 1790294929000, { headPr: 9216, deployedAt: 1790294929000 }),
+    run(SB91F, 50190, "released", 1790296657000, 1790305548000, { headPr: 9202, deployedAt: 1790305548000 }),
     // f6d127693 first tried on 25/09 before #9190 merged, and released on 29/09: the compare says it carried it
     run(SF6D1, 41001, "failed", 1790306807000, 1790307734000, { cause: "Local CI failed at tests" }),
     run(SF6D1, 41002, "released", 1790680959000, 1790692009000, { deployedAt: 1790692009000 }),
@@ -206,7 +239,7 @@ export function boardInputs(extra: Partial<BoardInputs> = {}): BoardInputs {
     github: boardGithub(),
     live: boardLive(),
     runs: boardRuns(),
-    logCoverage: { from: 1790000000000, to: NOW - 30_000 },
+    logCoverage: { from: 1789407240000, to: NOW - 30_000 },
     sessions: boardSessions(),
     ownerPending: boardOwnerPending(),
     botNames: new Map([[CHIEF, "Chief of Staff"], [MONITOR, "Monitor Chat Atendimento"]]),

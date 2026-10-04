@@ -18,7 +18,7 @@ import { BOARD_STAGES, DEFAULT_LIMITS, sanitizeLimits, type BoardLimits, type Pi
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { writeFileAtomic } from "./atomic.ts";
 import { buildPipelineBoard, parseReceipt, sessionPrs, utcStamp, type BoardInputs, type BoardOwnerPending, type BoardSession, type LivePr } from "./pipeline-board.ts";
-import { execGh, explicitReferences, GATE_CONTEXT, parseGate, type GhCache, type GhRunner } from "./productivity-github.ts";
+import { execGh, explicitReferences, GATE_CONTEXT, parseGate, partialDelivery, type GhCache, type GhRunner } from "./productivity-github.ts";
 import type { ReleaseRun } from "./productivity-release-log.ts";
 
 /** How often the open PRs are read again while someone looks at the board. */
@@ -54,6 +54,7 @@ export function parseLivePr(node: Json): LivePr | null {
     closes: (node.closingIssuesReferences?.nodes ?? []).map((issue: Json) => issue?.number).filter((n: unknown): n is number => typeof n === "number"),
     refs: [...new Set([...explicitReferences(node.body), ...explicitReferences(node.mergeCommit?.message)])].filter((n) => n !== node.number),
     fixes: [...new Set([...explicitReferences(node.body, { closing: true }), ...explicitReferences(node.mergeCommit?.message, { closing: true })])].filter((n) => n !== node.number),
+    ...(partialDelivery(`${node.title ?? ""}\n${node.body ?? ""}\n${node.mergeCommit?.message ?? ""}`) ? { partial: true as const } : {}),
     labels: (node.labels?.nodes ?? []).map((label: Json) => String(label?.name ?? "")).filter(Boolean),
   };
 }

@@ -43,12 +43,25 @@ export interface LivePr {
   refs: number[];
   /** Of `refs`, the ones it says it closes (not "Refs"); undefined in a cache read before it existed. */
   fixes?: number[];
+  /** It says it ships a part ("Fase 0 do #9071"). */
+  partial?: true;
   labels: string[];
 }
 
-/** The PR says it closes this issue (GitHub's link, Closes/Fecha…), not only cites it (Refs). */
+/** The PR says it closes this issue (GitHub's link, Closes/Fecha…), not only cites it (Refs).
+ * A PR read before `fixes` existed counts only by GitHub's link: "Refs" is the convention. */
 export function closesIssue(pr: Pick<LivePr, "closes" | "refs" | "fixes">, issue: number): boolean {
-  return pr.closes.includes(issue) || (pr.fixes ?? pr.refs).includes(issue);
+  return pr.closes.includes(issue) || (pr.fixes ?? []).includes(issue);
+}
+
+/** What shipped means for an issue still open. The repository's convention (lot P's gate
+ * refuses Closes/Fixes in a runtime PR): a whole fix ships with "Refs #N" and the issue
+ * stays open until it is validated — "validate". A PR that closes it and the issue is still
+ * open: "close" (the cycle was not closed). Only PRs that say they ship a part ("Fase 0",
+ * "parte 2"): "partial". */
+export function deliveryKind(prs: ReadonlyArray<Pick<LivePr, "closes" | "refs" | "fixes" | "partial">>, issue: number): "close" | "validate" | "partial" {
+  if (prs.some((pr) => closesIssue(pr, issue))) return "close";
+  return prs.length > 0 && prs.every((pr) => pr.partial) ? "partial" : "validate";
 }
 
 /** The fields of a Claude Code session the board reads. */
@@ -155,18 +168,21 @@ function oneEditApart(a: string, b: string): boolean {
 }
 
 /** A word that is a requester the dictionary learned, in any spelling a title uses for
- * them: the name itself in any case or accent; capitalized, a one-letter variant of a
- * name of 5+ letters (Felipe, Mateus), a diminutive (Pedrinho, Robertinha) or a short
- * form of 3–4 letters (Dai for Daiane) — never a common word. */
-export function isRequester(word: string, people: ReadonlySet<string>): boolean {
+ * them: the name itself in any case or accent; and, for a capitalized word that is not
+ * Portuguese (COMMON_PT, or a word the titles write in lower case), a one-letter variant
+ * of a name of 5+ letters (Felipe, Mateus) or a diminutive of one (Pedrinho); a short form
+ * (Dai) only where a title showed it beside the full name. "Mat", "Math", "Pat", "Rob",
+ * "Mate", "Marinho", "Patinho" and a sentence's "Daí" are words, not people. */
+export function isRequester(word: string, names: Pick<NameDictionary, "people" | "common" | "aliases">): boolean {
   const folded = fold(word);
-  if (people.has(folded)) return true;
-  if (!/^\p{Lu}/u.test(word) || folded.length < 3 || STOPWORDS.has(folded)) return false;
+  if (names.people.has(folded)) return true;
+  if (names.aliases.has(word.toLocaleLowerCase("pt-BR"))) return true;
+  if (!/^\p{Lu}/u.test(word) || folded.length < 4 || STOPWORDS.has(folded) || COMMON_PT.has(folded) || names.common.has(folded)) return false;
   const base = folded.replace(/z?inh[oa]s?$/u, "");
-  for (const name of people) {
-    if (folded.length >= 5 && name.length >= 5 && oneEditApart(folded, name)) return true;
-    if (base !== folded && base.length >= 3 && name.startsWith(base)) return true;
-    if (folded.length <= 4 && name.length >= folded.length + 2 && name.startsWith(folded)) return true;
+  for (const name of names.people) {
+    if (name.length < 5) continue;
+    if (folded.length >= 5 && oneEditApart(folded, name)) return true;
+    if (base !== folded && base.length >= 4 && name.startsWith(base)) return true;
   }
   return false;
 }
@@ -176,7 +192,32 @@ export interface NameDictionary {
   people: ReadonlySet<string>;
   /** Folded clients' (tenants') names. */
   tenants: ReadonlySet<string>;
+  /** Folded words the titles write in lower case: Portuguese, never a variant of a name. */
+  common: ReadonlySet<string>;
+  /** Short forms seen beside the full name in a title ("Dai" with "Daiane"), lower case with accents. */
+  aliases: ReadonlySet<string>;
 }
+
+/** Portuguese words a name variant could look like, capitalized at a sentence's start
+ * (the titles' own lower-case words are added to these when the dictionary is built). */
+export const COMMON_PT = new Set([
+  "mate", "mato", "matar", "mata", "matriz", "matricula", "mapa", "marca", "marco", "marinho", "marinha", "mar", "pato", "patinho", "pata", "patio", "pedra", "pedras",
+  "pedal", "pedaco", "pedido", "roberto", "robo", "robusto", "rota", "roda", "filme", "filho", "filha", "fila", "filtro", "dado", "dados", "daily", "dai", "daqui",
+  "daria", "dano", "danos", "dama", "data", "felino", "feliz", "fechar", "mesa", "meta", "metade", "metodo", "modo", "pagina", "pagar", "pago", "parte", "pauta",
+  "peso", "pena", "pelo", "pela", "perto", "pois", "porta", "posto", "rede", "regra", "resto", "risco", "roteiro", "salvo", "santo", "senha", "sino", "tela",
+  "tempo", "tipo", "todo", "toda", "valor", "vez", "via", "visao", "volta", "zona", "patricio", "mateiro", "dairy", "math", "matt", "rob", "pat",
+]);
+
+/** A second name or a surname that goes with a requester's first ("Pedro Henrique", "Mateus Rodrigues"). */
+const SECOND_NAMES = new Set([
+  "henrique", "paulo", "eduardo", "augusto", "gabriel", "luiz", "luis", "carlos", "antonio", "jose", "maria", "ana", "clara", "luiza", "luisa", "fernanda",
+  "cristina", "helena", "vitoria", "miguel", "arthur", "artur", "felipe", "filipe", "gustavo", "rafael", "lucas", "vinicius", "victor", "vitor", "ricardo",
+  "alberto", "roberto", "fernando", "rodrigo", "daniel", "daniela", "beatriz", "carolina", "julia", "juliana", "leticia", "camila", "amanda", "marcos",
+  "silva", "santos", "oliveira", "souza", "sousa", "rodrigues", "ferreira", "alves", "pereira", "lima", "gomes", "costa", "ribeiro", "martins", "carvalho",
+  "almeida", "lopes", "soares", "fernandes", "vieira", "barbosa", "rocha", "dias", "nascimento", "andrade", "moreira", "nunes", "marques", "machado",
+  "mendes", "freitas", "cardoso", "ramos", "goncalves", "santana", "teixeira", "araujo", "melo", "mello", "batista", "campos", "pinto", "moura", "cavalcanti",
+  "monteiro", "correia", "correa", "azevedo", "medeiros", "reis", "farias", "castro", "fonseca", "guimaraes", "siqueira", "xavier", "prado", "brito", "sales",
+]);
 
 /** Requesters and clients, learned only where the title says who asked —
  * "(Daiane 01/10)", "(ticket 142461, Pedro 02/10)", "— Marluce 30/09",
@@ -201,7 +242,9 @@ export function nameDictionary(texts: Iterable<string>): NameDictionary {
   // a client is named as one somewhere ("tenant PIPERUN", "cliente ACME"): then it goes from
   // every title, also where nothing marks it. Capitals alone are not a client ("NEGATIVA", "FORBIDDEN_WORDS")
   const tenant = /(?<![\p{L}\d_])(?:[Tt]enant|[Cc]liente|[Ww]orkspace)\s+([A-Z][A-Z0-9]{3,})(?![\p{L}\d_])/gu;
-  for (const text of texts) {
+  const common = new Set<string>();
+  const all = [...texts];
+  for (const text of all) {
     for (const group of text.matchAll(/\(([^()]*)\)/gu)) {
       const match = attributed.exec(group[1]!.trim());
       if (match) learn(match[1]!);
@@ -211,8 +254,22 @@ export function nameDictionary(texts: Iterable<string>): NameDictionary {
     for (const match of text.matchAll(sheet)) learn(match[1]!);
     for (const match of text.matchAll(reported)) learn((match[1] ?? match[2])!);
     for (const match of text.matchAll(tenant)) tenants.add(fold(match[1]!));
+    // a word written in lower case is a word of the language, never a person
+    for (const match of text.matchAll(/(?<![\p{L}\d_@.])\p{Ll}[\p{Ll}]{2,}(?![\p{L}\d_])/gu)) common.add(fold(match[0]));
   }
-  return { people, tenants };
+  // a short form counts only where a title shows it beside the full name ("Dai (Daiane)", "Daiane/Dai")
+  const aliases = new Set<string>();
+  for (const text of all) {
+    const words = [...text.matchAll(/\p{Lu}\p{Ll}+/gu)].map((match) => match[0]);
+    const full = words.filter((word) => people.has(fold(word))).map(fold);
+    if (!full.length) continue;
+    for (const word of words) {
+      const folded = fold(word);
+      if (folded.length >= 3 && !people.has(folded) && !STOPWORDS.has(folded) && full.some((name) => name.length >= folded.length + 2 && name.startsWith(folded))) aliases.add(word.toLocaleLowerCase("pt-BR"));
+    }
+  }
+  for (const name of people) common.delete(name);
+  return { people, tenants, common, aliases };
 }
 
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -222,7 +279,7 @@ const MARK = "\u0000";
 /** Longer than this, a title is cut (the screen clamps to two lines and shows it whole on hover). */
 const TITLE_MAX = 240;
 
-const hasPerson = (text: string, names: NameDictionary) => [...text.matchAll(/\p{L}+/gu)].some((word) => isRequester(word[0], names.people));
+const hasPerson = (text: string, names: NameDictionary) => [...text.matchAll(/\p{L}+/gu)].some((word) => isRequester(word[0], names));
 const hasTenant = (text: string, names: NameDictionary) => [...names.tenants].some((name) => fold(text).includes(name));
 
 /** A card's title: no leading issue numbers, no "fix(scope):", no requester
@@ -249,13 +306,15 @@ export function boardTitle(raw: string, names: NameDictionary): string {
     return inside === token ? "cliente" : inside;
   });
   // a requester, with the "do/da/pelo" before and the names and date that go with
-  text = text.replace(/\p{L}+/gu, (word) => (isRequester(word, names.people) ? MARK : word));
-  // the second name goes with the first ("Pedro Henrique")
-  for (let before = ""; before !== text;) { before = text; text = text.replace(new RegExp(`${MARK} (${NAME})(?![\\p{L}])`, "gu"), (whole, next: string) => (STOPWORDS.has(fold(next)) ? whole : `${MARK} ${MARK}`)); }
+  text = text.replace(/\p{L}+/gu, (word) => (isRequester(word, names) ? MARK : word));
+  // the second name goes with the first only when it is one ("Pedro Henrique", "Mateus Rodrigues") —
+  // never the next word of the sentence ("Filipe Sidebar quebrou")
+  for (let before = ""; before !== text;) { before = text; text = text.replace(new RegExp(`${MARK} (${NAME})(?![\\p{L}])`, "gu"), (whole, next: string) => (SECOND_NAMES.has(fold(next)) ? `${MARK} ${MARK}` : whole)); }
   // with the "do/da/pelo" before, the others joined to it ("do Roberto e da Daiane") and the date after
   const joined = String.raw`(?:\s*(?:\/|,)\s*|\s+|\s+e(?:\s+(?:d[oa]s?|pel[oa]s?|[oa]s?))?\s+)`;
   text = text.replace(new RegExp(String.raw`(?:(?<![\p{L}])(?:d[oa]|pel[oa]|por|com|[oa])\s+)?${MARK}(?:${joined}${MARK})*(?:,?\s+\(?${DATE}\)?)?`, "gu"), "");
-  text = text.replace(/\s+([,.;:!?)])(?=\s|$)/g, "$1").replace(/\(\s*\)/g, "").replace(/\s+\/\s+/g, " ")
+  // a slash between words stays ("automação / Chat Web"); one a removed name left alone goes
+  text = text.replace(/\s+([,.;:!?)])(?=\s|$)/g, "$1").replace(/\(\s*\)/g, "").replace(/\s+\/\s*(?=[,.;:)]|$)|(?<=^|\()\s*\/\s+/g, " ")
     .replace(/^[\s,;:/—–-]+/u, "").replace(/[\s,;:/—–-]+$/u, "").replace(/\s{2,}/g, " ").trim();
   if (!text) return "—";
   text = text[0]!.toLocaleUpperCase("pt-BR") + text.slice(1);
@@ -505,7 +564,7 @@ function fromCache(pr: GhPr | null, number = pr?.number ?? 0): LivePr {
   return {
     number, title: pr?.title ?? "", createdAt: pr?.createdAt ?? 0, updatedAt: pr?.updatedAt ?? 0, mergedAt: pr?.mergedAt ?? null,
     state: pr?.state ?? "OPEN", draft: pr?.draft ?? false, base: pr?.base ?? "main", head: pr?.head ?? "", headSha: null, mergeSha: pr?.mergeSha ?? null,
-    gate: "missing", gateAt: null, mergeState: null, closes: pr?.closes ?? [], refs: pr?.refs ?? [], ...(pr?.fixes ? { fixes: pr.fixes } : {}), labels: pr?.labels ?? [],
+    gate: "missing", gateAt: null, mergeState: null, closes: pr?.closes ?? [], refs: pr?.refs ?? [], ...(pr?.fixes ? { fixes: pr.fixes } : {}), ...(pr?.partial ? { partial: true as const } : {}), labels: pr?.labels ?? [],
   };
 }
 
@@ -583,15 +642,15 @@ function buildCard(keys: string[], context: CardContext): BoardCard | null {
   let closeout = false;
   if (stage === "entry") {
     if (delivered.length) {
-      // its PRs reached production more than 7 days ago and the issue is still open: a PR that
-      // said it closes it means the cycle was not closed; PRs that only cite it ("Refs", a
-      // "Fase 0") delivered part of it — the rest is still to do, not a cycle to close
+      // its PRs reached production more than 7 days ago and the issue is still open: shipped
+      // whole ("Refs", the convention) it waits to be validated and closed; a PR that closes it
+      // means the cycle was not closed; both are cycles to close. A phase ("Fase 0") is not.
       const last = [...delivered].sort((a, b) => b.delivered!.at - a.delivered!.at)[0]!;
-      const whole = primary !== null && delivered.some((pr) => closesIssue(pr, primary));
+      const kind = primary !== null ? deliveryKind(delivered, primary) : "validate";
       since = last.delivered!.at;
-      reason = { code: whole ? "delivered-open" : "delivered-partial" };
+      reason = { code: kind === "close" ? "delivered-open" : kind === "partial" ? "delivered-partial" : "delivered-validate" };
       release = { sha: last.delivered!.sha ? short(last.delivered!.sha) : "—", state: "released", at: last.delivered!.at, ...(last.delivered!.inferred ? { inferred: true as const } : {}) };
-      closeout = whole;
+      closeout = kind !== "partial";
     } else if (sessions.length) {
       // a session was opened for it and archived without a PR: reopen it or close the issue
       since = Math.max(...sessions.map((session) => session.archivedAt ?? session.lastActivityAt));
@@ -650,7 +709,7 @@ function buildCard(keys: string[], context: CardContext): BoardCard | null {
     limitMs: stageLimitMs(stage, urgent, context.limits),
     state, blocked, urgent, closeout, reason, owner,
     issueOpen: primaryIssue?.state === "OPEN",
-    partial: stage === "production" && primaryIssue?.state === "OPEN" && primary !== null && !delivered.some((pr) => closesIssue(pr, primary)),
+    closing: stage === "production" && primaryIssue?.state === "OPEN" && primary !== null ? deliveryKind(delivered, primary) : null,
     links: {
       issue: primary !== null ? `https://github.com/${repo}/issues/${primary}` : null,
       pr: linkPr ? `https://github.com/${repo}/pull/${linkPr.number}` : null,

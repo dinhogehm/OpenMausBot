@@ -10,7 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LIMITS, ENTRY_FOLD, isStale, sanitizeLimits, type BoardCard, type PipelineBoard } from "../shared/pipeline-board.ts";
 import { boardTitle, buildPipelineBoard, fold, nameDictionary, parseReceipt, sheetRowOf, utcStamp, type BoardInputs } from "./pipeline-board.ts";
-import { explicitReferences } from "./productivity-github.ts";
+import { explicitReferences, partialDelivery } from "./productivity-github.ts";
 import { boardInputs, boardInputsWithBacklog, boardLive, boardRuns, boardSessions, CHIEF, CLIENT_NAMES, HEAD_9332, MONITOR, NOW } from "./testing/pipeline-board-fixture.ts";
 
 const HOUR = 3_600_000;
@@ -29,13 +29,16 @@ describe("the board of 04/10 02:13Z (real records)", () => {
 
   it("puts every piece of work in one column, in the pipeline's order", () => {
     expect(board.columns.map((each) => each.stage)).toEqual(["entry", "session", "pr", "gate", "release", "production"]);
-    expect(keys(board, "entry")).toEqual(["issue:9355", "issue:9365", "issue:9364", "issue:9358", "issue:9352", "issue:9337", "issue:9308", "issue:9305", "issue:9354", "issue:9074"]);
+    expect(keys(board, "entry")).toEqual([
+      "issue:9355", "issue:9365", "issue:9364", "issue:9358", "issue:9352", "issue:9337", "issue:9308", "issue:9305",
+      "issue:9354", "issue:9074", "issue:8958", "issue:8883", "issue:9172", "issue:9071", "issue:8829", "issue:8961",
+    ]);
     expect(keys(board, "session")).toEqual(["issue:9058"]);
     expect(keys(board, "pr")).toEqual(["pr:9368"]);
     expect(keys(board, "gate")).toEqual(["issue:9052"]);
     expect(keys(board, "release")).toEqual(["issue:9195"]);
-    expect(keys(board, "production")).toEqual(["issue:8204", "issue:9334", "issue:9185"]);
-    expect(board.columns.map((each) => each.total)).toEqual([10, 1, 1, 1, 1, 3]);
+    expect(keys(board, "production")).toEqual(["issue:8204", "issue:9284", "issue:9334", "issue:9185", "issue:9197"]);
+    expect(board.columns.map((each) => each.total)).toEqual([16, 1, 1, 1, 1, 5]);
     expect(board.limits).toEqual(DEFAULT_LIMITS);
   });
 
@@ -128,27 +131,47 @@ describe("INSP-Z r1", () => {
     expect(at("issue:9358")).toBeLessThan(at("issue:9337"));
   });
 
-  it("Z-2: an open issue whose PRs shipped over 7 days ago is back in Entrada — and never vanishes", () => {
+  it("Z-2 / INSP-Z r3: an open issue shipped whole with 'Refs' (the repository's convention) waits to be validated and closed — a cycle to close", () => {
     const board = buildPipelineBoard(boardInputs());
-    // #9074's PRs only say "Refs #9074" (#9087: "resolve só o falso sucesso"): a partial delivery, not a cycle to close (INSP-Z r2 Z2-4)
+    // #9074: "Refs #9074" in each of its three PRs, shipped 22–23/09
     expect(card(board, "issue:9074")).toMatchObject({
-      stage: "entry", state: "idle", reason: { code: "delivered-partial" }, closeout: false, prs: [9087, 9113, 9118],
+      stage: "entry", state: "idle", reason: { code: "delivered-validate" }, closeout: true, prs: [9087, 9113, 9118],
       since: 1790111712000, release: { sha: "e21afb7e5", state: "released", at: 1790111712000, inferred: true },
       links: { pr: "https://github.com/dinhogehm/nuria-platform/pull/9118" }, limitMs: 7 * DAY, urgent: true,
     });
+    // the cycles of 04/10: six shipped whole with "Refs", and #9071's "Fase 0" — a phase, the rest still to do
+    const cycles = Object.fromEntries([9074, 8958, 8883, 9172, 8829, 8961, 9071].map((number) => [number, card(board, `issue:${number}`)]));
+    for (const number of [9074, 8958, 8883, 9172, 8829, 8961]) expect(cycles[number]).toMatchObject({ stage: "entry", reason: { code: "delivered-validate" }, closeout: true });
+    expect(cycles[9071]).toMatchObject({ stage: "entry", reason: { code: "delivered-partial" }, closeout: false, prs: [9097] });
+    expect(card(board, "issue:8958").prs).toEqual([8959, 9019]);
+    // never vanishes; and a PR that says it closes (#9190 "Fecha #9185") with the issue open: the cycle was not closed
     const later = buildPipelineBoard(boardInputs({ now: NOW + 9 * DAY } as Partial<BoardInputs>));
     expect(card(later, "issue:9074").stage).toBe("entry");
-    // #9190 says "Fecha #9185": shipped on 29/09, #9185 still open — 7 days on, a cycle to close
     expect(card(later, "issue:9185")).toMatchObject({ stage: "entry", reason: { code: "delivered-open" }, closeout: true, release: { sha: "f6d127693" } });
   });
 
-  it("Z2-5: in Produção, a card says its issue is still open — and whether what shipped only cited it", () => {
+  it("Z2-5 / INSP-Z r3: in Produção with the issue open — validate and close (Refs), close (Fecha), or the rest of a phase", () => {
     const board = buildPipelineBoard(boardInputs());
-    expect(card(board, "issue:9185")).toMatchObject({ stage: "production", issueOpen: true, partial: false });
-    expect(card(board, "issue:8204")).toMatchObject({ stage: "production", issueOpen: false, partial: false });
-    // #9280 says "Refs #9195": once it ships, #9195 (open) is a partial delivery in Produção
-    const shipped = buildPipelineBoard(boardInputs({ runs: boardRuns().map((run) => (run.outcome === "running" ? { ...run, outcome: "released" as const, endedAt: NOW - 60_000 } : run)), releaseHold: null }));
-    expect(card(shipped, "issue:9195")).toMatchObject({ stage: "production", issueOpen: true, partial: true });
+    // #9361 "Refs #9284 (P1, reprovada pelo cliente…)": the whole fix, shipped 03/10
+    expect(card(board, "issue:9284")).toMatchObject({ stage: "production", issueOpen: true, closing: "validate", priority: "p1", origin: "client", prs: [9361] });
+    expect(card(board, "issue:9334")).toMatchObject({ stage: "production", issueOpen: true, closing: "validate" });
+    // #9275 shipped by f6d127693 (the compare says so), "Refs #9197"
+    expect(card(board, "issue:9197")).toMatchObject({ stage: "production", issueOpen: true, closing: "validate", release: { sha: "f6d127693" } });
+    expect(card(board, "issue:9185")).toMatchObject({ stage: "production", issueOpen: true, closing: "close" });
+    expect(card(board, "issue:8204")).toMatchObject({ stage: "production", issueOpen: false, closing: null });
+    // a phase shipped and nothing else: in Produção it says so
+    const phase = buildPipelineBoard(boardInputs({ now: 1790111712000 + DAY } as Partial<BoardInputs>));
+    expect(card(phase, "issue:9071")).toMatchObject({ stage: "production", closing: "partial" });
+  });
+
+  it("INSP-Z r3: a part is what a PR says it is — 'Fase 0', 'parte 2', 'entrega parcial' — not 'parcialmente aplicadas' nor a ticket's 'etapa'", () => {
+    expect(partialDelivery("feat(email): threading de ticket independente do From — Fase 0 do #9071")).toBe(true);
+    expect(partialDelivery("Entrega parcial do #9062; parte 2 vem depois")).toBe(true);
+    expect(partialDelivery("primeira parte do épico")).toBe(true);
+    // #8905 and #8922's bodies, #9019's title: not a phase
+    expect(partialDelivery("o batch atômico não aplicava as escritas parcialmente aplicadas")).toBe(false);
+    expect(partialDelivery("fix(helpdesk): restaurar fila e etapa de tickets importados sem fila (#8958)")).toBe(false);
+    expect(partialDelivery("o encerramento é parcial nesse modo")).toBe(false);
   });
 
   it("Z-3: limits are the owner's — defaults sane, saved values used, broken ones the default", () => {
@@ -294,7 +317,7 @@ describe("the board's rules", () => {
 
   it("Produção keeps the last 7 days only", () => {
     const later = buildPipelineBoard(boardInputs({ now: 1790979918000 + 7 * DAY + 60_000 } as Partial<BoardInputs>));
-    expect(keys(later, "production")).toEqual(["issue:8204"]);
+    expect(keys(later, "production")).toEqual(["issue:8204", "issue:9284"]);
   });
 
   it("an old P3 nobody names stays off; an old P0 nobody touched is counted as backlog", () => {
@@ -362,8 +385,11 @@ describe("titles, rows and receipts", () => {
       "CSAT atribuído ao N2 (ticket 142461, Pedro 02/10)",
       "Widget pede OTP (Chat Patricia 24/09)",
       "Fila do atendimento — Roberto 30/09",
+      // a short form only counts where a title shows it beside the full name
+      "Widget sem aviso — Daiane (Dai) 02/10",
     ]);
     expect([...real.people].sort()).toEqual(["daiane", "filipe", "matheus", "patricia", "pedro", "roberto"]);
+    expect([...real.aliases]).toEqual(["dai"]);
     expect(boardTitle("Felipe pediu o filtro de motivo", real)).toBe("Pediu o filtro de motivo");
     expect(boardTitle("Erro reportado pelo Mateus no chat", real)).toBe("Erro reportado no chat");
     expect(boardTitle("Dai: aviso vermelho na fila", real)).toBe("Aviso vermelho na fila");
@@ -375,6 +401,37 @@ describe("titles, rows and receipts", () => {
     // common words that look like variants stay
     expect(boardTitle("Pedra no sapato: Daily e Dados do Filtro", real)).toBe("Pedra no sapato: Daily e Dados do Filtro");
     expect(boardTitle("Matrícula do Mateus Rodrigues", real)).toBe("Matrícula");
+  });
+
+  it("INSP-Z r3 Z3-2: words are words — Mat, Math, Pat, Rob, a sentence's 'Daí', Marinho, Patinho, Mate; a second name only when it is one", () => {
+    const real = nameDictionary([
+      "fix(atendimento): erro ao enviar mensagem (Matheus, 01/10)",
+      "Widget pede OTP (Chat Patricia 24/09)",
+      "Fila do atendimento — Roberto 30/09",
+      "aviso vermelho na fila (Daiane 01/10)",
+      "BI: indicadores (Filipe, planilha L110)",
+      "Fluxo de assentos — Marluce 30/09",
+      // the titles' own lower-case words are Portuguese: never a variant of a name
+      "o mate da fila fica no mapa",
+    ]);
+    // no short form was seen beside a full name: none counts
+    expect([...real.aliases]).toEqual([]);
+    expect(boardTitle("Mat de assentos não carrega", real)).toBe("Mat de assentos não carrega");
+    expect(boardTitle("Math do relatório errado", real)).toBe("Math do relatório errado");
+    expect(boardTitle("Pat do widget some", real)).toBe("Pat do widget some");
+    expect(boardTitle("Rob do agendamento falha", real)).toBe("Rob do agendamento falha");
+    expect(boardTitle("Daí o widget trava", real)).toBe("Daí o widget trava");
+    expect(boardTitle("Dai: aviso na fila", real)).toBe("Dai: aviso na fila");
+    expect(boardTitle("Marinho: cor do botão", real)).toBe("Marinho: cor do botão");
+    expect(boardTitle("Patinho de borracha no teste", real)).toBe("Patinho de borracha no teste");
+    expect(boardTitle("Mate o processo zumbi", real)).toBe("Mate o processo zumbi");
+    // the next capitalized word goes only if it is a second name or a surname, never a term
+    expect(boardTitle("Filipe Sidebar quebrou", real)).toBe("Sidebar quebrou");
+    expect(boardTitle("Fluxo de Marluce Sidebar (30/09)", real)).toBe("Fluxo de Sidebar");
+    expect(boardTitle("Relato do Mateus Rodrigues sobre a fila", real)).toBe("Relato sobre a fila");
+    // the variants that are names still go
+    expect(boardTitle("Felipe e Mateus pediram ajuste", real)).toBe("Pediram ajuste");
+    expect(boardTitle("Robertinho não recebe", real)).toBe("Não recebe");
   });
 
   it("INSP-Z r2 Z2-3: meetings, channels, days and months are never learned as people", () => {

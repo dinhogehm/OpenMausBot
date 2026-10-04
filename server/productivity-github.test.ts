@@ -81,6 +81,9 @@ describe("labels and links", () => {
     // of those, what it says it closes: not the "Refs" (lot Z: a partial delivery is not a cycle to close)
     expect(parsePr(node)!.fixes).toEqual([8986]);
     expect(explicitReferences("Refs #9074. Fecha #9185; corrige #3", { closing: true })).toEqual([9185, 3]);
+    // a PR that says it ships a phase is marked; one that does not, is not
+    expect(parsePr({ ...node, title: "feat(email): threading de ticket independente do From — Fase 0 do #9071" })!.partial).toBe(true);
+    expect(parsePr(node)!.partial).toBeUndefined();
   });
 
   it("reads the merge gate on the PR head", () => {

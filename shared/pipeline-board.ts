@@ -24,7 +24,9 @@ export type BoardReasonCode =
   | "no-session"
   /** Its PRs reached production (detail: when) but the issue is still open: the cycle was not closed. */
   | "delivered-open"
-  /** Its PRs that reached production only cite it (Refs, a phase): part of it shipped, the issue is open. */
+  /** Its PRs shipped whole with "Refs" (the convention) and the issue waits to be validated and closed. */
+  | "delivered-validate"
+  /** Only PRs that say they ship a part ("Fase 0") reached production; the issue is open. */
   | "delivered-partial"
   /** Its session was archived without a PR and the issue is still open: reopen it or close the issue. */
   | "session-archived"
@@ -87,8 +89,9 @@ export interface BoardCard {
   closeout: boolean;
   /** Its issue is still open on GitHub (Produção says so). */
   issueOpen: boolean;
-  /** In Produção: what shipped only cites the issue ("Refs", a phase) — a partial delivery. */
-  partial: boolean;
+  /** In Produção with the issue open: shipped whole with "Refs" (the convention) and waiting to
+   * be validated and closed ("validate"); a PR said it closes it ("close"); only a phase shipped ("partial"). */
+  closing: "close" | "validate" | "partial" | null;
   reason: BoardReason | null;
   owner: BoardOwnerItem | null;
   links: {
