@@ -129,6 +129,8 @@ export function reasonText(reason: BoardReason | null, lang: "pt-BR" | "en" = "p
   switch (reason.code) {
     case "delivered-open":
       return t("pipeline.reason.deliveredOpen", { when: at === null ? "—" : dayMonth(at) });
+    case "delivered-validate":
+      return t("pipeline.reason.deliveredValidate", { when: at === null ? "—" : dayMonth(at) });
     case "delivered-partial":
       return t("pipeline.reason.deliveredPartial", { when: at === null ? "—" : dayMonth(at) });
     case "session-failed":

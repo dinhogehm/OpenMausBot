@@ -44,6 +44,11 @@ const STATE_EDGE: Record<CardState, string> = {
   running: "border-l-accent", queued: "border-l-hairline", blocked: "border-l-danger", owner: "border-l-warning", idle: "border-l-hairline", done: "border-l-success",
 };
 
+/** What a card in Produção with its issue still open asks for: validate and close (shipped
+ * whole with "Refs", the repository's way), close (a PR said it closes it), or the rest (a phase). */
+const CLOSING_CHIP: Record<"close" | "validate" | "partial", LocaleKey> = { close: "pipeline.card.issueOpen", validate: "pipeline.card.validate", partial: "pipeline.card.partial" };
+const CLOSING_HINT: Record<"close" | "validate" | "partial", LocaleKey> = { close: "pipeline.card.issueOpenHint", validate: "pipeline.card.validateHint", partial: "pipeline.card.partialHint" };
+
 /** A title this short fits three lines of the narrowest column; a longer one may be cut. */
 const TITLE_FITS = 80;
 
@@ -186,8 +191,8 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
       {card.stage === "production" && card.issueOpen && (
         // in production, but the issue is not closed: the requester and the issue still wait for the cycle's end
         <p className="mt-1.5 flex flex-wrap items-center gap-1 text-[11.5px] text-ink">
-          <Chip className="border-warning/60 text-warning">{t(card.partial ? "pipeline.card.partial" : "pipeline.card.issueOpen")}</Chip>
-          <span className="text-ink-secondary">{t(card.partial ? "pipeline.card.partialHint" : "pipeline.card.issueOpenHint")}</span>
+          <Chip className="border-warning/60 text-warning">{t(CLOSING_CHIP[card.closing ?? "close"])}</Chip>
+          <span className="text-ink-secondary">{t(CLOSING_HINT[card.closing ?? "close"])}</span>
         </p>
       )}
 

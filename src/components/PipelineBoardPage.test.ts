@@ -47,10 +47,11 @@ describe("the board screen (pt-BR)", () => {
   it("separates what is stuck in the pipeline from the Entrada backlog past its limit; blocked, cycles to close, production", () => {
     expect(plain).toContain("Esperando você: 2");
     expect(plain).toContain("Parados na esteira: 2");
-    expect(plain).toContain("Entrada além do limite: 1");
+    expect(plain).toContain("Entrada além do limite: 3");
     expect(plain).toContain("Bloqueados: 1");
-    expect(plain).toContain("Ciclos a fechar: 2");
-    expect(plain).toContain("Em produção (7 dias): 3");
+    // six shipped whole with "Refs" (validate and close) and two sessions archived without a PR; #9071's phase is not one
+    expect(plain).toContain("Ciclos a fechar: 8");
+    expect(plain).toContain("Em produção (7 dias): 5");
     expect(plain).toContain("Release de produção 3c04d7c3d a caminho neste Mac");
   });
 
@@ -59,9 +60,12 @@ describe("the board screen (pt-BR)", () => {
     expect(plain).not.toContain("BEHIND");
     expect(plain).toContain("Rodando — no release 3c04d7c3d, em curso");
     expect(plain).toContain("Aguardando — a sessão parou: o último turno terminou e nada a retomou");
-    // #9074's PRs only cite it ("Refs"): a partial delivery, not a cycle to close (INSP-Z r2 Z2-4)
-    expect(plain).toContain("Aguardando — entrega parcial: uma PR que cita a issue entrou em produção em 22/09, a issue segue aberta");
-    // #9185 in production with its issue open says so (Z2-5)
+    // the repository's convention (INSP-Z r3): a whole fix ships with "Refs" and the issue waits for validation
+    expect(plain).toContain("Aguardando — entregue em 22/09, aguardando validação e fechamento");
+    // only a PR that says it is a phase is a partial delivery (#9071's "Fase 0")
+    expect(plain).toContain("Aguardando — entrega parcial: uma fase da issue entrou em produção em 22/09, o resto ainda falta");
+    // in Produção with the issue open: validate and close (Refs: #9284, #9334, #9197); close (Fecha: #9185)
+    expect(plain.match(/Validar e fechar avisar o solicitante/g)).toHaveLength(3);
     expect(plain).toContain("Issue ainda aberta fechar e avisar o solicitante");
     expect(plain).toContain("Aguardando — a sessão foi arquivada sem PR — reabrir ou fechar a issue");
     expect(plain).not.toMatch(/ainda sem sessão[^#]*sessão arquivada/);
@@ -74,7 +78,7 @@ describe("the board screen (pt-BR)", () => {
   it("flags the stuck with how long and the limit; the time in the stage is on every card", () => {
     expect(plain).toContain("Parado há 2,3 d (limite 24 h)");
     expect(plain).toContain("Parado há 11 d (limite 7 d)");
-    expect(html.match(/data-stale=""/g)).toHaveLength(3);
+    expect(html.match(/data-stale=""/g)).toHaveLength(5);
     expect(plain).toContain("2,4 d nesta etapa");
   });
 
@@ -175,20 +179,20 @@ describe("filters", () => {
 
   it("by bot, by none, by priority, by origin, by focus", () => {
     expect(keys({ bot: MONITOR })).toEqual(["issue:9355"]);
-    expect(keys({ bot: "none" })).toEqual(["issue:9074", "issue:9185", "issue:9337", "issue:9352", "issue:9354", "issue:9358", "issue:9364", "issue:9365", "pr:9368"]);
+    expect(keys({ bot: "none" })).toEqual(["issue:8829", "issue:8883", "issue:8958", "issue:8961", "issue:9071", "issue:9074", "issue:9172", "issue:9185", "issue:9197", "issue:9284", "issue:9337", "issue:9352", "issue:9354", "issue:9358", "issue:9364", "issue:9365", "pr:9368"]);
     expect(keys({ bot: CHIEF })).toEqual(["issue:8204", "issue:9052", "issue:9058", "issue:9195", "issue:9305", "issue:9308", "issue:9334"]);
     expect(keys({ priority: "p0" })).toEqual([]);
-    expect(keys({ priority: "p1" })).toEqual(["issue:9052", "issue:9058", "issue:9074", "issue:9185", "issue:9195", "issue:9334", "issue:9354"]);
-    expect(keys({ origin: "client" })).toEqual(["issue:8204", "issue:9195", "issue:9305", "issue:9308", "issue:9334", "issue:9337", "issue:9352", "issue:9355", "issue:9358", "issue:9364", "issue:9365"]);
+    expect(keys({ priority: "p1" })).toEqual(["issue:8883", "issue:8958", "issue:9052", "issue:9058", "issue:9074", "issue:9185", "issue:9195", "issue:9284", "issue:9334", "issue:9354"]);
+    expect(keys({ origin: "client" })).toEqual(["issue:8204", "issue:9195", "issue:9284", "issue:9305", "issue:9308", "issue:9334", "issue:9337", "issue:9352", "issue:9355", "issue:9358", "issue:9364", "issue:9365"]);
     expect(keys({ focus: "owner" })).toEqual(["issue:9334", "issue:9355"]);
     expect(keys({ focus: "stale" })).toEqual(["issue:9052", "issue:9058"]);
-    expect(keys({ focus: "entryStale" })).toEqual(["issue:9074"]);
-    expect(keys({ focus: "closeout" })).toEqual(["issue:9305", "issue:9308"]);
+    expect(keys({ focus: "entryStale" })).toEqual(["issue:8883", "issue:8958", "issue:9074"]);
+    expect(keys({ focus: "closeout" })).toEqual(["issue:8829", "issue:8883", "issue:8958", "issue:8961", "issue:9074", "issue:9172", "issue:9305", "issue:9308"]);
   });
 
   it("a filtered column says how many of how many, and why it is empty", () => {
     const plain = text(render(board, { filters: { ...DEFAULT_FILTERS, origin: "client" } }));
-    expect(plain).toContain("Entrada 8 de 10");
+    expect(plain).toContain("Entrada 8 de 16");
     expect(plain).toContain("Nada aqui com estes filtros");
     expect(plain).toContain("Limpar filtros");
   });
@@ -199,7 +203,7 @@ describe("filters", () => {
   });
 
   it("counts the summary over the whole board; blocked includes a blocked card the owner's item also holds", () => {
-    expect(boardSummary(board, NOW)).toEqual({ owner: 2, stale: 2, entryStale: 1, blocked: 1, closeout: 2, production: 3 });
+    expect(boardSummary(board, NOW)).toEqual({ owner: 2, stale: 2, entryStale: 3, blocked: 1, closeout: 8, production: 5 });
     const both = buildPipelineBoard(boardInputs({ ownerPending: [...boardInputs().ownerPending, { id: "o4", botId: CHIEF, threadId: "t4", title: "Decidir a PR #9332", createdAt: NOW - 3_600_000 }] }));
     expect(boardSummary(both, NOW)).toMatchObject({ owner: 3, blocked: 1 });
   });
@@ -257,10 +261,12 @@ describe("in English", () => {
     const plain = text(render(board, { locale: "en" }));
     expect(plain).toContain("Waiting on you: 2");
     expect(plain).toContain("Stuck in the pipeline: 2");
-    expect(plain).toContain("Intake past its limit: 1");
+    expect(plain).toContain("Intake past its limit: 3");
     expect(plain).toContain("Blocked — behind main — update the branch and run the gate again");
     expect(plain).toContain("Stuck for 11 d (limit 7 d)");
-    expect(plain).toContain("partial delivery: a PR that cites the issue shipped on 22/09, the issue is still open");
+    expect(plain).toContain("delivered on 22/09, awaiting validation and closing");
+    expect(plain).toContain("partial delivery: a phase of the issue shipped on 22/09, the rest is still to do");
+    expect(plain).toContain("Validate and close tell the requester");
     expect(plain).toContain("Issue still open close it and tell the requester");
     setLocale("pt-br");
     expect(reasonText({ code: "session-failed", detail: "the turn ran past 45 minutes and was stopped" }, "pt-BR")).toBe("a sessão falhou: o turno passou de 45 minutos e foi parado");
