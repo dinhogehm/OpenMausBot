@@ -281,6 +281,8 @@ export function ownerPendingRemindReport(item: Pick<OwnerPending, "id" | "title"
 export interface ResolvedOwnerPending extends OwnerPending {
   resolvedAt: number;
   resolvedBy: "owner" | "bot" | "server";
+  /** How, when it says more than who ("respondida na conversa"). */
+  resolvedNote?: string;
 }
 export interface OwnerPendingStep {
   text: string;
@@ -368,9 +370,10 @@ export function parseOwnerPendingDetails(input: { why?: unknown; steps?: unknown
 /** A settled item as kept for audit: who, what, when and what the person
  * answered — not its why/steps/options, so the ledger (rewritten on every
  * save) stays small (INSP-J2 #12). */
-function slimResolved(item: OwnerPending, resolvedAt: number, resolvedBy: ResolvedOwnerPending["resolvedBy"]): ResolvedOwnerPending {
+function slimResolved(item: OwnerPending, resolvedAt: number, resolvedBy: ResolvedOwnerPending["resolvedBy"], note?: string): ResolvedOwnerPending {
   return {
     id: item.id, botId: item.botId, threadId: item.threadId, title: item.title, createdAt: item.createdAt, resolvedAt, resolvedBy,
+    ...(note ? { resolvedNote: note } : {}),
     ...(item.key ? { key: item.key } : {}),
     ...(item.history?.length ? { history: item.history.slice(-OWNER_PENDING_HISTORY_MAX) } : {}),
   };
@@ -446,8 +449,10 @@ export interface AskPromotion {
   askedAt: number;
   /** Where the request went: the owner's channel, or the conversation itself. */
   reportThreadId: string;
-  /** The item that took the question over, once the bot opened it. */
+  /** The item the bot opened for it, linked by owner_pending add replacesAsk. */
   itemId?: string;
+  /** When the server saw the person answer it in the conversation itself (settled once). */
+  answeredAt?: number;
 }
 export const ASK_PROMOTIONS_MAX = 100;
 
@@ -458,7 +463,7 @@ export const QUESTION_REPORT_PREFIX = "[Servidor: pergunta sem passo a passo]";
  * `Ref <thread>@<askAt>` lets a stop at dispatch put the question back. */
 export function questionStepsAutoReport(ask: Pick<AskPromotion, "threadId" | "askAt" | "text">, threadTitle?: string): string {
   const where = threadTitle ? ` na conversa «${threadTitle.slice(0, 80)}»` : "";
-  return `${QUESTION_REPORT_PREFIX} Ref ${ask.threadId}@${ask.askAt}. Você terminou um turno${where} com uma pergunta ao dono: «${ask.text.slice(0, 300)}». Em "Precisa de você" ela aparece só como título, sem por quê, sem passos e sem opções. Registre-a com owner_pending add: title (o que o dono decide, em uma frase), why (1–2 frases: por que importa e o que acontece se esperar), steps (passos práticos, com o comando em command ou o link em link quando houver) e options (as respostas possíveis, UMA com recommended: true e why). O item substitui a pergunta na tela. Se já existe um item para isso, ou a pergunta não vale mais, não abra outro. Não escreva ao dono só por isto.`;
+  return `${QUESTION_REPORT_PREFIX} Ref ${ask.threadId}@${ask.askAt}. Você terminou um turno${where} com uma pergunta ao dono: «${ask.text.slice(0, 300)}». Em "Precisa de você" ela aparece só como título, sem por quê, sem passos e sem opções. Registre-a com owner_pending add: replacesAsk "${ask.threadId}@${ask.askAt}" (é o que liga o item a esta pergunta), title (o que o dono decide, em uma frase), why (1–2 frases: por que importa e o que acontece se esperar), steps (passos práticos, com o comando em command ou o link em link quando houver) e options (as respostas possíveis, UMA com recommended: true e why). O item substitui a pergunta na tela. Se a pergunta não vale mais, não abra nada. Não escreva ao dono só por isto.`;
 }
 
 /** The question a stopped request was about, read back from its Ref. */
@@ -468,30 +473,15 @@ export function questionReportRef(text: string): { threadId: string; askAt: numb
   return ref ? { threadId: ref[1]!, askAt: Number(ref[2]) } : null;
 }
 
-/** The words of a question or an item that say something (accents, case and punctuation aside). */
-function askWords(text: string): Set<string> {
-  return new Set(text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().split(/[^a-z0-9#]+/).filter((word) => word.length >= 4 || /^#\d+$/.test(word)));
+/** owner_pending add's replacesAsk, "<thread>@<askAt>" — the Ref of the
+ * request it answers (INSP-J2b #1: only this link replaces a question). */
+export function parseReplacesAsk(value: unknown): { threadId: string; askAt: number } | null {
+  const ref = typeof value === "string" ? /^([\w-]+)@(\d+)$/.exec(value.trim()) : null;
+  return ref ? { threadId: ref[1]!, askAt: Number(ref[2]) } : null;
 }
 
-/** The same question said again (a later reply repeating it): its words, in any order. */
-export function sameAskText(left: string, right: string): boolean {
-  const a = [...askWords(left)].sort().join(" ");
-  return a.length > 0 && a === [...askWords(right)].sort().join(" ");
-}
-
-/** The item the bot opened for a question it was asked to register: in the
- * conversation that asked or where the request went, after the request; or
- * anywhere after the question, saying it (the same #refs, or most of its words). */
-export function itemTakesOverAsk(promotion: AskPromotion, item: Pick<OwnerPending, "botId" | "threadId" | "createdAt" | "title" | "why" | "key">): boolean {
-  if (item.botId !== promotion.botId || item.key || item.createdAt < promotion.askAt) return false;
-  const words = askWords(promotion.text);
-  const said = askWords(`${item.title} ${item.why ?? ""}`);
-  const refs = [...words].filter((word) => word.startsWith("#"));
-  if (refs.length && refs.every((ref) => said.has(ref)) && item.createdAt >= promotion.askedAt) return true;
-  if ((item.threadId === promotion.threadId || item.threadId === promotion.reportThreadId) && item.createdAt >= promotion.askedAt) return true;
-  const shared = [...words].filter((word) => said.has(word)).length;
-  return words.size >= 3 && shared / Math.min(words.size, said.size || 1) >= 0.6;
-}
+/** Why an item settled by the server says the person answered its question in the conversation itself. */
+export const ANSWERED_IN_CONVERSATION = "respondida na conversa";
 
 /** What only the bot reads when the person asks, from "Precisa de você",
  * which decision it recommends (the turn's prompt, never the transcript). */
@@ -797,7 +787,7 @@ export class BotAutonomy {
       for (const done of raw.resolvedOwnerPending ?? []) {
         if (done && typeof done.id === "string" && typeof done.botId === "string" && typeof done.title === "string" && typeof done.resolvedAt === "number") this.resolvedOwnerPending.push(done);
       }
-      this.resolvedOwnerPending = keepResolved(this.resolvedOwnerPending.map((item) => slimResolved(item, item.resolvedAt, item.resolvedBy)));
+      this.resolvedOwnerPending = keepResolved(this.resolvedOwnerPending.map((item) => slimResolved(item, item.resolvedAt, item.resolvedBy, typeof item.resolvedNote === "string" ? item.resolvedNote : undefined)));
       const folded = this.foldEquivalentPending();
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
@@ -1365,7 +1355,7 @@ export class BotAutonomy {
   }
 
   /** Resolve one item of a bot by id, all of a conversation with "all", or a server item by key. */
-  resolveOwnerPending(match: { botId?: string; threadId?: string; id?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"] }): OwnerPending[] {
+  resolveOwnerPending(match: { botId?: string; threadId?: string; id?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"]; note?: string }): OwnerPending[] {
     const done = this.ownerPending.filter((open) =>
       (match.botId === undefined || open.botId === match.botId)
       && (match.key !== undefined ? open.key === match.key
@@ -1375,7 +1365,7 @@ export class BotAutonomy {
     this.ownerPending = this.ownerPending.filter((open) => !done.includes(open));
     // kept for audit, with what the person answered (J18)
     const at = this.now();
-    this.resolvedOwnerPending = keepResolved([...this.resolvedOwnerPending, ...done.map((item) => slimResolved(item, at, match.by ?? "server"))]);
+    this.resolvedOwnerPending = keepResolved([...this.resolvedOwnerPending, ...done.map((item) => slimResolved(item, at, match.by ?? "server", match.note))]);
     this.save();
     return done;
   }
@@ -1506,15 +1496,32 @@ export class BotAutonomy {
     return this.ownerPending.filter((item) => !item.key && missingParts(item).length > 0 && item.stepsAutoAskedAt === undefined).sort((a, b) => a.createdAt - b.createdAt);
   }
 
-  /** The request for a bot's question (lot J2): this very ask, or the same
-   * words asked again in that conversation — one request per question. */
-  askPromotionFor(botId: string, threadId: string, askAt: number, text: string): AskPromotion | null {
-    return this.askPromotions.find((each) => each.botId === botId && each.threadId === threadId && (each.askAt === askAt || sameAskText(each.text, text))) ?? null;
+  /** The request for a bot's question (lot J2): this very ask, by its exact
+   * moment — a new question with the same words is a new one (INSP-J2b #2). */
+  askPromotionFor(botId: string, threadId: string, askAt: number): AskPromotion | null {
+    return this.askPromotions.find((each) => each.botId === botId && each.threadId === threadId && each.askAt === askAt) ?? null;
+  }
+
+  /** Every request made, for the server's settling pass. */
+  allAskPromotions(): readonly AskPromotion[] {
+    return this.askPromotions;
+  }
+
+  /** The person answered the question in its conversation: settled once. */
+  markAskAnswered(promotion: AskPromotion): void {
+    promotion.answeredAt = this.now();
+    this.save();
+  }
+
+  /** The bot answered the request with owner_pending add replacesAsk: this item takes the question's place. */
+  linkAskPromotion(promotion: AskPromotion, itemId: string): void {
+    promotion.itemId = itemId;
+    this.save();
   }
 
   /** The server asked the bot to register its question (again, when the person asked). */
   noteAskPromotion(input: Omit<AskPromotion, "askedAt" | "itemId">): AskPromotion {
-    const current = this.askPromotionFor(input.botId, input.threadId, input.askAt, input.text);
+    const current = this.askPromotionFor(input.botId, input.threadId, input.askAt);
     const asked: AskPromotion = { ...input, askedAt: this.now() };
     this.askPromotions = [...this.askPromotions.filter((each) => each !== current), asked].slice(-ASK_PROMOTIONS_MAX);
     this.save();
@@ -1528,19 +1535,19 @@ export class BotAutonomy {
     if (this.askPromotions.length !== before) this.save();
   }
 
-  /** The item that took the question over (open or already settled), remembered once found; null while none did. */
+  /** The item the bot linked to the question (replacesAsk), open or already
+   * settled; null while none is — nothing else ever replaces it (INSP-J2b #1). */
   askPromotionItem(promotion: AskPromotion): OwnerPending | null {
-    if (promotion.itemId) {
-      return this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!)))
-        ?? this.resolvedOwnerPending.find((item) => item.botId === promotion.botId && item.id === promotion.itemId)
-        // settled and aged out of the audit trail: the question was answered all the same
-        ?? { id: promotion.itemId, botId: promotion.botId, threadId: promotion.reportThreadId, title: promotion.text, createdAt: promotion.askedAt };
-    }
-    const item = [...this.ownerPending, ...this.resolvedOwnerPending].filter((each) => itemTakesOverAsk(promotion, each)).sort((a, b) => a.createdAt - b.createdAt)[0];
-    if (!item) return null;
-    promotion.itemId = item.id;
-    this.save();
-    return item;
+    if (!promotion.itemId) return null;
+    return this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!)))
+      ?? this.resolvedOwnerPending.find((item) => item.botId === promotion.botId && item.id === promotion.itemId)
+      // settled and aged out of the audit trail: this very question was answered all the same
+      ?? { id: promotion.itemId, botId: promotion.botId, threadId: promotion.reportThreadId, title: promotion.text, createdAt: promotion.askedAt };
+  }
+
+  /** The open item linked to the question, if any (the one to settle when the person answers in the conversation). */
+  askPromotionOpenItem(promotion: AskPromotion): OwnerPending | null {
+    return promotion.itemId ? this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!))) ?? null : null;
   }
 
   /** The server's own items (keyed) still without why or steps — saved by an older build. */

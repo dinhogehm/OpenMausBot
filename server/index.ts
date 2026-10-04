@@ -278,6 +278,8 @@ import {
   questionStepsAutoReport,
   questionReportRef,
   QUESTION_REPORT_PREFIX,
+  parseReplacesAsk,
+  ANSWERED_IN_CONVERSATION,
   type AskPromotion,
   missingParts,
   STEPS_REPORT_PREFIX,
@@ -8116,7 +8118,11 @@ function threadNeedsInputAt(threadId: string): number | null {
  * (asked at `at`) as an item with why, steps and options (lot J2), if made. */
 function questionPromotion(threadId: string, at: number): AskPromotion | null {
   const owner = store.botByThread(threadId);
-  return owner ? autonomy.askPromotionFor(owner.id, threadId, at, goalNeedsInputAskForThread(threadId) ?? "") : null;
+  return owner ? autonomy.askPromotionFor(owner.id, threadId, at) : null;
+}
+/** The person wrote in the conversation after `at` (answered the question there, or moved on). */
+function personSpokeSince(threadId: string, at: number): boolean {
+  return store.messagesFor(threadId).some((message) => message.at > at && message.role === "user" && message.kind === "text" && !message.peerAsk && !message.from);
 }
 goalNeedsInputForThread = (threadId) => {
   const at = threadNeedsInputAt(threadId);
@@ -8736,6 +8742,8 @@ const stepsAsk = { bootAt: Date.now(), lastAt: 0, questionsAt: 0 };
 const NURIA_STOP_FILE = join(homedir(), ".nuria", "stop");
 function askStepsForOlderItems(): void {
   const now = Date.now();
+  // settling never sends anything to a bot: it runs even with ~/.nuria/stop
+  settleAnsweredQuestions();
   if (now - stepsAsk.bootAt < STEPS_ASK_AFTER_BOOT_MS || existsSync(NURIA_STOP_FILE)) return;
   // a bare question is looked at every minute on its own: an item's pace must not hold it back
   if (now - stepsAsk.questionsAt >= QUESTION_STEPS_PACE_MS) {
@@ -8768,22 +8776,43 @@ function askStepsForOlderItems(): void {
 /** A question a bot ended its turn with (lot J2): the line "Precisa de você"
  * shows has no why, steps nor options — the bot is asked, once, to register
  * it as an item that takes its place. Not in a routine's run nor an archived
- * conversation (the panel does not show those lines either), and only once
- * the person had a moment to answer it on the spot. */
+ * conversation (the panel does not show those lines either), and only when
+ * it has waited 30 min with the person silent in that conversation — a live
+ * exchange is never interrupted (INSP-J2b #3). */
 function askStepsForQuestions(now: number): void {
   for (const bot of store.bots) {
     if (bot.hidden) continue;
     for (const task of store.tasks(bot.id)) {
       if (task.routineRunId || task.archivedAt || task.activity === "waiting-on-you") continue;
       const at = goalNeedsInputForThread(task.threadId);
-      if (at === null || now - at < QUESTION_STEPS_ASK_AFTER_MS || questionPromotion(task.threadId, at)) continue;
+      if (at === null || now - at < QUESTION_STEPS_ASK_AFTER_MS || questionPromotion(task.threadId, at) || personSpokeSince(task.threadId, at)) continue;
       askQuestionSteps(bot.id, task.threadId, at);
     }
   }
 }
 
-/** A bare question gets this long to be answered on the spot before its bot is asked for the item (lot J2). */
-const QUESTION_STEPS_ASK_AFTER_MS = Number(process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS) >= 0 && process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS !== undefined ? Number(process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS) : 5 * 60_000;
+/** The person answered a question in its own conversation after the server
+ * asked for its item (INSP-J2b #3): the item the bot opened for it is
+ * settled as "respondida na conversa" — unless the person was already
+ * answering the item itself — and a request still waiting is withdrawn. */
+function settleAnsweredQuestions(): void {
+  for (const promotion of autonomy.allAskPromotions()) {
+    if (promotion.answeredAt !== undefined || !personSpokeSince(promotion.threadId, promotion.askAt)) continue;
+    autonomy.markAskAnswered(promotion);
+    autonomy.dropReports(promotion.reportThreadId, (each) => { const ref = questionReportRef(each); return ref?.threadId === promotion.threadId && ref.askAt === promotion.askAt; });
+    const item = autonomy.askPromotionOpenItem(promotion);
+    if (item && !item.history?.length) {
+      for (const done of autonomy.resolveOwnerPending({ botId: item.botId, id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION })) {
+        if (store.taskByThread(done.botId, done.threadId)) store.appendMessage(done.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Resolvido (${ANSWERED_IN_CONVERSATION}): ${done.title}`, 240), ok: true } });
+        console.log(`[owner-pending] ${done.id} settled: the person answered its question in ${promotion.threadId}`);
+      }
+    }
+    refreshBotRow(promotion.botId);
+  }
+}
+
+/** A bare question gets this long to be answered on the spot before its bot is asked for the item (INSP-J2b #3: 30 min). */
+const QUESTION_STEPS_ASK_AFTER_MS = Number(process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS) >= 0 && process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS !== undefined ? Number(process.env.OMB_QUESTION_STEPS_ASK_AFTER_MS) : 30 * 60_000;
 /** How often the bare questions are looked at: a minute (shrunk by the autonomy tests). */
 const QUESTION_STEPS_PACE_MS = autonomyTestMs("OMB_AUTONOMY_MINUTE_MS") ?? 60_000;
 /** "Pedir de novo" on a question: the same 15 min the screen waits before offering it (J17). */
@@ -19405,14 +19434,27 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           // born practical: why and steps, or refused with what is missing (J17)
           const incomplete = practicalMissing(structured);
           if (incomplete) return json(res, 400, { error: incomplete });
+          // the one link that lets an item take a bare question's place: the Ref of the server's request (INSP-J2b #1)
+          const replaces = body.replacesAsk === undefined ? null : parseReplacesAsk(body.replacesAsk);
+          if (body.replacesAsk !== undefined && !replaces) return json(res, 400, { error: "replacesAsk deve ser o Ref do pedido do servidor, no formato <conversa>@<número> (ex.: 9f3c…@1791066754187)." });
+          const promotion = replaces ? autonomy.askPromotionFor(bot.id, replaces.threadId, replaces.askAt) : null;
+          if (replaces && !promotion) return json(res, 400, { error: `replacesAsk ${replaces.threadId}@${replaces.askAt} não é de nenhum pedido do servidor a você. Copie o Ref exato do pedido "[Servidor: pergunta sem passo a passo]", ou abra o item sem replacesAsk.` });
+          if (promotion && personSpokeSince(promotion.threadId, promotion.askAt)) {
+            return json(res, 200, { message: "A pessoa já respondeu essa pergunta na conversa: não abri o item. Siga com a resposta dela." });
+          }
           const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured });
+          if (promotion) {
+            autonomy.linkAskPromotion(promotion, item.id);
+            refreshBotRow(bot.id);
+          }
+          const replaced = promotion ? ` Ele substitui a sua pergunta em "Precisa de você".` : "";
           if (item.duplicate) {
             // one action, one item: the person never sees the same ask twice (R9-followup #3)
-            return json(res, 200, { message: `Já existe em "Precisa de você" um item para isso: ${line(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}. Não abri outro. Cite ${item.id} ao falar com o dono; se o pedido mudou, use owner_pending update id ${item.id} (ou resolva ${item.id} e abra o novo).` });
+            return json(res, 200, { message: `Já existe em "Precisa de você" um item para isso: ${line(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}. Não abri outro.${replaced} Cite ${item.id} ao falar com o dono; se o pedido mudou, use owner_pending update id ${item.id} (ou resolva ${item.id} e abra o novo).` });
           }
           refreshBotRow(bot.id);
           const shape = practical(item);
-          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}. Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
+          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${replaced} Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
         }
         if (body.action === "update") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -23117,11 +23159,12 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!store.taskByThread(bot.id, m[2]!)) return json(res, 404, { error: "Esta conversa não existe mais." });
       const notYours = cloudGuestSendRefusal(auth, m[2]!);
       if (notYours) return json(res, 403, { error: notYours });
+      // a request still in its 15 min (its turn may be running right now, the question hidden meanwhile): nothing more is sent
+      const current = autonomy.allAskPromotions().findLast((each) => each.botId === bot.id && each.threadId === m![2] && !each.itemId && each.answeredAt === undefined);
+      if (current && Date.now() - current.askedAt < QUESTION_STEPS_ASK_AGAIN_MS) return json(res, 200, { ok: true, deduped: true, askedAt: current.askedAt });
       const at = goalNeedsInputForThread(m[2]!);
       if (at === null) return json(res, 409, { error: `${bot.name} não espera mais uma resposta sua nesta conversa.`, code: "no_question" });
       if (existsSync(NURIA_STOP_FILE)) return json(res, 409, { error: "O ~/.nuria/stop está ativo: nenhum pedido sai para os bots até ele ser removido. Responda abaixo ou abra a conversa.", code: "stopped" });
-      const current = questionPromotion(m[2]!, at);
-      if (current && Date.now() - current.askedAt < QUESTION_STEPS_ASK_AGAIN_MS) return json(res, 200, { ok: true, deduped: true, askedAt: current.askedAt });
       const asked = askQuestionSteps(bot.id, m[2]!, at);
       if (!asked) return json(res, 409, { error: `A conversa de ${bot.name} com você não existe mais. Responda abaixo.`, code: "no_channel" });
       return json(res, 202, { ok: true, deduped: false, askedAt: asked.askedAt });

@@ -1102,7 +1102,7 @@
     },
     {
       "name": "owner_pending",
-      "description": "List what waits on the person (a decision, an approval, an answer only they have) in \"Precisa de você\"; each item opens as a step-by-step screen. add one item per thing instead of ending replies with \"continua com você…\", in pt-BR: title starting with the verb (never just a mention), and ALWAYS why and steps (≥1, with the exact command or link) — add/update without them is refused —, options when it is a choice (a click sends you its reply here and resolves it). With 2 or more options, ALWAYS mark the one you recommend: recommended: true on exactly one, with why (one sentence). update rewrites an item (answer a request for steps with it); resolve when settled; list. Not for rooms.",
+      "description": "List what waits on the person (a decision, an approval, an answer only they have) in \"Precisa de você\"; each item opens as a step-by-step screen. add one item per thing instead of ending replies with \"continua com você…\", in pt-BR: title starting with the verb (never just a mention), and ALWAYS why and steps (≥1, with the exact command or link) — add/update without them is refused —, options when it is a choice (a click sends you its reply here and resolves it). With 2 or more options, ALWAYS mark the one you recommend: recommended: true on exactly one, with why (one sentence). update rewrites an item (answer a request for steps with it); resolve when settled; list. When the server asks you to register a question you left (\"[Servidor: pergunta sem passo a passo] Ref <thread>@<askAt>\"), add with replacesAsk set to that exact Ref: only then does the item take the question's place. Not for rooms.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1197,6 +1197,11 @@
           "id": {
             "type": "string",
             "description": "update/resolve: the item's id (resolve: or \"all\")."
+          },
+          "replacesAsk": {
+            "type": "string",
+            "maxLength": 120,
+            "description": "add only, answering the server's \"pergunta sem passo a passo\" request: its exact Ref, <thread>@<askAt>."
           }
         },
         "required": [

@@ -45,8 +45,8 @@ import {
   questionStepsAutoReport,
   questionReportRef,
   QUESTION_REPORT_PREFIX,
-  sameAskText,
-  itemTakesOverAsk,
+  parseReplacesAsk,
+  ANSWERED_IN_CONVERSATION,
 } from "./bot-autonomy.ts";
 
 let dir: string;
@@ -1448,50 +1448,61 @@ describe("a bare question asked to become an item (lot J2)", () => {
     const report = questionStepsAutoReport(ask, "@Chief of Staff");
     expect(report.startsWith(`${QUESTION_REPORT_PREFIX} Ref main@${ask.askAt}.`)).toBe(true);
     expect(report).toContain("na conversa «@Chief of Staff»");
-    expect(report).toContain("owner_pending add");
+    expect(report).toContain(`owner_pending add: replacesAsk "main@${ask.askAt}"`);
     expect(report).toContain("UMA com recommended: true e why");
     expect(report).toContain("Não escreva ao dono só por isto.");
     expect(questionReportRef(report)).toEqual({ threadId: "main", askAt: ask.askAt });
     expect(questionReportRef("[Servidor: lembrete de pendência] o1")).toBeNull();
+    expect(parseReplacesAsk(`main@${ask.askAt}`)).toEqual({ threadId: "main", askAt: ask.askAt });
+    for (const bad of ["main", "main@", "@1", "main@x", 12, "a b@1"]) expect(parseReplacesAsk(bad)).toBeNull();
   });
 
-  it("is one request per question: the same ask, or the same words asked again; remembered across a restart", () => {
+  it("is one request per exact question — the same words asked later are a new one (INSP-J2b #2); remembered across a restart", () => {
     const autonomy = make();
     const asked = autonomy.noteAskPromotion({ botId: "b", ...ask, reportThreadId: "channel" });
     expect(asked.askedAt).toBe(now);
-    expect(autonomy.askPromotionFor("b", "main", ask.askAt, "anything")).toEqual(asked);
-    expect(autonomy.askPromotionFor("b", "main", ask.askAt + 60_000, "a decisão de PRODUTO da #9356 continua com você — sigo com a opção A ou B")).toEqual(asked);
-    expect(autonomy.askPromotionFor("b", "main", ask.askAt + 60_000, "Mesclo a #9350?")).toBeNull();
-    expect(autonomy.askPromotionFor("b", "other", ask.askAt, ask.text)).toBeNull();
-    expect(sameAskText("", "")).toBe(false);
+    expect(autonomy.askPromotionFor("b", "main", ask.askAt)).toEqual(asked);
+    expect(autonomy.askPromotionFor("b", "main", ask.askAt + 60_000)).toBeNull();
+    expect(autonomy.askPromotionFor("b", "other", ask.askAt)).toBeNull();
+    expect(autonomy.askPromotionFor("other", "main", ask.askAt)).toBeNull();
     // "Pedir de novo": the same request, dated now
     now += 20 * 60_000;
     expect(autonomy.noteAskPromotion({ botId: "b", ...ask, reportThreadId: "channel" }).askedAt).toBe(now);
-    expect(make().askPromotionFor("b", "main", ask.askAt, "")?.askedAt).toBe(now);
+    expect(make().askPromotionFor("b", "main", ask.askAt)?.askedAt).toBe(now);
     // ~/.nuria/stop dropped the request before it reached the bot: the question goes back to unasked
     autonomy.dropAskPromotion("b", "main", ask.askAt);
-    expect(make().askPromotionFor("b", "main", ask.askAt, "")).toBeNull();
+    expect(make().askPromotionFor("b", "main", ask.askAt)).toBeNull();
   });
 
-  it("is replaced by the item the bot opens for it — not by an unrelated or earlier one — and stays replaced once it is settled", () => {
+  // INSP-J2b #1: three items the old word/#ref/thread rules took for the answer
+  it("is replaced only by the item linked with replacesAsk — never by one in the same channel, a short look-alike or the same #ref", () => {
     const autonomy = make();
-    autonomy.addOwnerPending("b", "main", { title: "Aprovar o carrier da #9300", why: "x", steps });
+    // FP2: "Decisão de produto pendente", another conversation, before the request
+    autonomy.addOwnerPending("b", "elsewhere", { title: "Decisão de produto pendente", why: "x", steps });
     now += 60_000;
     const asked = autonomy.noteAskPromotion({ botId: "b", ...ask, reportThreadId: "channel" });
+    now += 60_000;
+    // FP1: another subject, in the owner's channel, after the request
+    autonomy.addOwnerPending("b", "channel", { title: "Autorizar a linha nova da #9355 na planilha", why: "x", steps });
+    // FP3: another decision about the same issue
+    autonomy.addOwnerPending("b", "main", { title: "Liberar o merge da #9356 em produção", why: "x", steps });
     expect(autonomy.askPromotionItem(asked)).toBeNull();
-    // another bot's item, or a server item, never takes it over
-    expect(itemTakesOverAsk(asked, { botId: "other", threadId: "channel", createdAt: now, title: "Decidir a #9356" })).toBe(false);
-    expect(itemTakesOverAsk(asked, { botId: "b", threadId: "channel", createdAt: now, title: "Decidir a #9356", key: "tag-advance:x" })).toBe(false);
-    // elsewhere, saying it: the same #ref, after the request
-    expect(itemTakesOverAsk(asked, { botId: "b", threadId: "elsewhere", createdAt: now + 1, title: "Decidir a opção de produto da #9356" })).toBe(true);
-    expect(itemTakesOverAsk(asked, { botId: "b", threadId: "elsewhere", createdAt: now + 1, title: "Liberar a linha 97" })).toBe(false);
-    now += 30 * 60_000;
+    expect(make().askPromotionItem(make().askPromotionFor("b", "main", ask.askAt)!)).toBeNull();
+    // the bot's item, linked: it replaces the question, open or settled, across a restart
     const item = autonomy.addOwnerPending("b", "channel", { title: "Escolher entre A e B para o cliente", why: "A cliente espera.", steps });
+    autonomy.linkAskPromotion(asked, item.id);
     expect(autonomy.askPromotionItem(asked)?.id).toBe(item.id);
-    autonomy.resolveOwnerPending({ botId: "b", id: item.id, by: "owner" });
+    expect(autonomy.askPromotionOpenItem(asked)?.id).toBe(item.id);
+    autonomy.resolveOwnerPending({ botId: "b", id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION });
     const reloaded = make();
-    const again = reloaded.askPromotionFor("b", "main", ask.askAt, "")!;
-    expect(again.itemId).toBe(item.id);
+    const again = reloaded.askPromotionFor("b", "main", ask.askAt)!;
     expect(reloaded.askPromotionItem(again)?.id).toBe(item.id);
+    expect(reloaded.askPromotionOpenItem(again)).toBeNull();
+    expect(reloaded.resolvedOwnerPendingOf("b").find((each) => each.id === item.id)).toMatchObject({ resolvedBy: "owner", resolvedNote: "respondida na conversa" });
+    // a new question with the same words never inherits it
+    expect(reloaded.askPromotionFor("b", "main", ask.askAt + 86_400_000)).toBeNull();
+    // answered in the conversation: marked once, kept
+    reloaded.markAskAnswered(again);
+    expect(make().askPromotionFor("b", "main", ask.askAt)?.answeredAt).toBe(now);
   });
 });
