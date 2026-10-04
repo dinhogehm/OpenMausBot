@@ -680,6 +680,64 @@ it("tells the bot, under an hour-old note, which PRs it names are no longer open
   await expect.poll(async () => (await f.messages()).some((message: any) => message.text === "Checked"), { timeout: 10_000 }).toBe(true);
 }, { OMB_TEST_GRANT_PATH: `${refsBin}${delimiter}${GIT_DIR}` }), 60_000);
 
+// INSP-U r1 U1: the look-up runs between "the intake lock is free" and taking it.
+// This gh says it was called, then takes 5 s to answer.
+const slowRefsBin = mkdtempSync(join(tmpdir(), "omb-refs-slow-gh-"));
+const slowRefsCalled = join(slowRefsBin, "called");
+writeFileSync(join(slowRefsBin, "gh"), [
+  "#!/bin/sh",
+  // the fixture's PATH is sealed: sleep by its full path
+  `: > ${JSON.stringify(slowRefsCalled)}`,
+  "/bin/sleep 5",
+  "case \"$2\" in",
+  "  */issues/4242) printf 'closed\\ttrue\\t2026-10-01T21:02:11Z\\n' ;;",
+  "  *) echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;",
+  "esac",
+].join("\n"));
+chmodSync(join(slowRefsBin, "gh"), 0o755);
+
+it("a routine that takes the intake lock while the watch looks its note up on GitHub runs alone; the watch waits for it (INSP-U r1 U1)", () => fixture(async f => {
+  const { execFileSync } = await import("node:child_process");
+  const repo = join(f.session.info.dataDir, "refs-repo");
+  const commit = (message: string) => execFileSync("git", ["-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", message]);
+  execFileSync("git", ["init", "-q", repo]);
+  commit("first");
+  const gate = join(f.session.info.dataDir, "routine.gate");
+  f.save({ turns: [
+    { steps: [{ tool: "wake_when", arguments: { command: `git -C ${repo} log --format=%s -1`, reason: "Tag andou: fechar carrier #4242 em https://github.com/acme/web", every_minutes: 1, max_minutes: 600, standing: true, label: "prod" } }], reply: "Watching" },
+    // the routine's intake turn, held open until the test says
+    { expectContextIncludes: ["ROUTINE_U1 read the Chat"], gateFile: gate, reply: "Routine read" },
+    { expectContextIncludes: ["no longer open: PR #4242 merged."], reply: "Checked" },
+  ] });
+  const { routine } = await f.api("/api/routines", {
+    name: "Intake", prompt: "ROUTINE_U1 read the Chat", botId: f.bot.id,
+    enabled: false, schedule: { type: "interval", everyMinutes: 60, anchorAt: Date.now() + 3_600_000 },
+  });
+  await f.send("Watch the tag.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(1);
+  // an "hour" (12 s) passes, the watched output changes: the watch fires and asks gh
+  await new Promise((resolve) => setTimeout(resolve, 13_000));
+  commit("second");
+  await expect.poll(() => existsSync(slowRefsCalled), { timeout: 20_000 }).toBe(true);
+  // while gh sleeps, the same bot's routine sees the lock free and takes it
+  const { run } = await f.api(`/api/routines/${routine.id}/run`, {});
+  await expect.poll(async () => (await f.api("/api/routines", undefined, "GET")).runs.find((each: any) => each.id === run.id)?.status, { timeout: 15_000 }).toBe("running");
+  // gh answers; the watch must not start next to the routine
+  await new Promise((resolve) => setTimeout(resolve, 7_000));
+  const log = () => readFileSync(f.session.info.logPath, "utf8");
+  expect(log()).toMatch(/\[intake\] wake prod in \S+ of \S+ waits behind \S+ \(the bot's other intake turn\)/);
+  expect((await f.chips()).some((chip: string) => chip.startsWith('Vigia permanente "prod" disparou'))).toBe(false);
+  writeFileSync(gate, "open");
+  await expect.poll(() => f.turns().length, { timeout: 30_000 }).toBe(3);
+  const turns = f.turns();
+  // one intake turn after the other: each read its own step of the plan
+  expect(turns.map((turn: any) => turn.turnIndex)).toEqual([0, 1, 2]);
+  expect(turns[1].threadId).not.toBe(f.bot.activeTaskId);
+  expect(turns[2].threadId).toBe(f.bot.activeTaskId);
+  expect(log()).toContain(`waits behind ${turns[1].threadId}`);
+  await expect.poll(async () => (await f.messages()).some((message: any) => message.text === "Checked"), { timeout: 10_000 }).toBe(true);
+}, { OMB_TEST_GRANT_PATH: `${slowRefsBin}${delimiter}${GIT_DIR}` }), 90_000);
+
 it("follows the gate a turn cut at the time limit left running, and resumes the session when it ends (R8-resilience TO)", async () => {
   const { chmodSync, mkdtempSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");

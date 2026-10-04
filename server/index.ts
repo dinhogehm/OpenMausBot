@@ -8857,6 +8857,12 @@ async function autonomyTick(): Promise<void> {
     // what an old note names that is already done, looked up now (R10-followup #5)
     const refsLine = await reasonRefsLine(wake);
     if (!autonomy.isCurrent(wake)) continue;
+    // the look-up may have taken seconds: a routine or a teammate may have taken the
+    // intake lock (or the thread) meanwhile, and noting ours would overwrite theirs (INSP-U r1 U1)
+    if (autonomyTurnBlocked(wake.botId, turnThread, Boolean(wake.watch))) {
+      if (wake.watch && intakeBusyElsewhere(wake.botId, turnThread)) holdIntake(wake.botId, wake.threadId, `wake ${wake.watch.label ?? watchLabel(wake.watch.command)} in ${turnThread}`);
+      continue;
+    }
     if (wake.watch) noteIntakeTurn(wake.botId, turnThread);
     // Leased, not dropped: on disk until the turn completes, so a restart
     // in between gives it back (bot-autonomy.ts, inFlight).
