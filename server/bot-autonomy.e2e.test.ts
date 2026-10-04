@@ -546,6 +546,9 @@ it.runIf(process.platform === "darwin")("decides a headless session of a client'
   const other = join(data, "other-repo");
   execFileSync("git", ["init", "-q", repo]);
   execFileSync("git", ["init", "-q", other]);
+  // New Session the old way: with worktrees the server makes (lote X, on by
+  // default) the app's last folder no longer matters — own-worktrees tests
+  writeFileSync(join(data, "own-worktrees-settings.json"), JSON.stringify({ enabled: false }));
   const records = join(data, "Library", "Application Support", "Claude", "claude-code-sessions", "org", "acct");
   mkdirSync(records, { recursive: true });
   const newest = (cwd: string) => writeFileSync(join(records, "local_root.json"), JSON.stringify({ sessionId: "local_root", cliSessionId: "c-root", createdAt: Date.now(), cwd, title: "raiz" }));
@@ -576,6 +579,9 @@ it.runIf(process.platform === "darwin")("asks the owner ONCE to unblock the app 
   const data = f.session.info.dataDir;
   const repo = join(data, "platform");
   execFileSync("git", ["init", "-q", repo]);
+  // New Session the old way: with worktrees the server makes (lote X, on by
+  // default) the reused folder no longer blocks — own-worktrees tests
+  writeFileSync(join(data, "own-worktrees-settings.json"), JSON.stringify({ enabled: false }));
   const records = join(data, "Library", "Application Support", "Claude", "claude-code-sessions", "org", "acct");
   mkdirSync(records, { recursive: true });
   const folder = join(repo, ".claude", "worktrees", "reabertura-496989");
