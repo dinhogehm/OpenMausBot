@@ -44,6 +44,9 @@ const STATE_EDGE: Record<CardState, string> = {
   running: "border-l-accent", queued: "border-l-hairline", blocked: "border-l-danger", owner: "border-l-warning", idle: "border-l-hairline", done: "border-l-success",
 };
 
+/** A title this short fits three lines of the narrowest column; a longer one may be cut. */
+const TITLE_FITS = 80;
+
 /** "34 h" that never breaks between the number and its unit. */
 const span = (ms: number) => formatSpan(ms).replace(" ", " ");
 
@@ -94,6 +97,19 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
   const titleId = useId();
   const stale = isStale(card, now);
   const reason = reasonText(card.reason, lang(), card.release?.at ?? null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  // before the layout is measured (and where it is not, as in a static render), a long title is taken as cut
+  const [clamped, setClamped] = useState(card.title.length > TITLE_FITS);
+  useEffect(() => {
+    const node = titleRef.current;
+    if (!node || expanded) return;
+    const measure = () => setClamped(node.scrollHeight > node.clientHeight + 1);
+    measure();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    observer?.observe(node);
+    return () => observer?.disconnect();
+  }, [card.title, expanded]);
   const StateIcon = STATE_ICON[card.state];
   const age = stageAge(card, now);
   const tone = stale && card.state !== "owner" ? "border-l-danger" : STATE_EDGE[card.state];
@@ -128,7 +144,14 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
         </span>
       </div>
 
-      <h3 id={titleId} className="mt-1.5 line-clamp-2 text-[13.5px] font-medium leading-snug text-ink" title={card.title}>{card.title}</h3>
+      <h3 id={titleId} ref={titleRef} className={cn("mt-1.5 text-[13.5px] font-medium leading-snug text-ink", !expanded && "line-clamp-3")} title={card.title}>{card.title}</h3>
+      {/* the whole title by touch and keyboard, not only on hover */}
+      {(clamped || expanded) && (
+        <button type="button" aria-expanded={expanded} aria-controls={titleId} onClick={() => setExpanded(!expanded)}
+          className="mt-0.5 rounded text-[11.5px] font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70">
+          {t(expanded ? "pipeline.card.titleLess" : "pipeline.card.titleMore")}
+        </button>
+      )}
 
       {/* where it stands */}
       <p className="mt-1.5 flex items-start gap-1.5 text-[12px] leading-snug text-ink">
@@ -158,6 +181,13 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
           <Rocket size={12} aria-hidden className="mr-1 inline align-[-2px] text-success" />
           {card.release.at !== null ? t("pipeline.card.deliveredAt", { when: formatWhen(card.release.at), sha: card.release.sha }) : t("pipeline.card.release", { sha: card.release.sha })}
           {card.release.inferred && <span className="block pl-[18px]">{t("pipeline.card.inferred")}</span>}
+        </p>
+      )}
+      {card.stage === "production" && card.issueOpen && (
+        // in production, but the issue is not closed: the requester and the issue still wait for the cycle's end
+        <p className="mt-1.5 flex flex-wrap items-center gap-1 text-[11.5px] text-ink">
+          <Chip className="border-warning/60 text-warning">{t(card.partial ? "pipeline.card.partial" : "pipeline.card.issueOpen")}</Chip>
+          <span className="text-ink-secondary">{t(card.partial ? "pipeline.card.partialHint" : "pipeline.card.issueOpenHint")}</span>
         </p>
       )}
 
@@ -203,6 +233,14 @@ export function BoardCardView({ card, now, actions }: { card: BoardCard; now: nu
 
 const UNKNOWN_WHY: Partial<Record<BoardStage, LocaleKey>> = { production: "pipeline.column.unknownRelease" };
 
+/** What the fold holds, said as it is: old internal issues, P2/P3, with no priority, or both. */
+export function foldedText(folded: readonly BoardCard[]): string {
+  const prioritized = folded.some((card) => card.priority === "p2" || card.priority === "p3");
+  const unprioritized = folded.some((card) => card.priority === null);
+  const key: LocaleKey = prioritized && unprioritized ? "pipeline.column.foldedMixed" : prioritized ? "pipeline.column.foldedP2P3" : "pipeline.column.foldedNone";
+  return t(key, { count: formatCount(folded.length) });
+}
+
 export function BoardColumnView({ board, stage, cards, now, actions, filtered, labelledBy, id, role }: {
   board: PipelineBoard; stage: BoardStage; cards: BoardCard[]; now: number; actions: CardActions; filtered: boolean;
   labelledBy?: string; id?: string; role?: "tabpanel";
@@ -244,7 +282,7 @@ export function BoardColumnView({ board, stage, cards, now, actions, filtered, l
         {folded.length > 0 && (
           <button type="button" onClick={() => setUnfolded(true)}
             className="mt-2 w-full rounded-lg border border-dashed border-hairline/70 px-2 py-2 text-left text-[12px] font-medium text-ink hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/70">
-            {t("pipeline.column.folded", { count: formatCount(folded.length) })}
+            {foldedText(folded)}
           </button>
         )}
         {column.dormant !== null && column.dormant > 0 && <p className="px-2 pt-1.5 text-[11.5px] text-ink-secondary">{t("pipeline.column.dormant", { count: formatCount(column.dormant) })}</p>}

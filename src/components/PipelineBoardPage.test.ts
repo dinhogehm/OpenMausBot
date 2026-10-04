@@ -13,7 +13,7 @@ import { boardSummary, DEFAULT_FILTERS, ENTRY_FOLD, foldEntry, matchesFilters, O
 import { buildPipelineBoard } from "../../server/pipeline-board";
 import { boardInputs, boardInputsWithBacklog, CHIEF, CLIENT_NAMES, MONITOR, NOW } from "../../server/testing/pipeline-board-fixture";
 import type { BoardStage, PipelineBoard } from "../../shared/pipeline-board";
-import { BoardView, LimitsBar } from "./PipelineBoardPage";
+import { BoardView, foldedText, LimitsBar } from "./PipelineBoardPage";
 
 const board = buildPipelineBoard(boardInputs());
 const actions = { onOpenLink: () => {}, onOpenThread: () => {}, onOpenNeedsYou: () => {} };
@@ -49,7 +49,7 @@ describe("the board screen (pt-BR)", () => {
     expect(plain).toContain("Parados na esteira: 2");
     expect(plain).toContain("Entrada além do limite: 1");
     expect(plain).toContain("Bloqueados: 1");
-    expect(plain).toContain("Ciclos a fechar: 3");
+    expect(plain).toContain("Ciclos a fechar: 2");
     expect(plain).toContain("Em produção (7 dias): 3");
     expect(plain).toContain("Release de produção 3c04d7c3d a caminho neste Mac");
   });
@@ -59,7 +59,10 @@ describe("the board screen (pt-BR)", () => {
     expect(plain).not.toContain("BEHIND");
     expect(plain).toContain("Rodando — no release 3c04d7c3d, em curso");
     expect(plain).toContain("Aguardando — a sessão parou: o último turno terminou e nada a retomou");
-    expect(plain).toContain("Aguardando — issue aberta, PR entregue em 22/09: provável falta de fechamento");
+    // #9074's PRs only cite it ("Refs"): a partial delivery, not a cycle to close (INSP-Z r2 Z2-4)
+    expect(plain).toContain("Aguardando — entrega parcial: uma PR que cita a issue entrou em produção em 22/09, a issue segue aberta");
+    // #9185 in production with its issue open says so (Z2-5)
+    expect(plain).toContain("Issue ainda aberta fechar e avisar o solicitante");
     expect(plain).toContain("Aguardando — a sessão foi arquivada sem PR — reabrir ou fechar a issue");
     expect(plain).not.toMatch(/ainda sem sessão[^#]*sessão arquivada/);
     expect(plain).toContain("Gate: sem status");
@@ -81,9 +84,17 @@ describe("the board screen (pt-BR)", () => {
     expect(html.match(/type="number"/g)).toHaveLength(6);
   });
 
-  it("keeps the whole title for its tooltip, two lines on the card", () => {
+  it("three lines of title on the card, and a button that opens the whole by touch and keyboard (INSP-Z r2 Z2-1)", () => {
+    // the real long titles of #9368 and #9308
     expect(html).toContain('title="Fila sem estouro atrás de release, máquina devolvida na fase de rede, release mais curto (lote W)"');
-    expect(html).toMatch(/line-clamp-2[^"]*" title="Fila sem estouro/);
+    expect(html).toMatch(/line-clamp-3" title="Fila sem estouro/);
+    const card9368 = html.slice(html.indexOf('data-card="pr:9368"'), html.indexOf("</article>", html.indexOf('data-card="pr:9368"')));
+    const button = /<button[^>]*aria-expanded="false"[^>]*aria-controls="([^"]+)"[^>]*>Ver título inteiro<\/button>/.exec(card9368);
+    expect(button).not.toBeNull();
+    expect(card9368).toContain(`<h3 id="${button![1]}"`);
+    // a short title has no button
+    const card9058 = html.slice(html.indexOf('data-card="issue:9058"'), html.indexOf("</article>", html.indexOf('data-card="issue:9058"')));
+    expect(card9058).not.toContain("Ver título inteiro");
   });
 
   it("puts the person's items in evidence, first in their column, with the way to them", () => {
@@ -130,7 +141,14 @@ describe("Entrada's fold (INSP-Z r1 Z-1)", () => {
 
   it("says what the fold holds, and the summary counts every card", () => {
     const plain = text(render(full));
-    expect(plain).toMatch(/Mostrar mais \d+ issues antigas, sem prioridade, internas/);
+    // what it holds, as it is (INSP-Z r2 Z2-4): here P2/P3 and unprioritized
+    expect(plain).toMatch(/Mostrar mais \d+ issues antigas, internas, P2\/P3 ou sem prioridade/);
+    setLocale("pt-br");
+    const p2 = foldedText(entry.filter((card) => card.priority === "p2" || card.priority === "p3"));
+    const none = foldedText(entry.filter((card) => card.priority === null && card.origin === "internal"));
+    setLocale("en");
+    expect(p2).toMatch(/^Mostrar mais \d+ issues antigas, internas, P2\/P3$/);
+    expect(none).toMatch(/^Mostrar mais \d+ issues antigas, internas, sem prioridade$/);
     expect(boardSummary(full, NOW).entryStale).toBe(full.columns[0]!.cards.filter((card) => card.since !== null && card.limitMs !== null && NOW - card.since > card.limitMs).length);
   });
 });
@@ -165,7 +183,7 @@ describe("filters", () => {
     expect(keys({ focus: "owner" })).toEqual(["issue:9334", "issue:9355"]);
     expect(keys({ focus: "stale" })).toEqual(["issue:9052", "issue:9058"]);
     expect(keys({ focus: "entryStale" })).toEqual(["issue:9074"]);
-    expect(keys({ focus: "closeout" })).toEqual(["issue:9074", "issue:9305", "issue:9308"]);
+    expect(keys({ focus: "closeout" })).toEqual(["issue:9305", "issue:9308"]);
   });
 
   it("a filtered column says how many of how many, and why it is empty", () => {
@@ -181,7 +199,7 @@ describe("filters", () => {
   });
 
   it("counts the summary over the whole board; blocked includes a blocked card the owner's item also holds", () => {
-    expect(boardSummary(board, NOW)).toEqual({ owner: 2, stale: 2, entryStale: 1, blocked: 1, closeout: 3, production: 3 });
+    expect(boardSummary(board, NOW)).toEqual({ owner: 2, stale: 2, entryStale: 1, blocked: 1, closeout: 2, production: 3 });
     const both = buildPipelineBoard(boardInputs({ ownerPending: [...boardInputs().ownerPending, { id: "o4", botId: CHIEF, threadId: "t4", title: "Decidir a PR #9332", createdAt: NOW - 3_600_000 }] }));
     expect(boardSummary(both, NOW)).toMatchObject({ owner: 3, blocked: 1 });
   });
@@ -242,7 +260,8 @@ describe("in English", () => {
     expect(plain).toContain("Intake past its limit: 1");
     expect(plain).toContain("Blocked — behind main — update the branch and run the gate again");
     expect(plain).toContain("Stuck for 11 d (limit 7 d)");
-    expect(plain).toContain("the issue is open, its PR shipped on 22/09: probably never closed");
+    expect(plain).toContain("partial delivery: a PR that cites the issue shipped on 22/09, the issue is still open");
+    expect(plain).toContain("Issue still open close it and tell the requester");
     setLocale("pt-br");
     expect(reasonText({ code: "session-failed", detail: "the turn ran past 45 minutes and was stopped" }, "pt-BR")).toBe("a sessão falhou: o turno passou de 45 minutos e foi parado");
     setLocale("en");
