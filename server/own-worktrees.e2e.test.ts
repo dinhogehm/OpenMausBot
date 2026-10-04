@@ -287,7 +287,10 @@ it("has no command that removes, prunes or unlocks a worktree anywhere in its co
   const here = dirname(fileURLToPath(import.meta.url));
   for (const file of ["own-worktrees.ts", "desktop-work.ts"]) {
     const source = readFileSync(join(here, file), "utf8");
-    expect(source).not.toMatch(/"worktree",\s*"(?:remove|prune|unlock)"|worktree (?:remove|prune)|"branch",\s*"-[dD]"/);
+    // never as arguments to run; "worktree remove" appears only as the text told to a person
+    expect(source).not.toMatch(/"worktree",\s*"(?:remove|prune|unlock)"|"branch",\s*"-[dD]"/);
+    const told = source.split("\n").filter((line) => /worktree (?:remove|prune)/.test(line) && !line.trim().startsWith("//") && !line.trim().startsWith("*"));
+    expect(told.every((line) => /command: `git -C \$\{quote\(session\.repo\)\} worktree remove \$\{quote\(own\.path\)\}`/.test(line))).toBe(true);
   }
   // the one rm in own-worktrees.ts takes back a temporary clone or probe, never a worktree
   const own = readFileSync(join(here, "own-worktrees.ts"), "utf8");

@@ -14,6 +14,7 @@ import {
   readDesktopRecord,
   recordsUsingFolder,
   showsFolderName,
+  worktreeOption,
   type DesktopDriver,
   type OcrLine,
 } from "./claude-desktop.ts";
@@ -52,7 +53,8 @@ function fakeApp(screens: string[][], opts: { idle?: number; front?: string } = 
   return { driver, actions };
 }
 
-const NEW_IN_FOLDER = ["• Local", FOLDER, "gº omb/9353-comprar-assentos", "v worktree", "Descreva uma tarefa ou faça uma pergunta", "+ O v Ignorar permissões"];
+// the worktree option OFF, as OCR read the box on 03/10 ("|O worktree")
+const NEW_IN_FOLDER = ["• Local", FOLDER, "gº omb/9353-comprar-assentos", "|O worktree", "Descreva uma tarefa ou faça uma pergunta", "+ O v Ignorar permissões"];
 const SENT = ["Vou começar pelo Passo 0.", "Responder…", "+ O v Ignorar permissões"];
 
 describe("a new session in the server's own folder", () => {
@@ -84,6 +86,33 @@ describe("a new session in the server's own folder", () => {
     expect(step).toMatchObject({ ok: false, miss: true });
     expect(!step.ok && step.reason).toContain("does not show the folder 9353-comprar-assentos");
     expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+  });
+
+  it.each([
+    ["ON (the tick, as on R8-visual-claude-1: \"v worktree\")", "v worktree", "has the worktree option ON"],
+    ["unreadable", "? worktree", "could not read whether the new session's worktree option is on or off"],
+  ])("pastes nothing when the worktree option is %s: a miss, before the brief goes in (R11-1)", async (_name, chip, said) => {
+    const app = fakeApp([NEW_IN_FOLDER.map((line) => (line === "|O worktree" ? chip : line))]);
+    const step = await openDesktopSessionIn(app.driver, { folder: LINK, folderName: FOLDER, text: "brief" });
+    expect(step).toMatchObject({ ok: false, retry: true, miss: true, touched: true });
+    expect(!step.ok && step.reason).toContain(said);
+    expect(!step.ok && step.reason).toContain("nothing was typed");
+    expect(app.actions.some((action) => action.startsWith("paste") || action.startsWith("click") || action.startsWith("type"))).toBe(false);
+  });
+
+  it("goes on when the new session shows no worktree option at all (nothing the app could make)", async () => {
+    const app = fakeApp([NEW_IN_FOLDER.filter((line) => line !== "|O worktree"), SENT]);
+    expect(await openDesktopSessionIn(app.driver, { folder: LINK, folderName: FOLDER, text: "brief" })).toEqual({ ok: true });
+  });
+
+  it("reads the worktree option's box as OCR draws it", () => {
+    const line = (text: string): OcrLine => ({ x: 885, y: 788, w: 92, h: 15, text });
+    expect(worktreeOption([line("v worktree")])).toBe("on");
+    expect(worktreeOption([line("✓ worktree")])).toBe("on");
+    expect(worktreeOption([line("|O worktree")])).toBe("off");
+    expect(worktreeOption([line("□ worktree")])).toBe("off");
+    expect(worktreeOption([line("worktree")])).toBe("unknown");
+    expect(worktreeOption([line("nuria-platform")])).toBeNull();
   });
 
   it("stops before touching anything when the person is using the Mac", async () => {

@@ -387,7 +387,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
-import { addOwnWorktree, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
+import { addOwnWorktree, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
@@ -9598,6 +9598,54 @@ function ownWorktreeSettings(repo: string) {
 }
 /** Whether the app sessions of `repo` open in a worktree the server makes. */
 const ownWorktreesOn = (repo: string) => process.platform === "darwin" && ownWorktreeSettings(repo).enabled;
+/** The breaker of this path (own-worktrees.ts): kept across restarts. */
+const OWN_BREAKER_KEY = "own-worktree-breaker:";
+const ownBreaker = (() => {
+  const path = join(DATA_DIR, "own-worktree-breaker.json");
+  let state: OwnBreakerState = { repos: {} };
+  try { state = JSON.parse(readFileSync(path, "utf8")) as OwnBreakerState; } catch { /* none yet */ }
+  return {
+    get: () => state,
+    set(next: OwnBreakerState) {
+      state = next;
+      try { writeFileAtomic(path, `${JSON.stringify(state)}\n`, { mode: 0o600 }); } catch (error) { console.error(`[own-worktrees] breaker: ${error instanceof Error ? error.message : String(error)}`); }
+    },
+  };
+})();
+const realRepoOf = (repo: string) => { try { return realpathSync(repo); } catch { return repo; } };
+/** Whether new app sessions of `repo` open in a worktree the server makes now: on, and its breaker not tripped. */
+const ownPathActive = (repo: string) => ownWorktreesOn(repo) && !ownBreakerTripped(ownBreaker.get(), realRepoOf(repo));
+/** A session of this path landed elsewhere: counted; the 2nd in a row trips the breaker and asks the owner, once. */
+function noteOwnWrongFolder(session: CcSession, folder: string): void {
+  const own = session.desktop?.own;
+  if (!own) return;
+  const { state, tripped } = noteOwnFailure(ownBreaker.get(), session.repo, { at: Date.now(), sessionId: session.id, title: session.title, folder, expected: own.path });
+  ownBreaker.set(state);
+  console.log(`[own-worktrees] session ${session.id} opened in ${folder} instead of ${own.path} (${state.repos[session.repo]!.failures.length} in a row)${tripped ? ": breaker tripped, new sessions go the old way until a create works or the owner resolves the item" : ""}`);
+  if (!tripped) return;
+  const bot = store.bot(session.ownerBotId);
+  const thread = bot ? ownerChannelOf(bot.id) ?? sessionReportThread(session) : null;
+  if (!bot || !thread || !store.taskByThread(bot.id, thread)) return;
+  const item = autonomy.addOwnerPending(bot.id, thread, { ...ownBreakerItem(session.repo, state.repos[session.repo]!.failures), key: `${OWN_BREAKER_KEY}${session.repo}` });
+  ownBreaker.set({ repos: { ...ownBreaker.get().repos, [session.repo]: { ...ownBreaker.get().repos[session.repo]!, itemId: item.id } } });
+  refreshBotRow(bot.id);
+}
+/** A create worked (either way): the breaker of its repository rearms, and its item closes. */
+function rearmOwnPath(repo: string, why: string): void {
+  if (!ownBreaker.get().repos[repo]) return;
+  const was = ownBreakerTripped(ownBreaker.get(), repo);
+  ownBreaker.set(rearmOwnBreaker(ownBreaker.get(), repo));
+  for (const done of autonomy.resolveOwnerPending({ key: `${OWN_BREAKER_KEY}${repo}` })) refreshBotRow(done.botId);
+  if (was) console.log(`[own-worktrees] breaker of ${repo} rearmed: ${why}`);
+}
+/** The owner resolved the breaker's item: the path is tried again. */
+function settleOwnBreaker(): void {
+  for (const [repo, entry] of Object.entries(ownBreaker.get().repos)) {
+    if (entry.trippedAt === undefined || !entry.itemId) continue;
+    const open = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)).some((item) => item.key === `${OWN_BREAKER_KEY}${repo}`);
+    if (!open) rearmOwnPath(repo, "the owner resolved the item");
+  }
+}
 /** A program with the server's PATH, its stdout; rejects with its stderr. */
 const ownExec: OwnExec = (file, args, options = {}) => new Promise<string>((resolve, reject) => {
   execFileCc(file, args, { cwd: options.cwd, timeout: options.timeoutMs ?? 120_000, maxBuffer: 16 * 1024 * 1024, signal: options.signal, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout, stderr) => {
@@ -9762,6 +9810,8 @@ const desktopWork: DesktopWorkDeps = {
       return ownBriefText(session.title, session.desktop!.marker, own.brief, ccTurnFooter(session), own, cacheLine(own.caches ?? { mode: "install", reason: "sem resultado do clone", dirs: [] }));
     },
     classicBlocked: (session) => classicAppRefusal(session.repo),
+    wrongFolder: noteOwnWrongFolder,
+    adopted: (session) => rearmOwnPath(session.repo, `session ${session.id} opened in a worktree of its own`),
   },
 };
 
@@ -9915,6 +9965,14 @@ async function cleanReleasedWorktrees(): Promise<void> {
       }
     } catch { /* no task-workspaces here */ }
     stale.push(...staleTaskWorkspaces(workspaces, { inUse: inUseForDisk, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath }));
+    // the server's own worktrees of failed sessions (or never used): their own lines, "da sessão falhada …" (R11-dispatch R11-1)
+    const left = leftOwnWorktrees(ccLedger.all(), existsSync);
+    const leftPaths = new Set(left.map((each) => canonPath(each.path)));
+    for (let i = stale.length - 1; i >= 0; i--) if (leftPaths.has(canonPath(stale[i]!.path))) stale.splice(i, 1);
+    const leftKey = left.map((each) => each.path).sort().join("\n");
+    const leftTold = leftKey !== (releasedCleanup.lastKey.get("\u0000own-left") ?? "") ? leftWorktreesReport(left) : null;
+    releasedCleanup.lastKey.set("\u0000own-left", leftKey);
+    if (leftTold) console.log(`[worktrees] the server's worktrees left by failed or other-way sessions (told, nothing removed): ${left.map((each) => each.path).join(", ")}`);
     const staleKey = stale.map((each) => each.path).sort().join("\n");
     const staleNews = staleKey !== (releasedCleanup.lastKey.get("\u0000stale") ?? "");
     releasedCleanup.lastKey.set("\u0000stale", staleKey);
@@ -9926,7 +9984,7 @@ async function cleanReleasedWorktrees(): Promise<void> {
     }
     if (!stale.length) releasedCleanup.lastStale = { at: Date.now(), folders: [] };
     const staleTold = staleNews ? staleFoldersReport(stale) : null;
-    if (!lines.length && !staleTold) return;
+    if (!lines.length && !staleTold && !leftTold) return;
     const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
     const desk = chief ? chiefDeskThread(chief) : null;
     if (chief && desk && store.taskByThread(chief.id, desk)) {
@@ -9936,7 +9994,9 @@ async function cleanReleasedWorktrees(): Promise<void> {
       const parts = [
         ...(lines.length ? [`Worktrees já em produção — estas podem ser removidas por uma pessoa, depois de conferir:\n${lines.join("\n")}`] : []),
         ...(staleTold ? [staleTold.report] : []),
+        ...(leftTold ? [leftTold] : []),
       ];
+      if (leftTold) store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Disco: ${left.length} worktree(s) do OMB de sessão falhada ou não usada — informação, nada foi removido`, 240), ok: true } });
       autonomy.addReport(chief.id, desk, `[Servidor: worktrees e disco] O servidor não remove nada. ${parts.join("\n\n")}\nAo falar com o dono, diga o escopo: "nenhuma pode ser removida" vale só para as contidas na tag; as paradas fora dela são decisão dele.`);
     }
   } finally {
@@ -10497,7 +10557,8 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
     // create goes on through New Session, checked as below at that moment.
     // the repository's real path: the brief's folder check compares `pwd -P` with it
     const realRepo = (() => { try { return realpathSync(input.repo); } catch { return input.repo; } })();
-    const ownPlan = ownWorktreesOn(input.repo)
+    // (not while its breaker is tripped: two sessions in a row landed elsewhere — the old way, 409 and gesture)
+    const ownPlan = ownPathActive(input.repo)
       ? planOwnWorktree(realRepo, { title: input.title, issue: issueNumber(input.title, input.brief), sessionId: appId }, (plan) => ownPlanTaken(realRepo, plan))
       : null;
     // New Session in the app opens in the folder of its latest
@@ -10550,7 +10611,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
 function appAvailability(repo: string): { state: AppAvailability; reason: string | null } {
   if (process.platform !== "darwin") return { state: "unavailable", reason: null };
   // with a worktree the server makes, the app's last folder and the one it would reuse do not matter (lote X)
-  if (!ownWorktreesOn(repo)) {
+  if (!ownPathActive(repo)) {
     const lastRepo = lastAppRepo();
     if (!lastRepo || lastRepo !== repo) return { state: "unavailable", reason: null };
     if (appFolderBlock()) return { state: "blocked", reason: null };
@@ -10666,7 +10727,7 @@ function settleAppUnblock(): void {
   let open = store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)).filter((item) => item.key?.startsWith(APP_UNBLOCK_KEY));
   if (!open.length) return;
   // the server makes the worktrees of these repositories' sessions (lote X): no gesture of the owner is needed there
-  const ownNames = new Set([...new Set(ccLedger.all().map((session) => session.repo))].filter(ownWorktreesOn).map((repo) => basename(repo)));
+  const ownNames = new Set([...new Set(ccLedger.all().map((session) => session.repo))].filter(ownPathActive).map((repo) => basename(repo)));
   for (const key of new Set(open.map((item) => item.key!).filter((key) => ownNames.has(key.slice(APP_UNBLOCK_KEY.length))))) {
     for (const done of autonomy.resolveOwnerPending({ key })) refreshBotRow(done.botId);
     console.log(`[claude-desktop] the owner's "destravar o app" item (${key}) is closed: the server now makes each session's worktree and opens the app in it, so no gesture is needed`);
@@ -10973,6 +11034,8 @@ async function runDesktopWork(): Promise<void> {
   // the worktrees the server makes, and their seeds: git and installs, never the screen
   void prepareOwnWorktrees(desktopWork, ownPrepareState).catch((error) => console.error(`[own-worktrees] ${error instanceof Error ? error.message : String(error)}`));
   void refreshOwnSeeds().catch((error) => console.error(`[own-worktrees] seed: ${error instanceof Error ? error.message : String(error)}`));
+  // before the unblock items: a breaker the owner just resolved puts this path back first
+  settleOwnBreaker();
   settleAppUnblock();
   await runDesktopWorkFlow(desktopWork, desktopState);
 }
@@ -26046,6 +26109,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         summary: ownStore.summary(now - days * 86_400_000, now + 1),
         allTime: ownStore.summary(0, now + 1),
         latest: ownStore.allEvents().slice(-20).reverse(),
+        // worktrees of failed sessions (or never used): told with the command, never removed
+        left: leftOwnWorktrees(ccLedger.all(), existsSync),
+        breaker: ownBreaker.get().repos,
       });
     }
     // ── the productivity report (lot V): production throughput for the board ──

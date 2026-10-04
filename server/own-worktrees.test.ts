@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  appLinkFolder, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
+  appLinkFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
 } from "./own-worktrees.ts";
 import { worktreeLines } from "./productivity-export.ts";
@@ -391,6 +391,60 @@ describe("what the clones saved", () => {
     expect(again.seed(REPO)).toMatchObject({ state: "interrupted" });
     expect(again.allEvents()).toHaveLength(1);
     expect(JSON.parse(readFileSync(path, "utf8")).events).toHaveLength(1);
+  });
+});
+
+describe("the breaker (R11-1)", () => {
+  const W = `${REPO}/.claude/worktrees/9353-x`;
+  const failure = (id: string, folder: string, at = 1): OwnFailure => ({ at, sessionId: id, title: `${id} título`, folder, expected: W });
+  it("trips on the 2nd session in a row that landed elsewhere, once; the same session twice counts once", () => {
+    let state: OwnBreakerState = { repos: {} };
+    let out = noteOwnFailure(state, REPO, failure("a", `${W}/.claude/worktrees/app-1`));
+    expect(out.tripped).toBe(false);
+    out = noteOwnFailure(out.state, REPO, failure("a", `${W}/.claude/worktrees/app-1`));
+    expect(out.tripped).toBe(false);
+    out = noteOwnFailure(out.state, REPO, failure("b", REPO, 5));
+    expect(out.tripped).toBe(true);
+    expect(ownBreakerTripped(out.state, REPO)).toBe(true);
+    expect(ownBreakerTripped(out.state, "/other")).toBe(false);
+    // a 3rd does not trip it again (one item)
+    expect(noteOwnFailure(out.state, REPO, failure("c", REPO, 9)).tripped).toBe(false);
+    state = rearmOwnBreaker(out.state, REPO);
+    expect(ownBreakerTripped(state, REPO)).toBe(false);
+    expect(state.repos[REPO]).toBeUndefined();
+  });
+
+  it("tells the owner what the app did, per session, and the gesture", () => {
+    expect(ownFailureCause({ folder: `${W}/.claude/worktrees/app-1`, expected: W }, REPO)).toContain("o app criou uma worktree própria dentro da pasta do OMB");
+    expect(ownFailureCause({ folder: `${W}/.claude/worktrees/app-1`, expected: W }, REPO)).toContain("a opção worktree estava LIGADA");
+    expect(ownFailureCause({ folder: REPO, expected: W }, REPO)).toBe("o app abriu na raiz do repositório, não na pasta do OMB");
+    expect(ownFailureCause({ folder: `${REPO}/.claude/worktrees/reab-496989`, expected: W }, REPO)).toContain("o app abriu em outra worktree");
+    const item = ownBreakerItem(REPO, [failure("a", `${W}/.claude/worktrees/app-1`), failure("b", REPO)]);
+    expect(item.title).toBe("O app Claude abriu 2 sessões de nuria-platform fora da worktree que o servidor criou: deixe a opção worktree DESLIGADA para sessões novas");
+    expect(item.why).toContain('- "a título": o app criou uma worktree própria');
+    expect(item.why).toContain("as sessões novas vão pelo jeito antigo (Nova sessão), com o 409 e o gesto de sempre");
+    expect(item.steps.map((step) => step.text).join(" ")).toContain("Deixe-o DESLIGADO");
+  });
+});
+
+describe("worktrees left by failed sessions (R11-1)", () => {
+  it("are told 'da sessão falhada X' (or never used), with the command; nothing removed", () => {
+    const sessions = [
+      { id: "f1aaaaaaa", title: "9353 Comprar", repo: REPO, status: "failed", desktop: { own: { path: `${REPO}/.claude/worktrees/9353-comprar`, state: "ready" } } },
+      { id: "u2bbbbbbb", title: "9354 Outra", repo: REPO, status: "running", desktop: { own: { path: `${REPO}/.claude/worktrees/9354-outra`, state: "abandoned" } } },
+      { id: "ok3cccccc", title: "9355 Viva", repo: REPO, status: "running", desktop: { own: { path: `${REPO}/.claude/worktrees/9355-viva`, state: "ready" } } },
+      { id: "gone4dddd", title: "9356 Sumiu", repo: REPO, status: "failed", desktop: { own: { path: `${REPO}/.claude/worktrees/9356-sumiu`, state: "ready" } } },
+      { id: "cli5eeeee", title: "9357 CLI", repo: REPO, status: "failed" },
+    ];
+    const left = leftOwnWorktrees(sessions, (path) => !path.endsWith("9356-sumiu"));
+    expect(left.map((each) => [each.sessionId, each.why])).toEqual([["f1aaaaaaa", "failed"], ["u2bbbbbbb", "unused"]]);
+    expect(left[0]!.command).toBe(`git -C ${REPO} worktree remove ${REPO}/.claude/worktrees/9353-comprar`);
+    const report = leftWorktreesReport(left)!;
+    expect(report).toContain(`- ${REPO}/.claude/worktrees/9353-comprar: da sessão falhada "9353 Comprar" (f1aaaaaa)`);
+    expect(report).toContain('criada para a sessão "9354 Outra" (u2bbbbbb), que não a usou');
+    expect(report).toContain("O servidor não remove nada");
+    expect(report).not.toMatch(/--force/);
+    expect(leftWorktreesReport([])).toBeNull();
   });
 });
 
