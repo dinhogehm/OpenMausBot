@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, 
 import { createPortal } from "react-dom";
 import {
   ArrowLeft, BellRing, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock, Copy, ExternalLink, Inbox,
-  ListChecks, ListTodo, Loader2, MessageSquare, Send, ShieldQuestion, Sparkles, X,
+  ListChecks, ListTodo, Loader2, MessageSquare, Repeat, Send, ShieldQuestion, Sparkles, X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
@@ -10,6 +10,7 @@ import {
   answerNotDelivered, answerStuck, answerTime, awaitingBot, botSilent, chosenOption, decisionsInOrder, dueAt, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
   type NeedsYouItem, type NeedsYouSort,
 } from "@/lib/needs-you";
+import { CHOICE_REPLACED } from "../../shared/owner-pending-title";
 
 /** What a key press does on the resolution screen. Text fields keep their
  * keys: ⌘/Ctrl+Enter sends and Escape only leaves the field. Elsewhere ↑/↓
@@ -687,6 +688,16 @@ function History({ item, now }: { item: NeedsYouItem; now: number }) {
           // sent: a check, said to a screen reader and on hover — not repeated in every line (r2 N8);
           // waiting its turn: "na fila" (r2 N9); not sent: said in full
           const sent = t("needsYou.history.delivered", { name: item.botName });
+          // the person's own switch is no failure: neutral, saying what took its place (J P1)
+          if (!entry.delivered && !entry.queued && entry.error === CHOICE_REPLACED) {
+            const next = item.history!.slice(n + 1).find((each) => each.kind === "option");
+            return (
+              <li key={`${entry.at}-${n}`} data-history-state="replaced" className="flex items-start gap-2 text-[13px] leading-relaxed text-ink-secondary">
+                <Repeat size={14} aria-hidden="true" className="mt-0.5 shrink-0" />
+                <span className="min-w-0 break-words">{what}{" — "}{next?.label ? t("needsYou.history.replacedBy", { label: next.label }) : t("needsYou.history.replaced")}</span>
+              </li>
+            );
+          }
           return (
             <li key={`${entry.at}-${n}`} data-history-state={entry.delivered ? "delivered" : entry.queued ? "queued" : "failed"} title={entry.delivered ? sent : undefined} className="flex items-start gap-2 text-[13px] leading-relaxed text-ink">
               {entry.delivered

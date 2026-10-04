@@ -10,7 +10,11 @@
 // punctuation). Anything else keeps its words: in "@Osvaldo Aprovar o deploy"
 // the verb is the title's first word, never part of a name (INSP-I r2 #1).
 
-const HANDLE = /^@[\p{L}\p{N}][\p{L}\p{N}_.-]*/u;
+/** Why an earlier choice was not sent: the person switched it while it
+ * waited in the queue. The server writes it; the screen draws it neutral. */
+export const CHOICE_REPLACED = "substituída pela nova escolha";
+
+const HANDLE =/^@[\p{L}\p{N}][\p{L}\p{N}_.-]*/u;
 const AFTER = /^[\s,:;–—-]*/u;
 const CONNECTED = /^\s+(?:of|de|do|da|dos|das)\s+[\p{L}\p{N}]+/u;
 /** One or two capitalized words a "," ":" or ";" closes: the rest of a name

@@ -3270,6 +3270,8 @@
   "needsYou.history.askRecommend": "You asked for a recommendation {time}",
   "needsYou.history.delivered": "sent to {name}",
   "needsYou.history.notDelivered": "not sent",
+  "needsYou.history.replacedBy": "replaced by “{label}”",
+  "needsYou.history.replaced": "replaced by another choice",
   "needsYou.screen.stuckChoice": "Your choice has been queued for {age}: {name} is busy with something else.",
   "needsYou.screen.stuckMessage": "Your message has been queued for {age}: {name} is busy with something else.",
   "needsYou.screen.stuckRequest": "Your request has been queued for {age}: {name} is busy with something else.",
