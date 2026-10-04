@@ -46,7 +46,8 @@ export function releaseFailureCause(outTail: string): string | null {
     while (start > 0 && /\[ERROR\]/.test(lines[start - 1]!)) start -= 1;
     if (start < abort) return lines[start]!.replace(/^\[ERROR\]\s*/, "").slice(0, 300);
   }
-  const named = lines.findLast((line) => /Release snapshot changed|ADMISSION_TIMEOUT|Local CI failed at/.test(line))
+  // lot W: the owner's stop and a refused nested claim end a try too (ADMISSION_DIR_IGNORED only warns)
+  const named = lines.findLast((line) => /Release snapshot changed|ADMISSION_(?:TIMEOUT|STOPPED|NESTED_REFUSED)\b|Local CI failed at/.test(line))
     ?? lines.findLast((line) => /\[ERROR\]/.test(line));
   return named ? named.replace(/^\[ERROR\]\s*/, "").slice(0, 300) : null;
 }
@@ -59,9 +60,15 @@ export function releaseFailureCause(outTail: string): string | null {
 export function releaseCauseKey(cause: string): string {
   return cause
     .replace(/\s*\b(?:Logs?|Log file|See|Veja)\s*:\s*\S+/gi, "")
-    .replace(/(?:^|\s)(?:\/[\w.@+-]+)+\/?/g, " ")
+    // a path as a field's value (dir=/private/var/…/adm.5RILoB) keeps the field
+    .replace(/(^|\s|=)(?:\/[\w.@+-]+)+\/?/g, (_path, before: string) => (before === "=" ? "=" : " "))
     .replace(/\b\d{8}T\d{6}Z?\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z?\b|\b\d{1,2}:\d{2}(?::\d{2})?\b/g, "")
     .replace(/\bpids?[ =:]+\d+\b/gi, "")
+    // lot W's lease lines: who blocked and who held the lease, for how long, are the try's
+    // (blocked_by=ci-full:<pid>, holder_pid=<pid>, holder=<label> held=<N>s counted=<N>s)
+    .replace(/\b(\w+_pid)=\d+\b/g, "$1")
+    .replace(/\b(blocked_by=[\w-]+):\d+\b/g, "$1")
+    .replace(/\s+(?:holder|held|counted)=\S*/g, "")
     // how long one try waited for the lease changes every try, the timeout does not
     .replace(/\b(waited|elapsed|after)[=: ]+\d+(?:\.\d+)?\s*(?:ms|s|m|min)?\b/gi, "$1")
     .replace(/\b[0-9a-f]{12,40}\b/g, "")
@@ -585,6 +592,9 @@ export function releaseCausePt(cause: string | null): string {
   if (!cause) return "";
   if (nothingToPublish(cause)) return "sem alvo de runtime";
   if (/Release snapshot changed/i.test(cause)) return "snapshot mudou durante o release";
+  if (/ADMISSION_STOPPED/.test(cause)) return "parado pelo PARAR do dono (~/.nuria/stop)";
+  if (/ADMISSION_NESTED_REFUSED/.test(cause)) return "lease recusado: o processo não descende do dono do lease";
+  if (/ADMISSION_TIMEOUT.*\breason=release-ceiling\b/.test(cause)) return "o release na frente passou do teto de espera";
   if (/ADMISSION_TIMEOUT/.test(cause)) return "tempo de espera na fila esgotou";
   const step = /Local CI failed at\s+(\S+)/i.exec(cause)?.[1];
   if (step) return `CI local falhou em ${step}`;
