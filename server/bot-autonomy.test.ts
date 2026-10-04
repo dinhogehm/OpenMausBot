@@ -49,6 +49,7 @@ import {
   ANSWERED_IN_CONVERSATION,
   answerToAsk,
   answeredInConversationReport,
+  ANSWER_WINDOW_MS,
 } from "./bot-autonomy.ts";
 
 let dir: string;
@@ -1525,8 +1526,26 @@ describe("a bare question asked to become an item (lot J2)", () => {
     // a bot's statement in between changes nothing; peers and other bots' handoffs are not the person
     expect(answerToAsk([asked, bot(at + 1, "Vou conferir o QA."), { ...person(at + 2, "x"), from: { botId: "other" } }, person(at + 3, "Caminho B.")], at, asked.text)?.text).toBe("Caminho B.");
     // a question without #refs: a first message about some #ref is about something else
-    expect(answerToAsk([bot(at, "Fica 10 min ou sem limite?"), person(at + 1, "E a #9355?")], at, "Fica 10 min ou sem limite?")).toBeNull();
-    expect(answeredInConversationReport({ id: "o20", title: "Decidir o caminho da #9356" }, "Qual caminho sigo?", "Caminho B.")).toBe(
-      "[Servidor: pendência fechada] O dono respondeu na conversa à sua pergunta «Qual caminho sigo?»: «Caminho B.». O item o20 («Decidir o caminho da #9356») foi fechado como respondida na conversa. Siga com a resposta dele; não reabra o item. Não escreva ao dono só por isto.");
+    expect(answerToAsk([bot(at, "Fica 10 min ou sem limite?"), person(at + 1, "Olhe a #9355.")], at, "Fica 10 min ou sem limite?")).toBeNull();
+    expect(answeredInConversationReport({ id: "o20", title: "Decidir o caminho da #9356" }, { threadId: "main", askAt: at, text: "Qual caminho sigo?" }, "Caminho B.")).toBe(
+      `[Servidor: pendência fechada] O dono respondeu na conversa à sua pergunta «Qual caminho sigo?»: «Caminho B.». O item o20 («Decidir o caminho da #9356») foi fechado como respondida na conversa. Se era a resposta, siga com ela. Se não era resposta a esta pergunta, reabra o item com owner_pending add replacesAsk "main@${at}" (o mesmo title, why, steps e options). Não escreva ao dono só por isto.`);
+  });
+
+  // INSP-J2b r3, with the real question of 04/10
+  it("never takes a later plain order nor a question back as the answer — only within 2 h, and never a message ending in '?'", () => {
+    const at = ask.askAt;
+    const real = "A decisão de produto da #9356 continua com você: qual caminho sigo com o Filipe?";
+    const asked = { role: "bot", kind: "text", at, text: real };
+    const person = (when: number, text: string) => ({ role: "user", kind: "text", at: when, text });
+    // an order with no # a day later: about something else
+    expect(answerToAsk([asked, person(at + 86_400_000, "Arquive as conversas antigas.")], at, real)).toBeNull();
+    // …the same within 2 h answers it; just past 2 h it does not
+    expect(answerToAsk([asked, person(at + ANSWER_WINDOW_MS, "Siga com o caminho A.")], at, real)?.text).toBe("Siga com o caminho A.");
+    expect(answerToAsk([asked, person(at + ANSWER_WINDOW_MS + 1, "Siga com o caminho A.")], at, real)).toBeNull();
+    // the owner asking back, even naming #9356, is not an answer — nor does it let a later plain message count
+    expect(answerToAsk([asked, person(at + 60_000, "o Filipe respondeu sobre a #9356?")], at, real)).toBeNull();
+    expect(answerToAsk([asked, person(at + 60_000, "o Filipe respondeu sobre a #9356?"), person(at + 120_000, "Ok.")], at, real)).toBeNull();
+    // a later statement naming #9356 still is, past the 2 h
+    expect(answerToAsk([asked, person(at + 86_400_000, "Na #9356 siga com o caminho B.")], at, real)?.text).toBe("Na #9356 siga com o caminho B.");
   });
 });

@@ -576,6 +576,18 @@ it("asks the bot once to register its bare question as an item, never with ~/.nu
   await expect(f.api(`/api/bots/${f.bot.id}/tasks/${f.bot.activeTaskId}/ask-steps`, {})).rejects.toThrow(/não espera mais uma resposta sua/);
   await new Promise((resolve) => setTimeout(resolve, 1_500));
   expect(f.turns()).toHaveLength(2);
+  // INSP-J2b r3: the owner answers in the conversation; the server settles o1 and tells the bot, which may reopen it
+  f.save({ turns: [asking, { reply: "Registrado." }, { reply: "Certo, sigo com a B." }, {
+    expectContextIncludes: ["[Servidor: pendência fechada]", "O item o1", `reabra o item com owner_pending add replacesAsk \\"${ref}\\"`],
+    steps: [{ tool: "owner_pending", arguments: { ...item, replacesAsk: ref } }], reply: "Reabri o item.",
+  }] });
+  await f.send("Siga com a opção B.");
+  await expect.poll(() => f.turns().length, { timeout: 20_000 }).toBe(4);
+  expect(f.ledger().resolvedOwnerPending).toEqual([expect.objectContaining({ id: "o1", resolvedBy: "owner", resolvedNote: "respondida na conversa" })]);
+  expect(toolResult(f.turns()[3], "owner_pending")).toContain("Ele substitui a sua pergunta");
+  const reopened = (await task()).ownerPending;
+  expect(reopened).toEqual([expect.objectContaining({ title: "Decidir a opção de produto da #9356" })]);
+  expect(f.ledger().askPromotions[0].itemId).toBe(reopened[0].id);
 }, { OMB_OWNER_STEPS_ASK_AFTER_MS: "0", OMB_QUESTION_STEPS_ASK_AFTER_MS: "0" }), 90_000);
 
 // The app's records (under the fixture's HOME) decide: with the app able to
