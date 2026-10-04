@@ -25,7 +25,7 @@ describe("reading the PRs for the board", () => {
     expect(pr).toEqual({
       number: 9332, title: "feat(atendimento): prazo de reabertura (#9052)", createdAt: Date.parse("2026-10-01T15:17:56Z"), updatedAt: Date.parse("2026-10-04T14:06:49Z"),
       mergedAt: null, state: "OPEN", draft: false, base: "main", head: "feat/9052-x", headSha: "407e3f9247c315011ad85c663cf74c21bfb01475", mergeSha: null,
-      gate: "failure", gateAt: Date.parse("2026-10-04T10:00:00Z"), mergeState: "BEHIND", closes: [], refs: [9052, 9047], labels: ["priority:p1"],
+      gate: "failure", gateAt: Date.parse("2026-10-04T10:00:00Z"), mergeState: "BEHIND", closes: [], refs: [9052, 9047], fixes: [9052], labels: ["priority:p1"],
     });
     expect(JSON.stringify(pr)).not.toContain("bare");
     // GitHub not done computing: unknown, not a state

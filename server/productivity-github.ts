@@ -42,6 +42,9 @@ export interface GhPr {
   /** Issues the PR body or its merge commit names explicitly
    * (Closes/Fixes/Resolves/Refs #N) — read at sync, the text is not kept. */
   refs?: number[];
+  /** Of those, the ones it says it closes (Closes/Fixes/Resolves/Fecha/Corrige/Encerra #N),
+   * not only cites (Refs #N): a "Refs" PR delivers part of an issue (lot Z). */
+  fixes?: number[];
   labels: string[];
 }
 
@@ -128,14 +131,18 @@ export function migrateGhCache(cache: GhCache): { cache: GhCache; migrated: bool
 }
 
 // English and the repository's Portuguese (lot Z: #9190's "Fecha #9185" was no reference)
-const REFERENCE = /(?<![\p{L}])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|references?|fecha[rm]?|fechou|corrige[m]?|corrigir|corrigiu|resolvido|resolvida|resolveu|encerra[rm]?|encerrou)(?![\p{L}])[\s:]*((?:#\d+(?:\s*(?:,|;|&|\band\b|\be\b)\s*)?)+)/giu;
+const CLOSING = String.raw`close[sd]?|fix(?:e[sd])?|resolve[sd]?|fecha[rm]?|fechou|corrige[m]?|corrigir|corrigiu|resolvido|resolvida|resolveu|encerra[rm]?|encerrou`;
+const referenceOf = (words: string) => new RegExp(String.raw`(?<![\p{L}])(?:${words})(?![\p{L}])[\s:]*((?:#\d+(?:\s*(?:,|;|&|\band\b|\be\b)\s*)?)+)`, "giu");
+const REFERENCE = referenceOf(`${CLOSING}|refs?|references?`);
+const CLOSING_REFERENCE = referenceOf(CLOSING);
 
 /** Issue numbers a text names explicitly: "Closes #12", "Fixes: #3, #4", "Refs #9",
- * "Fecha #9185", "Corrige #3". A bare "#12" is not a reference (it may be a PR, a table row, a sentence). */
-export function explicitReferences(text: string | null | undefined): number[] {
+ * "Fecha #9185", "Corrige #3" — or, `closing`, only those it says it closes (not "Refs").
+ * A bare "#12" is not a reference (it may be a PR, a table row, a sentence). */
+export function explicitReferences(text: string | null | undefined, options: { closing?: boolean } = {}): number[] {
   if (!text) return [];
   const found = new Set<number>();
-  for (const match of text.matchAll(REFERENCE)) for (const number of match[1]!.matchAll(/#(\d+)/g)) found.add(Number(number[1]));
+  for (const match of text.matchAll(options.closing ? CLOSING_REFERENCE : REFERENCE)) for (const number of match[1]!.matchAll(/#(\d+)/g)) found.add(Number(number[1]));
   return [...found];
 }
 
@@ -224,6 +231,7 @@ export function parsePr(node: Json): GhPr | null {
     mergeSha: typeof node.mergeCommit?.oid === "string" ? node.mergeCommit.oid : null,
     closes: (node.closingIssuesReferences?.nodes ?? []).map((issue: Json) => issue?.number).filter((n: unknown): n is number => typeof n === "number"),
     refs: [...new Set([...explicitReferences(node.body), ...explicitReferences(node.mergeCommit?.message)])].filter((n) => n !== node.number),
+    fixes: [...new Set([...explicitReferences(node.body, { closing: true }), ...explicitReferences(node.mergeCommit?.message, { closing: true })])].filter((n) => n !== node.number),
     labels: (node.labels?.nodes ?? []).map((label: Json) => String(label?.name ?? "")).filter(Boolean),
   };
 }

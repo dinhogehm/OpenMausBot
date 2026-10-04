@@ -53,6 +53,7 @@ export function parseLivePr(node: Json): LivePr | null {
     mergeState: typeof node.mergeStateStatus === "string" && node.mergeStateStatus !== "UNKNOWN" ? node.mergeStateStatus : null,
     closes: (node.closingIssuesReferences?.nodes ?? []).map((issue: Json) => issue?.number).filter((n: unknown): n is number => typeof n === "number"),
     refs: [...new Set([...explicitReferences(node.body), ...explicitReferences(node.mergeCommit?.message)])].filter((n) => n !== node.number),
+    fixes: [...new Set([...explicitReferences(node.body, { closing: true }), ...explicitReferences(node.mergeCommit?.message, { closing: true })])].filter((n) => n !== node.number),
     labels: (node.labels?.nodes ?? []).map((label: Json) => String(label?.name ?? "")).filter(Boolean),
   };
 }

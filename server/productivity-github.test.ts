@@ -78,6 +78,9 @@ describe("labels and links", () => {
     const node = { number: 100, title: "t", body: "Corrige o fluxo.\n\nCloses #8986", createdAt: at(1), updatedAt: at(2), mergedAt: at(2), state: "MERGED", baseRefName: "main", headRefName: "perf/8750-epico", mergeCommit: { oid: "m", message: "fix: x (#100)\n\nRefs #8751" }, closingIssuesReferences: { nodes: [] }, labels: { nodes: [] } };
     // the epic number in the branch (#8750) is not a reference
     expect(parsePr(node)!.refs).toEqual([8986, 8751]);
+    // of those, what it says it closes: not the "Refs" (lot Z: a partial delivery is not a cycle to close)
+    expect(parsePr(node)!.fixes).toEqual([8986]);
+    expect(explicitReferences("Refs #9074. Fecha #9185; corrige #3", { closing: true })).toEqual([9185, 3]);
   });
 
   it("reads the merge gate on the PR head", () => {

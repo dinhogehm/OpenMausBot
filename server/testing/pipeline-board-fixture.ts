@@ -83,9 +83,10 @@ export function boardIssues(): GhIssue[] {
   ];
 }
 
-const merged = (number: number, title: string, createdAt: number, mergedAt: number, head: string, mergeSha: string, refs: number[], labels: string[] = []): LivePr => ({
+/** `fixes`: what the body says it closes; undefined like a cache read before the field existed. */
+const merged = (number: number, title: string, createdAt: number, mergedAt: number, head: string, mergeSha: string, refs: number[], labels: string[] = [], fixes?: number[]): LivePr => ({
   number, title, createdAt, updatedAt: mergedAt, mergedAt, state: "MERGED", draft: false, base: "main", head, headSha: null, mergeSha,
-  gate: "success", gateAt: mergedAt - 600_000, mergeState: null, closes: [], refs, labels,
+  gate: "success", gateAt: mergedAt - 600_000, mergeState: null, closes: [], refs, ...(fixes ? { fixes } : {}), labels,
 });
 
 /** The board's live read at the clock: the two open PRs and the merged ones. */
@@ -97,17 +98,18 @@ export function boardLive(): NonNullable<BoardInputs["live"]> {
       { number: 9368, title: "perf(release/admission): fila sem estouro atrás de release, máquina devolvida na fase de rede, release mais curto (lote W)", createdAt: 1791059533000, updatedAt: 1791070000000, mergedAt: null, state: "OPEN", draft: false, base: "main", head: "ops/lot-w-throughput", headSha: "5bc51ed6ab3dda77e6ec0a803b3582a97b1d3e46", mergeSha: null, gate: "missing", gateAt: null, mergeState: "BLOCKED", closes: [], refs: [9347], labels: [] },
     ],
     merged: [
-      merged(9280, "fix(helpdesk): rodízio de equipe atômico no fallback de distribuição (#9195)", 1790646964000, 1791075278000, "hotfix/9195-helpdesk-team-round-robin-race", "432bbd027f2794ae95ea7e823e30403743f90a49", [9195]),
-      merged(9350, "fix(filas): sidebar da fila do atendimento grava na chave que a conversa lê (ref #8204)", 1790950750000, 1791069231000, "fix/8204-sidebar-fila-atendimento", "ba034e1f30b43dd2abea695bb01082b69dc34c58", [8204]),
+      merged(9280, "fix(helpdesk): rodízio de equipe atômico no fallback de distribuição (#9195)", 1790646964000, 1791075278000, "hotfix/9195-helpdesk-team-round-robin-race", "432bbd027f2794ae95ea7e823e30403743f90a49", [9195], [], []), // "Refs #9195"
+      merged(9350, "fix(filas): sidebar da fila do atendimento grava na chave que a conversa lê (ref #8204)", 1790950750000, 1791069231000, "fix/8204-sidebar-fila-atendimento", "ba034e1f30b43dd2abea695bb01082b69dc34c58", [8204], [], []),
       merged(9344, "fix(inbox): pausa de inatividade do Webchat não vem mais marcada por padrão (#9334)", 1790927738000, 1790928868000, "fix/9334-pausa-inatividade-padrao", "3d98404b8cc8e4e55be6b795fb16e4159e971b43", [9334], ["priority:p2", "app:atendimento", "bug"]),
       merged(9345, "fix(atendimento): webchat não encerra antes do prazo nem ao dispensar pesquisa antiga (#9331)", 1790927771000, 1790929958000, "fix/9331-inatividade-encerra-cedo", "aa74c6345005427981e659874200dff5646a832d", [9331], ["priority:p2", "app:atendimento", "bug"]),
       merged(9348, "fix(scripts): contratos do reconciler selado não dependem do runtime Node (#9347)", 1790934232000, 1790964800000, "fix/9347-script-contracts-sqlite-warning", "9720b32e0c3179eafd7c0a31ae88b488528e7557", [9347], ["priority:p1", "bug"]),
-      // #9074's three, shipped on 22–23/09 (by the release times: their compares are not in this fixture)
-      merged(9087, "fix(atendimento): distribute_assignee não reporta sucesso quando só enfileira (#9074)", 1790018588000, 1790031752000, "fix/9074-distribute-assignee-false-success", "14a30776607d7f5e65e3a58dc45bf74f9b05915d", [9074]),
-      merged(9113, "fix(atendimento): registrar no histórico o motivo do encerramento da fila de espera (#9074)", 1790082290000, 1790088627000, "fix/9074-waiting-closure-history", "06797f64ba332024ced346631c7c9523c2c4e365", [9074]),
-      merged(9118, "fix(atendimento): presença expirada não encerra quem escreveu esperando resposta (#9074)", 1790087592000, 1790088636000, "fix/9074-presence-message-window", "8c56abfc1ef82367d085817d8fb8897e96912040", [9074]),
+      // #9074's three, shipped on 22–23/09 (by the release times: their compares are not in this fixture);
+      // each says "Refs #9074" — #9087: "Este PR resolve só o falso sucesso", the other legs stay open
+      merged(9087, "fix(atendimento): distribute_assignee não reporta sucesso quando só enfileira (#9074)", 1790018588000, 1790031752000, "fix/9074-distribute-assignee-false-success", "14a30776607d7f5e65e3a58dc45bf74f9b05915d", [9074], [], []),
+      merged(9113, "fix(atendimento): registrar no histórico o motivo do encerramento da fila de espera (#9074)", 1790082290000, 1790088627000, "fix/9074-waiting-closure-history", "06797f64ba332024ced346631c7c9523c2c4e365", [9074], [], []),
+      merged(9118, "fix(atendimento): presença expirada não encerra quem escreveu esperando resposta (#9074)", 1790087592000, 1790088636000, "fix/9074-presence-message-window", "8c56abfc1ef82367d085817d8fb8897e96912040", [9074], [], []),
       // "Fecha #9185" in its body (parsed into refs as the reader does), shipped by f6d127693 on 29/09
-      merged(9190, "perf(atendimento): pulso de presença do widget sem leitura no D1 — InboxRoom decide o \"ficou online\" (#9185)", 1790230111000, 1790341948000, "perf/9185-presence-sem-d1", "549e4a974f210b4331ee8144471c1b5f42cc9521", [9185], ["app:widget", "type:improvement", "source:agent", "priority:p1", "app:atendimento"]),
+      merged(9190, "perf(atendimento): pulso de presença do widget sem leitura no D1 — InboxRoom decide o \"ficou online\" (#9185)", 1790230111000, 1790341948000, "perf/9185-presence-sem-d1", "549e4a974f210b4331ee8144471c1b5f42cc9521", [9185], ["app:widget", "type:improvement", "source:agent", "priority:p1", "app:atendimento"], [9185]),
       // the carrier that shipped 9280: how code ships, never a card
       merged(9370, "chore(release): carrier 9195-rodizio-equipe-atomico", 1791075300000, 1791075327000, "chore/release-carrier-9195-rodizio-equipe-atomico", S3C04, []),
     ],

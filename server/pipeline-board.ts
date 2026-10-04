@@ -41,7 +41,14 @@ export interface LivePr {
   mergeState: string | null;
   closes: number[];
   refs: number[];
+  /** Of `refs`, the ones it says it closes (not "Refs"); undefined in a cache read before it existed. */
+  fixes?: number[];
   labels: string[];
+}
+
+/** The PR says it closes this issue (GitHub's link, Closes/Fecha…), not only cites it (Refs). */
+export function closesIssue(pr: Pick<LivePr, "closes" | "refs" | "fixes">, issue: number): boolean {
+  return pr.closes.includes(issue) || (pr.fixes ?? pr.refs).includes(issue);
 }
 
 /** The fields of a Claude Code session the board reads. */
@@ -113,19 +120,56 @@ export interface BoardInputs {
 /** A real day/month: "Etapa 1/3" is a date by shape, "Deploy 45/10" is not. */
 const DATE = String.raw`(?<!\d)(?:0?[1-9]|[12]\d|3[01])\/(?:0?[1-9]|1[0-2])(?:\/\d{2,4})?(?!\d)`;
 const NAME = String.raw`\p{Lu}\p{Ll}{2,}`;
-const NAMES = String.raw`(?:${NAME}\s*(?:\/|,|e(?![\p{L}]))\s*)*${NAME}`;
+/** One person as titles write them: "Daiane", "Pedro Henrique". */
+const PERSON = String.raw`${NAME}(?:\s+${NAME})?`;
+const NAMES = String.raw`(?:${PERSON}\s*(?:\/|,|e(?![\p{L}]))\s*)*${PERSON}`;
+/** Where the request came in, written before the name: "(Chat Patricia 24/09)". */
+const CHANNEL = String.raw`(?:Chat|Ticket|WhatsApp|Whats|E-?mail|Telefone|Liga[çc][ãa]o|Meet|Reuni[ãa]o|Planilha)\s+`;
 /** Without accents, in lower case: "Patrícia" and "PATRICIA" are one name. */
 export const fold = (text: string) => text.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-/** Words a title puts before a date or after "cliente" that are never a person. */
-const STOPWORDS = new Set([
-  "deploy", "release", "releases", "relatorio", "etapa", "fase", "lote", "sprint", "versao", "build", "teste", "testes", "bug", "erro", "falha", "fila", "filas",
+/** Words a title puts before a date or after "cliente" that are never a person: work,
+ * channels and meetings, the days and the months. */
+export const STOPWORDS = new Set([
+  "deploy", "release", "releases", "relatorio", "relatorios", "etapa", "fase", "lote", "sprint", "versao", "build", "teste", "testes", "bug", "erro", "falha", "fila", "filas",
   "helpdesk", "atendimento", "atendimentos", "ticket", "tickets", "chat", "widget", "sessao", "gate", "hoje", "ontem", "amanha", "issue", "issues", "linha", "planilha",
   "cliente", "clientes", "data", "prazo", "status", "admin", "agente", "agentes", "supervisor", "reprovado", "aprovado", "reprovacao", "producao", "main", "carrier",
-  "hotfix", "nuria", "piloto", "epic", "inbox", "portal", "core", "web", "infra", "segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo",
-  "janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro", "atualizacao", "correcao",
-  "melhoria", "ajuste", "tarefa", "demanda", "rodada", "revisao", "validacao", "entrega", "publicacao", "migracao", "backup", "monitor", "chief", "delivery",
-  "lead", "eng", "qa", "dba", "sre", "relato", "pedido", "final", "inicio", "fim", "semana", "mes", "dia", "plano", "conta", "empresa", "usuario", "usuarios",
+  "hotfix", "nuria", "piloto", "epic", "inbox", "portal", "core", "web", "infra",
+  "segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo", "seg", "ter", "qua", "qui", "sex", "sab", "dom",
+  "janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+  "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez",
+  "atualizacao", "correcao", "melhoria", "ajuste", "tarefa", "demanda", "rodada", "revisao", "validacao", "entrega", "publicacao", "migracao", "backup",
+  "monitor", "chief", "delivery", "lead", "eng", "qa", "dba", "sre", "relato", "pedido", "final", "inicio", "fim", "semana", "mes", "dia", "plano", "conta",
+  "empresa", "usuario", "usuarios", "reuniao", "reunioes", "call", "daily", "demo", "meet", "ligacao", "whatsapp", "whats", "email", "telefone", "suporte",
+  "comercial", "financeiro", "gestao", "equipe", "time", "contrato", "proposta", "treinamento", "implantacao", "onboarding", "evento", "alerta", "incidente",
 ]);
+
+/** One letter apart inside the name (Levenshtein 1, not at its end): "Felipe"/"Filipe",
+ * "Mateus"/"Matheus" — but not "Pedra"/"Pedro", where the end makes another word. */
+function oneEditApart(a: string, b: string): boolean {
+  if (a === b || Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  if (i >= Math.min(a.length, b.length) - 1) return false;
+  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
+  return a.length > b.length ? a.slice(i + 1) === b.slice(i) : a.slice(i) === b.slice(i + 1);
+}
+
+/** A word that is a requester the dictionary learned, in any spelling a title uses for
+ * them: the name itself in any case or accent; capitalized, a one-letter variant of a
+ * name of 5+ letters (Felipe, Mateus), a diminutive (Pedrinho, Robertinha) or a short
+ * form of 3–4 letters (Dai for Daiane) — never a common word. */
+export function isRequester(word: string, people: ReadonlySet<string>): boolean {
+  const folded = fold(word);
+  if (people.has(folded)) return true;
+  if (!/^\p{Lu}/u.test(word) || folded.length < 3 || STOPWORDS.has(folded)) return false;
+  const base = folded.replace(/z?inh[oa]s?$/u, "");
+  for (const name of people) {
+    if (folded.length >= 5 && name.length >= 5 && oneEditApart(folded, name)) return true;
+    if (base !== folded && base.length >= 3 && name.startsWith(base)) return true;
+    if (folded.length <= 4 && name.length >= folded.length + 2 && name.startsWith(folded)) return true;
+  }
+  return false;
+}
 
 export interface NameDictionary {
   /** Folded (fold()) requesters' names. */
@@ -143,11 +187,15 @@ export interface NameDictionary {
 export function nameDictionary(texts: Iterable<string>): NameDictionary {
   const people = new Set<string>();
   const tenants = new Set<string>();
+  // each person's first name is learned ("Pedro Henrique" → pedro); the second goes with it when removed
   const learn = (names: string) => {
-    for (const name of names.split(/\s*(?:\/|,|(?<![\p{L}])e(?![\p{L}]))\s*/u)) if (name && !STOPWORDS.has(fold(name))) people.add(fold(name));
+    for (const person of names.split(/\s*(?:\/|,|(?<![\p{L}])e(?![\p{L}]))\s*/u)) {
+      const first = person.trim().split(/\s+/)[0];
+      if (first && !STOPWORDS.has(fold(first))) people.add(fold(first));
+    }
   };
-  const attributed = new RegExp(String.raw`(?:^|[(,]\s*)(${NAMES}),?\s+${DATE}\s*$`, "u");
-  const tail = new RegExp(String.raw`[—–-]\s+(${NAMES}),?\s+${DATE}\s*$`, "u");
+  const attributed = new RegExp(String.raw`(?:^|[(,]\s*)(?:${CHANNEL})?(${NAMES}),?\s+${DATE}\s*$`, "u");
+  const tail = new RegExp(String.raw`[—–-]\s+(?:${CHANNEL})?(${NAMES}),?\s+\(?${DATE}\)?\s*$`, "u");
   const sheet = new RegExp(String.raw`\((${NAME}),\s*(?:planilha|linha|L\d)`, "gu");
   const reported = new RegExp(String.raw`(?:[Rr]elato|[Rr]elatad[oa]|[Rr]eportad[oa]|[Pp]edido|[Qq]uem pediu foi)\s+(?:d[oa]|pel[oa]|por|de|[oa])\s+(${NAME})|(?<![\p{L}])[Cc]lientes?\s+(${NAME})(?![\p{L}])`, "gu");
   // a client is named as one somewhere ("tenant PIPERUN", "cliente ACME"): then it goes from
@@ -174,7 +222,7 @@ const MARK = "\u0000";
 /** Longer than this, a title is cut (the screen clamps to two lines and shows it whole on hover). */
 const TITLE_MAX = 240;
 
-const hasPerson = (text: string, names: NameDictionary) => [...text.matchAll(/\p{L}+/gu)].some((word) => names.people.has(fold(word[0])));
+const hasPerson = (text: string, names: NameDictionary) => [...text.matchAll(/\p{L}+/gu)].some((word) => isRequester(word[0], names.people));
 const hasTenant = (text: string, names: NameDictionary) => [...names.tenants].some((name) => fold(text).includes(name));
 
 /** A card's title: no leading issue numbers, no "fix(scope):", no requester
@@ -201,8 +249,12 @@ export function boardTitle(raw: string, names: NameDictionary): string {
     return inside === token ? "cliente" : inside;
   });
   // a requester, with the "do/da/pelo" before and the names and date that go with
-  text = text.replace(/\p{L}+/gu, (word) => (names.people.has(fold(word)) ? MARK : word));
-  text = text.replace(new RegExp(String.raw`(?:(?<![\p{L}])(?:d[oa]|pel[oa]|por|com|[oa])\s+)?${MARK}(?:\s*(?:\/|,|(?<![\p{L}])e(?![\p{L}]))\s*${MARK})*(?:,?\s+${DATE})?`, "gu"), "");
+  text = text.replace(/\p{L}+/gu, (word) => (isRequester(word, names.people) ? MARK : word));
+  // the second name goes with the first ("Pedro Henrique")
+  for (let before = ""; before !== text;) { before = text; text = text.replace(new RegExp(`${MARK} (${NAME})(?![\\p{L}])`, "gu"), (whole, next: string) => (STOPWORDS.has(fold(next)) ? whole : `${MARK} ${MARK}`)); }
+  // with the "do/da/pelo" before, the others joined to it ("do Roberto e da Daiane") and the date after
+  const joined = String.raw`(?:\s*(?:\/|,)\s*|\s+|\s+e(?:\s+(?:d[oa]s?|pel[oa]s?|[oa]s?))?\s+)`;
+  text = text.replace(new RegExp(String.raw`(?:(?<![\p{L}])(?:d[oa]|pel[oa]|por|com|[oa])\s+)?${MARK}(?:${joined}${MARK})*(?:,?\s+\(?${DATE}\)?)?`, "gu"), "");
   text = text.replace(/\s+([,.;:!?)])(?=\s|$)/g, "$1").replace(/\(\s*\)/g, "").replace(/\s+\/\s+/g, " ")
     .replace(/^[\s,;:/—–-]+/u, "").replace(/[\s,;:/—–-]+$/u, "").replace(/\s{2,}/g, " ").trim();
   if (!text) return "—";
@@ -453,7 +505,7 @@ function fromCache(pr: GhPr | null, number = pr?.number ?? 0): LivePr {
   return {
     number, title: pr?.title ?? "", createdAt: pr?.createdAt ?? 0, updatedAt: pr?.updatedAt ?? 0, mergedAt: pr?.mergedAt ?? null,
     state: pr?.state ?? "OPEN", draft: pr?.draft ?? false, base: pr?.base ?? "main", head: pr?.head ?? "", headSha: null, mergeSha: pr?.mergeSha ?? null,
-    gate: "missing", gateAt: null, mergeState: null, closes: pr?.closes ?? [], refs: pr?.refs ?? [], labels: pr?.labels ?? [],
+    gate: "missing", gateAt: null, mergeState: null, closes: pr?.closes ?? [], refs: pr?.refs ?? [], ...(pr?.fixes ? { fixes: pr.fixes } : {}), labels: pr?.labels ?? [],
   };
 }
 
@@ -531,12 +583,15 @@ function buildCard(keys: string[], context: CardContext): BoardCard | null {
   let closeout = false;
   if (stage === "entry") {
     if (delivered.length) {
-      // its PRs reached production more than 7 days ago and the issue is still open: the cycle was not closed
+      // its PRs reached production more than 7 days ago and the issue is still open: a PR that
+      // said it closes it means the cycle was not closed; PRs that only cite it ("Refs", a
+      // "Fase 0") delivered part of it — the rest is still to do, not a cycle to close
       const last = [...delivered].sort((a, b) => b.delivered!.at - a.delivered!.at)[0]!;
+      const whole = primary !== null && delivered.some((pr) => closesIssue(pr, primary));
       since = last.delivered!.at;
-      reason = { code: "delivered-open" };
+      reason = { code: whole ? "delivered-open" : "delivered-partial" };
       release = { sha: last.delivered!.sha ? short(last.delivered!.sha) : "—", state: "released", at: last.delivered!.at, ...(last.delivered!.inferred ? { inferred: true as const } : {}) };
-      closeout = true;
+      closeout = whole;
     } else if (sessions.length) {
       // a session was opened for it and archived without a PR: reopen it or close the issue
       since = Math.max(...sessions.map((session) => session.archivedAt ?? session.lastActivityAt));
@@ -594,6 +649,8 @@ function buildCard(keys: string[], context: CardContext): BoardCard | null {
     since,
     limitMs: stageLimitMs(stage, urgent, context.limits),
     state, blocked, urgent, closeout, reason, owner,
+    issueOpen: primaryIssue?.state === "OPEN",
+    partial: stage === "production" && primaryIssue?.state === "OPEN" && primary !== null && !delivered.some((pr) => closesIssue(pr, primary)),
     links: {
       issue: primary !== null ? `https://github.com/${repo}/issues/${primary}` : null,
       pr: linkPr ? `https://github.com/${repo}/pull/${linkPr.number}` : null,

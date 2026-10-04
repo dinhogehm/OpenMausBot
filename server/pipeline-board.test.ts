@@ -128,17 +128,27 @@ describe("INSP-Z r1", () => {
     expect(at("issue:9358")).toBeLessThan(at("issue:9337"));
   });
 
-  it("Z-2: an open issue whose PRs shipped over 7 days ago is back in Entrada, 'delivered on <date>', a cycle to close", () => {
+  it("Z-2: an open issue whose PRs shipped over 7 days ago is back in Entrada — and never vanishes", () => {
     const board = buildPipelineBoard(boardInputs());
+    // #9074's PRs only say "Refs #9074" (#9087: "resolve só o falso sucesso"): a partial delivery, not a cycle to close (INSP-Z r2 Z2-4)
     expect(card(board, "issue:9074")).toMatchObject({
-      stage: "entry", state: "idle", reason: { code: "delivered-open" }, closeout: true, prs: [9087, 9113, 9118],
+      stage: "entry", state: "idle", reason: { code: "delivered-partial" }, closeout: false, prs: [9087, 9113, 9118],
       since: 1790111712000, release: { sha: "e21afb7e5", state: "released", at: 1790111712000, inferred: true },
       links: { pr: "https://github.com/dinhogehm/nuria-platform/pull/9118" }, limitMs: 7 * DAY, urgent: true,
     });
-    expect(isStale(card(board, "issue:9074"), NOW)).toBe(true);
-    // and it never vanishes: 9 days later, still there
     const later = buildPipelineBoard(boardInputs({ now: NOW + 9 * DAY } as Partial<BoardInputs>));
     expect(card(later, "issue:9074").stage).toBe("entry");
+    // #9190 says "Fecha #9185": shipped on 29/09, #9185 still open — 7 days on, a cycle to close
+    expect(card(later, "issue:9185")).toMatchObject({ stage: "entry", reason: { code: "delivered-open" }, closeout: true, release: { sha: "f6d127693" } });
+  });
+
+  it("Z2-5: in Produção, a card says its issue is still open — and whether what shipped only cited it", () => {
+    const board = buildPipelineBoard(boardInputs());
+    expect(card(board, "issue:9185")).toMatchObject({ stage: "production", issueOpen: true, partial: false });
+    expect(card(board, "issue:8204")).toMatchObject({ stage: "production", issueOpen: false, partial: false });
+    // #9280 says "Refs #9195": once it ships, #9195 (open) is a partial delivery in Produção
+    const shipped = buildPipelineBoard(boardInputs({ runs: boardRuns().map((run) => (run.outcome === "running" ? { ...run, outcome: "released" as const, endedAt: NOW - 60_000 } : run)), releaseHold: null }));
+    expect(card(shipped, "issue:9195")).toMatchObject({ stage: "production", issueOpen: true, partial: true });
   });
 
   it("Z-3: limits are the owner's — defaults sane, saved values used, broken ones the default", () => {
@@ -332,7 +342,7 @@ describe("titles, rows and receipts", () => {
 
   it("Z-7: in any case and with or without accents; e-mail addresses and a client's domain; no orphan punctuation", () => {
     expect(boardTitle("Erro reportado pela Patrícia 02/10 no CSAT", names)).toBe("Erro reportado no CSAT");
-    expect(boardTitle("Erro do PATRÍCIA e da patricia no filtro", names)).toBe("Erro e no filtro");
+    expect(boardTitle("Erro do PATRÍCIA e da patricia no filtro", names)).toBe("Erro no filtro");
     expect(boardTitle("Helpdesk: remetente em domínio do cliente — ex.: suporte@crmacmecorp.com", names)).toBe("Helpdesk: remetente em domínio do cliente");
     expect(boardTitle("Remetente crmacmecorp.com recusado pelo SendGrid", names)).toBe("Remetente cliente recusado pelo SendGrid");
     expect(boardTitle("Contato fulana.silva@gmail.com não recebe o e-mail", names)).toBe("Contato e-mail não recebe o e-mail");
@@ -342,6 +352,35 @@ describe("titles, rows and receipts", () => {
     expect(boardTitle("Deploy 02/10 travou na fila", names)).toBe("Deploy 02/10 travou na fila");
     expect(boardTitle("Relatório mensal fica zerado", names)).toBe("Relatório mensal fica zerado");
     expect(fold("Patrícia")).toBe("patricia");
+  });
+
+  it("INSP-Z r2 Z2-2: variants of a learned requester go too — Felipe, Mateus, Dai, Pedrinho, a second name, a channel before the name", () => {
+    const real = nameDictionary([
+      "BI: indicadores de CSAT não funcionam (Filipe, planilha L110)",
+      "fix(atendimento): erro ao enviar mensagem (Matheus, 01/10)",
+      "fix(atendimento): aviso vermelho na fila (Daiane 01/10)",
+      "CSAT atribuído ao N2 (ticket 142461, Pedro 02/10)",
+      "Widget pede OTP (Chat Patricia 24/09)",
+      "Fila do atendimento — Roberto 30/09",
+    ]);
+    expect([...real.people].sort()).toEqual(["daiane", "filipe", "matheus", "patricia", "pedro", "roberto"]);
+    expect(boardTitle("Felipe pediu o filtro de motivo", real)).toBe("Pediu o filtro de motivo");
+    expect(boardTitle("Erro reportado pelo Mateus no chat", real)).toBe("Erro reportado no chat");
+    expect(boardTitle("Dai: aviso vermelho na fila", real)).toBe("Aviso vermelho na fila");
+    expect(boardTitle("Pedrinho não recebe o e-mail", real)).toBe("Não recebe o e-mail");
+    expect(boardTitle("Erro no CSAT reportado por Pedro Henrique (02/10)", real)).toBe("Erro no CSAT reportado");
+    expect(boardTitle("Widget pede OTP a Patricia de novo", real)).toBe("Widget pede OTP de novo");
+    // no orphan connective
+    expect(boardTitle("Fila do Roberto e da Daiane não distribui", real)).toBe("Fila não distribui");
+    // common words that look like variants stay
+    expect(boardTitle("Pedra no sapato: Daily e Dados do Filtro", real)).toBe("Pedra no sapato: Daily e Dados do Filtro");
+    expect(boardTitle("Matrícula do Mateus Rodrigues", real)).toBe("Matrícula");
+  });
+
+  it("INSP-Z r2 Z2-3: meetings, channels, days and months are never learned as people", () => {
+    const common = nameDictionary(["Ajuste (Reunião 30/09)", "Pauta (Chat 02/10)", "Bug (Planilha 01/10)", "Release (Deploy 02/10)", "Fechamento (Relatório 30/09)", "Plano (Sprint 01/10)", "Revisão (Segunda 29/09)", "Corte (Outubro 01/10)"]);
+    expect([...common.people]).toEqual([]);
+    expect(boardTitle("Reunião de alinhamento com o Chat e a Planilha", common)).toBe("Reunião de alinhamento com o Chat e a Planilha");
   });
 
   it("capitals are not a client: emphasis and code stay as written", () => {
