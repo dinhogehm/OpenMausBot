@@ -157,6 +157,26 @@ describe("what needs the person, from every bot", () => {
     expect(SidebarNeedsYou({ items: needsYouItems(answered), density: "icons", now, onOpen: () => {} })).toBeNull();
   });
 
+  // lot J2: o14/o15 lived in the Monitor's routine runs, and the sidebar said "1"
+  it("counts the items a routine's run or an archived conversation opened, in the block and in 'Aguardando bots' — never a run's own question", () => {
+    const routine = "Atendimento: Chat, planilha e issues";
+    const listed = [bot("monitor", "Monitor Chat Atendimento", [
+      task("main", "@Chief of Staff", { goalNeedsInput: true, goalNeedsInputSince: now - 13 * 3_600_000, goalNeedsInputAsk: "A decisão de produto da #9356 continua com você." }),
+      task("run-a", routine, { routineRunId: "r1", ownerPending: [{ id: "o14", title: "Autorizar a linha nova da #9355 na planilha", since: now - 20 * 3_600_000 }] }),
+      task("run-b", routine, { routineRunId: "r2", ownerPending: [{ id: "o15", title: "Liberar os comentários na #9331 e na #9334", since: now - 6 * 3_600_000 }] }),
+      task("run-c", routine, { routineRunId: "r3", goalNeedsInput: true, goalNeedsInputSince: now - 30 * 3_600_000, goalNeedsInputAsk: "Abro uma conversa nova no Chat?" }),
+      task("run-d", routine, { routineRunId: "r4", ownerPending: [{ id: "o17", title: "Confirmar o aviso", since: now - 3_600_000, awaitingSince: now - 10 * 60_000 }] }),
+      task("old", "Arquivada", { archivedAt: now, goalNeedsInput: true, ownerPending: [{ id: "o16", title: "Conferir o aviso enviado", since: now - 2 * 3_600_000 }] }),
+    ])];
+    const html = renderToStaticMarkup(SidebarNeedsYou({ items: needsYouItems(listed), density: "comfortable", now, onOpen: () => {} })!);
+    expect(html).toContain('aria-label="4 itens precisam de você"');
+    expect(html).toContain("Autorizar a linha nova da #9355 na planilha");
+    expect(html).toContain("Liberar os comentários na #9331 e na #9334");
+    expect(html).toContain("Conferir o aviso enviado");
+    expect(html).not.toContain("Abro uma conversa nova no Chat?");
+    expect(html).toContain(">Aguardando bots (1)<");
+  });
+
   it("knows when the next answered item goes back to the person, so the sidebar re-renders right then (INSP-J2 r2 N3)", () => {
     const at = now - 30 * 60_000;
     expect(nextAwaitingChange([{ awaitingSince: at }, { awaitingSince: now - 5 * 3_600_000 }, {}], now)).toBe(at + AWAITING_MAX_MS);

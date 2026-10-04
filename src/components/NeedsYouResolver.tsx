@@ -392,9 +392,10 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
       <div id="needs-you-item-scroll" className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 pt-4 sm:px-7 sm:pt-5">
         <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12.5px] text-ink-secondary">
           <span><span className="font-medium text-ink">{item.botName}</span> {t("needsYou.screen.askedAgo", { age: waitingAge(item.since, now) })}</span>
-          {item.threadTitle && item.threadTitle !== item.title && (
-            // the separator travels with what it introduces: never alone at a line's end (INSP-I r1 #19)
-            <span className="min-w-0 max-w-full truncate"><span aria-hidden="true">· </span>{t("needsYou.screen.inThread", { title: item.threadTitle })}</span>
+          {item.threadTitle && (item.threadTitle !== item.title || item.threadKind) && (
+            // the separator travels with what it introduces: never alone at a line's end (INSP-I r1 #19);
+            // a routine's run or an archived conversation is said: "Abrir conversa" opens it all the same
+            <span data-resolver-thread-kind={item.threadKind} className="min-w-0 max-w-full truncate"><span aria-hidden="true">· </span>{t(item.threadKind === "routine" ? "needsYou.screen.inRoutineThread" : item.threadKind === "archived" ? "needsYou.screen.inArchivedThread" : "needsYou.screen.inThread", { title: item.threadTitle })}</span>
           )}
         </p>
         <h2 id="needs-you-item-title" className="mt-1.5 break-words text-[18px] font-semibold leading-snug text-ink sm:mt-2 sm:text-[21px]">{item.title}</h2>

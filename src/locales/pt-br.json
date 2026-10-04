@@ -851,6 +851,8 @@
   "needsYou.screen.next": "Próximo item",
   "needsYou.screen.askedAgo": "pediu há {age}",
   "needsYou.screen.inThread": "em “{title}”",
+  "needsYou.screen.inRoutineThread": "em “{title}”, execução de rotina",
+  "needsYou.screen.inArchivedThread": "em “{title}”, conversa arquivada",
   "needsYou.screen.botWrote": "O bot escreveu: {title}",
   "needsYou.screen.due": "Prazo: {due}",
   "needsYou.screen.overdue": "Prazo vencido: {due}",

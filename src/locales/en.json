@@ -927,6 +927,8 @@
   "needsYou.screen.next": "Next item",
   "needsYou.screen.askedAgo": "asked {age} ago",
   "needsYou.screen.inThread": "in “{title}”",
+  "needsYou.screen.inRoutineThread": "in “{title}”, a routine run",
+  "needsYou.screen.inArchivedThread": "in “{title}”, an archived conversation",
   "needsYou.screen.botWrote": "The bot wrote: {title}",
   "needsYou.screen.due": "Due {due}",
   "needsYou.screen.overdue": "Overdue: {due}",
