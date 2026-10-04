@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { canonicalFolder } from "./own-worktrees.ts";
 
 export const DESKTOP_IDLE_SECONDS = 5;
 export const DESKTOP_SESSIONS_DIR = join(homedir(), "Library", "Application Support", "Claude", "claude-code-sessions");
@@ -365,6 +366,51 @@ export const ROOT_SESSION_HOWTO = (repoName: string, baseBranch: string) =>
   // the same gesture as the 409 and the owner's item: root, worktree OFF
   // ("worktree on" landed in a reused folder on 02/10 10:07, R10-dispatch R10-1)
   `In the Claude app, start one new session (File → New Session) in the root of ${repoName} (folder ${repoName}, branch ${baseBranch}, worktree OFF) and send it a short message — the app records a session only once something is sent; keep it, the server starts new sessions from it. Then this create runs`;
+
+/** The app's link for a new session in a given folder: the one its own
+ * Finder service ("New Claude Code Session Here") opens. */
+export const newSessionInFolderUrl = (folder: string) => `claude://code/new?folder=${encodeURIComponent(folder)}`;
+
+/** The folder chip names `name`: a word of a line equal to it, or its start
+ * cut short by the app ("9353-comprar-assent…", at least 10 characters). */
+export function showsFolderName(lines: OcrLine[], name: string): boolean {
+  const wanted = name.toLowerCase();
+  return lines.some((line) => line.text.toLowerCase().split(/\s+/).some((raw) => {
+    const word = raw.replace(/^[([•·"']+|[)\],;:"'•·]+$/g, "");
+    const cut = word.replace(/(?:…|\.{2,})$/, "");
+    return word === wanted || (cut !== word && cut.length >= 10 && wanted.startsWith(cut));
+  }));
+}
+
+/**
+ * New session in a folder the server made for it (own-worktrees.ts, lote
+ * X): the app's link puts New Session in that folder, whatever folder the
+ * app used last, so no other session's worktree can be inherited. The brief
+ * goes in only when the new session's empty field shows with the folder's
+ * name in its chips; otherwise the step is a miss (the caller falls back to
+ * New Session after a few). `folder` is what the app is given (an alias
+ * outside .claude/worktrees: the app maps folders inside it back to the
+ * repository root); `folderName` is what its chip shows.
+ */
+export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string }): Promise<DesktopStep> {
+  if (!input.folder.startsWith("/") || !input.folderName) return { ok: false, reason: "invalid folder for a new session", retry: false };
+  return withScreen(driver, async (screen) => {
+    await act(screen, () => driver.openUrl(newSessionInFolderUrl(input.folder)));
+    await driver.sleep(3_000);
+    let stop = await guard(screen, "new session in its folder");
+    if (stop) return stop;
+    const size = await driver.screenSize();
+    const bottom = mainArea(await driver.ocr()).filter((line) => line.y > size.h * 0.55);
+    const field = bottom.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
+    if (!field) return { ok: false, reason: `the app's link did not open a new session for ${input.folderName} (no empty task field); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+    if (!showsFolderName(bottom, input.folderName)) return { ok: false, reason: `the new session does not show the folder ${input.folderName} in its chips; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+    stop = await guard(screen, "empty session field");
+    if (stop) return stop;
+    await act(screen, () => driver.click(field.x + 20, field.y + field.h / 2));
+    await driver.sleep(300);
+    return typeBrief(screen, input.text, size, input.folderName);
+  });
+}
 
 /** Paste the brief into the new session's field, type the note, send. */
 async function typeBrief(screen: Screen, text: string, size: { h: number }, repoName: string): Promise<DesktopStep> {
@@ -920,6 +966,12 @@ function readRecord(file: string): DesktopRecord | null {
       const value = toMs(record[key]);
       if (value === undefined) delete record[key];
       else record[key] = value;
+    }
+    // a session opened through the server's alias of its own worktree
+    // (own-worktrees.ts ownLinkPath) is about the worktree itself
+    for (const key of ["cwd", "worktreePath"] as const) {
+      const folder = record[key];
+      if (typeof folder === "string") record[key] = canonicalFolder(folder);
     }
     return record;
   } catch {
