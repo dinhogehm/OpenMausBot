@@ -3231,6 +3231,8 @@
   "needsYou.screen.askedRecommend": "Recommendation asked from {name} — {title}.",
   "needsYou.steps.asking": "Asking {name} for the steps… This item updates here as soon as they arrive.",
   "needsYou.steps.noAnswer": "{name} was asked for the steps {age} ago and has not answered yet.",
+  "needsYou.steps.askingQuestion": "Asking {name} to turn this question into an item with the steps and the options… It replaces this one here. You can also answer below.",
+  "needsYou.steps.noAnswerQuestion": "{name} was asked {age} ago to turn this question into an item with the steps and has not yet. You can answer below.",
   "needsYou.screen.decidedWaiting": "Sent “{label}” to {name} — {title}. Waiting for {name}.",
   "needsYou.screen.awaiting": "Waiting for {name}",
   "needsYou.screen.awaitingChose": "You chose “{label}” {time}: waiting for {name}. This item updates when they answer.",

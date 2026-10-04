@@ -830,6 +830,26 @@ function Decisions(props: NeedsYouResolverViewProps & { item: NeedsYouItem; plac
 
 function NoSteps(props: NeedsYouResolverViewProps & { item: NeedsYouItem }) {
   const { item, busy, now } = props;
+  // a bot's bare question the server asked it to register as an item (lot J2): it is coming, and the question stays answerable
+  if (!item.pendingId && !item.approval && item.stepsRequestedAt) {
+    const asking = now - item.stepsRequestedAt < STEPS_ASK_AGAIN_AFTER_MS;
+    return (
+      <div className="mt-2.5 rounded-xl border border-dashed border-hairline/80 px-4 py-3.5" {...(asking ? { "data-resolver-steps-asking": "" } : {})}>
+        <p role="status" className="flex items-start gap-2 text-[13.5px] leading-relaxed text-ink">
+          {asking
+            ? <Loader2 size={15} aria-hidden="true" className="mt-0.5 shrink-0 animate-spin text-accent-text motion-reduce:animate-none" />
+            : <Sparkles size={15} aria-hidden="true" className="mt-0.5 shrink-0 text-accent-text" />}
+          <span>{asking ? t("needsYou.steps.askingQuestion", { name: item.botName }) : t("needsYou.steps.noAnswerQuestion", { name: item.botName, age: waitingAge(item.stepsRequestedAt, now) })}</span>
+        </p>
+        {!asking && (
+          <button type="button" data-resolver-ask-steps="" disabled={busy !== null} onClick={() => props.onAskSteps(item)} className={cn(quietButton, "mt-3")}>
+            {busy === "steps" ? <Loader2 size={14} aria-hidden="true" className="animate-spin" /> : <ListChecks size={14} aria-hidden="true" />}
+            {t("needsYou.steps.askAgain")}
+          </button>
+        )}
+      </div>
+    );
+  }
   if (!item.pendingId) {
     return (
       <p className="mt-2 max-w-[68ch] text-[14px] leading-relaxed text-ink">

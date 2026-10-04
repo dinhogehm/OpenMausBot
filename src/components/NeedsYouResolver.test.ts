@@ -655,7 +655,7 @@ describe("items a routine's run or an archived conversation opened, and a bare q
   const steps = [{ text: "Confira a issue", link: "https://github.com/acme/app/issues/9355" }];
   const choice = [{ label: "Autorizar", reply: "Autorizo criar a linha.", recommended: true as const, why: "É uma linha só, conferida depois." }, { label: "Faço eu", reply: "Eu crio a linha." }];
   const monitor = bot("monitor", "Monitor Chat Atendimento", [
-    task("main", "@Chief of Staff", { goalNeedsInput: true, goalNeedsInputSince: now - 13 * 3_600_000, goalNeedsInputAsk: "A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282." }),
+    task("main", "@Chief of Staff", { goalNeedsInput: true, goalNeedsInputSince: now - 13 * 3_600_000, goalNeedsInputAsk: "A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282.", goalNeedsInputStepsAskedAt: now - 5 * 60_000 }),
     task("run-a", routine, { routineRunId: "r1", ownerPending: [{ id: "o14", title: "Autorizar a linha nova da #9355 na planilha Atendimento", since: now - 20 * 3_600_000, why: "A demanda não tem linha na planilha.", steps, options: choice }] }),
     task("run-b", routine, { routineRunId: "r2", ownerPending: [{ id: "o15", title: "Liberar os comentários de registro dos avisos na #9331 e na #9334", since: now - 6 * 3_600_000, why: "O hook barrou os comentários.", steps, options: choice }] }),
     // a routine's run that ends asking: its own line stays out (only the items count)
@@ -686,4 +686,21 @@ describe("items a routine's run or an archived conversation opened, and a bare q
     expect(o16.calls).toEqual(["conversation:old"]);
   });
 
+  it("shows a bare question as 'Pedindo o passo a passo…' while the bot registers it, then 'Pedir de novo' after 15 min — and it stays answerable", () => {
+    const asking = view({ items: real, selectedKey: realKey("main"), draft: "Siga com a opção A." });
+    expect(asking.title).toBe("A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282.");
+    expect(asking.html).toContain("Pedindo o passo a passo para Monitor Chat Atendimento… Ele chega aqui como um item com as opções, no lugar desta pergunta.");
+    expect(asking.find("data-resolver-steps-asking")).toBeDefined();
+    expect(asking.html).not.toContain("data-resolver-ask-steps");
+    expect(asking.html).not.toContain("Responda abaixo, ou abra a conversa para ver o contexto.");
+    asking.press("data-resolver-send");
+    expect(asking.calls).toEqual(["reply:main"]);
+    const late = view({ items: real, selectedKey: realKey("main"), now: now + 11 * 60_000 });
+    expect(late.html).toContain("O passo a passo foi pedido para Monitor Chat Atendimento há 16 min e ainda não chegou. Você pode responder abaixo.");
+    late.press("data-resolver-ask-steps");
+    expect(late.calls).toEqual(["steps:undefined"]);
+    // not asked (yet, or ~/.nuria/stop): as before
+    const bare = needsYouItems([bot("monitor", "Monitor Chat Atendimento", [task("main", "@Chief of Staff", { goalNeedsInput: true, goalNeedsInputSince: now - 60_000, goalNeedsInputAsk: "Mesclo a #12?" })])]);
+    expect(view({ items: bare, selectedKey: needsYouKey(bare[0]!) }).html).toContain("Responda abaixo, ou abra a conversa para ver o contexto.");
+  });
 });

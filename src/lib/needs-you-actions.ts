@@ -55,6 +55,14 @@ export async function remindOwnerPending(item: NeedsYouItem): Promise<{ deduped:
   }
 }
 
+/** "Pedir de novo" on a bot's bare question (lot J2): the server asks the
+ * bot, as itself, to register it as an item with steps; the row says
+ * "Pedindo…" through the bot frame it broadcasts. */
+export async function askQuestionSteps(item: NeedsYouItem): Promise<{ deduped: boolean }> {
+  const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/tasks/${encodeURIComponent(item.threadId)}/ask-steps`, { method: "POST" });
+  return { deduped: receipt?.deduped === true };
+}
+
 export async function resolveOwnerPending(item: NeedsYouItem): Promise<void> {
   if (!item.pendingId) return;
   await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/resolve`, { method: "POST" });

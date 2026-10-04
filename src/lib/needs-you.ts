@@ -202,7 +202,11 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
       // the bot's question says what it waits for better than the conversation's title
       const ask = task.goalNeedsInputAsk?.trim();
       const title = ask || needsYouTitle(task.title, { botName: bot.name, botNames });
-      items.push({ botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval });
+      items.push({
+        botId: bot.id, botName: bot.name, threadId: task.threadId, threadTitle: task.title, title, since: task.goalNeedsInputSince ?? task.updatedAt ?? task.createdAt, approval,
+        // the server asked the bot to register the question as an item with steps (lot J2): the screen says so
+        ...(!approval && task.goalNeedsInputStepsAskedAt ? { stepsRequestedAt: task.goalNeedsInputStepsAskedAt } : {}),
+      });
     }
   }
   return items.sort((a, b) => a.since - b.since);
