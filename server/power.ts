@@ -76,13 +76,36 @@ export function belowBatteryLimit(power: PowerState, minPercent: number): boolea
   return power.onBattery && (power.percent === null || power.percent < minPercent);
 }
 
-/** What the watcher of production releases does NOT do, said wherever the
- * battery is: it reads no battery and may start a release on its own
- * (R9-resilience BAT-W). Only the Chief's carrier orders are held. */
-const WATCHER_IGNORES_BATTERY = "o watcher automático de produção não olha a bateria e ainda pode começar um release sozinho";
+/** What the watcher of production releases does on battery, said wherever the
+ * battery is. Since BAT-W it reads the battery before it starts (no release
+ * under its minimum, NURIA_RELEASE_MIN_BATTERY_PERCENT, 60 by default since
+ * R12 B1, nor on an unknown charge); what it does NOT do is stop a release already running,
+ * and that release dies half-deployed if the battery runs out (R12-resilience
+ * B1, B2: the old text still said it read no battery). */
+const watcherOnBattery = (env: Record<string, string | undefined>) => `o watcher de produção confere a bateria só antes de começar um release (${watcherBatteryRule(env)}), mas um release já em curso não para: se a bateria acabar, a produção fica pela metade`;
+
+/** The watcher's default minimum since R12-resilience B1 (ops/r12-battery: 20 → 60). */
+export const WATCHER_DEFAULT_MIN_BATTERY_PERCENT = 60;
+
+/** The watcher's rule, read as it reads it (watch-production-release.sh, nuria #9379):
+ * NURIA_RELEASE_MIN_BATTERY, else its alias NURIA_RELEASE_MIN_BATTERY_PERCENT (an
+ * empty one counts as unset, as with ":-"), when it is a whole number from 0 to
+ * 100; else the default. */
+export function watcherBatteryRule(env: Record<string, string | undefined>): string {
+  const raw = env.NURIA_RELEASE_MIN_BATTERY || env.NURIA_RELEASE_MIN_BATTERY_PERCENT;
+  const set = raw !== undefined && /^[0-9]+$/.test(raw) && Number(raw) <= 100 ? Number(raw) : null;
+  if (set === 100) return "só começa na tomada";
+  if (set === 0) return "começa com qualquer carga";
+  // what lets a release start, not what stops it: "não começa abaixo …, ou na tomada" read as
+  // "não começa na tomada" (INSP-R12a R12b-2)
+  return `só começa na tomada ou com a bateria em ${set ?? WATCHER_DEFAULT_MIN_BATTERY_PERCENT}% ou mais`;
+}
+/** The way out while a release runs on battery. */
+const releaseRunningPlug = (running: boolean) => (running ? " Há um release em curso: ligue o Mac na tomada agora." : "");
 
 /** What to tell, once per level of a discharge below the owner's limit ("low", "critical"), or null. */
-export function batteryAlert(input: { power: PowerState; onBatterySince: number | null; now: number; releaseRunning: boolean; told: ReadonlySet<string>; minPercent?: number }): { level: string; text: string } | null {
+export function batteryAlert(input: { power: PowerState; onBatterySince: number | null; now: number; releaseRunning: boolean; told: ReadonlySet<string>; minPercent?: number; env?: Record<string, string | undefined> }): { level: string; text: string } | null {
+  const watcher = watcherOnBattery(input.env ?? process.env);
   const { power } = input;
   const minPercent = input.minPercent ?? DEFAULT_BATTERY_MIN_PERCENT;
   if (!belowBatteryLimit(power, minPercent)) return null;
@@ -92,13 +115,13 @@ export function batteryAlert(input: { power: PowerState; onBatterySince: number 
   if (power.percent === null) {
     // a no-break: no charge to compare, only the time without the wall
     if (minutes === null || input.now - input.onBatterySince! < UNKNOWN_CHARGE_ALERT_MS || input.told.has("low")) return null;
-    return { level: "low", text: `Sem tomada (no-break): ligue o Mac na tomada. Está sem energia da tomada${since}, carga desconhecida${running}; o Chief não manda carrier assim, mas ${WATCHER_IGNORES_BATTERY}.` };
+    return { level: "low", text: `Sem tomada (no-break): ligue o Mac na tomada. Está sem energia da tomada${since}, carga desconhecida${running}; o Chief não manda carrier assim, e ${watcher}.${releaseRunningPlug(input.releaseRunning)}` };
   }
   if (power.percent < criticalPercent(minPercent) && !input.told.has("critical")) {
-    return { level: "critical", text: `Bateria em ${power.percent}%, quase no fim: ligue o Mac na tomada já. Está na bateria${since}${running}; se desligar no meio de um deploy, a produção fica pela metade — ligue ou peça PARAR: ${WATCHER_IGNORES_BATTERY}.` };
+    return { level: "critical", text: `Bateria em ${power.percent}%, quase no fim: ligue o Mac na tomada já. Está na bateria${since}${running}; ${watcher}. Se não der para ligar agora, peça PARAR para nada novo começar.` };
   }
   if (!input.told.has("low") && !input.told.has("critical")) {
-    return { level: "low", text: `Bateria em ${power.percent}% (seu limite: ${minPercent}%): ligue o Mac na tomada. Está na bateria${since}${running}; o Chief não manda carrier abaixo de ${minPercent}%, mas ${WATCHER_IGNORES_BATTERY}.` };
+    return { level: "low", text: `Bateria em ${power.percent}% (seu limite: ${minPercent}%): ligue o Mac na tomada. Está na bateria${since}${running}; o Chief não manda carrier abaixo de ${minPercent}%, e ${watcher}.${releaseRunningPlug(input.releaseRunning)}` };
   }
   return null;
 }
@@ -196,11 +219,12 @@ export function pluggedInRefusal(power: PowerState | null): string | null {
 
 /** The owner's "plug the Mac in" item, born practical (R10-visual N13): why,
  * what to do, and that it closes by itself on the wall. */
-export function powerPendingDetails(releaseRunning: boolean): { due: string; why: string; steps: Array<{ text: string }>; options: Array<{ label: string; reply: string; recommended?: true; why?: string }> } {
+export function powerPendingDetails(releaseRunning: boolean, env: Record<string, string | undefined> = process.env): { due: string; why: string; steps: Array<{ text: string }>; options: Array<{ label: string; reply: string; recommended?: true; why?: string }> } {
+  const watcher = watcherOnBattery(env);
   return {
     // the most urgent item: first in "Prazo" (INSP-J r1 #14)
     due: "agora",
-    why: `Abaixo do seu limite de bateria, o Mac pode dormir ou desligar e matar no meio o que estiver rodando (CI, sessões dos bots${releaseRunning ? ", e o release de produção que está em curso" : ""}). ${WATCHER_IGNORES_BATTERY[0]!.toUpperCase()}${WATCHER_IGNORES_BATTERY.slice(1)}.`,
+    why: `Abaixo do seu limite de bateria, o Mac pode dormir ou desligar e matar no meio o que estiver rodando (CI, sessões dos bots${releaseRunning ? ", e o release de produção que está em curso" : ""}). ${watcher[0]!.toUpperCase()}${watcher.slice(1)}.`,
     steps: [
       { text: "Ligue o carregador no Mac (ou o no-break na tomada)." },
       { text: "Pronto: o servidor vê a tomada e fecha este item sozinho." },

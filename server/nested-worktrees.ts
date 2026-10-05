@@ -276,13 +276,76 @@ export function conversationFolders(
   return { inUse: [...(cwd ? [cwd] : []), workspace] };
 }
 
+/** What a folder's activity never looks into: dependencies, git's own files, builds. */
+const ACTIVITY_SKIPPED = new Set(["node_modules", ".git", "dist", "build", "out", ".next", ".turbo", ".cache", "coverage", "target", ".local-ci"]);
+
+/** When a folder last changed: the newest mtime of the folder and of every entry
+ * down to `depth` levels below it (repo/src/a.ts is 3), skipping ACTIVITY_SKIPPED.
+ * An edit in place changes only the file's own mtime, so the files are read, not
+ * only the folders (INSP-R12a R12b-3, r2 R2-3). At most `budget` entries are
+ * read: past it — readdir is in no order of date, the newest may be the next one —
+ * the activity is unknown (null), and a folder of unknown activity is never told
+ * as idle. A subfolder that cannot be read counts by its own time; the folder
+ * itself unreadable is unknown. */
+export function folderActivity(path: string, deps: { list: (dir: string) => string[]; stat: (path: string) => { mtimeMs: number; dir: boolean } | null }, budget = 2_000, depth = 3): number | null {
+  const top = deps.stat(path);
+  if (!top) return null;
+  let newest = top.mtimeMs;
+  let read = 0;
+  let level = [trimSlash(path)];
+  for (let below = 1; below <= depth && level.length; below += 1) {
+    const next: string[] = [];
+    for (const dir of level) {
+      let entries: string[] = [];
+      try { entries = deps.list(dir); } catch { continue; }
+      for (const entry of entries) {
+        if (ACTIVITY_SKIPPED.has(entry)) continue;
+        if (++read > budget) return null;
+        const child = `${dir}/${entry}`;
+        const each = deps.stat(child);
+        if (!each) continue;
+        if (each.mtimeMs > newest) newest = each.mtimeMs;
+        if (each.dir) next.push(child);
+      }
+    }
+    level = next;
+  }
+  return newest;
+}
+
+/** Every task-workspace under `root` (<root>/<bot>/<conversation>), with its
+ * last activity and the note of its conversation when closed or quiet. */
+export function scanTaskWorkspaces(root: string, deps: { list: (dir: string) => string[]; activity: (path: string) => number | null; notes: ReadonlyMap<string, string> }): Array<{ path: string; lastActivity: number | null; note?: string }> {
+  const found: Array<{ path: string; lastActivity: number | null; note?: string }> = [];
+  let bots: string[] = [];
+  try { bots = deps.list(root); } catch { return found; } // no task-workspaces here
+  for (const bot of bots) {
+    const botDir = `${trimSlash(root)}/${bot}`;
+    let threads: string[] = [];
+    try { threads = deps.list(botDir); } catch { continue; }
+    for (const thread of threads) {
+      const path = `${botDir}/${thread}`;
+      const note = deps.notes.get(path);
+      found.push({ path, lastActivity: deps.activity(path), ...(note ? { note } : {}) });
+    }
+  }
+  return found;
+}
+
 /** The task-workspaces (task-workspaces/<bot>/<conversation>) idle past
  * STALE_OUTSIDE_TAG_MS that no agent uses: no open conversation, no session
  * inside, not already told as a worktree. Information for a person, with a
  * command that moves to the Trash (undoable), never one that deletes. */
-export function staleTaskWorkspaces(folders: ReadonlyArray<{ path: string; lastActivity: number | null; note?: string }>, input: { inUse: Iterable<string>; now: number; known?: readonly string[]; canon?: (path: string) => string }): StaleFolder[] {
+export function staleTaskWorkspaces(folders: ReadonlyArray<{ path: string; lastActivity: number | null; note?: string }>, input: { inUse: Iterable<string>; now: number; known?: readonly string[]; canon?: (path: string) => string; root?: string; home?: string; processCwds?: Iterable<string> }): StaleFolder[] {
   const canon = (path: string) => trimSlash(input.canon ? input.canon(path) : path);
-  const used = [...input.inUse].filter(Boolean).map(canon);
+  const root = input.root ? canon(input.root) : null;
+  const home = input.home ? canon(input.home) : null;
+  // a folder at or above the task-workspaces root ("/", the home, ~/.openmausbot) holds
+  // none of them: an app session with cwd "/" made every one "in use" (R12-resilience D3),
+  // as the main checkout or above it holds no worktree in planReleasedWorktrees
+  const above = (each: string) => each === "/" || each === home || (root !== null && isInside(root, each));
+  // a live process (a manual claude, a shell) working inside one holds it too (INSP-R12a R12b-3)
+  const used = [...input.inUse, ...(input.processCwds ?? [])].filter(Boolean).map(canon).filter((each) => !above(each));
   const known = (input.known ?? []).map(canon);
   return folders.flatMap((folder) => {
     const path = canon(folder.path);
