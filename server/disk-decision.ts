@@ -78,6 +78,21 @@ export interface FolderFacts {
   dirty: boolean | null;
   /** HEAD on no remote branch; null when git could not tell. */
   unpushed: boolean | null;
+  /** Ignored files that only live here and matter (.dev.vars, .env*), past build junk. */
+  ignored?: string[];
+}
+
+// What an ignored file may be without being anyone's work: build output and caches.
+const JUNK = /(?:^|\/)(?:node_modules|dist|build|out|\.next|\.turbo|coverage|\.cache|\.local-ci|\.wrangler|target|\.vite|\.parcel-cache)(?:\/|$)|(?:^|\/)\.DS_Store$|\.(?:log|tsbuildinfo)$/;
+
+/** From `git status --porcelain --ignored`: whether anything is changed or
+ * untracked, and the ignored paths that are not build junk — a `.dev.vars`
+ * or a `.env` exists only on this Mac, and removing the folder loses it
+ * (INSP-R12F r2 R2-2). */
+export function porcelainState(output: string): { dirty: boolean; ignored: string[] } {
+  const lines = output.split("\n").filter((line) => line.trim());
+  const ignored = lines.filter((line) => line.startsWith("!! ")).map((line) => line.slice(3).trim().replace(/^"|"$/g, "")).filter((path) => !JUNK.test(path.replace(/\/$/, "")));
+  return { dirty: lines.some((line) => !line.startsWith("!! ")), ignored };
 }
 
 /** A folder is in use when a session or an agent's conversation works in it
@@ -122,7 +137,34 @@ export function leftFolders(text: string, folders: readonly string[], keepBusy =
   return [...out.values()];
 }
 
-const keyFolders = (key: string) => key.slice(DISK_DECISION_KEY_PREFIX.length).split(",");
+/** In a key, after the folders: those offered for removal. */
+const CLEAN_MARK = "|limpas:";
+/** The folders an item asks about, from its key. */
+export const keyFolders = (key: string) => key.slice(DISK_DECISION_KEY_PREFIX.length).split(CLEAN_MARK)[0]!.split(",");
+
+/** An open item checked again on the Mac (each routine run, and when the
+ * owner picks a removal): kept when nothing changed; replaced by what holds
+ * now when a folder came into use or is no longer clean ({A,B} → {A} once B
+ * is used, R2-1); closed, with why, when none is left to decide. `fresh` is
+ * diskDecisionItem over the item's own folders with the facts read now. */
+export function diskDecisionRecheck(openKey: string, fresh: NonNullable<ReturnType<typeof diskDecisionItem>> | null, busy: string): { action: "keep" } | { action: "replace"; item: NonNullable<ReturnType<typeof diskDecisionItem>> } | { action: "close"; note: string } {
+  if (!fresh) return { action: "close", note: `nenhuma pasta sobrou para decidir: ${busy || "todas em uso"}` };
+  return fresh.key === openKey ? { action: "keep" } : { action: "replace", item: fresh };
+}
+
+/** Why the folders are in use, for a closing note: "B (sessão «x» nela)". */
+export function busyNote(folders: readonly string[], facts: ReadonlyMap<string, FolderFacts>): string {
+  return folders.map((name) => [name, facts.get(name)?.inUse ?? (facts.has(name) ? null : "não conferida")] as const).filter(([, why]) => why).map(([name, why]) => `${name} (${why})`).join("; ");
+}
+
+/** An open item's folders with the sizes its steps said ("Veja X (3,0G; …)"). */
+export function openItemFolders(item: { key?: string; steps?: ReadonlyArray<{ text: string }> }): LeftFolder[] {
+  if (!item.key?.startsWith(DISK_DECISION_KEY_PREFIX)) return [];
+  return keyFolders(item.key).map((name) => {
+    const size = item.steps?.map((step) => new RegExp(`^Veja ${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(([^;]+);`).exec(step.text)?.[1]).find(Boolean);
+    return { name, size: size ?? "?", reason: "do item aberto" };
+  });
+}
 
 /** What to do with a new list: open (or refresh) its item, and which other
  * disk items it replaces. Nothing when an open item already asks about all
@@ -142,7 +184,9 @@ export function diskDecisionPlan(
   const byOwner = (each: { resolvedBy?: string; history?: readonly unknown[] }) => each.resolvedBy === "owner" || (each.resolvedBy === "bot" && Boolean(each.history?.length));
   if (settled.some((each) => disk(each) && byOwner(each) && covers(each.key) && now - each.resolvedAt < DISK_DECISION_SETTLED_MS)) return { add: false, replace: [] };
   const openDisk = open.filter(disk);
-  if (openDisk.some((each) => each.key !== key && covers(each.key))) return { add: false, replace: [] };
+  // an open item asking about more folders keeps them (it is checked again on its own); the same folders with other offers are replaced
+  const same = (other: string) => keyFolders(other).length === names.length && covers(other);
+  if (openDisk.some((each) => each.key !== key && covers(each.key) && !same(each.key))) return { add: false, replace: [] };
   return { add: true, replace: openDisk.filter((each) => each.key !== key).map((each) => each.key) };
 }
 
@@ -182,7 +226,7 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
   });
   const asked = folders.filter((folder) => !busy.some((each) => each.name === folder.name));
   if (!asked.length) return null;
-  const clean = asked.filter((folder) => facts.get(folder.name)?.dirty === false && facts.get(folder.name)?.unpushed === false);
+  const clean = asked.filter((folder) => facts.get(folder.name)?.dirty === false && facts.get(folder.name)?.unpushed === false && !facts.get(folder.name)?.ignored?.length);
   const pending = asked.filter((folder) => !clean.includes(folder));
   const names = asked.map((folder) => folder.name).sort();
   const total = totalSize(asked);
@@ -192,14 +236,19 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
   const shown = asked.slice(0, STEPS_FOLDERS_MAX);
   const what = (folder: LeftFolder) => {
     const fact = facts.get(folder.name)!;
-    const said = [fact.dirty === true ? "alterações não commitadas" : fact.dirty === null ? "estado do git desconhecido" : "", fact.unpushed === true ? "commits em nenhuma branch remota" : fact.unpushed === null ? "push desconhecido" : ""].filter(Boolean);
+    const said = [
+      fact.dirty === true ? "alterações não commitadas" : fact.dirty === null ? "estado do git desconhecido" : "",
+      fact.unpushed === true ? "commits em nenhuma branch remota" : fact.unpushed === null ? "push desconhecido" : "",
+      fact.ignored?.length ? `arquivos ignorados que só existem aqui: ${fact.ignored.slice(0, 4).join(", ")}${fact.ignored.length > 4 ? ", …" : ""}` : "",
+    ].filter(Boolean);
     return said.length ? said.join(", ") : "limpa e no GitHub";
   };
   const kept = busy.length ? ` Não mexer (fora deste item): ${busy.map((each) => `${each.name} (${each.busy})`).join("; ")}.` : "";
   return {
-    key: `${DISK_DECISION_KEY_PREFIX}${names.join(",")}`,
+    // the folders, and which are offered for removal: a change in either is another item (INSP-R12F r2 R2-1)
+    key: `${DISK_DECISION_KEY_PREFIX}${names.join(",")}${clean.length ? `${CLEAN_MARK}${words(clean).replace(/ /g, ",")}` : ""}`,
     title: `Decidir o destino de ${asked.length} worktree${asked.length === 1 ? "" : "s"} parada${asked.length === 1 ? "" : "s"} (${total}): ${names.join(", ")}`.slice(0, 200),
-    why: `A rotina de disco não pode removê-las sozinha. Juntas ocupam ${total}${free ? `; o disco está com ${free} GiB livres e o release exige 8` : ""}.${pending.length ? ` ${pending.length} têm trabalho que só existe neste Mac.` : ""}${kept}`.slice(0, 400),
+    why: `A rotina de disco não pode removê-las sozinha. Juntas ocupam ${total}${free ? `; o disco está com ${free} GiB livres e o release exige 8` : ""}.${pending.length ? ` ${pending.length} ${pending.length === 1 ? "tem" : "têm"} trabalho que só existe neste Mac.` : ""}${kept}`.slice(0, 400),
     steps: [
       { text: RECHECK },
       ...shown.map((folder) => ({

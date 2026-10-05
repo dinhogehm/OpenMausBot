@@ -8,6 +8,11 @@ import {
   diskDecisionPlan,
   diskRoutine,
   folderInUse,
+  busyNote,
+  diskDecisionRecheck,
+  keyFolders,
+  openItemFolders,
+  porcelainState,
   resolveFolder,
   totalSize,
   type FolderFacts,
@@ -133,7 +138,7 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
     facts.set("9052-tempo-de-reabertura-configuravel-35787b", { inUse: "sessão «9052 Tempo de reabertura» nela", dirty: false, unpushed: true });
     facts.set("atendimento-reaberto-bugs-496989", { inUse: null, dirty: false, unpushed: false });
     const item = diskDecisionItem(folders, facts, ROOT, RUN_1138)!;
-    expect(item.key).toBe(`${DISK_DECISION_KEY_PREFIX}8204-reprovado-sidebar-da-fila-nao-refle-9b50cd,atendimento-reaberto-bugs-496989`);
+    expect(item.key).toBe(`${DISK_DECISION_KEY_PREFIX}8204-reprovado-sidebar-da-fila-nao-refle-9b50cd,atendimento-reaberto-bugs-496989|limpas:atendimento-reaberto-bugs-496989`);
     expect(item.why).toContain("Não mexer (fora deste item): 9052-tempo-de-reabertura-configuravel-35787b (sessão «9052 Tempo de reabertura» nela)");
     const remove = item.options.find((option) => option.label === "Remover as limpas")!;
     expect(remove.reply).toContain("Remova as worktrees atendimento-reaberto-bugs-496989 com git worktree remove, sem --force.");
@@ -216,5 +221,56 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
     expect(diskDecisionPlan(key("A", "B"), [{ key: key("D") }], [replaced], now)).toEqual({ add: true, replace: [key("D")] });
     // a bot closing it without the owner's answer is not the owner's decision either
     expect(diskDecisionPlan(key("A", "B"), [], [{ ...replaced, resolvedBy: "bot" }], now).add).toBe(true);
+  });
+
+  // INSP-R12F r2 R2-1: the open {A,B} still offered "Remover as limpas: A B" after B came into use
+  it("an open item checked again: {A,B} with B now in use becomes {A}; none left closes it; nothing changed keeps it", () => {
+    const A = "8204-reprovado-sidebar-da-fila-nao-refle-9b50cd";
+    const B = "atendimento-reaberto-bugs-496989";
+    const folders = [{ name: A, size: "3,0G", reason: "commits só locais" }, { name: B, size: "263M", reason: "commits só locais" }];
+    const clean = new Map<string, FolderFacts>([[A, { inUse: null, dirty: false, unpushed: false }], [B, { inUse: null, dirty: false, unpushed: false }]]);
+    const open = diskDecisionItem(folders, clean, ROOT, RUN_1138)!;
+    expect(open.options[0]).toMatchObject({ label: "Remover as limpas" });
+    expect(open.options[0]!.reply).toContain(`Remova as worktrees ${A} ${B} com git worktree remove`);
+    // read back from the open item: its folders and the sizes its steps said
+    const back = openItemFolders(open);
+    expect(back.map((each) => [each.name, each.size])).toEqual([[A, "3,0G"], [B, "263M"]]);
+    // nothing changed: kept
+    expect(diskDecisionRecheck(open.key, diskDecisionItem(back, clean, ROOT, ""), "")).toEqual({ action: "keep" });
+    // B came into use: the item is A alone, and B is "não mexer"
+    const used = new Map(clean).set(B, { inUse: "sessão «9378 Supervisor» nela", dirty: false, unpushed: false });
+    const after = diskDecisionRecheck(open.key, diskDecisionItem(back, used, ROOT, ""), busyNote([A, B], used));
+    expect(after.action).toBe("replace");
+    const item = (after as { item: NonNullable<ReturnType<typeof diskDecisionItem>> }).item;
+    expect(keyFolders(item.key)).toEqual([A]);
+    expect(item.options[0]!.reply).toContain(`Remova as worktrees ${A} com git worktree remove`);
+    expect(item.options.map((option) => option.reply).join(" ")).not.toContain(`${B} com`);
+    expect(item.why).toContain(`Não mexer (fora deste item): ${B} (sessão «9378 Supervisor» nela)`);
+    // B no longer clean (an ignored .dev.vars appeared): same folders, other offers → another key
+    const notClean = new Map(clean).set(B, { inUse: null, dirty: false, unpushed: false, ignored: [".dev.vars"] });
+    expect(diskDecisionRecheck(open.key, diskDecisionItem(back, notClean, ROOT, ""), "").action).toBe("replace");
+    expect(diskDecisionPlan(diskDecisionItem(back, notClean, ROOT, "")!.key, [{ key: open.key }], [], Date.now())).toEqual({ add: true, replace: [open.key] });
+    // both in use: closed, with why
+    const both = new Map(used).set(A, { inUse: "há um processo vivo dentro dela", dirty: false, unpushed: false });
+    expect(diskDecisionRecheck(open.key, diskDecisionItem(back, both, ROOT, ""), busyNote([A, B], both))).toEqual({
+      action: "close",
+      note: `nenhuma pasta sobrou para decidir: ${A} (há um processo vivo dentro dela); ${B} (sessão «9378 Supervisor» nela)`,
+    });
+  });
+
+  // INSP-R12F r2 R2-2: "clean" ignored the ignored files; a .dev.vars lives only on this Mac
+  it("an ignored file that matters keeps a folder from being clean, past build junk", () => {
+    const state = porcelainState("!! node_modules/\n!! apps/web/.next/\n!! .turbo/\n!! dist/\n!! debug.log\n!! .dev.vars\n!! apps/api/.env.local\n");
+    expect(state).toEqual({ dirty: false, ignored: [".dev.vars", "apps/api/.env.local"] });
+    expect(porcelainState("!! node_modules/\n!! coverage/\n")).toEqual({ dirty: false, ignored: [] });
+    expect(porcelainState(" M src/a.ts\n!! node_modules/\n").dirty).toBe(true);
+    const folders = [{ name: "atendimento-reaberto-bugs-496989", size: "263M", reason: "commits só locais" }];
+    const facts = new Map<string, FolderFacts>([["atendimento-reaberto-bugs-496989", { inUse: null, dirty: false, unpushed: false, ignored: state.ignored }]]);
+    const item = diskDecisionItem(folders, facts, ROOT, "")!;
+    expect(item.options.map((option) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
+    expect(item.steps[1]!.text).toContain("arquivos ignorados que só existem aqui: .dev.vars, apps/api/.env.local");
+    // R2-3: one folder "tem", several "têm"
+    expect(item.why).toContain(" 1 tem trabalho que só existe neste Mac.");
+    expect(diskDecisionItem(diskDecisionFolders(RUN_1138, FOLDERS), idle(FOLDERS), ROOT, RUN_1138)!.why).toContain(" 3 têm trabalho que só existe neste Mac.");
   });
 });

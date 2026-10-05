@@ -30,13 +30,15 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     "**Onde dá para liberar mais espaço:** as três worktrees com commits só locais e sem alterações (8204, 9052 e atendimento-reaberto) somam cerca de 5,5 GiB, e a merge-deploy-open-prs-00664b mais 592M. Se esse trabalho já entrou na main por squash, alguém pode remover essas pastas manualmente; a rotina não pode removê-las.",
   ].join("\n");
   expect(reply.length).toBeGreaterThan(2_000);
-  const fixture = await launchVerificationServer({ ...process.env, FAKE_CLAUDE_REPLIES: JSON.stringify([reply, reply]) });
+  const fixture = await launchVerificationServer({ ...process.env, FAKE_CLAUDE_REPLIES: JSON.stringify([reply, reply, reply]) });
   const { url, dataDir } = fixture.info;
   const api = async (method: string, path: string, body?: unknown) => {
     const response = await fetch(`${url}${path}`, { method, headers: { "content-type": "application/json", origin: url }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return response.json() as Promise<any>;
   };
   let holder: ChildProcess | undefined;
+  let second: ChildProcess | undefined;
+  let third: ChildProcess | undefined;
   const ledger = () => (existsSync(join(dataDir, "bot-autonomy.json")) ? JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")) : {});
   try {
     // the worktrees, where the server looks for them (the fixture's home is its data dir)
@@ -84,8 +86,28 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     const chips = ((await api("GET", `/api/threads/${first.resultsThreadId}/messages?limit=100`)).messages as any[])
       .filter((message) => message.kind === "activity" && String(message.tool?.name ?? "").startsWith(`Em "Precisa de você" (${item.id})`));
     expect(chips).toHaveLength(1);
+    // INSP-R12F r2 R2-1: a process starts working in 8204 while the item is open — the next run checks the open item again
+    second = spawn("sleep", ["120"], { cwd: join(root, "8204-reprovado-sidebar-da-fila-nao-refle-9b50cd"), stdio: "ignore" });
+    await runOnce();
+    await expect.poll(() => ledger().ownerPending.map((each: any) => each.key), { timeout: 15_000 })
+      .toEqual(["disk-decision:9052-tempo-de-reabertura-configuravel-35787b,atendimento-reaberto-bugs-496989"]);
+    const [current] = ledger().ownerPending;
+    expect(current.why).toContain("8204-reprovado-sidebar-da-fila-nao-refle-9b50cd (há um processo vivo dentro dela)");
+    expect(JSON.stringify(current.options)).not.toContain("8204");
+    expect(ledger().resolvedOwnerPending.find((each: any) => each.id === item.id)).toMatchObject({ resolvedBy: "server", resolvedNote: "atualizado: conferido de novo no Mac" });
+    // and at the click: 9052 comes into use, the owner picks the removal — checked first, refused, the item updated
+    third = spawn("sleep", ["120"], { cwd: join(root, "9052-tempo-de-reabertura-configuravel-35787b"), stdio: "ignore" });
+    const response = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${current.id}/reply`, {
+      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ option: 0, label: current.options[0].label }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "disk_item_changed" });
+    expect(ledger().ownerPending.map((each: any) => each.key)).toEqual(["disk-decision:atendimento-reaberto-bugs-496989"]);
+    expect(ledger().ownerPending[0].history ?? []).toEqual([]);
   } finally {
     holder?.kill();
+    second?.kill();
+    third?.kill();
     await fixture.close();
   }
 }, 90_000);
