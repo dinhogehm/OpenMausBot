@@ -19852,13 +19852,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           const promotion = replaces ? autonomy.askPromotionFor(bot.id, replaces.threadId, replaces.askAt) : null;
           if (replaces && !promotion) return json(res, 400, { error: `replacesAsk ${replaces.threadId}@${replaces.askAt} não é de nenhum pedido do servidor a você. Copie o Ref exato do pedido "[Servidor: pergunta sem passo a passo]", ou abra o item sem replacesAsk.` });
           // reopening what the server settled as "respondida na conversa" is the bot's call (INSP-J2b r3): allowed
-          const reopening = Boolean(promotion?.itemId && autonomy.resolvedOwnerPendingOf(bot.id).some((each) => each.id === promotion.itemId && each.resolvedNote === ANSWERED_IN_CONVERSATION));
+          // the linked item itself (bot, id, conversation, birth), never another that had its id (R12-followup #3)
+          const reopening = Boolean(promotion && autonomy.askPromotionResolvedItem(promotion)?.resolvedNote === ANSWERED_IN_CONVERSATION);
           if (promotion && !reopening && questionAnswer(promotion)) {
             return json(res, 200, { message: "A pessoa já respondeu essa pergunta na conversa: não abri o item. Siga com a resposta dela." });
           }
           const item = autonomy.addOwnerPending(bot.id, threadId, { title, ...(typeof body.due === "string" ? { due: body.due } : {}), ...(typeof body.link === "string" ? { link: body.link } : {}), ...structured });
           if (promotion) {
-            autonomy.linkAskPromotion(promotion, item.id);
+            autonomy.linkAskPromotion(promotion, item);
             refreshBotRow(bot.id);
           }
           const replaced = promotion ? ` Ele substitui a sua pergunta em "Precisa de você".` : "";

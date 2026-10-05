@@ -1494,7 +1494,7 @@ describe("a bare question asked to become an item (lot J2)", () => {
     expect(make().askPromotionItem(make().askPromotionFor("b", "main", ask.askAt)!)).toBeNull();
     // the bot's item, linked: it replaces the question, open or settled, across a restart
     const item = autonomy.addOwnerPending("b", "channel", { title: "Escolher entre A e B para o cliente", why: "A cliente espera.", steps });
-    autonomy.linkAskPromotion(asked, item.id);
+    autonomy.linkAskPromotion(asked, item);
     expect(autonomy.askPromotionItem(asked)?.id).toBe(item.id);
     expect(autonomy.askPromotionOpenItem(asked)?.id).toBe(item.id);
     autonomy.resolveOwnerPending({ botId: "b", id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION });
@@ -1591,5 +1591,77 @@ describe("a reply that says the person is not needed asks nothing (R11-visual N1
     expect(echoAsk("Esse trabalho já é meu (item 5 da operação) e não depende de decisão sua.")).toBe(true);
     // a denial on both sides of the cut stays a denial
     expect(ownerAskAt(thread("O merge é meu, mas não depende de decisão sua."), at + 60_000)).toBeNull();
+  });
+});
+
+// R12-followup #3: "o3" was given 13 times to the Chief, and the Monitor has two
+// settled "o2" — the link of a question to its item read the first one
+describe("owner_pending ids are never reused", () => {
+  const steps = [{ text: "Leia a issue" }];
+
+  it("go up per bot, past every settled id, across a restart", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      wakes: [], goals: [], inFlight: [],
+      resolvedOwnerPending: [
+        ...[1, 2, 3].map((day) => ({ id: "o3", botId: "chief", threadId: "52417e4a", title: `Decisão ${day}`, createdAt: day * 1_000, resolvedAt: day * 1_000 + 1, resolvedBy: "bot" })),
+        { id: "o2", botId: "chief", threadId: "52417e4a", title: "Outra", createdAt: 5_000, resolvedAt: 5_001, resolvedBy: "bot" },
+        { id: "o9", botId: "monitor", threadId: "dc38193b", title: "Do Monitor", createdAt: 5_000, resolvedAt: 5_001, resolvedBy: "bot" },
+      ],
+    }));
+    const autonomy = make();
+    const first = autonomy.addOwnerPending("chief", "52417e4a", { title: "Decidir a #9374", why: "x", steps });
+    expect(first.id).toBe("o4");
+    autonomy.resolveOwnerPending({ botId: "chief", id: first.id });
+    // the open list is empty again: the old rule (open count + 1) said "o1"
+    expect(autonomy.addOwnerPending("chief", "52417e4a", { title: "Abrir a issue do Supervisor", why: "x", steps }).id).toBe("o5");
+    expect(autonomy.addOwnerPending("monitor", "dc38193b", { title: "Escrever na planilha", why: "x", steps }).id).toBe("o10");
+    const reloaded = make();
+    reloaded.resolveOwnerPending({ botId: "chief", id: "all", threadId: "52417e4a" });
+    expect(reloaded.addOwnerPending("chief", "52417e4a", { title: "Remover as pastas de disco", why: "x", steps }).id).toBe("o6");
+    expect(JSON.parse(readFileSync(join(dir, "bot-autonomy.json"), "utf8")).ownerPendingSeq).toEqual({ chief: 6, monitor: 10 });
+  });
+
+  // the Monitor's ledger of 05/10: o2 of 01/10 and o2 of 04/10, the request linked to "o2"
+  const monitor = "891b6b94";
+  const channel = "dc38193b";
+  const ledger = (notes: { first?: string; second?: string }) => ({
+    wakes: [], goals: [], inFlight: [],
+    resolvedOwnerPending: [
+      { id: "o2", botId: monitor, threadId: channel, title: "Escrever na linha 105 da planilha Atendimento (#9058, Filipe…)", createdAt: Date.parse("2026-10-01T20:00:00.110Z"), resolvedAt: Date.parse("2026-10-03T12:46:34.065Z"), resolvedBy: "bot", ...(notes.first ? { resolvedNote: notes.first } : {}) },
+      { id: "o2", botId: monitor, threadId: channel, title: "Decidir o caminho de produto da #9356 (widget pede código na…)", createdAt: Date.parse("2026-10-04T23:34:17.653Z"), resolvedAt: Date.parse("2026-10-04T23:44:02.753Z"), resolvedBy: "bot", ...(notes.second ? { resolvedNote: notes.second } : {}) },
+    ],
+    askPromotions: [{ botId: monitor, threadId: channel, reportThreadId: channel, askAt: Date.parse("2026-10-03T22:32:34.187Z"), askedAt: Date.parse("2026-10-04T23:33:56.989Z"), itemId: "o2", answeredAt: Date.parse("2026-10-04T23:41:47.034Z"), text: "A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282." }],
+  });
+
+  it("a request linked before the birth was kept finds its own o2 — the one opened for it, not the one of 01/10", () => {
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify(ledger({ first: ANSWERED_IN_CONVERSATION })));
+    const autonomy = make();
+    const [promotion] = autonomy.allAskPromotions();
+    expect(autonomy.askPromotionItem(promotion!)?.title).toContain("#9356");
+    // the reopening rule reads that item: the 01/10 one was settled "respondida na conversa", this one by the bot
+    expect(autonomy.askPromotionResolvedItem(promotion!)?.resolvedNote).toBeUndefined();
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify(ledger({ second: ANSWERED_IN_CONVERSATION })));
+    expect(make().askPromotionResolvedItem(make().allAskPromotions()[0]!)?.resolvedNote).toBe(ANSWERED_IN_CONVERSATION);
+    // and the next item of the Monitor is past both
+    expect(make().addOwnerPending(monitor, channel, { title: "Novo pedido", why: "x", steps }).id).toBe("o3");
+  });
+
+  it("a link keeps the item's conversation and birth: an item that took the same id elsewhere is not it", () => {
+    const autonomy = make();
+    const asked = autonomy.noteAskPromotion({ botId: "b", threadId: "main", askAt: now - 60_000, text: "Sigo com A ou B?", reportThreadId: "channel" });
+    const item = autonomy.addOwnerPending("b", "channel", { title: "Escolher entre A e B", why: "x", steps });
+    autonomy.linkAskPromotion(asked, item);
+    expect(asked).toMatchObject({ itemId: item.id, itemThreadId: "channel", itemCreatedAt: now });
+    autonomy.resolveOwnerPending({ botId: "b", id: item.id, by: "owner", note: ANSWERED_IN_CONVERSATION });
+    // an older ledger's open item with the same id, born later, in another conversation
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      ...JSON.parse(readFileSync(join(dir, "bot-autonomy.json"), "utf8")),
+      ownerPending: [{ id: item.id, botId: "b", threadId: "other", title: "Outra coisa", createdAt: now + 3_600_000 }],
+    }));
+    const reloaded = make();
+    const again = reloaded.allAskPromotions()[0]!;
+    expect(reloaded.askPromotionOpenItem(again)).toBeNull();
+    expect(reloaded.askPromotionItem(again)?.title).toBe("Escolher entre A e B");
+    expect(reloaded.askPromotionResolvedItem(again)?.resolvedNote).toBe(ANSWERED_IN_CONVERSATION);
   });
 });

@@ -451,6 +451,10 @@ export interface AskPromotion {
   reportThreadId: string;
   /** The item the bot opened for it, linked by owner_pending add replacesAsk. */
   itemId?: string;
+  /** That item's conversation and birth: with its id, the one item (ids were
+   * reused before the counter — the Monitor had two "o2"; R12-followup #3). */
+  itemThreadId?: string;
+  itemCreatedAt?: number;
   /** When the server saw the person answer it in the conversation itself (settled once). */
   answeredAt?: number;
 }
@@ -533,6 +537,12 @@ export function ownerPendingRecommendText(item: Pick<OwnerPending, "title">, bot
 
 /** A saved item's structured part, read back defensively (an older ledger
  * has none; a hand-edited one may carry anything). */
+/** 7 for "o7"; 0 for anything else. */
+function ownerPendingNumber(id: string): number {
+  const match = /^o(\d+)$/.exec(id);
+  return match ? Number(match[1]) : 0;
+}
+
 function savedDetails(pending: OwnerPending): OwnerPending {
   // a saved recommendation that no longer passes (no why, or two of them) loses
   // only the mark — never the item's why, steps and options (INSP-J2 #13)
@@ -651,6 +661,8 @@ interface Ledger {
   standingLost?: StandingLost[];
   /** Questions a bot left in a conversation, asked once to become items (lot J2). */
   askPromotions?: AskPromotion[];
+  /** Per bot, the number of its last "oN": ids only go up, never reused (R12-followup #3). */
+  ownerPendingSeq?: Record<string, number>;
 }
 
 /** A conversation whose last standing watch was cancelled: a watcher bot
@@ -761,6 +773,7 @@ export class BotAutonomy {
   private ownerPending: OwnerPending[] = [];
   private resolvedOwnerPending: ResolvedOwnerPending[] = [];
   private askPromotions: AskPromotion[] = [];
+  private ownerPendingSeq = new Map<string, number>();
   /** The bot's recent writes to watched sources, per bot (kept across restarts: saveEcho). */
   private selfWrites = new Map<string, SelfWrite[]>();
   /** Each watch's complete output lines of its last run (kept across restarts for that very output). */
@@ -826,6 +839,12 @@ export class BotAutonomy {
       }
       this.resolvedOwnerPending = keepResolved(this.resolvedOwnerPending.map((item) => slimResolved(item, item.resolvedAt, item.resolvedBy, typeof item.resolvedNote === "string" ? item.resolvedNote : undefined)));
       const folded = this.foldEquivalentPending();
+      // the counter starts past every "oN" the bot ever had, open, folded or settled (ledgers before it reused them)
+      for (const [botId, seq] of Object.entries(raw.ownerPendingSeq ?? {})) if (Number.isFinite(seq)) this.ownerPendingSeq.set(botId, seq);
+      for (const item of [...this.ownerPending, ...this.resolvedOwnerPending]) {
+        const top = Math.max(0, ...[item.id, ...(item.aliases ?? [])].map(ownerPendingNumber));
+        if (top > (this.ownerPendingSeq.get(item.botId) ?? 0)) this.ownerPendingSeq.set(item.botId, top);
+      }
       for (const lost of raw.standingLost ?? []) {
         if (lost && typeof lost.threadId === "string" && typeof lost.botId === "string") this.standingLost.set(lost.threadId, lost);
       }
@@ -869,7 +888,7 @@ export class BotAutonomy {
 
   private save(): void {
     if (!this.path) return;
-    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()], ...(this.askPromotions.length ? { askPromotions: this.askPromotions } : {}) };
+    const ledger: Ledger = { ...(this.promises.length ? { promises: this.promises } : {}), ...(this.ownerPending.length ? { ownerPending: this.ownerPending } : {}), ...(this.resolvedOwnerPending.length ? { resolvedOwnerPending: this.resolvedOwnerPending } : {}), wakes: [...this.wakes.values()], goals: [...this.goals.values()], reports: [...this.reports.values()], inFlight: this.inFlight, standingLost: [...this.standingLost.values()], ...(this.askPromotions.length ? { askPromotions: this.askPromotions } : {}), ...(this.ownerPendingSeq.size ? { ownerPendingSeq: Object.fromEntries(this.ownerPendingSeq) } : {}) };
     writeFileAtomic(this.path, `${JSON.stringify(ledger, null, 2)}\n`, { mode: 0o600 });
   }
 
@@ -1330,11 +1349,8 @@ export class BotAutonomy {
     const same = (open: OwnerPending) => here(open) || open === elsewhere;
     const existing = this.ownerPending.find(same);
     // an id still answered as an alias is taken: "resolve o8" must never close two items (INSP-H r1 #3)
-    const used = new Set(this.ownerPending.flatMap((open) => [open.id, ...(open.aliases ?? [])]));
-    let n = this.ownerPending.length + 1;
-    while (used.has(`o${n}`)) n += 1;
     const pending: OwnerPending = {
-      id: existing?.id ?? `o${n}`, botId, threadId, title, createdAt: existing?.createdAt ?? this.now(),
+      id: existing?.id ?? this.nextOwnerPendingId(botId), botId, threadId, title, createdAt: existing?.createdAt ?? this.now(),
       ...(input.due?.trim() ? { due: input.due.trim().slice(0, 80) } : existing?.due ? { due: existing.due } : {}),
       ...(input.link?.trim() ? { link: input.link.trim().slice(0, 500) } : existing?.link ? { link: existing.link } : {}),
       ...(input.command?.trim() ? { command: input.command.trim().slice(0, 500) } : existing?.command ? { command: existing.command } : {}),
@@ -1355,6 +1371,17 @@ export class BotAutonomy {
     if (mine.length > OWNER_PENDING_MAX_PER_THREAD) this.ownerPending = this.ownerPending.filter((open) => open !== mine[0]);
     this.save();
     return pending;
+  }
+
+  /** The bot's next "oN": past its last one (persisted), so a settled "o3"
+   * is never a new item's id (R12-followup #3: the Chief had 13 "o3"); and
+   * never an id still open or answered as an alias (INSP-H r1 #3). */
+  private nextOwnerPendingId(botId: string): string {
+    const used = new Set(this.ownerPending.flatMap((open) => [open.id, ...(open.aliases ?? [])]));
+    let n = (this.ownerPendingSeq.get(botId) ?? 0) + 1;
+    while (used.has(`o${n}`)) n += 1;
+    this.ownerPendingSeq.set(botId, n);
+    return `o${n}`;
   }
 
   /** Items saved before the dedupe (or by two conversations at once) that ask
@@ -1551,8 +1578,10 @@ export class BotAutonomy {
   }
 
   /** The bot answered the request with owner_pending add replacesAsk: this item takes the question's place. */
-  linkAskPromotion(promotion: AskPromotion, itemId: string): void {
-    promotion.itemId = itemId;
+  linkAskPromotion(promotion: AskPromotion, item: Pick<OwnerPending, "id" | "threadId" | "createdAt">): void {
+    promotion.itemId = item.id;
+    promotion.itemThreadId = item.threadId;
+    promotion.itemCreatedAt = item.createdAt;
     this.save();
   }
 
@@ -1576,15 +1605,34 @@ export class BotAutonomy {
    * settled; null while none is — nothing else ever replaces it (INSP-J2b #1). */
   askPromotionItem(promotion: AskPromotion): OwnerPending | null {
     if (!promotion.itemId) return null;
-    return this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!)))
-      ?? this.resolvedOwnerPending.find((item) => item.botId === promotion.botId && item.id === promotion.itemId)
+    return this.askPromotionOpenItem(promotion)
+      ?? this.askPromotionResolvedItem(promotion)
       // settled and aged out of the audit trail: this very question was answered all the same
       ?? { id: promotion.itemId, botId: promotion.botId, threadId: promotion.reportThreadId, title: promotion.text, createdAt: promotion.askedAt };
   }
 
   /** The open item linked to the question, if any (the one to settle when the person answers in the conversation). */
   askPromotionOpenItem(promotion: AskPromotion): OwnerPending | null {
-    return promotion.itemId ? this.ownerPending.find((item) => item.botId === promotion.botId && (item.id === promotion.itemId || item.aliases?.includes(promotion.itemId!))) ?? null : null;
+    const id = promotion.itemId;
+    if (!id) return null;
+    return this.ownerPending.find((item) => item.botId === promotion.botId && (
+      // by its conversation and birth too, when the link knows them: an item that merely took the id is not it
+      (item.id === id && (promotion.itemCreatedAt === undefined || (item.createdAt === promotion.itemCreatedAt && item.threadId === promotion.itemThreadId)))
+      // folded into an older equivalent item: that one answers for it
+      || Boolean(item.aliases?.includes(id)))) ?? null;
+  }
+
+  /** The settled item linked to the question, if it is still in the audit
+   * trail: by bot, id, conversation and birth. A link saved before those
+   * were kept takes, among the bot's settled items with that id, the one born
+   * nearest the server's request — the item was opened in answer to it. */
+  askPromotionResolvedItem(promotion: AskPromotion): ResolvedOwnerPending | null {
+    const id = promotion.itemId;
+    if (!id) return null;
+    const same = this.resolvedOwnerPending.filter((item) => item.botId === promotion.botId && item.id === id);
+    if (promotion.itemCreatedAt !== undefined) return same.find((item) => item.createdAt === promotion.itemCreatedAt && item.threadId === promotion.itemThreadId) ?? null;
+    const distance = (item: ResolvedOwnerPending) => Math.abs(item.createdAt - promotion.askedAt);
+    return same.reduce<ResolvedOwnerPending | null>((best, item) => (!best || distance(item) < distance(best) ? item : best), null);
   }
 
   /** The server's own items (keyed) still without why or steps — saved by an older build. */
