@@ -194,7 +194,8 @@ export function noteFolderBlock(state: FolderFlapState, block: Omit<FolderBlockS
 const brt = (at: number) => new Date(at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 const blockPt = (each: FolderBlockSeen) => each.kind === "reused"
   ? `${brt(each.at)}: a sessão${each.title ? ` "${each.title}"` : ""} caiu numa worktree que outras já usavam (${each.folder}), pede raiz com a worktree desligada`
-  : `${brt(each.at)}: a sessão do servidor${each.title ? ` "${each.title}"` : ""} caiu na raiz, sem worktree (${each.folder}), pede a worktree ligada`;
+  // a fact of what happened, never a gesture to make (the server's own worktrees need the option off: R12-1, INSP-R12a X3-6)
+  : `${brt(each.at)}: a sessão do servidor${each.title ? ` "${each.title}"` : ""} caiu na raiz, sem worktree (${each.folder}), aberta com a opção worktree desligada`;
 
 /** What the server answers the 409 with once it stopped asking gestures. */
 export function flappingRefusal(seen: readonly FolderBlockSeen[], repoName: string, fromQueue = false): string {

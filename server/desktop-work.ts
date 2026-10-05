@@ -91,9 +91,11 @@ export interface DesktopWorkDeps {
   liveWorktrees?: () => string[];
   /** The repository's base branch ("main"): a new session must open on it. */
   baseBranch?: (session: CcSession) => string;
-  /** The branch the repository root has checked out ("HEAD" when detached), and its branches: an unreadable branch chip is judged by them (R11-2). */
-  rootBranch?: (session: CcSession) => string | null;
+  /** The base branch the app recorded for its newest session in the repository (its `sourceBranch`), and the repository's branches: an unreadable branch chip is judged by them (R11-2). */
+  appBranch?: (session: CcSession) => string | null;
   branches?: (session: CcSession) => string[];
+  /** The real paths of the worktrees git lists for the session's repository: a "trust this workspace" is clicked only for one of them. */
+  registeredWorktrees?: (session: CcSession) => string[];
   /** A session of the app in the repository root to open before New Session (claude-desktop.ts rootAnchorSession). */
   rootAnchor?: (session: CcSession) => { localId: string; title?: string } | null;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
@@ -804,8 +806,8 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       deps.ledger.save();
       step = own
         // the app's link opens New Session in the server's own worktree (its alias)
-        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path })
-        : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, rootBranch: deps.rootBranch?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
+        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: deps.registeredWorktrees?.(next) ?? [] })
+        : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, appBranch: deps.appBranch?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
     } else {
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;
@@ -869,9 +871,13 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     }
     if (step.miss && own) {
       pending.misses = (pending.misses ?? 0) + 1;
+      // the last miss says why: a chip reading from an earlier miss never sticks to one of another cause (INSP-R12a X3-5)
       if (step.worktreeOption) {
         pending.worktreeOption = step.worktreeOption;
         if (step.seen) pending.worktreeSeen = step.seen.slice(0, 300);
+      } else {
+        delete pending.worktreeOption;
+        delete pending.worktreeSeen;
       }
       // the app would not open its link there: New Session, as before (the worktree stays)
       if (pending.misses >= OWN_OPEN_MAX_MISSES) {
@@ -913,11 +919,28 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
 
 const trustKey = (session: CcSession) => `cc-trust:${session.id}`;
 
+/** How long a create waits for the person to answer the app's "trust this workspace" before it gives up. */
+export const DESKTOP_TRUST_MAX_MS = 2 * 3_600_000;
+
 /** The app asks to trust a folder that is not a worktree the server made:
  * only the person decides. Asked once in "Precisa de você"; the create
- * waits (it is no miss) and looks again every DESKTOP_DRAFT_RECHECK_MS. */
+ * waits (it is no miss) and looks again every DESKTOP_DRAFT_RECHECK_MS —
+ * for DESKTOP_TRUST_MAX_MS at most: then it gives up, and the item says so
+ * (INSP-R12a X3-3). */
 function askToTrust(deps: DesktopWorkDeps, session: CcSession, folder: string, at: number): void {
   const pending = session.desktop!.pending!;
+  pending.trustSince ??= at;
+  if (at - pending.trustSince >= DESKTOP_TRUST_MAX_MS) {
+    const hours = Math.round(DESKTOP_TRUST_MAX_MS / 3_600_000);
+    deps.ownerPending?.(session, {
+      title: `A sessão "${session.title.slice(0, 50)}" desistiu de abrir no app Claude: ninguém respondeu ao pedido de confiar no workspace ${folder} em ${hours} h`,
+      key: trustKey(session),
+      why: `O app Claude pediu para confiar no workspace ${folder}, e o servidor não confia sozinho numa pasta que não é uma worktree dele. Depois de ${hours} h sem resposta, a criação desistiu; o bot foi avisado e pode abrir de novo.`,
+      steps: [{ text: "Se a pasta for sua, confie nela no app Claude e peça ao bot para abrir a sessão de novo; senão, resolva este item." }],
+    });
+    giveUpPending(deps, session, `the Claude app asked to trust the workspace ${folder} and nobody answered in ${hours} h (the server trusts only a worktree it made)`);
+    return;
+  }
   const first = pending.lastReason?.startsWith("o app pede para confiar") !== true;
   pending.lastReason = `o app pede para confiar no workspace ${folder}; esperando a pessoa`;
   pending.nextAttemptAt = at + DESKTOP_DRAFT_RECHECK_MS;

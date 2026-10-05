@@ -104,7 +104,7 @@ describe("a create with a worktree of the server's", () => {
     await runDesktopWork(h.deps, h.state);
     expect(h.steps.create).not.toHaveBeenCalled();
     // with the worktree's own path, by which a "trust this workspace" prompt is judged ours
-    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH });
+    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH, registered: [] });
     expect(session.desktop!.sentAt).toBe(h.now);
   });
 
@@ -215,6 +215,46 @@ describe("a create with a worktree of the server's", () => {
     await runDesktopWork(h.deps, h.state); // ok now
     expect(session.desktop!.sentAt).toBe(h.now);
     expect(resolved).toContain("cc-trust:s1");
+  });
+
+  it("gives up after 2 h without an answer to the trust question, and the item says so (INSP-R12a X3-3)", async () => {
+    const h = harness();
+    const asked: Array<{ key: string; title: string }> = [];
+    h.deps.ownerPending = (_session, item) => { asked.push({ key: item.key, title: item.title }); };
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    const prompt = { ok: false as const, reason: "the app asks to trust the workspace …", retry: true, touched: true, trustNeeded: "/Users/o/Projetos/outro" };
+    for (let i = 0; i < 6; i++) {
+      h.results.push(prompt);
+      await runDesktopWork(h.deps, h.state);
+      expect(session.status).toBe("running");
+      h.advance(21 * 60_000);
+    }
+    h.results.push(prompt);
+    await runDesktopWork(h.deps, h.state);
+    expect(session.status).toBe("failed");
+    expect(session.lastError).toContain("asked to trust the workspace /Users/o/Projetos/outro and nobody answered in 2 h");
+    expect(asked.map((each) => each.key)).toEqual(["cc-trust:s1", "cc-trust:s1"]);
+    expect(asked[1]!.title).toContain("desistiu de abrir no app Claude: ninguém respondeu ao pedido de confiar no workspace");
+  });
+
+  it("does not keep a worktree-option reading from an earlier miss when the next miss has another cause (INSP-R12a X3-5)", async () => {
+    const h = harness();
+    const refused: string[] = [];
+    h.deps.own!.chipRefused = (session) => { refused.push(session.id); };
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    h.results.push({ ok: false, reason: "the new session has the worktree option ON; nothing was typed", retry: true, miss: true, touched: true, seen: "v worktree", worktreeOption: "on" });
+    for (let i = 0; i < OWN_OPEN_MAX_MISSES - 1; i++) h.results.push({ ok: false, reason: "the new session does not show the folder", retry: true, miss: true, touched: true });
+    for (let i = 0; i < OWN_OPEN_MAX_MISSES; i++) {
+      await runDesktopWork(h.deps, h.state);
+      if (i === 0) expect(session.desktop!.pending!.worktreeOption).toBe("on");
+      if (i === 1) expect(session.desktop!.pending!.worktreeOption).toBeUndefined();
+      h.advance(11 * 60_000);
+    }
+    expect(session.desktop!.own!.state).toBe("abandoned");
+    // given up for the folder chip, not for the option: the breaker is not told "option ON"
+    expect(refused).toEqual([]);
   });
 
   it("fails when another session already works in the worktree", async () => {

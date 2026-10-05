@@ -351,6 +351,7 @@ import {
   macDesktopDriver,
   newMarker,
   lastAppRepo,
+  lastAppSourceBranch,
   liveWorktreeNames,
   liveRecordFolders,
   lastAppWorktreeFolder,
@@ -470,7 +471,7 @@ import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.t
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { citedRefs, parseRefState, RefLookups, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -9617,7 +9618,11 @@ const ownPathActive = (repo: string) => ownWorktreesOn(repo) && !ownBreakerTripp
 /** A session of this path landed elsewhere: counted; the 2nd in a row trips the breaker and asks the owner, once.
  * Kept by the repository's real path, the key ownPathActive reads (INSP-R11fix F-3). */
 /** Whether the server makes the sessions' worktrees for the repository of this name (its texts never ask to turn the worktree option on: R12-1). */
-const ownOnByName = (name: string) => [...new Set(ccLedger.all().map((session) => session.repo))].some((repo) => basename(repo) === name && ownWorktreesOn(repo));
+const ownOnByName = (name: string) => {
+  const repos = [...new Set(ccLedger.all().map((session) => session.repo))].filter((repo) => basename(repo) === name);
+  // a repository with no session yet: the settings as they stand for any repository (on by default) — INSP-R12a X3-6
+  return repos.length ? repos.some(ownWorktreesOn) : ownWorktreesOn("");
+};
 function noteOwnWrongFolder(session: CcSession, folder: string): void {
   noteOwnPathFailure(session, { folder }, `opened in ${folder} instead of ${session.desktop?.own?.path}`);
 }
@@ -9811,7 +9816,9 @@ const desktopWork: DesktopWorkDeps = {
   hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
   liveWorktrees: () => liveWorktreeNames(undefined, true),
   baseBranch: (session) => repoBaseBranch(session.repo),
-  rootBranch: (session) => gitLine(session.repo, ["rev-parse", "--abbrev-ref", "HEAD"]),
+  appBranch: (session) => lastAppSourceBranch(session.repo),
+  // the worktrees git lists for the repository (a "trust this workspace" is clicked only for one of ours)
+  registeredWorktrees: (session) => parseWorktreeList(gitLine(session.repo, ["worktree", "list", "--porcelain"]) ?? "").map((entry) => entry.path),
   branches: (session) => (gitLine(session.repo, ["for-each-ref", "--count=500", "--format=%(refname:short)", "refs/heads"]) ?? "").split("\n").filter(Boolean),
   // never a session the server opened (a failed one in the root is the newest there — INSP-S r1 S-3)
   rootAnchor: (session) => rootAnchorSession(session.repo, undefined, ourAppLocalIds()),

@@ -16,6 +16,7 @@ import {
   showsFolderName,
   worktreeOption,
   editDistance,
+  glyphForm,
   notRepoRoot,
   rootFolderRefusal,
   trustPrompt,
@@ -82,37 +83,52 @@ describe("the 20 real readings of 03/10 (R12-1, R11-2)", () => {
   });
 
   it("read the worktree box as OFF in all 20 — \"|O\", the Cyrillic \"П\" and the bare edges \"| |\"", () => {
-    for (const [seen, count] of REAL_0310) {
-      const option = worktreeOption(screenOf(seen).filter((line) => line.y === 788));
-      expect({ seen, option }).toEqual({ seen, option: "off" });
+    // 19 of the 20 are certainly an empty box ("|O" ×18, "|П" ×1)
+    for (const [seen, count] of REAL_0310.filter(([seen]) => !seen.startsWith("q9 - | |"))) {
+      expect({ seen, option: worktreeOption(screenOf(seen).filter((line) => line.y === 788)) }).toEqual({ seen, option: "off" });
       expect(count).toBeGreaterThan(0);
     }
+    // the 20th, "q9 - | | worktree", is ambiguous as logged (lines are joined by " | "):
+    // read as one line, two edges with nothing between: off; read as "| worktree", one lone edge: unknown — never pasted on
     const line = (text: string): OcrLine => ({ x: 885, y: 788, w: 92, h: 15, text });
-    expect(worktreeOption([line("| | worktree")])).toBe("off");
-    expect(worktreeOption([line("|п worktree")])).toBe("off");
-    expect(worktreeOption([line("q - worktree")])).toBe("unknown");
+    expect(worktreeOption([line("q9 - | | worktree")])).toBe("off");
+    expect(worktreeOption(screenOf(REAL_0310[1]![0]).filter((each) => each.y === 788))).toBe("unknown");
   });
 
-  it("take the unreadable branch chip (\"g9 -\", \"q9 -\", \"q -\") as the base only when git says the root is on it", () => {
+  // Every reading the box can give (INSP-R12a X3-1): "off" only for a box proved empty, any mark "on", any doubt "unknown".
+  it.each([
+    // proved empty
+    ["|O worktree", "off"], ["|П worktree", "off"], ["|п worktree", "off"], ["1O worktree", "off"], ["lO worktree", "off"], ["O worktree", "off"],
+    ["□ worktree", "off"], ["| | worktree", "off"], ["|| worktree", "off"], ["[] worktree", "off"], ["2º omb/9378-supervisor-do-aten... 1O worktree", "off"],
+    // a mark, with or without its edges
+    ["v worktree", "on"], ["✓ worktree", "on"], ["|v| worktree", "on"], ["|✓| worktree", "on"], ["|x| worktree", "on"], ["[✓]| worktree", "on"], ["[✓] worktree", "on"], ["|V worktree", "on"], ["☑ worktree", "on"],
+    // a doubt: never off
+    ["| worktree", "unknown"], ["• pasta | worktree", "unknown"], ["worktree", "unknown"], ["q - worktree", "unknown"], ["|? worktree", "unknown"], ["|OO worktree", "unknown"], ["|1 worktree", "unknown"],
+  ])("reads %s as %s", (text, want) => {
+    expect(worktreeOption([{ x: 885, y: 788, w: 92, h: 15, text }])).toBe(want);
+  });
+
+  it("take the unreadable branch chip (\"g9 -\", \"q9 -\", \"q -\") as the base only when the app's newest session recorded it", () => {
     for (const [seen] of REAL_0310) {
       const lines = screenOf(seen);
-      expect(notRepoRoot(lines, "main", { rootBranch: "main", branches: ["main", "fix/9326-x"] })).toBeNull();
-      expect(notRepoRoot(lines, "main", { rootBranch: "HEAD" })).toMatch(/^it does not show the base branch main: its branch chip could not be read \(it shows "[gq]9? -"\) and the repository root is on HEAD$/);
+      expect(notRepoRoot(lines, "main", { appBranch: "main", branches: ["main", "fix/9326-x"] })).toBeNull();
+      expect(notRepoRoot(lines, "main", { appBranch: "fix/9326-x" })).toMatch(/^it does not show the base branch main: its branch chip could not be read \(it shows "[gq]9? -"\) and the app's newest session started from fix\/9326-x$/);
+      expect(notRepoRoot(lines, "main")).toContain("recorded no base branch");
     }
-    // before R11-2 every one of them was refused
-    expect(notRepoRoot(screenOf(REAL_0310[0]![0]), "main")).toContain("could not be read");
   });
 
-  it("read the branch word with one OCR slip as the base, never another branch of the repository", () => {
+  it("read the branch word as the base only with look-alike glyphs, same length, and no other branch reading the same", () => {
     const chips = (branch: string) => [{ x: 540, y: 788, w: 60, h: 16, text: "• Local" }, { x: 660, y: 788, w: 60, h: 16, text: "nuria-platform" }, { x: 801, y: 788, w: 60, h: 16, text: `gº ${branch}` }, { x: 885, y: 788, w: 92, h: 15, text: "|O worktree" }];
-    expect(notRepoRoot(chips("main"), "main")).toBeNull();
-    expect(notRepoRoot(chips("maln"), "main")).toBeNull();
-    expect(notRepoRoot(chips("mai"), "main")).toBeNull();
-    // a branch the repository has, one slip from the base too: it is that branch, not the base
-    expect(notRepoRoot(chips("mail"), "main", { branches: ["main", "mail"] })).toBe("it shows mail, not main");
-    expect(notRepoRoot(chips("develop"), "main", { rootBranch: "main" })).toBe("it shows develop, not main");
-    expect(notRepoRoot(chips("fix/9326-x"), "main", { rootBranch: "main" })).toBe("it shows fix/9326-x, not main");
-    expect(editDistance("g9", "main")).toBe(4);
+    for (const word of ["main", "maln", "ma1n", "rnain", "MAIN"]) expect({ word, why: notRepoRoot(chips(word), "main") }).toEqual({ word, why: null });
+    for (const word of ["rain", "mai", "mainx", "man", "maim"]) expect({ word, why: notRepoRoot(chips(word), "main") }).toEqual({ word, why: `it shows ${word}, not main` });
+    // another branch of the repository that reads the same: refused
+    expect(notRepoRoot(chips("maln"), "main", { branches: ["main", "maln"] })).toBe("it shows maln, not main");
+    expect(notRepoRoot(chips("develop"), "main", { appBranch: "main" })).toBe("it shows develop, not main");
+    expect(notRepoRoot(chips("fix/9326-x"), "main", { appBranch: "main" })).toBe("it shows fix/9326-x, not main");
+    // the icon is "g"/"q" with "º", "°" or "9" — never a word like "go" ("go mainx")
+    const go = [{ x: 801, y: 788, w: 60, h: 16, text: "go mainx" }, { x: 885, y: 788, w: 92, h: 15, text: "|O worktree" }];
+    expect(notRepoRoot(go, "main", { appBranch: "main" })).toBe("it does not show the base branch main");
+    expect(glyphForm("rnaln")).toBe("main");
     expect(editDistance("maln", "main")).toBe(1);
   });
 });
@@ -160,22 +176,35 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
     return { worktree, alias };
   };
 
-  it("trusts the workspace by clicking its prompt only because the folder is the server's own worktree, then pastes", async () => {
+  it("trusts the workspace only once the screen shows our folder's new session, and the folder is a worktree git lists, then pastes", async () => {
     const { worktree, alias } = ownFolder();
     const app = fakeApp([screen9378(true), screen9378(false), SENT]);
-    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "9378 Supervisor\n[OMBX]\n\nPasso 0…", expected: worktree });
+    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "9378 Supervisor\n[OMBX]\n\nPasso 0…", expected: worktree, registered: ["/elsewhere", worktree] });
     expect(step).toEqual({ ok: true });
     // the prompt (1st line, y 700) clicked, then the field, then the paste
     expect(app.actions[1]).toBe("click 700,708");
     expect(app.actions.some((action) => action.startsWith("paste"))).toBe(true);
   });
 
-  it("clicks nothing in a folder that is not the server's worktree: the person is asked (trustNeeded)", async () => {
-    const { alias } = ownFolder();
-    for (const expected of [undefined, "/Users/o/Projetos/outro"]) {
+  it("clicks nothing when the folder is not a worktree git lists for the repository, or is not ours: the person is asked (trustNeeded)", async () => {
+    const { worktree, alias } = ownFolder();
+    for (const input of [{}, { expected: "/Users/o/Projetos/outro", registered: ["/Users/o/Projetos/outro"] }, { expected: worktree }, { expected: worktree, registered: ["/Users/o/Projetos/outro"] }]) {
       const app = fakeApp([screen9378(true)]);
-      const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", ...(expected ? { expected } : {}) });
+      const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", ...input });
       expect(step).toMatchObject({ ok: false, retry: true, trustNeeded: alias });
+      expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
+    }
+  });
+
+  it("clicks nothing when the screen with the prompt does not show our folder (the link opened something else): a miss (INSP-R12a X3-2)", async () => {
+    const { worktree, alias } = ownFolder();
+    const other = ["Confiar no workspace", "• Local", "• outra-pasta", "|O worktree", "Descreva uma tarefa ou faça uma pergunta", "+ O v Ignorar permissões"];
+    const noField = ["Confiar no workspace", "• Local", `• ${FOLDER_9378}`, "|O worktree"];
+    for (const screenLines of [other, noField]) {
+      const app = fakeApp([screenLines]);
+      const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", expected: worktree, registered: [worktree] });
+      expect(step).toMatchObject({ ok: false, miss: true });
+      expect(!step.ok && step.reason).toContain("nothing was clicked or typed");
       expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
     }
   });
@@ -183,10 +212,16 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
   it("stops without typing when the prompt stays after the click (a miss)", async () => {
     const { worktree, alias } = ownFolder();
     const app = fakeApp([screen9378(true)]);
-    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", expected: worktree });
+    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", expected: worktree, registered: [worktree] });
     expect(step).toMatchObject({ ok: false, miss: true });
     expect(!step.ok && step.reason).toContain("still asks to trust the workspace");
     expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+  });
+
+  it("takes only a whole prompt line or a bare button as the prompt, never a sentence (INSP-R12a X3-3)", () => {
+    const at = (text: string): OcrLine[] => [{ x: 600, y: 800, w: 200, h: 16, text }];
+    for (const text of ["Confiar no workspace", "• Confiar no workspace", "Confiar neste workspace", "Trust this workspace", "Trust the folder", "Confiar", "Trust"]) expect({ text, found: trustPrompt(at(text)) !== null }).toEqual({ text, found: true });
+    for (const text of ["Confiar no workspace do cliente é arriscado", "Trust the folder before running", "Confiar?", "Confiar em quem?", "Não confiar no workspace"]) expect({ text, found: trustPrompt(at(text)) !== null }).toEqual({ text, found: false });
   });
 
   it("never trusts in the old way (New Session in the repository): the person is asked", async () => {
@@ -194,6 +229,15 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
     const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "brief" });
     expect(step).toMatchObject({ ok: false, trustNeeded: "nuria-platform" });
     expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
+  });
+
+  it("in the old way, a conversation that says those words above the composer, before New Session opened, is not a prompt", async () => {
+    // the anchor's conversation on screen (upper half), New Session does not change the screen: a miss, not a trust question
+    const convo = [{ text: "Confiar no workspace", x: 600, y: 200 }, { text: "Sessão antiga v (nuria-platform", x: 600, y: 100 }];
+    const app = fakeApp([convo.map((each) => each.text)]);
+    const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "brief" });
+    expect(step).toMatchObject({ ok: false });
+    expect((step as { trustNeeded?: string }).trustNeeded).toBeUndefined();
   });
 });
 

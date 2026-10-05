@@ -216,7 +216,7 @@ describe("the app flapping between the two blocks", () => {
     expect(item.why.split("\n")).toEqual([
       "O servidor parou de pedir gestos de destravar: cada um trouxe o outro bloqueio (2 trocas).",
       `02/10, 10:07: a sessão "Aumentar usuários Piperun para 50" caiu numa worktree que outras já usavam (${F}), pede raiz com a worktree desligada`,
-      "02/10, 11:07: a sessão do servidor \"9311 Chat no ticket\" caiu na raiz, sem worktree (/r), pede a worktree ligada",
+      "02/10, 11:07: a sessão do servidor \"9311 Chat no ticket\" caiu na raiz, sem worktree (/r), aberta com a opção worktree desligada",
       `02/10, 12:07: a sessão "Aumentar usuários Piperun para 50" caiu numa worktree que outras já usavam (${F}), pede raiz com a worktree desligada`,
       expect.stringContaining("Diagnóstico: o app não está abrindo sessões em pasta própria de forma confiável"),
     ]);
