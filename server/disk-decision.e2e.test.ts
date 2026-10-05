@@ -133,6 +133,16 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     const said = ((await api("GET", `/api/threads/${last.threadId}/messages?limit=100`)).messages as any[]).find((message) => String(message.text ?? "").includes("pode remover todas"));
     expect(said.text).toContain("atendimento-reaberto-bugs-496989: ");
     expect(said.text).toContain("Reconfira no Mac antes de remover qualquer pasta");
+    // INSP-R12F r5 #3: the app gave up and the owner sent it again — taken once
+    const repeat = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${last.id}/reply`, {
+      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "pode remover todas" }),
+    });
+    expect(repeat.status).toBe(200);
+    expect(await repeat.json()).toMatchObject({ duplicate: true, message: expect.stringMatching(/^Essa mesma resposta já foi enviada há \d+ s; não mandei de novo\.$/) });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const sent = ((await api("GET", `/api/threads/${last.threadId}/messages?limit=100`)).messages as any[]).filter((message) => message.role === "user" && String(message.text ?? "").includes("pode remover todas"));
+    expect(sent).toHaveLength(1);
+    expect(ledger().ownerPending[0].history.filter((each: any) => each.text === "pode remover todas")).toHaveLength(1);
     // and a free-text answer after a folder came into use: refused, the item updated
     fourth = spawn("sleep", ["120"], { cwd: join(root, "atendimento-reaberto-bugs-496989"), stdio: "ignore" });
     const late = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${last.id}/reply`, {

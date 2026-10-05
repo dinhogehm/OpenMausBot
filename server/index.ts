@@ -122,7 +122,8 @@ import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-
 import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
-import { asksOwnerToDecide, busyNote, diskStateLine, filesBelow, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
+import { AnswerDedupe, answerKey, duplicateAnswerText } from "./answer-dedupe.ts";
+import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -13668,7 +13669,7 @@ async function diskFolderFacts(path: string, used: readonly string[], processCwd
  * folder that came into use or is no longer clean changes the item to what
  * holds now; with none left, it is closed with why. Folders gone from the
  * disk drop out. */
-async function recheckDiskItem(item: OwnerPending, used: readonly string[], processCwds: readonly string[] | null, text: string): Promise<{ outcome: "keep" | "replace" | "close"; line: string }> {
+async function recheckDiskItem(item: OwnerPending, used: readonly string[], processCwds: readonly string[] | null, text: string): Promise<{ outcome: "keep" | "replace" | "close"; line: string; note?: string }> {
   const folders = openItemFolders(item).filter((folder) => existsSync(join(NURIA_WORKTREES, folder.name)));
   const facts = new Map<string, FolderFacts>();
   for (const folder of folders) facts.set(folder.name, await diskFolderFacts(join(NURIA_WORKTREES, folder.name), used, processCwds));
@@ -13677,7 +13678,7 @@ async function recheckDiskItem(item: OwnerPending, used: readonly string[], proc
   const fresh = folders.length ? diskDecisionItem(folders, facts, NURIA_WORKTREES, text) : null;
   const result = diskDecisionRecheck(item.key!, fresh, folders.length ? busyNote(folders.map((folder) => folder.name), facts) : "as pastas não existem mais");
   if (result.action === "keep") return { outcome: "keep", line };
-  autonomy.resolveOwnerPending({ botId: item.botId, key: item.key!, by: "server", note: result.action === "replace" ? "atualizado: conferido de novo no Mac" : result.note });
+  autonomy.resolveOwnerPending({ botId: item.botId, key: item.key!, by: "server", note: result.action === "replace" ? DISK_REPLACED_NOTE : result.note });
   if (result.action === "replace") {
     const opened = autonomy.addOwnerPending(item.botId, item.threadId, result.item);
     store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você" atualizado (${opened.id}), conferido no Mac: ${result.item.title}`, 240), ok: true } });
@@ -13686,12 +13687,14 @@ async function recheckDiskItem(item: OwnerPending, used: readonly string[], proc
   }
   refreshBotRow(item.botId);
   console.log(`[disk] ${item.id} checked again on the Mac: ${result.action} (${item.key})`);
-  return { outcome: result.action, line };
+  return { outcome: result.action, line, ...(result.action === "close" ? { note: result.note } : {}) };
 }
 
 /** One disk-item pass at a time (a routine's run, an owner's answer): two
  * passes reading the Mac at different moments would undo each other's item. */
 let diskItemQueue: Promise<unknown> = Promise.resolve();
+/** Answers from "Precisa de você" just taken: a repeat is not sent twice (server/answer-dedupe.ts). */
+const answerDedupe = new AnswerDedupe();
 function diskItemTurn<T>(work: () => Promise<T>): Promise<T> {
   const turn = diskItemQueue.then(work, work);
   diskItemQueue = turn.catch(() => undefined);
@@ -23895,14 +23898,25 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // any answer to a disk item — a decision or free text ("pode remover todas") — is checked on the Mac first:
       // a folder used since, or no longer clean, changes the item and the answer is not sent (INSP-R12F r2 R2-1);
       // otherwise the Chief reads, under the answer, the state found now and to check again before removing (r3 R3-2)
+      // the same answer to the same item, sent again (the app gave up on a slow
+      // request and the person pressed again): taken once (INSP-R12F r5 #3)
+      if (answer.kind !== "ask") {
+        const key = answerKey(bot.id, item.id, answer);
+        const claim = answerDedupe.claim(key);
+        if (!claim.ok) return json(res, 200, { ok: true, duplicate: true, message: duplicateAnswerText(claim), resolved: 0 });
+        res.once("close", () => (res.writableFinished && res.statusCode < 300 ? answerDedupe.sent(key) : answerDedupe.release(key)));
+      }
       // "Manter" removes nothing: never checked, never refused (INSP-R12F r4)
       if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && !keepsFolders(answer)) {
         // in turn with a routine's pass: the item read after it, gone if that pass replaced it
         const check = await diskItemTurn(async () => {
           const now = autonomy.ownerPendingById(bot.id, item.id);
-          return now && now.key === item.key ? recheckDiskItem(now, foldersInUse(), await allProcessCwds(), "") : { outcome: "replace" as const, line: "" };
+          if (now && now.key === item.key) return recheckDiskItem(now, foldersInUse(), await allProcessCwds(), "");
+          // settled by the pass before: what that pass did to it, said as it is (INSP-R12F r5 #1)
+          const settled = autonomy.resolvedOwnerPendingOf(bot.id).findLast((each) => each.id === item.id && each.key === item.key);
+          return goneDiskItem(settled?.resolvedNote);
         });
-        if (check.outcome !== "keep") return json(res, 409, { error: check.outcome === "replace" ? "Conferi agora no Mac: alguma pasta passou a ser usada ou não está mais limpa. O item foi atualizado com o que vale agora; responda de novo." : "Conferi agora no Mac: nenhuma das pastas pode ser removida agora. O item foi fechado com o motivo.", code: "disk_item_changed" });
+        if (check.outcome !== "keep") return json(res, 409, { error: diskChangedText(check), code: "disk_item_changed" });
         text = `${text}\n\n${check.line}`;
       }
       try {

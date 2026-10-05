@@ -117,23 +117,46 @@ const EXPAND_MAX = 40;
 /** The files below `dir`, relative to it ("hooks/a.cjs"), for porcelainState:
  * at most `max` and `depth` levels; a folder of worktrees is named, never
  * walked (its worktrees are judged as worktrees). Null when unreadable. */
-export function filesBelow(dir: string, readdir: (dir: string) => Array<{ name: string; dir: boolean }>, max = 2_000, depth = 6): string[] | null {
-  const out: string[] = [];
-  const walk = (at: string, prefix: string, level: number): boolean => {
+export function filesBelow(dir: string, readdir: (dir: string) => Array<{ name: string; dir: boolean }>, max = 2_000, depth = 6, visitMax = 20_000): { files: string[]; truncated: boolean } | null {
+  let truncated = false;
+  // first, the secrets by name, over a larger walk: a .dev.vars is never past the cap (INSP-R12F r5 #2)
+  const secrets: string[] = [];
+  let visited = 0;
+  const seek = (at: string, prefix: string, level: number): boolean => {
     let entries: Array<{ name: string; dir: boolean }>;
-    // a level's own files first: a settings.local.json is never past the cap behind a big folder
-    try { entries = [...readdir(at)].sort((a, b) => Number(a.dir) - Number(b.dir)); } catch { return level > 0; }
+    try { entries = readdir(at); } catch { return level > 0; }
     for (const entry of entries) {
-      if (out.length >= max) return true;
+      if (++visited > visitMax) { truncated = true; return true; }
       const rel = `${prefix}${entry.name}`;
+      if (isSecret(entry.dir ? `${rel}/` : rel)) { secrets.push(entry.dir ? `${rel}/` : rel); continue; }
+      if (!entry.dir || /^\.?worktrees$/.test(entry.name) || JUNK.test(rel)) continue;
+      if (level + 1 >= depth) { truncated = true; continue; }
+      seek(`${at}/${entry.name}`, `${rel}/`, level + 1);
+    }
+    return true;
+  };
+  if (!seek(dir, "", 0)) return null;
+  const out: string[] = [...secrets];
+  const taken = new Set(secrets);
+  const walk = (at: string, prefix: string, level: number): void => {
+    let entries: Array<{ name: string; dir: boolean }>;
+    // a level's own files first
+    try { entries = [...readdir(at)].sort((a, b) => Number(a.dir) - Number(b.dir)); } catch { return; }
+    for (const entry of entries) {
+      if (out.length >= max) { truncated = true; return; }
+      const rel = `${prefix}${entry.name}`;
+      if (taken.has(rel) || taken.has(`${rel}/`)) continue;
       if (!entry.dir) { out.push(rel); continue; }
       if (/^\.?worktrees$/.test(entry.name) || level + 1 >= depth) { out.push(`${rel}/`); continue; }
       walk(`${at}/${entry.name}`, `${rel}/`, level + 1);
     }
-    return true;
   };
-  return walk(dir, "", 0) ? out : null;
+  walk(dir, "", 0);
+  return { files: out, truncated };
 }
+
+/** Said, as a secret, of a folder the walk could not finish. */
+export const NOT_WALKED = "(não percorrida inteira: pode haver mais segredos não listados; confira a pasta inteira antes de remover)";
 
 /** From `git status --porcelain --ignored`: whether anything is changed or
  * untracked; the ignored secrets; and the other ignored paths that are not
@@ -142,15 +165,19 @@ export function filesBelow(dir: string, readdir: (dir: string) => Array<{ name: 
  * ("!! .claude/"): such a folder that is not junk is listed file by file
  * (`list`, relative paths below it), so a settings.local.json inside is
  * seen as a secret and the rest by name (r4 R4-2). */
-export function porcelainState(output: string, list?: (dir: string) => string[] | null): { dirty: boolean; ignored: string[]; secrets: string[] } {
+export function porcelainState(output: string, list?: (dir: string) => string[] | { files: string[]; truncated: boolean } | null): { dirty: boolean; ignored: string[]; secrets: string[] } {
   const lines = output.split("\n").filter((line) => line.trim());
   const folded = lines.filter((line) => line.startsWith("!! ")).map((line) => line.slice(3).trim().replace(/^"|"$/g, ""));
   const junk = (path: string) => !NEVER_JUNK.test(path) && JUNK.test(path);
+  const cut: string[] = [];
   const paths = folded.flatMap((path) => {
     // a folder of worktrees is named, never walked: its worktrees are judged as worktrees
     if (!path.endsWith("/") || isSecret(path) || junk(path.replace(/\/$/, "")) || NEVER_JUNK.test(path) || !list) return [path];
-    const inside = list(path.replace(/\/$/, ""));
+    const listed = list(path.replace(/\/$/, ""));
+    const inside = Array.isArray(listed) ? listed : listed?.files;
     if (!inside?.length) return [path];
+    // a walk cut at its limit is said, as a secret: there may be more (INSP-R12F r5 #2)
+    if (!Array.isArray(listed) && listed?.truncated) cut.push(`${path}… ${NOT_WALKED}`);
     // every secret is kept; past EXPAND_MAX the other files of this folder are counted
     const all = inside.map((each) => `${path}${each}`);
     const others = all.filter((each) => !isSecret(each.replace(/\/$/, "")) && !junk(each.replace(/\/$/, "")));
@@ -161,7 +188,7 @@ export function porcelainState(output: string, list?: (dir: string) => string[] 
     ];
   });
   const bare = (path: string) => path.replace(/\/$/, "");
-  const secrets = paths.filter((path) => isSecret(bare(path)));
+  const secrets = [...paths.filter((path) => isSecret(bare(path))), ...cut];
   const ignored = paths.filter((path) => !isSecret(bare(path)) && !junk(bare(path)));
   return { dirty: lines.some((line) => !line.startsWith("!! ")), ignored, secrets };
 }
@@ -280,6 +307,23 @@ export function totalSize(folders: readonly LeftFolder[]): string {
 
 /** A path as one shell word (as nested-worktrees.ts quotes its commands). */
 const shellQuote = (value: string) => (/^[\w./@%+=:,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`);
+
+/** How the server settles an item it replaced with what holds now. */
+export const DISK_REPLACED_NOTE = "atualizado: conferido de novo no Mac";
+
+/** An answered item that the pass before already settled: replaced (by
+ * DISK_REPLACED_NOTE) or closed, with that pass's own words (INSP-R12F r5 #1). */
+export function goneDiskItem(resolvedNote: string | undefined): { outcome: "replace" | "close"; line: string; note?: string } {
+  return resolvedNote === DISK_REPLACED_NOTE ? { outcome: "replace", line: "" } : { outcome: "close", line: "", note: resolvedNote ?? "fechado por outra conferência no Mac" };
+}
+
+/** The 409 the person reads when an answer finds its disk item changed: a
+ * replaced item has a new one to answer; a closed one has nothing left to answer. */
+export function diskChangedText(check: { outcome: "replace" | "close" | "keep"; note?: string }): string {
+  return check.outcome === "replace"
+    ? "Conferi agora no Mac: alguma pasta passou a ser usada ou não está mais limpa. O item foi trocado por um novo, com o que vale agora; responda nele."
+    : `Este item foi fechado: ${check.note ?? "nenhuma das pastas pode ser removida agora"}. Não há mais o que responder nele.`;
+}
 
 /** The label of the decision that keeps the folders. */
 export const DISK_KEEP_LABEL = "Manter por 7 dias";

@@ -6,6 +6,10 @@ import { describe, expect, it } from "vitest";
 import { nestedWorktrees, parseWorktreeList } from "./nested-worktrees.ts";
 import {
   asksOwnerToDecide,
+  diskChangedText,
+  DISK_REPLACED_NOTE,
+  goneDiskItem,
+  NOT_WALKED,
   diskStateLine,
   filesBelow,
   keepsFolders,
@@ -363,7 +367,7 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
     expect(item.options[0]!.reply).toContain("merge-deploy-open-prs-00664b/.claude/settings.local.json");
     // walking a folder: a folder of worktrees is named, never walked
     const tree: Record<string, Array<{ name: string; dir: boolean }>> = { "/w/.claude": [{ name: "worktrees", dir: true }, { name: "a.md", dir: false }, { name: "hooks", dir: true }], "/w/.claude/hooks": [{ name: "x.cjs", dir: false }] };
-    expect(filesBelow("/w/.claude", (dir) => { if (!tree[dir]) throw new Error("no"); return tree[dir]!; })).toEqual(["a.md", "worktrees/", "hooks/x.cjs"]);
+    expect(filesBelow("/w/.claude", (dir) => { if (!tree[dir]) throw new Error("no"); return tree[dir]!; })).toEqual({ files: ["a.md", "worktrees/", "hooks/x.cjs"], truncated: false });
     expect(filesBelow("/w/nada", () => { throw new Error("no"); })).toBeNull();
     // atendimento-reaberto's real case: settings.local.json behind 40+ command files is still found, the rest counted
     const many = [...Array.from({ length: 50 }, (_, index) => `commands/AIOX/agents/a${index}.md`), "settings.local.json"];
@@ -430,5 +434,40 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
     ]);
     const line = diskStateLine([A, B, "sumiu-123"], facts, Date.parse("2026-10-05T19:40:00Z"));
     expect(line).toBe(`[Servidor: conferido no Mac em 05/10, 16:40 — ${A}: segredos ignorados: .dev.vars; ${B}: em uso (há um processo vivo dentro dela); sumiu-123: não conferida. Reconfira no Mac antes de remover qualquer pasta: o estado pode mudar até você executar. Segredos ignorados são apagados pela remoção; copie-os antes.]`);
+  });
+
+  // INSP-R12F r5 #1: the 409 said "responda de novo" for an item the pass before had closed
+  it("an answer to an item the pass before settled says what became of it", () => {
+    expect(goneDiskItem(DISK_REPLACED_NOTE)).toEqual({ outcome: "replace", line: "" });
+    expect(diskChangedText(goneDiskItem(DISK_REPLACED_NOTE))).toBe("Conferi agora no Mac: alguma pasta passou a ser usada ou não está mais limpa. O item foi trocado por um novo, com o que vale agora; responda nele.");
+    const closed = goneDiskItem("nenhuma pasta sobrou para decidir: atendimento-reaberto-bugs-496989 (há um processo vivo dentro dela)");
+    expect(closed.outcome).toBe("close");
+    expect(diskChangedText(closed)).toBe("Este item foi fechado: nenhuma pasta sobrou para decidir: atendimento-reaberto-bugs-496989 (há um processo vivo dentro dela). Não há mais o que responder nele.");
+    expect(diskChangedText(closed)).not.toContain("responda de novo");
+    expect(diskChangedText(goneDiskItem(undefined))).toBe("Este item foi fechado: fechado por outra conferência no Mac. Não há mais o que responder nele.");
+  });
+
+  // INSP-R12F r5 #2: a walk stopped at 2 000 entries cut silently, and a secret past it was missed
+  it("secrets are sought by name first, and a walk cut at its limit says there may be more", () => {
+    const tree: Record<string, Array<{ name: string; dir: boolean }>> = {
+      "/w/.claude": [{ name: "commands", dir: true }, { name: "deep", dir: true }],
+      "/w/.claude/commands": Array.from({ length: 30 }, (_, index) => ({ name: `c${index}.md`, dir: false })),
+      "/w/.claude/deep": [{ name: ".dev.vars", dir: false }, { name: "node_modules", dir: true }],
+    };
+    const readdir = (dir: string) => { if (!tree[dir]) throw new Error("no"); return tree[dir]!; };
+    // a cap of 10: the .dev.vars behind 30 command files is still found, and the cut is said
+    const cut = filesBelow("/w/.claude", readdir, 10)!;
+    expect(cut.files[0]).toBe("deep/.dev.vars");
+    expect(cut.files).toHaveLength(10);
+    expect(cut.truncated).toBe(true);
+    expect(filesBelow("/w/.claude", readdir)!.truncated).toBe(false);
+    // the secret search itself cut (visit budget): said too
+    expect(filesBelow("/w/.claude", readdir, 2_000, 6, 5)!.truncated).toBe(true);
+    const state = porcelainState("!! .claude/\n", () => cut);
+    expect(state.secrets).toEqual([".claude/deep/.dev.vars", `.claude/… ${NOT_WALKED}`]);
+    // and every removal says it
+    const item = diskDecisionItem([{ name: "x-1", size: "1M", reason: "r" }], new Map([["x-1", { inUse: null, unpushed: false, ...state }]]), ROOT, "")!;
+    expect(item.options[0]!.reply).toContain("pode haver mais segredos não listados; confira a pasta inteira antes de remover");
+    expect(porcelainState("!! .claude/\n", () => filesBelow("/w/.claude", readdir)).secrets).toEqual([".claude/deep/.dev.vars"]);
   });
 });
