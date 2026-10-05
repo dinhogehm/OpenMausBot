@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePsTable, type PsRow } from "./bg-jobs.ts";
-import { type AdmissionLease, ciLabel, ciOwner, ciQueuedBehindRelease, ciQueuedText, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, RELEASE_QUEUE_CEILING_S, releaseBlockedBy, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, releaseResumeHold, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
+import { type AdmissionLease, ciLabel, ciOwner, ciQueuedBehindRelease, ciQueuedText, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, RELEASE_QUEUE_CEILING_S, releaseBlockedBy, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, releaseResumeHold, RESUME_AFTER_MAX_MS, resumeAfterRelease, seedReleaseHold, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
 import { releaseFailures, releaseInLoop } from "./release-watch.ts";
 
 const log = [
@@ -687,6 +687,14 @@ describe("a release on its way holds every session's RETOMAR (INSP-S r1 S-1)", (
     expect(releaseHoldText({ label, state: "deploying" })).toBe("o release de produção e3e9e7ddc está na fase de rede; o seu ci:local pode rodar");
     // past the ceiling nothing is held, deploying or not
     expect(releaseResumeHold({ label, state: "holding", ageS: 18_000, overdue: true })).toBeNull();
+    // INSP-R11fix F-2: the worktree seed waits through the network phase too — there the disk and the network are the bottleneck
+    const deploying = { label, state: "deploying" as const, ageS: 3_600, overdue: false };
+    expect(releaseResumeHold(deploying, "/elsewhere", "/checkout")).toBeNull();
+    expect(seedReleaseHold(null, deploying)).toBe("o release de produção e3e9e7ddc está na fase de rede (deploy): a semente espera ele terminar");
+    expect(seedReleaseHold("o release de produção e3e9e7ddc está em andamento", { ...deploying, state: "holding" })).toBe("o release de produção e3e9e7ddc está em andamento");
+    expect(seedReleaseHold("?", null)).toBe("o estado da fila de admissão não pôde ser lido");
+    expect(seedReleaseHold(null, { ...deploying, overdue: true })).toBeNull();
+    expect(seedReleaseHold(null, null)).toBeNull();
   });
   it("a release past the 5 h ceiling is overdue (likely hung): the caller holds nothing for it", () => {
     const nowMs = Date.UTC(2026, 9, 3, 18, 0, 0);

@@ -400,7 +400,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { APP_FLAPPING_CHECK_LABEL, APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appFlappingPending, appStillBlockedText, appUnblockPending, flappingRefusal, type FolderBlockSeen, type FolderFlapState, noteFolderBlock, ownerChannelChip, serverRestartedChip, sessionChips, staleUnblockItem } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
-import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, releaseHoldText, releaseInFlight, type ReleaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, releaseResumeHold, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
+import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, releaseHoldText, releaseInFlight, type ReleaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, releaseResumeHold, resumeAfterRelease, seedReleaseHold, stoppedReleaseFromLog } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, RELEASE_FAILURES_ALERT, fullReleaseSha, haltReport, LAST_FAILURE_FILE, productionStateLine, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
@@ -9744,7 +9744,8 @@ async function refreshOwnSeeds(): Promise<void> {
       now: Date.now,
       releaseBusy: async () => {
         await refreshReleaseHold();
-        return releaseHold.label === "?" ? "o estado da fila de admissão não pôde ser lido" : releaseHold.label;
+        // the network phase holds the seed too (INSP-R11fix F-2)
+        return seedReleaseHold(releaseHold.label, releaseHold.found);
       },
       freeBytes: volumeFreeBytes,
       readFile: (path) => { try { return readFileSync(path, "utf8"); } catch { return null; } },

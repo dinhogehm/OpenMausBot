@@ -292,6 +292,17 @@ export function releaseHoldText(release: Pick<ReleaseInFlight, "label" | "state"
   return `${releaseName(release.label, true)} está ${release.state === "holding" ? "em andamento" : "na fila da máquina"}`;
 }
 
+/** What holds the worktree seed (a pnpm install, over the disk and the
+ * network) now, or null: a release holding or queueing for the machine (the
+ * server's `label`, "?" when unreadable) — and its network phase too, unlike
+ * a session's resume: there the disk and the network are the bottleneck, and
+ * a seed only speeds up later clones (INSP-R11fix F-2). Past the ceiling, none. */
+export function seedReleaseHold(label: string | null, found: ReleaseInFlight | null): string | null {
+  if (label === "?") return "o estado da fila de admissão não pôde ser lido";
+  if (label) return label;
+  return found?.state === "deploying" && !found.overdue ? `${releaseName(found.label, true)} está na fase de rede (deploy): a semente espera ele terminar` : null;
+}
+
 /** What holds a session's resume now (resumeNeeded's `hold.release`), or null:
  * a release holding or queueing for the machine holds every session; in its
  * network phase ("deploying") only the session working in the checkout the
