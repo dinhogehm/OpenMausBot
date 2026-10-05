@@ -120,6 +120,8 @@ import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { buildRecall } from "./recall.ts";
 import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-language.ts";
 import { englishNarration, narrationNoteText } from "./turn-narration.ts";
+import { idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
+import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -247,7 +249,7 @@ import type { GroupGoalRunCardData, GroupGoalRunStatus } from "../shared/group-g
 import { BUILT_IN_DRIVERS } from "./drivers/builtIn.ts";
 import { openCodeProviderKeysAllowed, setOpenCodeProviderKeyPolicy } from "./drivers/acp/opencode-go.ts";
 import { getOrCreateChannel, mirrorActivity, mirrorExchange, mirrorReply, type CommsBus } from "./comms-visibility.ts";
-import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, toolCallsWith, userTextMessagesWith, digestTimings, oldestDigestAt } from "./message-db.ts";
+import { readMessageText, recallMessages, recentMessages, searchMessagesAsync, closeMessageSearch, closeMessageDb, chatFollowups, cancelledChatFollowup, settleChatFollowups, threadsReferencing, botTextsWithRefsSince, toolCallsWith, userTextMessagesWith, digestTimings, oldestDigestAt } from "./message-db.ts";
 import { oldestUsageAt, ProductivityCollector } from "./productivity-collector.ts";
 import { boardEtag, PipelineBoardService } from "./pipeline-board-live.ts";
 import { executiveSummary, exportFileName, reportMarkdown, reportPdf } from "./productivity-export.ts";
@@ -8661,6 +8663,63 @@ async function checkPower(): Promise<void> {
   }
 }
 
+/** The pipeline standing still (server/pipeline-idle.ts): no open PR, no
+ * release, and P0/P1 with nobody on them — the Chief is woken once, in its
+ * desk, with the list (R12-followup #1). Only the desktop app's server looks
+ * (OMB_PIPELINE_IDLE=1 lets a test's server look too), every 10 min. */
+const PIPELINE_IDLE_FILE = join(DATA_DIR, "pipeline-idle.json");
+const pipelineIdle: { state: PipelineIdleState | null; lastAt: number; running: boolean } = { state: null, lastAt: 0, running: false };
+function ghJson(args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFileCc("gh", args, { timeout: 20_000, maxBuffer: 4 * 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => resolve(error ? null : String(stdout)));
+  });
+}
+async function checkPipelineIdle(): Promise<void> {
+  const enabled = process.env.OMB_PIPELINE_IDLE === "1" || (DESKTOP_MANAGED && !process.env.VITEST);
+  const every = autonomyTestMs("OMB_PIPELINE_IDLE_EVERY_MS") ?? PIPELINE_IDLE_EVERY_MS;
+  if (!enabled || pipelineIdle.running || Date.now() - pipelineIdle.lastAt < every) return;
+  const chief = store.bots.find((bot) => bot.chiefOfStaff && !bot.hidden);
+  if (!chief) return;
+  pipelineIdle.running = true;
+  pipelineIdle.lastAt = Date.now();
+  try {
+    if (!pipelineIdle.state) {
+      try { pipelineIdle.state = JSON.parse(readFileSync(PIPELINE_IDLE_FILE, "utf8")) as PipelineIdleState; } catch { pipelineIdle.state = {}; }
+    }
+    const stopped = existsSync(NURIA_STOP_FILE);
+    const prs = stopped ? null : await ghJson(idlePrsArgs(PRODUCTION_REPO));
+    const openPrs = stopped ? 0 : prs === null ? null : parseOpenPrCount(prs);
+    let releaseInFlight: boolean | null = false;
+    if (!stopped && openPrs === 0) {
+      await refreshReleaseHold();
+      releaseInFlight = releaseHold.label === "?" ? null : releaseHold.found !== null && !releaseHold.found.overdue;
+    }
+    const now = Date.now();
+    let candidates: IdleCandidate[] = [];
+    if (!stopped && openPrs === 0 && releaseInFlight === false) {
+      const issues = await ghJson(idleIssuesArgs(PRODUCTION_REPO));
+      const parsed = issues === null ? null : parseIdleIssues(issues);
+      if (parsed === null) return;
+      candidates = idleCandidates(parsed, ccLedger.all(), mentionedNumbers(botTextsWithRefsSince(now - PIPELINE_IDLE_QUIET_MS)), now);
+    }
+    const step = pipelineIdleStep(pipelineIdle.state, { stopped, openPrs, releaseInFlight, candidates, now });
+    if (step.state !== pipelineIdle.state) {
+      pipelineIdle.state = step.state;
+      try { writeFileAtomic(PIPELINE_IDLE_FILE, `${JSON.stringify(step.state)}\n`); } catch { /* memory still holds it */ }
+    }
+    if (!step.wake) return;
+    const desk = chiefDeskThread(chief);
+    if (!store.taskByThread(chief.id, desk)) return;
+    const order = pipelineOrder(sharedState.orders(chief.id));
+    store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Esteira parada: fila de PRs vazia, sem release, ${candidates.length} P0/P1 sem ninguém nelas (${candidates.slice(0, 4).map((each) => `#${each.number}`).join(", ")}${candidates.length > 4 ? ", …" : ""}) — o Chief foi avisado`, 240), ok: true } });
+    autonomy.addReport(chief.id, desk, pipelineIdleReport(candidates, PRODUCTION_REPO, order));
+    refreshBotRow(chief.id);
+    console.log(`[pipeline-idle] the pipeline stands still: ${candidates.length} P0/P1 with nobody on them (${candidates.map((each) => `#${each.number}`).join(" ")}); the Chief is told in ${desk}`);
+  } finally {
+    pipelineIdle.running = false;
+  }
+}
+
 /** The Mac's power right now, for an answer that claims it (INSP-J2 r2 N4):
  * null when unknown (not a Mac, pmset failed). OMB_TEST_PMSET_BATT stands in
  * for `pmset -g batt` in the e2e tests. */
@@ -8940,6 +8999,7 @@ async function autonomyTick(): Promise<void> {
   }
   void checkProductionRelease().catch((error) => console.error(`[release] ${error instanceof Error ? error.message : String(error)}`));
   void checkPower().catch((error) => console.error(`[power] ${error instanceof Error ? error.message : String(error)}`));
+  void checkPipelineIdle().catch((error) => console.error(`[pipeline-idle] ${error instanceof Error ? error.message : String(error)}`));
   void revalidateNeedsInputGoals().catch((error) => console.error(`[autonomy] needs-input check failed: ${error instanceof Error ? error.message : String(error)}`));
   void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
   try {
@@ -9040,6 +9100,12 @@ async function autonomyTick(): Promise<void> {
         if (ref) autonomy.dropAskPromotion(pending.botId, ref.threadId, ref.askAt);
         console.log(`[owner-pending] ~/.nuria/stop: the request to register the question in ${ref?.threadId ?? "?"} was not sent; asked again once the stop is gone`);
         if (ref) refreshBotRow(pending.botId);
+      }
+      // and the pipeline-idle report (R12-followup #1): not sent, so it may be sent again once the stop is gone
+      if (autonomy.dropReports(pending.threadId, (each) => each.startsWith(PIPELINE_IDLE_PREFIX)).length) {
+        if (pipelineIdle.state) pipelineIdle.state = {};
+        try { writeFileAtomic(PIPELINE_IDLE_FILE, "{}\n"); } catch { /* memory still holds it */ }
+        console.log("[pipeline-idle] ~/.nuria/stop: the report to the Chief was not sent; sent again once the stop is gone");
       }
       if (!autonomy.hasReports(pending.threadId)) continue;
     }

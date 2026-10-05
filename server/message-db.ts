@@ -583,6 +583,13 @@ export function threadsReferencing(fragment: string): string[] {
   return rows.map((row) => row.thread_id);
 }
 
+/** What any bot wrote as text since `since` that names a "#N" (every thread):
+ * which issues a bot is on (pipeline-idle.ts). */
+export function botTextsWithRefsSince(since: number, limit = 5_000): string[] {
+  const rows = db().prepare("SELECT text FROM messages WHERE role = 'bot' AND kind = 'text' AND at >= ? AND instr(text, '#') > 0 ORDER BY at DESC LIMIT ?").all(since, limit) as Array<{ text: string | null }>;
+  return rows.map((row) => row.text ?? "");
+}
+
 /** Case-insensitive substring search over text messages, newest first.
  * Keep literal substring semantics; HTTP callers run the scan off-thread. */
 export function searchMessages(query: string, limit = 40, threadId?: string): SearchHit[] {
