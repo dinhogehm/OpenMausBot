@@ -400,7 +400,7 @@ import { SESSION_TOKEN_SERVICE, SessionToken } from "./session-token.ts";
 import { APP_FLAPPING_CHECK_LABEL, APP_UNBLOCK_CHECK_LABEL, APP_UNBLOCK_DECLINE_LABEL, APP_UNBLOCK_DECLINE_MS, appFlappingPending, appStillBlockedText, appUnblockPending, flappingRefusal, type FolderBlockSeen, type FolderFlapState, noteFolderBlock, ownerChannelChip, serverRestartedChip, sessionChips, staleUnblockItem } from "./owner-chips.ts";
 import { CHANNEL_ORDER_WORDS, channelOrderTarget, decisionOf, firstSentence, isOwnerChannelOrder, isOwnerOrder, lastChannelOrder, SharedState, threadByRef } from "./shared-state.ts";
 import { channelTurnThread, ownerFirstName, routedReplyText, routedWakeNote, routesToChannel, saidToOwner } from "./owner-channel.ts";
-import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
+import { type AdmissionLease, ciQueuedBehindRelease, ciQueuedText, type DeployLease, preemptCiForRelease, type PreemptState, RELEASE_QUEUE_CEILING_S, releaseHoldText, releaseInFlight, type ReleaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, releaseResumeHold, resumeAfterRelease, stoppedReleaseFromLog } from "./release-priority.ts";
 import { batteryMinPercent, carrierBatteryCheck, carrierIntent, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, type PowerState, type PowerWatchState } from "./power.ts";
 import { ATTENTION_ESCALATION_FILE, ATTENTION_FILE_MAX_BYTES, DECLINED_SHA_FILE, RELEASE_FAILURES_ALERT, fullReleaseSha, haltReport, LAST_FAILURE_FILE, productionStateLine, releaseFailedText, releaseAttention, releaseAttentionAlert, releaseAttentionDue, HALT_ESCALATION_FILE, HALTED_REASON_FILE, HALTED_SHA_FILE, haltedRelease, nothingToPublish, readTail, RELEASE_ERR_LOG, RELEASE_OUT_LOG, RELEASED_SHA_FILE, releaseFailureCause, releaseFailures, releaseInLoop, releaseLoopItemsToClose, releaseLoopPending, releaseLoopPlan, releaseRetryText, ReleaseWatchState, haltStillMatters, tagAdvancePending, tagAdvanceToResolve, tagContainsRelease, tagManualAdvance, tagStuck, tagStuckCause, tagStuckReport } from "./release-watch.ts";
 
@@ -10182,7 +10182,7 @@ function readDeployLease(): DeployLease | null {
   const ownerPid = readAdmissionFile("deploy-lease", "owner.pid");
   if (!ownerPid) return null;
   const startedAt = Number(readAdmissionFile("deploy-lease", "started"));
-  return { ownerPid, label: readAdmissionFile("deploy-lease", "label") ?? "", start: readAdmissionFile("deploy-lease", "start"), startedAt: startedAt > 0 ? startedAt : undefined };
+  return { ownerPid, label: readAdmissionFile("deploy-lease", "label") ?? "", start: readAdmissionFile("deploy-lease", "start"), startedAt: startedAt > 0 ? startedAt : undefined, checkout: readAdmissionFile("deploy-lease", "checkout") };
 }
 function readReleaseIntents(): ReleaseIntent[] | null {
   // admission-control.sh creates intents/ on every acquire: missing while a
@@ -10248,8 +10248,10 @@ if (!process.env.VITEST || process.env.OMB_NOW_IN_TESTS === "1") nowStatus.start
  * releaseInFlight), read at most once a minute: while one is, no session is
  * told to resume (INSP-S r1 S-1). `label` null: none; "?" while the
  * admission state cannot be read (undecided, so nobody is told either). A
- * release past the ceiling has likely hung and holds nothing. */
-const releaseHold: { label: string | null; at: number; running: boolean } = { label: null, at: 0, running: false };
+ * release past the ceiling has likely hung and holds nothing. In its network
+ * phase (lote W2, "deploying") the machine is free: only the session in the
+ * checkout the release deploys from is held (R11 #2; `found`/`checkout`). */
+const releaseHold: { label: string | null; found: ReleaseInFlight | null; checkout: string | null; at: number; running: boolean } = { label: null, found: null, checkout: null, at: 0, running: false };
 // a test's minute is shorter (OMB_AUTONOMY_MINUTE_MS)
 const RELEASE_HOLD_EVERY_MS = autonomyTestMs("OMB_AUTONOMY_MINUTE_MS") ?? 60_000;
 async function refreshReleaseHold(): Promise<void> {
@@ -10257,6 +10259,8 @@ async function refreshReleaseHold(): Promise<void> {
   releaseHold.running = true;
   try {
     let label: string | null;
+    let found: ReleaseInFlight | null = null;
+    let checkout: string | null = null;
     try {
       const lease = readAdmissionLease();
       const deployLease = readDeployLease();
@@ -10264,27 +10268,39 @@ async function refreshReleaseHold(): Promise<void> {
       if (!lease && !deployLease && !intents.length) label = null;
       else {
         const rows = await psTable();
-        const found = releaseInFlight({ rows, lease, deployLease, intents, alive: (pid) => rows.some((row) => row.pid === pid) });
-        label = found && !found.overdue ? releaseHoldText(found) : null;
+        found = releaseInFlight({ rows, lease, deployLease, intents, alive: (pid) => rows.some((row) => row.pid === pid) });
+        checkout = deployLease?.checkout ?? null;
+        label = releaseResumeHold(found);
       }
     } catch {
       label = "?";
     }
-    if (label !== releaseHold.label) console.log(`[cc-sessions] release hold: ${label === null ? "none" : label === "?" ? "admission state unreadable" : label}`);
+    const said = label ?? (found?.state === "deploying" && !found.overdue ? `none (${releaseHoldText(found)})` : null);
+    if (label !== releaseHold.label || found?.state !== releaseHold.found?.state) console.log(`[cc-sessions] release hold: ${said === null ? "none" : label === "?" ? "admission state unreadable" : said}`);
     releaseHold.label = label;
+    releaseHold.found = found;
+    releaseHold.checkout = checkout;
     releaseHold.at = Date.now();
   } finally {
     releaseHold.running = false;
   }
 }
+/** The release hold this server last read, for this session: in the release's
+ * network phase only the session in the checkout it deploys from is held. */
+const releaseHoldOf = (session: Pick<CcSession, "cwd">): string | null => {
+  if (releaseHold.label !== null || releaseHold.found?.state !== "deploying" || !session.cwd) return releaseHold.label;
+  let cwd = session.cwd;
+  try { cwd = realpathSync(cwd); } catch { /* gone: compared as recorded */ }
+  return releaseResumeHold(releaseHold.found, cwd, releaseHold.checkout);
+};
 /** resumeNeeded under the release hold this server last read. */
-const resumeOf = (session: CcSession, now = Date.now()) => resumeNeeded(session, now, { release: releaseHold.label });
+const resumeOf = (session: CcSession, now = Date.now()) => resumeNeeded(session, now, { release: releaseHoldOf(session) });
 /** What a row shows: the session still holds its PR while a release runs,
  * so the mark stays, "on hold" — parked behind the release, or with one on
  * its way — instead of vanishing and coming back (INSP-S r2 S2-3). The bots
  * are told nothing meanwhile (resumeOf). */
 const wireResumeOf = (session: CcSession, now = Date.now()): WireCcSession["resume"] | null => {
-  const held = session.resumeAfterTag ? "parked" as const : releaseHold.label ? "release" as const : null;
+  const held = session.resumeAfterTag ? "parked" as const : releaseHoldOf(session) ? "release" as const : null;
   const need = resumeNeeded(held === "parked" ? { ...session, resumeAfterTag: undefined } : session, now);
   return need ? { ...need, ...(held ? { held } : {}) } : null;
 };
@@ -10916,7 +10932,7 @@ async function climbStopLadderTick(): Promise<void> {
     const said = await climbStopLadder({
       ledger: ccLedger,
       now: Date.now,
-      release: () => releaseHold.label,
+      release: (session) => session ? releaseHoldOf(session) : releaseHold.label,
       // GitHub's word before a PR is said open: the cache may lag a merge
       confirmOpen: async (session, prs) => {
         if (!session.delivery?.slug) return null;

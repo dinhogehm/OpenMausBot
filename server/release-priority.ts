@@ -201,8 +201,9 @@ export function ciToStop(pid: number, rows: readonly PsRow[], guard: StopGuard):
 export interface AdmissionLease { ownerPid: string; kind: string; label?: string; start?: string }
 export interface ReleaseIntent { pid: number; label: string; start?: string }
 /** nuria-platform lote W2: one release or deploy at a time, held for the whole release;
- * `startedAt` is when the release took it (epoch seconds). */
-export interface DeployLease { ownerPid: string; label: string; start?: string; startedAt?: number }
+ * `startedAt` is when the release took it (epoch seconds); `checkout`, the
+ * checkout it deploys from (a ci:local started in it waits for the release). */
+export interface DeployLease { ownerPid: string; label: string; start?: string; startedAt?: number; checkout?: string }
 /** nuria-platform's NURIA_ADMISSION_RELEASE_CEILING_SECONDS default: a release older than this has very likely hung. */
 export const RELEASE_QUEUE_CEILING_S = 5 * 3600;
 export interface QueuedBehindRelease { label: string; state: "holding" | "queued"; ageS: number | null; overdue: boolean }
@@ -256,14 +257,18 @@ export function ciQueuedBehindRelease(input: { rows: readonly PsRow[]; rootPid: 
 }
 
 /** A production release on its way on this Mac now, whatever CI waits for
- * it: it holds the machine (admission lease of kind release), holds the
- * deploy lease (lote W2: the whole release), or queues for the machine (an
- * intent). Liveness as in ciQueuedBehindRelease (pid in the table with the
- * start the lease recorded); `overdue` past the ceiling, when the release
- * very likely hung. Resuming a session now would put its ci:local against
- * that release — what lote W exists to prevent — so a session is not told
- * to resume while one is on its way (INSP-S r1 S-1). */
-export function releaseInFlight(input: { rows: readonly PsRow[]; lease: AdmissionLease | null; deployLease: DeployLease | null; intents: readonly ReleaseIntent[]; alive: (pid: number) => boolean; nowMs?: number; ceilingS?: number }): QueuedBehindRelease | null {
+ * it: it holds the machine (admission lease of kind release) or queues for it
+ * (an intent) — "holding"/"queued": resuming a session now would put its
+ * ci:local against that release, what lote W exists to prevent, so no
+ * session is told to resume (INSP-S r1 S-1). Or it holds only the deploy lease
+ * (lote W2: the network phase, after ADMISSION_DOWNGRADED … machine=released) —
+ * "deploying": the machine is free, a session's ci:local is admitted at once,
+ * so sessions resume (R11 #2: e3e9e7ddc held every resume 2h56, the machine
+ * free for ~2 h of it). Liveness as in ciQueuedBehindRelease (pid in the
+ * table with the start the lease recorded); `overdue` past the ceiling, when
+ * the release very likely hung. */
+export interface ReleaseInFlight extends Omit<QueuedBehindRelease, "state"> { state: QueuedBehindRelease["state"] | "deploying" }
+export function releaseInFlight(input: { rows: readonly PsRow[]; lease: AdmissionLease | null; deployLease: DeployLease | null; intents: readonly ReleaseIntent[]; alive: (pid: number) => boolean; nowMs?: number; ceilingS?: number }): ReleaseInFlight | null {
   const startOf = new Map(input.rows.map((row) => [row.pid, row.start.replace(/\s+/g, " ").trim()]));
   const live = (pid: number, start?: string) => {
     if (!Number.isInteger(pid) || pid <= 0 || !input.alive(pid)) return false;
@@ -273,16 +278,32 @@ export function releaseInFlight(input: { rows: readonly PsRow[]; lease: Admissio
   };
   const deployLive = input.deployLease !== null && live(Number(input.deployLease.ownerPid.trim()), input.deployLease.start);
   const ageS = deployLive && input.deployLease?.startedAt ? Math.max(0, Math.round((input.nowMs ?? Date.now()) / 1000 - input.deployLease.startedAt)) : null;
-  const found = (label: string, state: QueuedBehindRelease["state"]): QueuedBehindRelease => ({ label, state, ageS, overdue: ageS !== null && ageS >= (input.ceilingS ?? RELEASE_QUEUE_CEILING_S) });
+  const found = (label: string, state: ReleaseInFlight["state"]): ReleaseInFlight => ({ label, state, ageS, overdue: ageS !== null && ageS >= (input.ceilingS ?? RELEASE_QUEUE_CEILING_S) });
   if (input.lease && input.lease.kind.trim() === "release" && live(Number(input.lease.ownerPid.trim()), input.lease.start)) return found(input.lease.label?.trim() ?? "", "holding");
-  if (deployLive) return found(input.deployLease!.label.trim(), "holding");
+  // a release with the deploy lease queues for the machine through its intent (its CPU phase)
   const intent = input.intents.find((each) => live(each.pid, each.start));
-  return intent ? found(intent.label.trim(), "queued") : null;
+  if (intent) return found(intent.label.trim(), "queued");
+  return deployLive ? found(input.deployLease!.label.trim(), "deploying") : null;
 }
 
 /** What a session waiting on a release is told it waits for, in pt-BR. */
-export function releaseHoldText(release: Pick<QueuedBehindRelease, "label" | "state">): string {
+export function releaseHoldText(release: Pick<ReleaseInFlight, "label" | "state">): string {
+  if (release.state === "deploying") return `${releaseName(release.label, true)} está na fase de rede; o seu ci:local pode rodar`;
   return `${releaseName(release.label, true)} está ${release.state === "holding" ? "em andamento" : "na fila da máquina"}`;
+}
+
+/** What holds a session's resume now (resumeNeeded's `hold.release`), or null:
+ * a release holding or queueing for the machine holds every session; in its
+ * network phase ("deploying") only the session working in the checkout the
+ * release deploys from (a ci:local there waits for the release anyway); past
+ * the ceiling, none. `sessionCwd` and `releaseCheckout` resolved by the caller. */
+export function releaseResumeHold(found: ReleaseInFlight | null, sessionCwd?: string | null, releaseCheckout?: string | null): string | null {
+  if (!found || found.overdue) return null;
+  if (found.state !== "deploying") return releaseHoldText(found);
+  const trim = (path: string) => path.replace(/\/+$/, "");
+  return sessionCwd && releaseCheckout && trim(sessionCwd) === trim(releaseCheckout)
+    ? `${releaseName(found.label, true)} publica a partir do checkout desta sessão`
+    : null;
 }
 
 const releaseName = (label: string, article: boolean) => {

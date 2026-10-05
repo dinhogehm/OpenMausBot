@@ -57,8 +57,9 @@ export function stopStep(session: CcSession, now: number, release: string | null
 export interface StopLadderDeps {
   ledger: { all(): CcSession[]; save(): void };
   now: () => number;
-  /** A release on its way on this Mac (pt-BR), "?" when undecided, null when none. */
-  release: () => string | null;
+  /** A release on its way on this Mac (pt-BR), "?" when undecided, null when none;
+   * for a session, what holds it (in the network phase, only the release's checkout). */
+  release: (session?: CcSession) => string | null;
   /** GitHub's word on the PRs before they are said open: the ones still
    * open, or null when GitHub cannot be asked (the record stands). */
   confirmOpen?: (session: CcSession, prs: number[]) => Promise<number[] | null>;
@@ -113,12 +114,11 @@ export function stopTexts(session: CcSession, step: StopStep, now: number, owner
 /** Says the steps due now, oldest stop first, within the hourly budget. */
 export async function climbStopLadder(deps: StopLadderDeps): Promise<Array<{ session: CcSession; stage: StopStep["stage"] }>> {
   const now = deps.now();
-  const release = deps.release();
   const sessions = deps.ledger.all();
   const recent = sessions.filter((session) => [session.resumeReportedAt, session.stopEscalatedAt].some((at) => at !== undefined && at <= now && now - at < 3_600_000)).length;
   let budget = STOP_NOTICES_PER_HOUR - recent;
   const due = sessions.flatMap((session) => {
-    const step = stopStep(session, now, release);
+    const step = stopStep(session, now, deps.release(session));
     return step ? [{ session, step }] : [];
   }).sort((a, b) => a.step.since - b.step.since);
   const said: Array<{ session: CcSession; stage: StopStep["stage"] }> = [];
@@ -132,7 +132,7 @@ export async function climbStopLadder(deps: StopLadderDeps): Promise<Array<{ ses
       if (open && !open.length) continue; // merged or closed meanwhile: nothing holds the line
       if (open) step = { ...step, need: { ...step.need, prs: step.need.prs.filter((n) => open.includes(n)) } };
       // re-read: the session may have moved while GitHub answered
-      const again = stopStep(session, deps.now(), deps.release());
+      const again = stopStep(session, deps.now(), deps.release(session));
       if (!again || again.stage !== step.stage) continue;
     }
     const texts = stopTexts(session, step, now, deps.ownerName?.(session));
