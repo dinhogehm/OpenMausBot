@@ -535,14 +535,14 @@ export function ownerPendingRecommendText(item: Pick<OwnerPending, "title">, bot
   return `${botName}, qual destas decisões você recomenda para «${item.title}», e por quê?`;
 }
 
-/** A saved item's structured part, read back defensively (an older ledger
- * has none; a hand-edited one may carry anything). */
 /** 7 for "o7"; 0 for anything else. */
 function ownerPendingNumber(id: string): number {
   const match = /^o(\d+)$/.exec(id);
   return match ? Number(match[1]) : 0;
 }
 
+/** A saved item's structured part, read back defensively (an older ledger
+ * has none; a hand-edited one may carry anything). */
 function savedDetails(pending: OwnerPending): OwnerPending {
   // a saved recommendation that no longer passes (no why, or two of them) loses
   // only the mark — never the item's why, steps and options (INSP-J2 #13)
@@ -934,7 +934,8 @@ export class BotAutonomy {
         runs: 1,
         failures: 0,
         changedAt: at,
-        reasonAt: sameNote ? noteWrittenAt(sameNote) : at,
+        // a legacy note of unknown age stays unknown ("more than N"), its createdAt kept (INSP-R12F F9)
+        ...(sameNote ? (sameNote.watch?.reasonAt !== undefined ? { reasonAt: sameNote.watch.reasonAt } : {}) : { reasonAt: at }),
         ...(input.standing ? { standing: true as const, maxMs: input.maxMinutes * this.minuteMs, ...(input.label && input.label !== STANDING_DEFAULT_LABEL ? { label: input.label } : {}) } : {}),
       },
     };

@@ -1024,6 +1024,21 @@ describe("a standing watch's note keeps its age across re-arms", () => {
     expect(other.watch!.reasonAt).toBe(now);
     expect(wakePrompt(other, null, now)).toContain("Your note for this moment: Outra nota");
   });
+
+  // INSP-R12F F9: set again with the same note, a legacy watch's unknown age stayed "more than", not exact
+  it("a legacy watch set again with the same note keeps its age unknown", () => {
+    const armed = now;
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      goals: [], inFlight: [],
+      wakes: [{ botId: "chief", threadId: "t1", reason: prodReason, createdAt: armed, dueAt: armed + 240 * 60_000, watch: { command: prodArgv.join(" "), argv: prodArgv, everyMs: 300_000, baseline: "a", lastRunAt: armed, runs: 9, failures: 0, standing: true, label: "prod", maxMs: 240 * 60_000 } }],
+    }));
+    const autonomy = make();
+    now += 2 * 3_600_000;
+    const again = autonomy.setWatch("chief", "t1", { argv: prodArgv, command: prodArgv.join(" "), everyMinutes: 5, maxMinutes: 240, reason: prodReason, baseline: "b", standing: true, label: "prod" });
+    expect(again.watch!.reasonAt).toBeUndefined();
+    expect(again.createdAt).toBe(armed);
+    expect(wakePrompt(again, null, now)).toContain("written more than 2 h ago — check it still holds");
+  });
 });
 
 describe("a bot waiting on the person, in plain words", () => {

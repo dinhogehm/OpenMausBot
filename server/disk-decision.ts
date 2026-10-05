@@ -158,7 +158,10 @@ export function totalSize(folders: readonly LeftFolder[]): string {
   return gib >= 1 ? `~${gib.toFixed(1).replace(".", ",")} GiB` : `~${Math.round(bytes / 1024 ** 2)} MB`;
 }
 
-const RECHECK = "Antes de remover qualquer uma, reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h; pule as que tiverem e me diga quais.";
+/** A path as one shell word (as nested-worktrees.ts quotes its commands). */
+const shellQuote = (value: string) => (/^[\w./@%+=:,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`);
+
+const RECHECK ="Antes de remover qualquer uma, reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h; pule as que tiverem e me diga quais.";
 
 /** The one item for the owner, keyed by the folders it asks about. Folders
  * in use stay out of it (said in its why, "não mexer"); one with work only on
@@ -184,7 +187,7 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
   const names = asked.map((folder) => folder.name).sort();
   const total = totalSize(asked);
   const free = /\*{0,2}(\d+(?:,\d+)?) GiB livres/i.exec(text)?.[1];
-  const path = (name: string) => `${root}/${name}`;
+  const path = (name: string) => shellQuote(`${root}/${name}`);
   const words = (list: readonly LeftFolder[]) => list.map((folder) => folder.name).sort().join(" ");
   const shown = asked.slice(0, STEPS_FOLDERS_MAX);
   const what = (folder: LeftFolder) => {
@@ -208,7 +211,8 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
     options: [
       ...(clean.length ? [{ label: "Remover as limpas", reply: `Remova as worktrees ${words(clean)} com git worktree remove, sem --force. ${RECHECK}` }] : []),
       ...(pending.length ? [{ label: "Push e remover", reply: `Para as worktrees ${words(pending)}: faça push da branch de cada uma (sem force). Se houver alterações não commitadas, pare e me mostre; não descarte nada. Só com o push confirmado no GitHub, remova sem --force. ${RECHECK}` }] : []),
-      { label: "Manter", reply: `Mantenha as worktrees ${words(asked)}. Não remova nem volte a me perguntar por elas.` },
+      // as long as the server holds a settled list (DISK_DECISION_SETTLED_MS): it says so (INSP-R12F F7)
+      { label: "Manter por 7 dias", reply: `Mantenha as worktrees ${words(asked)} e não as remova. Elas só voltam a ser perguntadas daqui a 7 dias, se ainda estiverem no disco.` },
     ],
   };
 }

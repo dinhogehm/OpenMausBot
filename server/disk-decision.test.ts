@@ -113,7 +113,7 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
     expect(item.steps[0]!.text).toContain("reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h");
     expect(item.steps[1]!.text).toBe("Veja 8204-reprovado-sidebar-da-fila-nao-refle-9b50cd (3,0G; commits em nenhuma branch remota)");
     // work only on this Mac: "Push e remover", never a removal — and never --force
-    expect(item.options.map((option) => option.label)).toEqual(["Push e remover", "Manter"]);
+    expect(item.options.map((option) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
     expect(item.options.map((option) => option.reply).join(" ")).not.toContain("--force)");
     expect(item.options[0]!.reply).toContain("Se houver alterações não commitadas, pare e me mostre; não descarte nada");
     // it passes the same rules a bot's item does, nothing cut
@@ -141,9 +141,20 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
     expect(item.options.find((option) => option.label === "Push e remover")!.reply).toContain("8204-reprovado-sidebar-da-fila-nao-refle-9b50cd");
     // git could not tell: not clean
     facts.set("atendimento-reaberto-bugs-496989", { inUse: null, dirty: null, unpushed: false });
-    expect(diskDecisionItem(folders, facts, ROOT, RUN_1138)!.options.map((option) => option.label)).toEqual(["Push e remover", "Manter"]);
+    expect(diskDecisionItem(folders, facts, ROOT, RUN_1138)!.options.map((option) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
     // a folder not checked counts as in use; all in use: no item
     expect(diskDecisionItem(folders, new Map(), ROOT, RUN_1138)).toBeNull();
+  });
+
+  // INSP-R12F F7, F8: "Manter" promised "never again" while the server asks again after 7 days; paths unquoted
+  it("says how long 'Manter' holds, as the server keeps it, and quotes every path in its commands", () => {
+    const folders = [{ name: "8204 com espaço's", size: "3,0G", reason: "commits só locais" }];
+    const item = diskDecisionItem(folders, idle(folders), "/Users/osvaldo/Projetos/nuria-platform/.claude/worktrees", RUN_1138)!;
+    const keep = item.options.find((option) => option.label === "Manter por 7 dias")!;
+    expect(DISK_DECISION_SETTLED_MS).toBe(7 * 86_400_000);
+    expect(keep.reply).toContain("só voltam a ser perguntadas daqui a 7 dias");
+    expect(keep.reply).not.toContain("nem volte a me perguntar");
+    expect(item.steps[1]!.command).toBe(`git -C '/Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/8204 com espaço'\\''s' status --short && git -C '/Users/osvaldo/Projetos/nuria-platform/.claude/worktrees/8204 com espaço'\\''s' log --oneline origin/main..HEAD`);
   });
 
   it("knows a folder in use: a session, a conversation, a live process inside, a change in the last day, or unknown", () => {

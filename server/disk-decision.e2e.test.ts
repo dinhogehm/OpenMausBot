@@ -76,7 +76,7 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     expect(item.steps[0].text).toContain("reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h");
     expect(item.steps[1].command).toContain(`git -C ${root}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd status --short`);
     // not git repositories here: nothing is proved clean, so nothing is offered for removal
-    expect(item.options.map((option: any) => option.label)).toEqual(["Push e remover", "Manter"]);
+    expect(item.options.map((option: any) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
     // the hour after, the same words: the same item, no second one
     await runOnce();
     await new Promise((resolve) => setTimeout(resolve, 500));
