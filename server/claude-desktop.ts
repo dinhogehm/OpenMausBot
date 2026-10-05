@@ -264,7 +264,7 @@ export function chipRow(lines: OcrLine[]): OcrLine[] {
  * folder, so it may well read "main" there too. The guards that count for
  * folder reuse are the server's 409 (lastAppWorktreeFolder) before the
  * screen is touched, and reusedWorktree when the session is adopted. */
-export function notRepoRoot(lines: OcrLine[], baseBranch = "main", known: { appBranch?: string | null; branches?: readonly string[] } = {}): string | null {
+export function notRepoRoot(lines: OcrLine[], baseBranch = "main", known: { rootHead?: string | null; fromRoot?: boolean; branches?: readonly string[] } = {}): string | null {
   const words = chipRow(lines).flatMap((line) => line.text.split(/\s+/)).map((raw) => raw.replace(/^[([•·"']+|[)\],;:"'•·…]+$/g, "")).filter(Boolean);
   const base = baseBranch.toLowerCase();
   const isBase = (lower: string) => lower === base || lower === `origin/${base}`;
@@ -281,9 +281,12 @@ export function notRepoRoot(lines: OcrLine[], baseBranch = "main", known: { appB
   // length; l/i/1, o/0, "rn" for "m") and no other branch of the repository
   // reads the same — never "rain", "mai" or "mainx" (INSP-R12a X3-4). A
   // word with no letter ("-") is unreadable, and counts as the base only
-  // when the app itself recorded it: the newest session's base branch in
-  // its records (`appBranch`), not git's HEAD of the root. A real other
-  // branch still refuses.
+  // for a new session of the ROOT on the base: git's HEAD of the root is
+  // the base (`rootHead`), and when the app has a root session the New
+  // Session was opened from it (`fromRoot`; INSP-R12a-r2 R2-1). Worktree
+  // sessions do not count: their `sourceBranch` (197 of 197 records) says
+  // nothing about a root session, which never records one (0 of 204). A
+  // real other branch still refuses.
   const icon = words.findIndex((word) => /^[gq][º°9]?$/i.test(word));
   // (the worktree box right after, "|O", is not a branch: nothing was read)
   const next = icon >= 0 ? words[icon + 1] ?? "" : "";
@@ -295,9 +298,10 @@ export function notRepoRoot(lines: OcrLine[], baseBranch = "main", known: { appB
     if (glyphs === glyphForm(baseBranch) && !another) return null;
     return `it shows ${read}, not ${baseBranch}`;
   }
-  if (icon >= 0 && known.appBranch === baseBranch) return null;
+  if (icon >= 0 && known.rootHead === baseBranch && known.fromRoot !== false) return null;
+  const why = known.rootHead !== baseBranch ? `the repository root is ${known.rootHead ? `on ${known.rootHead}` : "on no known branch"}` : "New Session was not opened from the app's root session";
   return icon >= 0
-    ? `it does not show the base branch ${baseBranch}: its branch chip could not be read (it shows "${[words[icon], read].filter(Boolean).join(" ")}") and the app's newest session ${known.appBranch ? `started from ${known.appBranch}` : "recorded no base branch"}`
+    ? `it does not show the base branch ${baseBranch}: its branch chip could not be read (it shows "${[words[icon], read].filter(Boolean).join(" ")}") and ${why}`
     : `it does not show the base branch ${baseBranch}`;
 }
 
@@ -334,7 +338,9 @@ function newSessionScreen(lines: OcrLine[], repoName: string): boolean {
  * The app opens a new session in the last folder used; if that is not the
  * repository (or the worktree option is not there), stop and retry later.
  */
-export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string; anchor?: { localId: string; title?: string } | null; appBranch?: string | null; branches?: readonly string[] }): Promise<DesktopStep> {
+export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string; anchor?: { localId: string; title?: string } | null; rootHead?: string | null; branches?: readonly string[] }): Promise<DesktopStep> {
+  // the app's root session, when it has one, must be what New Session opened from (an unreadable branch chip is judged by it)
+  let fromRoot: boolean | undefined = input.anchor ? false : undefined;
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.activateClaude());
     await driver.sleep(700);
@@ -348,7 +354,7 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     const reused = (lines: OcrLine[]) => {
       const bottom = lines.filter((line) => line.y > size.h * 0.55);
       const chip = reusedWorktreeChip(chipRow(bottom), input.liveWorktrees);
-      const why = chip ? `it shows ${chip}, another session's worktree` : notRepoRoot(bottom, input.baseBranch, { appBranch: input.appBranch, branches: input.branches });
+      const why = chip ? `it shows ${chip}, another session's worktree` : notRepoRoot(bottom, input.baseBranch, { rootHead: input.rootHead, fromRoot, branches: input.branches });
       return why ? { ok: false as const, reason: `the new session is not in the root of ${input.repoName} (${why}); nothing was typed. ${ROOT_SESSION_HOWTO(input.repoName, input.baseBranch ?? "main")}`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } : null;
     };
     if (open) {
@@ -374,6 +380,7 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       before = mainArea(await driver.ocr());
       const title = input.anchor.title;
       const shown = !title || before.some((line) => sidebarMatch(line.text, title)) || headerNames(before.filter((line) => line.y < 140), title);
+      fromRoot = shown;
       note = shown ? `New Session from the root session ${input.anchor.localId}` : `the root session ${input.anchor.localId}${title ? ` ("${title.slice(0, 60)}")` : ""} did not show; New Session from whatever was on screen`;
     }
     await act(screen, () => driver.menuNewSession());
@@ -434,7 +441,8 @@ export function worktreeOption(row: OcrLine[]): "on" | "off" | "unknown" | null 
   // the left edge glued as "1"/"l" ("1O", 05/10 #9378)
   if (/^[1lI]?(?:[oO0]|□|☐|○|◯|[пП]|[Ππ])$/.test(inside)) return "off";
   // or its two edges with nothing between ("||", "[]", or "| |" read as two tokens)
-  if (!inside && (/^(?:\|\||\[\]|\(\))$/.test(box) || (box === "|" && tokens.at(-2) === "|"))) return "off";
+  // — exactly two: "| | |" may be a thin tick read as "|" between them (INSP-R12a-r2 R2-4)
+  if (!inside && (/^(?:\|\||\[\]|\(\))$/.test(box) || (box === "|" && tokens.at(-2) === "|" && tokens.at(-3) !== "|" && !tokens.at(-3)?.endsWith("|")))) return "off";
   // anything else — one lone edge ("| worktree", the glyph lost), a word — is a doubt: never pasted on
   return "unknown";
 }
@@ -491,7 +499,7 @@ export function showsFolderName(lines: OcrLine[], name: string): boolean {
  * outside .claude/worktrees: the app maps folders inside it back to the
  * repository root); `folderName` is what its chip shows.
  */
-export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string; registered?: readonly string[] }): Promise<DesktopStep> {
+export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string; registered?: () => readonly string[] }): Promise<DesktopStep> {
   if (!input.folder.startsWith("/") || !input.folderName) return { ok: false, reason: "invalid folder for a new session", retry: false };
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.openUrl(newSessionInFolderUrl(input.folder)));
@@ -516,7 +524,8 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     // its real path; anywhere else only the person decides (INSP-R12a X3-2).
     const trust = trustPrompt(bottom);
     if (trust) {
-      if (!ownWorktreeFolder(input.folder, input.expected, input.registered)) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName}, which is not a worktree the server made; nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.folder, seen: seenText(bottom.slice(-8)) };
+      // git's list is read only now, when there is a prompt to answer (INSP-R12a-r2 R2-5)
+      if (!ownWorktreeFolder(input.folder, input.expected, input.registered?.() ?? [])) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName}, which is not a worktree the server made; nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.folder, seen: seenText(bottom.slice(-8)) };
       stop = await guard(screen, "trust the workspace");
       if (stop) return stop;
       await act(screen, () => driver.click(trust.x + trust.w / 2, trust.y + trust.h / 2));
@@ -1133,18 +1142,6 @@ export function notPickedFolder(record: Pick<DesktopRecord, "scheduledTaskId" | 
 /** The repository of the app's most recent work session: New Session opens
  * in the last folder picked, whatever we would like. Scheduled runs and
  * scratch sessions do not move that folder, so they are skipped. */
-/** The base branch the app recorded for its newest work session in `repo`
- * (`sourceBranch`): what New Session's branch chip shows, as the app itself
- * keeps it (R11-2). Null when no such record says. */
-export function lastAppSourceBranch(repo: string, dir = DESKTOP_SESSIONS_DIR): string | null {
-  let newest: DesktopRecord | null = null;
-  for (const file of recordFiles(dir)) {
-    const record = readRecord(file);
-    if (record && !notPickedFolder(record) && repoOf(record) === repo && (record.createdAt ?? 0) > (newest?.createdAt ?? -1)) newest = record;
-  }
-  return typeof newest?.sourceBranch === "string" && newest.sourceBranch ? newest.sourceBranch : null;
-}
-
 export function lastAppRepo(dir = DESKTOP_SESSIONS_DIR): string | undefined {
   let newest: DesktopRecord | null = null;
   for (const file of recordFiles(dir)) {

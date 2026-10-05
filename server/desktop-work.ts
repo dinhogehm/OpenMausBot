@@ -91,8 +91,8 @@ export interface DesktopWorkDeps {
   liveWorktrees?: () => string[];
   /** The repository's base branch ("main"): a new session must open on it. */
   baseBranch?: (session: CcSession) => string;
-  /** The base branch the app recorded for its newest session in the repository (its `sourceBranch`), and the repository's branches: an unreadable branch chip is judged by them (R11-2). */
-  appBranch?: (session: CcSession) => string | null;
+  /** The branch git's HEAD of the repository root is on ("HEAD" when detached), and the repository's branches: an unreadable branch chip is judged by them, with the root session New Session opened from (R11-2, INSP-R12a-r2 R2-1). */
+  rootHead?: (session: CcSession) => string | null;
   branches?: (session: CcSession) => string[];
   /** The real paths of the worktrees git lists for the session's repository: a "trust this workspace" is clicked only for one of them. */
   registeredWorktrees?: (session: CcSession) => string[];
@@ -806,8 +806,8 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       deps.ledger.save();
       step = own
         // the app's link opens New Session in the server's own worktree (its alias)
-        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: deps.registeredWorktrees?.(next) ?? [] })
-        : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, appBranch: deps.appBranch?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
+        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [] })
+        : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, rootHead: deps.rootHead?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
     } else {
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;

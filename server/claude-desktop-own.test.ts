@@ -21,6 +21,7 @@ import {
   rootFolderRefusal,
   trustPrompt,
   createDesktopSession,
+  rootAnchorSession,
   type DesktopDriver,
   type OcrLine,
 } from "./claude-desktop.ts";
@@ -103,18 +104,71 @@ describe("the 20 real readings of 03/10 (R12-1, R11-2)", () => {
     // a mark, with or without its edges
     ["v worktree", "on"], ["✓ worktree", "on"], ["|v| worktree", "on"], ["|✓| worktree", "on"], ["|x| worktree", "on"], ["[✓]| worktree", "on"], ["[✓] worktree", "on"], ["|V worktree", "on"], ["☑ worktree", "on"],
     // a doubt: never off
-    ["| worktree", "unknown"], ["• pasta | worktree", "unknown"], ["worktree", "unknown"], ["q - worktree", "unknown"], ["|? worktree", "unknown"], ["|OO worktree", "unknown"], ["|1 worktree", "unknown"],
+    ["| worktree", "unknown"], ["• pasta | worktree", "unknown"], ["| | | worktree", "unknown"], ["q9 - | | | worktree", "unknown"], ["worktree", "unknown"], ["q - worktree", "unknown"], ["|? worktree", "unknown"], ["|OO worktree", "unknown"], ["|1 worktree", "unknown"],
   ])("reads %s as %s", (text, want) => {
     expect(worktreeOption([{ x: 885, y: 788, w: 92, h: 15, text }])).toBe(want);
   });
 
-  it("take the unreadable branch chip (\"g9 -\", \"q9 -\", \"q -\") as the base only when the app's newest session recorded it", () => {
+  it("take the unreadable branch chip (\"g9 -\", \"q9 -\", \"q -\") as the base only for a ROOT session on the base: root HEAD on it, opened from the root session when there is one", () => {
     for (const [seen] of REAL_0310) {
       const lines = screenOf(seen);
-      expect(notRepoRoot(lines, "main", { appBranch: "main", branches: ["main", "fix/9326-x"] })).toBeNull();
-      expect(notRepoRoot(lines, "main", { appBranch: "fix/9326-x" })).toMatch(/^it does not show the base branch main: its branch chip could not be read \(it shows "[gq]9? -"\) and the app's newest session started from fix\/9326-x$/);
-      expect(notRepoRoot(lines, "main")).toContain("recorded no base branch");
+      // the 03/10 screens: root on main, New Session from the root session (or no root session at all)
+      expect(notRepoRoot(lines, "main", { rootHead: "main", fromRoot: true, branches: ["main", "fix/9326-x"] })).toBeNull();
+      expect(notRepoRoot(lines, "main", { rootHead: "main" })).toBeNull();
+      // the root elsewhere, detached, or unknown: refused
+      expect(notRepoRoot(lines, "main", { rootHead: "HEAD", fromRoot: true })).toMatch(/^it does not show the base branch main: its branch chip could not be read \(it shows "[gq]9? -"\) and the repository root is on HEAD$/);
+      expect(notRepoRoot(lines, "main", { fromRoot: true })).toContain("the repository root is on no known branch");
+      // a root session exists but New Session did not open from it: no confirmation, refused
+      expect(notRepoRoot(lines, "main", { rootHead: "main", fromRoot: false })).toContain("New Session was not opened from the app's root session");
     }
+  });
+
+  describe("with the app's records as they really are (INSP-R12a-r2 R2-1)", () => {
+    // worktree sessions carry sourceBranch (197 of 197); root sessions never do (0 of 204)
+    const ROOT = "/Users/o/Projetos/nuria-platform";
+    const rootRecord = { sessionId: "local_0a0000a1-0000-4000-8000-000000000000", cliSessionId: "c-root", cwd: ROOT, originCwd: ROOT, title: "Sessão raiz do gerente OpenMausBot", createdAt: Date.parse("2026-10-03T12:00:00Z") };
+    const worktreeRecord = { sessionId: "local_0a0000a2-0000-4000-8000-000000000000", cliSessionId: "c-wt", cwd: `${ROOT}/.claude/worktrees/9195-x`, worktreePath: `${ROOT}/.claude/worktrees/9195-x`, worktreeName: "9195-x", sourceBranch: "main", branch: "claude/9195-x", originCwd: ROOT, title: "9195 Filtros", createdAt: Date.parse("2026-10-03T13:00:00Z") };
+    const recordsDir: string[] = [];
+    afterEach(() => { for (const dir of recordsDir.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+    const withRecords = (records: object[]) => {
+      const dir = mkdtempSync(join(tmpdir(), "omb-recs-"));
+      recordsDir.push(dir);
+      mkdirSync(join(dir, "org", "acct"), { recursive: true });
+      for (const record of records) writeFileSync(join(dir, "org", "acct", `${(record as { sessionId: string }).sessionId}.json`), JSON.stringify(record));
+      return dir;
+    };
+    // a 03/10 screen after New Session ("g9 -"), the root session before it, then the brief gone
+    const G9 = ["• Local", "nuria-platform", "g9 - |O worktree", "Descreva uma tarefa ou faça uma pergunta", "+ O v Ignorar permissões"];
+    const run = async (anchor: { localId: string; title?: string } | null, rootHead: string | null, anchorShows = true) => {
+      const anchorScreen = anchorShows ? ["Sessão raiz do gerente OpenMausBot v (nuria-platform", "Responder…", "+ O v Ignorar permissões"] : ["Outra coisa v (nuria-platform", "Responder…", "+ O v Ignorar permissões"];
+      // (no root session: no screen for it — New Session comes right after the first look)
+      const app = fakeApp(anchor ? [["tela qualquer"], anchorScreen, G9, SENT] : [["tela qualquer"], G9, SENT]);
+      const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "brief", anchor, rootHead });
+      return { step, pasted: app.actions.some((action) => action.startsWith("paste")) };
+    };
+
+    it("a root session on record, root on main, New Session from it: the unreadable chip passes — the newer worktree session's sourceBranch is not looked at", async () => {
+      const anchor = rootAnchorSession(ROOT, withRecords([rootRecord, worktreeRecord]));
+      expect(anchor).toEqual({ localId: rootRecord.sessionId, title: rootRecord.title });
+      const ok = await run(anchor, "main");
+      expect(ok.pasted).toBe(true);
+      // the root session did not show: no confirmation, refused
+      const unconfirmed = await run(anchor, "main", false);
+      expect(unconfirmed.pasted).toBe(false);
+      expect(!unconfirmed.step.ok && unconfirmed.step.reason).toContain("New Session was not opened from the app's root session");
+      // the root detached: refused, whatever the worktree session recorded
+      const detached = await run(anchor, "HEAD");
+      expect(detached.pasted).toBe(false);
+      expect(!detached.step.ok && detached.step.reason).toContain("the repository root is on HEAD");
+    });
+
+    it("only worktree sessions on record (sourceBranch main): root HEAD alone decides — a worktree session never vouches for a root chip", async () => {
+      expect(rootAnchorSession(ROOT, withRecords([worktreeRecord]))).toBeNull();
+      expect((await run(null, "main")).pasted).toBe(true);
+      const detached = await run(null, "HEAD");
+      expect(detached.pasted).toBe(false);
+      expect(!detached.step.ok && detached.step.reason).toContain("the repository root is on HEAD");
+    });
   });
 
   it("read the branch word as the base only with look-alike glyphs, same length, and no other branch reading the same", () => {
@@ -123,11 +177,11 @@ describe("the 20 real readings of 03/10 (R12-1, R11-2)", () => {
     for (const word of ["rain", "mai", "mainx", "man", "maim"]) expect({ word, why: notRepoRoot(chips(word), "main") }).toEqual({ word, why: `it shows ${word}, not main` });
     // another branch of the repository that reads the same: refused
     expect(notRepoRoot(chips("maln"), "main", { branches: ["main", "maln"] })).toBe("it shows maln, not main");
-    expect(notRepoRoot(chips("develop"), "main", { appBranch: "main" })).toBe("it shows develop, not main");
-    expect(notRepoRoot(chips("fix/9326-x"), "main", { appBranch: "main" })).toBe("it shows fix/9326-x, not main");
+    expect(notRepoRoot(chips("develop"), "main", { rootHead: "main" })).toBe("it shows develop, not main");
+    expect(notRepoRoot(chips("fix/9326-x"), "main", { rootHead: "main" })).toBe("it shows fix/9326-x, not main");
     // the icon is "g"/"q" with "º", "°" or "9" — never a word like "go" ("go mainx")
     const go = [{ x: 801, y: 788, w: 60, h: 16, text: "go mainx" }, { x: 885, y: 788, w: 92, h: 15, text: "|O worktree" }];
-    expect(notRepoRoot(go, "main", { appBranch: "main" })).toBe("it does not show the base branch main");
+    expect(notRepoRoot(go, "main", { rootHead: "main" })).toBe("it does not show the base branch main");
     expect(glyphForm("rnaln")).toBe("main");
     expect(editDistance("maln", "main")).toBe(1);
   });
@@ -179,7 +233,7 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
   it("trusts the workspace only once the screen shows our folder's new session, and the folder is a worktree git lists, then pastes", async () => {
     const { worktree, alias } = ownFolder();
     const app = fakeApp([screen9378(true), screen9378(false), SENT]);
-    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "9378 Supervisor\n[OMBX]\n\nPasso 0…", expected: worktree, registered: ["/elsewhere", worktree] });
+    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "9378 Supervisor\n[OMBX]\n\nPasso 0…", expected: worktree, registered: () => ["/elsewhere", worktree] });
     expect(step).toEqual({ ok: true });
     // the prompt (1st line, y 700) clicked, then the field, then the paste
     expect(app.actions[1]).toBe("click 700,708");
@@ -188,7 +242,7 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
 
   it("clicks nothing when the folder is not a worktree git lists for the repository, or is not ours: the person is asked (trustNeeded)", async () => {
     const { worktree, alias } = ownFolder();
-    for (const input of [{}, { expected: "/Users/o/Projetos/outro", registered: ["/Users/o/Projetos/outro"] }, { expected: worktree }, { expected: worktree, registered: ["/Users/o/Projetos/outro"] }]) {
+    for (const input of [{}, { expected: "/Users/o/Projetos/outro", registered: () => ["/Users/o/Projetos/outro"] }, { expected: worktree }, { expected: worktree, registered: () => ["/Users/o/Projetos/outro"] }]) {
       const app = fakeApp([screen9378(true)]);
       const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", ...input });
       expect(step).toMatchObject({ ok: false, retry: true, trustNeeded: alias });
@@ -202,7 +256,10 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
     const noField = ["Confiar no workspace", "• Local", `• ${FOLDER_9378}`, "|O worktree"];
     for (const screenLines of [other, noField]) {
       const app = fakeApp([screenLines]);
-      const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", expected: worktree, registered: [worktree] });
+      // git's list is not even read when the screen is not ours (INSP-R12a-r2 R2-5)
+      let listed = 0;
+      const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", expected: worktree, registered: () => { listed += 1; return [worktree]; } });
+      expect(listed).toBe(0);
       expect(step).toMatchObject({ ok: false, miss: true });
       expect(!step.ok && step.reason).toContain("nothing was clicked or typed");
       expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
@@ -212,7 +269,7 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
   it("stops without typing when the prompt stays after the click (a miss)", async () => {
     const { worktree, alias } = ownFolder();
     const app = fakeApp([screen9378(true)]);
-    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", expected: worktree, registered: [worktree] });
+    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", expected: worktree, registered: () => [worktree] });
     expect(step).toMatchObject({ ok: false, miss: true });
     expect(!step.ok && step.reason).toContain("still asks to trust the workspace");
     expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);

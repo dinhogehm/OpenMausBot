@@ -351,7 +351,6 @@ import {
   macDesktopDriver,
   newMarker,
   lastAppRepo,
-  lastAppSourceBranch,
   liveWorktreeNames,
   liveRecordFolders,
   lastAppWorktreeFolder,
@@ -9816,7 +9815,7 @@ const desktopWork: DesktopWorkDeps = {
   hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
   liveWorktrees: () => liveWorktreeNames(undefined, true),
   baseBranch: (session) => repoBaseBranch(session.repo),
-  appBranch: (session) => lastAppSourceBranch(session.repo),
+  rootHead: (session) => gitLine(session.repo, ["rev-parse", "--abbrev-ref", "HEAD"]),
   // the worktrees git lists for the repository (a "trust this workspace" is clicked only for one of ours)
   registeredWorktrees: (session) => parseWorktreeList(gitLine(session.repo, ["worktree", "list", "--porcelain"]) ?? "").map((entry) => entry.path),
   branches: (session) => (gitLine(session.repo, ["for-each-ref", "--count=500", "--format=%(refname:short)", "refs/heads"]) ?? "").split("\n").filter(Boolean),
