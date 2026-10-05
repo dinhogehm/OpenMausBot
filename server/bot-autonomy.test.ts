@@ -1573,4 +1573,23 @@ describe("a reply that says the person is not needed asks nothing (R11-visual N1
     expect(ownerAskText("O cache é meu, já limpei. A decisão do merge da #9350 continua com você.")).toBe("A decisão do merge da #9350 continua com você.");
     expect(echoAsk("A decisão do merge da #9350 continua com você.")).toBe(false);
   });
+
+  // INSP-R11fix F-1: a denial in one clause never cancels an ask in another
+  it("reads a sentence by its clauses: 'é meu, mas preciso…' and 'não preciso de você para X, só preciso que…' still ask", () => {
+    for (const said of [
+      "O merge é meu, mas preciso de uma decisão sua sobre o carrier.",
+      "Não preciso de você para o merge, só preciso que você aprove o carrier.",
+      "O cache fica comigo; preciso de você para liberar o disco.",
+      "Isso é meu, porém a decisão do carrier fica com você.",
+    ]) {
+      expect(ownerAskAt(thread(said), at + 60_000), said).toBe(at);
+      expect(echoAsk(said), said).toBe(false);
+    }
+    expect(ownerAskText("O merge é meu, mas preciso de uma decisão sua sobre o carrier.")).toBe("O merge é meu, mas preciso de uma decisão sua sobre o carrier.");
+    // the Chief's real reply of 04/10 still asks nothing
+    expect(ownerAskAt(thread(real), at + 60_000)).toBeNull();
+    expect(echoAsk("Esse trabalho já é meu (item 5 da operação) e não depende de decisão sua.")).toBe(true);
+    // a denial on both sides of the cut stays a denial
+    expect(ownerAskAt(thread("O merge é meu, mas não depende de decisão sua."), at + 60_000)).toBeNull();
+  });
 });

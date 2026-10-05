@@ -2152,7 +2152,10 @@ const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma d
 // word edges by letter, not \b: \b is ASCII-only, and "é", "você" end in a non-ASCII letter
 const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
 /** A sentence that asks for the person: an explicit ask, never one that denies it. */
-const asksOwner = (sentence: string): boolean => OWNER_ASK.test(sentence) && !NOT_ASK.test(sentence);
+/** A sentence's clauses, cut where a contrast or a list starts a new one ("é meu, mas preciso…",
+ * "não preciso de você para X, só preciso que…"): a denial in one never cancels an ask in another (INSP-R11fix F-1). */
+const CLAUSE_CUT = /\s*(?:,?\s*(?<![\p{L}])(?:mas|por[ée]m|s[óo] que|contudo|entretanto|todavia)(?![\p{L}])|;|,\s*s[óo](?![\p{L}]))\s*/iu;
+const asksOwner = (sentence: string): boolean => sentence.split(CLAUSE_CUT).some((clause) => OWNER_ASK.test(clause) && !NOT_ASK.test(clause));
 const sentencesOf = (text: string): string[] => text.split(/(?<=[.!?…])\s+|\n+/);
 
 /** Since when the bot has been waiting on the person: the first of its
@@ -2234,7 +2237,7 @@ export function echoAsk(text: string, itemIds: readonly string[] = []): boolean 
   // or naming an item ("Quer que eu responda à cliente agora (o4)?"): never an echo (INSP-J r1 #4)
   if (/\?\s*\)?\s*$/.test(plain)) return false;
   // it says the person is not needed ("já é meu", "não depende de decisão sua"): nothing to ask (R11-visual N15)
-  if (NOT_ASK.test(plain)) return true;
+  if (NOT_ASK.test(plain) && !sentencesOf(plain).some(asksOwner)) return true;
   // another item by its id, said and nothing asked ("O Monitor abriu a pendência o6.")
   if (/\b(?:pend[êe]ncias?|itens?|pedidos?)\s+o\d+\b/i.test(plain) || /\(o\d+\)/.test(plain)) return true;
   const ids = new Set(itemIds.map((id) => id.toLowerCase()));
