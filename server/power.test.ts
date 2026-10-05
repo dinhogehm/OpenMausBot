@@ -94,14 +94,22 @@ describe("power", () => {
     const told = new Set<string>();
     const base = { onBatterySince: 0, releaseRunning: true, told };
     const low = batteryAlert({ ...base, power: { onBattery: true, percent: 19 }, now: 45 * 60_000 })!;
-    expect(low).toEqual({ level: "low", text: "Bateria em 19% (seu limite: 20%): ligue o Mac na tomada. Está na bateria há 45 min, com release de produção em curso; o Chief não manda carrier abaixo de 20%, mas o watcher automático de produção não olha a bateria e ainda pode começar um release sozinho." });
-    expect(low.text).not.toMatch(/nenhum carrier novo começa/);
+    // R12-resilience B2: the watcher reads the battery before it starts (BAT-W); what it does not
+    // do is stop a release already running — that is the risk to say, with the wall as the way out
+    expect(low).toEqual({ level: "low", text: "Bateria em 19% (seu limite: 20%): ligue o Mac na tomada. Está na bateria há 45 min, com release de produção em curso; o Chief não manda carrier abaixo de 20%, e o watcher automático de produção só olha a bateria antes de começar um release (não começa abaixo do mínimo dele, 20% por padrão), mas um release já em curso não para: se a bateria acabar no meio, a produção fica pela metade. Há um release em curso: ligue o Mac na tomada agora." });
+    expect(low.text).not.toMatch(/nenhum carrier novo começa|não olha a bateria|pode começar um release sozinho/);
+    // without a release running, the risk is still said, the "agora" is not
+    const quiet = batteryAlert({ power: { onBattery: true, percent: 19 }, onBatterySince: 0, now: 1, releaseRunning: false, told: new Set() })!;
+    expect(quiet.text).toContain("um release já em curso não para");
+    expect(quiet.text).not.toContain("Há um release em curso");
     told.add(low.level);
     expect(batteryAlert({ ...base, power: { onBattery: true, percent: 15 }, now: 50 * 60_000 })).toBeNull();
     const critical = batteryAlert({ ...base, power: { onBattery: true, percent: 9 }, now: 80 * 60_000 })!;
     expect(critical.level).toBe("critical");
     expect(critical.text).toContain("PARAR");
-    expect(critical.text).toContain("não olha a bateria");
+    expect(critical.text).toContain("um release já em curso não para");
+    expect(critical.text).toContain("Há um release em curso: ligue o Mac na tomada agora.");
+    expect(critical.text).not.toContain("não olha a bateria");
     told.add(critical.level);
     expect(batteryAlert({ ...base, power: { onBattery: true, percent: 5 }, now: 90 * 60_000 })).toBeNull();
     expect(batteryAlert({ ...base, power: { onBattery: false, percent: 12 }, now: 1 })).toBeNull();

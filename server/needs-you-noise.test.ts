@@ -194,6 +194,9 @@ describe("the items the server creates come with why, steps and options", () => 
     const power = powerPendingDetails(true);
     practical({ title: "Ligue o Mac na tomada (12%, abaixo do seu limite de 20%) — release em curso", ...power });
     expect(power.why).toContain("o release de produção que está em curso");
-    expect(power.why).toContain("O watcher automático de produção não olha a bateria");
+    expect(power.why).toContain("O watcher automático de produção só olha a bateria antes de começar um release");
+    expect(power.why).toContain("um release já em curso não para");
+    // the way out is the item's first step (and the why stays under 400 characters)
+    expect(power.steps[0]!.text).toContain("Ligue o carregador no Mac");
   });
 });
