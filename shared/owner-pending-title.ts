@@ -14,7 +14,7 @@
  * waited in the queue. The server writes it; the screen draws it neutral. */
 export const CHOICE_REPLACED = "substituída pela nova escolha";
 
-const HANDLE =/^@[\p{L}\p{N}][\p{L}\p{N}_.-]*/u;
+const HANDLE = /^@[\p{L}\p{N}][\p{L}\p{N}_.-]*/u;
 const AFTER = /^[\s,:;–—-]*/u;
 const CONNECTED = /^\s+(?:of|de|do|da|dos|das)\s+[\p{L}\p{N}]+/u;
 /** One or two capitalized words a "," ":" or ";" closes: the rest of a name

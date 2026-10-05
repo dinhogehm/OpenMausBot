@@ -14,7 +14,7 @@ const HANDOFF = /^@([^·]+?) · (.+)$/;
 /** A teammate's handoff title, which displayThreadTitle rewrites whole. */
 export const isHandoffTitle = (title: string): boolean => HANDOFF.test(title);
 
-const capitalized =(text: string) => text.charAt(0).toLocaleUpperCase() + text.slice(1);
+const capitalized = (text: string) => text.charAt(0).toLocaleUpperCase() + text.slice(1);
 
 /** A conversation's title as shown, with the bot that opened it as the name its "@" may carry. */
 export const shownTaskTitle = (task: { title: string; openedBy?: { name: string } | null }): string =>
