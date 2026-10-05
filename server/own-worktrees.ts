@@ -776,3 +776,90 @@ export class OwnWorktreeStore {
   allEvents(): readonly OwnEvent[] { return this.events; }
   summary(from: number, to: number): OwnSummary { return ownSummary(this.events, this.allSeeds(), from, to); }
 }
+
+// ── the breaker: the app keeps opening the sessions elsewhere ─────────────
+// A session opened through the alias that the app put in another folder
+// (one it made itself with its worktree option on, the root, another
+// worktree) stops at its folder check and fails. Two in a row in the same
+// repository and the server stops using this path there: the owner gets
+// one item with the diagnosis, and the starts go the old way (New Session,
+// its 409 and gesture) until a create works or the owner resolves the item
+// (R11-dispatch R11-1).
+
+export const OWN_BREAKER_FAILURES = 2;
+
+export interface OwnFailure { at: number; sessionId: string; title: string; folder: string; expected: string }
+export interface OwnBreakerRepo { failures: OwnFailure[]; trippedAt?: number; itemId?: string }
+export interface OwnBreakerState { repos: Record<string, OwnBreakerRepo> }
+
+export const ownBreakerTripped = (state: OwnBreakerState, repo: string) => state.repos[repo]?.trippedAt !== undefined;
+
+/** A failure of the path in `repo`: the new state, and whether this one tripped it. */
+export function noteOwnFailure(state: OwnBreakerState, repo: string, failure: OwnFailure): { state: OwnBreakerState; tripped: boolean } {
+  const before = state.repos[repo] ?? { failures: [] };
+  const failures = [...before.failures.filter((each) => each.sessionId !== failure.sessionId), failure].slice(-5);
+  const trips = before.trippedAt === undefined && failures.length >= OWN_BREAKER_FAILURES;
+  return { state: { repos: { ...state.repos, [repo]: { ...before, failures, ...(trips ? { trippedAt: failure.at } : {}) } } }, tripped: trips };
+}
+
+/** Rearmed: a create that worked, or the owner's item resolved. */
+export function rearmOwnBreaker(state: OwnBreakerState, repo: string): OwnBreakerState {
+  if (!state.repos[repo]) return state;
+  const repos = { ...state.repos };
+  delete repos[repo];
+  return { repos };
+}
+
+/** What happened to one failure, in words: the app's own worktree inside or beside ours means its worktree option was on. */
+export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected">, repo: string): string {
+  if (failure.folder.startsWith(`${failure.expected}/`)) return `o app criou uma worktree própria dentro da pasta do OMB (${failure.folder}): a opção worktree estava LIGADA`;
+  if (failure.folder === repo) return "o app abriu na raiz do repositório, não na pasta do OMB";
+  if (failure.folder.includes("/.claude/worktrees/")) return `o app abriu em outra worktree (${failure.folder}), não na do OMB: a opção worktree estava LIGADA, ou o app reaproveitou uma pasta`;
+  return `o app abriu em ${failure.folder}, não na pasta do OMB`;
+}
+
+/** The owner's item when the breaker trips. */
+export function ownBreakerItem(repo: string, failures: readonly OwnFailure[]): { title: string; why: string; steps: Array<{ text: string }> } {
+  const name = basename(repo);
+  return {
+    title: `O app Claude abriu ${failures.length} sessões de ${name} fora da worktree que o servidor criou: deixe a opção worktree DESLIGADA para sessões novas`,
+    why: [
+      `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app. As últimas ${failures.length} não ficaram nela e pararam no Passo 0, sem mexer em nada:`,
+      ...failures.map((each) => `- "${each.title.slice(0, 60)}": ${ownFailureCause(each, repo)}`),
+      "Até você resolver este item, as sessões novas vão pelo jeito antigo (Nova sessão), com o 409 e o gesto de sempre. As worktrees criadas ficam como estão (o servidor nunca remove) e aparecem no relatório de disco.",
+    ].join("\n"),
+    steps: [
+      { text: "No app Claude, abra uma sessão nova (Arquivo → Nova sessão) e veja o chip “worktree” ao lado da pasta." },
+      { text: "Deixe-o DESLIGADO e feche sem enviar nada: a pasta das sessões do servidor já é a worktree." },
+      { text: "Resolva este item: o servidor volta a criar a worktree e abrir o app nela. Se falhar de novo duas vezes, este item volta com o que a tela mostrou." },
+    ],
+  };
+}
+
+// ── the worktrees of sessions that did not use them: told, never removed ──
+
+export interface LeftWorktree { path: string; repo: string; sessionId: string; title: string; why: "failed" | "unused"; command: string }
+
+const quote = (value: string) => (/^[\w./@%+=:,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`);
+
+/** The server's worktrees whose session failed, or that the session never
+ * used (it went the old way): for the disk report, with the command a
+ * person runs. Nothing here removes anything. */
+export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: string; repo: string; status: string; desktop?: { own?: { path: string; state: string } } }>, exists: (path: string) => boolean): LeftWorktree[] {
+  const out: LeftWorktree[] = [];
+  for (const session of sessions) {
+    const own = session.desktop?.own;
+    if (!own || !exists(own.path)) continue;
+    const why = session.status === "failed" ? "failed" as const : own.state === "abandoned" || own.state === "failed" ? "unused" as const : null;
+    if (!why) continue;
+    out.push({ path: own.path, repo: session.repo, sessionId: session.id, title: session.title, why, command: `git -C ${quote(session.repo)} worktree remove ${quote(own.path)}` });
+  }
+  return out;
+}
+
+/** The disk report's lines for them (null when there are none). */
+export function leftWorktreesReport(left: readonly LeftWorktree[]): string | null {
+  if (!left.length) return null;
+  const lines = left.map((each) => `- ${each.path}: ${each.why === "failed" ? `da sessão falhada "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)})` : `criada para a sessão "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que não a usou`} — para remover, depois de conferir: ${each.command}`);
+  return `Worktrees criadas pelo OMB que ficaram sem uso (${left.length}). O servidor não remove nada; uma pessoa confere (git status, o que há dentro) e decide:\n${lines.join("\n")}`;
+}

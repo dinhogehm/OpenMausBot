@@ -126,6 +126,10 @@ export interface OwnWorktreeDeps {
   briefFor: (session: CcSession) => string;
   /** Why New Session, the old way, would land in a wrong folder now (the 409's words), or null. */
   classicBlocked: (session: CcSession) => string | null;
+  /** A session opened through the server's worktree landed in `folder` instead (the breaker counts it). */
+  wrongFolder?: (session: CcSession, folder: string) => void;
+  /** A create was adopted in a worktree of its own (either way): the breaker rearms. */
+  adopted?: (session: CcSession) => void;
 }
 
 /** Screens that did not show the new session in its folder before New Session is used instead. */
@@ -446,11 +450,14 @@ function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopR
       session.worktree = basename(own.path);
       deps.ledger.save();
       deps.chip(session, `aberta no app Claude, na worktree que o OMB criou (${basename(own.path)})`);
+      deps.own?.adopted?.(session);
       return true;
     }
     desktop.wrongFolder = record.worktreePath ?? folder ?? "?";
     const where = folder === own.path ? `in it together with ${[...new Set(others)].join(", ")}` : `in ${desktop.wrongFolder} instead`;
     failDesktopSession(deps, session, `the session should have opened in the worktree the server made for it (${own.path}) and opened ${where}${guarded} The worktree the server made stays as it is (the server never removes one); start the work again`);
+    // the breaker counts it: two in a row and this path is set aside (R11-dispatch R11-1)
+    deps.own?.wrongFolder?.(session, desktop.wrongFolder);
     return false;
   }
   if (!recordInWorktree(record)) {
@@ -465,6 +472,8 @@ function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopR
     return false;
   }
   deps.chip(session, "aberta no app Claude");
+  // a create that worked, the old way: the breaker of the server's worktrees rearms
+  deps.own?.adopted?.(session);
   return true;
 }
 
@@ -675,6 +684,7 @@ export function followDesktopSessions(deps: DesktopWorkDeps): void {
         if (!desktop.wrongFolder) {
           desktop.wrongFolder = record.worktreePath ?? record.cwd ?? "?";
           failDesktopSession(deps, session, `the session stopped at its folder check: it opened in ${desktop.wrongFolder}, a folder that existed before its brief (a reused worktree or the root), and touched nothing. New sessions wait until the owner unblocks the app (the 409 says how); start the work again then`);
+          if (desktop.own?.state === "ready") deps.own?.wrongFolder?.(session, desktop.wrongFolder);
         } else deps.ledger.save();
         continue;
       }

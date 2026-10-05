@@ -141,6 +141,29 @@ describe("a create with a worktree of the server's", () => {
     expect(reviveScreenFailures({ ledger: h.ledger, readRecord: () => ({ sessionId: LOCAL, cliSessionId: "c" }), chip: () => {} })).toEqual([]);
   });
 
+  it("tells the breaker of every session that landed elsewhere (a worktree the app made inside ours), and of every one adopted right (R11-1)", async () => {
+    const h = harness();
+    const wrong: Array<[string, string]> = [];
+    const adopted: string[] = [];
+    h.deps.own!.wrongFolder = (session, folder) => { wrong.push([session.id, folder]); };
+    h.deps.own!.adopted = (session) => { adopted.push(session.id); };
+    const bad = h.start("s1");
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    await runDesktopWork(h.deps, h.state);
+    h.byMarker.set(bad.desktop!.marker, { sessionId: LOCAL, cliSessionId: "cli-1", createdAt: h.now, cwd: `${PATH}/.claude/worktrees/app-1`, worktreePath: `${PATH}/.claude/worktrees/app-1`, worktreeName: "app-1" });
+    followDesktopSessions(h.deps);
+    expect(wrong).toEqual([["s1", `${PATH}/.claude/worktrees/app-1`]]);
+    expect(adopted).toEqual([]);
+    const good = h.start("s2");
+    good.desktop!.own!.path = `${PATH}-2`;
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    await runDesktopWork(h.deps, h.state);
+    h.byMarker.set(good.desktop!.marker, { sessionId: "local_0a00000b-0000-4000-8000-000000000000", cliSessionId: "cli-2", createdAt: h.now, cwd: `${PATH}-2` });
+    followDesktopSessions(h.deps);
+    expect(adopted).toEqual(["s2"]);
+    expect(wrong).toHaveLength(1);
+  });
+
   it("fails when another session already works in the worktree", async () => {
     const h = harness();
     const session = h.start();

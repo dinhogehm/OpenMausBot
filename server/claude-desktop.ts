@@ -367,6 +367,21 @@ export const ROOT_SESSION_HOWTO = (repoName: string, baseBranch: string) =>
   // ("worktree on" landed in a reused folder on 02/10 10:07, R10-dispatch R10-1)
   `In the Claude app, start one new session (File → New Session) in the root of ${repoName} (folder ${repoName}, branch ${baseBranch}, worktree OFF) and send it a short message — the app records a session only once something is sent; keep it, the server starts new sessions from it. Then this create runs`;
 
+/** The new session's worktree option, as its chip reads: a checkbox drawn
+ * before the word, OCR'd as a tick ("v", "✓") when on and as an empty box
+ * ("O", "o", "□") when off — "v worktree" on R8-visual-claude-1 (01/10, a
+ * session the app put in a worktree) and "|O worktree" on the 03/10 screens.
+ * null: no worktree option on the screen (nothing the app could make);
+ * "unknown": the chip is there but its mark reads as neither. */
+export function worktreeOption(row: OcrLine[]): "on" | "off" | "unknown" | null {
+  const line = row.find((each) => /\bworktree\b/i.test(each.text));
+  if (!line) return null;
+  const before = line.text.slice(0, line.text.search(/\bworktree\b/i)).replace(/[|[\]()]/g, " ").trim().split(/\s+/).pop() ?? "";
+  if (/^(?:v|✓|✔|√|☑|☒|\[x\]|x)$/i.test(before)) return "on";
+  if (/^(?:o|0|□|☐|○|◯)$/i.test(before)) return "off";
+  return "unknown";
+}
+
 /** The app's link for a new session in a given folder: the one its own
  * Finder service ("New Claude Code Session Here") opens. */
 export const newSessionInFolderUrl = (folder: string) => `claude://code/new?folder=${encodeURIComponent(folder)}`;
@@ -404,6 +419,12 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     const field = bottom.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
     if (!field) return { ok: false, reason: `the app's link did not open a new session for ${input.folderName} (no empty task field); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     if (!showsFolderName(bottom, input.folderName)) return { ok: false, reason: `the new session does not show the folder ${input.folderName} in its chips; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+    // the folder IS the worktree: with the app's worktree option on, the app
+    // would make one of its own inside or beside it (R11-dispatch R11-1)
+    const option = worktreeOption(chipRow(bottom));
+    if (option === "on" || option === "unknown") {
+      return { ok: false, reason: option === "on" ? `the new session has the worktree option ON (the app would make a worktree of its own instead of using ${input.folderName}); nothing was typed` : `could not read whether the new session's worktree option is on or off; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+    }
     stop = await guard(screen, "empty session field");
     if (stop) return stop;
     await act(screen, () => driver.click(field.x + 20, field.y + field.h / 2));
