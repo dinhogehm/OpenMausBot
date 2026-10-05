@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { BotAutonomy } from "./bot-autonomy.ts";
-import { batteryAlert, batteryMinPercent, carrierBatteryCheck, carrierIntent, DEFAULT_BATTERY_MIN_PERCENT, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, readPowerWatch, shouldReadPmsetLog, startsCarrier, UNKNOWN_CHARGE_ALERT_MS } from "./power.ts";
+import { batteryAlert, batteryMinPercent, carrierBatteryCheck, carrierIntent, DEFAULT_BATTERY_MIN_PERCENT, isReleaseProcess, lastUnplugAt, parsePmsetBatt, pluggedInRefusal, POWER_PENDING_KEY, POWER_PLUGGED_LABEL, powerPendingDetails, powerStep, watcherBatteryRule, readPowerWatch, shouldReadPmsetLog, startsCarrier, UNKNOWN_CHARGE_ALERT_MS } from "./power.ts";
 
 const onBattery = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=27525219)\t53%; discharging; 1:16 remaining present: true\n";
 const plugged = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=27525219)\t100%; charged; 0:00 remaining present: true\n";
@@ -90,13 +90,28 @@ describe("power", () => {
     expect(DEFAULT_BATTERY_MIN_PERCENT).toBe(20);
   });
 
+  // R12-resilience B1: the watcher's minimum is NURIA_RELEASE_MIN_BATTERY_PERCENT, 60 by
+  // default (ops/r12-battery); the text reads it like the watcher does, so they never disagree
+  it("says the watcher's own minimum: the variable when it is set and valid, else 60%; 100 is 'só na tomada'", () => {
+    expect(watcherBatteryRule({})).toBe("não começa abaixo do mínimo dele, 60% por padrão, ou na tomada");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("não começa abaixo do mínimo dele, 40%, ou na tomada");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: "100" })).toBe("só começa na tomada");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: "0" })).toBe("começa com qualquer carga, mínimo 0%");
+    // what the watcher would refuse (not a whole number from 0 to 100) falls back as it does
+    for (const bad of ["", "abc", "12.5", "101", "-1", " 30"]) expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: bad }), bad).toBe("não começa abaixo do mínimo dele, 60% por padrão, ou na tomada");
+    const alert = batteryAlert({ power: { onBattery: true, percent: 19 }, onBatterySince: 0, now: 1, releaseRunning: false, told: new Set(), env: { NURIA_RELEASE_MIN_BATTERY_PERCENT: "100" } })!;
+    expect(alert.text).toContain("só olha a bateria antes de começar um release (só começa na tomada)");
+    expect(powerPendingDetails(true, { NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" }).why).toContain("(não começa abaixo do mínimo dele, 40%, ou na tomada)");
+  });
+
   it("tells the Chief below the limit, then when critical — each once, and never promises what the watcher does not do", () => {
     const told = new Set<string>();
-    const base = { onBatterySince: 0, releaseRunning: true, told };
+    // the watcher's variable unset, whatever the shell running the tests has
+    const base = { onBatterySince: 0, releaseRunning: true, told, env: {} };
     const low = batteryAlert({ ...base, power: { onBattery: true, percent: 19 }, now: 45 * 60_000 })!;
     // R12-resilience B2: the watcher reads the battery before it starts (BAT-W); what it does not
     // do is stop a release already running — that is the risk to say, with the wall as the way out
-    expect(low).toEqual({ level: "low", text: "Bateria em 19% (seu limite: 20%): ligue o Mac na tomada. Está na bateria há 45 min, com release de produção em curso; o Chief não manda carrier abaixo de 20%, e o watcher automático de produção só olha a bateria antes de começar um release (não começa abaixo do mínimo dele, 20% por padrão), mas um release já em curso não para: se a bateria acabar no meio, a produção fica pela metade. Há um release em curso: ligue o Mac na tomada agora." });
+    expect(low).toEqual({ level: "low", text: "Bateria em 19% (seu limite: 20%): ligue o Mac na tomada. Está na bateria há 45 min, com release de produção em curso; o Chief não manda carrier abaixo de 20%, e o watcher de produção só olha a bateria antes de começar um release (não começa abaixo do mínimo dele, 60% por padrão, ou na tomada), mas um release já em curso não para: se a bateria acabar, a produção fica pela metade. Há um release em curso: ligue o Mac na tomada agora." });
     expect(low.text).not.toMatch(/nenhum carrier novo começa|não olha a bateria|pode começar um release sozinho/);
     // without a release running, the risk is still said, the "agora" is not
     const quiet = batteryAlert({ power: { onBattery: true, percent: 19 }, onBatterySince: 0, now: 1, releaseRunning: false, told: new Set() })!;
