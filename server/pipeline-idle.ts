@@ -51,7 +51,7 @@ export function idleIssuesArgs(repo: string): string[] {
 
 /** `gh pr list` for the open PRs: the gate's queue. */
 export function idlePrsArgs(repo: string): string[] {
-  return ["pr", "list", "-R", repo, "--state", "open", "--json", "number,isDraft", "--limit", "100"];
+  return ["pr", "list", "-R", repo, "--state", "open", "--json", "number,isDraft,updatedAt", "--limit", "100"];
 }
 
 /** The open P0/P1 from `gh issue list --json number,title,labels,createdAt`; null when unreadable. */
@@ -64,17 +64,35 @@ export function parseIdleIssues(json: string): IdleIssue[] | null {
     if (!row || typeof row.number !== "number") continue;
     const labels: string[] = Array.isArray(row.labels) ? row.labels.map((label: any) => String(label?.name ?? "").toLowerCase()) : [];
     const priority = labels.includes("priority:p0") ? "p0" : labels.includes("priority:p1") ? "p1" : null;
-    if (!priority) continue;
+    // blocked: waiting on something else, not standing still (INSP-R12F F5: #9027)
+    if (!priority || labels.includes("status:blocked")) continue;
     out.push({ number: row.number, title: String(row.title ?? ""), priority, createdAt: Number.isFinite(Date.parse(row.createdAt)) ? Date.parse(row.createdAt) : 0 });
   }
   return out;
 }
 
-/** How many open PRs wait in the queue (drafts are not in it); null when unreadable. */
-export function parseOpenPrCount(json: string): number | null {
+/** How many open PRs keep the pipeline moving: not drafts, and touched in
+ * the last day — a PR forgotten for days is the pipeline standing still,
+ * not moving (INSP-R12F F5). One without a date counts. Null when unreadable. */
+export function parseOpenPrCount(json: string, now: number): number | null {
   let rows: unknown;
   try { rows = JSON.parse(json); } catch { return null; }
-  return Array.isArray(rows) ? rows.filter((row: any) => row && typeof row.number === "number" && !row.isDraft).length : null;
+  if (!Array.isArray(rows)) return null;
+  const recent = (row: any) => !Number.isFinite(Date.parse(row.updatedAt)) || now - Date.parse(row.updatedAt) < PIPELINE_IDLE_QUIET_MS;
+  return rows.filter((row: any) => row && typeof row.number === "number" && !row.isDraft && recent(row)).length;
+}
+
+/** The issues an open "Precisa de você" item names: waiting on the owner, not on the Chief. */
+export function heldByOwner(items: ReadonlyArray<{ title: string; why?: string; link?: string; steps?: ReadonlyArray<{ text: string; command?: string; link?: string }> }>): Set<number> {
+  return mentionedNumbers(items.map((item) => [item.title, item.why ?? "", item.link?.replace(/^.*\/(?:issues|pull)\/(\d+).*$/, "#$1") ?? "", ...(item.steps ?? []).map((step) => step.text)].join("\n")));
+}
+
+/** The release as last read (index.ts releaseHold): in flight, none, or
+ * unknown — never read yet, being read, or older than `maxAgeMs` (a restart
+ * reads it fresh) counts as unknown, and unknown wakes nobody (INSP-R12F F4). */
+export function releaseInFlightOf(hold: { label: string | null; found: { overdue?: boolean } | null; at: number; running: boolean }, now: number, maxAgeMs: number): boolean | null {
+  if (hold.at === 0 || hold.running || now - hold.at > maxAgeMs || hold.label === "?") return null;
+  return hold.found !== null && !hold.found.overdue;
 }
 
 /** "#9058", "#8675" in what the bots wrote: the issues someone is on. */

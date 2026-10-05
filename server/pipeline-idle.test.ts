@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  heldByOwner,
+  releaseInFlightOf,
   idleCandidates,
   idleIssuesArgs,
   mentionedNumbers,
@@ -50,9 +52,10 @@ describe("the pipeline standing still (R12-followup #1)", () => {
     expect(issues.map((each) => [each.number, each.priority])).toContainEqual([8675, "p1"]);
     expect(issues.some((each) => each.number === 9001)).toBe(false);
     expect(parseIdleIssues("not json")).toBeNull();
-    expect(parseOpenPrCount("[]")).toBe(0);
-    expect(parseOpenPrCount(JSON.stringify([{ number: 9379, isDraft: false }, { number: 9380, isDraft: true }]))).toBe(1);
-    expect(parseOpenPrCount("")).toBeNull();
+    const at = Date.parse("2026-10-05T16:20:00Z");
+    expect(parseOpenPrCount("[]", at)).toBe(0);
+    expect(parseOpenPrCount(JSON.stringify([{ number: 9379, isDraft: false }, { number: 9380, isDraft: true }]), at)).toBe(1);
+    expect(parseOpenPrCount("", at)).toBeNull();
     expect(idleIssuesArgs(REPO)).toContain('label:"priority:p0","priority:p1"');
     const now = brt("2026-10-04T20:20:00");
     // idle since 02/10: nobody is on it; running, or moved in the last day: someone is
@@ -126,5 +129,37 @@ describe("the pipeline standing still (R12-followup #1)", () => {
     const report = pipelineIdleReport(idleCandidates(parseIdleIssues(ISSUES_JSON)!, SESSIONS, new Set(), brt("2026-10-04T20:20:00")), REPO, order);
     expect(report).toContain("Ordem do dono de 03/10: «Objetivo permanente: manter a esteira andando.");
     expect(pipelineOrder([orders[0]!])).toBeNull();
+  });
+
+  // INSP-R12F F4 and F5
+  it("a release not read yet, being read, read long ago or unreadable is unknown, and unknown wakes nobody", () => {
+    const now = Date.parse("2026-10-05T16:20:00Z");
+    const fresh = { label: null, found: null, at: now - 30_000, running: false };
+    expect(releaseInFlightOf(fresh, now, 120_000)).toBe(false);
+    expect(releaseInFlightOf({ ...fresh, found: { overdue: false } }, now, 120_000)).toBe(true);
+    // after a restart, before the first read: the initial state is not "no release"
+    expect(releaseInFlightOf({ ...fresh, at: 0 }, now, 120_000)).toBeNull();
+    expect(releaseInFlightOf({ ...fresh, running: true }, now, 120_000)).toBeNull();
+    expect(releaseInFlightOf({ ...fresh, at: now - 600_000 }, now, 120_000)).toBeNull();
+    expect(releaseInFlightOf({ ...fresh, label: "?" }, now, 120_000)).toBeNull();
+    expect(pipelineIdleStep({}, { stopped: false, openPrs: 0, releaseInFlight: releaseInFlightOf({ ...fresh, at: 0 }, now, 120_000), candidates: idleCandidates(parseIdleIssues(ISSUES_JSON)!, SESSIONS, new Set(), now), now }).wake).toBe(false);
+  });
+
+  it("a blocked issue, one an open owner item names, and a PR forgotten for days do not count", () => {
+    const now = Date.parse("2026-10-05T16:20:00Z");
+    // #9027, P1 and status:blocked, as on 05/10
+    const blocked = JSON.stringify([{ number: 9027, title: "Campos resetados ao salvar", createdAt: "2026-09-19T00:00:00Z", labels: [{ name: "status:blocked" }, { name: "priority:p1" }] }]);
+    expect(parseIdleIssues(blocked)).toEqual([]);
+    // an open "Precisa de você" item waits on the owner for #9058 (title) and #8675 (link)
+    const held = heldByOwner([
+      { title: "Decidir o aviso da #9058 no widget" },
+      { title: "Liberar o hotfix", link: "https://github.com/dinhogehm/nuria-platform/issues/8675" },
+    ]);
+    expect(held).toEqual(new Set([9058, 8675]));
+    expect(idleCandidates(parseIdleIssues(ISSUES_JSON)!, SESSIONS, held, now).map((each) => each.number)).not.toContain(9058);
+    // the ops PR #9379 touched today keeps the pipeline moving; a PR untouched for 3 days does not
+    const prs = JSON.stringify([{ number: 9100, isDraft: false, updatedAt: "2026-10-02T10:00:00Z" }]);
+    expect(parseOpenPrCount(prs, now)).toBe(0);
+    expect(parseOpenPrCount(JSON.stringify([{ number: 9379, isDraft: false, updatedAt: "2026-10-05T16:15:34Z" }]), now)).toBe(1);
   });
 });

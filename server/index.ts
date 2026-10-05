@@ -120,7 +120,7 @@ import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { buildRecall } from "./recall.ts";
 import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-language.ts";
 import { englishNarration, narrationPatch } from "./turn-narration.ts";
-import { idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
+import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { asksOwnerToDecide, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskRoutine, folderInUse, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
@@ -8689,11 +8689,12 @@ async function checkPipelineIdle(): Promise<void> {
     }
     const stopped = existsSync(NURIA_STOP_FILE);
     const prs = stopped ? null : await ghJson(idlePrsArgs(PRODUCTION_REPO));
-    const openPrs = stopped ? 0 : prs === null ? null : parseOpenPrCount(prs);
+    const openPrs = stopped ? 0 : prs === null ? null : parseOpenPrCount(prs, Date.now());
     let releaseInFlight: boolean | null = false;
     if (!stopped && openPrs === 0) {
       await refreshReleaseHold();
-      releaseInFlight = releaseHold.label === "?" ? null : releaseHold.found !== null && !releaseHold.found.overdue;
+      // read now by this call or another: anything older, or still being read, is unknown (INSP-R12F F4)
+      releaseInFlight = releaseInFlightOf(releaseHold, Date.now(), 2 * RELEASE_HOLD_EVERY_MS);
     }
     const now = Date.now();
     let candidates: IdleCandidate[] = [];
@@ -8701,19 +8702,20 @@ async function checkPipelineIdle(): Promise<void> {
       const issues = await ghJson(idleIssuesArgs(PRODUCTION_REPO));
       const parsed = issues === null ? null : parseIdleIssues(issues);
       if (parsed === null) return;
-      candidates = idleCandidates(parsed, ccLedger.all(), mentionedNumbers(botTextsWithRefsSince(now - PIPELINE_IDLE_QUIET_MS)), now);
+      // a bot named it in the last day, or an open "Precisa de você" item waits on the owner for it
+      const taken = new Set([...mentionedNumbers(botTextsWithRefsSince(now - PIPELINE_IDLE_QUIET_MS)), ...heldByOwner(store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id)))]);
+      candidates = idleCandidates(parsed, ccLedger.all(), taken, now);
     }
     const step = pipelineIdleStep(pipelineIdle.state, { stopped, openPrs, releaseInFlight, candidates, now });
-    if (step.state !== pipelineIdle.state) {
-      pipelineIdle.state = step.state;
-      try { writeFileAtomic(PIPELINE_IDLE_FILE, `${JSON.stringify(step.state)}\n`); } catch { /* memory still holds it */ }
-    }
     if (!step.wake) return;
     const desk = chiefDeskThread(chief);
+    // "told" is kept only once the report is on the Chief's desk (INSP-R12F F5)
     if (!store.taskByThread(chief.id, desk)) return;
     const order = pipelineOrder(sharedState.orders(chief.id));
     store.appendMessage(desk, { role: "bot", kind: "activity", tool: { name: chipText(`Esteira parada: fila de PRs vazia, sem release, ${candidates.length} P0/P1 sem ninguém nelas (${candidates.slice(0, 4).map((each) => `#${each.number}`).join(", ")}${candidates.length > 4 ? ", …" : ""}) — o Chief foi avisado`, 240), ok: true } });
     autonomy.addReport(chief.id, desk, pipelineIdleReport(candidates, PRODUCTION_REPO, order));
+    pipelineIdle.state = step.state;
+    try { writeFileAtomic(PIPELINE_IDLE_FILE, `${JSON.stringify(step.state)}\n`); } catch { /* memory still holds it */ }
     refreshBotRow(chief.id);
     console.log(`[pipeline-idle] the pipeline stands still: ${candidates.length} P0/P1 with nobody on them (${candidates.map((each) => `#${each.number}`).join(" ")}); the Chief is told in ${desk}`);
   } finally {
