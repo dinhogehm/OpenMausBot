@@ -43,6 +43,7 @@ import {
   wakeFiredChip,
   watchLabel,
   wakePrompt,
+  noteWrittenAt,
   questionStepsAutoReport,
   questionReportRef,
   QUESTION_REPORT_PREFIX,
@@ -959,6 +960,69 @@ describe("a standing watch's old note", () => {
     const late = wakePrompt(wake, null, now + 5 * 3_600_000);
     expect(late).toContain("written 5 h ago — check it still holds");
     expect(late).toContain("Conferir se contém 2995ef215");
+  });
+});
+
+// R11/R12-followup #2: the Chief's 'prod' kept a note of 01/10 with no
+// reasonAt, and each re-arm moved createdAt — the note read as fresh
+describe("a standing watch's note keeps its age across re-arms", () => {
+  const prodArgv = ["git", "ls-remote", "origin", "refs/tags/nuria-production-deployed"];
+  const prodReason = "Tag de produção andou: fechar carrier #9327, avisar sessões 9295 (#9314), 8891 (#9318) e pedir ao QA a validação";
+
+  it("the real 'prod' without reasonAt: two firings 10 min apart both say the note is old", () => {
+    // as on 05/10: re-armed for the last time at 12:13 BRT by the old build, no reasonAt
+    const armed = Date.parse("2026-10-05T15:13:06.046Z");
+    writeFileSync(join(dir, "bot-autonomy.json"), JSON.stringify({
+      goals: [], inFlight: [],
+      wakes: [{ botId: "chief", threadId: "dbb9f1cf", reason: prodReason, createdAt: armed, dueAt: armed + 240 * 60_000, watch: { command: prodArgv.join(" "), argv: prodArgv, everyMs: 300_000, baseline: "e3e9e7ddc\trefs/tags/nuria-production-deployed", baselineFingerprint: "f1", lastFingerprint: "f1", stdoutFingerprint: true, lastRunAt: armed, runs: 900, failures: 0, standing: true, label: "prod", maxMs: 240 * 60_000, fired: 12 } }],
+    }));
+    const autonomy = make();
+    const wake = autonomy.standingFor("dbb9f1cf", "prod")!;
+    expect(noteWrittenAt(wake)).toBe(armed);
+    // the carrier #9377 goes out at 14:20 BRT: the tag moves
+    now = armed + 127 * 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "51c3bf741\trefs/tags/nuria-production-deployed", fingerprint: "f2", matched: false })).toBe("changed");
+    expect(wakePrompt(wake, null, now)).toContain(`Your note for this moment, written more than 2 h 7 min ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${prodReason}`);
+    autonomy.rearmStanding(wake);
+    expect(wake.createdAt).toBe(armed);
+    expect(wake.watch!.reasonAt).toBeUndefined();
+    // a hotfix 10 min later: before, createdAt was 10 min old and no age was said
+    now += 10 * 60_000;
+    expect(autonomy.recordWatchRun(wake, { ok: true, output: "7a0c2d915\trefs/tags/nuria-production-deployed", fingerprint: "f3", matched: false })).toBe("changed");
+    expect(wakePrompt(wake, null, now)).toContain("written more than 2 h 17 min ago — check it still holds");
+    autonomy.rearmStanding(wake);
+    // and after a restart too
+    expect(noteWrittenAt(make().standingFor("dbb9f1cf", "prod")!)).toBe(armed);
+    // the bot writes a current note: its age starts there, and re-arms keep it
+    autonomy.updateStandingReason("dbb9f1cf", "prod", "Tag andou: conferir qual carrier entrou e avisar o QA");
+    const written = now;
+    expect(wake.watch!.reasonAt).toBe(written);
+    now += 30 * 60_000;
+    expect(wakePrompt(wake, null, now)).toContain("Your note for this moment: Tag andou");
+    now += 4 * 60 * 60_000;
+    autonomy.rearmStanding(wake);
+    expect(wake.watch!.reasonAt).toBe(written);
+    expect(wakePrompt(wake, null, now)).toContain("written 4 h 30 min ago — check it still holds");
+  });
+
+  it("a watch set now and re-armed keeps its first createdAt; set again with the same note keeps the note's age, with another it starts over", () => {
+    const autonomy = make();
+    const set = now;
+    const input = { argv: prodArgv, command: prodArgv.join(" "), everyMinutes: 5, maxMinutes: 240, reason: "Conferir o carrier e pedir ao QA", baseline: "a", standing: true, label: "prod" };
+    const wake = autonomy.setWatch("chief", "t1", input);
+    now += 5 * 3_600_000;
+    autonomy.recordWatchRun(wake, { ok: true, output: "b", fingerprint: "fb", matched: false });
+    autonomy.rearmStanding(wake);
+    expect(wake.createdAt).toBe(set);
+    now += 10 * 60_000;
+    autonomy.recordWatchRun(wake, { ok: true, output: "c", fingerprint: "fc", matched: false });
+    expect(wakePrompt(wake, null, now)).toContain("written 5 h 10 min ago — check it still holds");
+    const again = autonomy.setWatch("chief", "t1", { ...input, baseline: "c" });
+    expect(again.watch!.reasonAt).toBe(set);
+    expect(again.createdAt).toBe(set);
+    const other = autonomy.setWatch("chief", "t1", { ...input, reason: "Outra nota", baseline: "c" });
+    expect(other.watch!.reasonAt).toBe(now);
+    expect(wakePrompt(other, null, now)).toContain("Your note for this moment: Outra nota");
   });
 });
 

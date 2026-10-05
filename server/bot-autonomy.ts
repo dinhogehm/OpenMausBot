@@ -912,12 +912,15 @@ export class BotAutonomy {
     input: { command: string; argv: string[]; everyMinutes: number; maxMinutes: number; until?: string; reason: string; baseline: string; baselineFingerprint?: string; standing?: boolean; label?: string; ignore?: string },
   ): BotWake {
     const at = this.now();
+    // the same standing watch set again with the same note keeps the note's age
+    const before = input.standing ? this.standingFor(threadId, input.label ?? STANDING_DEFAULT_LABEL) : null;
+    const sameNote = before?.watch && before.botId === botId && before.reason === input.reason ? before : null;
     const wake: BotWake = {
       botId,
       threadId,
       dueAt: at + input.maxMinutes * this.minuteMs,
       reason: input.reason,
-      createdAt: at,
+      createdAt: sameNote?.createdAt ?? at,
       watch: {
         command: input.command,
         argv: input.argv,
@@ -931,7 +934,7 @@ export class BotAutonomy {
         runs: 1,
         failures: 0,
         changedAt: at,
-        reasonAt: at,
+        reasonAt: sameNote ? noteWrittenAt(sameNote) : at,
         ...(input.standing ? { standing: true as const, maxMs: input.maxMinutes * this.minuteMs, ...(input.label && input.label !== STANDING_DEFAULT_LABEL ? { label: input.label } : {}) } : {}),
       },
     };
@@ -1219,7 +1222,8 @@ export class BotAutonomy {
     else delete watch.lastTrigger;
     delete watch.trigger;
     watch.failures = 0;
-    wake.createdAt = at;
+    // createdAt and reasonAt stay: the note is as old as when it was written,
+    // not as the last re-arm (R11-followup #2 — 'prod' read 1 h old after 4 days)
     wake.dueAt = at + (watch.maxMs ?? WATCH_DEFAULT_MAX_MINUTES * this.minuteMs);
     this.save();
     return wake;
@@ -2052,6 +2056,14 @@ function clipLines(lines: string[], max: number): string[] {
   return kept;
 }
 
+/** When a wake's note was written. A standing watch keeps it across
+ * re-arms (reasonAt); one set before reasonAt existed falls back on its
+ * createdAt — which re-arms no longer move, and which older builds moved at
+ * every firing, so it is the latest the note can be from ("more than N"). */
+export function noteWrittenAt(wake: Pick<BotWake, "createdAt" | "watch">): number {
+  return wake.watch?.standing ? wake.watch.reasonAt ?? wake.createdAt : wake.createdAt;
+}
+
 /** `refsLine`: what the note names that the server found already done
  * (watch-reason-refs.ts), said right under the note (R10-followup #5). */
 export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, reminder = languageReminder(), refsLine: string | null = null): string {
@@ -2059,8 +2071,8 @@ export function wakePrompt(wake: BotWake, goal: BotGoal | null, now: number, rem
     `[${wake.watch ? "Watch" : "Wake-up"} you scheduled ${minutesLabel(now - wake.createdAt)} ago. Nobody typed this.]`,
     ...watchLines(wake),
     // a standing watch's note was written when it was set: it can be stale by now
-    wake.watch?.standing && wake.watch.reasonAt !== undefined && now - wake.watch.reasonAt >= 3_600_000
-      ? `Your note for this moment, written ${minutesLabel(now - wake.watch.reasonAt)} ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${wake.reason}`
+    wake.watch?.standing && now - noteWrittenAt(wake) >= 3_600_000
+      ? `Your note for this moment, written ${wake.watch.reasonAt === undefined ? "more than " : ""}${minutesLabel(now - noteWrittenAt(wake))} ago — check it still holds before acting on it; if not, give it a current one with wake_when update_reason (same label): ${wake.reason}`
       : `Your note for this moment: ${wake.reason}`,
     ...(refsLine ? [refsLine] : []),
     ...(goal && goal.status === "active"

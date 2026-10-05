@@ -302,6 +302,7 @@ import {
   reportsPrompt,
   wakeChip,
   wakePrompt,
+  noteWrittenAt,
   chipText,
   parseStandingLabel,
   STANDING_DEFAULT_LABEL,
@@ -8898,7 +8899,7 @@ function refState(slug: string, number: number): Promise<RefState | null> {
 }
 
 async function reasonRefsLine(wake: BotWake): Promise<string | null> {
-  const writtenAt = wake.watch?.standing ? wake.watch.reasonAt ?? wake.createdAt : wake.createdAt;
+  const writtenAt = noteWrittenAt(wake);
   // an hour (of the test's shrunk minutes, end to end)
   if (Date.now() - writtenAt < 60 * (autonomyTestMs("OMB_AUTONOMY_MINUTE_MS") ?? 60_000)) return null;
   const cited = citedRefs(wake.reason);
