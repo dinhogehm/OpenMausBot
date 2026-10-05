@@ -6,7 +6,7 @@
 import { BOOT_CLOUD_SECRETS } from "./cloud-secrets-boot.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -9953,7 +9953,11 @@ async function cleanReleasedWorktrees(): Promise<void> {
     const workspaces = scanTaskWorkspaces(TASK_WORKSPACES_DIR, {
       list: (dir) => readdirSync(dir),
       // the newest entry one level below, not only the top's mtime (INSP-R12a R12b-3)
-      activity: (path) => (existsSync(join(path, ".git")) ? activity(path) : null) ?? folderActivity(path, { list: (dir) => readdirSync(dir), mtime }),
+      // (lstat: a link is not followed into another tree; unknown past the budget is never "idle")
+      activity: (path) => (existsSync(join(path, ".git")) ? activity(path) : null) ?? folderActivity(path, {
+        list: (dir) => readdirSync(dir),
+        stat: (each) => { try { const found = lstatSync(each); return { mtimeMs: found.mtimeMs, dir: found.isDirectory() }; } catch { return null; } },
+      }),
       notes: quietWorkspaces,
     });
     // an app session in "/" or the home holds none of them (R12-resilience D3);

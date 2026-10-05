@@ -724,32 +724,56 @@ describe("live processes and activity below the top of a task-workspace (INSP-R1
     expect(listed(["/", home, "/usr/libexec"])).toEqual(folders.map((each) => each.path));
   });
 
-  it("the activity of a folder is its newest entry one level below, sampled up to a limit", () => {
+  // INSP-R12a-r2 R2-3: one level was not enough (an edit in repo/src/a.ts changes no folder
+  // above it), and a cut at 200 entries could leave the newest out and call the folder idle
+  const stat = (path: string) => { try { const each = statSync(path); return { mtimeMs: each.mtimeMs, dir: each.isDirectory() }; } catch { return null; } };
+  const fsDeps = { list: (dir: string) => readdirSync(dir), stat };
+
+  it("the activity of a folder is its newest entry down to 3 levels below: a new file in repo/src counts", () => {
     const base = realpathSync(mkdtempSync(join(tmpdir(), "omb-r12b3-")));
     try {
       const ws = join(base, "54118a8a");
       mkdirSync(join(ws, "repo", "src"), { recursive: true });
+      mkdirSync(join(ws, "repo", "node_modules", "x"), { recursive: true });
       writeFileSync(join(ws, "notes.md"), "x");
+      writeFileSync(join(ws, "repo", "src", "a.ts"), "old");
+      writeFileSync(join(ws, "repo", "node_modules", "x", "index.js"), "x");
       const recent = Date.UTC(2026, 9, 5, 9, 0);
-      // the top and the file stay old; only the repo folder changed today
-      for (const each of [ws, join(ws, "notes.md")]) utimesSync(each, idle / 1000, idle / 1000);
-      utimesSync(join(ws, "repo"), recent / 1000, recent / 1000);
-      const mtime = (path: string) => { try { return statSync(path).mtimeMs; } catch { return null; } };
-      expect(mtime(ws)).toBe(idle);
-      expect(folderActivity(ws, { list: (dir) => readdirSync(dir), mtime })).toBe(recent);
+      const newer = Date.UTC(2026, 9, 5, 10, 0);
+      const old = (path: string) => utimesSync(path, idle / 1000, idle / 1000);
+      // a file written today at the third level; every folder above it stays old
+      writeFileSync(join(ws, "repo", "src", "b.ts"), "new");
+      utimesSync(join(ws, "repo", "src", "b.ts"), recent / 1000, recent / 1000);
+      for (const each of ["repo/src/a.ts", "repo/src", "repo/node_modules", "repo/node_modules/x", "repo", "notes.md", "."]) old(join(ws, each));
+      // what is skipped (node_modules, .git, builds) never counts, however new
+      utimesSync(join(ws, "repo", "node_modules", "x", "index.js"), newer / 1000, newer / 1000);
+      expect(stat(ws)!.mtimeMs).toBe(idle);
+      expect(stat(join(ws, "repo"))!.mtimeMs).toBe(idle);
+      expect(folderActivity(ws, fsDeps)).toBe(recent);
       // so it is not told as idle since 29/09
-      expect(staleTaskWorkspaces([{ path: ws, lastActivity: folderActivity(ws, { list: (dir) => readdirSync(dir), mtime }) }], { inUse: [], now, root: base, home })).toEqual([]);
+      expect(staleTaskWorkspaces([{ path: ws, lastActivity: folderActivity(ws, fsDeps) }], { inUse: [], now, root: base, home })).toEqual([]);
+      // all old: its newest time, the folder is told
+      old(join(ws, "repo", "src", "b.ts"));
+      expect(folderActivity(ws, fsDeps)).toBe(idle);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
-    // a folder of thousands of entries: at most `limit` of them are read
+  });
+
+  it("past its budget of stat calls the activity is unknown, and a folder of unknown activity is never told as idle", () => {
     let stats = 0;
     const many = Array.from({ length: 5_000 }, (_, i) => `f${i}`);
-    const at = folderActivity("/w", { list: () => many, mtime: (path) => { stats += 1; return path === "/w/f10" ? 5 : 1; } }, 200);
-    expect(stats).toBeLessThanOrEqual(201);
-    expect(at).toBe(5);
-    // unreadable: the top's own time
-    expect(folderActivity("/w", { list: () => { throw new Error("EACCES"); }, mtime: () => 3 })).toBe(3);
+    const deps = { list: (dir: string) => (dir === "/w" ? many : []), stat: (path: string) => { stats += 1; return { mtimeMs: path === "/w/f4999" ? 5 : 1, dir: false }; } };
+    // the newest may be past the cut (readdir is in no order of date): no guess
+    expect(folderActivity("/w", deps, 2_000)).toBeNull();
+    expect(stats).toBeLessThanOrEqual(2_001);
+    expect(staleTaskWorkspaces([{ path: "/w", lastActivity: folderActivity("/w", deps, 2_000) }], { inUse: [], now, root: "/", home })).toEqual([]);
+    // within the budget, the newest wherever it is
+    stats = 0;
+    expect(folderActivity("/w", deps, 6_000)).toBe(5);
+    // unreadable below: the top's own time; the top unreadable: unknown
+    expect(folderActivity("/w", { list: () => { throw new Error("EACCES"); }, stat: () => ({ mtimeMs: 3, dir: true }) })).toBe(3);
+    expect(folderActivity("/w", { list: () => [], stat: () => null })).toBeNull();
   });
 });
 

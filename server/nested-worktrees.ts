@@ -276,16 +276,39 @@ export function conversationFolders(
   return { inUse: [...(cwd ? [cwd] : []), workspace] };
 }
 
-/** When a folder last changed: the newest of its own time and of its entries one
- * level below — an edit inside repo/ or a new file does not touch the top's mtime
- * (INSP-R12a R12b-3). At most `limit` entries are read; unreadable, the top's time. */
-export function folderActivity(path: string, deps: { list: (dir: string) => string[]; mtime: (path: string) => number | null }, limit = 200): number | null {
-  let newest = deps.mtime(path);
-  let entries: string[] = [];
-  try { entries = deps.list(path); } catch { return newest; }
-  for (const entry of entries.slice(0, limit)) {
-    const at = deps.mtime(`${trimSlash(path)}/${entry}`);
-    if (at !== null && (newest === null || at > newest)) newest = at;
+/** What a folder's activity never looks into: dependencies, git's own files, builds. */
+const ACTIVITY_SKIPPED = new Set(["node_modules", ".git", "dist", "build", "out", ".next", ".turbo", ".cache", "coverage", "target", ".local-ci"]);
+
+/** When a folder last changed: the newest mtime of the folder and of every entry
+ * down to `depth` levels below it (repo/src/a.ts is 3), skipping ACTIVITY_SKIPPED.
+ * An edit in place changes only the file's own mtime, so the files are read, not
+ * only the folders (INSP-R12a R12b-3, r2 R2-3). At most `budget` entries are
+ * read: past it — readdir is in no order of date, the newest may be the next one —
+ * the activity is unknown (null), and a folder of unknown activity is never told
+ * as idle. A subfolder that cannot be read counts by its own time; the folder
+ * itself unreadable is unknown. */
+export function folderActivity(path: string, deps: { list: (dir: string) => string[]; stat: (path: string) => { mtimeMs: number; dir: boolean } | null }, budget = 2_000, depth = 3): number | null {
+  const top = deps.stat(path);
+  if (!top) return null;
+  let newest = top.mtimeMs;
+  let read = 0;
+  let level = [trimSlash(path)];
+  for (let below = 1; below <= depth && level.length; below += 1) {
+    const next: string[] = [];
+    for (const dir of level) {
+      let entries: string[] = [];
+      try { entries = deps.list(dir); } catch { continue; }
+      for (const entry of entries) {
+        if (ACTIVITY_SKIPPED.has(entry)) continue;
+        if (++read > budget) return null;
+        const child = `${dir}/${entry}`;
+        const each = deps.stat(child);
+        if (!each) continue;
+        if (each.mtimeMs > newest) newest = each.mtimeMs;
+        if (each.dir) next.push(child);
+      }
+    }
+    level = next;
   }
   return newest;
 }
