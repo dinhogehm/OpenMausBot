@@ -122,6 +122,7 @@ import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-
 import { englishNarration, narrationNoteText } from "./turn-narration.ts";
 import { idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
+import { asksOwnerToDecide, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskRoutine } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -13602,6 +13603,37 @@ function routineRunFallbackText(card: NonNullable<Message["routineRun"]>): strin
   return `Routine “${card.routineName}” ${state}${detail ? `\n\n${detail}` : ""}`;
 }
 
+/** A disk routine's run that leaves folders to the owner ("para você
+ * decidir", "alguém pode remover essas pastas manualmente"): ONE item in
+ * "Precisa de você" with why, steps and decisions, keyed by the folders
+ * (server/disk-decision.ts) — refreshed, never doubled, not reopened for a
+ * week once the owner settled it. */
+const NURIA_WORKTREES = join(homedir(), "Projetos", "nuria-platform", ".claude", "worktrees");
+function openDiskDecision(run: RoutineRun, routineName: string, threadId: string): void {
+  try {
+    const botId = run.botId;
+    // the run's whole reply (its output is cut at 2 000 characters, and the ask closes a long table)
+    const reply = run.threadId ? [...store.messagesFor(run.threadId)].reverse().find((message) => message.role === "bot" && message.kind === "text" && message.text?.trim())?.text : undefined;
+    const text = reply ?? run.output ?? "";
+    if (!text || !diskRoutine(routineName, text) || !asksOwnerToDecide(text)) return;
+    let names: string[];
+    try { names = readdirSync(NURIA_WORKTREES); } catch { return; }
+    const folders = diskDecisionFolders(text, names);
+    if (!folders.length) return;
+    const item = diskDecisionItem(folders, NURIA_WORKTREES, text);
+    const plan = diskDecisionPlan(item.key, autonomy.ownerPendingOf(botId), autonomy.resolvedOwnerPendingOf(botId), Date.now());
+    if (!plan.add) return;
+    for (const key of plan.replace) autonomy.resolveOwnerPending({ botId, key, by: "server", note: "substituído pela lista nova da rotina de disco" });
+    const known = autonomy.ownerPendingOf(botId).some((open) => open.key === item.key);
+    const opened = autonomy.addOwnerPending(botId, threadId, item);
+    if (!known) store.appendMessage(threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${opened.id}): ${item.title}`, 240), ok: true } });
+    refreshBotRow(botId);
+    console.log(`[disk] the routine left ${folders.length} folder(s) to the owner: ${known ? "item refreshed" : `item ${opened.id} opened`} (${item.key})`);
+  } catch (error) {
+    console.error(`[disk] decision item: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** Upsert one durable lifecycle card per run. Replaying the same transition,
  * including restart recovery, patches the existing run id instead of adding
  * another chat message. */
@@ -13655,6 +13687,9 @@ function syncRoutineRunToSource(run: RoutineRun): string | null {
       store.patchTask(run.botId, run.threadId, { unread: false });
     }
   }
+
+  // a disk routine that ends leaving folders to the owner opens the one item for them (R12-followup #5)
+  if (statusChanged && run.status === "completed" && run.target === "bot" && !source.group) openDiskDecision(run, card.routineName, sourceThreadId);
 
   // Merely queueing/running is ambient progress. Attention and terminal
   // states become unread in the conversation where the user asked for them.
