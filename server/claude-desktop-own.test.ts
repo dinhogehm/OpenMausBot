@@ -114,9 +114,11 @@ describe("the 20 real readings of 03/10 (R12-1, R11-2)", () => {
       const lines = screenOf(seen);
       // the 03/10 screens: root on main, New Session from the root session (or no root session at all)
       expect(notRepoRoot(lines, "main", { rootHead: "main", fromRoot: true, branches: ["main", "fix/9326-x"] })).toBeNull();
-      expect(notRepoRoot(lines, "main", { rootHead: "main" })).toBeNull();
-      // the root elsewhere, detached, or unknown: refused
-      expect(notRepoRoot(lines, "main", { rootHead: "HEAD", fromRoot: true })).toMatch(/^it does not show the base branch main: its branch chip could not be read \(it shows "[gq]9? -"\) and the repository root is on HEAD$/);
+      // no root session seen (none, R3-1): refused, saying so
+      expect(notRepoRoot(lines, "main", { rootHead: "main" })).toContain("the app has no root session to open New Session from");
+      // the root elsewhere, detached, or unknown: refused, with the owner's step (R3-2)
+      expect(notRepoRoot(lines, "main", { rootHead: "HEAD", fromRoot: true })).toMatch(/^it does not show the base branch main: its branch chip could not be read \(it shows "[gq]9? -"\) and the repository root is on a detached HEAD — a raiz do repositório está em HEAD solto: volte-a para main \(git switch main na raiz\), e o caminho antigo volta a abrir sessões$/);
+      expect(notRepoRoot(lines, "main", { rootHead: "fix/9326-x", fromRoot: true })).toContain("a raiz do repositório está em fix/9326-x, não em main: volte-a para main");
       expect(notRepoRoot(lines, "main", { fromRoot: true })).toContain("the repository root is on no known branch");
       // a root session exists but New Session did not open from it: no confirmation, refused
       expect(notRepoRoot(lines, "main", { rootHead: "main", fromRoot: false })).toContain("New Session was not opened from the app's root session");
@@ -159,15 +161,27 @@ describe("the 20 real readings of 03/10 (R12-1, R11-2)", () => {
       // the root detached: refused, whatever the worktree session recorded
       const detached = await run(anchor, "HEAD");
       expect(detached.pasted).toBe(false);
-      expect(!detached.step.ok && detached.step.reason).toContain("the repository root is on HEAD");
+      // R3-2: the detached root said as what to do
+      expect(!detached.step.ok && detached.step.reason).toContain("a raiz do repositório está em HEAD solto: volte-a para main (git switch main na raiz)");
     });
 
-    it("only worktree sessions on record (sourceBranch main): root HEAD alone decides — a worktree session never vouches for a root chip", async () => {
+    it("only worktree sessions on record (sourceBranch main): no root session to open New Session from, so the unreadable chip is refused even with the root on main (INSP-R12a-r3 R3-1)", async () => {
       expect(rootAnchorSession(ROOT, withRecords([worktreeRecord]))).toBeNull();
-      expect((await run(null, "main")).pasted).toBe(true);
+      const noAnchor = await run(null, "main");
+      expect(noAnchor.pasted).toBe(false);
+      expect(!noAnchor.step.ok && noAnchor.step.reason).toContain("the app has no root session to open New Session from — abra no app uma sessão na raiz");
       const detached = await run(null, "HEAD");
       expect(detached.pasted).toBe(false);
-      expect(!detached.step.ok && detached.step.reason).toContain("the repository root is on HEAD");
+      expect(!detached.step.ok && detached.step.reason).toContain("a raiz do repositório está em HEAD solto");
+    });
+
+    it("a root session with no title is never counted as seen (INSP-R12a-r3 R3-3)", async () => {
+      const untitled = { ...rootRecord, title: undefined };
+      const anchor = rootAnchorSession(ROOT, withRecords([untitled]));
+      expect(anchor).toEqual({ localId: rootRecord.sessionId });
+      const step = await run(anchor, "main");
+      expect(step.pasted).toBe(false);
+      expect(!step.step.ok && step.step.reason).toContain("New Session was not opened from the app's root session");
     });
   });
 

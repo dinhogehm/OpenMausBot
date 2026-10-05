@@ -298,8 +298,17 @@ export function notRepoRoot(lines: OcrLine[], baseBranch = "main", known: { root
     if (glyphs === glyphForm(baseBranch) && !another) return null;
     return `it shows ${read}, not ${baseBranch}`;
   }
-  if (icon >= 0 && known.rootHead === baseBranch && known.fromRoot !== false) return null;
-  const why = known.rootHead !== baseBranch ? `the repository root is ${known.rootHead ? `on ${known.rootHead}` : "on no known branch"}` : "New Session was not opened from the app's root session";
+  // only with the root session seen on screen before New Session: without one, New Session opens in
+  // the app's last folder, maybe a worktree (INSP-R12a-r3 R3-1)
+  if (icon >= 0 && known.rootHead === baseBranch && known.fromRoot === true) return null;
+  const why = known.rootHead !== baseBranch
+    ? known.rootHead === "HEAD"
+      // said to the owner as what to do (R3-2)
+      ? `the repository root is on a detached HEAD — a raiz do repositório está em HEAD solto: volte-a para ${baseBranch} (git switch ${baseBranch} na raiz), e o caminho antigo volta a abrir sessões`
+      : `the repository root is ${known.rootHead ? `on ${known.rootHead} — a raiz do repositório está em ${known.rootHead}, não em ${baseBranch}: volte-a para ${baseBranch}` : "on no known branch"}`
+    : known.fromRoot === undefined
+      ? "the app has no root session to open New Session from — abra no app uma sessão na raiz (o 409 diz como)"
+      : "New Session was not opened from the app's root session";
   return icon >= 0
     ? `it does not show the base branch ${baseBranch}: its branch chip could not be read (it shows "${[words[icon], read].filter(Boolean).join(" ")}") and ${why}`
     : `it does not show the base branch ${baseBranch}`;
@@ -379,9 +388,10 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
       if (stop) return stop;
       before = mainArea(await driver.ocr());
       const title = input.anchor.title;
-      const shown = !title || before.some((line) => sidebarMatch(line.text, title)) || headerNames(before.filter((line) => line.y < 140), title);
+      // a root session with no title cannot be checked on screen: never counted as seen (INSP-R12a-r3 R3-3)
+      const shown = Boolean(title) && (before.some((line) => sidebarMatch(line.text, title!)) || headerNames(before.filter((line) => line.y < 140), title!));
       fromRoot = shown;
-      note = shown ? `New Session from the root session ${input.anchor.localId}` : `the root session ${input.anchor.localId}${title ? ` ("${title.slice(0, 60)}")` : ""} did not show; New Session from whatever was on screen`;
+      note = shown ? `New Session from the root session ${input.anchor.localId}` : `the root session ${input.anchor.localId}${title ? ` ("${title.slice(0, 60)}") did not show` : " has no title to check on screen"}; New Session from whatever was on screen`;
     }
     await act(screen, () => driver.menuNewSession());
     await driver.sleep(2_500);
