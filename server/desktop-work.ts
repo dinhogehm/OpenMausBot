@@ -91,6 +91,9 @@ export interface DesktopWorkDeps {
   liveWorktrees?: () => string[];
   /** The repository's base branch ("main"): a new session must open on it. */
   baseBranch?: (session: CcSession) => string;
+  /** The branch the repository root has checked out ("HEAD" when detached), and its branches: an unreadable branch chip is judged by them (R11-2). */
+  rootBranch?: (session: CcSession) => string | null;
+  branches?: (session: CcSession) => string[];
   /** A session of the app in the repository root to open before New Session (claude-desktop.ts rootAnchorSession). */
   rootAnchor?: (session: CcSession) => { localId: string; title?: string } | null;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
@@ -128,6 +131,8 @@ export interface OwnWorktreeDeps {
   classicBlocked: (session: CcSession) => string | null;
   /** A session opened through the server's worktree landed in `folder` instead (the breaker counts it). */
   wrongFolder?: (session: CcSession, folder: string) => void;
+  /** A create through the server's worktree given up because the new session's worktree option read ON or unreadable (the breaker counts it). */
+  chipRefused?: (session: CcSession, option: "on" | "unknown", seen?: string) => void;
   /** A create was adopted in a worktree of its own (either way): the breaker rearms. */
   adopted?: (session: CcSession) => void;
 }
@@ -462,7 +467,7 @@ function adoptRecord(deps: DesktopWorkDeps, session: CcSession, record: DesktopR
   }
   if (!recordInWorktree(record)) {
     desktop.wrongFolder = record.cwd ?? "?";
-    failDesktopSession(deps, session, `the session opened outside a git worktree (in ${record.cwd ?? "an unknown folder"}), on the main checkout: the app opened it with the worktree option off${guarded} New sessions wait until the owner turns the worktree back on (the 409 says how); start the work again then`);
+    failDesktopSession(deps, session, `the session opened outside a git worktree (in ${record.cwd ?? "an unknown folder"}), on the main checkout: the app opened it with the worktree option off${guarded} New sessions wait until the owner unblocks the app (the 409 says how — where the server makes the sessions' worktrees, the option stays off); start the work again then`);
     return false;
   }
   const reused = reusedWorktree(deps, session, record);
@@ -800,7 +805,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       step = own
         // the app's link opens New Session in the server's own worktree (its alias)
         ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text })
-        : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null });
+        : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, rootBranch: deps.rootBranch?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
     } else {
       const record = deps.readRecord(desktop.localId!);
       userFrameAt = record?.latestUserFrameAt ?? 0;
@@ -856,10 +861,16 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
     }
     if (step.miss && own) {
       pending.misses = (pending.misses ?? 0) + 1;
+      if (step.worktreeOption) {
+        pending.worktreeOption = step.worktreeOption;
+        if (step.seen) pending.worktreeSeen = step.seen.slice(0, 300);
+      }
       // the app would not open its link there: New Session, as before (the worktree stays)
       if (pending.misses >= OWN_OPEN_MAX_MISSES) {
         own.state = "abandoned";
         own.reason = `${step.reason}${step.seen ? ` — the screen showed: ${step.seen}` : ""}`.slice(0, 600);
+        // the worktree option ON (or unreadable) counts in the breaker like a wrong folder, with its own diagnosis (R12-1)
+        if (pending.worktreeOption) deps.own?.chipRefused?.(next, pending.worktreeOption, pending.worktreeSeen);
         fallBackToNewSession(deps, next, `o app não abriu a sessão na worktree criada pelo OMB em ${pending.misses} tentativas (${step.reason.slice(0, 160)})`);
         return;
       }

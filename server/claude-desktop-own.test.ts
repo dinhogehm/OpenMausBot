@@ -15,6 +15,9 @@ import {
   recordsUsingFolder,
   showsFolderName,
   worktreeOption,
+  editDistance,
+  notRepoRoot,
+  rootFolderRefusal,
   type DesktopDriver,
   type OcrLine,
 } from "./claude-desktop.ts";
@@ -56,6 +59,71 @@ function fakeApp(screens: string[][], opts: { idle?: number; front?: string } = 
 // the worktree option OFF, as OCR read the box on 03/10 ("|O worktree")
 const NEW_IN_FOLDER = ["• Local", FOLDER, "gº omb/9353-comprar-assentos", "|O worktree", "Descreva uma tarefa ou faça uma pergunta", "+ O v Ignorar permissões"];
 const SENT = ["Vou começar pelo Passo 0.", "Responder…", "+ O v Ignorar permissões"];
+
+// The 20 screens the old barrier stopped on, 03/10 12Z–14Z (server.log, "the
+// screen showed: …", lines joined by " | "), with how many times each.
+const REAL_0310: Array<[string, number]> = [
+  ["• Local | nuria-platform | g9 - |O worktree | G | Descreva uma tarefa ou faça uma pergunta | + O v Ignorar permissões | Opus 5.5 | Médio", 17],
+  ["q9 - | | worktree | Terminal | Descreva uma tarefa ou faca uma pergunta | * | Opus 5.5 | Médio | C", 1],
+  ["nuria-platform | g9 - |O worktree | G | Descreva uma tarefa ou faça uma pergunta | + O v Ignorar permissões | Opus 5.5 | Médio | C", 1],
+  ["• Local | • nuria-platform | q - |П worktree | Descreva uma tarefa ou faça uma pergunta | + O v Ignorar permissões | G | Opus 5.5 | Médio", 1],
+];
+/** One screen as OCR lines: the chips on one row (y 788), the field and the bar below. */
+const screenOf = (seen: string): OcrLine[] => seen.split(" | ").map((text, i, all) => {
+  const chips = all.findIndex((each) => /worktree/i.test(each));
+  return { x: 540 + i * 60, y: i <= chips ? 788 : 840 + i * 10, w: 60, h: 16, text };
+});
+
+describe("the 20 real readings of 03/10 (R12-1, R11-2)", () => {
+  it("are 20 screens", () => {
+    expect(REAL_0310.reduce((sum, [, count]) => sum + count, 0)).toBe(20);
+  });
+
+  it("read the worktree box as OFF in all 20 — \"|O\", the Cyrillic \"П\" and the bare edges \"| |\"", () => {
+    for (const [seen, count] of REAL_0310) {
+      const option = worktreeOption(screenOf(seen).filter((line) => line.y === 788));
+      expect({ seen, option }).toEqual({ seen, option: "off" });
+      expect(count).toBeGreaterThan(0);
+    }
+    const line = (text: string): OcrLine => ({ x: 885, y: 788, w: 92, h: 15, text });
+    expect(worktreeOption([line("| | worktree")])).toBe("off");
+    expect(worktreeOption([line("|п worktree")])).toBe("off");
+    expect(worktreeOption([line("q - worktree")])).toBe("unknown");
+  });
+
+  it("take the unreadable branch chip (\"g9 -\", \"q9 -\", \"q -\") as the base only when git says the root is on it", () => {
+    for (const [seen] of REAL_0310) {
+      const lines = screenOf(seen);
+      expect(notRepoRoot(lines, "main", { rootBranch: "main", branches: ["main", "fix/9326-x"] })).toBeNull();
+      expect(notRepoRoot(lines, "main", { rootBranch: "HEAD" })).toMatch(/^it does not show the base branch main: its branch chip could not be read \(it shows "[gq]9? -"\) and the repository root is on HEAD$/);
+    }
+    // before R11-2 every one of them was refused
+    expect(notRepoRoot(screenOf(REAL_0310[0]![0]), "main")).toContain("could not be read");
+  });
+
+  it("read the branch word with one OCR slip as the base, never another branch of the repository", () => {
+    const chips = (branch: string) => [{ x: 540, y: 788, w: 60, h: 16, text: "• Local" }, { x: 660, y: 788, w: 60, h: 16, text: "nuria-platform" }, { x: 801, y: 788, w: 60, h: 16, text: `gº ${branch}` }, { x: 885, y: 788, w: 92, h: 15, text: "|O worktree" }];
+    expect(notRepoRoot(chips("main"), "main")).toBeNull();
+    expect(notRepoRoot(chips("maln"), "main")).toBeNull();
+    expect(notRepoRoot(chips("mai"), "main")).toBeNull();
+    // a branch the repository has, one slip from the base too: it is that branch, not the base
+    expect(notRepoRoot(chips("mail"), "main", { branches: ["main", "mail"] })).toBe("it shows mail, not main");
+    expect(notRepoRoot(chips("develop"), "main", { rootBranch: "main" })).toBe("it shows develop, not main");
+    expect(notRepoRoot(chips("fix/9326-x"), "main", { rootBranch: "main" })).toBe("it shows fix/9326-x, not main");
+    expect(editDistance("g9", "main")).toBe(4);
+    expect(editDistance("maln", "main")).toBe(1);
+  });
+});
+
+describe("the old way's texts where the server makes the worktrees (R12-1)", () => {
+  it("never ask to turn the worktree option on", () => {
+    const refusal = rootFolderRefusal({ folder: "/r/nuria-platform", title: "9311 x" }, "nuria-platform", false, true);
+    expect(refusal).not.toMatch(/LIGAR|LIGUE|ligue/);
+    expect(refusal).toContain("a opção worktree tem de ficar DESLIGADA: não peça ao dono para ligá-la");
+    // without the server's worktrees the old gesture stays as it was
+    expect(rootFolderRefusal({ folder: "/r/nuria-platform" }, "nuria-platform")).toContain("LIGAR a opção worktree");
+  });
+});
 
 describe("a new session in the server's own folder", () => {
   it("is opened by the app's link with the alias, and the brief goes in once the empty field and the folder's chip show", async () => {

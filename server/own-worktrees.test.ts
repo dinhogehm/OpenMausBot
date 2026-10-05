@@ -394,6 +394,26 @@ describe("what the clones saved", () => {
   });
 });
 
+describe("the breaker counts the worktree option ON or unreadable too (R12-1)", () => {
+  const W = `${REPO}/.claude/worktrees/9353-x`;
+  it("trips on two creates given up for the chip, and tells the owner to turn the option off", () => {
+    const chip = (id: string, option: "on" | "unknown"): OwnFailure => ({ at: 1, sessionId: id, title: `${id} título`, folder: "", expected: W, chip: option, seen: "• Local | 9353-x | v worktree" });
+    let out = noteOwnFailure({ repos: {} }, REPO, chip("a", "on"));
+    expect(out.tripped).toBe(false);
+    out = noteOwnFailure(out.state, REPO, chip("b", "unknown"));
+    expect(out.tripped).toBe(true);
+    const item = ownBreakerItem(REPO, out.state.repos[REPO]!.failures);
+    expect(item.title).toBe("O app Claude abriu 2 sessões de nuria-platform com a opção worktree LIGADA ou ilegível: desligue-a antes de abrir sessão (o servidor já cria a pasta)");
+    expect(item.why).toContain('- "a título": a opção worktree estava LIGADA na sessão nova (a tela mostrou: • Local | 9353-x | v worktree); nada foi colado — desligue-a antes de abrir sessão');
+    expect(item.why).toContain('- "b título": a opção worktree estava ilegível');
+    // mixed with a wrong folder: the general title, each cause said
+    const mixed = ownBreakerItem(REPO, [chip("a", "on"), { at: 2, sessionId: "c", title: "c título", folder: `${W}/.claude/worktrees/app-1`, expected: W }]);
+    expect(mixed.title).toContain("fora da worktree que o servidor criou");
+    expect(mixed.why).toContain("a opção worktree estava LIGADA na sessão nova");
+    expect(mixed.why).toContain("o app criou uma worktree própria dentro da pasta do OMB");
+  });
+});
+
 describe("the breaker (R11-1)", () => {
   const W = `${REPO}/.claude/worktrees/9353-x`;
   const failure = (id: string, folder: string, at = 1): OwnFailure => ({ at, sessionId: id, title: `${id} título`, folder, expected: W });

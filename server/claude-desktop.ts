@@ -64,7 +64,7 @@ export interface DesktopDriver {
 export type DesktopStep = { ok: true; suggestion?: string; note?: string } | DesktopStop;
 /** `draft`: text nobody sent sits in the field (never typed over);
  * `leftProbe`: the probe "." stayed at its end (the person came back first). */
-export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean };
+export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean; worktreeOption?: "on" | "unknown" };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -264,7 +264,7 @@ export function chipRow(lines: OcrLine[]): OcrLine[] {
  * folder, so it may well read "main" there too. The guards that count for
  * folder reuse are the server's 409 (lastAppWorktreeFolder) before the
  * screen is touched, and reusedWorktree when the session is adopted. */
-export function notRepoRoot(lines: OcrLine[], baseBranch = "main"): string | null {
+export function notRepoRoot(lines: OcrLine[], baseBranch = "main", known: { rootBranch?: string | null; branches?: readonly string[] } = {}): string | null {
   const words = chipRow(lines).flatMap((line) => line.text.split(/\s+/)).map((raw) => raw.replace(/^[([•·"']+|[)\],;:"'•·…]+$/g, "")).filter(Boolean);
   const base = baseBranch.toLowerCase();
   const isBase = (lower: string) => lower === base || lower === `origin/${base}`;
@@ -274,8 +274,44 @@ export function notRepoRoot(lines: OcrLine[], baseBranch = "main"): string | nul
     return /^[\w.-]+\/[\w./-]+$/.test(lower) || (/^[0-9a-f]{7,40}$/.test(lower) && /\d/.test(lower)) || lower === "head" || lower.startsWith("detached");
   });
   if (other) return `it shows ${other}, not ${baseBranch}`;
-  if (!words.some((word) => isBase(word.toLowerCase()))) return `it does not show the base branch ${baseBranch}`;
-  return null;
+  if (words.some((word) => isBase(word.toLowerCase()))) return null;
+  // R11-2: OCR misreads the branch chip ("gº main" came out "g9 -", "q9 -",
+  // "q -" on all 20 screens of 03/10). The word after the branch icon is
+  // read with tolerance: one edit from the base (and closer to it than to
+  // any other branch of the repository) is the base; a word with no letter
+  // ("-") is unreadable, and counts as the base only when git says the
+  // repository root is on it. A real other branch still refuses.
+  const icon = words.findIndex((word) => /^[gq][º°9o0]?$/i.test(word));
+  // (the worktree box right after, "|O", is not a branch: nothing was read)
+  const next = icon >= 0 ? words[icon + 1] ?? "" : "";
+  const boxOfWorktree = next.length <= 2 && /^worktree$/i.test(words[icon + 2] ?? "");
+  const read = next.startsWith("|") || /^worktree$/i.test(next) || boxOfWorktree ? "" : next;
+  const word = read.toLowerCase();
+  if (/[\p{L}\p{N}]/u.test(word)) {
+    const nearest = (known.branches ?? []).filter((branch) => branch.toLowerCase() !== base).map((branch) => editDistance(word, branch.toLowerCase())).sort((a, b) => a - b)[0] ?? Infinity;
+    const toBase = editDistance(word, base);
+    if (toBase <= 1 && toBase < nearest) return null;
+    return `it shows ${read}, not ${baseBranch}`;
+  }
+  if (icon >= 0 && known.rootBranch === baseBranch) return null;
+  return icon >= 0
+    ? `it does not show the base branch ${baseBranch}: its branch chip could not be read (it shows "${[words[icon], read].filter(Boolean).join(" ")}") and the repository root is ${known.rootBranch ? `on ${known.rootBranch}` : "on no known branch"}`
+    : `it does not show the base branch ${baseBranch}`;
+}
+
+/** Levenshtein distance, for short OCR'd words. */
+export function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let previous = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const here = row[j]!;
+      row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+      previous = here;
+    }
+  }
+  return row[b.length]!;
 }
 
 /** The new session's own screen still up: its placeholder, or its row of
@@ -291,7 +327,7 @@ function newSessionScreen(lines: OcrLine[], repoName: string): boolean {
  * The app opens a new session in the last folder used; if that is not the
  * repository (or the worktree option is not there), stop and retry later.
  */
-export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string; anchor?: { localId: string; title?: string } | null }): Promise<DesktopStep> {
+export async function createDesktopSession(driver: DesktopDriver, input: { repoName: string; text: string; liveWorktrees?: readonly string[]; baseBranch?: string; anchor?: { localId: string; title?: string } | null; rootBranch?: string | null; branches?: readonly string[] }): Promise<DesktopStep> {
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.activateClaude());
     await driver.sleep(700);
@@ -305,7 +341,7 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     const reused = (lines: OcrLine[]) => {
       const bottom = lines.filter((line) => line.y > size.h * 0.55);
       const chip = reusedWorktreeChip(chipRow(bottom), input.liveWorktrees);
-      const why = chip ? `it shows ${chip}, another session's worktree` : notRepoRoot(bottom, input.baseBranch);
+      const why = chip ? `it shows ${chip}, another session's worktree` : notRepoRoot(bottom, input.baseBranch, { rootBranch: input.rootBranch, branches: input.branches });
       return why ? { ok: false as const, reason: `the new session is not in the root of ${input.repoName} (${why}); nothing was typed. ${ROOT_SESSION_HOWTO(input.repoName, input.baseBranch ?? "main")}`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) } : null;
     };
     if (open) {
@@ -376,9 +412,13 @@ export const ROOT_SESSION_HOWTO = (repoName: string, baseBranch: string) =>
 export function worktreeOption(row: OcrLine[]): "on" | "off" | "unknown" | null {
   const line = row.find((each) => /\bworktree\b/i.test(each.text));
   if (!line) return null;
-  const before = line.text.slice(0, line.text.search(/\bworktree\b/i)).replace(/[|[\]()]/g, " ").trim().split(/\s+/).pop() ?? "";
+  const raw = line.text.slice(0, line.text.search(/\bworktree\b/i)).trimEnd();
+  // the empty box read as its two edges: "| | worktree", "| worktree" (03/10, R12-1)
+  if (/\|\s*\|?$/.test(raw)) return "off";
+  const before = raw.replace(/[|[\]()]/g, " ").trim().split(/\s+/).pop() ?? "";
   if (/^(?:v|✓|✔|√|☑|☒|\[x\]|x)$/i.test(before)) return "on";
-  if (/^(?:o|0|□|☐|○|◯)$/i.test(before)) return "off";
+  // the empty box: "O", and the Cyrillic "П" OCR reads its open square as ("|П worktree", 03/10)
+  if (/^(?:[oO0]|□|☐|○|◯|[пП]|[Ππ])$/.test(before)) return "off";
   return "unknown";
 }
 
@@ -423,7 +463,7 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     // would make one of its own inside or beside it (R11-dispatch R11-1)
     const option = worktreeOption(chipRow(bottom));
     if (option === "on" || option === "unknown") {
-      return { ok: false, reason: option === "on" ? `the new session has the worktree option ON (the app would make a worktree of its own instead of using ${input.folderName}); nothing was typed` : `could not read whether the new session's worktree option is on or off; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      return { ok: false, reason: option === "on" ? `the new session has the worktree option ON (the app would make a worktree of its own instead of using ${input.folderName}); nothing was typed` : `could not read whether the new session's worktree option is on or off; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)), worktreeOption: option };
     }
     stop = await guard(screen, "empty session field");
     if (stop) return stop;
@@ -1089,10 +1129,13 @@ export function lastServerSessionInRoot(serverLocalIds: ReadonlySet<string>, dir
 
 /** What cc_session_start answers (409) while the server's last session
  * landed in the root (lastServerSessionInRoot). */
-export function rootFolderRefusal(last: { folder: string; title?: string }, repoName: string, fromQueue = false): string {
+export function rootFolderRefusal(last: { folder: string; title?: string }, repoName: string, fromQueue = false, ownPath = false): string {
   return [
     `não abri: a última sessão que o servidor abriu no app Claude${last.title ? ` ("${last.title}")` : ""} caiu na raiz (${last.folder}), sem worktree própria — o app está abrindo sessões novas com a worktree desligada, e a próxima cairia lá também, mexendo direto no checkout principal.`,
-    `Peça ao dono para, no app, abrir Arquivo → Nova sessão na pasta ${repoName}, LIGAR a opção worktree e enviar uma mensagem curta: o app só grava a sessão depois do primeiro envio. Quando a sessão dele abrir numa worktree nova, o servidor volta a abrir sessões no app sozinho.`,
+    // with the server's own worktrees (lote X) the option must stay OFF: never ask to turn it on (R12-1)
+    ownPath
+      ? `Neste repositório o servidor cria a pasta de cada sessão e abre o app nela, e para isso a opção worktree tem de ficar DESLIGADA: não peça ao dono para ligá-la. Esse caminho está suspenso pelo disjuntor; peça ao dono para deixar a opção worktree desligada e resolver o item "O app Claude abriu … sessões …" em "Precisa de você": o servidor volta a abrir as sessões na pasta dele.`
+      : `Peça ao dono para, no app, abrir Arquivo → Nova sessão na pasta ${repoName}, LIGAR a opção worktree e enviar uma mensagem curta: o app só grava a sessão depois do primeiro envio. Quando a sessão dele abrir numa worktree nova, o servidor volta a abrir sessões no app sozinho.`,
     fromQueue
       ? `Este pedido veio da fila de sessões e continua nela: o servidor tenta de novo sozinho a cada 5 min e desiste, com aviso, depois de 24 h falhando. Se não der para esperar, use surface "cli" com cli_reason.`
       : `Então tente de novo. Se não der para esperar, use surface "cli" com cli_reason.`,

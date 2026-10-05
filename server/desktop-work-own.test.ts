@@ -164,6 +164,33 @@ describe("a create with a worktree of the server's", () => {
     expect(wrong).toHaveLength(1);
   });
 
+  it("a create given up for the worktree option ON (or unreadable) is told to the breaker, with what the screen showed (R12-1)", async () => {
+    const h = harness();
+    const refused: Array<[string, string, string | undefined]> = [];
+    h.deps.own!.chipRefused = (session, option, seen) => { refused.push([session.id, option, seen]); };
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    for (let i = 0; i < OWN_OPEN_MAX_MISSES; i++) {
+      h.results.push({ ok: false, reason: "the new session has the worktree option ON; nothing was typed", retry: true, miss: true, touched: true, seen: "• Local | 9353-comprar-assentos | v worktree", worktreeOption: "on" });
+      await runDesktopWork(h.deps, h.state);
+      h.advance(11 * 60_000);
+    }
+    expect(session.desktop!.own!.state).toBe("abandoned");
+    expect(refused).toEqual([["s1", "on", "• Local | 9353-comprar-assentos | v worktree"]]);
+    // a miss for another reason is not the chip's
+    const h2 = harness();
+    const other: string[] = [];
+    h2.deps.own!.chipRefused = (each) => { other.push(each.id); };
+    h2.start();
+    await prepareOwnWorktrees(h2.deps, h2.prepareState);
+    for (let i = 0; i < OWN_OPEN_MAX_MISSES; i++) {
+      h2.results.push({ ok: false, reason: "the new session does not show the folder", retry: true, miss: true, touched: true });
+      await runDesktopWork(h2.deps, h2.state);
+      h2.advance(11 * 60_000);
+    }
+    expect(other).toEqual([]);
+  });
+
   it("fails when another session already works in the worktree", async () => {
     const h = harness();
     const session = h.start();
