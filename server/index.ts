@@ -122,7 +122,7 @@ import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-
 import { englishNarration, narrationNoteText } from "./turn-narration.ts";
 import { idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
-import { asksOwnerToDecide, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskRoutine } from "./disk-decision.ts";
+import { asksOwnerToDecide, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskRoutine, folderInUse, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -13639,7 +13639,23 @@ function routineRunFallbackText(card: NonNullable<Message["routineRun"]>): strin
  * (server/disk-decision.ts) — refreshed, never doubled, not reopened for a
  * week once the owner settled it. */
 const NURIA_WORKTREES = join(homedir(), "Projetos", "nuria-platform", ".claude", "worktrees");
-function openDiskDecision(run: RoutineRun, routineName: string, threadId: string): void {
+/** One folder as it is on this Mac now: in use (sessions, conversations,
+ * live processes, last change), and its git state (INSP-R12F F1). */
+async function diskFolderFacts(path: string, used: readonly string[], processCwds: readonly string[] | null): Promise<FolderFacts> {
+  const canon = canonPath(path);
+  const mtime = (file: string) => { try { return statSync(file).mtimeMs; } catch { return null; } };
+  const activity = worktreeLastActivity(path, { readFile: (file) => readFileSync(file, "utf8"), mtime }) ?? folderActivity(path, {
+    list: (dir) => readdirSync(dir),
+    stat: (each) => { try { const found = lstatSync(each); return { mtimeMs: found.mtimeMs, dir: found.isDirectory() }; } catch { return null; } },
+  });
+  const sessionOf = () => ccLedger.all().find((session) => session.status !== "archived" && session.status !== "failed" && (session.cwd ? canonPath(session.cwd) === canon || canonPath(session.cwd).startsWith(`${canon}/`) : false))?.title ?? null;
+  const inUse = folderInUse(canon, { used: used.map(canonPath), processCwds: processCwds?.map(canonPath) ?? null, activity, now: Date.now(), root: canonPath(NURIA_WORKTREES), home: canonPath(homedir()), sessionOf });
+  const dirty = await gitAsync(["-C", path, "status", "--porcelain"]).then((out) => out.trim().length > 0, () => null);
+  const unpushed = await gitAsync(["-C", path, "branch", "-r", "--contains", "HEAD"]).then((out) => out.trim().length === 0, () => null);
+  return { inUse, dirty, unpushed };
+}
+
+async function openDiskDecision(run: RoutineRun, routineName: string, threadId: string): Promise<void> {
   try {
     const botId = run.botId;
     // the run's whole reply (its output is cut at 2 000 characters, and the ask closes a long table)
@@ -13650,7 +13666,13 @@ function openDiskDecision(run: RoutineRun, routineName: string, threadId: string
     try { names = readdirSync(NURIA_WORKTREES); } catch { return; }
     const folders = diskDecisionFolders(text, names);
     if (!folders.length) return;
-    const item = diskDecisionItem(folders, NURIA_WORKTREES, text);
+    // checked on the Mac, not taken from the routine's words
+    const used = foldersInUse();
+    const processCwds = await allProcessCwds();
+    const facts = new Map<string, FolderFacts>();
+    for (const folder of folders) facts.set(folder.name, await diskFolderFacts(join(NURIA_WORKTREES, folder.name), used, processCwds));
+    const item = diskDecisionItem(folders, facts, NURIA_WORKTREES, text);
+    if (!item) return;
     const plan = diskDecisionPlan(item.key, autonomy.ownerPendingOf(botId), autonomy.resolvedOwnerPendingOf(botId), Date.now());
     if (!plan.add) return;
     for (const key of plan.replace) autonomy.resolveOwnerPending({ botId, key, by: "server", note: "substituído pela lista nova da rotina de disco" });
@@ -13719,7 +13741,7 @@ function syncRoutineRunToSource(run: RoutineRun): string | null {
   }
 
   // a disk routine that ends leaving folders to the owner opens the one item for them (R12-followup #5)
-  if (statusChanged && run.status === "completed" && run.target === "bot" && !source.group) openDiskDecision(run, card.routineName, sourceThreadId);
+  if (statusChanged && run.status === "completed" && run.target === "bot" && !source.group) void openDiskDecision(run, card.routineName, sourceThreadId);
 
   // Merely queueing/running is ambient progress. Attention and terminal
   // states become unread in the conversation where the user asked for them.

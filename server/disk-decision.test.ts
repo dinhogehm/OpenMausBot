@@ -7,8 +7,10 @@ import {
   diskDecisionItem,
   diskDecisionPlan,
   diskRoutine,
+  folderInUse,
   resolveFolder,
   totalSize,
+  type FolderFacts,
 } from "./disk-decision.ts";
 import { parseOwnerPendingDetails } from "./bot-autonomy.ts";
 
@@ -28,6 +30,8 @@ const FOLDERS = [
   "chat-wait-time-issue-21f481",
 ];
 const NAME = "Limpeza automática de disco (nuria-platform)";
+/** As checked on the Mac: nobody in them, commits on no remote branch. */
+const idle = (folders: ReadonlyArray<string | { name: string }>) => new Map<string, FolderFacts>(folders.map((each) => [typeof each === "string" ? each : each.name, { inUse: null, dirty: false, unpushed: true }]));
 
 // The routine's run of 05/10 11:38 in the owner's channel (the "5,5 GiB" one)
 const RUN_1138 = `**Alerta de disco:** só restam **9 GiB livres**, abaixo do limite de 10 GiB. Nesta rodada não apaguei nada, então o espaço ficou igual antes e depois.
@@ -100,17 +104,61 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
       { name: "atendimento-reaberto-bugs-496989", size: "263M", reason: "commits só locais" },
     ]);
     expect(totalSize(folders)).toBe("~5,5 GiB");
-    const item = diskDecisionItem(folders, ROOT, RUN_1138);
+    const item = diskDecisionItem(folders, idle(folders), ROOT, RUN_1138)!;
     expect(item.key).toBe(`${DISK_DECISION_KEY_PREFIX}8204-reprovado-sidebar-da-fila-nao-refle-9b50cd,9052-tempo-de-reabertura-configuravel-35787b,atendimento-reaberto-bugs-496989`);
     expect(item.title).toBe("Decidir o destino de 3 worktrees paradas (~5,5 GiB): 8204-reprovado-sidebar-da-fila-nao-refle-9b50cd, 9052-tempo-de-reabertura-configuravel-35787b, atendimento-reaberto-bugs-496989");
     expect(item.why).toContain("o disco está com 9 GiB livres e o release exige 8");
-    expect(item.steps[0]).toEqual({
-      text: "Veja o que só existe em 8204-reprovado-sidebar-da-fila-nao-refle-9b50cd (3,0G, commits só locais)",
-      command: `git -C ${ROOT}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd status --short && git -C ${ROOT}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd log --oneline origin/main..HEAD`,
-    });
-    expect(item.options.map((option) => option.label)).toEqual(["Remover todas", "Push e remover", "Manter"]);
-    // it passes the same rules a bot's item does
+    expect(item.why).toContain("3 têm trabalho que só existe neste Mac");
+    // first, check again on the Mac; then look at each one
+    expect(item.steps[0]!.text).toContain("reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h");
+    expect(item.steps[1]!.text).toBe("Veja 8204-reprovado-sidebar-da-fila-nao-refle-9b50cd (3,0G; commits em nenhuma branch remota)");
+    // work only on this Mac: "Push e remover", never a removal — and never --force
+    expect(item.options.map((option) => option.label)).toEqual(["Push e remover", "Manter"]);
+    expect(item.options.map((option) => option.reply).join(" ")).not.toContain("--force)");
+    expect(item.options[0]!.reply).toContain("Se houver alterações não commitadas, pare e me mostre; não descarte nada");
+    // it passes the same rules a bot's item does, nothing cut
     expect(parseOwnerPendingDetails({ why: item.why, steps: item.steps, options: item.options })).toMatchObject({ ok: true });
+    for (const option of item.options) expect(option.reply.length).toBeLessThanOrEqual(500);
+  });
+
+  // INSP-R12F F1: "a 9374 está com sessão ativa" put the session's worktree in "Remover todas (--force)"
+  it("never offers a folder in use, and offers removal only for a folder proved clean and pushed", () => {
+    const folders9374 = [...FOLDERS, "9374-pausa-inatividade-no-clique-c38a86"];
+    const said = `${RUN_1138.replace(/\*\*Onde dá[\s\S]*$/, "")}\n\n8204 tem commits só locais, e a 9374 está com sessão ativa; alguém pode remover essas pastas manualmente.`;
+    // named only in the sentence, not in the run's table: never taken
+    expect(diskDecisionFolders(said, folders9374).map((each) => each.name)).toEqual(["8204-reprovado-sidebar-da-fila-nao-refle-9b50cd"]);
+    // in use on the Mac (a session, a process, a change today): out of the item, said as "não mexer"
+    const folders = diskDecisionFolders(RUN_1138, FOLDERS);
+    const facts = idle(folders);
+    facts.set("9052-tempo-de-reabertura-configuravel-35787b", { inUse: "sessão «9052 Tempo de reabertura» nela", dirty: false, unpushed: true });
+    facts.set("atendimento-reaberto-bugs-496989", { inUse: null, dirty: false, unpushed: false });
+    const item = diskDecisionItem(folders, facts, ROOT, RUN_1138)!;
+    expect(item.key).toBe(`${DISK_DECISION_KEY_PREFIX}8204-reprovado-sidebar-da-fila-nao-refle-9b50cd,atendimento-reaberto-bugs-496989`);
+    expect(item.why).toContain("Não mexer (fora deste item): 9052-tempo-de-reabertura-configuravel-35787b (sessão «9052 Tempo de reabertura» nela)");
+    const remove = item.options.find((option) => option.label === "Remover as limpas")!;
+    expect(remove.reply).toContain("Remova as worktrees atendimento-reaberto-bugs-496989 com git worktree remove, sem --force.");
+    expect(remove.reply).not.toContain("8204");
+    expect(item.options.find((option) => option.label === "Push e remover")!.reply).toContain("8204-reprovado-sidebar-da-fila-nao-refle-9b50cd");
+    // git could not tell: not clean
+    facts.set("atendimento-reaberto-bugs-496989", { inUse: null, dirty: null, unpushed: false });
+    expect(diskDecisionItem(folders, facts, ROOT, RUN_1138)!.options.map((option) => option.label)).toEqual(["Push e remover", "Manter"]);
+    // a folder not checked counts as in use; all in use: no item
+    expect(diskDecisionItem(folders, new Map(), ROOT, RUN_1138)).toBeNull();
+  });
+
+  it("knows a folder in use: a session, a conversation, a live process inside, a change in the last day, or unknown", () => {
+    const path = `${ROOT}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd`;
+    const now = Date.parse("2026-10-05T16:38:37Z");
+    const base = { used: [], processCwds: [], activity: now - 3 * 86_400_000, now, root: ROOT, home: "/Users/osvaldo" };
+    expect(folderInUse(path, base)).toBeNull();
+    expect(folderInUse(path, { ...base, sessionOf: () => "8204 Sidebar da fila" })).toBe("sessão «8204 Sidebar da fila» nela");
+    expect(folderInUse(path, { ...base, used: [`${path}/apps/web`] })).toBe("uma conversa ou sessão trabalha nela");
+    expect(folderInUse(path, { ...base, processCwds: [`${path}/apps/web`] })).toBe("há um processo vivo dentro dela");
+    expect(folderInUse(path, { ...base, processCwds: null })).toBe("não consegui ler os processos vivos");
+    expect(folderInUse(path, { ...base, activity: now - 3_600_000 })).toBe("mudou nas últimas 24 h");
+    expect(folderInUse(path, { ...base, activity: null })).toBe("não consegui medir a última mudança");
+    // an app session in "/" or the home, or a process in the worktrees' root, holds none of them
+    expect(folderInUse(path, { ...base, used: ["/", "/Users/osvaldo", ROOT], processCwds: ["/", ROOT] })).toBeNull();
   });
 
   it("with no folder named, every folder left to the owner — never one with a session on it or touched today", () => {
@@ -125,12 +173,12 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
 
   it("one item per list: 13:38's subset is already asked, the same list is refreshed, a settled one is not reopened for a week", () => {
     const now = Date.parse("2026-10-05T16:38:37Z");
-    const first = diskDecisionItem(diskDecisionFolders(RUN_1138, FOLDERS), ROOT, RUN_1138);
+    const first = diskDecisionItem(diskDecisionFolders(RUN_1138, FOLDERS), idle(FOLDERS), ROOT, RUN_1138)!;
     expect(diskDecisionPlan(first.key, [], [], now)).toEqual({ add: true, replace: [] });
     // the hourly run says it again: refreshed in place
     expect(diskDecisionPlan(first.key, [{ key: first.key }], [], now)).toEqual({ add: true, replace: [] });
     // 13:38 names 8204 and 9052, both in the open item: nothing new
-    const subset = diskDecisionItem(diskDecisionFolders(RUN_1338, FOLDERS), ROOT, RUN_1338);
+    const subset = diskDecisionItem(diskDecisionFolders(RUN_1338, FOLDERS), idle(FOLDERS), ROOT, RUN_1338)!;
     expect(subset.key).toBe(`${DISK_DECISION_KEY_PREFIX}8204-reprovado-sidebar-da-fila-nao-refle-9b50cd,9052-tempo-de-reabertura-configuravel-35787b`);
     expect(diskDecisionPlan(subset.key, [{ key: first.key }, { key: "release-loop:abc" }], [], now)).toEqual({ add: false, replace: [] });
     // a list with a folder more replaces the open one

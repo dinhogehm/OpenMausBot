@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb } from "../scripts/control-omb.ts";
@@ -26,7 +27,7 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     "|---|---|---|",
     ...rows,
     "",
-    "**Onde dá para liberar mais espaço:** as três worktrees com commits só locais e sem alterações (8204, 9052 e atendimento-reaberto) somam cerca de 5,5 GiB. Se esse trabalho já entrou na main por squash, alguém pode remover essas pastas manualmente; a rotina não pode removê-las.",
+    "**Onde dá para liberar mais espaço:** as três worktrees com commits só locais e sem alterações (8204, 9052 e atendimento-reaberto) somam cerca de 5,5 GiB, e a merge-deploy-open-prs-00664b mais 592M. Se esse trabalho já entrou na main por squash, alguém pode remover essas pastas manualmente; a rotina não pode removê-las.",
   ].join("\n");
   expect(reply.length).toBeGreaterThan(2_000);
   const fixture = await launchVerificationServer({ ...process.env, FAKE_CLAUDE_REPLIES: JSON.stringify([reply, reply]) });
@@ -35,11 +36,18 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     const response = await fetch(`${url}${path}`, { method, headers: { "content-type": "application/json", origin: url }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return response.json() as Promise<any>;
   };
+  let holder: ChildProcess | undefined;
   const ledger = () => (existsSync(join(dataDir, "bot-autonomy.json")) ? JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")) : {});
   try {
     // the worktrees, where the server looks for them (the fixture's home is its data dir)
     const root = join(dataDir, "Projetos", "nuria-platform", ".claude", "worktrees");
-    for (const folder of folders) mkdirSync(join(root, folder), { recursive: true });
+    const threeDaysAgo = (Date.now() - 3 * 86_400_000) / 1000;
+    for (const folder of folders) {
+      mkdirSync(join(root, folder), { recursive: true });
+      utimesSync(join(root, folder), threeDaysAgo, threeDaysAgo);
+    }
+    // a live process working inside merge-deploy: in use, whatever the routine says (INSP-R12F F1)
+    holder = spawn("sleep", ["120"], { cwd: join(root, "merge-deploy-open-prs-00664b"), stdio: "ignore" });
     const { bot } = await runControlOmb(["new-bot", "--name", "Chief of Staff", "--url", url]) as any;
     const { routine } = await api("POST", "/api/routines", {
       name: "Limpeza automática de disco (nuria-platform)", prompt: "Rotina de limpeza de disco.", botId: bot.id, enabled: false,
@@ -63,9 +71,12 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
       title: "Decidir o destino de 3 worktrees paradas (~5,5 GiB): 8204-reprovado-sidebar-da-fila-nao-refle-9b50cd, 9052-tempo-de-reabertura-configuravel-35787b, atendimento-reaberto-bugs-496989",
     });
     expect(item.why).toContain("o disco está com 9 GiB livres");
+    expect(item.why).toContain("Não mexer (fora deste item): merge-deploy-open-prs-00664b (há um processo vivo dentro dela)");
     expect(item.steps).toHaveLength(4);
-    expect(item.steps[0].command).toBe(`git -C ${root}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd status --short && git -C ${root}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd log --oneline origin/main..HEAD`);
-    expect(item.options.map((option: any) => option.label)).toEqual(["Remover todas", "Push e remover", "Manter"]);
+    expect(item.steps[0].text).toContain("reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h");
+    expect(item.steps[1].command).toContain(`git -C ${root}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd status --short`);
+    // not git repositories here: nothing is proved clean, so nothing is offered for removal
+    expect(item.options.map((option: any) => option.label)).toEqual(["Push e remover", "Manter"]);
     // the hour after, the same words: the same item, no second one
     await runOnce();
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -74,6 +85,7 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
       .filter((message) => message.kind === "activity" && String(message.tool?.name ?? "").startsWith(`Em "Precisa de você" (${item.id})`));
     expect(chips).toHaveLength(1);
   } finally {
+    holder?.kill();
     await fixture.close();
   }
 }, 90_000);

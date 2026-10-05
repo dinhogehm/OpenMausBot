@@ -52,8 +52,10 @@ export function resolveFolder(token: string, folders: readonly string[]): string
 
 /** The folders the owner is asked about: those the asking paragraph names
  * ("8204, 9052 e atendimento-reaberto somam cerca de 5,5 GiB… alguém pode
- * remover essas pastas manualmente"), with what the run's table says of
- * them; when it names none, every folder the run left for the owner. */
+ * remover essas pastas manualmente") AND the run's table or list left, with
+ * what it says of them; when it names none, every folder it left. A folder
+ * named only in a sentence ("a 9374 está com sessão ativa") is never taken
+ * (INSP-R12F F1). Whether one is in use is checked on the Mac (folderInUse). */
 export function diskDecisionFolders(text: string, folders: readonly string[]): LeftFolder[] {
   const left = leftFolders(text, folders, true);
   const named: string[] = [];
@@ -64,10 +66,35 @@ export function diskDecisionFolders(text: string, folders: readonly string[]): L
       if (name && !named.includes(name)) named.push(name);
     }
   }
-  const chosen = named.length
-    ? named.map((name) => left.find((folder) => folder.name === name) ?? { name, size: "?", reason: "citada pela rotina" })
-    : left;
+  const chosen = named.length ? left.filter((folder) => named.includes(folder.name)) : left;
   return chosen.filter((folder) => !notForOwner(folder.reason));
+}
+
+/** What the server found on the Mac about one folder (index.ts openDiskDecision). */
+export interface FolderFacts {
+  /** Why it is in use (a session, a live process, touched within the day, unknown activity), or null. */
+  inUse: string | null;
+  /** Changes not committed; null when git could not tell. */
+  dirty: boolean | null;
+  /** HEAD on no remote branch; null when git could not tell. */
+  unpushed: boolean | null;
+}
+
+/** A folder is in use when a session or an agent's conversation works in it
+ * (or inside it), a live process has its cwd there, or it changed in the
+ * last 24 h — or its activity cannot be read. A folder at or above the
+ * worktrees' root (an app session in "/" or the home) holds none of them. */
+export function folderInUse(path: string, input: { used: readonly string[]; processCwds: readonly string[] | null; activity: number | null; now: number; root: string; home: string; sessionOf?: (path: string) => string | null }): string | null {
+  const inside = (a: string, b: string) => a === b || a.startsWith(`${b}/`);
+  const above = (each: string) => each === "/" || each === input.home || inside(input.root, each);
+  const session = input.sessionOf?.(path);
+  if (session) return `sessão «${session}» nela`;
+  if (input.used.filter((each) => !above(each)).some((each) => inside(each, path) || inside(path, each))) return "uma conversa ou sessão trabalha nela";
+  if (input.processCwds === null) return "não consegui ler os processos vivos";
+  if (input.processCwds.filter((each) => !above(each)).some((each) => inside(each, path))) return "há um processo vivo dentro dela";
+  if (input.activity === null) return "não consegui medir a última mudança";
+  if (input.now - input.activity < 24 * 3_600_000) return "mudou nas últimas 24 h";
+  return null;
 }
 
 /** The folders a run's text says were left, with size and why: from its
@@ -128,36 +155,57 @@ export function totalSize(folders: readonly LeftFolder[]): string {
   return gib >= 1 ? `~${gib.toFixed(1).replace(".", ",")} GiB` : `~${Math.round(bytes / 1024 ** 2)} MB`;
 }
 
-/** The one item for the owner: keyed by the folders. */
-export function diskDecisionItem(folders: readonly LeftFolder[], root: string, text: string): {
+const RECHECK = "Antes de remover qualquer uma, reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h; pule as que tiverem e me diga quais.";
+
+/** The one item for the owner, keyed by the folders it asks about. Folders
+ * in use stay out of it (said in its why, "não mexer"); one with work only on
+ * this Mac (changes, commits on no remote branch, or git could not tell) is
+ * offered only "Push e remover"; only a folder proved clean and pushed is
+ * offered for removal, and never with --force (INSP-R12F F1). Null when no
+ * folder is left to decide. */
+export function diskDecisionItem(folders: readonly LeftFolder[], facts: ReadonlyMap<string, FolderFacts>, root: string, text: string): {
   key: string;
   title: string;
   why: string;
   steps: Array<{ text: string; command?: string }>;
   options: Array<{ label: string; reply: string; recommended?: true; why?: string }>;
-} {
-  const names = folders.map((folder) => folder.name).sort();
-  const total = totalSize(folders);
+} | null {
+  const busy = folders.flatMap((folder) => {
+    const reason = facts.get(folder.name)?.inUse ?? (facts.has(folder.name) ? null : "não conferida");
+    return reason ? [{ ...folder, busy: reason }] : [];
+  });
+  const asked = folders.filter((folder) => !busy.some((each) => each.name === folder.name));
+  if (!asked.length) return null;
+  const clean = asked.filter((folder) => facts.get(folder.name)?.dirty === false && facts.get(folder.name)?.unpushed === false);
+  const pending = asked.filter((folder) => !clean.includes(folder));
+  const names = asked.map((folder) => folder.name).sort();
+  const total = totalSize(asked);
   const free = /\*{0,2}(\d+(?:,\d+)?) GiB livres/i.exec(text)?.[1];
   const path = (name: string) => `${root}/${name}`;
-  const list = names.join(" ");
-  const shown = folders.slice(0, STEPS_FOLDERS_MAX);
+  const words = (list: readonly LeftFolder[]) => list.map((folder) => folder.name).sort().join(" ");
+  const shown = asked.slice(0, STEPS_FOLDERS_MAX);
+  const what = (folder: LeftFolder) => {
+    const fact = facts.get(folder.name)!;
+    const said = [fact.dirty === true ? "alterações não commitadas" : fact.dirty === null ? "estado do git desconhecido" : "", fact.unpushed === true ? "commits em nenhuma branch remota" : fact.unpushed === null ? "push desconhecido" : ""].filter(Boolean);
+    return said.length ? said.join(", ") : "limpa e no GitHub";
+  };
+  const kept = busy.length ? ` Não mexer (fora deste item): ${busy.map((each) => `${each.name} (${each.busy})`).join("; ")}.` : "";
   return {
     key: `${DISK_DECISION_KEY_PREFIX}${names.join(",")}`,
-    title: `Decidir o destino de ${folders.length} worktree${folders.length === 1 ? "" : "s"} parada${folders.length === 1 ? "" : "s"} (${total}): ${names.join(", ")}`.slice(0, 200),
-    why: `A rotina de disco não pode removê-las: têm commits ou alterações que só existem neste Mac. Juntas ocupam ${total}${free ? `; o disco está com ${free} GiB livres e o release exige 8` : ""}. Enquanto ninguém decide, a rotina repete o aviso a cada hora.`.slice(0, 400),
+    title: `Decidir o destino de ${asked.length} worktree${asked.length === 1 ? "" : "s"} parada${asked.length === 1 ? "" : "s"} (${total}): ${names.join(", ")}`.slice(0, 200),
+    why: `A rotina de disco não pode removê-las sozinha. Juntas ocupam ${total}${free ? `; o disco está com ${free} GiB livres e o release exige 8` : ""}.${pending.length ? ` ${pending.length} têm trabalho que só existe neste Mac.` : ""}${kept}`.slice(0, 400),
     steps: [
+      { text: RECHECK },
       ...shown.map((folder) => ({
-        text: `Veja o que só existe em ${folder.name} (${folder.size}, ${folder.reason})`.slice(0, 300),
+        text: `Veja ${folder.name} (${folder.size}; ${what(folder)})`.slice(0, 300),
         command: `git -C ${path(folder.name)} status --short && git -C ${path(folder.name)} log --oneline origin/main..HEAD`,
       })),
-      ...(folders.length > shown.length ? [{ text: `E mais ${folders.length - shown.length}: ${names.filter((name) => !shown.some((folder) => folder.name === name)).join(", ")}`.slice(0, 300) }] : []),
-      { text: "Escolha abaixo; o Chief executa a escolha e confirma no canal." },
+      ...(asked.length > shown.length ? [{ text: `E mais ${asked.length - shown.length}: ${names.filter((name) => !shown.some((folder) => folder.name === name)).join(", ")}`.slice(0, 300) }] : []),
     ].slice(0, 8),
     options: [
-      { label: "Remover todas", reply: `Pode remover as worktrees ${list} (git worktree remove --force). O que só existe nelas pode ser descartado.` },
-      { label: "Push e remover", reply: `Faça push das branches das worktrees ${list} (sem force) e, com o push confirmado no GitHub, remova-as sem --force.` },
-      { label: "Manter", reply: `Mantenha as worktrees ${list}. Não remova nem volte a me perguntar por elas.` },
+      ...(clean.length ? [{ label: "Remover as limpas", reply: `Remova as worktrees ${words(clean)} com git worktree remove, sem --force. ${RECHECK}` }] : []),
+      ...(pending.length ? [{ label: "Push e remover", reply: `Para as worktrees ${words(pending)}: faça push da branch de cada uma (sem force). Se houver alterações não commitadas, pare e me mostre; não descarte nada. Só com o push confirmado no GitHub, remova sem --force. ${RECHECK}` }] : []),
+      { label: "Manter", reply: `Mantenha as worktrees ${words(asked)}. Não remova nem volte a me perguntar por elas.` },
     ],
   };
 }
