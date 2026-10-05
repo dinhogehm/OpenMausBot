@@ -99,6 +99,14 @@ describe("power", () => {
     expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: "0" })).toBe("começa com qualquer carga, mínimo 0%");
     // what the watcher would refuse (not a whole number from 0 to 100) falls back as it does
     for (const bad of ["", "abc", "12.5", "101", "-1", " 30"]) expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: bad }), bad).toBe("não começa abaixo do mínimo dele, 60% por padrão, ou na tomada");
+    // the final watcher (nuria #9379): NURIA_RELEASE_MIN_BATTERY first, the _PERCENT name as its alias,
+    // as "${NURIA_RELEASE_MIN_BATTERY:-${NURIA_RELEASE_MIN_BATTERY_PERCENT:-60}}" reads them
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "80" })).toBe("não começa abaixo do mínimo dele, 80%, ou na tomada");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "80", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("não começa abaixo do mínimo dele, 80%, ou na tomada");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "100", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("só começa na tomada");
+    // empty is unset for ":-": the alias counts; set but invalid is the default, not the alias
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("não começa abaixo do mínimo dele, 40%, ou na tomada");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "abc", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("não começa abaixo do mínimo dele, 60% por padrão, ou na tomada");
     const alert = batteryAlert({ power: { onBattery: true, percent: 19 }, onBatterySince: 0, now: 1, releaseRunning: false, told: new Set(), env: { NURIA_RELEASE_MIN_BATTERY_PERCENT: "100" } })!;
     expect(alert.text).toContain("só olha a bateria antes de começar um release (só começa na tomada)");
     expect(powerPendingDetails(true, { NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" }).why).toContain("(não começa abaixo do mínimo dele, 40%, ou na tomada)");

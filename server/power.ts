@@ -87,10 +87,12 @@ const watcherOnBattery = (env: Record<string, string | undefined>) => `o watcher
 /** The watcher's default minimum since R12-resilience B1 (ops/r12-battery: 20 → 60). */
 export const WATCHER_DEFAULT_MIN_BATTERY_PERCENT = 60;
 
-/** The watcher's rule, read as it reads it: NURIA_RELEASE_MIN_BATTERY_PERCENT when
- * it is a whole number from 0 to 100, else the default (watch-production-release.sh). */
+/** The watcher's rule, read as it reads it (watch-production-release.sh, nuria #9379):
+ * NURIA_RELEASE_MIN_BATTERY, else its alias NURIA_RELEASE_MIN_BATTERY_PERCENT (an
+ * empty one counts as unset, as with ":-"), when it is a whole number from 0 to
+ * 100; else the default. */
 export function watcherBatteryRule(env: Record<string, string | undefined>): string {
-  const raw = env.NURIA_RELEASE_MIN_BATTERY_PERCENT;
+  const raw = env.NURIA_RELEASE_MIN_BATTERY || env.NURIA_RELEASE_MIN_BATTERY_PERCENT;
   const set = raw !== undefined && /^[0-9]+$/.test(raw) && Number(raw) <= 100 ? Number(raw) : null;
   if (set === 100) return "só começa na tomada";
   if (set === 0) return "começa com qualquer carga, mínimo 0%";
