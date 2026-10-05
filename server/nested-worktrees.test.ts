@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  archiveCleanupNote, codexRolloutFolders, diskAlertText, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
+  archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
   releasedPlanLine, releasedScopeLine, sizeLabel, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
 
@@ -632,5 +632,54 @@ describe("the low-disk alert (R10-resilience D)", () => {
     expect(alert.report.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(5);
     expect(alert.report).toContain("As maiores (e mais 2):");
     expect(alert.report).toContain("- worktree /w/6 (7,0 GB)");
+  });
+});
+
+// R11-resilience D2: a bot conversation's own folder IS its task-workspace
+// (task.cwd = the workspace), and it was pushed as "in use" before the
+// closed/quiet check — so the real 82feff85/54118a8a (closed), 82feff85/fa9d2302
+// and e9ba01c7/70fa6c86 (open, quiet since 29/09), ~6,5 GB, never reached the report.
+describe("a conversation's folders for the disk report (R11-resilience D2)", () => {
+  const now = Date.UTC(2026, 9, 4, 23, 0);
+  const T = "/Users/o/.openmausbot/task-workspaces";
+  const ws = (bot: string, thread: string) => `${T}/${bot}/${thread}`;
+  const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });
+  const quietSince = Date.UTC(2026, 8, 29, 12, 0);
+  const forDisk = { forDisk: true, hasGoal: false, now, day };
+  const conversations = [
+    { workspace: ws("82feff85", "54118a8a"), task: { cwd: ws("82feff85", "54118a8a"), closedBy: "lead", title: "@Lead PRODEV · parallel work", createdAt: quietSince, updatedAt: quietSince } },
+    { workspace: ws("82feff85", "fa9d2302"), task: { cwd: ws("82feff85", "fa9d2302"), title: "@Delivery PRODEV", createdAt: quietSince, updatedAt: quietSince } },
+    { workspace: ws("e9ba01c7", "busy"), task: { cwd: ws("e9ba01c7", "busy"), busy: true, title: "@Lead PRODEV", createdAt: quietSince, updatedAt: quietSince } },
+  ];
+
+  it("a closed or quiet conversation's own folder is not 'in use' for the disk report; a busy one is", () => {
+    const [closed, quiet, busy] = conversations.map(({ task, workspace }) => conversationFolders(task, workspace, forDisk));
+    expect(closed).toEqual({ inUse: [], quiet: "conversa \"@Lead PRODEV · parallel work\" fechada" });
+    expect(quiet).toEqual({ inUse: [], quiet: "conversa \"@Delivery PRODEV\" aberta, parada desde 29/09" });
+    expect(busy).toEqual({ inUse: [ws("e9ba01c7", "busy"), ws("e9ba01c7", "busy")] });
+    // a project folder the conversation works in stays in use, quiet or not
+    expect(conversationFolders({ ...conversations[1]!.task, cwd: "/Users/o/Projetos/nuria-platform" }, conversations[1]!.workspace, forDisk))
+      .toEqual({ inUse: ["/Users/o/Projetos/nuria-platform"], quiet: "conversa \"@Delivery PRODEV\" aberta, parada desde 29/09" });
+    // a conversation working toward a goal is not quiet
+    expect(conversationFolders(conversations[1]!.task, conversations[1]!.workspace, { ...forDisk, hasGoal: true }).quiet).toBeUndefined();
+    // for anything but the disk report, everything a conversation has is in use
+    expect(conversationFolders(conversations[0]!.task, conversations[0]!.workspace, { ...forDisk, forDisk: false })).toEqual({ inUse: [ws("82feff85", "54118a8a"), ws("82feff85", "54118a8a")] });
+  });
+
+  it("end to end: the closed and the quiet workspaces reach the report, the busy one does not", () => {
+    const inUse: string[] = [];
+    const notes = new Map<string, string>();
+    for (const { task, workspace } of conversations) {
+      const folders = conversationFolders(task, workspace, forDisk);
+      inUse.push(...folders.inUse);
+      if (folders.quiet) notes.set(workspace, folders.quiet);
+    }
+    const listed = staleTaskWorkspaces(conversations.map(({ workspace }) => ({ path: workspace, lastActivity: quietSince, ...(notes.has(workspace) ? { note: notes.get(workspace)! } : {}) })), { inUse, now });
+    expect(listed.map((each) => [each.path, each.note])).toEqual([
+      [ws("82feff85", "54118a8a"), "conversa \"@Lead PRODEV · parallel work\" fechada"],
+      [ws("82feff85", "fa9d2302"), "conversa \"@Delivery PRODEV\" aberta, parada desde 29/09"],
+    ]);
+    // nothing is removed: each is a command a person runs
+    expect(listed.every((each) => each.command.startsWith("mv ") && each.command.endsWith(" ~/.Trash/"))).toBe(true);
   });
 });

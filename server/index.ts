@@ -470,7 +470,7 @@ import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.t
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { citedRefs, parseRefState, RefLookups, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, diskAlertText, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, STALE_OUTSIDE_TAG_MS, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -9837,16 +9837,13 @@ function foldersInUse(opts: { quietWorkspaces?: Map<string, string> } = {}): str
     if (bot.cwd) folders.push(bot.cwd);
     for (const task of store.tasks(bot.id)) {
       if (task.archivedAt) continue;
-      if (typeof task.cwd === "string") folders.push(task.cwd);
       const workspace = join(TASK_WORKSPACES_DIR, bot.id, task.threadId);
       // for the disk report only: a closed conversation's workspace, or one
-      // quiet for 72 h and not running, is told as information (INSP-J r1 #7a)
-      if (opts.quietWorkspaces) {
-        const quietSince = task.updatedAt ?? task.createdAt;
-        if (task.closedBy) { opts.quietWorkspaces.set(workspace, `conversa "${task.title.slice(0, 40)}" fechada`); continue; }
-        if (!task.busy && !autonomy.goalFor(task.threadId) && now - quietSince > STALE_OUTSIDE_TAG_MS) { opts.quietWorkspaces.set(workspace, `conversa "${task.title.slice(0, 40)}" aberta, parada desde ${day(quietSince)}`); continue; }
-      }
-      folders.push(workspace);
+      // quiet for 72 h and not running, is told as information (INSP-J r1 #7a) —
+      // its own folder (task.cwd = the workspace) included (R11-resilience D2)
+      const own = conversationFolders(task, workspace, { forDisk: Boolean(opts.quietWorkspaces), hasGoal: Boolean(autonomy.goalFor(task.threadId)), now, day });
+      folders.push(...own.inUse);
+      if (own.quiet) opts.quietWorkspaces?.set(workspace, own.quiet);
     }
   }
   for (const group of store.groups ?? []) {
