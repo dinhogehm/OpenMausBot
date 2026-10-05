@@ -18,6 +18,8 @@ import {
   editDistance,
   notRepoRoot,
   rootFolderRefusal,
+  trustPrompt,
+  createDesktopSession,
   type DesktopDriver,
   type OcrLine,
 } from "./claude-desktop.ts";
@@ -122,6 +124,76 @@ describe("the old way's texts where the server makes the worktrees (R12-1)", () 
     expect(refusal).toContain("a opção worktree tem de ficar DESLIGADA: não peça ao dono para ligá-la");
     // without the server's worktrees the old gesture stays as it was
     expect(rootFolderRefusal({ folder: "/r/nuria-platform" }, "nuria-platform")).toContain("LIGAR a opção worktree");
+  });
+});
+
+// #9378, 05/10 12:59–13:03 (R12-visual N20): the screen the app showed for
+// the server's first real create through its own worktree, as the log has it.
+const REAL_9378 = "Confiar no workspace | • Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Ignorar permissões | Opus 5.5 | Médio";
+const FOLDER_9378 = "9378-supervisor-do-atendimento";
+/** The real line as OCR lines: the prompt on top, the chips on one row, the field and the bar below. */
+const screen9378 = (withPrompt = true): string[] => REAL_9378.split(" | ").filter((text) => withPrompt || !text.startsWith("Confiar"));
+
+describe("the real screen of #9378 (R12-visual N20)", () => {
+  const line = (text: string): OcrLine => ({ x: 600, y: 800, w: 200, h: 16, text });
+  it("reads the folder chip cut short with a stray dot after the ellipsis, and the box \"1O\" as off", () => {
+    expect(showsFolderName([line("• 9378-supervisor-do-ate….")], FOLDER_9378)).toBe(true);
+    expect(showsFolderName([line("9378-supervisor-do-ate…,")], FOLDER_9378)).toBe(true);
+    expect(showsFolderName([line("9378-supervisor-do-ate...")], FOLDER_9378)).toBe(true);
+    // a cut that does not start the folder's name is not it
+    expect(showsFolderName([line("9379-supervisor-do-ate….")], FOLDER_9378)).toBe(false);
+    expect(worktreeOption([line("2º omb/9378-supervisor-do-aten... 1O worktree")])).toBe("off");
+    expect(trustPrompt(REAL_9378.split(" | ").map(line))?.text).toBe("Confiar no workspace");
+  });
+
+  const dirs: string[] = [];
+  afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+  /** The server's worktree of #9378 and the alias the app is given, for real (the trust check reads real paths). */
+  const ownFolder = () => {
+    const root = mkdtempSync(join(tmpdir(), "omb-trust-"));
+    dirs.push(root);
+    const worktree = join(root, "nuria-platform", ".claude", "worktrees", FOLDER_9378);
+    mkdirSync(worktree, { recursive: true });
+    const alias = join(root, ".omb-worktree-links", "nuria-platform", FOLDER_9378);
+    mkdirSync(join(alias, ".."), { recursive: true });
+    symlinkSync(worktree, alias);
+    return { worktree, alias };
+  };
+
+  it("trusts the workspace by clicking its prompt only because the folder is the server's own worktree, then pastes", async () => {
+    const { worktree, alias } = ownFolder();
+    const app = fakeApp([screen9378(true), screen9378(false), SENT]);
+    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "9378 Supervisor\n[OMBX]\n\nPasso 0…", expected: worktree });
+    expect(step).toEqual({ ok: true });
+    // the prompt (1st line, y 700) clicked, then the field, then the paste
+    expect(app.actions[1]).toBe("click 700,708");
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(true);
+  });
+
+  it("clicks nothing in a folder that is not the server's worktree: the person is asked (trustNeeded)", async () => {
+    const { alias } = ownFolder();
+    for (const expected of [undefined, "/Users/o/Projetos/outro"]) {
+      const app = fakeApp([screen9378(true)]);
+      const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", ...(expected ? { expected } : {}) });
+      expect(step).toMatchObject({ ok: false, retry: true, trustNeeded: alias });
+      expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
+    }
+  });
+
+  it("stops without typing when the prompt stays after the click (a miss)", async () => {
+    const { worktree, alias } = ownFolder();
+    const app = fakeApp([screen9378(true)]);
+    const step = await openDesktopSessionIn(app.driver, { folder: alias, folderName: FOLDER_9378, text: "brief", expected: worktree });
+    expect(step).toMatchObject({ ok: false, miss: true });
+    expect(!step.ok && step.reason).toContain("still asks to trust the workspace");
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+  });
+
+  it("never trusts in the old way (New Session in the repository): the person is asked", async () => {
+    const app = fakeApp([["Sessão antiga v (nuria-platform"], ["Confiar no workspace", "• Local", "nuria-platform", "gº main", "|O worktree", "Descreva uma tarefa ou faça uma pergunta"]]);
+    const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "brief" });
+    expect(step).toMatchObject({ ok: false, trustNeeded: "nuria-platform" });
+    expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
   });
 });
 

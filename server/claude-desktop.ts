@@ -14,7 +14,7 @@
 // retried later, backing off; nothing is lost.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalFolder } from "./own-worktrees.ts";
@@ -64,7 +64,7 @@ export interface DesktopDriver {
 export type DesktopStep = { ok: true; suggestion?: string; note?: string } | DesktopStop;
 /** `draft`: text nobody sent sits in the field (never typed over);
  * `leftProbe`: the probe "." stayed at its end (the person came back first). */
-export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean; worktreeOption?: "on" | "unknown" };
+export type DesktopStop = { ok: false; reason: string; retry: boolean; miss?: boolean; touched?: boolean; human?: boolean; seen?: string; draft?: string; leftProbe?: boolean; worktreeOption?: "on" | "unknown"; trustNeeded?: string };
 
 const RETURN = 36;
 const ESCAPE = 53;
@@ -378,6 +378,10 @@ export async function createDesktopSession(driver: DesktopDriver, input: { repoN
     // word too: pasting there would send the brief into it. Require that
     // the screen changed (New Session opened) and read the folder and the
     // worktree option only near the composer, where a new session shows them.
+    // the app asks to trust the folder: never clicked in the old way (not a worktree the server made), the person decides
+    if (trustPrompt(lines)) {
+      return { ok: false, reason: `the app asks to trust the workspace of the new session (${input.repoName}); nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.repoName, seen: seenText(lines.slice(0, 8)) };
+    }
     if (sameScreen(before, lines)) {
       return { ok: false, reason: "New Session did not open (the screen did not change)", retry: true, miss: true, touched: true, seen: seenText(lines.slice(-8)) };
     }
@@ -418,8 +422,29 @@ export function worktreeOption(row: OcrLine[]): "on" | "off" | "unknown" | null 
   const before = raw.replace(/[|[\]()]/g, " ").trim().split(/\s+/).pop() ?? "";
   if (/^(?:v|✓|✔|√|☑|☒|\[x\]|x)$/i.test(before)) return "on";
   // the empty box: "O", and the Cyrillic "П" OCR reads its open square as ("|П worktree", 03/10)
-  if (/^(?:[oO0]|□|☐|○|◯|[пП]|[Ππ])$/.test(before)) return "off";
+  // (its left edge may come glued as "1", "l" or "|": "1O worktree", 05/10 #9378)
+  if (/^[1lI|!]?(?:[oO0]|□|☐|○|◯|[пП]|[Ππ])$/.test(before)) return "off";
   return "unknown";
+}
+
+/** The app's "trust this workspace" prompt, as the control to click: a
+ * bare "Confiar"/"Trust" button when OCR shows one, else the prompt's own
+ * line ("Confiar no workspace", the only reading so far, 05/10 #9378). */
+const TRUST_BUTTON = /^\W*(?:Confiar|Trust)\W*$/i;
+const TRUST_LINE = /^\W*(?:Confiar (?:no|neste|nesse) (?:workspace|espaço de trabalho)|Trust (?:this |the )?(?:workspace|folder))\b/i;
+export function trustPrompt(lines: OcrLine[]): OcrLine | null {
+  return lines.find((line) => TRUST_BUTTON.test(line.text.trim())) ?? lines.find((line) => TRUST_LINE.test(line.text.trim())) ?? null;
+}
+
+/** The folder the app was given is the server's own worktree: its real path
+ * is `expected`, a folder inside some `.claude/worktrees/`. */
+export function ownWorktreeFolder(folder: string, expected: string | undefined): boolean {
+  if (!expected || !expected.includes("/.claude/worktrees/")) return false;
+  try {
+    return realpathSync(folder) === realpathSync(expected);
+  } catch {
+    return false;
+  }
 }
 
 /** The app's link for a new session in a given folder: the one its own
@@ -432,7 +457,8 @@ export function showsFolderName(lines: OcrLine[], name: string): boolean {
   const wanted = name.toLowerCase();
   return lines.some((line) => line.text.toLowerCase().split(/\s+/).some((raw) => {
     const word = raw.replace(/^[([•·"']+|[)\],;:"'•·]+$/g, "");
-    const cut = word.replace(/(?:…|\.{2,})$/, "");
+    // the cut mark and any stray punctuation OCR puts after it: "9378-supervisor-do-ate…." (R12-visual N20)
+    const cut = word.replace(/(?:…|\.{2,})[.,;:·'"!?]*$/, "");
     return word === wanted || (cut !== word && cut.length >= 10 && wanted.startsWith(cut));
   }));
 }
@@ -447,7 +473,7 @@ export function showsFolderName(lines: OcrLine[], name: string): boolean {
  * outside .claude/worktrees: the app maps folders inside it back to the
  * repository root); `folderName` is what its chip shows.
  */
-export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string }): Promise<DesktopStep> {
+export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string }): Promise<DesktopStep> {
   if (!input.folder.startsWith("/") || !input.folderName) return { ok: false, reason: "invalid folder for a new session", retry: false };
   return withScreen(driver, async (screen) => {
     await act(screen, () => driver.openUrl(newSessionInFolderUrl(input.folder)));
@@ -455,7 +481,21 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     let stop = await guard(screen, "new session in its folder");
     if (stop) return stop;
     const size = await driver.screenSize();
-    const bottom = mainArea(await driver.ocr()).filter((line) => line.y > size.h * 0.55);
+    let main = mainArea(await driver.ocr());
+    // The app asks to trust a folder it has not seen ("Confiar no workspace",
+    // 05/10 #9378). Trusted here only when the folder is the server's own
+    // worktree, by its real path; anywhere else only the person decides.
+    const trust = trustPrompt(main);
+    if (trust) {
+      if (!ownWorktreeFolder(input.folder, input.expected)) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName}, which is not a worktree the server made; nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.folder, seen: seenText(main.slice(0, 8)) };
+      stop = await guard(screen, "trust the workspace");
+      if (stop) return stop;
+      await act(screen, () => driver.click(trust.x + trust.w / 2, trust.y + trust.h / 2));
+      await driver.sleep(1_000);
+      main = mainArea(await driver.ocr());
+      if (trustPrompt(main)) return { ok: false, reason: `the app still asks to trust the workspace ${input.folderName} after the click; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(main.slice(0, 8)) };
+    }
+    const bottom = main.filter((line) => line.y > size.h * 0.55);
     const field = bottom.find((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim()));
     if (!field) return { ok: false, reason: `the app's link did not open a new session for ${input.folderName} (no empty task field); nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
     if (!showsFolderName(bottom, input.folderName)) return { ok: false, reason: `the new session does not show the folder ${input.folderName} in its chips; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };

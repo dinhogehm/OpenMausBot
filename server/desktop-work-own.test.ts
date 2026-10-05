@@ -103,7 +103,8 @@ describe("a create with a worktree of the server's", () => {
     expect(pickDesktopPending(h.ledger.all(), h.now)?.id).toBe("s1");
     await runDesktopWork(h.deps, h.state);
     expect(h.steps.create).not.toHaveBeenCalled();
-    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String) });
+    // with the worktree's own path, by which a "trust this workspace" prompt is judged ours
+    expect(h.steps.openIn).toHaveBeenCalledWith({}, { folder: LINK, folderName: "9353-comprar-assentos", text: session.desktop!.pending?.text ?? expect.any(String), expected: PATH });
     expect(session.desktop!.sentAt).toBe(h.now);
   });
 
@@ -189,6 +190,31 @@ describe("a create with a worktree of the server's", () => {
       h2.advance(11 * 60_000);
     }
     expect(other).toEqual([]);
+  });
+
+  it("a workspace the app asks to trust and the server may not: the person is asked once, the create waits (no miss), and the item closes once it opens (R12-visual N20)", async () => {
+    const h = harness();
+    const asked: Array<{ key: string; title: string }> = [];
+    const resolved: string[] = [];
+    h.deps.ownerPending = (_session, item) => { asked.push({ key: item.key, title: item.title }); };
+    h.deps.resolveOwnerPending = (key) => { resolved.push(key); };
+    const session = h.start();
+    await prepareOwnWorktrees(h.deps, h.prepareState);
+    const prompt = { ok: false as const, reason: "the app asks to trust the workspace …; nothing was clicked or typed", retry: true, touched: true, trustNeeded: "/Users/o/Projetos/outro" };
+    h.results.push(prompt);
+    await runDesktopWork(h.deps, h.state);
+    expect(asked).toEqual([{ key: "cc-trust:s1", title: 'Confiar no workspace /Users/o/Projetos/outro no app Claude (a sessão "9353 Comprar assentos" espera por isso)' }]);
+    expect(session.desktop!.pending).toMatchObject({ kind: "create", attempts: 0 });
+    expect(session.desktop!.pending!.misses).toBeUndefined();
+    expect(session.desktop!.pending!.nextAttemptAt).toBe(h.now + 20 * 60_000);
+    h.advance(21 * 60_000);
+    h.results.push(prompt);
+    await runDesktopWork(h.deps, h.state);
+    expect(asked).toHaveLength(1); // once
+    h.advance(21 * 60_000);
+    await runDesktopWork(h.deps, h.state); // ok now
+    expect(session.desktop!.sentAt).toBe(h.now);
+    expect(resolved).toContain("cc-trust:s1");
   });
 
   it("fails when another session already works in the worktree", async () => {
