@@ -802,6 +802,13 @@ export function noteOwnFailure(state: OwnBreakerState, repo: string, failure: Ow
   return { state: { repos: { ...state.repos, [repo]: { ...before, failures, ...(trips ? { trippedAt: failure.at } : {}) } } }, tripped: trips };
 }
 
+/** The key the breaker keeps a repository by: its real path, so a session that
+ * names it through a symlink trips and rearms what the path check reads
+ * (INSP-R11fix F-3). The path as given when it cannot be resolved. */
+export function breakerRepo(repo: string, realpath: (path: string) => string = realpathSync): string {
+  try { return realpath(repo); } catch { return repo; }
+}
+
 /** Rearmed: a create that worked, or the owner's item resolved. */
 export function rearmOwnBreaker(state: OwnBreakerState, repo: string): OwnBreakerState {
   if (!state.repos[repo]) return state;

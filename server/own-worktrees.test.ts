@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  appLinkFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
+  appLinkFolder, breakerRepo, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, ownBreakerTripped, ownFailureCause, rearmOwnBreaker, type OwnBreakerState, type OwnFailure, cacheLine, canonicalFolder, cloneSeedCaches, ensureLink, findCacheDirs, installFor, installText, lockHash, OWN_DEFAULTS, ownLinkPath, ownSettingsFor, ownSummary, OwnWorktreeStore, planOwnWorktree,
   refreshSeed, savedText, SEED_DIR, SEED_LOCK_REASON, type CloneIo, type Exec, type OwnEvent, type SeedDeps, type SeedState,
 } from "./own-worktrees.ts";
 import { worktreeLines } from "./productivity-export.ts";
@@ -412,6 +412,29 @@ describe("the breaker (R11-1)", () => {
     state = rearmOwnBreaker(out.state, REPO);
     expect(ownBreakerTripped(state, REPO)).toBe(false);
     expect(state.repos[REPO]).toBeUndefined();
+  });
+
+  // INSP-R11fix F-3: tripped by session.repo, read by the real path — behind a symlink it never read as tripped
+  it("keeps a repository by its real path: tripped through a symlink, read through the real path, and back", () => {
+    const root = mkdtempSync(join(tmpdir(), "omb-breaker-"));
+    try {
+      const real = join(root, "real-repo");
+      mkdirSync(real);
+      const link = join(root, "linked-repo");
+      symlinkSync(real, link);
+      expect(breakerRepo(link)).toBe(breakerRepo(real));
+      expect(breakerRepo(join(root, "gone"))).toBe(join(root, "gone"));
+      let out = noteOwnFailure({ repos: {} }, breakerRepo(link), failure("a", link));
+      out = noteOwnFailure(out.state, breakerRepo(link), failure("b", link, 5));
+      expect(out.tripped).toBe(true);
+      // the path check reads it by the real path (and through the link): tripped
+      expect(ownBreakerTripped(out.state, breakerRepo(real))).toBe(true);
+      expect(ownBreakerTripped(out.state, breakerRepo(link))).toBe(true);
+      // rearmed through the real path, it is rearmed for the link too
+      expect(ownBreakerTripped(rearmOwnBreaker(out.state, breakerRepo(real)), breakerRepo(link))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("tells the owner what the app did, per session, and the gesture", () => {

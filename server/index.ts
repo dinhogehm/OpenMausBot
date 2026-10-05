@@ -387,7 +387,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
-import { addOwnWorktree, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
+import { addOwnWorktree, breakerRepo, cacheLine, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
@@ -9612,26 +9612,28 @@ const ownBreaker = (() => {
     },
   };
 })();
-const realRepoOf = (repo: string) => { try { return realpathSync(repo); } catch { return repo; } };
 /** Whether new app sessions of `repo` open in a worktree the server makes now: on, and its breaker not tripped. */
-const ownPathActive = (repo: string) => ownWorktreesOn(repo) && !ownBreakerTripped(ownBreaker.get(), realRepoOf(repo));
-/** A session of this path landed elsewhere: counted; the 2nd in a row trips the breaker and asks the owner, once. */
+const ownPathActive = (repo: string) => ownWorktreesOn(repo) && !ownBreakerTripped(ownBreaker.get(), breakerRepo(repo));
+/** A session of this path landed elsewhere: counted; the 2nd in a row trips the breaker and asks the owner, once.
+ * Kept by the repository's real path, the key ownPathActive reads (INSP-R11fix F-3). */
 function noteOwnWrongFolder(session: CcSession, folder: string): void {
   const own = session.desktop?.own;
   if (!own) return;
-  const { state, tripped } = noteOwnFailure(ownBreaker.get(), session.repo, { at: Date.now(), sessionId: session.id, title: session.title, folder, expected: own.path });
+  const repo = breakerRepo(session.repo);
+  const { state, tripped } = noteOwnFailure(ownBreaker.get(), repo, { at: Date.now(), sessionId: session.id, title: session.title, folder, expected: own.path });
   ownBreaker.set(state);
-  console.log(`[own-worktrees] session ${session.id} opened in ${folder} instead of ${own.path} (${state.repos[session.repo]!.failures.length} in a row)${tripped ? ": breaker tripped, new sessions go the old way until a create works or the owner resolves the item" : ""}`);
+  console.log(`[own-worktrees] session ${session.id} opened in ${folder} instead of ${own.path} (${state.repos[repo]!.failures.length} in a row)${tripped ? ": breaker tripped, new sessions go the old way until a create works or the owner resolves the item" : ""}`);
   if (!tripped) return;
   const bot = store.bot(session.ownerBotId);
   const thread = bot ? ownerChannelOf(bot.id) ?? sessionReportThread(session) : null;
   if (!bot || !thread || !store.taskByThread(bot.id, thread)) return;
-  const item = autonomy.addOwnerPending(bot.id, thread, { ...ownBreakerItem(session.repo, state.repos[session.repo]!.failures), key: `${OWN_BREAKER_KEY}${session.repo}` });
-  ownBreaker.set({ repos: { ...ownBreaker.get().repos, [session.repo]: { ...ownBreaker.get().repos[session.repo]!, itemId: item.id } } });
+  const item = autonomy.addOwnerPending(bot.id, thread, { ...ownBreakerItem(repo, state.repos[repo]!.failures), key: `${OWN_BREAKER_KEY}${repo}` });
+  ownBreaker.set({ repos: { ...ownBreaker.get().repos, [repo]: { ...ownBreaker.get().repos[repo]!, itemId: item.id } } });
   refreshBotRow(bot.id);
 }
 /** A create worked (either way): the breaker of its repository rearms, and its item closes. */
-function rearmOwnPath(repo: string, why: string): void {
+function rearmOwnPath(given: string, why: string): void {
+  const repo = breakerRepo(given);
   if (!ownBreaker.get().repos[repo]) return;
   const was = ownBreakerTripped(ownBreaker.get(), repo);
   ownBreaker.set(rearmOwnBreaker(ownBreaker.get(), repo));
