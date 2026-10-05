@@ -39,6 +39,7 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
   let holder: ChildProcess | undefined;
   let second: ChildProcess | undefined;
   let third: ChildProcess | undefined;
+  let fourth: ChildProcess | undefined;
   const ledger = () => (existsSync(join(dataDir, "bot-autonomy.json")) ? JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")) : {});
   try {
     // the worktrees, where the server looks for them (the fixture's home is its data dir)
@@ -104,10 +105,30 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     expect(await response.json()).toMatchObject({ code: "disk_item_changed" });
     expect(ledger().ownerPending.map((each: any) => each.key)).toEqual(["disk-decision:atendimento-reaberto-bugs-496989"]);
     expect(ledger().ownerPending[0].history ?? []).toEqual([]);
+    // INSP-R12F r3 R3-2: a free-text answer is checked too, and reaches the Chief with the state found now
+    const last = ledger().ownerPending[0];
+    const free = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${last.id}/reply`, {
+      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "pode remover todas" }),
+    });
+    expect(free.status, await free.clone().text()).toBeLessThan(300);
+    await expect.poll(async () => JSON.stringify((await api("GET", `/api/threads/${last.threadId}/messages?limit=100`)).messages), { timeout: 10_000 })
+      .toContain("[Servidor: conferido no Mac em ");
+    const said = ((await api("GET", `/api/threads/${last.threadId}/messages?limit=100`)).messages as any[]).find((message) => String(message.text ?? "").includes("pode remover todas"));
+    expect(said.text).toContain("atendimento-reaberto-bugs-496989: ");
+    expect(said.text).toContain("Reconfira no Mac antes de remover qualquer pasta");
+    // and a free-text answer after a folder came into use: refused, the item updated
+    fourth = spawn("sleep", ["120"], { cwd: join(root, "atendimento-reaberto-bugs-496989"), stdio: "ignore" });
+    const late = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${last.id}/reply`, {
+      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "pode remover" }),
+    });
+    expect(late.status).toBe(409);
+    expect(await late.json()).toMatchObject({ code: "disk_item_changed" });
+    expect(ledger().ownerPending ?? []).toEqual([]);
   } finally {
     holder?.kill();
     second?.kill();
     third?.kill();
+    fourth?.kill();
     await fixture.close();
   }
 }, 90_000);

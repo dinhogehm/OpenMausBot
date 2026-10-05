@@ -1,6 +1,8 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   asksOwnerToDecide,
+  diskStateLine,
   DISK_DECISION_KEY_PREFIX,
   DISK_DECISION_SETTLED_MS,
   diskDecisionFolders,
@@ -260,17 +262,76 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
 
   // INSP-R12F r2 R2-2: "clean" ignored the ignored files; a .dev.vars lives only on this Mac
   it("an ignored file that matters keeps a folder from being clean, past build junk", () => {
-    const state = porcelainState("!! node_modules/\n!! apps/web/.next/\n!! .turbo/\n!! dist/\n!! debug.log\n!! .dev.vars\n!! apps/api/.env.local\n");
-    expect(state).toEqual({ dirty: false, ignored: [".dev.vars", "apps/api/.env.local"] });
-    expect(porcelainState("!! node_modules/\n!! coverage/\n")).toEqual({ dirty: false, ignored: [] });
+    const state = porcelainState("!! node_modules/\n!! apps/web/.next/\n!! .turbo/\n!! dist/\n!! debug.log\n!! notes/rascunho.md\n!! apps/api/.local-ops/\n");
+    expect(state).toEqual({ dirty: false, ignored: ["notes/rascunho.md", "apps/api/.local-ops/"], secrets: [] });
+    expect(porcelainState("!! node_modules/\n!! coverage/\n")).toEqual({ dirty: false, ignored: [], secrets: [] });
     expect(porcelainState(" M src/a.ts\n!! node_modules/\n").dirty).toBe(true);
     const folders = [{ name: "atendimento-reaberto-bugs-496989", size: "263M", reason: "commits só locais" }];
     const facts = new Map<string, FolderFacts>([["atendimento-reaberto-bugs-496989", { inUse: null, dirty: false, unpushed: false, ignored: state.ignored }]]);
     const item = diskDecisionItem(folders, facts, ROOT, "")!;
     expect(item.options.map((option) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
-    expect(item.steps[1]!.text).toContain("arquivos ignorados que só existem aqui: .dev.vars, apps/api/.env.local");
+    expect(item.steps[1]!.text).toContain("arquivos ignorados que só existem aqui: notes/rascunho.md, apps/api/.local-ops/");
+    // and the removal names them
+    expect(item.options[0]!.reply).toContain("Também só existem nela e somem com a remoção: atendimento-reaberto-bugs-496989/notes/rascunho.md");
     // R2-3: one folder "tem", several "têm"
     expect(item.why).toContain(" 1 tem trabalho que só existe neste Mac.");
     expect(diskDecisionItem(diskDecisionFolders(RUN_1138, FOLDERS), idle(FOLDERS), ROOT, RUN_1138)!.why).toContain(" 3 têm trabalho que só existe neste Mac.");
+  });
+
+  // INSP-R12F r3 R3-1: with the old list the real 8204 and atendimento-reaberto had 11 and 7 "ignored that matter", all generated
+  it("the real ignored lists of 8204 and atendimento-reaberto are junk: both come out clean", () => {
+    const real = (name: string) => readFileSync(new URL(`./testing/disk-decision/st-${name}.txt`, import.meta.url), "utf8");
+    for (const name of ["8204-reprovado-sidebar-da-fila-nao-refle-9b50cd", "atendimento-reaberto-bugs-496989"]) {
+      const output = real(name);
+      expect(output.split("\n").filter((line) => line.startsWith("!! ")).length, name).toBeGreaterThan(70);
+      expect(porcelainState(output), name).toEqual({ dirty: false, ignored: [], secrets: [] });
+    }
+    const folders = [
+      { name: "8204-reprovado-sidebar-da-fila-nao-refle-9b50cd", size: "3,0G", reason: "commits só locais" },
+      { name: "atendimento-reaberto-bugs-496989", size: "263M", reason: "commits só locais" },
+    ];
+    // pushed meanwhile: offered for removal, with no ignored file named
+    const facts = new Map<string, FolderFacts>(folders.map((folder) => [folder.name, { inUse: null, ...porcelainState(real(folder.name)), unpushed: false }]));
+    const item = diskDecisionItem(folders, facts, ROOT, "")!;
+    expect(item.options.map((option) => option.label)).toEqual(["Remover as limpas", "Manter por 7 dias"]);
+    expect(item.steps[1]!.text).toBe("Veja 8204-reprovado-sidebar-da-fila-nao-refle-9b50cd (3,0G; limpa e no GitHub)");
+  });
+
+  it("a secret is never junk, and every option that removes its folder names it and asks to copy it first", () => {
+    const state = porcelainState("!! node_modules/\n!! .dev.vars\n!! apps/api/.dev.vars.production\n!! web/.env.local\n!! .env.example\n!! certs/server.pem\n!! apps/migrator/credentials/\n!! graft/\n!! .deploy-history/\n");
+    expect(state).toEqual({ dirty: false, ignored: [".env.example"], secrets: [".dev.vars", "apps/api/.dev.vars.production", "web/.env.local", "certs/server.pem", "apps/migrator/credentials/"] });
+    // a secret inside what would be junk is still a secret
+    expect(porcelainState("!! graft/.env\n").secrets).toEqual(["graft/.env"]);
+    const A = "8204-reprovado-sidebar-da-fila-nao-refle-9b50cd";
+    const B = "atendimento-reaberto-bugs-496989";
+    const folders = [{ name: A, size: "3,0G", reason: "commits só locais" }, { name: B, size: "263M", reason: "commits só locais" }];
+    // A pushed and clean but with a .dev.vars; B with commits on no remote and a .env
+    const facts = new Map<string, FolderFacts>([
+      [A, { inUse: null, dirty: false, unpushed: false, secrets: [".dev.vars"] }],
+      [B, { inUse: null, dirty: false, unpushed: true, secrets: ["web/.env.local"] }],
+    ]);
+    const item = diskDecisionItem(folders, facts, ROOT, "")!;
+    // a folder with a secret is never "limpa"
+    expect(item.options.map((option) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
+    for (const option of item.options.filter((each) => /remov/i.test(each.label))) {
+      expect(option.reply).toContain(`Antes de remover, copie para fora e me confirme estes segredos ignorados, que a remoção apaga: ${A}/.dev.vars, ${B}/web/.env.local.`);
+    }
+    expect(item.steps[1]!.text).toContain("segredos ignorados: .dev.vars");
+    // and with only clean-and-pushed folders bar a secret, "Remover as limpas" never takes it
+    const one = diskDecisionItem([folders[0]!], new Map([[A, { inUse: null, dirty: false, unpushed: false, secrets: [".dev.vars"] }]]), ROOT, "")!;
+    expect(one.options[0]).toMatchObject({ label: "Push e remover" });
+    expect(one.options[0]!.reply).toContain(`${A}/.dev.vars`);
+  });
+
+  // INSP-R12F r3 R3-2: what the Chief reads under any answer to a disk item
+  it("the state line under an answer says what was found now and to check again before removing", () => {
+    const A = "8204-reprovado-sidebar-da-fila-nao-refle-9b50cd";
+    const B = "atendimento-reaberto-bugs-496989";
+    const facts = new Map<string, FolderFacts>([
+      [A, { inUse: null, dirty: false, unpushed: false, secrets: [".dev.vars"] }],
+      [B, { inUse: "há um processo vivo dentro dela", dirty: false, unpushed: true }],
+    ]);
+    const line = diskStateLine([A, B, "sumiu-123"], facts, Date.parse("2026-10-05T19:40:00Z"));
+    expect(line).toBe(`[Servidor: conferido no Mac em 05/10, 16:40 — ${A}: segredos ignorados: .dev.vars; ${B}: em uso (há um processo vivo dentro dela); sumiu-123: não conferida. Reconfira no Mac antes de remover qualquer pasta: o estado pode mudar até você executar. Segredos ignorados são apagados pela remoção; copie-os antes.]`);
   });
 });

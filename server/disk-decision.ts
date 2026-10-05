@@ -78,21 +78,43 @@ export interface FolderFacts {
   dirty: boolean | null;
   /** HEAD on no remote branch; null when git could not tell. */
   unpushed: boolean | null;
-  /** Ignored files that only live here and matter (.dev.vars, .env*), past build junk. */
+  /** Ignored files that only live here and matter (not build output), secrets apart. */
   ignored?: string[];
+  /** Ignored secrets (.dev.vars, .env, keys): never junk; a removal must have them copied first. */
+  secrets?: string[];
 }
 
-// What an ignored file may be without being anyone's work: build output and caches.
-const JUNK = /(?:^|\/)(?:node_modules|dist|build|out|\.next|\.turbo|coverage|\.cache|\.local-ci|\.wrangler|target|\.vite|\.parcel-cache)(?:\/|$)|(?:^|\/)\.DS_Store$|\.(?:log|tsbuildinfo)$/;
+// Secrets, by name: never junk, wherever they are (INSP-R12F r3 R3-1).
+const SECRET = /(?:^|\/)(?:\.dev\.vars[^/]*|\.env(?!\.example$|\.sample$|\.template$)(?:\.[^/]*)?|[^/]*\.(?:pem|key|p12|pfx|jks|keystore)|credentials[^/]*|[^/]*service[-_]account[^/]*\.json|id_(?:rsa|ed25519|ecdsa)[^/]*|\.npmrc|\.netrc|\.pgpass)$/i;
+
+// What an ignored path may be without being anyone's work: build output,
+// caches and what the tools regenerate. Read off the real nuria-platform
+// worktrees (`git status --porcelain --ignored`, 05/10): smart-deploy's
+// .deploy-*, graft's index, husky's _/, the .ignore graft writes, nested
+// release worktrees, the ci:local receipts, the inspection outputs, the
+// lighthouse reports and the widget's _generated bundle; and the root
+// .claude/, which a worktree gets as a copy of the main checkout's (the same
+// CLAUDE.md, rules, settings.local.json and plan.md, compared on 05/10).
+const JUNK = new RegExp([
+  "(?:^|/)(?:node_modules|dist|build|out|\\.next|\\.turbo|coverage|\\.cache|\\.local-ci|\\.wrangler|target|\\.vite|\\.parcel-cache|\\.svelte-kit|\\.nuxt|\\.output|storybook-static|\\.vercel|\\.lighthouse|_generated)(?:/|$)",
+  "(?:^|/)(?:\\.deploy-history|graft|\\.worktrees|\\.audit-out)(?:/|$)",
+  "^\\.husky/_(?:/|$)",
+  "^\\.claude(?:/|$)",
+  "(?:^|/)(?:\\.deploy-metrics\\.json|\\.deploy-report\\.[a-z]+|\\.ignore|\\.DS_Store|\\.eslintcache)$",
+  "\\.(?:log|tsbuildinfo)$",
+].join("|"));
 
 /** From `git status --porcelain --ignored`: whether anything is changed or
- * untracked, and the ignored paths that are not build junk — a `.dev.vars`
- * or a `.env` exists only on this Mac, and removing the folder loses it
- * (INSP-R12F r2 R2-2). */
-export function porcelainState(output: string): { dirty: boolean; ignored: string[] } {
+ * untracked; the ignored secrets; and the other ignored paths that are not
+ * junk — they exist only on this Mac, and removing the folder loses them
+ * (INSP-R12F r2 R2-2, r3 R3-1). */
+export function porcelainState(output: string): { dirty: boolean; ignored: string[]; secrets: string[] } {
   const lines = output.split("\n").filter((line) => line.trim());
-  const ignored = lines.filter((line) => line.startsWith("!! ")).map((line) => line.slice(3).trim().replace(/^"|"$/g, "")).filter((path) => !JUNK.test(path.replace(/\/$/, "")));
-  return { dirty: lines.some((line) => !line.startsWith("!! ")), ignored };
+  const paths = lines.filter((line) => line.startsWith("!! ")).map((line) => line.slice(3).trim().replace(/^"|"$/g, ""));
+  const bare = (path: string) => path.replace(/\/$/, "");
+  const secrets = paths.filter((path) => SECRET.test(bare(path)));
+  const ignored = paths.filter((path) => !SECRET.test(bare(path)) && !JUNK.test(bare(path)));
+  return { dirty: lines.some((line) => !line.startsWith("!! ")), ignored, secrets };
 }
 
 /** A folder is in use when a session or an agent's conversation works in it
@@ -205,6 +227,29 @@ export function totalSize(folders: readonly LeftFolder[]): string {
 /** A path as one shell word (as nested-worktrees.ts quotes its commands). */
 const shellQuote = (value: string) => (/^[\w./@%+=:,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`);
 
+/** One folder's state, in words ("commits em nenhuma branch remota, segredos ignorados: .dev.vars"). */
+export function folderState(fact: FolderFacts): string {
+  const said = [
+    fact.dirty === true ? "alterações não commitadas" : fact.dirty === null ? "estado do git desconhecido" : "",
+    fact.unpushed === true ? "commits em nenhuma branch remota" : fact.unpushed === null ? "push desconhecido" : "",
+    fact.secrets?.length ? `segredos ignorados: ${fact.secrets.join(", ")}` : "",
+    fact.ignored?.length ? `arquivos ignorados que só existem aqui: ${fact.ignored.slice(0, 4).join(", ")}${fact.ignored.length > 4 ? ", …" : ""}` : "",
+  ].filter(Boolean);
+  return said.length ? said.join(", ") : "limpa e no GitHub";
+}
+
+/** What the Chief reads under any answer to a disk item (an option or free
+ * text): each folder as the server found it just now, and to check again
+ * before removing — the turn may run minutes later (INSP-R12F r3 R3-2). */
+export function diskStateLine(folders: readonly string[], facts: ReadonlyMap<string, FolderFacts>, at: number): string {
+  const when = new Date(at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const each = folders.map((name) => {
+    const fact = facts.get(name);
+    return `${name}: ${!fact ? "não conferida" : fact.inUse ? `em uso (${fact.inUse})` : folderState(fact)}`;
+  });
+  return `[Servidor: conferido no Mac em ${when} — ${each.join("; ")}. Reconfira no Mac antes de remover qualquer pasta: o estado pode mudar até você executar. Segredos ignorados são apagados pela remoção; copie-os antes.]`;
+}
+
 const RECHECK ="Antes de remover qualquer uma, reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h; pule as que tiverem e me diga quais.";
 
 /** The one item for the owner, keyed by the folders it asks about. Folders
@@ -226,7 +271,7 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
   });
   const asked = folders.filter((folder) => !busy.some((each) => each.name === folder.name));
   if (!asked.length) return null;
-  const clean = asked.filter((folder) => facts.get(folder.name)?.dirty === false && facts.get(folder.name)?.unpushed === false && !facts.get(folder.name)?.ignored?.length);
+  const clean = asked.filter((folder) => facts.get(folder.name)?.dirty === false && facts.get(folder.name)?.unpushed === false && !facts.get(folder.name)?.ignored?.length && !facts.get(folder.name)?.secrets?.length);
   const pending = asked.filter((folder) => !clean.includes(folder));
   const names = asked.map((folder) => folder.name).sort();
   const total = totalSize(asked);
@@ -234,15 +279,17 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
   const path = (name: string) => shellQuote(`${root}/${name}`);
   const words = (list: readonly LeftFolder[]) => list.map((folder) => folder.name).sort().join(" ");
   const shown = asked.slice(0, STEPS_FOLDERS_MAX);
-  const what = (folder: LeftFolder) => {
-    const fact = facts.get(folder.name)!;
-    const said = [
-      fact.dirty === true ? "alterações não commitadas" : fact.dirty === null ? "estado do git desconhecido" : "",
-      fact.unpushed === true ? "commits em nenhuma branch remota" : fact.unpushed === null ? "push desconhecido" : "",
-      fact.ignored?.length ? `arquivos ignorados que só existem aqui: ${fact.ignored.slice(0, 4).join(", ")}${fact.ignored.length > 4 ? ", …" : ""}` : "",
-    ].filter(Boolean);
-    return said.length ? said.join(", ") : "limpa e no GitHub";
+  const what = (folder: LeftFolder) => folderState(facts.get(folder.name)!);
+  // what a removal loses that git does not keep: named in every option that removes (INSP-R12F r3 R3-1)
+  const copyFirst = (list: readonly LeftFolder[]) => {
+    const secrets = list.flatMap((folder) => (facts.get(folder.name)?.secrets ?? []).map((each) => `${folder.name}/${each}`));
+    const others = list.flatMap((folder) => (facts.get(folder.name)?.ignored ?? []).map((each) => `${folder.name}/${each}`));
+    return [
+      secrets.length ? `Antes de remover, copie para fora e me confirme estes segredos ignorados, que a remoção apaga: ${secrets.join(", ")}.` : "",
+      others.length ? `Também só existem nela e somem com a remoção: ${others.slice(0, 6).join(", ")}${others.length > 6 ? ", …" : ""}.` : "",
+    ].filter(Boolean).join(" ");
   };
+  const removing = (list: readonly LeftFolder[]) => [copyFirst(list), RECHECK].filter(Boolean).join(" ");
   const kept = busy.length ? ` Não mexer (fora deste item): ${busy.map((each) => `${each.name} (${each.busy})`).join("; ")}.` : "";
   return {
     // the folders, and which are offered for removal: a change in either is another item (INSP-R12F r2 R2-1)
@@ -258,8 +305,8 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
       ...(asked.length > shown.length ? [{ text: `E mais ${asked.length - shown.length}: ${names.filter((name) => !shown.some((folder) => folder.name === name)).join(", ")}`.slice(0, 300) }] : []),
     ].slice(0, 8),
     options: [
-      ...(clean.length ? [{ label: "Remover as limpas", reply: `Remova as worktrees ${words(clean)} com git worktree remove, sem --force. ${RECHECK}` }] : []),
-      ...(pending.length ? [{ label: "Push e remover", reply: `Para as worktrees ${words(pending)}: faça push da branch de cada uma (sem force). Se houver alterações não commitadas, pare e me mostre; não descarte nada. Só com o push confirmado no GitHub, remova sem --force. ${RECHECK}` }] : []),
+      ...(clean.length ? [{ label: "Remover as limpas", reply: `Remova as worktrees ${words(clean)} com git worktree remove, sem --force. ${removing(clean)}` }] : []),
+      ...(pending.length ? [{ label: "Push e remover", reply: `Para as worktrees ${words(pending)}: faça push da branch de cada uma (sem force). Se houver alterações não commitadas, pare e me mostre; não descarte nada. Só com o push confirmado no GitHub, remova sem --force. ${removing(pending)}` }] : []),
       // as long as the server holds a settled list (DISK_DECISION_SETTLED_MS): it says so (INSP-R12F F7)
       { label: "Manter por 7 dias", reply: `Mantenha as worktrees ${words(asked)} e não as remova. Elas só voltam a ser perguntadas daqui a 7 dias, se ainda estiverem no disco.` },
     ],

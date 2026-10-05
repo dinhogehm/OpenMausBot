@@ -122,7 +122,7 @@ import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-
 import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
-import { asksOwnerToDecide, busyNote, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
+import { asksOwnerToDecide, busyNote, diskStateLine, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -13655,20 +13655,22 @@ async function diskFolderFacts(path: string, used: readonly string[], processCwd
   // ignored files count too: a .dev.vars lives only here (INSP-R12F r2 R2-2)
   const state = await gitAsync(["-C", path, "status", "--porcelain", "--ignored"]).then(porcelainState, () => null);
   const unpushed = await gitAsync(["-C", path, "branch", "-r", "--contains", "HEAD"]).then((out) => out.trim().length === 0, () => null);
-  return { inUse, dirty: state ? state.dirty : null, unpushed, ...(state?.ignored.length ? { ignored: state.ignored } : {}) };
+  return { inUse, dirty: state ? state.dirty : null, unpushed, ...(state?.ignored.length ? { ignored: state.ignored } : {}), ...(state?.secrets.length ? { secrets: state.secrets } : {}) };
 }
 
 /** An open disk item checked again on the Mac now (INSP-R12F r2 R2-1): a
  * folder that came into use or is no longer clean changes the item to what
  * holds now; with none left, it is closed with why. Folders gone from the
  * disk drop out. */
-async function recheckDiskItem(item: OwnerPending, used: readonly string[], processCwds: readonly string[] | null, text: string): Promise<"keep" | "replace" | "close"> {
+async function recheckDiskItem(item: OwnerPending, used: readonly string[], processCwds: readonly string[] | null, text: string): Promise<{ outcome: "keep" | "replace" | "close"; line: string }> {
   const folders = openItemFolders(item).filter((folder) => existsSync(join(NURIA_WORKTREES, folder.name)));
   const facts = new Map<string, FolderFacts>();
   for (const folder of folders) facts.set(folder.name, await diskFolderFacts(join(NURIA_WORKTREES, folder.name), used, processCwds));
+  // what the Chief reads under the owner's answer: the state found just now (INSP-R12F r3 R3-2)
+  const line = diskStateLine(openItemFolders(item).map((folder) => folder.name), facts, Date.now());
   const fresh = folders.length ? diskDecisionItem(folders, facts, NURIA_WORKTREES, text) : null;
   const result = diskDecisionRecheck(item.key!, fresh, folders.length ? busyNote(folders.map((folder) => folder.name), facts) : "as pastas não existem mais");
-  if (result.action === "keep") return "keep";
+  if (result.action === "keep") return { outcome: "keep", line };
   autonomy.resolveOwnerPending({ botId: item.botId, key: item.key!, by: "server", note: result.action === "replace" ? "atualizado: conferido de novo no Mac" : result.note });
   if (result.action === "replace") {
     const opened = autonomy.addOwnerPending(item.botId, item.threadId, result.item);
@@ -13678,7 +13680,7 @@ async function recheckDiskItem(item: OwnerPending, used: readonly string[], proc
   }
   refreshBotRow(item.botId);
   console.log(`[disk] ${item.id} checked again on the Mac: ${result.action} (${item.key})`);
-  return result.action;
+  return { outcome: result.action, line };
 }
 
 async function openDiskDecision(run: RoutineRun, routineName: string, threadId: string): Promise<void> {
@@ -23850,11 +23852,6 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
             return json(res, 409, { error: `${appStillBlockedText(block, name, ownOnByName(name))}${diagnosis}`, code: "app_still_blocked" });
           }
         }
-        // a removal picked on a disk item is checked on the Mac first: a folder used since, or no longer clean, changes the item (INSP-R12F r2 R2-1)
-        if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && /remov/i.test(option.label)) {
-          const outcome = await recheckDiskItem(item, foldersInUse(), await allProcessCwds(), "");
-          if (outcome !== "keep") return json(res, 409, { error: outcome === "replace" ? "Conferi agora no Mac: alguma pasta passou a ser usada ou não está mais limpa. O item foi atualizado com o que vale agora; escolha de novo." : "Conferi agora no Mac: nenhuma das pastas pode ser removida agora. O item foi fechado com o motivo.", code: "disk_item_changed" });
-        }
         // "seguir no terminal" is kept: the server does not recreate the item for 24 h (INSP-J r1 #8) — and it closes it
         const declined = Boolean(item.key?.startsWith(APP_UNBLOCK_KEY) && option.label === APP_UNBLOCK_DECLINE_LABEL);
         if (declined) ownerDeclines.set(item.key!, Date.now() + APP_UNBLOCK_DECLINE_MS);
@@ -23875,6 +23872,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         resolve = body.resolve === true;
         text = ownerPendingReplyText(item, reply.slice(0, 4_000), resolve);
         answer = { kind: "text", text: reply };
+      }
+      // any answer to a disk item — a decision or free text ("pode remover todas") — is checked on the Mac first:
+      // a folder used since, or no longer clean, changes the item and the answer is not sent (INSP-R12F r2 R2-1);
+      // otherwise the Chief reads, under the answer, the state found now and to check again before removing (r3 R3-2)
+      if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask") {
+        const check = await recheckDiskItem(item, foldersInUse(), await allProcessCwds(), "");
+        if (check.outcome !== "keep") return json(res, 409, { error: check.outcome === "replace" ? "Conferi agora no Mac: alguma pasta passou a ser usada ou não está mais limpa. O item foi atualizado com o que vale agora; responda de novo." : "Conferi agora no Mac: nenhuma das pastas pode ser removida agora. O item foi fechado com o motivo.", code: "disk_item_changed" });
+        text = `${text}\n\n${check.line}`;
       }
       try {
         assertWithinBudget(cfg, DATA_DIR);
