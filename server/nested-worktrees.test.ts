@@ -1,12 +1,13 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
-  releasedPlanLine, releasedScopeLine, sizeLabel, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
+  releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, sizeLabel, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
+import { liveRecordFolders } from "./claude-desktop.ts";
 
 const parent = "/r/nuria-platform/.claude/worktrees/9286-lote";
 const porcelain = [
@@ -632,6 +633,78 @@ describe("the low-disk alert (R10-resilience D)", () => {
     expect(alert.report.split("\n").filter((line) => line.startsWith("- "))).toHaveLength(5);
     expect(alert.report).toContain("As maiores (e mais 2):");
     expect(alert.report).toContain("- worktree /w/6 (7,0 GB)");
+  });
+});
+
+// R12-resilience D3: three old sessions of the Claude app (Feb.) kept cwd "/", and
+// isInside(workspace, "/") holds for every path: every task-workspace was "in use",
+// so D2 had no effect live. A folder above the task-workspaces root ("/", the home,
+// ~/.openmausbot) never holds one, as in planReleasedWorktrees ("or above it").
+describe("folders in use above the task-workspaces (R12-resilience D3)", () => {
+  const now = Date.UTC(2026, 9, 5, 15, 0);
+  const idle = Date.UTC(2026, 8, 29, 12, 0);
+  const home = "/Users/o";
+  const root = `${home}/.openmausbot/task-workspaces`;
+  const folders = ["82feff85/54118a8a", "82feff85/fa9d2302", "e9ba01c7/70fa6c86"].map((each) => ({ path: `${root}/${each}`, lastActivity: idle }));
+
+  it("'/', the home and ~/.openmausbot hold no task-workspace; the bot's folder, the conversation's or one inside it still do", () => {
+    for (const above of ["/", home, `${home}/`, `${home}/.openmausbot`, root]) {
+      expect(staleTaskWorkspaces(folders, { inUse: [above], now, root, home }).map((each) => each.path), above).toEqual(folders.map((each) => each.path));
+    }
+    expect(staleTaskWorkspaces(folders, { inUse: [`${root}/82feff85`], now, root, home }).map((each) => each.path)).toEqual([`${root}/e9ba01c7/70fa6c86`]);
+    expect(staleTaskWorkspaces(folders, { inUse: [`${root}/e9ba01c7/70fa6c86/repo/.claude/worktrees/x`], now, root, home }).map((each) => each.path)).toEqual([`${root}/82feff85/54118a8a`, `${root}/82feff85/fa9d2302`]);
+    // a project folder elsewhere holds nothing here
+    expect(staleTaskWorkspaces(folders, { inUse: [`${home}/Projetos/nuria-platform`], now, root, home })).toHaveLength(3);
+  });
+
+  it("end to end: app sessions with cwd '/' and the home, the real three workspaces reach the report (~6,5 GB); a session inside one keeps it out", () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "omb-d3-")));
+    try {
+      const tmpHome = join(base, "home");
+      const tmpRoot = join(tmpHome, ".openmausbot", "task-workspaces");
+      const real = ["82feff85/54118a8a", "82feff85/fa9d2302", "e9ba01c7/70fa6c86", "e9ba01c7/sessao-viva"];
+      for (const each of real) {
+        mkdirSync(join(tmpRoot, each), { recursive: true });
+        utimesSync(join(tmpRoot, each), idle / 1000, idle / 1000);
+      }
+      // the Claude app's records (claude-code-sessions/<org>/<account>/local_*.json), not archived
+      const sessions = join(base, "claude-code-sessions", "org", "account");
+      mkdirSync(sessions, { recursive: true });
+      const record = (id: string, cwd: string) => writeFileSync(join(sessions, `local_${id}.json`), JSON.stringify({ sessionId: `local_${id}`, cliSessionId: id, cwd, isArchived: false, title: id }));
+      record("afe017e2", "/");
+      record("06bd2da9", "/");
+      record("6521cda0", tmpHome);
+      record("viva", join(tmpRoot, "e9ba01c7", "sessao-viva"));
+      const day = (ms: number) => new Date(ms).toLocaleDateString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit" });
+      // what foldersInUse gathers: the app's live folders, then each open conversation
+      const inUse = [...liveRecordFolders(join(base, "claude-code-sessions"))];
+      const notes = new Map<string, string>();
+      const conversations = [
+        { workspace: join(tmpRoot, "82feff85", "54118a8a"), task: { closedBy: "lead", title: "@Lead PRODEV · parallel work", createdAt: idle, updatedAt: idle } },
+        { workspace: join(tmpRoot, "82feff85", "fa9d2302"), task: { title: "@Delivery PRODEV", createdAt: idle, updatedAt: idle } },
+        { workspace: join(tmpRoot, "e9ba01c7", "70fa6c86"), task: { title: "@Lead PRODEV", createdAt: idle, updatedAt: idle } },
+      ];
+      for (const { workspace, task } of conversations) {
+        const own = conversationFolders({ ...task, cwd: workspace }, workspace, { forDisk: true, hasGoal: false, now, day });
+        inUse.push(...own.inUse);
+        if (own.quiet) notes.set(workspace, own.quiet);
+      }
+      expect(inUse).toEqual(expect.arrayContaining(["/", tmpHome]));
+      const scanned = scanTaskWorkspaces(tmpRoot, { list: (dir) => readdirSync(dir), activity: (path) => statSync(path).mtimeMs, notes });
+      const listed = staleTaskWorkspaces(scanned, { inUse, now, root: tmpRoot, home: tmpHome, canon: realpathSync });
+      expect(listed.map((each) => [each.path.slice(tmpRoot.length + 1), each.note])).toEqual([
+        ["82feff85/54118a8a", "conversa \"@Lead PRODEV · parallel work\" fechada"],
+        ["82feff85/fa9d2302", "conversa \"@Delivery PRODEV\" aberta, parada desde 29/09"],
+        ["e9ba01c7/70fa6c86", "conversa \"@Lead PRODEV\" aberta, parada desde 29/09"],
+      ]);
+      // as the report tells them, with the sizes du gave live (2,2 + 2,2 + 2,1 GB)
+      const told = staleFoldersReport(listed.map((each, i) => ({ ...each, sizeKb: [2.2, 2.2, 2.1][i]! * 1024 * 1024 })))!;
+      expect(told.chip).toContain("3 pasta(s) parada(s) há mais de 72 h fora da tag, ~6,5 GB");
+      // not told where the root and the home are, the session in the home still holds them all
+      expect(staleTaskWorkspaces(scanned, { inUse, now, canon: realpathSync })).toEqual([]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 

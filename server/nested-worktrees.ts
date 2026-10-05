@@ -276,13 +276,38 @@ export function conversationFolders(
   return { inUse: [...(cwd ? [cwd] : []), workspace] };
 }
 
+/** Every task-workspace under `root` (<root>/<bot>/<conversation>), with its
+ * last activity and the note of its conversation when closed or quiet. */
+export function scanTaskWorkspaces(root: string, deps: { list: (dir: string) => string[]; activity: (path: string) => number | null; notes: ReadonlyMap<string, string> }): Array<{ path: string; lastActivity: number | null; note?: string }> {
+  const found: Array<{ path: string; lastActivity: number | null; note?: string }> = [];
+  let bots: string[] = [];
+  try { bots = deps.list(root); } catch { return found; } // no task-workspaces here
+  for (const bot of bots) {
+    const botDir = `${trimSlash(root)}/${bot}`;
+    let threads: string[] = [];
+    try { threads = deps.list(botDir); } catch { continue; }
+    for (const thread of threads) {
+      const path = `${botDir}/${thread}`;
+      const note = deps.notes.get(path);
+      found.push({ path, lastActivity: deps.activity(path), ...(note ? { note } : {}) });
+    }
+  }
+  return found;
+}
+
 /** The task-workspaces (task-workspaces/<bot>/<conversation>) idle past
  * STALE_OUTSIDE_TAG_MS that no agent uses: no open conversation, no session
  * inside, not already told as a worktree. Information for a person, with a
  * command that moves to the Trash (undoable), never one that deletes. */
-export function staleTaskWorkspaces(folders: ReadonlyArray<{ path: string; lastActivity: number | null; note?: string }>, input: { inUse: Iterable<string>; now: number; known?: readonly string[]; canon?: (path: string) => string }): StaleFolder[] {
+export function staleTaskWorkspaces(folders: ReadonlyArray<{ path: string; lastActivity: number | null; note?: string }>, input: { inUse: Iterable<string>; now: number; known?: readonly string[]; canon?: (path: string) => string; root?: string; home?: string }): StaleFolder[] {
   const canon = (path: string) => trimSlash(input.canon ? input.canon(path) : path);
-  const used = [...input.inUse].filter(Boolean).map(canon);
+  const root = input.root ? canon(input.root) : null;
+  const home = input.home ? canon(input.home) : null;
+  // a folder at or above the task-workspaces root ("/", the home, ~/.openmausbot) holds
+  // none of them: an app session with cwd "/" made every one "in use" (R12-resilience D3),
+  // as the main checkout or above it holds no worktree in planReleasedWorktrees
+  const above = (each: string) => each === "/" || each === home || (root !== null && isInside(root, each));
+  const used = [...input.inUse].filter(Boolean).map(canon).filter((each) => !above(each));
   const known = (input.known ?? []).map(canon);
   return folders.flatMap((folder) => {
     const path = canon(folder.path);
