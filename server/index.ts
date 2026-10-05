@@ -470,7 +470,7 @@ import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.t
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { citedRefs, parseRefState, RefLookups, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -9952,11 +9952,13 @@ async function cleanReleasedWorktrees(): Promise<void> {
     // the task-workspaces of conversations no longer open, idle for days
     const workspaces = scanTaskWorkspaces(TASK_WORKSPACES_DIR, {
       list: (dir) => readdirSync(dir),
-      activity: (path) => (existsSync(join(path, ".git")) ? activity(path) ?? mtime(path) : mtime(path)),
+      // the newest entry one level below, not only the top's mtime (INSP-R12a R12b-3)
+      activity: (path) => (existsSync(join(path, ".git")) ? activity(path) : null) ?? folderActivity(path, { list: (dir) => readdirSync(dir), mtime }),
       notes: quietWorkspaces,
     });
-    // an app session in "/" or the home holds none of them (R12-resilience D3)
-    stale.push(...staleTaskWorkspaces(workspaces, { inUse: inUseForDisk, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath, root: TASK_WORKSPACES_DIR, home: homedir() }));
+    // an app session in "/" or the home holds none of them (R12-resilience D3);
+    // a live process working inside one holds it, as for the worktrees (INSP-R12a R12b-3)
+    stale.push(...staleTaskWorkspaces(workspaces, { inUse: inUseForDisk, processCwds: cwds, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath, root: TASK_WORKSPACES_DIR, home: homedir() }));
     // the server's own worktrees of failed sessions (or never used): their own lines, "da sessão falhada …" (R11-dispatch R11-1)
     const left = leftOwnWorktrees(ccLedger.all(), existsSync);
     const leftPaths = new Set(left.map((each) => canonPath(each.path)));

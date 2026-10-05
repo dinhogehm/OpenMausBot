@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
+  archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, isDisposableIgnored, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, RELEASED_MIN_IDLE_MS,
   releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, sizeLabel, staleFoldersReport, staleTaskWorkspaces, unquoteGit, worktreeLastActivity, type ReleasedPlanDeps,
 } from "./nested-worktrees.ts";
 import { liveRecordFolders } from "./claude-desktop.ts";
@@ -705,6 +705,51 @@ describe("folders in use above the task-workspaces (R12-resilience D3)", () => {
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
+  });
+});
+
+// INSP-R12a R12b-3: now that the report lists task-workspaces live, a manual claude or shell
+// working inside one must hold it, and an edit in a subfolder must count as activity
+describe("live processes and activity below the top of a task-workspace (INSP-R12a R12b-3)", () => {
+  const now = Date.UTC(2026, 9, 5, 15, 0);
+  const idle = Date.UTC(2026, 8, 29, 12, 0);
+  const home = "/Users/o";
+  const root = `${home}/.openmausbot/task-workspaces`;
+  const folders = ["82feff85/54118a8a", "82feff85/fa9d2302"].map((each) => ({ path: `${root}/${each}`, lastActivity: idle }));
+
+  it("a process working inside a task-workspace holds it; one in '/' or the home holds none", () => {
+    const listed = (processCwds: string[]) => staleTaskWorkspaces(folders, { inUse: [], processCwds, now, root, home }).map((each) => each.path);
+    expect(listed([`${root}/82feff85/54118a8a/repo/src`])).toEqual([`${root}/82feff85/fa9d2302`]);
+    // every daemon runs in "/", a login shell in the home
+    expect(listed(["/", home, "/usr/libexec"])).toEqual(folders.map((each) => each.path));
+  });
+
+  it("the activity of a folder is its newest entry one level below, sampled up to a limit", () => {
+    const base = realpathSync(mkdtempSync(join(tmpdir(), "omb-r12b3-")));
+    try {
+      const ws = join(base, "54118a8a");
+      mkdirSync(join(ws, "repo", "src"), { recursive: true });
+      writeFileSync(join(ws, "notes.md"), "x");
+      const recent = Date.UTC(2026, 9, 5, 9, 0);
+      // the top and the file stay old; only the repo folder changed today
+      for (const each of [ws, join(ws, "notes.md")]) utimesSync(each, idle / 1000, idle / 1000);
+      utimesSync(join(ws, "repo"), recent / 1000, recent / 1000);
+      const mtime = (path: string) => { try { return statSync(path).mtimeMs; } catch { return null; } };
+      expect(mtime(ws)).toBe(idle);
+      expect(folderActivity(ws, { list: (dir) => readdirSync(dir), mtime })).toBe(recent);
+      // so it is not told as idle since 29/09
+      expect(staleTaskWorkspaces([{ path: ws, lastActivity: folderActivity(ws, { list: (dir) => readdirSync(dir), mtime }) }], { inUse: [], now, root: base, home })).toEqual([]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+    // a folder of thousands of entries: at most `limit` of them are read
+    let stats = 0;
+    const many = Array.from({ length: 5_000 }, (_, i) => `f${i}`);
+    const at = folderActivity("/w", { list: () => many, mtime: (path) => { stats += 1; return path === "/w/f10" ? 5 : 1; } }, 200);
+    expect(stats).toBeLessThanOrEqual(201);
+    expect(at).toBe(5);
+    // unreadable: the top's own time
+    expect(folderActivity("/w", { list: () => { throw new Error("EACCES"); }, mtime: () => 3 })).toBe(3);
   });
 });
 

@@ -82,7 +82,7 @@ export function belowBatteryLimit(power: PowerState, minPercent: number): boolea
  * R12 B1, nor on an unknown charge); what it does NOT do is stop a release already running,
  * and that release dies half-deployed if the battery runs out (R12-resilience
  * B1, B2: the old text still said it read no battery). */
-const watcherOnBattery = (env: Record<string, string | undefined>) => `o watcher de produção só olha a bateria antes de começar um release (${watcherBatteryRule(env)}), mas um release já em curso não para: se a bateria acabar, a produção fica pela metade`;
+const watcherOnBattery = (env: Record<string, string | undefined>) => `o watcher de produção confere a bateria só antes de começar um release (${watcherBatteryRule(env)}), mas um release já em curso não para: se a bateria acabar, a produção fica pela metade`;
 
 /** The watcher's default minimum since R12-resilience B1 (ops/r12-battery: 20 → 60). */
 export const WATCHER_DEFAULT_MIN_BATTERY_PERCENT = 60;
@@ -95,9 +95,10 @@ export function watcherBatteryRule(env: Record<string, string | undefined>): str
   const raw = env.NURIA_RELEASE_MIN_BATTERY || env.NURIA_RELEASE_MIN_BATTERY_PERCENT;
   const set = raw !== undefined && /^[0-9]+$/.test(raw) && Number(raw) <= 100 ? Number(raw) : null;
   if (set === 100) return "só começa na tomada";
-  if (set === 0) return "começa com qualquer carga, mínimo 0%";
-  const min = set === null ? `${WATCHER_DEFAULT_MIN_BATTERY_PERCENT}% por padrão` : `${set}%`;
-  return `não começa abaixo do mínimo dele, ${min}, ou na tomada`;
+  if (set === 0) return "começa com qualquer carga";
+  // what lets a release start, not what stops it: "não começa abaixo …, ou na tomada" read as
+  // "não começa na tomada" (INSP-R12a R12b-2)
+  return `só começa na tomada ou com a bateria em ${set ?? WATCHER_DEFAULT_MIN_BATTERY_PERCENT}% ou mais`;
 }
 /** The way out while a release runs on battery. */
 const releaseRunningPlug = (running: boolean) => (running ? " Há um release em curso: ligue o Mac na tomada agora." : "");
@@ -117,7 +118,7 @@ export function batteryAlert(input: { power: PowerState; onBatterySince: number 
     return { level: "low", text: `Sem tomada (no-break): ligue o Mac na tomada. Está sem energia da tomada${since}, carga desconhecida${running}; o Chief não manda carrier assim, e ${watcher}.${releaseRunningPlug(input.releaseRunning)}` };
   }
   if (power.percent < criticalPercent(minPercent) && !input.told.has("critical")) {
-    return { level: "critical", text: `Bateria em ${power.percent}%, quase no fim: ligue o Mac na tomada já. Está na bateria${since}${running}; ${watcher}. Ligue o Mac na tomada, ou peça PARAR para nada novo começar.${releaseRunningPlug(input.releaseRunning)}` };
+    return { level: "critical", text: `Bateria em ${power.percent}%, quase no fim: ligue o Mac na tomada já. Está na bateria${since}${running}; ${watcher}. Se não der para ligar agora, peça PARAR para nada novo começar.` };
   }
   if (!input.told.has("low") && !input.told.has("critical")) {
     return { level: "low", text: `Bateria em ${power.percent}% (seu limite: ${minPercent}%): ligue o Mac na tomada. Está na bateria${since}${running}; o Chief não manda carrier abaixo de ${minPercent}%, e ${watcher}.${releaseRunningPlug(input.releaseRunning)}` };

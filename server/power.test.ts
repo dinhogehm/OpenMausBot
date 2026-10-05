@@ -92,24 +92,29 @@ describe("power", () => {
 
   // R12-resilience B1: the watcher's minimum is NURIA_RELEASE_MIN_BATTERY_PERCENT, 60 by
   // default (ops/r12-battery); the text reads it like the watcher does, so they never disagree
+  // INSP-R12a R12b-2: "(não começa abaixo do mínimo dele, 60% por padrão, ou na tomada)" read
+  // as "não começa … na tomada", the opposite; the rule now says what lets a release start
   it("says the watcher's own minimum: the variable when it is set and valid, else 60%; 100 is 'só na tomada'", () => {
-    expect(watcherBatteryRule({})).toBe("não começa abaixo do mínimo dele, 60% por padrão, ou na tomada");
-    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("não começa abaixo do mínimo dele, 40%, ou na tomada");
+    expect(watcherBatteryRule({})).toBe("só começa na tomada ou com a bateria em 60% ou mais");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("só começa na tomada ou com a bateria em 40% ou mais");
     expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: "100" })).toBe("só começa na tomada");
-    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: "0" })).toBe("começa com qualquer carga, mínimo 0%");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: "0" })).toBe("começa com qualquer carga");
+    for (const each of ["", "40", "100", "0"]) expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: each })).not.toMatch(/não começa|por padrão, ou/);
     // what the watcher would refuse (not a whole number from 0 to 100) falls back as it does
-    for (const bad of ["", "abc", "12.5", "101", "-1", " 30"]) expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: bad }), bad).toBe("não começa abaixo do mínimo dele, 60% por padrão, ou na tomada");
+    for (const bad of ["", "abc", "12.5", "101", "-1", " 30"]) expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY_PERCENT: bad }), bad).toBe("só começa na tomada ou com a bateria em 60% ou mais");
     // the final watcher (nuria #9379): NURIA_RELEASE_MIN_BATTERY first, the _PERCENT name as its alias,
     // as "${NURIA_RELEASE_MIN_BATTERY:-${NURIA_RELEASE_MIN_BATTERY_PERCENT:-60}}" reads them
-    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "80" })).toBe("não começa abaixo do mínimo dele, 80%, ou na tomada");
-    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "80", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("não começa abaixo do mínimo dele, 80%, ou na tomada");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "80" })).toBe("só começa na tomada ou com a bateria em 80% ou mais");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "80", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("só começa na tomada ou com a bateria em 80% ou mais");
     expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "100", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("só começa na tomada");
     // empty is unset for ":-": the alias counts; set but invalid is the default, not the alias
-    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("não começa abaixo do mínimo dele, 40%, ou na tomada");
-    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "abc", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("não começa abaixo do mínimo dele, 60% por padrão, ou na tomada");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("só começa na tomada ou com a bateria em 40% ou mais");
+    expect(watcherBatteryRule({ NURIA_RELEASE_MIN_BATTERY: "abc", NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" })).toBe("só começa na tomada ou com a bateria em 60% ou mais");
     const alert = batteryAlert({ power: { onBattery: true, percent: 19 }, onBatterySince: 0, now: 1, releaseRunning: false, told: new Set(), env: { NURIA_RELEASE_MIN_BATTERY_PERCENT: "100" } })!;
-    expect(alert.text).toContain("só olha a bateria antes de começar um release (só começa na tomada)");
-    expect(powerPendingDetails(true, { NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" }).why).toContain("(não começa abaixo do mínimo dele, 40%, ou na tomada)");
+    expect(alert.text).toContain("confere a bateria só antes de começar um release (só começa na tomada)");
+    expect(powerPendingDetails(true, { NURIA_RELEASE_MIN_BATTERY_PERCENT: "40" }).why).toContain("(só começa na tomada ou com a bateria em 40% ou mais)");
+    // the why stays under the 400 characters of an owner item with the longest rule
+    expect(powerPendingDetails(true, {}).why.length).toBeLessThanOrEqual(400);
   });
 
   it("tells the Chief below the limit, then when critical — each once, and never promises what the watcher does not do", () => {
@@ -119,7 +124,7 @@ describe("power", () => {
     const low = batteryAlert({ ...base, power: { onBattery: true, percent: 19 }, now: 45 * 60_000 })!;
     // R12-resilience B2: the watcher reads the battery before it starts (BAT-W); what it does not
     // do is stop a release already running — that is the risk to say, with the wall as the way out
-    expect(low).toEqual({ level: "low", text: "Bateria em 19% (seu limite: 20%): ligue o Mac na tomada. Está na bateria há 45 min, com release de produção em curso; o Chief não manda carrier abaixo de 20%, e o watcher de produção só olha a bateria antes de começar um release (não começa abaixo do mínimo dele, 60% por padrão, ou na tomada), mas um release já em curso não para: se a bateria acabar, a produção fica pela metade. Há um release em curso: ligue o Mac na tomada agora." });
+    expect(low).toEqual({ level: "low", text: "Bateria em 19% (seu limite: 20%): ligue o Mac na tomada. Está na bateria há 45 min, com release de produção em curso; o Chief não manda carrier abaixo de 20%, e o watcher de produção confere a bateria só antes de começar um release (só começa na tomada ou com a bateria em 60% ou mais), mas um release já em curso não para: se a bateria acabar, a produção fica pela metade. Há um release em curso: ligue o Mac na tomada agora." });
     expect(low.text).not.toMatch(/nenhum carrier novo começa|não olha a bateria|pode começar um release sozinho/);
     // without a release running, the risk is still said, the "agora" is not
     const quiet = batteryAlert({ power: { onBattery: true, percent: 19 }, onBatterySince: 0, now: 1, releaseRunning: false, told: new Set() })!;
@@ -131,8 +136,10 @@ describe("power", () => {
     expect(critical.level).toBe("critical");
     expect(critical.text).toContain("PARAR");
     expect(critical.text).toContain("um release já em curso não para");
-    expect(critical.text).toContain("Há um release em curso: ligue o Mac na tomada agora.");
     expect(critical.text).not.toContain("não olha a bateria");
+    // INSP-R12a: the critical alert said "ligue o Mac na tomada" three times; once is enough
+    expect(critical.text.match(/ligue o Mac na tomada/gi)).toHaveLength(1);
+    expect(critical.text).toContain("com release de produção em curso");
     told.add(critical.level);
     expect(batteryAlert({ ...base, power: { onBattery: true, percent: 5 }, now: 90 * 60_000 })).toBeNull();
     expect(batteryAlert({ ...base, power: { onBattery: false, percent: 12 }, now: 1 })).toBeNull();
