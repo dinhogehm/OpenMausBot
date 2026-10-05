@@ -13689,7 +13689,20 @@ async function recheckDiskItem(item: OwnerPending, used: readonly string[], proc
   return { outcome: result.action, line };
 }
 
-async function openDiskDecision(run: RoutineRun, routineName: string, threadId: string): Promise<void> {
+/** One disk-item pass at a time (a routine's run, an owner's answer): two
+ * passes reading the Mac at different moments would undo each other's item. */
+let diskItemQueue: Promise<unknown> = Promise.resolve();
+function diskItemTurn<T>(work: () => Promise<T>): Promise<T> {
+  const turn = diskItemQueue.then(work, work);
+  diskItemQueue = turn.catch(() => undefined);
+  return turn;
+}
+
+function openDiskDecision(run: RoutineRun, routineName: string, threadId: string): Promise<void> {
+  return diskItemTurn(() => openDiskDecisionNow(run, routineName, threadId));
+}
+
+async function openDiskDecisionNow(run: RoutineRun, routineName: string, threadId: string): Promise<void> {
   try {
     const botId = run.botId;
     // the run's whole reply (its output is cut at 2 000 characters, and the ask closes a long table)
@@ -23884,7 +23897,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // otherwise the Chief reads, under the answer, the state found now and to check again before removing (r3 R3-2)
       // "Manter" removes nothing: never checked, never refused (INSP-R12F r4)
       if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && !keepsFolders(answer)) {
-        const check = await recheckDiskItem(item, foldersInUse(), await allProcessCwds(), "");
+        // in turn with a routine's pass: the item read after it, gone if that pass replaced it
+        const check = await diskItemTurn(async () => {
+          const now = autonomy.ownerPendingById(bot.id, item.id);
+          return now && now.key === item.key ? recheckDiskItem(now, foldersInUse(), await allProcessCwds(), "") : { outcome: "replace" as const, line: "" };
+        });
         if (check.outcome !== "keep") return json(res, 409, { error: check.outcome === "replace" ? "Conferi agora no Mac: alguma pasta passou a ser usada ou não está mais limpa. O item foi atualizado com o que vale agora; responda de novo." : "Conferi agora no Mac: nenhuma das pastas pode ser removida agora. O item foi fechado com o motivo.", code: "disk_item_changed" });
         text = `${text}\n\n${check.line}`;
       }
