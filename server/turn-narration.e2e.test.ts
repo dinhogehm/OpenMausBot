@@ -27,8 +27,9 @@ it("an English line before a Portuguese reply ends the turn as a work note, not 
     const texts = messages.filter((message) => message.role === "bot" && message.kind === "text" && message.turnId).map((message) => message.text);
     expect(texts).toEqual([reply]);
     const note = messages.find((message) => message.kind === "activity" && String(message.tool?.name ?? "").startsWith("Nota de trabalho do bot, em inglês"));
-    expect(note?.tool?.name).toContain("Both nested ones are clean and published");
-    expect(note?.text).toBeUndefined();
+    // nothing lost: the whole text, backticks and all, in the message and in the chip's output (INSP-R12F F3)
+    expect(note?.text).toBe(narration);
+    expect(note?.tool?.output).toBe(narration);
     // a turn answered in English (the person wrote in English): nothing is hidden
     await runControlOmb(["send", "--bot", chief.id, "--text", "Is the gate green?", "--url", url]);
     expect(await runControlOmb(["wait", "--bot", chief.id, "--timeout", "30", "--url", url])).toMatchObject({ status: "settled" });

@@ -119,7 +119,7 @@ import { connectorCallFromFrame, connectorRefusalText, connectorUnrecognizedText
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { buildRecall } from "./recall.ts";
 import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-language.ts";
-import { englishNarration, narrationNoteText } from "./turn-narration.ts";
+import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { asksOwnerToDecide, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskRoutine, folderInUse, type FolderFacts } from "./disk-decision.ts";
@@ -7655,7 +7655,7 @@ bus.subscribe((event: RuntimeEvent) => {
         // English narration before a Portuguese reply is a work note, not a message to the person (R12-followup #4)
         if (terminal && bot && isPortugueseLanguage(cfg.language)) {
           for (const note of englishNarration(store.messagesFor(event.threadId), completedTurnId, terminal.id)) {
-            store.patchMessage(event.threadId, note.id, { kind: "activity", text: undefined, tool: { name: chipText(narrationNoteText(note.text ?? ""), 400), ok: true } });
+            store.patchMessage(event.threadId, note.id, narrationPatch(note.text ?? ""));
           }
         }
       }
