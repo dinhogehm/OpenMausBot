@@ -2,7 +2,7 @@ import { BellDot, CircleAlert, Clock3, Loader2 } from "lucide-react";
 import { useStore, type Bot, type Group, type Task } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
-import { displayThreadTitle } from "@/lib/thread-title";
+import { shownTaskTitle } from "@/lib/thread-title";
 import { orderedSidebarThreads, orderedThreadList } from "./SidebarThreadRow";
 import type { SidebarDensity } from "@/lib/sidebar-preferences";
 import { needsYouLabel } from "@/lib/message-stamp";
@@ -119,14 +119,14 @@ export function AttentionThreadRows({ entries, onJump }: { entries: AttentionThr
       const working = !waiting && !teammateWait && (entry.task.busy || entry.task.activity === "working");
       const status = entry.task.goalNeedsInput && entry.task.activity !== "waiting-on-you" ? needsYouLabel(entry.task.goalNeedsInputSince) : waiting ? t("task.waiting") : working ? t("chat.activity.working") : teammateWait ? t("task.waitingOnTeammate") : entry.task.queued ? t("task.queued") : t("task.unread");
       const name = attentionOwnerName(entry);
-      const label = t("attention.item", { title: entry.task.title, name, status });
+      const label = t("attention.item", { title: shownTaskTitle(entry.task), name, status });
       const Icon = waiting ? CircleAlert : working ? Loader2 : teammateWait || entry.task.queued ? Clock3 : BellDot;
       return <button key={`${entry.kind}-${entry.kind === "bot" ? entry.botId : entry.groupId}-${entry.task.threadId}`} type="button" aria-label={label} title={label}
         onClick={() => onJump(entry)}
         className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-[13px] text-ink hover:bg-raised/70">
         <Icon size={15} aria-hidden="true" className={cn("shrink-0", working && "animate-spin text-success", waiting && "text-warning", teammateWait && "text-warning")} />
         <span className="min-w-0 flex-1">
-          <span className="block truncate">{displayThreadTitle(entry.task.title)}</span>
+          <span className="block truncate">{shownTaskTitle(entry.task)}</span>
           <span className="block truncate text-[11px] text-ink-secondary">{name} · {status}</span>
         </span>
       </button>;
@@ -164,13 +164,13 @@ export function BotActivityRow({ bot, task, iconOnly, onJump, now }: { bot: Pick
   // a row that is here only for its signals says nothing more than they do
   // the button's label replaces its children's: every signal it shows is said here (INSP-S r1 S-6)
   const said = [watch?.text, sessions?.text, sessions?.waiting?.text, sessions?.resume?.text, cc?.text].filter((text): text is string => Boolean(text)).map((text) => ` · ${text.replace(/\n\s*/g, " · ")}`).join("");
-  const label = `${bot.name}: ${task.title}${attention ? ` · ${status}` : ""}${task.unread && (waiting || working || teammateWait || task.queued) ? ` · ${t("task.unread")}` : ""}${said}`;
+  const label = `${bot.name}: ${shownTaskTitle(task)}${attention ? ` · ${status}` : ""}${task.unread && (waiting || working || teammateWait || task.queued) ? ` · ${t("task.unread")}` : ""}${said}`;
   const Icon = waiting ? CircleAlert : working ? Loader2 : teammateWait || task.queued ? Clock3 : BellDot;
   return <button type="button" data-sidebar-activity-row={task.threadId} aria-label={label} title={label}
     onClick={onJump}
     className={cn("flex min-h-7 w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] outline-none hover:bg-raised/50 focus-visible:ring-1 focus-visible:ring-accent/60", iconOnly && "flex-wrap justify-center gap-y-0.5", waiting ? "text-warning" : "text-ink-secondary")}>
     {attention && <Icon size={12} aria-hidden="true" className={cn("shrink-0", working && "animate-spin text-success", teammateWait && "text-warning", task.unread && !waiting && !working && !teammateWait && "text-accent")} />}
-    {!iconOnly && <><span data-activity-title className="min-w-0 flex-1 truncate">{displayThreadTitle(task.title)}</span>
+    {!iconOnly && <><span data-activity-title className="min-w-0 flex-1 truncate">{shownTaskTitle(task)}</span>
       {!unreadOnly && <span data-activity-status className="min-w-0 max-w-[55%] shrink truncate text-[10px]">{waiting && !needsYou ? t("task.waiting") : status}</span>}
       <SignalIcons watch={watch} cc={cc} sessions={sessions} />
       {task.unread && (waiting || working || teammateWait || task.queued) && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-hidden="true" />}</>}

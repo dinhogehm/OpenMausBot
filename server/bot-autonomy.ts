@@ -2147,6 +2147,13 @@ export function lastQuestionAt(messages: ReadonlyArray<{ role: string; kind: str
 /** "Preciso de você", "Continuam com você", "Decisão para você"…: the bot
  * asks the person for something in plain words, not only with a "?". */
 const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa de voc[êe]|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
+/** A sentence that says the person is NOT needed (R11-visual N15: "Esse
+ * trabalho já é meu … e não depende de decisão sua." counted for 10 h). */
+// word edges by letter, not \b: \b is ASCII-only, and "é", "você" end in a non-ASCII letter
+const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
+/** A sentence that asks for the person: an explicit ask, never one that denies it. */
+const asksOwner = (sentence: string): boolean => OWNER_ASK.test(sentence) && !NOT_ASK.test(sentence);
+const sentencesOf = (text: string): string[] => text.split(/(?<=[.!?…])\s+|\n+/);
 
 /** Since when the bot has been waiting on the person: the first of its
  * replies, after the person's last message, that asks them something (a
@@ -2162,7 +2169,7 @@ export function ownerAskAt(messages: ReadonlyArray<{ role: string; kind: string;
     if (message.role === "user" && message.peerAsk) break;
     if (message.role !== "bot" || message.kind !== "text" || message.from) continue;
     const text = (message.text ?? "").replace(/[\s*_`)\]\p{Extended_Pictographic}\uFE0F]+$/u, "");
-    if ((text.endsWith("?") || OWNER_ASK.test(text)) && now - message.at < maxAgeMs) return message.at;
+    if ((text.endsWith("?") || sentencesOf(text).some(asksOwner)) && now - message.at < maxAgeMs) return message.at;
   }
   return null;
 }
@@ -2189,7 +2196,7 @@ export function ownerAskText(text: string, max = 200, knownNames: readonly strin
   const found = at >= 0
     // a short question carries the sentence before it ("A #9350 passou no gate. Mesclo?": INSP-J r1 #4)
     ? (usefulWords(sentences[at]!) < 2 && at > 0 ? `${sentences[at - 1]} ${sentences[at]}` : sentences[at]!)
-    : sentences.find((each) => OWNER_ASK.test(each)) ?? sentences[0] ?? "";
+    : sentences.find(asksOwner) ?? sentences[0] ?? "";
   // the vocative is who, not what ("Osvaldo, a sessão da #9058…": R10-visual N12c)
   const vocative = leadingVocative(found);
   const said = vocative ? found.replace(/^[\s*_>"'“-]*[^,]+,\s*/u, "") : found;
@@ -2226,6 +2233,8 @@ export function echoAsk(text: string, itemIds: readonly string[] = []): boolean 
   // a question asks something of its own, even short ("Mesclo?", "Confirma?")
   // or naming an item ("Quer que eu responda à cliente agora (o4)?"): never an echo (INSP-J r1 #4)
   if (/\?\s*\)?\s*$/.test(plain)) return false;
+  // it says the person is not needed ("já é meu", "não depende de decisão sua"): nothing to ask (R11-visual N15)
+  if (NOT_ASK.test(plain)) return true;
   // another item by its id, said and nothing asked ("O Monitor abriu a pendência o6.")
   if (/\b(?:pend[êe]ncias?|itens?|pedidos?)\s+o\d+\b/i.test(plain) || /\(o\d+\)/.test(plain)) return true;
   const ids = new Set(itemIds.map((id) => id.toLowerCase()));

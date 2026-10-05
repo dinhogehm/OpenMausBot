@@ -20,6 +20,7 @@ import {
   ownerAskAt,
   ownerAsk,
   ownerAskText,
+  echoAsk,
   ownerPendingReplyText,
   ownerPendingAwaitNote,
   ownerPendingRemindReport,
@@ -1547,5 +1548,29 @@ describe("a bare question asked to become an item (lot J2)", () => {
     expect(answerToAsk([asked, person(at + 60_000, "o Filipe respondeu sobre a #9356?"), person(at + 120_000, "Ok.")], at, real)).toBeNull();
     // a later statement naming #9356 still is, past the 2 h
     expect(answerToAsk([asked, person(at + 86_400_000, "Na #9356 siga com o caminho B.")], at, real)?.text).toBe("Na #9356 siga com o caminho B.");
+  });
+});
+
+// R11-visual N15: the one row that counted for 10 h said the owner was not needed
+describe("a reply that says the person is not needed asks nothing (R11-visual N15)", () => {
+  const real = "Somadas, as três órfãs do Grok Bot ocupam cerca de 8,6 GB. Adotar cada uma com uma sessão ou descartá-la com justificativa na issue é o que mais liberaria espaço. Esse trabalho já é meu (item 5 da operação) e não depende de decisão sua. Registrei esta rodada no log do dia.";
+  const at = Date.parse("2026-10-04T13:39:00Z");
+  const thread = (reply: string) => [{ role: "user", kind: "text", at: at - 60_000, text: "Rotina de limpeza de disco." }, { role: "bot", kind: "text", at, text: reply }];
+
+  it("the Chief's real reply of 04/10 is no ask, nor an ask line", () => {
+    expect(ownerAskAt(thread(real), at + 60_000)).toBeNull();
+    expect(echoAsk("Esse trabalho já é meu (item 5 da operação) e não depende de decisão sua.")).toBe(true);
+    for (const said of ["Não precisa de nada seu: sigo sozinho.", "Nada para você aqui.", "Isso fica comigo.", "Não há decisão para você nesta rodada."]) {
+      expect(ownerAskAt(thread(`Feito. ${said}`), at + 60_000), said).toBeNull();
+      expect(echoAsk(said), said).toBe(true);
+    }
+  });
+
+  it("a real ask still counts — a question, or 'continua com você' — even beside a denial", () => {
+    expect(ownerAskAt(thread("A decisão de produto da #9356 continua com você, sem registro novo na issue nem na #9282."), at + 60_000)).toBe(at);
+    expect(ownerAskAt(thread(`${real} Mesclo a #9350?`), at + 60_000)).toBe(at);
+    expect(ownerAskAt(thread("O cache é meu. A decisão do merge da #9350 continua com você."), at + 60_000)).toBe(at);
+    expect(ownerAskText("O cache é meu, já limpei. A decisão do merge da #9350 continua com você.")).toBe("A decisão do merge da #9350 continua com você.");
+    expect(echoAsk("A decisão do merge da #9350 continua com você.")).toBe(false);
   });
 });

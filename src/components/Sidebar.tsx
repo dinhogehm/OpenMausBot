@@ -1270,7 +1270,7 @@ export function BotListItem({
               {sidebarStamp(last.at)}
             </span>
           )}
-          {signals && !renaming && <span data-bot-signals className="flex shrink-0 items-center gap-1 self-center"><SignalIcons watch={signals.watch} cc={signals.cc} sessions={signals.sessions} /></span>}
+          {signals && !renaming && <span data-bot-signals className="flex shrink-0 items-center gap-1 self-center"><SignalIcons watch={signals.watch} cc={signals.cc} sessions={signals.sessions} worded={density === "comfortable"} /></span>}
           {(expanded || (quiet && !statusLine)) && unread && <span className="size-1.5 shrink-0 rounded-full bg-accent" aria-label={t("task.unreadMany")} />}
         </div>
         {bot.chiefOfStaff && !renaming && !quiet && (

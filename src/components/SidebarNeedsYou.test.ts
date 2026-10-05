@@ -157,6 +157,17 @@ describe("what needs the person, from every bot", () => {
     expect(SidebarNeedsYou({ items: needsYouItems(answered), density: "icons", now, onOpen: () => {} })).toBeNull();
   });
 
+  // R11-visual N9: a handoff conversation never shows as "@Chief of Staff · work" nor "· work"
+  it("names a handoff conversation by who asked, in the row and as the item's conversation", () => {
+    const listed = [bot("monitor", "Monitor Chat", [
+      task("h1", "@Chief of Staff · work", { goalNeedsInput: true, goalNeedsInputSince: now - 60_000 }),
+      task("h2", "@Chief of Staff", { ownerPending: [{ id: "o1", title: "Conferir o aviso", since: now - 60_000 }] }),
+    ])];
+    const [question, item] = needsYouItems(listed).toSorted((a, b) => a.threadId.localeCompare(b.threadId));
+    expect(question).toMatchObject({ title: "Pedido de Chief of Staff", threadTitle: "Pedido de Chief of Staff" });
+    expect(item).toMatchObject({ title: "Conferir o aviso", threadTitle: "Pedido de Chief of Staff" });
+  });
+
   // lot J2: o14/o15 lived in the Monitor's routine runs, and the sidebar said "1"
   it("counts the items a routine's run or an archived conversation opened, in the block and in 'Aguardando bots' — never a run's own question", () => {
     const routine = "Atendimento: Chat, planilha e issues";

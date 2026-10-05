@@ -5,6 +5,7 @@ import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
 import { answerNotDelivered, answerStuck, answerTime, awaitingBot, AWAITING_MAX_MS, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, nextAwaitingChange, sortNeedsYou } from "@/lib/needs-you";
 import { decisionReply, remindOwnerPending } from "@/lib/needs-you-actions";
+import { CHOICE_REPLACED } from "../../shared/owner-pending-title";
 import { awaitingLine, decisionNotice, remindNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
 
 // Invented bots and items: no client data.
@@ -528,16 +529,36 @@ describe("keys on the resolution screen", () => {
     const at = new Date(2026, 9, 2, 14, 0).getTime();
     const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
       { id: "o45", title: "Confirmar o teto do lote", since: now - 6 * 3_600_000, options: [{ label: "Sim", reply: "Sim." }, { label: "Não", reply: "Não." }], history: [
-        { at, kind: "option", label: "Sim", text: "Sim.", delivered: false, error: "substituída pela nova escolha" },
+        { at, kind: "option", label: "Sim", text: "Sim.", delivered: false, error: "o servidor reiniciou antes da entrega" },
         { at: at + 60_000, kind: "option", label: "Não", text: "Não.", delivered: false, error: "cancelamento na conversa antes de chegar ao bot" },
       ] },
     ] })])]);
     const { tree, html } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
     const reasons = tree.filter((node) => "data-history-reason" in node.props).map((node) => Children.toArray(node.props.children).join(""));
     // the older one shows its reason; the last one is the banner's, said once there
-    expect(reasons).toEqual(["substituída pela nova escolha"]);
+    expect(reasons).toEqual(["o servidor reiniciou antes da entrega"]);
     expect(html.split("cancelamento na conversa").length - 1).toBe(2);
     expect(String(tree.find((node) => "data-history-reason" in node.props)!.props.className)).not.toContain("sr-only");
+  });
+
+  // J P1 (INSP-J2 r6, R11-visual): the person's own switch is no failure
+  it("draws a choice the person replaced in a neutral tone, saying what replaced it — never red", () => {
+    const at = new Date(2026, 9, 2, 8, 42).getTime();
+    const list = needsYouItems([bot("monitor", "Monitor Chat", [task("m1", "Vigia", { ownerPending: [
+      { id: "o12", title: "Colar os comentários", since: now - 3 * 3_600_000, options: [{ label: "Já colei", reply: "a" }, { label: "Cole você", reply: "b" }], awaitingSince: at + 120_000, history: [
+        { at, kind: "option", label: "Já colei", text: "a", delivered: false, error: CHOICE_REPLACED },
+        { at: at + 120_000, kind: "option", label: "Cole você", text: "b", delivered: false, queued: true },
+      ] },
+    ] })])]);
+    const { tree } = view({ items: list, selectedKey: needsYouKey(list[0]!) });
+    const replaced = tree.find((node) => node.props["data-history-state"] === "replaced")!;
+    const text = renderToStaticMarkup(replaced);
+    expect(text).toContain("Você escolheu “Já colei”");
+    expect(text).toContain("substituída por “Cole você”");
+    expect(text).not.toContain("não enviado");
+    expect(text).not.toMatch(/danger/);
+    expect(String(replaced.props.className)).toContain("text-ink-secondary");
+    expect(tree.some((node) => "data-history-reason" in node.props)).toBe(false);
   });
 
   // INSP-J2 r5 B4: "ainda está na fila" is news, not a failure

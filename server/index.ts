@@ -104,7 +104,7 @@ import { groupTurnCwd } from "./room-cwd.ts";
 import { RoomTurnDeadline, RoomTurnStallRegistry, roomTurnTimeoutMessage } from "./room-turn-timeout.ts";
 import * as boat from "./boat.ts";
 import { TeamComputers, teamComputerAssignment, teamComputerCreate, teamComputerOwner, type TeamComputerRecord } from "./team-computers.ts";
-import { isMentionOnly } from "../shared/owner-pending-title.ts";
+import { CHOICE_REPLACED, isMentionOnly } from "../shared/owner-pending-title.ts";
 import { isEffortLevel, type BotVisibility, type CardAnswerer, type ResolvedSender, type WireBot, type WireCcAlert, type WireGroup, type WireOwnerPending, type WireCcSession, type WireTask } from "../shared/wire.ts";
 import type { TeamComputersPayload } from "../shared/team-computer.ts";
 import { boatCreateRecoverySnapshot, retireDeletedBoatCreate } from "./boat-create-idempotency.ts";
@@ -11599,7 +11599,6 @@ function settleQueuedAnswers(queueIds: readonly string[] | undefined, outcome: {
 
 /** The person's earlier choice on `item` that still waits in the send queue:
  * settled as replaced, then taken out of the queue so it never runs. */
-const CHOICE_REPLACED = "substituída pela nova escolha";
 function replaceQueuedChoice(botId: string, item: OwnerPending): void {
   const queued = (item.history ?? []).filter((entry) => entry.queued && entry.kind === "option" && entry.queueId).map((entry) => entry.queueId!);
   if (!queued.length) return;

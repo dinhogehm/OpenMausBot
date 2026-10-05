@@ -345,7 +345,19 @@ export function nowLines(server: NowServerStatus | null, local: NowLocal, now: n
 /** Lines whose facts changed since the owner last looked (none on the very first look). */
 export function nowNews(lines: readonly NowLine[], seen: NowSeen | null): Set<NowLineId> {
   if (!seen) return new Set();
-  return new Set(lines.filter((line) => line.fingerprint && seen.keys[line.id] !== line.fingerprint).map((line) => line.id));
+  const counted = lines.filter((line) => line.fingerprint);
+  const changed = counted.filter((line) => seen.keys[line.id] !== line.fingerprint);
+  // more than half changed (the day's first look): a badge on nearly every line marks nothing —
+  // the "Desde 09:44: …" line above says what arrived (R11-visual N16)
+  if (changed.length * 2 > counted.length) return new Set();
+  return new Set(changed.map((line) => line.id));
+}
+
+/** The rail button's count: only what asks the owner — items that started waiting on them
+ * since they last looked —, never the panel's other news (R11-visual N16). */
+export function nowOwnerNews(local: NowLocal, seen: NowSeen | null): number {
+  if (!seen) return 0;
+  return local.needsYou.waiting.filter((item) => item.since > seen.at).length;
 }
 
 export const seenKeys = (lines: readonly NowLine[]): Record<string, string> => Object.fromEntries(lines.map((line) => [line.id, line.fingerprint]));

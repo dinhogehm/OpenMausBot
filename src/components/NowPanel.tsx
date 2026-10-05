@@ -6,7 +6,7 @@ import { serverNotifiedSince } from "@/lib/notify";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import {
-  clockText, nowLines, nowLocal, nowMarkdown, nowNews, nowNotificationKeys, nowNotifications, nowSince, seenKeys,
+  clockText, nowLines, nowLocal, nowMarkdown, nowNews, nowOwnerNews, nowNotificationKeys, nowNotifications, nowSince, seenKeys,
   type NowLine, type NowLineId, type NowTarget, type NowTone,
 } from "@/lib/now-status";
 import { useStore } from "@/state/store";
@@ -323,7 +323,8 @@ export function SidebarNow({ density, onOpenNeedsYou }: { density: SidebarDensit
     }).catch(() => {});
   };
 
-  const count = news.size;
+  // the rail counts only what asks the owner, in the warning ink "Precisa de você" uses (R11-visual N16)
+  const count = nowOwnerNews(local, seen);
   return (
     <div className={density === "icons" ? "relative" : "contents"}>
       <button
@@ -339,7 +340,7 @@ export function SidebarNow({ density, onOpenNeedsYou }: { density: SidebarDensit
       >
         <Radar size={20} strokeWidth={2} aria-hidden="true" />
         {count > 0 && (
-          <span data-now-news="" aria-hidden="true" className="absolute right-1 top-1 flex min-w-4 items-center justify-center rounded-full bg-accent px-0.5 text-[9.5px] font-semibold leading-4 text-accent-ink">{count > 9 ? "9+" : count}</span>
+          <span data-now-news="" aria-hidden="true" className="absolute right-0.5 top-0.5 flex min-w-4 items-center justify-center rounded-full border border-warning/60 bg-panel px-0.5 text-[9.5px] font-semibold leading-[14px] text-warning">{count > 9 ? "9+" : count}</span>
         )}
       </button>
       {/* in a portal, fixed under the button: wider than the sidebar, never cut by its edge nor by the phone drawer's transform */}

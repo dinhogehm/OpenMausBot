@@ -9,11 +9,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setLocale } from "@/lib/i18n";
 import { needsYouKey } from "@/lib/needs-you";
-import { boardSummary, DEFAULT_FILTERS, ENTRY_FOLD, foldEntry, isCycleToClose, matchesFilters, OPEN_NEEDS_YOU_EVENT, openNeedsYou, reasonText, stageAge, visibleCards, type BoardFilters } from "@/lib/pipeline-board";
+import { boardSummary, DEFAULT_FILTERS, ENTRY_FOLD, foldEntry, isCycleToClose, matchesFilters, OPEN_NEEDS_YOU_EVENT, openNeedsYou, reasonText, stageAge, stateLabel, unownedCard, visibleCards, type BoardFilters } from "@/lib/pipeline-board";
 import { buildPipelineBoard } from "../../server/pipeline-board";
 import { boardInputs, boardInputsWithBacklog, CHIEF, CLIENT_NAMES, MONITOR, NOW } from "../../server/testing/pipeline-board-fixture";
 import type { BoardCard, BoardStage, PipelineBoard } from "../../shared/pipeline-board";
-import { BoardView, foldedText, LimitsBar } from "./PipelineBoardPage";
+import { BoardCardView, BoardView, foldedText, LimitsBar } from "./PipelineBoardPage";
 
 const board = buildPipelineBoard(boardInputs());
 const actions = { onOpenLink: () => {}, onOpenThread: () => {}, onOpenNeedsYou: () => {} };
@@ -45,7 +45,7 @@ describe("the board screen (pt-BR)", () => {
   });
 
   it("separates what is stuck in the pipeline from the Entrada backlog past its limit; blocked, cycles to close, production", () => {
-    expect(plain).toContain("Esperando você: 2");
+    expect(plain).toContain("Precisa de você: 2");
     expect(plain).toContain("Parados na esteira: 2");
     expect(plain).toContain("Entrada além do limite: 3");
     expect(plain).toContain("Bloqueados: 1");
@@ -60,7 +60,8 @@ describe("the board screen (pt-BR)", () => {
     expect(plain).toContain("Bloqueado — atrás da main — atualizar a branch e rodar o gate de novo");
     expect(plain).not.toContain("BEHIND");
     expect(plain).toContain("Rodando — no release 3c04d7c3d, em curso");
-    expect(plain).toContain("Aguardando — a sessão parou: o último turno terminou e nada a retomou");
+    // waiting says on whom (R11-visual N18)
+    expect(plain).toContain("Aguardando Chief of Staff — a sessão parou: o último turno terminou e nada a retomou");
     // the repository's convention (INSP-Z r3): a whole fix ships with "Refs" and the issue waits for validation
     expect(plain).toContain("Aguardando — entregue em 22/09, aguardando validação e fechamento");
     // only a PR that says it is a phase is a partial delivery (#9071's "Fase 0")
@@ -72,7 +73,7 @@ describe("the board screen (pt-BR)", () => {
     const convention = "Convenção: PR com &quot;Refs #N&quot; é correção completa; a issue fica aberta até o solicitante validar (entregue, aguardando validação/fechamento, conta em Ciclos a fechar). &quot;Entrega parcial&quot; só quando a PR diz Fase/parte/etapa N.";
     expect(html.split(`title="${convention}"`)).toHaveLength(3);
     expect(plain).toContain("issue ou linha da planilha — Convenção: PR com \"Refs #N\" é correção completa");
-    expect(plain).toContain("Aguardando — a sessão foi arquivada sem PR — reabrir ou fechar a issue");
+    expect(plain).toContain("Aguardando Chief of Staff — a sessão foi arquivada sem PR — reabrir ou fechar a issue");
     expect(plain).not.toMatch(/ainda sem sessão[^#]*sessão arquivada/);
     expect(plain).toContain("Gate: sem status");
     expect(plain).toContain("recibo de outro commit");
@@ -116,12 +117,34 @@ describe("the board screen (pt-BR)", () => {
     expect(html).toContain('aria-label="Abrir a sessão no app Claude"');
   });
 
-  it("names who carries each card, or '—' when nobody does", () => {
+  it("names who carries each card, or 'ninguém' when nobody does", () => {
     expect(plain).toContain("Chief of Staff");
     expect(plain).toContain("Monitor Chat Atendimento");
     expect(plain).toContain("sessão rodando");
     const prCard = html.slice(html.indexOf('data-card="pr:9368"'), html.indexOf("</article>", html.indexOf('data-card="pr:9368"')));
-    expect(text(prCard)).toContain("Responsável —");
+    expect(text(prCard)).toContain("Responsável ninguém");
+  });
+
+  // R11-visual N18: #9365/#9364 read "Aguardando — ainda sem sessão" with "—" as the bot
+  it("says a card nobody took is 'Sem dono — ninguém pegou ainda', amber past its limit; one name for the owner's state", () => {
+    const card = (key: string) => html.slice(html.indexOf(`data-card="${key}"`), html.indexOf("</article>", html.indexOf(`data-card="${key}"`)));
+    for (const key of ["issue:9365", "issue:9364"]) {
+      expect(text(card(key))).toContain("Sem dono — ninguém pegou ainda");
+      expect(text(card(key))).not.toContain("Aguardando — ainda sem sessão");
+      expect(card(key)).toContain('data-card-state-line="unowned"');
+    }
+    // within its limit it reads in the secondary ink; past it, amber
+    expect(card("issue:9365")).not.toMatch(/data-card-state-line="unowned"[^]*?text-warning/);
+    const late = board.columns.flatMap((column) => column.cards).find((each) => each.key === "issue:9365")!;
+    const lateHtml = renderToStaticMarkup(createElement(BoardCardView, { card: { ...late, since: NOW - 30 * 86_400_000, limitMs: 7 * 86_400_000 }, now: NOW, actions }));
+    expect(lateHtml).toMatch(/data-card-state-line="unowned"[^]*?shrink-0 text-warning[^]*?<span class="font-semibold text-warning">[^<]+<\/span>/);
+    setLocale("pt-br");
+    expect(unownedCard({ state: "idle", bot: null, reason: { code: "no-session" } })).toBe(true);
+    expect(unownedCard({ state: "idle", bot: null, reason: { code: "delivered-validate" } })).toBe(false);
+    expect(stateLabel({ state: "idle", bot: { id: "x", name: "Chief of Staff" }, reason: null })).toBe("Aguardando Chief of Staff");
+    // the card's state and its button use one name: "Precisa de você"
+    expect(text(card("issue:9355"))).toMatch(/^.*Precisa de você — ainda sem sessão.*Precisa de você/);
+    expect(plain).not.toContain("Esperando você");
   });
 
   it("never shows a requester's or a client's name", () => {
@@ -272,7 +295,7 @@ describe("on a phone, the columns are tabs; on a narrow window, filters and limi
 describe("in English", () => {
   it("says the same in the reader's language, the session's error included", () => {
     const plain = text(render(board, { locale: "en" }));
-    expect(plain).toContain("Waiting on you: 2");
+    expect(plain).toContain("Needs you: 2");
     expect(plain).toContain("Stuck in the pipeline: 2");
     expect(plain).toContain("Intake past its limit: 3");
     expect(plain).toContain("Blocked — behind main — update the branch and run the gate again");

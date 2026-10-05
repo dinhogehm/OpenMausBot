@@ -8,7 +8,7 @@ import { setLocale } from "@/lib/i18n";
 import type { Bot, Task } from "@/state/store";
 import type { NowServerStatus } from "../../shared/now-status";
 import {
-  durationText, nowLines, nowLocal, nowMarkdown, nowNews, nowNotificationKeys, nowNotifications, nowSince, phaseText, seenKeys, type NowLine,
+  durationText, nowLines, nowLocal, nowMarkdown, nowNews, nowOwnerNews, nowNotificationKeys, nowNotifications, nowSince, phaseText, seenKeys, type NowLine,
 } from "./now-status";
 
 const SHA = "3c04d7c3d2608c36f082fded54bcb0d99e833a85";
@@ -250,6 +250,23 @@ describe("what changed since the owner last looked", () => {
     const seen = { at: NOW, keys: seenKeys(lines) };
     expect(nowNews(nowLines(server({ release: { ...server().release, phase: "deploy" } }), local, NOW), seen).has("release")).toBe(false);
     expect(nowNews(nowLines(server({ release: { ...server().release, sha: PREV } }), local, NOW), seen).has("release")).toBe(true);
+  });
+
+  // R11-visual N16: "novo" on 6 of 7 lines marked nothing, and the rail's blue "6" competed with the amber
+  it("marks nothing when more than half the lines changed (the 'Desde' line says it), and the rail counts only what waits on the owner", () => {
+    const counted = lines.filter((line) => line.fingerprint);
+    const stale = { at: NOW - 86_400_000, keys: Object.fromEntries(counted.map((line) => [line.id, "yesterday"])) };
+    expect(nowNews(lines, stale).size).toBe(0);
+    expect(nowSince(server(), local, stale)).toMatch(/^Desde /);
+    // half or fewer changed: each one marked
+    const half = { at: NOW, keys: { ...seenKeys(lines), ...Object.fromEntries(counted.slice(0, Math.floor(counted.length / 2)).map((line) => [line.id, "old"])) } };
+    expect(nowNews(lines, half).size).toBe(Math.floor(counted.length / 2));
+    // the rail: items that started waiting on the owner since the last look, and nothing on the first look
+    const at7 = Date.parse("2026-10-04T10:00:00Z");
+    expect(nowOwnerNews(local, { at: at7, keys: {} })).toBe(local.needsYou.waiting.filter((item) => item.since > at7).length);
+    expect(nowOwnerNews(local, { at: at7, keys: {} })).toBeGreaterThan(0);
+    expect(nowOwnerNews(local, { at: NOW, keys: {} })).toBe(0);
+    expect(nowOwnerNews(local, null)).toBe(0);
   });
 });
 

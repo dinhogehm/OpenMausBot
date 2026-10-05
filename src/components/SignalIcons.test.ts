@@ -107,6 +107,22 @@ describe("steps waiting for the Mac, and sessions to resume", () => {
     expect(renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions: mixed }))).toMatch(/data-thread-cc-resume="2"[^>]*text-warning/);
   });
 
+  // R11-visual N19: "⌛3 ⧐2" side by side in amber did not read without hovering
+  it("where the row has room, says the first signal to act on in a word, keeping every label for a screen reader", () => {
+    const sessions = line();
+    const worded = renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions, worded: true }));
+    // the session to resume comes first; the hourglass keeps its count
+    expect(worded).toMatch(/data-thread-cc-resume="1"[^>]*>.*<span data-signal-word="resume" aria-hidden="true"[^>]*>1 a retomar<\/span>/);
+    expect(worded).not.toContain('data-signal-word="waiting"');
+    expect(worded).toMatch(/<span aria-hidden="true" class="text-\[10px\] leading-none tabular-nums">2<\/span>/);
+    for (const label of [sessions!.resume!.text, sessions!.waiting!.text]) expect(worded).toContain(`aria-label="${label.replace(/"/g, "&quot;")}"`);
+    // nothing to resume (or all on hold): the waiting steps in a word
+    const waitingOnly = ccSessionsSummary([{ sessionId: "a", title: "x", status: "running", surface: "app", screenWait: { kind: "create", since: now, waitingFor: "locked" } }, { sessionId: "b", title: "y", status: "running", surface: "app", screenWait: { kind: "send", since: now, waitingFor: "locked" } }], now);
+    expect(renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions: waitingOnly, worded: true }))).toContain(">2 no app</span>");
+    // not worded (compact, icons, thread rows): icons and counts only
+    expect(renderToStaticMarkup(createElement(SignalIcons, { watch: null, cc: null, sessions }))).not.toContain("data-signal-word");
+  });
+
   it("says why to resume in English for an English reader (INSP-S r1 S-8)", () => {
     setLocale("en");
     const text = ccSessionsSummary([
