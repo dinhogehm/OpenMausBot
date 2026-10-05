@@ -185,8 +185,25 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
     const bigger = `${DISK_DECISION_KEY_PREFIX}8204-reprovado-sidebar-da-fila-nao-refle-9b50cd,9052-tempo-de-reabertura-configuravel-35787b,atendimento-reaberto-bugs-496989,merge-deploy-open-prs-00664b`;
     expect(diskDecisionPlan(bigger, [{ key: first.key }], [], now)).toEqual({ add: true, replace: [first.key] });
     // the owner chose "Manter" an hour ago: not asked again, nor for a part of it
-    expect(diskDecisionPlan(first.key, [], [{ key: first.key, resolvedAt: now - 3_600_000 }], now)).toEqual({ add: false, replace: [] });
-    expect(diskDecisionPlan(subset.key, [], [{ key: first.key, resolvedAt: now - 3_600_000 }], now).add).toBe(false);
-    expect(diskDecisionPlan(first.key, [], [{ key: first.key, resolvedAt: now - DISK_DECISION_SETTLED_MS - 1 }], now).add).toBe(true);
+    const owner = { key: first.key, resolvedAt: now - 3_600_000, resolvedBy: "owner" };
+    expect(diskDecisionPlan(first.key, [], [owner], now)).toEqual({ add: false, replace: [] });
+    expect(diskDecisionPlan(subset.key, [], [owner], now).add).toBe(false);
+    // the bot closed it after the owner answered: the owner's decision too
+    expect(diskDecisionPlan(first.key, [], [{ ...owner, resolvedBy: "bot", history: [{ kind: "option", label: "Manter" }] }], now).add).toBe(false);
+    expect(diskDecisionPlan(first.key, [], [{ ...owner, resolvedAt: now - DISK_DECISION_SETTLED_MS - 1 }], now).add).toBe(true);
+  });
+
+  // INSP-R12F F2: {A,B,C} at 11:38, {D} at 12:38 (the server replaced the first), {A,B} at 13:38
+  it("an item the server replaced was decided by nobody: the list comes back at once", () => {
+    const now = Date.parse("2026-10-05T16:38:37Z");
+    const key = (...names: string[]) => `${DISK_DECISION_KEY_PREFIX}${names.join(",")}`;
+    const abc = key("A", "B", "C");
+    // 12:38: {D} replaces the open {A,B,C}, which the server settles
+    expect(diskDecisionPlan(key("D"), [{ key: abc }], [], now - 3_600_000)).toEqual({ add: true, replace: [abc] });
+    const replaced = { key: abc, resolvedAt: now - 3_600_000, resolvedBy: "server" };
+    // 13:38: {A,B} is asked again, and replaces {D}
+    expect(diskDecisionPlan(key("A", "B"), [{ key: key("D") }], [replaced], now)).toEqual({ add: true, replace: [key("D")] });
+    // a bot closing it without the owner's answer is not the owner's decision either
+    expect(diskDecisionPlan(key("A", "B"), [], [{ ...replaced, resolvedBy: "bot" }], now).add).toBe(true);
   });
 });

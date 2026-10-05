@@ -127,17 +127,20 @@ const keyFolders = (key: string) => key.slice(DISK_DECISION_KEY_PREFIX.length).s
 /** What to do with a new list: open (or refresh) its item, and which other
  * disk items it replaces. Nothing when an open item already asks about all
  * of these folders (13:38 asked about 8204 and 9052, already in 11:38's), or
- * when the owner settled them less than a week ago. */
+ * when the OWNER settled them less than a week ago — they resolved it, or
+ * the bot did after the owner answered it. An item the server replaced with
+ * a newer list was decided by nobody (INSP-R12F F2). */
 export function diskDecisionPlan(
   key: string,
   open: ReadonlyArray<{ key?: string }>,
-  settled: ReadonlyArray<{ key?: string; resolvedAt: number }>,
+  settled: ReadonlyArray<{ key?: string; resolvedAt: number; resolvedBy?: string; history?: readonly unknown[] }>,
   now: number,
 ): { add: boolean; replace: string[] } {
   const names = keyFolders(key);
   const covers = (other: string) => names.every((name) => keyFolders(other).includes(name));
   const disk = (each: { key?: string }): each is { key: string } => Boolean(each.key?.startsWith(DISK_DECISION_KEY_PREFIX));
-  if (settled.some((each) => disk(each) && covers(each.key) && now - each.resolvedAt < DISK_DECISION_SETTLED_MS)) return { add: false, replace: [] };
+  const byOwner = (each: { resolvedBy?: string; history?: readonly unknown[] }) => each.resolvedBy === "owner" || (each.resolvedBy === "bot" && Boolean(each.history?.length));
+  if (settled.some((each) => disk(each) && byOwner(each) && covers(each.key) && now - each.resolvedAt < DISK_DECISION_SETTLED_MS)) return { add: false, replace: [] };
   const openDisk = open.filter(disk);
   if (openDisk.some((each) => each.key !== key && covers(each.key))) return { add: false, replace: [] };
   return { add: true, replace: openDisk.filter((each) => each.key !== key).map((each) => each.key) };
