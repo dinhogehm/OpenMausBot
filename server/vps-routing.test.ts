@@ -642,8 +642,8 @@ createServer(socket => socket.end()).listen(port, '127.0.0.1');
         expect(checkMount.args).toContain("production-vps");
         expect(checkMount.token).not.toBe(refillMount.token);
         expect(await taskBusy(refill.threadId)).toBe(true);
-        expect((await activities(check.threadId)).join("|")).not.toContain("Waiting for its turn");
-        expect((await activities(refill.threadId)).join("|")).not.toContain("Waiting for its turn");
+        expect((await activities(check.threadId)).join("|")).not.toContain("Aguardando a vez");
+        expect((await activities(refill.threadId)).join("|")).not.toContain("Aguardando a vez");
         // the alias is pinned while ANY of the bot's threads runs on the VPS
         expect((await api("PUT", "/api/config", { vps: { sshAlias: "other-vps" } })).status).toBe(409);
 
@@ -657,7 +657,7 @@ createServer(socket => socket.end()).listen(port, '127.0.0.1');
           blockedReason: "Another thread is using this computer. This call was not performed. Pause computer work until that thread finishes, then take a fresh screenshot before acting.",
         });
         await until(async () => (await activities(refill.threadId)).includes(
-          "Waiting for its turn on this computer — TCPR operator is running Queue check. Starts automatically when that finishes.",
+          "Aguardando a vez neste computador — TCPR operator está rodando «Queue check». Começa sozinho quando isso terminar.",
         ), "the wait chip naming the holder");
 
         // both turns finish; the wait resolves as free-and-continuing or as
@@ -667,8 +667,8 @@ createServer(socket => socket.end()).listen(port, '127.0.0.1');
         await until(async () => (await botById(bot.id))?.busy === false, "both turns settling");
         const settled = await activities(refill.threadId);
         expect(settled.some((name) =>
-          name.startsWith("Computer free — continuing after ") || name.startsWith("Stopped waiting for the computer after "))).toBe(true);
-        expect(settled.join("|")).not.toMatch(/still busy|error/i);
+          name.startsWith("Computador livre — seguindo depois de ") || name.startsWith("Parou de esperar pelo computador depois de "))).toBe(true);
+        expect(settled.join("|")).not.toMatch(/still busy|continua ocupado|error/i);
         // the last thread out clears the claim: the alias can move again
         expect((await api("PUT", "/api/config", { vps: { sshAlias: "production-vps" } })).status).toBe(200);
       } finally {

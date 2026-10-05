@@ -3040,16 +3040,16 @@ describe("harness HTTP API", () => {
       const sibling = (await api("POST", `/api/bots/${botIds[0]}/tasks`, { title: "Waiting sibling" })).body.task;
       expect((await api("POST", `/api/bots/${botIds[0]}/messages`, { text: "wait then cancel", threadId: sibling.threadId })).status).toBe(202);
       await expect.poll(async () => JSON.stringify((await api("GET", `/api/threads/${sibling.threadId}/messages`)).body),
-        { timeout: 5_000 }).toMatch(/Waiting for its turn on this computer/);
+        { timeout: 5_000 }).toMatch(/Aguardando a vez neste computador/);
       expect((await api("POST", `/api/bots/${botIds[0]}/interrupt`, { threadId: sibling.threadId })).status).toBe(200);
       // The wait is history, not a placeholder: the waiting chip stays as
       // written and the stop appends a resolution line beside it.
       await expect.poll(async () => JSON.stringify((await api("GET", `/api/threads/${sibling.threadId}/messages`)).body),
-        { timeout: 5_000 }).toMatch(/Stopped waiting for the computer after /);
+        { timeout: 5_000 }).toMatch(/Parou de esperar pelo computador depois de /);
       const siblingMessages: Array<{ tool?: { name?: string; ok?: boolean } }> =
         (await api("GET", `/api/threads/${sibling.threadId}/messages`)).body.messages;
-      expect(siblingMessages.some((message) => (message.tool?.name ?? "").startsWith("Waiting for its turn on this computer"))).toBe(true);
-      const stoppedChip = siblingMessages.find((message) => (message.tool?.name ?? "").startsWith("Stopped waiting for the computer after "));
+      expect(siblingMessages.some((message) => (message.tool?.name ?? "").startsWith("Aguardando a vez neste computador"))).toBe(true);
+      const stoppedChip = siblingMessages.find((message) => (message.tool?.name ?? "").startsWith("Parou de esperar pelo computador depois de "));
       expect(stoppedChip?.tool?.ok).toBe(true);
       const siblingEvents = ((await api("GET", `/api/threads/${sibling.threadId}/events`)).body.entries as Array<{ kind: string; data: any }>)
         .filter((entry) => entry.kind === "runtime").map((entry) => entry.data);
@@ -3074,7 +3074,7 @@ describe("harness HTTP API", () => {
       expect((await api("POST", `/api/groups/${roomId}/messages`, { text: "use the occupied shared desktop" })).status).toBe(202);
       await expect.poll(async () => JSON.stringify((await api("GET", "/api/bots?messages=30")).body.groups.find(
         (group: { id: string }) => group.id === roomId,
-      )), { timeout: 5_000 }).toMatch(/Waiting for its turn on this computer/);
+      )), { timeout: 5_000 }).toMatch(/Aguardando a vez neste computador/);
       expect(promptsOnBoat()).toBe(1);
       expect((await api("POST", `/api/bots/${botIds[0]}/interrupt`, {})).status).toBe(200);
       await idle(botIds[0]);
@@ -3086,11 +3086,11 @@ describe("harness HTTP API", () => {
       // ends of the history.
       await expect.poll(async () => JSON.stringify((await api("GET", "/api/bots?messages=30")).body.groups.find(
         (group: { id: string }) => group.id === roomId,
-      )), { timeout: 5_000 }).toMatch(/Computer free — continuing after waiting /);
+      )), { timeout: 5_000 }).toMatch(/Computador livre — seguindo depois de esperar /);
       const roomMessages: Array<{ tool?: { name?: string } }> = (await api("GET", "/api/bots?messages=30")).body.groups.find(
         (group: { id: string }) => group.id === roomId,
       ).messages;
-      expect(roomMessages.some((message) => (message.tool?.name ?? "").startsWith("Waiting for its turn on this computer"))).toBe(true);
+      expect(roomMessages.some((message) => (message.tool?.name ?? "").startsWith("Aguardando a vez neste computador"))).toBe(true);
       const roomEvents = ((await api("GET", `/api/threads/${room.threadId}/events`)).body.entries as Array<{ kind: string; data: any }>)
         .filter((entry) => entry.kind === "runtime").map((entry) => entry.data);
       expect(roomEvents.find((event) => event.type === "turn.wait_started")).toMatchObject({
@@ -3199,15 +3199,15 @@ describe("harness HTTP API", () => {
       const sibling = (await isolatedApi("POST", `/api/bots/${botId}/tasks`, { title: "Waiting sibling" })).body.task;
       expect((await isolatedApi("POST", `/api/bots/${botId}/messages`, { text: "wait past the ceiling", threadId: sibling.threadId })).status).toBe(202);
       await expect.poll(async () => JSON.stringify((await isolatedApi("GET", `/api/threads/${sibling.threadId}/messages`)).body),
-        { timeout: 5_000 }).toMatch(/Waiting for its turn on this computer/);
+        { timeout: 5_000 }).toMatch(/Aguardando a vez neste computador/);
       // The ceiling fires: the turn gives up, but the wait it waited through
       // stays in the transcript and the event log instead of being erased.
       await expect.poll(async () => JSON.stringify((await isolatedApi("GET", `/api/threads/${sibling.threadId}/messages`)).body),
-        { timeout: 8_000 }).toMatch(/Computer is still busy after /);
+        { timeout: 8_000 }).toMatch(/O computador continua ocupado depois de /);
       const siblingMessages: Array<{ tool?: { name?: string; ok?: boolean } }> =
         (await isolatedApi("GET", `/api/threads/${sibling.threadId}/messages`)).body.messages;
-      expect(siblingMessages.some((message) => (message.tool?.name ?? "").startsWith("Waiting for its turn on this computer"))).toBe(true);
-      const gaveUpChip = siblingMessages.find((message) => (message.tool?.name ?? "").startsWith("Computer is still busy after "));
+      expect(siblingMessages.some((message) => (message.tool?.name ?? "").startsWith("Aguardando a vez neste computador"))).toBe(true);
+      const gaveUpChip = siblingMessages.find((message) => (message.tool?.name ?? "").startsWith("O computador continua ocupado depois de "));
       expect(gaveUpChip?.tool?.ok).toBe(false);
       const waitEvents = ((await isolatedApi("GET", `/api/threads/${sibling.threadId}/events`)).body.entries as Array<{ kind: string; data: any }>)
         .filter((entry) => entry.kind === "runtime").map((entry) => entry.data);
@@ -3224,7 +3224,7 @@ describe("harness HTTP API", () => {
         .find((entry: any) => entry.id === botId)?.tasks.find((task: any) => task.threadId === sibling.threadId)?.busy,
       { timeout: 5_000 }).toBe(false);
       const settledMessages = (await isolatedApi("GET", `/api/threads/${sibling.threadId}/messages`)).body.messages;
-      const failures = settledMessages.filter((message: any) => message.tool?.ok === false && /Computer is still busy after/.test(message.tool.name));
+      const failures = settledMessages.filter((message: any) => message.tool?.ok === false && /O computador continua ocupado depois de/.test(message.tool.name));
       expect(failures).toHaveLength(1);
       expect(failures[0].turnSucceeded).toBe(false);
 
@@ -3240,11 +3240,11 @@ describe("harness HTTP API", () => {
       })).body.group;
       expect((await isolatedApi("POST", `/api/groups/${room.id}/messages`, { text: "wait for the same occupied desktop" })).status).toBe(202);
       await expect.poll(async () => JSON.stringify((await isolatedApi("GET", `/api/threads/${room.threadId}/messages`)).body),
-        { timeout: 8_000 }).toMatch(/Computer is still busy after /);
+        { timeout: 8_000 }).toMatch(/O computador continua ocupado depois de /);
       await expect.poll(async () => (await isolatedApi("GET", "/api/bots?messages=0")).body.groups
         .find((group: any) => group.id === room.id)?.working, { timeout: 5_000 }).toBe(false);
       const roomMessages = (await isolatedApi("GET", `/api/threads/${room.threadId}/messages`)).body.messages;
-      expect(roomMessages.filter((message: any) => message.tool?.ok === false && /Computer is still busy after/.test(message.tool.name))).toHaveLength(1);
+      expect(roomMessages.filter((message: any) => message.tool?.ok === false && /O computador continua ocupado depois de/.test(message.tool.name))).toHaveLength(1);
       const roomEvents = (await isolatedApi("GET", `/api/threads/${room.threadId}/events`)).body.entries;
       expect(roomEvents.filter((entry: any) => entry.kind === "runtime" && entry.data.type === "turn.wait_ended"))
         .toMatchObject([{ data: { outcome: "gave_up" } }]);

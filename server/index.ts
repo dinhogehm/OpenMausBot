@@ -118,7 +118,8 @@ import * as composio from "./composio.ts";
 import { connectorCallFromFrame, connectorRefusalText, connectorUnrecognizedText, evaluateConnectorTools } from "./connector-verdict.ts";
 import { chiefOfStaffSystemPrompt } from "./chief-of-staff.ts";
 import { buildRecall } from "./recall.ts";
-import { languagePrompt, languageReminder } from "./reply-language.ts";
+import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-language.ts";
+import { englishNarration, narrationNoteText } from "./turn-narration.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -2801,10 +2802,10 @@ async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = 
     waitEnded = true;
     const waitedMs = waitedSince === undefined ? 0 : Date.now() - waitedSince;
     const text = outcome === "acquired"
-      ? computerFreeAfterText(holder, waitedMs)
+      ? computerFreeAfterText(holder, waitedMs, cfg.language)
       : outcome === "gave_up"
-        ? computerStillBusyText(holder, waitedMs)
-        : computerStoppedWaitingText(holder, waitedMs);
+        ? computerStillBusyText(holder, waitedMs, cfg.language)
+        : computerStoppedWaitingText(holder, waitedMs, cfg.language);
     store.appendMessage(owner.threadId, {
       role: "bot", kind: "activity",
       ...(outcome === "gave_up" ? { turnSucceeded: false } : {}),
@@ -2837,7 +2838,7 @@ async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = 
           : undefined;
         waitingMessage = store.appendMessage(owner.threadId, {
           role: "bot", kind: "activity",
-          tool: { name: computerWaitingText(holder) },
+          tool: { name: computerWaitingText(holder, cfg.language) },
           ...(holderThreadRef ? { threadRef: holderThreadRef } : {}),
         });
         waitedSince = Date.now();
@@ -2874,7 +2875,7 @@ async function bindTurnComputer(owner: TurnOwner, resource: string, exclusive = 
       sweepIdleCloudSeats();
       if (Date.now() >= deadline) {
         endWait("gave_up");
-        throw new ComputerWaitGaveUp(computerStillBusyText(holder, GROUP_GOAL_WAIT_MAX_MS));
+        throw new ComputerWaitGaveUp(computerStillBusyText(holder, GROUP_GOAL_WAIT_MAX_MS, cfg.language));
       }
       await new Promise<void>(resolve => setTimeout(resolve, 100));
     }
@@ -7648,6 +7649,12 @@ bus.subscribe((event: RuntimeEvent) => {
       if (completedTurnId) {
         const terminal = store.markTerminalAssistantMessage(event.threadId, completedTurnId);
         if (terminal) store.patchMessage(event.threadId, terminal.id, { turnSucceeded: event.ok });
+        // English narration before a Portuguese reply is a work note, not a message to the person (R12-followup #4)
+        if (terminal && bot && isPortugueseLanguage(cfg.language)) {
+          for (const note of englishNarration(store.messagesFor(event.threadId), completedTurnId, terminal.id)) {
+            store.patchMessage(event.threadId, note.id, { kind: "activity", text: undefined, tool: { name: chipText(narrationNoteText(note.text ?? ""), 400), ok: true } });
+          }
+        }
       }
       const reply = lastReply.get(event.threadId) ?? "";
       lastReply.delete(event.threadId);
