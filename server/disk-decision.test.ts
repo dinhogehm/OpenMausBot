@@ -1,8 +1,14 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { nestedWorktrees, parseWorktreeList } from "./nested-worktrees.ts";
 import {
   asksOwnerToDecide,
   diskStateLine,
+  filesBelow,
+  keepsFolders,
   DISK_DECISION_KEY_PREFIX,
   DISK_DECISION_SETTLED_MS,
   diskDecisionFolders,
@@ -279,22 +285,113 @@ describe("a disk routine that leaves folders to the owner (R12-followup #5)", ()
   });
 
   // INSP-R12F r3 R3-1: with the old list the real 8204 and atendimento-reaberto had 11 and 7 "ignored that matter", all generated
-  it("the real ignored lists of 8204 and atendimento-reaberto are junk: both come out clean", () => {
+  // r3 R3-1, corrected by r4: the generated nuria files are junk; .worktrees/ and .claude/ never are
+  it("the real ignored lists of 8204 and atendimento-reaberto: generated files are junk, .worktrees/ and .claude/ are not", () => {
     const real = (name: string) => readFileSync(new URL(`./testing/disk-decision/st-${name}.txt`, import.meta.url), "utf8");
-    for (const name of ["8204-reprovado-sidebar-da-fila-nao-refle-9b50cd", "atendimento-reaberto-bugs-496989"]) {
-      const output = real(name);
-      expect(output.split("\n").filter((line) => line.startsWith("!! ")).length, name).toBeGreaterThan(70);
-      expect(porcelainState(output), name).toEqual({ dirty: false, ignored: [], secrets: [] });
+    const s8204 = real("8204-reprovado-sidebar-da-fila-nao-refle-9b50cd");
+    expect(s8204.split("\n").filter((line) => line.startsWith("!! ")).length).toBeGreaterThan(130);
+    // .deploy-*, graft/, .husky/_/, .ignore, .local-ci/, node_modules, .turbo, dist, .lighthouse: junk; the nested worktrees' folder: not
+    expect(porcelainState(s8204)).toEqual({ dirty: false, ignored: [".worktrees/"], secrets: [] });
+    // atendimento-reaberto's .claude/, walked: its settings.local.json is a secret, the rest only lives here
+    const claude = ["CLAUDE.md", "settings.local.json", "plan.md", "hooks/synapse-engine.cjs", ".DS_Store"];
+    expect(porcelainState(real("atendimento-reaberto-bugs-496989"), (dir) => (dir === ".claude" ? claude : null))).toEqual({
+      dirty: false, ignored: [".claude/CLAUDE.md", ".claude/plan.md", ".claude/hooks/synapse-engine.cjs"], secrets: [".claude/settings.local.json"],
+    });
+    // unreadable: the folder itself, never dropped
+    expect(porcelainState(real("atendimento-reaberto-bugs-496989")).ignored).toEqual([".claude/"]);
+  });
+
+  // INSP-R12F r4 R4-1: a nested worktree hidden in .worktrees/ was deleted with its parent, uncommitted work and all
+  it("a folder holding another worktree is in use, never offered — proved with a real repository", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "omb-nested-"));
+    try {
+      const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } }).toString();
+      const main = join(tmp, "main");
+      mkdirSync(main);
+      git(main, "init", "-q", "-b", "main");
+      writeFileSync(join(main, ".gitignore"), ".worktrees/\n");
+      git(main, "add", ".");
+      git(main, "commit", "-q", "-m", "init");
+      const parent = join(main, ".claude", "worktrees", "p");
+      git(main, "worktree", "add", "-q", "-b", "p", parent);
+      const nested = join(parent, ".worktrees", "n");
+      git(parent, "worktree", "add", "-q", "-b", "n", nested);
+      writeFileSync(join(nested, "trabalho.txt"), "não commitado\n");
+      // what the parent's own status shows: only the folded folder
+      const status = git(parent, "status", "--porcelain", "--ignored");
+      expect(status.trim()).toBe("!! .worktrees/");
+      const state = porcelainState(status);
+      expect(state.ignored).toEqual([".worktrees/"]);
+      // the repository's worktrees name the nested one: the parent is in use
+      const canon = realpathSync(parent);
+      const inside = nestedWorktrees(parseWorktreeList(git(parent, "worktree", "list", "--porcelain")).map((entry) => ({ ...entry, path: realpathSync(entry.path) })), canon).map((entry) => entry.path);
+      const base = { used: [], processCwds: [], activity: 0, now: 3 * 86_400_000, root: realpathSync(join(main, ".claude", "worktrees")), home: "/nowhere" };
+      const why = folderInUse(canon, { ...base, nested: inside });
+      expect(why).toBe("contém a worktree aninhada .worktrees/n");
+      // unreadable worktree list: in use as well
+      expect(folderInUse(canon, { ...base, nested: null })).toBe("não consegui ler as worktrees do repositório");
+      // a stray folder, not a worktree (chat-wait-time-issue-21f481 on 05/10): git answered for the main checkout
+      expect(folderInUse(canon, { ...base, nested: [], registered: false })).toBe("não é uma worktree do repositório");
+      expect(folderInUse(canon, { ...base, nested: [], registered: true })).toBeNull();
+      const item = diskDecisionItem([{ name: "p", size: "1M", reason: "commits só locais" }], new Map([["p", { inUse: why, dirty: false, unpushed: true, ignored: state.ignored }]]), join(main, ".claude", "worktrees"), "");
+      expect(item).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
     }
-    const folders = [
-      { name: "8204-reprovado-sidebar-da-fila-nao-refle-9b50cd", size: "3,0G", reason: "commits só locais" },
-      { name: "atendimento-reaberto-bugs-496989", size: "263M", reason: "commits só locais" },
-    ];
-    // pushed meanwhile: offered for removal, with no ignored file named
-    const facts = new Map<string, FolderFacts>(folders.map((folder) => [folder.name, { inUse: null, ...porcelainState(real(folder.name)), unpushed: false }]));
-    const item = diskDecisionItem(folders, facts, ROOT, "")!;
-    expect(item.options.map((option) => option.label)).toEqual(["Remover as limpas", "Manter por 7 dias"]);
-    expect(item.steps[1]!.text).toBe("Veja 8204-reprovado-sidebar-da-fila-nao-refle-9b50cd (3,0G; limpa e no GitHub)");
+    // the real 8204: its .worktrees/release-sqlite-warning (git worktree list --porcelain, 05/10)
+    const root = "/Users/osvaldo/Projetos/nuria-platform/.claude/worktrees";
+    const list = `worktree /Users/osvaldo/Projetos/nuria-platform\nHEAD aaa\nbranch refs/heads/main\n\nworktree ${root}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd\nHEAD 61377d01b96499696662caba36e5db86fef354c6\nbranch refs/heads/worktree-8204-reprovado-sidebar-da-fila-nao-refle-9b50cd\n\nworktree ${root}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd/.worktrees/release-sqlite-warning\nHEAD ac06977627d4e5a3e1ce3a6c36102827d8ed2c96\nbranch refs/heads/fix/release-reconciler-sqlite-warning\n\nworktree ${root}/9052-tempo-de-reabertura-configuravel-35787b\nHEAD bbb\nbranch refs/heads/x\n`;
+    const p8204 = `${root}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd`;
+    const nested8204 = nestedWorktrees(parseWorktreeList(list), p8204).map((entry) => entry.path);
+    expect(folderInUse(p8204, { used: [], processCwds: [], activity: 0, now: 3 * 86_400_000, root, home: "/Users/osvaldo", nested: nested8204 })).toBe("contém a worktree aninhada .worktrees/release-sqlite-warning");
+    expect(nestedWorktrees(parseWorktreeList(list), `${root}/9052-tempo-de-reabertura-configuravel-35787b`)).toEqual([]);
+  });
+
+  // INSP-R12F r4 R4-2: .claude/ differs per worktree (merge-deploy's settings.local.json; 503's settings.json, helpers/)
+  it("merge-deploy's and 503's .claude/: settings.local.json is a secret, the rest only lives there", () => {
+    const status = "!! .claude/.DS_Store\n!! .claude/CLAUDE.md\n!! .claude/commands/\n!! .claude/helpers/\n!! .claude/hooks/\n!! .claude/launch.json\n!! .claude/plan.md\n!! .claude/rules/\n!! .claude/settings.local.json\n!! .claude/settings.local.json.bak-20260910-143136\n!! .claude/skills/\n";
+    const inside: Record<string, string[]> = { ".claude/hooks": ["synapse-engine.cjs", "README.md"], ".claude/helpers": ["graft.cjs"], ".claude/skills": ["graft/SKILL.md"], ".claude/rules": ["mcp-usage.md"], ".claude/commands": ["greet.md", ".DS_Store"] };
+    const state = porcelainState(status, (dir) => inside[dir] ?? null);
+    expect(state.secrets).toEqual([".claude/settings.local.json", ".claude/settings.local.json.bak-20260910-143136"]);
+    expect(state.ignored).toEqual([
+      ".claude/CLAUDE.md", ".claude/commands/greet.md", ".claude/helpers/graft.cjs", ".claude/hooks/synapse-engine.cjs", ".claude/hooks/README.md",
+      ".claude/launch.json", ".claude/plan.md", ".claude/rules/mcp-usage.md", ".claude/skills/graft/SKILL.md",
+    ]);
+    // a folder with them is never clean, and every removal says to copy the secret first
+    const item = diskDecisionItem([{ name: "merge-deploy-open-prs-00664b", size: "592M", reason: "alterações" }], new Map([["merge-deploy-open-prs-00664b", { inUse: null, unpushed: false, ...state }]]), ROOT, "")!;
+    expect(item.options.map((option) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
+    expect(item.options[0]!.reply).toContain("merge-deploy-open-prs-00664b/.claude/settings.local.json");
+    // walking a folder: a folder of worktrees is named, never walked
+    const tree: Record<string, Array<{ name: string; dir: boolean }>> = { "/w/.claude": [{ name: "worktrees", dir: true }, { name: "a.md", dir: false }, { name: "hooks", dir: true }], "/w/.claude/hooks": [{ name: "x.cjs", dir: false }] };
+    expect(filesBelow("/w/.claude", (dir) => { if (!tree[dir]) throw new Error("no"); return tree[dir]!; })).toEqual(["a.md", "worktrees/", "hooks/x.cjs"]);
+    expect(filesBelow("/w/nada", () => { throw new Error("no"); })).toBeNull();
+    // atendimento-reaberto's real case: settings.local.json behind 40+ command files is still found, the rest counted
+    const many = [...Array.from({ length: 50 }, (_, index) => `commands/AIOX/agents/a${index}.md`), "settings.local.json"];
+    const big = porcelainState("!! .claude/\n", () => many);
+    expect(big.secrets).toEqual([".claude/settings.local.json"]);
+    expect(big.ignored).toHaveLength(41);
+    expect(big.ignored.at(-1)).toBe(".claude/… (+10)");
+    // a folder of worktrees folded by git is named, never walked
+    expect(porcelainState("!! .worktrees/\n", () => ["n/trabalho.txt"]).ignored).toEqual([".worktrees/"]);
+  });
+
+  // INSP-R12F r4 R4-3, R4-4
+  it("more secrets by name or folder, and .audit-out/, .wrangler/, out/ are not junk", () => {
+    const state = porcelainState(["secrets/", ".secrets/", "config/secrets.json", "token.json", "apps/x/token-prod.json", "AuthKey_ABC.p8", ".aws/", ".envrc", ".gcloud/", "infra/prod.tfvars", ".audit-out/", ".wrangler/", "out/", "target/"].map((path) => `!! ${path}`).join("\n"));
+    expect(state.secrets).toEqual(["secrets/", ".secrets/", "config/secrets.json", "token.json", "apps/x/token-prod.json", "AuthKey_ABC.p8", ".aws/", ".envrc", ".gcloud/", "infra/prod.tfvars"]);
+    expect(state.ignored).toEqual([".audit-out/", ".wrangler/", "out/", "target/"]);
+    // inside a folded secrets folder, walked: still secrets
+    expect(porcelainState("!! secrets/\n", () => ["db.txt"]).secrets).toEqual(["secrets/"]);
+  });
+
+  // INSP-R12F r4: "Manter" removes nothing — not checked on the Mac, never refused
+  it("only an answer that may remove is checked: 'Manter por 7 dias' is not", () => {
+    expect(keepsFolders({ kind: "option", label: "Manter por 7 dias" })).toBe(true);
+    expect(keepsFolders({ kind: "option", label: "Push e remover" })).toBe(false);
+    expect(keepsFolders({ kind: "option", label: "Remover as limpas" })).toBe(false);
+    expect(keepsFolders({ kind: "text", label: "Manter por 7 dias" })).toBe(false);
+    const item = diskDecisionItem([{ name: "x-1", size: "1M", reason: "r" }], new Map([["x-1", { inUse: null, dirty: false, unpushed: true }]]), ROOT, "")!;
+    expect(item.options.at(-1)!.label).toBe("Manter por 7 dias");
   });
 
   it("a secret is never junk, and every option that removes its folder names it and asks to copy it first", () => {

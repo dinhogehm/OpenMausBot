@@ -1,6 +1,6 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, utimesSync } from "node:fs";
-import { join } from "node:path";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
 import { launchVerificationServer, runControlOmb } from "../scripts/control-omb.ts";
 
@@ -30,7 +30,9 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     "**Onde dá para liberar mais espaço:** as três worktrees com commits só locais e sem alterações (8204, 9052 e atendimento-reaberto) somam cerca de 5,5 GiB, e a merge-deploy-open-prs-00664b mais 592M. Se esse trabalho já entrou na main por squash, alguém pode remover essas pastas manualmente; a rotina não pode removê-las.",
   ].join("\n");
   expect(reply.length).toBeGreaterThan(2_000);
-  const fixture = await launchVerificationServer({ ...process.env, FAKE_CLAUDE_REPLIES: JSON.stringify([reply, reply, reply]) });
+  // the sealed fixture PATH has no git: granted by name
+  const gitDir = dirname(execFileSync("/usr/bin/which", ["git"]).toString().trim());
+  const fixture = await launchVerificationServer({ ...process.env, FAKE_CLAUDE_REPLIES: JSON.stringify([reply, reply, reply, reply]), OMB_TEST_GRANT_PATH: gitDir });
   const { url, dataDir } = fixture.info;
   const api = async (method: string, path: string, body?: unknown) => {
     const response = await fetch(`${url}${path}`, { method, headers: { "content-type": "application/json", origin: url }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -43,12 +45,27 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
   const ledger = () => (existsSync(join(dataDir, "bot-autonomy.json")) ? JSON.parse(readFileSync(join(dataDir, "bot-autonomy.json"), "utf8")) : {});
   try {
     // the worktrees, where the server looks for them (the fixture's home is its data dir)
-    const root = join(dataDir, "Projetos", "nuria-platform", ".claude", "worktrees");
+    // real git worktrees of a real repository: the server reads their status and the repository's worktree list
+    const main = join(dataDir, "Projetos", "nuria-platform");
+    const root = join(main, ".claude", "worktrees");
+    const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+    mkdirSync(main, { recursive: true });
+    git(main, "init", "-q", "-b", "main");
+    writeFileSync(join(main, ".gitignore"), ".claude/\n");
+    git(main, "add", ".");
+    git(main, "commit", "-q", "-m", "init");
+    for (const folder of folders) git(main, "worktree", "add", "-q", "-b", folder, join(root, folder));
+    // three days old, everywhere the server looks for the last change
     const threeDaysAgo = (Date.now() - 3 * 86_400_000) / 1000;
-    for (const folder of folders) {
-      mkdirSync(join(root, folder), { recursive: true });
-      utimesSync(join(root, folder), threeDaysAgo, threeDaysAgo);
-    }
+    const age = (dir: string) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) age(path);
+        utimesSync(path, threeDaysAgo, threeDaysAgo);
+      }
+      utimesSync(dir, threeDaysAgo, threeDaysAgo);
+    };
+    age(main);
     // a live process working inside merge-deploy: in use, whatever the routine says (INSP-R12F F1)
     holder = spawn("sleep", ["120"], { cwd: join(root, "merge-deploy-open-prs-00664b"), stdio: "ignore" });
     const { bot } = await runControlOmb(["new-bot", "--name", "Chief of Staff", "--url", url]) as any;
@@ -78,7 +95,7 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     expect(item.steps).toHaveLength(4);
     expect(item.steps[0].text).toContain("reconfira que nenhuma tem sessão, processo vivo dentro ou mudança nas últimas 24 h");
     expect(item.steps[1].command).toContain(`git -C ${root}/8204-reprovado-sidebar-da-fila-nao-refle-9b50cd status --short`);
-    // not git repositories here: nothing is proved clean, so nothing is offered for removal
+    // their commits are on no remote: nothing is proved clean, so nothing is offered for plain removal
     expect(item.options.map((option: any) => option.label)).toEqual(["Push e remover", "Manter por 7 dias"]);
     // the hour after, the same words: the same item, no second one
     await runOnce();
@@ -124,6 +141,21 @@ it("a disk routine that leaves folders to the owner opens one item with why, ste
     expect(late.status).toBe(409);
     expect(await late.json()).toMatchObject({ code: "disk_item_changed" });
     expect(ledger().ownerPending ?? []).toEqual([]);
+    // INSP-R12F r4: "Manter por 7 dias" removes nothing — not checked, never refused, even with the folder in use
+    fourth.kill();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await runOnce();
+    await expect.poll(() => (ledger().ownerPending ?? []).map((each: any) => each.key), { timeout: 15_000 }).toEqual(["disk-decision:atendimento-reaberto-bugs-496989"]);
+    const again = ledger().ownerPending[0];
+    fourth = spawn("sleep", ["120"], { cwd: join(root, "atendimento-reaberto-bugs-496989"), stdio: "ignore" });
+    const keep = again.options.findIndex((option: any) => option.label === "Manter por 7 dias");
+    const kept = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${again.id}/reply`, {
+      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ option: keep, label: "Manter por 7 dias" }),
+    });
+    expect(kept.status, await kept.clone().text()).toBeLessThan(300);
+    const settled = ledger().resolvedOwnerPending.find((each: any) => each.id === again.id);
+    expect(settled.resolvedBy).toBe("owner");
+    expect(settled.history.at(-1)).toMatchObject({ kind: "option", label: "Manter por 7 dias" });
   } finally {
     holder?.kill();
     second?.kill();

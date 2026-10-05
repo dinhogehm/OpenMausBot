@@ -84,36 +84,85 @@ export interface FolderFacts {
   secrets?: string[];
 }
 
-// Secrets, by name: never junk, wherever they are (INSP-R12F r3 R3-1).
-const SECRET = /(?:^|\/)(?:\.dev\.vars[^/]*|\.env(?!\.example$|\.sample$|\.template$)(?:\.[^/]*)?|[^/]*\.(?:pem|key|p12|pfx|jks|keystore)|credentials[^/]*|[^/]*service[-_]account[^/]*\.json|id_(?:rsa|ed25519|ecdsa)[^/]*|\.npmrc|\.netrc|\.pgpass)$/i;
+// Secrets, by name: never junk, wherever they are (INSP-R12F r3 R3-1, r4
+// R4-3): a file by its name, or anything inside a secrets folder.
+const SECRET_FILE = /(?:^|\/)(?:\.dev\.vars[^/]*|\.env(?!\.example$|\.sample$|\.template$)(?:\.[^/]*)?|\.envrc|[^/]*\.(?:pem|key|p8|p12|pfx|jks|keystore|tfvars)|credentials[^/]*|secrets?\.[a-z]+|token[^/]*\.json|[^/]*service[-_]account[^/]*\.json|id_(?:rsa|ed25519|ecdsa)[^/]*|\.npmrc|\.netrc|\.pgpass|settings\.local\.json[^/]*)$/i;
+const SECRET_DIR = /(?:^|\/)(?:\.?secrets|\.aws|\.gcloud|\.ssh|\.gnupg)(?:\/|$)/i;
+const isSecret = (path: string) => SECRET_FILE.test(path) || SECRET_DIR.test(path);
 
-// What an ignored path may be without being anyone's work: build output,
-// caches and what the tools regenerate. Read off the real nuria-platform
-// worktrees (`git status --porcelain --ignored`, 05/10): smart-deploy's
-// .deploy-*, graft's index, husky's _/, the .ignore graft writes, nested
-// release worktrees, the ci:local receipts, the inspection outputs, the
-// lighthouse reports and the widget's _generated bundle; and the root
-// .claude/, which a worktree gets as a copy of the main checkout's (the same
-// CLAUDE.md, rules, settings.local.json and plan.md, compared on 05/10).
+// What an ignored path may be without being anyone's work. When in doubt it
+// is NOT junk (INSP-R12F r4). Junk is what an install, a build or a test
+// run makes again — the set nested-worktrees.ts calls disposable — and what
+// the nuria tools regenerate, read off the real worktrees on 05/10:
+// smart-deploy's .deploy-history/ and .deploy-*, graft's graft/ and .ignore,
+// husky's .husky/_/, lighthouse's reports, the widget's _generated bundle.
+// Never junk: .worktrees/ and .claude/ (a nested worktree lives there, and
+// removing the parent deletes it, R4-1), .claude/ itself (settings.local.json
+// and the like differ per worktree, R4-2), .audit-out/ (inspection work, R4-4),
+// .wrangler/ (a local D1 may hold data made by hand), out/ and target/.
 const JUNK = new RegExp([
-  "(?:^|/)(?:node_modules|dist|build|out|\\.next|\\.turbo|coverage|\\.cache|\\.local-ci|\\.wrangler|target|\\.vite|\\.parcel-cache|\\.svelte-kit|\\.nuxt|\\.output|storybook-static|\\.vercel|\\.lighthouse|_generated)(?:/|$)",
-  "(?:^|/)(?:\\.deploy-history|graft|\\.worktrees|\\.audit-out)(?:/|$)",
+  "(?:^|/)(?:node_modules|\\.pnpm-store|dist|build|\\.next|\\.turbo|\\.vite|\\.cache|coverage|playwright-report|test-results|blob-report|\\.local-ci|\\.deploy-cache|\\.lighthouse|_generated)(?:/|$)",
+  "^(?:\\.deploy-history|graft)(?:/|$)",
   "^\\.husky/_(?:/|$)",
-  "^\\.claude(?:/|$)",
-  "(?:^|/)(?:\\.deploy-metrics\\.json|\\.deploy-report\\.[a-z]+|\\.ignore|\\.DS_Store|\\.eslintcache)$",
+  "^(?:\\.deploy-metrics\\.json|\\.deploy-report\\.[a-z]+|\\.ignore)$",
+  "(?:^|/)(?:\\.DS_Store|\\.eslintcache)$",
   "\\.(?:log|tsbuildinfo)$",
 ].join("|"));
+/** Nothing under a folder of worktrees is junk: a worktree is never build output. */
+const NEVER_JUNK = /(?:^|\/)\.?worktrees(?:\/|$)/;
+
+/** Past this many files listed inside one folder, the rest are counted. */
+const EXPAND_MAX = 40;
+
+/** The files below `dir`, relative to it ("hooks/a.cjs"), for porcelainState:
+ * at most `max` and `depth` levels; a folder of worktrees is named, never
+ * walked (its worktrees are judged as worktrees). Null when unreadable. */
+export function filesBelow(dir: string, readdir: (dir: string) => Array<{ name: string; dir: boolean }>, max = 2_000, depth = 6): string[] | null {
+  const out: string[] = [];
+  const walk = (at: string, prefix: string, level: number): boolean => {
+    let entries: Array<{ name: string; dir: boolean }>;
+    // a level's own files first: a settings.local.json is never past the cap behind a big folder
+    try { entries = [...readdir(at)].sort((a, b) => Number(a.dir) - Number(b.dir)); } catch { return level > 0; }
+    for (const entry of entries) {
+      if (out.length >= max) return true;
+      const rel = `${prefix}${entry.name}`;
+      if (!entry.dir) { out.push(rel); continue; }
+      if (/^\.?worktrees$/.test(entry.name) || level + 1 >= depth) { out.push(`${rel}/`); continue; }
+      walk(`${at}/${entry.name}`, `${rel}/`, level + 1);
+    }
+    return true;
+  };
+  return walk(dir, "", 0) ? out : null;
+}
 
 /** From `git status --porcelain --ignored`: whether anything is changed or
  * untracked; the ignored secrets; and the other ignored paths that are not
  * junk — they exist only on this Mac, and removing the folder loses them
- * (INSP-R12F r2 R2-2, r3 R3-1). */
-export function porcelainState(output: string): { dirty: boolean; ignored: string[]; secrets: string[] } {
+ * (INSP-R12F r2 R2-2, r3 R3-1). git folds an ignored folder into one line
+ * ("!! .claude/"): such a folder that is not junk is listed file by file
+ * (`list`, relative paths below it), so a settings.local.json inside is
+ * seen as a secret and the rest by name (r4 R4-2). */
+export function porcelainState(output: string, list?: (dir: string) => string[] | null): { dirty: boolean; ignored: string[]; secrets: string[] } {
   const lines = output.split("\n").filter((line) => line.trim());
-  const paths = lines.filter((line) => line.startsWith("!! ")).map((line) => line.slice(3).trim().replace(/^"|"$/g, ""));
+  const folded = lines.filter((line) => line.startsWith("!! ")).map((line) => line.slice(3).trim().replace(/^"|"$/g, ""));
+  const junk = (path: string) => !NEVER_JUNK.test(path) && JUNK.test(path);
+  const paths = folded.flatMap((path) => {
+    // a folder of worktrees is named, never walked: its worktrees are judged as worktrees
+    if (!path.endsWith("/") || isSecret(path) || junk(path.replace(/\/$/, "")) || NEVER_JUNK.test(path) || !list) return [path];
+    const inside = list(path.replace(/\/$/, ""));
+    if (!inside?.length) return [path];
+    // every secret is kept; past EXPAND_MAX the other files of this folder are counted
+    const all = inside.map((each) => `${path}${each}`);
+    const others = all.filter((each) => !isSecret(each.replace(/\/$/, "")) && !junk(each.replace(/\/$/, "")));
+    const shown = new Set(others.slice(0, EXPAND_MAX));
+    return [
+      ...all.filter((each) => isSecret(each.replace(/\/$/, "")) || shown.has(each)),
+      ...(others.length > EXPAND_MAX ? [`${path}… (+${others.length - EXPAND_MAX})`] : []),
+    ];
+  });
   const bare = (path: string) => path.replace(/\/$/, "");
-  const secrets = paths.filter((path) => SECRET.test(bare(path)));
-  const ignored = paths.filter((path) => !SECRET.test(bare(path)) && !JUNK.test(bare(path)));
+  const secrets = paths.filter((path) => isSecret(bare(path)));
+  const ignored = paths.filter((path) => !isSecret(bare(path)) && !junk(bare(path)));
   return { dirty: lines.some((line) => !line.startsWith("!! ")), ignored, secrets };
 }
 
@@ -121,9 +170,14 @@ export function porcelainState(output: string): { dirty: boolean; ignored: strin
  * (or inside it), a live process has its cwd there, or it changed in the
  * last 24 h — or its activity cannot be read. A folder at or above the
  * worktrees' root (an app session in "/" or the home) holds none of them. */
-export function folderInUse(path: string, input: { used: readonly string[]; processCwds: readonly string[] | null; activity: number | null; now: number; root: string; home: string; sessionOf?: (path: string) => string | null }): string | null {
+export function folderInUse(path: string, input: { used: readonly string[]; processCwds: readonly string[] | null; activity: number | null; now: number; root: string; home: string; sessionOf?: (path: string) => string | null; nested?: readonly string[] | null; registered?: boolean }): string | null {
   const inside = (a: string, b: string) => a === b || a.startsWith(`${b}/`);
   const above = (each: string) => each === "/" || each === input.home || inside(input.root, each);
+  // removing a parent deletes a worktree inside it, uncommitted work and all (nested-worktrees.ts, INSP-R12F r4 R4-1)
+  if (input.nested === null) return "não consegui ler as worktrees do repositório";
+  // not a worktree of the repository (a stray folder): git would answer for the checkout above it
+  if (input.registered === false) return "não é uma worktree do repositório";
+  if (input.nested?.length) return `contém a worktree aninhada ${input.nested.map((each) => each.slice(path.length + 1)).join(", ")}`;
   const session = input.sessionOf?.(path);
   if (session) return `sessão «${session}» nela`;
   if (input.used.filter((each) => !above(each)).some((each) => inside(each, path) || inside(path, each))) return "uma conversa ou sessão trabalha nela";
@@ -227,6 +281,14 @@ export function totalSize(folders: readonly LeftFolder[]): string {
 /** A path as one shell word (as nested-worktrees.ts quotes its commands). */
 const shellQuote = (value: string) => (/^[\w./@%+=:,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`);
 
+/** The label of the decision that keeps the folders. */
+export const DISK_KEEP_LABEL = "Manter por 7 dias";
+
+/** An answer that only keeps the folders ("Manter por 7 dias"): nothing to check on the Mac before it. */
+export function keepsFolders(answer: { kind: string; label?: string }): boolean {
+  return answer.kind === "option" && answer.label === DISK_KEEP_LABEL;
+}
+
 /** One folder's state, in words ("commits em nenhuma branch remota, segredos ignorados: .dev.vars"). */
 export function folderState(fact: FolderFacts): string {
   const said = [
@@ -308,7 +370,7 @@ export function diskDecisionItem(folders: readonly LeftFolder[], facts: Readonly
       ...(clean.length ? [{ label: "Remover as limpas", reply: `Remova as worktrees ${words(clean)} com git worktree remove, sem --force. ${removing(clean)}` }] : []),
       ...(pending.length ? [{ label: "Push e remover", reply: `Para as worktrees ${words(pending)}: faça push da branch de cada uma (sem force). Se houver alterações não commitadas, pare e me mostre; não descarte nada. Só com o push confirmado no GitHub, remova sem --force. ${removing(pending)}` }] : []),
       // as long as the server holds a settled list (DISK_DECISION_SETTLED_MS): it says so (INSP-R12F F7)
-      { label: "Manter por 7 dias", reply: `Mantenha as worktrees ${words(asked)} e não as remova. Elas só voltam a ser perguntadas daqui a 7 dias, se ainda estiverem no disco.` },
+      { label: DISK_KEEP_LABEL, reply: `Mantenha as worktrees ${words(asked)} e não as remova. Elas só voltam a ser perguntadas daqui a 7 dias, se ainda estiverem no disco.` },
     ],
   };
 }

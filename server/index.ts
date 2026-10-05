@@ -122,7 +122,7 @@ import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-
 import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
-import { asksOwnerToDecide, busyNote, diskStateLine, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
+import { asksOwnerToDecide, busyNote, diskStateLine, filesBelow, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -475,7 +475,7 @@ import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.t
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { citedRefs, parseRefState, RefLookups, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, nestedWorktrees, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -13651,9 +13651,15 @@ async function diskFolderFacts(path: string, used: readonly string[], processCwd
     stat: (each) => { try { const found = lstatSync(each); return { mtimeMs: found.mtimeMs, dir: found.isDirectory() }; } catch { return null; } },
   });
   const sessionOf = () => ccLedger.all().find((session) => session.status !== "archived" && session.status !== "failed" && (session.cwd ? canonPath(session.cwd) === canon || canonPath(session.cwd).startsWith(`${canon}/`) : false))?.title ?? null;
-  const inUse = folderInUse(canon, { used: used.map(canonPath), processCwds: processCwds?.map(canonPath) ?? null, activity, now: Date.now(), root: canonPath(NURIA_WORKTREES), home: canonPath(homedir()), sessionOf });
-  // ignored files count too: a .dev.vars lives only here (INSP-R12F r2 R2-2)
-  const state = await gitAsync(["-C", path, "status", "--porcelain", "--ignored"]).then(porcelainState, () => null);
+  // every worktree of the repository: one inside this folder keeps it out (INSP-R12F r4 R4-1)
+  const worktrees = await gitAsync(["-C", path, "worktree", "list", "--porcelain"]).then((out) => parseWorktreeList(out).map((entry) => ({ ...entry, path: canonPath(entry.path) })), () => null);
+  const nested = worktrees ? nestedWorktrees(worktrees, canon).map((entry) => entry.path) : null;
+  // a folder that is not itself a worktree: git would answer for the checkout above it
+  const registered = worktrees ? worktrees.some((entry) => entry.path === canon) : undefined;
+  const inUse = folderInUse(canon, { used: used.map(canonPath), processCwds: processCwds?.map(canonPath) ?? null, activity, now: Date.now(), root: canonPath(NURIA_WORKTREES), home: canonPath(homedir()), sessionOf, nested, ...(registered === undefined ? {} : { registered }) });
+  // ignored files count too: a .dev.vars lives only here (INSP-R12F r2 R2-2); a folded folder is walked (r4 R4-2)
+  const readdir = (dir: string) => readdirSync(dir, { withFileTypes: true }).map((entry) => ({ name: entry.name, dir: entry.isDirectory() }));
+  const state = await gitAsync(["-C", path, "status", "--porcelain", "--ignored"]).then((out) => porcelainState(out, (dir) => filesBelow(join(path, dir), readdir)), () => null);
   const unpushed = await gitAsync(["-C", path, "branch", "-r", "--contains", "HEAD"]).then((out) => out.trim().length === 0, () => null);
   return { inUse, dirty: state ? state.dirty : null, unpushed, ...(state?.ignored.length ? { ignored: state.ignored } : {}), ...(state?.secrets.length ? { secrets: state.secrets } : {}) };
 }
@@ -23876,7 +23882,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // any answer to a disk item — a decision or free text ("pode remover todas") — is checked on the Mac first:
       // a folder used since, or no longer clean, changes the item and the answer is not sent (INSP-R12F r2 R2-1);
       // otherwise the Chief reads, under the answer, the state found now and to check again before removing (r3 R3-2)
-      if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask") {
+      // "Manter" removes nothing: never checked, never refused (INSP-R12F r4)
+      if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && !keepsFolders(answer)) {
         const check = await recheckDiskItem(item, foldersInUse(), await allProcessCwds(), "");
         if (check.outcome !== "keep") return json(res, 409, { error: check.outcome === "replace" ? "Conferi agora no Mac: alguma pasta passou a ser usada ou não está mais limpa. O item foi atualizado com o que vale agora; responda de novo." : "Conferi agora no Mac: nenhuma das pastas pode ser removida agora. O item foi fechado com o motivo.", code: "disk_item_changed" });
         text = `${text}\n\n${check.line}`;
