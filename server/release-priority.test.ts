@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parsePsTable, type PsRow } from "./bg-jobs.ts";
-import { type AdmissionLease, ciLabel, ciOwner, ciQueuedBehindRelease, ciQueuedText, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, RELEASE_QUEUE_CEILING_S, releaseBlockedBy, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
+import { type AdmissionLease, ciLabel, ciOwner, ciQueuedBehindRelease, ciQueuedText, ciToStop, type CiStop, leaseConfirms, ownerSession, preemptCiForRelease, type PreemptEnv, type PreemptState, PREEMPT_RETRY_LIMIT, refusalText, RELEASE_QUEUE_CEILING_S, releaseBlockedBy, releaseHoldText, releaseInFlight, type ReleaseIntent, releaseLabelSha, releaseOverdueText, releaseResumeHold, RESUME_AFTER_MAX_MS, resumeAfterRelease, stoppedReleaseFromLog, targetDrift } from "./release-priority.ts";
 import { releaseFailures, releaseInLoop } from "./release-watch.ts";
 
 const log = [
@@ -623,10 +623,12 @@ describe("a release on its way holds every session's RETOMAR (INSP-S r1 S-1)", (
   const base = { rows: real, lease: null, deployLease: null, intents: [], alive };
   const liveStart = "Thu Oct 1 15:01:22 2026";
 
-  it("holds while a live release holds the machine, the deploy lease, or queues for the machine", () => {
+  it("holds while a live release holds the machine or queues for it; with only the deploy lease it is deploying", () => {
     expect(releaseInFlight({ ...base, lease: { ownerPid: "90001", kind: "release", label: release } })).toEqual({ label: release, state: "holding", ageS: null, overdue: false });
-    // a CI holds the machine and the release holds its deploy lease: it is on its way all the same
-    expect(releaseInFlight({ ...base, lease: { ownerPid: "40409", kind: "ci-full" }, deployLease: { ownerPid: "90001", label: release } })).toMatchObject({ label: release, state: "holding" });
+    // a CI holds the machine and the release only its deploy lease: on its way, in the network phase (R11 #2)
+    expect(releaseInFlight({ ...base, lease: { ownerPid: "40409", kind: "ci-full" }, deployLease: { ownerPid: "90001", label: release } })).toMatchObject({ label: release, state: "deploying" });
+    // the deploy lease and its own intent: the release's CPU phase, queued for the machine
+    expect(releaseInFlight({ ...base, lease: { ownerPid: "40409", kind: "ci-full" }, deployLease: { ownerPid: "90001", label: release }, intents: [{ pid: 90001, label: release }] })).toMatchObject({ state: "queued" });
     expect(releaseInFlight({ ...base, lease: { ownerPid: "40409", kind: "ci-full" }, intents: [{ pid: 90001, label: release }] })).toMatchObject({ label: release, state: "queued" });
     expect(releaseHoldText({ label: release, state: "holding" })).toBe("o release de produção 23a9f93c0 está em andamento");
     expect(releaseHoldText({ label: release, state: "queued" })).toBe("o release de produção 23a9f93c0 está na fila da máquina");
@@ -637,7 +639,54 @@ describe("a release on its way holds every session's RETOMAR (INSP-S r1 S-1)", (
     expect(releaseInFlight({ ...base, lease: { ownerPid: "99999", kind: "release", label: release } })).toBeNull();
     expect(releaseInFlight({ ...base, deployLease: { ownerPid: "38043", label: release, start: "Mon Sep 28 09:00:00 2026" } })).toBeNull();
     expect(releaseInFlight({ ...base, deployLease: { ownerPid: "", label: release } })).toBeNull();
-    expect(releaseInFlight({ ...base, deployLease: { ownerPid: "38043", label: release, start: liveStart } })).toMatchObject({ state: "holding" });
+    expect(releaseInFlight({ ...base, deployLease: { ownerPid: "38043", label: release, start: liveStart } })).toMatchObject({ state: "deploying" });
+  });
+  // R11 #2: the release of e3e9e7ddc held every resume 20:17:32 → 23:13:43 (2h56) although
+  // it gave the machine back at ~21:05. Its admission lines (production-release.out.log
+  // 172382-172384, 214461, 215279-215381), replayed on the admission state they leave.
+  it("replaying e3e9e7ddc: sessions resume from ADMISSION_DOWNGRADED on, but not in the release's checkout", () => {
+    const label = "release:production:e3e9e7ddcca33657585fd6d7b60296af44d0e838";
+    const lines = [
+      `ADMISSION_DEPLOY_GRANTED label=${label} pid=96897 waited=0s`,
+      `ADMISSION_INTENT kind=release label=${label} pid=96897`,
+      `ADMISSION_GRANTED kind=release label=${label} pid=96897 waited=0s`,
+      "ADMISSION_NESTED kind=ci-full label=local-ci:e3e9e7ddcca3 holder_kind=release holder_pid=96897",
+      "ADMISSION_NESTED kind=deploy label=deploy:production:e3e9e7ddcca33657585fd6d7b60296af44d0e838 holder_kind=release holder_pid=96897",
+      "ADMISSION_DOWNGRADED kind=release pid=96897 machine=released deploy=held",
+      "ADMISSION_DEPLOY_RELEASED pid=96897",
+      "ADMISSION_RELEASED kind=release pid=96897",
+    ];
+    const checkout = "/Users/osvaldo/Projetos/nuria-platform/.worktrees/release-related-automation-chain";
+    let lease: { ownerPid: string; kind: string; label?: string } | null = null;
+    let deployLease: { ownerPid: string; label: string; checkout?: string } | null = null;
+    let intents: Array<{ pid: number; label: string }> = [];
+    const hold = (cwd?: string) => releaseResumeHold(releaseInFlight({ rows: real, lease, deployLease, intents, alive: (pid) => pid === 96897 }), cwd, checkout);
+    const seen: Array<[string, string | null, string | null]> = [];
+    for (const line of lines) {
+      const pid = line.match(/pid=(\d+)/)?.[1] ?? "";
+      const lineLabel = line.match(/label=(\S+)/)?.[1] ?? "";
+      if (line.startsWith("ADMISSION_DEPLOY_GRANTED")) deployLease = { ownerPid: pid, label: lineLabel, checkout };
+      else if (line.startsWith("ADMISSION_INTENT")) intents = [{ pid: Number(pid), label: lineLabel }];
+      else if (line.startsWith("ADMISSION_GRANTED kind=release")) { lease = { ownerPid: pid, kind: "release", label: lineLabel }; intents = []; }
+      else if (line.startsWith("ADMISSION_DOWNGRADED") || line.startsWith("ADMISSION_RELEASED")) lease = null;
+      else if (line.startsWith("ADMISSION_DEPLOY_RELEASED")) deployLease = null;
+      seen.push([line.split(" ")[0], hold("/Users/osvaldo/Projetos/nuria-platform/.worktrees/some-session"), hold(checkout)]);
+    }
+    const running = "o release de produção e3e9e7ddc está em andamento";
+    expect(seen).toEqual([
+      ["ADMISSION_DEPLOY_GRANTED", null, "o release de produção e3e9e7ddc publica a partir do checkout desta sessão"],
+      ["ADMISSION_INTENT", "o release de produção e3e9e7ddc está na fila da máquina", "o release de produção e3e9e7ddc está na fila da máquina"],
+      ["ADMISSION_GRANTED", running, running],
+      ["ADMISSION_NESTED", running, running],
+      ["ADMISSION_NESTED", running, running],
+      // ~21:05Z: the machine is free, a session's ci:local is admitted at once
+      ["ADMISSION_DOWNGRADED", null, "o release de produção e3e9e7ddc publica a partir do checkout desta sessão"],
+      ["ADMISSION_DEPLOY_RELEASED", null, null],
+      ["ADMISSION_RELEASED", null, null],
+    ]);
+    expect(releaseHoldText({ label, state: "deploying" })).toBe("o release de produção e3e9e7ddc está na fase de rede; o seu ci:local pode rodar");
+    // past the ceiling nothing is held, deploying or not
+    expect(releaseResumeHold({ label, state: "holding", ageS: 18_000, overdue: true })).toBeNull();
   });
   it("a release past the 5 h ceiling is overdue (likely hung): the caller holds nothing for it", () => {
     const nowMs = Date.UTC(2026, 9, 3, 18, 0, 0);

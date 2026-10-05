@@ -15,7 +15,7 @@ import { writeFileAtomic } from "./atomic.ts";
 import type { PsRow } from "./bg-jobs.ts";
 import type { GhRunner } from "./productivity-github.ts";
 import { clockNear, databaseVerdict, type ReleaseRun } from "./productivity-release-log.ts";
-import { type AdmissionLease, ciOwner, type DeployLease, type ManagedSessionProcs, type QueuedBehindRelease, releaseLabelSha } from "./release-priority.ts";
+import { type AdmissionLease, ciOwner, type DeployLease, type ManagedSessionProcs, releaseLabelSha, type ReleaseInFlight } from "./release-priority.ts";
 
 /** Open PRs are read from GitHub at most this often (one `gh pr list`). */
 export const NOW_PRS_EVERY_MS = 3 * 60_000;
@@ -357,7 +357,7 @@ export function ciLocalNow(input: {
   lease: AdmissionLease | null | "unreadable";
   leaseSince: number | null;
   rows: readonly PsRow[] | null;
-  release: QueuedBehindRelease | null;
+  release: ReleaseInFlight | null;
   sessions?: readonly ManagedSessionProcs[];
   sessionInfo?: (sessionId: string) => NowCiSession | null;
 }): NowCi {
@@ -407,7 +407,7 @@ export interface NowInputs {
   /** The newest run in the live log, as fed so far. */
   tail: ReleaseTailState;
   /** release-priority's releaseInFlight now; "unknown" when the admission state could not be read. */
-  inFlight: QueuedBehindRelease | null | "unknown";
+  inFlight: ReleaseInFlight | null | "unknown";
   /** When the release in flight started: the deploy lease's or release-started.json's time. */
   releaseStartedAt: number | null;
   /** The PRs the release in flight carries (git); null unknown. */
@@ -489,7 +489,7 @@ export function buildNowStatus(input: NowInputs): NowServerStatus {
     const firstStep = tail?.firstClock !== null && tail?.firstClock !== undefined ? clockBefore(tail.firstClock, input.now) : null;
     const estimate = tail ? releaseEstimateNow(input.runs, tail, input.now) : { profile: null, estimateMs: null, remainingMs: null, samples: 0 };
     release = {
-      state: input.inFlight.state === "holding" ? "running" : "queued",
+      state: input.inFlight.state === "queued" ? "queued" : "running",
       ...(sha ? { sha } : {}),
       startedAt: firstStep ?? input.releaseStartedAt,
       phase: tail?.phase ?? (input.inFlight.state === "queued" ? "queued" : null),
@@ -548,7 +548,7 @@ export interface NowDeps {
   readDeployLease: () => DeployLease | null;
   /** When the lease was taken (its owner.pid file's time), ms. */
   leaseSince: () => number | null;
-  inFlight: (rows: readonly PsRow[]) => QueuedBehindRelease | null;
+  inFlight: (rows: readonly PsRow[]) => ReleaseInFlight | null;
   ps: () => Promise<PsRow[]>;
   gh: GhRunner;
   git: (args: string[]) => Promise<string>;
@@ -684,7 +684,7 @@ export class NowStatusService {
     try { rows = deps.enabled ? await deps.ps() : null; } catch { rows = null; }
     let lease: AdmissionLease | null | "unreadable" = null;
     try { lease = deps.readLease(); } catch { lease = "unreadable"; }
-    let inFlight: QueuedBehindRelease | null | "unknown" = null;
+    let inFlight: ReleaseInFlight | null | "unknown" = null;
     try { inFlight = rows ? deps.inFlight(rows) : deps.enabled ? "unknown" : null; } catch { inFlight = "unknown"; }
     const ci = deps.enabled
       ? ciLocalNow({ lease, leaseSince: deps.leaseSince(), rows, release: inFlight === "unknown" ? null : inFlight, sessions: deps.sessions(), sessionInfo: deps.sessionInfo })
@@ -791,7 +791,7 @@ export class NowStatusService {
   }
 
   /** When the release in flight took the deploy, or the watcher started it (release-started.json). */
-  private releaseStartedAt(inFlight: QueuedBehindRelease, sha: string | null): number | null {
+  private releaseStartedAt(inFlight: ReleaseInFlight, sha: string | null): number | null {
     const deploy = this.deps.readDeployLease();
     if (deploy?.startedAt && (!sha || releaseLabelSha(deploy.label) === sha)) return deploy.startedAt * 1000;
     try {

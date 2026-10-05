@@ -13,8 +13,9 @@ import { waitForExit } from "./testing/cleanup.ts";
 // holding its own PR open; 8204 (#9350) idle too, but parked by the server
 // behind a release (resumeAfterTag, INSP-S r1 S-1); and a message for an app
 // session waiting for the Mac (screen locked). While a release is on its way
-// (the fixture's own deploy lease, held by this test's pid) nobody is told
-// to resume anything; once it is gone, the rows carry both signals and the
+// (the fixture's own machine and deploy leases, held by this test's pid) nobody
+// is told to resume anything; once it gives the machine back (its network
+// phase, deploy lease still held — R11 #2), the rows carry both signals and the
 // session's bot and the Chief are told, once — never about 8204. The waiting
 // step's next try is a day away, so this test never reaches the screen of
 // the Mac it runs on.
@@ -55,11 +56,16 @@ it("holds RETOMAR while a release is on its way or holds the session, then tells
       { ...base, id: "s9311", title: "9311 Chat no ticket", worktree: "w4", surface: "app", status: "running", lastActivityAt: now - 60_000, progressAt: now - 60_000,
         desktop: { marker: "OMBTEST001", turnsSeen: 1, localId: "local_0a0000ee-0000-4000-8000-000000000000", cliSessionId: "c", pending: { kind: "send", text: "segue", since: now - 12 * 60_000, attempts: 1, lastReason: "the screen is locked or the display is asleep", nextAttemptAt: now + 24 * 3_600_000 } } },
     ] }));
-    // a production release on its way: the fixture's HOME is its data dir, and this test's pid is alive
-    const deployLease = join(dataDir, ".nuria", "admission", "deploy-lease");
-    mkdirSync(deployLease, { recursive: true });
-    writeFileSync(join(deployLease, "owner.pid"), String(process.pid));
-    writeFileSync(join(deployLease, "label"), "release:production:d5bb1f70b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6");
+    // a production release on its way, holding the machine (its CPU phase) and the deploy lease:
+    // the fixture's HOME is its data dir, and this test's pid is alive
+    const releaseLabel = "release:production:d5bb1f70b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6";
+    for (const [dir, kind] of [["deploy-lease", null], ["lease", "release"]] as const) {
+      const path = join(dataDir, ".nuria", "admission", dir);
+      mkdirSync(path, { recursive: true });
+      writeFileSync(join(path, "owner.pid"), String(process.pid));
+      writeFileSync(join(path, "label"), releaseLabel);
+      if (kind) writeFileSync(join(path, "kind"), kind);
+    }
     await boot();
 
     // while it runs: no RETOMAR to anyone; the rows keep the mark, "on hold" (INSP-S r2 S2-3)
@@ -71,8 +77,11 @@ it("holds RETOMAR while a release is on its way or holds the session, then tells
     expect(existsSync(prompts) ? readFileSync(prompts, "utf8") : "").not.toContain("[Sessão para retomar]");
     expect(readFileSync(logPath, "utf8")).not.toContain("must be resumed");
 
-    // the release is gone: two to resume, the parked one still on hold (the server resumes it)
-    rmSync(join(dataDir, ".nuria"), { recursive: true, force: true });
+    // ADMISSION_DOWNGRADED … machine=released deploy=held (R11 #2): the release is in its network
+    // phase and the machine is free, so a session's ci:local runs at once — two to resume, the
+    // parked one still on hold (the server resumes it when the tag moves)
+    rmSync(join(dataDir, ".nuria", "admission", "lease"), { recursive: true, force: true });
+    await expect.poll(() => readFileSync(logPath, "utf8"), { timeout: 15_000, interval: 200 }).toContain("[cc-sessions] release hold: none (o release de produção d5bb1f70b está na fase de rede; o seu ci:local pode rodar)");
     await expect.poll(heldOf, { timeout: 15_000, interval: 200 }).toEqual({ s9052: "free", s9195: "free", s8204: "parked" });
     const rows = await sessionsOf(monitor.id);
     expect(rows.find((session) => session.sessionId === "s9052").resume).toMatchObject({ prs: [9332], why: "falhou: o turno passou de 45 minutos e foi parado", kind: "failed" });
