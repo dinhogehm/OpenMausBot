@@ -788,7 +788,9 @@ export class OwnWorktreeStore {
 
 export const OWN_BREAKER_FAILURES = 2;
 
-export interface OwnFailure { at: number; sessionId: string; title: string; folder: string; expected: string }
+/** `chip`: the session never opened — its worktree option read ON or
+ * unreadable, so nothing was typed (R12-1); `folder` is then empty. */
+export interface OwnFailure { at: number; sessionId: string; title: string; folder: string; expected: string; chip?: "on" | "unknown"; seen?: string }
 export interface OwnBreakerRepo { failures: OwnFailure[]; trippedAt?: number; itemId?: string }
 export interface OwnBreakerState { repos: Record<string, OwnBreakerRepo> }
 
@@ -818,7 +820,8 @@ export function rearmOwnBreaker(state: OwnBreakerState, repo: string): OwnBreake
 }
 
 /** What happened to one failure, in words: the app's own worktree inside or beside ours means its worktree option was on. */
-export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected">, repo: string): string {
+export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected" | "chip" | "seen">, repo: string): string {
+  if (failure.chip) return `a opção worktree estava ${failure.chip === "on" ? "LIGADA" : "ilegível"} na sessão nova${failure.seen ? ` (a tela mostrou: ${failure.seen.slice(0, 120)})` : ""}; nada foi colado — desligue-a antes de abrir sessão`;
   if (failure.folder.startsWith(`${failure.expected}/`)) return `o app criou uma worktree própria dentro da pasta do OMB (${failure.folder}): a opção worktree estava LIGADA`;
   if (failure.folder === repo) return "o app abriu na raiz do repositório, não na pasta do OMB";
   if (failure.folder.includes("/.claude/worktrees/")) return `o app abriu em outra worktree (${failure.folder}), não na do OMB: a opção worktree estava LIGADA, ou o app reaproveitou uma pasta`;
@@ -828,10 +831,15 @@ export function ownFailureCause(failure: Pick<OwnFailure, "folder" | "expected">
 /** The owner's item when the breaker trips. */
 export function ownBreakerItem(repo: string, failures: readonly OwnFailure[]): { title: string; why: string; steps: Array<{ text: string }> } {
   const name = basename(repo);
+  const chipOnly = failures.every((each) => each.chip);
   return {
-    title: `O app Claude abriu ${failures.length} sessões de ${name} fora da worktree que o servidor criou: deixe a opção worktree DESLIGADA para sessões novas`,
+    title: chipOnly
+      ? `O app Claude abriu ${failures.length} sessões de ${name} com a opção worktree LIGADA ou ilegível: desligue-a antes de abrir sessão (o servidor já cria a pasta)`
+      : `O app Claude abriu ${failures.length} sessões de ${name} fora da worktree que o servidor criou: deixe a opção worktree DESLIGADA para sessões novas`,
     why: [
-      `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app. As últimas ${failures.length} não ficaram nela e pararam no Passo 0, sem mexer em nada:`,
+      chipOnly
+        ? `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app, e só com a opção worktree desligada. Nas últimas ${failures.length}, a opção estava ligada ou não deu para lê-la, e nada foi colado:`
+        : `As sessões novas de ${name} abrem numa worktree que o servidor cria, pelo link do próprio app. As últimas ${failures.length} não ficaram nela (ou nem abriram, com a opção worktree ligada), sem mexer em nada:`,
       ...failures.map((each) => `- "${each.title.slice(0, 60)}": ${ownFailureCause(each, repo)}`),
       "Até você resolver este item, as sessões novas vão pelo jeito antigo (Nova sessão), com o 409 e o gesto de sempre. As worktrees criadas ficam como estão (o servidor nunca remove) e aparecem no relatório de disco.",
     ].join("\n"),

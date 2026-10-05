@@ -64,6 +64,26 @@ describe("what the owner reads on the lot's chips", () => {
 // R10-dispatch R10-2: the unblock item asks the gesture that fits what the
 // records show now, is rewritten in place when it does not (the legacy o8
 // had only a title), and "Feito, conferir" says why when it did not work.
+describe("the old way's items where the server makes the worktrees (R12-1)", () => {
+  it("never ask to turn the worktree option on: the server's path needs it OFF, and the breaker's item is what ends it", () => {
+    const item = appUnblockPending("nuria-platform", "root", true);
+    const text = [item.title, item.why, ...item.steps.map((step) => step.text), ...item.options.map((option) => option.reply)].join("\n");
+    // an order to turn it on, anywhere ("Não ligue a opção" is the opposite and allowed)
+    expect(text).not.toMatch(/LIGUE|LIGAR|com a worktree ligada|(?<!Não )ligue a opção/);
+    expect(text).toContain("Não ligue a opção");
+    expect(item.title).toContain("Deixe a opção worktree DESLIGADA");
+    expect(item.steps.map((step) => step.text).join(" ")).toContain('resolva o item "O app Claude abriu … sessões de nuria-platform …"');
+    const still = appStillBlockedText({ kind: "root", last: { folder: "/r/nuria-platform", title: "9311 x" } }, "nuria-platform", true);
+    expect(still).toContain("Não ligue a opção");
+    expect(still).not.toMatch(/estava ligada/);
+    // the item of the old gesture is rewritten to this one in place
+    expect(staleUnblockItem(appUnblockPending("nuria-platform", "root"), "nuria-platform", "root", [], true)).toEqual(item);
+    expect(staleUnblockItem(item, "nuria-platform", "root", [], true)).toBeNull();
+    // without the server's worktrees, the old remedy is unchanged
+    expect(appUnblockPending("nuria-platform", "root").steps.map((step) => step.text).join(" ")).toContain("LIGUE a opção worktree");
+  });
+});
+
 describe("the owner's unblock-the-app item", () => {
   it("asks root + worktree OFF for a reused folder, worktree ON when the server's session landed in the root — same answers", () => {
     const reused = appUnblockPending("nuria-platform");
@@ -196,7 +216,7 @@ describe("the app flapping between the two blocks", () => {
     expect(item.why.split("\n")).toEqual([
       "O servidor parou de pedir gestos de destravar: cada um trouxe o outro bloqueio (2 trocas).",
       `02/10, 10:07: a sessão "Aumentar usuários Piperun para 50" caiu numa worktree que outras já usavam (${F}), pede raiz com a worktree desligada`,
-      "02/10, 11:07: a sessão do servidor \"9311 Chat no ticket\" caiu na raiz, sem worktree (/r), pede a worktree ligada",
+      "02/10, 11:07: a sessão do servidor \"9311 Chat no ticket\" caiu na raiz, sem worktree (/r), aberta com a opção worktree desligada",
       `02/10, 12:07: a sessão "Aumentar usuários Piperun para 50" caiu numa worktree que outras já usavam (${F}), pede raiz com a worktree desligada`,
       expect.stringContaining("Diagnóstico: o app não está abrindo sessões em pasta própria de forma confiável"),
     ]);

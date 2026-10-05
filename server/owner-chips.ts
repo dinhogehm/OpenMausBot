@@ -59,8 +59,10 @@ export const APP_UNBLOCK_CHECK_LABEL = "Feito, conferir";
  * blocked: what the server sees, and the likely slip — the item stays
  * open, nothing goes to the bot (R10-dispatch R10-2: "fiz e não destravou"
  * had no way to be said, nor to be told). */
-export function appStillBlockedText(block: { kind: "reused" | "root" | "flapping"; last: { folder: string; title?: string } }, repoName: string): string {
+export function appStillBlockedText(block: { kind: "reused" | "root" | "flapping"; last: { folder: string; title?: string } }, repoName: string, ownPath = false): string {
   const which = block.last.title ? ` ("${block.last.title}")` : "";
+  // with the server's own worktrees the option stays OFF: the root is the old way's cost, not a gesture to make (R12-1)
+  if (block.kind === "root" && ownPath) return `Ainda não destravou: a sessão mais recente do app ainda é a do servidor${which}, na raiz de ${repoName}, porque o jeito antigo com a opção worktree desligada cai na raiz. Não ligue a opção: neste repositório o servidor cria a pasta de cada sessão e precisa dela DESLIGADA. Resolva o item "O app Claude abriu … sessões …": o servidor volta a abrir as sessões na pasta dele e fecha este item.`;
   if (block.kind === "flapping") return `Ainda não destravou, e não adianta repetir: o app alternou entre reaproveitar worktrees de ${repoName} e abrir sessões na raiz, e cada gesto trouxe o outro bloqueio. O servidor parou de pedir gestos; este item agora diz o que os registros mostram e o teste guiado a fazer.`;
   return block.kind === "reused"
     ? `Ainda não destravou: a sessão mais recente do app${which} está em ${block.last.folder}, uma worktree que outras sessões já usaram. Se você acabou de enviar a mensagem, espere alguns segundos e confira de novo (o app só grava a sessão depois do primeiro envio). Se a sua sessão abriu numa pasta de .claude/worktrees, a worktree estava ligada: refaça com ela desligada, na raiz de ${repoName}.`
@@ -74,7 +76,7 @@ export function appStillBlockedText(block: { kind: "reused" | "root" | "flapping
  * root, worktree OFF, ends the reuse), the same the 409 asks the bot for
  * (claude-desktop.ts reusedFolderRefusal); "seguir no terminal" is kept by
  * the server for 24 h, so the promise is true (INSP-J r1 #8). */
-export const appUnblockPending = (repoName: string, kind: "reused" | "root" = "reused") => kind === "root" ? appWorktreeOnPending(repoName) : ({
+export const appUnblockPending = (repoName: string, kind: "reused" | "root" = "reused", ownPath = false) => kind === "root" ? (ownPath ? appRootWithOwnPathPending(repoName) : appWorktreeOnPending(repoName)) : ({
   title: appUnblockTitle(repoName),
   why: `O app Claude está reaproveitando worktrees de ${repoName}, então o servidor não cria sessões nele: até você destravar, as sessões dos bots rodam no terminal, sem aparecer no app.`,
   steps: [
@@ -109,11 +111,29 @@ const appWorktreeOnPending = (repoName: string) => ({
   ],
 });
 
+/** The "root" item where the server makes the sessions' worktrees (lote X):
+ * that path needs the worktree option OFF, so the item never asks to turn
+ * it on — the old way landing in the root is the cost of the breaker being
+ * tripped, and what ends it is the breaker's own item (R12-1). Same key. */
+const appRootWithOwnPathPending = (repoName: string) => ({
+  title: `Deixe a opção worktree DESLIGADA no app e resolva o item do OMB sobre sessões de ${repoName} fora da pasta (o jeito antigo está caindo na raiz; até lá as sessões vão para o terminal)`,
+  why: `Em ${repoName} o servidor cria a pasta de cada sessão e abre o app nela; para isso a opção worktree do app tem de ficar DESLIGADA. Esse caminho está suspenso (o disjuntor desarmou depois de sessões fora da pasta), e o jeito antigo, com a opção desligada, cai na raiz do repositório. Não ligue a opção: isso faria o app criar a própria worktree também no caminho do servidor.`,
+  steps: [
+    { text: "No app Claude, abra uma sessão nova (Arquivo → Nova sessão) e confira que a opção worktree está DESLIGADA; feche sem enviar." },
+    { text: `Em "Precisa de você", resolva o item "O app Claude abriu … sessões de ${repoName} …": o servidor volta a abrir as sessões na pasta que ele cria.` },
+    { text: "Pronto: com o caminho do servidor de volta, este item se fecha sozinho." },
+  ],
+  options: [
+    { label: APP_UNBLOCK_CHECK_LABEL, reply: `Deixei a opção worktree desligada e resolvi o item do OMB sobre ${repoName}. O servidor conferiu.`, recommended: true as const, why: "Leva um minuto e as sessões dos bots voltam a aparecer no app, onde você as acompanha." },
+    { label: APP_UNBLOCK_DECLINE_LABEL, reply: `Não vou mexer no app agora: siga com as sessões de ${repoName} no terminal. O servidor não me pede isso de novo nas próximas 24 h.` },
+  ],
+});
+
 /** An open unblock item while the app is still not free: the item it
  * should be now, or null when it already asks the gesture that fits
  * `kind` (R10-dispatch R10-2: the legacy o8 had only a title). */
-export function staleUnblockItem(item: { why?: string; steps?: ReadonlyArray<{ text: string }> }, repoName: string, kind: "reused" | "root" | "flapping", seen: readonly FolderBlockSeen[] = []): ReturnType<typeof appUnblockPending> | null {
-  const want = kind === "flapping" ? appFlappingPending(repoName, seen) : appUnblockPending(repoName, kind);
+export function staleUnblockItem(item: { why?: string; steps?: ReadonlyArray<{ text: string }> }, repoName: string, kind: "reused" | "root" | "flapping", seen: readonly FolderBlockSeen[] = [], ownPath = false): ReturnType<typeof appUnblockPending> | null {
+  const want = kind === "flapping" ? appFlappingPending(repoName, seen) : appUnblockPending(repoName, kind, ownPath);
   const said = (steps: ReadonlyArray<{ text: string }> | undefined) => (steps ?? []).map((step) => step.text).join("\n");
   return item.why === want.why && said(item.steps) === said(want.steps) ? null : want;
 }
@@ -174,7 +194,8 @@ export function noteFolderBlock(state: FolderFlapState, block: Omit<FolderBlockS
 const brt = (at: number) => new Date(at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 const blockPt = (each: FolderBlockSeen) => each.kind === "reused"
   ? `${brt(each.at)}: a sessão${each.title ? ` "${each.title}"` : ""} caiu numa worktree que outras já usavam (${each.folder}), pede raiz com a worktree desligada`
-  : `${brt(each.at)}: a sessão do servidor${each.title ? ` "${each.title}"` : ""} caiu na raiz, sem worktree (${each.folder}), pede a worktree ligada`;
+  // a fact of what happened, never a gesture to make (the server's own worktrees need the option off: R12-1, INSP-R12a X3-6)
+  : `${brt(each.at)}: a sessão do servidor${each.title ? ` "${each.title}"` : ""} caiu na raiz, sem worktree (${each.folder}), aberta com a opção worktree desligada`;
 
 /** What the server answers the 409 with once it stopped asking gestures. */
 export function flappingRefusal(seen: readonly FolderBlockSeen[], repoName: string, fromQueue = false): string {

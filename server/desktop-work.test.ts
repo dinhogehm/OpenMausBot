@@ -1080,7 +1080,9 @@ describe("a new session the app lands in a folder that is not its own", () => {
     expect(session.status).toBe("failed");
     expect(session.desktop!.wrongFolder).toBe("/Users/o/Projetos/nuria-platform");
     expect(session.lastError).toContain("the worktree option off");
-    expect(session.lastError).toContain("New sessions wait until the owner turns the worktree back on");
+    // never "turn the worktree on": where the server makes the worktrees the option stays off (R12-1)
+    expect(session.lastError).toContain("New sessions wait until the owner unblocks the app (the 409 says how — where the server makes the sessions' worktrees, the option stays off)");
+    expect(session.lastError).not.toMatch(/turns? the worktree (?:back )?on/);
     expect(sessionErrorPt(session.lastError!)).toContain("a sessão abriu na raiz, sem worktree");
   });
 });

@@ -6,7 +6,7 @@
 import { BOOT_CLOUD_SECRETS } from "./cloud-secrets-boot.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -475,7 +475,7 @@ import { peerDeliveryReceipt, type PeerDeliveryReceipt } from "./peer-delivery.t
 import { botMarkPattern, botSlug, selfWriteOf } from "./watch-echo.ts";
 import { citedRefs, parseRefState, RefLookups, refStateArgs, type RefState, sessionForNumber, staleRefsLine, watchSlug } from "./watch-reason-refs.ts";
 import { CcStartQueue, drainStartQueue, priorityLabel, queueListing, slotFreeForWork, START_QUEUE_MAX, startGate, startPriority, type StartResult } from "./cc-start-queue.ts";
-import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
+import { archiveCleanupNote, codexRolloutFolders, conversationFolders, diskAlertText, folderActivity, parseWorktreeList, planArchivedWorktree, planNestedWorktrees, planReleasedWorktrees, releasedPlanLine, releasedScopeLine, scanTaskWorkspaces, type StaleFolder, staleFoldersReport, staleTaskWorkspaces, worktreeLastActivity } from "./nested-worktrees.ts";
 import { exitWithParent } from "./parent-watch.ts";
 import { peerProvenanceNote, withPeerProvenance } from "./peer-provenance.ts";
 import { decideRoomPost, emptyRoomPostBudget, type RoomPostAttempt, type RoomPostBudget } from "./room-post-budget.ts";
@@ -9691,17 +9691,34 @@ const ownBreaker = (() => {
 const ownPathActive = (repo: string) => ownWorktreesOn(repo) && !ownBreakerTripped(ownBreaker.get(), breakerRepo(repo));
 /** A session of this path landed elsewhere: counted; the 2nd in a row trips the breaker and asks the owner, once.
  * Kept by the repository's real path, the key ownPathActive reads (INSP-R11fix F-3). */
+/** Whether the server makes the sessions' worktrees for the repository of this name (its texts never ask to turn the worktree option on: R12-1). */
+const ownOnByName = (name: string) => {
+  const repos = [...new Set(ccLedger.all().map((session) => session.repo))].filter((repo) => basename(repo) === name);
+  // a repository with no session yet: the settings as they stand for any repository (on by default) — INSP-R12a X3-6
+  return repos.length ? repos.some(ownWorktreesOn) : ownWorktreesOn("");
+};
 function noteOwnWrongFolder(session: CcSession, folder: string): void {
+  noteOwnPathFailure(session, { folder }, `opened in ${folder} instead of ${session.desktop?.own?.path}`);
+}
+/** A create of this path given up because the new session's worktree option read ON or unreadable (R12-1): counted the same way. */
+function noteOwnChipRefused(session: CcSession, option: "on" | "unknown", seen?: string): void {
+  noteOwnPathFailure(session, { folder: "", chip: option, ...(seen ? { seen } : {}) }, `was given up: the new session's worktree option read ${option === "on" ? "ON" : "unreadable"}`);
+}
+function noteOwnPathFailure(session: CcSession, what: { folder: string; chip?: "on" | "unknown"; seen?: string }, said: string): void {
   const own = session.desktop?.own;
   if (!own) return;
   const repo = breakerRepo(session.repo);
-  const { state, tripped } = noteOwnFailure(ownBreaker.get(), repo, { at: Date.now(), sessionId: session.id, title: session.title, folder, expected: own.path });
+  const { state, tripped } = noteOwnFailure(ownBreaker.get(), repo, { at: Date.now(), sessionId: session.id, title: session.title, expected: own.path, ...what });
   ownBreaker.set(state);
-  console.log(`[own-worktrees] session ${session.id} opened in ${folder} instead of ${own.path} (${state.repos[repo]!.failures.length} in a row)${tripped ? ": breaker tripped, new sessions go the old way until a create works or the owner resolves the item" : ""}`);
+  console.log(`[own-worktrees] session ${session.id} ${said} (${state.repos[repo]!.failures.length} in a row)${tripped ? ": breaker tripped, new sessions go the old way until a create works or the owner resolves the item" : ""}`);
   if (!tripped) return;
   const bot = store.bot(session.ownerBotId);
   const thread = bot ? ownerChannelOf(bot.id) ?? sessionReportThread(session) : null;
-  if (!bot || !thread || !store.taskByThread(bot.id, thread)) return;
+  if (!bot || !thread || !store.taskByThread(bot.id, thread)) {
+    // tripped all the same; only a create that works rearms it now (R12 INFO)
+    console.warn(`[own-worktrees] breaker of ${repo} tripped, but the owner could not be asked: ${!bot ? `the bot ${session.ownerBotId} no longer exists` : "no open conversation of its bot holds the item"}`);
+    return;
+  }
   const item = autonomy.addOwnerPending(bot.id, thread, { ...ownBreakerItem(repo, state.repos[repo]!.failures), key: `${OWN_BREAKER_KEY}${repo}` });
   ownBreaker.set({ repos: { ...ownBreaker.get().repos, [repo]: { ...ownBreaker.get().repos[repo]!, itemId: item.id } } });
   refreshBotRow(bot.id);
@@ -9753,7 +9770,7 @@ function classicAppRefusal(repo: string, fromQueue = false): string | null {
   const block = appFolderBlock();
   if (!block) return null;
   return block.kind === "flapping" ? flappingRefusal(block.seen, basename(repo), fromQueue)
-    : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(repo), fromQueue) : rootFolderRefusal(block.last, basename(repo), fromQueue);
+    : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(repo), fromQueue) : rootFolderRefusal(block.last, basename(repo), fromQueue, ownWorktreesOn(repo));
 }
 /** Make the session's planned worktree, its alias for the app, and clone its caches from the seed. */
 async function prepareOwnWorktree(session: CcSession): Promise<Awaited<ReturnType<NonNullable<DesktopWorkDeps["own"]>["prepare"]>>> {
@@ -9873,6 +9890,10 @@ const desktopWork: DesktopWorkDeps = {
   hookBlock: (sessionId) => lastHookBlock(DUAL_DECISIONS_LOG, sessionId),
   liveWorktrees: () => liveWorktreeNames(undefined, true),
   baseBranch: (session) => repoBaseBranch(session.repo),
+  rootHead: (session) => gitLine(session.repo, ["rev-parse", "--abbrev-ref", "HEAD"]),
+  // the worktrees git lists for the repository (a "trust this workspace" is clicked only for one of ours)
+  registeredWorktrees: (session) => parseWorktreeList(gitLine(session.repo, ["worktree", "list", "--porcelain"]) ?? "").map((entry) => entry.path),
+  branches: (session) => (gitLine(session.repo, ["for-each-ref", "--count=500", "--format=%(refname:short)", "refs/heads"]) ?? "").split("\n").filter(Boolean),
   // never a session the server opened (a failed one in the root is the newest there — INSP-S r1 S-3)
   rootAnchor: (session) => rootAnchorSession(session.repo, undefined, ourAppLocalIds()),
   folderUsers: (folder, exceptLocalId) => recordsUsingFolder(folder, exceptLocalId, undefined, true).map((record) => record.title ?? record.sessionId),
@@ -9889,6 +9910,7 @@ const desktopWork: DesktopWorkDeps = {
     },
     classicBlocked: (session) => classicAppRefusal(session.repo),
     wrongFolder: noteOwnWrongFolder,
+    chipRefused: noteOwnChipRefused,
     adopted: (session) => rearmOwnPath(session.repo, `session ${session.id} opened in a worktree of its own`),
   },
 };
@@ -9896,6 +9918,15 @@ const desktopWork: DesktopWorkDeps = {
 // App sessions an older build failed over a screen step are alive in the
 // app: back to idle on load, so they take messages again.
 if (process.platform === "darwin") reviveScreenFailures(desktopWork);
+
+/** `git <args>` in the repository, its output trimmed; null when git fails. */
+function gitLine(repo: string, args: string[]): string | null {
+  try {
+    return String(execFileSyncCc("git", ["-C", repo, ...args], { stdio: "pipe", timeout: 15_000, env: { ...process.env, PATH: augmentedPath() } })).trim();
+  } catch {
+    return null;
+  }
+}
 
 /** The branch origin/HEAD points to ("main"), what a new app session must show. */
 function repoBaseBranch(repo: string): string {
@@ -10025,21 +10056,19 @@ async function cleanReleasedWorktrees(): Promise<void> {
       if (plan.candidates.length) lines.push(`Para remover (sem --force; confira antes): ${plan.candidates.map((candidate) => candidate.command).join(" ; ")}`);
     }
     // the task-workspaces of conversations no longer open, idle for days
-    const workspaces: Array<{ path: string; lastActivity: number | null; note?: string }> = [];
-    try {
-      for (const bot of readdirSync(TASK_WORKSPACES_DIR)) {
-        const botDir = join(TASK_WORKSPACES_DIR, bot);
-        let threads: string[] = [];
-        try { threads = readdirSync(botDir); } catch { continue; }
-        for (const thread of threads) {
-          const path = join(botDir, thread);
-          const at = existsSync(join(path, ".git")) ? activity(path) ?? mtime(path) : mtime(path);
-          const note = quietWorkspaces.get(path);
-          workspaces.push({ path, lastActivity: at, ...(note ? { note } : {}) });
-        }
-      }
-    } catch { /* no task-workspaces here */ }
-    stale.push(...staleTaskWorkspaces(workspaces, { inUse: inUseForDisk, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath }));
+    const workspaces = scanTaskWorkspaces(TASK_WORKSPACES_DIR, {
+      list: (dir) => readdirSync(dir),
+      // the newest entry one level below, not only the top's mtime (INSP-R12a R12b-3)
+      // (lstat: a link is not followed into another tree; unknown past the budget is never "idle")
+      activity: (path) => (existsSync(join(path, ".git")) ? activity(path) : null) ?? folderActivity(path, {
+        list: (dir) => readdirSync(dir),
+        stat: (each) => { try { const found = lstatSync(each); return { mtimeMs: found.mtimeMs, dir: found.isDirectory() }; } catch { return null; } },
+      }),
+      notes: quietWorkspaces,
+    });
+    // an app session in "/" or the home holds none of them (R12-resilience D3);
+    // a live process working inside one holds it, as for the worktrees (INSP-R12a R12b-3)
+    stale.push(...staleTaskWorkspaces(workspaces, { inUse: inUseForDisk, processCwds: cwds, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath, root: TASK_WORKSPACES_DIR, home: homedir() }));
     // the server's own worktrees of failed sessions (or never used): their own lines, "da sessão falhada …" (R11-dispatch R11-1)
     const left = leftOwnWorktrees(ccLedger.all(), existsSync);
     const leftPaths = new Set(left.map((each) => canonPath(each.path)));
@@ -10665,7 +10694,7 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
       // only the owner can unblock it: one item for them, however many starts hit this (R9-dispatch R9-2)
       const asked = askOwnerToUnblockApp(bot, threadId, input.repo, block);
       const refusal = block.kind === "flapping" ? flappingRefusal(block.seen, basename(input.repo), fromQueue)
-        : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(input.repo), fromQueue) : rootFolderRefusal(block.last, basename(input.repo), fromQueue);
+        : block.kind === "reused" ? reusedFolderRefusal(block.last, basename(input.repo), fromQueue) : rootFolderRefusal(block.last, basename(input.repo), fromQueue, ownWorktreesOn(input.repo));
       return { status: 409, body: { error: `${refusal}${asked ? ` O pedido ao dono já está em "Precisa de você" (${asked}): não abra outro item para isso.` : ""}` }, retry: fromQueue };
     }
     const session = ccLedger.create({ id: appId, ownerBotId: bot.id, ownerThreadId: threadId, title: uniqueSessionTitle(ccLedger.all(), input.title, appId), repo: ownPlan ? realRepo : input.repo, permissionMode: input.permissionMode, surface: "app", desktop: { marker: newMarker(), turnsSeen: 0 } });
@@ -10757,7 +10786,7 @@ function askOwnerToUnblockApp(bot: BotRecord, threadId: string, repo: string, bl
     console.log(`[claude-desktop] the owner chose to keep ${name}'s sessions in the terminal until ${new Date(declinedUntil).toISOString()}: not asked again`);
     return null;
   }
-  const want = block?.kind === "flapping" ? appFlappingPending(name, block.seen) : appUnblockPending(name, block?.kind ?? "reused");
+  const want = block?.kind === "flapping" ? appFlappingPending(name, block.seen) : appUnblockPending(name, block?.kind ?? "reused", ownWorktreesOn(repo));
   const item = autonomy.addOwnerPending(bot.id, thread, { ...want, key: `${APP_UNBLOCK_KEY}${name}` });
   refreshBotRow(bot.id);
   return item.id;
@@ -10828,7 +10857,8 @@ function settleAppUnblock(): void {
   const block = appFolderBlock();
   if (block) {
     for (const item of open) {
-      const want = staleUnblockItem(item, item.key!.slice(APP_UNBLOCK_KEY.length), block.kind, block.kind === "flapping" ? block.seen : []);
+      const name = item.key!.slice(APP_UNBLOCK_KEY.length);
+      const want = staleUnblockItem(item, name, block.kind, block.kind === "flapping" ? block.seen : [], ownOnByName(name));
       if (!want) continue;
       autonomy.addOwnerPending(item.botId, item.threadId, { ...want, key: item.key! });
       refreshBotRow(item.botId);
@@ -23754,14 +23784,14 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (block) {
             const name = item.key.slice(APP_UNBLOCK_KEY.length);
             // the item asks, from now on, the gesture that fits what the records show
-            const want = staleUnblockItem(item, name, block.kind, block.kind === "flapping" ? block.seen : []);
+            const want = staleUnblockItem(item, name, block.kind, block.kind === "flapping" ? block.seen : [], ownOnByName(name));
             if (want) {
               autonomy.addOwnerPending(bot.id, item.threadId, { ...want, key: item.key });
               refreshBotRow(bot.id);
             }
             // the flip: the diagnosis itself, not only "it changed"
             const diagnosis = block.kind === "flapping" ? `\n\n${(want ?? staleUnblockItem({}, name, "flapping", block.seen))?.why ?? ""}` : "";
-            return json(res, 409, { error: `${appStillBlockedText(block, name)}${diagnosis}`, code: "app_still_blocked" });
+            return json(res, 409, { error: `${appStillBlockedText(block, name, ownOnByName(name))}${diagnosis}`, code: "app_still_blocked" });
           }
         }
         // "seguir no terminal" is kept: the server does not recreate the item for 24 h (INSP-J r1 #8) — and it closes it

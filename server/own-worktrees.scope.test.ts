@@ -1,4 +1,5 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync } from "node:fs";
+import { createRequire } from "node:module";
 import { userInfo } from "node:os";
 import path, { join } from "node:path";
 import { runInNewContext } from "node:vm";
@@ -82,9 +83,12 @@ function installedScope(): ((cwd: string) => boolean) | null {
   if (!existsSync(hook)) return null;
   const source = readFileSync(hook, "utf8");
   const root = /^const CODE_ROOT = .+;$/m.exec(source)?.[0];
-  const inCode = /^\s*const inCode = (.+);$/m.exec(source)?.[1];
-  if (!root || !inCode) return null;
-  return (cwd: string) => runInNewContext(`${root}\n(${inCode})`, { path, os: { homedir: () => HOME }, cwd }) as boolean;
+  // its scope block as written there, from the cwd it reads to inCode (v2.5 also resolves the realpath)
+  const block = /^\s*const cwd = String\(input\.cwd[\s\S]*?^\s*const inCode = .+;$/m.exec(source)?.[0];
+  if (!root || !block) return null;
+  // the realpath it uses comes from its rules module (only its exports: importing it runs nothing)
+  const rules = createRequire(hook)(join(HOME, ".laya", "hooks", "dual-review-rules.cjs")) as { realpath?: (path: string) => string | null };
+  return (cwd: string) => runInNewContext(`${root}\n${block}\ninCode`, { path, os: { homedir: () => HOME }, input: { cwd }, realpath: rules.realpath ?? (() => null) }) as boolean;
 }
 
 describe("the alias and the review hook's scope", () => {

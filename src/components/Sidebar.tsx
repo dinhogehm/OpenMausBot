@@ -47,6 +47,7 @@ import { cn } from "@/lib/cn";
 import { useHeldMenuMotion, useMenuMotion } from "./MenuMotion";
 import { lastNonReceipt } from "@/lib/receipts";
 import { t } from "@/lib/i18n";
+import { shownTaskTitle, titleMatches } from "@/lib/thread-title";
 import { isRoutineProblemRun } from "@/lib/routines";
 import type { LocaleKey } from "@/locales";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -1848,10 +1849,10 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
         b.name.toLowerCase().includes(q) ||
         (b.title ?? "").toLowerCase().includes(q) ||
         preview(b).toLowerCase().includes(q) ||
-        b.tasks?.some((task) => !task.routineRunId && task.title.toLowerCase().includes(q)) ||
+        b.tasks?.some((task) => !task.routineRunId && titleMatches(task, q)) ||
         b.projects?.some((folder) => folder.name.toLowerCase().includes(q)),
     );
-  const visibleGroups = state.groups.filter((g) => !q || g.name.toLowerCase().includes(q) || g.tasks?.some((task) => task.title.toLowerCase().includes(q)));
+  const visibleGroups = state.groups.filter((g) => !q || g.name.toLowerCase().includes(q) || g.tasks?.some((task) => titleMatches(task, q)));
   const {
     unsectionedChief,
     pinnedBots,
@@ -2288,7 +2289,7 @@ export function Sidebar({ open, onClose, collapseToIcons = false }: {
                     : [];
             const collapsed = sectionCollapsed(id);
             const queued = collapsed ? [...sectionChiefItems, ...sectionBotItems].flatMap((bot) =>
-              sidebarBotActivityTasks(bot, state.pendingQueued).filter((task) => task.queued).map((task) => `${bot.name}: ${task.title}`)) : [];
+              sidebarBotActivityTasks(bot, state.pendingQueued).filter((task) => task.queued).map((task) => `${bot.name}: ${shownTaskTitle(task)}`)) : [];
             const attention = collapsed
               ? sidebarSectionAttention(
                   [...sectionChiefItems, ...sectionBotItems],

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { t } from "@/lib/i18n";
+import { setLocale, t } from "@/lib/i18n";
+import { titleMatches } from "@/lib/thread-title";
 import {
   TASK_PICKER_DISMISS_MS,
   filterTasks,
@@ -97,5 +98,20 @@ describe("filterTasks", () => {
 
   it("returns nothing when nothing matches", () => {
     expect(filterTasks(tasks, "zzzz")).toEqual([]);
+  });
+
+  it("finds a handoff by the title it shows and by the one stored (R12-visual N21)", () => {
+    setLocale("pt-br");
+    try {
+      const handoffs = [{ title: "@Chief of Staff · work" }, { title: "Clean up" }, { title: "@Lead PRODEV · parallel work" }];
+      expect(filterTasks(handoffs, "pedido").map((task) => task.title)).toEqual(["@Chief of Staff · work"]);
+      expect(filterTasks(handoffs, "trabalho paralelo").map((task) => task.title)).toEqual(["@Lead PRODEV · parallel work"]);
+      // the raw text still finds it
+      expect(filterTasks(handoffs, "@chief").map((task) => task.title)).toEqual(["@Chief of Staff · work"]);
+      expect(filterTasks(handoffs, "· work").map((task) => task.title)).toEqual(["@Chief of Staff · work"]);
+      expect(titleMatches({ title: "@Chief of Staff · work" }, "pedido de chief")).toBe(true);
+    } finally {
+      setLocale("en");
+    }
   });
 });

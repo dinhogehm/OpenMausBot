@@ -277,6 +277,11 @@ export interface CcDesktopPending {
   helperFailures?: number;
   /** archive: clicked; the app's record must say archived by then. */
   verifyUntil?: number;
+  /** create in the server's worktree: the new session's worktree option read ON or unreadable (the last time), and what the screen showed. */
+  worktreeOption?: "on" | "unknown";
+  worktreeSeen?: string;
+  /** create: since when the app asks to trust the workspace, waiting for the person. */
+  trustSince?: number;
   /** archive: clicks that the app's record did not confirm. */
   archiveTries?: number;
 }
