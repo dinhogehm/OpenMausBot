@@ -4,9 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
 import { answerNotDelivered, answerStuck, answerTime, awaitingBot, AWAITING_MAX_MS, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, nextAwaitingChange, sortNeedsYou } from "@/lib/needs-you";
-import { decisionReply, remindOwnerPending } from "@/lib/needs-you-actions";
+import { decisionReply, remindOwnerPending, replyToOwnerPending } from "@/lib/needs-you-actions";
 import { CHOICE_REPLACED } from "../../shared/owner-pending-title";
-import { awaitingLine, decisionNotice, remindNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
+import { awaitingLine, decisionNotice, remindNotice, replyNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
 
 // Invented bots and items: no client data.
 const now = new Date(2026, 9, 2, 15, 40).getTime();
@@ -618,6 +618,29 @@ describe("keys on the resolution screen", () => {
     const inline = tree.filter((node) => node.props["data-placement"] === "inline" && "data-resolver-option" in node.props);
     expect(inline).toHaveLength(2);
     expect(inline.map((node) => node.props["aria-pressed"])).toEqual([undefined, undefined]);
+  });
+
+  // INSP-R12F r6 D2: the server took a repeat once and said so; the screen showed "Enviado" as if sent again
+  it("shows the server's notice, in the neutral tone, when the same answer had already gone", async () => {
+    const message = "Essa mesma resposta já foi enviada há 12 s; não mandei de novo.";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, duplicate: true, message, resolved: 0 }), { status: 200 })));
+    const item = items.find((each) => each.pendingId === "o1")!;
+    const dispatch = vi.fn();
+    const decided = await replyToOwnerPending(item, decisionReply(item, 0), dispatch);
+    expect(decided).toEqual({ resolved: 0, info: message });
+    expect(decisionNotice(item, 0, decided)).toBe(message);
+    const typed = await replyToOwnerPending(item, { text: "pode remover todas", resolve: false }, dispatch);
+    expect(replyNotice(item, false, typed)).toBe(message);
+    expect(dispatch).not.toHaveBeenCalled();
+    // a real send still says "Enviado…"
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true, resolved: 0 }), { status: 202 })));
+    const sent = await replyToOwnerPending(item, { text: "pode remover todas", resolve: false }, dispatch);
+    expect(sent).toEqual({ resolved: 0 });
+    expect(replyNotice(item, false, sent)).toContain("Chief of Staff");
+    expect(replyNotice(item, false, sent)).not.toBe(message);
+    // the notice is the neutral one, like "ainda está na fila"
+    const shown = view({ selectedKey: keyOf("o1"), notice: message, noticeTone: "info" });
+    expect(shown.find("data-resolver-notice")!.props["data-tone"]).toBe("info");
   });
 
   it("says a server item the choice closed is resolved, never 'aguardando' (N4)", () => {

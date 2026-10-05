@@ -24,12 +24,14 @@ export class AnswerDedupe {
     this.now = now;
   }
 
-  /** The first of its kind in the window goes; a repeat is told what became of the first. */
-  claim(key: string): { ok: true } | { ok: false; sent: boolean; agoMs: number } {
+  /** The first of its kind in the window goes; a repeat is told what became
+   * of the first — unless `failed` says the first's delivery failed since it
+   * was taken (failedSince): then this one goes. */
+  claim(key: string, failed?: (since: number) => boolean): { ok: true } | { ok: false; sent: boolean; agoMs: number } {
     const at = this.now();
     for (const [each, seen] of this.seen) if (at - seen.at > this.windowMs) this.seen.delete(each);
     const first = this.seen.get(key);
-    if (first) return { ok: false, sent: first.sent, agoMs: at - first.at };
+    if (first && !failed?.(first.at)) return { ok: false, sent: first.sent, agoMs: at - first.at };
     this.seen.set(key, { at, sent: false });
     return { ok: true };
   }
@@ -44,6 +46,29 @@ export class AnswerDedupe {
   release(key: string): void {
     this.seen.delete(key);
   }
+}
+
+/** Calls `done` with the status the handler itself answers with, when it
+ * writes it — not when the client goes away: an app that aborts at 300 ms
+ * while the handler still delivers at 1.5 s must not free the key (INSP-R12F
+ * r6 D1). Writing to a closed socket still calls writeHead. Once only. */
+export function onAnswered<T extends { writeHead: (status: number, ...rest: any[]) => unknown }>(res: T, done: (status: number) => void): void {
+  const original = res.writeHead.bind(res);
+  let told = false;
+  res.writeHead = ((status: number, ...rest: any[]) => {
+    if (!told) {
+      told = true;
+      done(status);
+    }
+    return original(status, ...rest);
+  }) as T["writeHead"];
+}
+
+/** The first answer was queued (202) and its delivery failed afterwards: the
+ * item's history says so, with an error, after the first was taken — the
+ * same answer is free again (INSP-R12F r6 D2). */
+export function failedSince(history: ReadonlyArray<{ at: number; kind: string; label?: string; text: string; error?: string }> | undefined, answer: { kind: string; label?: string; text: string }, since: number): boolean {
+  return Boolean(history?.some((each) => each.at >= since && each.error && each.kind === answer.kind && (each.label ?? "") === (answer.label ?? "") && each.text === answer.text));
 }
 
 /** What the person reads when a repeat is dropped. */

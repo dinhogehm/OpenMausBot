@@ -618,9 +618,20 @@ function ItemDetail(props: NeedsYouResolverViewProps & { item: NeedsYouItem; pos
 /** What the screen says after a decision (INSP-J2 r2 N4): a server item the
  * choice closed is resolved — never "aguardando" a bot that waits on nothing. */
 export function decisionNotice(item: Pick<NeedsYouItem, "options" | "botName" | "title">, option: number, result: unknown): string {
+  // "Essa mesma resposta já foi enviada…": the server's own words, in the neutral notice (INSP-R12F r6 D2)
+  const info = (result as { info?: unknown } | undefined)?.info;
+  if (typeof info === "string" && info) return info;
   const values = { label: item.options?.[option]?.label ?? "", name: item.botName, title: item.title };
   const resolved = Number((result as { resolved?: unknown } | undefined)?.resolved ?? 0) > 0;
   return t(resolved ? "needsYou.screen.decided" : "needsYou.screen.decidedWaiting", values);
+}
+
+/** What the screen says after the person's own words were sent — or, when the
+ * same words had already gone, the server's notice (INSP-R12F r6 D2). */
+export function replyNotice(item: Pick<NeedsYouItem, "botName" | "title">, resolve: boolean, result: unknown): string {
+  const info = (result as { info?: unknown } | undefined)?.info;
+  if (typeof info === "string" && info) return info;
+  return t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName, title: item.title });
 }
 
 /** What the screen says after "Lembrar": sent, already on its way, or — in
@@ -1018,10 +1029,11 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     if (!text) return;
     const resolve = Boolean(item.pendingId) && resolveOnSend;
     void run("reply", async () => {
-      await onReply(item, text, resolve);
+      const result = await onReply(item, text, resolve);
       // the draft goes only once the bot has it: a failed send keeps it
       setDrafts((all) => ({ ...all, [key]: "" }));
-    }, t(resolve ? "needsYou.screen.sentResolved" : "needsYou.screen.sent", { name: item.botName, title: item.title }));
+      return result;
+    }, (result) => replyNotice(item, resolve, result));
   };
 
   // focus: into the screen on open, kept inside while open, back to the opener on close

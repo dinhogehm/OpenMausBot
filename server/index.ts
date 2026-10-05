@@ -122,7 +122,7 @@ import { isPortugueseLanguage, languagePrompt, languageReminder } from "./reply-
 import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
-import { AnswerDedupe, answerKey, duplicateAnswerText } from "./answer-dedupe.ts";
+import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
 import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -23902,9 +23902,13 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       // request and the person pressed again): taken once (INSP-R12F r5 #3)
       if (answer.kind !== "ask") {
         const key = answerKey(bot.id, item.id, answer);
-        const claim = answerDedupe.claim(key);
+        const said = answer;
+        // a first that was queued and failed to deliver since (its history says "não enviada") frees the key (r6 D2)
+        const history = () => autonomy.ownerPendingById(bot.id, item.id)?.history ?? autonomy.resolvedOwnerPendingOf(bot.id).findLast((each) => each.id === item.id)?.history;
+        const claim = answerDedupe.claim(key, (since) => failedSince(history(), said, since));
         if (!claim.ok) return json(res, 200, { ok: true, duplicate: true, message: duplicateAnswerText(claim), resolved: 0 });
-        res.once("close", () => (res.writableFinished && res.statusCode < 300 ? answerDedupe.sent(key) : answerDedupe.release(key)));
+        // settled by what this handler answers, when it answers — never by the client going away (r6 D1)
+        onAnswered(res, (status) => (status < 300 ? answerDedupe.sent(key) : answerDedupe.release(key)));
       }
       // "Manter" removes nothing: never checked, never refused (INSP-R12F r4)
       if (item.key?.startsWith(DISK_DECISION_KEY_PREFIX) && answer.kind !== "ask" && !keepsFolders(answer)) {

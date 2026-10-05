@@ -29,7 +29,7 @@ export async function sendToConversation(item: NeedsYouItem, text: string, dispa
   }
 }
 
-export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendingReply, dispatch: (action: Action) => void): Promise<{ resolved: number }> {
+export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendingReply, dispatch: (action: Action) => void): Promise<{ resolved: number; info?: string }> {
   if (!item.pendingId) throw new Error("not an owner_pending item");
   const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/reply`, {
     method: "POST",
@@ -39,6 +39,9 @@ export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendin
   if (receipt?.queued && typeof receipt.threadId === "string" && typeof receipt.queueId === "string" && typeof receipt.text === "string") {
     dispatch({ type: "pendingQueued", threadId: receipt.threadId, queueId: receipt.queueId, text: receipt.text, reason: receipt.reason === "capacity" || receipt.reason === "group-turn" ? receipt.reason : undefined });
   }
+  // the same answer sent again (the app gave up and the person pressed again): the server
+  // took it once, and says so — news for the neutral notice, not a new send (INSP-R12F r6 D2)
+  if (receipt?.duplicate === true && typeof receipt.message === "string") return { resolved: 0, info: receipt.message };
   return { resolved: Number(receipt?.resolved ?? 0) };
 }
 
