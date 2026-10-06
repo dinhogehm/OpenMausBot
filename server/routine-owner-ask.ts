@@ -330,7 +330,7 @@ export function routineAskTitle(ask: RoutineAsk): string {
   // nothing left but "a decisão": what the sentence says before it ("A Marluce pediu que a escala se mantenha; a decisão fica com você")
   if (![...contentWords(subject)].some((word) => !["decisao", "resposta", "escolha"].includes(word))) subject = ask.sentence.split(/;\s*/)[0]!.trim();
   else if (withoutAsk(said) !== said) subject = askedNoun(subject);
-  return `${ask.decide ? "Decidir" : "Ver"}: ${lower(clipTitle(subject, 90))}` || "Pendência deixada por uma rotina";
+  return `${ask.decide ? "Decidir" : "Ver"}: ${lower(clipTitle(subject, 90))}`;
 }
 /** What the ask is about, first: the noun right before the words that left it with the owner ("… e a resposta depende
  * de você" → "a resposta"), with what led to it after, in parentheses; an opening adverb ("Até agora,", "Desde

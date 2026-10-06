@@ -13,6 +13,7 @@ import type { ProviderInstance, SendTurnInput } from "../contracts.ts";
 import { removeTempDir } from "../testing/cleanup.ts";
 import { recordEvents } from "../testing/events.ts";
 import { GrokDriver } from "./grok.ts";
+import { CerebrasDriver } from "./cerebras.ts";
 import { MinimaxDriver } from "./minimax.ts";
 import { OpenAICompatDriver } from "./openai-compat.ts";
 
@@ -29,7 +30,7 @@ interface ChatRequest {
 }
 
 type Script = (body: ChatRequest, response: ServerResponse, round: number) => void;
-type Provider = "openai-compat" | "grok" | "minimax";
+type Provider = "openai-compat" | "grok" | "minimax" | "cerebras";
 const API_KEY_CANARY = "fixture-credential-cda00ee8d8384f54";
 
 function deferred<T = void>() {
@@ -118,6 +119,8 @@ async function fixture(script: Script, provider: Provider = "openai-compat", api
   const common = { instanceId: randomUUID(), displayName: "Tool contract fixture", enabled: true };
   const instance: ProviderInstance = provider === "minimax"
     ? await MinimaxDriver.create({ ...common, config: { url: `${origin}/v1` }, environment: { MINIMAX_API_KEY: apiKey } })
+    : provider === "cerebras"
+    ? await CerebrasDriver.create({ ...common, config: CerebrasDriver.decodeConfig({ url: `${origin}/v1` }), environment: { CEREBRAS_API_KEY: apiKey } })
     : await (provider === "grok" ? GrokDriver : OpenAICompatDriver).create({
       ...common,
       config: { url: `${origin}/v1`, apiKeyEnv: "FIXTURE_CHAT_KEY" },
@@ -281,6 +284,36 @@ describe("OpenAI-compatible computer images", () => {
       { type: "image_url", image_url: { url: `data:image/png;base64,${png}` } },
     ] });
     expect(f.instance.adapter.capabilities).toMatchObject({ computerMcp: true, localComputerMcp: true, browserMcp: true, nativeImageInput: true });
+  });
+
+  it.each([
+    ["gpt-oss-120b", false],
+    ["qwen-3.8-27b", true],
+  ] as const)("Cerebras %s keeps the browser and receives screenshots only if it can see images", async (model, sees) => {
+    const f = await fixture((_body, response, round) => {
+      if (round === 1) sse(response, [chunk({ tool_calls: [{ ...toolCall(), function: { ...toolCall().function, name: "browser_write" } }] }, "tool_calls")]);
+      else answer(response, "Read the page.");
+    }, "cerebras");
+    writeFileSync(join(f.directory, "mcp.mjs"), MCP_SCRIPT.replace(
+      'text: "Stored " + args.name + "=" + args.value',
+      `text: "Screenshot captured" }, { type: "image", mimeType: "image/png", data: ${JSON.stringify(png)}`,
+    ));
+    const imagePath = join(f.directory, "input.png");
+    writeFileSync(imagePath, Buffer.from(png, "base64"));
+    const browser = f.integrations!.custom!.audit as { command: string; args: string[]; env: Record<string, string> };
+    await f.start({ model, integrations: { browser }, images: [{ path: imagePath, mime: "image/png", bytes: Buffer.from(png, "base64").length }] });
+    await f.decide();
+    expect(await f.completed()).toMatchObject({ ok: true });
+    expect(f.effects()).toHaveLength(1);
+    expect(f.instance.adapter.capabilities).toMatchObject({ browserMcp: true });
+    const sent = JSON.stringify(f.requests);
+    expect(sent.includes("image_url")).toBe(sees);
+    const toolMessage = f.requests[1].messages.find((message) => message.role === "tool");
+    expect(String(toolMessage?.content).includes("this model cannot see images")).toBe(!sees);
+    if (!sees) {
+      expect(f.requests[0].messages.at(-1)?.content).toContain("cannot see images");
+      expect(f.requests[1].messages.at(-1)).toMatchObject({ role: "tool" });
+    }
   });
 
   it("keeps every tool response ahead of screenshots in a multiple-call batch", async () => {
@@ -825,6 +858,25 @@ describe("structured tool execution boundaries", () => {
     expect(f.recorder.events.filter((event) => event.type === "turn.completed")).toHaveLength(1);
   });
 
+  it("resends a refused tool call after a step ran without repeating it, and ends asking only for what's left", async () => {
+    const message = "Tool call validation failed: tool call validation failed: attempted to call tool 'json' which was not in request.tools";
+    const f = await fixture((_body, response, round) => round === 1
+      ? sse(response, [chunk({ tool_calls: [toolCall()] }, "tool_calls")])
+      : sse(response, [{ error: { message, type: "invalid_request_error", code: "tool_use_failed" } }]));
+    await f.start({ approvalMode: "full" });
+    expect(await f.completed()).toMatchObject({ ok: false, stopReason: "error" });
+    expect(f.effects()).toHaveLength(1);
+    expect(f.requests).toHaveLength(4);
+    expect(f.requests[1].messages.some((entry) => entry.role === "tool" && entry.tool_call_id === "call_write")).toBe(true);
+    expect(f.requests[2]).toEqual(f.requests[1]);
+    expect(f.requests[3]).toEqual(f.requests[1]);
+    expect(f.recorder.events.filter((event) => event.type === "turn.retrying")).toEqual([1, 2].map((attempt) =>
+      expect.objectContaining({ attempt, reason: "tool_use_failed" })));
+    expect(f.recorder.events.filter((event) => event.type === "runtime.error")).toEqual([expect.objectContaining({
+      message: `The model tried to use a tool it was not given ("json"). The steps before it already ran, so ask only for what's left. Provider: ${message}`,
+    })]);
+  });
+
   it("rejects a repeated call ID in a later model round before duplicating its effect", async () => {
     const f = await fixture((_body, response) => sse(response, [chunk({ tool_calls: [toolCall()] }, "tool_calls")]));
     await f.start();
@@ -836,7 +888,19 @@ describe("structured tool execution boundaries", () => {
     expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "runtime.error", message: expect.stringMatching(/repeat|duplicate/i) }));
   });
 
-  it("stops a model that keeps requesting tools at the turn limit", async () => {
+  it("finishes a tool-heavy task that needs more than sixteen steps", async () => {
+    // A tool-heavy model (one call per step) used to be cut off at 16 steps.
+    const f = await fixture((_body, response, round) => round <= 40
+      ? sse(response, [chunk({ tool_calls: [toolCall("audit_write", `{"name":"step","value":"${round}"}`, `call_${round}`)] }, "tool_calls")])
+      : answer(response));
+    await f.start({ approvalMode: "full" });
+    expect(await f.completed()).toMatchObject({ ok: true });
+    expect(f.requests).toHaveLength(41);
+    expect(f.effects()).toHaveLength(40);
+    expect(f.recorder.events.some((event) => event.type === "runtime.error")).toBe(false);
+  });
+
+  it("stops a model that keeps requesting tools after 64 steps, with one next action that does not repeat the steps that ran", async () => {
     const f = await fixture((_body, response, round) => sse(response, [
       chunk({ tool_calls: [toolCall("audit_write", '{"name":"receipt","value":"done"}', `call_${round}`)] }, "tool_calls"),
     ]));
@@ -844,12 +908,50 @@ describe("structured tool execution boundaries", () => {
       if (event.type === "request.opened") void f.instance.adapter.respondToRequest(f.threadId, event.requestId!, { behavior: "allow" });
     });
     await f.start();
-    expect(await f.completed()).toMatchObject({ ok: false });
+    expect(await f.completed()).toMatchObject({ ok: false, stopReason: "error" });
     stop();
-    expect(f.requests.length).toBeGreaterThan(1);
-    expect(f.requests.length).toBeLessThanOrEqual(16);
-    expect(f.effects().length).toBeLessThanOrEqual(16);
-    expect(f.recorder.events).toContainEqual(expect.objectContaining({ type: "runtime.error", message: expect.stringMatching(/limit/i) }));
+    expect(f.requests).toHaveLength(64);
+    expect(f.effects()).toHaveLength(64);
+    expect(f.recorder.events.filter((event) => event.type === "runtime.error")).toEqual([expect.objectContaining({
+      message: "Stopped after 64 steps without a final answer. The steps so far already ran, so ask only for what's left.",
+      terminal: true,
+    })]);
+  });
+
+  it("stops at 200 tool calls in one turn without running the batch that crosses it", async () => {
+    // The turn's total is separate from the 32-per-reply bound.
+    const f = await fixture((_body, response, round) => sse(response, [chunk({
+      tool_calls: Array.from({ length: 25 }, (_, index) => ({
+        ...toolCall("audit_write", `{"name":"r${round}","value":"${index}"}`, `call_${round}_${index}`), index,
+      })),
+    }, "tool_calls")]));
+    await f.start({ approvalMode: "full" });
+    expect(await f.completed()).toMatchObject({ ok: false, stopReason: "error" });
+    // Eight replies of 25 ran (exactly 200); the ninth would pass 200, so none of it ran.
+    expect(f.requests).toHaveLength(9);
+    expect(f.effects()).toHaveLength(200);
+    expect(f.recorder.events.filter((event) => event.type === "runtime.error")).toEqual([expect.objectContaining({
+      message: "Stopped after 200 tool calls without a final answer. The steps so far already ran, so ask only for what's left.",
+    })]);
+  });
+
+  it("keeps Grok's native log small on a long turn with large tool results", async () => {
+    // Logging the whole transcript on every step grows with the square of the
+    // step count; a step is logged by its message count, like the other engines.
+    ensureDirs();
+    const large = "note ".repeat(4_000);
+    const f = await fixture((_body, response, round) => round <= 20
+      ? sse(response, [chunk({ tool_calls: [toolCall("audit_write", JSON.stringify({ name: `step${round}`, value: large }), `call_${round}`)] }, "tool_calls")])
+      : answer(response), "grok");
+    await f.start({ approvalMode: "full" });
+    expect(await f.completed()).toMatchObject({ ok: true });
+    expect(f.effects()).toHaveLength(20);
+    const log = readFileSync(join(NATIVE_DIR, `${f.threadId}.ndjson`), "utf8");
+    // The whole turn's log is smaller than one tool result.
+    expect(log.length).toBeLessThan(large.length);
+    const outgoing = log.trim().split("\n").map((line) => JSON.parse(line) as { dir: string; msg: unknown })
+      .filter((entry) => entry.dir === "out").map((entry) => entry.msg);
+    expect(outgoing).toEqual(f.requests.map((request) => ({ model: "fixture-model", messageCount: request.messages.length })));
   });
 
   it.each(["stream", "approval", "rpc", "continuation"] as const)("cancels during %s, closes execution authority, and settles exactly once", async (stage) => {

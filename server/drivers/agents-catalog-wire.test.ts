@@ -48,26 +48,30 @@ const flag = (on: boolean) => (on ? "1" : "0");
 /** Every combination server/index.ts agentsIntegration() can produce, plus the
  * standing external runtime (docs/self-hosting.md), which sets only its own
  * switch. The bot id is fixed because a room turn writes it into the
- * start_thread schema. */
+ * start_thread schema. A name without "+non-chief" is a Chief of Staff's
+ * turn, which mounts the most. */
 function profiles(): Record<string, Profile> {
   const all: Record<string, Profile> = {};
-  for (const room of [false, true]) {
-    for (const ownThread of room ? [false, true] : [false]) {
-      for (const skills of [false, true]) {
-        for (const shared of [false, true]) {
-          for (const voice of [false, true]) {
-            const name = [room ? "room" : "direct", ownThread && "own-thread", skills && "skills", shared && "shared", voice && "voice"]
-              .filter(Boolean).join("+");
-            all[name] = {
-              family: room ? "room" : "direct",
-              env: {
-                OMB_ROOM_TURN: flag(room),
-                OMB_OWN_THREAD_CREATION: flag(ownThread),
-                OMB_SKILL_AUTHORING_ENABLED: flag(skills),
-                OMB_SHARED_COMPUTERS_ENABLED: flag(shared),
-                OMB_VOICE_NOTES: flag(voice),
-              },
-            };
+  for (const chief of [true, false]) {
+    for (const room of [false, true]) {
+      for (const ownThread of room ? [false, true] : [false]) {
+        for (const skills of [false, true]) {
+          for (const shared of [false, true]) {
+            for (const voice of [false, true]) {
+              const name = [room ? "room" : "direct", ownThread && "own-thread", skills && "skills", shared && "shared", voice && "voice", !chief && "non-chief"]
+                .filter(Boolean).join("+");
+              all[name] = {
+                family: room ? "room" : "direct",
+                env: {
+                  OMB_ROOM_TURN: flag(room),
+                  OMB_OWN_THREAD_CREATION: flag(ownThread),
+                  OMB_SKILL_AUTHORING_ENABLED: flag(skills),
+                  OMB_SHARED_COMPUTERS_ENABLED: flag(shared),
+                  OMB_VOICE_NOTES: flag(voice),
+                  OMB_CHIEF_OF_STAFF: flag(chief),
+                },
+              };
+            }
           }
         }
       }
@@ -76,7 +80,7 @@ function profiles(): Record<string, Profile> {
   // A Cloud home is one more switch on top of any of these; its fullest
   // profiles are pinned, and differ from their family only where the test
   // below says they may.
-  for (const name of ["direct+skills+shared+voice", "room+own-thread+skills+shared+voice"]) {
+  for (const name of ["direct+skills+shared+voice", "room+own-thread+skills+shared+voice", "direct+skills+shared+voice+non-chief", "room+own-thread+skills+shared+voice+non-chief"]) {
     all[`${name}+cloud-home`] = { family: all[name]!.family, env: { ...all[name]!.env, OMB_CLOUD_HOME: "1" } };
   }
   all.external = { family: "external", env: { OMB_EXTERNAL_RUNTIME: "1" } };
@@ -91,12 +95,18 @@ function profiles(): Record<string, Profile> {
       OMB_SHARED_COMPUTERS_ENABLED: "1",
       OMB_VOICE_NOTES: "1",
       OMB_CLOUD_HOME: "1",
+      OMB_CHIEF_OF_STAFF: "1",
     },
   };
   return all;
 }
 
 const PROFILES = profiles();
+/** Refused by the server to every bot that is not a Chief of Staff. */
+const CHIEF_ONLY_TOOLS = ["create_bot", "list_team_setup", "propose_team_setup", "propose_bot_deletion", "create_room", "manage_room", "retry_thread"];
+/** Their for_bot_id, changing another bot, is a Chief's alone. */
+const CHIEF_TARGET_TOOLS = ["propose_profile", "propose_model"];
+const CHIEF_PROFILE_TARGET = " A Chief of Staff may pass for_bot_id (from list_bots) for a requested change to another bot in its section.";
 /** The profile of each family that mounts the most: checked in whole, as
  * readable JSON. Every other profile is a by-name subset of one of these and
  * is pinned by tool names, byte count and sha256 in profiles.json. */
@@ -106,34 +116,63 @@ const FULL = { direct: "direct+skills+shared+voice", room: "room+own-thread+skil
  * by more than 2%, and may not undercut it by more than 2% either: a smaller
  * catalog is the goal, so lock the win in by lowering the number.
  * Raised on purpose by lot I (+1.6–1.8 KB): owner_pending gained update, why,
- * steps and options, so an item the person opens says how to resolve it. */
+ * steps and options, so an item the person opens says how to resolve it.
+ * Re-measured on the merge of upstream v0.1.98 (2026-10-06): upstream's
+ * numbers plus this fork's tools (cc_session_*, session_search/read,
+ * owner_pending's fields, watches), ~14 KB on every profile. */
 const BUDGET_BASELINE: Record<string, number> = {
-  "direct": 57250,
-  "direct+voice": 57991,
-  "direct+shared": 58995,
-  "direct+shared+voice": 59736,
-  "direct+skills": 59176,
-  "direct+skills+voice": 59917,
-  "direct+skills+shared": 60921,
-  "direct+skills+shared+voice": 61662,
-  "room": 55087,
-  "room+voice": 55828,
-  "room+shared": 56832,
-  "room+shared+voice": 57573,
-  "room+skills": 57013,
-  "room+skills+voice": 57754,
-  "room+skills+shared": 58758,
-  "room+skills+shared+voice": 59499,
-  "room+own-thread": 56374,
-  "room+own-thread+voice": 57115,
-  "room+own-thread+shared": 58119,
-  "room+own-thread+shared+voice": 58860,
-  "room+own-thread+skills": 58300,
-  "room+own-thread+skills+voice": 59041,
-  "room+own-thread+skills+shared": 60045,
-  "room+own-thread+skills+shared+voice": 60786,
-  "direct+skills+shared+voice+cloud-home": 60736,
-  "room+own-thread+skills+shared+voice+cloud-home": 59860,
+  "direct": 62234,
+  "direct+voice": 62975,
+  "direct+shared": 63979,
+  "direct+shared+voice": 64720,
+  "direct+skills": 64160,
+  "direct+skills+voice": 64901,
+  "direct+skills+shared": 65905,
+  "direct+skills+shared+voice": 66646,
+  "room": 60663,
+  "room+voice": 61404,
+  "room+shared": 62408,
+  "room+shared+voice": 63149,
+  "room+skills": 62589,
+  "room+skills+voice": 63330,
+  "room+skills+shared": 64334,
+  "room+skills+shared+voice": 65075,
+  "room+own-thread": 61950,
+  "room+own-thread+voice": 62691,
+  "room+own-thread+shared": 63695,
+  "room+own-thread+shared+voice": 64436,
+  "room+own-thread+skills": 63876,
+  "room+own-thread+skills+voice": 64617,
+  "room+own-thread+skills+shared": 65621,
+  "room+own-thread+skills+shared+voice": 66362,
+  "direct+skills+shared+voice+cloud-home": 65701,
+  "room+own-thread+skills+shared+voice+cloud-home": 65417,
+  "direct+non-chief": 52761,
+  "direct+voice+non-chief": 53502,
+  "direct+shared+non-chief": 54506,
+  "direct+shared+voice+non-chief": 55247,
+  "direct+skills+non-chief": 54687,
+  "direct+skills+voice+non-chief": 55428,
+  "direct+skills+shared+non-chief": 56432,
+  "direct+skills+shared+voice+non-chief": 57173,
+  "room+non-chief": 51190,
+  "room+voice+non-chief": 51931,
+  "room+shared+non-chief": 52935,
+  "room+shared+voice+non-chief": 53676,
+  "room+skills+non-chief": 53116,
+  "room+skills+voice+non-chief": 53857,
+  "room+skills+shared+non-chief": 54861,
+  "room+skills+shared+voice+non-chief": 55602,
+  "room+own-thread+non-chief": 52477,
+  "room+own-thread+voice+non-chief": 53218,
+  "room+own-thread+shared+non-chief": 54222,
+  "room+own-thread+shared+voice+non-chief": 54963,
+  "room+own-thread+skills+non-chief": 54403,
+  "room+own-thread+skills+voice+non-chief": 55144,
+  "room+own-thread+skills+shared+non-chief": 56148,
+  "room+own-thread+skills+shared+voice+non-chief": 56889,
+  "direct+skills+shared+voice+non-chief+cloud-home": 56228,
+  "room+own-thread+skills+shared+voice+non-chief+cloud-home": 55944,
   "external": 3030,
   "external+everything": 3030,
 };
@@ -231,8 +270,10 @@ describe("agents proxy tools/list golden", () => {
     for (const [name, profile] of Object.entries(PROFILES)) {
       const full = new Map(toolsOf(wires[FULL[profile.family]]!).map((tool) => [tool.name, JSON.stringify(tool)]));
       for (const tool of toolsOf(wires[name]!)) {
-        // A Cloud home's own select_computer is pinned by the next test.
+        // A Cloud home's own select_computer is pinned by the next test, and
+        // a non-Chief's propose_profile and propose_model by the one after.
         if (profile.env.OMB_CLOUD_HOME === "1" && tool.name === "select_computer") continue;
+        if (profile.env.OMB_CHIEF_OF_STAFF === "0" && CHIEF_TARGET_TOOLS.includes(tool.name)) continue;
         expect(JSON.stringify(tool), `${name}: ${tool.name}`).toBe(full.get(tool.name));
       }
     }
@@ -242,7 +283,7 @@ describe("agents proxy tools/list golden", () => {
     type SelectTool = Tool & { inputSchema: { properties: { surface: { enum: string[]; description: string } } } };
     const select = (wire: string) => toolsOf(wire).find((tool) => tool.name === "select_computer") as SelectTool;
     const cloudHome = Object.keys(PROFILES).filter((name) => name.endsWith("+cloud-home"));
-    expect(cloudHome).toHaveLength(2);
+    expect(cloudHome).toHaveLength(4);
     for (const name of cloudHome) {
       const desktop = wires[name.slice(0, -"+cloud-home".length)]!;
       const names = toolsOf(wires[name]!).map((tool) => tool.name);
@@ -253,6 +294,37 @@ describe("agents proxy tools/list golden", () => {
       expect(surface.enum).toEqual(["auto", "cloud", "browser"]);
       expect(surface.description).not.toMatch(/\b(?:vm|local) =/);
     }
+  });
+
+  it("shows only a Chief of Staff the Chief-only tools, and for_bot_id on another bot's profile or model", () => {
+    // Every route behind these refuses a bot that is not a Chief, so the rest
+    // are not shown them; otherwise the two catalogs are the same to the byte.
+    type SchemaTool = Tool & { description: string; inputSchema: { properties: Record<string, unknown> } };
+    const nonChief = Object.keys(PROFILES).filter((name) => PROFILES[name]!.env.OMB_CHIEF_OF_STAFF === "0");
+    expect(nonChief).toHaveLength(26);
+    for (const name of nonChief) {
+      const chiefTools = toolsOf(wires[name.replace("+non-chief", "")]!) as SchemaTool[];
+      const tools = new Map((toolsOf(wires[name]!) as SchemaTool[]).map((tool) => [tool.name, tool]));
+      expect(chiefTools.map((tool) => tool.name)).toEqual(expect.arrayContaining(CHIEF_ONLY_TOOLS));
+      expect([...tools.keys()], name).toEqual(chiefTools.map((tool) => tool.name).filter((tool) => !CHIEF_ONLY_TOOLS.includes(tool)));
+      for (const chiefTool of chiefTools.filter((tool) => tools.has(tool.name))) {
+        let expected: SchemaTool = chiefTool;
+        if (CHIEF_TARGET_TOOLS.includes(chiefTool.name)) {
+          const { for_bot_id: forBotId, ...properties } = chiefTool.inputSchema.properties;
+          expect(forBotId, `${name}: ${chiefTool.name}`).toBeDefined();
+          expected = { ...chiefTool, description: chiefTool.description.replace(CHIEF_PROFILE_TARGET, ""), inputSchema: { ...chiefTool.inputSchema, properties } };
+        }
+        expect(JSON.stringify(tools.get(chiefTool.name)), `${name}: ${chiefTool.name}`).toBe(JSON.stringify(expected));
+      }
+      expect(chiefTools.find((tool) => tool.name === "propose_profile")!.description).toContain(CHIEF_PROFILE_TARGET);
+      expect(JSON.stringify(CHIEF_TARGET_TOOLS.map((tool) => tools.get(tool)))).not.toContain("for_bot_id");
+      // Any bot may ask to change a reachable section peer's routine.
+      for (const routine of ["propose_routine", "propose_routine_action"]) {
+        expect(tools.get(routine)!.inputSchema.properties, `${name}: ${routine}`).toHaveProperty("for_bot_id");
+      }
+    }
+    // A standing external runtime is shown none of them, Chief or not.
+    expect(wires["external+everything"]).toBe(wires.external);
   });
 
   it("is what the catalog module computes in-process, so another front end mounts the same tools", () => {

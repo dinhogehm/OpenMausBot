@@ -13,7 +13,7 @@ import { timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 
 import type { Scope, SessionRecord, SessionRegistry } from "./sessions.ts";
-import { denyReason as companionDenial } from "../companion/src/routes.ts";
+import { denyReason as companionDenial, isCompanionNotice } from "../companion/src/routes.ts";
 
 /** How much a loopback request without a session is trusted.
  *
@@ -389,7 +389,7 @@ export function clientBotPatchViolation(body: unknown): string | null {
 }
 
 /** Same for a room: name and reading state, never its folder or who answers. */
-const CLIENT_GROUP_PATCH_FIELDS = new Set(["name", "bulletin", "unread", "pinnedMessageId", "section"]);
+const CLIENT_GROUP_PATCH_FIELDS = new Set(["name", "bulletin", "unread", "pinnedMessageId", "section", "turnTimeoutMinutes"]);
 export function clientGroupPatchViolation(body: unknown): string | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return "body";
   for (const key of Object.keys(body)) if (!CLIENT_GROUP_PATCH_FIELDS.has(key)) return key;
@@ -516,7 +516,8 @@ export function resolveRequestAuth(req: IncomingMessage, options: ResolveOptions
         !secureTokenMatch(companionToken, options.companionMutationToken ?? "") ||
         req.headers["x-openmausbot-companion"] !== "1" ||
         !/^[\w-]{1,128}$/.test(headerValue(req.headers["x-openmausbot-companion-device"]) ?? "") ||
-        companionDenial({ path, method, authenticated: true })
+        // a phone's allowlisted route, or the companion's own notice (an unpaired phone)
+        (companionDenial({ path, method, authenticated: true }) && !isCompanionNotice(method, path))
       ) return deny(403, "forbidden: invalid companion request");
       return { auth: { kind: "loopback", scopes: LOOPBACK_SCOPES }, status: 401, error: "" };
     }

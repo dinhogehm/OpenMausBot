@@ -58,6 +58,21 @@ function fixture() {
 describe("additive portable team backups", () => {
   beforeEach(() => rmSync(DATA_DIR, { recursive: true, force: true }));
 
+  it("carries tool restrictions through backup and import without restoring execution grants", () => {
+    const { store, routines, chief, scout } = fixture();
+    const scope = { allow: ["native:read", "mcp:notes:read"], deny: ["mcp:notes:write"] };
+    store.patchBot(chief.id, { toolScope: scope } as never);
+    store.patchBot(scout.id, { toolScope: { allow: [] } } as never);
+    const backup = createTeamBackup(store, routines.listRoutines(), "Selected tools");
+    expect(backup.bots.find((bot) => bot.key === chief.id)).toHaveProperty("toolScope", scope);
+    const restored = importTeamBackup(store, routines, backup, selection());
+    expect(restored.bots.find((bot) => bot.name === "Mira 2")).toMatchObject({ toolScope: scope, computer: "off", composio: false, approvalMode: "ask", connectorTools: {} });
+    expect(restored.bots.find((bot) => bot.name === "Scout 2")).toHaveProperty("toolScope", { allow: [] });
+    const invalid = structuredClone(backup) as unknown as { bots: Array<{ toolScope: unknown }> };
+    invalid.bots[0].toolScope = { allow: null };
+    expect(() => parseTeamBackup(invalid)).toThrow();
+  });
+
   it("carries each bot's memory, topic notes and daily logs, scrubbed on the way out and private on the way in", () => {
     const { store, routines, chief, scout } = fixture();
     const now = new Date(2026, 8, 10, 12);
@@ -123,8 +138,10 @@ describe("additive portable team backups", () => {
     expect(result.bots.find((bot) => bot.name === "Archived 2")).toMatchObject({ hidden: true });
     expect(importedChief).not.toHaveProperty("cwd");
     expect(importedChief).not.toHaveProperty("alwaysAllow");
+    // Imported threads follow the imported bot's model.
     expect(importedChief.tasks?.every((task) => task.activity === "idle" && task.busy === false
-      && task.unread === false && task.modelSelection?.instanceId === selection().instanceId)).toBe(true);
+      && task.unread === false && task.modelSelection === undefined
+      && store.projectBotForTask(importedChief.id, task.threadId)?.modelSelection.instanceId === selection().instanceId)).toBe(true);
     expect(store.bot(otherChief.id)?.chiefOfStaff).toBe(true);
     expect(store.bot(archived.id)?.hidden).toBe(true);
     expect(importedScout.mascotBody).toBe(scout.mascotBody);
@@ -208,6 +225,27 @@ describe("additive portable team backups", () => {
     // rows the marker never armed — a backup from before the feature —
     // restore exactly as they left, with no marker invented for them
     expect(restoredBot.tasks!.find((task) => task.title === "First conversation")).not.toHaveProperty("titleFromFirstMessage");
+  });
+
+  it("keeps a conversation's longer turn limit through backup and restore", () => {
+    const { store, routines, chief, scout, group } = fixture();
+    const threadId = group.tasks!.find((task) => task.title === "Second room task")!.threadId;
+    store.setGroupTaskTurnTimeout(group.id, threadId, 30);
+    const dm = store.createGroup("Direct", [chief.id, scout.id], true);
+    store.patchGroup(dm.id, { turnTimeoutMinutes: 45 });
+
+    const backup = createTeamBackup(store, routines.listRoutines(), "Limits");
+    const roomTask = backup.groups.find((candidate) => candidate.key === group.id)!.tasks.find((task) => task.key === threadId)!;
+    expect(roomTask.turnTimeoutMinutes).toBe(30);
+    expect(backup.groups.find((candidate) => candidate.key === dm.id)!.tasks[0].turnTimeoutMinutes).toBe(45);
+    expect(backup.bots.every((bot) => bot.tasks.every((task) => task.turnTimeoutMinutes === undefined))).toBe(true);
+
+    const result = importTeamBackup(store, routines, JSON.parse(JSON.stringify(backup)), selection());
+    const restored = result.groups.find((candidate) => candidate.name.startsWith("Project room"))!;
+    expect(restored.tasks!.find((task) => task.title === "Second room task")!.turnTimeoutMinutes).toBe(30);
+    const restoredDm = result.groups.find((candidate) => candidate.name.startsWith("Direct"))!;
+    expect(restoredDm.turnTimeoutMinutes).toBe(45);
+    expect(restoredDm.dm).toBe(true);
   });
 
   it.each(["unknown-version", "duplicate-bot", "cycle", "dangling-room", "dangling-task", "duplicate-chief", "oversized-soul"])("rejects %s before any writes", (corruption) => {
@@ -309,6 +347,8 @@ describe("additive portable team backups", () => {
     const dm = store.createGroup("Old direct message", [chief.id, scout.id], true);
     store.appendMessage(dm.threadId, { role: "bot", kind: "text", text: "Keep this old reply", from: { botId: chief.id, name: chief.name, color: chief.color } });
     store.deleteBot(chief.id);
+    // Recreate the pre-repair records this legacy-export regression covers.
+    Object.assign(group, { memberIds: [chief.id, scout.id], defaultResponder: { kind: "member", botId: chief.id } });
     const backup = createTeamBackup(store, routines.listRoutines(), "My team");
     expect(backup.warnings).toHaveLength(4);
     expect(backup.routines).toEqual([]);

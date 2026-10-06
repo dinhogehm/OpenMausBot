@@ -34,6 +34,7 @@ const DEFAULT_FIRST_ENDPOINT_CHECK_MS = 2 * 60_000;
  * needs the user (expired sign-in, computer limit) is never retried. */
 const AUTO_RETRY_CODES = new Set([
   "endpoint_capacity",
+  "endpoint_rate_limited",
   "endpoint_unavailable",
   "endpoint_busy",
   "network_unavailable",
@@ -47,6 +48,13 @@ const AUTO_RETRY_CODES = new Set([
  * longer has a working route behind it (or that its last reconcile failed),
  * so the next reconcile must run instead of trusting the saved address. */
 const ENDPOINT_NEEDS_RECONCILE = new Set(["deleting", "deleted", "error"]);
+
+/** Connector states in which the watchdog asks the control plane whether the
+ * saved endpoint still exists. "ready" is included on purpose: the connector
+ * verifies its public route once, so after a long sleep it can still say
+ * "ready" for a tunnel the server reclaimed meanwhile. "unavailable" (no
+ * connector binary) and "stopped" are left alone. */
+const WATCHDOG_CHECK_STATES = new Set(["starting", "ready", "retrying", "error"]);
 
 const defaultSetTimer = (callback, milliseconds) => {
   const timer = setTimeout(callback, milliseconds);
@@ -173,6 +181,7 @@ const FRIENDLY_MESSAGES = Object.freeze({
   installation_limit_reached: "This account has reached its computer limit. Remove an old computer and try again.",
   installation_exists: "This computer is already connected. Try again to recover it.",
   endpoint_busy: "The secure connection is still being prepared. Try again in a moment.",
+  endpoint_rate_limited: "The secure connection service is busy right now. Local Wi-Fi and Tailscale pairing still work; try again in {wait}.",
   endpoint_capacity: "Secure HTTPS links are temporarily full. Pair on this Wi-Fi or with Tailscale for now; we'll retry automatically.",
   endpoint_unavailable: "The secure connection service could not finish setup. Local Wi-Fi and Tailscale pairing still work. If this keeps happening, contact support with the error reference.",
   endpoint_cleanup_pending: "The secure connection is still being removed. Try signing out again shortly.",
@@ -182,9 +191,18 @@ const FRIENDLY_MESSAGES = Object.freeze({
   request_failed: "The secure connection request could not be completed. Local pairing still works; try again.",
 });
 
+/** "45 seconds", "3 minutes", or "a few minutes" when the server gave no hint. */
+function retryWait(retryAfterMs) {
+  const seconds = Math.ceil((retryAfterMs ?? 0) / 1_000);
+  if (!(seconds > 0)) return "a few minutes";
+  if (seconds < 90) return `${seconds} seconds`;
+  return `${Math.round(seconds / 60)} minutes`;
+}
+
 export function friendlyCompanionAccountError(error) {
   const code = error instanceof ControlPlaneError ? error.code : "";
-  const message = FRIENDLY_MESSAGES[code] ?? FRIENDLY_MESSAGES.request_failed;
+  const message = (FRIENDLY_MESSAGES[code] ?? FRIENDLY_MESSAGES.request_failed)
+    .replace("{wait}", () => retryWait(error.retryAfterMs));
   const reference = error instanceof ControlPlaneError && error.requestId
     ? ` Reference: ${error.requestId}.`
     : "";
@@ -242,6 +260,11 @@ export function createCompanionAccountService({
   autoRetryMaxMs = DEFAULT_AUTO_RETRY_MAX_MS,
   endpointCheckIntervalMs = DEFAULT_ENDPOINT_CHECK_INTERVAL_MS,
   firstEndpointCheckMs = DEFAULT_FIRST_ENDPOINT_CHECK_MS,
+  // One line per failed setup step, for server.log and the bug-report bundle.
+  // The phase message is replaced by every retry, so without this a support
+  // reference shown once is gone. Only the code, HTTP status, request id and
+  // retry delay are written: never an email, token, credential or address.
+  log = () => {},
 } = {}) {
   const configured = Boolean(client);
   let healthy = false;
@@ -294,6 +317,7 @@ export function createCompanionAccountService({
     const jittered = Math.round(backoff * (0.8 + 0.4 * random()));
     const delay = Math.min(autoRetryMaxMs, Math.max(jittered, error.retryAfterMs ?? 0));
     autoRetryAttempt += 1;
+    writeLog(`companion account: retrying ${error.code} in ${Math.round(delay / 1_000)}s (attempt ${autoRetryAttempt})`);
     autoRetryTimer = setTimer(() => {
       autoRetryTimer = null;
       void retryFromTimer().catch(() => {});
@@ -558,11 +582,24 @@ export function createCompanionAccountService({
     return settledState();
   };
 
+  const writeLog = (line) => {
+    try {
+      log(line);
+    } catch {
+      // Logging never changes the outcome of a setup step.
+    }
+  };
+
   const failAction = (
     error,
     { email, expiredSessionIsSignedOut = false, signedOut = false } = {},
   ) => {
     const message = friendlyCompanionAccountError(error);
+    writeLog(
+      error instanceof ControlPlaneError
+        ? `companion account: setup failed code=${error.code} status=${error.status || "none"} ref=${error.requestId || "none"}`
+        : "companion account: setup failed on this computer (not a control-plane answer)",
+    );
     phase = {
       status:
         signedOut ||
@@ -706,7 +743,12 @@ export function createCompanionAccountService({
     let endpoint;
     try {
       endpoint = await client.getEndpoint(account.installationCredential);
-    } catch {
+    } catch (error) {
+      // A rejected installation credential (it expires after 90 days) is a
+      // definitive answer too: the saved address can no longer be repaired
+      // with it. Retry recovers through the account session, or shows the
+      // "sign-in expired" state so the person is asked to sign in.
+      if (error instanceof ControlPlaneError && error.status === 401) return retryWork();
       return null;
     }
     if (endpoint && endpoint.url === access.endpoint && !ENDPOINT_NEEDS_RECONCILE.has(endpoint.status)) {
@@ -715,19 +757,24 @@ export function createCompanionAccountService({
     return retryWork();
   };
 
-  /** While the companion is on but its connector cannot come up, ask the
-   * control plane (cheaply, no provider calls) whether the endpoint still
-   * exists. This is how a computer whose idle tunnel was reclaimed while
-   * Remote access was off recovers once the user turns it back on. */
+  /** While the companion is on, ask the control plane (cheaply, no provider
+   * calls) every interval whether the endpoint still exists. This is how a
+   * computer whose idle tunnel was reclaimed recovers on its own: after
+   * Remote access is turned back on, and also when the app kept running
+   * through a long sleep and its connector still reports the old "ready". */
   const watchdogTick = () => {
     watchdogTimer = null;
     if (disposed) return;
     watchdogTimer = setTimer(watchdogTick, endpointCheckIntervalMs);
     if (!companionIsOn() || autoRetryTimer !== null) return;
+    // A sign-in only the person can renew; asking again changes nothing.
+    if (phase?.status === "signed-out") return;
     const connection = managedConnectionState?.() ?? {};
-    // Only a connector that keeps failing; "unavailable" is a missing binary.
-    if (!["retrying", "error"].includes(connection.status)) return;
-    if (lastEndpointCheck !== null && now() - lastEndpointCheck < endpointCheckIntervalMs) return;
+    if (!WATCHDOG_CHECK_STATES.has(connection.status)) return;
+    // Skip only a check that ran recently (restore's launch check, say). A
+    // full-interval comparison would also skip the regular tick whenever the
+    // previous check landed a few milliseconds after its own tick.
+    if (lastEndpointCheck !== null && now() - lastEndpointCheck < endpointCheckIntervalMs / 2) return;
     void serialize(reconcileIfEndpointGone).catch(() => {});
   };
 

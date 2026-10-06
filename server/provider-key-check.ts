@@ -5,13 +5,13 @@
 // The answer is a verdict and, on success, a few model ids; never the key,
 // never the raw response. Keys travel only over TLS, except to a loopback
 // test double.
-export type ProviderKeyKind = "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral";
+export type ProviderKeyKind = "anthropic" | "openai" | "openrouter" | "openaiCompat" | "xai" | "mistral" | "cerebras";
 
 export type ProviderKeyVerdict =
   | { ok: true; check: "authentication" | "models"; models: string[] }
   | { ok: false; reason: "rejected" | "unreachable" | "unexpected"; status?: number };
 
-export const PROVIDER_KEY_KINDS: readonly ProviderKeyKind[] = ["anthropic", "openai", "openrouter", "openaiCompat", "xai", "mistral"];
+export const PROVIDER_KEY_KINDS: readonly ProviderKeyKind[] = ["anthropic", "openai", "openrouter", "openaiCompat", "xai", "mistral", "cerebras"];
 
 const DEFAULT_URLS: Record<ProviderKeyKind, string> = {
   anthropic: "https://api.anthropic.com",
@@ -20,18 +20,25 @@ const DEFAULT_URLS: Record<ProviderKeyKind, string> = {
   openaiCompat: "https://openrouter.ai/api/v1",
   xai: "https://api.x.ai/v1",
   mistral: "https://api.mistral.ai/v1",
+  cerebras: "https://api.cerebras.ai/v1",
 };
 
 const MAX_MODELS = 5;
 
-function isLoopback(hostname: string): boolean {
+/** A URL hostname on this machine: the only place a key may go over plain http. */
+export function isLoopback(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, "");
   return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.startsWith("127.");
 }
 
+/** A provider's base URL: the configured one, or its default. */
+export function providerBaseUrl(provider: ProviderKeyKind, base?: string | null): string {
+  return (base?.trim() || DEFAULT_URLS[provider]).replace(/\/+$/, "");
+}
+
 /** The models endpoint for a provider, from its base URL or the default. */
 export function providerModelsUrl(provider: ProviderKeyKind, base?: string | null): string {
-  const root = (base?.trim() || DEFAULT_URLS[provider]).replace(/\/+$/, "");
+  const root = providerBaseUrl(provider, base);
   if (provider === "anthropic") return root.endsWith("/v1") ? `${root}/models` : `${root}/v1/models`;
   return `${root}/models`;
 }

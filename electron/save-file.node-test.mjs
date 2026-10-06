@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { collisionFreeDownloadPath, defaultSaveName, resolveSavablePath, withSavableFile } from "./save-file.mjs";
+import { collisionFreeDownloadPath, defaultSaveName, resolveSavablePath, revealDownloadWhenDone, revealInFolder, withSavableFile } from "./save-file.mjs";
 
 // Creating a symlink on Windows needs elevation or developer mode, so the
 // symlink cases only run where the runner can actually make one.
@@ -150,7 +151,19 @@ describe("attachment download destination", () => {
     const handler = main.indexOf('session.defaultSession.on("will-download"');
     assert.notEqual(handler, -1);
     assert.match(main.slice(handler), /item\.setSavePath\(collisionFreeDownloadPath\(/);
+    assert.match(main.slice(handler), /revealDownloadWhenDone\(item, /);
     assert.ok(handler < main.indexOf("createWindow();"));
+  });
+
+  it("reveals only a completed download at its actual save path", () => {
+    const revealed = [];
+    for (const state of ["completed", "cancelled", "interrupted"]) {
+      const item = new EventEmitter();
+      item.getSavePath = () => `/downloads/report-${state}.txt`;
+      revealDownloadWhenDone(item, (filePath) => revealed.push(filePath));
+      item.emit("done", {}, state);
+    }
+    assert.deepEqual(revealed, ["/downloads/report-completed.txt"]);
   });
 });
 
@@ -212,5 +225,50 @@ describe("save-file source handles", () => {
     assert.equal(closed, true);
     assert.deepEqual(statOptions, { bigint: true });
     assert.deepEqual(handleStatOptions, { bigint: true });
+  });
+});
+
+describe("Show in folder for a file outside the workspace", () => {
+  // Stands in for Electron's shell: revealing is the only thing that may
+  // happen to the path, and only after it has been validated.
+  const shell = () => {
+    const shown = [];
+    return { shown, reveal: (target) => shown.push(target) };
+  };
+
+  it("reveals an existing file or folder by its normalised absolute path", async () => {
+    const file = path.join(home, "secret.txt");
+    const spelled = path.join(home, "workspace-elsewhere", "..", "secret.txt");
+    const { shown, reveal } = shell();
+    assert.equal(await revealInFolder(spelled, { reveal }), "shown");
+    assert.equal(await revealInFolder(botHome, { reveal }), "shown");
+    assert.deepEqual(shown, [file, botHome]);
+  });
+
+  it("says a missing file is missing and reveals nothing", async () => {
+    const { shown, reveal } = shell();
+    assert.equal(await revealInFolder(path.join(home, "gone.js"), { reveal }), "missing");
+    assert.deepEqual(shown, []);
+  });
+
+  it("refuses relative paths, URLs and network shares without touching the disk", async () => {
+    const { shown, reveal } = shell();
+    const fsp = { stat: () => assert.fail("an invalid path must not be looked up") };
+    for (const rawPath of ["secret.txt", "../secret.txt", pathToFileURL(path.join(home, "secret.txt")).href,
+      "https://example.com/x", "//server/share/x", "", "\0", null, 42]) {
+      assert.equal(await revealInFolder(rawPath, { reveal, fsp }), "invalid", String(rawPath));
+    }
+    for (const rawPath of ["\\\\server\\share\\x.js", "\\\\?\\C:\\x.js", "C:relative.js", "file:///C:/x.js"]) {
+      assert.equal(await revealInFolder(rawPath, { reveal, fsp, pathApi: path.win32 }), "invalid", rawPath);
+    }
+    assert.deepEqual(shown, []);
+  });
+
+  it("accepts a Windows drive path like the one in the report", async () => {
+    const { shown, reveal } = shell();
+    const fsp = { stat: async () => ({ isFile: () => true, isDirectory: () => false }) };
+    const rawPath = "C:\\Users\\Maus\\_draft\\..\\_draft\\ollama-gen.js";
+    assert.equal(await revealInFolder(rawPath, { reveal, fsp, pathApi: path.win32 }), "shown");
+    assert.deepEqual(shown, ["C:\\Users\\Maus\\_draft\\ollama-gen.js"]);
   });
 });

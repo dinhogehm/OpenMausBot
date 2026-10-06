@@ -19,12 +19,147 @@ import { Store, toWireTask, type BotRecord } from "./store.ts";
 import type { TeamSetupRequest } from "../shared/team-setup.ts";
 import { SECTION_CONTEXTS_FILE, readSectionContext, writeSectionContext } from "./section-context.ts";
 import { TeamComputers } from "./team-computers.ts";
+import { allowsTool } from "../shared/tool-scope.ts";
 
 const selection = (): ModelSelection => ({ instanceId: "claude", model: "claude-sonnet-5" });
 
 describe("Store", () => {
   beforeEach(() => {
     rmSync(DATA_DIR, { recursive: true, force: true });
+  });
+
+  it("retains tool selection across restarts and distinguishes clearing from no tools", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({ name: "Scoped drafter" });
+    store.patchBot(bot.id, { toolScope: { allow: [], deny: ["native:bash", "native:bash"] } } as never);
+    expect(new Store(selection).bot(bot.id)).toMatchObject({ toolScope: { allow: [], deny: ["native:bash"] } });
+    expect(() => store.patchBot(bot.id, { toolScope: { allow: null } } as never)).toThrow(/tool selection/i);
+    store.patchBot(bot.id, { toolScope: undefined } as never);
+    expect(new Store(selection).bot(bot.id)).not.toHaveProperty("toolScope");
+  });
+
+  it.each([undefined, { allow: ["native:read"] }, { deny: ["native:bash"] }])("does not activate a wider tool selection when saving %j fails", (toolScope) => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    store.patchBot(bot.id, { toolScope: { allow: [] }, browser: true });
+    const save = vi.spyOn(store as unknown as { saveBots(): void }, "saveBots")
+      .mockImplementationOnce(() => { throw new Error("disk full"); });
+    expect(() => store.patchBot(bot.id, { toolScope, browser: false })).toThrow("disk full");
+    expect(store.bot(bot.id)).toBe(bot);
+    expect(bot.toolScope).toEqual({ allow: [] });
+    expect(allowsTool(bot.toolScope, { kind: "native", name: "read" })).toBe(false);
+    // A failed widening must not undo a runtime revocation in the same edit.
+    expect(bot.browser).toBe(false);
+    expect(new Store(selection).bot(bot.id)?.toolScope).toEqual({ allow: [] });
+    save.mockRestore();
+    store.patchBot(bot.id, { toolScope });
+    expect(allowsTool(bot.toolScope, { kind: "native", name: "read" })).toBe(true);
+    expect(new Store(selection).bot(bot.id)?.toolScope).toEqual(toolScope);
+  });
+
+  it("keeps tool revocations effective in memory when persistence fails", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const save = vi.spyOn(store as unknown as { saveBots(): void }, "saveBots")
+      .mockImplementationOnce(() => { throw new Error("disk full"); });
+    expect(() => store.patchBot(bot.id, { toolScope: { allow: [] } })).toThrow("disk full");
+    expect(allowsTool(bot.toolScope, { kind: "native", name: "read" })).toBe(false);
+    save.mockRestore();
+  });
+
+  it("does not publish a new restricted bot when its first save fails", () => {
+    const store = new Store(selection);
+    const save = vi.spyOn(store as unknown as { saveBots(): void }, "saveBots")
+      .mockImplementationOnce(() => { throw new Error("disk full"); });
+    expect(() => store.createBot({ name: "Failed restricted creation", toolScope: { allow: [] } })).toThrow("disk full");
+    expect(store.bots).toEqual([]);
+    save.mockRestore();
+    expect(new Store(selection).bots).toEqual([]);
+  });
+
+  it("rejects malformed tool selection before creating a bot", () => {
+    const store = new Store(selection);
+    expect(() => store.createBot({ toolScope: { allow: "all" } } as never)).toThrow(/tool selection/i);
+    expect(store.bots).toEqual([]);
+    expect(new Store(selection).bots).toEqual([]);
+  });
+
+  it("retains corrupt persisted tool selection as denied access instead of inheriting all tools", () => {
+    const store = new Store(selection);
+    const bot = store.createBot({ name: "Corrupt selection fixture" });
+    const bots = JSON.parse(readFileSync(join(DATA_DIR, "bots.json"), "utf8"));
+    bots[0].toolScope = { allow: "all" };
+    writeFileSync(join(DATA_DIR, "bots.json"), JSON.stringify(bots));
+    const restored = new Store(selection).bot(bot.id)!;
+    expect(restored).toHaveProperty("toolScope", { allow: "all" });
+    expect(allowsTool((restored as unknown as { toolScope: unknown }).toolScope, { kind: "native", name: "read" })).toBe(false);
+  });
+
+  // MOCA-264: a deleted bot stayed in its rooms for good — counted on the
+  // Save button, refused by the roster check on every save, and still the
+  // room's lead.
+  it("takes a deleted bot out of every room it was in and passes its lead role on", () => {
+    const store = new Store(selection);
+    const [ada, ben, cleo] = [store.createBot({}), store.createBot({}), store.createBot({})];
+    const room = store.createGroup("Launch team", [ada.id, ben.id, cleo.id], false);
+    store.patchGroup(room.id, { defaultResponder: { kind: "member", botId: ben.id }, busyBotId: ben.id });
+    const pair = store.createGroup("Ada & Ben", [ada.id, ben.id], true);
+    const changes: unknown[] = [];
+    store.onChange((change) => changes.push(change));
+
+    expect(store.deleteBot(ben.id)).toBe(true);
+    expect(store.group(room.id)).toMatchObject({ memberIds: [ada.id, cleo.id], defaultResponder: { kind: "member", botId: ada.id } });
+    expect(store.group(room.id)?.turnStartedAt).toBeUndefined();
+    expect(store.group(pair.id)?.memberIds).toEqual([ada.id, ben.id]);
+    expect(changes).toContainEqual({ type: "group", groupId: room.id });
+    expect(new Store(selection).group(room.id)?.memberIds).toEqual([ada.id, cleo.id]);
+  });
+
+  it("finishes bot erasure if the room registry cannot persist, then repairs it on restart", () => {
+    const store = new Store(selection);
+    const [ada, ben] = [store.createBot({}), store.createBot({})];
+    const room = store.createGroup("Launch team", [ada.id, ben.id], false);
+    const internals = store as unknown as { saveGroups: () => void };
+    vi.spyOn(internals, "saveGroups").mockImplementationOnce(() => { throw new Error("fixture write failure"); });
+
+    expect(store.deleteBot(ben.id)).toBe(true);
+    expect(store.bot(ben.id)).toBeNull();
+    expect(store.messagesFor(ben.threadId)).toEqual([]);
+    expect(existsSync(soulFile(ben.id))).toBe(false);
+    expect(JSON.parse(readFileSync(join(DATA_DIR, "groups.json"), "utf8"))[0].memberIds).toContain(ben.id);
+    expect(new Store(selection).group(room.id)?.memberIds).toEqual([ada.id]);
+  });
+
+  it("repairs rooms that still list a deleted bot when it starts", () => {
+    const store = new Store(selection);
+    const [ada, cleo] = [store.createBot({}), store.createBot({})];
+    const room = store.createGroup("Launch team", [ada.id, cleo.id], false);
+    const groupsFile = join(DATA_DIR, "groups.json");
+    const saved = JSON.parse(readFileSync(groupsFile, "utf8"));
+    const ghost = "8a2acb50-6276-4ce2-926a-9e112b848acc";
+    Object.assign(saved.find((g: { id: string }) => g.id === room.id), {
+      memberIds: [ghost, ada.id, cleo.id],
+      defaultResponder: { kind: "member", botId: ghost },
+    });
+    writeFileSync(groupsFile, JSON.stringify(saved));
+
+    const restarted = new Store(selection);
+    expect(restarted.group(room.id)).toMatchObject({ memberIds: [ada.id, cleo.id], defaultResponder: { kind: "member", botId: ada.id } });
+    const persisted = JSON.parse(readFileSync(groupsFile, "utf8")).find((g: { id: string }) => g.id === room.id);
+    expect(persisted.memberIds).toEqual([ada.id, cleo.id]);
+  });
+
+  it("never empties rooms when the bot list cannot be read", () => {
+    const store = new Store(selection);
+    const [ada, cleo] = [store.createBot({}), store.createBot({})];
+    const room = store.createGroup("Launch team", [ada.id, cleo.id], false);
+    const groupsFile = join(DATA_DIR, "groups.json");
+    const before = readFileSync(groupsFile, "utf8");
+    writeFileSync(join(DATA_DIR, "bots.json"), "{ not json");
+
+    expect(new Store(selection).group(room.id)?.memberIds).toEqual([ada.id, cleo.id]);
+    expect(JSON.parse(readFileSync(groupsFile, "utf8")).find((g: { id: string }) => g.id === room.id).memberIds)
+      .toEqual(JSON.parse(before).find((g: { id: string }) => g.id === room.id).memberIds);
   });
 
   it("renames populated teams without changing members, conversations, grants or computer identity", () => {
@@ -165,7 +300,7 @@ describe("Store", () => {
     expect(reloaded.messagesFor(bot.threadId)).toHaveLength(2);
     expect(reloaded.messagesFor(bot.threadId)[1].compaction?.summary).toContain("-5 != 5");
     expect(JSON.stringify(reloaded.messagesFor(bot.threadId))).not.toContain(key);
-    const wire = toWireTask(reloaded.taskByThread(bot.id, bot.threadId)!);
+    const wire = toWireTask(reloaded.taskByThread(bot.id, bot.threadId)!, selection());
     for (const field of Object.keys(patch)) expect(wire).not.toHaveProperty(field);
   });
 
@@ -201,7 +336,7 @@ describe("Store", () => {
     store.patchTask(bot.id, bot.threadId, { surface: "local", surfaceSource: "user" });
     const reloaded = new Store(selection);
     expect(reloaded.taskByThread(bot.id, bot.threadId)).toMatchObject({ surface: "local", surfaceSource: "user" });
-    expect(toWireTask(reloaded.taskByThread(bot.id, bot.threadId)!)).not.toHaveProperty("surfaceSource");
+    expect(toWireTask(reloaded.taskByThread(bot.id, bot.threadId)!, selection())).not.toHaveProperty("surfaceSource");
     const saved = JSON.parse(readFileSync(join(DATA_DIR, "bots.json"), "utf8")) as any[];
     expect(saved[0].tasks[0]).toMatchObject({ surface: "local", surfaceSource: "user" });
   });
@@ -240,6 +375,45 @@ describe("Store", () => {
     expect(reloaded.taskByThread(bot.id, legacyMismatch.threadId)?.surfaceSource).toBeUndefined();
     expect(reloaded.taskByThread(bot.id, autoMatch.threadId)).toMatchObject({ surface: "vm" });
     expect(reloaded.taskByThread(bot.id, autoMismatch.threadId)!.surface).toBeUndefined();
+  });
+
+  // Every turn re-saves the same resume cursor and the same context model;
+  // each rewrite of bots.json used to cost an fsync (~4 ms on macOS) on the
+  // event loop while putting back identical bytes.
+  it("leaves bots.json alone when a save changes nothing, and writes the next real change", () => {
+    const file = join(DATA_DIR, "bots.json");
+    const store = new Store(selection);
+    const bot = store.createBot({}, { seedMessages: false });
+    store.setResumeCursor(bot.id, "claude", { sessionId: "s-1" }, bot.threadId);
+    store.patchTask(bot.id, bot.threadId, { lastContextModel: "claude-sonnet-5" });
+    const saved = statSync(file).ino;
+    const events: unknown[] = [];
+    store.onChange((change) => events.push(change));
+
+    store.setResumeCursor(bot.id, "claude", { sessionId: "s-1" }, bot.threadId);
+    store.patchTask(bot.id, bot.threadId, { lastContextModel: "claude-sonnet-5" });
+    expect(statSync(file).ino).toBe(saved);
+    // Listeners still hear about every save, changed or not.
+    expect(events).toEqual([{ type: "bot", botId: bot.id }, { type: "bot", botId: bot.id }]);
+
+    store.setResumeCursor(bot.id, "claude", { sessionId: "s-2" }, bot.threadId);
+    expect(statSync(file).ino).not.toBe(saved);
+    expect(new Store(selection).taskByThread(bot.id, bot.threadId)?.resumeCursors).toEqual({ claude: { sessionId: "s-2" } });
+  });
+
+  it("still overwrites a bots.json changed on disk when the next save differs from it", () => {
+    // A workspace restore or a hand edit changes the file under the Store;
+    // the skip compares against the disk, not against the last write.
+    const file = join(DATA_DIR, "bots.json");
+    const store = new Store(selection);
+    const bot = store.createBot({ name: "Original" }, { seedMessages: false });
+    store.setResumeCursor(bot.id, "claude", { sessionId: "s-1" }, bot.threadId);
+    const edited = JSON.parse(readFileSync(file, "utf8"));
+    edited[0].name = "Edited on disk";
+    writeFileSync(file, JSON.stringify(edited, null, 2));
+
+    store.setResumeCursor(bot.id, "claude", { sessionId: "s-1" }, bot.threadId);
+    expect(JSON.parse(readFileSync(file, "utf8"))[0].name).toBe("Original");
   });
 
   it.skipIf(process.platform === "win32")("writes the bot and group registries owner-only and tightens loose ones on load", () => {
@@ -299,31 +473,43 @@ describe("Store", () => {
     } finally { database.close(); }
   });
 
-  it("commits a confirmed model switch once, preserving siblings and rolling back failed writes", () => {
-    const store = new Store(selection);
+  it("commits a confirmed model switch once, moving followers safely and rolling back failed writes", () => {
+    const store = new Store(selection, undefined, (instanceId) => ({ claude: "claudeAgent", codex: "codex" })[instanceId]);
     const bot = store.createBot();
     store.patchBot(bot.id, { approvalMode: "full", alwaysAllow: ["old-tool"] });
     const first = store.activeTask(bot.id)!;
     const sibling = store.createTask(bot.id)!;
+    const picked = store.createTask(bot.id)!;
+    const opus = { instanceId: "claude", model: "claude-opus-5" };
+    store.switchTaskModel(bot.id, picked.threadId, opus, false, false);
     const next = { instanceId: "codex", model: "fixture-model" };
     const save = vi.spyOn(store as unknown as { saveBots(bots: BotRecord[]): void }, "saveBots");
     store.switchTaskModel(bot.id, first.threadId, next, false, true);
     expect(save).toHaveBeenCalledTimes(1);
     expect(store.projectBotForTask(bot.id, first.threadId)).toMatchObject({ modelSelection: next, approvalMode: "ask", alwaysAllow: [] });
     expect(bot).toMatchObject({ modelSelection: selection(), approvalMode: "full" });
-    expect(sibling).toMatchObject({ modelSelection: selection(), approvalMode: "full", alwaysAllow: ["old-tool"] });
+    expect(sibling).toMatchObject({ approvalMode: "full", alwaysAllow: ["old-tool"] });
+    expect(sibling.modelSelection).toBeUndefined();
     delete sibling.approvalMode;
     delete sibling.autoApprove;
     delete sibling.alwaysAllow;
     save.mockImplementationOnce(() => { throw new Error("disk full"); });
     expect(() => store.switchTaskModel(bot.id, first.threadId, next, true, true)).toThrow("disk full");
     expect(bot).toMatchObject({ modelSelection: selection(), approvalMode: "full" });
+    expect(sibling.modelSelection).toBeUndefined();
     store.switchTaskModel(bot.id, first.threadId, next, true, true);
     expect(bot).toMatchObject({ modelSelection: next, approvalMode: "ask", alwaysAllow: [] });
-    expect(sibling).toMatchObject({ modelSelection: selection(), approvalMode: "full", alwaysAllow: ["old-tool"] });
+    // The thread it was changed from now follows the bot; a sibling that
+    // follows moves to the new engine and, its Full access belonging to the
+    // old one, back to Ask; a thread's own model and level stay.
+    expect(first.modelSelection).toBeUndefined();
+    expect(sibling).toMatchObject({ approvalMode: "ask", autoApprove: false, alwaysAllow: [] });
+    expect(store.projectBotForTask(bot.id, sibling.threadId)?.modelSelection).toEqual(next);
+    expect(picked).toMatchObject({ modelSelection: opus, approvalMode: "full", alwaysAllow: ["old-tool"] });
     const reloaded = new Store(selection);
     expect(reloaded.bot(bot.id)).toMatchObject({ modelSelection: next, approvalMode: "ask" });
-    expect(reloaded.taskByThread(bot.id, sibling.threadId)).toMatchObject({ modelSelection: selection(), approvalMode: "full" });
+    expect(reloaded.taskByThread(bot.id, sibling.threadId)).toMatchObject({ approvalMode: "ask" });
+    expect(reloaded.taskByThread(bot.id, picked.threadId)).toMatchObject({ modelSelection: opus, approvalMode: "full" });
   });
 
   it("createBot seeds a greeting without promising engine-specific tools", () => {
@@ -648,6 +834,9 @@ describe("Store", () => {
     expect(artifact.parentId).toBe(turnEnd.id);
     // the re-parented child was announced so live clients converge
     expect(patches).toContain(followUp.id);
+    // a restart and the uncached-thread page both start from SQLite's leaf
+    expect(new Store(selection).messagesTail(bot.threadId, 2).activeLeafId).toBe(followUp.id);
+    expect(new Store(selection).activePath(bot.threadId).map((m) => m.id)).toEqual(path);
   });
 
   it("insertMessageAfter is a plain append when the anchor is still the leaf, or unknown", () => {
@@ -656,6 +845,7 @@ describe("Store", () => {
     const turnEnd = store.appendMessage(bot.threadId, { role: "bot", kind: "text", text: "done" });
     const artifact = store.insertMessageAfter(bot.threadId, turnEnd.id, { role: "bot", kind: "screen", png: "abc" });
     expect(store.activePath(bot.threadId).at(-1)?.id).toBe(artifact.id); // became the leaf
+    expect(new Store(selection).activePath(bot.threadId).at(-1)?.id).toBe(artifact.id); // and stays it after a reload
 
     const orphan = store.insertMessageAfter(bot.threadId, "no-such-message", { role: "bot", kind: "text", text: "x" });
     expect(store.activePath(bot.threadId).at(-1)?.id).toBe(orphan.id);
@@ -1007,7 +1197,8 @@ describe("Store", () => {
     expect(explicit.modelSelection).toEqual({ instanceId: "codex", model: "chosen", effort: "medium" });
     for (const bot of [defaulted, explicit, new Store(selection).bot("set-up")!]) {
       expect(bot.modelSelection.effort).toBe("medium");
-      expect(bot.tasks?.[0].modelSelection).toEqual(bot.modelSelection);
+      // The first thread follows the bot's completed selection.
+      expect(bot.tasks?.[0].modelSelection).toBeUndefined();
     }
   });
 
@@ -1025,7 +1216,7 @@ describe("Store", () => {
     expect("cwd" in (store.bot("plain-bot") ?? {})).toBe(false);
   });
 
-  it("stores variants independently and seeds future conversations from the bot default", () => {
+  it("stores variants independently; conversations without one of their own follow the bot", () => {
     const store = new Store(selection);
     const bot = store.createBot();
     const first = bot.threadId;
@@ -1037,7 +1228,7 @@ describe("Store", () => {
     const future = store.createTask(bot.id, "Future")!;
     const reloaded = new Store(selection);
     expect(reloaded.projectBotForTask(bot.id, first)!.modelSelection).toEqual(chosen);
-    expect(reloaded.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual(selection());
+    expect(reloaded.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual({ ...chosen, variant: "minimal" });
     expect(reloaded.projectBotForTask(bot.id, future.threadId)!.modelSelection).toEqual({ ...chosen, variant: "minimal" });
   });
 
@@ -1062,18 +1253,16 @@ describe("Store", () => {
     const second = store.createTask(bot.id, "Second")!;
     const pinned = { instanceId: "claude", model: "claude-opus-4-5" };
     store.switchTaskModel(bot.id, first, pinned, false, false);
-    // A legacy thread with no selection of its own must not silently follow
-    // the new default: it is pinned to the previous one at apply time.
-    const legacy = store.bot(bot.id)!.tasks!.find((task) => task.threadId === second.threadId)!;
-    legacy.modelSelection = undefined;
+    // A person's pick stays; a thread with no model of its own follows the
+    // bot onto the new one.
     const next = { instanceId: "codex", model: "gpt-5-codex" };
     expect(store.applyModelDefault(bot.id, next)?.modelSelection).toEqual(next);
     expect(store.projectBotForTask(bot.id, first)!.modelSelection).toEqual(pinned);
-    expect(store.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual(selection());
+    expect(store.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual(next);
     const reloaded = new Store(selection);
     expect(reloaded.bot(bot.id)!.modelSelection).toEqual(next);
     expect(reloaded.projectBotForTask(bot.id, first)!.modelSelection).toEqual(pinned);
-    expect(reloaded.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual(selection());
+    expect(reloaded.projectBotForTask(bot.id, second.threadId)!.modelSelection).toEqual(next);
   });
 
   it("keeps one persisted Chief of Staff per section and supports handoff", () => {
@@ -2263,7 +2452,11 @@ describe("soul", () => {
     expect(reloaded.bot(chief.id)?.managedSections).toContain(name);
     expect(reloaded.bot(chief.id)?.lastTeamSetupReceipt?.requestId).toBe(request.requestId);
     expect(reloaded.bot(bot.id)).toMatchObject({ section: name, modelSelection: { instanceId: "codex", model: "fixture" } });
-    expect(reloaded.bot(bot.id)?.tasks?.[0]).toMatchObject({ modelSelection: selection(), approvalMode: "edits", autoApprove: false, alwaysAllow: ["Read"] });
+    // The legacy thread follows the bot onto Codex, which can't auto-accept
+    // edits: its frozen level goes back to Ask, as on any engine switch.
+    expect(reloaded.bot(bot.id)?.tasks?.[0]).toMatchObject({ approvalMode: "ask", autoApprove: false, alwaysAllow: [] });
+    expect(reloaded.bot(bot.id)?.tasks?.[0].modelSelection).toBeUndefined();
+    expect(reloaded.projectBotForTask(bot.id, bot.threadId)?.modelSelection).toEqual({ instanceId: "codex", model: "fixture" });
     expect(() => reloaded.applyTeamSetup({ ...request, requestId: "too-many", newTeams: ["Overflow"] })).toThrow(/scope/);
     expect(() => reloaded.applyTeamSetup({ ...request, requestId: "too-long", newTeams: ["X".repeat(61)] })).toThrow(/scope/);
     expect(reloaded.bot(chief.id)?.managedSections).toHaveLength(100);

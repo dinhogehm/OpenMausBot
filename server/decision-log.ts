@@ -34,7 +34,7 @@ import { basename, join } from "node:path";
 
 import type { AutoVerdictSource } from "./auto-approve.ts";
 import { redactSecrets } from "./redact.ts";
-import { csvCell } from "./usage-ledger.ts";
+import { csvCell, monthKey } from "./usage-ledger.ts";
 
 /** A verdict's outcome. auto-* rows came from a policy — connector grants,
  * auto-approve rules — with no card in front of a person; user-* rows
@@ -65,9 +65,10 @@ export type DecisionSource =
   | "skill"
   | "profile"
   | "model"
-  | "tightening"
   | "user"
   | "connector-scope"
+  | "outbound"
+  | "team-memory"
   | "auto-review"
   | "auto-review-shadow";
 
@@ -97,9 +98,11 @@ export interface DecisionRow {
   unattended?: boolean;
   /** who answered, on rows a person's answer produced */
   actor?: DecisionActor;
+  /** "call": that person answered by voice on a Live call, not with a tap */
+  via?: "call";
   /** how the ask reached the fold: a tool call (absent) or a block parsed
-   * out of model-authored output ("output", the BoatAgent transport).
-   * Question cards only. */
+   * out of model-authored output ("output", only in rows the removed
+   * Computer engine wrote). Question cards only. */
   origin?: "output";
 }
 
@@ -135,16 +138,13 @@ export function decisionRetentionDays(configured: number | undefined, env: NodeJ
   return DEFAULT_DECISION_RETENTION_DAYS;
 }
 
-const actorScope = new AsyncLocalStorage<DecisionActor>();
+const actorScope = new AsyncLocalStorage<{ actor: DecisionActor; via?: "call" }>();
 
 /** Run `work` as a person's card answer: every `source: "user"` row it
- * writes names `actor`, without each resolver having to thread it through. */
-export function withDecisionActor<T>(actor: DecisionActor, work: () => T): T {
-  return actorScope.run(actor, work);
-}
-
-function monthKey(at: Date): string {
-  return `${at.getUTCFullYear()}-${String(at.getUTCMonth() + 1).padStart(2, "0")}`;
+ * writes names `actor` (and `via`, for an answer spoken on a Live call),
+ * without each resolver having to thread it through. */
+export function withDecisionActor<T>(actor: DecisionActor, work: () => T, via?: "call"): T {
+  return actorScope.run(via ? { actor, via } : { actor }, work);
 }
 
 export function decisionFileFor(dataDir: string, at: Date): string {
@@ -165,10 +165,12 @@ async function writeDecision(dataDir: string, record: DecisionRow): Promise<void
  * the fold that calls this is delivering approvals and cards, and a full
  * disk must not turn into denied tools. */
 export function appendDecision(dataDir: string, row: Omit<DecisionRow, "at">): void {
-  const actor = row.actor ?? (row.source === "user" ? actorScope.getStore() : undefined);
+  const scope = row.source === "user" ? actorScope.getStore() : undefined;
+  const actor = row.actor ?? scope?.actor;
+  const via = row.via ?? scope?.via;
   // Redact now, not when the queue drains: the row is what was true at the
   // moment of the decision.
-  const record = redactSecrets({ at: new Date().toISOString(), ...row, ...(actor ? { actor } : {}) }) as DecisionRow;
+  const record = redactSecrets({ at: new Date().toISOString(), ...row, ...(actor ? { actor } : {}), ...(via ? { via } : {}) }) as DecisionRow;
   const previous = writeQueues.get(dataDir) ?? Promise.resolve();
   // Serialize appends (and the occasional prune) per directory, so two
   // simultaneous approvals keep their decision order.
@@ -330,7 +332,7 @@ export function decisionsCsv(rows: DecisionRow[]): string {
       row.summary ?? "",
       row.rule ?? "",
       row.unattended ? "yes" : "",
-      actorLabel(row.actor),
+      row.via === "call" ? `${actorLabel(row.actor)} (by voice)` : actorLabel(row.actor),
       row.threadId,
       row.requestId ?? "",
     ].map(csvCell).join(","));

@@ -33,7 +33,7 @@ describe.skipIf(process.platform === "win32")("direct final-screen settlement", 
     expect((await api("POST", `/api/bots/${botId}/messages`, { text: "FIRST_SCREEN", threadId })).status).toBe(202);
     await expect.poll(() => existsSync(join(fixture, "provider.json")), { timeout: 10_000 }).toBe(true);
     const dump = JSON.parse(readFileSync(join(fixture, "provider.json"), "utf8"));
-    const token = dump.mcpConfig.mcpServers.browser.env.OMB_BROWSER_TOKEN;
+    const token = dump.mcpConfig.mcpServers.browser.env.OMB_MCP_TOKEN;
     expect((await api("POST", "/api/internal/browser/mcp", {
       method: "tools/call", params: { name: "agent_browser_screenshot", arguments: {} },
     }, token)).status).toBe(200);
@@ -127,6 +127,22 @@ describe.skipIf(process.platform === "win32")("direct final-screen settlement", 
     expect(screenIndex).toBeGreaterThanOrEqual(0);
     expect(screenIndex).toBeLessThan(
       messages.findIndex((message: any) => message.text === "FOLLOWUP_AFTER_SCREEN"));
+  }, 30_000);
+
+  it("sends the settled screenshot to live clients without its pixels; the image route serves them", async () => {
+    await beginCapture();
+    gate("capture.gate");
+    const frame = await events.until((candidate) => candidate.kind === "message" &&
+      candidate.threadId === threadId && candidate.message?.kind === "screen", 15_000);
+    expect(frame.message).toMatchObject({ hasImage: true, mime: "image/png" });
+    expect(frame.message.png).toBeUndefined();
+    expect(JSON.stringify(frame)).not.toContain("iVBORw0KGgo");
+    const image = await fetch(`${session.info.url}/api/threads/${threadId}/messages/${frame.message.id}/image`,
+      { headers: { origin: session.info.url } });
+    expect(image.status).toBe(200);
+    expect(image.headers.get("content-type")).toBe("image/png");
+    expect(Buffer.from(await image.arrayBuffer()).toString("base64"))
+      .toBe("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQAAAABJRU5ErkJggg==");
   }, 30_000);
 
   it("bounds capture settlement and discards a late frame after the thread is deleted", async () => {

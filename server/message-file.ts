@@ -35,9 +35,14 @@ export function messageFileRoots(options: {
   ])];
 }
 
-function statusError(status: number, message: string): Error & { status: number } {
-  return Object.assign(new Error(message), { status });
+function statusError(status: number, message: string, code?: string): Error & { status: number; code?: string } {
+  return Object.assign(new Error(message), { status, ...(code ? { code } : {}) });
 }
+
+// The client offers "Show in folder" for exactly this refusal, so it carries a
+// stable code instead of being recognised by its English text.
+const outsideWorkspace = () =>
+  statusError(403, "the linked file is outside this conversation's workspace", "outside_workspace");
 
 function decodePathWithSuffixRemoved(href: string): string {
   // Split before decoding so an encoded `?` or `#` remains part of the
@@ -227,10 +232,10 @@ export function messageReferencesFile(text: string, requested: string): boolean 
   return false;
 }
 
-/** Decode exactly the entity spellings emitted by the composer. A single
- * pass is intentional: double-encoded input must not turn into a path only
- * while it is being authorised. */
-function decodeAttachmentAttribute(value: string): string {
+/** Decode exactly the entity spellings the composer writes into an
+ * attachment tag. A single pass is intentional: double-encoded input stays
+ * encoded and must not turn into a path only while it is being authorised. */
+export function decodeAttachmentAttribute(value: string): string {
   return value.replace(
     /&(quot|lt|gt|amp);|&#(9|10|13);/g,
     (entity, named: string | undefined, numeric: string | undefined) => {
@@ -285,17 +290,12 @@ function safeDisplayName(value: string): string {
 }
 
 /**
- * Confirm that a stored user message carries the requested attachment as an
- * exact standalone transport tag. Plain prose, inline examples, fenced code,
- * and near-matching paths do not grant access. The HTTP route pairs this
- * message capability with ATTACHMENTS_DIR containment, so this can never
- * become an arbitrary host-file reader.
+ * The user-facing name of the requested attachment when a stored user
+ * message carries it as an exact standalone transport tag, else null. Plain
+ * prose, inline examples, fenced code, and near-matching paths do not grant
+ * access. The HTTP route pairs this message capability with ATTACHMENTS_DIR
+ * containment, so this can never become an arbitrary host-file reader.
  */
-export function messageReferencesAttachment(text: string, requested: string): boolean {
-  return messageAttachmentName(text, requested) !== null;
-}
-
-/** Return the user-facing name carried by an authorised attachment tag. */
 export function messageAttachmentName(text: string, requested: string): string | null {
   let wanted: string;
   try {
@@ -423,7 +423,7 @@ export async function openMessageFile(href: string, roots: readonly string[]): P
       }
 
       const canonicalAfter = await realpath(candidate);
-      if (!containedBy(root, canonicalAfter)) throw statusError(403, "the linked file is outside this conversation's workspace");
+      if (!containedBy(root, canonicalAfter)) throw outsideWorkspace();
       const after = await stat(canonicalAfter);
       if (opened.dev !== after.dev || opened.ino !== after.ino) {
         throw statusError(409, "the linked file changed while it was being opened");
@@ -442,7 +442,7 @@ export async function openMessageFile(href: string, roots: readonly string[]): P
     }
   }
 
-  if (sawOutsideRoot) throw statusError(403, "the linked file is outside this conversation's workspace");
+  if (sawOutsideRoot) throw outsideWorkspace();
   throw statusError(404, "the linked file is unavailable");
 }
 

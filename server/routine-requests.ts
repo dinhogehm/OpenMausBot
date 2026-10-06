@@ -9,6 +9,7 @@ import { newId } from "./contracts.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { parseJson, schemaIssue, type JsonObject, type JsonValue } from "./schema.ts";
 import {
+  intervalHasRestrictions,
   nextOccurrence,
   type Routine,
   type RoutineInput,
@@ -733,12 +734,6 @@ function formatInstant(at: number, timeZone: string): string {
   }
 }
 
-function intervalHasRestrictions(
-  schedule: Extract<RoutineRequestSchedule, { type: "interval" }>,
-): boolean {
-  return schedule.weekdays !== undefined || schedule.window !== undefined || schedule.endsAt !== undefined;
-}
-
 export function scheduleText(schedule: RoutineRequestSchedule, timeZone: string): string {
   if (schedule.type === "cron") return `${cronScheduleLabel(schedule)} · Cron: ${schedule.expression}`;
   if (schedule.type === "once") return `${formatInstant(schedule.at, timeZone)} (${timeZone})`;
@@ -843,7 +838,7 @@ function cardCopy(
   const nextRunAt = nextForOperation(operation, manager, now);
   const scheduleTimeZone = definition.schedule.type === "cron" ? definition.schedule.timeZone : timeZone;
   const when = operation.action === "run_now" ? "Now" : scheduleText(definition.schedule, timeZone);
-  const destination = definition.runOn === "cloud" ? "Boat-hosted agent" : "Bot’s current model and configured computer";
+  const destination = definition.runOn === "cloud" ? "Bot’s current model on its cloud computer" : "Bot’s current model and configured computer";
   const current = operation.action === "create"
     ? null
     : manager.listRoutines().find((routine) => routine.id === operation.routineId) ?? null;

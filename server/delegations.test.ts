@@ -122,6 +122,16 @@ describe("queueDelegation", () => {
     expect(_pendingCount(from.threadId)).toBe(0);
   });
 
+  it("lets a cross-bot send start a new ownership chain at the depth cap", () => {
+    const result = queueDelegation(commsBus, from, {
+      toBotId: target.id,
+      message: "own this",
+      depth: 1,
+      oneWay: true,
+    }, 1);
+    expect(result.result).toBe("ok");
+  });
+
   it("rejects when the target bot does not exist", () => {
     const result = queueDelegation(commsBus, from, {
       toBotId: "ghost",
@@ -678,6 +688,30 @@ describe("drainDelegations", () => {
     expect(runTargetCalls).toEqual([]);
   });
 
+  it.each(["missing target", "deleted target thread", "deleted source too"] as const)(
+    "reports one-way delivery failure after %s without waking the sender or recreating a thread",
+    async (change) => {
+      const source = store.createTask(from.id, "Source", false)!;
+      const opened = store.createTask(target.id, "Recipient", false)!;
+      const queued = queueDelegation(commsBus, from, {
+        toBotId: target.id, message: "Independent work", depth: 0, oneWay: true,
+        ...(change !== "missing target" ? { targetThreadId: opened.threadId } : {}),
+      }, 1, source.threadId);
+      if (change === "missing target") store.deleteBot(target.id);
+      else store.deleteTask(target.id, opened.threadId);
+      if (change === "deleted source too") store.deleteTask(from.id, source.threadId);
+      const runTarget = vi.fn();
+      const settled = vi.fn();
+      drainDelegations(commsBus, approvalBus, source.threadId, runTarget, settled);
+      await waitFor(() => findDelegationReceipt(queued.id!) && _pendingCount(source.threadId) === 0);
+      expect(runTarget).not.toHaveBeenCalled();
+      expect(settled).not.toHaveBeenCalled();
+      expect(store.messagesFor(opened.threadId)).toEqual([]);
+      if (change === "deleted source too") expect(store.messagesFor(source.threadId)).toEqual([]);
+      else expect(store.messagesFor(source.threadId).some(message => message.tool?.ok === false)).toBe(true);
+    },
+  );
+
   it("auto-allows when alwaysAllow already covers the pair (no card pushed)", async () => {
     store.patchBot(from.id, {
       approvePeerComms: true,
@@ -822,6 +856,19 @@ describe("delegations survive a restart", () => {
     await waitFor(() => ran.length === 1 && pendingThreads().length === 0);
     expect(ran[0]).toContain("left over");
     expect(pendingThreads()).toEqual([]);
+  });
+
+  it("keeps an external runtime's completion owner across a restart and dispatches with it", async () => {
+    queueDelegation(buses.commsBus, from, { toBotId: target.id, message: "from the gateway", depth: 0, completionOwner: "external" }, 1);
+    expect(JSON.parse(readFileSync(file(), "utf8"))[from.threadId][0]).toMatchObject({ completionOwner: "external" });
+    _resetPending();
+    _loadPending();
+    const owners: Array<string | undefined> = [];
+    drainDelegations(buses.commsBus, buses.approvalBus, from.threadId, async (...args) => {
+      owners.push(args[9]);
+    });
+    await waitFor(() => owners.length === 1 && pendingThreads().length === 0);
+    expect(owners).toEqual(["external"]);
   });
 
   it("tolerates a missing or corrupt file", () => {
@@ -1159,6 +1206,16 @@ describe("busy waits and expiry", () => {
     expect(findDelegationReceipt(queued.id!)).toMatchObject({ status: "dropped" });
   });
 
+  it("keeps an accepted one-way send when its source turn fails", () => {
+    const opened = store.createTask(target.id, "Owned work", false)!;
+    queueDelegation(commsBus, from, {
+      toBotId: target.id, message: "keep running", depth: 0,
+      targetThreadId: opened.threadId, oneWay: true,
+    }, 1);
+    discardDelegations(commsBus, from.threadId);
+    expect(_pendingCount(from.threadId)).toBe(1);
+  });
+
   it("expires a handoff nobody could take within 24 hours, and wakes the delegator", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
@@ -1183,6 +1240,30 @@ describe("busy waits and expiry", () => {
       });
       expect(chipCount("Delegação para @Helper expirou — ninguém pegou em 24 horas")).toBe(1);
       expect(settled).toEqual(["expired"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("records an external runtime's failed or expired handoff without waking the delegator", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const gone = store.createBot();
+      const failed = queueDelegation(commsBus, from, { toBotId: gone.id, message: "never runs", depth: 0, completionOwner: "external" }, 1);
+      store.deleteBot(gone.id);
+      store.patchBot(target.id, { busy: true });
+      const expired = queueDelegation(commsBus, from, { toBotId: target.id, message: "later", depth: 0, completionOwner: "external" }, 1);
+      const runTarget = vi.fn();
+      const onSettled = vi.fn();
+      drainDelegations(commsBus, approvalBus, from.threadId, runTarget, onSettled);
+      await waitFor(() => findDelegationReceipt(failed.id!) && pendingDelegationInfo(expired.id!)?.waiting === true);
+
+      vi.setSystemTime(new Date(Date.now() + DELEGATION_TTL_MS));
+      expect(expireStaleDelegations(commsBus, Date.now(), onSettled)).toBe(1);
+      expect(findDelegationReceipt(failed.id!)).toMatchObject({ status: "error", result: "no such bot" });
+      expect(findDelegationReceipt(expired.id!)).toMatchObject({ status: "expired" });
+      expect(runTarget).not.toHaveBeenCalled();
+      expect(onSettled).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

@@ -17,6 +17,26 @@ next task; no app restart is needed.
 
 Tokens for URL servers go in headers, never in the address.
 
+### Whop
+
+In Plugins, find **Whop** alongside Gmail, Slack and the other apps and click **Connect**. The built-in card
+uses Whop's official hosted MCP endpoint and opens Whop's browser sign-in;
+no API key, local CLI or Composio connection is needed. After successful
+sign-in and tool discovery it enables the connection. A cancelled or failed
+first setup remains off and can be retried without adding another server.
+
+Open **Bot access** on the Whop card to reach each bot's existing Access
+settings. Bots set to use every enabled MCP server inherit the connection;
+bots with an explicit selection must include its server name. The next task
+uses the selection. Whop also appears in the **Connected** filter. **Disconnect** disables the connection and signs out;
+the saved entry remains available to reconnect. Existing custom Whop entries
+at the official HTTP endpoint are recognized rather than replaced.
+
+Whop currently requests admin access across businesses your Whop account can
+manage, and its own consequential-action confirmations still apply. See the
+[official Whop MCP documentation](https://github.com/whopio/whop-mcp-server).
+This is an optional connected tool, not a change to OMB's subscription billing.
+
 ### Servers that ask you to sign in
 
 Some URL servers take no token; they want you to sign in with your browser
@@ -84,6 +104,30 @@ After you save, the editor shows the redirect URI to register with the app:
 the server's address. Sign-in with a registered app always uses that port; if
 another program holds it, sign-in stops and says so. Changing the client ID
 or the scopes signs the server out; a new secret for the same app does not.
+
+### Example: give your bots web search
+
+A good first URL server is You.com's search server, because the free profile
+needs no token at all. Add a URL server with the address
+
+```
+https://api.you.com/mcp?profile=free
+```
+
+leave the headers empty, and press **Test** — the handshake completes and the
+server advertises `you-search` (web search) and `you-discover` (a directory of
+other MCP servers). The free profile is read-only and rate-limited to 100
+searches a day; there is no key, so none is stored. Turn the server on and
+every compatible bot can search the web on its next task — `you-search` results
+arrive like any other tool result, through the approval cards.
+
+If the free limits are too small, [you.com/platform](https://you.com/platform)
+issues an API key with a higher quota and the `you-contents` tool for
+full-page extraction. Add the same address without `?profile=free` and one
+header line, `Authorization: Bearer <your key>` — the key is kept write-only
+like every other header value. `you-research` (multi-step cited reports) is
+served by its own dedicated server, `https://api.you.com/mcp/research` — add
+it the same way, with the same header.
 
 ### Import and choose tools per bot
 

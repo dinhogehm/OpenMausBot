@@ -47,9 +47,12 @@ const ENTRY_POINTS = [
   "openmausbot.ts",
   "pair-cli.ts",
   "workspace-backup.worker.ts",
-  // the OMB Cloud Pro home image's entry point (deploy/fly/Dockerfile): it
+  // the OMB Cloud Pro home image's entry point (Dockerfile, cloud-home): it
   // spawns index.js beside it and the Caddy edge
   "cloud-home-start.ts",
+  // the container image's entry point (Dockerfile, deploy/podman): it spawns
+  // index.js beside it and starts it again on RESTART_EXIT_CODE
+  "server-launcher.ts",
   // The packaged smoke probe imports this manifest directly. Importing the
   // shared avatar contract widens TypeScript's inferred emit root to the repo,
   // so tsc may place its copy under dist-server/server/. Bundle an explicit
@@ -65,7 +68,8 @@ const ENTRY_POINTS = [
   "permission-proxy.ts",
   "connector-proxy.ts",
   "mcp-gate.ts",
-  "browser-proxy.ts",
+  "mcp-remote-proxy.ts",
+  "harness-mcp-proxy.ts",
   "drivers/agents-proxy.ts",
   "drivers/dweb-proxy.ts",
   "drivers/phone-proxy.ts",
@@ -152,6 +156,12 @@ if (existsSync(join(root, "enterprise", "server", "index.ts"))) {
   copyFileSync(join(root, "enterprise", "LICENSE"), join(root, "dist-server", "enterprise", "LICENSE"));
 }
 
+// The packaged desktop forks this bootstrap rather than index.js
+// (electron/server-child-launch.mjs): it turns on Node's compile cache for the
+// server process, then imports index.js beside it. Copied, not bundled:
+// esbuild would inline index.js into it.
+copyFileSync(join(root, "scripts", "desktop-server-entry.mjs"), join(root, "dist-server", "desktop-entry.mjs"));
+
 // The model catalog snapshot (server/model-catalog/catalog.ts) is read from
 // disk, not inlined: 1.5 MB of JSON has no place in index.js. The bundle looks
 // for it under model-catalog/ beside itself. Its MIT notice is inside the file.
@@ -159,12 +169,11 @@ const catalogSnapshot = join(root, "dist-server", "model-catalog", "models-dev.s
 mkdirSync(dirname(catalogSnapshot), { recursive: true });
 copyFileSync(join(server, "model-catalog", "models-dev.snapshot.json"), catalogSnapshot);
 
-// pi-mcp-extension.ts is NOT an OpenMausBot entry point: it is loaded by the
-// external `pi` process (pi's own jiti), which resolves its
-// @earendil-works/pi-coding-agent and typebox imports from pi's install. Ship
-// it verbatim as .ts so the packaged app has it too — never bundle it, or
-// esbuild would inline pi's packages and the extension would stop loading.
+// Pi loads this through its own jiti and supplies TypeBox. Inline our local
+// policy module so the extension also works without the source checkout;
+// keep the Pi-owned dependency external and retain the .ts loading contract.
 const piMcpExtSrc = join(server, "drivers", "pi-mcp-extension.ts");
 const piMcpExtDest = join(root, "dist-server", "drivers", "pi-mcp-extension.ts");
 mkdirSync(dirname(piMcpExtDest), { recursive: true });
-copyFileSync(piMcpExtSrc, piMcpExtDest);
+await build({ entryPoints: [piMcpExtSrc], outfile: piMcpExtDest, bundle: true,
+  platform: "node", target: "node24", format: "esm", external: ["typebox"], });

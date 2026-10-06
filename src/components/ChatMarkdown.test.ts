@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -6,6 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ChatMarkdown,
   CodeBlock,
+  HIGHLIGHT_CACHE_MAX,
+  HIGHLIGHT_CACHE_MAX_CHARS,
   samePeers,
   chatUrlTransform,
   markdownImageName,
@@ -59,6 +62,39 @@ describe("mention highlighting", () => {
 });
 
 describe("math rendering", () => {
+  it.each([
+    "\\(x% comment\r\n+y\\)\n\nAfter",
+    "> Before \\(x% comment\n> +y\\)\n\nAfter",
+    "> > Before \\(x% comment\n> > +y\\)\n\nAfter",
+    "> - Before \\(x% comment\n>   +y\\)\n\nAfter",
+    "\\(x\n+y\\)\n\nAfter",
+    "\\(\nx\n+y\\)\n\nAfter",
+    "\\(\r\nx+y\\)\n\nAfter",
+    "\\( \t\n \r\nx\n+y\\)\n\nAfter",
+  ])("retains multiline inline TeX and following prose: %s", (text) => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, { text }));
+    expect(html.match(/class="katex"/g)).toHaveLength(1);
+    expect(html).not.toContain("katex-display");
+    expect(html).not.toContain("katex-error");
+    expect(html).toContain("<mi>x</mi><mo>+</mo><mi>y</mi>");
+    expect(html).toContain('<p dir="ltr">After</p>');
+  });
+
+  it("keeps the earlier currency fix's exact prices plain and multiline image offsets scoped", () => {
+    const prices = "Jan −$3,000 · Feb −$2,000 · Avg ≈ $2,200 and $5 vs $10";
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, { text: prices }));
+    expect(html).not.toContain('class="katex"');
+    expect(html).toContain(prices);
+    const text = "$5 before \\(\r\nx+y\\)\n\n![diagram](/workspace/diagram.png)";
+    const preview = vi.spyOn(AttachmentPreview, "MarkdownImagePreview");
+    try {
+      renderToStaticMarkup(createElement(ChatMarkdown, { text, message: { threadId: "thread-1", messageId: "message-1" } }));
+      expect(preview.mock.calls[0][0].sourceOffset).toBe(text.indexOf("!["));
+    } finally {
+      preview.mockRestore();
+    }
+  });
+
   it("renders inline, display, and TeX-style delimiters with KaTeX", () => {
     const html = renderToStaticMarkup(createElement(ChatMarkdown, {
       text: "Inline $s'(t)=2t$.\n\n$$\\int_0^3 2t\\,dt=9$$\n\n\\(x^2\\)\n\n\\[y^2\\]",
@@ -69,7 +105,7 @@ describe("math rendering", () => {
 
   it("keeps code dollar signs and malformed TeX delimiters literal", () => {
     const text = "`const price = '$5'`\n\n```tex\n\\(not rendered\\)\n```\n\nUnclosed \\(x";
-    const html = renderToStaticMarkup(createElement(ChatMarkdown, { text, streaming: true }));
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, { text }));
     expect(html).not.toContain('class="katex"');
     expect(normalizeMathDelimiters(text)).toBe(text);
   });
@@ -114,6 +150,119 @@ describe("math rendering", () => {
     );
   });
 
+  it("keeps prices literal instead of rendering the text between them as math", () => {
+    for (const [text, expected] of [
+      ["**1. R$ 120:** o plano custa R$ 120 por mês.", 0],
+      ["**2. Os R$1.500,00: à vista ou parcelado?** O total fica em R$ 1.500,00.", 0],
+      ["It costs $5 and the upgrade costs $10.", 0],
+      ["Plans: US$5, $20 per month, or $x$ per seat.", 1],
+    ] as const) {
+      const html = renderToStaticMarkup(createElement(ChatMarkdown, { text }));
+      expect(html.match(/class="katex"/g)?.length ?? 0).toBe(expected);
+      expect(html).toContain("$");
+    }
+    const prose = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "**1. R$ 120:** o plano custa R$ 120 por mês.",
+    }));
+    expect(prose).not.toContain('class="katex"');
+    expect(prose).toContain("<strong>1. R$ 120:</strong>");
+    expect(prose).toContain("custa R$ 120 por");
+  });
+
+  it("still renders inline dollar math next to prices", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "Pay $5 now; the rate is $r = 0.1$ and \\( x^2 \\) grows.",
+    }));
+    expect(html.match(/class="katex"/g)).toHaveLength(2);
+    expect(html).toContain("Pay $5 now");
+  });
+
+  it("does not treat a math closer as a currency sign", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, { text: "$R$ 120 and US$5." }));
+    expect(html.match(/class="katex"/g)).toHaveLength(1);
+    expect(html).toContain("120 and US$5.");
+  });
+
+  it.each([
+    ["https://shop.test/item/$5", "https://shop.test/item/$5"],
+    ["www.shop.test/item/$5", "http://www.shop.test/item/$5"],
+    ["<https://shop.test/item/$5>", "https://shop.test/item/$5"],
+    ["[Store](https://shop.test/item/$5)", "https://shop.test/item/$5"],
+  ])("keeps dollar signs in link destinations: %s", (text, href) => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, { text }));
+    expect(html).toContain(`href="${href}"`);
+    expect(html).not.toContain("%5C");
+  });
+
+  it("normalizes math in explicit link labels without changing destinations", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: "[\\(x^2\\)](https://shop.test/item/$5)",
+    }));
+    expect(html).toContain('href="https://shop.test/item/$5"');
+    expect(html.match(/class="katex"/g)).toHaveLength(1);
+  });
+
+  it("contains long inline formulas in a horizontal scroll container", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+      text: `Inline $${"abcdefghijklmnopqrstuvwxyz".repeat(3)}$.`,
+    }));
+    expect(html.match(/class="katex"/g)).toHaveLength(1);
+    const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+    const rule = css.match(/\.chat-md :not\(\.katex-display\) > \.katex \{([^}]*)\}/)?.[1];
+    expect(rule).toContain("max-width: 100%");
+    expect(rule).toContain("overflow-x: auto");
+  });
+
+  it("does not pair dollars across paragraphs", () => {
+    const html = renderToStaticMarkup(createElement(ChatMarkdown, { text: "Costs $5.\n\nThen pay later$" }));
+    expect(html).not.toContain('class="katex"');
+  });
+
+  it.each([
+    "R$ 120.\n\n![receipt](/workspace/receipt.png)",
+    "Pay $5.\n\n![receipt][image]\n\n[image]: /workspace/receipt.png",
+    "` lone ![receipt](/workspace/receipt.png) ``code``",
+    "![receipt][R$5]\n\n[R$5]: /workspace/receipt.png",
+    "![R$5]\n\n[R$5]: /workspace/receipt.png",
+    "[R$5]: /workspace/receipt.png\n\nPay $10.\n\n![receipt][R$5]",
+    "Price R$ 120.\n\n[![receipt](/workspace/receipt.png)][R$5]\n\n[R$5]: https://example.test",
+    "Price R$ 120.\n\n[![receipt](/workspace/receipt.png)](https://shop.test/item/$5)",
+  ])("keeps local image authorization offsets after prices: %s", (text) => {
+    const preview = vi.spyOn(AttachmentPreview, "MarkdownImagePreview");
+    try {
+      renderToStaticMarkup(createElement(ChatMarkdown, {
+        text, message: { threadId: "thread-1", messageId: "message-1" },
+      }));
+      expect(preview).toHaveBeenCalledOnce();
+      expect(preview.mock.calls[0][0].sourceOffset).toBe(text.indexOf("!["));
+      expect(preview.mock.calls[0][0].filePath).toBe("/workspace/receipt.png");
+    } finally {
+      preview.mockRestore();
+    }
+  });
+
+  it("keeps separate authorization offsets for repeated images after normalized math and code", () => {
+    const image = "![receipt $5](/workspace/receipt.png)";
+    const text = `Price R$ 120; \\( x^2 \\) and \`$5\`.\n\n${image}\n\nPay $10.\n\n${image}`;
+    const preview = vi.spyOn(AttachmentPreview, "MarkdownImagePreview");
+    try {
+      // the second render reads the message's normalized text from the cache;
+      // its image offsets must still point into the stored text
+      for (const _render of ["first", "cached"]) {
+        preview.mockClear();
+        const html = renderToStaticMarkup(createElement(ChatMarkdown, {
+          text, message: { threadId: "thread-1", messageId: "message-1" },
+        }));
+        expect(html).toContain('class="katex"');
+        expect(preview.mock.calls.map(([props]) => props.sourceOffset)).toEqual([
+          text.indexOf(image), text.lastIndexOf(image),
+        ]);
+      }
+    } finally {
+      preview.mockRestore();
+    }
+  });
+
   it("normalizes math in messages that also contain an image", () => {
     const html = renderToStaticMarkup(createElement(ChatMarkdown, {
       text: "![diagram](https://example.test/diagram.png)\n\n\\(x^2\\)",
@@ -130,7 +279,7 @@ describe("repaired tables", () => {
     }));
     expect(html).toContain('font-semibold">Pros | Cons</div>');
     expect(html.match(/<table\b/g)).toHaveLength(1);
-    expect(html).toContain(">a | b</th>");
+    expect(html).toContain(">a | b</span>");
     expect(html.match(/<th\b/g)).toHaveLength(2);
   });
 
@@ -184,14 +333,74 @@ it("requests both code palettes for skin-aware highlighting", async () => {
   const codeToHtml = vi.fn().mockResolvedValue("<pre>dual palette</pre>");
   vi.doMock("shiki", () => ({ codeToHtml }));
   const cleanup: ReturnType<React.EffectCallback>[] = [];
+  // effects stay captured, so each static render is a fresh first frame
+  const fence = createElement(ChatMarkdown, { text: "```text\nPalette regression sample\n```" });
   try {
-    renderToStaticMarkup(createElement(ChatMarkdown, { text: "```text\nPalette regression sample\n```" }));
-    for (const callback of effects) cleanup.push(callback());
+    expect(renderToStaticMarkup(fence)).not.toContain("dual palette");
+    for (const callback of effects.splice(0)) cleanup.push(callback());
     await vi.waitFor(() => expect(codeToHtml).toHaveBeenCalledWith("Palette regression sample", {
       lang: "text",
       themes: { light: "github-light-default", dark: "github-dark-default" },
       defaultColor: "light-dark()",
     }));
+    // a remount (revisiting the thread) paints the cached highlight at once,
+    // never plain text first
+    await vi.waitFor(() => expect(renderToStaticMarkup(fence)).toContain("dual palette"));
+  } finally {
+    for (const close of cleanup) if (typeof close === "function") close();
+    effect.mockImplementation(originalUseEffect);
+    vi.doUnmock("shiki");
+  }
+});
+
+it("keeps the newest highlighted code within both the count and the size bound", async () => {
+  const originalUseEffect = (await vi.importActual<typeof React>("react")).useEffect;
+  const effects: React.EffectCallback[] = [];
+  const effect = vi.mocked(React.useEffect).mockImplementation((callback) => { effects.push(callback); });
+  // each block's highlighted HTML is padded to the size the step needs
+  let htmlChars = 0;
+  const codeToHtml = vi.fn(async (code: string) => `<pre class="cache-probe">${code}</pre>`.padEnd(htmlChars, " "));
+  vi.doMock("shiki", () => ({ codeToHtml }));
+  const cleanup: ReturnType<React.EffectCallback>[] = [];
+  const block = (code: string) => createElement(CodeBlock, { code, lang: "text" });
+  // a cached block paints highlighted in its first frame
+  const painted = (code: string) => {
+    const html = renderToStaticMarkup(block(code));
+    effects.length = 0;
+    return html.includes('class="cache-probe"');
+  };
+  // mount a block and let its highlight settle
+  const highlight = async (code: string) => {
+    const calls = codeToHtml.mock.results.length;
+    renderToStaticMarkup(block(code));
+    for (const callback of effects.splice(0)) cleanup.push(callback());
+    await vi.waitFor(() => expect(codeToHtml.mock.results.length).toBe(calls + 1), { interval: 1 });
+    await codeToHtml.mock.results[calls]!.value;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  try {
+    // past the count, the oldest block goes
+    const small = Array.from({ length: HIGHLIGHT_CACHE_MAX + 1 }, (_, i) => `small block ${i}`);
+    for (const code of small) await highlight(code);
+    expect(painted(small[0]!)).toBe(false);
+    expect(small.slice(1).every(painted)).toBe(true);
+
+    // four quarter-size blocks fill the size bound, pushing the small ones out
+    htmlChars = Math.floor(HIGHLIGHT_CACHE_MAX_CHARS / 4);
+    const big = Array.from({ length: 5 }, (_, i) => `big block ${i}`);
+    for (const code of big.slice(0, 4)) await highlight(code);
+    expect(small.some(painted)).toBe(false);
+    expect(big.slice(0, 4).every(painted)).toBe(true);
+    // past the size, the oldest block goes
+    await highlight(big[4]!);
+    expect(painted(big[0]!)).toBe(false);
+    expect(big.slice(1).every(painted)).toBe(true);
+
+    // a block bigger than the whole bound is not kept and pushes nothing out
+    htmlChars = HIGHLIGHT_CACHE_MAX_CHARS + 1;
+    await highlight("huge block");
+    expect(painted("huge block")).toBe(false);
+    expect(big.slice(1).every(painted)).toBe(true);
   } finally {
     for (const close of cleanup) if (typeof close === "function") close();
     effect.mockImplementation(originalUseEffect);
@@ -341,6 +550,19 @@ describe("ChatMarkdown attachments", () => {
     }
   });
 
+  it("preserves dollar signs in Windows file destinations", () => {
+    const save = vi.spyOn(AttachmentPreview, "useLocalFileSave");
+    const filePath = "C:\\Users\\Maus\\R$5\\receipt.pdf";
+    try {
+      renderToStaticMarkup(createElement(ChatMarkdown, {
+        text: `[Receipt](${filePath})`, message: { threadId: "thread-1", messageId: "message-1" },
+      }));
+      expect(save.mock.calls[0]?.[0]).toBe(filePath);
+    } finally {
+      save.mockRestore();
+    }
+  });
+
   it("keeps an unscoped legacy file link inert", () => {
     const html = renderToStaticMarkup(createElement(ChatMarkdown, {
       text: "[Download the report](/workspace/final-report.pdf)",
@@ -350,6 +572,65 @@ describe("ChatMarkdown attachments", () => {
     expect(html).toContain("Unavailable legacy file reference");
     expect(html).not.toContain("href=\"/workspace/final-report.pdf\"");
     expect(html).not.toContain("type=\"button\"");
+  });
+
+  describe("a file link outside the conversation's workspace", () => {
+    const filePath = "C:\\Users\\Maus\\_draft\\ollama-gen.js";
+    const render = (outsideWorkspace: boolean) => {
+      const save = vi.spyOn(AttachmentPreview, "useLocalFileSave").mockReturnValue({
+        state: "failed",
+        reason: "the linked file is outside this conversation's workspace",
+        savedTo: "",
+        outsideWorkspace,
+        save: vi.fn(async () => undefined),
+      });
+      try {
+        return renderToStaticMarkup(createElement(ChatMarkdown, {
+          text: `[ollama-gen.js](${filePath})`, message: { threadId: "thread-1", messageId: "message-1" },
+        }));
+      } finally {
+        save.mockRestore();
+      }
+    };
+    const revealInFolder = vi.fn(async () => "shown" as const);
+
+    it("offers Show in folder in the local desktop app, without printing the path", () => {
+      vi.stubGlobal("window", { ogb: { revealInFolder, remoteClient: { active: false } } });
+      try {
+        const html = render(true);
+        expect(html).toContain("the linked file is outside this conversation&#x27;s workspace");
+        expect(html).toContain("Show in folder");
+        expect(html).not.toContain("<code");
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("shows the full path as selectable text to a remote client instead", () => {
+      vi.stubGlobal("window", { ogb: { revealInFolder, remoteClient: { active: true } } });
+      try {
+        const html = render(true);
+        expect(html).not.toContain("Show in folder");
+        expect(html).toMatch(/<code[^>]*select-all[^>]*>C:\\Users\\Maus\\_draft\\ollama-gen\.js<\/code>/);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("shows the path in a browser, which has no desktop bridge", () => {
+      expect(render(true)).toContain(`>${filePath}</code>`);
+    });
+
+    it("leaves other failures alone", () => {
+      vi.stubGlobal("window", { ogb: { revealInFolder, remoteClient: { active: false } } });
+      try {
+        const html = render(false);
+        expect(html).not.toContain("Show in folder");
+        expect(html).not.toContain(filePath);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
   });
 
   it("makes a message-authorized file link downloadable", () => {
@@ -390,7 +671,7 @@ describe("ChatMarkdown code blocks", () => {
     ["averylongunknownlanguageidentifier", "Averylongunknownlanguageidentifier"],
   ])("lets the %s badge shrink without wrapping the count or controls", (lang, label) => {
     const html = renderToStaticMarkup(createElement(CodeBlock, {
-      code: "first\nsecond", lang, streaming: false,
+      code: "first\nsecond", lang,
     }));
     const badge = html.match(/<span[^>]*title="[^"]*"[^>]*>/)?.[0];
     expect(badge).toContain(`title="${label}"`);
@@ -450,7 +731,6 @@ describe("ChatMarkdown code blocks", () => {
     const html = renderToStaticMarkup(createElement(CodeBlock, {
       code: "line1\nline2\nline3\n",
       lang: "py",
-      streaming: false,
     }));
 
     expect(html).toContain("Python");
@@ -542,7 +822,7 @@ describe("bidi: message content carries its own direction", () => {
     expect(html).toContain("list-disc space-y-1 ps-5");
     expect(html).toContain("list-decimal space-y-1 ps-5");
     expect(html).toContain("border-s-2 border-hairline ps-3");
-    expect(html).toContain("px-2 py-1.5 text-start font-semibold");
+    expect(html).toContain('scope="col"');
     expect(html).not.toMatch(/class="[^"]*\bpl-5\b/);
     expect(html).not.toMatch(/class="[^"]*\bborder-l-2\b/);
     expect(html).not.toMatch(/class="[^"]*\btext-left\b/);
@@ -558,7 +838,6 @@ describe("bidi: message content carries its own direction", () => {
     const fenced = renderToStaticMarkup(createElement(CodeBlock, {
       code: "const total = items[0].count + 1;",
       lang: "ts",
-      streaming: false,
     }));
     expect(fenced).toContain('<div dir="ltr"');
   });
@@ -669,8 +948,9 @@ it("renders mermaid strictly and serves repeat views from cache", async () => {
     expect(render).toHaveBeenCalledWith(expect.any(String), "flowchart LR\n  Ship-->Sea");
 
     // a settled remount (revisiting the thread, a skin flip) re-renders from
-    // cache: still exactly one real mermaid render for this source
-    renderToStaticMarkup(createElement(ChatMarkdown, { text: fence }));
+    // cache: the diagram is in its first frame, and still exactly one real
+    // mermaid render for this source
+    expect(renderToStaticMarkup(createElement(ChatMarkdown, { text: fence }))).toContain("<svg>sea lanes</svg>");
     for (const callback of effects.splice(0)) cleanup.push(callback());
     await Promise.resolve();
     expect(render).toHaveBeenCalledTimes(1);

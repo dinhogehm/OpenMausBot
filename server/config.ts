@@ -1,22 +1,21 @@
 // Config + data dirs. One file, ~/.openmausbot/config.json, env fallbacks:
 //   { "xai": {"key":"xai-…"}, "composio": {"apiKey":"ak_…"}, "box": {"token":"…"},
 //     "instances": { "<instanceId>": {"driver":"grok", …} } }
-import { readFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { normalizeImageGenerationUrl, type ImageGenerationConfig } from "../shared/image-generation.ts";
 
 import { writeFileAtomic } from "./atomic.ts";
+import { withoutComputerEngine } from "./computer-engine-removal.ts";
 import { newBotDefaultsSchema, type NewBotDefaults } from "./new-bot-defaults.ts";
-import { EFFORT_LEVELS, type EffortLevel } from "../shared/wire.ts";
+import { EFFORT_LEVELS, type EffortLevel, type LiveSettings } from "../shared/wire.ts";
 import { isModelVariant, type InstanceConfigMap, type ModelSelection } from "./contracts.ts";
 import { PROVIDER_ICON_PRESETS, providerIconError } from "../shared/provider-icon.ts";
 import type { McpServerSpec } from "./contracts.ts";
 import { isRemoteMcpServer, parseStoredMcpServer } from "./mcp-registry.ts";
 import { parseJson, schemaIssue, type JsonObject, type JsonValue } from "./schema.ts";
-import { CLOUD_SEAT_IDLE_STOP_MS } from "./cloud-overflow.ts";
-import { cloudHomeConfigured } from "./cloud-home.ts";
 
 const optionalText = z.string().optional();
 const SSH_ALIAS = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
@@ -31,6 +30,13 @@ export type FishTtsModel = (typeof FISH_TTS_MODELS)[number];
 export const DEFAULT_ROOM_TURN_TIMEOUT_MINUTES = 5;
 export const MIN_ROOM_TURN_TIMEOUT_MINUTES = 1;
 export const MAX_ROOM_TURN_TIMEOUT_MINUTES = 1_440;
+/** Per-call ceiling for a bot's MCP tools (tools/call on the chat MCP
+ * transport). 10 minutes matches the historic constant in
+ * chat-mcp-tools.ts; a single tool call that runs longer is cut at this
+ * deadline because its execution outcome can no longer be trusted. */
+export const DEFAULT_MCP_CALL_TIMEOUT_MINUTES = 10;
+export const MIN_MCP_CALL_TIMEOUT_MINUTES = 1;
+export const MAX_MCP_CALL_TIMEOUT_MINUTES = 60;
 export const DEFAULT_ROOM_HANDOFF_LIFETIME_MINUTES = 30;
 export const DEFAULT_ROOM_HANDOFF_MIN_RUNWAY_MINUTES = 10;
 export const DEFAULT_ROOM_HANDOFF_HARD_CAP_MINUTES = 240;
@@ -118,6 +124,16 @@ const roomConfigSchema = z.object({
       (rooms.handoffHardCapMinutes ?? DEFAULT_ROOM_HANDOFF_HARD_CAP_MINUTES),
   { message: "rooms handoff bounds must satisfy handoffMinRunwayMinutes <= handoffLifetimeMinutes <= handoffHardCapMinutes" },
 );
+const mcpConfigSchema = z.object({
+  /** Ceiling (minutes) for one bot MCP tool call. Missing values resolve to
+   * 10, preserving the historic chat-mcp-tools constant. */
+  callTimeoutMinutes: z
+    .number()
+    .int()
+    .min(MIN_MCP_CALL_TIMEOUT_MINUTES)
+    .max(MAX_MCP_CALL_TIMEOUT_MINUTES)
+    .optional(),
+}).strict();
 /** Isolation for bot desktops. Migration note (issue #1654): switching
  * modes changes lease keys and vm-home directories, so desktops cold-start
  * under the new mode — a pool seat lives in vm-homes/pool-N — while the old
@@ -321,17 +337,10 @@ const featureConfigSchema = z.object({
    * conversations that share words with the message ride into the turn.
    * Read-only; on unless explicitly switched off — see autoRecallEnabled. */
   autoRecall: z.boolean().optional(),
-  /** Idle release for computer claims (#1653): a desktop seat that stays
-   * screen-quiet for 90 seconds is released to waiting turns while its
-   * holder's turn still lives; the previous holder re-claims directly
-   * for 10 minutes and yields to an occupied seat. Off until baked; see
-   * computerClaimIdleReleaseEnabled for how to enable it by hand. */
-  computerClaimIdleRelease: z.boolean().optional(),
-  /** Consented cloud overflow for local computer waits (#1655): a wait
-   * may offer a per-second-billed cloud seat, but only through an explicit
-   * consent card or a configured allowlist — never a silent Auto default.
-   * Off until baked; see cloudOverflowEnabled for how to enable it by hand. */
-  cloudOverflow: z.boolean().optional(),
+  /** Opt-in shared skills library: one store at the data dir that bots
+   * read by assignment instead of per-workspace copies. Off until
+   * explicitly enabled — see skillsLibraryEnabled. */
+  skillsLibrary: z.boolean().optional(),
 });
 /** First-run progress. Kept in the workspace config rather than a browser so
  * it survives cleared site data and is shared by every paired client. Hint
@@ -418,6 +427,7 @@ const appConfigSchema = z.object({
     phone: z.enum(["ios", "android"]).optional(),
   }).optional(),
   mistral: z.object({ key: optionalText }).optional(),
+  cerebras: z.object({ key: optionalText }).optional(),
   xai: z.object({ key: optionalText, url: optionalText }).optional(),
   /** Anthropic API key for Claude Code billed per token, handed only to
    * Claude instances; `url` only for a proxy or a test double. Never a
@@ -465,8 +475,12 @@ const appConfigSchema = z.object({
    * provider is Boat now and the key is kept for compatibility. */
   box: z.object({ token: optionalText }).optional(),
   vps: vpsConfigSchema.optional(),
-  /** Optional OpenCode key; persisted write-only and passed only to its child. */
-  opencodeGo: z.object({ apiKey: optionalText }).optional(),
+  /** Optional OpenCode key; persisted write-only and passed only to its child.
+   * `providerKeys`: keys for OpenCode's other providers (Venice, Groq…) by the
+   * environment name OpenCode reads, also write-only and only for its child.
+   * Settings changes go through mergeOpenCodeProviderKeys; the stored copy
+   * is read loosely (storedAppConfigSchema). */
+  opencodeGo: z.object({ apiKey: optionalText, providerKeys: z.record(z.string(), z.string()).optional() }).optional(),
   /** Voice settings and the selected voice id. `provider` picks the
    * engine: "elevenlabs" (default; needs `key`), "fish" (needs its own
    * `fishKey`; `fishModel` picks its speech model), "system" (the Mac's
@@ -506,6 +520,15 @@ const appConfigSchema = z.object({
       .optional(),
     jobs: z.object({ roomRouting: z.boolean().optional() }).optional(),
   }).optional(),
+  /** Live calls: an OpenAI project key for GPT-Live, kept apart from every
+   * other OpenAI credential so a Live call never bills an image or engine key
+   * the user did not hand to it. `voice` is a GPT-Live built-in voice name. */
+  live: z.object({
+    key: optionalText,
+    voice: z.string().trim().max(40).regex(/^[a-z]*$/, "a Live voice is a lowercase built-in voice name").optional(),
+    readTypedReplies: z.boolean().optional(),
+    idleMinutes: z.number().int().min(1).max(60).optional(),
+  }).optional(),
   /** Avatar provider credentials stay separate; choosing a router never reuses a cloud key. */
   imageGen: z.object({
     provider: z.enum(["openai", "xai", "custom"]).optional(),
@@ -529,6 +552,7 @@ const appConfigSchema = z.object({
    * system language. Unknown tags degrade to English in the renderer. */
   language: optionalText,
   rooms: roomConfigSchema.optional(),
+  mcp: mcpConfigSchema.optional(),
   context: z.object({
     rebuildBytes: z.number().int().min(1_024).max(1_000_000).optional(),
     compactAt: z.number().positive().max(10_000_000).optional(),
@@ -549,15 +573,6 @@ const appConfigSchema = z.object({
    * owner's limit, default 20) on battery, the Chief and the owner hear it
    * and no carrier ORDER goes out; above it, nothing is said. */
   power: z.object({ batteryMinPercent: z.number().int().min(1).max(99).optional() }).strict().optional(),
-  /** #1655 cloud-overflow settings. perSecondCostUsd is the operator's own
-   * verified rate: with no price configured the feature stays inert rather
-   * than show an invented one. allowlistedThreads carries standing consent
-   * for exact thread ids. */
-  cloudOverflow: z.object({
-    perSecondCostUsd: z.number().positive().max(10).optional(),
-    idleStopMs: z.number().int().positive().max(24 * 60 * 60_000).optional(),
-    allowlistedThreads: z.array(z.string().min(1)).max(1000).optional(),
-  }).strict().optional(),
   localVm: localVmConfigSchema.optional(),
   features: featureConfigSchema.optional(),
   onboarding: onboardingConfigSchema.optional(),
@@ -573,6 +588,15 @@ const appConfigSchema = z.object({
 });
 const storedAppConfigSchema = appConfigSchema.extend({
   browserProfiles: storedBrowserProfilesSchema.optional(),
+  /** Read loosely, like mcpServers: a hand-edited provider key that isn't
+   * text is dropped here, and a bad name or key later
+   * (openCodeProviderKeys), never the whole file. */
+  opencodeGo: z.object({
+    apiKey: optionalText,
+    providerKeys: z.record(z.string(), z.unknown()).catch({})
+      .transform((keys) => Object.fromEntries(Object.entries(keys).filter((entry): entry is [string, string] => typeof entry[1] === "string")))
+      .optional(),
+  }).optional(),
 });
 const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true, cliStartup: true, customDomain: true })
   .extend({ threads: threadsPatchSchema.optional(), newBots: newBotsPatchSchema.optional() });
@@ -598,6 +622,7 @@ export interface AppConfig {
   language?: string;
   xai?: { key?: string; url?: string };
   mistral?: { key?: string };
+  cerebras?: { key?: string };
   /** `everyClaudeBot`: the key runs every Claude bot instead of its login.
    * Unset means true, which is how a key behaved before it had its own
    * `claudeApi` instance; a key first saved from Settings sets false. */
@@ -614,13 +639,15 @@ export interface AppConfig {
   box?: { token?: string };
   /** A named host from the user's SSH config. Authentication stays with SSH. */
   vps?: { sshAlias?: string };
-  opencodeGo?: { apiKey?: string };
+  opencodeGo?: { apiKey?: string; providerKeys?: Record<string, string> };
   tts?: { key?: string; fishKey?: string; voice?: string; provider?: "elevenlabs" | "fish" | "system" | "chatterbox" | "xai"; baseUrl?: string; model?: string; fishModel?: FishTtsModel };
   /** The decision model; see the schema above and server/decider. */
   decider?: { enabled?: boolean; provider?: "jev" | "off"; key?: string; baseUrl?: string; jobs?: { roomRouting?: boolean } };
   imageGen?: ImageGenerationConfig;
+  live?: { key?: string; voice?: string; readTypedReplies?: boolean; idleMinutes?: number };
   profile?: { name?: string; email?: string; aboutMe?: string };
   rooms?: { turnTimeoutMinutes: number; handoffLifetimeMinutes?: number; handoffMinRunwayMinutes?: number; handoffHardCapMinutes?: number };
+  mcp?: { callTimeoutMinutes?: number };
   threads?: { maxConcurrentPerBot: number; eventLogMaxBytes?: number; eventLogRetentionDays?: number };
   context?: { rebuildBytes?: number; compactAt?: number; autoCompact?: boolean };
   memory?: { captureQuietMs?: number; tidyHour?: number };
@@ -629,10 +656,7 @@ export interface AppConfig {
    * seats shared by all conversations, with per-thread affinity (#1654). */
   localVm?: { mode?: "shared" | "per-bot" | "pool"; maxInstances?: number; idleTimeoutMinutes?: number };
   /** Opt-in product experiments. Every flag defaults to disabled. */
-  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean; autoRecall?: boolean; computerClaimIdleRelease?: boolean; cloudOverflow?: boolean; routinesInConversation?: boolean };
-  /** #1655: consented cloud overflow for local computer waits. The cost is
-   * the operator's own per-second rate; unset keeps the feature inert. */
-  cloudOverflow?: { perSecondCostUsd?: number; idleStopMs?: number; allowlistedThreads?: string[] };
+  features?: { skillAuthoring?: boolean; showToolCalls?: boolean; browser?: boolean; sharedComputers?: boolean; claudeUserMcp?: boolean; llmThreadTitles?: boolean; autoRecall?: boolean; routinesInConversation?: boolean; skillsLibrary?: boolean };
   /** First-run progress; see onboardingConfigSchema. */
   onboarding?: { completedAt?: string; version?: number; reelSeen?: boolean; hintsSeen?: string[]; firstTurnAt?: string };
   /** Named browser sessions any bot can be pointed at. */
@@ -764,6 +788,23 @@ export function roomTurnTimeoutMinutes(cfg: AppConfig): number {
   return cfg.rooms?.turnTimeoutMinutes ?? DEFAULT_ROOM_TURN_TIMEOUT_MINUTES;
 }
 
+export function mcpCallTimeoutMinutes(cfg: AppConfig): number {
+  return cfg.mcp?.callTimeoutMinutes ?? DEFAULT_MCP_CALL_TIMEOUT_MINUTES;
+}
+
+export const LIVE_IDLE_MINUTES_DEFAULT = 5;
+
+/** Non-secret Live settings. The key only shows up as `configured`. */
+export function liveSettingsFor(cfg: AppConfig): LiveSettings {
+  const minutes = cfg.live?.idleMinutes;
+  return {
+    configured: Boolean(cfg.live?.key?.trim()),
+    voice: cfg.live?.voice ?? "",
+    readTypedReplies: cfg.live?.readTypedReplies ?? true,
+    idleMinutes: Number.isInteger(minutes) && minutes! >= 1 && minutes! <= 60 ? minutes! : LIVE_IDLE_MINUTES_DEFAULT,
+  };
+}
+
 export interface RoomHandoffLimitsMs {
   lifetimeMs: number;
   minRunwayMs: number;
@@ -846,14 +887,11 @@ export function routinesInConversationEnabled(cfg: AppConfig): boolean {
   return cfg.features?.routinesInConversation === true;
 }
 
-/** Workspace-level gate for the experimental built-in browser. A bot's own
- * switch sits under it, so either can withhold the browser. Off until the
- * desktop's first-run welcome turns it on. A Cloud home (cloud-home.ts)
- * skips that welcome, ships the browser in its image and has no other screen
- * of its own, so there it is on unless the person switched it off. */
-export function builtInBrowserEnabled(cfg: AppConfig, env: NodeJS.ProcessEnv = process.env): boolean {
-  const chosen = cfg.features?.browser;
-  return chosen === undefined ? cloudHomeConfigured(env) : chosen === true;
+/** Workspace-level gate for the built-in browser. A bot's own switch sits
+ * under it, so either can withhold the browser. On unless the person switched
+ * it off: an explicit `false` (Settings, or a bot's computer panel) is kept. */
+export function builtInBrowserEnabled(cfg: AppConfig, _env: NodeJS.ProcessEnv = process.env): boolean {
+  return cfg.features?.browser !== false;
 }
 
 /** Opt-in computer sharing: the routes, the agent tools, the advertised
@@ -887,47 +925,14 @@ export function llmThreadTitlesEnabled(cfg: AppConfig): boolean {
   return cfg.features?.llmThreadTitles === true;
 }
 
-/** Idle release for computer claims (#1653): a whole-turn desktop hold
- * ends after a screen-quiet window (default 90 seconds, screen-poller
- * frames excluded) instead of at turn settle, and the previous holder
- * re-claims directly inside a reclaim window (default 10 minutes) while
- * yielding to a seat another turn already holds. Off unless an explicit
- * `true` — bake it as a maintainer-only flag first, exactly like
- * sharedComputers: enable by hand in ~/.openmausbot/config.json
- * (`{"features": {"computerClaimIdleRelease": true}}`) and restart. */
-export function computerClaimIdleReleaseEnabled(cfg: AppConfig): boolean {
-  return cfg.features?.computerClaimIdleRelease === true;
-}
-
-/** Consented cloud overflow for local computer waits (#1655): while a turn
- * waits for a local desktop, it may offer overflow to a per-second-billed
- * cloud seat — never silently: the card names the cost, and only an
- * explicit per-conversation consent or a configured allowlist thread may
- * start the machine, which then hard-stops after an idle window. Off
- * unless an explicit `true`, like computerClaimIdleRelease: enable by
- * hand in ~/.openmausbot/config.json
- * (`{"features": {"cloudOverflow": true}, "cloudOverflow": {"perSecondCostUsd": 0.0004}}`)
- * and restart. */
-export function cloudOverflowEnabled(cfg: AppConfig): boolean {
-  return cfg.features?.cloudOverflow === true;
-}
-
-/** The per-second rate shown on the card, or null when the operator has
- * not set one: the offer fails closed rather than guess a price. */
-export function cloudOverflowPerSecondCostUsd(cfg: AppConfig): number | null {
-  const cost = cfg.cloudOverflow?.perSecondCostUsd;
-  return typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : null;
-}
-
-/** How long a cloud seat may stay screen-quiet before it is stopped. */
-export function cloudOverflowIdleStopMs(cfg: AppConfig): number {
-  return cfg.cloudOverflow?.idleStopMs ?? CLOUD_SEAT_IDLE_STOP_MS;
-}
-
-/** Threads with standing consent, by exact thread id. */
-export function cloudOverflowAllowlistedThreads(cfg: AppConfig): Set<string> {
-  return new Set(cfg.cloudOverflow?.allowlistedThreads ?? []);
-}
+/** Opt-in shared skills library (skills lane S1): one store at the data dir
+ * that bots reference by assignment instead of per-workspace copies. Off
+ * unless enabled by hand in ~/.openmausbot/config.json
+ * (`{"features": {"skillsLibrary": true}}`); while off, every skills
+ * surface keeps today's byte-identical per-bot behavior. */
+export function skillsLibraryEnabled(cfg: AppConfig): boolean {
+  return cfg.features?.skillsLibrary === true;
+ }
 
 /** Config sections no provider driver reads. A write that touches only
  * these must not rebuild the fleet: rebuilding disposes every engine child
@@ -941,6 +946,7 @@ export const FLEET_NEUTRAL_KEYS: ReadonlySet<string> = new Set([
   // no engine reads it: the harness asks it before a turn starts
   "decider",
   "imageGen",
+  "live",
   "vps",
   "rooms",
   "threads",
@@ -949,7 +955,6 @@ export const FLEET_NEUTRAL_KEYS: ReadonlySet<string> = new Set([
   "memory",
   "localVm",
   "features",
-  "cloudOverflow",
   "browserProfiles",
   "onboarding",
 ]);
@@ -1043,6 +1048,8 @@ export function loadConfig(): AppConfig {
   // shadow the save until the next launch.
   cfg.mistral = { ...cfg.mistral };
   if (process.env.MISTRAL_API_KEY !== undefined) cfg.mistral.key = process.env.MISTRAL_API_KEY;
+  cfg.cerebras = { ...cfg.cerebras };
+  if (process.env.CEREBRAS_API_KEY !== undefined) cfg.cerebras.key = process.env.CEREBRAS_API_KEY;
   cfg.xai = { ...cfg.xai };
   if (process.env.XAI_API_KEY !== undefined) cfg.xai.key = process.env.XAI_API_KEY;
   // Deliberately not ANTHROPIC_API_KEY: a key in the server's own env is
@@ -1076,6 +1083,8 @@ export function loadConfig(): AppConfig {
   if (process.env.OMB_FISH_AUDIO_API_KEY !== undefined) cfg.tts.fishKey = process.env.OMB_FISH_AUDIO_API_KEY;
   cfg.decider = { ...cfg.decider };
   if (process.env.OMB_JEV_API_KEY !== undefined) cfg.decider.key = process.env.OMB_JEV_API_KEY;
+  cfg.live = { ...cfg.live };
+  if (process.env.OMB_OPENAI_LIVE_KEY !== undefined) cfg.live.key = process.env.OMB_OPENAI_LIVE_KEY;
   cfg.imageGen = { ...cfg.imageGen };
   if (process.env.OMB_OPENAI_IMAGE_KEY !== undefined) cfg.imageGen.key = process.env.OMB_OPENAI_IMAGE_KEY;
   if (process.env.OMB_CUSTOM_IMAGE_KEY !== undefined) cfg.imageGen.customApiKey = process.env.OMB_CUSTOM_IMAGE_KEY;
@@ -1090,6 +1099,32 @@ export function loadConfig(): AppConfig {
   return cfg;
 }
 
+/** `derive(loadConfig())`, worked out again only when config.json changes:
+ * a new file (every save renames one into place), a new size, a new
+ * modification time, or new permissions or owner. For values read on every
+ * request or stream frame, where parsing the file each time costs more than
+ * the work itself. A file that is missing, saved in the last two seconds, or
+ * that loadConfig() could not use (unreadable, a failed read, invalid JSON)
+ * is read on every call: a second write inside one clock tick is never
+ * missed, and a file that is fixed is used again on the next call. */
+export function cacheUntilConfigChanges<T>(derive: (config: AppConfig) => T): () => T {
+  let cached: { stamp: string; value: T } | null = null;
+  return () => {
+    let stamp: string | null = null;
+    try {
+      const file = statSync(join(DATA_DIR, "config.json"), { bigint: true });
+      if (Date.now() - Number(file.mtimeMs) >= 2_000) stamp = `${file.ino}:${file.size}:${file.mtimeNs}:${file.ctimeNs}`;
+    } catch {
+      // Missing or out of reach: read it the way loadConfig() always has.
+    }
+    if (stamp !== null && cached?.stamp === stamp) return cached.value;
+    const value = derive(loadConfig());
+    // A warning means loadConfig() ignored the file and ran on defaults.
+    cached = stamp === null || lastIgnoredConfigWarning !== "" ? null : { stamp, value };
+    return value;
+  };
+}
+
 /** After saveConfig() writes a credential, the running process's env must
  * follow the newest value — loadConfig() prefers env, so the secret injected
  * at boot would otherwise shadow the save until relaunch: the UI would show
@@ -1101,6 +1136,7 @@ export function syncCredentialEnv(patch: Partial<Omit<AppConfig, "threads" | "ne
   const secrets: Array<[value: string | undefined, name: string]> = [
     [patch.xai?.key, "XAI_API_KEY"],
     [patch.mistral?.key, "MISTRAL_API_KEY"],
+    [patch.cerebras?.key, "CEREBRAS_API_KEY"],
     [patch.anthropic?.key, "OMB_ANTHROPIC_API_KEY"],
     [patch.openaiCompat?.key, "OPENAI_COMPAT_API_KEY"],
     [patch.openai?.key, "OMB_OPENAI_API_KEY"],
@@ -1113,6 +1149,7 @@ export function syncCredentialEnv(patch: Partial<Omit<AppConfig, "threads" | "ne
     [patch.decider?.key, "OMB_JEV_API_KEY"],
     [patch.imageGen?.key, "OMB_OPENAI_IMAGE_KEY"],
     [patch.imageGen?.customApiKey, "OMB_CUSTOM_IMAGE_KEY"],
+    [patch.live?.key, "OMB_OPENAI_LIVE_KEY"],
   ];
   for (const [value, name] of secrets) {
     if (value === undefined) continue;
@@ -1142,6 +1179,7 @@ export function syncCredentialEnv(patch: Partial<Omit<AppConfig, "threads" | "ne
 export const WORKSPACE_CREDENTIAL_ENV = [
   "XAI_API_KEY",
   "MISTRAL_API_KEY",
+  "CEREBRAS_API_KEY",
   "OMB_ANTHROPIC_API_KEY",
   "OMB_ANTHROPIC_API_URL",
   "OMB_HOSTED_MODEL_TOKEN",
@@ -1157,6 +1195,7 @@ export const WORKSPACE_CREDENTIAL_ENV = [
   "OMB_JEV_API_KEY",
   "OMB_OPENAI_IMAGE_KEY",
   "OMB_CUSTOM_IMAGE_KEY",
+  "OMB_OPENAI_LIVE_KEY",
   "COMPOSIO_API_KEY",
   "OMB_COMPOSIO_BROKER_TOKEN",
   // Cloud Pro's included Boat, voice and decision relay tokens
@@ -1216,9 +1255,84 @@ export const PROVIDER_CREDENTIAL_ENV = [
   "OPENCODE_API_KEY",
   "XAI_API_KEY",
   "MISTRAL_API_KEY",
+  "CEREBRAS_API_KEY",
   "CURSOR_API_KEY",
   "CURSOR_AUTH_TOKEN",
 ] as const;
+
+/** Provider keys OpenCode reads from its environment, as it does in a
+ * terminal: with ANTHROPIC_API_KEY set, `opencode` lists Anthropic's models.
+ * Keys OpenMaus saves for another engine (xAI, Mistral, the workspace
+ * Anthropic key) are workspace credentials under other names and never
+ * ride along. */
+export const OPENCODE_PROVIDER_ENV = [
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+  "KIMI_API_KEY",
+  "MOONSHOT_API_KEY",
+  "MINIMAX_API_KEY",
+] as const;
+
+/** Keys the owner saves in Settings for OpenCode's other providers (Venice,
+ * Groq, DeepSeek…), each under the environment name OpenCode reads. A Cloud
+ * has no terminal to export them in. They go to OpenCode's process only,
+ * never to this server's own environment. */
+export const OPENCODE_PROVIDER_KEY_LIMIT = 20;
+const OPENCODE_PROVIDER_KEY_NAME = /^[A-Z][A-Z0-9_]{0,59}_(?:API_KEY|KEY|TOKEN)$/;
+/** Printable, no spaces: no provider key has any, and a pasted sentence is not a key. */
+const OPENCODE_PROVIDER_KEY_VALUE = /^[\x21-\x7e]{1,4096}$/;
+
+/** Why OpenCode can't be given a key under this name, or undefined. A name
+ * OpenMaus keeps for itself or another engine would never reach OpenCode:
+ * every engine keeps only the credential names it reads (credentialEnv). */
+function openCodeProviderKeyNameRefusal(name: string): string | undefined {
+  if (!OPENCODE_PROVIDER_KEY_NAME.test(name)) {
+    return "Use the name the provider reads its key from: capitals, ending in _API_KEY, _KEY or _TOKEN, such as VENICE_API_KEY.";
+  }
+  if (name === "OPENCODE_API_KEY") return "Save the OpenCode key in the OpenCode API key box instead.";
+  const reserved = name.startsWith("OPENCODE_") || name.startsWith("OMB_")
+    || (WORKSPACE_CREDENTIAL_ENV as readonly string[]).includes(name)
+    || ((PROVIDER_CREDENTIAL_ENV as readonly string[]).includes(name) && !(OPENCODE_PROVIDER_ENV as readonly string[]).includes(name));
+  return reserved ? `OpenMaus keeps ${name} for itself, so OpenCode can't be given it here. Put this key in opencode.json instead.` : undefined;
+}
+
+/** The saved OpenCode provider keys that can be used, by name. A hand-edited
+ * entry OpenCode could not be given, or whose value is not a key, is
+ * skipped; so is anything past the limit. */
+export function openCodeProviderKeys(cfg: Pick<AppConfig, "opencodeGo">): Record<string, string> {
+  const saved = cfg.opencodeGo?.providerKeys ?? {};
+  const usable = Object.keys(saved).sort()
+    .filter((name) => !openCodeProviderKeyNameRefusal(name) && OPENCODE_PROVIDER_KEY_VALUE.test(saved[name] ?? ""))
+    .slice(0, OPENCODE_PROVIDER_KEY_LIMIT);
+  return Object.fromEntries(usable.map((name) => [name, saved[name]!]));
+}
+
+/** A Settings change to the saved OpenCode provider keys: a key saves or
+ * replaces its name, "" removes it, and every other saved key stays. Returns
+ * the whole new set to store, or why it was refused. */
+export function mergeOpenCodeProviderKeys(
+  cfg: Pick<AppConfig, "opencodeGo">,
+  change: Record<string, string>,
+): { ok: true; keys: Record<string, string> } | { ok: false; error: string } {
+  const keys = new Map(Object.entries(openCodeProviderKeys(cfg)));
+  for (const [name, raw] of Object.entries(change)) {
+    const value = raw.trim();
+    if (!value) {
+      keys.delete(name);
+      continue;
+    }
+    const refusal = openCodeProviderKeyNameRefusal(name);
+    if (refusal) return { ok: false, error: refusal };
+    if (!OPENCODE_PROVIDER_KEY_VALUE.test(value)) return { ok: false, error: "That doesn't look like a key. Paste only the key, with no spaces." };
+    keys.set(name, value);
+  }
+  if (keys.size > OPENCODE_PROVIDER_KEY_LIMIT) {
+    return { ok: false, error: `OpenCode can hold up to ${OPENCODE_PROVIDER_KEY_LIMIT} provider keys. Remove one you no longer use, then add this one.` };
+  }
+  return { ok: true, keys: Object.fromEntries([...keys].sort(([a], [b]) => (a < b ? -1 : 1))) };
+}
 
 const configSaveListeners = new Set<(before: JsonObject, after: JsonObject) => void>();
 
@@ -1254,7 +1368,7 @@ export function saveConfig(
   // back after we have successfully recognized the legacy list.
   const storedProfiles = storedBrowserProfilesSchema.safeParse(disk.browserProfiles);
   if (storedProfiles.success) disk.browserProfiles = storedProfiles.data;
-  for (const key of ["xai", "anthropic", "mistral", "openai", "openrouter", "openaiCompat", "composio", "box", "opencodeGo", "tts", "decider", "imageGen", "profile", "rooms", "threads", "context", "memory", "localVm", "features", "cloudOverflow", "budgets", "billing", "decisions", "power", "onboarding", "browserEngine", "newBots"] as const) {
+  for (const key of ["xai", "anthropic", "mistral", "cerebras", "openai", "openrouter", "openaiCompat", "composio", "box", "opencodeGo", "tts", "decider", "imageGen", "live", "profile", "rooms", "mcp", "threads", "context", "memory", "localVm", "features", "budgets", "billing", "decisions", "power", "onboarding", "browserEngine", "newBots"] as const) {
     const section = checkedPatch[key];
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);
@@ -1488,6 +1602,8 @@ export function instanceOwnsRouting(
         || ownUrl(routingDefaults?.url || cfg.openaiCompat?.url || process.env.OPENAI_COMPAT_URL || "https://openrouter.ai/api/v1");
     case "mistral":
       return own(entry.environment?.MISTRAL_API_KEY) || ownUrl("https://api.mistral.ai/v1");
+    case "cerebras":
+      return own(entry.environment?.CEREBRAS_API_KEY) || ownUrl("https://api.cerebras.ai/v1");
     case "grok":
       return own(entry.environment?.XAI_API_KEY) || (own(config.apiKeyEnv) && config.apiKeyEnv !== "XAI_API_KEY")
         || ownUrl("https://api.x.ai/v1", cfg.xai?.url);
@@ -1498,13 +1614,14 @@ export function instanceOwnsRouting(
 
 /** The credential env instanceConfigs() injects for one driver at runtime.
  * Each secret goes only to the driver that actually reads it: the API-key
- * Grok driver reads XAI_API_KEY, the Computer driver reads BOX_TOKEN, and
- * OpenCode reads OPENCODE_API_KEY. Every other engine brings its own
- * login, so handing it a key it never uses would only put that key in the
- * environment of an unrelated child process. */
+ * Grok driver reads XAI_API_KEY and OpenCode reads OPENCODE_API_KEY. Every
+ * other engine brings its own login, so handing it a key it never uses would
+ * only put that key in the environment of an unrelated child process. The
+ * Boat token reaches no engine at all: the harness alone talks to Boat. */
 function injectedEnvironment(cfg: AppConfig, instanceId: string, driver: string): Map<string, string> {
   const environment = new Map<string, string>();
   if (driver === "mistral" && cfg.mistral?.key) environment.set("MISTRAL_API_KEY", cfg.mistral.key);
+  if (driver === "cerebras" && cfg.cerebras?.key) environment.set("CEREBRAS_API_KEY", cfg.cerebras.key);
   if (driver === "grok" && cfg.xai?.key) environment.set("XAI_API_KEY", cfg.xai.key);
   // The workspace Anthropic key reaches Claude Code as the variable it
   // reads, carried in the instance environment so the driver can tell a
@@ -1530,11 +1647,11 @@ function injectedEnvironment(cfg: AppConfig, instanceId: string, driver: string)
     if (driver === "openai-compat" && cfg.openaiCompat?.url)
       environment.set("OPENAI_COMPAT_URL", cfg.openaiCompat.url);
   }
-  // driverKind "boxAgent" and env BOX_TOKEN keep their historical names.
-  // Only the person's own token: without one the driver itself falls back
-  // to Cloud Pro's included token, which never enters an environment map.
-  if (driver === "boxAgent" && cfg.box?.token) environment.set("BOX_TOKEN", cfg.box.token);
-  if (driver === "opencodeGo" && cfg.opencodeGo?.apiKey) environment.set("OPENCODE_API_KEY", cfg.opencodeGo.apiKey);
+  if (driver === "opencodeGo") {
+    // Keys for OpenCode's other providers, under the names OpenCode reads.
+    for (const [name, key] of Object.entries(openCodeProviderKeys(cfg))) environment.set(name, key);
+    if (cfg.opencodeGo?.apiKey) environment.set("OPENCODE_API_KEY", cfg.opencodeGo.apiKey);
+  }
   return environment;
 }
 
@@ -1591,9 +1708,9 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
     chatgpt: { driver: "codex", displayName: "ChatGPT plan", config: { authMode: "chatgpt-plan" } },
     antigravity: { driver: "antigravityAgent" },
     opencodeGo: { driver: "opencodeGo" },
-    computer: { driver: "boxAgent" },
     openaiCompat: { driver: "openai-compat" },
     mistral: { driver: "mistral" },
+    cerebras: { driver: "cerebras" },
     ...API_KEY_FLEET,
     qwen: { driver: "qwenAgent" },
     hermes: { driver: "hermesAgent" },
@@ -1612,11 +1729,13 @@ export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
     cursor: { driver: "cursorAgent" },
     openaiCompat: { driver: "openai-compat" },
     mistral: { driver: "mistral" },
+    cerebras: { driver: "cerebras" },
     ...API_KEY_FLEET,
     ...CUSTOM_ONLY,
   } as const;
   const configured = cfg.instances && Object.keys(cfg.instances).length ? cfg.instances : null;
-  const map: InstanceConfigMap = configured ? { ...configured } : { ...DEFAULT_FLEET };
+  // A fleet saved before the Computer engine was removed may still name it.
+  const map: InstanceConfigMap = withoutComputerEngine(configured ? { ...configured } : { ...DEFAULT_FLEET });
   // Product fleets pick up newly shipped engines. A one-off test/shadow map
   // (no claude/grok/codex) is left exactly as written.
   if (
