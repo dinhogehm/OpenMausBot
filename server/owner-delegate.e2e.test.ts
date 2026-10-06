@@ -24,7 +24,7 @@ it("delegates an item to a session and settles it by the session's report, closi
   const promptFile = join(tools, "prompts.jsonl");
   const fake = join(tools, "fake-claude.mjs");
   writeFileSync(fake, `#!/usr/bin/env node
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 const argv = process.argv.slice(2);
@@ -37,7 +37,9 @@ let result = readFileSync(${JSON.stringify(resultFile)}, "utf8");
 if (result.includes("{{COMMIT}}")) {
   // a commit of the session's own, a minute ahead: made after the delegation, on its branch
   const env = { ...process.env, GIT_COMMITTER_DATE: new Date(Date.now() + 60_000).toISOString(), GIT_AUTHOR_DATE: new Date(Date.now() + 60_000).toISOString() };
-  execFileSync(${JSON.stringify(GIT)}, ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-q", "-m", "delegada"], { env });
+  writeFileSync(join(cwd, "delegada.txt"), "feito\\n");
+  execFileSync(${JSON.stringify(GIT)}, ["-C", cwd, "add", "delegada.txt"], { env });
+  execFileSync(${JSON.stringify(GIT)}, ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "delegada"], { env });
   result = result.replace("{{COMMIT}}", execFileSync(${JSON.stringify(GIT)}, ["-C", cwd, "rev-parse", "HEAD"]).toString().trim());
 }
 console.log(JSON.stringify({ type: "system", subtype: "init", cwd, session_id: "x" }));

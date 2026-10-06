@@ -435,6 +435,12 @@ describe("D1: a short flag with a glued value, or of several letters", () => {
     ["head -c/etc/hosts", false],
     ["git log -O/etc/hosts", false],
     ["grep -xyz termo src", false],
+    ["grep -rf/Users/osvaldo/.zsh_history .", false],
+    ["rg -uf/abs termo", false],
+    ["git diff -RO/etc/hosts", false],
+    ["git log -nO/etc/hosts", false],
+    ["grep -rf~/x .", false],
+    ["git log -n5", true],
   ] as const)("%s → %s", (command, allowed) => {
     expect(allowedCommand(command)).toBe(allowed);
   });

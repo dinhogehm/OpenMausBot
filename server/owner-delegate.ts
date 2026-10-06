@@ -238,6 +238,8 @@ export function allowedCommand(command: string): boolean {
   for (const arg of args) {
     const short = /^-([a-z])(.+)$/.exec(arg);
     if (!short) continue;
+    // grouped short flags with a value glued after them (`-rfVALOR`): refused, only a digit count like `-n5` passes (INSP-DEL r5 E1)
+    if (/^-[a-z]+[^a-z]/.test(arg) && !/^-[a-z]\d+$/.test(arg)) return false;
     if (/^[a-z]+$/.test(short[2]!)) {
       if (!HARMLESS_SHORT.has(arg)) return false;
     } else values.push(short[2]!);
