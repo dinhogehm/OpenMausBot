@@ -116,7 +116,7 @@ const ONLY_YOU: ReadonlyArray<[RegExp, string]> = [
   [/\bpush\b.*\b(?:main|master)\b|\bpush (?:direto )?(?:em|na|no|para|pra) (?:a |o )?(?:main|master)\b|\bpush\b.*\*/, "push direto em main"],
   [/--admin\b|\bgh\s+auth\b/, "usa --admin ou mexe na autenticação do gh"],
   [/\bwrangler\b/, "usa wrangler"],
-  [/\bsenhas?\b|\bpasswords?\b|\btokens?\b|\bcredenciai?s?\b|\bcredentials?\b|\bsecrets?\b|\bsegredos?\b|\bapi[_ -]?keys?\b|\bchaves?\b|\bchaveiro\b|\bkeychain\b|\.npmrc\b|\.netrc\b|\bhosts\.yml\b|\.config\/gh\b|(?<![\w-])\.aws\b|\.docker\/config\.json\b/, "envolve senha, token ou credencial"],
+  [/\bsenhas?\b|\bpasswords?\b|\btokens?\b|\bcredenciai?s?\b|\bcredentials?\b|\bsecrets?\b|\bsegredos?\b|\bapi[_ -]?keys?\b|\bchaves?\b|\bchaveiro\b|\bkeychain\b|\.npmrc\b|\.netrc\b|\bhosts\.yml\b|\.config\/gh\b|(?<![\w-])\.aws\b|\.docker\/config\.json\b|\.git\/config\b/, "envolve senha, token ou credencial"],
   [/\bprodu(?:cao|coes|ction)\b|\bprod\b|\bdeploy|\breleases?\b|release:local|\bcarrier\b|\bpublic(?:ar|ue|a|acao|ado)\b|\bpublish|pr:merge|\bmerg(?:e|ear|eie|ed|ing)\b|\bmescl|\bhotfix\b/, "produção, release ou merge"],
   [/\bapprov|\baprov(?:ar|e|o|a|ado|ada|acao|acoes)\b|\bautoriz/, "aprovação ou autorização"],
   [/\bpoliticas?\b|\bregras?\b|\bpermiss(?:ao|oes)\b/, "decisão de política ou de regra"],
@@ -173,20 +173,34 @@ const FILLER = new Set(["o", "a", "os", "as", "um", "uma", "uns", "umas", "do", 
 /** What may come before the action, said by the owner or a bot ("pode", "depois", "por favor"). */
 const LEAD_IN = /^(?:(?:e|depois|entao|em seguida|tambem|so|apenas|primeiro|por fim|finalmente|agora|pode|podem|sim|ok|por favor|favor|voce|para|pra)\s+)+/;
 
+/** What no agent touches, named anywhere in a step: a remote database, a migration, production, a server, a global package. */
+const FORBIDDEN_OBJECT = /\bbancos?\b|\bdatabases?\b|\bmigra|\bproduc|\bprod\b|\bservidor|\bservers?\b|\bglobal|\bremot/;
+/** The gerunds of the allowed actions ("lendo os logs"), and words that only look like one. */
+const ALLOWED_GERUNDS = new Set(["lendo", "investigando", "conferindo", "verificando", "confirmando", "analisando", "diagnosticando", "reproduzindo", "revisando", "testando", "procurando", "buscando", "examinando", "listando", "comparando", "comentando", "corrigindo", "quando", "comando", "bando", "lindo", "vindo"]);
+
 /** Whether every action a text asks is one an agent may do: each clause's
  * leading verb is allowed (with its object, for "abrir", "rodar", "criar",
  * "fazer", "escrever"), and there is at least one. INSP-DEL r2 B6. */
 export function allowedActions(text: string): boolean {
   const plain = deaccented(normalized(text));
+  // an object no agent touches, wherever it sits; a gerund of an action outside the list (INSP-DEL r3 C2)
+  if (FORBIDDEN_OBJECT.test(plain)) return false;
+  if ([...plain.matchAll(/\b[a-z]+(?:ando|endo|indo)\b/g)].some((match) => !ALLOWED_GERUNDS.has(match[0]))) return false;
   let verbs = 0;
+  let previous = false;
   for (const raw of plain.split(/[,;:.!?\n]|\s+e\s+|\s+depois\s+|\s+entao\s+|\s+para\s+|\s+pra\s+/)) {
     const clause = raw.trim().replace(LEAD_IN, "").replace(/^[^\p{L}\d]+/u, "");
     if (!clause) continue;
     const [word = "", ...rest] = clause.split(/\s+/);
-    if (FILLER.has(word) || /^\d/.test(word)) continue;
+    // a clause opening with an article or a number continues the list of the allowed verb before it; nothing else
+    if (FILLER.has(word) || /^\d/.test(word)) {
+      if (!previous) return false;
+      continue;
+    }
     const object = rest.join(" ");
     const ok = ALLOWED_VERBS.has(word) || OBJECT_VERBS.some(([verb, needs]) => verb.test(word) && needs.test(object));
     if (!ok) return false;
+    previous = true;
     verbs += 1;
   }
   return verbs > 0;
@@ -198,7 +212,8 @@ const ALLOWED_COMMANDS: readonly RegExp[] = [
   /^npx\s+(?:vitest\s+run|tsc\s+--noemit)(?:\s+[\w:=./-]+)*$/,
   /^git\s+(?:status|log|diff|show|fetch|branch\s+--show-current|worktree\s+add|switch\s+-c|checkout\s+-b|add|commit)(?:\s+.*)?$/,
   // only `git push -u origin <work branch>`: no option as the name, no main/master/HEAD, no refs/…, no ":" or "+" (INSP-DEL r2 B4)
-  /^git\s+push\s+-u\s+origin\s+(?!-)(?!(?:main|master|head)$)(?!refs\/)[a-z0-9][\w./-]*$/,
+  // …and only to a work branch by its prefix, never a name that reads as a tag (INSP-DEL r3 C3)
+  /^git\s+push\s+-u\s+origin\s+(?:fix|feat|chore|ops|test|docs|perf|refactor|claude)\/(?!v?\d+(?:\.\d+)+(?:[-+]\S*)?$)[a-z0-9][\w./-]*$/,
   /^gh\s+(?:pr\s+(?:view|checks|diff|list|create|comment)|issue\s+(?:view|list|comment)|run\s+(?:view|list))(?:\s+.*)?$/,
   /^(?:rg|grep|ls|cat|head|tail|wc)(?:\s+.*)?$/,
 ];
@@ -211,9 +226,20 @@ export function allowedCommand(command: string): boolean {
   if (!plain || /[;&|<>`$*?(){}\n]/.test(plain)) return false;
   if (!ALLOWED_COMMANDS.some((pattern) => pattern.test(plain))) return false;
   const [tool = "", ...args] = plain.split(/\s+/);
-  if (/^(?:rg|grep|ls|cat|head|tail|wc)$/.test(tool) && args.some((arg) => !arg.startsWith("-") && (/^[/~]/.test(arg) || /(?:^|\/)\.\.(?:\/|$)/.test(arg)))) return false;
-  if (tool === "git" && /(?:^|\s)--output\b/.test(plain)) return false;
-  if (tool === "gh" && /\bcomment\b/.test(plain) && (/(?:^|\s)(?:-f|--body-file)\b/.test(plain) || !/(?:^|\s)(?:-b|--body)(?:\s|=)/.test(plain))) return false;
+  // every argument, a flag's value (`--x=valor`) and what follows -f/--file/--body-file: a relative path inside the repository, never .git/ (INSP-DEL r3 C1)
+  const values = args.flatMap((arg, index) => [
+    ...(arg.startsWith("-") ? (arg.includes("=") ? [arg.slice(arg.indexOf("=") + 1)] : []) : [arg]),
+    ...(/^(?:-f|--file|--body-file)$/.test(arg) && args[index + 1] ? [args[index + 1]!] : []),
+  ]);
+  if (values.some((value) => /^[/~]/.test(value) || /(?:^|\/)\.\.(?:\/|$)/.test(value) || /(?:^|\/)\.git(?:\/|$)/.test(value))) return false;
+  const flags = args.filter((arg) => arg.startsWith("-")).map((arg) => arg.split("=")[0]!);
+  if (flags.some((flag) => /^(?:--no-index|--pre|--pre-glob|--output|--file|--body-file)$/.test(flag))) return false;
+  if (tool === "git" && args[0] === "commit" && flags.some((flag) => flag !== "-m")) return false;
+  if (tool === "gh") {
+    if (flags.some((flag) => /^(?:-f|-r|--repo)$/.test(flag))) return false;
+    if (args[0] === "pr" && args[1] === "create" && flags.some((flag) => !/^(?:--title|--body|--base|--head|-t|-b|-h)$/.test(flag))) return false;
+    if (/\bcomment\b/.test(plain) && !/(?:^|\s)(?:-b|--body)(?:\s|=)/.test(plain)) return false;
+  }
   return true;
 }
 

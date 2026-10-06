@@ -10908,6 +10908,12 @@ function settleDelegation(session: CcSession): void {
     const now = autonomy.ownerPendingById(ref.botId, ref.itemId);
     // resolved or delegated again while the check ran
     if (!now || (now.delegation ? now.delegation.sessionId !== session.id : now.delegationBack?.sessionId !== session.id)) return;
+    // already back with the owner: a later "concluido" only notes what it shows, the owner settles (INSP-DEL r3 C6)
+    if (!now.delegation && now.delegationBack) {
+      if (proof) autonomy.patchOwnerPending(ref.botId, ref.itemId, { delegationBack: { ...now.delegationBack, text: `${now.delegationBack.text} Depois disso, a sessão ${session.id} disse que concluiu, com evidência conferida: ${proof}. Confira e marque como resolvido, se for o caso.` } });
+      refreshBotRow(ref.botId);
+      return;
+    }
     if (!proof) {
       delegationReturned(ref, { at: Date.now(), outcome: "parcial", text: `o agente disse concluído, mas não deu evidência que o servidor conseguisse conferir (um link de PR aberto ou mergeado depois da delegação, ou um commit na branch da sessão). Confira na sessão ${session.id}.`, sessionId: session.id });
       return;
