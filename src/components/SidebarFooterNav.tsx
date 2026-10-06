@@ -96,8 +96,9 @@ export function SidebarFooterNav({ density }: { density: SidebarDensity }) {
   const tone = (active: boolean) => (active ? "text-accent" : "text-ink-secondary");
   const routinesNeedYou = state.routineRuns.some((run) => isRoutineProblemRun(run) && !run.seenAt);
   const ccAlerts = state.bots.flatMap((bot) => (bot.tasks ?? []).flatMap((task) => (task.ccAlerts ?? []).map((alert) => ({ bot, task, alert }))));
-  // Simple mode on a full-width sidebar keeps only the owner's rows (Report,
-  // Esteira, Claude Code alerts): the builder tools stay Advanced-only.
+  // Simple mode on a full-width sidebar has no rows left: draw nothing, so
+  // the profile row is the foot's first line (#2384).
+  if (!advanced && !iconsOnly) return null;
 
   return (
     // `tools` is the guided tour's anchor for "the places down here".

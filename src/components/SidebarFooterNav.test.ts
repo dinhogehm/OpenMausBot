@@ -46,11 +46,9 @@ describe("sidebar footer places", () => {
     expect(html).not.toContain('data-sidebar-nav="apps"');
   });
 
-  // this fork: Simple mode keeps the owner's rows (Report, Esteira); the
-  // builder places stay Advanced-only
-  it.each(["comfortable", "compact"] as const)("draws only Report and Esteira in Simple mode (%s)", (density) => {
+  it.each(["comfortable", "compact"] as const)("draws no place rows at all in Simple mode (%s)", (density) => {
     const { html } = render(density);
-    expect(html.match(/data-sidebar-nav="([^"]+)"/g)).toEqual(['data-sidebar-nav="report"', 'data-sidebar-nav="pipeline"']);
+    expect(html).toBe("");
   });
 
   it("keeps Simple mode's Apps on the avatars-only rail, without Routines or Triggers", () => {
