@@ -245,6 +245,8 @@ export interface OwnerPending {
   demotedAt?: number;
   /** The owner said "Ainda vale": back on top, the 48 h and 2 runs count again from here. */
   keptAt?: number;
+  /** A routine's item: the routine that said it (its runs are counted by it, not by a name that may change). */
+  routineId?: string;
 }
 
 /** One answer of the person to an item (J18). */
@@ -1354,7 +1356,7 @@ export class BotAutonomy {
    * for anything else the existing item comes back untouched, flagged
    * `duplicate`, so the bot is told "já existe o5" instead of the person
    * getting a second item for the same action. */
-  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number }): OwnerPending & { duplicate?: true } {
+  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number; routineId?: string }): OwnerPending & { duplicate?: true } {
     const title = input.title.replace(/\s+/g, " ").trim().slice(0, OWNER_PENDING_TITLE_MAX);
     const here = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
     const elsewhere = this.ownerPending.find((open) => open.botId === botId && !here(open) && sameOwnerPending(open, { ...input, title }));
@@ -1380,6 +1382,7 @@ export class BotAutonomy {
       ...(existing?.awaitingSince ? { awaitingSince: existing.awaitingSince } : {}),
       ...(existing?.stepsAutoAskedAt ? { stepsAutoAskedAt: existing.stepsAutoAskedAt } : {}),
       ...(input.lastSaidAt !== undefined ? { lastSaidAt: input.lastSaidAt } : existing?.lastSaidAt !== undefined ? { lastSaidAt: existing.lastSaidAt } : {}),
+      ...(input.routineId ? { routineId: input.routineId } : existing?.routineId ? { routineId: existing.routineId } : {}),
     };
     // a server item (same key) found in another conversation follows the server to where it says it now
     this.ownerPending = [...this.ownerPending.filter((open) => !same(open)), pending];
@@ -1568,7 +1571,7 @@ export class BotAutonomy {
    * item ("pedido há 2 min") until the bot updates it. */
   /** A routine's item, set in place (server/routine-owner-ask.ts): its why, options and where it stands
    * ("Talvez já resolvido"). An undefined value clears the field. */
-  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt">>): OwnerPending | null {
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt">>): OwnerPending | null {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
     for (const [field, value] of Object.entries(patch) as Array<[keyof typeof patch, unknown]>) {

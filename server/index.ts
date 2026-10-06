@@ -123,7 +123,7 @@ import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
-import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswerCloses, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
 import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -13729,7 +13729,7 @@ function openRoutineAsks(run: RoutineRun, routineName: string, threadId: string)
       channelReplies: store.messagesFor(channel).filter((message) => message.role === "bot" && message.kind === "text" && !message.from).slice(-60).map((message) => message.text ?? ""),
       botNames: store.bots.map((each) => each.name),
     });
-    const result = applyRoutineAsks(autonomy, { botId: bot.id, botName: bot.name, routineName, threadId, conversationTitle: store.taskByThread(bot.id, threadId)?.title, text, at: Date.now(), ownerName, knownNames: store.bots.map((each) => each.name) });
+    const result = applyRoutineAsks(autonomy, { botId: bot.id, botName: bot.name, routineName, routineId: run.routineId, threadId, conversationTitle: store.taskByThread(bot.id, threadId)?.title, text, at: Date.now(), ownerName, knownNames: store.bots.map((each) => each.name) });
     for (const item of result.opened) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${item.id}): ${item.title}`, 240), ok: true } });
     for (const item of result.resolved) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${item.id} fechado, ${ROUTINE_ASK_RESOLVED_NOTE}`, 240), ok: true } });
     if (!result.opened.length && !result.refreshed.length && !result.resolved.length && !result.demoted.length && !result.promoted.length) return;
@@ -23962,7 +23962,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (!reply) return json(res, 400, { error: "Escreva a resposta ao bot." });
         // a routine's item closes with the owner's words when they end it ("Já falei com ele"); a question
         // or a note goes to the bot and the item stays open — in doubt, open (INSP-N22 A3)
-        resolve = body.resolve === true || Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX) && ownerAnswerCloses(reply));
+        // a ticket's or issue's item: its action named, or the item closed in so many words (INSP-N22 r3 R6)
+        resolve = body.resolve === true || Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX) && ownerEndsRoutineAsk(item, reply));
         text = ownerPendingReplyText(item, reply.slice(0, 4_000), resolve);
         answer = { kind: "text", text: reply };
       }

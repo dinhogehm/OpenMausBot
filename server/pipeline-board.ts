@@ -104,6 +104,8 @@ export interface BoardOwnerPending {
   why?: string;
   steps?: ReadonlyArray<{ text: string; command?: string; link?: string }>;
   awaitingSince?: number;
+  /** A routine's item said once and let go ("Talvez já resolvido"): not the owner's to act on now. */
+  demotedAt?: number;
 }
 
 export interface BoardInputs {
@@ -490,7 +492,8 @@ export function buildPipelineBoard(input: BoardInputs): PipelineBoard {
       groups.join(key, `issue:${number}`);
     }
   }
-  const ownerItems = input.ownerPending.filter((item) => !(item.awaitingSince !== undefined && now - item.awaitingSince < OWNER_PENDING_AWAIT_MS));
+  // what waits on a bot, or may be resolved already ("Talvez já resolvido", INSP-N22 r3 R4), is not "Precisa de você" here either
+  const ownerItems = input.ownerPending.filter((item) => !(item.awaitingSince !== undefined && now - item.awaitingSince < OWNER_PENDING_AWAIT_MS) && item.demotedAt === undefined);
   const cites = new Map(ownerItems.map((item) => [item, itemCites(item)]));
   const citedIssues = new Set([...cites.values()].flatMap((cite) => [...cite.numbers]));
   // Entrada: open issues that entered lately, urgent ones in motion, those on the delivery

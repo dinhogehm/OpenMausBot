@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BotAutonomy, OWNER_PENDING_MAX_PER_THREAD } from "./bot-autonomy.ts";
-import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswerCloses, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_OWNER_THREAD_NOTE, ROUTINE_ASK_SETTLED_MS, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_OWNER_THREAD_NOTE, ROUTINE_ASK_SETTLED_MS, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
 
 // The Monitor's routine "Atendimento: Chat, planilha e issues", 05/10 09:00 (R12-visual N22), as it wrote it.
 const MONITOR_0510 = [
@@ -364,5 +364,77 @@ describe("INSP-N22 r2", () => {
     expect(titles("O Osvaldo precisa aprovar a PR do relatório.")[0]).toMatch(/\| Aprovar a PR do relatório\.?$/);
     expect(titles("O comentário na #9331 está aguardando o Osvaldo.")[0]).toMatch(/\| Ver: o comentário na #9331$/);
     expect(routineOwnerAsks("A Marluce disse que a resposta depende de você e do Filipe.", ctx)).toEqual([]);
+  });
+});
+
+describe("INSP-N22 r3", () => {
+  const WIDGET = "A conversa do widget (Nuria.identify) continua com você: às 8:39 você disse que ia falar direto com o Luis Rossi.";
+  const make = (clock: () => number) => new BotAutonomy({ path: null, now: clock });
+  const base = { botId: "m", botName: "Monitor", routineName: "R", threadId: "t1", ...ctx };
+
+  it("R1 (n22/flap.ts): named by the routine, the item is alive — back on top, and not let go again before 48 h and 2 runs more", () => {
+    let clock = Date.parse("2026-10-05T12:00:00Z");
+    const ledger = make(() => clock);
+    applyRoutineAsks(ledger, { ...base, text: WIDGET, at: clock });
+    const states: string[] = [];
+    for (let h = 1; h <= 110; h++) {
+      clock += 3_600_000;
+      const text = h === 55 ? "O Luis Rossi ainda não respondeu no widget do Nuria.identify." : "Nada novo.";
+      const result = applyRoutineAsks(ledger, { ...base, text, at: clock });
+      if (result.demoted.length) states.push(`h${h} rebaixado`);
+      if (result.promoted.length) states.push(`h${h} topo`);
+    }
+    expect(states).toEqual(["h48 rebaixado", "h55 topo", "h103 rebaixado"]);
+    expect(ledger.ownerPendingOf("m")[0]!.lastSaidAt).toBe(Date.parse("2026-10-05T12:00:00Z") + 55 * 3_600_000);
+  });
+
+  it("R2: an order not to, or not yet, closes nothing", () => {
+    let clock = Date.parse("2026-10-05T12:00:00Z");
+    const ledger = make(() => clock);
+    applyRoutineAsks(ledger, { ...base, text: "Preciso da sua decisão: posso escrever o número da issue nas Observações da linha 110, depois do texto do Filipe?", at: clock });
+    expect(ownerSettlesRoutineAsks(ledger, "m", [{ at: clock + 60_000, text: "Não escreva nada na linha 110 ainda." }])).toEqual([]);
+    expect(ownerSettlesRoutineAsks(ledger, "m", [{ at: clock + 60_000, text: "Escreva o número da issue na linha 110." }])).toHaveLength(1);
+  });
+
+  it("R3: the runs are counted by the routine's id — a renamed routine still lets its item go", () => {
+    let clock = Date.parse("2026-10-05T12:00:00Z");
+    const ledger = make(() => clock);
+    const [item] = applyRoutineAsks(ledger, { ...base, routineId: "r1", text: WIDGET, at: clock }).opened;
+    expect(item!.routineId).toBe("r1");
+    clock += 49 * 3_600_000;
+    applyRoutineAsks(ledger, { ...base, routineName: "R (renomeada)", routineId: "r1", text: "Nada novo.", at: clock });
+    // another routine of the bot does not count
+    applyRoutineAsks(ledger, { ...base, routineName: "Outra", routineId: "r2", text: "Nada novo.", at: clock });
+    expect(ledger.ownerPendingOf("m")[0]!.quietRuns).toBe(1);
+    expect(applyRoutineAsks(ledger, { ...base, routineName: "R (renomeada)", routineId: "r1", text: "Nada novo.", at: clock + 3_600_000 }).demoted.map((each) => each.id)).toEqual([item!.id]);
+  });
+
+  it("R5: after \"Ainda vale\" the why says so instead of asking to confirm; the titles lead with what is asked", () => {
+    let clock = Date.parse("2026-10-05T12:00:00Z");
+    const ledger = make(() => clock);
+    const [item] = applyRoutineAsks(ledger, { ...base, text: WIDGET, at: clock }).opened;
+    clock += 30 * 3_600_000;
+    markStaleRoutineAsks(ledger, clock);
+    expect(ledger.ownerPendingById("m", item!.id)!.why).toContain("confirme se ainda vale");
+    const kept = keepRoutineAsk(ledger, "m", item!.id, clock)!;
+    expect(kept.why).not.toContain("confirme se ainda vale");
+    expect(kept.why).toMatch(/\(você confirmou que ainda vale às \d\d:\d\d de \d\d\/\d\d\)$/);
+    // not marked stale again right away: a day from the confirmation
+    expect(markStaleRoutineAsks(ledger, clock + 3_600_000)).toEqual([]);
+    expect(titles("Até agora, a resposta ao Filipe continua com você.")[0]).toMatch(/\| Ver: a resposta ao Filipe$/);
+    expect(titles("Desde ontem, quando a Marluce pediu, a escala fica com você.")[0]).toMatch(/\| Ver: a escala \(quando a Marluce pediu\)$/);
+    expect(titles("O cliente se queixou de novo e a resposta depende de você.")[0]).toMatch(/\| Responder: o cliente se queixou de novo$/);
+  });
+
+  it("R6: a ticket's item closes with its action named or in so many words — not with any \"resolvido\" beside the ticket", () => {
+    const ticket = { key: "routine-ask:ticket:atd-202610-0042", title: "Ver: a abertura da issue do ATD-202610-0042", why: "X, na rotina \"Y\", escreveu: \"Ainda dependem do Osvaldo: a abertura da issue do ATD-202610-0042 e, com ela, a linha dele na planilha.\" Última vez dita às 16:00 de 01/10." };
+    expect(ownerEndsRoutineAsk(ticket, "Respondi a cliente do ATD-202610-0042, resolvido.")).toBe(false);
+    expect(ownerEndsRoutineAsk(ticket, "Abri a issue do ATD-202610-0042.")).toBe(true);
+    expect(ownerEndsRoutineAsk(ticket, "Pode fechar, já resolvi isso.")).toBe(true);
+    expect(ownerEndsRoutineAsk(ticket, "Ainda não abri a issue.")).toBe(false);
+    let clock = Date.parse("2026-10-05T12:00:00Z");
+    const ledger = make(() => clock);
+    applyRoutineAsks(ledger, { ...base, text: "Ainda dependem do Osvaldo: a abertura da issue do ATD-202610-0042 e, com ela, a linha dele na planilha.", at: clock });
+    expect(ownerSettlesRoutineAsks(ledger, "m", [{ at: clock + 60_000, text: "Respondi a cliente do ATD-202610-0042, resolvido." }])).toEqual([]);
   });
 });

@@ -309,10 +309,26 @@ export function routineAskTitle(ask: RoutineAsk): string {
   if (label && !asksOwnerSentence(label)) return `${ask.decide ? "Decidir" : "Ver"}: ${lower(clipTitle(label, 90))}`;
   // a statement: what it is about, without the words that leave it with the owner
   // ("O comentário na #9331 está aguardando o Osvaldo" → "Ver: o comentário na #9331")
+  // "O cliente se queixou de novo e a resposta depende de você": the owner's action is the answer
+  const answer = /^(.+?),?\s+(?:e|ent[ãa]o|mas)\s+a\s+resposta$/iu.exec(withoutAsk(said));
+  if (answer && !ask.decide) return `Responder: ${lower(clipTitle(answer[1]!, 90))}`;
   let subject = (withoutAsk(said) || said).replace(/,?\s*(?:ent[ãa]o|e|mas)?\s*(?:a|o)\s+(?:decis[ãa]o|resposta|escolha)\s*$/iu, "").trim();
   // nothing left but "a decisão": what the sentence says before it ("A Marluce pediu que a escala se mantenha; a decisão fica com você")
   if (![...contentWords(subject)].some((word) => !["decisao", "resposta", "escolha"].includes(word))) subject = ask.sentence.split(/;\s*/)[0]!.trim();
+  else if (withoutAsk(said) !== said) subject = askedNoun(subject);
   return `${ask.decide ? "Decidir" : "Ver"}: ${lower(clipTitle(subject, 90))}` || "Pendência deixada por uma rotina";
+}
+/** What the ask is about, first: the noun right before the words that left it with the owner ("… e a resposta depende
+ * de você" → "a resposta"), with what led to it after, in parentheses; an opening adverb ("Até agora,", "Desde
+ * ontem,") dropped (INSP-N22 r3 R5). */
+function askedNoun(text: string): string {
+  const parts = text.split(/,\s+|\s+e\s+/).map((each) => each.trim()).filter(Boolean);
+  const kept = parts.filter((each, at) => !(at < parts.length - 1 && /^(?:at[ée]|desde|hoje|ontem|agora|ainda|tamb[ée]m|por enquanto|nesta|neste|de novo|mais uma vez)(?![\p{L}])/iu.test(each)));
+  const main = kept.at(-1) ?? text;
+  const lead = kept.slice(0, -1).join(", ");
+  // a short noun phrase leads; a long one is the whole thing already
+  if (!lead || main.split(/\s+/).length > 6) return kept.join(", ");
+  return `${main} (${lead.charAt(0).toLocaleLowerCase("pt-BR")}${lead.slice(1)})`;
 }
 /** An infinitive opens it: an action ("Abrir a issue", "Responder ao Filipe", "Revisar a planilha"). */
 const ACTION_START = /^\s*\p{L}+(?:ar|er|ir|or)(?![\p{L}])/iu;
@@ -470,7 +486,10 @@ export function ownerAnswerCloses(text: string): boolean {
  * conversa, três vigias permanentes…" for "Três vigias permanentes: não posso armar numa execução de rotina. Se quiser,
  * peça na minha conversa principal" (real, 30/09 16:12) — the infinitive the bot used, said as an order or done. */
 function ownerActs(asked: string, sentence: string): boolean {
-  const verbs = [...contentWords(asked)].filter((word) => /^[a-z]{3,}(?:ar|er|ir)$/.test(word) && !COMMON_VERBS.has(word));
+  // "Não escreva nada na linha 110 ainda": an order not to, or not yet, ends nothing (INSP-N22 r3 R2)
+  if (/\?/.test(sentence) || OWNER_NOT_YET.test(sentence)) return false;
+  // the infinitive the bot used, and the one its noun stands for ("a abertura da issue" → abrir)
+  const verbs = [...new Set([...contentWords(asked)].filter((word) => /^[a-z]{3,}(?:ar|er|ir)$/.test(word) && !COMMON_VERBS.has(word)).concat(NOUN_VERBS.filter(([noun]) => noun.test(asked)).map(([, verb]) => verb)))];
   if (!verbs.length) return false;
   const words = new Set(strip(sentence).toLowerCase().split(/[^a-z]+/));
   return verbs.some((verb) => {
@@ -482,6 +501,29 @@ function ownerActs(asked: string, sentence: string): boolean {
   });
 }
 const COMMON_VERBS = new Set(["estar", "ficar", "deixar", "poder", "fazer", "dizer", "quiser", "querer", "saber", "haver", "olhar", "achar", "passar", "chegar", "falar", "tratar", "mandar", "pedir"]);
+/** The words that keep the owner's message open, as in ownerAnswerCloses: a "not", a "not yet", a later. */
+const OWNER_NOT_YET = /(?<![\p{L}])(?:n[ãa]o|nem|ainda|depois|amanh[ãa]|talvez|nunca|jamais|errado|errada|ignora|ignore)(?![\p{L}])/iu;
+/** The verb a noun of the ask stands for. */
+const NOUN_VERBS: ReadonlyArray<[RegExp, string]> = [
+  [/(?<![\p{L}])abertura(?![\p{L}])/iu, "abrir"],
+  [/(?<![\p{L}])cria[çc][ãa]o(?![\p{L}])/iu, "criar"],
+  [/(?<![\p{L}])envio(?![\p{L}])/iu, "enviar"],
+  [/(?<![\p{L}])registro(?![\p{L}])/iu, "registrar"],
+  [/(?<![\p{L}])aprova[çc][ãa]o(?![\p{L}])/iu, "aprovar"],
+  [/(?<![\p{L}])(?:merge|mesclagem)(?![\p{L}])/iu, "mesclar"],
+];
+/** The owner closes the item in so many words ("pode fechar", "já resolvi isso"): what a ticket's item needs when the
+ * action itself is not named — "Respondi a cliente do ATD-…, resolvido" is not the issue opened (INSP-N22 r3 R6). */
+const EXPLICIT_CLOSE = /(?<![\p{L}])(?:pode fechar|pode encerrar|pode tirar|j[áa] resolvi (?:isso|essa|esse|este|esta)|resolvi (?:isso|essa pend[êe]ncia|esse item)|isso (?:j[áa] )?(?:est[áa] )?resolvid[oa]|esse item (?:j[áa] )?(?:est[áa] )?resolvido|j[áa] resolvi essa pend[êe]ncia)(?![\p{L}])/iu;
+
+/** The owner's words end THIS item: for a ticket or issue, its action named or the item closed in so many words; else
+ * the words that end anything, or the action done or ordered — never under a "not", a "not yet" or a question. */
+export function ownerEndsRoutineAsk(item: Pick<OwnerPending, "key" | "why" | "title">, text: string): boolean {
+  const facts = itemFacts(item);
+  if (!facts) return ownerAnswerCloses(text);
+  if (facts.kind === "ticket" || facts.kind === "issue") return ownerActs(facts.asked, text) || (EXPLICIT_CLOSE.test(text) && !/\?/.test(text) && !OWNER_NOT_YET.test(text));
+  return ownerAnswerCloses(text) || ownerActs(facts.asked, text);
+}
 
 /** The owner wrote, in a conversation of the bot after the item was opened, about the same pendency (by its key), in
  * words that end it or doing what it asked: the item closes as the owner's (INSP-N22 r2 F2). */
@@ -491,7 +533,7 @@ export function ownerSettlesRoutineAsks(ledger: RoutineAskLedger, botId: string,
     const facts = isRoutineItem(item) ? itemFacts(item) : null;
     if (!facts) continue;
     const settled = messages.some((message) => message.at > item.createdAt && sentencesOf(message.text ?? "").map(unquoted).some((sentence) =>
-      isAbout(facts, sentence, "owner") && (ownerAnswerCloses(sentence) || ownerActs(facts.asked, sentence))));
+      isAbout(facts, sentence, "owner") && ownerEndsRoutineAsk(item, sentence)));
     if (settled) done.push(...ledger.resolveOwnerPending({ botId, key: item.key, by: "owner", note: ROUTINE_ASK_OWNER_THREAD_NOTE }));
   }
   return done;
@@ -507,9 +549,9 @@ export function routineReplyText(messages: ReadonlyArray<{ role: string; kind: s
 export interface RoutineAskLedger {
   ownerPendingOf(botId: string): OwnerPending[];
   resolvedOwnerPendingOf(botId?: string): ResolvedOwnerPending[];
-  addOwnerPending(botId: string, threadId: string, input: { title: string; key: string; link?: string; why: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number }): OwnerPending;
+  addOwnerPending(botId: string, threadId: string, input: { title: string; key: string; link?: string; why: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number; routineId?: string }): OwnerPending;
   resolveOwnerPending(match: { botId?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"]; note?: string }): OwnerPending[];
-  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt">>): OwnerPending | null;
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt">>): OwnerPending | null;
 }
 
 const isRoutineItem = (item: Pick<OwnerPending, "key">) => Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX));
@@ -540,10 +582,12 @@ export function settleRoutineAsks(ledger: RoutineAskLedger, botId: string, text:
  * each pendency it leaves with the owner is ONE item in `threadId` (the
  * routine's conversation): the same pendency refreshes its item, another
  * one about the same subject opens its own. */
-export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string; botName: string; routineName: string; threadId: string; conversationTitle?: string; text: string; at: number } & Pick<RoutineAskContext, "ownerName" | "knownNames">): { opened: OwnerPending[]; refreshed: OwnerPending[]; resolved: OwnerPending[]; demoted: OwnerPending[]; promoted: OwnerPending[] } {
+export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string; botName: string; routineName: string; routineId?: string; threadId: string; conversationTitle?: string; text: string; at: number } & Pick<RoutineAskContext, "ownerName" | "knownNames">): { opened: OwnerPending[]; refreshed: OwnerPending[]; resolved: OwnerPending[]; demoted: OwnerPending[]; promoted: OwnerPending[] } {
   const resolved = settleRoutineAsks(ledger, run.botId, run.text);
   const opened: OwnerPending[] = [];
   const refreshed: OwnerPending[] = [];
+  const demoted: OwnerPending[] = [];
+  const promoted: OwnerPending[] = [];
   const open = ledger.ownerPendingOf(run.botId);
   const itemIds = open.flatMap((item) => [item.id, ...(item.aliases ?? [])]);
   for (const ask of routineOwnerAsks(run.text, { ownerName: run.ownerName, knownNames: run.knownNames, itemIds })) {
@@ -564,25 +608,26 @@ export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string;
       for (let n = 2; taken.has(key); n++) key = `${base}~${words}-${n}`;
     }
     const want = routineAskItem(ask, { botName: run.botName, routineName: run.routineName, conversationTitle: run.conversationTitle, firstAt: existing?.createdAt ?? run.at, lastAt: run.at });
+    // asked again, under "Talvez já resolvido": the refresh brings it back on top (read before: the refresh replaces it)
+    const wasDown = existing?.demotedAt !== undefined;
     // the same item keeps its title: a reworded repetition never renames what the owner reads
-    const item = ledger.addOwnerPending(run.botId, existing?.threadId ?? run.threadId, { ...want, key, ...(existing ? { title: existing.title } : {}) });
+    const item = ledger.addOwnerPending(run.botId, existing?.threadId ?? run.threadId, { ...want, key, ...(existing ? { title: existing.title } : {}), ...(run.routineId ? { routineId: run.routineId } : {}) });
     (existing ? refreshed : opened).push(item);
+    if (wasDown) promoted.push(item);
   }
   // the routine's other items: named again (in passing) → back on top; not named → one more quiet run (INSP-N22 r2 F2)
   const touched = new Set([...opened, ...refreshed, ...resolved].map((item) => item.id));
-  const demoted: OwnerPending[] = [];
-  const promoted: OwnerPending[] = [];
   for (const item of ledger.ownerPendingOf(run.botId)) {
     const facts = isRoutineItem(item) && !touched.has(item.id) ? itemFacts(item) : null;
-    if (!facts || facts.routineName !== run.routineName) continue;
+    // its routine by id (a renamed routine is the same one, INSP-N22 r3 R3); an older item without one, by the name its why quotes
+    if (!facts || (item.routineId ? item.routineId !== run.routineId : facts.routineName !== run.routineName)) continue;
     const cited = sentencesOf(run.text).map(unquoted).some((sentence) => isAbout(facts, sentence, "owner"));
     if (cited) {
       // read before the patch: the ledger hands its own object, and the patch changes it in place
       const wasDown = item.demotedAt !== undefined;
-      if (wasDown || item.quietRuns) {
-        const back = ledger.patchOwnerPending(run.botId, item.id, { quietRuns: undefined, demotedAt: undefined, options: doneOption() });
-        if (back && wasDown) promoted.push(back);
-      }
+      // named: alive — the 48 h and the 2 runs count again from this run (INSP-N22 r3 R1), and the "não repete" note goes
+      const back = ledger.patchOwnerPending(run.botId, item.id, { quietRuns: undefined, demotedAt: undefined, lastSaidAt: run.at, ...(wasDown ? { options: doneOption() } : {}), ...(item.why?.includes(STALE_MARK) ? { why: withoutNotes(item.why) } : {}) });
+      if (back && wasDown) promoted.push(back);
       continue;
     }
     const quiet = ledger.patchOwnerPending(run.botId, item.id, { quietRuns: (item.quietRuns ?? 0) + 1 });
@@ -608,10 +653,18 @@ function demoteIfLetGo(ledger: RoutineAskLedger, item: OwnerPending, now: number
   });
 }
 
-/** "Ainda vale": back on top; the 48 h and the 2 runs count again from now. */
+/** "Ainda vale": back on top; the 48 h and the 2 runs count again from now, and the why stops asking to confirm it —
+ * it says the owner did (INSP-N22 r3 R5). */
 export function keepRoutineAsk(ledger: RoutineAskLedger, botId: string, id: string, now: number): OwnerPending | null {
-  return ledger.patchOwnerPending(botId, id, { demotedAt: undefined, quietRuns: undefined, keptAt: now, options: doneOption() });
+  const why = ledger.ownerPendingOf(botId).find((each) => each.id === id)?.why;
+  return ledger.patchOwnerPending(botId, id, {
+    demotedAt: undefined, quietRuns: undefined, keptAt: now, options: doneOption(),
+    ...(why ? { why: `${withoutNotes(why)} (você confirmou que ainda vale às ${when(now)})` } : {}),
+  });
 }
+const STALE_MARK = "(o bot não repete desde";
+/** The why without the notes the server added after it ("não repete desde…", "você confirmou…"). */
+const withoutNotes = (why: string) => why.replace(/\s*\((?:o bot não repete desde|você confirmou que ainda vale)[^)]*\)/g, "");
 
 /** The minute pass over the routine items: the one the routine stopped repeating 24 h ago says so ("(o bot não repete
  * desde 05/10; confirme se ainda vale)", INSP-N22 A8), and the one let go goes under "Talvez já resolvido" (r2 F2) —
@@ -622,7 +675,8 @@ export function markStaleRoutineAsks(ledger: RoutineAskLedger & { allOwnerPendin
     if (!isRoutineItem(item) || !item.why) continue;
     const lastAt = item.lastSaidAt ?? item.createdAt;
     let current: OwnerPending | null = item;
-    if (now - lastAt >= ROUTINE_ASK_STALE_MS && !item.why.includes("(o bot não repete desde")) {
+    // a day after it was last said — or after the owner said it still holds
+    if (now - Math.max(lastAt, item.keptAt ?? 0) >= ROUTINE_ASK_STALE_MS && !item.why.includes(STALE_MARK)) {
       current = ledger.patchOwnerPending(item.botId, item.id, { why: `${item.why}${STALE_NOTE(lastAt)}` });
       if (current) changed.push(current);
     }
