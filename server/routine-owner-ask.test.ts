@@ -595,6 +595,29 @@ describe("INSP-N22 r6", () => {
     expect(ownerAnswersItem(item, text)).toBe(false);
   });
 
+  it.each([
+    ["linha", "Escrevi o número na linha 110, não precisa mais."],
+    ["linha", "Pode escrever o número da issue na linha 110, não tem problema."],
+    ["linha", "Escreva o número da issue na linha 110, não precisa me perguntar de novo."],
+    ["widget", "Já falei com o Luis Rossi sobre o widget, não precisa fazer nada."],
+    ["widget", "Falei com o Luis Rossi sobre o widget ainda hoje cedo."],
+    ["widget", "Resolvido: falei com o Luis Rossi do widget, nem precisa voltar nisso."],
+    ["ticket", "Abri a issue do ATD-202610-0042, não precisa mais lembrar."],
+    ["marluce", "Falei com a Marluce: é ajuste de grade, não mudança de regra."],
+  ] as const)("V1 (r7): what only reinforces the ending is no reservation — the r4's 8 close from the panel: %s — %s", (which, text) => {
+    const asks = {
+      widget: WIDGET,
+      linha: "Preciso da sua decisão: posso escrever o número da issue nas Observações da linha 110, depois do texto do Filipe?",
+      ticket: "Ainda dependem do Osvaldo: a abertura da issue do ATD-202610-0042 e, com ela, a linha dele na planilha.",
+      marluce: "Uma decisão fica com você: se o que a Marluce espera, tickets distribuídos fora do horário do chat, vira mudança de regra ou só ajuste na grade de horário do helpdesk.",
+    };
+    const clock = Date.parse("2026-10-05T12:00:00Z");
+    const item = applyRoutineAsks(new BotAutonomy({ path: null, now: () => clock }), { ...base, text: asks[which], at: clock }).opened[0]!;
+    expect(ownerAnswersItem(item, text)).toBe(true);
+    // and the same words alone end nothing
+    expect(ownerAnswersItem(item, "Não precisa.")).toBe(false);
+  });
+
   it("U1: an item closed with a reservation never holds the routine back from asking it again", () => {
     let clock = Date.parse("2026-10-05T12:00:00Z");
     const ledger = new BotAutonomy({ path: null, now: () => clock });

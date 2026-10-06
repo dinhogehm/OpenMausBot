@@ -592,7 +592,9 @@ function explicitlyClosed(text: string): boolean {
  * closes it; a question, a "not" before the verb, a wait or a part ("vai", "vou", "aguardo", "metade", "falta") keeps it
  * open and goes to the bot (INSP-N22 r5 T2). */
 export function ownerAnswersItem(item: Pick<OwnerPending, "key" | "why" | "title">, text: string): boolean {
-  const said = text.trim();
+  // what only reinforces the ending is no reservation: "não precisa (mais)", "nem precisa", "sem problema", "sem pressa",
+  // "ainda hoje", and the subject corrected ("é ajuste de grade, não mudança de regra"; "não é X, é Y") — INSP-N22 r7 V1
+  const said = text.trim().replace(REINFORCING, " ").replace(/\s+([.,;:!])/g, "$1").trim();
   if (!said || answerWithReservation(said) || /(?<![\p{L}])depois(?!\s+d[aeo]s?(?![\p{L}]))(?![\p{L}])/iu.test(said)) return false;
   if (/(?<![\p{L}])pront[oa]\s+(?:para|pra)(?![\p{L}])/iu.test(said)) return false;
   const plain = strip(said).toLowerCase();
@@ -601,6 +603,16 @@ export function ownerAnswersItem(item: Pick<OwnerPending, "key" | "why" | "title
   const yes = /^(?:sim|ok)(?![a-z])/.exec(plain) ?? PANEL_YES.exec(plain) ?? (facts ? actionMatch(facts, plain)?.match ?? null : null);
   return Boolean(yes && !negatedBefore(plain, yes.index, yes[0].length));
 }
+const REINFORCING = new RegExp([
+  "(?<![\\p{L}])n[ãa]o\\s+precisa(?:\\s+mais)?(?:\\s+(?!mas(?![\\p{L}]))\\p{L}+){0,4}",
+  "(?<![\\p{L}])nem\\s+precisa(?:\\s+\\p{L}+){0,4}",
+  "(?<![\\p{L}])(?:n[ãa]o\\s+tem|sem)\\s+(?:problema|pressa)",
+  "(?<![\\p{L}])ainda\\s+hoje(?:\\s+cedo)?",
+  // "é ajuste de grade, não mudança de regra" — the subject corrected after an "é …"
+  "(?<=(?:^|[\\s:])[ée]\\s[^,;.!?]{1,60}),\\s*n[ãa]o\\s+[^,;.!?]{1,50}",
+  // "não é mudança de regra, é ajuste de grade"
+  "(?<![\\p{L}])n[ãa]o\\s+[ée]\\s+[^,;.!?]{1,50}(?=,\\s*[ée]\\s)",
+].join("|"), "giu");
 /** A reservation anywhere keeps the panel answer open — it goes to the bot, the item stays (INSP-N22 r6 U1): "Tentei…,
  * mas ele não atendeu", "Mandei mensagem, sem resposta", "Sim, mas ainda não falei", "Ok, deixa comigo", "Pode deixar
  * que eu cuido", "…, ele vê". */
