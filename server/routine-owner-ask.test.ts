@@ -438,3 +438,82 @@ describe("INSP-N22 r3", () => {
     expect(ownerSettlesRoutineAsks(ledger, "m", [{ at: clock + 60_000, text: "Respondi a cliente do ATD-202610-0042, resolvido." }])).toEqual([]);
   });
 });
+
+describe("INSP-N22 r4", () => {
+  const make = (clock: () => number) => new BotAutonomy({ path: null, now: clock });
+  const base = { botId: "m", botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", routineId: "R-A", threadId: "t1", ...ctx };
+  const ASKS = {
+    widget: "A conversa do widget (Nuria.identify) continua com você: às 8:39 você disse que ia falar direto com o Luis Rossi.",
+    linha: "Preciso da sua decisão: posso escrever o número da issue nas Observações da linha 110, depois do texto do Filipe?",
+    ticket: "Ainda dependem do Osvaldo: a abertura da issue do ATD-202610-0042 e, com ela, a linha dele na planilha.",
+    marluce: "Uma decisão fica com você: se o que a Marluce espera, tickets distribuídos fora do horário do chat, vira mudança de regra ou só ajuste na grade de horário do helpdesk.",
+  };
+  const ends = (which: keyof typeof ASKS, owner: string) => {
+    const clock = Date.parse("2026-10-05T12:00:00Z");
+    const ledger = make(() => clock);
+    const item = applyRoutineAsks(ledger, { ...base, text: ASKS[which], at: clock }).opened[0]!;
+    const panel = ownerEndsRoutineAsk(item, owner);
+    const conversation = ownerSettlesRoutineAsks(ledger, "m", [{ at: clock + 60_000, text: owner }]).length > 0;
+    expect(panel, `painel: ${owner}`).toBe(conversation);
+    return panel;
+  };
+
+  it("S1: \"named\" is strict — the 4 passing mentions of the Chief (real, 30/09-02/10) never keep the rules of 30/09 alive", () => {
+    let clock = new Date(2026, 8, 30, 16, 9).getTime();
+    const ledger = make(() => clock);
+    const parado = "**Parado, esperando você:**\n2. **Regras de 30/09 na minha memória permanente:** só gravo o que você me confirmar diretamente. Pode ser a mesma frase que o Chief sugeriu na conversa principal: \"confirmo as regras de 30/09 e arme os três vigias permanentes\".";
+    const [rules] = applyRoutineAsks(ledger, { ...base, text: parado, at: clock }).opened;
+    for (const said of ["O Chief of Staff respondeu e está de acordo com o que fiz.", "Quem respondeu foi minha conversa \"@Chief of Staff\", às 12:17 e 12:20; o Chief abriu a issue #9331.", "O Chief of Staff olhou o código e a minha resposta à Daiane bate com o que está na `main`.", "O Chief of Staff abriu a issue da linha 110: é a #9358."]) {
+      clock += 6 * 3_600_000;
+      applyRoutineAsks(ledger, { ...base, text: said, at: clock });
+      expect(ledger.ownerPendingById("m", rules!.id)!.lastSaidAt, said).toBe(rules!.createdAt);
+    }
+    // its own words, three of them, do name it
+    clock += 3_600_000;
+    applyRoutineAsks(ledger, { ...base, text: "As regras da memória permanente seguem sem a sua confirmação.", at: clock });
+    expect(ledger.ownerPendingById("m", rules!.id)!.lastSaidAt).toBe(clock);
+  });
+
+  it("S2: a \"not\" of another clause, \"ainda hoje\" or \"depois do texto\" never keeps open what the owner ended (the inspector's phrases)", () => {
+    for (const [which, owner] of [
+      ["linha", "Escrevi o número na linha 110, não precisa mais."],
+      ["linha", "Pode escrever o número da issue na linha 110, não tem problema."],
+      ["linha", "Escreva o número da issue na linha 110, não precisa me perguntar de novo."],
+      ["linha", "Escreva o número da issue na linha 110 depois do texto do Filipe."],
+      ["widget", "Já falei com o Luis Rossi sobre o widget, não precisa fazer nada."],
+      ["widget", "Falei com o Luis Rossi sobre o widget ainda hoje cedo."],
+      ["widget", "Resolvido: falei com o Luis Rossi do widget, nem precisa voltar nisso."],
+      ["ticket", "Abri a issue do ATD-202610-0042, não precisa mais lembrar."],
+      ["ticket", "A issue do ATD-202610-0042 já foi aberta por mim."],
+      ["marluce", "Falei com a Marluce: é ajuste de grade, não mudança de regra."],
+    ] as const) expect(ends(which, owner), owner).toBe(true);
+    // and a "not" of its own clause, a later, still keep it open
+    for (const [which, owner] of [
+      ["linha", "Não escreva nada na linha 110 ainda."],
+      ["linha", "Escreva o número da issue na linha 110 depois."],
+      ["widget", "Ainda não falei com o Luis Rossi sobre o widget."],
+      ["ticket", "Ainda não abri a issue do ATD-202610-0042."],
+    ] as const) expect(ends(which, owner), owner).toBe(false);
+    for (const text of ["Pronto pra falar com ele amanhã", "Pronto para revisar, me manda o link", "Respondi errado, ignora", "Decidi esperar a Marluce", "Fechado: ele manda o print na segunda", "Falei com a Marluce, ela vai pensar", "Já falei com ele e ele pediu mais um dia", "Acabei de responder", "ok", "Feito o pedido; aguardo a resposta dele pra fechar", "Pode fechar esse, abre outro pro reembolso", "Concluído não, só começado", "Respondi o Luis Rossi, falta o Filipe", "Tratei metade", "Feito em parte"]) {
+      expect(ownerAnswerCloses(text), text).toBe(false);
+    }
+  });
+
+  it("S3: the object of the ask, and \"pode fechar\" only for the item (the inspector's phrases)", () => {
+    expect(ends("ticket", "Pode fechar o ticket ATD-202610-0042 no helpdesk, a cliente sumiu.")).toBe(false);
+    expect(ends("ticket", "Abri o ATD-202610-0042 pra ver o histórico.")).toBe(false);
+    expect(ends("linha", "Escrevi na linha 110 que o Filipe vai mandar o print.")).toBe(false);
+    expect(ends("ticket", "Pode fechar o item do ATD-202610-0042.")).toBe(true);
+    expect(ends("ticket", "Abri a issue do ATD-202610-0042 agora há pouco.")).toBe(true);
+  });
+
+  it("S4: an older item matched by its routine's name keeps the routine's id", () => {
+    let clock = Date.parse("2026-10-05T12:00:00Z");
+    const ledger = make(() => clock);
+    const [item] = applyRoutineAsks(ledger, { ...base, routineId: undefined, text: ASKS.widget, at: clock }).opened;
+    expect(item!.routineId).toBeUndefined();
+    clock += 3_600_000;
+    applyRoutineAsks(ledger, { ...base, text: "Nada novo.", at: clock });
+    expect(ledger.ownerPendingById("m", item!.id)!.routineId).toBe("R-A");
+  });
+});

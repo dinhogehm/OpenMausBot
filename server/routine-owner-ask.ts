@@ -470,39 +470,83 @@ function isAbout(facts: NonNullable<ReturnType<typeof itemFacts>>, sentence: str
   return sharedWords(sentence, asked, routineWords) >= 2 && (who === "owner" || overlap(sentence, asked, routineWords) >= 0.5);
 }
 
+/** The routine names the item, strictly: by its key when it has one (the ticket, issue, row or person, as the bot's word
+ * for done needs it), else 3 words of what was asked beyond the bots' names and the routine's own words. */
+function citesItem(facts: NonNullable<ReturnType<typeof itemFacts>>, sentence: string, botWords: readonly string[]): boolean {
+  if (facts.kind !== "frase") return isAbout(facts, sentence, "bot");
+  return sharedWords(sentence, facts.asked, [...facts.routineWords, ...botWords]) >= 3;
+}
+
 /** The owner's own words end the pendency ("Já falei com ele", "resolvido", "pode fechar"): never a question, a "not
  * yet", a doubt, a part ("metade", "falta o Filipe"), a wait ("aguardo", "ele pediu mais um dia", "vai pensar"), a
  * correction ("errado, ignora") or another ask ("abre outro") — those go to the bot and keep the item open (INSP-N22 A3, r2 F3). */
 export function ownerAnswerCloses(text: string): boolean {
   const said = text.trim();
-  if (!said || /\?/.test(said)) return false;
-  if (/(?<![\p{L}])(?:n[ãa]o|nem|ainda|depois|amanh[ãa]|vou|vamos|vai|v[ãa]o|talvez|acho|qual|quando|como|porque|por que|mas|metade|parte|parcial\p{L}*|falta|faltam|faltando|aguardo|aguardando|esperando|esperar|pediu|pedi|errado|errada|ignora|ignore|desconsider\p{L}*|outro|outra|abre|abra|segunda|semana)(?![\p{L}])/iu.test(said)) return false;
+  if (!said || stillOpen(said)) return false;
   // "pronto" ends it only said alone ("Pronto." / "Pronto, feito") — "pronto para revisar" is ready to start
   if (/(?<![\p{L}])pront[oa]\s+(?:para|pra)(?![\p{L}])/iu.test(said)) return false;
-  return /(?<![\p{L}])(?:j[áa] (?:resolvi|falei|respondi|tratei|cuidei|decidi|fiz|liberei|abri|aprovei)|resolvi|resolvido|resolvida|feito|feita|pronto|pronta|falei com|respondi|tratei|cuidei|decidi|pode fechar|pode encerrar|encerrad[oa]|conclu[íi]d[oa]|fechad[oa]|ok,? resolvido)(?![\p{L}])/iu.test(said);
+  const close = OWNER_CLOSE.exec(said);
+  return Boolean(close && !negatedBefore(said, close.index, close[0].length) && (!/^pode (?:fechar|encerrar)/iu.test(close[0]) || closesTheItem(said, close.index + close[0].length)));
+}
+const OWNER_CLOSE = /(?<![\p{L}])(?:j[áa] (?:resolvi|falei|respondi|tratei|cuidei|decidi|fiz|liberei|abri|aprovei)|resolvi|resolvido|resolvida|feito|feita|pronto|pronta|falei com|respondi|tratei|cuidei|decidi|pode fechar|pode encerrar|encerrad[oa]|conclu[íi]d[oa]|fechad[oa]|ok,? resolvido)(?![\p{L}])/iu;
+/** Words that keep the owner's message open wherever they are: a question, a part ("metade", "falta o Filipe"), a wait
+ * ("aguardo", "ele pediu mais um dia", "vai pensar"), a later ("amanhã", "na segunda", "escreva depois" — not "depois do
+ * texto", a place), a correction ("errado, ignora"), another ask ("abre outro"), a doubt (INSP-N22 r4 S2, S3). */
+function stillOpen(said: string): boolean {
+  if (/\?/.test(said)) return true;
+  if (/(?<![\p{L}])(?:amanh[ãa]|vou|vamos|vai|v[ãa]o|talvez|acho|qual|metade|parte|parcial\p{L}*|falta|faltam|faltando|aguardo|aguardando|esperando|esperar|pediu|pedi|errado|errada|ignora|ignore|desconsider\p{L}*|outro|outra|abre|abra|segunda|semana)(?![\p{L}])/iu.test(said)) return true;
+  // "depois" as a time ("escreva depois", "depois eu vejo"), never as a place ("depois do texto do Filipe")
+  return /(?<![\p{L}])depois(?!\s+d[aeo]s?(?![\p{L}]))(?![\p{L}])/iu.test(said);
+}
+/** A "not" before the word, in its own clause ("ainda não falei", "não escreva"), or right after it ("Concluído não, só
+ * começado") — never one of another clause ("Escrevi o número, não precisa mais"; "é ajuste de grade, não mudança"). */
+function negatedBefore(said: string, at: number, length: number): boolean {
+  const before = said.slice(0, at);
+  const clause = before.slice(Math.max(before.lastIndexOf(","), before.lastIndexOf(";"), before.lastIndexOf(":"), before.lastIndexOf("."), -1) + 1);
+  if (/(?<![\p{L}])(?:n[ãa]o|nem|nunca|jamais|ainda)(?![\p{L}])/iu.test(clause)) return true;
+  return /^\s*(?:n[ãa]o|nem|nunca)(?![\p{L}])/iu.test(said.slice(at + length));
+}
+/** "Pode fechar" closes the item when it is the item it closes: alone, or "esse/este/isso/o item…/essa pendência" — never
+ * another thing ("Pode fechar o ticket ATD-… no helpdesk", INSP-N22 r4 S3). */
+function closesTheItem(said: string, from: number): boolean {
+  const rest = said.slice(from).replace(/^\s+/, "");
+  return !rest || /^[.,;:!—–-]/.test(rest) || /^(?:esse|este|isso|isto|ess[ae] (?:item|pend[êe]ncia)|est[ae] (?:item|pend[êe]ncia)|o item|a pend[êe]ncia)(?![\p{L}])/iu.test(rest);
 }
 
 /** The owner, in a conversation with the bot, did or ordered the very thing the item asked: "Monitor, arme AGORA, nesta
  * conversa, três vigias permanentes…" for "Três vigias permanentes: não posso armar numa execução de rotina. Se quiser,
  * peça na minha conversa principal" (real, 30/09 16:12) — the infinitive the bot used, said as an order or done. */
-function ownerActs(asked: string, sentence: string): boolean {
-  // "Não escreva nada na linha 110 ainda": an order not to, or not yet, ends nothing (INSP-N22 r3 R2)
-  if (/\?/.test(sentence) || OWNER_NOT_YET.test(sentence)) return false;
+function ownerActs(facts: NonNullable<ReturnType<typeof itemFacts>>, sentence: string): boolean {
+  const { asked } = facts;
+  // "Não escreva nada na linha 110 ainda", "o Filipe vai mandar": an order not to, a not yet, a later end nothing (INSP-N22 r3 R2, r4 S3)
+  if (stillOpen(sentence)) return false;
   // the infinitive the bot used, and the one its noun stands for ("a abertura da issue" → abrir)
   const verbs = [...new Set([...contentWords(asked)].filter((word) => /^[a-z]{3,}(?:ar|er|ir)$/.test(word) && !COMMON_VERBS.has(word)).concat(NOUN_VERBS.filter(([noun]) => noun.test(asked)).map(([, verb]) => verb)))];
   if (!verbs.length) return false;
-  const words = new Set(strip(sentence).toLowerCase().split(/[^a-z]+/));
-  return verbs.some((verb) => {
+  const plain = strip(sentence).toLowerCase();
+  const done = verbs.flatMap((verb) => {
     const stem = verb.slice(0, -2);
     const ending = verb.slice(-2);
-    // the order ("arme", "abra") and the past ("armei", "abri", "armou")
-    const forms = ending === "ar" ? [`${stem}e`, `${stem}ei`, `${stem}ou`, `${stem}em`] : [`${stem}a`, `${stem}i`, `${stem}eu`, `${stem}iu`, `${stem}am`];
-    return forms.some((form) => words.has(form));
+    // the order ("arme", "abra"), the past ("armei", "abri", "armou"), the done ("aberta", "escrito") and "pode escrever"
+    const forms = ending === "ar"
+      ? [`${stem}e`, `${stem}ei`, `${stem}ou`, `${stem}em`, `${stem}ad[oa]s?`]
+      : [`${stem}a`, `${stem}i`, `${stem}eu`, `${stem}iu`, `${stem}am`, `${stem}id[oa]s?`, ...(IRREGULAR_DONE[verb] ? [IRREGULAR_DONE[verb]!] : [])];
+    const match = new RegExp(`(?<![a-z])(?:pode\\s+${verb}|${forms.join("|")})(?![a-z])`).exec(plain);
+    return match ? [{ match, verb }] : [];
+  });
+  return done.some(({ match, verb }) => {
+    // a "not" before it in its own clause ("ainda não abri"), not one of another clause ("…, não precisa mais") (INSP-N22 r4 S2)
+    if (negatedBefore(plain, match.index, match[0].length)) return false;
+    // and what it was asked for: a word of the ask beyond its subject, the routine's and the verb's — "Abri o ATD-0042
+    // pra ver o histórico" is not "a abertura da issue" (INSP-N22 r4 S3)
+    // (a ticket's, issue's, row's or person's id is the subject; an item of words is its words — those are what it asks)
+    const except = [...(facts.kind === "frase" ? facts.routineWords : facts.subjectTokens), ...facts.askedIds.ticket, ...facts.askedIds.issue, verb, match[0], "abertura", "linha"];
+    return sharedWords(sentence, asked, except) >= 1;
   });
 }
+/** The done of a verb that does not end in -ido. */
+const IRREGULAR_DONE: Record<string, string> = { abrir: "abert[oa]s?", escrever: "escrit[oa]s?", fazer: "feit[oa]s?", pôr: "post[oa]s?" };
 const COMMON_VERBS = new Set(["estar", "ficar", "deixar", "poder", "fazer", "dizer", "quiser", "querer", "saber", "haver", "olhar", "achar", "passar", "chegar", "falar", "tratar", "mandar", "pedir"]);
-/** The words that keep the owner's message open, as in ownerAnswerCloses: a "not", a "not yet", a later. */
-const OWNER_NOT_YET = /(?<![\p{L}])(?:n[ãa]o|nem|ainda|depois|amanh[ãa]|talvez|nunca|jamais|errado|errada|ignora|ignore)(?![\p{L}])/iu;
 /** The verb a noun of the ask stands for. */
 const NOUN_VERBS: ReadonlyArray<[RegExp, string]> = [
   [/(?<![\p{L}])abertura(?![\p{L}])/iu, "abrir"],
@@ -514,15 +558,24 @@ const NOUN_VERBS: ReadonlyArray<[RegExp, string]> = [
 ];
 /** The owner closes the item in so many words ("pode fechar", "já resolvi isso"): what a ticket's item needs when the
  * action itself is not named — "Respondi a cliente do ATD-…, resolvido" is not the issue opened (INSP-N22 r3 R6). */
-const EXPLICIT_CLOSE = /(?<![\p{L}])(?:pode fechar|pode encerrar|pode tirar|j[áa] resolvi (?:isso|essa|esse|este|esta)|resolvi (?:isso|essa pend[êe]ncia|esse item)|isso (?:j[áa] )?(?:est[áa] )?resolvid[oa]|esse item (?:j[áa] )?(?:est[áa] )?resolvido|j[áa] resolvi essa pend[êe]ncia)(?![\p{L}])/iu;
+const EXPLICIT_CLOSE = /(?<![\p{L}])(?:pode (?:fechar|encerrar|tirar)|j[áa] resolvi (?:isso|essa|esse|este|esta)|resolvi (?:isso|essa pend[êe]ncia|esse item)|isso (?:j[áa] )?(?:est[áa] )?resolvid[oa]|esse item (?:j[áa] )?(?:est[áa] )?resolvido|j[áa] resolvi essa pend[êe]ncia)(?![\p{L}])/iu;
+/** The item closed in so many words: "pode fechar" only when what it closes is the item (alone, "esse", "isso", "o item",
+ * "essa pendência") — "Pode fechar o ticket ATD-… no helpdesk" is another thing (INSP-N22 r4 S3). */
+function explicitlyClosed(text: string): boolean {
+  if (stillOpen(text)) return false;
+  const close = EXPLICIT_CLOSE.exec(text);
+  if (!close || negatedBefore(text, close.index, close[0].length)) return false;
+  return !/^pode /iu.test(close[0]) || closesTheItem(text, close.index + close[0].length);
+}
 
-/** The owner's words end THIS item: for a ticket or issue, its action named or the item closed in so many words; else
- * the words that end anything, or the action done or ordered — never under a "not", a "not yet" or a question. */
+/** The owner's words end THIS item: for a ticket or issue, its action named with what it was for, or the item closed in
+ * so many words; else the words that end anything, or the action done or ordered — never under a "not" of its own
+ * clause, a "not yet", a later or a question. */
 export function ownerEndsRoutineAsk(item: Pick<OwnerPending, "key" | "why" | "title">, text: string): boolean {
   const facts = itemFacts(item);
   if (!facts) return ownerAnswerCloses(text);
-  if (facts.kind === "ticket" || facts.kind === "issue") return ownerActs(facts.asked, text) || (EXPLICIT_CLOSE.test(text) && !/\?/.test(text) && !OWNER_NOT_YET.test(text));
-  return ownerAnswerCloses(text) || ownerActs(facts.asked, text);
+  if (facts.kind === "ticket" || facts.kind === "issue") return ownerActs(facts, text) || explicitlyClosed(text);
+  return ownerAnswerCloses(text) || ownerActs(facts, text);
 }
 
 /** The owner wrote, in a conversation of the bot after the item was opened, about the same pendency (by its key), in
@@ -551,7 +604,7 @@ export interface RoutineAskLedger {
   resolvedOwnerPendingOf(botId?: string): ResolvedOwnerPending[];
   addOwnerPending(botId: string, threadId: string, input: { title: string; key: string; link?: string; why: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number; routineId?: string }): OwnerPending;
   resolveOwnerPending(match: { botId?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"]; note?: string }): OwnerPending[];
-  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt">>): OwnerPending | null;
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId">>): OwnerPending | null;
 }
 
 const isRoutineItem = (item: Pick<OwnerPending, "key">) => Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX));
@@ -617,11 +670,16 @@ export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string;
   }
   // the routine's other items: named again (in passing) → back on top; not named → one more quiet run (INSP-N22 r2 F2)
   const touched = new Set([...opened, ...refreshed, ...resolved].map((item) => item.id));
+  const botWords = [...contentWords((run.knownNames ?? []).join(" "))];
   for (const item of ledger.ownerPendingOf(run.botId)) {
     const facts = isRoutineItem(item) && !touched.has(item.id) ? itemFacts(item) : null;
     // its routine by id (a renamed routine is the same one, INSP-N22 r3 R3); an older item without one, by the name its why quotes
     if (!facts || (item.routineId ? item.routineId !== run.routineId : facts.routineName !== run.routineName)) continue;
-    const cited = sentencesOf(run.text).map(unquoted).some((sentence) => isAbout(facts, sentence, "owner"));
+    // an older item matched by its routine's name keeps the id from now on (INSP-N22 r4 S4)
+    if (!item.routineId && run.routineId) ledger.patchOwnerPending(run.botId, item.id, { routineId: run.routineId });
+    // named, strictly: its key (ticket, issue, row, person), or 3 of its words that are not a bot's name nor the
+    // routine's — "O Chief of Staff respondeu…" never keeps the rules of 30/09 alive (INSP-N22 r4 S1, real 30/09-02/10)
+    const cited = sentencesOf(run.text).map(unquoted).some((sentence) => citesItem(facts, sentence, botWords));
     if (cited) {
       // read before the patch: the ledger hands its own object, and the patch changes it in place
       const wasDown = item.demotedAt !== undefined;
