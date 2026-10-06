@@ -239,6 +239,12 @@ export interface OwnerPending {
   updatedAt?: number;
   /** A routine's item (server/routine-owner-ask.ts): the last time the routine said it. */
   lastSaidAt?: number;
+  /** A routine's item: runs of its routine in a row that did not name it since it was last said (or kept). */
+  quietRuns?: number;
+  /** A routine's item said once and let go (48 h and 2 runs without it): out of the count, under "Talvez já resolvido". */
+  demotedAt?: number;
+  /** The owner said "Ainda vale": back on top, the 48 h and 2 runs count again from here. */
+  keptAt?: number;
 }
 
 /** One answer of the person to an item (J18). */
@@ -1560,6 +1566,19 @@ export class BotAutonomy {
 
   /** The person asked the bot to rewrite an item with steps: shown on the
    * item ("pedido há 2 min") until the bot updates it. */
+  /** A routine's item, set in place (server/routine-owner-ask.ts): its why, options and where it stands
+   * ("Talvez já resolvido"). An undefined value clears the field. */
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt">>): OwnerPending | null {
+    const item = this.ownerPendingById(botId, id);
+    if (!item) return null;
+    for (const [field, value] of Object.entries(patch) as Array<[keyof typeof patch, unknown]>) {
+      if (value === undefined) delete item[field];
+      else (item as unknown as Record<string, unknown>)[field] = value;
+    }
+    this.save();
+    return item;
+  }
+
   markOwnerPendingStepsRequested(botId: string, id: string): OwnerPending | null {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
@@ -2223,7 +2242,7 @@ const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma d
 /** A sentence that says the person is NOT needed (R11-visual N15: "Esse
  * trabalho já é meu … e não depende de decisão sua." counted for 10 h). */
 // word edges by letter, not \b: \b is ASCII-only, and "é", "você" end in a non-ASCII letter
-const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|nada (?:disso |d[ae]ss[ae]s? )?(?:depende|precisa|est[áa] (?:esperando|aguardando)|esperando|aguardando)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu)|nenhum[ao]?s?(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|dono)|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
+const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|nada (?:disso |d[ae]ss[ae]s? )?(?:depende|precisa|est[áa] (?:esperando|aguardando)|esperando|aguardando)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu)|nenhum[ao]?s?\s+(?:\p{L}+\s+){0,2}(?:fica|ficam|continua|continuam|depende|dependem|precisa|precisam|est[áa]|est[ãa]o|espera|esperam|aguarda|aguardam)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|dono)|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
 /** A sentence that asks for the person: an explicit ask, never one that denies it. */
 /** A sentence's clauses, cut where a contrast or a list starts a new one ("é meu, mas preciso…",
  * "não preciso de você para X, só preciso que…"): a denial in one never cancels an ask in another (INSP-R11fix F-1). */

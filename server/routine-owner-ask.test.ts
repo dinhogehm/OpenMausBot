@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BotAutonomy, OWNER_PENDING_MAX_PER_THREAD } from "./bot-autonomy.ts";
-import { applyRoutineAsks, markStaleRoutineAsks, ownerAnswerCloses, ROUTINE_ASK_SETTLED_MS, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswerCloses, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_OWNER_THREAD_NOTE, ROUTINE_ASK_SETTLED_MS, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
 
 // The Monitor's routine "Atendimento: Chat, planilha e issues", 05/10 09:00 (R12-visual N22), as it wrote it.
 const MONITOR_0510 = [
@@ -29,7 +29,8 @@ describe("routineOwnerAsks: what a routine leaves with the owner", () => {
   it("the Monitor's real reply of 05/10: one ask, the widget conversation owed to the Luis Rossi", () => {
     const asks = routineOwnerAsks(MONITOR_0510, ctx);
     expect(asks).toHaveLength(1);
-    expect(asks[0]).toMatchObject({ subject: { kind: "conversa", id: "widget" }, people: [{ name: "Luis Rossi", article: "o" }], context: "widget" });
+    // the widget is a channel, not a conversation of its own: the key is the person it is owed to (INSP-N22 r2 F1)
+    expect(asks[0]).toMatchObject({ subject: { kind: "pessoa", id: "luis-rossi" }, people: [{ name: "Luis Rossi", article: "o" }], context: "widget" });
     expect(routineAskTitle(asks[0]!)).toBe("Responder ao Luis Rossi (widget)");
   });
 
@@ -80,8 +81,9 @@ describe("routineOwnerAsks: what a routine leaves with the owner", () => {
   // INSP-N22 A1, A6: the ticket rules the key; a person only when the pendency is owed to them
   it("the key: a ticket or issue named before the person; a person named in passing is no subject", () => {
     expect(titles("O reembolso do Luis Rossi depende de você: ele pediu estorno de R$ 400 no ticket ATD-202610-0099.").map((each) => each.split(" | ")[0])).toEqual(["routine-ask:ticket:atd-202610-0099"]);
-    expect(titles("Fica com você decidir a escala; hoje de manhã falei com o Filipe sobre outra coisa.")).toEqual(["routine-ask:frase:decidir-escala-manha-falei | Decidir: fica com você decidir a escala"]);
-    expect(titles("A Marluce disse que a resposta depende de você e do Filipe.")[0]).toMatch(/^routine-ask:frase:/);
+    expect(titles("Fica com você decidir a escala; hoje de manhã falei com o Filipe sobre outra coisa.")).toEqual(["routine-ask:frase:decidir-escala-manha-falei | Decidir a escala"]);
+    // reported: her words, not the bot's ask (INSP-N22 r2)
+    expect(titles("A Marluce disse que a resposta depende de você e do Filipe.")).toEqual([]);
     expect(titles("Fica com você responder ao Filipe e à Marluce sobre a escala de sábado.")).toEqual(["routine-ask:pessoa:filipe+marluce | Responder ao Filipe e à Marluce"]);
     // two pendencies with the same person in one reply: two asks
     expect(titles("A conversa do widget continua com você: você ia falar com o Luis Rossi. O reembolso do Luis Rossi também depende de você.")).toHaveLength(2);
@@ -105,7 +107,7 @@ describe("routineOwnerAsks: what a routine leaves with the owner", () => {
 });
 
 describe("saysRoutineAskResolved: the bot says THIS pendency is done (INSP-N22 A4, n22/close.ts)", () => {
-  const widget = { key: "routine-ask:conversa:widget", title: "Responder ao Luis Rossi (widget)", why: "O bot Monitor, na rotina \"Atendimento\", escreveu: \"A conversa do widget (Nuria.identify) continua com você: às 8:39 você disse que ia falar direto com o Luis Rossi.\" Última vez dita às 09:00 de 05/10." };
+  const widget = { key: "routine-ask:pessoa:luis-rossi", title: "Responder ao Luis Rossi (widget)", why: "O bot Monitor, na rotina \"Atendimento\", escreveu: \"A conversa do widget (Nuria.identify) continua com você: às 8:39 você disse que ia falar direto com o Luis Rossi.\" Última vez dita às 09:00 de 05/10." };
   it("closes on the past, affirmative and whole, about the same pendency", () => {
     expect(saysRoutineAskResolved(widget, "A conversa do widget com o Luis Rossi foi resolvida.")).toBe(true);
     expect(saysRoutineAskResolved(widget, "A conversa do widget com o Luis Rossi não está mais com você.")).toBe(true);
@@ -175,7 +177,7 @@ describe("applyRoutineAsks: one item per pendency, in the ledger", () => {
     const first = run(ledger, MONITOR_0510);
     expect(first.opened).toHaveLength(1);
     const item = first.opened[0]!;
-    expect(item).toMatchObject({ id: "o1", threadId: "results", key: "routine-ask:conversa:widget", title: "Responder ao Luis Rossi (widget)" });
+    expect(item).toMatchObject({ id: "o1", threadId: "results", key: "routine-ask:pessoa:luis-rossi", title: "Responder ao Luis Rossi (widget)" });
     expect(item.why).toBe("O bot Monitor Chat Atendimento, na rotina \"Atendimento: Chat, planilha e issues\", escreveu: \"A conversa do widget (Nuria.identify) continua com você: às 8:39 você disse que ia falar direto com o Luis Rossi.\" Última vez dita às 09:00 de 05/10.");
     expect(item.steps?.map((step) => step.text)).toEqual([
       "Veja o contexto na conversa \"Atendimento: Chat, planilha e issues\" do bot Monitor Chat Atendimento.",
@@ -200,9 +202,12 @@ describe("applyRoutineAsks: one item per pendency, in the ledger", () => {
     const ledger = make();
     const [widget] = run(ledger, MONITOR_0510).opened;
     now += 3_600_000;
-    const other = run(ledger, "A conversa do widget com a Daiane também continua com você: ela pediu o histórico de ontem.");
+    const other = run(ledger, "O reembolso do Luis Rossi também depende de você: ele pediu estorno de R$ 400.");
     expect(other.refreshed).toEqual([]);
-    expect(other.opened.map((each) => each.key)).toEqual([expect.stringMatching(/^routine-ask:conversa:widget~/)]);
+    expect(other.opened).toHaveLength(1);
+    // the same person, another pendency: its own key (~words)
+    const third = run(ledger, "Novo: responder ao Luis Rossi sobre o cancelamento do contrato continua com você.");
+    expect(third.opened.map((each) => each.key)).toEqual([expect.stringMatching(/^routine-ask:pessoa:luis-rossi~/)]);
     const kept = ledger.ownerPendingById("monitor", widget!.id)!;
     expect(kept.why).toBe(widget!.why);
     // a decision of a sheet row: two items for two decisions
@@ -257,5 +262,107 @@ describe("applyRoutineAsks: one item per pendency, in the ledger", () => {
     for (let n = 0; n <= OWNER_PENDING_MAX_PER_THREAD; n++) ledger.addOwnerPending("monitor", "results", { title: `Item próprio ${n}` });
     expect(ledger.ownerPendingById("monitor", item!.id)).toBeTruthy();
     expect(ledger.ownerPendingOf("monitor").filter((each) => !each.key)).toHaveLength(OWNER_PENDING_MAX_PER_THREAD);
+  });
+});
+
+describe("INSP-N22 r2", () => {
+  let dir: string;
+  let now: number;
+  const make = () => new BotAutonomy({ path: join(dir, "bot-autonomy.json"), now: () => now });
+  const run = (ledger: BotAutonomy, text: string) => applyRoutineAsks(ledger, { botId: "monitor", botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", threadId: "results", text, at: now, ...ctx });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "omb-routine-ask-r2-"));
+    now = new Date(2026, 8, 30, 16, 9).getTime();
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("F1: a channel is no key — the widget conversation of someone else never closes the Luis Rossi's item; an identified conversation is", () => {
+    const ledger = make();
+    const [item] = run(ledger, MONITOR_0510).opened;
+    expect(item!.key).toBe("routine-ask:pessoa:luis-rossi");
+    expect(settleRoutineAsks(ledger, "monitor", "A conversa do widget com a Daiane foi resolvida.")).toEqual([]);
+    expect(settleRoutineAsks(ledger, "monitor", "A conversa sobre o bug do widget foi encerrada no Chat.")).toEqual([]);
+    expect(routineOwnerAsks("A conversa `dGFX5l60z8U` do Filipe continua com você.", ctx).map(routineAskKey)).toEqual(["routine-ask:conversa:dgfx5l60z8u"]);
+  });
+
+  // the Monitor's real 30/09 16:09: "Parado, esperando você:" and two items; the owner armed the watches at 16:12
+  const PARADO = [
+    "**Parado, esperando você:**",
+    "1. **Três vigias permanentes (Chat, planilha e issues):** não posso armar numa execução de rotina. Se quiser, peça na minha conversa principal.",
+    "2. **Regras de 30/09 na minha memória permanente:** só gravo o que você me confirmar diretamente.",
+  ].join("\n");
+  const ARMED = "▎ Monitor, arme AGORA, nesta conversa, três vigias permanentes com wake_when (standing: true, cada um com seu label, sem until):\n▎ 1. label \"chat\": gog chat messages list spaces/AAQA4TXnzJ4 --plain, a cada 3 min";
+
+  it("F2: the owner doing what the item asked, in a conversation with the bot, closes it as theirs (real 30/09 16:12)", () => {
+    const ledger = make();
+    const opened = run(ledger, PARADO).opened;
+    expect(opened.map((each) => each.title)).toEqual(["Ver: três vigias permanentes (Chat, planilha e issues)", "Ver: regras de 30/09 na minha memória permanente"]);
+    // a question about it, or an earlier message, closes nothing
+    expect(ownerSettlesRoutineAsks(ledger, "monitor", [{ at: now + 60_000, text: "O que são os três vigias permanentes?" }, { at: now - 60_000, text: ARMED }])).toEqual([]);
+    const done = ownerSettlesRoutineAsks(ledger, "monitor", [{ at: now + 3 * 60_000, text: ARMED }]);
+    expect(done.map((each) => each.id)).toEqual([opened[0]!.id]);
+    expect(ledger.resolvedOwnerPendingOf("monitor")[0]).toMatchObject({ resolvedBy: "owner", resolvedNote: ROUTINE_ASK_OWNER_THREAD_NOTE });
+    // the rules: still open
+    expect(ledger.ownerPendingOf("monitor").map((each) => each.id)).toEqual([opened[1]!.id]);
+  });
+
+  it("F2: said once and let go — 48 h AND 2 runs without it: under \"Talvez já resolvido\", never closed; \"Ainda vale\" and the bot naming it bring it back", () => {
+    const ledger = make();
+    const [item] = run(ledger, MONITOR_0510).opened;
+    const quiet = "Passada concluída. Não havia nada novo.";
+    // two quiet runs, but within 48 h: on top
+    now += 3_600_000;
+    run(ledger, quiet);
+    now += 3_600_000;
+    expect(run(ledger, quiet).demoted).toEqual([]);
+    // 48 h: the minute pass lets it go (2 quiet runs already)
+    now = item!.createdAt + ROUTINE_ASK_LET_GO_MS;
+    expect(markStaleRoutineAsks(ledger, now).map((each) => each.demotedAt)).toEqual([now]);
+    const down = ledger.ownerPendingById("monitor", item!.id)!;
+    expect(down.options?.map((each) => each.label)).toEqual(["Já resolvi", ROUTINE_ASK_KEEP_LABEL]);
+    expect(ledger.ownerPendingOf("monitor")).toHaveLength(1);
+    // "Ainda vale": back on top, counting again from now
+    keepRoutineAsk(ledger, "monitor", item!.id, now);
+    expect(ledger.ownerPendingById("monitor", item!.id)).toMatchObject({ keptAt: now, options: [{ label: "Já resolvi" }] });
+    expect(ledger.ownerPendingById("monitor", item!.id)!.demotedAt).toBeUndefined();
+    now += 3_600_000;
+    run(ledger, quiet);
+    now += 3_600_000;
+    run(ledger, quiet);
+    expect(markStaleRoutineAsks(ledger, now).filter((each) => each.demotedAt !== undefined)).toEqual([]);
+    now += ROUTINE_ASK_LET_GO_MS;
+    expect(run(ledger, quiet).demoted.map((each) => each.id)).toEqual([item!.id]);
+    // the bot names it again: back on top by itself
+    now += 3_600_000;
+    const back = run(ledger, "A conversa do widget: o Luis Rossi escreveu de novo às 9h e segue sem resposta.");
+    expect(back.promoted.map((each) => each.id)).toEqual([item!.id]);
+    expect(ledger.ownerPendingById("monitor", item!.id)!.demotedAt).toBeUndefined();
+  });
+
+  it("F3: the owner's partial or open words never close it (the inspector's phrases)", () => {
+    for (const text of ["Tratei metade", "Feito em parte", "Respondi o Luis Rossi, falta o Filipe", "Falei com a Marluce, ela vai pensar", "Já falei com ele e ele pediu mais um dia", "Feito o pedido; aguardo a resposta dele pra fechar", "Respondi errado, ignora", "Pronto para revisar, me manda o link", "Pode fechar esse, abre outro pro reembolso"]) {
+      expect(ownerAnswerCloses(text), text).toBe(false);
+    }
+    expect(ownerAnswerCloses("Pronto, feito.")).toBe(true);
+  });
+
+  it("F4: a pronoun, a relative or a \"nenhum\" of another clause is no condition nor denial: these ask", () => {
+    for (const text of ["O cliente se queixou de novo e a resposta depende de você.", "O ticket que abriu quando o chat caiu continua com você.", "Nenhum agente respondeu o ticket ATD-202610-0050, então a decisão fica com você.", "A Marluce pediu que a escala se mantenha; a decisão fica com você."]) {
+      expect(routineOwnerAsks(text, ctx), text).toHaveLength(1);
+    }
+    // still: the conditions that open the clause of the ask
+    expect(routineOwnerAsks("Caso o Filipe não responda até amanhã, a decisão fica com você.", ctx)).toEqual([]);
+  });
+
+  it("F5: a \"not\" after the word for done, about what was asked, keeps it open", () => {
+    const row = { key: "routine-ask:linha:110", title: "Decidir: posso escrever…", why: "X, na rotina \"Y\", escreveu: \"Preciso da sua decisão: posso escrever o número da issue nas Observações da linha 110?\" Última vez dita às 15:02 de 02/10." };
+    expect(saysRoutineAskResolved(row, "A linha 110 foi fechada pelo Filipe como duplicada; o número da issue ainda não foi escrito.")).toBe(false);
+  });
+
+  it("F6: a title the owner acts on; someone else's reported words open nothing", () => {
+    expect(titles("A planilha da escala de sábado ficou sem dono. O Osvaldo precisa decidir isso.")).toEqual([expect.stringMatching(/\| Decidir: a planilha da escala de sábado ficou sem dono\.?$/)]);
+    expect(titles("O Osvaldo precisa aprovar a PR do relatório.")[0]).toMatch(/\| Aprovar a PR do relatório\.?$/);
+    expect(titles("O comentário na #9331 está aguardando o Osvaldo.")[0]).toMatch(/\| Ver: o comentário na #9331$/);
+    expect(routineOwnerAsks("A Marluce disse que a resposta depende de você e do Filipe.", ctx)).toEqual([]);
   });
 });

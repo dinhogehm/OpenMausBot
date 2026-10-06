@@ -52,7 +52,7 @@ it("a routine that leaves something with the owner opens one item, refreshed by 
     const first = await runOnce();
     await expect.poll(() => (ledger().ownerPending ?? []).length, { timeout: 10_000 }).toBe(1);
     const [item] = ledger().ownerPending;
-    expect(item).toMatchObject({ botId: bot.id, threadId: first.resultsThreadId, key: "routine-ask:conversa:widget", title: "Responder ao Luis Rossi (widget)" });
+    expect(item).toMatchObject({ botId: bot.id, threadId: first.resultsThreadId, key: "routine-ask:pessoa:luis-rossi", title: "Responder ao Luis Rossi (widget)" });
     expect(item.why).toContain("na rotina \"Atendimento: Chat, planilha e issues\", escreveu: \"A conversa do widget (Nuria.identify) continua com você");
     expect(item.steps).toHaveLength(3);
     await runOnce();

@@ -123,7 +123,7 @@ import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
-import { applyRoutineAsks, markStaleRoutineAsks, ownerAnswerCloses, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswerCloses, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
 import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -7662,6 +7662,8 @@ bus.subscribe((event: RuntimeEvent) => {
         }
         // the bot's reply says a routine's item is resolved: it closes (R12-visual N22)
         if (terminal?.text && bot) closeRoutineAsksSaid(bot.id, terminal.text);
+        // and the owner's words that started it may have dealt with one (INSP-N22 r2 F2) — never in a routine's own run
+        if (bot && !store.taskByThread(bot.id, event.threadId)?.routineRunId) closeRoutineAsksOwnerSaid(bot.id, event.threadId);
       }
       const reply = lastReply.get(event.threadId) ?? "";
       lastReply.delete(event.threadId);
@@ -10236,6 +10238,8 @@ threadSignals = (threadId) => {
     ...(item.awaitingSince ? { awaitingSince: item.awaitingSince } : {}),
     // when the bot last rewrote it: an older "não foi entregue" is over then (INSP-J2 r4 A2)
     ...(item.updatedAt ? { updatedAt: item.updatedAt } : {}),
+    // a routine's item said once and let go: under "Talvez já resolvido", out of the count (INSP-N22 r2 F2)
+    ...(item.demotedAt ? { demotedAt: item.demotedAt } : {}),
   }));
   return {
     ...(watches.length ? { watches } : {}),
@@ -13728,9 +13732,9 @@ function openRoutineAsks(run: RoutineRun, routineName: string, threadId: string)
     const result = applyRoutineAsks(autonomy, { botId: bot.id, botName: bot.name, routineName, threadId, conversationTitle: store.taskByThread(bot.id, threadId)?.title, text, at: Date.now(), ownerName, knownNames: store.bots.map((each) => each.name) });
     for (const item of result.opened) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${item.id}): ${item.title}`, 240), ok: true } });
     for (const item of result.resolved) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${item.id} fechado, ${ROUTINE_ASK_RESOLVED_NOTE}`, 240), ok: true } });
-    if (!result.opened.length && !result.refreshed.length && !result.resolved.length) return;
+    if (!result.opened.length && !result.refreshed.length && !result.resolved.length && !result.demoted.length && !result.promoted.length) return;
     refreshBotRow(bot.id);
-    console.log(`[owner-pending] routine "${routineName}" of ${bot.name}: ${[...result.opened.map((item) => `${item.id} opened`), ...result.refreshed.map((item) => `${item.id} refreshed`), ...result.resolved.map((item) => `${item.id} resolved`)].join(", ")}`);
+    console.log(`[owner-pending] routine "${routineName}" of ${bot.name}: ${[...result.opened.map((item) => `${item.id} opened`), ...result.refreshed.map((item) => `${item.id} refreshed`), ...result.resolved.map((item) => `${item.id} resolved`), ...result.demoted.map((item) => `${item.id} under "Talvez já resolvido"`), ...result.promoted.map((item) => `${item.id} back on top`)].join(", ")}`);
   } catch (error) {
     console.error(`[owner-pending] routine ask: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -13742,6 +13746,19 @@ function closeRoutineAsksSaid(botId: string, text: string): void {
   for (const item of done) {
     if (store.taskByThread(botId, item.threadId)) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${item.id} fechado, ${ROUTINE_ASK_RESOLVED_NOTE}`, 240), ok: true } });
     console.log(`[owner-pending] ${item.id} (${item.key}) resolved: its bot said so`);
+  }
+  if (done.length) refreshBotRow(botId);
+}
+
+/** The owner wrote, in a conversation of the bot, about a routine's item in words that end it or doing what it asked:
+ * it closes as the owner's (INSP-N22 r2 F2). The person's last messages there are read at each turn's end. */
+function closeRoutineAsksOwnerSaid(botId: string, threadId: string): void {
+  const said = store.messagesFor(threadId).filter((message) => message.role === "user" && message.kind === "text" && !message.peerAsk && !message.from).slice(-5).map((message) => ({ at: message.at, text: message.text }));
+  if (!said.length) return;
+  const done = ownerSettlesRoutineAsks(autonomy, botId, said);
+  for (const item of done) {
+    if (store.taskByThread(botId, item.threadId)) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${item.id} fechado, você tratou disso na conversa`, 240), ok: true } });
+    console.log(`[owner-pending] ${item.id} (${item.key}) resolved: the owner dealt with it in ${threadId}`);
   }
   if (done.length) refreshBotRow(botId);
 }
@@ -23880,6 +23897,11 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         text = ownerPendingRecommendText(item, bot.name);
         resolve = false;
         answer = { kind: "ask", label: "recommend", text };
+      } else if (body.option !== undefined && item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX) && body.label === ROUTINE_ASK_KEEP_LABEL && item.options?.some((each) => each.label === ROUTINE_ASK_KEEP_LABEL)) {
+        // "Ainda vale" on a routine's item under "Talvez já resolvido": back on top, nothing sent to the bot (INSP-N22 r2 F2)
+        keepRoutineAsk(autonomy, bot.id, item.id, Date.now());
+        refreshBotRow(bot.id);
+        return json(res, 200, { ok: true, resolved: 0, kept: true, message: `"${item.title}" voltou para o topo de "Precisa de você".` });
       } else if (body.option !== undefined) {
         // the decision the person SAW: its position and its label, so a bot
         // that reordered or rewrote the options meanwhile never gets another

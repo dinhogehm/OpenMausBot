@@ -7,7 +7,7 @@ import {
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import {
-  answerNotDelivered, answerStuck, answerTime, awaitingBot, botSilent, chosenOption, decisionsInOrder, dueAt, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
+  answerNotDelivered, answerStuck, answerTime, awaitingBot, botSilent, chosenOption, decisionsInOrder, dueAt, maybeResolved, waitingOnYou, needsYouBots, needsYouKey, needsYouSteps, negativeDecision, sortNeedsYou, waitingAge,
   type NeedsYouItem, type NeedsYouSort,
 } from "@/lib/needs-you";
 import { CHOICE_REPLACED } from "../../shared/owner-pending-title";
@@ -89,14 +89,23 @@ export interface NeedsYouResolverViewProps {
   onOpenConversation: (item: NeedsYouItem) => void;
   onDismissError: () => void;
   onDismissNotice?: () => void;
+  /** "Talvez já resolvido" opened: a routine's items said once and let go (INSP-N22 r2 F2). Folded by default. */
+  showMaybeResolved?: boolean;
+  onToggleMaybeResolved?: () => void;
 }
 
 /** The visible list (filtered by bot, sorted) and the item on screen. */
-export function resolverSelection(props: Pick<NeedsYouResolverViewProps, "items" | "botFilter" | "sort" | "now" | "selectedKey" | "fallbackIndex">) {
+export function resolverSelection(props: Pick<NeedsYouResolverViewProps, "items" | "botFilter" | "sort" | "now" | "selectedKey" | "fallbackIndex" | "showMaybeResolved">) {
   const filtered = props.botFilter ? props.items.filter((item) => item.botId === props.botFilter) : props.items;
   const sorted = sortNeedsYou(filtered, props.sort, props.now);
-  // what waits on the person first; what waits on a bot after, in the same order (INSP-J2 #2)
-  const visible = [...sorted.filter((each) => !awaitingBot(each, props.now)), ...sorted.filter((each) => awaitingBot(each, props.now))];
+  const maybe = sorted.filter((each) => maybeResolved(each) && !awaitingBot(each, props.now));
+  // what waits on the person first; what waits on a bot after, in the same order (INSP-J2 #2); last, folded unless
+  // opened (or the one on screen), what may be resolved already (INSP-N22 r2 F2)
+  const visible = [
+    ...sorted.filter((each) => !awaitingBot(each, props.now) && !maybeResolved(each)),
+    ...sorted.filter((each) => awaitingBot(each, props.now)),
+    ...maybe.filter((each) => props.showMaybeResolved || needsYouKey(each) === props.selectedKey),
+  ];
   const found = visible.findIndex((item) => needsYouKey(item) === props.selectedKey);
   const index = found >= 0 ? found : Math.min(Math.max(props.fallbackIndex, 0), visible.length - 1);
   return { visible, index, item: visible[index] ?? null };
@@ -141,6 +150,19 @@ function jumpToDecisions() {
 export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
   const { items, now, pane } = props;
   const { visible, index, item } = resolverSelection(props);
+  const maybeCount = (props.botFilter ? items.filter((each) => each.botId === props.botFilter) : items).filter((each) => maybeResolved(each) && !awaitingBot(each, now)).length;
+  const maybeHeading = (
+    <button
+      type="button"
+      data-resolver-maybe-section=""
+      aria-expanded={Boolean(props.showMaybeResolved)}
+      onClick={() => props.onToggleMaybeResolved?.()}
+      className="flex w-full items-center gap-1 px-2 pb-1 pt-3 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-secondary outline-none hover:text-ink focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-focus"
+    >
+      {props.showMaybeResolved ? <ChevronDown size={12} aria-hidden="true" /> : <ChevronRight size={12} aria-hidden="true" />}
+      <span>{t("needsYou.screen.maybeResolvedSection", { count: maybeCount })}</span>
+    </button>
+  );
   const bots = needsYouBots(items);
   const yours = waitingOnYou(items, now).length;
   const filterName = bots.find((bot) => bot.botId === props.botFilter)?.botName;
@@ -207,7 +229,7 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                 ))}
               </div>
             </div>
-            {visible.length ? (
+            {visible.length || maybeCount ? (
               <ul className="min-h-0 flex-1 overflow-y-auto py-1.5">
                 {visible.map((each, position) => {
                   const key = needsYouKey(each);
@@ -216,8 +238,11 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                   const Icon = each.approval ? ShieldQuestion : each.options?.length ? ListChecks : each.pendingId ? ListTodo : CircleAlert;
                   // the answered ones come last, under their own heading and count (INSP-J2 #2)
                   const firstAwaiting = awaitingBot(each, now) && (position === 0 || !awaitingBot(visible[position - 1]!, now));
+                  // what may be resolved already, under its own folding heading (INSP-N22 r2 F2)
+                  const firstMaybe = maybeResolved(each) && !awaitingBot(each, now) && (position === 0 || !maybeResolved(visible[position - 1]!) || awaitingBot(visible[position - 1]!, now));
                   return (
                     <li key={key} className="px-1.5">
+                      {firstMaybe && maybeHeading}
                       {firstAwaiting && (
                         <p data-resolver-awaiting-section="" className="px-2 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-wide text-ink-secondary">
                           {t("needsYou.screen.awaitingSection", { count: visible.filter((other) => awaitingBot(other, now)).length })}
@@ -276,6 +301,8 @@ export function NeedsYouResolverView(props: NeedsYouResolverViewProps) {
                     </li>
                   );
                 })}
+                {/* folded: only its heading, which opens it */}
+                {maybeCount > 0 && !visible.some((each) => maybeResolved(each) && !awaitingBot(each, now)) && <li className="px-1.5">{maybeHeading}</li>}
               </ul>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
@@ -946,6 +973,8 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
   const [noticeTone, setNoticeTone] = useState<"success" | "info">("success");
   const [copied, setCopied] = useState<string | null>(null);
   const [tick, setTick] = useState(() => Date.now());
+  // folded, unless the screen opens on one of them (the sidebar's "Talvez já resolvido" line)
+  const [showMaybeResolved, setShowMaybeResolved] = useState(() => items.some((each) => needsYouKey(each) === initialKey && maybeResolved(each)));
   const dialogRef = useRef<HTMLDivElement>(null);
   const replyRef = useRef<HTMLTextAreaElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -978,7 +1007,7 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
     return () => clearTimeout(timer);
   }, [notice]);
 
-  const selection = resolverSelection({ items, botFilter, sort, now, selectedKey, fallbackIndex });
+  const selection = resolverSelection({ items, botFilter, sort, now, selectedKey, fallbackIndex, showMaybeResolved });
   const current = selection.item;
   const currentKey = current ? needsYouKey(current) : null;
   const draft = currentKey ? drafts[currentKey] ?? "" : "";
@@ -1139,6 +1168,8 @@ export function NeedsYouResolver({ open, items, initialKey, now: fixedNow, onClo
           onOpenConversation={onOpenConversation}
           onDismissError={() => setError(null)}
           onDismissNotice={() => setNotice(null)}
+          showMaybeResolved={showMaybeResolved}
+          onToggleMaybeResolved={() => setShowMaybeResolved((open) => !open)}
         />
       </div>
     </div>,

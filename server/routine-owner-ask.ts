@@ -57,7 +57,9 @@ const has = (sentence: string, id: string) => `-${slug(sentence)}-`.includes(`-$
 
 /** Capitalized words that are not people: tools, places, the app's own words. */
 const NOT_PEOPLE = new Set(["chat", "chief", "staff", "github", "nuria", "claude", "google", "gmail", "slack", "precisa", "monitor", "atendimento", "helpdesk", "planilha", "widget", "mac", "app", "pr", "issue", "issues", "você", "voce", "bot", "sheets", "drive", "brt", "codex", "openmausbot", "omb", "space", "meet", "whatsapp", "observações", "observacoes", "status", "jev", "laya"]);
-const STOP_WORDS = new Set(["para", "pela", "pelo", "como", "mais", "ainda", "esta", "essa", "este", "esse", "isso", "isto", "voce", "sobre", "quando", "depois", "antes", "porque", "entre", "fica", "continua", "continuam", "preciso", "precisa", "decisao", "sua", "seu", "suas", "seus", "dela", "dele", "aqui", "agora", "hoje", "tambem", "nada", "tudo", "cada", "qual", "quais", "duas", "dois", "coisas", "coisa", "depende", "dependem", "aguardando", "aguardo", "esperando", "disse", "foram", "seria", "estao", "novo", "nova", "passada", "novidade", "dito", "ficou", "segue", "seguem", "deixei", "deixar", "preferi"]);
+const STOP_WORDS = new Set(["para", "pela", "pelo", "como", "mais", "ainda", "esta", "essa", "este", "esse", "isso", "isto", "voce", "sobre", "quando", "depois", "antes", "porque", "entre", "fica", "continua", "continuam", "preciso", "precisa", "decisao", "sua", "seu", "suas", "seus", "dela", "dele", "aqui", "agora", "hoje", "tambem", "nada", "tudo", "cada", "qual", "quais", "duas", "dois", "coisas", "coisa", "depende", "dependem", "aguardando", "aguardo", "esperando", "disse", "foram", "seria", "estao", "novo", "nova", "passada", "novidade", "dito", "ficou", "segue", "seguem", "deixei", "deixar", "preferi",
+  // in every sentence of its kind: never a word two pendencies share (INSP-N22 r2 F1)
+  "conversa", "conversas", "nesta", "neste", "nessa", "nesse"]);
 
 /** Lines of a reply as the bot speaks them: code and quoted blocks are not the bot speaking. */
 function linesOf(text: string): string[] {
@@ -94,12 +96,22 @@ function ownerByName(name: string | null | undefined): { asks: RegExp; denies: R
   };
 }
 
-/** An ask said under a condition is no ask yet: "Se a checagem estourar, trago o que depende de você", "Caso o Filipe não responda, a decisão fica com você" (INSP-N22 A5). */
-const OPEN_CONDITION = /(?<![\p{L}])(?:se|caso|quando|assim que|depois que|desde que|a menos que)(?![\p{L}])/iu;
+/** An ask said under a condition is no ask yet: "Se a checagem estourar, trago o que depende de você", "Caso o Filipe não responda, a decisão fica com você" (INSP-N22 A5).
+ * Only the conjunction that opens a conditional clause before the ask, in the ask's own clause: "se", "caso" or "quando"
+ * starting it, or "se"/"caso" after a comma — never the pronoun ("o cliente se queixou", "trata-se"), a relative
+ * ("o ticket que abriu quando o chat caiu") nor a "se" of another clause ("que a escala se mantenha; a decisão…") (INSP-N22 r2 F4). */
+function underCondition(sentence: string, at: number): boolean {
+  const before = sentence.slice(0, at);
+  // the ask's clause: from the last ";" (or a sentence's start) to the ask
+  const clause = before.slice(before.lastIndexOf(";") + 1);
+  return /^\s*(?:se|caso|quando|assim que|a menos que)(?![\p{L}-])/iu.test(clause) || /,\s*(?:se|caso)\s+(?!\p{L}+-se)(?!(?:queix|mant|torn|esquec|lembr|preocup)\p{L}*)/iu.test(clause);
+}
+/** Someone else's words, reported: "A Marluce disse que a resposta depende de você" — theirs, not the bot's ask (INSP-N22 r2). */
+const REPORTED = /(?<![\p{L}])(?:disse|diz|dizem|disseram|escreveu|escreveram|falou|comentou|contou|avisou|perguntou|acha|achou)\s+que(?![\p{L}])/iu;
 
 const NAME = "\\p{Lu}\\p{Ll}+(?:\\s+\\p{Lu}\\p{Ll}+){0,2}";
 /** The person the pendency is owed to: the one to answer or talk to ("responder ao Filipe e à Marluce", "falar direto com o Luis Rossi", "conversa nova com o Filipe"), or the one who waits or asked ("a Marluce espera"). Named in passing is not it (INSP-N22 A6). */
-const OWED_TO = new RegExp(`(?<![\\p{L}])(?:respond\\p{L}*|responda|falar|fale|retornar|retorno|avisar|avise|ligar|escrever|mandar|cobrar|conversar|conversa(?:\\s+\\p{Ll}+)?)\\s+(?:direto\\s+|diretamente\\s+)?(?:com\\s+|para\\s+|pra\\s+)?(?:(ao|à|o|a)\\s+)?(${NAME})(?:\\s*(?:,|e)\\s+(?:(ao|à|o|a)\\s+)?(${NAME}))?`, "u");
+const OWED_TO = new RegExp(`(?<![\\p{L}])(?:respond\\p{L}*|responda|falar|fale|retornar|retorno|avisar|avise|ligar|escrever|mandar|cobrar|conversar|conversa(?:\\s+\\p{Ll}+){0,2})\\s+(?:direto\\s+|diretamente\\s+)?(?:com\\s+|para\\s+|pra\\s+)?(?:(ao|à|o|a)\\s+)?(${NAME})(?:\\s*(?:,|e)\\s+(?:(ao|à|o|a)\\s+)?(${NAME}))?`, "u");
 const WAITS = new RegExp(`(?<![\\p{L}])(?:(o|a)\\s+)?(${NAME})\\s+(?:espera|aguarda|pediu|quer|perguntou|cobrou|cobra)(?![\\p{L}])`, "u");
 function peopleIn(sentence: string, exclude: ReadonlySet<string>): RoutineAsk["people"] {
   const clean = (name: string | undefined) => {
@@ -150,12 +162,15 @@ const DECIDE = /(?<![\p{L}])(?:decis[ãa]o|decid\p{L}*)/iu;
 function subjectOf(text: string, exclude: ReadonlySet<string>): Pick<RoutineAsk, "subject" | "people" | "context"> {
   const ids = idsIn(text);
   const people = peopleIn(text, exclude);
+  // a channel named ("conversa do widget") is shown in the title, never the key: many conversations run in it (INSP-N22 r2 F1)
   const context = /(?<![\p{L}])conversa\s+(?:d[oa]|no|na)\s+(\p{Ll}[\p{L}\d.-]*)/u.exec(text)?.[1]?.replace(/[.,;:]+$/, "");
   const extra = { ...(people ? { people } : {}), ...(context ? { context } : {}) };
+  // an identified conversation: a Chat thread or message id, as a link or bare ("threads/f3Kp6uZ37Xg", "conversa `dGFX5l60z8U`")
+  const conversation = /(?:threads|messages)\/([\w-]{8,})/.exec(text)?.[1] ?? /(?<![\p{L}])(?:conversa|fio)\s+(?:\p{Ll}+\s+)?`?([A-Za-z0-9_-]{9,})`?(?![\w-])/u.exec(text)?.[1];
   if (ids.ticket[0]) return { subject: { kind: "ticket", id: ids.ticket[0], label: ids.ticket[0].toUpperCase() }, ...extra };
   if (ids.issue[0]) return { subject: { kind: "issue", id: ids.issue[0], label: `#${ids.issue[0]}` }, ...extra };
   if (ids.linha[0]) return { subject: { kind: "linha", id: ids.linha[0], label: `linha ${ids.linha[0]}` }, ...extra };
-  if (context) return { subject: { kind: "conversa", id: slug(context), label: context }, ...extra };
+  if (conversation && /\d|[A-Z]/.test(conversation)) return { subject: { kind: "conversa", id: conversation.toLowerCase(), label: conversation }, ...extra };
   if (people) return { subject: { kind: "pessoa", id: people.map((each) => slug(each.name)).join("+"), label: people.map((each) => each.name).join(" e ") }, ...extra };
   return { subject: { kind: "frase", id: [...contentWords(text)].slice(0, 4).join("-") || "pendencia", label: "" }, ...extra };
 }
@@ -168,7 +183,9 @@ const subjectWords = (ask: Pick<RoutineAsk, "subject" | "people" | "context">) =
 function asks(sentence: string, next: string | undefined, owner: ReturnType<typeof ownerByName>): boolean {
   const at = ownerAskIndex(sentence, owner?.asks);
   if (at < 0) return false;
-  if (OPEN_CONDITION.test(sentence.slice(0, at))) return false;
+  if (underCondition(sentence, at)) return false;
+  // reported: "X disse que … depende de você" — the ask is in what X said (the clause of the ask, before it)
+  if (REPORTED.test(sentence.slice(0, at).slice(sentence.slice(0, at).lastIndexOf(";") + 1))) return false;
   // the owner by name, denied ("Nada está aguardando o Osvaldo"), with nothing else asking
   if (owner?.denies.test(sentence) && !asksOwnerSentence(sentence)) return false;
   if (/\?\s*$/.test(sentence) && next && /^n[ãa]o\b/iu.test(next)) return false;
@@ -185,8 +202,19 @@ export function routineOwnerAsks(text: string, context: RoutineAskContext = {}):
   const exclude = new Set([...(context.knownNames ?? []).flatMap((name) => name.toLowerCase().split(/\s+/)), ...(context.ownerName ? [context.ownerName.trim().split(/\s+/)[0]!.toLowerCase()] : [])]);
   const lines = linesOf(text);
   const found: Array<RoutineAsk & { listed: boolean }> = [];
-  const add = (sentence: string, what: string | undefined, lead: string | null, listed: boolean) => {
+  const first = context.ownerName?.trim().split(/\s+/)[0];
+  // "O Osvaldo precisa decidir isso": the verb is the owner's action; "isso" points at the sentence before (INSP-N22 r2 F6)
+  const ownerTask = first ? new RegExp(`(?<![\\p{L}])${escape(first)}\\s+precisa\\s+(decidir|responder|aprovar|confirmar|liberar|escolher)\\s*(.*?)[.!]?$`, "iu") : null;
+  const add = (sentence: string, what: string | undefined, lead: string | null, listed: boolean, before?: string) => {
     if (echoAsk(sentence, context.itemIds ?? []) && (!what || echoAsk(what, context.itemIds ?? []))) return;
+    const task = !what && ownerTask ? ownerTask.exec(sentence) : null;
+    if (task) {
+      // "isso": what the sentence before says, to decide; else the owner's own verb and its object ("Decidir isso", "Aprovar a PR")
+      if (/^(?:isso|isto|aquilo|essa|esse|esta|este|a respeito)?$/iu.test(task[2]!.trim()) && before) {
+        what = before;
+        if (/^decid/i.test(task[1]!)) lead = lead ?? task[0];
+      } else what = `${task[1]} ${task[2]}`.trim();
+    }
     // a list's item is its own pendency; a sentence is about all it says (its lead names the conversation: "A conversa do widget continua com você: …")
     const about = unquoted(listed && what ? what : sentence);
     const subject = subjectOf(about, exclude);
@@ -221,7 +249,7 @@ export function routineOwnerAsks(text: string, context: RoutineAskContext = {}):
       const colon = sentence.indexOf(":");
       const lead = colon > 0 && colon < 80 && asksOwnerSentence(sentence.slice(0, colon), owner?.asks) ? original.slice(0, colon) : null;
       const what = lead !== null && original.slice(colon + 1).trim().length > 8 ? original.slice(colon + 1).trim() : undefined;
-      add(original, what, lead, false);
+      add(original, what, lead, false, sentences[at - 1] ?? lines.slice(0, index).map(plainLine).filter(Boolean).at(-1));
     });
   }
   // the same pendency said twice in the reply is one; a loose sentence that reads like a listed one is that one
@@ -263,18 +291,40 @@ const lower = (text: string) => text.charAt(0).toLocaleLowerCase("pt-BR") + text
 
 /** A short title, plain pt-BR: "Responder ao Luis Rossi (widget)", "Decidir: …", else what is left with the owner. */
 export function routineAskTitle(ask: RoutineAsk): string {
-  if (ask.decide && ask.what) return `Decidir: ${lower(clipTitle(ask.what, 100))}`;
   const people = ask.people ?? [];
-  if (people.length && TALK.test(ask.what ?? ask.sentence)) {
+  if (!ask.decide && people.length && TALK.test(ask.what ?? ask.sentence)) {
     const names = people.map(toPerson).join(" e ");
     // no article said ("falar com Filipe"): no preposition guessed either
     return `${people.every((each) => each.article) ? `Responder ${names}` : `Falar com ${people.map((each) => each.name).join(" e ")}`}${ask.context ? ` (${ask.context})` : ""}`;
   }
-  if (ask.what) return clipTitle(ask.what);
   // the clause that asks, not what the sentence adds after a ";" ("…; hoje de manhã falei com o Filipe sobre outra coisa")
-  const clause = ask.sentence.split(/;\s*/).find((each) => asksOwnerSentence(each)) ?? ask.sentence;
-  if (ask.decide) return `Decidir: ${lower(clipTitle(clause, 80))}`;
-  return clipTitle(clause) || "Pendência deixada por uma rotina";
+  const clause = ask.what ?? ask.sentence.split(/;\s*/).find((each) => asksOwnerSentence(each)) ?? ask.sentence;
+  // "Fica com você decidir a escala" → "decidir a escala"
+  const said = /^\s*(?:fica|ficam|continua|continuam)\s+com\s+voc[êe]\s+(\p{L}+(?:ar|er|ir)(?![\p{L}]).*)$/iu.exec(clause)?.[1] ?? clause;
+  // already an action for the owner: a question to decide ("Posso escrever…?"), or a verb ("Abrir a issue…", "Aprovar a #9370")
+  if (ask.decide && (ask.what || /\?\s*$/.test(said)) && !/^\s*decid/iu.test(said)) return `Decidir: ${lower(clipTitle(said, 100))}`;
+  if (ACTION_START.test(said) && !STATEMENT_START.test(said)) return clipTitle(said.charAt(0).toLocaleUpperCase("pt-BR") + said.slice(1));
+  // "Três vigias permanentes (…): não posso armar…" — a label, then the bot's own statement: the label is what to look at
+  const label = /^([^:]{3,70}):\s+\S/.exec(said)?.[1];
+  if (label && !asksOwnerSentence(label)) return `${ask.decide ? "Decidir" : "Ver"}: ${lower(clipTitle(label, 90))}`;
+  // a statement: what it is about, without the words that leave it with the owner
+  // ("O comentário na #9331 está aguardando o Osvaldo" → "Ver: o comentário na #9331")
+  let subject = (withoutAsk(said) || said).replace(/,?\s*(?:ent[ãa]o|e|mas)?\s*(?:a|o)\s+(?:decis[ãa]o|resposta|escolha)\s*$/iu, "").trim();
+  // nothing left but "a decisão": what the sentence says before it ("A Marluce pediu que a escala se mantenha; a decisão fica com você")
+  if (![...contentWords(subject)].some((word) => !["decisao", "resposta", "escolha"].includes(word))) subject = ask.sentence.split(/;\s*/)[0]!.trim();
+  return `${ask.decide ? "Decidir" : "Ver"}: ${lower(clipTitle(subject, 90))}` || "Pendência deixada por uma rotina";
+}
+/** An infinitive opens it: an action ("Abrir a issue", "Responder ao Filipe", "Revisar a planilha"). */
+const ACTION_START = /^\s*\p{L}+(?:ar|er|ir|or)(?![\p{L}])/iu;
+/** Words that end like an infinitive but open a statement. */
+const STATEMENT_START = /^\s*(?:lugar|par|mar|bar|ser|ter|ir|vir|estar|haver|poder|dever|querer|saber|cor|dor|valor|favor|amor|melhor|pior|maior|menor|anterior|posterior|superior|inferior|interior|exterior)(?![\p{L}])/iu;
+/** The sentence without the ask that leaves it with the owner ("… continua com você", "… depende de você", "… está aguardando o Osvaldo"). */
+function withoutAsk(text: string): string {
+  return text
+    .replace(/,?\s*(?:que\s+)?(?:ainda\s+|também\s+|tamb[ée]m\s+)?(?:continua|continuam|fica|ficam|est[áa]|est[ãa]o|segue|seguem)\s+(?:(?:aguardando|esperando)\s+(?:por\s+)?|com\s+)(?:(?:o|a)\s+)?(?:voc[êe]|\p{Lu}\p{Ll}+)(?![\p{L}]).*$/u, "")
+    .replace(/,?\s*(?:ainda\s+|tamb[ée]m\s+|s[óo]\s+)?(?:depende|dependem|precisa|precisam)\s+(?:de\s+voc[êe]|d[ao]\s+(?:sua|seu)\s+\p{L}+|d[oa]\s+\p{Lu}\p{Ll}+).*$/u, "")
+    .replace(/[\s,;:–—-]+$/, "")
+    .trim();
 }
 
 const when = (ms: number) => {
@@ -340,34 +390,12 @@ function quotedOf(item: Pick<OwnerPending, "why" | "title">): string {
  * and said in the past, affirmative and whole — never a question, a future,
  * a part, a condition, a negation, a quote or a table row (INSP-N22 A4). */
 export function saysRoutineAskResolved(item: Pick<OwnerPending, "key" | "why" | "title">, text: string): boolean {
-  const key = item.key ?? "";
-  if (!key.startsWith(ROUTINE_ASK_KEY_PREFIX)) return false;
-  const [kind, ...rest] = key.slice(ROUTINE_ASK_KEY_PREFIX.length).split(":");
-  const id = rest.join(":").split("~")[0]!;
-  const asked = quotedOf(item);
-  const askedIds = idsIn(asked);
-  const done = ACTION_DONE.filter(([noun]) => noun.test(asked)).map(([, participle]) => participle);
-  const where = /\(([^()]+)\)$/.exec(item.title)?.[1];
-  // the routine's own words ("Chat, planilha e issues") are in every run: they never tell what was asked (real, 01/10:
-  // "Passada das 13h concluída: li o Chat… a planilha e as issues" is not the three watches being armed)
-  const routineWords = [...contentWords(/na rotina "([^"]+)"/.exec(item.why ?? "")?.[1] ?? "")];
-  const subjectTokens = [...id.split(/[-+]/), ...routineWords];
+  const facts = itemFacts(item);
+  if (!facts) return false;
+  const { kind, asked, askedIds, done, routineWords, subjectTokens } = facts;
   return sentencesOf(text).filter((sentence) => !/^\|.*\|/.test(sentence)).map(unquoted).some((sentence) => {
     if (/\?\s*$/.test(sentence)) return false;
-    const ids = idsIn(sentence);
-    // another ticket, issue or row of the same kind than the one asked is another pendency (linha 112 is not linha 110)
-    for (const each of ["ticket", "issue", "linha"] as const) {
-      if (askedIds[each].length && ids[each].length && !ids[each].some((one) => askedIds[each].includes(one))) return false;
-    }
-    // a person or a conversation: a ticket or issue the ask never named is something else ("o bug do widget foi resolvido na #9370")
-    if (kind !== "ticket" && kind !== "issue" && [...ids.ticket, ...ids.issue].some((one) => !askedIds.ticket.includes(one) && !askedIds.issue.includes(one))) return false;
-    const about = kind === "ticket" || kind === "issue" || kind === "linha"
-      ? (kind === "linha" ? ids.linha.includes(id) : kind === "issue" ? ids.issue.includes(id) : ids.ticket.includes(id))
-      : kind === "conversa" ? has(sentence, id) && (sharedWords(sentence, asked, [id, ...routineWords]) >= 1 || NO_LONGER_YOURS.test(sentence))
-        : kind === "pessoa" ? id.split("+").every((each) => has(sentence, each)) && (sharedWords(sentence, asked, subjectTokens) >= 2 || Boolean(where && has(sentence, slug(where))))
-          // words alone: two of what was asked, and most of what the sentence says
-          : sharedWords(sentence, asked, routineWords) >= 2 && overlap(sentence, asked, routineWords) >= 0.5;
-    if (!about) return false;
+    if (!isAbout(facts, sentence, "bot")) return false;
     if (NO_LONGER_YOURS.test(sentence)) return true;
     // still asking ("continua com você; o resto foi resolvido") is no resolution
     if (asksOwnerSentence(sentence) || NOT_DONE_YET.test(sentence)) return false;
@@ -377,17 +405,98 @@ export function saysRoutineAskResolved(item: Pick<OwnerPending, "key" | "why" | 
     const match = action ?? ((kind === "ticket" || kind === "issue" || kind === "linha") ? (word && sharedWords(sentence, asked, [...subjectTokens, ...askedIds.ticket, ...askedIds.issue]) >= 2 ? word : null) : word);
     if (!match) return false;
     const before = sentence.slice(0, match.index);
-    return !NEGATION.test(before) && !CONDITION.test(before);
+    if (NEGATION.test(before) || CONDITION.test(before)) return false;
+    // a "not" after it, about what was asked: "a linha 110 foi fechada …; o número da issue ainda não foi escrito" (INSP-N22 r2 F5)
+    const after = sentence.slice(match.index + match[0].length);
+    return !(NEGATED_AFTER.test(after) && sharedWords(after, asked, routineWords) >= 1);
   });
 }
+const NEGATED_AFTER = /(?<![\p{L}])(?:n[ãa]o|nem|nunca|jamais)(?![\p{L}])/iu;
 
-/** The owner's own words end the pendency ("Já falei com ele", "resolvido", "pode fechar"): never a question, a "not yet", or a doubt — those go to the bot and keep the item open (INSP-N22 A3). */
+/** What an item asked, read back from its key and why: its subject, the bot's words, the ids it named, the action it was for. */
+function itemFacts(item: Pick<OwnerPending, "key" | "why" | "title">) {
+  const key = item.key ?? "";
+  if (!key.startsWith(ROUTINE_ASK_KEY_PREFIX)) return null;
+  const [kind, ...rest] = key.slice(ROUTINE_ASK_KEY_PREFIX.length).split(":");
+  const id = rest.join(":").split("~")[0]!;
+  const asked = quotedOf(item);
+  // the routine's own words ("Chat, planilha e issues") are in every run: they never tell what was asked (real, 01/10:
+  // "Passada das 13h concluída: li o Chat… a planilha e as issues" is not the three watches being armed)
+  const routineWords = [...contentWords(/na rotina "([^"]+)"/.exec(item.why ?? "")?.[1] ?? "")];
+  return {
+    kind: kind as SubjectKind, id, asked, askedIds: idsIn(asked), routineWords,
+    done: ACTION_DONE.filter(([noun]) => noun.test(asked)).map(([, participle]) => participle),
+    where: /\(([^()]+)\)$/.exec(item.title)?.[1],
+    subjectTokens: [...id.split(/[-+]/), ...routineWords],
+    routineName: /na rotina "([^"]+)"/.exec(item.why ?? "")?.[1] ?? null,
+  };
+}
+
+/** The sentence is about THIS pendency, by its key: the same ticket, issue, row or conversation; the person it is owed
+ * to, by name, with what was asked; else two of its words — and nothing else named instead (another ticket, issue or row).
+ * `who`: the owner talks about it in fewer words than a report ("arme os três vigias"). */
+function isAbout(facts: NonNullable<ReturnType<typeof itemFacts>>, sentence: string, who: "bot" | "owner"): boolean {
+  const { kind, id, asked, askedIds, where, routineWords, subjectTokens } = facts;
+  const ids = idsIn(sentence);
+  // another ticket, issue or row of the same kind than the one asked is another pendency (linha 112 is not linha 110)
+  for (const each of ["ticket", "issue", "linha"] as const) {
+    if (askedIds[each].length && ids[each].length && !ids[each].some((one) => askedIds[each].includes(one))) return false;
+  }
+  // a person or words alone: a ticket or issue the ask never named is something else ("o bug do widget foi resolvido na #9370")
+  if (kind !== "ticket" && kind !== "issue" && [...ids.ticket, ...ids.issue].some((one) => !askedIds.ticket.includes(one) && !askedIds.issue.includes(one))) return false;
+  if (kind === "linha") return ids.linha.includes(id);
+  if (kind === "issue") return ids.issue.includes(id);
+  if (kind === "ticket") return ids.ticket.includes(id);
+  if (kind === "conversa") return has(sentence, id);
+  // the person it is owed to, by name; and what was asked (two of its words) or the channel the title names ("(widget)")
+  if (kind === "pessoa") return id.split("+").every((each) => has(sentence, each)) && (sharedWords(sentence, asked, subjectTokens) >= 2 || Boolean(where && has(sentence, slug(where))));
+  // words alone: two of what was asked — and, from a report, most of what the sentence says
+  return sharedWords(sentence, asked, routineWords) >= 2 && (who === "owner" || overlap(sentence, asked, routineWords) >= 0.5);
+}
+
+/** The owner's own words end the pendency ("Já falei com ele", "resolvido", "pode fechar"): never a question, a "not
+ * yet", a doubt, a part ("metade", "falta o Filipe"), a wait ("aguardo", "ele pediu mais um dia", "vai pensar"), a
+ * correction ("errado, ignora") or another ask ("abre outro") — those go to the bot and keep the item open (INSP-N22 A3, r2 F3). */
 export function ownerAnswerCloses(text: string): boolean {
   const said = text.trim();
   if (!said || /\?/.test(said)) return false;
-  if (/(?<![\p{L}])(?:n[ãa]o|nem|ainda|depois|amanh[ãa]|vou|vamos|talvez|acho|qual|quando|como|porque|por que|mas)(?![\p{L}])/iu.test(said)) return false;
+  if (/(?<![\p{L}])(?:n[ãa]o|nem|ainda|depois|amanh[ãa]|vou|vamos|vai|v[ãa]o|talvez|acho|qual|quando|como|porque|por que|mas|metade|parte|parcial\p{L}*|falta|faltam|faltando|aguardo|aguardando|esperando|esperar|pediu|pedi|errado|errada|ignora|ignore|desconsider\p{L}*|outro|outra|abre|abra|segunda|semana)(?![\p{L}])/iu.test(said)) return false;
+  // "pronto" ends it only said alone ("Pronto." / "Pronto, feito") — "pronto para revisar" is ready to start
+  if (/(?<![\p{L}])pront[oa]\s+(?:para|pra)(?![\p{L}])/iu.test(said)) return false;
   return /(?<![\p{L}])(?:j[áa] (?:resolvi|falei|respondi|tratei|cuidei|decidi|fiz|liberei|abri|aprovei)|resolvi|resolvido|resolvida|feito|feita|pronto|pronta|falei com|respondi|tratei|cuidei|decidi|pode fechar|pode encerrar|encerrad[oa]|conclu[íi]d[oa]|fechad[oa]|ok,? resolvido)(?![\p{L}])/iu.test(said);
 }
+
+/** The owner, in a conversation with the bot, did or ordered the very thing the item asked: "Monitor, arme AGORA, nesta
+ * conversa, três vigias permanentes…" for "Três vigias permanentes: não posso armar numa execução de rotina. Se quiser,
+ * peça na minha conversa principal" (real, 30/09 16:12) — the infinitive the bot used, said as an order or done. */
+function ownerActs(asked: string, sentence: string): boolean {
+  const verbs = [...contentWords(asked)].filter((word) => /^[a-z]{3,}(?:ar|er|ir)$/.test(word) && !COMMON_VERBS.has(word));
+  if (!verbs.length) return false;
+  const words = new Set(strip(sentence).toLowerCase().split(/[^a-z]+/));
+  return verbs.some((verb) => {
+    const stem = verb.slice(0, -2);
+    const ending = verb.slice(-2);
+    // the order ("arme", "abra") and the past ("armei", "abri", "armou")
+    const forms = ending === "ar" ? [`${stem}e`, `${stem}ei`, `${stem}ou`, `${stem}em`] : [`${stem}a`, `${stem}i`, `${stem}eu`, `${stem}iu`, `${stem}am`];
+    return forms.some((form) => words.has(form));
+  });
+}
+const COMMON_VERBS = new Set(["estar", "ficar", "deixar", "poder", "fazer", "dizer", "quiser", "querer", "saber", "haver", "olhar", "achar", "passar", "chegar", "falar", "tratar", "mandar", "pedir"]);
+
+/** The owner wrote, in a conversation of the bot after the item was opened, about the same pendency (by its key), in
+ * words that end it or doing what it asked: the item closes as the owner's (INSP-N22 r2 F2). */
+export function ownerSettlesRoutineAsks(ledger: RoutineAskLedger, botId: string, messages: ReadonlyArray<{ at: number; text?: string }>): OwnerPending[] {
+  const done: OwnerPending[] = [];
+  for (const item of ledger.ownerPendingOf(botId)) {
+    const facts = isRoutineItem(item) ? itemFacts(item) : null;
+    if (!facts) continue;
+    const settled = messages.some((message) => message.at > item.createdAt && sentencesOf(message.text ?? "").map(unquoted).some((sentence) =>
+      isAbout(facts, sentence, "owner") && (ownerAnswerCloses(sentence) || ownerActs(facts.asked, sentence))));
+    if (settled) done.push(...ledger.resolveOwnerPending({ botId, key: item.key, by: "owner", note: ROUTINE_ASK_OWNER_THREAD_NOTE }));
+  }
+  return done;
+}
+export const ROUTINE_ASK_OWNER_THREAD_NOTE = "owner-thread: o dono tratou disso na conversa com o bot";
 
 /** The run's reply: its last text of its own — a narration turned into a work note (activity) and another bot's words are no reply. */
 export function routineReplyText(messages: ReadonlyArray<{ role: string; kind: string; text?: string; from?: unknown }>): string | undefined {
@@ -400,6 +509,7 @@ export interface RoutineAskLedger {
   resolvedOwnerPendingOf(botId?: string): ResolvedOwnerPending[];
   addOwnerPending(botId: string, threadId: string, input: { title: string; key: string; link?: string; why: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number }): OwnerPending;
   resolveOwnerPending(match: { botId?: string; key?: string; by?: ResolvedOwnerPending["resolvedBy"]; note?: string }): OwnerPending[];
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt">>): OwnerPending | null;
 }
 
 const isRoutineItem = (item: Pick<OwnerPending, "key">) => Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX));
@@ -430,7 +540,7 @@ export function settleRoutineAsks(ledger: RoutineAskLedger, botId: string, text:
  * each pendency it leaves with the owner is ONE item in `threadId` (the
  * routine's conversation): the same pendency refreshes its item, another
  * one about the same subject opens its own. */
-export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string; botName: string; routineName: string; threadId: string; conversationTitle?: string; text: string; at: number } & Pick<RoutineAskContext, "ownerName" | "knownNames">): { opened: OwnerPending[]; refreshed: OwnerPending[]; resolved: OwnerPending[] } {
+export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string; botName: string; routineName: string; threadId: string; conversationTitle?: string; text: string; at: number } & Pick<RoutineAskContext, "ownerName" | "knownNames">): { opened: OwnerPending[]; refreshed: OwnerPending[]; resolved: OwnerPending[]; demoted: OwnerPending[]; promoted: OwnerPending[] } {
   const resolved = settleRoutineAsks(ledger, run.botId, run.text);
   const opened: OwnerPending[] = [];
   const refreshed: OwnerPending[] = [];
@@ -458,17 +568,66 @@ export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string;
     const item = ledger.addOwnerPending(run.botId, existing?.threadId ?? run.threadId, { ...want, key, ...(existing ? { title: existing.title } : {}) });
     (existing ? refreshed : opened).push(item);
   }
-  return { opened, refreshed, resolved };
+  // the routine's other items: named again (in passing) → back on top; not named → one more quiet run (INSP-N22 r2 F2)
+  const touched = new Set([...opened, ...refreshed, ...resolved].map((item) => item.id));
+  const demoted: OwnerPending[] = [];
+  const promoted: OwnerPending[] = [];
+  for (const item of ledger.ownerPendingOf(run.botId)) {
+    const facts = isRoutineItem(item) && !touched.has(item.id) ? itemFacts(item) : null;
+    if (!facts || facts.routineName !== run.routineName) continue;
+    const cited = sentencesOf(run.text).map(unquoted).some((sentence) => isAbout(facts, sentence, "owner"));
+    if (cited) {
+      // read before the patch: the ledger hands its own object, and the patch changes it in place
+      const wasDown = item.demotedAt !== undefined;
+      if (wasDown || item.quietRuns) {
+        const back = ledger.patchOwnerPending(run.botId, item.id, { quietRuns: undefined, demotedAt: undefined, options: doneOption() });
+        if (back && wasDown) promoted.push(back);
+      }
+      continue;
+    }
+    const quiet = ledger.patchOwnerPending(run.botId, item.id, { quietRuns: (item.quietRuns ?? 0) + 1 });
+    const down = quiet ? demoteIfLetGo(ledger, quiet, run.at) : null;
+    if (down) demoted.push(down);
+  }
+  return { opened, refreshed, resolved, demoted, promoted };
 }
 
-/** The routine items the routine stopped repeating 24 h ago say so: "(o bot não repete desde 05/10; confirme se ainda vale)" — still open, never closed by silence (INSP-N22 A8). */
+/** Said once and let go: 48 h without the routine saying it again AND 2 runs of it since that did not name it. */
+export const ROUTINE_ASK_LET_GO_MS = 48 * 3_600_000;
+export const ROUTINE_ASK_LET_GO_RUNS = 2;
+export const ROUTINE_ASK_KEEP_LABEL = "Ainda vale";
+const doneOption = (): OwnerPendingOption[] => [{ label: ROUTINE_ASK_DONE_LABEL, reply: "Já resolvi essa pendência." }];
+
+/** The item goes under "Talvez já resolvido" — out of the count and the chip, never closed: it keeps "Já resolvi", and "Ainda vale" brings it back. */
+function demoteIfLetGo(ledger: RoutineAskLedger, item: OwnerPending, now: number): OwnerPending | null {
+  if (item.demotedAt !== undefined || (item.quietRuns ?? 0) < ROUTINE_ASK_LET_GO_RUNS) return null;
+  if (now - Math.max(item.lastSaidAt ?? item.createdAt, item.keptAt ?? 0) < ROUTINE_ASK_LET_GO_MS) return null;
+  return ledger.patchOwnerPending(item.botId, item.id, {
+    demotedAt: now,
+    options: [...doneOption(), { label: ROUTINE_ASK_KEEP_LABEL, reply: "Ainda vale: essa pendência continua comigo." }],
+  });
+}
+
+/** "Ainda vale": back on top; the 48 h and the 2 runs count again from now. */
+export function keepRoutineAsk(ledger: RoutineAskLedger, botId: string, id: string, now: number): OwnerPending | null {
+  return ledger.patchOwnerPending(botId, id, { demotedAt: undefined, quietRuns: undefined, keptAt: now, options: doneOption() });
+}
+
+/** The minute pass over the routine items: the one the routine stopped repeating 24 h ago says so ("(o bot não repete
+ * desde 05/10; confirme se ainda vale)", INSP-N22 A8), and the one let go goes under "Talvez já resolvido" (r2 F2) —
+ * still open, never closed by silence. The items changed. */
 export function markStaleRoutineAsks(ledger: RoutineAskLedger & { allOwnerPending(): OwnerPending[] }, now: number): OwnerPending[] {
-  const marked: OwnerPending[] = [];
+  const changed: OwnerPending[] = [];
   for (const item of ledger.allOwnerPending()) {
     if (!isRoutineItem(item) || !item.why) continue;
     const lastAt = item.lastSaidAt ?? item.createdAt;
-    if (now - lastAt < ROUTINE_ASK_STALE_MS || item.why.includes("(o bot não repete desde")) continue;
-    marked.push(ledger.addOwnerPending(item.botId, item.threadId, { title: item.title, key: item.key!, why: `${item.why}${STALE_NOTE(lastAt)}` }));
+    let current: OwnerPending | null = item;
+    if (now - lastAt >= ROUTINE_ASK_STALE_MS && !item.why.includes("(o bot não repete desde")) {
+      current = ledger.patchOwnerPending(item.botId, item.id, { why: `${item.why}${STALE_NOTE(lastAt)}` });
+      if (current) changed.push(current);
+    }
+    const down = current ? demoteIfLetGo(ledger, current, now) : null;
+    if (down && !changed.includes(down)) changed.push(down);
   }
-  return marked;
+  return changed;
 }

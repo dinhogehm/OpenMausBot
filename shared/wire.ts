@@ -177,6 +177,8 @@ export interface WireOwnerPending {
   awaitingSince?: number;
   /** When the bot last rewrote it (owner_pending update). */
   updatedAt?: number;
+  /** A routine's item said once and let go: under "Talvez já resolvido", out of the count and the chip. */
+  demotedAt?: number;
 }
 
 export interface WireTask {

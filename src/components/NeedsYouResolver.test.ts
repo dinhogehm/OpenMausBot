@@ -3,7 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Bot, Task } from "@/state/store";
 import { setLocale } from "@/lib/i18n";
-import { answerNotDelivered, answerStuck, answerTime, awaitingBot, AWAITING_MAX_MS, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, nextAwaitingChange, sortNeedsYou } from "@/lib/needs-you";
+import { createElement } from "react";
+import { answerNotDelivered, answerStuck, answerTime, awaitingBot, AWAITING_MAX_MS, botSilent, dueAt, needsYouItems, needsYouKey, needsYouTitle, nextAwaitingChange, sortNeedsYou, waitingOnYou } from "@/lib/needs-you";
+import { SidebarNeedsYou } from "./SidebarNeedsYou";
 import { decisionReply, remindOwnerPending, replyToOwnerPending } from "@/lib/needs-you-actions";
 import { CHOICE_REPLACED } from "../../shared/owner-pending-title";
 import { awaitingLine, decisionNotice, remindNotice, replyNotice, linkLabel, NeedsYouResolverView, resolverEscape, resolverKeyAction, type NeedsYouResolverViewProps } from "./NeedsYouResolver";
@@ -748,5 +750,38 @@ describe("items a routine's run or an archived conversation opened, and a bare q
     // not asked (yet, or ~/.nuria/stop): as before
     const bare = needsYouItems([bot("monitor", "Monitor Chat Atendimento", [task("main", "@Chief of Staff", { goalNeedsInput: true, goalNeedsInputSince: now - 60_000, goalNeedsInputAsk: "Mesclo a #12?" })])]);
     expect(view({ items: bare, selectedKey: needsYouKey(bare[0]!) }).html).toContain("Responda abaixo, ou abra a conversa para ver o contexto.");
+  });
+});
+
+// INSP-N22 r2 F2: a routine's item said once and let go is out of the count, folded under "Talvez já resolvido"
+describe("Talvez já resolvido", () => {
+  const letGo = [bot("monitor", "Monitor Chat", [task("m1", "Atendimento", { ownerPending: [
+    { id: "o7", title: "Responder ao Luis Rossi (widget)", since: now - 60 * 60_000, options: [{ label: "Já resolvi", reply: "Já resolvi essa pendência." }] },
+    { id: "o3", title: "Ver: regras de 30/09 na minha memória permanente", since: now - 4 * 86_400_000, demotedAt: now - 86_400_000,
+      options: [{ label: "Já resolvi", reply: "Já resolvi essa pendência." }, { label: "Ainda vale", reply: "Ainda vale: essa pendência continua comigo." }] },
+  ] })])];
+  it("is not counted, and its section is folded until opened", () => {
+    const items = needsYouItems(letGo);
+    expect(waitingOnYou(items, now).map((each) => each.pendingId)).toEqual(["o7"]);
+    const folded = view({ items });
+    expect(folded.html).toContain("Talvez já resolvido (1)");
+    const demoted = items.find((each) => each.pendingId === "o3")!;
+    expect(folded.find("data-resolver-row", needsYouKey(demoted))).toBeUndefined();
+    folded.press("data-resolver-maybe-section");
+    const calls: string[] = [];
+    const opened = view({ items, showMaybeResolved: true, selectedKey: needsYouKey(demoted), onToggleMaybeResolved: () => calls.push("toggle") });
+    expect(opened.find("data-resolver-row", needsYouKey(demoted))).toBeTruthy();
+    opened.press("data-resolver-maybe-section");
+    expect(calls).toEqual(["toggle"]);
+    // "Já resolvi" and "Ainda vale", as its decisions
+    expect(opened.html).toContain("Ainda vale");
+    expect(opened.html).toContain("Já resolvi");
+  });
+  it("the sidebar: one quiet line, no alert count", () => {
+    const items = needsYouItems(letGo);
+    const html = renderToStaticMarkup(createElement(SidebarNeedsYou, { items, density: "comfortable", now, onOpen: () => {} }));
+    expect(html).toContain('aria-label="1 itens precisam de você"');
+    expect(html).toContain("Talvez já resolvido (1)");
+    expect(html.match(/data-needs-you-row=/g)).toHaveLength(1);
   });
 });

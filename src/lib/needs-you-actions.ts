@@ -42,6 +42,8 @@ export async function replyToOwnerPending(item: NeedsYouItem, reply: OwnerPendin
   // the same answer sent again (the app gave up and the person pressed again): the server
   // took it once, and says so — news for the neutral notice, not a new send (INSP-R12F r6 D2)
   if (receipt?.duplicate === true && typeof receipt.message === "string") return { resolved: 0, info: receipt.message };
+  // "Ainda vale" on an item under "Talvez já resolvido": back on top, nothing sent to the bot (INSP-N22 r2 F2)
+  if (receipt?.kept === true && typeof receipt.message === "string") return { resolved: 0, info: receipt.message };
   return { resolved: Number(receipt?.resolved ?? 0) };
 }
 

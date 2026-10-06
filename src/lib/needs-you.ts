@@ -44,7 +44,12 @@ export interface NeedsYouItem {
   awaitingSince?: number;
   /** When the bot last rewrote it. */
   updatedAt?: number;
+  /** A routine's item said once and let go: under "Talvez já resolvido", out of the count and the chip. */
+  demotedAt?: number;
 }
+
+/** A routine's item said once and let go (INSP-N22 r2 F2): shown apart, folded, never counted as waiting on the person. */
+export const maybeResolved = (item: Pick<NeedsYouItem, "demotedAt">): boolean => item.demotedAt !== undefined;
 
 /** How long an answered item waits on its bot before it comes back to the
  * person as "o bot não respondeu" (INSP-J2 #2). */
@@ -83,8 +88,8 @@ export function answerNotDelivered(item: Awaitable & Pick<NeedsYouItem, "updated
   return last;
 }
 
-/** What waits on the person (the count, the sidebar, the badge): not what waits on a bot. */
-export const waitingOnYou = <T extends Awaitable>(items: readonly T[], now: number): T[] => items.filter((item) => !awaitingBot(item, now));
+/** What waits on the person (the count, the sidebar, the badge): not what waits on a bot, nor what may be resolved already. */
+export const waitingOnYou = <T extends Awaitable & Pick<NeedsYouItem, "demotedAt">>(items: readonly T[], now: number): T[] => items.filter((item) => !awaitingBot(item, now) && !maybeResolved(item));
 
 /** When the next answered item goes back to the person (its bot's 2 h run
  * out, delivered or still queued), or null: the sidebar re-renders exactly
@@ -194,6 +199,7 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
           ...(pending.history?.length ? { history: pending.history } : {}),
           ...(pending.awaitingSince ? { awaitingSince: pending.awaitingSince } : {}),
           ...(pending.updatedAt ? { updatedAt: pending.updatedAt } : {}),
+          ...(pending.demotedAt ? { demotedAt: pending.demotedAt } : {}),
         });
       }
       // the conversation's own line (an approval, a question): never from a routine's run nor an archived one
