@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { OwnerPending } from "./bot-autonomy.ts";
 import {
-  allowedCommand, asData, delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck,
+  allowedActions, allowedCommand, asData, delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck,
   DELEGATION_IDLE_MS, DELEGATION_TTL_MS, evidenceRefs, forOwner, onlyYouReason, ownerCategory, parseDelegationReport, verifiedEvidence,
 } from "./owner-delegate.ts";
 
@@ -374,5 +374,86 @@ describe("the hook by its names on this Mac (INSP-DEL r2 B8)", () => {
   it("puts Jev and Laya with the hook", () => {
     expect(ownerCategory("A sessão foi barrada pelo Jev: investigue")).toBe("mexe no hook ou no revisor");
     expect(ownerCategory("Investigue o que a Laya respondeu")).toBe("mexe no hook ou no revisor");
+  });
+});
+
+// INSP-DEL r4 D3: one table per rule, with benign strings — the case that passes and the one that does not.
+describe("C1: every argument is a relative path inside the repository", () => {
+  it.each([
+    ["cat src/app.ts", true],
+    ["grep -rn erro src", true],
+    ["git diff main", true],
+    ["git commit -m ajuste", true],
+    ["gh pr create --title ajuste --body corrige", true],
+    ["cat /etc/hosts", false],
+    ["cat ~/.zsh_history", false],
+    ["grep --file=/etc/hosts termo src", false],
+    ["git diff --no-index /etc/hosts README.md", false],
+    ["git commit -F notas.txt", false],
+    ["gh pr create --title ajuste --body-file notas.txt", false],
+    ["gh pr create --repo acme/outro --title ajuste", false],
+    ["rg --pre=cat termo src", false],
+    ["cat .git/config", false],
+  ] as const)("%s → %s", (command, allowed) => {
+    expect(allowedCommand(command)).toBe(allowed);
+  });
+});
+
+describe("C2: every clause of a step is checked", () => {
+  it.each([
+    ["Leia os logs e o histórico do widget", true],
+    ["Rode os testes e depois abra uma PR", true],
+    ["Leia os logs reiniciando o processo", false],
+    ["Rode os testes e a migração da tabela", false],
+    ["Corrija o teste e 3 ajustes no servidor", false],
+    ["O histórico do widget: leia", false],
+  ] as const)("%s → %s", (text, allowed) => {
+    expect(allowedActions(text)).toBe(allowed);
+  });
+});
+
+describe("C3: push only to a work branch, never a tag's name", () => {
+  it.each([
+    ["git push -u origin fix/ajuste-500", true],
+    ["git push -u origin claude/doc-widget", true],
+    ["git push -u origin v1.2.3", false],
+    ["git push -u origin fix/v1.2.3", false],
+    ["git push -u origin ajuste-500", false],
+    ["git push -u origin wip/ajuste", false],
+  ] as const)("%s → %s", (command, allowed) => {
+    expect(allowedCommand(command)).toBe(allowed);
+  });
+});
+
+describe("D1: a short flag with a glued value, or of several letters", () => {
+  it.each([
+    ["git commit -am ajuste", true],
+    ["grep -rn termo src", true],
+    ["head -n20 src/app.ts", true],
+    ["ls -la src", true],
+    ["grep -f/etc/hosts termo src", false],
+    ["head -c/etc/hosts", false],
+    ["git log -O/etc/hosts", false],
+    ["grep -xyz termo src", false],
+  ] as const)("%s → %s", (command, allowed) => {
+    expect(allowedCommand(command)).toBe(allowed);
+  });
+});
+
+describe("D2: nouns of risky actions are no object for an agent", () => {
+  it.each([
+    ["Leia o log do teste", true],
+    ["Leia o log da limpeza", false],
+    ["Confira a instalação do widget", false],
+    ["Verifique a desinstalação", false],
+    ["Revise a publicação do pacote", false],
+    ["Investigue o rollback de ontem", false],
+    ["Leia o reset da tabela", false],
+    ["Confira a implantação", false],
+    ["Leia a exclusão de ontem", false],
+    ["Leia a remoção do arquivo", false],
+    ["Investigue o reinício do processo", false],
+  ] as const)("%s → %s", (text, allowed) => {
+    expect(allowedActions(text)).toBe(allowed);
   });
 });

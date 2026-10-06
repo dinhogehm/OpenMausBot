@@ -10910,7 +10910,8 @@ function settleDelegation(session: CcSession): void {
     if (!now || (now.delegation ? now.delegation.sessionId !== session.id : now.delegationBack?.sessionId !== session.id)) return;
     // already back with the owner: a later "concluido" only notes what it shows, the owner settles (INSP-DEL r3 C6)
     if (!now.delegation && now.delegationBack) {
-      if (proof) autonomy.patchOwnerPending(ref.botId, ref.itemId, { delegationBack: { ...now.delegationBack, text: `${now.delegationBack.text} Depois disso, a sessão ${session.id} disse que concluiu, com evidência conferida: ${proof}. Confira e marque como resolvido, se for o caso.` } });
+      // once per piece of evidence: a session saying it again does not grow the text (INSP-DEL r4 D5)
+      if (proof && !now.delegationBack.text.includes(proof)) autonomy.patchOwnerPending(ref.botId, ref.itemId, { delegationBack: { ...now.delegationBack, text: `${now.delegationBack.text} Depois disso, a sessão ${session.id} disse que concluiu, com evidência conferida: ${proof}. Confira e marque como resolvido, se for o caso.` } });
       refreshBotRow(ref.botId);
       return;
     }

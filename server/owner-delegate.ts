@@ -174,7 +174,7 @@ const FILLER = new Set(["o", "a", "os", "as", "um", "uma", "uns", "umas", "do", 
 const LEAD_IN = /^(?:(?:e|depois|entao|em seguida|tambem|so|apenas|primeiro|por fim|finalmente|agora|pode|podem|sim|ok|por favor|favor|voce|para|pra)\s+)+/;
 
 /** What no agent touches, named anywhere in a step: a remote database, a migration, production, a server, a global package. */
-const FORBIDDEN_OBJECT = /\bbancos?\b|\bdatabases?\b|\bmigra|\bproduc|\bprod\b|\bservidor|\bservers?\b|\bglobal|\bremot/;
+const FORBIDDEN_OBJECT = /\bbancos?\b|\bdatabases?\b|\bmigra|\bproduc|\bprod\b|\bservidor|\bservers?\b|\bglobal|\bremot|\breinici|\blimpeza|\bremoc|\bexclus|\binstalac|\bdesinstal|\bpublicac|\bimplanta|\brollback|\breset/;
 /** The gerunds of the allowed actions ("lendo os logs"), and words that only look like one. */
 const ALLOWED_GERUNDS = new Set(["lendo", "investigando", "conferindo", "verificando", "confirmando", "analisando", "diagnosticando", "reproduzindo", "revisando", "testando", "procurando", "buscando", "examinando", "listando", "comparando", "comentando", "corrigindo", "quando", "comando", "bando", "lindo", "vindo"]);
 
@@ -218,6 +218,9 @@ const ALLOWED_COMMANDS: readonly RegExp[] = [
   /^(?:rg|grep|ls|cat|head|tail|wc)(?:\s+.*)?$/,
 ];
 
+/** Short flags of more than one letter that only read or list (INSP-DEL r4 D1). */
+const HARMLESS_SHORT = new Set(["-am", "-rn", "-nr", "-ri", "-ir", "-rl", "-lr", "-in", "-ni", "-il", "-li", "-rni", "-rin", "-la", "-al", "-lh", "-hl", "-lah", "-alh"]);
+
 /** Whether a command is in the allowlist: one command, no shell plumbing, no
  * wildcard; files read only by a relative path inside the repository; no
  * `--output`; a comment only with `--body` (INSP-DEL r2 B5). */
@@ -231,10 +234,18 @@ export function allowedCommand(command: string): boolean {
     ...(arg.startsWith("-") ? (arg.includes("=") ? [arg.slice(arg.indexOf("=") + 1)] : []) : [arg]),
     ...(/^(?:-f|--file|--body-file)$/.test(arg) && args[index + 1] ? [args[index + 1]!] : []),
   ]);
+  // a short flag with its value glued (`-fVALOR`): the value is a path like any other; letters only: a known combination (INSP-DEL r4 D1)
+  for (const arg of args) {
+    const short = /^-([a-z])(.+)$/.exec(arg);
+    if (!short) continue;
+    if (/^[a-z]+$/.test(short[2]!)) {
+      if (!HARMLESS_SHORT.has(arg)) return false;
+    } else values.push(short[2]!);
+  }
   if (values.some((value) => /^[/~]/.test(value) || /(?:^|\/)\.\.(?:\/|$)/.test(value) || /(?:^|\/)\.git(?:\/|$)/.test(value))) return false;
   const flags = args.filter((arg) => arg.startsWith("-")).map((arg) => arg.split("=")[0]!);
   if (flags.some((flag) => /^(?:--no-index|--pre|--pre-glob|--output|--file|--body-file)$/.test(flag))) return false;
-  if (tool === "git" && args[0] === "commit" && flags.some((flag) => flag !== "-m")) return false;
+  if (tool === "git" && args[0] === "commit" && flags.some((flag) => flag !== "-m" && flag !== "-am")) return false;
   if (tool === "gh") {
     if (flags.some((flag) => /^(?:-f|-r|--repo)$/.test(flag))) return false;
     if (args[0] === "pr" && args[1] === "create" && flags.some((flag) => !/^(?:--title|--body|--base|--head|-t|-b|-h)$/.test(flag))) return false;
