@@ -123,6 +123,7 @@ import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
+import { applyRoutineAsks, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
 import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -7659,6 +7660,8 @@ bus.subscribe((event: RuntimeEvent) => {
             store.patchMessage(event.threadId, note.id, narrationPatch(note.text ?? ""));
           }
         }
+        // the bot's reply says a routine's item is resolved: it closes (R12-visual N22)
+        if (terminal?.text && bot) closeRoutineAsksSaid(bot.id, terminal.text);
       }
       const reply = lastReply.get(event.threadId) ?? "";
       lastReply.delete(event.threadId);
@@ -13701,6 +13704,46 @@ function diskItemTurn<T>(work: () => Promise<T>): Promise<T> {
   return turn;
 }
 
+/** A routine's run that leaves something with the owner ("A conversa do
+ * widget continua com você", R12-visual N22): ONE item per subject in the
+ * routine's conversation, refreshed — never doubled — by the hourly
+ * repetition; what the run says is resolved closes. A disk routine's ask is
+ * openDiskDecision's. */
+function openRoutineAsks(run: RoutineRun, routineName: string, threadId: string): void {
+  try {
+    const bot = store.bot(run.botId);
+    if (!bot) return;
+    // the run's whole reply (its output is cut at 2 000 characters)
+    const text = (run.threadId ? routineReplyText(store.messagesFor(run.threadId)) : undefined) ?? run.output ?? "";
+    if (!text || diskRoutine(routineName, text)) return;
+    const channel = ownerChannelOf(bot.id) ?? threadId;
+    const ownerName = ownerFirstName({
+      profileName: cfg.profile?.name,
+      aboutMe: cfg.profile?.aboutMe,
+      channelReplies: store.messagesFor(channel).filter((message) => message.role === "bot" && message.kind === "text" && !message.from).slice(-60).map((message) => message.text ?? ""),
+      botNames: store.bots.map((each) => each.name),
+    });
+    const result = applyRoutineAsks(autonomy, { botId: bot.id, botName: bot.name, routineName, threadId, conversationTitle: store.taskByThread(bot.id, threadId)?.title, text, at: Date.now(), ownerName, knownNames: store.bots.map((each) => each.name) });
+    for (const item of result.opened) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`Em "Precisa de você" (${item.id}): ${item.title}`, 240), ok: true } });
+    for (const item of result.resolved) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${item.id} fechado, ${ROUTINE_ASK_RESOLVED_NOTE}`, 240), ok: true } });
+    if (!result.opened.length && !result.refreshed.length && !result.resolved.length) return;
+    refreshBotRow(bot.id);
+    console.log(`[owner-pending] routine "${routineName}" of ${bot.name}: ${[...result.opened.map((item) => `${item.id} opened`), ...result.refreshed.map((item) => `${item.id} refreshed`), ...result.resolved.map((item) => `${item.id} resolved`)].join(", ")}`);
+  } catch (error) {
+    console.error(`[owner-pending] routine ask: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** The bot says, in a conversation, that a routine's item is resolved: it closes (R12-visual N22). */
+function closeRoutineAsksSaid(botId: string, text: string): void {
+  const done = settleRoutineAsks(autonomy, botId, text);
+  for (const item of done) {
+    if (store.taskByThread(botId, item.threadId)) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${item.id} fechado, ${ROUTINE_ASK_RESOLVED_NOTE}`, 240), ok: true } });
+    console.log(`[owner-pending] ${item.id} (${item.key}) resolved: its bot said so`);
+  }
+  if (done.length) refreshBotRow(botId);
+}
+
 function openDiskDecision(run: RoutineRun, routineName: string, threadId: string): Promise<void> {
   return diskItemTurn(() => openDiskDecisionNow(run, routineName, threadId));
 }
@@ -13800,6 +13843,8 @@ function syncRoutineRunToSource(run: RoutineRun): string | null {
 
   // a disk routine that ends leaving folders to the owner opens the one item for them (R12-followup #5)
   if (statusChanged && run.status === "completed" && run.target === "bot" && !source.group) void openDiskDecision(run, card.routineName, sourceThreadId);
+  // any other routine that ends leaving something with the owner opens ONE item for it (R12-visual N22)
+  if (statusChanged && run.status === "completed" && run.target === "bot" && !source.group) openRoutineAsks(run, card.routineName, sourceThreadId);
 
   // Merely queueing/running is ambient progress. Attention and terminal
   // states become unread in the conversation where the user asked for them.
@@ -23891,7 +23936,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       } else {
         const reply = typeof body.text === "string" ? body.text.trim() : "";
         if (!reply) return json(res, 400, { error: "Escreva a resposta ao bot." });
-        resolve = body.resolve === true;
+        // a routine's item closes with the owner's answer, whatever it says: the bot hears it (R12-visual N22)
+        resolve = body.resolve === true || Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX));
         text = ownerPendingReplyText(item, reply.slice(0, 4_000), resolve);
         answer = { kind: "text", text: reply };
       }

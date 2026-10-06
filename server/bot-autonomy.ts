@@ -2207,16 +2207,20 @@ export function lastQuestionAt(messages: ReadonlyArray<{ role: string; kind: str
 
 /** "Preciso de você", "Continuam com você", "Decisão para você"…: the bot
  * asks the person for something in plain words, not only with a "?". */
-const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa de voc[êe]|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
+// "depende de você", "precisa da sua decisão", "aguardando você", "deixei essa decisão com você" (R12-visual N22)
+const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa (?:de voc[êe]|da sua|do seu)|depende(?:m)? (?:de voc[êe]|da sua|do seu)|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|deix(?:o|ei|ar|amos) (?:essa |esta |a )?decis[ãa]o com voc[êe]|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|aguardando (?:voc[êe]|a sua|o seu|sua|seu)|esperando (?:por )?voc[êe]|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
 /** A sentence that says the person is NOT needed (R11-visual N15: "Esse
  * trabalho já é meu … e não depende de decisão sua." counted for 10 h). */
 // word edges by letter, not \b: \b is ASCII-only, and "é", "você" end in a non-ASCII letter
-const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
+const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|nada (?:disso |d[ae]ss[ae]s? )?(?:depende|precisa|est[áa] (?:esperando|aguardando)|esperando|aguardando)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu)|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
 /** A sentence that asks for the person: an explicit ask, never one that denies it. */
 /** A sentence's clauses, cut where a contrast or a list starts a new one ("é meu, mas preciso…",
  * "não preciso de você para X, só preciso que…"): a denial in one never cancels an ask in another (INSP-R11fix F-1). */
 const CLAUSE_CUT = /\s*(?:,?\s*(?<![\p{L}])(?:mas|por[ée]m|s[óo] que|contudo|entretanto|todavia)(?![\p{L}])|;|,\s*s[óo](?![\p{L}]))\s*/iu;
 const asksOwner = (sentence: string): boolean => sentence.split(CLAUSE_CUT).some((clause) => OWNER_ASK.test(clause) && !NOT_ASK.test(clause));
+/** asksOwner, also for a routine's text (server/routine-owner-ask.ts), with an extra ask `also` (the owner by name) judged by clause the same way. */
+export const asksOwnerSentence = (sentence: string, also?: RegExp): boolean =>
+  sentence.split(CLAUSE_CUT).some((clause) => (OWNER_ASK.test(clause) || Boolean(also?.test(clause))) && !NOT_ASK.test(clause));
 const sentencesOf = (text: string): string[] => text.split(/(?<=[.!?…])\s+|\n+/);
 
 /** Since when the bot has been waiting on the person: the first of its
