@@ -10902,7 +10902,8 @@ function settleDelegation(session: CcSession): void {
   }
   // "concluido" closes only on evidence the server checks itself: a PR open or
   // merged since the delegation, or a commit on the session's branch (INSP-DEL A5)
-  const since = item.delegation?.at ?? 0;
+  // the work must be newer than THIS session, which the delegation created: never 0, even after the item came back (INSP-DEL r2 B1)
+  const since = Math.max(session.createdAt, item.delegation?.at ?? 0);
   void verifiedEvidence(result.evidence, since, delegationEvidenceDeps(session, since)).then((proof) => {
     const now = autonomy.ownerPendingById(ref.botId, ref.itemId);
     // resolved or delegated again while the check ran
@@ -10927,17 +10928,35 @@ function delegationEvidenceDeps(session: CcSession, since: number): EvidenceDeps
     // the app's PATH lacks Homebrew (gh) and a sealed fixture's lacks git: the same augmented PATH as execCc
     execFileCc(cmd, args, { timeout: 15_000, env: { ...process.env, PATH: augmentedPath() }, ...(cwd ? { cwd } : {}) }, (error, stdout) => (error ? reject(error) : resolve(String(stdout))));
   });
-  const dir = session.desktop?.own?.path ?? (session.worktree ? join(session.repo, ".claude", "worktrees", session.worktree) : session.repo);
+  // only the session's own worktree: never the repository's main checkout (INSP-DEL r2 B3)
+  const dir = session.desktop?.own?.path ?? (session.worktree ? join(session.repo, ".claude", "worktrees", session.worktree) : null);
+  const branchOf = async () => (dir && existsSync(dir) ? (await run("git", ["-C", dir, "branch", "--show-current"])).trim() : "");
+  const baseRef = async () => {
+    // the base the work must be new against: origin's default branch, else origin/main
+    try { return (await run("git", ["-C", dir!, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])).trim() || "origin/main"; } catch { return "origin/main"; }
+  };
   return {
+    // a PR of THIS session: its head is the session's branch, in the session's repository, created since the delegation (INSP-DEL r2 B2)
     prView: async (url) => {
-      const parsed = JSON.parse(await run("gh", ["pr", "view", url, "--json", "state,createdAt,updatedAt"])) as { state?: string; createdAt?: string; updatedAt?: string };
-      return parsed.state && parsed.createdAt ? { state: parsed.state, createdAt: parsed.createdAt, ...(parsed.updatedAt ? { updatedAt: parsed.updatedAt } : {}) } : null;
+      const branch = await branchOf();
+      if (!branch || !dir) return null;
+      const parsed = JSON.parse(await run("gh", ["pr", "view", url, "--json", "state,createdAt,headRefName,url"], dir)) as { state?: string; createdAt?: string; headRefName?: string; url?: string };
+      if (!parsed.state || !parsed.createdAt || parsed.headRefName !== branch) return null;
+      // the repository: `gh pr view` run in the session's worktree resolves the same URL only for that repository
+      const own = JSON.parse(await run("gh", ["pr", "view", parsed.headRefName, "--json", "url"], dir).catch(() => "{}")) as { url?: string };
+      if (!own.url || own.url !== parsed.url) return null;
+      return { state: parsed.state, createdAt: parsed.createdAt };
     },
+    // a commit of THIS session: on its branch, new against the base, with a real change, made since the delegation (INSP-DEL r2 B3)
     hasCommit: async (sha) => {
-      if (!existsSync(dir)) return false;
+      if (!dir || !existsSync(dir)) return false;
       await run("git", ["-C", dir, "cat-file", "-e", `${sha}^{commit}`]);
       await run("git", ["-C", dir, "merge-base", "--is-ancestor", sha, "HEAD"]);
-      // a commit already there before the delegation proves nothing about it
+      const base = await baseRef();
+      const onBase = await run("git", ["-C", dir, "merge-base", "--is-ancestor", sha, base]).then(() => true, () => false);
+      if (onBase) return false;
+      const changed = (await run("git", ["-C", dir, "show", "--name-only", "--format=", sha])).trim();
+      if (!changed) return false;
       const committed = Number((await run("git", ["-C", dir, "show", "-s", "--format=%ct", sha])).trim()) * 1000;
       return Number.isFinite(committed) && committed >= since;
     },

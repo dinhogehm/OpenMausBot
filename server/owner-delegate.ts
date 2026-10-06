@@ -106,8 +106,8 @@ export function itemText(item: ItemText): string {
 const ONLY_YOU: ReadonlyArray<[RegExp, string]> = [
   // first: a disk decision lists folders by name, and a name may say "hook" (o28's "hook-v2-4")
   [/\bdisco\b|espaco livre|liberar espaco|\bgib livres\b|\bremoca?o\b|\bremov(?:er|a|e|endo|ido)\b|\bapag(?:ar|ue|a|ando)\b|\bdescart|\bworktrees? parad|\bdelet|\bexclu(?:ir|a|ia|indo|ido)\b|\bworktree\s+remove\b/, "decisão de remoção (disco)"],
-  [/\brm\s+(?:-{1,2}[\w-]+\s+)*-[a-z]*[rf]|\brm\s+--(?:recursive|force)\b|\bgit\s+clean\b|\breset\s+--hard\b|\bbranch\s+(?:-d|--delete)\b|--force-with-lease|--force\b|\bpush\b.*\s-f\b|\bpush\b.*\s\+\S|\bsudo\b|\bchmod\b|\bchown\b/, "comando destrutivo ou de superusuário"],
-  [/\.laya\b|nuria-ops\/hook|dual-review|dual-decisions|\brevisor\b|\breview[- ]?hook\b|\bhooks?\b/, "mexe no hook ou no revisor"],
+  [/\brm\s+(?:-{1,2}[\w-]+\s+)*-[a-z]*[rf]|\brm\s+--(?:recursive|force)\b|\bgit\s+clean\b|\breset\s+--hard\b|\bbranch\s+(?:-d|--delete)\b|--force-with-lease|--force\b|--mirror\b|\bpush\b.*\s--(?:all|tags|delete|prune)\b|\bpush\b.*\s-f\b|\bpush\b.*\s\+\S|\bsudo\b|\bchmod\b|\bchown\b/, "comando destrutivo ou de superusuário"],
+  [/\.laya\b|nuria-ops\/hook|dual-review|dual-decisions|\brevisor\b|\breview[- ]?hook\b|\bhooks?\b|\bjev\b|\blaya\b/, "mexe no hook ou no revisor"],
   [/\blaunchctl\b|\blaunch ?agents?\b|\blaunch ?daemons?\b|\.plist\b/, "mexe em launchctl, LaunchAgents ou LaunchDaemons"],
   [/(?<![\w-])\.nuria(?![\w-])|chave do recibo|\breceipt key\b/, "mexe em ~/.nuria (recibo, approvals, stop)"],
   [/\.claude\/settings|\bsettings(?:\.local)?\.json\b/, "mexe nas configurações do Claude"],
@@ -116,7 +116,7 @@ const ONLY_YOU: ReadonlyArray<[RegExp, string]> = [
   [/\bpush\b.*\b(?:main|master)\b|\bpush (?:direto )?(?:em|na|no|para|pra) (?:a |o )?(?:main|master)\b|\bpush\b.*\*/, "push direto em main"],
   [/--admin\b|\bgh\s+auth\b/, "usa --admin ou mexe na autenticação do gh"],
   [/\bwrangler\b/, "usa wrangler"],
-  [/\bsenhas?\b|\bpasswords?\b|\btokens?\b|\bcredenciai?s?\b|\bcredentials?\b|\bsecrets?\b|\bsegredos?\b|\bapi[_ -]?keys?\b|\bchaves?\b|\bchaveiro\b|\bkeychain\b/, "envolve senha, token ou credencial"],
+  [/\bsenhas?\b|\bpasswords?\b|\btokens?\b|\bcredenciai?s?\b|\bcredentials?\b|\bsecrets?\b|\bsegredos?\b|\bapi[_ -]?keys?\b|\bchaves?\b|\bchaveiro\b|\bkeychain\b|\.npmrc\b|\.netrc\b|\bhosts\.yml\b|\.config\/gh\b|(?<![\w-])\.aws\b|\.docker\/config\.json\b/, "envolve senha, token ou credencial"],
   [/\bprodu(?:cao|coes|ction)\b|\bprod\b|\bdeploy|\breleases?\b|release:local|\bcarrier\b|\bpublic(?:ar|ue|a|acao|ado)\b|\bpublish|pr:merge|\bmerg(?:e|ear|eie|ed|ing)\b|\bmescl|\bhotfix\b/, "produção, release ou merge"],
   [/\bapprov|\baprov(?:ar|e|o|a|ado|ada|acao|acoes)\b|\bautoriz/, "aprovação ou autorização"],
   [/\bpoliticas?\b|\bregras?\b|\bpermiss(?:ao|oes)\b/, "decisão de política ou de regra"],
@@ -153,25 +153,71 @@ export function ownerCategory(text: string): string | null {
   return null;
 }
 
-/** What an agent may be asked to do, by the words of a step or a decision. */
-const ALLOWED_ACTION = /\binvestig|\b(?:ler|leia|le|lendo|leitura)\b|\bconfer|\bverific|\banalis|\bdiagnost|\breproduz|\btest|\bsuite\b|ci:local|\babr(?:ir|a|e)\b.{0,24}\b(?:pr|pull request)\b|\bpull request\b|\bcoment|\bcommit|\bworktree\b|\bbranch de trabalho\b|\blogs?\b|\bdiff\b|\brevis(?:ar|e|ao)\b|\bcorrig|\bcorrij/;
+/** The verbs an agent may be asked to do anything with (read, investigate, check, test, review, fix, comment, commit). */
+const ALLOWED_VERBS = new Set([
+  "ler", "leia", "le", "investigar", "investigue", "investiga", "conferir", "confira", "confere", "verificar", "verifique", "verifica",
+  "confirmar", "confirme", "analisar", "analise", "diagnosticar", "diagnostique", "reproduzir", "reproduza", "revisar", "revise",
+  "testar", "teste", "testa", "procurar", "procure", "buscar", "busque", "examinar", "examine", "listar", "liste", "comparar", "compare",
+  "comentar", "comente", "commitar", "commite", "corrigir", "corrija",
+]);
+/** The verbs allowed only with an object of the allowlist ("abra a PR", "rode os testes", "crie a worktree"). */
+const OBJECT_VERBS: ReadonlyArray<[RegExp, RegExp]> = [
+  [/^(?:abrir|abra|abre)$/, /\b(?:pr|pull request|worktree|branch de trabalho)\b/],
+  [/^(?:criar|crie|cria)$/, /\b(?:worktree|branch de trabalho|pr|pull request|testes?)\b/],
+  [/^(?:rodar|rode|roda|executar|execute|executa)$/, /\b(?:testes?|suite|ci:local|lint|typecheck|vitest|checks?)\b/],
+  [/^(?:fazer|faca|faz)$/, /\b(?:commit|pr|pull request)\b/],
+  [/^(?:escrever|escreva)$/, /\btestes?\b/],
+];
+/** Words that open a clause without being its action: it continues the one before ("…e o histórico"). */
+const FILLER = new Set(["o", "a", "os", "as", "um", "uma", "uns", "umas", "do", "da", "dos", "das", "no", "na", "nos", "nas", "de", "em", "com", "por", "sem", "que", "se", "ao", "aos", "isso", "isto", "ele", "ela", "eles", "elas", "seu", "sua", "seus", "suas", "todo", "toda", "todos", "todas", "cada", "mais", "menos"]);
+/** What may come before the action, said by the owner or a bot ("pode", "depois", "por favor"). */
+const LEAD_IN = /^(?:(?:e|depois|entao|em seguida|tambem|so|apenas|primeiro|por fim|finalmente|agora|pode|podem|sim|ok|por favor|favor|voce|para|pra)\s+)+/;
+
+/** Whether every action a text asks is one an agent may do: each clause's
+ * leading verb is allowed (with its object, for "abrir", "rodar", "criar",
+ * "fazer", "escrever"), and there is at least one. INSP-DEL r2 B6. */
+export function allowedActions(text: string): boolean {
+  const plain = deaccented(normalized(text));
+  let verbs = 0;
+  for (const raw of plain.split(/[,;:.!?\n]|\s+e\s+|\s+depois\s+|\s+entao\s+|\s+para\s+|\s+pra\s+/)) {
+    const clause = raw.trim().replace(LEAD_IN, "").replace(/^[^\p{L}\d]+/u, "");
+    if (!clause) continue;
+    const [word = "", ...rest] = clause.split(/\s+/);
+    if (FILLER.has(word) || /^\d/.test(word)) continue;
+    const object = rest.join(" ");
+    const ok = ALLOWED_VERBS.has(word) || OBJECT_VERBS.some(([verb, needs]) => verb.test(word) && needs.test(object));
+    if (!ok) return false;
+    verbs += 1;
+  }
+  return verbs > 0;
+}
 
 /** The commands an agent may run: tests, checks, git on a work branch, gh to read, open a PR or comment. */
 const ALLOWED_COMMANDS: readonly RegExp[] = [
   /^(?:npm|pnpm)\s+(?:run\s+)?(?:test|lint|typecheck|check|ci:local)[\w:-]*(?:\s+[\w:=./-]+)*$/,
   /^npx\s+(?:vitest\s+run|tsc\s+--noemit)(?:\s+[\w:=./-]+)*$/,
   /^git\s+(?:status|log|diff|show|fetch|branch\s+--show-current|worktree\s+add|switch\s+-c|checkout\s+-b|add|commit)(?:\s+.*)?$/,
-  /^git\s+push\s+(?:-u\s+)?origin\s+(?!(?:main|master|head)\b)[\w./-]+$/,
+  // only `git push -u origin <work branch>`: no option as the name, no main/master/HEAD, no refs/…, no ":" or "+" (INSP-DEL r2 B4)
+  /^git\s+push\s+-u\s+origin\s+(?!-)(?!(?:main|master|head)$)(?!refs\/)[a-z0-9][\w./-]*$/,
   /^gh\s+(?:pr\s+(?:view|checks|diff|list|create|comment)|issue\s+(?:view|list|comment)|run\s+(?:view|list))(?:\s+.*)?$/,
   /^(?:rg|grep|ls|cat|head|tail|wc)(?:\s+.*)?$/,
 ];
 
-/** Whether a command is in the allowlist: one command, no shell plumbing, no wildcard. */
+/** Whether a command is in the allowlist: one command, no shell plumbing, no
+ * wildcard; files read only by a relative path inside the repository; no
+ * `--output`; a comment only with `--body` (INSP-DEL r2 B5). */
 export function allowedCommand(command: string): boolean {
   const plain = deaccented(normalized(command)).trim();
   if (!plain || /[;&|<>`$*?(){}\n]/.test(plain)) return false;
-  return ALLOWED_COMMANDS.some((pattern) => pattern.test(plain));
+  if (!ALLOWED_COMMANDS.some((pattern) => pattern.test(plain))) return false;
+  const [tool = "", ...args] = plain.split(/\s+/);
+  if (/^(?:rg|grep|ls|cat|head|tail|wc)$/.test(tool) && args.some((arg) => !arg.startsWith("-") && (/^[/~]/.test(arg) || /(?:^|\/)\.\.(?:\/|$)/.test(arg)))) return false;
+  if (tool === "git" && /(?:^|\s)--output\b/.test(plain)) return false;
+  if (tool === "gh" && /\bcomment\b/.test(plain) && (/(?:^|\s)(?:-f|--body-file)\b/.test(plain) || !/(?:^|\s)(?:-b|--body)(?:\s|=)/.test(plain))) return false;
+  return true;
 }
+
+const AGENT_CAN = "ler, investigar, testar, commit numa branch de trabalho, PR";
 
 /** "não", "espere", "pare": the owner's words that say no. */
 const OWNER_SAYS_NO = /\bnao\b|\bnunca\b|\bespere\b|\baguarde\b|\bpare\b|\bdon'?t\b|\bstop\b|\bcancel|\bdeixa (?:quieto|como esta)\b/;
@@ -219,14 +265,18 @@ export function onlyYouReason(item: ItemText & Pick<OwnerPending, "key" | "histo
   const category = ownerCategory([itemText({ ...item, options }), words?.text ?? ""].join("\n"));
   if (category) return category;
   if (choice === "none") return "escolher entre as decisões (nenhuma recomendada)";
-  if (!item.steps?.length && !item.command && !choice && !words) return "sem passos que um agente possa seguir";
-  // the allowlist: what is not plainly reading, testing, committing on a work branch or a PR is the owner's
-  for (const [index, step] of (item.steps ?? []).entries()) {
+  // no steps: the owner's, whatever they answered in words (INSP-DEL r2 B7)
+  if (!item.steps?.length) return "sem passos que um agente possa seguir";
+  // the allowlist: every action of the title, each step, the decision and the owner's words is reading,
+  // investigating, testing, committing on a work branch or a PR — anything else is the owner's (r2 B6/B7)
+  if (!allowedActions(item.title)) return `o título pede algo fora do que um agente pode (${AGENT_CAN})`;
+  for (const [index, step] of item.steps.entries()) {
     if (step.command && !allowedCommand(step.command)) return `o comando do passo ${index + 1} está fora do que um agente pode`;
-    if (!readings(step.text).some((form) => ALLOWED_ACTION.test(form)) && !step.command) return `o passo ${index + 1} está fora do que um agente pode (ler, investigar, testar, commit numa branch de trabalho, PR)`;
+    if (!allowedActions(step.text)) return `o passo ${index + 1} está fora do que um agente pode (${AGENT_CAN})`;
   }
   if (item.command && !allowedCommand(item.command)) return "o comando do item está fora do que um agente pode";
-  if (choice && !readings(choice.option.reply).some((form) => ALLOWED_ACTION.test(form))) return "a decisão está fora do que um agente pode";
+  if (choice && !allowedActions(choice.option.reply)) return "a decisão está fora do que um agente pode";
+  if (words && !allowedActions(words.text)) return `a sua resposta pede algo fora do que um agente pode (${AGENT_CAN})`;
   return null;
 }
 
