@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BotAutonomy, OWNER_PENDING_MAX_PER_THREAD } from "./bot-autonomy.ts";
-import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_OWNER_THREAD_NOTE, ROUTINE_ASK_SETTLED_MS, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_SETTLED_MS, ownerAnswersItem, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
 
 // The Monitor's routine "Atendimento: Chat, planilha e issues", 05/10 09:00 (R12-visual N22), as it wrote it.
 const MONITOR_0510 = [
@@ -293,17 +293,27 @@ describe("INSP-N22 r2", () => {
   ].join("\n");
   const ARMED = "▎ Monitor, arme AGORA, nesta conversa, três vigias permanentes com wake_when (standing: true, cada um com seu label, sem until):\n▎ 1. label \"chat\": gog chat messages list spaces/AAQA4TXnzJ4 --plain, a cada 3 min";
 
-  it("F2: the owner doing what the item asked, in a conversation with the bot, closes it as theirs (real 30/09 16:12)", () => {
+  it("F2/T1: the owner doing what the item asked, in a conversation with the bot, folds it under \"Talvez já resolvido\" to confirm — never closes it (real 30/09 16:12)", () => {
     const ledger = make();
     const opened = run(ledger, PARADO).opened;
     expect(opened.map((each) => each.title)).toEqual(["Ver: três vigias permanentes (Chat, planilha e issues)", "Ver: regras de 30/09 na minha memória permanente"]);
-    // a question about it, or an earlier message, closes nothing
+    // a question about it, or an earlier message, moves nothing
     expect(ownerSettlesRoutineAsks(ledger, "monitor", [{ at: now + 60_000, text: "O que são os três vigias permanentes?" }, { at: now - 60_000, text: ARMED }])).toEqual([]);
-    const done = ownerSettlesRoutineAsks(ledger, "monitor", [{ at: now + 3 * 60_000, text: ARMED }]);
-    expect(done.map((each) => each.id)).toEqual([opened[0]!.id]);
-    expect(ledger.resolvedOwnerPendingOf("monitor")[0]).toMatchObject({ resolvedBy: "owner", resolvedNote: ROUTINE_ASK_OWNER_THREAD_NOTE });
-    // the rules: still open
-    expect(ledger.ownerPendingOf("monitor").map((each) => each.id)).toEqual([opened[1]!.id]);
+    const at = now + 3 * 60_000;
+    const moved = ownerSettlesRoutineAsks(ledger, "monitor", [{ at, text: ARMED }]);
+    expect(moved.map((each) => each.id)).toEqual([opened[0]!.id]);
+    // still open, folded, with the note and both answers
+    expect(ledger.resolvedOwnerPendingOf("monitor")).toEqual([]);
+    const watches = ledger.ownerPendingById("monitor", opened[0]!.id)!;
+    expect(watches.demotedAt).toBe(at);
+    expect(watches.why).toMatch(/\(você tratou disso na conversa às 16:12 de 30\/09; confirme\)$/);
+    expect(watches.options?.map((each) => each.label)).toEqual(["Já resolvi", ROUTINE_ASK_KEEP_LABEL]);
+    // the routine naming it (to report the watches armed) does not bring it back; asking it again does
+    now += 3_600_000;
+    expect(run(ledger, "Os três vigias permanentes do Chat, da planilha e das issues estão armados na conversa principal.").promoted).toEqual([]);
+    expect(ledger.ownerPendingById("monitor", opened[0]!.id)!.demotedAt).toBe(at);
+    // the rules: on top
+    expect(ledger.ownerPendingById("monitor", opened[1]!.id)!.demotedAt).toBeUndefined();
   });
 
   it("F2: said once and let go — 48 h AND 2 runs without it: under \"Talvez já resolvido\", never closed; \"Ainda vale\" and the bot naming it bring it back", () => {
@@ -515,5 +525,54 @@ describe("INSP-N22 r4", () => {
     clock += 3_600_000;
     applyRoutineAsks(ledger, { ...base, text: "Nada novo.", at: clock });
     expect(ledger.ownerPendingById("m", item!.id)!.routineId).toBe("R-A");
+  });
+});
+
+describe("INSP-N22 r5 T2: the owner answering THE item from the panel", () => {
+  const clock = Date.parse("2026-10-05T12:00:00Z");
+  const base = { botId: "m", botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", routineId: "R-A", threadId: "t1", ...ctx };
+  const ASKS = {
+    widget: "A conversa do widget (Nuria.identify) continua com você: às 8:39 você disse que ia falar direto com o Luis Rossi.",
+    linha: "Preciso da sua decisão: posso escrever o número da issue nas Observações da linha 110, depois do texto do Filipe?",
+    ticket: "Ainda dependem do Osvaldo: a abertura da issue do ATD-202610-0042 e, com ela, a linha dele na planilha.",
+    marluce: "Uma decisão fica com você: se o que a Marluce espera, tickets distribuídos fora do horário do chat, vira mudança de regra ou só ajuste na grade de horário do helpdesk.",
+  };
+  const answers = (which: keyof typeof ASKS, text: string) => {
+    const item = applyRoutineAsks(new BotAutonomy({ path: null, now: () => clock }), { ...base, text: ASKS[which], at: clock }).opened[0]!;
+    return ownerAnswersItem(item, text);
+  };
+  it.each([
+    ["ticket", "Abri a #9364 para o ATD-202610-0042."],
+    ["ticket", "Registrei a issue do ATD-202610-0042 no GitHub."],
+    ["ticket", "Criei a issue do ATD-202610-0042."],
+    ["ticket", "Abri, é a #9364 (ATD-202610-0042)."],
+    ["ticket", "ATD-202610-0042: aberta, #9364."],
+    ["linha", "Pode escrever na linha 110."],
+    ["linha", "Pode escrever, linha 110 liberada."],
+    ["linha", "Escreva na linha 110."],
+    ["linha", "Sim, pode escrever o número na linha 110."],
+    ["widget", "Conversei com o Luis Rossi sobre o widget, tudo certo."],
+    ["widget", "Falei direto com o Luis Rossi, o widget está ok."],
+    ["marluce", "É só ajuste de grade, falei com a Marluce."],
+    ["marluce", "Mudança de regra: tickets fora do horário vão para a fila da Marluce, decidido."],
+  ] as const)("closes (the inspector's 13): %s — %s", (which, text) => {
+    expect(answers(which, text)).toBe(true);
+  });
+  it.each([
+    ["widget", "Qual widget? Não entendi"],
+    ["widget", "Ainda não falei com o Luis Rossi."],
+    ["widget", "Vou falar amanhã."],
+    ["widget", "Acho que o Chief resolveu, confere?"],
+    ["widget", "Manda o link da conversa"],
+    ["widget", "Falei com a Marluce, ela vai pensar"],
+    ["widget", "Feito o pedido; aguardo a resposta dele pra fechar"],
+    ["widget", "Concluído não, só começado"],
+    ["widget", "Respondi o Luis Rossi, falta o Filipe"],
+    ["widget", "Tratei metade"],
+    ["linha", "Não escreva nada na linha 110 ainda."],
+    ["linha", "Escreva o número da issue na linha 110 depois."],
+    ["ticket", "Ainda não abri a issue do ATD-202610-0042."],
+  ] as const)("stays open: %s — %s", (which, text) => {
+    expect(answers(which, text)).toBe(false);
   });
 });

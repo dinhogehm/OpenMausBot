@@ -123,7 +123,7 @@ import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
-import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswersItem, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
 import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -13751,14 +13751,15 @@ function closeRoutineAsksSaid(botId: string, text: string): void {
 }
 
 /** The owner wrote, in a conversation of the bot, about a routine's item in words that end it or doing what it asked:
- * it closes as the owner's (INSP-N22 r2 F2). The person's last messages there are read at each turn's end. */
+ * it goes under "Talvez já resolvido", never closed — a guess must not hide a pendency (INSP-N22 r2 F2, r5 T1). The
+ * person's last messages there are read at each turn's end. */
 function closeRoutineAsksOwnerSaid(botId: string, threadId: string): void {
   const said = store.messagesFor(threadId).filter((message) => message.role === "user" && message.kind === "text" && !message.peerAsk && !message.from).slice(-5).map((message) => ({ at: message.at, text: message.text }));
   if (!said.length) return;
   const done = ownerSettlesRoutineAsks(autonomy, botId, said);
   for (const item of done) {
-    if (store.taskByThread(botId, item.threadId)) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${item.id} fechado, você tratou disso na conversa`, 240), ok: true } });
-    console.log(`[owner-pending] ${item.id} (${item.key}) resolved: the owner dealt with it in ${threadId}`);
+    if (store.taskByThread(botId, item.threadId)) store.appendMessage(item.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${item.id} em "Talvez já resolvido" — você tratou disso na conversa; confirme com "Já resolvi"`, 240), ok: true } });
+    console.log(`[owner-pending] ${item.id} (${item.key}) under "Talvez já resolvido": the owner seems to have dealt with it in ${threadId}`);
   }
   if (done.length) refreshBotRow(botId);
 }
@@ -23963,7 +23964,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // a routine's item closes with the owner's words when they end it ("Já falei com ele"); a question
         // or a note goes to the bot and the item stays open — in doubt, open (INSP-N22 A3)
         // a ticket's or issue's item: its action named, or the item closed in so many words (INSP-N22 r3 R6)
-        resolve = body.resolve === true || Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX) && ownerEndsRoutineAsk(item, reply));
+        // answering THIS item from the panel, the owner needs not name it: any affirmative or action closes it (INSP-N22 r5 T2)
+        resolve = body.resolve === true || Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX) && ownerAnswersItem(item, reply));
         text = ownerPendingReplyText(item, reply.slice(0, 4_000), resolve);
         answer = { kind: "text", text: reply };
       }
