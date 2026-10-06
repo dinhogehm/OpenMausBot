@@ -46,6 +46,8 @@ export interface QueuedStart {
   lastReason?: string;
   /** The first of the failures in a row (cleared when only a slot is missing). */
   failingSince?: number;
+  /** An item the owner delegated (lote del): set by the server only, never from a bot's body. */
+  delegation?: { botId: string; itemId: string };
 }
 
 export const START_QUEUE_MAX = 30;
@@ -236,6 +238,9 @@ export interface StartResult {
   busy?: boolean;
   /** Could not open for a reason that may pass: stays queued, tried again later. */
   retry?: boolean;
+  /** The session it opened, or its place in the queue (a delegation follows it, lote del). */
+  sessionId?: string;
+  queueId?: string;
 }
 
 export interface DrainDeps {
