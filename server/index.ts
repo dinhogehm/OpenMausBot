@@ -123,7 +123,7 @@ import { englishNarration, narrationPatch } from "./turn-narration.ts";
 import { heldByOwner, idleCandidates, idleIssuesArgs, idlePrsArgs, mentionedNumbers, parseIdleIssues, releaseInFlightOf, parseOpenPrCount, PIPELINE_IDLE_EVERY_MS, PIPELINE_IDLE_PREFIX, PIPELINE_IDLE_QUIET_MS, pipelineIdleReport, pipelineIdleStep, pipelineOrder, type IdleCandidate, type PipelineIdleState } from "./pipeline-idle.ts";
 import { PRODUCTION_REPO } from "../shared/productivity.ts";
 import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered } from "./answer-dedupe.ts";
-import { applyRoutineAsks, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { applyRoutineAsks, markStaleRoutineAsks, ownerAnswerCloses, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
 import { asksOwnerToDecide, busyNote, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, filesBelow, goneDiskItem, keepsFolders, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, type FolderFacts } from "./disk-decision.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
@@ -8836,6 +8836,8 @@ function askStepsForOlderItems(): void {
   const now = Date.now();
   // settling never sends anything to a bot: it runs even with ~/.nuria/stop
   settleAnsweredQuestions();
+  // a routine's item it stopped repeating says so, still open (INSP-N22 A8)
+  for (const item of markStaleRoutineAsks(autonomy, now)) refreshBotRow(item.botId);
   if (now - stepsAsk.bootAt < STEPS_ASK_AFTER_BOOT_MS || existsSync(NURIA_STOP_FILE)) return;
   // a bare question is looked at every minute on its own: an item's pace must not hold it back
   if (now - stepsAsk.questionsAt >= QUESTION_STEPS_PACE_MS) {
@@ -23936,8 +23938,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       } else {
         const reply = typeof body.text === "string" ? body.text.trim() : "";
         if (!reply) return json(res, 400, { error: "Escreva a resposta ao bot." });
-        // a routine's item closes with the owner's answer, whatever it says: the bot hears it (R12-visual N22)
-        resolve = body.resolve === true || Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX));
+        // a routine's item closes with the owner's words when they end it ("Já falei com ele"); a question
+        // or a note goes to the bot and the item stays open — in doubt, open (INSP-N22 A3)
+        resolve = body.resolve === true || Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX) && ownerAnswerCloses(reply));
         text = ownerPendingReplyText(item, reply.slice(0, 4_000), resolve);
         answer = { kind: "text", text: reply };
       }

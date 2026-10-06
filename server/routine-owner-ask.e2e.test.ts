@@ -18,6 +18,7 @@ it("a routine that leaves something with the owner opens one item, refreshed by 
     ask, reworded, ask,
     "Respondi ao Luis Rossi no widget; a conversa está resolvida.",
     ask,
+    "Anotado: vou conferir qual é a conversa do widget.",
     "Anotado.",
     ask,
   ];
@@ -51,7 +52,7 @@ it("a routine that leaves something with the owner opens one item, refreshed by 
     const first = await runOnce();
     await expect.poll(() => (ledger().ownerPending ?? []).length, { timeout: 10_000 }).toBe(1);
     const [item] = ledger().ownerPending;
-    expect(item).toMatchObject({ botId: bot.id, threadId: first.resultsThreadId, key: "routine-ask:pessoa:luis-rossi", title: "Responder ao Luis Rossi (widget)" });
+    expect(item).toMatchObject({ botId: bot.id, threadId: first.resultsThreadId, key: "routine-ask:conversa:widget", title: "Responder ao Luis Rossi (widget)" });
     expect(item.why).toContain("na rotina \"Atendimento: Chat, planilha e issues\", escreveu: \"A conversa do widget (Nuria.identify) continua com você");
     expect(item.steps).toHaveLength(3);
     await runOnce();
@@ -72,7 +73,15 @@ it("a routine that leaves something with the owner opens one item, refreshed by 
     await expect.poll(() => (ledger().ownerPending ?? []).length, { timeout: 10_000 }).toBe(1);
     const [next] = ledger().ownerPending;
     expect(next.id).not.toBe(item.id);
-    // the owner answers it in words: it closes, and the bot hears the answer
+    // a question of the owner goes to the bot and keeps the item open (INSP-N22 A3)
+    const asked = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${next.id}/reply`, {
+      method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "Qual widget? Não entendi" }),
+    });
+    expect(asked.status, await asked.clone().text()).toBeLessThan(300);
+    expect(await asked.json()).toMatchObject({ resolved: 0 });
+    expect(ledger().ownerPending.map((each: any) => each.id)).toEqual([next.id]);
+    expect(await runControlOmb(["wait", "--bot", bot.id, "--timeout", "30", "--url", url])).toMatchObject({ status: "settled" });
+    // the owner answers it in words that end it: it closes, and the bot hears the answer
     const answered = await fetch(`${url}/api/bots/${bot.id}/owner-pending/${next.id}/reply`, {
       method: "POST", headers: { "content-type": "application/json", origin: url }, body: JSON.stringify({ text: "Já falei com ele por telefone." }),
     });

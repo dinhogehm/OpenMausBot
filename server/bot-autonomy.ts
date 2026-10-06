@@ -237,6 +237,8 @@ export interface OwnerPending {
   awaitingSince?: number;
   /** Last time the bot rewrote it (owner_pending update). */
   updatedAt?: number;
+  /** A routine's item (server/routine-owner-ask.ts): the last time the routine said it. */
+  lastSaidAt?: number;
 }
 
 /** One answer of the person to an item (J18). */
@@ -375,6 +377,8 @@ function slimResolved(item: OwnerPending, resolvedAt: number, resolvedBy: Resolv
     id: item.id, botId: item.botId, threadId: item.threadId, title: item.title, createdAt: item.createdAt, resolvedAt, resolvedBy,
     ...(note ? { resolvedNote: note } : {}),
     ...(item.key ? { key: item.key } : {}),
+    // a routine's item keeps the words it quoted: the routine repeating the SAME pendency is told from a new one (INSP-N22 A2)
+    ...(item.key?.startsWith("routine-ask:") && item.why ? { why: item.why } : {}),
     ...(item.history?.length ? { history: item.history.slice(-OWNER_PENDING_HISTORY_MAX) } : {}),
   };
 }
@@ -1344,7 +1348,7 @@ export class BotAutonomy {
    * for anything else the existing item comes back untouched, flagged
    * `duplicate`, so the bot is told "já existe o5" instead of the person
    * getting a second item for the same action. */
-  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }): OwnerPending & { duplicate?: true } {
+  addOwnerPending(botId: string, threadId: string, input: { title: string; due?: string; link?: string; key?: string; command?: string; why?: string; steps?: OwnerPendingStep[]; options?: OwnerPendingOption[]; lastSaidAt?: number }): OwnerPending & { duplicate?: true } {
     const title = input.title.replace(/\s+/g, " ").trim().slice(0, OWNER_PENDING_TITLE_MAX);
     const here = (open: OwnerPending) => open.threadId === threadId && (input.key ? open.key === input.key : open.title === title);
     const elsewhere = this.ownerPending.find((open) => open.botId === botId && !here(open) && sameOwnerPending(open, { ...input, title }));
@@ -1369,11 +1373,17 @@ export class BotAutonomy {
       ...(existing?.history?.length ? { history: existing.history } : {}),
       ...(existing?.awaitingSince ? { awaitingSince: existing.awaitingSince } : {}),
       ...(existing?.stepsAutoAskedAt ? { stepsAutoAskedAt: existing.stepsAutoAskedAt } : {}),
+      ...(input.lastSaidAt !== undefined ? { lastSaidAt: input.lastSaidAt } : existing?.lastSaidAt !== undefined ? { lastSaidAt: existing.lastSaidAt } : {}),
     };
     // a server item (same key) found in another conversation follows the server to where it says it now
     this.ownerPending = [...this.ownerPending.filter((open) => !same(open)), pending];
-    const mine = this.ownerPending.filter((open) => open.threadId === threadId);
-    if (mine.length > OWNER_PENDING_MAX_PER_THREAD) this.ownerPending = this.ownerPending.filter((open) => open !== mine[0]);
+    // the cap holds a bot's own items; the server's (a routine's ask, the disk, the app) are never
+    // dropped by it: that would close what waits on the owner without a word (INSP-N22 A7)
+    const mine = this.ownerPending.filter((open) => open.threadId === threadId && !open.key);
+    if (mine.length > OWNER_PENDING_MAX_PER_THREAD) {
+      console.warn(`[owner-pending] ${mine[0]!.id} ("${mine[0]!.title.slice(0, 80)}") left the list: more than ${OWNER_PENDING_MAX_PER_THREAD} items of the bot in ${threadId}`);
+      this.ownerPending = this.ownerPending.filter((open) => open !== mine[0]);
+    }
     this.save();
     return pending;
   }
@@ -2207,12 +2217,13 @@ export function lastQuestionAt(messages: ReadonlyArray<{ role: string; kind: str
 
 /** "Preciso de você", "Continuam com você", "Decisão para você"…: the bot
  * asks the person for something in plain words, not only with a "?". */
-// "depende de você", "precisa da sua decisão", "aguardando você", "deixei essa decisão com você" (R12-visual N22)
-const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa (?:de voc[êe]|da sua|do seu)|depende(?:m)? (?:de voc[êe]|da sua|do seu)|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|deix(?:o|ei|ar|amos) (?:essa |esta |a )?decis[ãa]o com voc[êe]|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|aguardando (?:voc[êe]|a sua|o seu|sua|seu)|esperando (?:por )?voc[êe]|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
+// "depende de você", "precisa da sua decisão", "aguardando você", "deixei essa decisão com você" (R12-visual N22);
+// "do seu"/"da sua" only before what the owner gives (a decision, an ok, a GO): "depende do seu token" asks nothing (INSP-N22 A5)
+const OWNER_ASK = /\b(preciso (?:que voc[êe]|de voc[êe]|da sua|do seu|de uma decis[ãa]o)|precisa de voc[êe]|(?:precisa(?:m)?|depende(?:m)?) d[ao] (?:sua|seu) (?:decis[ãa]o|autoriza[çc][ãa]o|aprova[çc][ãa]o|confirma[çc][ãa]o|resposta|aval|ok|go|libera[çc][ãa]o|escolha|aceite|aten[çc][ãa]o|retorno|valida[çc][ãa]o|revis[ãa]o|parecer|sinal|palavra)\b|depende(?:m)? de voc[êe]|continua(?:m)? com voc[êe]|fica(?:m)? com voc[êe]|decis[ãa]o (?:para voc[êe]|sua)|deix(?:o|ei|ar|amos) (?:essa |esta |a )?decis[ãa]o com voc[êe]|pend[êe]ncias? (?:com voc[êe]|do dono|suas)|aguardo (?:a sua|o seu|sua|seu)|aguardando voc[êe]|aguardando (?:a |o )?(?:sua|seu) (?:decis[ãa]o|autoriza[çc][ãa]o|aprova[çc][ãa]o|confirma[çc][ãa]o|resposta|aval|ok|go|libera[çc][ãa]o|escolha|aceite|aten[çc][ãa]o|retorno|valida[çc][ãa]o|revis[ãa]o|parecer|sinal|palavra)\b|esperando (?:por )?voc[êe]|s[óo] voc[êe] pode|need (?:you|your)|waiting (?:on|for) you)/i;
 /** A sentence that says the person is NOT needed (R11-visual N15: "Esse
  * trabalho já é meu … e não depende de decisão sua." counted for 10 h). */
 // word edges by letter, not \b: \b is ASCII-only, and "é", "você" end in a non-ASCII letter
-const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|nada (?:disso |d[ae]ss[ae]s? )?(?:depende|precisa|est[áa] (?:esperando|aguardando)|esperando|aguardando)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu)|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
+const NOT_ASK = /(?<![\p{L}\p{N}])(?:n[ãa]o (?:depende|precisa|preciso|requer|exige|pede)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu|dono)|nada (?:para|pra) (?:voc[êe]|o dono|fazer)|(?:[ée]|fica|est[áa]) (?:meu|comigo)|sigo sozinh[oa]|n[ãa]o (?:h[áa]|tem) (?:nada|pend[êe]ncia|decis[ãa]o) (?:para|pra|sua|de voc[êe])|nada (?:disso |d[ae]ss[ae]s? )?(?:depende|precisa|est[áa] (?:esperando|aguardando)|esperando|aguardando)(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|sua|seu)|nenhum[ao]?s?(?![\p{L}])[^.!?]*?(?<![\p{L}])(?:voc[êe]|dono)|doesn'?t (?:need|depend on) you)(?![\p{L}\p{N}])/iu;
 /** A sentence that asks for the person: an explicit ask, never one that denies it. */
 /** A sentence's clauses, cut where a contrast or a list starts a new one ("é meu, mas preciso…",
  * "não preciso de você para X, só preciso que…"): a denial in one never cancels an ask in another (INSP-R11fix F-1). */
@@ -2222,6 +2233,19 @@ const asksOwner = (sentence: string): boolean => sentence.split(CLAUSE_CUT).some
 export const asksOwnerSentence = (sentence: string, also?: RegExp): boolean =>
   sentence.split(CLAUSE_CUT).some((clause) => (OWNER_ASK.test(clause) || Boolean(also?.test(clause))) && !NOT_ASK.test(clause));
 const sentencesOf = (text: string): string[] => text.split(/(?<=[.!?…])\s+|\n+/);
+/** Where, in `sentence`, the ask starts (its first clause that asks without denying), or -1: what comes
+ * before it says whether it is said under a condition ("Se a checagem estourar, trago o que depende de você"). */
+export function ownerAskIndex(sentence: string, also?: RegExp): number {
+  let from = 0;
+  for (const clause of sentence.split(CLAUSE_CUT)) {
+    const at = sentence.indexOf(clause, from);
+    from = at + clause.length;
+    if (NOT_ASK.test(clause)) continue;
+    const found = [OWNER_ASK.exec(clause), also?.exec(clause) ?? null].filter((match): match is RegExpExecArray => match !== null).map((match) => match.index);
+    if (found.length) return at + Math.min(...found);
+  }
+  return -1;
+}
 
 /** Since when the bot has been waiting on the person: the first of its
  * replies, after the person's last message, that asks them something (a
