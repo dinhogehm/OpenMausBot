@@ -129,13 +129,18 @@ const SENSITIVE_LITERALS = [
   "nuria-ops/hook", "dual-review", "launchagents", "launchdaemons", "release:local", "pr:merge", "--force", "--admin",
 ];
 
-/** A token with a wildcard (`${LC}ctl`, `~/.nu*a/`) that could spell a sensitive literal. */
+/** A glob as a pattern: `*` any run, `?` one character, anchored. */
+const globPattern = (glob: string) => new RegExp(`^${glob.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[\\w./:-]*").replace(/\?/g, "[\\w./:-]")}$`);
+/** The literals and each of their path segments (".nuria", "launchctl"). */
+const SENSITIVE_PARTS = [...new Set(SENSITIVE_LITERALS.flatMap((literal) => [literal, ...literal.split("/").filter((part) => part.length > 1 && part !== "~")]))];
+
+/** A token with a wildcard (`${LC}ctl`, `~/.nu*a/stop`) that could spell a
+ * sensitive literal — whole, or one of its path segments. */
 function wildcardHit(reading: string): string | null {
   for (const token of reading.split(/\s+/)) {
     if (!/[*?]/.test(token)) continue;
-    const pattern = new RegExp(`^${token.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[\\w./:-]*").replace(/\?/g, "[\\w./:-]")}$`);
-    const loose = token.replace(/^[~/.]+|\/+$/g, "");
-    if (SENSITIVE_LITERALS.some((literal) => pattern.test(literal) || (loose.length > 1 && new RegExp(`^${loose.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, "[\\w./:-]*").replace(/\?/g, "[\\w./:-]")}$`).test(literal.replace(/^[~/.]+|\/+$/g, ""))))) return token;
+    const pieces = [token, ...token.split("/").filter((piece) => /[*?]/.test(piece) && piece.replace(/[*?]/g, "").length > 1)];
+    if (pieces.some((piece) => SENSITIVE_PARTS.some((part) => globPattern(piece).test(part)))) return token;
   }
   return null;
 }
