@@ -68,6 +68,16 @@ export async function askQuestionSteps(item: NeedsYouItem): Promise<{ deduped: b
   return { deduped: receipt?.deduped === true };
 }
 
+/** "Delegar a um agente" (lote del): the server opens a Claude Code session
+ * for the item; the row turns "delegado" through the bot frame it
+ * broadcasts. A second click is told so, never a second session. */
+export async function delegateOwnerPending(item: NeedsYouItem): Promise<{ info?: string; sessionId?: string; queued?: boolean }> {
+  if (!item.pendingId) throw new Error("not an owner_pending item");
+  const receipt = await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/delegate`, { method: "POST", body: "{}" });
+  if (receipt?.duplicate === true && typeof receipt.message === "string") return { info: receipt.message };
+  return { ...(typeof receipt?.sessionId === "string" ? { sessionId: receipt.sessionId } : {}), ...(typeof receipt?.queueId === "string" ? { queued: true } : {}) };
+}
+
 export async function resolveOwnerPending(item: NeedsYouItem): Promise<void> {
   if (!item.pendingId) return;
   await api(`/api/bots/${encodeURIComponent(item.botId)}/owner-pending/${encodeURIComponent(item.pendingId)}/resolve`, { method: "POST" });

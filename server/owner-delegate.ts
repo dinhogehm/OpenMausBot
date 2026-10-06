@@ -59,6 +59,8 @@ export function itemText(item: ItemText): string {
 /** What only the owner may touch, by its words: [pattern, short reason]. In
  * doubt it is listed — a missing button costs a click, a wrong one a guard. */
 const ONLY_YOU: ReadonlyArray<[RegExp, string]> = [
+  // first: a disk decision lists folders by name, and a name may say "hook" (o28's "hook-v2-4")
+  [/\bdisco\b|espa[çc]o livre|liberar espa[çc]o|\bGiB livres\b|\bremo[çc][ãa]o\b|\bremover\b|\bapagar\b|\bdescart|\brm -r|\bworktrees? parad/i, "decisão de remoção (disco)"],
   [/\.laya\b|nuria-ops\/hook|dual-review|dual-decisions|\brevisor\b|\breview[- ]?hook\b|\bhooks?\b/i, "mexe no hook ou no revisor"],
   [/\blaunchctl\b|\blaunch ?agents?\b|\.plist\b/i, "mexe em launchctl ou LaunchAgents"],
   [/(?<![\w-])\.nuria(?![\w-])|chave do recibo|\breceipt key\b/i, "mexe em ~/.nuria (recibo, approvals, stop)"],
@@ -69,7 +71,6 @@ const ONLY_YOU: ReadonlyArray<[RegExp, string]> = [
   [/--force\b|\bpush\s+(?:[^\n]*\s)?-f\b/i, "usa --force"],
   [/\bwrangler\b/i, "usa wrangler"],
   [/\bsenhas?\b|\bpasswords?\b|\btokens?\b|\bcredenciai?s?\b|\bcredentials?\b|\bsecrets?\b|\bsegredos?\b|\bapi[_ -]?keys?\b|\bchaveiro\b|\bkeychain\b/i, "envolve senha, token ou credencial"],
-  [/\bdisco\b|espa[çc]o livre|liberar espa[çc]o|\bGiB livres\b|\bremo[çc][ãa]o\b|\bremover\b|\bapagar\b|\bdescart|\brm -r|\bworktrees? parad/i, "decisão de remoção (disco)"],
   [/\bpol[íi]ticas?\b|\bregras?\b|\bautoriz|\bpermiss[ãa]o\b|\bpermiss[õo]es\b/i, "decisão de política ou de regra"],
 ];
 

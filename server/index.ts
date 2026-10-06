@@ -24005,6 +24005,59 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (!asked) return json(res, 409, { error: `A conversa de ${bot.name} com você não existe mais. Responda abaixo.`, code: "no_channel" });
       return json(res, 202, { ok: true, deduped: false, askedAt: asked.askedAt });
     }
+    // "Delegar a um agente" (lote del): the server opens a Claude Code session
+    // for the item the way the Chief does (startCcSession: the same guard,
+    // worktree option and breaker) with the decision the owner chose, else
+    // the recommended one, else the steps. The item waits on the session, out
+    // of the count, until its report settles it. Never an approve, and only
+    // what an agent may do (server/owner-delegate.ts onlyYouReason).
+    m = path.match(/^\/api\/bots\/([\w-]+)\/owner-pending\/([\w-]+)\/delegate$/);
+    if (m && method === "POST") {
+      const bot = store.bot(m[1]!);
+      if (!bot) return json(res, 404, { error: "no such bot" });
+      const item = autonomy.ownerPendingById(bot.id, m[2]!);
+      if (!item) return json(res, 404, { error: "Este item já foi resolvido." });
+      const notYours = cloudGuestSendRefusal(auth, item.threadId);
+      if (notYours) return json(res, 403, { error: notYours });
+      // a double click is one delegation: the replies' answer-dedupe, keyed by the item
+      const key = answerKey(bot.id, item.id, { kind: "delegate", text: "" });
+      const claim = answerDedupe.claim(key);
+      if (!claim.ok) return json(res, 200, { ok: true, duplicate: true, message: claim.sent ? "Este item já foi delegado; não abri outra sessão." : "A delegação deste item ainda está sendo aberta; não abri outra sessão." });
+      onAnswered(res, (status) => (status < 300 ? answerDedupe.sent(key) : answerDedupe.release(key)));
+      // one delegation at a time per item
+      if (item.delegation) return json(res, 409, { error: `Este item já está com um agente (delegado ${delegationTime(item.delegation.at)}).`, code: "already_delegated" });
+      const view = delegateView(item, ccIsGitRepo);
+      if ("onlyYou" in view) return json(res, 409, { error: `Só você: ${view.onlyYou}.`, code: "not_delegable" });
+      if (existsSync(NURIA_STOP_FILE)) return json(res, 409, { error: "O ~/.nuria/stop está ativo: nenhuma sessão é aberta até ele ser removido.", code: "stopped" });
+      try {
+        assertWithinBudget(cfg, DATA_DIR);
+      } catch (error) {
+        return json(res, 409, { error: error instanceof Error ? error.message : String(error), code: "spend_cap" });
+      }
+      const owner = delegationOwner(bot, item);
+      if (!owner) return json(res, 409, { error: "A conversa de origem deste item não existe mais. Marque-o como resolvido.", code: "no_thread" });
+      const { title, brief } = delegationBrief(item, { botName: bot.name, threadTitle: store.taskByThread(bot.id, item.threadId)?.title, now: Date.now(), time: delegationTime });
+      // the app when it can take the session now; else the terminal, with the reason the server knows
+      const app = appAvailability(view.repo);
+      const body: Record<string, unknown> = { title, brief, repo: view.repo, ...(app.state === "available" ? {} : { surface: "cli", cliReason: `delegação do dono pelo "Precisa de você": ${app.reason ?? "o app Claude não abre sessão neste repositório agora"}` }) };
+      const choice = delegationChoice(item);
+      const ref = { botId: bot.id, itemId: item.id };
+      // marked before the start: the session it creates finds the item delegated
+      autonomy.patchOwnerPending(bot.id, item.id, { delegation: { at: Date.now(), state: "queued", ...(choice && choice !== "none" ? { option: choice.option.label } : {}) }, delegationBack: undefined });
+      const started = startCcSession(owner.bot, owner.threadId, owner.threadId, body, false, ref);
+      if (started.status !== 200 || (!started.sessionId && !started.queueId)) {
+        const reason = String(started.body.error ?? started.body.message ?? "erro desconhecido").slice(0, 600);
+        delegationReturned(ref, { at: Date.now(), outcome: "falhou", text: `a sessão não abriu: ${reason}` });
+        return json(res, 409, { error: `A sessão não abriu: ${reason}`, code: "not_opened" });
+      }
+      const now = autonomy.ownerPendingById(bot.id, item.id);
+      if (started.queueId && now?.delegation) autonomy.patchOwnerPending(bot.id, item.id, { delegation: { ...now.delegation, queueId: started.queueId } });
+      delegationChip(item, `Delegado a um agente pelo dono: ${item.title}${started.sessionId ? ` (sessão ${started.sessionId})` : " (na fila de sessões)"}`);
+      refreshBotRow(bot.id);
+      if (owner.bot.id !== bot.id) refreshBotRow(owner.bot.id);
+      console.log(`[owner-delegate] ${item.id} of ${bot.name} delegated: ${started.sessionId ? `session ${started.sessionId}` : `queued ${started.queueId}`} in ${view.repo}${choice && choice !== "none" ? `, decision "${choice.option.label}"` : ""}`);
+      return json(res, 202, { ok: true, ...(started.sessionId ? { sessionId: started.sessionId } : {}), ...(started.queueId ? { queueId: started.queueId } : {}) });
+    }
     // The person answers an item from "Precisa de você": a decision the bot
     // offered (options[n]), their own words, or a request for the steps. The
     // answer goes to the bot that owns the item, in the conversation it came

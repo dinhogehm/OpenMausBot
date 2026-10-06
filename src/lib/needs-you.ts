@@ -46,6 +46,13 @@ export interface NeedsYouItem {
   updatedAt?: number;
   /** A routine's item said once and let go: under "Talvez já resolvido", out of the count and the chip. */
   demotedAt?: number;
+  /** "Delegar a um agente" (lote del): the button shows; else why only the person can do it. */
+  delegable?: true;
+  onlyYou?: string;
+  /** Delegated to a Claude Code session: it waits on the session, out of the count. */
+  delegation?: NonNullable<WireOwnerPending["delegation"]>;
+  /** Back from a delegation: on top, with what the agent did and what is left. */
+  delegationBack?: NonNullable<WireOwnerPending["delegationBack"]>;
 }
 
 /** A routine's item said once and let go (INSP-N22 r2 F2): shown apart, folded, never counted as waiting on the person. */
@@ -55,7 +62,7 @@ export const maybeResolved = (item: Pick<NeedsYouItem, "demotedAt">): boolean =>
  * person as "o bot não respondeu" (INSP-J2 #2). */
 export const AWAITING_MAX_MS = 2 * 3_600_000;
 
-type Awaitable = Pick<NeedsYouItem, "awaitingSince" | "history">;
+type Awaitable = Pick<NeedsYouItem, "awaitingSince" | "history"> & { delegation?: unknown };
 
 /** The person's last answer still waits its turn in a busy conversation: the
  * bot has not had it (INSP-J2 r3 R2). */
@@ -65,7 +72,11 @@ export const answerQueued = (item: Awaitable): boolean =>
 /** Answered, and its bot still has time to rewrite or resolve it — or the
  * answer waits its turn, within the same 2 h: not the person's. */
 export const awaitingBot = (item: Awaitable, now: number): boolean =>
-  item.awaitingSince !== undefined && now - item.awaitingSince < AWAITING_MAX_MS;
+  // delegated to an agent (lote del): it waits on the session the same way
+  item.delegation !== undefined || (item.awaitingSince !== undefined && now - item.awaitingSince < AWAITING_MAX_MS);
+
+/** Delegated to an agent (lote del): it waits on the session, like an answered item on its bot. */
+export const delegated = (item: Pick<NeedsYouItem, "delegation">): boolean => item.delegation !== undefined;
 
 /** Answered, and the bot did nothing for AWAITING_MAX_MS since it got it: the person's again. */
 export const botSilent = (item: Awaitable, now: number): boolean =>
@@ -200,6 +211,9 @@ export function needsYouItems(bots: readonly Bot[]): NeedsYouItem[] {
           ...(pending.awaitingSince ? { awaitingSince: pending.awaitingSince } : {}),
           ...(pending.updatedAt ? { updatedAt: pending.updatedAt } : {}),
           ...(pending.demotedAt ? { demotedAt: pending.demotedAt } : {}),
+          // "Delegar a um agente" (lote del)
+          ...(pending.delegable ? { delegable: true as const } : {}), ...(pending.onlyYou ? { onlyYou: pending.onlyYou } : {}),
+          ...(pending.delegation ? { delegation: pending.delegation } : {}), ...(pending.delegationBack ? { delegationBack: pending.delegationBack } : {}),
         });
       }
       // the conversation's own line (an approval, a question): never from a routine's run nor an archived one
@@ -279,6 +293,13 @@ export type NeedsYouSort = "due" | "age";
 /** "due": what falls due first (items without a deadline after, oldest
  * first); "age": what has waited longest. */
 export function sortNeedsYou(items: readonly NeedsYouItem[], sort: NeedsYouSort, now = Date.now()): NeedsYouItem[] {
+  const sorted = sortedNeedsYou(items, sort, now);
+  // back from a delegation: on top, the latest first (lote del)
+  const back = sorted.filter((item) => item.delegationBack).sort((a, b) => b.delegationBack!.at - a.delegationBack!.at);
+  return back.length ? [...back, ...sorted.filter((item) => !item.delegationBack)] : sorted;
+}
+
+function sortedNeedsYou(items: readonly NeedsYouItem[], sort: NeedsYouSort, now: number): NeedsYouItem[] {
   if (sort === "age") return items.toSorted((a, b) => a.since - b.since);
   const when = new Map(items.map((item) => [item, dueAt(item.due, now)]));
   return items.toSorted((a, b) => {
