@@ -593,18 +593,29 @@ function explicitlyClosed(text: string): boolean {
  * open and goes to the bot (INSP-N22 r5 T2). */
 export function ownerAnswersItem(item: Pick<OwnerPending, "key" | "why" | "title">, text: string): boolean {
   const said = text.trim();
-  if (!said || PANEL_OPEN.test(said) || /(?<![\p{L}])depois(?!\s+d[aeo]s?(?![\p{L}]))(?![\p{L}])/iu.test(said)) return false;
+  if (!said || answerWithReservation(said) || /(?<![\p{L}])depois(?!\s+d[aeo]s?(?![\p{L}]))(?![\p{L}])/iu.test(said)) return false;
   if (/(?<![\p{L}])pront[oa]\s+(?:para|pra)(?![\p{L}])/iu.test(said)) return false;
   const plain = strip(said).toLowerCase();
   const facts = itemFacts(item);
-  const yes = PANEL_YES.exec(plain) ?? (facts ? actionMatch(facts, plain)?.match ?? null : null);
+  // "sim"/"ok" alone or opening the answer; a done or the ask's own action anywhere
+  const yes = /^(?:sim|ok)(?![a-z])/.exec(plain) ?? PANEL_YES.exec(plain) ?? (facts ? actionMatch(facts, plain)?.match ?? null : null);
   return Boolean(yes && !negatedBefore(plain, yes.index, yes[0].length));
+}
+/** A reservation anywhere keeps the panel answer open — it goes to the bot, the item stays (INSP-N22 r6 U1): "Tentei…,
+ * mas ele não atendeu", "Mandei mensagem, sem resposta", "Sim, mas ainda não falei", "Ok, deixa comigo", "Pode deixar
+ * que eu cuido", "…, ele vê". */
+const PANEL_RESERVATION = /(?<![\p{L}])(?:mas|por[ée]m|n[ãa]o|nem|sem|ainda|deixa comigo|pode deixar|eu cuido|eu vejo|(?:ele|ela) v[êe])(?![\p{L}])/iu;
+/** The words of a panel answer that kept, or would have kept, it open: a closed item answered with one of them never
+ * holds the routine back from asking it again (INSP-N22 r6 U1). */
+export function answerWithReservation(text: string): boolean {
+  return PANEL_OPEN.test(text) || PANEL_RESERVATION.test(text);
 }
 /** What keeps a panel answer open wherever it is. */
 const PANEL_OPEN = /\?|(?<![\p{L}])(?:vai|vou|aguardo|aguardando|esperar|esperando|metade|parte|parcial\p{L}*|falta|faltam|faltando|amanh[ãa]|talvez|pediu|errado|errada|ignora|ignore|segunda)(?![\p{L}])/iu;
-/** An affirmative or a done, accents off: "sim", "ok", "feito", "aberta", "tudo certo", "pode escrever", "falei",
- * "conversei", "registrei", "abri", "decidi"… */
-const PANEL_YES = /(?<![a-z])(?:sim|ok|feit[oa]|pront[oa]|resolvid[oa]|decidid[oa]|liberad[oa]|abert[oa]|conclu[ií]d[oa]|fechad[oa]|tudo certo|esta ok|pode [a-z]{3,}|[a-z]{3,}ei|abri|escrevi|decidi|respondi|resolvi|fiz|pus)(?![a-z])/;
+/** A done, accents off: the explicit forms ("feito", "resolvido", "aberta", "decidido", "tudo certo", "pode escrever")
+ * and the verbs of an ending ("falei com", "conversei com", "respondi", "abri", "registrei", "decidi") — never any past
+ * in -ei: "Liguei e ele não atendeu", "Tentei…" end nothing (INSP-N22 r6 U1). */
+const PANEL_YES = /(?<![a-z])(?:feit[oa]|pront[oa]|resolvid[oa]|decidid[oa]|liberad[oa]|abert[oa]|conclu[ií]d[oa]|fechad[oa]|tudo certo|esta ok|pode [a-z]{3,}|(?:falei|conversei)(?: direto)? com|resolvi|respondi|abri|escrevi|registrei|criei|decidi|liberei|aprovei|tratei|fiz|pus)(?![a-z])/;
 
 export function ownerEndsRoutineAsk(item: Pick<OwnerPending, "key" | "why" | "title">, text: string): boolean {
   const facts = itemFacts(item);
@@ -622,7 +633,10 @@ export function ownerSettlesRoutineAsks(ledger: RoutineAskLedger, botId: string,
   for (const item of ledger.ownerPendingOf(botId)) {
     const facts = isRoutineItem(item) && item.demotedAt === undefined ? itemFacts(item) : null;
     if (!facts) continue;
-    const said = messages.find((message) => message.at > item.createdAt && sentencesOf(message.text ?? "").map(unquoted).some((sentence) =>
+    // only what the owner wrote after the item last changed hands: opened, said again, kept ("Ainda vale") or folded —
+    // an old message never undoes the owner's "Ainda vale" at the next turn's end (INSP-N22 r6 U2)
+    const since = Math.max(item.createdAt, item.keptAt ?? 0, item.lastSaidAt ?? 0, item.demotedAt ?? 0);
+    const said = messages.find((message) => message.at > since && sentencesOf(message.text ?? "").map(unquoted).some((sentence) =>
       isAbout(facts, sentence, "owner") && ownerEndsRoutineAsk(item, sentence)));
     if (!said) continue;
     const down = ledger.patchOwnerPending(botId, item.id, {
@@ -654,6 +668,11 @@ export interface RoutineAskLedger {
 const isRoutineItem = (item: Pick<OwnerPending, "key">) => Boolean(item.key?.startsWith(ROUTINE_ASK_KEY_PREFIX));
 /** An item's key, without the mark that tells a second pendency of the same subject apart. */
 const baseKey = (key: string) => key.split("~")[0]!;
+/** The owner closed it with words that keep a reservation (their last answer in its history). */
+const closedWithReservation = (item: Pick<ResolvedOwnerPending, "history">) => {
+  const last = item.history?.findLast((each) => each.kind === "text");
+  return Boolean(last && answerWithReservation(last.text));
+};
 /** The item says the same pendency as `ask`: the same subject, and what it asks beyond it reads alike. */
 function itemIsAsk(item: Pick<OwnerPending, "key" | "why" | "title">, ask: RoutineAsk): boolean {
   if (!item.key || baseKey(item.key) !== routineAskKey(ask)) return false;
@@ -694,7 +713,8 @@ export function applyRoutineAsks(ledger: RoutineAskLedger, run: { botId: string;
     if (mine.some((item) => !item.key && ((label && has(`${item.title} ${item.why ?? ""}`, label)) || overlap(ask.what ?? ask.sentence, `${item.title} ${item.why ?? ""}`) >= 0.6))) continue;
     const existing = mine.find((item) => isRoutineItem(item) && itemIsAsk(item, ask));
     // answered by the owner a moment ago, the SAME pendency: the routine is only repeating what it read before (INSP-N22 A2)
-    if (!existing && ledger.resolvedOwnerPendingOf(run.botId).some((item) => item.resolvedBy === "owner" && run.at - item.resolvedAt < ROUTINE_ASK_SETTLED_MS && itemIsAsk(item, ask))) continue;
+    // — not when the owner's closing words carried a reservation: that answer must not hold it back (INSP-N22 r6 U1)
+    if (!existing && ledger.resolvedOwnerPendingOf(run.botId).some((item) => item.resolvedBy === "owner" && run.at - item.resolvedAt < ROUTINE_ASK_SETTLED_MS && itemIsAsk(item, ask) && !closedWithReservation(item))) continue;
     // another pendency about a subject that already has one: its own key
     const base = routineAskKey(ask);
     const taken = new Set([...mine, ...ledger.resolvedOwnerPendingOf(run.botId)].flatMap((item) => (item.key ? [item.key] : [])));

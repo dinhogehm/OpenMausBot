@@ -576,3 +576,60 @@ describe("INSP-N22 r5 T2: the owner answering THE item from the panel", () => {
     expect(answers(which, text)).toBe(false);
   });
 });
+
+describe("INSP-N22 r6", () => {
+  const WIDGET = "A conversa do widget (Nuria.identify) continua com você: às 8:39 você disse que ia falar direto com o Luis Rossi.";
+  const base = { botId: "m", botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", routineId: "R-A", threadId: "t1", ...ctx };
+
+  it.each([
+    "Tentei falar com o Luis Rossi, mas ele não atendeu.",
+    "Liguei e ele não atendeu.",
+    "Mandei mensagem pra ele, sem resposta.",
+    "Sim, mas ainda não falei com ele.",
+    "Ok, deixa comigo.",
+    "Pode deixar que eu cuido disso.",
+    "Expliquei pro Filipe o caso, ele vê.",
+  ])("U1: a panel answer with a reservation keeps the item open (the inspector's 7): %s", (text) => {
+    const clock = Date.parse("2026-10-05T12:00:00Z");
+    const item = applyRoutineAsks(new BotAutonomy({ path: null, now: () => clock }), { ...base, text: WIDGET, at: clock }).opened[0]!;
+    expect(ownerAnswersItem(item, text)).toBe(false);
+  });
+
+  it("U1: an item closed with a reservation never holds the routine back from asking it again", () => {
+    let clock = Date.parse("2026-10-05T12:00:00Z");
+    const ledger = new BotAutonomy({ path: null, now: () => clock });
+    const [item] = applyRoutineAsks(ledger, { ...base, text: WIDGET, at: clock }).opened;
+    ledger.recordOwnerPendingAnswer("m", item!.id, { kind: "text", text: "Ok, deixa comigo.", delivered: true });
+    ledger.resolveOwnerPending({ botId: "m", id: item!.id, by: "owner" });
+    clock += 3_600_000;
+    expect(applyRoutineAsks(ledger, { ...base, text: WIDGET, at: clock }).opened).toHaveLength(1);
+    // a clean "done" still holds it back
+    const [again] = ledger.ownerPendingOf("m");
+    ledger.recordOwnerPendingAnswer("m", again!.id, { kind: "text", text: "Falei com o Luis Rossi, tudo certo.", delivered: true });
+    ledger.resolveOwnerPending({ botId: "m", id: again!.id, by: "owner" });
+    clock += 3_600_000;
+    expect(applyRoutineAsks(ledger, { ...base, text: WIDGET, at: clock }).opened).toEqual([]);
+  });
+
+  it("U2: the owner spoke, the item folded, \"Ainda vale\", a turn ends — it stays on top, folded again by nothing old", () => {
+    let clock = Date.parse("2026-10-05T12:00:00Z");
+    const ledger = new BotAutonomy({ path: null, now: () => clock });
+    const [item] = applyRoutineAsks(ledger, { ...base, text: WIDGET, at: clock }).opened;
+    const said = [{ at: clock + 60_000, text: "Já falei com o Luis Rossi sobre o widget." }];
+    clock += 2 * 60_000;
+    expect(ownerSettlesRoutineAsks(ledger, "m", said).map((each) => each.id)).toEqual([item!.id]);
+    clock += 60_000;
+    keepRoutineAsk(ledger, "m", item!.id, clock);
+    // the next turn's end reads the same last messages: nothing moves, so no chip is written again
+    clock += 60_000;
+    expect(ownerSettlesRoutineAsks(ledger, "m", said)).toEqual([]);
+    expect(ledger.ownerPendingById("m", item!.id)!.demotedAt).toBeUndefined();
+    // the routine asks again, then a turn ends with the same old messages: still on top
+    clock += 3_600_000;
+    applyRoutineAsks(ledger, { ...base, text: WIDGET, at: clock });
+    expect(ownerSettlesRoutineAsks(ledger, "m", said)).toEqual([]);
+    expect(ledger.ownerPendingById("m", item!.id)!.demotedAt).toBeUndefined();
+    // a new message of the owner after that folds it again
+    expect(ownerSettlesRoutineAsks(ledger, "m", [...said, { at: clock + 60_000, text: "Conversei com o Luis Rossi sobre o widget agora, falei com ele." }])).toHaveLength(1);
+  });
+});
