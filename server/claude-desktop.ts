@@ -477,6 +477,49 @@ export function trustPrompt(lines: OcrLine[]): OcrLine | null {
   return lines.find((line) => TRUST_BUTTON.test(line.text.trim())) ?? lines.find((line) => TRUST_LINE.test(line.text.trim())) ?? null;
 }
 
+/** The folder a prompt names in its own words, when it does ("Confiar em
+ * /Users/…/9384-… e iniciar uma sessão de código?", the app's PDCixSwULY;
+ * "Trust /… and start a code session?"), else null. */
+export function trustPromptFolder(lines: OcrLine[]): string | null {
+  for (const line of lines) {
+    const named = /^(?:Confiar em|Trust) (\/.+?)(?: e iniciar| and start|\?|$)/i.exec(line.text.trim());
+    if (named) return named[1]!.trim();
+  }
+  return null;
+}
+
+/** A line of the Claude app's own log (~/Library/Logs/Claude/main.log) about
+ * a workspace's trust: the app checking a folder it opens ("checkTrust"),
+ * saving one ("saveTrust", "Saved workspace trust for"). Local time, to the second. */
+export interface TrustLogLine { at: number; kind: "check" | "save"; folder: string }
+
+export function parseTrustLog(text: string): TrustLogLine[] {
+  const out: TrustLogLine[] = [];
+  for (const raw of text.split("\n")) {
+    const line = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) \[\w+\] (?:LocalSessions\.(checkTrust|saveTrust): cwd=(.+)|Saved workspace trust for (.+))$/.exec(raw.trimEnd());
+    if (!line) continue;
+    const [, y, mo, d, h, mi, s, kind, cwd, saved] = line;
+    out.push({ at: new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s)).getTime(), kind: kind === "checkTrust" ? "check" : "save", folder: (cwd ?? saved)!.trim() });
+  }
+  return out;
+}
+
+const realOrSelf = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+
+/** Whether a trust prompt on screen is for `expected`, by what ties it to a
+ * folder: the folder the prompt names, else the newest folder the app's log
+ * checked (or saved) since our link was opened. "ours", "other" (and which),
+ * or "none" — nothing ties it to any folder. Compared by real path, so the
+ * alias the app was given is the worktree it points to. */
+export function trustPromptFor(lines: OcrLine[], log: readonly TrustLogLine[], since: number, expected: string, kinds: ReadonlyArray<TrustLogLine["kind"]> = ["check", "save"]): { is: "ours" } | { is: "other"; folder: string } | { is: "none" } {
+  const real = realOrSelf(expected);
+  const named = trustPromptFolder(lines);
+  // the log is to the second: a line of the second the link was opened counts
+  const newest = named ?? log.filter((each) => kinds.includes(each.kind) && each.at >= Math.floor(since / 1_000) * 1_000).sort((a, b) => b.at - a.at)[0]?.folder;
+  if (!newest) return { is: "none" };
+  return realOrSelf(newest) === real ? { is: "ours" } : { is: "other", folder: newest };
+}
+
 /** The folder the app was given is the server's own worktree: its real path
  * is `expected`, which git lists among the repository's worktrees
  * (`registered`, real paths) — never only the server's record against itself
@@ -517,9 +560,10 @@ export function showsFolderName(lines: OcrLine[], name: string): boolean {
  * outside .claude/worktrees: the app maps folders inside it back to the
  * repository root); `folderName` is what its chip shows.
  */
-export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string; registered?: () => readonly string[] }): Promise<DesktopStep> {
+export async function openDesktopSessionIn(driver: DesktopDriver, input: { folder: string; folderName: string; text: string; expected?: string; registered?: () => readonly string[]; trustLog?: () => string }): Promise<DesktopStep> {
   if (!input.folder.startsWith("/") || !input.folderName) return { ok: false, reason: "invalid folder for a new session", retry: false };
   return withScreen(driver, async (screen) => {
+    const opened = Date.now();
     await act(screen, () => driver.openUrl(newSessionInFolderUrl(input.folder)));
     await driver.sleep(3_000);
     let stop = await guard(screen, "new session in its folder");
@@ -537,13 +581,28 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
     };
     let bottom = await band();
     const seen = ours(bottom);
-    if ("ok" in seen) return seen;
-    // The app asks to trust a folder it has not seen ("Confiar no workspace",
-    // 05/10 #9378). Clicked only now that the screen shows our folder, and
-    // only when that folder is a worktree git lists for the repository, by
-    // its real path; anywhere else only the person decides (INSP-R12a X3-2).
     const trust = trustPrompt(bottom);
+    // The app's log, read only when there is a prompt to tie to a folder.
+    const log = () => (input.trustLog ? parseTrustLog(input.trustLog()) : []);
+    // The prompt with the chips still on the folder before (16 of the 19
+    // "does not show the folder" misses of 05–06/10): clicked only when
+    // something ties the prompt to OUR worktree — the folder it names, or the
+    // app's log checking it since our link opened — never on the screen
+    // alone; nothing ties it: a miss, as before (R13-dispatch, owner's call).
+    const chipBefore = "ok" in seen && Boolean(trust) && bottom.some((line) => NEW_SESSION_PLACEHOLDER.test(line.text.trim())) && !bottom.some((line) => SCRATCH_FOLDER.test(line.text));
+    if ("ok" in seen && !chipBefore) return seen;
+    // read once, before any click: what ties the prompt to a folder
+    const tie = trust && input.expected && (input.trustLog || "ok" in seen) ? trustPromptFor(bottom, log(), opened, input.expected) : { is: "none" as const };
+    if ("ok" in seen) {
+      if (tie.is !== "ours") return { ...seen, reason: `${seen.reason}; the app asks to trust a workspace, and ${tie.is === "other" ? `it is ${tie.folder}, not ${input.folderName}` : `nothing ties it to ${input.folderName} (the prompt names no folder, the app's log checked none since the link opened)`} — not clicked` };
+    }
+    // The app asks to trust a folder it has not seen ("Confiar no workspace",
+    // 05/10 #9378). Clicked only when that folder is a worktree git lists for
+    // the repository, by its real path; anywhere else only the person decides
+    // (INSP-R12a X3-2) — and never when what ties the prompt to a folder
+    // names another one.
     if (trust) {
+      if (tie.is === "other") return { ok: false, reason: `the app asks to trust the workspace ${tie.folder}, not ${input.folderName}; nothing was clicked or typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
       // git's list is read only now, when there is a prompt to answer (INSP-R12a-r2 R2-5)
       if (!ownWorktreeFolder(input.folder, input.expected, input.registered?.() ?? [])) return { ok: false, reason: `the app asks to trust the workspace ${input.folderName}, which is not a worktree the server made; nothing was clicked or typed`, retry: true, touched: true, trustNeeded: input.folder, seen: seenText(bottom.slice(-8)) };
       stop = await guard(screen, "trust the workspace");
@@ -552,6 +611,9 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
       await driver.sleep(1_000);
       bottom = await band();
       if (trustPrompt(bottom)) return { ok: false, reason: `the app still asks to trust the workspace ${input.folderName} after the click; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
+      // what the app saved, when its log says: another folder is a miss, said
+      const saved = input.expected && input.trustLog ? trustPromptFor([], log(), opened, input.expected, ["save"]) : { is: "none" as const };
+      if (saved.is === "other") return { ok: false, reason: `the app saved the trust for ${saved.folder}, not ${input.folderName}, after the click; nothing was typed`, retry: true, miss: true, touched: true, seen: seenText(bottom.slice(-8)) };
       // Never pasted on the screen of the click: both times the server
       // clicked it (06/10 11:06 and 12:01 BRT) the app saved the trust and
       // then started the session in a scratch folder of its own, a second
@@ -560,6 +622,7 @@ export async function openDesktopSessionIn(driver: DesktopDriver, input: { folde
       // (R13-dispatch R13-3).
       return { ok: false, reason: `trusted the workspace ${input.folderName}; nothing was typed — the app's link is opened again and the folder checked before the brief goes in`, retry: true, touched: true, trusted: true, seen: seenText(bottom.slice(-8)) };
     }
+    if ("ok" in seen) return seen;
     const { field } = seen;
     // the folder IS the worktree: with the app's worktree option on, the app
     // would make one of its own inside or beside it (R11-dispatch R11-1)

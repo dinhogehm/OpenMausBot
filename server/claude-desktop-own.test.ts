@@ -20,6 +20,8 @@ import {
   notRepoRoot,
   rootFolderRefusal,
   trustPrompt,
+  trustPromptFolder,
+  parseTrustLog,
   createDesktopSession,
   rootAnchorSession,
   type DesktopDriver,
@@ -348,6 +350,148 @@ describe("the real screen of #9378 (R12-visual N20)", () => {
     const step = await createDesktopSession(app.driver, { repoName: "nuria-platform", text: "brief" });
     expect(step).toMatchObject({ ok: false });
     expect((step as { trustNeeded?: string }).trustNeeded).toBeUndefined();
+  });
+});
+
+// The 16 creates of 05–06/10 that stopped at "does not show the folder" with
+// the trust prompt on screen (server.log: time, session, the folder asked
+// for, what the screen showed). The owner's call: click "Confiar" right after
+// OUR link even with the chip on the folder before — only when something ties
+// the prompt to our worktree by its real path (the folder it names, or the
+// app's main.log checking it since the link opened); nothing does: no click,
+// a miss, as before. NB: in all 16, main.log has no line naming our folder
+// before the screen was read — only after a click (saveTrust), or a check of
+// ANOTHER folder (03:31:25 checkTrust …/9337-…-2f6a57, 4 s before 06/10 03:31:29Z).
+const REAL_TRUST_16: Array<[string, string, string, string]> = [
+  ["2026-10-05T16:00:50Z", "472b5524", "9378-supervisor-do-atendimento", "Confiar no workspace | • Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.,5 | Médio"],
+  ["2026-10-05T16:02:00Z", "472b5524", "9378-supervisor-do-atendimento", "Confiar no workspace | • Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.,5 | Médio"],
+  ["2026-10-05T16:04:10Z", "472b5524", "9378-supervisor-do-atendimento", "Confiar no workspace | • Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.,5 | Médio"],
+  ["2026-10-05T18:37:31Z", "035161dc", "9378-supervisor-do-atendimento-035161", "Confiar no workspace | • Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-05T18:38:20Z", "035161dc", "9378-supervisor-do-atendimento-035161", "Confiar no workspace | • Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-05T18:41:50Z", "2f2ec068", "9337-sobrecarga-d1-no-envio-do-agente", "Confiar no workspace | • Local | • 9378-supervisor-do-ate…. | 2º omb/9378-supervisor-do-aten... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.,5 | Médio"],
+  ["2026-10-05T19:45:39Z", "035161dc", "9378-supervisor-do-atendimento-035161", "Confiar no workspace | • Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-05T19:56:12Z", "2f2ec068", "9337-sobrecarga-d1-no-envio-do-agente", "Confiar no workspace | • Local | • 9337-sobrecarga-d1-no-….. | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-06T03:31:29Z", "e712f070", "9378-supervisor-papel-base-gerente", "Confiar no workspace | • Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-06T03:32:09Z", "e712f070", "9378-supervisor-papel-base-gerente", "Confiar no workspace | • Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-06T03:33:19Z", "e712f070", "9378-supervisor-papel-base-gerente", "Confiar no workspace | • Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-06T03:43:48Z", "e0d7126a", "9378-supervisor-papel-base-gerente-e0d712", "Confiar no workspace | • Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-06T03:44:29Z", "e0d7126a", "9378-supervisor-papel-base-gerente-e0d712", "Confiar no workspace | • Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-06T03:45:39Z", "e0d7126a", "9378-supervisor-papel-base-gerente-e0d712", "Confiar no workspace | • Local | • 9337-sobrecarga-d1-no-... | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-06T14:02:55Z", "b23900b6", "9378-supervisor-papel-base-gerente-b23900", "Confiar no workspace | • Local | • 9337-sobrecarga-d1-no-….. | 2º omb/9337-sobrecarga-d1-no-e... 1O worktree | Descreva uma tarefa ou faça uma pergunta | + O v Automático | Opus 5.5 | Médio"],
+  ["2026-10-06T14:52:35Z", "b7fcd057", "9384-hook-v2-7-c2b-append-atendimento-b7fcd0", "Confiar no workspace | • Local | • nuria-platform | gº main |O worktree | Descreva uma tarefa ou faça uma pergunta | + o v Ignorar permissões | Opus 5.5 | Médio"],
+];
+
+describe("\"Confiar\" with the chip still on the folder before: clicked only when tied to our worktree (R13-dispatch, owner's call)", () => {
+  const dirs: string[] = [];
+  afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+  /** Our worktree and the alias the app is given, and the previous session's (another one), for real: the tie is by real path. */
+  const world = (folder: string) => {
+    const root = mkdtempSync(join(tmpdir(), "omb-trust16-"));
+    dirs.push(root);
+    const make = (name: string) => {
+      const worktree = join(root, "nuria-platform", ".claude", "worktrees", name);
+      mkdirSync(worktree, { recursive: true });
+      const alias = join(root, ".omb-worktree-links", "nuria-platform", name);
+      mkdirSync(join(alias, ".."), { recursive: true });
+      symlinkSync(worktree, alias);
+      return { worktree, alias };
+    };
+    return { ours: make(folder), before: make("9337-sobrecarga-d1-no-envio-do-agente-2f6a57") };
+  };
+  /** A line of main.log as the app writes it: local time, to the second. */
+  const logLine = (at: number, text: string) => {
+    const d = new Date(at);
+    const two = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())} [info] ${text}`;
+  };
+  const screenFrom = (seen: string) => seen.split(" | ");
+  const chipOurs = (seen: string, folder: string) => showsFolderName(screenFrom(seen).map((text) => ({ x: 600, y: 800, w: 200, h: 16, text })), folder);
+
+  it("are 16; in 6 the chip already reads as ours (cut short), in 10 it shows the folder before", () => {
+    expect(REAL_TRUST_16).toHaveLength(16);
+    expect(REAL_TRUST_16.filter(([, , folder, seen]) => chipOurs(seen, folder))).toHaveLength(6);
+    expect(REAL_TRUST_16.every(([, , , seen]) => trustPrompt(screenFrom(seen).map((text) => ({ x: 600, y: 800, w: 200, h: 16, text })))?.text === "Confiar no workspace")).toBe(true);
+  });
+
+  it.each(REAL_TRUST_16.filter(([, , folder, seen]) => !chipOurs(seen, folder)))("%s %s: nothing ties the prompt to %s (main.log as it was: no line naming it before the screen) — no click, a miss", async (at, _session, folder, seen) => {
+    const { ours } = world(folder);
+    vi.setSystemTime(Date.parse(at) - 4_000);
+    // what main.log had before that screen: other folders, checked earlier than the link (or nothing)
+    const log = [logLine(Date.parse(at) - 3_600_000, `LocalSessions.checkTrust: cwd=${ours.alias}`), logLine(Date.parse(at) - 120_000, "LocalSessions.checkTrust: cwd=/Users/o/Projetos/nuria-platform")].join("\n");
+    const app = fakeApp([screenFrom(seen)]);
+    let listed = 0;
+    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => { listed += 1; return [ours.worktree]; }, trustLog: () => log });
+    expect(step).toMatchObject({ ok: false, miss: true, retry: true });
+    expect(!step.ok && step.reason).toContain(`nothing ties it to ${folder}`);
+    expect(!step.ok && step.reason).toContain("not clicked");
+    expect(listed).toBe(0);
+    expect(app.actions.some((action) => action.startsWith("click") || action.startsWith("paste"))).toBe(false);
+  });
+
+  it.each(REAL_TRUST_16.filter(([, , folder, seen]) => !chipOurs(seen, folder)))("%s %s: the app's log checked OUR worktree (%s) since the link opened — clicked, nothing pasted, the link opened again next", async (at, _session, folder, seen) => {
+    const { ours } = world(folder);
+    vi.setSystemTime(Date.parse(at) - 4_000);
+    const opened = Date.now();
+    const log = [logLine(opened - 60_000, "LocalSessions.checkTrust: cwd=/Users/o/Projetos/nuria-platform"), logLine(opened + 1_000, `LocalSessions.checkTrust: cwd=${ours.alias}`)].join("\n");
+    const after = screenFrom(seen).filter((line) => !line.startsWith("Confiar"));
+    const app = fakeApp([screenFrom(seen), after]);
+    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => [ours.worktree], trustLog: () => `${log}\n${logLine(Date.now(), `Saved workspace trust for ${ours.alias}`)}` });
+    expect(step).toMatchObject({ ok: false, retry: true, trusted: true });
+    expect(app.actions.filter((action) => action.startsWith("click"))).toEqual(["click 700,708"]);
+    expect(app.actions.some((action) => action.startsWith("paste"))).toBe(false);
+  });
+
+  it("the log checked ANOTHER folder since the link (06/10 03:31:25 checkTrust …/9337-…-2f6a57, before e712f070's screen): no click, and the reason names it", async () => {
+    const [at, , folder, seen] = REAL_TRUST_16[8]!;
+    const { ours, before } = world(folder);
+    vi.setSystemTime(Date.parse(at) - 4_000);
+    const log = logLine(Date.now() + 0, `LocalSessions.checkTrust: cwd=${before.alias}`);
+    const app = fakeApp([screenFrom(seen)]);
+    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "brief", expected: ours.worktree, registered: () => [ours.worktree], trustLog: () => log });
+    expect(step).toMatchObject({ ok: false, miss: true });
+    expect(!step.ok && step.reason).toContain(`it is ${before.alias}, not ${folder}`);
+    expect(app.actions.some((action) => action.startsWith("click"))).toBe(false);
+  });
+
+  it("the prompt naming our folder in its own words ties it; naming another does not; a folder not git's (X3-2) is never clicked", async () => {
+    const [at, , folder, seen] = REAL_TRUST_16[15]!;
+    const { ours, before } = world(folder);
+    vi.setSystemTime(Date.parse(at));
+    const named = (path: string) => screenFrom(seen).map((line) => (line === "Confiar no workspace" ? `Confiar em ${path} e iniciar uma sessão de código?` : line)).concat("Confiar");
+    expect(trustPromptFolder([{ x: 0, y: 0, w: 0, h: 0, text: `Confiar em ${ours.alias} e iniciar uma sessão de código?` }])).toBe(ours.alias);
+    const yes = fakeApp([named(ours.alias), screenFrom(seen).slice(1)]);
+    expect(await openDesktopSessionIn(yes.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => [ours.worktree], trustLog: () => "" })).toMatchObject({ trusted: true });
+    const no = fakeApp([named(before.alias)]);
+    expect(await openDesktopSessionIn(no.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => [ours.worktree], trustLog: () => "" })).toMatchObject({ ok: false, miss: true });
+    expect(no.actions.some((action) => action.startsWith("click"))).toBe(false);
+    // tied to it, but git does not list it as the repository's worktree: the person decides (X3-2)
+    const notGits = fakeApp([named(ours.alias)]);
+    expect(await openDesktopSessionIn(notGits.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => ["/elsewhere"], trustLog: () => "" })).toMatchObject({ ok: false, trustNeeded: ours.alias });
+    expect(notGits.actions.some((action) => action.startsWith("click"))).toBe(false);
+  });
+
+  it("after the click, the app saving the trust for another folder is a miss, said", async () => {
+    const [at, , folder, seen] = REAL_TRUST_16[15]!;
+    const { ours, before } = world(folder);
+    vi.setSystemTime(Date.parse(at));
+    const opened = Date.now();
+    let reads = 0;
+    const log = () => (reads++ === 0 ? logLine(opened, `LocalSessions.checkTrust: cwd=${ours.alias}`) : `${logLine(opened, `LocalSessions.checkTrust: cwd=${ours.alias}`)}\n${logLine(Date.now(), `Saved workspace trust for ${before.alias}`)}`);
+    const app = fakeApp([screenFrom(seen), screenFrom(seen).slice(1)]);
+    const step = await openDesktopSessionIn(app.driver, { folder: ours.alias, folderName: folder, text: "b", expected: ours.worktree, registered: () => [ours.worktree], trustLog: log });
+    expect(step).toMatchObject({ ok: false, miss: true });
+    expect(!step.ok && step.reason).toContain(`the app saved the trust for ${before.alias}`);
+  });
+
+  it("reads main.log's trust lines as the app writes them (06/10 11:04:44 BRT)", () => {
+    const lines = parseTrustLog([
+      "2026-10-06 11:04:41 [info] LocalSessions.getPrChecks: cwd=/x, prNumber=9386",
+      "2026-10-06 11:04:44 [info] LocalSessions.saveTrust: cwd=/Users/osvaldo/Projetos/.omb-worktree-links/nuria-platform/9378-supervisor-papel-base-gerente-b23900",
+      "2026-10-06 11:04:44 [info] Saved workspace trust for /Users/osvaldo/Projetos/.omb-worktree-links/nuria-platform/9378-supervisor-papel-base-gerente-b23900",
+      "2026-10-06 11:06:15 [info] LocalSessions.checkTrust: cwd=/Users/osvaldo/Library/Application Support/Claude/scratch-workspaces/x/scratch-2026-10-06-c55113",
+    ].join("\n"));
+    expect(lines.map((each) => [each.kind, each.folder.split("/").pop()])).toEqual([["save", "9378-supervisor-papel-base-gerente-b23900"], ["save", "9378-supervisor-papel-base-gerente-b23900"], ["check", "scratch-2026-10-06-c55113"]]);
+    expect(lines[0]!.at).toBe(new Date(2026, 9, 6, 11, 4, 44).getTime());
   });
 });
 

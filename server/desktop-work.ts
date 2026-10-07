@@ -96,6 +96,8 @@ export interface DesktopWorkDeps {
   branches?: (session: CcSession) => string[];
   /** The real paths of the worktrees git lists for the session's repository: a "trust this workspace" is clicked only for one of them. */
   registeredWorktrees?: (session: CcSession) => string[];
+  /** The tail of the Claude app's own log (main.log), read only: what ties a "trust" prompt to a folder. */
+  trustLog?: () => string;
   /** A session of the app in the repository root to open before New Session (claude-desktop.ts rootAnchorSession). */
   rootAnchor?: (session: CcSession) => { localId: string; title?: string } | null;
   /** The review hook's latest deny/ask (or decision) for a Claude Code session id. */
@@ -844,7 +846,7 @@ export async function runDesktopWork(deps: DesktopWorkDeps, state: { busy: boole
       deps.ledger.save();
       step = own
         // the app's link opens New Session in the server's own worktree (its alias)
-        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [] })
+        ? await (steps.openIn ?? openDesktopSessionIn)(driver, { folder: own.link ?? own.path, folderName: basename(own.path), text: pending.text, expected: own.path, registered: () => deps.registeredWorktrees?.(next) ?? [], ...(deps.trustLog ? { trustLog: deps.trustLog } : {}) })
         : await (steps.create ?? createDesktopSession)(driver, { repoName: deps.repoName(next), text: pending.text, liveWorktrees: deps.liveWorktrees?.() ?? [], baseBranch: deps.baseBranch?.(next) ?? "main", anchor: deps.rootAnchor?.(next) ?? null, rootHead: deps.rootHead?.(next) ?? null, branches: deps.branches?.(next) ?? [] });
     } else {
       const record = deps.readRecord(desktop.localId!);

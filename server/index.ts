@@ -10524,6 +10524,8 @@ const desktopWork: DesktopWorkDeps = {
   rootHead: (session) => gitLine(session.repo, ["rev-parse", "--abbrev-ref", "HEAD"]),
   // the worktrees git lists for the repository (a "trust this workspace" is clicked only for one of ours)
   registeredWorktrees: (session) => parseWorktreeList(gitLine(session.repo, ["worktree", "list", "--porcelain"]) ?? "").map((entry) => entry.path),
+  // the app's own log, read only: what ties a "trust this workspace" prompt to a folder (its last 256 KiB)
+  trustLog: () => readTail(join(homedir(), "Library", "Logs", "Claude", "main.log"), 256 * 1024),
   branches: (session) => (gitLine(session.repo, ["for-each-ref", "--count=500", "--format=%(refname:short)", "refs/heads"]) ?? "").split("\n").filter(Boolean),
   // never a session the server opened (a failed one in the root is the newest there — INSP-S r1 S-3)
   rootAnchor: (session) => rootAnchorSession(session.repo, undefined, ourAppLocalIds()),
@@ -11365,7 +11367,10 @@ function startCcSession(bot: BotRecord, threadId: string, replyThreadId: string,
   ccLedger.save();
   // the worktree made and seeded by the server first, as for the app (R13-gate G2); elsewhere claude -w makes a bare one
   if (process.platform === "darwin" && ownWorktreesOn(input.repo)) {
-    ccLedger.markRunning(session);
+    // running while its worktree is made (not a turn yet: runCcTurn counts it)
+    session.status = "running";
+    session.progressAt = Date.now();
+    ccLedger.save();
     void startSeededCli(session, input.brief).catch((error) => console.error(`[cc-session] ${session.id}: seeded start failed: ${error instanceof Error ? error.message : String(error)}`));
   } else runCcTurn(session, input.brief, true);
   ccChip(session, `iniciada em ${input.repo}/.claude/worktrees/${session.worktree}`);
