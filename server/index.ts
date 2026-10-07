@@ -14791,8 +14791,9 @@ function botMainThread(botId: string): string | undefined {
  * renameResultsThreads). One nobody renamed is that automatic default, not a
  * choice: new runs move to the main thread, and the old thread stays. */
 function legacyResultsThread(routineName: string, task: TaskRecord): boolean {
-  return task.title.endsWith(" · Results") || task.title.endsWith(" · Resultados")
-    || task.title === threadTitleFrom(`${routineName} · Results`) || task.title === threadTitleFrom(`${routineName} · Resultados`);
+  // Not "· Resultados": a routine that already has its own results
+  // conversation keeps reporting in it (the owner's decision, INSP-UP #1).
+  return task.title.endsWith(" · Results") || task.title === threadTitleFrom(`${routineName} · Results`);
 }
 
 function routineSourceThread(run: RoutineRun): string | null {
@@ -15221,6 +15222,11 @@ routines = new RoutineManager({
     const mainAllowed = main && (!CLOUD_HOME || (opener === CLOUD_OWNER_KEY && !cloudGuestOpened(main)));
     const keepChosen = chosen && !chosen.routineRunId && !(mainAllowed && legacyResultsThread(routine.name, chosen));
     if (keepChosen) return chosen.threadId;
+    // This fork (INSP-UP #1): a routine made in a chat that still reaches it
+    // has its own conversation there, and keeps reporting into it (no
+    // results snapshot: the run reports to its sourceThreadId). Only a
+    // routine with no conversation of its own goes to the main thread.
+    if (!forceNew && !chosen && routineSourceOwner({ ...routine, resultsThreadId: undefined })) return undefined;
     if (mainAllowed || !CLOUD_HOME) return main;
     const threadId = store.createTask(routine.botId, `${routine.name} · Resultados`, false)?.threadId;
     if (threadId) threadStarters.set(threadId, opener!);

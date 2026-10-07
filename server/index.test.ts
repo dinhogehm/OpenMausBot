@@ -10057,7 +10057,7 @@ describe("harness HTTP API", () => {
       expect((await api("PATCH", `/api/bots/${teammate.id}`, {
         modelSelection: { instanceId: "ghost", model: "unavailable-fixture" },
       })).status).toBe(200);
-      expect((await api("POST", `/api/bots/${teammate.id}/read`, { threadId: teammate.threadId })).status).toBe(200);
+      expect((await api("POST", `/api/bots/${bot.id}/read`, { threadId: bot.threadId })).status).toBe(200);
       const crossEvents = await openSse(`${BASE}/api/events`);
       let crossRun;
       try {
@@ -10066,30 +10066,26 @@ describe("harness HTTP API", () => {
           (frame) => frame.kind === "notify" && frame.notification?.kind === "routine-failed",
           5_000,
         );
-        expect(failedNotice.notification).toMatchObject({ botId: teammate.id, threadId: teammate.threadId });
+        expect(failedNotice.notification).toMatchObject({ botId: bot.id, threadId: bot.threadId });
       } finally {
         crossEvents.close();
       }
       expect(crossRun.status).toBe(201);
-      // Execution and reporting both belong to the teammate: a routine another
-      // bot asked for reports into the running bot's main thread, not into the
-      // proposer's conversation that held the card.
+      // Execution belongs to the teammate, but the confirmed request's
+      // reporting destination is still the proposer's conversation: this
+      // fork keeps a chat-made routine reporting in its own chat (INSP-UP #1).
       await expect.poll(async () => {
-        const destination = (await api("GET", `/api/threads/${teammate.threadId}/messages`)).body;
-        return destination.messages.filter(
+        const source = (await api("GET", `/api/threads/${bot.threadId}/messages`)).body;
+        return source.messages.filter(
           (message: { routineRun?: { runId?: string; status?: string } }) =>
             message.routineRun?.runId === crossRun.body.run.id && message.routineRun?.status === "failed",
         );
       }, { timeout: 5_000 }).toHaveLength(1);
-      expect((await api("GET", `/api/threads/${bot.threadId}/messages`)).body.messages.some(
-        (message: { routineRun?: { runId?: string } }) => message.routineRun?.runId === crossRun.body.run.id,
-      )).toBe(false);
       const crossStateAfterRun = (await api("GET", "/api/bots?messages=0")).body;
-      expect(crossStateAfterRun.bots.find((candidate: { id: string }) => candidate.id === teammate.id)
-        ?.tasks.find((task: { threadId: string }) => task.threadId === teammate.threadId)?.unread).toBe(true);
+      expect(crossStateAfterRun.bots.find((candidate: { id: string }) => candidate.id === bot.id)
+        ?.tasks.find((task: { threadId: string }) => task.threadId === bot.threadId)?.unread).toBe(true);
 
-      // A teammate moved out of the section still never reports into the
-      // proposer's conversation.
+      // Moving either bot out of the section revokes that reporting route.
       expect((await api("PATCH", `/api/bots/${teammate.id}`, { section: "Private routine work" })).status).toBe(200);
       const movedRun = await api("POST", `/api/routines/${crossRoutine.id}/run`);
       expect(movedRun.status).toBe(201);

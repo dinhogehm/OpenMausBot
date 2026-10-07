@@ -88,6 +88,17 @@ it("reports every run into the bot's main thread while fresh executions, approva
     expect((await api("GET", "/api/routines")).routines.find((candidate: any) => candidate.id === routine.id).resultsThreadId).toBe(originalThread);
     expect((await currentBot()).tasks.some((task: any) => task.threadId === legacy.threadId)).toBe(true);
     expect((await messages(originalThread)).filter((message) => message.kind === "routine.run")).toHaveLength(3);
+    // This fork (INSP-UP #1, the Monitor's real routine): a routine that
+    // already has its own "<name> · Resultados" conversation keeps reporting
+    // in it; it is not a legacy default to move away from.
+    const { task: own } = await api("POST", `/api/bots/${bot.id}/tasks`, { title: "Atendimento: Chat, planilha e issues · Resultados" }, 201);
+    await api("PATCH", `/api/routines/${routine.id}`, { resultsThreadId: own.threadId });
+    const { run: kept } = await api("POST", `/api/routines/${routine.id}/run`, undefined, 201);
+    expect(kept.resultsThreadId).toBe(own.threadId);
+    await expect.poll(async () => (await runState(kept.id))?.status, { timeout: 15_000 }).toBe("completed");
+    expect((await api("GET", "/api/routines")).routines.find((candidate: any) => candidate.id === routine.id).resultsThreadId).toBe(own.threadId);
+    expect((await messages(own.threadId)).filter((message) => message.routineRun?.runId === kept.id)).toHaveLength(1);
+    expect((await messages(originalThread)).filter((message) => message.kind === "routine.run")).toHaveLength(3);
     await api("PATCH", `/api/routines/${routine.id}`, { resultsThreadId: dedicated });
 
     const gate = join(fixture.info.dataDir, "results-finish");
@@ -145,7 +156,9 @@ it("reports every run into the bot's main thread while fresh executions, approva
   }
 }, 90_000);
 
-it("reports a routine made in another chat into the bot's main thread, not that chat or a new results thread", async () => {
+// This fork (INSP-UP #1, the Chief's disk routine): a routine made in a chat
+// keeps reporting into that chat, its own conversation, not the main thread.
+it("reports a routine made in another chat into that chat, not the main thread or a new results thread", async () => {
   const fixture = await launchVerificationServer(process.env, undefined, undefined, undefined, undefined, { scripted: true });
   const evidence: unknown[] = [{ fixture: fixture.info }];
   const planPath = join(fixture.info.dataDir, "room-plan.json");
@@ -182,16 +195,16 @@ it("reports a routine made in another chat into the bot's main thread, not that 
     expect(definition.sourceThreadId).toBe(chat);
 
     const { run } = await api("POST", `/api/routines/${routineId}/run`, undefined, 201);
-    expect(run.resultsThreadId).toBe(mainThread);
+    expect(run.resultsThreadId).toBeUndefined();
     await expect.poll(async () => (await api("GET", "/api/routines")).runs.find((candidate: any) => candidate.id === run.id)?.status, { timeout: 20_000 }).toBe("completed");
     const finished = (await api("GET", "/api/routines")).runs.find((candidate: any) => candidate.id === run.id);
-    expect((await messages(mainThread)).find((message) => message.routineRun?.runId === run.id)?.routineRun)
+    expect((await messages(chat)).find((message) => message.routineRun?.runId === run.id)?.routineRun)
       .toMatchObject({ status: "completed", executionThreadId: finished.threadId });
-    expect((await messages(chat)).some((message) => message.kind === "routine.run")).toBe(false);
+    expect((await messages(mainThread)).some((message) => message.kind === "routine.run")).toBe(false);
     const saved = (await api("GET", "/api/bots")).bots.find((candidate: any) => candidate.id === bot.id);
     expect(saved.tasks.filter((candidate: any) => !candidate.routineRunId).map((candidate: any) => candidate.threadId).sort())
       .toEqual([mainThread, chat].sort());
-    expect(saved.tasks.find((candidate: any) => candidate.threadId === mainThread).unread).toBe(true);
+    expect(saved.tasks.find((candidate: any) => candidate.threadId === chat).unread).toBe(true);
     expect(saved.tasks.find((candidate: any) => candidate.threadId === finished.threadId)).toMatchObject({ routineRunId: run.id });
     evidence.push({ run: finished, bot: saved, main: await messages(mainThread) });
   } finally {
