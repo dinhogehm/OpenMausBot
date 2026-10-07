@@ -139,6 +139,17 @@ describe("one name per thing", () => {
     expect([...new Set(offending)]).toEqual([]);
   });
 
+  // R13-visual N29: "login do Cloud", "plano do Cloud", "seu Cloud", "OMB Cloud" sat beside "Minha Nuvem"
+  it("pt-BR never says Cloud alone: the plan and its sign-in are OpenMausBot Cloud, the home is Minha Nuvem", () => {
+    const pack = locales["pt-br"] as Record<string, string>;
+    const offending = Object.entries(pack)
+      // the plan's own name, another company's product, and the Server menu's literal item (Electron's menu is not translated)
+      .filter(([, value]) => /\bCloud\b/.test(value.replace(/OpenMausBot Cloud|Cerebras Cloud|“My Cloud”/g, "")))
+      .map(([key, value]) => `${key}: ${value}`);
+    expect(offending).toEqual([]);
+    expect(pack["sidebar.preview.screenFrame"]).toBe("Captura de tela");
+  });
+
   it("hard-coded strings in src, server, electron and shared use the same words", () => {
     const findings = hardcodedFindings();
     const offending = findings

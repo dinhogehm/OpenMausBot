@@ -1,4 +1,5 @@
 import type { GroupGoalRunCardData } from "../../shared/group-goal-run";
+import type { RoutineRunCardData } from "../../shared/routine-run";
 import type { ConnectorCardData } from "../../shared/wire";
 
 export const PINNED_SECTION_ID = "builtin:pinned";
@@ -66,6 +67,40 @@ export function sidebarGoalRunPreview(run: GroupGoalRunCardData): string {
   const summary = detail || goal;
   const label = GOAL_RUN_PREVIEW_LABEL[run.status];
   return summary ? `${label}: ${summary}` : label;
+}
+
+/** The catalog keys a routine run's preview reads its state from. */
+export type SidebarRoutineRunPreviewKey =
+  | "sidebar.preview.routineRun.queued"
+  | "sidebar.preview.routineRun.running"
+  | "sidebar.preview.routineRun.waiting"
+  | "sidebar.preview.routineRun.completed"
+  | "sidebar.preview.routineRun.failed"
+  | "sidebar.preview.routineRun.cancelled"
+  | "sidebar.preview.routineRun.missed"
+  | "sidebar.preview.routineRun.needsInput";
+
+/** A routine run's receipt previews as what the run said, in the bot's own
+ * words, or as where it stands in the reader's language — never as the
+ * English line the computer writes for clients without the card
+ * ("Routine “…” completed", R13-visual N25). A run that failed says so: its
+ * error is the provider's text, not the bot's. */
+export function sidebarRoutineRunPreview(
+  run: Pick<RoutineRunCardData, "routineName" | "status" | "goalStatus" | "summary">,
+  say: (key: SidebarRoutineRunPreviewKey, params: { name: string }) => string,
+): string {
+  const failed = run.status === "failed" || run.status === "missed" || run.status === "cancelled";
+  const summary = failed ? "" : (run.summary ?? "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^\s*(?:[-*+•]|\d+[.)]|#{1,6})\s+/gm, "")
+    .replace(/[*_`~]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (summary) return summary;
+  const key: SidebarRoutineRunPreviewKey = run.goalStatus === "needs-input"
+    ? "sidebar.preview.routineRun.needsInput"
+    : `sidebar.preview.routineRun.${run.status}`;
+  return say(key, { name: run.routineName });
 }
 
 /** The catalog keys a connection card's preview reads its state from. */

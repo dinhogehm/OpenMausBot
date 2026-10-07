@@ -98,6 +98,21 @@ describe("tasks", () => {
     expect(titleFromMessage("x".repeat(80))).toHaveLength(48);
   });
 
+  // R12-visual N24: the Chief's conversation of 03/10 was named "Pode" for good
+  it("a one-word first message names nothing: the next message does", async () => {
+    const { store, UNTITLED_THREAD } = await freshStore();
+    const bot = store.createBot();
+    const task = store.createTask(bot.id)!;
+    for (const said of ["Pode", "Sim.", "ok?", "  Vai  "]) {
+      expect(store.titleTaskFromFirstMessage(bot.id, said, task.threadId)).toBeNull();
+      expect(store.activeTask(bot.id)!.title).toBe(UNTITLED_THREAD);
+    }
+    expect(store.titleTaskFromFirstMessage(bot.id, "Pode abrir a issue da Marluce", task.threadId)?.title).toBe("Pode abrir a issue da Marluce");
+    // two words of substance already name it ("Fechar #9389")
+    const other = store.createTask(bot.id)!;
+    expect(store.titleTaskFromFirstMessage(bot.id, "Fechar #9389", other.threadId)?.title).toBe("Fechar #9389");
+  });
+
   it("returns the task it named, so a caller knows which title it may replace", async () => {
     const { store } = await freshStore();
     const bot = store.createBot();

@@ -345,6 +345,14 @@ export function threadTitleFrom(title?: string): string {
 }
 
 /** A task's name, taken from the first thing you asked it to do. */
+/** A first message too short to name what the conversation is about: one
+ * word of substance at most ("Pode", "Sim", "ok?"). The next message names it
+ * instead — "Pode" sat in the Chief's list for days (R12-visual N24). */
+export function tooShortToTitle(text: string): boolean {
+  const line = text.trim().split("\n")[0]!;
+  return (line.match(/\p{L}{3,}|\d+/gu) ?? []).length < 2;
+}
+
 export function titleFromMessage(text: string): string {
   const line = text.trim().split("\n")[0]!.trim();
   return line.length > 48 ? `${line.slice(0, 47)}…` : line || UNTITLED_TASK;
@@ -2895,6 +2903,8 @@ export class Store {
   titleTaskFromFirstMessage(botId: string, text: string, threadId?: string): TaskRecord | null {
     const task = threadId ? this.taskByThread(botId, threadId) : this.activeTask(botId);
     if (!task || task.titleFromFirstMessage || (task.title !== UNTITLED_TASK && task.title !== UNTITLED_THREAD)) return null;
+    // "Pode": the row keeps its sentinel title, and the next message gets the naming attempt
+    if (tooShortToTitle(text)) return null;
     task.title = titleFromMessage(text);
     task.titleFromFirstMessage = true;
     this.saveBots();

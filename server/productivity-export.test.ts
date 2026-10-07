@@ -75,23 +75,26 @@ describe("board model", () => {
   });
 
   it("success rate over the runs that ran; superseded and aborted apart (INSP-V r1 #1)", () => {
-    expect(by("successRate")).toMatchObject({ value: "60%", detail: "3 de 5 que rodaram · 1 substituído e 1 abortado fora da taxa" });
+    expect(by("successRate")).toMatchObject({ value: "60%", detail: "3 de 5 que rodaram · fora da conta: 1 trocado por um commit mais novo e 1 abortado antes de rodar" });
   });
 
   it("the stopped pipeline says production stayed up and shows the weekend (INSP-V r1 #2)", () => {
     expect(by("blocked")).toMatchObject({ label: "Pipeline de release parado", value: "5 h", detail: "produção no ar · 0 min em fim de semana" });
   });
 
-  it("P1 shows p1 + high, the old scale, apart (INSP-V r1 #5)", () => {
-    expect(by("openP1").detail).toBe("agora: P1 1 = 1 priority:p1 + 0 priority:high (legado) · P0 1");
-    expect(by("openP1").short).toBe("fim do período contra fim do anterior; P1 = p1 + high, P0 = p0 + critical");
+  it("P1 counts p1 + high, the old scale, and says how many still carry the old label — never the label names (INSP-V r1 #5, R13-visual N17)", () => {
+    expect(by("openP1").detail).toBe("agora: P1 1 · P0 1 (1 ainda com o rótulo antigo)");
+    expect(by("openP1").short).toBe("fim do período contra fim do anterior; rótulos novos e antigos somados");
+    const old = { ...report(), backlog: { ...report().backlog, openP1: 3, openP1Split: { current: 1, legacy: 2 } } };
+    expect(boardKpis(old).find((kpi) => kpi.key === "openP1")!.detail).toBe("agora: P1 3 (2 ainda com o rótulo antigo) · P0 1 (1 ainda com o rótulo antigo)");
+    for (const line of [...boardKpis(old).flatMap((kpi) => [kpi.detail, kpi.short]), ...executiveSummary(old)]) expect(line).not.toMatch(/priority:|carrier/);
   });
 
   it("compares P0/P1 at the end of each period, with today apart and labelled (INSP-V r2 #2)", () => {
     const september = buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") } });
     const card = boardKpis(september).find((kpi) => kpi.key === "openP1")!;
     // the value is the end of September (2), the same instant its comparison uses — not today's count
-    expect(card).toMatchObject({ value: "2", detail: "ao fim do período · agora 2: P1 1 = 1 priority:p1 + 0 priority:high (legado) · P0 1" });
+    expect(card).toMatchObject({ value: "2", detail: "ao fim do período · agora 2: P1 1 · P0 1 (1 ainda com o rótulo antigo)" });
     expect(september.kpis.openP1AtEnd).toBe(2);
   });
 
@@ -129,14 +132,15 @@ describe("board model", () => {
 });
 
 describe("executive summary", () => {
-  it("is five pt-BR lines with the numbers, the rules and the coverage of each", () => {
+  it("is six pt-BR lines with the numbers, the rules and the coverage of each; releases and bots apart (R13-visual N17)", () => {
     const lines = executiveSummary(report());
     expect(lines).toEqual([
       "Produção: ≥3 entregas (sem base comparável), 0,9 por dia útil com dados (3,5 dias úteis), com ≥4 PRs e ≥2 issues concluídas no ar (1 release sem conteúdo lido); parte do período sem fonte de releases.",
       "Vazão: 5 PRs mergeadas (anterior: 0) e 2 issues resolvidas (anterior: 0), 1 bug e 1 P0/P1.",
       "Lead time issue até produção: mediana 43 h, p90 2,6 d (n=2; sem base comparável); merge até produção 1,8 h.",
-      "Backlog agora: 2 issues abertas; P1 1 (1 priority:p1 + 0 priority:high legado) e P0 1; a mais antiga #104, 22 d; 1 PR esperando o gate.",
-      "Releases: sucesso 60% (3 de 5 que rodaram; 1 substituído e 1 abortado fora da taxa), 1 recusado; pipeline parado 5 h com produção no ar (0 min em fim de semana). Bots: 3 turnos em 4,5 dias registrados; custo US$ 0,75 (engenharia US$ 0,00, operação US$ 0,75); custo de engenharia por entrega — (nenhum custo de bot de engenharia registrado).",
+      "Backlog agora: 2 issues abertas; P1 1 e P0 1 (1 ainda com o rótulo antigo); a mais antiga #104, 22 d; 1 PR esperando o gate.",
+      "Releases: sucesso 60%, 3 de 5 que rodaram; 1 recusado. Fora da conta: 1 trocado por um commit mais novo e 1 abortado antes de rodar. Pipeline parado 5 h com produção no ar, 0 min em fim de semana.",
+      "Bots: 3 turnos em 4,5 dias registrados; custo US$ 0,75 (engenharia US$ 0,00, operação US$ 0,75); custo de engenharia por entrega — (nenhum custo de bot de engenharia registrado).",
     ]);
   });
 
@@ -149,12 +153,12 @@ describe("executive summary", () => {
     expect(costPerDeliveryText(one)).toBe("— (só 1 entrega nos dias registrados; mínimo 5)");
     const enough = { ...few, kpis: { ...few.kpis, deliveriesInUsageDays: 6, costPerDelivery: 0.2 } };
     expect(costPerDeliveryText(enough)).toBe("US$ 0,20 por entrega (6 entregas nos dias registrados)");
-    expect(executiveSummary(few)[4]).toContain("custo US$ 1,95 (engenharia US$ 1,20, operação US$ 0,75)");
+    expect(executiveSummary(few)[5]).toContain("custo US$ 1,95 (engenharia US$ 1,20, operação US$ 0,75)");
   });
 
   it("reads a closed month's backlog at its end, and labels today apart (INSP-V r2 #7)", () => {
     const september = buildProductivityReport({ ...scenario(), granularity: "day", period: { from: brt("2026-09-01T00:00:00"), to: brt("2026-10-01T00:00:00") } });
-    expect(executiveSummary(september)[3]).toBe("Backlog ao fim do período (30/09/2026): 4 issues abertas, 2 P0/P1. Agora: P1 1 (1 priority:p1 + 0 priority:high legado) e P0 1; 1 PR esperando o gate.");
+    expect(executiveSummary(september)[3]).toBe("Backlog ao fim do período (30/09/2026): 4 issues abertas, 2 P0/P1. Agora: P1 1 e P0 1 (1 ainda com o rótulo antigo); 1 PR esperando o gate.");
     const markdown = reportMarkdown(september);
     expect(markdown).toContain("## Backlog ao fim do período (30/09/2026 23:59)");
     expect(markdown).toContain("## Backlog agora (02/10/2026 12:00)");
@@ -163,7 +167,7 @@ describe("executive summary", () => {
   it("says the bots' cost covers only the recorded days (INSP-V r1 #6)", () => {
     const base = scenario();
     const none = buildProductivityReport({ ...base, local: { ...base.local, usageFrom: null }, usage: [], granularity: "day", period: { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") } });
-    expect(executiveSummary(none)[4]).toMatch(/Bots: sem registro de uso no período\.$/);
+    expect(executiveSummary(none)[5]).toMatch(/Bots: sem registro de uso no período\.$/);
   });
 
   it("has an English version with the same numbers", () => {
@@ -192,7 +196,7 @@ describe("Markdown", () => {
     expect(markdown).toContain("2 commits só tiveram runs substituídos ou abortados (nenhum rodou): contados no cabeçalho, não listados.");
     expect(markdown).toContain("conteúdo desconhecido (primeiro release conhecido)");
     expect(markdown).not.toContain("sem release anterior para comparar");
-    expect(markdown).toContain("P1: 1 = 1 priority:p1 + 0 priority:high (escala antiga)");
+    expect(markdown).toContain("- P1: 1\n");
   });
 
   it("shows the bots' days before the ledger as —, not 0 (INSP-V r1 #6)", () => {
@@ -284,7 +288,7 @@ describe("PDF", () => {
     const usage = [...base.usage, { at: new Date(brt("2026-10-01T15:00:00")).toISOString(), botId: "new-bot", botName: "Bot Novo", input: 10, output: 1, costUsd: 0.4 }];
     const withOther = buildProductivityReport({ ...base, usage, granularity: "day", period: { from: brt("2026-09-28T00:00:00"), to: brt("2026-10-03T00:00:00") } });
     expect(withOther.kpis).toMatchObject({ costUsd: 1.15, costOperationsUsd: 0.75, costOtherUsd: 0.4 });
-    expect(executiveSummary(withOther)[4]).toContain("custo US$ 1,15 (engenharia US$ 0,00, operação US$ 0,75, outros (bots fora da lista de papéis) US$ 0,40)");
+    expect(executiveSummary(withOther)[5]).toContain("custo US$ 1,15 (engenharia US$ 0,00, operação US$ 0,75, outros (bots fora da lista de papéis) US$ 0,40)");
   });
 
   it("never cuts a list without saying how many are left (INSP-V r1 #12)", () => {

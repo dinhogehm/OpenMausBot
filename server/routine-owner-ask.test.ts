@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BotAutonomy, OWNER_PENDING_MAX_PER_THREAD } from "./bot-autonomy.ts";
-import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_SETTLED_MS, ownerAnswersItem, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
+import { applyRoutineAsks, keepRoutineAsk, routineAskItem, markStaleRoutineAsks, ownerAnswerCloses, ownerEndsRoutineAsk, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_LET_GO_MS, ROUTINE_ASK_SETTLED_MS, ownerAnswersItem, routineAskKey, routineAskTitle, routineOwnerAsks, routineReplyText, saysRoutineAskResolved, settleRoutineAsks } from "./routine-owner-ask.ts";
 
 // The Monitor's routine "Atendimento: Chat, planilha e issues", 05/10 09:00 (R12-visual N22), as it wrote it.
 const MONITOR_0510 = [
@@ -654,5 +654,56 @@ describe("INSP-N22 r6", () => {
     expect(ledger.ownerPendingById("m", item!.id)!.demotedAt).toBeUndefined();
     // a new message of the owner after that folds it again
     expect(ownerSettlesRoutineAsks(ledger, "m", [...said, { at: clock + 60_000, text: "Conversei com o Luis Rossi sobre o widget agora, falei com ele." }])).toHaveLength(1);
+  });
+});
+
+// R13-visual N26: the two routine items of 06/10 (o16, o17) got titles with no subject. The Monitor's replies, verbatim
+// from messages.db (threads 61532c8d at 11:08 and 31df5560 at 15:00).
+const MONITOR_0610_1108 = [
+  "O Chief concordou: a linha da Marluce ([#9389](https://github.com/dinhogehm/nuria-platform/issues/9389)) fica com você, como você decidiu às 11:05. Ele não vai me pedir para gravar nada nela.",
+  "",
+  "- **Próximo passo:** quando você avisar que gravou a linha 191, eu leio as linhas 190 a 192. A ideia é confirmar que a 190 continua com o Matheus (#9384), que a 191 ficou com a Marluce e que a coluna de Observações não quebrou. Mando o resultado para o Chief.",
+  "- **Quem regravou a 190:** continua sem resposta. O Chief não achou essa gravação no log dos comandos e prefere não dizer que foi você.",
+  "- **Se demorar:** se a 191 ainda estiver vazia quando a #9389 andar, o Chief fala com você.",
+  "",
+  "Nesta passada não há mais nada pendente no Chat nem no GitHub.",
+].join("\n");
+const MONITOR_0610_1500 = [
+  "Passada das 15h feita. Não postei nada, porque não havia novidade.",
+  "",
+  "- **Chat:** a última mensagem continua sendo a sua resposta à Marluce na conversa dela, às 10:10 BRT, sobre a [#9389](https://github.com/dinhogehm/nuria-platform/issues/9389). Ninguém escreveu depois e nenhuma pergunta ficou sem resposta.",
+  "- **GitHub:** nenhuma issue foi atualizada desde as 13h BRT.",
+  "- **Planilha:** comparei com o snapshot das 07h. As diferenças são as que já conhecíamos: a linha da Jess ([#9380](https://github.com/dinhogehm/nuria-platform/issues/9380)) agora está \"Pendente\" e a linha do Matheus ([#9384](https://github.com/dinhogehm/nuria-platform/issues/9384)) entrou. A linha da Marluce ([#9389](https://github.com/dinhogehm/nuria-platform/issues/9389)) ainda não aparece na planilha. Ela continua com você, então não mexi. Salvei um snapshot novo para comparar na próxima passada.",
+].join("\n");
+
+describe("R13-visual N26: a routine item's title always says what it is about", () => {
+  it("o16 (real 11:08): a fact told before the colon is no label, and \"como você decidiu\" asks no decision", () => {
+    expect(titles(MONITOR_0610_1108)).toEqual(["routine-ask:issue:9389 | Ver: a linha da Marluce (#9389)"]);
+  });
+
+  it("o17 (real 15:00): \"Ela continua com você\" takes its subject from the sentence before, which the why quotes too", () => {
+    const asks = routineOwnerAsks(MONITOR_0610_1500, ctx);
+    expect(asks.map((ask) => `${routineAskKey(ask)} | ${routineAskTitle(ask)}`)).toEqual(["routine-ask:issue:9389 | Ver: a linha da Marluce (#9389) ainda não aparece na planilha"]);
+    const item = routineAskItem(asks[0]!, { botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", firstAt: 0, lastAt: 0 });
+    expect(item.why).toContain("A linha da Marluce (#9389");
+    expect(item.why).toContain("Ela continua com você, então não mexi.");
+  });
+
+  it("the subject from the paragraph: the nearest sentence naming an issue, a row or a person, else the one before", () => {
+    expect(titles("A linha 191 ainda está vazia. O Chat ficou quieto a tarde toda. Isso continua com você.")).toEqual(["routine-ask:linha:191 | Ver: a linha 191 ainda está vazia"]);
+    expect(titles("O widget caiu de novo às 14h.\nIsso continua com você.")).toEqual([expect.stringMatching(/\| Ver: o widget caiu de novo às 14h$/)]);
+    // another item of the list is another paragraph: never its subject
+    expect(titles("- A #9380 está pendente.\n- Ela continua com você.")[0]).not.toContain("9380");
+  });
+
+  it("still no subject: whose message it is, in which routine — never a pronoun nobody can place", () => {
+    const [ask] = routineOwnerAsks("Ela continua com você.", ctx);
+    const item = routineAskItem(ask!, { botName: "Monitor Chat Atendimento", routineName: "Atendimento: Chat, planilha e issues", firstAt: 0, lastAt: 0 });
+    expect(item.title).toBe("Ver o recado do Monitor Chat Atendimento na rotina \"Atendimento: Chat, planilha e issues\"");
+  });
+
+  it("a decision still asked keeps \"Decidir\"; a label that is no told fact stays the label", () => {
+    expect(titles("Uma decisão fica com você: se o Filipe recebe a escala nova.")[0]).toMatch(/\| Decidir: se o Filipe recebe a escala nova$/);
+    expect(titles("Escala de sábado do helpdesk: a conversa continua com você.")[0]).toMatch(/\| Ver: escala de sábado do helpdesk$/);
   });
 });

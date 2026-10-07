@@ -99,6 +99,7 @@ import {
   sidebarConnectorPreview,
   sidebarGoalRunPreview,
   sidebarLayoutInteractive,
+  sidebarRoutineRunPreview,
   sidebarSectionCollapsed,
   sidebarSectionLabel,
   userSectionId,
@@ -178,6 +179,7 @@ function preview(bot: Bot, visible: Message[], instances: InstanceInfo[]): strin
   if (last.kind === "activity" && last.tool) return activityPreview(last.tool, botEngine(bot, instances));
   if (last.kind === "screen") return t("sidebar.preview.screenFrame");
   if (last.kind === "connector" && last.connector) return sidebarConnectorPreview(last.connector, t);
+  if (last.kind === "routine.run" && last.routineRun) return sidebarRoutineRunPreview(last.routineRun, t);
   const peer = peerLine(last);
   if (peer) return `${peer.name}: ${peer.body}`;
   return citationPreviewText(last.text ?? "");
@@ -210,7 +212,9 @@ function groupPreview(group: Group, bots: Bot[], instances: InstanceInfo[]): str
       ? sidebarGoalRunPreview(last.goalRun)
       : last.kind === "connector" && last.connector
         ? sidebarConnectorPreview(last.connector, t)
-        : (last.text ?? "");
+        : last.kind === "routine.run" && last.routineRun
+          ? sidebarRoutineRunPreview(last.routineRun, t)
+          : (last.text ?? "");
   const readable = citationPreviewText(text);
   if (last.role === "user") return t("sidebar.preview.you", { text: readable });
   return last.from ? `${last.from.name}: ${readable}` : readable;

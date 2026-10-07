@@ -37,16 +37,25 @@ describe("report screen (pt-BR)", () => {
   const html = render(report());
   const plain = text(html);
 
-  it("names the period in the title and opens with the five-line summary", () => {
+  it("names the period in the title and opens with the six-line summary", () => {
     expect(plain).toContain("Produtividade de engenharia — 28/09 a 02/10/2026");
     expect(plain).toContain("Resumo executivo");
-    expect(html.match(/<ol[^>]*>[\s\S]*?<\/ol>/)![0].match(/<li>/g)).toHaveLength(5);
+    expect(html.match(/<ol[^>]*>[\s\S]*?<\/ol>/)![0].match(/<li>/g)).toHaveLength(6);
     expect(plain).toContain("Produção: ≥3 entregas (sem base comparável), 0,9 por dia útil com dados (3,5 dias úteis), com ≥4 PRs e ≥2 issues concluídas no ar");
   });
 
   it("says where no release source exists, as unknown — not zero", () => {
     expect(html).toContain('role="note"');
-    expect(plain).toContain("Sem base comparável: a fonte de releases não cobre os dois períodos");
+    // said once, above the cards; each production card only points at it (R13-visual N17)
+    expect(plain.split("a fonte de releases não cobre os dois períodos")).toHaveLength(2);
+    expect(plain).toContain("Os cartões de produção não trazem comparação com o período anterior: a fonte de releases não cobre os dois períodos.");
+    expect(plain).toContain("Sem comparação (veja o aviso acima)");
+  });
+
+  it("speaks to the board: no release carriers nor label names (R13-visual N17)", () => {
+    // the definitions keep the labels they define (chore/release-carrier-*, priority:p0…p3); the numbers never show them
+    expect(plain).not.toMatch(/carriers? de release|carrier #|priority:p1 \+|\(escala antiga\) ·|P1 = p1/);
+    expect(plain).toContain("PRs de publicação, à parte: 1");
   });
 
   it("shows the board's eight KPIs, each with its definition beside it and behind its button", () => {
@@ -68,12 +77,12 @@ describe("report screen (pt-BR)", () => {
     // labels before numbers: no "1 releases" whatever the count (INSP-V r2 #4)
     expect(plain).toContain("no ar: PRs ≥4, issues concluídas ≥2 · releases sem conteúdo lido: 1");
     expect(plain).toContain("60%");
-    expect(plain).toContain("3 de 5 que rodaram · fora da taxa: substituídos 1, abortados 1, recusados 1");
+    expect(plain).toContain("3 de 5 que rodaram · não contam como falha: trocados por um commit mais novo 1, abortados antes de rodar 1, recusados 1");
     expect(plain).toContain("produção no ar · 0 min em fim de semana");
   });
 
-  it("shows P1 as p1 + high with the split (INSP-V r1 #5)", () => {
-    expect(plain).toContain("P1 1 = 1 priority:p1 + 0 priority:high (escala antiga) · P0 1");
+  it("shows P1 as p1 + high with the split, in words (INSP-V r1 #5, R13-visual N17)", () => {
+    expect(plain).toContain("P1 1 (1 com o rótulo novo, 0 com o antigo) · P0 1");
   });
 
   it("compares by one rule: no trend on a small base, the previous value instead (INSP-V r1 #7)", () => {
@@ -167,7 +176,7 @@ describe("a closed month and the time before the bots' ledger", () => {
     const plain = text(render(september));
     expect(plain).toContain("Produtividade de engenharia — setembro/2026");
     // P0/P1 at the end of September against the end of August; today apart, labelled (INSP-V r2 #2)
-    expect(plain).toContain("ao fim do período · agora 2: P1 1 = 1 priority:p1 + 0 priority:high (escala antiga) · P0 1");
+    expect(plain).toContain("ao fim do período · agora 2: P1 1 (1 com o rótulo novo, 0 com o antigo) · P0 1");
     // the backlog of the closed month, then today's (INSP-V r2 #7)
     expect(plain).toContain("Backlog ao fim do período (30/09/2026)");
     expect(plain).toContain("P0/P1 abertas (rótulos de hoje)");
@@ -206,7 +215,8 @@ describe("pieces", () => {
     const line = (comparison: ReturnType<typeof compareKpi>) => text(renderToStaticMarkup(createElement(DeltaLine, { comparison, polarity: "up" })));
     expect(line(compareKpi(2868, 2))).toContain("Previous period: 2");
     expect(line(compareKpi(2868, 0, { beforeRepo: true }))).toContain("before the repository existed");
-    expect(line(compareKpi(27, 2, { comparable: false }))).toContain("No comparable base");
+    // why is said once above the cards (R13-visual N17)
+    expect(line(compareKpi(27, 2, { comparable: false }))).toContain("Not compared (see the note above)");
   });
 
   it("will not hand a stale report to the board: the menu says why and offers \"Atualizar e exportar\" (INSP-V r2 #3)", () => {
