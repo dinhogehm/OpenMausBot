@@ -411,7 +411,7 @@ import {
 } from "./desktop-work.ts";
 import { DESKTOP_HELPER_SOURCE } from "./claude-desktop-helper.ts";
 import { DiskWatch, freeBytes as volumeFreeBytes } from "./disk-watch.ts";
-import { addOwnWorktree, breakerRepo, cacheLine, enqueueSeededStart, installText, prepareCliWorktree, pruneDanglingLinks, seededStartChain, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
+import { addOwnWorktree, breakerRepo, cacheLine, enqueueSeededStart, groupExec, installText, prepareCliWorktree, pruneDanglingLinks, seededStartChain, cloneSeedCaches, ensureLink, type Exec as OwnExec, hooksFolder, leftOwnWorktrees, leftWorktreesReport, noteOwnFailure, ownBreakerCli, ownBreakerItem, type OwnBreakerState, ownBreakerTripped, rearmOwnBreaker, findCacheDirs, ownLinkPath, ownSettingsFor, OwnWorktreeStore, planOwnWorktree, realCloneIo, realDirFs, refreshSeed, savedText } from "./own-worktrees.ts";
 import { BG_JOB_MAX_MS, cutLeftovers, parseLsofCwd, backgroundProcesses, bgJobOverdueReport, bgJobResumePrompt, jobAlive, newTurnTree, noteDescendants, psTable, type TurnTree } from "./bg-jobs.ts";
 import { spawn as spawnCcProcess, execFile as execFileCc, execFileSync as execFileSyncCc, type ChildProcess as CcChildProcess } from "node:child_process";
 import { archiveBlockers, claimedPrNumbers, claimsInToolCalls, githubSlug, newDeliveryCache, openPrsOfSession, parseLsRemoteTag, PRODUCTION_TAG, resumeNeeded, watchProductionDelivery } from "./prod-delivery.ts";
@@ -10414,6 +10414,8 @@ const ownPrepareState = { preparing: false };
 /** The seeded headless starts, chained: each spawns after the one before it
  * (INSP-R13dis 3), 3 min each at most, then aborted and waited for (R2-1, R3-1/2). */
 const seededStart = seededStartChain();
+/** The seeded starts' git and cp: process groups, settled on close (own-worktrees.ts groupExec). */
+const preparationExec: OwnExec = (file, args, options = {}) => groupExec({ ...process.env, PATH: augmentedPath() })(file, args, { timeoutMs: 120_000, ...options });
 /** A headless session's first turn in a worktree the server made and seeded
  * from the same seed as the app's (R13-gate G2: `claude -p -w` made bare
  * ones, and the first ci:local failed on a missing vite after ~14 min of
@@ -10424,8 +10426,9 @@ function startSeededCli(session: CcSession, brief: string): Promise<void> {
   const settings = ownWorktreeSettings(seedRepo);
   return enqueueSeededStart(seededStart, session, {
     prepare: (repo, name, signal) => {
-      // every git and cp of it stops with the abort
-      const exec: OwnExec = (file, args, options = {}) => ownExec(file, args, { ...options, signal });
+      // every git and cp of it stops with the abort — its whole process group (hooks too), settled only once
+      // it has exited (INSP-R4-1)
+      const exec: OwnExec = (file, args, options = {}) => preparationExec(file, args, { ...options, signal });
       return prepareCliWorktree(repo, name, {
         add: (plan) => addOwnWorktree(repo, plan, exec, repoBaseBranch(repo)),
         clone: async (path) => {
@@ -10572,6 +10575,12 @@ function gitLine(repo: string, args: string[]): string | null {
   }
 }
 
+/** The worktrees git lists for a repository, or null when git cannot say (the worktree report's commands — INSP-R4-2). */
+function registeredWorktreePaths(repo: string): string[] | null {
+  const out = gitLine(repo, ["worktree", "list", "--porcelain"]);
+  return out === null ? null : parseWorktreeList(out).map((entry) => entry.path);
+}
+
 /** The branch origin/HEAD points to ("main"), what a new app session must show. */
 function repoBaseBranch(repo: string): string {
   try {
@@ -10714,7 +10723,7 @@ async function cleanReleasedWorktrees(): Promise<void> {
     // a live process working inside one holds it, as for the worktrees (INSP-R12a R12b-3)
     stale.push(...staleTaskWorkspaces(workspaces, { inUse: inUseForDisk, processCwds: cwds, now: Date.now(), known: stale.map((each) => each.path), canon: canonPath, root: TASK_WORKSPACES_DIR, home: homedir() }));
     // the server's own worktrees of failed sessions (or never used): their own lines, "da sessão falhada …" (R11-dispatch R11-1)
-    const left = leftOwnWorktrees(ccLedger.all(), existsSync);
+    const left = leftOwnWorktrees(ccLedger.all(), existsSync, registeredWorktreePaths);
     const leftPaths = new Set(left.map((each) => canonPath(each.path)));
     for (let i = stale.length - 1; i >= 0; i--) if (leftPaths.has(canonPath(stale[i]!.path))) stale.splice(i, 1);
     const leftKey = left.map((each) => each.path).sort().join("\n");
@@ -28554,7 +28563,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         allTime: ownStore.summary(0, now + 1),
         latest: ownStore.allEvents().slice(-20).reverse(),
         // worktrees of failed sessions (or never used): told with the command, never removed
-        left: leftOwnWorktrees(ccLedger.all(), existsSync),
+        left: leftOwnWorktrees(ccLedger.all(), existsSync, registeredWorktreePaths),
         breaker: ownBreaker.get().repos,
       });
     }

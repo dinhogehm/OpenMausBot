@@ -22,6 +22,7 @@
 // Nothing here removes a worktree, ever: the owner's rule is that the
 // server only reports. A failed clone takes back only the temporary copy it
 // was writing, inside the new worktree, before any session saw it.
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statfsSync, statSync, symlinkSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -139,6 +140,61 @@ export function failureText(error: unknown): string {
   const stderr = String((error as { stderr?: unknown })?.stderr || "").trim();
   const text = stderr || (error instanceof Error ? error.message : String(error));
   return text.split("\n").map((line) => line.replace(/^(?:fatal|error):\s*/i, "").trim()).filter(Boolean).slice(-2).join(" ").slice(0, 300) || "falhou sem dizer por quê";
+}
+
+/** After SIGTERM to a preparation's process group, how long before SIGKILL. */
+export const GROUP_KILL_AFTER_MS = 10_000;
+
+/** An Exec for a seeded start's preparation (R13-dispatch INSP-R4-1): each
+ * program in a process group of its own (`detached`), its abort or timeout a
+ * SIGTERM to the whole group — git's hooks, cp's children — then SIGKILL,
+ * and it settles only on `close`: when the program has exited and every
+ * process holding its output (a grandchild too) is gone. execFile's callback
+ * fires at the abort itself, with the program still running (3 s apart on a
+ * program that takes its time to stop). */
+export function groupExec(env: NodeJS.ProcessEnv = process.env, killAfterMs = GROUP_KILL_AFTER_MS): Exec {
+  return (file, args, options = {}) => new Promise<string>((resolve, reject) => {
+    if (options.signal?.aborted) {
+      reject(Object.assign(new Error(`${file}: aborted before it started`), { name: "AbortError" }));
+      return;
+    }
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(file, args, { cwd: options.cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    const cap = 16 * 1024 * 1024;
+    let out = "";
+    let err = "";
+    child.stdout?.on("data", (chunk: Buffer) => { if (out.length < cap) out += chunk.toString(); });
+    child.stderr?.on("data", (chunk: Buffer) => { if (err.length < cap) err += chunk.toString(); });
+    let stopped: string | null = null;
+    let hard: ReturnType<typeof setTimeout> | undefined;
+    const group = (sig: NodeJS.Signals) => { try { if (child.pid) process.kill(-child.pid, sig); } catch { /* gone already */ } };
+    const stop = (why: string) => {
+      if (stopped) return;
+      stopped = why;
+      group("SIGTERM");
+      hard = setTimeout(() => group("SIGKILL"), killAfterMs);
+      hard.unref?.();
+    };
+    const timer = options.timeoutMs ? setTimeout(() => stop(`passou de ${Math.round(options.timeoutMs! / 1000)} s`), options.timeoutMs) : undefined;
+    const onAbort = () => stop("interrompido");
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    let spawnError: Error | null = null;
+    child.on("error", (error) => { spawnError = error; });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      clearTimeout(hard);
+      options.signal?.removeEventListener("abort", onAbort);
+      if (spawnError) reject(Object.assign(spawnError, { stderr: err }));
+      else if (stopped) reject(Object.assign(new Error(`${file} ${stopped}`), { name: "AbortError", stderr: err }));
+      else if (code === 0) resolve(out);
+      else reject(Object.assign(new Error(`${file} saiu com ${code ?? signal}`), { stderr: err }));
+    });
+  });
 }
 
 /** Make the session's worktree from a fresh origin/<base>. A fetch that
@@ -365,8 +421,13 @@ export async function cloneSeedCaches(seed: SeedState | undefined, worktree: str
   // one file first, proved shared: where the volume cannot clone, cp -c
   // falls back to a full copy on its own (man cp) and would fill the disk
   const probe = join(worktree, CLONE_PROBE);
-  const cannot = await io.cloneFile(join(seed.path, seed.lockName!), probe);
-  io.dropTemp(probe);
+  let cannot: string | null;
+  try {
+    cannot = await io.cloneFile(join(seed.path, seed.lockName!), probe);
+  } finally {
+    // taken back whatever happened, an abort mid-check too (INSP-R4-3)
+    io.dropTemp(probe);
+  }
   if (cannot) return fallback(`o volume não clona arquivos (não é APFS?): ${cannot}`);
   const cloned: string[] = [];
   let savedKb = 0;
@@ -627,7 +688,8 @@ export function realCloneIo(exec: Exec, node: () => Promise<string | null>): Clo
       }
     },
     rename: renameSync,
-    dropTemp: (path) => rmSync(path, { recursive: true, force: true }),
+    // (the copy's cp has exited by then — groupExec settles on close — and a straggling write is retried, INSP-R4-3)
+    dropTemp: (path) => rmSync(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }),
     node,
     hooks: (folder) => hooksFolder(folder, exec),
     listDir: (path) => { try { return readdirSync(path); } catch { return null; } },
@@ -1044,18 +1106,42 @@ export function ownBreakerItem(repo: string, failures: readonly OwnFailure[]): {
 
 // ── the worktrees of sessions that did not use them: told, never removed ──
 
-export interface LeftWorktree { path: string; repo: string; sessionId: string; title: string; why: "failed" | "unused"; command: string }
+export interface LeftWorktree { path: string; repo: string; sessionId: string; title: string; why: "failed" | "unused" | "interrupted"; command: string }
 
 const quote = (value: string) => (/^[\w./@%+=:,-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`);
+
+/** What a person runs for a folder a seeded start left half made (INSP-R4-2):
+ * a plain remove refuses an interrupted checkout, and a folder git never
+ * registered is "not a working tree". `registered`: whether git lists it,
+ * null when unknown (then both ways are said). The --force is for that one
+ * folder only — the OMB made it and gave it up mid-preparation, and no
+ * session uses it; a folder never registered goes to the Trash, not rm. */
+export function interruptedCommand(repo: string, path: string, registered: boolean | null): string {
+  const branch = `worktree-${basename(path)}`;
+  const git = `git -C ${quote(repo)}`;
+  const listed = `${git} worktree remove --force ${quote(path)}`;
+  const unlisted = `${git} worktree prune, e mova a pasta para o Lixo (mv ${quote(path)} ~/.Trash/)`;
+  const how = registered === true ? listed : registered === false ? unlisted : `confira com ${git} worktree list; se ela estiver na lista: ${listed}; se não estiver: ${unlisted}`;
+  return `${how}; depois, ${git} branch -D ${branch} (a branch que o OMB criou para ela). O --force vale SÓ para esta pasta: o OMB a abandonou no meio da preparação (checkout incompleto) e nenhuma sessão a usa`;
+}
 
 /** The server's worktrees whose session failed, or that the session never
  * used (it went the old way): for the disk report, with the command a
  * person runs. Nothing here removes anything. */
-export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: string; repo: string; status: string; desktop?: { own?: { path: string; state: string } }; cliWorktreeLeft?: { path: string } }>, exists: (path: string) => boolean): LeftWorktree[] {
+export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: string; repo: string; status: string; desktop?: { own?: { path: string; state: string } }; cliWorktreeLeft?: { path: string } }>, exists: (path: string) => boolean, registered?: (repo: string) => readonly string[] | null): LeftWorktree[] {
   const out: LeftWorktree[] = [];
   for (const session of sessions) {
-    // a headless start given up past its deadline left one too (R3-1): never used, told the same way
-    const own = session.desktop?.own ?? (session.cliWorktreeLeft ? { path: session.cliWorktreeLeft.path, state: "abandoned" } : undefined);
+    // a headless start given up past its deadline left one (R3-1): its checkout may be half made,
+    // or git never registered it — its own lines, with what works for each (INSP-R4-2)
+    if (!session.desktop?.own && session.cliWorktreeLeft) {
+      const path = session.cliWorktreeLeft.path;
+      if (!exists(path)) continue;
+      const listed = registered?.(session.repo) ?? null;
+      const real = (each: string) => { try { return realpathSync(each); } catch { return each; } };
+      out.push({ path, repo: session.repo, sessionId: session.id, title: session.title, why: "interrupted", command: interruptedCommand(session.repo, path, listed === null ? null : listed.some((each) => real(each) === real(path))) });
+      continue;
+    }
+    const own = session.desktop?.own;
     if (!own || !exists(own.path)) continue;
     const why = session.status === "failed" ? "failed" as const : own.state === "abandoned" || own.state === "failed" ? "unused" as const : null;
     if (!why) continue;
@@ -1067,7 +1153,9 @@ export function leftOwnWorktrees(sessions: ReadonlyArray<{ id: string; title: st
 /** The disk report's lines for them (null when there are none). */
 export function leftWorktreesReport(left: readonly LeftWorktree[]): string | null {
   if (!left.length) return null;
-  const lines = left.map((each) => `- ${each.path}: ${each.why === "failed" ? `da sessão falhada "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)})` : `criada para a sessão "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que não a usou`} — para remover, depois de conferir: ${each.command}`);
+  const lines = left.map((each) => each.why === "interrupted"
+    ? `- ${each.path}: preparação interrompida (prazo de ${Math.round(SEEDED_START_MAX_MS / 1000)} s) da sessão de CLI "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que seguiu em outra worktree — para remover: ${each.command}`
+    : `- ${each.path}: ${each.why === "failed" ? `da sessão falhada "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)})` : `criada para a sessão "${each.title.slice(0, 60)}" (${each.sessionId.slice(0, 8)}), que não a usou`} — para remover, depois de conferir: ${each.command}`);
   return `Worktrees criadas pelo OMB que ficaram sem uso (${left.length}). O servidor não remove nada; uma pessoa confere (git status, o que há dentro) e decide:\n${lines.join("\n")}`;
 }
 
