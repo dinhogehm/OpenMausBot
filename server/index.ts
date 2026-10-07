@@ -137,6 +137,7 @@ import { AnswerDedupe, answerKey, duplicateAnswerText, failedSince, onAnswered }
 import { delegationBackText, delegationBrief, delegationChiefNote, delegationChoice, delegationClosedNote, delegationRepo, delegationStuck, forOwner, itemText, onlyYouReason, parseDelegationReport, verifiedEvidence, type DelegatedItemRef, type EvidenceDeps, type OwnerDelegationBack } from "./owner-delegate.ts";
 import { applyRoutineAsks, keepRoutineAsk, markStaleRoutineAsks, ownerAnswersItem, ownerSettlesRoutineAsks, ROUTINE_ASK_KEEP_LABEL, ROUTINE_ASK_KEY_PREFIX, ROUTINE_ASK_RESOLVED_NOTE, routineReplyText, settleRoutineAsks } from "./routine-owner-ask.ts";
 import { asksOwnerToDecide, botDiskItemFolders, busyNote, diskAllowedLine, diskChangedText, DISK_REPLACED_NOTE, diskStateLine, duSize, filesBelow, goneDiskItem, keepsFolders, keptOutOf, DISK_DECISION_KEY_PREFIX, diskDecisionFolders, diskDecisionItem, diskDecisionPlan, diskDecisionRecheck, diskRoutine, folderInUse, openItemFolders, porcelainState, replyLeavesDiskToOwner, withBotKeeps, type FolderFacts, type LeftFolder } from "./disk-decision.ts";
+import { fixedRowWarning, itemRowWrites, plainRowCells, rowVerdict, supersededItems, supersededLine, supersedeRefs, FIXED_ROW_STALE_MS, type RowCheck } from "./owner-pending-guard.ts";
 import { createMemoryUpkeep, upkeepEnabled } from "./memory-upkeep.ts";
 import { appendAboutMe, commitLearned, planLearned } from "./profile-learned.ts";
 import { canAccessTeam, canReachPeer, coordinatorSupervises, livePeerRoster, livePeerRosterBlock, peerAllowed, peerName, peerRosterSystemPrompt, peerStatus, peerStatusWords, reachablePeers, resolveTeammate, roomPeerRosterSystemPrompt, roomRosterLine, PEER_ACCESS_HELP } from "./peer-roster.ts";
@@ -9580,6 +9581,56 @@ async function reasonRefsLine(wake: BotWake): Promise<string | null> {
   }
 }
 
+/** A bot's item that says another item's commands must not run ("Os comandos
+ * antigos para a linha 190 apagariam a linha dela: não rode esses", the
+ * Monitor's o1 on 06/10) marks that sibling superseded — the Chief's o2 kept
+ * offering them and the client's row was overwritten (R13-intake #1). Its
+ * decisions and commands go off, said by which item of which bot. */
+function markSuperseded(bot: { id: string; name: string }, item: OwnerPending): string[] {
+  const refs = supersedeRefs(item, store.bots.map((each) => each.name));
+  if (!refs.length) return [];
+  const now = Date.now();
+  const open = store.bots.flatMap((each) => autonomy.ownerPendingOf(each.id));
+  const hits = supersededItems({ botId: bot.id, id: item.id, at: now }, refs, open, (botId) => store.bot(botId)?.name ?? "");
+  for (const { item: sibling, text } of hits) {
+    autonomy.patchOwnerPending(sibling.botId, sibling.id, { supersededBy: { botId: bot.id, botName: bot.name, id: item.id, at: now, text } });
+    if (store.taskByThread(sibling.botId, sibling.threadId)) store.appendMessage(sibling.threadId, { role: "bot", kind: "activity", tool: { name: chipText(`"Precisa de você": ${sibling.id} superado pelo ${item.id} do ${bot.name} — decisões e comandos desligados`, 240), ok: true } });
+    refreshBotRow(sibling.botId);
+    console.log(`[owner-pending] ${sibling.id} of ${store.bot(sibling.botId)?.name ?? sibling.botId} superseded by ${item.id} of ${bot.name}: ${text}`);
+  }
+  return hits.map(({ item: sibling }) => (sibling.botId === bot.id ? sibling.id : `${sibling.id} do ${store.bot(sibling.botId)?.name ?? sibling.botId}`));
+}
+
+/** Items whose commands write a fixed row of a sheet, older than 6 h: the
+ * row read now (`gog sheets get … --plain`), at most every 30 min each, so
+ * the notice says what it holds (R13-intake #1). Only the desktop app's
+ * server reads (OMB_ROW_CHECK=1 lets a test's server read too). */
+const rowChecking = new Set<string>();
+async function checkFixedRows(): Promise<void> {
+  if (!(process.env.OMB_ROW_CHECK === "1" || (DESKTOP_MANAGED && !process.env.VITEST))) return;
+  const now = Date.now();
+  for (const item of store.bots.flatMap((bot) => autonomy.ownerPendingOf(bot.id))) {
+    if (item.supersededBy || now - (item.updatedAt ?? item.createdAt) <= FIXED_ROW_STALE_MS) continue;
+    if (item.rowCheck && now - item.rowCheck.at < 30 * 60_000) continue;
+    const write = itemRowWrites(item)[0];
+    const key = `${item.botId}/${item.id}`;
+    if (!write || rowChecking.has(key)) continue;
+    rowChecking.add(key);
+    try {
+      const args = ["sheets", "get", write.sheetId, `${write.tab}!A${write.row}:Z${write.row}`, "--plain", "--no-input", ...(write.account ? ["--account", write.account] : [])];
+      const out = await new Promise<string | null>((resolve) => execFileCc(process.env.OMB_GOG_BIN || "gog", args, { timeout: 20_000, maxBuffer: 1024 * 1024, env: { ...process.env, PATH: augmentedPath() } }, (error, stdout) => resolve(error ? null : String(stdout))));
+      if (out === null) continue;
+      const verdict = rowVerdict(write, plainRowCells(out));
+      const rowCheck: RowCheck = typeof verdict === "string" ? { at: Date.now(), tab: write.tab, row: write.row, verdict } : { at: Date.now(), tab: write.tab, row: write.row, ...verdict };
+      autonomy.patchOwnerPending(item.botId, item.id, { rowCheck });
+      refreshBotRow(item.botId);
+      if (rowCheck.verdict === "ocupada") console.log(`[owner-pending] ${item.id}: row ${write.row} of ${write.tab} holds ${rowCheck.holds?.join(", ")} — its commands would overwrite it`);
+    } finally {
+      rowChecking.delete(key);
+    }
+  }
+}
+
 async function autonomyTick(): Promise<void> {
   try {
     askStepsForOlderItems();
@@ -9589,6 +9640,7 @@ async function autonomyTick(): Promise<void> {
   void checkProductionRelease().catch((error) => console.error(`[release] ${error instanceof Error ? error.message : String(error)}`));
   void checkPower().catch((error) => console.error(`[power] ${error instanceof Error ? error.message : String(error)}`));
   void checkPipelineIdle().catch((error) => console.error(`[pipeline-idle] ${error instanceof Error ? error.message : String(error)}`));
+  void checkFixedRows().catch((error) => console.error(`[owner-pending] row check: ${error instanceof Error ? error.message : String(error)}`));
   void revalidateNeedsInputGoals().catch((error) => console.error(`[autonomy] needs-input check failed: ${error instanceof Error ? error.message : String(error)}`));
   void runDesktopWork().catch((error) => console.error(`[claude-desktop] ${error instanceof Error ? error.stack ?? error.message : String(error)}`));
   try {
@@ -10829,6 +10881,9 @@ threadSignals = (threadId) => {
     ...(item.demotedAt ? { demotedAt: item.demotedAt } : {}),
     // "Delegar a um agente": the button, why not, or the delegation running or back (lote del)
     ...wireDelegation(item),
+    // another item said its commands must not run; a fixed sheet row that may have changed (R13-intake #1)
+    ...(item.supersededBy ? { superseded: { by: `${item.supersededBy.id} do ${item.supersededBy.botName}`, at: item.supersededBy.at, text: item.supersededBy.text } } : {}),
+    ...(() => { const warning = fixedRowWarning(item, Date.now()); return warning ? { rowWarning: warning } : {}; })(),
   }));
   return {
     ...(watches.length ? { watches } : {}),
@@ -21857,7 +21912,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           }
           refreshBotRow(bot.id);
           const shape = practical(item);
-          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${replaced} Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
+          const superseding = markSuperseded(bot, item);
+          const marked = superseding.length ? ` Marquei como superado, com decisões e comandos desligados: ${superseding.join(", ")}.` : "";
+          return json(res, 200, { message: `Em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${replaced}${marked} Resolva com owner_pending resolve id ${item.id} quando estiver decidido.` });
         }
         if (body.action === "update") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -21884,7 +21941,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!item) return json(res, 404, { error: `nenhum item ${id} seu; chame owner_pending list` });
           refreshBotRow(bot.id);
           const shape = practical(item);
-          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.` });
+          const superseding = markSuperseded(bot, item);
+          const marked = superseding.length ? ` Marquei como superado, com decisões e comandos desligados: ${superseding.join(", ")}.` : "";
+          return json(res, 200, { message: `Atualizado em "Precisa de você": ${line(item)}${shape ? ` (${shape})` : ""}.${marked}` });
         }
         if (body.action === "resolve") {
           const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -21896,7 +21955,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         }
         if (body.action === "list") {
           const open = autonomy.ownerPendingOf(bot.id);
-          const state = (item: OwnerPending) => `${item.stepsRequestedAt ? " (a pessoa pediu o passo a passo: owner_pending update)" : item.steps?.length ? "" : " (sem passos)"}${item.recommendRequestedAt ? " (a pessoa pediu a sua recomendação: owner_pending update com recommended e why)" : (item.options?.length ?? 0) >= 2 && !item.options!.some((option) => option.recommended) ? " (sem recomendada)" : ""}`;
+          const state = (item: OwnerPending) => `${item.stepsRequestedAt ? " (a pessoa pediu o passo a passo: owner_pending update)" : item.steps?.length ? "" : " (sem passos)"}${item.recommendRequestedAt ? " (a pessoa pediu a sua recomendação: owner_pending update com recommended e why)" : (item.options?.length ?? 0) >= 2 && !item.options!.some((option) => option.recommended) ? " (sem recomendada)" : ""}${item.supersededBy ? ` (SUPERADO pelo ${item.supersededBy.id} do ${item.supersededBy.botName}: resolva ou reescreva os comandos)` : ""}${fixedRowWarning(item, Date.now()) ? ` (${fixedRowWarning(item, Date.now())} Para linha nova, use append, não número fixo.)` : ""}`;
           return json(res, 200, { message: open.length ? open.map((item) => `${line(item)}${state(item)}${item.threadId === threadId ? "" : ` [conversa ${item.threadId}]`}`).join("\n") : "Nada esperando a pessoa." });
         }
         return json(res, 400, { error: "action deve ser add, update, resolve ou list" });
@@ -25853,6 +25912,9 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         keepRoutineAsk(autonomy, bot.id, item.id, Date.now());
         refreshBotRow(bot.id);
         return json(res, 200, { ok: true, resolved: 0, kept: true, message: `"${item.title}" voltou para o topo de "Precisa de você".` });
+      } else if (body.option !== undefined && item.supersededBy) {
+        // another item said this one's commands must not run: its decisions are off (R13-intake #1)
+        return json(res, 409, { error: supersededLine(item.supersededBy), code: "item_superseded" });
       } else if (body.option !== undefined) {
         // the decision the person SAW: its position and its label, so a bot
         // that reordered or rewrote the options meanwhile never gets another

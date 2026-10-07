@@ -3597,6 +3597,7 @@
   "needsYou.screen.botSilent": "Sem resposta de {name} há {age}: o item voltou para você.",
   "needsYou.screen.awaitingSection": "Aguardando bots ({count})",
   "needsYou.screen.botSilentShort": "{name} não respondeu",
+  "needsYou.screen.superseded": "Superado pelo {by}: {text} As decisões e os comandos deste item ficaram desligados.",
   "needsYou.screen.changeAnswer": "Mudar resposta",
   "needsYou.screen.keepAnswer": "Manter a resposta",
   "needsYou.time.today": "às {time}",

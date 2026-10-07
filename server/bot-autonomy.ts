@@ -27,6 +27,7 @@
 // promised wake nor forgets a running goal.
 import { existsSync, readFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic.ts";
+import type { RowCheck, Superseded } from "./owner-pending-guard.ts";
 import { leadingVocative } from "./owner-channel.ts";
 import { languageReminder } from "./reply-language.ts";
 import { stripLeadingMentions } from "../shared/owner-pending-title.ts";
@@ -252,6 +253,10 @@ export interface OwnerPending {
   delegation?: OwnerDelegation;
   /** It came back from a delegation (partial, stopped by the hook, never opened): on top, with why. */
   delegationBack?: OwnerDelegationBack;
+  /** Another bot's item (or another of its own) said this one's commands must not run (R13-intake #1): decisions and commands off. */
+  supersededBy?: Superseded;
+  /** What the server last read of the fixed sheet row its commands write (R13-intake #1). */
+  rowCheck?: RowCheck;
 }
 
 /** One answer of the person to an item (J18). */
@@ -560,6 +565,10 @@ function ownerPendingNumber(id: string): number {
 
 /** A saved item's structured part, read back defensively (an older ledger
  * has none; a hand-edited one may carry anything). */
+/** The item said again with the same commands and decisions (or none sent): what was said of them still holds. */
+const sameCommands = (existing: OwnerPending, input: { steps?: OwnerPendingStep[]; options?: OwnerPendingOption[] }) =>
+  (!input.steps?.length || JSON.stringify(input.steps) === JSON.stringify(existing.steps)) && (!input.options?.length || JSON.stringify(input.options) === JSON.stringify(existing.options));
+
 function savedDetails(pending: OwnerPending): OwnerPending {
   // a saved recommendation that no longer passes (no why, or two of them) loses
   // only the mark — never the item's why, steps and options (INSP-J2 #13)
@@ -1389,6 +1398,9 @@ export class BotAutonomy {
       // a delegation running (or just back) stays with the item when the bot or the server says it again (lote del)
       ...(existing?.delegation ? { delegation: existing.delegation } : {}),
       ...(existing?.delegationBack ? { delegationBack: existing.delegationBack } : {}),
+      // said again with the same commands: still superseded (R13-intake #1); new commands are the bot's new answer
+      ...(existing?.supersededBy && sameCommands(existing, input) ? { supersededBy: existing.supersededBy } : {}),
+      ...(existing?.rowCheck && sameCommands(existing, input) ? { rowCheck: existing.rowCheck } : {}),
       ...(input.lastSaidAt !== undefined ? { lastSaidAt: input.lastSaidAt } : existing?.lastSaidAt !== undefined ? { lastSaidAt: existing.lastSaidAt } : {}),
       ...(input.routineId ? { routineId: input.routineId } : existing?.routineId ? { routineId: existing.routineId } : {}),
     };
@@ -1567,6 +1579,11 @@ export class BotAutonomy {
       else delete next.options;
     }
     delete next.stepsRequestedAt;
+    // its own bot rewrote the commands or the decisions: no longer the superseded ones, nor the row it read (R13-intake #1)
+    if (!sameCommands(item, { ...(patch.steps !== undefined ? { steps: patch.steps } : {}), ...(patch.options !== undefined ? { options: patch.options } : {}) })) {
+      delete next.supersededBy;
+      delete next.rowCheck;
+    }
     // the bot answered the person by rewriting the item: no longer waiting on it (J18)
     delete next.awaitingSince;
     if (patch.options !== undefined) delete next.recommendRequestedAt;
@@ -1579,7 +1596,7 @@ export class BotAutonomy {
    * item ("pedido há 2 min") until the bot updates it. */
   /** A routine's item, set in place (server/routine-owner-ask.ts): its why, options and where it stands
    * ("Talvez já resolvido"). An undefined value clears the field. */
-  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack">>): OwnerPending | null {
+  patchOwnerPending(botId: string, id: string, patch: Partial<Pick<OwnerPending, "why" | "options" | "quietRuns" | "demotedAt" | "keptAt" | "lastSaidAt" | "routineId" | "delegation" | "delegationBack" | "supersededBy" | "rowCheck">>): OwnerPending | null {
     const item = this.ownerPendingById(botId, id);
     if (!item) return null;
     for (const [field, value] of Object.entries(patch) as Array<[keyof typeof patch, unknown]>) {
