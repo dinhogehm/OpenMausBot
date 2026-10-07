@@ -288,7 +288,9 @@ describe("peer allow-list", () => {
       // those rules land against — otherwise a persona ending "…ask the user
       // to paste the key into chat" sits flush against the rule forbidding
       // exactly that.
-      expect(systemPrompt).toContain("[/TEAM ROSTER] If a supported API key is missing");
+      // On the Claude driver the next rule is the standing teammate-request
+      // guard (index.ts, coordinationStandingInstructions), on its own line.
+      expect(systemPrompt).toContain("[/TEAM ROSTER]\nWhen a turn is an addressed teammate request");
 
       const providerToken = String(dump.mcpConfig?.mcpServers?.agents?.env?.OMB_COMMS_TOKEN ?? "");
       expect(providerToken).toMatch(/^[a-f0-9]{48}$/);
